@@ -816,3 +816,38 @@ exclusion and performance remain open; all 69 areas retain individual status.
 Evidence: `artifacts/checks/laravel-env-0.1.29-{build-receipt,native-result,fixture}.json`,
 `laravel-env-0.1.29-{native,relaunch,workspace,clippy,frontend-tests}.log`,
 `phpantom-117-{full-suite,client-final,openstorm-host,final-clippy,final-fmt}.log`.
+
+### Eloquent and facade acceptance slice on 0.1.29 (2026-10-30)
+
+Extended the actual OpenStorm client corpus against the pinned engine Laravel
+example, explicitly installed at exact framework 13.37.0. Eleven hover scenarios
+verify exact boolean, float, Carbon, enum, nullable custom-cast, collection and
+singular relationship types, a relationship method chain, an attributed protected
+scope, an app-defined facade and a named container service. Six completion scenarios
+verify scopes, retained model fields, relationship results and facade/container
+methods. Three navigation assertions check both the target file and exact function
+line. An unsaved model cast changes dependent hover from float to bool without a
+disk write; closing that overlay restores float. All seven client cases passed in
+the final combined run. Targeted Clippy with warnings denied and workspace Rust
+formatting passed. The initial exploratory hover probe accidentally matched `bake`
+inside `$bakery`; the corrected test uses an exact expression line/column. Its
+failure log is retained and is not counted as a product failure.
+
+The unchanged signed 0.1.29 runtime passed native F1 cast documentation (`float`
+with cast origin), protected `freshlyBaked()` scope insertion, `quality float`
+completion after `first()`, and Cmd+B to the exact protected declaration at
+Bakery.php:74. The accepted completion was saved and its persisted PHP syntax
+validated. Relationship documentation showed `Collection<Loaf>` with its origin;
+facade Cmd+B opened BakeryService::bake at line 9. A native partial-text selection
+was affected by folded/inlay offsets during test setup; that disposable edit was
+undone, then full-document paste and explicit Go to Line positioning were used.
+The final fixture is valid, model/service source bytes and approved environment
+bytes are unchanged, normal quit exited app/server, and signature verification
+passed again. No application code changed in this acceptance extension, so a new
+bundle was not produced. Frontend and engine full-suite results from the matching
+0.1.29 runtime remain applicable; this extension adds test code only.
+
+FEAT-026–029 and FEAT-066 gain evidence, while their broader gates remain partial:
+pivots, unknown morphs, contextual/environment container bindings and wider version
+matrices remain open. Evidence: `laravel-eloquent-0.1.29-{native-result.json,
+client-full.log,all-client-final.log,clippy.log,rustfmt.log}` in `artifacts/checks/`.

@@ -513,3 +513,120 @@ async fn laravel_environment_helper_keys_use_only_approved_synthetic_values() {
     assert_eq!(std::fs::read_to_string(root.join(".env")).unwrap(), environment);
     mgr.shutdown_all().await;
 }
+
+/// This corpus is acquired by the pinned engine build recipe and installed with
+/// explicit Composer actions; opening the document never boots the framework.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires OPENSTORM_TEST_ENGINE_LARAVEL_ROOT with pinned engine example and Laravel 13.37.0"]
+async fn laravel_casts_relationships_scopes_and_facades_through_client() {
+    let root = PathBuf::from(std::env::var_os("OPENSTORM_TEST_ENGINE_LARAVEL_ROOT").expect("engine Laravel fixture"))
+        .canonicalize()
+        .unwrap();
+    let lock: serde_json::Value = serde_json::from_slice(&std::fs::read(root.join("composer.lock")).unwrap()).unwrap();
+    let framework = lock["packages"].as_array().unwrap().iter().find(|p| p["name"] == "laravel/framework").unwrap();
+    assert_eq!(framework["version"], "v13.37.0");
+    for name in ["app/Models/Bakery.php", "app/Models/BlogPost.php", "app/Facades/Oven.php"] {
+        assert!(root.join(name).is_file(), "missing pinned corpus file {name}");
+    }
+    let bin = std::env::var_os("OPENSTORM_TEST_PHPANTOM_BIN").map(PathBuf::from).unwrap_or_else(|| {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../src-tauri/resources/phpantom/phpantom_lsp")
+    });
+    let mut php = LanguageRegistry::load(None).unwrap().get(&LanguageId::new("php")).unwrap();
+    php.language_servers.retain(|s| s.name == "phpantom");
+    php.language_servers[0].command = bin.to_string_lossy().into_owned();
+    let mgr = LspManager::new(root.clone(), Arc::new(LanguageRegistry::from_configs(vec![php])), Arc::new(|_| {}));
+    let doc = DocId::next();
+    let path = root.join("openstorm-eloquent-client.php");
+    assert!(!path.exists(), "acceptance document must remain an overlay");
+    let prefix = "<?php\nuse App\\Models\\{Bakery, BlogPost};\nuse App\\Facades\\Oven;\n$bakery = new Bakery();\n$post = new BlogPost();\n";
+    let mut text = format!("{prefix}$bakery->apricot;\n");
+    mgr.did_open(doc, &path, &LanguageId::new("php"), 1, &text);
+    let cases = [
+        ("$bakery->apricot;", "apricot", "bool"),
+        ("$bakery->quality;", "quality", "float"),
+        ("$bakery->proved_at;", "proved_at", "Carbon"),
+        ("$bakery->jam_flavor;", "jam_flavor", "JamFlavor"),
+        ("$bakery->icing;", "icing", "?Frosting"),
+        ("$bakery->baguettes;", "baguettes", "Collection<Loaf>"),
+        ("$post->author;", "author", "BlogAuthor"),
+        ("$post->author()->first()->displayName;", "displayName", "string"),
+        ("Bakery::query()->freshlyBaked()->first()->quality;", "quality", "float"),
+        ("Oven::bake('rye');", "bake", "string"),
+        ("app('pastry.oven')->bake('rye');", "bake", "string"),
+    ];
+    for (index, (expression, symbol, expected)) in cases.iter().enumerate() {
+        let next = format!("{prefix}{expression}\n");
+        replace(&mgr, doc, index as u32 + 2, &text, &next);
+        text = next;
+        let mut content = String::new();
+        for _ in 0..80 {
+            if let Ok(Some(hover)) =
+                mgr.hover(doc, Pos::new(5, expression.find(symbol).unwrap() as u32), Default::default()).await
+            {
+                content = hover.contents.value;
+                if content.contains(expected) {
+                    break;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        assert!(content.contains(expected), "{expression}: expected {expected} in hover, got {content:?}");
+        if index < 9 {
+            assert!(content.contains(&format!("**var** `{expected}`")), "precise type for {expression}: {content}");
+        }
+        eprintln!("accepted hover {expression}: {content}");
+    }
+    let completions = [
+        ("Bakery::query()->fre", "freshlyBaked"),
+        ("Bakery::query()->freshlyBaked()->first()->qua", "quality"),
+        ("$post->author()->first()->dis", "displayName"),
+        ("$bakery->baguettes->first()->getW", "getWeight"),
+        ("Oven::ba", "bake"),
+        ("app('pastry.oven')->ba", "bake"),
+    ];
+    for (index, (expression, expected)) in completions.iter().enumerate() {
+        let next = format!("{prefix}{expression}");
+        replace(&mgr, doc, index as u32 + 100, &text, &next);
+        text = next;
+        let list = mgr.completion(doc, Pos::new(5, expression.len() as u32), None, Default::default()).await.unwrap();
+        assert!(list.items.iter().any(|i| i.label.starts_with(expected)), "missing {expected} for {expression}");
+    }
+    let targets = [
+        ("Oven::bake('rye');", "bake", "app/Support/BakeryService.php"),
+        ("$post->author();", "author", "app/Models/BlogPost.php"),
+        ("Bakery::query()->freshlyBaked();", "freshlyBaked", "app/Models/Bakery.php"),
+    ];
+    for (index, (expression, symbol, target)) in targets.iter().enumerate() {
+        let next = format!("{prefix}{expression}\n");
+        replace(&mgr, doc, index as u32 + 200, &text, &next);
+        text = next;
+        let locations =
+            mgr.goto(doc, Pos::new(5, expression.find(symbol).unwrap() as u32), GotoKind::Definition).await.unwrap();
+        assert!(
+            locations.iter().any(|l| l.path.ends_with(target)),
+            "{expression}: expected {target}, got {locations:?}"
+        );
+        let location = locations.iter().find(|l| l.path.ends_with(target)).unwrap();
+        let source = std::fs::read_to_string(&location.path).unwrap();
+        assert!(
+            source.lines().nth(location.range.start.line as usize).unwrap().contains(&format!("function {symbol}(")),
+            "destination must be the exact declaration"
+        );
+    }
+    let model_path = root.join("app/Models/Bakery.php");
+    let original = std::fs::read_to_string(&model_path).unwrap();
+    let changed = original.replace("'quality' => 'float'", "'quality' => 'bool'");
+    assert_ne!(original, changed, "pinned quality cast fixture");
+    let model_doc = DocId::next();
+    mgr.did_open(model_doc, &model_path, &LanguageId::new("php"), 1, &changed);
+    let next = format!("{prefix}$bakery->quality;\n");
+    replace(&mgr, doc, 300, &text, &next);
+    let hover = mgr.hover(doc, Pos::new(5, 9), Default::default()).await.unwrap().unwrap();
+    assert!(hover.contents.value.contains("bool"), "unsaved cast overlay: {}", hover.contents.value);
+    assert_eq!(std::fs::read_to_string(&model_path).unwrap(), original);
+    mgr.did_close(model_doc);
+    let hover = mgr.hover(doc, Pos::new(5, 9), Default::default()).await.unwrap().unwrap();
+    assert!(hover.contents.value.contains("float"), "closing overlay restores disk cast: {}", hover.contents.value);
+    assert!(!path.exists(), "intelligence queries must not write the overlay to disk");
+    mgr.shutdown_all().await;
+}

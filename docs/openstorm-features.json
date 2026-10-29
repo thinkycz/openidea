@@ -275,7 +275,9 @@
       "milestone": 2,
       "status": "partial",
       "acceptance_gate": "Attributes/properties correct with nullability, dates/enums/casts and provenance",
-      "openstorm_evidence": [],
+      "openstorm_evidence": [
+        "0.1.29 real client: exact bool/float/Carbon/enum/nullable-custom-cast types and cast-origin hovers; unsaved casts update and close restores disk. Native F1 quality shows float plus cast origin."
+      ],
       "remaining": "Reassess current OpenStorm implementation against this full gate; Workbench acceptance does not transfer."
     },
     {
@@ -285,7 +287,9 @@
       "milestone": 2,
       "status": "partial",
       "acceptance_gate": "Fluent chains retain model; protected attributed scopes visible as framework API",
-      "openstorm_evidence": [],
+      "openstorm_evidence": [
+        "0.1.29 real client: protected attributed freshlyBaked completion and exact declaration navigation; chained first() retains model quality type. Native completion accepted/persisted scope and quality; Cmd+B opens protected declaration line 74."
+      ],
       "remaining": "Reassess current OpenStorm implementation against this full gate; Workbench acceptance does not transfer."
     },
     {
@@ -295,7 +299,9 @@
       "milestone": 2,
       "status": "partial",
       "acceptance_gate": "Differentiate method/query vs dynamic property; preserve pivot and unknown morph targets",
-      "openstorm_evidence": [],
+      "openstorm_evidence": [
+        "0.1.29 real client: Collection<Loaf>, singular BlogAuthor, relationship method first()->displayName, collection item completion and exact relationship declaration. Native F1 shows Collection<Loaf> plus relationship origin. Pivot/unknown morph matrices remain open."
+      ],
       "remaining": "Reassess current OpenStorm implementation against this full gate; Workbench acceptance does not transfer."
     },
     {
@@ -305,7 +311,9 @@
       "milestone": 2,
       "status": "partial",
       "acceptance_gate": "Underlying service methods; contextual/env binding not collapsed into one false type",
-      "openstorm_evidence": [],
+      "openstorm_evidence": [
+        "0.1.29 real client: static Oven facade and named container service method hover/completion; facade goto exact BakeryService::bake declaration. Native Cmd+B opens service at line 9. Contextual/env binding matrices remain open."
+      ],
       "remaining": "Reassess current OpenStorm implementation against this full gate; Workbench acceptance does not transfer."
     },
     {
@@ -703,7 +711,8 @@
         "Laravel adapter validates open PHP source receipts/engine generation after queries; unsaved-dependency change regression refuses stale results. Project-switch cancellation/late-response regression passes; native project-switch/performance remain open.",
         "0.1.27 client/host regressions cover unsaved config/PHP/JSON keys, Unicode JSON positions, JSON-first PHP references and PHP example isolation. 58 mock cases passed with safe-capability gating; native final-copy checks pending.",
         "0.1.28 native: unsaved dotenv key removal updates PHP completion with disk unchanged; usages include another unsaved PHP buffer; external disk bytes survive Cancel. 117 adds accurate UTF-16 exported-key destinations; native follow-up pending.",
-        "0.1.29 native unsaved dotenv/PHP overlays survive engine restart; undo/redo updates precise goto destinations and chained references. All six real-client and three actual-host cases pass with bundled 117."
+        "0.1.29 native unsaved dotenv/PHP overlays survive engine restart; undo/redo updates precise goto destinations and chained references. All six real-client and three actual-host cases pass with bundled 117.",
+        "0.1.29 Eloquent real-client: unsaved cast change float to bool updates dependent hover without disk write; closing model overlay restores float."
       ],
       "remaining": "Completion/diagnostic stale responses, target-profile builtin-cache invalidation, broader project/configuration and multi-project cases remain unaccepted."
     },

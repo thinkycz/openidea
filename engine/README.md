@@ -77,3 +77,15 @@ Patch 0117 reuses the dotenv key-offset parser to navigate past indentation and 
 optional `export` prefix. Definition locations use UTF-16 columns, so a subsequent
 reference request starts on the declared key. The native 116 destination failure
 and actual-client failing regression are retained in the progress/check record.
+
+The Eloquent acceptance extension runs through OpenStorm's actual client with
+`OPENSTORM_TEST_ENGINE_LARAVEL_ROOT` pointing at a disposable copy of the pinned
+source's `examples/laravel/` corpus installed at exact Laravel 13.37.0. Validate
+Composer autoloading and PHP syntax first; install/update dependencies only as an
+explicit action with plugins/scripts disabled and an isolated Composer profile.
+Do not point this variable at a real user project. The existing
+`OPENSTORM_TEST_LARAVEL_ROOT` test uses the separate User/displayName fixture.
+`OPENSTORM_TEST_PHPANTOM_BIN` should select the checksum-verified packaged engine.
+Run `cargo test -p ide-lsp --test phpantom -- --ignored --nocapture` to exercise all
+seven client cases. This creates only test-owned resources and overlays; the
+synthetic environment case requires authorization for its fake fixture data.

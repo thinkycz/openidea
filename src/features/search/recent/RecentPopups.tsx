@@ -31,6 +31,7 @@ import {
   switcherToolWindows,
   type RecentFileItem,
 } from "./model";
+import { showSearchEverywhere } from "../everywhere/store";
 import { cycleSwitcher, hideRecentPopup, showRecentPopup, useRecentPopup } from "./store";
 import styles from "./RecentPopups.module.css";
 import { tx } from "@/platform/i18n";
@@ -63,7 +64,9 @@ function RecentFilesDialog() {
   const toolWindows = useContributions((s) => s.toolWindows);
   const [paths, setPaths] = useState<string[] | null>(null);
   // Switcher: the open editor tabs (files and others), when the editor service lists them.
-  const [tabs] = useState<OpenEditorTab[] | null>(() => (switcher ? (maybeEditorService()?.openTabs?.() ?? null) : null));
+  const [tabs] = useState<OpenEditorTab[] | null>(() =>
+    switcher ? (maybeEditorService()?.openTabs?.() ?? null) : null,
+  );
   const [removed, setRemoved] = useState<ReadonlySet<string>>(() => new Set());
   const [query, setQuery] = useState("");
   const [column, setColumn] = useState<"files" | "tools">("files");
@@ -172,7 +175,11 @@ function RecentFilesDialog() {
   const onKeyDown = (e: KeyboardEvent<HTMLElement>) => {
     if (e.key === "Enter") {
       e.preventDefault();
-      if (effectiveColumn === "files") openFile(files[fIndex], e.shiftKey);
+      if (effectiveColumn === "files" && !files[fIndex] && query.trim()) {
+        // Nothing recent matches: carry the text over to Go to File.
+        const text = query.trim();
+        afterClose(() => showSearchEverywhere("files", { query: text }));
+      } else if (effectiveColumn === "files") openFile(files[fIndex], e.shiftKey);
       else openTool(tools[tIndex]?.tw);
       return;
     }
@@ -249,7 +256,11 @@ function RecentFilesDialog() {
                 showRecentPopup("files");
                 inputRef.current?.focus();
               }}
-              label={<><T>Show edited only</T> {recentShortcut && <span className={styles.hint}>{recentShortcut}</span>}</>}
+              label={
+                <>
+                  <T>Show edited only</T> {recentShortcut && <span className={styles.hint}>{recentShortcut}</span>}
+                </>
+              }
             />
           </>
         )}
@@ -416,7 +427,17 @@ function useOpenOutlines(paths: readonly string[]): ReadonlyMap<string, OutlineI
 const tokenCache = new Map<string, CodeToken[]>();
 
 /** A snippet's lines coloured by the file's language (parsed together, so multi-line constructs colour right). */
-function SnippetCode({ path, lines, first, caret }: { path: string; lines: readonly string[]; first: number; caret: number }) {
+function SnippetCode({
+  path,
+  lines,
+  first,
+  caret,
+}: {
+  path: string;
+  lines: readonly string[];
+  first: number;
+  caret: number;
+}) {
   const language = useMemo(() => languageForPath(path), [path]);
   const text = lines.join("\n");
   const key = `${language}\u0000${text}`;
@@ -565,9 +586,11 @@ function RecentLocationsDialog() {
                   tone="strong"
                 />
                 <span className={styles.dir}>{breadcrumbOf(outlines.get(l.path), l) || l.rel}</span>
-                {l.changed && <span className={styles.changed}>
+                {l.changed && (
+                  <span className={styles.changed}>
                     <T>changed</T>
-                  </span>}
+                  </span>
+                )}
                 <span className={styles.time}>{locationTime(l.time, now)}</span>
               </div>
               <SnippetCode path={l.path} lines={dedent(l.snippet)} first={l.snippetStart} caret={l.line} />

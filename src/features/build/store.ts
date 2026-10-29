@@ -25,7 +25,7 @@ import {
 } from "@/platform/ipc";
 import { useProject } from "@/platform/project";
 import { maybeEditorService, notifications, toolWindowService } from "@/workbench/contributions";
-import { removeTask, upsertTask } from "@/workbench/tasks";
+import { cancelTask, removeTask, upsertTask, useTasks } from "@/workbench/tasks";
 import { appendOutput, finishSummary, firstError, messageFiles, type BuildStatus, type ConsoleLine } from "./model";
 
 export const BUILD_TASK_ID = "build:compile";
@@ -207,7 +207,10 @@ export async function startBuild(kind: BuildKind, file: string | null = null): P
     }
   } finally {
     if (useBuildRun.getState().request === request) useBuildRun.setState({ request: null });
-    setContext(BUILD_LAST_STATUS, result?.success ? "success" : useBuildRun.getState().status === "cancelled" ? "cancelled" : "failed");
+    setContext(
+      BUILD_LAST_STATUS,
+      result?.success ? "success" : useBuildRun.getState().status === "cancelled" ? "cancelled" : "failed",
+    );
     setContext(BUILD_RUNNING, false);
     upsertTask({ id: BUILD_TASK_ID, title: taskTitle, message: null, fraction: 1, done: true });
   }
@@ -245,7 +248,10 @@ function showFailure() {
 
 export function stopBuild() {
   const { request } = useBuildRun.getState();
-  if (request != null) backend.cancel(request);
+  if (request == null) return;
+  // Through the task, so its progress says "Cancelling…" until the build has stopped.
+  if (useTasks.getState().tasks.some((t) => t.id === BUILD_TASK_ID && t.cancel)) cancelTask(BUILD_TASK_ID);
+  else backend.cancel(request);
 }
 
 /** Runs the last build again (the tool window's rerun button). */

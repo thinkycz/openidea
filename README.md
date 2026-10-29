@@ -43,14 +43,14 @@ for 60+ languages. Builds for macOS, Windows and Linux.
 Opening [freqtrade](https://github.com/freqtrade/freqtrade) (Python, ~770 files)
 with warm caches, median of 5 runs:
 
-| | OpenIDEA | IntelliJ IDEA 2026.2.3 |
-|---|---|---|
-| Window with the project | **0.9 s** | 3.1 s |
-| Ready (CPU settled) | **1.1 s** | 13.2 s |
-| Memory (USS, all processes) | **169 MB** | 2011 MB |
-| CPU time until ready | **2.4 s** | 47.9 s |
-| Idle CPU | **4 %** of a core | 7 % of a core |
-| Quit | **0.3 s** | 5.9 s |
+|                             | OpenIDEA          | IntelliJ IDEA 2026.2.3 |
+| --------------------------- | ----------------- | ---------------------- |
+| Window with the project     | **0.9 s**         | 3.1 s                  |
+| Ready (CPU settled)         | **1.1 s**         | 13.2 s                 |
+| Memory (USS, all processes) | **169 MB**        | 2011 MB                |
+| CPU time until ready        | **2.4 s**         | 47.9 s                 |
+| Idle CPU                    | **4 %** of a core | 7 % of a core          |
+| Quit                        | **0.3 s**         | 5.9 s                  |
 
 A release build of OpenIDEA from `main` and IDEA with default settings and plugins, on
 Windows 11, 32-core AMD, 62 GB RAM.
@@ -65,7 +65,7 @@ pnpm install
 pnpm tauri dev
 ```
 
-Rust 1.96, Node 22, pnpm and the [Tauri prerequisites](https://v2.tauri.app/start/prerequisites/).
+Rust 1.96, Node 22, pnpm 11 and the [Tauri prerequisites](https://v2.tauri.app/start/prerequisites/).
 
 ## License
 

@@ -1,5 +1,13 @@
 /** Pure composer helpers: `@` / `/` completion, attachments, history recall, settings. */
-import type { AgentCommand, AgentConfigOption, AgentEntry, AgentImage, AgentPrompt, AgentUsage } from "@/bindings";
+import type {
+  AgentCommand,
+  AgentConfigOption,
+  AgentEntry,
+  AgentImage,
+  AgentPrompt,
+  AgentRetry,
+  AgentUsage,
+} from "@/bindings";
 import { tx } from "@/platform/i18n";
 
 export interface FileRef {
@@ -28,7 +36,8 @@ export function completionAt(text: string, caret: number): Completion | null {
   if (!word) return null;
   const from = caret - word[3]!.length - 1;
   // Commands only as the message's first word.
-  if (word[2] === "/") return before.slice(0, from).trim() === "" ? { kind: "command", query: word[3]!, from, to: caret } : null;
+  if (word[2] === "/")
+    return before.slice(0, from).trim() === "" ? { kind: "command", query: word[3]!, from, to: caret } : null;
   return { kind: "file", query: word[3]!, from, to: caret };
 }
 
@@ -75,7 +84,8 @@ export function mentionOf(rel: string, lines?: { from: number; to: number }): st
 export function toPrompt(draft: ComposerDraft): AgentPrompt {
   const seen = new Set<string>();
   const files = draft.files.filter((f) => {
-    if (seen.has(f.path) || !new RegExp(`@${escapeRe(f.rel)}(?![\\w./-])|@${escapeRe(f.rel)}:`).test(draft.text)) return false;
+    if (seen.has(f.path) || !new RegExp(`@${escapeRe(f.rel)}(?![\\w./-])|@${escapeRe(f.rel)}:`).test(draft.text))
+      return false;
     seen.add(f.path);
     return true;
   });
@@ -129,6 +139,14 @@ export function nextValue(option: AgentConfigOption, current = option.current): 
 }
 
 /** "12%" of the context window and a tooltip with the numbers. */
+/** A pending API retry: "3/10" (or "3" when the agent gives no limit) and the seconds left. */
+export function retryParts(r: AgentRetry, now: number): { attempt: string; wait: number } {
+  return {
+    attempt: r.maxRetries != null ? `${r.attempt}/${r.maxRetries}` : String(r.attempt),
+    wait: r.retryAtMs == null ? 0 : Math.max(0, Math.ceil((r.retryAtMs - now) / 1000)),
+  };
+}
+
 export function usageLabel(u: AgentUsage): { short: string; detail: string } {
   const pct = Math.min(100, Math.round((u.used / u.size) * 100));
   return { short: `${pct}%`, detail: tx`${tokens(u.used)} / ${tokens(u.size)} tokens` };

@@ -4,16 +4,60 @@ Base: thinkycz/openidea 50212e73972d6f05bf16050cb0ba10102a6c8054 (0.1.21).
 Branch: codex/openstorm-php-laravel. Target: macOS Apple Silicon, local delivery.
 
 ## Contract
+
 Preserve OpenIDEA layout, default keymap, autosave and debugger. Use separate
 cz.thinky.openstorm application data; retain .openidea project settings.
 Bundle released PHPantom 0.11.1-workbench.114; support builtins and PHP target context.
 The current scope is the full 69-area roadmap in `docs/openstorm-features.json`,
 with Laravel/Blade/workflow work authorized in milestone order. New debugger
-functionality, upstream automatic updates, public publication, notarization,
+functionality, upstream automatic updates, public app releases, notarization,
 actual profile migration and user-server deployment remain deferred. Selective
 settings-import functionality may be implemented without migrating real profiles.
 
-## Current continuation status (2026-10-29)
+## Upstream synchronization (2026-10-29)
+
+User-authorized scope: commit/push the existing work and merge the upstream
+repository into this fork. `origin` remains `thinkycz/openidea`; `upstream` is
+`l0ng-ai/openidea`. The working branch remains `codex/openstorm-php-laravel`.
+The foundation was checkpointed in commit `3149758` before merging.
+
+Upstream pin: `200ed6a52835e9d66923a2b4f5ad53f420afd24c`, 69 commits after
+`50212e7`, 804 changed files, through upstream 0.1.24. OpenStorm's independent
+source version is now 0.1.23; no new native app is built or installed by this sync.
+The 0.1.22 package/receipts below describe the earlier foundation candidate.
+
+Imported changes include editor navigation, folding, tabs/splits and LightEdit;
+Eclipse keymaps and cancellable background tasks; multi-repository Git workflows
+and diff navigation; database grid/filter/SQL improvements; native Codex/Claude
+agent drivers, ACP v2/registry and retry reporting; proxy settings, system fonts,
+mise/asdf toolchains and remote environment reload; plus Finder file-paste,
+macOS Settings-window visibility and WebKit compatibility fixes. Existing upstream
+debugger improvements are inherited, not newly accepted OpenStorm roadmap work.
+
+Integration preserves OpenStorm identity/caches and attribution, disabled updater
+feed/artifacts, bundled PHPantom and its checksum, `.openidea` compatibility,
+save-conflict prompts and guarded edit plans. PHPantom's checked rename takes
+precedence over upstream multi-server rename so a refusal cannot be masked by an
+unchecked provider; the new regression covers that combination. New upstream
+workspace-edit fixtures were adapted to the optional guard field. Source-text
+translations and updater strings retain OpenStorm branding.
+
+The existing Unicode regressions exposed different behavior of an end-anchored
+Unicode character class in local Node 26 versus Node 24. A shared code-point
+boundary check preserves UTF-16 offsets and old-WebKit compatibility; both existing
+regressions passed after the adjustment. Dependency setup uses upstream's pnpm 11
+workspace format (local validation 11.28.9), without changing global developer tools.
+
+Verification: frontend 2,986 passed; browser E2E 21 passed / 1 existing skipped;
+type checking, lint, format check and frontend build passed. Lint retains inherited
+warnings. Rust workspace: 1295 passed, 0 failed, 24 ignored.
+Workspace Clippy (`-D warnings`) and Rust formatting passed. The real PHPantom
+client cases (2) and actual-host checked-edit case (1) also passed after integration.
+Local Rust tests use `cargo test --workspace --no-fail-fast`, not CI's nextest;
+Linux/Windows/musl CI and post-sync native acceptance are not claimed.
+
+## Foundation batch status (2026-10-29)
+
 Batch 1 is implemented and packaged as a locally signed development build at
 `artifacts/batches/0.1.22/OpenStorm.app`. Final native acceptance is partial: the
 latest package needs a controlled final-copy recheck and quit/relaunch check after
@@ -31,6 +75,7 @@ case. Its receipt is `artifacts/checks/phpantom-rebuild-receipt.json`. The shipp
 released executable remains unchanged; rebuilt byte identity is not claimed.
 
 ## Foundation delivery progress (0.1.21, historical)
+
 - OpenStorm application name, cz.thinky.openstorm identity and isolated updater override implemented.
 - PHPantom is bundled with original licenses, checksum and source/patch provenance; build verifies the checksum.
 - Default PHP server resolves the bundled engine; explicit custom paths remain supported. Intelephense and Phpactor remain fallbacks.
@@ -46,23 +91,24 @@ released executable remains unchanged; rebuilt byte identity is not claimed.
 - Both real-engine tests passed again against the executable inside the installed application.
 
 ## Packaged acceptance
-| Scenario | Observed result |
-| --- | --- |
-| Clean-profile launch and app identity | Passed; settings/index/history under the disposable profile's `Library/Application Support/cz.thinky.openstorm`, logs under its `Library/Logs/cz.thinky.openstorm` |
-| Bundled engine without a global server | Passed with PATH restricted to system directories; process executable was inside OpenStorm.app; version .114 |
-| Plain PHP | Method completion, insertion and parameter help passed without Composer |
-| Composer PHP | Method completion, snippet parameters, class completion with import insertion, call documentation, declaration navigation, usages, two-file reviewed rename and diagnostics passed |
-| Unsaved cross-file state | New class method completed in another buffer while its defining file on disk still lacked the method |
-| Builtin source | DateTime opened read-only with PHP 8.5 target banner; attempted typing did not modify it |
-| PHP target | Composer ^8.2 target reported by the engine; ^8.2 also verified through builtin navigation in the integration test |
-| Laravel 12 | Custom model method completed directly and after `query()->where()->first()`; builder methods passed the real-engine test |
-| Default autosave | Saved completion/rename edits to disk on focus change; default checkbox verified; restored after temporarily disabling it for unsaved/conflict tests |
-| External clean changes | Reloaded external text and cleared obsolete diagnostics |
-| External dirty conflicts | Fixed: autosave pauses; explicit Save asks Overwrite / Cancel (default). A newer disk edit invalidates earlier consent. Native cancellation, overwrite, reopened-tab retention and quit cancellation passed |
-| Server restart | Process ID changed, open files reopened, diagnostics continued |
-| Quit/relaunch | App and PHP service exited; no-argument relaunch restored the Composer project, tabs and saved content |
-| Layout, settings and terminal | Rounded upstream layout inspected; settings shortcut, Go to File, Go to Line, declaration, documentation, usages, rename and terminal tab controls exercised |
-| Debugger | Existing implementation retained; no runtime debugger acceptance claimed |
+
+| Scenario                               | Observed result                                                                                                                                                                                             |
+| -------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Clean-profile launch and app identity  | Passed; settings/index/history under the disposable profile's `Library/Application Support/cz.thinky.openstorm`, logs under its `Library/Logs/cz.thinky.openstorm`                                          |
+| Bundled engine without a global server | Passed with PATH restricted to system directories; process executable was inside OpenStorm.app; version .114                                                                                                |
+| Plain PHP                              | Method completion, insertion and parameter help passed without Composer                                                                                                                                     |
+| Composer PHP                           | Method completion, snippet parameters, class completion with import insertion, call documentation, declaration navigation, usages, two-file reviewed rename and diagnostics passed                          |
+| Unsaved cross-file state               | New class method completed in another buffer while its defining file on disk still lacked the method                                                                                                        |
+| Builtin source                         | DateTime opened read-only with PHP 8.5 target banner; attempted typing did not modify it                                                                                                                    |
+| PHP target                             | Composer ^8.2 target reported by the engine; ^8.2 also verified through builtin navigation in the integration test                                                                                          |
+| Laravel 12                             | Custom model method completed directly and after `query()->where()->first()`; builder methods passed the real-engine test                                                                                   |
+| Default autosave                       | Saved completion/rename edits to disk on focus change; default checkbox verified; restored after temporarily disabling it for unsaved/conflict tests                                                        |
+| External clean changes                 | Reloaded external text and cleared obsolete diagnostics                                                                                                                                                     |
+| External dirty conflicts               | Fixed: autosave pauses; explicit Save asks Overwrite / Cancel (default). A newer disk edit invalidates earlier consent. Native cancellation, overwrite, reopened-tab retention and quit cancellation passed |
+| Server restart                         | Process ID changed, open files reopened, diagnostics continued                                                                                                                                              |
+| Quit/relaunch                          | App and PHP service exited; no-argument relaunch restored the Composer project, tabs and saved content                                                                                                      |
+| Layout, settings and terminal          | Rounded upstream layout inspected; settings shortcut, Go to File, Go to Line, declaration, documentation, usages, rename and terminal tab controls exercised                                                |
+| Debugger                               | Existing implementation retained; no runtime debugger acceptance claimed                                                                                                                                    |
 
 Laravel and Composer disposable copies were corrected for inherited namespace
 escaping and their autoload files regenerated with project scripts/plugins disabled.
@@ -72,11 +118,13 @@ inserted the method in the native editor. A temporary stdio tracing wrapper was
 removed from the test profile; the final plain-PHP run used default bundled resolution.
 
 ## Known limitations
+
 - Quick documentation worked on the call site; the tested declaration position returned no documentation.
 - The local toolchain emitted a missing-libLLVM warning while stripping debug information. The release build succeeded; app size is not a final optimized distribution-size claim.
 - Local ad-hoc signature only; no notarization, publication, cross-platform or new debugger validation.
 
 ## PHP configuration
+
 The engine reads Composer PHP requirements and existing `.phpantom.toml` project
 configuration. Builtin source banners show the applied target returned by the engine.
 Existing Language Servers settings can disable PHPantom or override its command/args;
@@ -84,6 +132,7 @@ Tools settings can override `phpantom_lsp`. No global installation is needed on 
 supported platform. Existing Xdebug configuration is unchanged.
 
 ## Verification commands
+
 - `pnpm test`, `pnpm typecheck`, `pnpm lint`, `pnpm build`
 - `cargo fmt --all --check`
 - `cargo test -p ide-tools -p ide-lsp --lib --tests`
@@ -95,11 +144,13 @@ Native test cases use disposable copies in `/tmp/openstorm-acceptance`.
 PHP Workbench and the original evaluation checkout are preserved.
 
 ## Build environment
+
 macOS 27.0.1 (26A434), Apple Silicon; rustc 1.99.1, Node 26.7.0, pnpm 9.15.0.
 Rust uses the preserved toolchain and shared build cache under the earlier evaluation
 workspace. Local check logs are preserved in `artifacts/checks/` (ignored by Git).
 
 ## Delivery receipt
+
 Installed bundle: `/Users/longdo/Applications/OpenStorm.app`, identifier
 `cz.thinky.openstorm`, version 0.1.21, arm64. App/service processes were closed
 after testing. `artifacts/checks/build-receipt.json` records executable hashes
@@ -109,6 +160,7 @@ retained in local evidence. CI uses nextest; the local full-suite run used
 `cargo test --workspace --no-fail-fast` instead.
 
 ## Save conflict follow-up (2026-10-28)
+
 The overwrite regression failed on the previous build. The save path now compares
 raw content fingerprints at write time, including same-size changes and deleted
 files. Autosave pauses on conflict. Explicit Save offers Cancel (default) and
@@ -119,6 +171,7 @@ guard, and conflicted buffers survive closing their last tab.
 Frontend: 2,536 passed. Rust workspace: 1089 passed, 0 failed, 17 ignored. Type checking, frontend build and formatting passed; lint retained two existing warnings. Rust clippy with `-D warnings` passed. Updated signed app installed and native acceptance passed.
 
 ### Save conflict packaged acceptance
+
 - Default autosave preserved the external bytes and kept the editor dirty.
 - Save showed Overwrite / Cancel, with Cancel focused by default.
 - Cancel preserved both the external file and unsaved editor contents.
@@ -134,6 +187,7 @@ silently bypass the guard. The previous installed app is recoverable at
 `artifacts/OpenStorm-before-save-conflict.app`.
 
 ## Full 69-area roadmap continuation
+
 The active requirements ledger is `docs/openstorm-features.json`. Workbench
 completion claims are retained only as historical context, not OpenStorm acceptance.
 Milestone order: PHP intelligence → Laravel understanding → Blade/frontend →
@@ -144,6 +198,7 @@ Current batch: guarded edit plans, PHPantom checked rename, Optimize Imports.
 Status: implemented and packaged; final native acceptance remains partial (see current status).
 
 ### First batch implementation evidence (0.1.22 candidate)
+
 - Guarded plans bind the open-buffer revisions, PHP project corpus/configuration,
   effective settings and engine generations. Application rejects stale previews,
   aliases, overlapping/colliding edits, invalid UTF-16 positions, read-only targets,
@@ -172,85 +227,87 @@ for each reviewed request; performance is not yet accepted. Reviewed file creati
 move/delete and migration of other generated-edit entry points remain outstanding.
 
 ### 69-area acceptance inventory
+
 The complete original acceptance requirements are retained in
 `docs/openstorm-features.json`; each row below remains visible until individually
 accepted or explicitly deferred. “Partial” does not transfer Workbench acceptance.
 FEAT-058/059 use explicit OpenStorm acceptance overrides in the inventory: the
 OpenIDEA appearance and docking take precedence over the old Workbench layout.
 
-| ID | Area | Feature | Status |
-|---|---|---|---|
-| FEAT-001 | Editor | Buffers, files and encoding | partial |
-| FEAT-002 | Editor | Multiple carets and selections | partial |
-| FEAT-003 | Editor | Syntax highlighting and mixed documents | partial |
-| FEAT-004 | Editor | Tabs, splits and workspace recovery | partial |
-| FEAT-005 | Editor | Find/replace and project search | partial |
-| FEAT-006 | Editor | Folding, breadcrumbs, outline and minimap option | partial |
-| FEAT-007 | Editor | Smart indentation, pairs and snippets | partial |
-| FEAT-008 | Editor | Large files and resource limits | partial |
-| FEAT-009 | Editor | IME, Unicode and accessibility | partial |
-| FEAT-010 | Editor | Local history and recovery | partial |
-| FEAT-011 | PHP intelligence | Contextual PHP autocomplete | partial |
-| FEAT-012 | PHP intelligence | Expected-type and name ranking | partial |
-| FEAT-013 | PHP intelligence | Hover and signature help | partial |
-| FEAT-014 | PHP intelligence | Definition/implementation/type navigation | partial |
-| FEAT-015 | PHP intelligence | References and usages | partial |
-| FEAT-016 | PHP intelligence | Rename | partial |
-| FEAT-017 | PHP intelligence | Diagnostics and intentions | partial |
-| FEAT-018 | PHP intelligence | Format and import optimization | partial |
-| FEAT-019 | PHP intelligence | PHP version and extension profiles | partial |
-| FEAT-020 | PHP intelligence | Composer project understanding | partial |
-| FEAT-021 | PHP intelligence | Flow, generics and shapes | partial |
-| FEAT-022 | PHP intelligence | Extract/inline/change-signature refactorings | partial |
-| FEAT-023 | PHP intelligence | Generate constructors/accessors/overrides/docs | partial |
-| FEAT-024 | PHP intelligence | Call/type hierarchy and structural search | partial |
-| FEAT-025 | Laravel | Framework/version detection | partial |
-| FEAT-026 | Laravel | Eloquent model fields and casts | partial |
-| FEAT-027 | Laravel | Eloquent builders, scopes and collections | partial |
-| FEAT-028 | Laravel | Relationships, pivots and morphs | partial |
-| FEAT-029 | Laravel | Facades and container inference | partial |
-| FEAT-030 | Laravel | Routes and controller actions | partial |
-| FEAT-031 | Laravel | Config, environment references and translations | partial |
-| FEAT-032 | Laravel | Views and cross-file data | partial |
-| FEAT-033 | Laravel | Blade PHP + HTML/CSS/JS source mapping | partial |
-| FEAT-034 | Laravel | Blade components, props, slots and directives | partial |
-| FEAT-035 | Laravel | Validation, FormRequest and auth policies | partial |
-| FEAT-036 | Laravel | Migrations and schema-aware assistance | partial |
-| FEAT-037 | Laravel | Factories, seeders and generated resources | partial |
-| FEAT-038 | Laravel | Artisan panel and command runner | partial |
-| FEAT-039 | Laravel | Laravel logs and exception navigation | partial |
-| FEAT-040 | Laravel | Livewire, Alpine and Inertia | partial |
-| FEAT-041 | Laravel | Pint, Larastan and Laravel coding actions | partial |
-| FEAT-042 | Laravel | Project dashboard, jobs/events and resource generation | partial |
-| FEAT-043 | Tooling and full stack | PHP interpreters: local/Herd/container/SSH | partial |
-| FEAT-044 | Tooling and full stack | Composer commands and package UI | partial |
-| FEAT-045 | Tooling and full stack | PHPUnit and Pest test explorer | partial |
-| FEAT-046 | Tooling and full stack | Coverage and profiling | partial |
-| FEAT-047 | Tooling and full stack | Xdebug stepping and variables | user-deferred |
-| FEAT-048 | Tooling and full stack | Remote/container debugging | user-deferred |
-| FEAT-049 | Tooling and full stack | Git status/diff/blame/staging | partial |
-| FEAT-050 | Tooling and full stack | Terminal and run configurations | partial |
-| FEAT-051 | Tooling and full stack | HTTP request files and response viewer | partial |
-| FEAT-052 | Tooling and full stack | Database browser, SQL and migrations | partial |
-| FEAT-053 | Tooling and full stack | HTML/CSS/JS/TS, Vue/React and Vite | partial |
-| FEAT-054 | Tooling and full stack | Tailwind classes and CSS assets | partial |
-| FEAT-055 | Tooling and full stack | Remote SSH/SFTP/deployment workflows | partial |
-| FEAT-056 | Tooling and full stack | Docker/Sail environments | partial |
-| FEAT-057 | Tooling and full stack | AI full-line/chat/agents and MCP | partial |
-| FEAT-058 | Workbench | Islands Dark/Light/contrast and density | partial |
-| FEAT-059 | Workbench | Project/editor/tool-window docking | partial |
-| FEAT-060 | Workbench | PhpStorm-familiar keymaps | partial |
-| FEAT-061 | Workbench | Search Everywhere / action palette / recent files | partial |
-| FEAT-062 | Workbench | Settings and import/migration | partial |
-| FEAT-063 | Workbench | Notifications, indexing and crash states | partial |
-| FEAT-064 | Workbench | Install/update and platform services | partial |
-| FEAT-065 | Quality | Performance and memory | partial |
-| FEAT-066 | Quality | Versioned semantic snapshot correctness | partial |
-| FEAT-067 | Quality | Trust and execution boundaries | partial |
-| FEAT-068 | Quality | Language service/process isolation | partial |
-| FEAT-069 | Quality | Reference corpus and parity reporting | partial |
+| ID       | Area                   | Feature                                                | Status        |
+| -------- | ---------------------- | ------------------------------------------------------ | ------------- |
+| FEAT-001 | Editor                 | Buffers, files and encoding                            | partial       |
+| FEAT-002 | Editor                 | Multiple carets and selections                         | partial       |
+| FEAT-003 | Editor                 | Syntax highlighting and mixed documents                | partial       |
+| FEAT-004 | Editor                 | Tabs, splits and workspace recovery                    | partial       |
+| FEAT-005 | Editor                 | Find/replace and project search                        | partial       |
+| FEAT-006 | Editor                 | Folding, breadcrumbs, outline and minimap option       | partial       |
+| FEAT-007 | Editor                 | Smart indentation, pairs and snippets                  | partial       |
+| FEAT-008 | Editor                 | Large files and resource limits                        | partial       |
+| FEAT-009 | Editor                 | IME, Unicode and accessibility                         | partial       |
+| FEAT-010 | Editor                 | Local history and recovery                             | partial       |
+| FEAT-011 | PHP intelligence       | Contextual PHP autocomplete                            | partial       |
+| FEAT-012 | PHP intelligence       | Expected-type and name ranking                         | partial       |
+| FEAT-013 | PHP intelligence       | Hover and signature help                               | partial       |
+| FEAT-014 | PHP intelligence       | Definition/implementation/type navigation              | partial       |
+| FEAT-015 | PHP intelligence       | References and usages                                  | partial       |
+| FEAT-016 | PHP intelligence       | Rename                                                 | partial       |
+| FEAT-017 | PHP intelligence       | Diagnostics and intentions                             | partial       |
+| FEAT-018 | PHP intelligence       | Format and import optimization                         | partial       |
+| FEAT-019 | PHP intelligence       | PHP version and extension profiles                     | partial       |
+| FEAT-020 | PHP intelligence       | Composer project understanding                         | partial       |
+| FEAT-021 | PHP intelligence       | Flow, generics and shapes                              | partial       |
+| FEAT-022 | PHP intelligence       | Extract/inline/change-signature refactorings           | partial       |
+| FEAT-023 | PHP intelligence       | Generate constructors/accessors/overrides/docs         | partial       |
+| FEAT-024 | PHP intelligence       | Call/type hierarchy and structural search              | partial       |
+| FEAT-025 | Laravel                | Framework/version detection                            | partial       |
+| FEAT-026 | Laravel                | Eloquent model fields and casts                        | partial       |
+| FEAT-027 | Laravel                | Eloquent builders, scopes and collections              | partial       |
+| FEAT-028 | Laravel                | Relationships, pivots and morphs                       | partial       |
+| FEAT-029 | Laravel                | Facades and container inference                        | partial       |
+| FEAT-030 | Laravel                | Routes and controller actions                          | partial       |
+| FEAT-031 | Laravel                | Config, environment references and translations        | partial       |
+| FEAT-032 | Laravel                | Views and cross-file data                              | partial       |
+| FEAT-033 | Laravel                | Blade PHP + HTML/CSS/JS source mapping                 | partial       |
+| FEAT-034 | Laravel                | Blade components, props, slots and directives          | partial       |
+| FEAT-035 | Laravel                | Validation, FormRequest and auth policies              | partial       |
+| FEAT-036 | Laravel                | Migrations and schema-aware assistance                 | partial       |
+| FEAT-037 | Laravel                | Factories, seeders and generated resources             | partial       |
+| FEAT-038 | Laravel                | Artisan panel and command runner                       | partial       |
+| FEAT-039 | Laravel                | Laravel logs and exception navigation                  | partial       |
+| FEAT-040 | Laravel                | Livewire, Alpine and Inertia                           | partial       |
+| FEAT-041 | Laravel                | Pint, Larastan and Laravel coding actions              | partial       |
+| FEAT-042 | Laravel                | Project dashboard, jobs/events and resource generation | partial       |
+| FEAT-043 | Tooling and full stack | PHP interpreters: local/Herd/container/SSH             | partial       |
+| FEAT-044 | Tooling and full stack | Composer commands and package UI                       | partial       |
+| FEAT-045 | Tooling and full stack | PHPUnit and Pest test explorer                         | partial       |
+| FEAT-046 | Tooling and full stack | Coverage and profiling                                 | partial       |
+| FEAT-047 | Tooling and full stack | Xdebug stepping and variables                          | user-deferred |
+| FEAT-048 | Tooling and full stack | Remote/container debugging                             | user-deferred |
+| FEAT-049 | Tooling and full stack | Git status/diff/blame/staging                          | partial       |
+| FEAT-050 | Tooling and full stack | Terminal and run configurations                        | partial       |
+| FEAT-051 | Tooling and full stack | HTTP request files and response viewer                 | partial       |
+| FEAT-052 | Tooling and full stack | Database browser, SQL and migrations                   | partial       |
+| FEAT-053 | Tooling and full stack | HTML/CSS/JS/TS, Vue/React and Vite                     | partial       |
+| FEAT-054 | Tooling and full stack | Tailwind classes and CSS assets                        | partial       |
+| FEAT-055 | Tooling and full stack | Remote SSH/SFTP/deployment workflows                   | partial       |
+| FEAT-056 | Tooling and full stack | Docker/Sail environments                               | partial       |
+| FEAT-057 | Tooling and full stack | AI full-line/chat/agents and MCP                       | partial       |
+| FEAT-058 | Workbench              | Islands Dark/Light/contrast and density                | partial       |
+| FEAT-059 | Workbench              | Project/editor/tool-window docking                     | partial       |
+| FEAT-060 | Workbench              | PhpStorm-familiar keymaps                              | partial       |
+| FEAT-061 | Workbench              | Search Everywhere / action palette / recent files      | partial       |
+| FEAT-062 | Workbench              | Settings and import/migration                          | partial       |
+| FEAT-063 | Workbench              | Notifications, indexing and crash states               | partial       |
+| FEAT-064 | Workbench              | Install/update and platform services                   | partial       |
+| FEAT-065 | Quality                | Performance and memory                                 | partial       |
+| FEAT-066 | Quality                | Versioned semantic snapshot correctness                | partial       |
+| FEAT-067 | Quality                | Trust and execution boundaries                         | partial       |
+| FEAT-068 | Quality                | Language service/process isolation                     | partial       |
+| FEAT-069 | Quality                | Reference corpus and parity reporting                  | partial       |
 
 ### Broad gates for the first batch candidate
+
 - Rust workspace: 1,096 passed, 0 failed, 18 ignored. Two real-engine client cases
   were then run explicitly and passed, including unsaved collision refusal.
 - Frontend: 2,536 passed; type checking and production assets build passed.
@@ -264,6 +321,7 @@ OpenIDEA appearance and docking take precedence over the old Workbench layout.
   candidate's successful broad checks.
 
 ### Native iteration findings
+
 The first development bundle exercised Ctrl+Alt+O (unused-import removal),
 Cmd+Z/Cmd+Shift+Z, Shift+F6 (three-file preview), Cancel, and a stale preview after
 an external caller edit. Stale application wrote nothing and displayed an explicit
@@ -284,6 +342,7 @@ recovery originals/manifest. The failure was reproduced before the strict-writer
 fix. Broader checks and a corrected packaged native pass remain required.
 
 ### Final batch 1 receipt and remaining acceptance
+
 - Package: `artifacts/batches/0.1.22/OpenStorm.app`, Apple Silicon, development
   profile, identifier `cz.thinky.openstorm`, version 0.1.22. Ad-hoc deep/strict
   signature verification passed. No optimized app promotion or publication.

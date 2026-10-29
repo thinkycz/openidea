@@ -179,6 +179,19 @@ fn symbol_ranking_is_idea_like() {
 }
 
 #[test]
+fn recent_files_skip_deleted_files_but_keep_virtual_documents() {
+    let fx = sample();
+    let idx = fx.open();
+    let app = fx.root.join("web/app.py");
+    let virt = PathBuf::from("jdt://contents/rt.jar/java.lang/String.class");
+    idx.mark_recent(&app);
+    idx.mark_recent(&virt);
+    assert_eq!(idx.recent_files(), vec![virt.clone(), app.clone()]);
+    std::fs::remove_file(&app).unwrap();
+    assert_eq!(idx.recent_files(), vec![virt]);
+}
+
+#[test]
 fn persistence_skips_unchanged_files_on_reopen() {
     let fx = sample();
     {
@@ -472,4 +485,26 @@ fn file_type_changes_reparse_affected_files() {
     assert!(idx.wait_idle(WAIT));
     assert_eq!(symbols(&idx, "beta", SymbolFilter::All), ["beta"]);
     assert_eq!(idx.shared.parsed.load(Ordering::SeqCst), parsed + 1, "only the affected file is re-parsed");
+}
+
+#[test]
+fn unindexed_index_never_scans_or_persists() {
+    let fx = Fixture::new(&[("a.rs", "fn alpha() {}\n")]);
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let sink: SharedSink = {
+        let events = events.clone();
+        Arc::new(move |e: IdeEvent| events.lock().push(e))
+    };
+    let languages = Arc::new(LanguageRegistry::load(None).unwrap());
+    let idx = ProjectIndex::unindexed(&fx.root, languages, Arc::new(Syntax::new()), sink).unwrap();
+    assert!(idx.wait_idle(WAIT));
+    let st = idx.status();
+    assert!(!st.indexing);
+    assert_eq!(st.files, 0);
+    assert!(files(&idx, "a").is_empty());
+    idx.mark_recent(&fx.root.join("a.rs"));
+    assert!(idx.wait_idle(WAIT));
+    assert_eq!(idx.recent_files(), vec![fx.root.join("a.rs")]);
+    assert!(!fx.cache.exists());
+    assert!(!events.lock().iter().any(|e| matches!(e, IdeEvent::Task { .. })), "no indexing task");
 }

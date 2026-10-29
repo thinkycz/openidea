@@ -9,6 +9,7 @@ import { DEFAULT_REMOTE, validateRemote, type RemoteSettings } from "./remoteSet
 export type UpdateMethod = "merge" | "rebase";
 export type IncomingCheck = "auto" | "always" | "never";
 export type VcsConfirm = "ask" | "silently" | "never";
+export type PatchCreated = "ask" | "no" | "reveal";
 export type CursorShape = "block" | "underline" | "bar";
 
 export interface IssueLinkValid {
@@ -25,9 +26,17 @@ export interface GitSettingsValid {
   incomingCheck: IncomingCheck;
   protectedBranches: string;
   signOff: boolean;
+  warnLargeFiles: boolean;
+  largeFileMb: number;
+  warnBadFileNames: boolean;
+  showPushDialog: boolean;
+  pushDialogOnlyProtected: boolean;
+  combineStashAndShelf: boolean;
 }
 
 export interface CommitSettingsValid {
+  nonModal: boolean;
+  clearInitialMessage: boolean;
   analyzeCode: boolean;
   checkTodo: boolean;
   reformat: boolean;
@@ -48,7 +57,14 @@ export interface VcsSettingsValid {
   historyLimit: number;
   git: GitSettingsValid;
   commit: CommitSettingsValid;
-  confirmation: { onCreate: VcsConfirm; onDelete: VcsConfirm };
+  confirmation: {
+    onCreate: VcsConfirm;
+    onDelete: VcsConfirm;
+    showUpdateOptions: boolean;
+    confirmDropCommits: boolean;
+    onPatchCreated: PatchCreated;
+  };
+  shelf: { removeApplied: boolean };
   issueNavigation: IssueLinkValid[];
 }
 
@@ -65,8 +81,11 @@ export interface DebuggerSettingsValid {
   focusAppOnBreakpoint: boolean;
   hideOnTermination: boolean;
   breakpointsAnyFile: boolean;
+  runToCursorInlay: boolean;
   inlineValues: boolean;
+  sortValues: boolean;
   valueTooltip: boolean;
+  valueTooltipOnSelection: boolean;
   valueTooltipDelay: number;
   skipLibraryCode: boolean;
   python: { attachSubprocess: boolean; gevent: boolean };
@@ -135,6 +154,7 @@ export interface WorkflowSettings extends RemoteSettings {
 export const WORKFLOW_LIMITS = {
   historyLimit: { min: 10, max: 100_000 },
   messageLimit: { min: 20, max: 500 },
+  largeFileMb: { min: 1, max: 100_000 },
   bufferKb: { min: 16, max: 1_048_576 },
   tooltipDelay: { min: 0, max: 10_000 },
   terminationTimeoutMs: { min: 0, max: 600_000 },
@@ -171,8 +191,16 @@ export const DEFAULT_WORKFLOW: WorkflowSettings = {
       incomingCheck: "auto",
       protectedBranches: "master; main",
       signOff: false,
+      warnLargeFiles: true,
+      largeFileMb: 50,
+      warnBadFileNames: true,
+      showPushDialog: true,
+      pushDialogOnlyProtected: false,
+      combineStashAndShelf: false,
     },
     commit: {
+      nonModal: true,
+      clearInitialMessage: false,
       analyzeCode: true,
       checkTodo: true,
       reformat: false,
@@ -186,7 +214,14 @@ export const DEFAULT_WORKFLOW: WorkflowSettings = {
       showRightMargin: true,
       wrapAtMargin: false,
     },
-    confirmation: { onCreate: "ask", onDelete: "ask" },
+    confirmation: {
+      onCreate: "ask",
+      onDelete: "ask",
+      showUpdateOptions: true,
+      confirmDropCommits: true,
+      onPatchCreated: "ask",
+    },
+    shelf: { removeApplied: false },
     issueNavigation: [],
   },
   console: {
@@ -207,8 +242,11 @@ export const DEFAULT_WORKFLOW: WorkflowSettings = {
     focusAppOnBreakpoint: false,
     hideOnTermination: false,
     breakpointsAnyFile: false,
+    runToCursorInlay: true,
     inlineValues: true,
+    sortValues: false,
     valueTooltip: true,
+    valueTooltipOnSelection: true,
     valueTooltipDelay: 700,
     skipLibraryCode: true,
     python: { attachSubprocess: true, gevent: false },
@@ -279,8 +317,16 @@ export function validateVcs(raw: unknown): VcsSettingsValid {
       incomingCheck: oneOf(g.incomingCheck, ["auto", "always", "never"] as const, d.git.incomingCheck),
       protectedBranches: text(g.protectedBranches, d.git.protectedBranches),
       signOff: bool(g.signOff, d.git.signOff),
+      warnLargeFiles: bool(g.warnLargeFiles, d.git.warnLargeFiles),
+      largeFileMb: num(g.largeFileMb, d.git.largeFileMb, L.largeFileMb, true),
+      warnBadFileNames: bool(g.warnBadFileNames, d.git.warnBadFileNames),
+      showPushDialog: bool(g.showPushDialog, d.git.showPushDialog),
+      pushDialogOnlyProtected: bool(g.pushDialogOnlyProtected, d.git.pushDialogOnlyProtected),
+      combineStashAndShelf: bool(g.combineStashAndShelf, d.git.combineStashAndShelf),
     },
     commit: {
+      nonModal: bool(c.nonModal, d.commit.nonModal),
+      clearInitialMessage: bool(c.clearInitialMessage, d.commit.clearInitialMessage),
       analyzeCode: bool(c.analyzeCode, d.commit.analyzeCode),
       checkTodo: bool(c.checkTodo, d.commit.checkTodo),
       reformat: bool(c.reformat, d.commit.reformat),
@@ -297,7 +343,11 @@ export function validateVcs(raw: unknown): VcsSettingsValid {
     confirmation: {
       onCreate: oneOf(conf.onCreate, confirm, d.confirmation.onCreate),
       onDelete: oneOf(conf.onDelete, confirm, d.confirmation.onDelete),
+      showUpdateOptions: bool(conf.showUpdateOptions, d.confirmation.showUpdateOptions),
+      confirmDropCommits: bool(conf.confirmDropCommits, d.confirmation.confirmDropCommits),
+      onPatchCreated: oneOf(conf.onPatchCreated, ["ask", "no", "reveal"] as const, d.confirmation.onPatchCreated),
     },
+    shelf: { removeApplied: bool(obj(v.shelf).removeApplied, d.shelf.removeApplied) },
     issueNavigation: Array.isArray(v.issueNavigation)
       ? v.issueNavigation
           .map((x) => obj(x))
@@ -328,8 +378,11 @@ export function validateDebugger(raw: unknown): DebuggerSettingsValid {
     focusAppOnBreakpoint: bool(v.focusAppOnBreakpoint, d.focusAppOnBreakpoint),
     hideOnTermination: bool(v.hideOnTermination, d.hideOnTermination),
     breakpointsAnyFile: bool(v.breakpointsAnyFile, d.breakpointsAnyFile),
+    runToCursorInlay: bool(v.runToCursorInlay, d.runToCursorInlay),
     inlineValues: bool(v.inlineValues, d.inlineValues),
+    sortValues: bool(v.sortValues, d.sortValues),
     valueTooltip: bool(v.valueTooltip, d.valueTooltip),
+    valueTooltipOnSelection: bool(v.valueTooltipOnSelection, d.valueTooltipOnSelection),
     valueTooltipDelay: num(v.valueTooltipDelay, d.valueTooltipDelay, WORKFLOW_LIMITS.tooltipDelay, true),
     skipLibraryCode: bool(v.skipLibraryCode, d.skipLibraryCode),
     python: {
@@ -346,7 +399,12 @@ export function validateRun(raw: unknown): RunSettingsValid {
     confirmRerun: bool(v.confirmRerun, d.confirmRerun),
     confirmTerminate: bool(v.confirmTerminate, d.confirmTerminate),
     showOnStart: bool(v.showOnStart, d.showOnStart),
-    terminationTimeoutMs: num(v.terminationTimeoutMs, d.terminationTimeoutMs, WORKFLOW_LIMITS.terminationTimeoutMs, true),
+    terminationTimeoutMs: num(
+      v.terminationTimeoutMs,
+      d.terminationTimeoutMs,
+      WORKFLOW_LIMITS.terminationTimeoutMs,
+      true,
+    ),
   };
 }
 
@@ -457,7 +515,10 @@ export function useWorkflowSettings<T>(select: (s: WorkflowSettings) => T): T {
 }
 
 /** Calls `listener` whenever a section changes (deep-compared by JSON), not initially. */
-export function onWorkflowSettingsChange<T>(select: (s: WorkflowSettings) => T, listener: (value: T, prev: T) => void): () => void {
+export function onWorkflowSettingsChange<T>(
+  select: (s: WorkflowSettings) => T,
+  listener: (value: T, prev: T) => void,
+): () => void {
   let prev = select(workflowSettings());
   let prevJson = JSON.stringify(prev);
   return useProject.subscribe((s, old) => {

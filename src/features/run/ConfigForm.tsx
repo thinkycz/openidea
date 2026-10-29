@@ -260,7 +260,10 @@ export function ConfigForm({ config, all, type, errors, template, onChange, modi
     ...ADAPTERS.map((a) => ({ value: a.id, label: a.label })),
   ];
   if (config.debugAdapter && !ADAPTERS.some((a) => a.id === config.debugAdapter))
-    adapterOptions.push({ value: config.debugAdapter, label: txTemplate(`${config.debugAdapter} (no launch template)`) });
+    adapterOptions.push({
+      value: config.debugAdapter,
+      label: txTemplate(`${config.debugAdapter} (no launch template)`),
+    });
 
   const targetOptions: SelectOption[] = [
     { value: "", label: "Local machine" },
@@ -645,7 +648,7 @@ function TypeField({
         spellCheck={false}
         value={value}
         placeholder={tx(field.placeholder)}
-        rows={4}
+        rows={field.rows ?? 4}
         onChange={(e) => onChange(e.target.value)}
       />
     );

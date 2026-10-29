@@ -6,6 +6,7 @@ import {
   mergeListing,
   nodeKeyFor,
   planRefresh,
+  visibleEntries,
   visibleInfo,
   type Listings,
   type TreeOptions,
@@ -13,7 +14,17 @@ import {
 
 const entry = (path: string, kind: "file" | "dir" = "file", extra: Partial<FileEntry> = {}): FileEntry => {
   const name = path.slice(path.lastIndexOf("/") + 1);
-  return { name, path, kind, size: 0, mtimeMs: 1, ignored: false, excluded: false, hidden: name.startsWith("."), ...extra };
+  return {
+    name,
+    path,
+    kind,
+    size: 0,
+    mtimeMs: 1,
+    ignored: false,
+    excluded: false,
+    hidden: name.startsWith("."),
+    ...extra,
+  };
 };
 
 const ROOT = { path: "/r", name: "acme" };
@@ -179,5 +190,25 @@ describe("mergeListing", () => {
     expect(next[1]).not.toBe(b);
     expect(next).toHaveLength(3);
     expect(mergeListing(undefined, prev)).toBe(prev);
+  });
+});
+
+describe("visibleEntries sorting", () => {
+  const files = [
+    entry("/r/b.ts", "file", { mtimeMs: 30 }),
+    entry("/r/a.md", "file", { mtimeMs: 10 }),
+    entry("/r/c.md", "file", { mtimeMs: 20 }),
+    entry("/r/src", "dir", { mtimeMs: 5 }),
+  ];
+  const names = (sortBy: TreeOptions["sortBy"], foldersFirst = true) =>
+    visibleEntries(files, { ...DEFAULT_TREE_OPTIONS, sortBy, foldersFirst }).map((e) => e.name);
+
+  it("sorts by type, then name, folders first", () => {
+    expect(names("type")).toEqual(["src", "a.md", "c.md", "b.ts"]);
+  });
+
+  it("sorts by modification time, newest first", () => {
+    expect(names("modified")).toEqual(["src", "b.ts", "c.md", "a.md"]);
+    expect(names("modified", false)).toEqual(["b.ts", "c.md", "a.md", "src"]);
   });
 });

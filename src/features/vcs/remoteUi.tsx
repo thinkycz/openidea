@@ -13,8 +13,24 @@ import { allRepos, lastRemoteFailure, runRemote, saveAll } from "./ops";
 import { currentRepo, refreshNow, repoName, useVcs } from "./store";
 import styles from "./common.module.css";
 
+/** Update Project…: the options dialog, or (Confirmation › Show options before Update off) the default method right away. */
 export function showUpdateDialog() {
+  const { vcs } = workflowSettings();
+  if (!vcs.confirmation.showUpdateOptions) return void updateProject(vcs.git.updateMethod === "rebase");
   openDialog((close) => <UpdateDialog onClose={close} />);
+}
+
+async function updateProject(rebase: boolean) {
+  await saveAll();
+  const branch = useVcs.getState().branch;
+  const repos = allRepos();
+  const detail =
+    repos.length > 1
+      ? `${repos.length} repositories`
+      : branch?.upstream
+        ? `${branch.head} ← ${branch.upstream}`
+        : undefined;
+  await runRemote({ op: "pull", rebase }, detail, repos);
 }
 
 function UpdateDialog({ onClose }: { onClose: () => void }) {
@@ -23,15 +39,7 @@ function UpdateDialog({ onClose }: { onClose: () => void }) {
   const [rebase, setRebase] = useState(() => workflowSettings().vcs.git.updateMethod === "rebase");
   const run = async () => {
     onClose();
-    await saveAll();
-    const repos = allRepos();
-    const detail =
-      repos.length > 1
-        ? `${repos.length} repositories`
-        : branch?.upstream
-          ? `${branch.head} ← ${branch.upstream}`
-          : undefined;
-    await runRemote({ op: "pull", rebase }, detail, repos);
+    await updateProject(rebase);
   };
   return (
     <Dialog
@@ -115,7 +123,9 @@ export function pushCandidates(repos: readonly RepoPush[]): RepoPush[] {
 
 /** Checked by default: repositories with outgoing commits (a new branch only in the selected one). */
 export function defaultPushChecked(repos: readonly RepoPush[], selected: string | null): Set<string> {
-  return new Set(repos.filter((r) => (r.branch.upstream ? r.commits.length > 0 : r.root === selected)).map((r) => r.root));
+  return new Set(
+    repos.filter((r) => (r.branch.upstream ? r.commits.length > 0 : r.root === selected)).map((r) => r.root),
+  );
 }
 
 type PushRow = { type: "repo"; repo: RepoPush } | { type: "commit"; repo: RepoPush; commit: Commit };
@@ -162,7 +172,8 @@ function MultiPushDialog({ onClose }: { onClose: () => void }) {
       if (!next.delete(root)) next.add(root);
       return next;
     });
-  const targetOf = (r: RepoPush) => (r.branch.upstream ? r.branch.upstream.slice(r.branch.upstream.indexOf("/") + 1) : r.branch.head!);
+  const targetOf = (r: RepoPush) =>
+    r.branch.upstream ? r.branch.upstream.slice(r.branch.upstream.indexOf("/") + 1) : r.branch.head!;
   const picked = (repos ?? []).filter((r) => checked.has(r.root));
   const push = async () => {
     onClose();
@@ -271,8 +282,9 @@ function MultiPushDialog({ onClose }: { onClose: () => void }) {
 }
 
 function PushDialog({ target: pushTarget, onClose }: { target: PushTarget; onClose: () => void }) {
-  const branch = useVcs((s) => s.branch);
-  const branches = useVcs((s) => s.branches);
+  const [repo] = useState(currentRepo);
+  const [branch] = useState(() => useVcs.getState().branch);
+  const [branches] = useState(() => useVcs.getState().branches);
   const [commits, setCommits] = useState<Commit[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [force, setForce] = useState(false);
@@ -294,10 +306,10 @@ function PushDialog({ target: pushTarget, onClose }: { target: PushTarget; onClo
       if (!head) return [];
       if (!explicit) {
         const q = outgoingQuery(upstream);
-        return logOf(q.branch, q.limit, q.range);
+        return logOf(q.branch, q.limit, q.range, repo);
       }
       const tip = revision ?? head;
-      return upstream ? logOf(tip, 1000, `${upstream}..${tip}`) : logOf(tip, 50);
+      return upstream ? logOf(tip, 1000, `${upstream}..${tip}`, repo) : logOf(tip, 50, null, repo);
     })()
       .then((c) => alive && setCommits(c))
       .catch((e) => alive && setError(e instanceof Error ? e.message : String(e)));
@@ -328,6 +340,7 @@ function PushDialog({ target: pushTarget, onClose }: { target: PushTarget; onClo
           target: retarget ? edited : null,
         },
         `${revision ? `${head} up to ${revision.slice(0, 8)}` : head} → ${targetLabel}`,
+        [repo],
       );
       return;
     }
@@ -339,6 +352,7 @@ function PushDialog({ target: pushTarget, onClose }: { target: PushTarget; onClo
         tags: pushTags ? tagsMode : null,
       },
       upstream ? `${head} → ${upstream}` : `${head} → new remote branch`,
+      repo,
     );
   };
 

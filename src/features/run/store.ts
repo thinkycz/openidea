@@ -5,7 +5,15 @@
  */
 import { create } from "zustand";
 import { Channel } from "@tauri-apps/api/core";
-import { call, commands, isTauri, type OutputChunk, type RunConfig, type RunId, type TestCaseReport } from "@/platform/ipc";
+import {
+  call,
+  commands,
+  isTauri,
+  type OutputChunk,
+  type RunConfig,
+  type RunId,
+  type TestCaseReport,
+} from "@/platform/ipc";
 import { formatCompileErrors, isJvmApplication, parseJavaArgs, resolveJavaCommand } from "@/platform/javaLaunch";
 import { downloadJdkActions } from "@/platform/jdk";
 import { useProject } from "@/platform/project";
@@ -15,13 +23,21 @@ import { maybeEditorService, notifications, toolWindowService } from "@/workbenc
 import { ConsoleModel } from "./console";
 import { jvmFrameTarget } from "./links";
 import { confirmRerun, confirmTerminate } from "./dialogs";
-import { createTestParser, frameworkFor, TestResults, withTestReporting, type TestEvent, type TestOutputParser } from "./testing";
+import {
+  createTestParser,
+  frameworkFor,
+  TestResults,
+  withTestReporting,
+  type TestEvent,
+  type TestOutputParser,
+} from "./testing";
 import { recordTestStates } from "./testing/states";
 import { failedTestPaths, leafTestPaths, rerunFailedConfig, testsConfig } from "./testing/rerun";
 import { compoundChildren } from "./configs";
 import { remoteLabel, startWithRemedies } from "./remote";
 import { TerminalOutput } from "./terminalOutput";
 import { typeFor } from "./types";
+import { startedPort } from "./serverPort";
 import { tx } from "@/platform/i18n";
 
 /** The permanent "Current File" pseudo-configuration of the chooser (runs the active file's context). */
@@ -44,6 +60,8 @@ export interface RunSession {
   baseConfig?: RunConfig;
   /** "Emulate terminal in output console": the output is a terminal. */
   terminal?: boolean;
+  /** The HTTP port the application's embedded web server reported it started on. */
+  httpPort?: number;
 }
 
 interface SessionRuntime {
@@ -166,6 +184,7 @@ export async function loadConfigs(): Promise<void> {
 export function defaultSelection(configs: readonly RunConfig[]): RunConfig | undefined {
   const score = (c: RunConfig) => {
     if (c.isTest) return 1;
+    if (c.kind === "spring-boot") return 4;
     const s = `${c.id} ${c.name}`.toLowerCase();
     if (/bootrun|spring-boot:run|:run\b|run:|\bdev\b|\bstart\b|\bserve\b|runserver/.test(s)) return 3;
     if (/build|package|lint|check|format|clean/.test(s)) return 0;
@@ -220,7 +239,10 @@ function persistTemporary() {
   const root = useProject.getState().project?.root;
   if (!root) return;
   const { configs, temporary } = useRun.getState();
-  writeTemporary(root, temporary.map((id) => configs.find((c) => c.id === id)).filter((c): c is RunConfig => !!c));
+  writeTemporary(
+    root,
+    temporary.map((id) => configs.find((c) => c.id === id)).filter((c): c is RunConfig => !!c),
+  );
 }
 
 export function isTemporary(id: string | null | undefined): boolean {
@@ -240,12 +262,17 @@ export function adoptTemporary(config: RunConfig): RunConfig {
     return existing;
   }
   let temporary = [...state.temporary.filter((id) => id !== config.id), config.id];
-  const busy = new Set(state.sessions.filter((x) => x.status === "running" || x.status === "starting").map((x) => x.config.id));
+  const busy = new Set(
+    state.sessions.filter((x) => x.status === "running" || x.status === "starting").map((x) => x.config.id),
+  );
   while (temporary.length > MAX_TEMPORARY) {
     const evict = temporary.find((id) => id !== config.id && !busy.has(id)) ?? temporary[0]!;
     temporary = temporary.filter((id) => id !== evict);
   }
-  const configs = [...state.configs.filter((c) => c.id !== config.id && (!state.temporary.includes(c.id) || temporary.includes(c.id))), config];
+  const configs = [
+    ...state.configs.filter((c) => c.id !== config.id && (!state.temporary.includes(c.id) || temporary.includes(c.id))),
+    config,
+  ];
   useRun.setState({ configs, temporary });
   persistTemporary();
   selectConfig(config.id);
@@ -386,7 +413,9 @@ export async function prepareLaunch(config: RunConfig, chain: readonly string[] 
 export async function startCompound(config: RunConfig, chain: readonly string[] = []): Promise<RunSession[]> {
   if (!(await prepareLaunch(config, chain))) return [];
   const children = compoundChildren(config, useRun.getState().configs);
-  const sessions = await Promise.all(children.map((c) => startRun(c, undefined, undefined, { chain: [...chain, config.id] })));
+  const sessions = await Promise.all(
+    children.map((c) => startRun(c, undefined, undefined, { chain: [...chain, config.id] })),
+  );
   return sessions.filter((s): s is RunSession => !!s);
 }
 
@@ -438,14 +467,25 @@ export async function startRun(
   let session = reuse ? state.sessions.find((s) => s.id === reuse) : undefined;
   // As in IDEA, a configuration that doesn't allow parallel
   // runs asks before stopping its running instances; rerunning a tab restarts it without asking.
-  const others = config.allowParallel ? [] : state.sessions.filter((s) => s.config.id === config.id && busy(s) && s.id !== session?.id);
+  const others = config.allowParallel
+    ? []
+    : state.sessions.filter((s) => s.config.id === config.id && busy(s) && s.id !== session?.id);
   if (others.length) {
-    if (workflowSettings().run.confirmRerun && !(await confirmRerun(config.name, others.length + (session && busy(session) ? 1 : 0))))
+    if (
+      workflowSettings().run.confirmRerun &&
+      !(await confirmRerun(config.name, others.length + (session && busy(session) ? 1 : 0)))
+    )
       return null;
     await Promise.all(others.map((s) => stopSession(s.id)));
     session ??= others[0];
   }
-  if (session && busy(session)) await stopSession(session.id);
+  const stopping = others.map((s) => s.id);
+  if (session && busy(session)) {
+    await stopSession(session.id);
+    stopping.push(session.id);
+  }
+  // The new process starts once the old one is gone (it may still hold a port or a lock).
+  await waitForExit(stopping);
   session ??= state.sessions.find((s) => s.config.id === config.id && !busy(s));
 
   try {
@@ -472,9 +512,13 @@ export async function startRun(
       endedAt: null,
       stdinClosed: false,
       stopped: false,
+      httpPort: undefined,
     };
     const updated = session;
-    useRun.setState((s) => ({ sessions: s.sessions.map((x) => (x.id === updated.id ? updated : x)), activeSession: updated.id }));
+    useRun.setState((s) => ({
+      sessions: s.sessions.map((x) => (x.id === updated.id ? updated : x)),
+      activeSession: updated.id,
+    }));
   } else {
     session = {
       id: `run${++sessionSeq}`,
@@ -496,10 +540,16 @@ export async function startRun(
   const rt = runtimes.get(sessionId)!;
   const generation = rt.generation;
   if (options.onLine) rt.lineListeners.push(options.onLine);
+  rt.lineListeners.push((line) => {
+    const port = startedPort(line);
+    if (port !== null && runtimes.get(sessionId)?.generation === generation && getSession(sessionId)?.httpPort !== port)
+      patchSession(sessionId, { httpPort: port });
+  });
   rt.onExit = options.onExit;
   try {
     if (config.focusToolWindow) toolWindowService().show("run", true);
-    else if (options.show ?? config.openToolWindow ?? workflowSettings().run.showOnStart) toolWindowService().show("run");
+    else if (options.show ?? config.openToolWindow ?? workflowSettings().run.showOnStart)
+      toolWindowService().show("run");
   } catch {
     /* no workbench (tests) */
   }
@@ -595,7 +645,8 @@ async function resolveJvmApplication(sessionId: string, config: RunConfig): Prom
   say(`Building and resolving the classpath of ${parsed.mainClass}…\n`);
   try {
     const info = await call(commands.javaResolveLaunch(config.cwd ?? "", parsed.classpath === "test", true));
-    if (info.build === "withErrors") say("Build completed with errors; launching with the last compiled classes.\n", "stderr");
+    if (info.build === "withErrors")
+      say("Build completed with errors; launching with the last compiled classes.\n", "stderr");
     if (info.build === "failed") say("Build failed; launching with the last compiled classes.\n", "stderr");
     const compileReport = formatCompileErrors(info);
     if (compileReport) say(compileReport, "stderr");
@@ -620,7 +671,13 @@ async function resolveJvmApplication(sessionId: string, config: RunConfig): Prom
     say(`Cannot resolve the classpath: ${message}\n`, "stderr");
     // jdtls can't start without a newer JDK: "Download JDK 25".
     const actions = downloadJdkActions(message);
-    notifications().notify({ group: "run", level: "error", title: `Cannot run '${config.name}'`, body: message, actions });
+    notifications().notify({
+      group: "run",
+      level: "error",
+      title: `Cannot run '${config.name}'`,
+      body: message,
+      actions,
+    });
     return null;
   }
 }
@@ -680,9 +737,9 @@ export function testReportEvents(reports: readonly TestCaseReport[]): TestEvent[
     const text = [r.message, r.output].filter(Boolean).join("\n");
     for (const line of text.split("\n").slice(0, 200)) events.push({ type: "output", path, line });
     const outer = r.className.split("$")[0]!;
-    const frame = new RegExp(`at (${outer.replace(/[.$]/g, "\\$&")}(?:\\$[\\w$]+)?)\\.[\\w$<>]+\\(([\\w$-]+\\.(?:java|kt|groovy|scala)):(\\d+)\\)`).exec(
-      r.output ?? "",
-    );
+    const frame = new RegExp(
+      `at (${outer.replace(/[.$]/g, "\\$&")}(?:\\$[\\w$]+)?)\\.[\\w$<>]+\\(([\\w$-]+\\.(?:java|kt|groovy|scala)):(\\d+)\\)`,
+    ).exec(r.output ?? "");
     if (frame) events.push({ type: "location", path, location: jvmFrameTarget(frame[1], frame[2]!, Number(frame[3])) });
   }
   return events;
@@ -690,7 +747,7 @@ export function testReportEvents(reports: readonly TestCaseReport[]): TestEvent[
 
 function notifyExit(sessionId: string, code: number | null) {
   const session = getSession(sessionId);
-  if (!session || code === 0 || code === null) return;
+  if (!session || session.stopped || code === 0 || code === null) return;
   let visible = true;
   try {
     visible = toolWindowService().isVisible("run");
@@ -736,8 +793,34 @@ export async function stopSession(sessionId: string): Promise<void> {
   try {
     await call(commands.runStop(session.runId));
   } catch (e) {
-    notifications().notify({ group: "run", level: "error", title: "Cannot stop process", body: e instanceof Error ? e.message : String(e) });
+    notifications().notify({
+      group: "run",
+      level: "error",
+      title: "Cannot stop process",
+      body: e instanceof Error ? e.message : String(e),
+    });
   }
+}
+
+/** Resolves once the given sessions' processes exited (or after `timeoutMs`). */
+function waitForExit(sessionIds: readonly string[], timeoutMs = 10_000): Promise<void> {
+  const live = () =>
+    sessionIds.some((id) => {
+      const s = getSession(id);
+      return !!s && s.runId !== null && s.status === "running";
+    });
+  if (!live()) return Promise.resolve();
+  return new Promise((resolve) => {
+    const done = () => {
+      clearTimeout(timer);
+      unsubscribe();
+      resolve();
+    };
+    const timer = setTimeout(done, timeoutMs);
+    const unsubscribe = useRun.subscribe(() => {
+      if (!live()) done();
+    });
+  });
 }
 
 export function rerunSession(sessionId: string) {
@@ -766,7 +849,11 @@ export function rerunFailed(sessionId: string): boolean {
  * Run / Debug the tests selected in a session's test tree (IDEA: a temporary
  * configuration for them). False when the framework can't filter tests.
  */
-export async function runSelectedTests(sessionId: string, nodeIds: readonly string[], debug: boolean): Promise<boolean> {
+export async function runSelectedTests(
+  sessionId: string,
+  nodeIds: readonly string[],
+  debug: boolean,
+): Promise<boolean> {
   const session = getSession(sessionId);
   const tests = runtimes.get(sessionId)?.tests;
   if (!session || !tests) return false;
@@ -776,7 +863,10 @@ export async function runSelectedTests(sessionId: string, nodeIds: readonly stri
   const name = nodes.length === 1 ? nodes[0]!.name : `${paths.length} tests`;
   const derived = testsConfig(base, paths, name);
   if (!derived) return false;
-  const config = adoptTemporary({ ...derived, id: `context:tests:${base.id}:${paths.map((p) => p.join("/")).join("|")}` });
+  const config = adoptTemporary({
+    ...derived,
+    id: `context:tests:${base.id}:${paths.map((p) => p.join("/")).join("|")}`,
+  });
   if (debug) await executeAction("run.debugConfig", config);
   else await startRun(config);
   return true;
@@ -803,7 +893,10 @@ export async function sendStdin(sessionId: string, text: string): Promise<void> 
   try {
     await call(commands.runStdin(session.runId, text + "\n"));
   } catch (e) {
-    enqueue(sessionId, { kind: "system", text: tx`Cannot write to stdin: ${e instanceof Error ? e.message : String(e)}\n` });
+    enqueue(sessionId, {
+      kind: "system",
+      text: tx`Cannot write to stdin: ${e instanceof Error ? e.message : String(e)}\n`,
+    });
   }
 }
 
@@ -846,7 +939,8 @@ export async function closeSessionTab(sessionId: string): Promise<boolean> {
   const session = getSession(sessionId);
   if (!session) return false;
   const running = session.status === "running" || session.status === "starting";
-  if (running && workflowSettings().run.confirmTerminate && !(await confirmTerminate(session.config.name))) return false;
+  if (running && workflowSettings().run.confirmTerminate && !(await confirmTerminate(session.config.name)))
+    return false;
   closeSession(sessionId);
   return true;
 }
@@ -913,5 +1007,10 @@ export function modifyTemporary(config: RunConfig) {
       useRun.setState({ configs: st.configs.map((c) => (c.id === adopted.id ? { ...c, detected: true } : c)) });
     persistTemporary();
   });
-  useRun.setState({ editorOpen: true, chooserOpen: false, editTarget: adopted.id, editDirty: adopted.detected === false });
+  useRun.setState({
+    editorOpen: true,
+    chooserOpen: false,
+    editTarget: adopted.id,
+    editDirty: adopted.detected === false,
+  });
 }

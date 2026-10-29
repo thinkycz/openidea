@@ -41,11 +41,15 @@ export function lineCommentDefaults(language: string | undefined): { atFirstColu
 }
 
 /** Effective Comment Code style of a language: Code Style override, else the language default. */
-export function lineCommentStyleFor(prefs: EditorExtras, language: string | undefined): { atFirstColumn: boolean; addSpace: boolean } {
+export function lineCommentStyleFor(
+  prefs: EditorExtras,
+  language: string | undefined,
+): { atFirstColumn: boolean; addSpace: boolean } {
   const base = lineCommentDefaults(language);
   const own = language ? prefs.codeStyle.languages[language] : undefined;
   return {
-    atFirstColumn: typeof own?.lineCommentAtFirstColumn === "boolean" ? own.lineCommentAtFirstColumn : base.atFirstColumn,
+    atFirstColumn:
+      typeof own?.lineCommentAtFirstColumn === "boolean" ? own.lineCommentAtFirstColumn : base.atFirstColumn,
     addSpace: typeof own?.lineCommentAddSpace === "boolean" ? own.lineCommentAddSpace : base.addSpace,
   };
 }
@@ -76,7 +80,10 @@ export const EDITOR_EXTRA_DEFAULTS = {
   appearance: {
     caretBlinking: true,
     caretBlinkPeriod: 500,
+    smoothCaretBlinking: false,
     blockCaret: false,
+    smoothCaretMovement: false,
+    caretMovementStyle: "snappy",
     lineNumbers: true,
     methodSeparators: false,
     whitespaceLeading: true,
@@ -142,7 +149,14 @@ export const EDITOR_EXTRA_DEFAULTS = {
     nextErrorErrorsOnly: true,
     stickyLinesMax: 5,
   },
-  inlay: { types: true, parameters: true, other: true, disabledLanguages: [] as string[], codeVisionUsages: true, codeVisionAuthor: true },
+  inlay: {
+    types: true,
+    parameters: true,
+    other: true,
+    disabledLanguages: [] as string[],
+    codeVisionUsages: true,
+    codeVisionAuthor: true,
+  },
   inlineCompletion: { enabled: true, onlyOnPause: false, pauseMs: 500, disabledLanguages: [] as string[] },
   gutterIconsDisabled: [] as string[],
   showGutterIcons: true,

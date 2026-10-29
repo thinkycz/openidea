@@ -34,7 +34,21 @@ export function isCancelled(e: unknown): boolean {
   return e instanceof IpcError && e.kind === "cancelled";
 }
 
-let nextId = 1;
+/** Backend `unavailable` message when servers run but none has the feature: "jdtls doesn't support inline completion". */
+const LACKS_FEATURE = /^\S.* doesn't support \S.*$/;
+
+/**
+ * What to tell the user when a language-server feature is `unavailable`: the
+ * running server that lacks it, so a working server doesn't read as missing;
+ * `fallback` when no server is running.
+ */
+export function unavailableText(e: unknown, fallback = "No language server available"): string {
+  return e instanceof IpcError && e.kind === "unavailable" && LACKS_FEATURE.test(e.message) ? e.message : fallback;
+}
+
+// Ids are shared by every window of the backend and outlive a reload there (a cancel that
+// arrives before its request began is remembered), so each page starts at a random point.
+let nextId = 1 + Math.floor(Math.random() * 0x7000_0000);
 /** Allocates an id for a cancellable request (see `commands.cancelRequest`). */
 export function nextRequestId(): RequestId {
   return nextId++ as RequestId;
@@ -64,7 +78,10 @@ export async function ideEventsReady(): Promise<void> {
 }
 
 /** Subscribes to one backend event type (or `"*"`); returns an unsubscribe function. */
-export function onIdeEvent<K extends IdeEvent["type"]>(type: K | "*", handler: (event: EventOf<K>) => void): () => void {
+export function onIdeEvent<K extends IdeEvent["type"]>(
+  type: K | "*",
+  handler: (event: EventOf<K>) => void,
+): () => void {
   ensureListening();
   let set = handlers.get(type);
   if (!set) handlers.set(type, (set = new Set()));

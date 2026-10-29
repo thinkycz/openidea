@@ -27,7 +27,7 @@ describe("usages", () => {
     ]);
     expect(usageCount(groups)).toBe(3);
     expect(groups[0]!.usages[0]!.text).toBe("");
-    expect(trimPreview(groups[1]!.usages[1]!)).toEqual({ text: "const x = foo();", from: 10, to: 13 });
+    expect(trimPreview(groups[1]!.usages[1]!)).toEqual({ text: "const x = foo();", textCol: 2, from: 10, to: 13 });
   });
 });
 
@@ -94,7 +94,8 @@ describe("sortProblems", () => {
     code: null,
   });
   const items = [d("warning", 1, "b"), d("error", 5, "c"), d("warning", 0, "z"), d("error", 2, "a")];
-  const lines = (order: { bySeverity: boolean; byName: boolean }) => sortProblems(items, order).map((x) => x.range.start.line);
+  const lines = (order: { bySeverity: boolean; byName: boolean }) =>
+    sortProblems(items, order).map((x) => x.range.start.line);
 
   it("orders by severity, then position (IDEA's default)", () => {
     expect(lines({ bySeverity: true, byName: false })).toEqual([2, 5, 0, 1]);

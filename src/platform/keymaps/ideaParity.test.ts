@@ -19,6 +19,9 @@ describe("IDEA keymap parity", () => {
     ["code.quickDocumentation", ["F1", "Ctrl+J"], ["Ctrl+Q"]],
     // Git.Branches: the macOS keymaps remove ⇧⌘` (it cycles windows there).
     ["vcs.branches", [], ["Ctrl+Shift+`"]],
+    // Git.CreateNewBranch shares Inline's shortcut.
+    ["vcs.newBranch", ["Meta+Alt+N"], ["Ctrl+Alt+N"]],
+    ["refactor.inline", ["Meta+Alt+N"], ["Ctrl+Alt+N"]],
     ["debug.resume", ["Meta+Alt+R", "F9"], ["F9"]],
     ["code.quickDefinition", ["Alt+Space", "Meta+Y"], ["Ctrl+Shift+I"]],
     ["editor.copyPath", ["Meta+Shift+C"], ["Ctrl+Shift+C"]],
@@ -52,6 +55,26 @@ describe("IDEA keymap parity", () => {
     // Vcs.Log.GoToRef: Find in the Git Log table.
     ["vcs.log.goToRef", ["Meta+F"], ["Ctrl+F"]],
     // Back / Forward also carry the mouse side buttons (`<mouse-shortcut keystroke="button4"/>`).
+    ["editor.codeBlockStartWithSelection", ["Meta+Alt+Shift+["], ["Ctrl+Shift+["]],
+    ["editor.codeBlockEndWithSelection", ["Meta+Alt+Shift+]"], ["Ctrl+Shift+]"]],
+    ["code.collapseBlock", ["Meta+Shift+."], ["Ctrl+Shift+."]],
+    ["code.autoIndentLines", ["Ctrl+Alt+I"], ["Ctrl+Alt+I"]],
+    ["code.showErrorDescription", ["Meta+F1"], ["Ctrl+F1"]],
+    ["code.moveElementLeft", ["Meta+Alt+Shift+Left"], ["Ctrl+Alt+Shift+Left"]],
+    ["code.moveElementRight", ["Meta+Alt+Shift+Right"], ["Ctrl+Alt+Shift+Right"]],
+    ["code.surroundWithLiveTemplate", ["Meta+Alt+J"], ["Ctrl+Alt+J"]],
+    ["navigate.customRegion", ["Meta+Alt+."], ["Ctrl+Alt+."]],
+    ["navigate.showFilePath", ["Meta+Alt+F12"], ["Ctrl+Alt+F12"]],
+    ["navigate.nextHighlightedUsage", ["Ctrl+Alt+Down"], ["Ctrl+Alt+Down"]],
+    ["analyze.inspectFile", ["Alt+Shift+I"], ["Alt+Shift+I"]],
+    ["project.copyElement", ["F5"], ["F5"]],
+    ["debug.quickEvaluate", ["Meta+Alt+F8"], ["Ctrl+Alt+F8"]],
+    ["run.chooseDebugConfig", ["Ctrl+Alt+D"], ["Alt+Shift+F9"]],
+    ["editor.nextSplitter", ["Alt+Tab"], ["Alt+Tab"]],
+    ["toolwindow.resizeLeft", ["Ctrl+Alt+Left"], ["Ctrl+Alt+Shift+Left"]],
+    ["toolwindow.closeContent", ["Meta+W", "Ctrl+Shift+F4"], ["Ctrl+F4", "Ctrl+Shift+F4"]],
+    ["layout.restoreDefault", ["Shift+F12"], ["Shift+F12"]],
+    ["workbench.stopBackgroundProcesses", ["Meta+Shift+F2"], ["Ctrl+Shift+F2"]],
     ["navigate.back", ["Meta+[", "Meta+Alt+Left", "Button4"], ["Ctrl+Alt+Left", "Button4"]],
     ["navigate.forward", ["Meta+]", "Meta+Alt+Right", "Button5"], ["Ctrl+Alt+Right", "Button5"]],
   ])("%s", (id, mac, win) => {
@@ -75,6 +98,10 @@ describe("IDEA keymap parity", () => {
     order(km, "navigate.nextError", "vcs.changelist.edit");
     order(km, "debug.setValue", "vcs.changelist.edit");
     order(km, "find.replaceInFile", "find.rerun");
+    order(km, "navigate.nextOccurrence", "navigate.nextHighlightedUsage");
+    order(km, "code.moveElementLeft", "toolwindow.resizeLeft");
     order(km, "find.inFile", "vcs.log.goToRef");
+    // Inline (text editor only) wins over New Branch.
+    order(km, "vcs.newBranch", "refactor.inline");
   });
 });

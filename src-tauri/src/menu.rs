@@ -207,6 +207,7 @@ pub fn spec(os: Os) -> Vec<Entry> {
         act("file.new", "New…"),
         act("file.newScratchFile", "New Scratch File…"),
         act("file.openProject", "Open…"),
+        act("file.openFile", "Open File…"),
         act("file.openInNewWindow", "Open in New Window…"),
         sub(
             "openRecent",
@@ -218,6 +219,7 @@ pub fn spec(os: Os) -> Vec<Entry> {
         SEP,
         act("remote.connect", "Remote Development…"),
         act("remote.disconnect", "Disconnect from Remote Host"),
+        act("remote.reloadEnvironment", "Reload Environment"),
         SEP,
         act("file.save", "Save All"),
         act("file.reloadAllFromDisk", "Reload All from Disk"),
@@ -408,8 +410,10 @@ pub fn spec(os: Os) -> Vec<Entry> {
             act("navigate.gotoTest", "Test"),
             SEP,
             act("navigate.fileStructure", "File Structure"),
+            act("navigate.showFilePath", "File Path"),
             act("navigate.callHierarchy", "Call Hierarchy"),
             act("navigate.typeHierarchy", "Type Hierarchy"),
+            act("navigate.customRegion", "Custom Folding…"),
             SEP,
             act("navigate.nextMethod", "Next Method"),
             act("navigate.previousMethod", "Previous Method"),
@@ -438,6 +442,8 @@ pub fn spec(os: Os) -> Vec<Entry> {
             act("code.parameterInfo", "Parameter Info"),
             act("code.quickDocumentation", "Quick Documentation"),
             act("code.expressionTypeInfo", "Expression Type Info"),
+            act("code.showErrorDescription", "Error Description"),
+            act("editor.contextInfo", "Context Info"),
             act("code.showIntentions", "Show Context Actions"),
             act("code.generate", "Generate…"),
             act("code.overrideMethods", "Override Methods…"),
@@ -445,9 +451,11 @@ pub fn spec(os: Os) -> Vec<Entry> {
             SEP,
             act("code.insertLiveTemplate", "Insert Live Template…"),
             act("code.surroundWith", "Surround With…"),
+            act("code.surroundWithLiveTemplate", "Surround with Live Template…"),
             act("code.unwrap", "Unwrap/Remove…"),
             SEP,
             act("code.reformat", "Reformat Code"),
+            act("code.autoIndentLines", "Auto-Indent Lines"),
             act("code.optimizeImports", "Optimize Imports"),
             act("code.cleanup", "Code Cleanup…"),
             SEP,
@@ -458,6 +466,10 @@ pub fn spec(os: Os) -> Vec<Entry> {
             act("code.shrinkSelection", "Shrink Selection"),
             act("code.duplicateLine", "Duplicate Line or Selection"),
             act("code.deleteLine", "Delete Line"),
+            act("code.moveStatementUp", "Move Statement Up"),
+            act("code.moveStatementDown", "Move Statement Down"),
+            act("code.moveElementLeft", "Move Element Left"),
+            act("code.moveElementRight", "Move Element Right"),
             act("code.moveLineUp", "Move Line Up"),
             act("code.moveLineDown", "Move Line Down"),
             SEP,
@@ -468,13 +480,43 @@ pub fn spec(os: Os) -> Vec<Entry> {
                     act("code.foldToggle", "Expand/Collapse"),
                     act("code.foldAll", "Collapse All"),
                     act("code.unfoldAll", "Expand All"),
+                    sub(
+                        "expandToLevel",
+                        "Expand to Level",
+                        vec![
+                            act("code.expandToLevel1", "1"),
+                            act("code.expandToLevel2", "2"),
+                            act("code.expandToLevel3", "3"),
+                            act("code.expandToLevel4", "4"),
+                            act("code.expandToLevel5", "5"),
+                        ],
+                    ),
+                    sub(
+                        "expandAllToLevel",
+                        "Expand All to Level",
+                        vec![
+                            act("code.expandAllToLevel1", "1"),
+                            act("code.expandAllToLevel2", "2"),
+                            act("code.expandAllToLevel3", "3"),
+                            act("code.expandAllToLevel4", "4"),
+                            act("code.expandAllToLevel5", "5"),
+                        ],
+                    ),
                     SEP,
+                    act("code.collapseBlock", "Fold Code Block"),
                     act("code.foldSelection", "Fold Selection / Remove Region"),
                 ],
             ),
             SEP,
             act("analyze.inspectCode", "Inspect Code…"),
-            sub("analyzeCode", "Analyze Code", vec![act("analyze.locateDuplicates", "Locate Duplicates…")]),
+            sub(
+                "analyzeCode",
+                "Analyze Code",
+                vec![
+                    act("analyze.inspectFile", "Inspect Current File"),
+                    act("analyze.locateDuplicates", "Locate Duplicates…"),
+                ],
+            ),
             act("analyze.stackTrace", "Analyze Stack Trace or Thread Dump…"),
         ],
     ));
@@ -496,6 +538,7 @@ pub fn spec(os: Os) -> Vec<Entry> {
             act("refactor.inline", "Inline…"),
             SEP,
             act("refactor.move", "Move…"),
+            act("project.copyElement", "Copy…"),
             act("refactor.safeDelete", "Safe Delete…"),
         ],
     ));
@@ -525,6 +568,7 @@ pub fn spec(os: Os) -> Vec<Entry> {
             act("run.stop", "Stop"),
             SEP,
             act("run.chooseConfig", "Run…"),
+            act("run.chooseDebugConfig", "Debug…"),
             act("runAnything.show", "Run Anything…"),
             act("run.editConfigs", "Edit Configurations…"),
             act("debug.attachToProcess", "Attach to Process…"),
@@ -542,6 +586,7 @@ pub fn spec(os: Os) -> Vec<Entry> {
             act("debug.showExecutionPoint", "Show Execution Point"),
             act("debug.resetFrame", "Reset Frame"),
             act("debug.evaluate", "Evaluate Expression…"),
+            act("debug.quickEvaluate", "Quick Evaluate Expression"),
             sub(
                 "debuggingActions",
                 "Debugging Actions",
@@ -568,8 +613,14 @@ pub fn spec(os: Os) -> Vec<Entry> {
             act("vcs.pull", "Pull…"),
             act("vcs.fetch", "Fetch"),
             SEP,
+            // Operation items (Abort Merge, Continue Rebase…) are enabled only while it is in progress.
             act("vcs.merge", "Merge…"),
+            act("vcs.merge.abort", "Abort Merge"),
             act("vcs.rebase", "Rebase…"),
+            act("vcs.rebase.abort", "Abort Rebase"),
+            act("vcs.rebase.continue", "Continue Rebase"),
+            act("vcs.rebase.skip", "Skip Commit"),
+            act("vcs.resolveConflicts", "Resolve Conflicts…"),
             SEP,
             act("vcs.branches", "Branches…"),
             act("vcs.newBranch", "New Branch…"),
@@ -579,17 +630,7 @@ pub fn spec(os: Os) -> Vec<Entry> {
             act("vcs.newWorktree", "New Worktree…"),
             act("vcs.worktrees", "Worktrees…"),
             SEP,
-            act("vcs.showDiff", "Show Diff"),
-            act("vcs.rollback", "Rollback…"),
-            act("vcs.annotate", "Annotate with Git Blame"),
             act("vcs.showLog", "Show Git Log"),
-            act("vcs.localHistory", "Local History"),
-            act("localHistory.putLabel", "Put Label…"),
-            SEP,
-            act("vcs.stash", "Stash Changes…"),
-            act("vcs.unstash", "Unstash Changes…"),
-            act("vcs.shelve", "Shelve Changes…"),
-            act("vcs.showShelf", "Show Shelf"),
             sub(
                 "gitPatch",
                 "Patch",
@@ -599,12 +640,32 @@ pub fn spec(os: Os) -> Vec<Entry> {
                     act("vcs.applyPatchFromClipboard", "Apply Patch from Clipboard…"),
                 ],
             ),
-            SEP,
-            act("vcs.resolveConflicts", "Resolve Conflicts…"),
-            act("vcs.rebase.continue", "Continue Rebase"),
-            act("vcs.rebase.abort", "Abort Rebase"),
-            act("vcs.rebase.skip", "Skip Commit"),
-            act("vcs.merge.abort", "Abort Merge"),
+            sub(
+                "gitUncommittedChanges",
+                "Uncommitted Changes",
+                vec![
+                    act("vcs.shelve", "Shelve Changes…"),
+                    act("vcs.showShelf", "Show Shelf"),
+                    act("vcs.stash", "Stash Changes…"),
+                    act("vcs.unstash", "Unstash Changes…"),
+                    act("vcs.rollback", "Rollback…"),
+                ],
+            ),
+            sub(
+                "gitCurrentFile",
+                "Current File",
+                vec![
+                    act("vcs.addToVcs", "Add to VCS"),
+                    SEP,
+                    act("vcs.annotate", "Annotate with Git Blame"),
+                    act("vcs.showDiff", "Show Diff"),
+                    act("vcs.compareWithBranch", "Compare with Branch or Revision…"),
+                    act("vcs.showHistory", "Show History"),
+                    SEP,
+                    act("vcs.localHistory", "Local History"),
+                    act("localHistory.putLabel", "Put Label…"),
+                ],
+            ),
             SEP,
             sub(
                 "gitHub",
@@ -620,6 +681,11 @@ pub fn spec(os: Os) -> Vec<Entry> {
             act("vcs.clone", "Clone…"),
             SEP,
             act("vcs.operations", "VCS Operations Popup…"),
+            SEP,
+            act("vcs.revert.continue", "Continue Revert"),
+            act("vcs.revert.abort", "Abort Revert"),
+            act("vcs.cherryPick.continue", "Continue Cherry-Pick"),
+            act("vcs.cherryPick.abort", "Abort Cherry-Pick"),
         ],
     ));
 
@@ -684,6 +750,16 @@ pub fn spec(os: Os) -> Vec<Entry> {
                 act("toolwindow.hideActive", "Hide Active Tool Window"),
                 act("toolwindow.maximize", "Maximize Tool Window"),
                 act("toolwindow.closeContent", "Close Active Tab"),
+                sub(
+                    "resizeToolWindow",
+                    "Resize",
+                    vec![
+                        act("toolwindow.resizeLeft", "Stretch to Left"),
+                        act("toolwindow.resizeRight", "Stretch to Right"),
+                        act("toolwindow.resizeUp", "Stretch to Top"),
+                        act("toolwindow.resizeDown", "Stretch to Bottom"),
+                    ],
+                ),
                 SEP,
                 act("toolwindow.jumpToLast", "Jump to Last Tool Window"),
                 act("toolwindow.focusEditor", "Focus Editor"),
@@ -706,6 +782,11 @@ pub fn spec(os: Os) -> Vec<Entry> {
                 act("editor.splitDown", "Split Down"),
                 act("editor.unsplit", "Unsplit"),
                 act("editor.moveToOppositeGroup", "Move to Opposite Group"),
+                act("editor.openInOppositeGroup", "Open in Opposite Group"),
+                act("editor.changeSplitOrientation", "Change Splitter Orientation"),
+                act("editor.unsplitAll", "Unsplit All"),
+                act("editor.nextSplitter", "Go to Next Splitter"),
+                act("editor.prevSplitter", "Go to Previous Splitter"),
             ],
         ),
         SEP,
@@ -1213,6 +1294,7 @@ mod tests {
                 "app.about",
                 "app.quit",
                 "file.openProject",
+                "file.openFile",
                 "file.openInNewWindow",
                 "file.closeProject",
                 "file.save",
@@ -1404,6 +1486,10 @@ mod tests {
                         "toolwindow.closeContent",
                         "toolwindow.jumpToLast",
                         "toolwindow.focusEditor",
+                        "toolwindow.resizeLeft",
+                        "toolwindow.resizeRight",
+                        "toolwindow.resizeUp",
+                        "toolwindow.resizeDown",
                     ]
                     .contains(id)
             }));
@@ -1434,6 +1520,69 @@ mod tests {
         assert!(item_enabled("dyn:toolwindow.git", &disabled));
         assert!(item_enabled("recent:/p/refactor.rename", &disabled));
         assert!(item_enabled("submenu:refactor", &disabled));
+    }
+
+    #[test]
+    fn git_menu_follows_idea_order() {
+        let spec = spec(Os::Mac);
+        let Some(Entry::Submenu { children, .. }) = spec.iter().find(|e| matches!(e, Entry::Submenu { id: "git", .. }))
+        else {
+            panic!("Git menu missing");
+        };
+        let top: Vec<&str> = children
+            .iter()
+            .map(|e| match e {
+                Entry::Action { id, .. } | Entry::Submenu { id, .. } => *id,
+                Entry::Separator => "|",
+                _ => "?",
+            })
+            .collect();
+        assert_eq!(
+            top,
+            [
+                "vcs.commit",
+                "vcs.push",
+                "vcs.update",
+                "vcs.pull",
+                "vcs.fetch",
+                "|",
+                "vcs.merge",
+                "vcs.merge.abort",
+                "vcs.rebase",
+                "vcs.rebase.abort",
+                "vcs.rebase.continue",
+                "vcs.rebase.skip",
+                "vcs.resolveConflicts",
+                "|",
+                "vcs.branches",
+                "vcs.newBranch",
+                "vcs.newTag",
+                "vcs.resetHead",
+                "|",
+                "vcs.newWorktree",
+                "vcs.worktrees",
+                "|",
+                "vcs.showLog",
+                "gitPatch",
+                "gitUncommittedChanges",
+                "gitCurrentFile",
+                "|",
+                "gitHub",
+                "vcs.manageRemotes",
+                "vcs.clone",
+                "|",
+                "vcs.operations",
+                "|",
+                "vcs.revert.continue",
+                "vcs.revert.abort",
+                "vcs.cherryPick.continue",
+                "vcs.cherryPick.abort",
+            ]
+        );
+        let ids = action_ids(children);
+        for moved in ["vcs.showDiff", "vcs.rollback", "vcs.annotate", "vcs.localHistory", "localHistory.putLabel"] {
+            assert!(ids.contains(&moved), "{moved} missing from the Git menu");
+        }
     }
 
     #[test]

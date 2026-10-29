@@ -17,6 +17,7 @@ pub struct VcsSettings {
     pub git: GitSettings,
     pub commit: CommitSettings,
     pub confirmation: VcsConfirmationSettings,
+    pub shelf: ShelfSettings,
     /// Issue Navigation: commit-message patterns turned into links.
     pub issue_navigation: Vec<IssueLink>,
 }
@@ -31,6 +32,7 @@ impl Default for VcsSettings {
             git: GitSettings::default(),
             commit: CommitSettings::default(),
             confirmation: VcsConfirmationSettings::default(),
+            shelf: ShelfSettings::default(),
             issue_navigation: Vec::new(),
         }
     }
@@ -53,6 +55,17 @@ pub struct GitSettings {
     pub protected_branches: String,
     /// Initial state of Commit Options › Sign-off Commit.
     pub sign_off: bool,
+    /// Ask before committing files larger than `large_file_mb`.
+    pub warn_large_files: bool,
+    pub large_file_mb: u32,
+    /// Ask before committing names that are invalid on Windows or differ only in case.
+    pub warn_bad_file_names: bool,
+    /// Commit and Push opens the Push dialog; otherwise it pushes right away.
+    pub show_push_dialog: bool,
+    /// With `show_push_dialog`: only for commits to protected branches.
+    pub push_dialog_only_protected: bool,
+    /// Stashes and shelves share one tab.
+    pub combine_stash_and_shelf: bool,
 }
 
 impl Default for GitSettings {
@@ -66,6 +79,12 @@ impl Default for GitSettings {
             incoming_check: "auto".into(),
             protected_branches: "master; main".into(),
             sign_off: false,
+            warn_large_files: true,
+            large_file_mb: 50,
+            warn_bad_file_names: true,
+            show_push_dialog: true,
+            push_dialog_only_protected: false,
+            combine_stash_and_shelf: false,
         }
     }
 }
@@ -74,6 +93,11 @@ impl Default for GitSettings {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Type)]
 #[serde(default, rename_all = "camelCase")]
 pub struct CommitSettings {
+    /// Commit from the Commit tool window; off = Local Changes in the Git tool
+    /// window and a Commit dialog.
+    pub non_modal: bool,
+    /// Start with an empty message instead of the last one / the changelist's.
+    pub clear_initial_message: bool,
     pub analyze_code: bool,
     pub check_todo: bool,
     pub reformat: bool,
@@ -91,6 +115,8 @@ pub struct CommitSettings {
 impl Default for CommitSettings {
     fn default() -> Self {
         Self {
+            non_modal: true,
+            clear_initial_message: false,
             analyze_code: true,
             check_todo: true,
             reformat: false,
@@ -107,18 +133,38 @@ impl Default for CommitSettings {
     }
 }
 
-/// Version Control › Confirmation. Values: `ask` | `silently` | `never`.
+/// Version Control › Confirmation.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Type)]
 #[serde(default, rename_all = "camelCase")]
 pub struct VcsConfirmationSettings {
+    /// `ask` | `silently` | `never`.
     pub on_create: String,
     pub on_delete: String,
+    /// Update Project opens its options dialog first.
+    pub show_update_options: bool,
+    pub confirm_drop_commits: bool,
+    /// After a patch is saved: `ask` | `no` | `reveal` (show it in the file manager).
+    pub on_patch_created: String,
 }
 
 impl Default for VcsConfirmationSettings {
     fn default() -> Self {
-        Self { on_create: "ask".into(), on_delete: "ask".into() }
+        Self {
+            on_create: "ask".into(),
+            on_delete: "ask".into(),
+            show_update_options: true,
+            confirm_drop_commits: true,
+            on_patch_created: "ask".into(),
+        }
     }
+}
+
+/// Version Control › Shelf.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, Type)]
+#[serde(default, rename_all = "camelCase")]
+pub struct ShelfSettings {
+    /// Initial state of Unshelve's "Remove successfully applied files from the shelf".
+    pub remove_applied: bool,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, Type)]
@@ -169,8 +215,14 @@ pub struct DebuggerSettings {
     pub focus_app_on_breakpoint: bool,
     pub hide_on_termination: bool,
     pub breakpoints_any_file: bool,
+    /// While suspended, hovering the start of a line shows a Run to Cursor button.
+    pub run_to_cursor_inlay: bool,
     pub inline_values: bool,
+    /// Data Views: list variables by name instead of the adapter's order.
+    pub sort_values: bool,
     pub value_tooltip: bool,
+    /// While suspended, selecting an expression shows its value.
+    pub value_tooltip_on_selection: bool,
     pub value_tooltip_delay: u32,
     /// Stepping: do not step into library code (debugpy `justMyCode`, js-debug `skipFiles`).
     pub skip_library_code: bool,
@@ -184,8 +236,11 @@ impl Default for DebuggerSettings {
             focus_app_on_breakpoint: false,
             hide_on_termination: false,
             breakpoints_any_file: false,
+            run_to_cursor_inlay: true,
             inline_values: true,
+            sort_values: false,
             value_tooltip: true,
+            value_tooltip_on_selection: true,
             value_tooltip_delay: 700,
             skip_library_code: true,
             python: PythonDebuggerSettings::default(),

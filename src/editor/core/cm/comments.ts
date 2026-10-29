@@ -1,10 +1,18 @@
 /**
  * Comment with Line Comment and Enter inside a line comment, as in IDEA.
  */
-import { EditorSelection, Facet, countColumn, type ChangeSpec, type EditorState, type SelectionRange } from "@codemirror/state";
+import {
+  EditorSelection,
+  Facet,
+  countColumn,
+  type ChangeSpec,
+  type EditorState,
+  type SelectionRange,
+} from "@codemirror/state";
 import type { Command, EditorView } from "@codemirror/view";
 import { indentString, syntaxTree } from "@codemirror/language";
 import { toggleComment } from "@codemirror/commands";
+import { offsetAtVisibleColumn, visibleColumn } from "./visibleColumn";
 
 /** Code Style › <Language> › Code Generation › Comment Code. */
 export interface LineCommentStyle {
@@ -57,12 +65,16 @@ export const commentLine: Command = (view) => {
     if (!block) blocks.push(target);
     target.ranges.push(i);
     target.endLine = Math.max(target.endLine, endLine);
-    const wholeLines = r.empty || (r.from === doc.lineAt(r.from).from && r.to === doc.lineAt(r.to).from && r.to > r.from);
+    const wholeLines =
+      r.empty || (r.from === doc.lineAt(r.from).from && r.to === doc.lineAt(r.to).from && r.to > r.from);
     const emptyLine = !doc.lineAt(r.from).text.trim();
-    target.caretUpdate = r.empty && emptyLine && !repeated ? "commentStart" : r.empty ? "down" : wholeLines ? "restoreSelection" : null;
+    target.caretUpdate =
+      r.empty && emptyLine && !repeated ? "commentStart" : r.empty ? "down" : wholeLines ? "restoreSelection" : null;
   }
 
-  const tokens = blocks.map((b) => lineToken(state, doc.line(b.startLine).from + leadingWs(doc.line(b.startLine).text)));
+  const tokens = blocks.map((b) =>
+    lineToken(state, doc.line(b.startLine).from + leadingWs(doc.line(b.startLine).text)),
+  );
   // Languages without line comments (CSS, HTML…): block comments.
   if (tokens.some((t) => !t)) return toggleComment(view);
 
@@ -140,9 +152,9 @@ export const commentLine: Command = (view) => {
       } else if (b.caretUpdate === "down") {
         const line = next.lineAt(r.head);
         if (line.number >= next.lines) continue;
-        const col = countColumn(next.sliceString(line.from, r.head), state.tabSize);
+        const col = visibleColumn(line.text, r.head - line.from, state.tabSize);
         const below = next.line(line.number + 1);
-        ranges[i] = EditorSelection.cursor(below.from + offsetAtColumn(below.text, col, state.tabSize));
+        ranges[i] = EditorSelection.cursor(below.from + offsetAtVisibleColumn(below.text, col, state.tabSize));
       } else {
         const from = next.lineAt(r.from).from;
         ranges[i] = r.head >= r.anchor ? EditorSelection.range(from, r.to) : EditorSelection.range(r.to, from);
@@ -158,15 +170,6 @@ export const commentLine: Command = (view) => {
   afterComment.set(view, view.state);
   return true;
 };
-
-function offsetAtColumn(text: string, col: number, tabSize: number): number {
-  let cols = 0;
-  for (let i = 0; i < text.length; i++) {
-    if (cols >= col) return i;
-    cols += text[i] === "\t" ? tabSize - (cols % tabSize) : 1;
-  }
-  return text.length;
-}
 
 /** Smallest indent of the non-blank lines, also no deeper than a line comment right above. */
 function minIndent(state: EditorState, startLine: number, endLine: number, token: string): number {

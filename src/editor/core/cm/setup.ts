@@ -11,6 +11,7 @@ import {
   highlightSpecialChars,
   keymap,
   lineNumbers,
+  tooltips,
 } from "@codemirror/view";
 import {
   bracketMatching,
@@ -44,6 +45,7 @@ import { caretExtension, fontZoom, methodLinesField, prefsExtension, softWrapAct
 import { commentTokens } from "./languages";
 import { multiCaretMouse } from "./multiCaret";
 import { columnModeExtension } from "./columnMode";
+import { visibleGoalColumns } from "./verticalMotion";
 import { tabKeymap } from "./smartKeys";
 import { editorBaseKeymap } from "./baseKeymap";
 import { occurrenceSearch } from "./editing";
@@ -107,7 +109,8 @@ export function detectIndent(text: string): { insertSpaces: boolean; size?: numb
   if (n < 2 || (tabs === 0 && spaces === 0)) return null;
   if (tabs > spaces) return { insertSpaces: false };
   let best: number | undefined;
-  for (const [d, c] of deltas) if (best === undefined || c > deltas.get(best)! || (c === deltas.get(best)! && d < best)) best = d;
+  for (const [d, c] of deltas)
+    if (best === undefined || c > deltas.get(best)! || (c === deltas.get(best)! && d < best)) best = d;
   return { insertSpaces: true, size: best };
 }
 
@@ -166,8 +169,16 @@ export function fontExtension(settings: EditorSettings | undefined): Extension {
   if ((family && family !== BUNDLED_MONO_FAMILY) || fallback) {
     vars.push(`--openidea-editor-font: ${monoFontFamily(family, fallback, "var(--font-mono)")}`);
   }
-  if (settings?.fontSize) vars.push(`--openidea-editor-font-size: ${settings.fontSize}px`, `--openidea-editor-base-size: ${settings.fontSize}px`);
-  if (settings?.lineHeight) vars.push(`--openidea-editor-line-height: ${settings.lineHeight}px`, `--openidea-editor-base-line: ${settings.lineHeight}px`);
+  if (settings?.fontSize)
+    vars.push(
+      `--openidea-editor-font-size: ${settings.fontSize}px`,
+      `--openidea-editor-base-size: ${settings.fontSize}px`,
+    );
+  if (settings?.lineHeight)
+    vars.push(
+      `--openidea-editor-line-height: ${settings.lineHeight}px`,
+      `--openidea-editor-base-line: ${settings.lineHeight}px`,
+    );
   const attrs: Record<string, string> = {};
   if (vars.length) attrs.style = vars.join("; ");
   if (prefs.ligatures) attrs.class = "cm-openidea-ligatures";
@@ -179,12 +190,18 @@ export function readOnlyExtension(readOnly: boolean): Extension {
 }
 
 /** Soft wraps per settings (file patterns), unless toggled for the file (`override`). */
-export function wrapExtension(settings: EditorSettings | undefined, path: string, override?: boolean | null): Extension {
+export function wrapExtension(
+  settings: EditorSettings | undefined,
+  path: string,
+  override?: boolean | null,
+): Extension {
   return (override ?? softWrapActive(settings?.softWrap, prefsOf(settings), path)) ? EditorView.lineWrapping : [];
 }
 
 export function stickyExtension(settings: EditorSettings | undefined): Extension {
-  return settings?.stickyScroll === false || isDistractionFree() ? [] : [stickyScroll, stickyMaxLines.of(prefsOf(settings).codeEditing.stickyLinesMax)];
+  return settings?.stickyScroll === false || isDistractionFree()
+    ? []
+    : [stickyScroll, stickyMaxLines.of(prefsOf(settings).codeEditing.stickyLinesMax)];
 }
 
 const matchingBracket = Decoration.mark({ class: "cm-matchingBracket" });
@@ -219,10 +236,16 @@ export function lineNumbersExtension(settings: EditorSettings | undefined): Exte
  * Distraction Free Mode: no gutter, text column centred at the configured
  * width (see `cm-openidea-distractionFree` in theme.ts).
  */
-export function distractionFreeExtension(settings: EditorSettings | undefined, active = isDistractionFree()): Extension {
+export function distractionFreeExtension(
+  settings: EditorSettings | undefined,
+  active = isDistractionFree(),
+): Extension {
   if (!active) return [];
   const columns = distractionFreeWidth(prefsOf(settings).appearance.distractionFreeWidth);
-  return EditorView.editorAttributes.of({ class: "cm-openidea-distractionFree", style: `--openidea-df-columns: ${columns}` });
+  return EditorView.editorAttributes.of({
+    class: "cm-openidea-distractionFree",
+    style: `--openidea-df-columns: ${columns}`,
+  });
 }
 
 export function foldingFor(settings: EditorSettings | undefined): Extension {
@@ -280,8 +303,20 @@ export interface SetupOptions {
   extra?: Extension;
 }
 
+/**
+ * Tooltips (hints, docs, completion) stay below the editor's top edge: one
+ * above the first lines flips below them instead of hiding under the tabs.
+ */
+const tooltipSpace = tooltips({
+  tooltipSpace: (view) => {
+    const top = view.scrollDOM.getBoundingClientRect().top;
+    return { top, left: 0, right: window.innerWidth, bottom: window.innerHeight };
+  },
+});
+
 export function baseExtensions(o: SetupOptions): Extension {
   return [
+    tooltipSpace,
     compartments.font.of(fontExtension(o.settings)),
     openideaTheme,
     compartments.lineNumbers.of(lineNumbersExtension(o.settings)),
@@ -296,6 +331,7 @@ export function baseExtensions(o: SetupOptions): Extension {
     EditorState.allowMultipleSelections.of(true),
     multiCaretMouse,
     columnModeExtension,
+    visibleGoalColumns,
     occurrenceSearch,
     overwriteField,
     gutterLineDrag,
@@ -310,17 +346,30 @@ export function baseExtensions(o: SetupOptions): Extension {
     findExtension(),
     overviewLane,
     codeLensExtension,
-    EditorView.contentAttributes.of({ spellcheck: "false", autocorrect: "off", autocapitalize: "off", "aria-label": tx`Editor for ${o.ctx.path}` }),
+    EditorView.contentAttributes.of({
+      spellcheck: "false",
+      autocorrect: "off",
+      autocapitalize: "off",
+      "aria-label": tx`Editor for ${o.ctx.path}`,
+    }),
     tabKeymap,
     keymap.of([...closeBracketsKeymap, ...editorBaseKeymap, indentWithTab]),
     compartments.language.of(o.language ?? []),
-    compartments.comments.of(commentTokens(o.info)),
+    compartments.comments.of(commentTokens(o.info, o.ctx.language)),
     compartments.indent.of(indentExtension(o.indent ?? effectiveIndent(o.settings, o.info))),
     compartments.readOnly.of(readOnlyExtension(o.ctx.readOnly)),
     compartments.wrap.of(wrapExtension(o.settings, o.ctx.path, o.wrapOverride)),
     compartments.sticky.of(stickyExtension(o.settings)),
     compartments.heavy.of(heavyExtension(o.docLength, o.settings)),
-    compartments.prefs.of(prefsFor({ settings: o.settings, path: o.ctx.path, info: o.info, readOnly: o.ctx.readOnly, wrapOverride: o.wrapOverride })),
+    compartments.prefs.of(
+      prefsFor({
+        settings: o.settings,
+        path: o.ctx.path,
+        info: o.info,
+        readOnly: o.ctx.readOnly,
+        wrapOverride: o.wrapOverride,
+      }),
+    ),
     compartments.contributions.of(contributionExtensions(o.ctx)),
     compartments.distractionFree.of(distractionFreeExtension(o.settings)),
     o.extra ?? [],

@@ -24,6 +24,7 @@ async fn checked_rename_refreshes_a_closed_declaration_after_commit() {
     std::fs::write(&main, "<?php\nuse Demo\\Invoice;\n$invoice = new Invoice();\n$label = '😀'; $invoice->total();\n")
         .unwrap();
     let host = Host::new(HostConfig {
+        project_environment: false,
         config_dir: tmp.path().join("config"),
         data_dir: tmp.path().join("data"),
         languages: Arc::new(ide_language::LanguageRegistry::load(None).unwrap()),

@@ -84,6 +84,7 @@ impl AppState {
             }),
             owner: Self::owner_window,
             runtime: tauri::async_runtime::handle().inner().clone(),
+            project_environment: false,
         }));
         Ok(Self {
             recent: RecentProjects::load(&config_dir),
@@ -136,6 +137,12 @@ impl AppState {
             self.recent.rename(&project.root, Some(display_name.trim()))?;
         }
         Ok(project)
+    }
+
+    /// Opens `window` for editing the loose file `file` (LightEdit); not a recent project.
+    pub fn open_light(&self, window: &str, file: &Path) -> IdeResult<Arc<Project>> {
+        self.remote_dev.disconnect(window);
+        self.host.open_light(window, file)
     }
 
     pub fn close_project(&self, window: &str) {

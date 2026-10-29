@@ -23,7 +23,7 @@ import {
 import { downloadJdkActions } from "@/platform/jdk";
 import { useProject } from "@/platform/project";
 import { editorService, notifications } from "@/workbench/contributions";
-import { removeTask, upsertTask } from "@/workbench/tasks";
+import { cancelTask, removeTask, upsertTask, useTasks } from "@/workbench/tasks";
 import { profilesList, type GradleRunOptions, type MavenRunOptions } from "./model";
 
 export interface BuildSettings {
@@ -105,9 +105,12 @@ export function updateSettings(patch: (s: BuildSettings) => BuildSettings) {
   if (root) writeSettings(root, settings);
 }
 
-export const toggleMavenOffline = () => updateSettings((s) => ({ ...s, maven: { ...s.maven, offline: !s.maven.offline } }));
-export const toggleSkipTests = () => updateSettings((s) => ({ ...s, maven: { ...s.maven, skipTests: !s.maven.skipTests } }));
-export const toggleGradleOffline = () => updateSettings((s) => ({ ...s, gradle: { ...s.gradle, offline: !s.gradle.offline } }));
+export const toggleMavenOffline = () =>
+  updateSettings((s) => ({ ...s, maven: { ...s.maven, offline: !s.maven.offline } }));
+export const toggleSkipTests = () =>
+  updateSettings((s) => ({ ...s, maven: { ...s.maven, skipTests: !s.maven.skipTests } }));
+export const toggleGradleOffline = () =>
+  updateSettings((s) => ({ ...s, gradle: { ...s.gradle, offline: !s.gradle.offline } }));
 
 export function setProfile(id: string, checked: boolean) {
   updateSettings((s) => ({ ...s, maven: { ...s.maven, profiles: { ...s.maven.profiles, [id]: checked } } }));
@@ -169,7 +172,8 @@ export async function loadModel(): Promise<void> {
 
 /** Tree keys expanded on first show: the top-level projects. */
 export function initialExpanded(tool: BuildTool, model: BuildModel): Set<string> {
-  if (tool === "maven") return new Set(model.maven?.projects.filter((p) => !p.aggregated).map((p) => `mvn:${p.pom}`) ?? []);
+  if (tool === "maven")
+    return new Set(model.maven?.projects.filter((p) => !p.aggregated).map((p) => `mvn:${p.pom}`) ?? []);
   return new Set(model.gradle ? ["gradle::"] : []);
 }
 
@@ -227,7 +231,10 @@ export async function syncTool(tool: BuildTool): Promise<void> {
 
 export function cancelSync(tool: BuildTool) {
   const s = useBuild.getState().syncing[tool];
-  if (s) void commands.cancelRequest(s.request);
+  if (!s) return;
+  const taskId = `build-sync:${tool}`;
+  if (useTasks.getState().tasks.some((t) => t.id === taskId && t.cancel)) cancelTask(taskId);
+  else void commands.cancelRequest(s.request);
 }
 
 export function resetBuild() {

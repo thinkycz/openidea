@@ -3,7 +3,14 @@ import { EditorSelection, EditorState, type Extension } from "@codemirror/state"
 import { EditorView } from "@codemirror/view";
 import { indentService, indentUnit } from "@codemirror/language";
 import { closeBrackets, insertBracket } from "@codemirror/autocomplete";
-import { autoIndentBackspace, insertTab, smartBackspace, smartBackspaceApplies, tabOutOfScope, tabOutScopes } from "./smartKeys";
+import {
+  autoIndentBackspace,
+  insertTab,
+  smartBackspace,
+  smartBackspaceApplies,
+  tabOutOfScope,
+  tabOutScopes,
+} from "./smartKeys";
 
 /** One unit (2) deeper after a (non-blank) line ending in `{`, one less on a line starting with `}`. */
 const braces = indentService.of((cx, pos) => {
@@ -35,7 +42,12 @@ function make(text: string, extensions: Extension = [], unit = "  ") {
     state: EditorState.create({
       doc,
       selection: EditorSelection.create(ranges.length ? ranges : [EditorSelection.cursor(0)]),
-      extensions: [EditorState.allowMultipleSelections.of(true), EditorState.tabSize.of(4), indentUnit.of(unit), extensions],
+      extensions: [
+        EditorState.allowMultipleSelections.of(true),
+        EditorState.tabSize.of(4),
+        indentUnit.of(unit),
+        extensions,
+      ],
     }),
     parent: document.body,
   });
@@ -47,7 +59,9 @@ function show(view: EditorView): string {
   const { doc, selection } = view.state;
   let out = doc.toString();
   for (const r of [...selection.ranges].sort((a, b) => b.from - a.from))
-    out = r.empty ? out.slice(0, r.head) + "|" + out.slice(r.head) : out.slice(0, r.from) + "[" + out.slice(r.from, r.to) + "]" + out.slice(r.to);
+    out = r.empty
+      ? out.slice(0, r.head) + "|" + out.slice(r.head)
+      : out.slice(0, r.from) + "[" + out.slice(r.from, r.to) + "]" + out.slice(r.to);
   return out;
 }
 
@@ -56,6 +70,12 @@ describe("tab", () => {
     const v = make("ab|c\n|x");
     insertTab(v);
     expect(show(v)).toBe("ab  |c\n  |x");
+  });
+
+  it("counts wide characters as two columns towards the indent stop", () => {
+    const v = make("a张|x\n张|y");
+    insertTab(v);
+    expect(show(v)).toBe("a张 |x\n张  |y");
   });
 
   it("inserts a tab character when the code style uses tabs", () => {
@@ -81,6 +101,7 @@ describe("smart backspace", () => {
   it("applies in 'proper indent' mode except in indentation-based languages", () => {
     expect(smartBackspaceApplies("autoindent", "java")).toBe(true);
     expect(smartBackspaceApplies("autoindent", "python")).toBe(false);
+    expect(smartBackspaceApplies("autoindent", "gdscript")).toBe(false);
     expect(smartBackspaceApplies("nearest", "java")).toBe(false);
   });
 

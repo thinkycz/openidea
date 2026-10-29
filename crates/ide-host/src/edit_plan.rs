@@ -148,6 +148,7 @@ mod tests {
         std::fs::write(&main, "<?php function total() {}\n").unwrap();
         std::fs::write(root.join("composer.json"), "{}").unwrap();
         let host = Host::new(HostConfig {
+            project_environment: false,
             config_dir: tmp.path().join("config"),
             data_dir: tmp.path().join("data"),
             languages: Arc::new(ide_language::LanguageRegistry::load(None).unwrap()),

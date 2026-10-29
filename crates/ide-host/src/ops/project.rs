@@ -38,15 +38,15 @@ pub async fn open(host: &Arc<Host>, window: &str, path: &Path) -> IdeResult<Arc<
 }
 
 pub fn current(host: &Host, window: &str) -> Option<ProjectInfo> {
-    host.project(window).ok().map(|p| info(&p))
+    host.project(window).ok().filter(|p| !p.light).map(|p| info(&p))
 }
 
 /// Effective settings for the window's project, or global settings without one.
 pub fn settings(host: &Host, window: &str) -> Settings {
-    match host.project(window) {
+    host.with_proxy_password(match host.project(window) {
         Ok(p) => p.settings.effective(),
         Err(_) => host.global_settings.effective(),
-    }
+    })
 }
 
 pub fn roots(host: &Host, window: &str) -> IdeResult<ide_workspace::ProjectRoots> {
@@ -64,7 +64,8 @@ pub struct SettingsApplied {
 
 /// Sets `key` to `value` (JSON text, e.g. `14` or `"dark"`) for the window's
 /// project or globally, and applies it to the open projects: file defaults,
-/// file types, language servers, index scope and SSH configurations.
+/// file types, language servers, index scope, SSH configurations and the HTTP proxy
+/// (whose password goes to the saved passwords, not the settings file).
 pub fn set_settings(
     host: &Host,
     window: &str,
@@ -75,7 +76,13 @@ pub fn set_settings(
     let value: serde_json::Value =
         serde_json::from_str(value).map_err(|e| ide_core::IdeError::invalid(e.to_string()))?;
     let current = host.project(window).ok();
-    let project_scope = matches!(scope, SettingsScope::Project) && current.is_some();
+    // A LightEdit window has no project layer: its values are global.
+    let project_scope = matches!(scope, SettingsScope::Project) && current.as_ref().is_some_and(|p| !p.light);
+    let is_proxy = key == "proxy" || key.starts_with("proxy.");
+    let Some(value) = host.take_proxy_password(key, value)? else {
+        host.apply_proxy();
+        return Ok(SettingsApplied { settings: settings(host, window), project_scope, roots_changed: None });
+    };
     let settings = match &current {
         Some(p) if project_scope => p.settings.set(scope, key, value)?,
         Some(p) => {
@@ -90,7 +97,7 @@ pub fn set_settings(
     // A global value reaches every other open project too.
     if !project_scope {
         for project in host.projects() {
-            if current.as_ref().is_some_and(|c| c.root == project.root) {
+            if current.as_ref().is_some_and(|c| Arc::ptr_eq(c, &project)) {
                 continue;
             }
             let effective = project.settings.reload();
@@ -112,6 +119,9 @@ pub fn set_settings(
     if key == "ssh" || key.starts_with("ssh.") {
         host.ssh.set_configs(host.global_settings.effective().ssh.configs);
     }
+    if is_proxy {
+        host.apply_proxy();
+    }
     // A new interpreter / toolchain / server executable restarts the language servers it affects.
     if ["languages", "tools", "languageServers"].iter().any(|k| key == *k || key.starts_with(&format!("{k}."))) {
         for project in affected() {
@@ -131,5 +141,5 @@ pub fn set_settings(
         });
     }
     let roots_changed = current.as_ref().filter(|_| roots_changed && project_scope).map(|p| p.root.clone().into());
-    Ok(SettingsApplied { settings, project_scope, roots_changed })
+    Ok(SettingsApplied { settings: host.with_proxy_password(settings), project_scope, roots_changed })
 }

@@ -4,6 +4,7 @@
  * click steps into the chosen one, Esc cancels. Hovering a call selects it.
  * Falls back to the chooser dialog when the calls cannot be placed on the line.
  */
+import { hasIdentifierBefore } from "@/platform/textBoundaries";
 import { RangeSetBuilder, type Extension } from "@codemirror/state";
 import { Decoration, EditorView, ViewPlugin, type DecorationSet } from "@codemirror/view";
 import { editorsFor, activeEditor, type EditorDocContext, type TextEditorHandle } from "@/editor/api";
@@ -25,7 +26,11 @@ export function calleeName(label: string): string | null {
 
 /** A call of `name`: `name(` not preceded by an identifier character. */
 function callPattern(name: string, flags: string): RegExp {
-  return new RegExp(`(?<![\\p{L}\\p{N}_$])${name.replace(/\$/g, "\\$")}\\s*\\(`, flags);
+  return new RegExp(`${name.replace(/\$/g, "\\$")}\\s*\\(`, flags);
+}
+
+function isCallBoundary(text: string, from: number): boolean {
+  return !hasIdentifierBefore(text, from);
 }
 
 function identifierEnd(text: string, from: number): number {
@@ -47,12 +52,15 @@ export function locateStepTargets(lineText: string, line: number, targets: StepI
     let to = -1;
     if (t.column != null && (t.line == null || t.line === line) && t.column < lineText.length) {
       from = t.column;
-      to = t.endColumn != null && t.endColumn > from ? Math.min(t.endColumn, lineText.length) : identifierEnd(lineText, from);
+      to =
+        t.endColumn != null && t.endColumn > from
+          ? Math.min(t.endColumn, lineText.length)
+          : identifierEnd(lineText, from);
     } else {
       const name = calleeName(t.label);
       if (!name) return null;
       for (const m of lineText.matchAll(callPattern(name, "gu"))) {
-        if (used.has(m.index!)) continue;
+        if (used.has(m.index!) || !isCallBoundary(lineText, m.index!)) continue;
         from = m.index!;
         to = from + name.length;
         break;
@@ -75,7 +83,7 @@ export function targetsOnLine(lineText: string, line: number, targets: StepInTar
     if (t.line != null) return t.line === line;
     if (t.column != null) return true;
     const name = calleeName(t.label);
-    return !name || callPattern(name, "u").test(lineText);
+    return !name || [...lineText.matchAll(callPattern(name, "gu"))].some((m) => isCallBoundary(lineText, m.index));
   });
   return kept.length ? kept : targets;
 }
@@ -107,7 +115,9 @@ export function startInlineSmartStep(session: DebugSessionId, thread: number, ta
   const ranges = locateStepTargets(doc.line(line + 1).text, line, targets);
   if (!ranges || ranges.length < 2) return false;
   const first = ranges.findIndex((r) => r.id === targets[0]!.id);
-  useOverlays.setState({ smartStep: { session, thread, targets, inline: { path, line, ranges, index: Math.max(0, first) } } });
+  useOverlays.setState({
+    smartStep: { session, thread, targets, inline: { path, line, ranges, index: Math.max(0, first) } },
+  });
   editor.view.focus();
   return true;
 }

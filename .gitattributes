@@ -1,2 +1,5 @@
 # Preserve the checksummed engine patch series, including unified-diff context spaces.
 engine/patches/*.patch -whitespace
+
+# Keep tauri-specta generated unions byte-for-byte reproducible.
+src/bindings.ts -whitespace

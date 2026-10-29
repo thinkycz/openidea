@@ -15,13 +15,18 @@ export interface TreeOptions {
   /** Merge single-child folder chains (`com/acme/orders` → `com.acme.orders`). */
   compact: boolean;
   foldersFirst: boolean;
+  /** Order within a folder: name, file type (extension), or newest modification first. */
+  sortBy: SortKey;
 }
+
+export type SortKey = "name" | "type" | "modified";
 
 export const DEFAULT_TREE_OPTIONS: TreeOptions = {
   showHidden: false,
   showExcluded: true,
   compact: true,
   foldersFirst: true,
+  sortBy: "name",
 };
 
 export interface ProjectNode {
@@ -74,11 +79,27 @@ const collator = new Intl.Collator(undefined, { numeric: true, sensitivity: "bas
 /** Symlinks report the target's metadata; folders have size 0 (the entry has no target kind). */
 export const isDirEntry = (e: FileEntry) => e.kind === "dir" || (e.kind === "symlink" && e.size === 0);
 
-export function sortEntries(entries: readonly FileEntry[], foldersFirst: boolean): FileEntry[] {
+const extensionOf = (name: string) => {
+  const dot = name.lastIndexOf(".");
+  return dot > 0 ? name.slice(dot + 1) : "";
+};
+
+export function sortEntries(
+  entries: readonly FileEntry[],
+  foldersFirst: boolean,
+  sortBy: SortKey = "name",
+): FileEntry[] {
   return [...entries].sort((a, b) => {
     if (foldersFirst) {
       const d = Number(isDirEntry(b)) - Number(isDirEntry(a));
       if (d) return d;
+    }
+    if (sortBy === "type") {
+      const t = collator.compare(extensionOf(a.name), extensionOf(b.name));
+      if (t) return t;
+    } else if (sortBy === "modified") {
+      const m = (b.mtimeMs ?? 0) - (a.mtimeMs ?? 0);
+      if (m) return m;
     }
     return collator.compare(a.name, b.name) || (a.name < b.name ? -1 : a.name > b.name ? 1 : 0);
   });
@@ -88,7 +109,7 @@ export function sortEntries(entries: readonly FileEntry[], foldersFirst: boolean
 export function visibleEntries(listing: readonly FileEntry[], opts: TreeOptions): FileEntry[] {
   const filtered = listing.filter((e) => isVisible(e, opts));
   // The backend already sorts folders first (natural order); only re-sort when needed.
-  return opts.foldersFirst ? filtered : sortEntries(filtered, false);
+  return opts.foldersFirst && opts.sortBy === "name" ? filtered : sortEntries(filtered, opts.foldersFirst, opts.sortBy);
 }
 
 /** JVM-style source folders join compacted package chains with `.` instead of `/`. */
@@ -286,13 +307,26 @@ export function withExtraRoots(
       if (ns === null && model.roots.some((r) => !r.group && isSameOrInside(path, r.path))) return null;
       const sub = buildModel({ path, name: extra.label }, listings, opts, ro ? null : placeholder);
       const subRoot = sub.roots[0]!;
-      const rootNode: ProjectNode = { ...subRoot, key: rekey(subRoot.key), root: !parentKey, icon: extra.icon, detail: extra.detail };
+      const rootNode: ProjectNode = {
+        ...subRoot,
+        key: rekey(subRoot.key),
+        root: !parentKey,
+        icon: extra.icon,
+        detail: extra.detail,
+      };
       if (ro) rootNode.readOnly = true;
       const nodes = new Map<string, ProjectNode>();
       for (const [k, v] of sub.byKey)
-        nodes.set(k, k === subRoot.key ? rootNode : ns !== null || ro ? { ...v, key: rekey(k), readOnly: ro || v.readOnly } : v);
+        nodes.set(
+          k,
+          k === subRoot.key ? rootNode : ns !== null || ro ? { ...v, key: rekey(k), readOnly: ro || v.readOnly } : v,
+        );
       for (const n of nodes.values()) out.byKey.set(n.key, n);
-      for (const [k, v] of sub.children) out.children.set(rekey(k), v.map((n) => nodes.get(n.key) ?? n));
+      for (const [k, v] of sub.children)
+        out.children.set(
+          rekey(k),
+          v.map((n) => nodes.get(n.key) ?? n),
+        );
       for (const [p, k] of sub.keyOfPath) if (!out.keyOfPath.has(p)) out.keyOfPath.set(p, rekey(k));
       return rootNode;
     }
@@ -341,7 +375,11 @@ export function withReadOnlyFolders(model: TreeModel, folders: readonly string[]
     }
   if (!changed) return model;
   const children = new Map<string, ProjectNode[]>();
-  for (const [k, kids] of model.children) children.set(k, kids.map((n) => byKey.get(n.key) ?? n));
+  for (const [k, kids] of model.children)
+    children.set(
+      k,
+      kids.map((n) => byKey.get(n.key) ?? n),
+    );
   return { roots: model.roots.map((n) => byKey.get(n.key) ?? n), children, byKey, keyOfPath: model.keyOfPath };
 }
 
@@ -387,7 +425,12 @@ export function buildPathsModel(roots: readonly ExtraRoot[], paths: readonly str
   const ensureRoot = (r: ExtraRoot & { path: string }, rank: number) => {
     const existing = byKey.get(r.path);
     if (existing) return existing;
-    const n = node(r.path, r.label, true, { root: true, icon: r.icon || undefined, detail: r.detail, readOnly: r.readOnly });
+    const n = node(r.path, r.label, true, {
+      root: true,
+      icon: r.icon || undefined,
+      detail: r.detail,
+      readOnly: r.readOnly,
+    });
     rootNodes.push([rank, n]);
     return n;
   };
@@ -396,7 +439,8 @@ export function buildPathsModel(roots: readonly ExtraRoot[], paths: readonly str
     if (byKey.has(path)) continue;
     let rank = -1;
     for (let i = 0; i < folders.length; i++)
-      if (isInside(path, folders[i]!.path) && (rank < 0 || folders[i]!.path.length > folders[rank]!.path.length)) rank = i;
+      if (isInside(path, folders[i]!.path) && (rank < 0 || folders[i]!.path.length > folders[rank]!.path.length))
+        rank = i;
     const root =
       rank >= 0
         ? ensureRoot(folders[rank]!, rank)

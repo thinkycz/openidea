@@ -90,11 +90,29 @@ impl ProjectIndex {
         let store = store::Store::open(cache_dir, &root, &syntax.fingerprint());
         let filter = filter::PathFilter::new(&root, &content_roots, &excludes);
         let shared = Arc::new(Shared::new(filter, languages, syntax, sink, store));
+        Self::start(shared, root, true)
+    }
+
+    /// An index that never scans or persists anything (a window editing loose
+    /// files): queries answer empty, recent files are kept in memory only.
+    pub fn unindexed(
+        root: &Path,
+        languages: Arc<LanguageRegistry>,
+        syntax: Arc<Syntax>,
+        sink: SharedSink,
+    ) -> IdeResult<Arc<Self>> {
+        let root = dunce::canonicalize(root).unwrap_or_else(|_| root.to_owned());
+        let filter = filter::PathFilter::new(&root, &[], &[]);
+        let shared = Arc::new(Shared::new(filter, languages, syntax, sink, None));
+        Self::start(shared, root, false)
+    }
+
+    fn start(shared: Arc<Shared>, root: PathBuf, scan: bool) -> IdeResult<Arc<Self>> {
         let worker = {
             let shared = shared.clone();
             std::thread::Builder::new()
                 .name("openidea-index".into())
-                .spawn(move || shared.run())
+                .spawn(move || shared.run(scan))
                 .map_err(|e| ide_core::IdeError::internal(format!("cannot start indexer: {e}")))?
         };
         Ok(Arc::new(Self { shared, worker: Mutex::new(Some(worker)), root }))
@@ -200,9 +218,11 @@ impl ProjectIndex {
         self.shared.enqueue(Job::SaveRecent);
     }
 
-    /// Recently opened files, most recent first.
+    /// Recently opened files, most recent first; files deleted since (also while
+    /// the IDE was closed) are left out. Virtual documents are always listed.
     pub fn recent_files(&self) -> Vec<PathBuf> {
-        self.shared.recent.lock().clone()
+        let recent = self.shared.recent.lock().clone();
+        recent.into_iter().filter(|p| p.to_str().is_some_and(ide_core::text::is_virtual_uri) || p.exists()).collect()
     }
 
     /// Blocks until the initial scan and every queued update has been applied

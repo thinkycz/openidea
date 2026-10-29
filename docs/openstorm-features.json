@@ -703,5 +703,11 @@
       "remaining": "Reassess current OpenStorm implementation against this full gate; Workbench acceptance does not transfer."
     }
   ],
-  "source_sha256": "1099a56789f19e555b26336df06f3aa756b52ec9e3f08d17a09ab10195c133fa"
+  "source_sha256": "1099a56789f19e555b26336df06f3aa756b52ec9e3f08d17a09ab10195c133fa",
+  "upstream_sync": {
+    "commit": "200ed6a52835e9d66923a2b4f5ad53f420afd24c",
+    "commits_since_base": 69,
+    "source_version": "0.1.23",
+    "native_acceptance": "not rerun after source sync; 0.1.22 native evidence is historical"
+  }
 }

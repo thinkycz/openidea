@@ -39,12 +39,18 @@ import { editorService } from "@/workbench/contributions";
 import { fileIconName } from "@/ui";
 import { NO_SERVER, debounce, docOf, isUnavailable, lspRequest, reportLspError } from "./lsp";
 import { offsetToPos, rangeToOffsets } from "./positions";
-import { SYNTAX_NOTE, declarationFallback, isSelfTarget, localHighlights, type DeclarationTarget } from "./syntaxFallback";
+import {
+  SYNTAX_NOTE,
+  declarationFallback,
+  isSelfTarget,
+  localHighlights,
+  type DeclarationTarget,
+} from "./syntaxFallback";
 import { showHint } from "./hint";
 import { caretAnchor, openPopup, type ListPopupItem } from "./popupStore";
 import { identifierAt, readManyFileLines } from "./files";
 import { documentLinks, followReference, knownLinks, linkReference, referenceAt, textReference } from "./links";
-import { serverBackoff } from "./availability";
+import { featureBackoff } from "./availability";
 import { requestHover } from "./hover";
 import { declarationSummary, renderCode } from "./markdown";
 import { editorPrefs } from "@/platform/editorSettings";
@@ -53,6 +59,8 @@ import { shortcutLabel } from "@/platform/keymap";
 import { isNavigationGesture, onNavigationModifier } from "@/platform/navigationModifier";
 import { create } from "zustand";
 import { tx } from "@/platform/i18n";
+
+const highlightsBackoff = featureBackoff();
 
 export async function navigateTo(loc: Location) {
   await editorService().openFile(loc.path, {
@@ -305,7 +313,8 @@ const linkField = StateField.define<LinkState | null>({
         create: (view) => {
           const dom = document.createElement("div");
           dom.className = "cm-lsp-hover cm-lsp-nav-info";
-          if ("code" in info) dom.appendChild(renderCode(info.code, info.language ?? docOf(view)?.uiMode ?? null, "cm-lsp-code"));
+          if ("code" in info)
+            dom.appendChild(renderCode(info.code, info.language ?? docOf(view)?.uiMode ?? null, "cm-lsp-code"));
           else dom.textContent = info.text;
           return { dom };
         },
@@ -458,7 +467,7 @@ const linkPlugin = ViewPlugin.fromClass(
           clearTimeout(this.probeTimer);
           this.probing = null;
           // Cancellation and server errors are transient, not negative results.
-      });
+        });
     }
   },
   {
@@ -525,7 +534,10 @@ const highlightField = StateField.define<HighlightState>({
 });
 
 /** IDEA's status bar text while ⌘⇧F7 highlights are shown. */
-export const useUsagesStatus = create<{ text: string | null; owner: EditorView | null }>(() => ({ text: null, owner: null }));
+export const useUsagesStatus = create<{ text: string | null; owner: EditorView | null }>(() => ({
+  text: null,
+  owner: null,
+}));
 
 function setUsagesStatus(owner: EditorView | null, text: string | null) {
   useUsagesStatus.setState({ owner, text });
@@ -557,10 +569,13 @@ async function fetchHighlights(view: EditorView, sticky: boolean) {
     }
     const at = items.find((i) => i.from <= head && head <= i.to) ?? state.wordAt(head);
     const name = at ? state.sliceDoc(at.from, at.to) : "";
-    setUsagesStatus(view, usagesStatusText(items.length, name ? `'${name}'` : "the element", shortcutLabel("find.highlightUsages") ?? null));
+    setUsagesStatus(
+      view,
+      usagesStatusText(items.length, name ? `'${name}'` : "the element", shortcutLabel("find.highlightUsages") ?? null),
+    );
   };
   let lspError: unknown = null;
-  if (!serverBackoff.active(doc.doc)) {
+  if (!highlightsBackoff.active(doc.doc)) {
     try {
       const items = await lspRequest(() => commands.lspDocumentHighlights(doc.doc, offsetToPos(state.doc, head)));
       if (stale()) return;
@@ -569,7 +584,7 @@ async function fetchHighlights(view: EditorView, sticky: boolean) {
       return;
     } catch (e) {
       if (isCancelled(e)) return;
-      if (isUnavailable(e)) serverBackoff.mark(doc.doc);
+      if (isUnavailable(e)) highlightsBackoff.mark(doc.doc);
       lspError = e;
     }
   }
@@ -614,6 +629,23 @@ export function highlightUsages(view: EditorView) {
   void fetchHighlights(view, true);
 }
 
+/**
+ * ⌃⌥↓ / ⌃⌥↑: the next (previous) highlighted usage of the element at the caret,
+ * wrapping, with the caret at the same offset inside it.
+ */
+export function gotoHighlightedUsage(view: EditorView, dir: 1 | -1): boolean {
+  const st = view.state.field(highlightField, false);
+  const ranges: { from: number; to: number }[] = [];
+  st?.deco.between(0, view.state.doc.length, (from, to) => void ranges.push({ from, to }));
+  const head = view.state.selection.main.head;
+  const current = ranges.findIndex((r) => r.from <= head && head <= r.to);
+  if (ranges.length < 2 || current < 0) return false;
+  const target = ranges[(current + dir + ranges.length) % ranges.length]!;
+  const pos = Math.min(target.from + (head - ranges[current]!.from), target.to);
+  view.dispatch({ selection: EditorSelection.cursor(pos), scrollIntoView: true, userEvent: "select.navigate" });
+  return true;
+}
+
 const highlightPlugin = ViewPlugin.fromClass(
   class {
     private request = debounce(() => void fetchHighlights(this.view, false), 300);
@@ -628,7 +660,8 @@ const highlightPlugin = ViewPlugin.fromClass(
       }
       const clear = () => {
         this.request.cancel();
-        if (st.deco.size) queueMicrotask(() => this.view.dispatch({ effects: setHighlights.of({ items: [], sticky: false }) }));
+        if (st.deco.size)
+          queueMicrotask(() => this.view.dispatch({ effects: setHighlights.of({ items: [], sticky: false }) }));
       };
       // Code Editing › "Usages of element at caret".
       if (!editorPrefs().codeEditing.highlightUsages || !u.state.selection.main.empty) {

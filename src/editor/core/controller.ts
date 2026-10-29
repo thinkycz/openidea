@@ -31,6 +31,7 @@ import { fileIconName, showContextMenu, type MenuItem } from "@/ui";
 import { usePlatform } from "@/platform/platformInfo";
 import {
   activateTab,
+  changeSplitOrientation,
   closeAll,
   closeKey,
   closeOthers,
@@ -57,6 +58,7 @@ import {
   splitPane,
   tabOptions,
   togglePin,
+  unsplitAll,
   type SplitEdge,
   type Tab,
   type TabsState,
@@ -101,6 +103,9 @@ export function isTextInput(input: EditorInput): input is EditorInput & { path: 
 }
 
 export const useTabs = create<TabsState>(() => initialTabsState());
+
+/** Session key of the LightEdit window: its tabs reopen the next time a window switches to LightEdit. */
+export const LIGHT_EDIT_SESSION = "<lightEdit>";
 
 export interface EditorStatus {
   path: string;
@@ -179,7 +184,7 @@ export class EditorController implements SlotHost {
   activeSlot: EditorSlot | null = null;
   private statusScheduled = false;
   private disposers: Array<() => void> = [];
-  /** Project root whose editor session is being tracked (null while switching). */
+  /** Project root (or {@link LIGHT_EDIT_SESSION}) whose editor session is being tracked (null while switching). */
   private sessionRoot: string | null = null;
   private sessionTimer: ReturnType<typeof setTimeout> | undefined;
   /** Restored caret / scroll per path, applied when the file's first slot is created. */
@@ -217,6 +222,7 @@ export class EditorController implements SlotHost {
     tabOptions.activateOnClose = editorPrefs().tabs.activateOnClose as typeof tabOptions.activateOnClose;
     let prevSettings = useProject.getState().settings;
     let prevRoot = useProject.getState().project?.root ?? null;
+    let prevLight = useProject.getState().lightEdit;
     this.disposers.push(
       useProject.subscribe((s) => {
         if (s.settings !== prevSettings) {
@@ -226,14 +232,17 @@ export class EditorController implements SlotHost {
           this.manager.applySettings();
         }
         const root = s.project?.root ?? null;
-        if (root !== prevRoot) {
+        // Entering or leaving LightEdit replaces the backend's documents too.
+        if (root !== prevRoot || s.lightEdit !== prevLight) {
           prevRoot = root;
+          prevLight = s.lightEdit;
           this.saveSession();
           this.sessionRoot = null;
           this.closeEverything();
           this.nav.clear();
           this.edits.clear();
           if (root) this.restoreSession(root);
+          else if (s.lightEdit) this.restoreSession(LIGHT_EDIT_SESSION);
         }
       }),
     );
@@ -335,7 +344,10 @@ export class EditorController implements SlotHost {
       files[path] = slot.viewState();
     }
     const kinds = useContributions.getState().editorKinds;
-    storeSession(root, serializeSession(useTabs.getState(), files, (input) => !!kinds.get(input.kind)?.restorable));
+    storeSession(
+      root,
+      serializeSession(useTabs.getState(), files, (input) => !!kinds.get(input.kind)?.restorable),
+    );
   }
 
   /** Reopens the tabs, splits and carets saved for `root` (after the project opened). */
@@ -865,6 +877,15 @@ export class EditorController implements SlotHost {
     }
   }
 
+  /** Window › Editor Tabs › Goto Next / Previous Splitter: the active tab of the next split pane, wrapping. */
+  focusSplitter(dir: 1 | -1) {
+    const s = useTabs.getState();
+    const ids = paneIds(s).filter((id) => s.panes[id]?.active);
+    if (ids.length < 2) return;
+    const next = ids[(ids.indexOf(s.activePane) + dir + ids.length) % ids.length]!;
+    this.activate(next, s.panes[next]!.active!);
+  }
+
   // --- tab commands -----------------------------------------------------------------------------
 
   private apply(f: (s: TabsState) => TabsState) {
@@ -894,6 +915,10 @@ export class EditorController implements SlotHost {
     };
     this.apply((s) => closeUnmodified(s, paneId, modified));
   }
+  closeReadOnly(paneId: string) {
+    const writable = (t: Tab) => !t.input.path || !useDocMeta.getState()[t.input.path]?.readOnly;
+    this.apply((s) => closeUnmodified(s, paneId, writable));
+  }
   /** Reload from Disk: re-reads the open, unmodified documents of `paths`. */
   async reloadFromDisk(paths: string[]) {
     for (const path of paths) {
@@ -912,7 +937,11 @@ export class EditorController implements SlotHost {
         const encoding = await this.manager.backend.setEncoding(meta.doc, meta.encoding, true);
         model.setMeta({ encoding });
       } catch (e) {
-        notifications().notify({ level: "error", title: "Cannot reload from disk", body: e instanceof Error ? e.message : String(e) });
+        notifications().notify({
+          level: "error",
+          title: "Cannot reload from disk",
+          body: e instanceof Error ? e.message : String(e),
+        });
       }
     }
   }
@@ -985,6 +1014,30 @@ export class EditorController implements SlotHost {
 
   unsplit(paneId: string) {
     this.apply((s) => removePane(s, paneId));
+  }
+  unsplitAll(paneId: string) {
+    this.apply((s) => unsplitAll(s, paneId));
+    this.focus();
+  }
+  changeSplitOrientation(paneId: string) {
+    this.apply((s) => changeSplitOrientation(s, paneId));
+  }
+  /** IDEA "Open in Opposite Group": the tab stays and a copy opens next door (or in a new split). */
+  openInOpposite(paneId: string, tabId: string) {
+    const s = useTabs.getState();
+    const tab = s.panes[paneId]?.tabs.find((t) => t.id === tabId);
+    if (!tab) return;
+    const target = neighbourPane(s, paneId);
+    if (!target) {
+      this.activate(paneId, tabId, false);
+      return this.split(paneId, "row");
+    }
+    const r = openTab(s, target, tab.input);
+    useTabs.setState(r.state, true);
+    void this.ensureSlot(r.tabId, { from: this.slots.get(tabId) }).then((slot) => {
+      if (slot?.view) slot.focus();
+      else if (slot) slot.wantsFocus = true;
+    });
   }
 
   closeActiveTab() {
@@ -1074,7 +1127,8 @@ export class EditorController implements SlotHost {
   closePath(path: string) {
     this.apply((s) => {
       const keys = new Set<string>();
-      for (const pane of Object.values(s.panes)) for (const t of pane.tabs) if (t.input.path === path) keys.add(t.input.key);
+      for (const pane of Object.values(s.panes))
+        for (const t of pane.tabs) if (t.input.path === path) keys.add(t.input.key);
       let next = s;
       for (const key of keys) next = closeKey(next, key);
       return next;
@@ -1083,6 +1137,20 @@ export class EditorController implements SlotHost {
 
   closeInput(key: string) {
     this.apply((s) => closeKey(s, key));
+  }
+
+  activeInput(): EditorInput | null {
+    return this.activeTabOf()?.input ?? null;
+  }
+
+  onActiveInputChange(fn: (input: EditorInput | null) => void): () => void {
+    let prev = this.activeInput()?.key;
+    return useTabs.subscribe(() => {
+      const input = this.activeInput();
+      if (input?.key === prev) return;
+      prev = input?.key;
+      fn(input);
+    });
   }
 
   activePath(): string | null {
@@ -1125,8 +1193,12 @@ export class EditorController implements SlotHost {
       ...(tabs.some((t) => t.pinned)
         ? ([{ label: "Close All but Pinned", run: () => this.closeAll(paneId, true) }] as MenuItem[])
         : []),
+      ...(tabs.some((t) => !t.pinned && !!t.input.path && useDocMeta.getState()[t.input.path]?.readOnly)
+        ? ([{ label: "Close All Read-Only Tabs", run: () => this.closeReadOnly(paneId) }] as MenuItem[])
+        : []),
       { kind: "separator" },
       { label: tab.pinned ? "Unpin Tab" : "Pin Tab", icon: "pin", run: () => this.togglePin(paneId, tab.id) },
+      ...(tab.preview ? ([{ label: "Keep Tab Open", run: () => this.keepTab(paneId, tab.id) }] as MenuItem[]) : []),
       { kind: "separator" },
       { label: "Split and Move Right", run: () => this.moveTabToSplit(paneId, tab.id, paneId, "right") },
       { label: "Split and Move Down", run: () => this.moveTabToSplit(paneId, tab.id, paneId, "bottom") },
@@ -1145,7 +1217,10 @@ export class EditorController implements SlotHost {
       ...(split
         ? ([
             { label: "Move to Opposite Group", run: () => this.moveToOpposite(paneId, tab.id) },
+            { label: "Open in Opposite Group", run: () => this.openInOpposite(paneId, tab.id) },
+            { label: "Change Splitter Orientation", run: () => this.changeSplitOrientation(paneId) },
             { label: "Unsplit", run: () => this.unsplit(paneId) },
+            { label: "Unsplit All", run: () => this.unsplitAll(paneId) },
           ] as MenuItem[])
         : []),
       { kind: "separator" },
@@ -1164,7 +1239,14 @@ export class EditorController implements SlotHost {
                 { kind: "action", action: "project.copyAbsolutePath", arg: path, label: "Absolute Path" },
                 { kind: "action", action: "project.copyFileName", arg: path, label: "File Name" },
                 ...(inProject
-                  ? ([{ kind: "action", action: "project.copyRelativePath", arg: path, label: "Path From Content Root" }] as MenuItem[])
+                  ? ([
+                      {
+                        kind: "action",
+                        action: "project.copyRelativePath",
+                        arg: path,
+                        label: "Path From Content Root",
+                      },
+                    ] as MenuItem[])
                   : []),
               ],
             },

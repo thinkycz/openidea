@@ -1,9 +1,19 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { FIT_INTERVAL_MS, PROCESS_RESIZE_DELAY_MS, fitScheduler, settledResize } from "./fit";
 import { isAllowedIdeShortcut, terminalKeyAction } from "./keys";
 import { matchCounter } from "./FindBar";
 import { buildSearchDecorations } from "./theme";
 import { findTerminalLinks, resolvePath, trimUrl } from "./links";
-import { layoutPanes, nextTabName, removeFromLayout, splitLayout, tabFullTitle, tabTitle, trimMiddle, type TerminalTab } from "./store";
+import {
+  layoutPanes,
+  nextTabName,
+  removeFromLayout,
+  splitLayout,
+  tabFullTitle,
+  tabTitle,
+  trimMiddle,
+  type TerminalTab,
+} from "./store";
 import type { SessionSnapshot } from "./session";
 import { buildTheme, mix, parseColor, terminalFont, toHex } from "./theme";
 
@@ -114,7 +124,10 @@ describe("terminal keys", () => {
     expect(terminalKeyAction(key({ key: "T", code: "KeyT", ctrlKey: true, shiftKey: true }), false)).toEqual({
       kind: "pass",
     });
-    expect(terminalKeyAction(key({ key: "t", code: "KeyT", ctrlKey: true }), false)).toEqual({ kind: "send", data: "\x14" });
+    expect(terminalKeyAction(key({ key: "t", code: "KeyT", ctrlKey: true }), false)).toEqual({
+      kind: "send",
+      data: "\x14",
+    });
   });
 
   it("implements macOS conveniences", () => {
@@ -210,18 +223,55 @@ describe("split layout", () => {
 
 describe("terminalFont", () => {
   const BASE = '"JetBrains Mono Variable", "JetBrains Mono", ui-monospace, Menlo, monospace';
-  const t = { useEditorFont: true, fontFamily: "JetBrains Mono", fontSize: 10, lineHeight: 1, fallbackFontFamily: "", columnWidth: 1 };
+  const t = {
+    useEditorFont: true,
+    fontFamily: "JetBrains Mono",
+    fontSize: 10,
+    lineHeight: 1,
+    fallbackFontFamily: "",
+    columnWidth: 1,
+  };
   const editor = { fontFamily: "JetBrains Mono", fontSize: 10, lineHeight: 12 };
   const head = (family: string) => family.slice(0, family.indexOf('"Symbols Nerd Font Mono"'));
 
   it.each([
     // #26: "Use editor font" with the default family must reach the bundled face, not the system monospace.
-    ["editor font, default family", t, editor, `"JetBrains Mono Variable", "JetBrains Mono", ${BASE.replace(", monospace", "")}, `],
-    ["editor font, no editor settings", t, undefined, `"JetBrains Mono Variable", "JetBrains Mono", ${BASE.replace(", monospace", "")}, `],
-    ["editor font, custom family", t, { ...editor, fontFamily: "Fira Code" }, `"Fira Code", ${BASE.replace(", monospace", "")}, `],
-    ["editor font, editor fallback", t, { ...editor, fallbackFont: "PingFang SC" }, `"JetBrains Mono Variable", "JetBrains Mono", "PingFang SC", ${BASE.replace(", monospace", "")}, `],
-    ["own font, default family", { ...t, useEditorFont: false }, editor, `"JetBrains Mono Variable", "JetBrains Mono", ${BASE.replace(", monospace", "")}, `],
-    ["own font, custom + fallback", { ...t, useEditorFont: false, fontFamily: "Hack", fallbackFontFamily: "PingFang SC" }, editor, `"Hack", "PingFang SC", ${BASE.replace(", monospace", "")}, `],
+    [
+      "editor font, default family",
+      t,
+      editor,
+      `"JetBrains Mono Variable", "JetBrains Mono", ${BASE.replace(", monospace", "")}, `,
+    ],
+    [
+      "editor font, no editor settings",
+      t,
+      undefined,
+      `"JetBrains Mono Variable", "JetBrains Mono", ${BASE.replace(", monospace", "")}, `,
+    ],
+    [
+      "editor font, custom family",
+      t,
+      { ...editor, fontFamily: "Fira Code" },
+      `"Fira Code", ${BASE.replace(", monospace", "")}, `,
+    ],
+    [
+      "editor font, editor fallback",
+      t,
+      { ...editor, fallbackFont: "PingFang SC" },
+      `"JetBrains Mono Variable", "JetBrains Mono", "PingFang SC", ${BASE.replace(", monospace", "")}, `,
+    ],
+    [
+      "own font, default family",
+      { ...t, useEditorFont: false },
+      editor,
+      `"JetBrains Mono Variable", "JetBrains Mono", ${BASE.replace(", monospace", "")}, `,
+    ],
+    [
+      "own font, custom + fallback",
+      { ...t, useEditorFont: false, fontFamily: "Hack", fallbackFontFamily: "PingFang SC" },
+      editor,
+      `"Hack", "PingFang SC", ${BASE.replace(", monospace", "")}, `,
+    ],
   ])("%s resolves through the bundled stack", (_, settings, ed, expected) => {
     const font = terminalFont(settings, ed, BASE);
     expect(head(font.family)).toBe(expected);
@@ -230,7 +280,11 @@ describe("terminalFont", () => {
   });
 
   it("prefers the terminal's fallback over the editor's", () => {
-    const font = terminalFont({ ...t, fallbackFontFamily: "Sarasa Mono SC" }, { ...editor, fallbackFont: "PingFang SC" }, BASE);
+    const font = terminalFont(
+      { ...t, fallbackFontFamily: "Sarasa Mono SC" },
+      { ...editor, fallbackFont: "PingFang SC" },
+      BASE,
+    );
     expect(font.family).toContain('"Sarasa Mono SC"');
     expect(font.family).not.toContain("PingFang SC");
   });
@@ -247,6 +301,11 @@ describe("terminalFont", () => {
     expect([f.weight, f.boldWeight]).toEqual([400, 700]);
   });
 
+  it("keeps the terminal's line height with Use editor font", () => {
+    expect(terminalFont(t, { ...editor, lineHeight: 21 }, BASE).lineHeight).toBe(1);
+    expect(terminalFont({ ...t, lineHeight: 1.2 }, editor, BASE).lineHeight).toBe(1.2);
+  });
+
   it("turns the column width into letter spacing", () => {
     expect(terminalFont({ ...t, useEditorFont: false }, editor, BASE).letterSpacing).toBe(0);
     expect(terminalFont({ ...t, useEditorFont: false, columnWidth: 1.5 }, editor, BASE).letterSpacing).toBe(3);
@@ -255,8 +314,13 @@ describe("terminalFont", () => {
 
 describe("terminal tab titles", () => {
   const tab: TerminalTab = { id: "t1", name: "Local", customName: null, panes: ["s1"], layout: "s1", activePane: "s1" };
-  const snap = (appTitle: string | null): Record<string, SessionSnapshot> => ({
-    s1: { status: "running", exitCode: null, title: "zsh", appTitle, cwd: "/p" },
+  const snap = (appTitle: string | null, commandRunning = true): Record<string, SessionSnapshot> => ({
+    s1: { status: "running", exitCode: null, title: "zsh", appTitle, commandRunning, cwd: "/p" },
+  });
+
+  it("shows the default name at the prompt, whatever title the shell sets", () => {
+    expect(tabTitle(tab, snap("thomas@mac: ~/repo", false))).toBe("Local");
+    expect(tabFullTitle(tab, snap("thomas@mac: ~/repo", false))).toBe("Local");
   });
 
   it("follows the title the running program sets, else the default name", () => {
@@ -277,5 +341,40 @@ describe("terminal tab titles", () => {
   it("elides the middle", () => {
     expect(trimMiddle("abcdefghij", 5)).toBe("ab…ij");
     expect(trimMiddle("abc", 5)).toBe("abc");
+  });
+});
+
+describe("fit scheduling", () => {
+  afterEach(() => vi.useRealTimers());
+
+  it("refits at most once per interval while resizing, and once after it stops", () => {
+    vi.useFakeTimers();
+    const fit = vi.fn();
+    const f = fitScheduler(fit);
+    f.schedule();
+    vi.advanceTimersToNextFrame();
+    expect(fit).toHaveBeenCalledTimes(1);
+    for (let i = 0; i < 6; i++) {
+      f.schedule();
+      vi.advanceTimersByTime(16);
+    }
+    expect(fit).toHaveBeenCalledTimes(1);
+    vi.advanceTimersByTime(FIT_INTERVAL_MS);
+    expect(fit).toHaveBeenCalledTimes(2);
+    f.schedule();
+    f.cancel();
+    vi.advanceTimersByTime(FIT_INTERVAL_MS * 2);
+    expect(fit).toHaveBeenCalledTimes(2);
+  });
+
+  it("reports only the size the terminal settles on", () => {
+    vi.useFakeTimers();
+    const report = vi.fn();
+    const r = settledResize(report);
+    r.resized(80, 20);
+    vi.advanceTimersByTime(PROCESS_RESIZE_DELAY_MS / 2);
+    r.resized(80, 24);
+    vi.advanceTimersByTime(PROCESS_RESIZE_DELAY_MS);
+    expect(report).toHaveBeenCalledExactlyOnceWith(80, 24);
   });
 });

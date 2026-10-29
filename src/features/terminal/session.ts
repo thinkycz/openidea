@@ -10,12 +10,21 @@ import "@xterm/xterm/css/xterm.css";
 import { Channel } from "@tauri-apps/api/core";
 import { call, commands, isTauri, type TerminalId } from "@/platform/ipc";
 import { editorService, notifications } from "@/workbench/contributions";
+import { fitScheduler, settledResize } from "./fit";
 import { findTerminalLinks, resolvePath, type TerminalLink } from "./links";
 import { splitCommandLine } from "@/platform/commandLine";
 import { useProject } from "@/platform/project";
 import { workflowSettings, type TerminalSettingsValid } from "@/platform/workflowSettings";
 import { editorPrefs } from "@/platform/editorSettings";
-import { readSearchDecorations, readTerminalTheme, remeasureWhenFontsLoad, terminalFont, type EditorFont, type TerminalFontSettings } from "./theme";
+import {
+  readSearchDecorations,
+  readTerminalTheme,
+  remeasureWhenFontsLoad,
+  terminalFont,
+  type EditorFont,
+  type TerminalFontSettings,
+  MIN_CONTRAST_RATIO,
+} from "./theme";
 
 export interface TerminalSearchOptions {
   caseSensitive: boolean;
@@ -38,6 +47,8 @@ export interface SessionSnapshot {
   title: string;
   /** Window title set by the running program (OSC 0/2), null when unset or blank. */
   appTitle: string | null;
+  /** A command is running (shell integration's OSC 133 C … D), or the session runs a non-shell program. */
+  commandRunning: boolean;
   /** Current directory (initial cwd, updated by OSC 7). */
   cwd: string;
 }
@@ -158,8 +169,8 @@ export class TerminalSession {
   private disposed = false;
   private disposables: IDisposable[] = [];
   private resizeObserver: ResizeObserver | null = null;
-  private fitRaf = 0;
-  private fitTimer: ReturnType<typeof setTimeout> | undefined;
+  private readonly fitter = fitScheduler(() => this.doFit());
+  private readonly ptyResize = settledResize((cols, rows) => this.resizePty(cols, rows));
   private inputRaf = 0;
   private pendingInput = "";
   private lastSize = { cols: 0, rows: 0 };
@@ -169,7 +180,14 @@ export class TerminalSession {
   constructor(opts: SessionOptions) {
     this.opts = opts;
     this.key = opts.key;
-    this.snapshot = { status: "idle", exitCode: null, title: "Local", appTitle: null, cwd: opts.cwd };
+    this.snapshot = {
+      status: "idle",
+      exitCode: null,
+      title: "Local",
+      appTitle: null,
+      commandRunning: false,
+      cwd: opts.cwd,
+    };
     this.host = document.createElement("div");
     this.host.className = "openidea-terminal-host";
     this.host.dataset.terminalSession = opts.key;
@@ -195,7 +213,7 @@ export class TerminalSession {
       macOptionClickForcesSelection: true,
       rightClickSelectsWord: false,
       drawBoldTextInBrightColors: false,
-      minimumContrastRatio: 1,
+      minimumContrastRatio: MIN_CONTRAST_RATIO,
       smoothScrollDuration: 0,
       // Same width as the IDE's scrollbars (global.css); the slider is styled there too (Terminal.module.css).
       overviewRuler: { width: 10 },
@@ -222,8 +240,14 @@ export class TerminalSession {
         }
         return true;
       }),
+      // OSC 133 (shell integration): C = a command starts, D = it finished.
+      this.term.parser.registerOscHandler(133, (data) => {
+        if (data === "C" || data.startsWith("D")) this.update({ commandRunning: data === "C" });
+        return true;
+      }),
       this.term.registerLinkProvider({
-        provideLinks: (y, callback) => callback(workflowSettings().terminal.highlightHyperlinks ? this.linksAt(y) : undefined),
+        provideLinks: (y, callback) =>
+          callback(workflowSettings().terminal.highlightHyperlinks ? this.linksAt(y) : undefined),
       }),
       this.term.onBell(() => {
         if (workflowSettings().terminal.audibleBell) beep();
@@ -256,7 +280,13 @@ export class TerminalSession {
     const o = this.term.options;
     if (o.fontFamily !== font.family) {
       o.fontFamily = font.family;
-      if (this.opened) remeasureWhenFontsLoad(this.term, font, () => !this.disposed, () => this.scheduleFit());
+      if (this.opened)
+        remeasureWhenFontsLoad(
+          this.term,
+          font,
+          () => !this.disposed,
+          () => this.scheduleFit(),
+        );
     }
     if (o.fontSize !== font.size) o.fontSize = font.size;
     if (o.lineHeight !== font.lineHeight) o.lineHeight = font.lineHeight;
@@ -310,7 +340,12 @@ export class TerminalSession {
       // xterm's DOM renderer: the WebGL one rasterizes glyphs per background, so
       // selected text rendered at a visibly different weight than the rest.
       this.term.open(this.host);
-      remeasureWhenFontsLoad(this.term, fontFor(workflowSettings().terminal), () => !this.disposed, () => this.scheduleFit());
+      remeasureWhenFontsLoad(
+        this.term,
+        fontFor(workflowSettings().terminal),
+        () => !this.disposed,
+        () => this.scheduleFit(),
+      );
       this.term.textarea?.addEventListener("focus", () => this.opts.onFocus(this.key));
     }
     this.resizeObserver?.disconnect();
@@ -326,17 +361,7 @@ export class TerminalSession {
   }
 
   private scheduleFit() {
-    if (this.fitRaf) return;
-    const run = () => {
-      if (!this.fitRaf) return;
-      cancelAnimationFrame(this.fitRaf);
-      clearTimeout(this.fitTimer);
-      this.fitRaf = 0;
-      this.doFit();
-    };
-    this.fitRaf = requestAnimationFrame(run);
-    // WebKit pauses rAF in background windows; don't leave the shell unstarted until the window is shown.
-    this.fitTimer = setTimeout(run, 100);
+    this.fitter.schedule();
   }
 
   private doFit() {
@@ -347,17 +372,24 @@ export class TerminalSession {
     if (dims.cols !== this.term.cols || dims.rows !== this.term.rows) this.term.resize(dims.cols, dims.rows);
     if (this.snapshot.status === "idle") {
       void this.start();
-    } else if (this.ptyId !== null && (this.lastSize.cols !== dims.cols || this.lastSize.rows !== dims.rows)) {
-      this.lastSize = { cols: dims.cols, rows: dims.rows };
-      void commands.termResize(this.ptyId, dims.cols, dims.rows);
+    } else if (this.ptyId !== null) {
+      this.ptyResize.resized(dims.cols, dims.rows);
     }
+  }
+
+  private resizePty(cols: number, rows: number) {
+    if (this.disposed || this.ptyId === null) return;
+    if (this.lastSize.cols === cols && this.lastSize.rows === rows) return;
+    this.lastSize = { cols, rows };
+    void commands.termResize(this.ptyId, cols, rows);
   }
 
   /** Spawns the PTY with the current size. */
   async start() {
     if (this.disposed || this.snapshot.status === "starting" || this.snapshot.status === "running") return;
     const generation = ++this.generation;
-    this.update({ status: "starting", exitCode: null, appTitle: null });
+    const custom = this.opts.command;
+    this.update({ status: "starting", exitCode: null, appTitle: null, commandRunning: !!custom && !custom.shell });
     if (!isTauri()) {
       this.term.writeln("\x1b[2mTerminal is unavailable outside the desktop app.\x1b[0m");
       this.update({ status: "error" });
@@ -373,12 +405,19 @@ export class TerminalSession {
     try {
       const t = workflowSettings().terminal;
       const [shellPath, ...shellArgs] = splitCommandLine(t.shellPath);
-      const custom = this.opts.command;
       const shell = custom ? custom.program : shellPath;
       const args = custom ? custom.args : shellArgs;
       const info = await call(
         commands.termSpawn(
-          { cwd: this.opts.cwd, shell: shell ?? null, args, env: { ...t.env }, cols, rows, shellIntegration: (!custom || !!custom.shell) && t.shellIntegration },
+          {
+            cwd: this.opts.cwd,
+            shell: shell ?? null,
+            args,
+            env: { ...t.env },
+            cols,
+            rows,
+            shellIntegration: (!custom || !!custom.shell) && t.shellIntegration,
+          },
           channel,
         ),
       );
@@ -495,9 +534,15 @@ export class TerminalSession {
       return false;
     }
     this.searchDecorations ??= readSearchDecorations();
-    const options: ISearchOptions = { ...opts, incremental: direction === "next" && incremental, decorations: this.searchDecorations };
+    const options: ISearchOptions = {
+      ...opts,
+      incremental: direction === "next" && incremental,
+      decorations: this.searchDecorations,
+    };
     try {
-      return direction === "next" ? this.searchAddon.findNext(query, options) : this.searchAddon.findPrevious(query, options);
+      return direction === "next"
+        ? this.searchAddon.findNext(query, options)
+        : this.searchAddon.findPrevious(query, options);
     } catch {
       // Invalid regular expression.
       this.clearSearch();
@@ -519,8 +564,8 @@ export class TerminalSession {
   dispose() {
     if (this.disposed) return;
     this.disposed = true;
-    cancelAnimationFrame(this.fitRaf);
-    clearTimeout(this.fitTimer);
+    this.fitter.cancel();
+    this.ptyResize.cancel();
     cancelAnimationFrame(this.inputRaf);
     this.resizeObserver?.disconnect();
     this.host.removeEventListener("mousedown", this.onMiddleClick);

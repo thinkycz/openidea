@@ -1,9 +1,10 @@
+import { commitKey, commitRepo } from "./multiRoot";
 /**
  * Actions for operations in progress, Git Log commits, change lists, the shelf
  * and patches (ids are bound in keymaps/intellij-macos.ts where IDEA binds them).
  */
 import type { Commit } from "@/bindings";
-import { getContext, setContext } from "@/platform/context";
+import { setContext } from "@/platform/context";
 import { call, commands } from "@/platform/ipc";
 import { notifications, toolWindowService } from "@/workbench/contributions";
 import { executeAction, registerActions, type Action } from "@/platform/actions";
@@ -19,7 +20,9 @@ import {
   showMoveToChangelist,
 } from "./changelistsUi";
 import { useChangelists } from "./changelists";
+import { commitWindowFocused } from "./actions";
 import { useCommit } from "./commitStore";
+import { openCommit } from "./commitUi";
 import { goToChild, goToParent, goToRef, selectedCommits, useGitLog } from "./logStore";
 import { chooseRevision } from "./RevisionChooser";
 import {
@@ -43,7 +46,7 @@ import {
 } from "./rebase";
 import { showApplyPatch, showCreatePatchForChanges, showCreatePatchForCommits } from "./patches";
 import { deleteShelf, renameShelf, shelveChanges, showShelf, unshelve, useShelf } from "./shelf";
-import { currentRepo, useVcs } from "./store";
+import { currentRepo, focusRepo, useVcs } from "./store";
 
 const VCS = "vcsAvailable";
 const IN_GIT_LOG = "vcsAvailable && activeToolWindow == git";
@@ -55,7 +58,7 @@ export function commitArg(arg: unknown): Commit | null {
   if (arg && typeof arg === "object" && "id" in arg && "summary" in arg) return arg as Commit;
   const id = typeof arg === "string" ? arg : selected;
   if (!id) return null;
-  return commits.find((c) => c.id === id) ?? null;
+  return commits.find((c) => commitKey(c) === id) ?? null;
 }
 
 /** Commits an action refers to: its argument (commit list or commit), else the Git Log selection. */
@@ -70,12 +73,15 @@ export function commitsArg(arg: unknown): Commit[] {
 }
 
 function withCommits(fn: (cs: Commit[]) => unknown) {
-  return ({ arg }: { arg?: unknown }) => {
+  return async ({ arg }: { arg?: unknown }) => {
     const cs = commitsArg(arg);
     if (!cs.length) {
       notifications().notify({ group: "vcs", level: "info", title: "Select a commit in the Git log" });
       return;
     }
+    if (new Set(cs.map(commitRepo)).size > 1) return;
+    const repo = commitRepo(cs[0]!);
+    if (repo) await focusRepo(repo);
     void fn(cs);
   };
 }
@@ -91,22 +97,24 @@ async function openCommitInBrowser(c: Commit) {
 }
 
 function withCommit(fn: (c: Commit) => unknown) {
-  return ({ arg }: { arg?: unknown }) => {
+  return async ({ arg }: { arg?: unknown }) => {
     const c = commitArg(arg);
     if (!c) {
       notifications().notify({ group: "vcs", level: "info", title: "Select a commit in the Git log" });
       return;
     }
+    const repo = commitRepo(c);
+    if (repo) await focusRepo(repo);
     void fn(c);
   };
 }
 
-/** Paths an action on changes refers to: argument, else the Commit tool window selection. */
+/** Paths an action on changes refers to: argument, else the change tree's selection (Commit window or Git › Local Changes). */
 function changePaths(arg: unknown): string[] | undefined {
   if (Array.isArray(arg)) return arg.filter((x): x is string => typeof x === "string");
   if (typeof arg === "string") return [arg];
   const sel = useCommit.getState().selection;
-  return getContext().activeToolWindow === "commit" && sel.length ? sel : undefined;
+  return commitWindowFocused() && sel.length ? sel : undefined;
 }
 
 /** A change list id: argument, else the list of the Commit tool window selection. */
@@ -145,21 +153,21 @@ export function registerHistoryActions(): () => void {
       id: "vcs.rebase.continue",
       title: "Continue Rebase",
       category: "Git",
-      when: VCS,
+      when: "vcsAvailable && vcsOperation == rebase",
       run: () => void controlOperation("continue", "rebase"),
     },
     {
       id: "vcs.rebase.abort",
       title: "Abort Rebase",
       category: "Git",
-      when: VCS,
+      when: "vcsAvailable && vcsOperation == rebase",
       run: () => void controlOperation("abort", "rebase"),
     },
     {
       id: "vcs.rebase.skip",
       title: "Skip Commit",
       category: "Git",
-      when: VCS,
+      when: "vcsAvailable && vcsOperation == rebase",
       keywords: ["rebase"],
       run: () => void controlOperation("skip", "rebase"),
     },
@@ -167,7 +175,7 @@ export function registerHistoryActions(): () => void {
       id: "vcs.merge.abort",
       title: "Abort Merge",
       category: "Git",
-      when: VCS,
+      when: "vcsAvailable && vcsOperation == merge",
       run: () => void controlOperation("abort", "merge"),
     },
     {
@@ -467,7 +475,7 @@ export function registerHistoryActions(): () => void {
       when: VCS,
       run: ({ arg }) => {
         commitChangelist(listArg(arg) ?? useChangelists.getState().state.active);
-        toolWindowService().show("commit", true);
+        openCommit();
       },
     },
 

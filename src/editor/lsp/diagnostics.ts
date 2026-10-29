@@ -37,7 +37,12 @@ export function setFileDiagnostics(path: string, source: string, items: Diagnost
   const had = byPath.get(path)?.has(source) ?? false;
   storeDiagnostics(path, source, items);
   // `server` names the producer for views that see the diagnostic alone (inspection controls).
-  if (items.length || had) publishLocalDiagnostics(path, source, items.map((d) => (d.server ? d : { ...d, server: source })));
+  if (items.length || had)
+    publishLocalDiagnostics(
+      path,
+      source,
+      items.map((d) => (d.server ? d : { ...d, server: source })),
+    );
 }
 
 function storeDiagnostics(path: string, source: string, items: Diagnostic[]) {
@@ -47,7 +52,10 @@ function storeDiagnostics(path: string, source: string, items: Diagnostic[]) {
     if (!sources.size) byPath.delete(path);
   } else {
     if (!sources) byPath.set(path, (sources = new Map()));
-    sources.set(source, items.map((d) => ({ ...d, source: d.source ?? source })));
+    sources.set(
+      source,
+      items.map((d) => ({ ...d, source: d.source ?? source })),
+    );
     noteDiagnosticCodes(source, items);
   }
   listeners.get(path)?.forEach((l) => l());
@@ -92,7 +100,10 @@ export function installDiagnosticsEvents(): () => void {
   const off = onIdeEvent("diagnostics", (e) => storeDiagnostics(e.path, e.source, e.items));
   // Diagnostics published before this window (re)loaded were missed: ask for them again.
   const resend = () => {
-    if (isTauri()) void ideEventsReady().then(() => commands.lspResendDiagnostics()).catch(() => {});
+    if (isTauri())
+      void ideEventsReady()
+        .then(() => commands.lspResendDiagnostics())
+        .catch(() => {});
   };
   if (useProject.getState().project) resend();
   const offProject = useProject.subscribe((s, prev) => {
@@ -244,12 +255,7 @@ const lintTheme = EditorView.theme({
 });
 
 export function diagnosticsExtension() {
-  return [
-    linter(null, { tooltipFilter: () => [], autoPanel: false }),
-    marksField,
-    diagnosticsSync,
-    lintTheme,
-  ];
+  return [linter(null, { tooltipFilter: () => [], autoPanel: false }), marksField, diagnosticsSync, lintTheme];
 }
 
 export interface PlacedDiagnostic {
@@ -292,8 +298,24 @@ export function gotoDiagnostic(view: EditorView, dir: 1 | -1): boolean {
   view.dispatch({ selection: EditorSelection.cursor(target.from), scrollIntoView: true, userEvent: "select.navigate" });
   showHint(view, target.diagnostic.message, {
     pos: target.from,
-    tone: target.diagnostic.severity === "error" ? "error" : target.diagnostic.severity === "warning" ? "warning" : "info",
+    tone:
+      target.diagnostic.severity === "error" ? "error" : target.diagnostic.severity === "warning" ? "warning" : "info",
     timeout: 6000,
+  });
+  return true;
+}
+
+/** ⌘F1 Show Error Description: the problems at the caret, worst first. */
+export function showErrorDescription(view: EditorView): boolean {
+  const at = diagnosticsAt(view, view.state.selection.main.head);
+  if (!at.length) {
+    showHint(view, "No problems at the caret");
+    return false;
+  }
+  const worst = at[0]!.diagnostic.severity;
+  showHint(view, [...new Set(at.map((p) => p.diagnostic.message))].join("\n"), {
+    tone: worst === "error" ? "error" : worst === "warning" ? "warning" : "info",
+    timeout: 10000,
   });
   return true;
 }

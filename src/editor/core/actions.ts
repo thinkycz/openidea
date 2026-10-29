@@ -1,8 +1,8 @@
 /** Editor actions (ids from keymaps/intellij-macos.ts). */
 import { EditorSelection, type EditorState } from "@codemirror/state";
-import type { EditorView } from "@codemirror/view";
-import { addCursorAbove, addCursorBelow, moveLineDown, moveLineUp, toggleBlockComment } from "@codemirror/commands";
-import { syntaxTree, toggleFold } from "@codemirror/language";
+import { EditorView } from "@codemirror/view";
+import { indentSelection, moveLineDown, moveLineUp, toggleBlockComment } from "@codemirror/commands";
+import { foldEffect, syntaxTree, toggleFold } from "@codemirror/language";
 import { acceptCompletion, completionStatus } from "@codemirror/autocomplete";
 import { executeAction, registerActions, type Action } from "@/platform/actions";
 import { getContext } from "@/platform/context";
@@ -23,14 +23,43 @@ import {
   toggleCase,
   unselectOccurrence,
 } from "./cm/editing";
-import { emptyStack, extendSelection, shrinkSelection, type SelectionStack, type SimpleRange } from "./model/selectionStack";
+import {
+  emptyStack,
+  extendSelection,
+  shrinkSelection,
+  type SelectionStack,
+  type SimpleRange,
+} from "./model/selectionStack";
 import type { EditorSlot } from "./model/slot";
 import { findAgain, openFindBar } from "./view/FindBar";
-import { collapseAll, collapseRecursively, expandAll, expandRecursively, foldAtCaret, foldSelection, unfoldAtCaret } from "./cm/folding";
+import {
+  collapseAll,
+  collapseRecursively,
+  expandAll,
+  expandRecursively,
+  collapseBlock,
+  expandToLevelEffects,
+  foldAtCaret,
+  foldSelection,
+  unfoldAtCaret,
+} from "./cm/folding";
 import { reverseLines, sortLines } from "./cm/lines";
-import { cursorCodeBlockEnd, cursorCodeBlockStart, cursorMatchBrace, scrollToCenter, splitLine } from "./cm/caretCommands";
+import { customRegions } from "./cm/regions";
+import { enclosingHeaders } from "./cm/stickyScroll";
+import { moveElementLeft, moveElementRight } from "./cm/moveElement";
+import { caretAnchor, openPopup } from "@/editor/lsp/popupStore";
+import {
+  cursorCodeBlockEnd,
+  cursorCodeBlockStart,
+  cursorMatchBrace,
+  scrollToCenter,
+  selectCodeBlockEnd,
+  selectCodeBlockStart,
+  splitLine,
+} from "./cm/caretCommands";
 import { isOverwrite, toggleOverwrite } from "./cm/overwrite";
 import { isColumnMode, toggleColumnMode } from "./cm/columnMode";
+import { cloneCaretAbove, cloneCaretBelow } from "./cm/verticalMotion";
 import { pasteAsPlainText, pasteFromHistory, unwrapAtCaret } from "./extras";
 import { cyclicExpandWord } from "./wordCompletion";
 import { qualifiedReference } from "./copyReference";
@@ -86,19 +115,32 @@ export function syntaxCandidates(state: EditorState, sel: SimpleRange): SimpleRa
   const word = state.wordAt(sel.from);
   if (word) out.push({ from: word.from, to: word.to });
   const tree = syntaxTree(state);
-  for (let node: ReturnType<typeof tree.resolveInner> | null = tree.resolveInner(sel.from, 1); node; node = node.parent) {
+  for (
+    let node: ReturnType<typeof tree.resolveInner> | null = tree.resolveInner(sel.from, 1);
+    node;
+    node = node.parent
+  ) {
     out.push({ from: node.from, to: node.to });
-    const text = state.sliceDoc(node.from, Math.min(node.to, node.from + 1)) + state.sliceDoc(Math.max(node.from, node.to - 1), node.to);
+    const text =
+      state.sliceDoc(node.from, Math.min(node.to, node.from + 1)) +
+      state.sliceDoc(Math.max(node.from, node.to - 1), node.to);
     if (/^[([{"'`][)\]}"'`]$/.test(text) && node.to - node.from > 2) out.push({ from: node.from + 1, to: node.to - 1 });
   }
   const line = state.doc.lineAt(sel.from);
   const endLine = state.doc.lineAt(sel.to);
   const indent = /^\s*/.exec(line.text)![0].length;
-  out.push({ from: line.from + indent, to: endLine.to }, { from: line.from, to: endLine.to }, { from: 0, to: state.doc.length });
+  out.push(
+    { from: line.from + indent, to: endLine.to },
+    { from: line.from, to: endLine.to },
+    { from: 0, to: state.doc.length },
+  );
   return out;
 }
 
-function rangesFromBackend(state: EditorState, ranges: Array<{ start: { line: number; col: number }; end: { line: number; col: number } }>): SimpleRange[] {
+function rangesFromBackend(
+  state: EditorState,
+  ranges: Array<{ start: { line: number; col: number }; end: { line: number; col: number } }>,
+): SimpleRange[] {
   const off = (p: { line: number; col: number }) => {
     if (p.line + 1 > state.doc.lines) return state.doc.length;
     const l = state.doc.line(p.line + 1);
@@ -120,8 +162,14 @@ export interface BackendChain {
  * unchanged and the selection still covers its position: every node around
  * the selection is around that position too. Repeated ⌥↑ then needs no IPC.
  */
-export function reusableChain(chain: BackendChain | undefined, counter: number, current: SimpleRange): SimpleRange[] | null {
-  return chain && chain.counter === counter && chain.pos >= current.from && chain.pos <= current.to ? chain.ranges : null;
+export function reusableChain(
+  chain: BackendChain | undefined,
+  counter: number,
+  current: SimpleRange,
+): SimpleRange[] | null {
+  return chain && chain.counter === counter && chain.pos >= current.from && chain.pos <= current.to
+    ? chain.ranges
+    : null;
 }
 
 const chains = new WeakMap<EditorSlot, BackendChain>();
@@ -156,10 +204,17 @@ async function extend(slot: EditorSlot) {
   const results = currents.map((c, i) =>
     extendSelection(prev[i] ?? emptyStack(), c, [...candidates[i]!, ...syntaxCandidates(v.state, c)]),
   );
-  stacks.set(slot, results.map((r) => r.state));
+  stacks.set(
+    slot,
+    results.map((r) => r.state),
+  );
   if (!results.some((r) => r.next)) return;
   const ranges = results.map((r, i) => (r.next ? EditorSelection.range(r.next.from, r.next.to) : before.ranges[i]!));
-  v.dispatch({ selection: EditorSelection.create(ranges, before.mainIndex), scrollIntoView: true, userEvent: "select.extend" });
+  v.dispatch({
+    selection: EditorSelection.create(ranges, before.mainIndex),
+    scrollIntoView: true,
+    userEvent: "select.extend",
+  });
 }
 
 /** Extend / shrink run in order: a quick ⌥↑⌥↑ extends twice although extending waits for the backend. */
@@ -177,10 +232,17 @@ function shrink(slot: EditorSlot) {
   const sel = view.state.selection;
   const prev = stacks.get(slot) ?? [];
   const results = sel.ranges.map((r, i) => shrinkSelection(prev[i] ?? emptyStack(), { from: r.from, to: r.to }));
-  stacks.set(slot, results.map((r) => r.state));
+  stacks.set(
+    slot,
+    results.map((r) => r.state),
+  );
   if (!results.some((r) => r.next)) return;
   const ranges = results.map((r, i) => (r.next ? EditorSelection.range(r.next.from, r.next.to) : sel.ranges[i]!));
-  view.dispatch({ selection: EditorSelection.create(ranges, sel.mainIndex), scrollIntoView: true, userEvent: "select.shrink" });
+  view.dispatch({
+    selection: EditorSelection.create(ranges, sel.mainIndex),
+    scrollIntoView: true,
+    userEvent: "select.shrink",
+  });
 }
 
 // --- structural editing without a Lezer tree ------------------------------------------
@@ -231,7 +293,8 @@ function moveStatement(view: EditorView, slot: EditorSlot, up: boolean) {
     const v = slot.view;
     if (!v) return;
     const language = slot.model.getMeta().language;
-    if ((await hasStructure(language)) && (await moveStatementStructural(v, up, queriesFor(slot.model))) !== "fallback") return;
+    if ((await hasStructure(language)) && (await moveStatementStructural(v, up, queriesFor(slot.model))) !== "fallback")
+      return;
     if (slot.view === v) (up ? moveLineUp : moveLineDown)(v);
   });
 }
@@ -246,13 +309,80 @@ function completeCurrentStatement(view: EditorView, slot: EditorSlot) {
   if (completionStatus(view.state) === "active") acceptCompletion(view);
   const language = slot.model.getMeta().language;
   const sel = view.state.selection;
-  if ((hasLezerTree(view.state) && language !== "java") || sel.ranges.length > 1) return completeStatement(language)(view);
+  if ((hasLezerTree(view.state) && language !== "java") || sel.ranges.length > 1)
+    return completeStatement(language)(view);
   void queueEdit(slot, async () => {
     const v = slot.view;
     if (!v || v.state.readOnly) return;
-    if ((await hasStructure(language)) && (await completeStatementStructural(v, language, queriesFor(slot.model))) !== "fallback") return;
+    if (
+      (await hasStructure(language)) &&
+      (await completeStatementStructural(v, language, queriesFor(slot.model))) !== "fallback"
+    )
+      return;
     if (slot.view === v) completeStatement(language)(v);
   });
+}
+
+/**
+ * View › Context Info (⌃⇧Q / Alt+Q): the declaration lines around the caret
+ * (class, method, block headers), most useful when they are scrolled away.
+ */
+function showContextInfo(view: EditorView) {
+  const state = view.state;
+  const line = state.doc.lineAt(state.selection.main.head).number;
+  const headers = enclosingHeaders(state, line);
+  const text = headers.map((n) => state.doc.line(n).text.trimEnd()).join("\n");
+  void executeAction("editor.showHint", { text: text || "No context information here" });
+}
+
+/** Navigate › Custom Folding (⌥⌘.): the file's custom regions; picking one moves the caret to it. */
+function showCustomRegions(view: EditorView) {
+  const regions = customRegions(view.state.doc);
+  if (!regions.length) return void executeAction("editor.showHint", { text: "No custom folding regions in this file" });
+  const head = view.state.selection.main.head;
+  openPopup({
+    kind: "list",
+    anchor: caretAnchor(view, head),
+    title: "Custom Folding Regions",
+    items: regions.map((r) => ({
+      id: String(r.startLine),
+      label: r.name || "(no description)",
+      detail: `:${r.startLine}`,
+      icon: "folder",
+      run: () => {
+        const line = view.state.doc.line(Math.min(r.startLine, view.state.doc.lines));
+        const at = line.from + /^\s*/.exec(line.text)![0].length;
+        view.dispatch({
+          selection: { anchor: at },
+          effects: EditorView.scrollIntoView(at, { y: "start", yMargin: 40 }),
+          userEvent: "select.navigate",
+        });
+        view.focus();
+      },
+    })),
+  });
+}
+
+/** Folding › Expand to Level / Expand All to Level (titles kept literal for the text catalog). */
+const FOLD_LEVELS: Array<[number, string, string]> = [
+  [1, "Expand to Level 1", "Expand All to Level 1"],
+  [2, "Expand to Level 2", "Expand All to Level 2"],
+  [3, "Expand to Level 3", "Expand All to Level 3"],
+  [4, "Expand to Level 4", "Expand All to Level 4"],
+  [5, "Expand to Level 5", "Expand All to Level 5"],
+];
+
+function foldLevel(view: EditorView, level: number, all: boolean) {
+  const effects = expandToLevelEffects(view.state, level, all);
+  if (!effects.length) return;
+  // A caret inside a new fold would unfold it again: it moves to the fold's start.
+  const head = view.state.selection.main.head;
+  const hiding = effects
+    .filter((e) => e.is(foldEffect))
+    .map((e) => e.value as { from: number; to: number })
+    .filter((r) => r.from < head && head < r.to)
+    .sort((a, b) => a.from - b.from)[0];
+  view.dispatch({ effects, selection: hiding ? { anchor: hiding.from } : undefined });
 }
 
 // --- cyclic expand word / copy reference ------------------------------------------------
@@ -299,7 +429,8 @@ function copyReference(view: EditorView, slot: EditorSlot) {
 
 /** ⌃G; when nothing more is found, a hint first and the search from the top on the next press (IDEA). */
 function addNextOccurrence(view: EditorView) {
-  if (nextOccurrence(view) === "notFound") void executeAction("editor.showHint", { text: "Not found, press again to search from the top" });
+  if (nextOccurrence(view) === "notFound")
+    void executeAction("editor.showHint", { text: "Not found, press again to search from the top" });
 }
 
 /** Settings › Editor › Color Scheme switches that are also toggle actions. */
@@ -309,7 +440,11 @@ export async function toggleSchemeSwitch(key: SchemeSwitch, on = !editorPrefs()[
   try {
     useProject.setState({ settings: await call(commands.settingsSet("global", `editor.${key}`, JSON.stringify(on))) });
   } catch (e) {
-    notifications().notify({ level: "error", title: "Cannot change the setting", body: e instanceof Error ? e.message : String(e) });
+    notifications().notify({
+      level: "error",
+      title: "Cannot change the setting",
+      body: e instanceof Error ? e.message : String(e),
+    });
   }
 }
 
@@ -326,7 +461,12 @@ const schemeSwitch = (id: string, title: string, key: SchemeSwitch, keywords: st
 
 export function registerEditorActions(): () => void {
   const ctrl = editorController();
-  const text = (id: string, title: string, run: (view: EditorView, slot: EditorSlot) => unknown, extra: Partial<Action> = {}): Action => ({
+  const text = (
+    id: string,
+    title: string,
+    run: (view: EditorView, slot: EditorSlot) => unknown,
+    extra: Partial<Action> = {},
+  ): Action => ({
     id,
     title,
     category: "Code",
@@ -356,24 +496,42 @@ export function registerEditorActions(): () => void {
     text("code.deleteLine", "Delete Line", (v) => deleteLine(v)),
     text("code.moveLineUp", "Move Line Up", (v) => moveLineUp(v)),
     text("code.moveLineDown", "Move Line Down", (v) => moveLineDown(v)),
+    text("code.moveElementLeft", "Move Element Left", (v) => moveElementLeft(v), {
+      keywords: ["swap argument", "move parameter"],
+    }),
+    text("code.moveElementRight", "Move Element Right", (v) => moveElementRight(v), {
+      keywords: ["swap argument", "move parameter"],
+    }),
     text("code.moveStatementUp", "Move Statement Up", (v, slot) => moveStatement(v, slot, true)),
     text("code.moveStatementDown", "Move Statement Down", (v, slot) => moveStatement(v, slot, false)),
-    text("code.extendSelection", "Extend Selection", (_v, slot) => void queueSelection(slot, extend), { category: "Edit" }),
-    text("code.shrinkSelection", "Shrink Selection", (_v, slot) => void queueSelection(slot, shrink), { category: "Edit" }),
+    text("code.extendSelection", "Extend Selection", (_v, slot) => void queueSelection(slot, extend), {
+      category: "Edit",
+    }),
+    text("code.shrinkSelection", "Shrink Selection", (_v, slot) => void queueSelection(slot, shrink), {
+      category: "Edit",
+    }),
     text("code.fold", "Collapse", (v) => foldAtCaret(v), { category: "Folding", keywords: ["fold"] }),
     text("code.unfold", "Expand", (v) => unfoldAtCaret(v), { category: "Folding", keywords: ["unfold"] }),
     text("code.foldToggle", "Toggle Fold", (v) => toggleFold(v), { category: "Folding" }),
     text("code.cyclicExpandWord", "Cyclic Expand Word", (v, slot) => expandWord(v, slot, "backward"), {
       keywords: ["hippie", "complete word", "dabbrev"],
     }),
-    text("code.cyclicExpandWordBackward", "Cyclic Expand Word (Backward)", (v, slot) => expandWord(v, slot, "forward"), {
-      keywords: ["hippie", "complete word", "dabbrev"],
-    }),
+    text(
+      "code.cyclicExpandWordBackward",
+      "Cyclic Expand Word (Backward)",
+      (v, slot) => expandWord(v, slot, "forward"),
+      {
+        keywords: ["hippie", "complete word", "dabbrev"],
+      },
+    ),
     text("editor.copyReference", "Copy Reference", (v, slot) => copyReference(v, slot), {
       category: "Edit",
       keywords: ["fully qualified name", "fqn", "copy path"],
     }),
-    text("code.pasteAsPlainText", "Paste as Plain Text", (v) => pasteAsPlainText(v), { category: "Edit", icon: "paste" }),
+    text("code.pasteAsPlainText", "Paste as Plain Text", (v) => pasteAsPlainText(v), {
+      category: "Edit",
+      icon: "paste",
+    }),
     {
       id: "editor.toggleSoftWrap",
       title: "Soft-Wrap",
@@ -386,19 +544,67 @@ export function registerEditorActions(): () => void {
     },
     text("code.foldAll", "Collapse All", (v) => collapseAll(v), { category: "Folding", icon: "collapse-all" }),
     text("code.unfoldAll", "Expand All", (v) => expandAll(v), { category: "Folding", icon: "expand-all" }),
-    text("code.collapseRecursively", "Collapse Recursively", (v) => collapseRecursively(v), { category: "Folding", keywords: ["fold"] }),
-    text("code.expandRecursively", "Expand Recursively", (v) => expandRecursively(v), { category: "Folding", keywords: ["unfold"] }),
-    text("code.addCaretNextOccurrence", "Add Selection for Next Occurrence", (v) => addNextOccurrence(v), { category: "Edit" }),
+    text("code.collapseRecursively", "Collapse Recursively", (v) => collapseRecursively(v), {
+      category: "Folding",
+      keywords: ["fold"],
+    }),
+    text("code.expandRecursively", "Expand Recursively", (v) => expandRecursively(v), {
+      category: "Folding",
+      keywords: ["unfold"],
+    }),
+    text("code.addCaretNextOccurrence", "Add Selection for Next Occurrence", (v) => addNextOccurrence(v), {
+      category: "Edit",
+    }),
     text("code.selectAllOccurrences", "Select All Occurrences", (v) => selectAllOccurrences(v), { category: "Edit" }),
     text("code.completeStatement", "Complete Current Statement", (v, slot) => completeCurrentStatement(v, slot)),
     text("code.startNewLine", "Start New Line", (v) => startNewLine(v)),
     text("code.startNewLineBefore", "Start New Line Before Current", (v) => startNewLineBefore(v)),
     text("code.splitLine", "Split Line", (v) => splitLine(v)),
     text("editor.scrollToCenter", "Scroll to Center", (v) => scrollToCenter(v), { category: "Editor Actions" }),
-    text("editor.codeBlockStart", "Move Caret to Code Block Start", (v) => cursorCodeBlockStart(v), { category: "Editor Actions" }),
-    text("editor.codeBlockEnd", "Move Caret to Code Block End", (v) => cursorCodeBlockEnd(v), { category: "Editor Actions" }),
-    text("editor.cloneCaretAbove", "Clone Caret Above", (v) => addCursorAbove(v), { category: "Editor Actions" }),
-    text("editor.cloneCaretBelow", "Clone Caret Below", (v) => addCursorBelow(v), { category: "Editor Actions" }),
+    text("editor.codeBlockStart", "Move Caret to Code Block Start", (v) => cursorCodeBlockStart(v), {
+      category: "Editor Actions",
+    }),
+    text("editor.codeBlockEnd", "Move Caret to Code Block End", (v) => cursorCodeBlockEnd(v), {
+      category: "Editor Actions",
+    }),
+    text(
+      "editor.codeBlockStartWithSelection",
+      "Move Caret to Code Block Start with Selection",
+      (v) => selectCodeBlockStart(v),
+      { category: "Editor Actions" },
+    ),
+    text(
+      "editor.codeBlockEndWithSelection",
+      "Move Caret to Code Block End with Selection",
+      (v) => selectCodeBlockEnd(v),
+      {
+        category: "Editor Actions",
+      },
+    ),
+    text("editor.contextInfo", "Context Info", (v) => showContextInfo(v), {
+      category: "View",
+      keywords: ["enclosing method", "enclosing class", "where am I"],
+    }),
+    text("navigate.customRegion", "Custom Folding…", (v) => showCustomRegions(v), {
+      category: "Navigate",
+      keywords: ["region", "editor-fold", "go to region"],
+    }),
+    ...FOLD_LEVELS.flatMap(([level, one, all]) => [
+      text(`code.expandToLevel${level}`, one, (v) => foldLevel(v, level, false), {
+        category: "Folding",
+        keywords: ["unfold", "fold level"],
+      }),
+      text(`code.expandAllToLevel${level}`, all, (v) => foldLevel(v, level, true), {
+        category: "Folding",
+        keywords: ["unfold", "fold level"],
+      }),
+    ]),
+    text("code.collapseBlock", "Fold Code Block", (v) => collapseBlock(v), { category: "Folding", keywords: ["fold"] }),
+    text("code.autoIndentLines", "Auto-Indent Lines", (v) => !v.state.readOnly && indentSelection(v), {
+      keywords: ["reindent", "fix indentation"],
+    }),
+    text("editor.cloneCaretAbove", "Clone Caret Above", (v) => cloneCaretAbove(v), { category: "Editor Actions" }),
+    text("editor.cloneCaretBelow", "Clone Caret Below", (v) => cloneCaretBelow(v), { category: "Editor Actions" }),
     text("editor.matchBrace", "Move Caret to Matching Brace", (v) => cursorMatchBrace(v), {
       category: "Editor Actions",
       // ⌃M is Show Commit Message History in the commit window.
@@ -414,12 +620,19 @@ export function registerEditorActions(): () => void {
     }),
     text("code.joinLines", "Join Lines", (v) => joinLines(v)),
     text("code.toggleCase", "Toggle Case", (v) => toggleCase(v), { keywords: ["upper", "lower"] }),
-    text("code.addCaretsToLineEnds", "Add Carets to Ends of Selected Lines", (v) => addCaretsToLineEnds(v), { category: "Edit" }),
+    text("code.addCaretsToLineEnds", "Add Carets to Ends of Selected Lines", (v) => addCaretsToLineEnds(v), {
+      category: "Edit",
+    }),
     text("code.unselectOccurrence", "Unselect Occurrence", (v) => unselectOccurrence(v), { category: "Edit" }),
-    text("code.pasteFromHistory", "Paste from History…", (v) => pasteFromHistory(v), { category: "Edit", keywords: ["clipboard", "paste multiple"] }),
+    text("code.pasteFromHistory", "Paste from History…", (v) => pasteFromHistory(v), {
+      category: "Edit",
+      keywords: ["clipboard", "paste multiple"],
+    }),
     text("code.sortLines", "Sort Lines", (v) => sortLines(v), { category: "Edit" }),
     text("code.reverseLines", "Reverse Lines", (v) => reverseLines(v), { category: "Edit" }),
-    text("code.unwrap", "Unwrap/Remove…", (_v, slot) => void unwrapAtCaret(slot), { keywords: ["unwrap", "remove if"] }),
+    text("code.unwrap", "Unwrap/Remove…", (_v, slot) => void unwrapAtCaret(slot), {
+      keywords: ["unwrap", "remove if"],
+    }),
     text("code.foldSelection", "Fold Selection / Remove Region", (v) => foldSelection(v), { category: "Folding" }),
     {
       id: "editor.toggleColumnSelection",
@@ -441,7 +654,12 @@ export function registerEditorActions(): () => void {
       when: "projectOpen",
       keywords: ["synchronize", "refresh", "revert"],
       run: ({ arg }) => {
-        const paths = typeof arg === "string" ? [arg] : Array.isArray(arg) ? arg.filter((p): p is string => typeof p === "string") : [];
+        const paths =
+          typeof arg === "string"
+            ? [arg]
+            : Array.isArray(arg)
+              ? arg.filter((p): p is string => typeof p === "string")
+              : [];
         const active = ctrl.activePath();
         return ctrl.reloadFromDisk(paths.length ? paths : active ? [active] : []);
       },
@@ -558,6 +776,8 @@ export function registerEditorActions(): () => void {
       category: "Navigate",
       keywords: ["breadcrumbs"],
       when: "projectOpen",
+      // ⌘↑ / ⌘↓ inside a popup (Search Everywhere's previous / next group) stay with it.
+      keyWhen: "!popupOpen",
       run: () => {
         if (activeSlot()) return openNavBarPopup();
         // No editor: the status bar breadcrumbs (StatusItems › Breadcrumbs) take focus.
@@ -622,7 +842,13 @@ export function registerEditorActions(): () => void {
       run: () => ctrl.reopenClosed(),
     },
     { id: "editor.nextTab", title: "Select Next Tab", category: "Window", when: TABS_WHEN, run: () => ctrl.cycle(1) },
-    { id: "editor.prevTab", title: "Select Previous Tab", category: "Window", when: TABS_WHEN, run: () => ctrl.cycle(-1) },
+    {
+      id: "editor.prevTab",
+      title: "Select Previous Tab",
+      category: "Window",
+      when: TABS_WHEN,
+      run: () => ctrl.cycle(-1),
+    },
     {
       id: "editor.splitRight",
       title: "Split Right",
@@ -640,6 +866,22 @@ export function registerEditorActions(): () => void {
       run: () => ctrl.split(useTabs.getState().activePane, "column"),
     },
     {
+      id: "editor.nextSplitter",
+      title: "Go to Next Splitter",
+      category: "Window",
+      keywords: ["split", "editor group", "pane"],
+      when: "editorSplit",
+      run: () => ctrl.focusSplitter(1),
+    },
+    {
+      id: "editor.prevSplitter",
+      title: "Go to Previous Splitter",
+      category: "Window",
+      keywords: ["split", "editor group", "pane"],
+      when: "editorSplit",
+      run: () => ctrl.focusSplitter(-1),
+    },
+    {
       id: "editor.moveToOppositeGroup",
       title: "Move to Opposite Group",
       category: "Window",
@@ -655,6 +897,30 @@ export function registerEditorActions(): () => void {
       category: "Window",
       when: "editorSplit",
       run: () => ctrl.unsplit(useTabs.getState().activePane),
+    },
+    {
+      id: "editor.unsplitAll",
+      title: "Unsplit All",
+      category: "Window",
+      when: "editorSplit",
+      run: () => ctrl.unsplitAll(useTabs.getState().activePane),
+    },
+    {
+      id: "editor.changeSplitOrientation",
+      title: "Change Splitter Orientation",
+      category: "Window",
+      when: "editorSplit",
+      run: () => ctrl.changeSplitOrientation(useTabs.getState().activePane),
+    },
+    {
+      id: "editor.openInOppositeGroup",
+      title: "Open in Opposite Group",
+      category: "Window",
+      when: TABS_WHEN,
+      run: () => {
+        const t = activePaneTab();
+        if (t) ctrl.openInOpposite(t.paneId, t.tabId);
+      },
     },
     {
       id: "editor.copyPath",

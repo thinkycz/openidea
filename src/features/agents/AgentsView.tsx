@@ -1,21 +1,29 @@
 /** Agents tool window: tasks grouped by what they need from the user. */
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import type { AgentStatus as Status, AgentTask } from "@/bindings";
 import { executeAction } from "@/platform/actions";
+import { maybeEditorService, type EditorInput } from "@/workbench/contributions";
 import { confirmChecked } from "@/workbench/messages";
 import { EmptyState, Icon, IconButton, Spinner, T, Tree, showContextMenu, type MenuItem } from "@/ui";
-import { age, branchLabel, groupTasks, isBusy, type TaskGroup } from "./model";
+import { SESSION_KIND, age, branchLabel, groupTasks, isBusy, type TaskGroup } from "./model";
 import { archiveTask, deleteTask, openHome, openTask, useAgents } from "./store";
 import styles from "./Agents.module.css";
 import { tx } from "@/platform/i18n";
 
 export function AgentsHeaderActions() {
-  return <IconButton icon="plus" action="agents.newTask" size="small" />;
+  return (
+    <>
+      <IconButton icon="plus" action="agents.newTask" size="small" />
+    </>
+  );
 }
 
 type Node = { kind: "group"; group: TaskGroup } | { kind: "task"; task: AgentTask };
 
 const nodeKey = (n: Node) => (n.kind === "group" ? `g:${n.group.status}` : n.task.id);
+
+const sessionTask = (input: EditorInput | null | undefined) =>
+  input?.kind === SESSION_KIND ? (input.data as { task?: string } | undefined)?.task : undefined;
 
 export function TaskStatusIcon({ status }: { status: Status }) {
   switch (status) {
@@ -28,6 +36,8 @@ export function TaskStatusIcon({ status }: { status: Status }) {
       return <Icon name="check" size={13} className={styles.ready} label="Ready" />;
     case "failed":
       return <Icon name="close" size={13} className={styles.failed} label="Failed" />;
+    case "limited":
+      return <Icon name="clock" size={13} className={styles.failed} label="Usage limit" />;
     case "archived":
       return <Icon name="minus" size={13} className={styles.archived} label="Archived" />;
   }
@@ -39,7 +49,23 @@ export function AgentsView() {
   const tasks = useAgents((s) => s.tasks);
   const providers = useAgents((s) => s.providers);
   const [collapsed, setCollapsed] = useState<Set<string>>(() => new Set(["g:archived"]));
-  const [selected, setSelected] = useState<Set<string>>(() => new Set());
+  const [selected, setSelected] = useState<Set<string>>(() => {
+    const task = sessionTask(maybeEditorService()?.activeInput?.());
+    return new Set(task ? [task] : []);
+  });
+  // Follow the active session tab.
+  useEffect(
+    () =>
+      maybeEditorService()?.onActiveInputChange?.((input) => {
+        const task = sessionTask(input);
+        if (!task) return;
+        setSelected(new Set([task]));
+        const group = groupTasks(useAgents.getState().tasks.values()).find((g) => g.tasks.some((t) => t.id === task));
+        const key = group && `g:${group.status}`;
+        if (key) setCollapsed((c) => (c.has(key) ? new Set([...c].filter((k) => k !== key)) : c));
+      }),
+    [],
+  );
   const roots = useMemo<Node[]>(() => groupTasks(tasks.values()).map((group) => ({ kind: "group", group })), [tasks]);
   const expanded = useMemo(() => new Set(roots.map(nodeKey).filter((k) => !collapsed.has(k))), [roots, collapsed]);
   if (!loaded)
@@ -58,7 +84,9 @@ export function AgentsView() {
         roots={roots}
         getKey={nodeKey}
         getLabel={(n) => (n.kind === "group" ? n.group.label : n.task.title)}
-        getChildren={(n) => (n.kind === "group" ? n.group.tasks.map((task) => ({ kind: "task", task }) as Node) : undefined)}
+        getChildren={(n) =>
+          n.kind === "group" ? n.group.tasks.map((task) => ({ kind: "task", task }) as Node) : undefined
+        }
         isExpandable={(n) => n.kind === "group"}
         expanded={expanded}
         onExpandedChange={(_next, node, open) =>

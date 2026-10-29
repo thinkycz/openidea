@@ -11,6 +11,11 @@ export const commands = {
 	recentProjects: () => __TAURI_INVOKE<RecentProject[]>("recent_projects"),
 	removeRecentProject: (path: string) => typedError<null, IdeError>(__TAURI_INVOKE("remove_recent_project", { path })),
 	openProject: (path: string) => typedError<ProjectInfo_Serialize, IdeError>(__TAURI_INVOKE("open_project", { path })),
+	/**
+	 *  Edits the loose file `path` in this window without a project (LightEdit);
+	 *  a window already in LightEdit keeps its files. Returns the effective (global) settings.
+	 */
+	lightEditOpen: (path: string) => typedError<Settings_Serialize, IdeError>(__TAURI_INVOKE("light_edit_open", { path })),
 	/**  The project open in this window (a settings window: its parent's), if any. */
 	projectCurrent: () => __TAURI_INVOKE<{
 	root: IpcPath,
@@ -51,11 +56,28 @@ export const commands = {
 	 */
 	projectRoots: () => typedError<ProjectRoots, IdeError>(__TAURI_INVOKE("project_roots")),
 	cancelRequest: (id: RequestId) => __TAURI_INVOKE<void>("cancel_request", { id }),
+	/**
+	 *  Stops a background task the backend reported with `cancellable` set; false when it
+	 *  has ended or can't be cancelled.
+	 */
+	cancelTask: (id: TaskId) => __TAURI_INVOKE<boolean>("cancel_task", { id }),
 	/**  Routes frontend logs into the backend `tracing` pipeline. */
 	logFrontend: (level: LogLevel, message: string) => __TAURI_INVOKE<void>("log_frontend", { level, message }),
 	/**  Streams the project's agent events to this window; returns every task. */
 	agentSubscribe: (onEvent: Channel<AgentEvent>) => typedError<AgentTask[], IdeError>(__TAURI_INVOKE("agent_subscribe", { onEvent })),
 	agentProviders: () => typedError<AgentProvider[], IdeError>(__TAURI_INVOKE("agent_providers")),
+	/**
+	 *  Agents of the ACP Registry this machine can run, with what is installed; the list
+	 *  saved earlier when the registry is unreachable. Cancel with `cancel_request(request)`.
+	 */
+	agentRegistryList: (request: RequestId) => typedError<AgentRegistry, IdeError>(__TAURI_INVOKE("agent_registry_list", { request })),
+	/**
+	 *  Installs the registry's current version of agent `id` (also to update it), streaming
+	 *  progress through `on_event`. Cancel with `cancel_request(request)`.
+	 */
+	agentRegistryInstall: (id: string, request: RequestId, onEvent: Channel<InstallEvent>) => typedError<null, IdeError>(__TAURI_INVOKE("agent_registry_install", { id, request, onEvent })),
+	/**  Removes a registry agent: its agent file and installed files. */
+	agentRegistryRemove: (id: string) => typedError<null, IdeError>(__TAURI_INVOKE("agent_registry_remove", { id })),
 	/**
 	 *  Slash commands to complete for `provider` in `task`'s directory, or in the project
 	 *  before a task exists (skills and custom commands on disk included).
@@ -72,6 +94,19 @@ export const commands = {
 	agentSendQueuedNow: (task: string, queued: string) => typedError<null, IdeError>(__TAURI_INVOKE("agent_send_queued_now", { task, queued })),
 	/**  Changes a session setting (model, mode, thinking effort…). */
 	agentSetConfig: (task: string, option: string, value: string) => typedError<null, IdeError>(__TAURI_INVOKE("agent_set_config", { task, option, value })),
+	/**  Copies the task's conversation into a new task, up to its first `turns` turns (all when `None`). */
+	agentFork: (task: string, turns: number | null) => typedError<AgentTask, IdeError>(__TAURI_INVOKE("agent_fork", { task, turns })),
+	/**  Drops the task's turns after its first `turns`; returns the message of the first dropped one. */
+	agentRollback: (task: string, turns: number) => typedError<{
+	text: string,
+	files: IpcPath[],
+	images: AgentImage[],
+} | null, IdeError>(__TAURI_INVOKE("agent_rollback", { task, turns })),
+	/**
+	 *  What the agent reports about itself when it starts (no session: no MCP servers, hooks
+	 *  or sign-in run). Remembered until `refresh`.
+	 */
+	agentProbe: (provider: string, refresh: boolean) => typedError<AgentProbe, IdeError>(__TAURI_INVOKE("agent_probe", { provider, refresh })),
 	/**  Stops the task's current turn, or with `subagent` only that subagent's work. */
 	agentCancel: (task: string, subagent: string | null) => typedError<null, IdeError>(__TAURI_INVOKE("agent_cancel", { task, subagent })),
 	/**  Answers a permission request; `option: null` cancels it. */
@@ -117,6 +152,11 @@ export const commands = {
 	 *  false when the clipboard stayed busy; the caller keeps working either way.
 	 */
 	clipboardSetFileList: (paths: string[]) => typedError<boolean, IdeError>(__TAURI_INVOKE("clipboard_set_file_list", { paths })),
+	/**
+	 *  Every installed family, sorted, each flagged monospaced or not. Read once
+	 *  per run (off the command threads) and cached.
+	 */
+	systemFontFamilies: () => typedError<FontFamily[], IdeError>(__TAURI_INVOKE("system_font_families")),
 	/**
 	 *  Opens a document. Async: reading and decoding a large file must not block
 	 *  the main thread (synchronous commands run on it).
@@ -435,9 +475,9 @@ export const commands = {
 	vcsDiffWithWorktree: (repo: string | null, rev: string) => typedError<ChangedFile[], IdeError>(__TAURI_INVOKE("vcs_diff_with_worktree", { repo, rev })),
 	/**  Files that differ between two revisions (the "N files updated" of Update Project). */
 	vcsDiffRevisions: (repo: string | null, from: string, to: string) => typedError<ChangedFile[], IdeError>(__TAURI_INVOKE("vcs_diff_revisions", { repo, from, to })),
-	vcsCreatePatch: (source: PatchSource) => typedError<string, IdeError>(__TAURI_INVOKE("vcs_create_patch", { source })),
-	vcsPatchPreview: (patch: string) => typedError<PatchFile[], IdeError>(__TAURI_INVOKE("vcs_patch_preview", { patch })),
-	vcsApplyPatch: (patch: string) => typedError<ApplyOutcome, IdeError>(__TAURI_INVOKE("vcs_apply_patch", { patch })),
+	vcsCreatePatch: (repo: string | null, source: PatchSource) => typedError<string, IdeError>(__TAURI_INVOKE("vcs_create_patch", { repo, source })),
+	vcsPatchPreview: (repo: string | null, patch: string) => typedError<PatchFile[], IdeError>(__TAURI_INVOKE("vcs_patch_preview", { repo, patch })),
+	vcsApplyPatch: (repo: string | null, patch: string) => typedError<ApplyOutcome, IdeError>(__TAURI_INVOKE("vcs_apply_patch", { repo, patch })),
 	/**  Shelve Changes: saves the changes of `paths` as a patch on the shelf and reverts them. */
 	vcsShelve: (name: string, paths: string[]) => typedError<ShelvedChangeList, IdeError>(__TAURI_INVOKE("vcs_shelve", { name, paths })),
 	vcsShelves: () => typedError<ShelvedChangeList[], IdeError>(__TAURI_INVOKE("vcs_shelves")),
@@ -481,6 +521,8 @@ export const commands = {
 	runCloseStdin: (id: RunId) => typedError<null, IdeError>(__TAURI_INVOKE("run_close_stdin", { id })),
 	/**  Terminal size of a run started with "Emulate terminal in output console". */
 	runResize: (id: RunId, cols: number, rows: number) => typedError<null, IdeError>(__TAURI_INVOKE("run_resize", { id, cols, rows })),
+	/**  Writes the Gradle init script adding `jvm_args` to the JVMs the build forks; returns its path. */
+	runGradleJvmArgsScript: (jvmArgs: string[]) => typedError<string, IdeError>(__TAURI_INVOKE("run_gradle_jvm_args_script", { jvmArgs })),
 	/**
 	 *  Results from the JUnit XML reports (Surefire, Failsafe, Gradle) of the module at
 	 *  `module` (relative to the project root) written since `since_ms` (Unix epoch, ms).
@@ -579,8 +621,16 @@ export const commands = {
 	/**
 	 *  Opens `path` in a new window (`new_window`) or tells the caller to open it
 	 *  itself (`current`). A project already open in some window is focused instead.
+	 *  `files` then open in that project's editor.
 	 */
-	windowOpenProject: (path: string, newWindow: boolean) => typedError<OpenOutcome, IdeError>(__TAURI_INVOKE("window_open_project", { path, newWindow })),
+	windowOpenProject: (path: string, newWindow: boolean, files: string[]) => typedError<OpenOutcome, IdeError>(__TAURI_INVOKE("window_open_project", { path, newWindow, files })),
+	/**
+	 *  Loose `files` opened from a window without a local project: a file inside a local project
+	 *  open in some window goes to that window, the others to the LightEdit window (this one,
+	 *  another, or a new one from a remote project window). Returns the files this window opens
+	 *  itself, in LightEdit.
+	 */
+	windowOpenFiles: (files: string[]) => typedError<IpcPath[], IdeError>(__TAURI_INVOKE("window_open_files", { files })),
 	/**
 	 *  [`window_open_project`] for folder `path` on the host of SSH configuration
 	 *  `ssh_config` (Remote Development); a new window connects itself.
@@ -601,6 +651,11 @@ export const commands = {
 	windowTakeLaunch: () => __TAURI_INVOKE<{
 	/**  Project folder to open. */
 	project: IpcPath | null,
+	/**
+	 *  Files to open in the editor: in `project` once it is open, else in this
+	 *  window's project or (without one) in LightEdit.
+	 */
+	files: IpcPath[],
 	/**  Remote project to open (Remote Development). */
 	remote: RemoteLaunch | null,
 	/**  Settings windows: the page to show. */
@@ -641,11 +696,11 @@ export const commands = {
 	date: string | null,
 } | null>("app_startup_update_check"),
 	/**
-	 *  Downloads and installs the available update, then quits through every
-	 *  window's unsaved-changes check and relaunches. If a window cancels the quit,
-	 *  the update applies on the next start.
+	 *  Downloads and installs the available update, streaming progress to `on_progress`.
+	 *  Cancellable through `request` until the download completes; the UI then restarts
+	 *  with `app_restart`. One install runs at a time.
 	 */
-	appInstallUpdate: () => typedError<null, IdeError>(__TAURI_INVOKE("app_install_update")),
+	appInstallUpdate: (request: RequestId, onProgress: Channel<UpdateProgress>) => typedError<null, IdeError>(__TAURI_INVOKE("app_install_update", { request, onProgress })),
 	debugExceptionFilters: () => typedError<SessionExceptionFilters[], IdeError>(__TAURI_INVOKE("debug_exception_filters")),
 	debugSetExceptionBreakpoints: (choices: { [key in string]: boolean }) => typedError<null, IdeError>(__TAURI_INVOKE("debug_set_exception_breakpoints", { choices })),
 	debugSetVariable: (session: DebugSessionId, container: number, name: string, evaluateName: string | null, frameId: number | null, value: string) => typedError<Variable, IdeError>(__TAURI_INVOKE("debug_set_variable", { session, container, name, evaluateName, frameId, value })),
@@ -803,6 +858,11 @@ export const commands = {
 	httpHistory: () => typedError<HttpHistoryEntry[], IdeError>(__TAURI_INVOKE("http_history")),
 	httpHistoryGet: (id: string) => typedError<HttpExchange, IdeError>(__TAURI_INVOKE("http_history_get", { id })),
 	httpHistoryClear: () => typedError<null, IdeError>(__TAURI_INVOKE("http_history_clear")),
+	/**
+	 *  System Settings › HTTP Proxy › Check connection: GETs `url` through `proxy` as
+	 *  edited (not yet applied); the response status, or why there was none.
+	 */
+	proxyCheckConnection: (proxy: ProxySettings, url: string) => typedError<string, IdeError>(__TAURI_INVOKE("proxy_check_connection", { proxy, url })),
 	dbSources: () => typedError<DataSource[], IdeError>(__TAURI_INVOKE("db_sources")),
 	dbSaveSources: (sources: DataSource[]) => typedError<null, IdeError>(__TAURI_INVOKE("db_save_sources", { sources })),
 	/**
@@ -881,6 +941,11 @@ export const commands = {
 	 *  `on_channel` tagged with the id.
 	 */
 	remoteInvoke: (cmd: string, args: string, onChannel: Channel<ChannelFrame>) => typedError<string, IdeError>(__TAURI_INVOKE("remote_invoke", { cmd, args, onChannel })),
+	/**
+	 *  Reload Environment: new child processes get the login shell's current environment
+	 *  (and the project's `remoteEnv` on a remote host); running ones keep theirs.
+	 */
+	envReload: () => typedError<EnvReloaded, IdeError>(__TAURI_INVOKE("env_reload")),
 	/**  Test Connection: connects with unsaved settings and returns the server version. */
 	dbTest: (source: DataSource, password: string | null, sshSecret: string | null) => typedError<string, IdeError>(__TAURI_INVOKE("db_test", { source, password, sshSecret })),
 	dbConnected: () => typedError<string[], IdeError>(__TAURI_INVOKE("db_connected")),
@@ -942,6 +1007,21 @@ export type ActiveTheme = {
 	theme: ThemeDef,
 };
 
+/**
+ *  What a task's agent can do beyond a plain conversation, as it reported when its
+ *  session started.
+ */
+export type AgentCapabilities = {
+	/**  Images in messages. */
+	images?: boolean,
+	/**  The conversation can be copied into a new task (`session/fork`). */
+	fork?: boolean,
+	/**  Its latest turns can be dropped. */
+	rollback?: boolean,
+	/**  A message can join the running turn instead of waiting for it. */
+	steer?: boolean,
+};
+
 /**  A file the task changed, relative to [`AgentTask::base_commit`]. */
 export type AgentChange = {
 	path: IpcPath,
@@ -1000,7 +1080,9 @@ attachments: string[];
 /**  When it was sent (ms since the epoch); `None` in tasks saved before this was kept. */
 sentMs?: number | null; 
 /**  When the turn it started ended; `None` while it runs or when it was cut off. */
-doneMs?: number | null } | { type: "agent"; text: string } | { type: "thought"; text: string } | { type: "tool"; id: string; title: string; 
+doneMs?: number | null; 
+/**  Sent into a running turn rather than starting one. */
+steered?: boolean } | { type: "agent"; text: string } | { type: "thought"; text: string } | { type: "tool"; id: string; title: string; 
 /**  ACP tool kind: `read`, `edit`, `execute`, `search`, `fetch`, `think`… */
 kind: string; status: AgentToolStatus; locations: IpcPath[]; 
 /**  Text the tool reported (command output…), truncated. */
@@ -1030,6 +1112,8 @@ chosen: string | null } | { type: "error"; message: string };
 export type AgentEvent = 
 /**  A task was created or its metadata changed. */
 { type: "task"; task: AgentTask } | { type: "removed"; id: string } | 
+/**  The task's conversation was cut to its first `length` entries (turns rolled back). */
+{ type: "truncated"; task: string; length: number } | 
 /**  Entry `index` of `task` (of its subagent `subagent`) was added or replaced. */
 { type: "entry"; task: string; subagent: string | null; index: number; entry: AgentEntry };
 
@@ -1053,6 +1137,24 @@ export type AgentPlanItem = {
 	status: string,
 };
 
+/**
+ *  What an agent says about itself when it starts (`initialize` only: no session, so no
+ *  MCP servers, hooks or sign-in run).
+ */
+export type AgentProbe = {
+	provider: string,
+	/**  The agent's own name and version, when it reports them. */
+	name: string | null,
+	version: string | null,
+	/**  How it is driven: `ACP v1`, `ACP v2` or `native`. */
+	protocol: string,
+	capabilities: AgentCapabilities,
+	/**  Ways to sign in it offers. */
+	authMethods: string[],
+	/**  Why it could not be started. */
+	error: string | null,
+};
+
 /**  A message to the agent: text, plus files to look at and images. */
 export type AgentPrompt = {
 	text: string,
@@ -1071,6 +1173,7 @@ export type AgentProvider = {
 	config: AgentConfigOption[],
 	/**  Slash commands it offered last time. */
 	commands: AgentCommand[],
+	source: AgentSource,
 };
 
 export type AgentQueued = {
@@ -1078,13 +1181,39 @@ export type AgentQueued = {
 	prompt: AgentPrompt,
 };
 
+export type AgentRegistry = {
+	agents: RegistryAgent[],
+	/**  Set when the registry could not be reached and the copy saved earlier is shown. */
+	warning: string | null,
+};
+
+/**  An API request the agent is about to retry. */
+export type AgentRetry = {
+	attempt: number,
+	maxRetries: number | null,
+	/**  When the next attempt starts (ms since the epoch). */
+	retryAtMs: number | null,
+	error: string | null,
+};
+
+/**  Where an agent comes from. */
+export type AgentSource = { kind: "builtin" } | 
+/**  Defined by the user in `<config>/agents/<id>.toml`. */
+{ kind: "custom" } | 
+/**  Installed from the ACP Registry. */
+{ kind: "registry"; version: string; 
+/**  A newer version the registry offers. */
+update: string | null };
+
 export type AgentStatus = 
 /**  Creating the worktree / starting the agent. */
 "starting" | "running" | 
 /**  Waiting for a permission answer. */
 "needsInput" | 
 /**  The turn ended; the result can be reviewed or the conversation continued. */
-"ready" | "failed" | "archived";
+"ready" | "failed" | 
+/**  The account's usage limit was reached; the conversation can go on once it resets. */
+"limited" | "archived";
 
 /**  What a subagent is doing, as its parent reports it. */
 export type AgentSubagentStatus = "running" | 
@@ -1123,6 +1252,14 @@ export type AgentTask = {
 	usage: AgentUsage | null,
 	/**  Messages waiting for the current turn to end, oldest first. */
 	queue: AgentQueued[],
+	capabilities?: AgentCapabilities,
+	/**  When a [`AgentStatus::Limited`] task's limit resets (ms since the epoch), if the agent said. */
+	resetsMs?: number | null,
+	/**
+	 *  The agent is retrying a failed API request (connection lost, overloaded…); cleared
+	 *  by its next output or any status change.
+	 */
+	retry?: AgentRetry | null,
 };
 
 export type AgentToolDiff = {
@@ -1674,6 +1811,13 @@ export type CommitOptions = {
 
 /**  Version Control › Commit: commit checks and commit-message inspections. */
 export type CommitSettings = {
+	/**
+	 *  Commit from the Commit tool window; off = Local Changes in the Git tool
+	 *  window and a Commit dialog.
+	 */
+	nonModal?: boolean,
+	/**  Start with an empty message instead of the last one / the changelist's. */
+	clearInitialMessage?: boolean,
 	analyzeCode?: boolean,
 	checkTodo?: boolean,
 	reformat?: boolean,
@@ -2158,8 +2302,14 @@ export type DebuggerSettings = {
 	focusAppOnBreakpoint?: boolean,
 	hideOnTermination?: boolean,
 	breakpointsAnyFile?: boolean,
+	/**  While suspended, hovering the start of a line shows a Run to Cursor button. */
+	runToCursorInlay?: boolean,
 	inlineValues?: boolean,
+	/**  Data Views: list variables by name instead of the adapter's order. */
+	sortValues?: boolean,
 	valueTooltip?: boolean,
+	/**  While suspended, selecting an expression shows its value. */
+	valueTooltipOnSelection?: boolean,
 	valueTooltipDelay?: number,
 	/**  Stepping: do not step into library code (debugpy `justMyCode`, js-debug `skipFiles`). */
 	skipLibraryCode?: boolean,
@@ -2455,7 +2605,13 @@ export type EditorAppearanceSettings = {
 	caretBlinking?: boolean,
 	/**  Blink period in ms. */
 	caretBlinkPeriod?: number,
+	/**  Fade the caret in and out instead of toggling it; rounds its corners. */
+	smoothCaretBlinking?: boolean,
 	blockCaret?: boolean,
+	/**  Animate the caret between positions when it is moved. */
+	smoothCaretMovement?: boolean,
+	/**  Smooth caret movement curve: `snappy` | `gliding`. */
+	caretMovementStyle?: string,
 	lineNumbers?: boolean,
 	methodSeparators?: boolean,
 	/**  Sub-options of `editor.showWhitespace`. */
@@ -2646,6 +2802,16 @@ export type EncodingSettings = {
 };
 
 export type EntryKind = "file" | "dir" | "symlink";
+
+/**  What Reload Environment changed. */
+export type EnvReloaded = {
+	/**  Names of the variables new child processes now get differently (added, changed or removed). */
+	changed: string[],
+	/**  The `devcontainer.json` whose `remoteEnv` applies, if any. */
+	devcontainer: string | null,
+	/**  Whether the login shell was read (it isn't on Windows). */
+	shellRead: boolean,
+};
 
 export type ErrorKind = "notFound" | "alreadyExists" | "permissionDenied" | "invalidInput" | 
 /**  Document version mismatch; the UI must resync the full text. */
@@ -2864,6 +3030,15 @@ export type FoldingSettings = {
 	docComments?: boolean,
 };
 
+/**
+ *  One installed family. `monospaced` is the font system's own flag (fixed
+ *  pitch; on Linux also fontconfig's dual-width CJK monospace).
+ */
+export type FontFamily = {
+	name: string,
+	monospaced: boolean,
+};
+
 export type FormatOptions = {
 	tabSize: number,
 	insertSpaces: boolean,
@@ -2960,6 +3135,17 @@ export type GitSettings = {
 	protectedBranches?: string,
 	/**  Initial state of Commit Options › Sign-off Commit. */
 	signOff?: boolean,
+	/**  Ask before committing files larger than `large_file_mb`. */
+	warnLargeFiles?: boolean,
+	largeFileMb?: number,
+	/**  Ask before committing names that are invalid on Windows or differ only in case. */
+	warnBadFileNames?: boolean,
+	/**  Commit and Push opens the Push dialog; otherwise it pushes right away. */
+	showPushDialog?: boolean,
+	/**  With `show_push_dialog`: only for commits to protected branches. */
+	pushDialogOnlyProtected?: boolean,
+	/**  Stashes and shelves share one tab. */
+	combineStashAndShelf?: boolean,
 };
 
 export type GoSettings = {
@@ -3154,7 +3340,9 @@ export type IdeEvent =
 /**  Full replacement of diagnostics for one file from one producer. */
 { type: "diagnostics"; path: IpcPath; source: string; items: Diagnostic[] } | 
 /**  Progress of a background task; `fraction` is `None` when indeterminate. */
-{ type: "task"; id: TaskId; title: string; message: string | null; fraction: number | null; done: boolean } | 
+{ type: "task"; id: TaskId; title: string; message: string | null; fraction: number | null; done: boolean; 
+/**  The UI may stop it with `cancel_task(id)` (see [`crate::task`]). */
+cancellable: boolean } | 
 /**  Project indexing state changed (dumb mode on/off). */
 { type: "indexState"; indexing: boolean; files: number; symbols: number } | 
 /**  Git status / branch information should be refreshed. */
@@ -3590,6 +3778,11 @@ export type LanguagesSettings = {
 export type Launch = {
 	/**  Project folder to open. */
 	project: IpcPath | null,
+	/**
+	 *  Files to open in the editor: in `project` once it is open, else in this
+	 *  window's project or (without one) in LightEdit.
+	 */
+	files: IpcPath[],
 	/**  Remote project to open (Remote Development). */
 	remote: RemoteLaunch | null,
 	/**  Settings windows: the page to show. */
@@ -4399,6 +4592,30 @@ export type ProjectStructureSettings = {
 	excludeFiles?: string,
 };
 
+export type ProxyKind = "http" | "socks";
+
+export type ProxyMode = 
+/**  Every connection goes direct. */
+"none" | 
+/**  The system's proxy: `HTTP_PROXY` / `HTTPS_PROXY` / `NO_PROXY` of the environment. */
+"auto" | 
+/**  The proxy configured here. */
+"manual";
+
+export type ProxySettings = {
+	mode?: ProxyMode,
+	kind?: ProxyKind,
+	host?: string,
+	port?: number,
+	/**  Hosts reached directly, comma-separated; `*` matches any characters (`*.example.com`, `192.168.*`). */
+	noProxy?: string,
+	/**  Send `login` / `password` to the proxy. */
+	authenticate?: boolean,
+	login?: string,
+	/**  Kept in the saved passwords rather than `settings.toml`; filled in when settings are read. */
+	password?: string,
+};
+
 export type PruneTarget = "containers" | 
 /**  Dangling images only. */
 "images" | 
@@ -4517,6 +4734,41 @@ export type ReferencesIncomplete =
 "indexing" | 
 /**  More project files mention the name than were checked. */
 "tooManyFiles";
+
+/**  A registry agent this machine can run (or has installed). */
+export type RegistryAgent = {
+	id: string,
+	name: string,
+	/**  The registry's current version. */
+	version: string,
+	description: string,
+	repository: string | null,
+	website: string | null,
+	authors: string[],
+	license: string | null,
+	/**
+	 *  How it installs here; `None` when it no longer can (an installed agent whose
+	 *  runtime went away).
+	 */
+	distribution: RegistryDistribution | null,
+	/**
+	 *  The release archive comes without a SHA-256, so the download cannot be checked.
+	 *  npm and uv packages are checked by those tools.
+	 */
+	noChecksum: boolean,
+	/**  The installed version. */
+	installed: string | null,
+	/**  Whether [`Self::version`] is newer than the installed one. */
+	update: boolean,
+};
+
+export type RegistryDistribution = 
+/**  A release archive for this OS and architecture. */
+"binary" | 
+/**  An npm package (needs Node.js). */
+"npx" | 
+/**  A Python package run by uv. */
+"uvx";
 
 export type Remote = {
 	name: string,
@@ -4992,6 +5244,8 @@ export type Settings_Deserialize = {
 	 */
 	customKeymaps?: { [key in string]: CustomKeymap },
 	notifications?: NotificationSettings,
+	/**  System Settings › HTTP Proxy (global only). */
+	proxy?: ProxySettings,
 	/**  Interpreters / toolchains per language (Python, Node.js, Rust, Go, TypeScript). */
 	languages?: LanguagesSettings,
 	/**  Project Structure: source / test / resource / excluded folders (project-relative). */
@@ -5045,6 +5299,8 @@ export type Settings_Serialize = {
 	 */
 	customKeymaps: { [key in string]: CustomKeymap },
 	notifications: NotificationSettings,
+	/**  System Settings › HTTP Proxy (global only). */
+	proxy: ProxySettings,
 	/**  Interpreters / toolchains per language (Python, Node.js, Rust, Go, TypeScript). */
 	languages: LanguagesSettings,
 	/**  Project Structure: source / test / resource / excluded folders (project-relative). */
@@ -5082,6 +5338,12 @@ export type Settings_Serialize = {
 };
 
 export type Severity = "error" | "warning" | "info" | "hint";
+
+/**  Version Control › Shelf. */
+export type ShelfSettings = {
+	/**  Initial state of Unshelve's "Remove successfully applied files from the shelf". */
+	removeApplied?: boolean,
+};
 
 /**  A change list on the shelf. */
 export type ShelvedChangeList = {
@@ -5646,6 +5908,13 @@ export type UpdateInfo = {
 	date: string | null,
 };
 
+/**  Progress of [`app_install_update`], streamed to the UI's background task. */
+export type UpdateProgress = 
+/**  Bytes received so far; `total` when the server sends a length. */
+{ type: "downloading"; downloaded: number | null; total: number | null } | 
+/**  Download done; the new version is being written over this one. */
+{ type: "installing" };
+
 export type Variable = {
 	name: string,
 	value: string,
@@ -5655,10 +5924,16 @@ export type Variable = {
 	evaluateName: string | null,
 };
 
-/**  Version Control › Confirmation. Values: `ask` | `silently` | `never`. */
+/**  Version Control › Confirmation. */
 export type VcsConfirmationSettings = {
+	/**  `ask` | `silently` | `never`. */
 	onCreate?: string,
 	onDelete?: string,
+	/**  Update Project opens its options dialog first. */
+	showUpdateOptions?: boolean,
+	confirmDropCommits?: boolean,
+	/**  After a patch is saved: `ask` | `no` | `reveal` (show it in the file manager). */
+	onPatchCreated?: string,
 };
 
 /**  A repository of the project (IDEA's VCS root). */
@@ -5683,6 +5958,7 @@ export type VcsSettings = {
 	git?: GitSettings,
 	commit?: CommitSettings,
 	confirmation?: VcsConfirmationSettings,
+	shelf?: ShelfSettings,
 	/**  Issue Navigation: commit-message patterns turned into links. */
 	issueNavigation?: IssueLink[],
 };

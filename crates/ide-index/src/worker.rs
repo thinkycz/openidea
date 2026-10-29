@@ -127,13 +127,18 @@ impl Shared {
 
     // ---------------------------------------------------------------- thread
 
-    pub(crate) fn run(&self) {
+    /// `scan`: load the persisted index and scan the roots before serving updates.
+    pub(crate) fn run(&self, scan: bool) {
         {
             let mut q = self.queue.lock();
             q.busy = true;
         }
-        self.load_persisted();
-        self.full_scan();
+        if scan {
+            self.load_persisted();
+            self.full_scan();
+        } else {
+            self.indexing.store(false, Ordering::SeqCst);
+        }
         {
             let mut q = self.queue.lock();
             q.busy = false;
@@ -194,6 +199,7 @@ impl Shared {
             message: None,
             fraction: None,
             done: true,
+            cancellable: false,
         });
         self.emit_state();
     }
@@ -209,6 +215,7 @@ impl Shared {
             message: Some("Scanning files…".into()),
             fraction: None,
             done: false,
+            cancellable: false,
         });
 
         let filter = self.filter();
@@ -255,6 +262,7 @@ impl Shared {
                     message: Some(format!("{done} / {total} files")),
                     fraction: Some(done as f32 / total.max(1) as f32),
                     done: false,
+                    cancellable: false,
                 });
             }
         }
@@ -266,6 +274,7 @@ impl Shared {
             message: None,
             fraction: Some(1.0),
             done: true,
+            cancellable: false,
         });
         self.emit_state();
         let d = self.data.read();

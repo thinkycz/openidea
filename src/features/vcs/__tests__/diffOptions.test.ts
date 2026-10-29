@@ -11,7 +11,7 @@ import {
 } from "../diffOptions";
 import { clipboardDiffData, compareFilesData, parseTextsArg } from "../compare";
 import { diffInput, diffTitle, sideFile, sideKey } from "../diffInput";
-import { viewerBase } from "../cm";
+import { changedLineGutters, viewerBase } from "../cm";
 
 const doc = (s: string) => Text.of(s.split("\n"));
 
@@ -24,8 +24,22 @@ describe("diff options", () => {
   it("parses stored options with per-field defaults", () => {
     expect(parseDiffOptions(null)).toEqual(DEFAULT_DIFF_OPTIONS);
     expect(
-      parseDiffOptions({ mode: "split", ignore: "trim", highlight: "lines", collapse: false, syncScroll: false }),
-    ).toEqual({ mode: "split", ignore: "trim", highlight: "lines", collapse: false, syncScroll: false });
+      parseDiffOptions({
+        mode: "split",
+        ignore: "trim",
+        highlight: "lines",
+        collapse: false,
+        syncScroll: false,
+        alignChanges: false,
+      }),
+    ).toEqual({
+      mode: "split",
+      ignore: "trim",
+      highlight: "lines",
+      collapse: false,
+      syncScroll: false,
+      alignChanges: false,
+    });
     expect(parseDiffOptions({ ignore: "bogus", highlight: 3, collapse: "x" })).toEqual(DEFAULT_DIFF_OPTIONS);
   });
 
@@ -155,6 +169,26 @@ describe("diff options", () => {
     parent.remove();
   });
 
+  it("carries the change background into the line number gutter", () => {
+    const parent = document.createElement("div");
+    document.body.appendChild(parent);
+    const extensions = [viewerBase({ readOnly: true }), changedLineGutters];
+    const mv = new MergeView({
+      a: { doc: "keep\nlet x = 1;\nend\n", extensions },
+      b: { doc: "keep\nlet x = 2;\nadded\nend\n", extensions },
+      parent,
+      gutter: false,
+      diffConfig: { override: whitespaceDiff("none") },
+    });
+    const numbers = (v: typeof mv.a, cls: string) =>
+      [...v.dom.querySelectorAll(`.cm-lineNumbers .${cls}`)].map((e) => e.textContent);
+    expect(numbers(mv.a, "cm-diffChangedGutter")).toEqual(["2"]);
+    expect(numbers(mv.b, "cm-diffChangedGutter")).toEqual(["2", "3"]);
+    expect(numbers(mv.b, "cm-diffWholeGutter")).toEqual(["3"]);
+    mv.destroy();
+    parent.remove();
+  });
+
   it("marks a deleted last line as a whole line", () => {
     const parent = document.createElement("div");
     document.body.appendChild(parent);
@@ -182,6 +216,22 @@ describe("diff options", () => {
     expect(mv.b.dom.querySelector(".cm-diffWholeLine")).toBeNull();
     expect(mv.a.dom.querySelector(".cm-changedText")).not.toBeNull();
     expect(mv.b.dom.querySelector(".cm-changedText")).not.toBeNull();
+    mv.destroy();
+    parent.remove();
+  });
+
+  it("gives a read-only side a tab stop and leaves an editable side alone", () => {
+    const parent = document.createElement("div");
+    document.body.appendChild(parent);
+    const mv = new MergeView({
+      a: { doc: "old\n", extensions: viewerBase({ readOnly: true }) },
+      b: { doc: "new\n", extensions: viewerBase({ readOnly: false }) },
+      parent,
+    });
+    expect(mv.a.contentDOM.getAttribute("contenteditable")).toBe("false");
+    expect(mv.a.contentDOM.getAttribute("tabindex")).toBe("0");
+    expect(mv.b.contentDOM.getAttribute("contenteditable")).toBe("true");
+    expect(mv.b.contentDOM.hasAttribute("tabindex")).toBe(false);
     mv.destroy();
     parent.remove();
   });

@@ -86,6 +86,8 @@ export interface StatusItemContribution {
   title?: string;
   /** Shown until the user decides otherwise (default true). */
   defaultVisible?: boolean;
+  /** Also shown in a LightEdit window (editor tabs only), whose status bar has only such items. */
+  lightEdit?: boolean;
 }
 
 /** Title bar widget (VCS branch, run configuration, run/debug buttons…). */
@@ -144,6 +146,8 @@ export interface ServiceTreeItem {
   detail?: string;
   /** Greyed label (stopped, not running). */
   dim?: boolean;
+  /** Expanded the first time the node appears. */
+  expanded?: boolean;
   /** Undefined for leaves. */
   children?: ServiceTreeItem[];
 }
@@ -368,6 +372,13 @@ export function textEditorWrapperFor(
   return undefined;
 }
 
+/**
+ * Spread on an element that handles files dropped from the OS itself (copy into
+ * a folder, attach to a prompt); the window-wide drop (open in the editor)
+ * leaves drops over it alone.
+ */
+export const OWNS_FILE_DROP = { "data-owns-file-drop": "" } as const;
+
 // ---------------------------------------------------------------------------
 // Services implemented by one feature and consumed by others. The provider
 // calls `provide*` during activation; consumers call through the accessor.
@@ -409,6 +420,10 @@ export interface EditorService {
   openPaths?(): string[];
   /** Every open tab, files or not, most recently active first (Switcher). */
   openTabs?(): OpenEditorTab[];
+  /** Input of the active tab (any kind), if any. */
+  activeInput?(): EditorInput | null;
+  /** Calls `fn` whenever the active tab changes; returns the unsubscribe. */
+  onActiveInputChange?(fn: (input: EditorInput | null) => void): () => void;
   /** Closes every tab showing `path`. */
   closePath?(path: string): void;
   /** Closes the tab of the input with this `key` (e.g. a merge editor once applied). */
@@ -599,7 +614,8 @@ export interface SettingsPageContribution {
   order?: number;
   /** Extra words matched by the settings search. */
   keywords?: string[];
-  component: ComponentType;
+  /** Omitted: the page lists links to its sub-pages. */
+  component?: ComponentType;
   /** The page edits settings that a project can override (Global / This project switch). */
   projectScope?: boolean;
 }
@@ -720,7 +736,14 @@ export function projectViewRoots(map: ReadonlyMap<string, ProjectViewRootContrib
 // in `paths[0]`, the target directory (features/templates: file templates, http-client: HTTP Request).
 
 export type ContextMenuId =
-  "editor" | "projectView" | "editorTab" | "editorGutter" | "openIn" | "stopProcess" | "selectIn" | "new";
+  | "editor"
+  | "projectView"
+  | "editorTab"
+  | "editorGutter"
+  | "openIn"
+  | "stopProcess"
+  | "selectIn"
+  | "new";
 
 export interface MenuGroupContext {
   /** Files / directories the menu is for (absolute paths; a virtual URI for virtual documents). */
@@ -863,6 +886,8 @@ export interface RunConfigTypeField {
    */
   control?: "text" | "textarea" | "select" | "checkbox" | "output";
   mono?: boolean;
+  /** Visible lines of a `textarea` (default 4). */
+  rows?: number;
   placeholder?: string;
   options?: ReadonlyArray<{ value: string; label: string }>;
   /** Values offered while typing (e.g. the scripts of detected configurations). */

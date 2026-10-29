@@ -175,6 +175,15 @@ export function openMoveDialog(nodes: ProjectNode[] = selectedNodes(), target?: 
   openMoveDialogFor(paths, target, paths.length === 1 && movable.some((n) => n.path === paths[0] && n.dir));
 }
 
+/** Copy… (F5): IDEA's Copy dialog for the selection, into the folder it is in. */
+export function openCopyDialog(nodes: ProjectNode[] = selectedNodes()) {
+  const copyable = nodes.filter((n) => !n.root && !n.group);
+  const paths = topLevelPaths(copyable);
+  if (!paths.length) return;
+  const single = paths.length === 1 && copyable.some((n) => n.path === paths[0] && n.dir);
+  openCopyDialogFor(paths, parentOf(paths[0]!), single);
+}
+
 function openMoveDialogFor(paths: string[], target?: string, dir?: boolean, done?: () => void) {
   if (!paths.length) return;
   openFileRefactorDialog({
@@ -358,7 +367,11 @@ export async function safeToDelete(files: string[]): Promise<boolean> {
     result = await fileUsages(files, abort.signal);
   } catch {
     if (user.choice) return user.choice === "skip";
-    notifications().notify({ level: "warning", title: "Usage search did not finish; nothing was deleted", key: "project.safeDelete" });
+    notifications().notify({
+      level: "warning",
+      title: "Usage search did not finish; nothing was deleted",
+      key: "project.safeDelete",
+    });
     return false;
   } finally {
     clearTimeout(timer);
@@ -385,7 +398,12 @@ export async function findFileUsages(path: string) {
     return;
   }
   if (result.status !== "ok")
-    notifications().notify({ level: "info", title: `Cannot find usages of '${name}'`, body: result.reason, group: "search" });
+    notifications().notify({
+      level: "info",
+      title: `Cannot find usages of '${name}'`,
+      body: result.reason,
+      group: "search",
+    });
   else if (!result.usages.length)
     notifications().notify({ level: "info", title: `No usages of '${name}' found`, group: "search" });
   else viewUsages(name, result.usages);
@@ -487,7 +505,8 @@ export async function paste(target = targetFolder()) {
   // win over ours — unless they are the copy we handed to the OS ourselves.
   if (external.length && !sameFiles(external, clipboard?.paths)) return pasteFromOsClipboard(external, target);
   if (!clipboard?.paths.length) return;
-  const isDir = (p: string) => get().listings.has(p) || currentModel().byKey.get(currentModel().keyOfPath.get(p) ?? p)?.dir === true;
+  const isDir = (p: string) =>
+    get().listings.has(p) || currentModel().byKey.get(currentModel().keyOfPath.get(p) ?? p)?.dir === true;
   const single = clipboard.paths.length === 1 && isDir(clipboard.paths[0]!);
   if (!clipboard.cut) return openCopyDialogFor(clipboard.paths, target, single);
   const paths = clipboard.paths.filter((p) => parentOf(p) !== target);
@@ -506,7 +525,11 @@ async function pasteFromOsClipboard(paths: string[], target: string) {
 /** The same files, as the clipboard keeps them (`/`-separated, any order). */
 function sameFiles(files: string[], paths: string[] | undefined): boolean {
   if (!paths || files.length !== paths.length) return false;
-  const key = (list: string[]) => list.map((p) => (caseInsensitive ? p.toLowerCase() : p)).sort().join("\n");
+  const key = (list: string[]) =>
+    list
+      .map((p) => (caseInsensitive ? p.toLowerCase() : p))
+      .sort()
+      .join("\n");
   return key(files) === key(paths);
 }
 
@@ -554,7 +577,8 @@ export async function transfer(
       errors.push(`${name}: cannot copy a folder into itself`);
       continue;
     }
-    const srcIsDir = get().listings.has(src) || currentModel().byKey.get(currentModel().keyOfPath.get(src) ?? src)?.dir === true;
+    const srcIsDir =
+      get().listings.has(src) || currentModel().byKey.get(currentModel().keyOfPath.get(src) ?? src)?.dir === true;
     const finalName = paths.length === 1 && newName ? newName : uniqueName(name, isTaken, srcIsDir);
     const to = joinPath(target, finalName);
     try {
@@ -613,10 +637,12 @@ export async function dropPaths(paths: string[], target: string, copy: boolean) 
   if (!movable.length) return;
   // IDEA opens the Move refactoring dialog for drops inside the project.
   if (!copy) {
-    const node = movable.length === 1 ? currentModel().byKey.get(currentModel().keyOfPath.get(movable[0]!) ?? "") : undefined;
+    const node =
+      movable.length === 1 ? currentModel().byKey.get(currentModel().keyOfPath.get(movable[0]!) ?? "") : undefined;
     return openMoveDialogFor(movable, target, node?.dir);
   }
-  const node = movable.length === 1 ? currentModel().byKey.get(currentModel().keyOfPath.get(movable[0]!) ?? "") : undefined;
+  const node =
+    movable.length === 1 ? currentModel().byKey.get(currentModel().keyOfPath.get(movable[0]!) ?? "") : undefined;
   openCopyDialogFor(movable, target, node?.dir);
 }
 

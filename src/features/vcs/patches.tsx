@@ -1,15 +1,19 @@
+import { commitRepo } from "./multiRoot";
 /** Create Patch… (from local changes or commits) and Apply Patch… (file or clipboard, with a preview). */
 import { useEffect, useState } from "react";
 import type { Commit, FileStatus, PatchFile, PatchSource } from "@/bindings";
 import { call, commands } from "@/platform/ipc";
 import { Button, Checkbox, Dialog, Icon, Input, List, Spinner, fileIconName, T } from "@/ui";
+import { workflowSettings } from "@/platform/workflowSettings";
 import { notifications } from "@/workbench/contributions";
+import { ask } from "@/workbench/messages";
+import { rememberSetting } from "./confirmations";
 import { openDialog } from "./dialogs";
 import { KIND_COLOR, baseName, dirName, stripSlash } from "./model";
 import { errorMessage, logConsole, runOp, saveAll } from "./ops";
 import { FileChecklist, defaultChangeFiles, reportApply } from "./shelf";
 import { activeList, useChangelists } from "./changelists";
-import { useVcs } from "./store";
+import { currentRepoRoot, useVcs } from "./store";
 import styles from "./common.module.css";
 import { tx } from "@/platform/i18n";
 
@@ -53,8 +57,29 @@ async function browseSave(current: string): Promise<string | null> {
   }
 }
 
+/** Settings › Version Control › Confirmation › When patch is created: ask / no / show in Finder. */
+async function afterPatchSaved(path: string) {
+  const mode = workflowSettings().vcs.confirmation.onPatchCreated;
+  if (mode === "no") return;
+  if (mode === "ask") {
+    const r = await ask({
+      title: "Create Patch",
+      body: tx("Patch file created successfully. Show it in Finder?"),
+      checkbox: "Don't ask again",
+      buttons: [{ id: "show", label: "Show", primary: true }],
+    });
+    const show = r.button === "show";
+    if (r.checked) await rememberSetting("vcs.confirmation.onPatchCreated", show ? "reveal" : "no");
+    if (!show) return;
+  }
+  void import("@tauri-apps/plugin-opener").then((m) => m.revealItemInDir(path)).catch(() => undefined);
+}
+
 function CreatePatchDialog({ origin, onClose }: { origin: PatchOrigin; onClose: () => void }) {
   const root = useVcs((s) => s.root) ?? "";
+  const [repo] = useState(() =>
+    origin.kind === "commits" ? (commitRepo(origin.commits[0]!) ?? currentRepoRoot()) : currentRepoRoot(),
+  );
   const listName = useChangelists((s) => activeList(s.state).name);
   const [selected, setSelected] = useState(
     () => new Set(origin.kind === "changes" ? origin.files.map((f) => f.path) : []),
@@ -79,15 +104,17 @@ function CreatePatchDialog({ origin, onClose }: { origin: PatchOrigin; onClose: 
             commits: [...origin.commits].sort((a, b) => (a.timeMs ?? 0) - (b.timeMs ?? 0)).map((c) => c.id),
             reverse,
           };
-    await runOp(
+    const done = await runOp(
       "Create patch",
       async () => {
-        const patch = await call(commands.vcsCreatePatch(source));
+        const patch = await call(commands.vcsCreatePatch(repo, source));
         if (toFile) await call(commands.vcsWritePatch(file.trim(), patch));
         else await navigator.clipboard.writeText(patch);
+        return true;
       },
       { success: toFile ? `Patch saved to ${baseName(file.trim())}` : "Patch copied to the clipboard", refresh: false },
     );
+    if (done && toFile) await afterPatchSaved(file.trim());
   };
   return (
     <Dialog
@@ -189,12 +216,13 @@ export async function showApplyPatch(from: "file" | "clipboard", path?: string) 
 }
 
 function ApplyPatchDialog({ patch, source, onClose }: { patch: string; source: string; onClose: () => void }) {
+  const [repo] = useState(currentRepoRoot);
   const [files, setFiles] = useState<PatchFile[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   useEffect(() => {
     let alive = true;
     void saveAll().then(() =>
-      call(commands.vcsPatchPreview(patch))
+      call(commands.vcsPatchPreview(repo, patch))
         .then((f) => alive && setFiles(f))
         .catch((e) => alive && setError(errorMessage(e))),
     );
@@ -206,7 +234,7 @@ function ApplyPatchDialog({ patch, source, onClose }: { patch: string; source: s
   const run = async () => {
     onClose();
     await saveAll();
-    const outcome = await runOp(`Apply patch (${source})`, () => call(commands.vcsApplyPatch(patch)), {
+    const outcome = await runOp(`Apply patch (${source})`, () => call(commands.vcsApplyPatch(repo, patch)), {
       refresh: false,
     });
     if (outcome) await reportApply(outcome, "Patch applied");

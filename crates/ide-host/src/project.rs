@@ -50,6 +50,9 @@ pub struct Project {
     /// Watchers of the Project Structure content roots outside the project folder.
     pub(crate) content_watchers: Mutex<Vec<(PathBuf, Watcher)>>,
     pub(crate) _scratch_watcher: Option<Watcher>,
+    /// A LightEdit window's loose files ([`Host::open_light`]): global settings only,
+    /// nothing indexed, no language servers, repositories or project services.
+    pub light: bool,
 }
 
 impl Host {
@@ -66,11 +69,14 @@ impl Host {
         // it, with its warm index, language servers and unsaved documents.
         if let Ok(current) = self.project(window)
             && current.root == root
+            && !current.light
         {
             return Ok(current);
         }
         self.close_project(window);
         let sink: SharedSink = (self.sink_for)(window);
+        // Before anything the project starts: its children get the project's environment.
+        let post_start = self.environment.project_opened(&root, &sink);
         let settings = SettingsStore::load(&self.config_dir, Some(&root));
         let detected_roots = Arc::new(RwLock::new(ide_workspace::roots::detect(&root)));
         let excludes = exclude_globs(&settings.effective(), &detected_roots.read());
@@ -278,29 +284,8 @@ impl Host {
         mark("git");
         tracing::info!("opened {} in window {window} in {} ms {laps:?}", root.display(), started.elapsed().as_millis());
 
-        let db = Arc::new(ide_db::DbManager::new(
-            root.clone(),
-            self.data_dir.join("db-passwords.json"),
-            self.data_dir.join("db-history.json"),
-            self.ssh.clone(),
-        ));
-        let http_history = Arc::new(ide_http::History::new(self.data_dir.join("http-history").join(&project_key)));
-        let agents = Arc::new(ide_agent::AgentManager::new(
-            ide_agent::AgentPaths {
-                project_root: root.clone(),
-                store_dir: self.data_dir.join("agents").join(&project_key),
-                // Outside the app data dir: its path has spaces on macOS, which trips up build scripts.
-                worktrees_dir: dirs::home_dir()
-                    .unwrap_or_else(|| self.data_dir.clone())
-                    .join(".openidea")
-                    .join("worktrees")
-                    .join(&project_key),
-                models_file: self.data_dir.join("agents").join("models.json"),
-                custom_agents_dir: Some(self.config_dir.join("agents")),
-                home_dir: dirs::home_dir(),
-            },
-            self.runtime.clone(),
-        ));
+        let (db, http_history, agents) = self.project_services(&root, &project_key);
+        ide_agent::registry::maintain(crate::ops::agent::registry_paths(self));
         let project = Arc::new(Project {
             root,
             sink,
@@ -322,6 +307,7 @@ impl Host {
             watcher,
             content_watchers: Mutex::new(content_watchers),
             _scratch_watcher: scratch_watcher,
+            light: false,
         });
         {
             let weak = Arc::downgrade(&project);
@@ -330,8 +316,151 @@ impl Host {
             }));
         }
         self.insert_project(window, project.clone());
+        if let Some(cmd) = post_start {
+            self.environment.spawn_post_start(cmd, project.root.clone(), project.sink.clone());
+        }
         Ok(project)
     }
+
+    /// Database connections, HTTP Client history and coding agents of the project at `root`.
+    pub(crate) fn project_services(
+        &self,
+        root: &Path,
+        project_key: &str,
+    ) -> (Arc<ide_db::DbManager>, Arc<ide_http::History>, Arc<ide_agent::AgentManager>) {
+        let db = Arc::new(ide_db::DbManager::new(
+            root.to_path_buf(),
+            self.data_dir.join("db-passwords.json"),
+            self.data_dir.join("db-history.json"),
+            self.ssh.clone(),
+        ));
+        let http_history = Arc::new(ide_http::History::new(self.data_dir.join("http-history").join(project_key)));
+        let agents = Arc::new(ide_agent::AgentManager::new(
+            ide_agent::AgentPaths {
+                project_root: root.to_path_buf(),
+                store_dir: self.data_dir.join("agents").join(project_key),
+                // Outside the app data dir: its path has spaces on macOS, which trips up build scripts.
+                worktrees_dir: dirs::home_dir()
+                    .unwrap_or_else(|| self.data_dir.clone())
+                    .join(".openidea")
+                    .join("worktrees")
+                    .join(project_key),
+                models_file: self.data_dir.join("agents").join("models.json"),
+                custom_agents_dir: Some(self.config_dir.join("agents")),
+                home_dir: dirs::home_dir(),
+            },
+            self.runtime.clone(),
+        ));
+        (db, http_history, agents)
+    }
+}
+
+impl Host {
+    /// Opens `window` for editing loose files (LightEdit), `file` first: documents
+    /// with syntax highlighting, saving and Local History over the global settings,
+    /// without an index, language servers, repositories or project settings. A
+    /// window already in LightEdit keeps its session; only its watchers grow.
+    pub fn open_light(&self, window: &str, file: &Path) -> IdeResult<Arc<Project>> {
+        let file = dunce::canonicalize(file)?;
+        if file.is_dir() {
+            return Err(IdeError::invalid(format!("{} is a folder", file.display())));
+        }
+        let dir = file.parent().map(Path::to_path_buf).ok_or_else(|| IdeError::invalid("no parent folder"))?;
+        if let Ok(current) = self.project(window)
+            && current.light
+        {
+            current.watch_light_dir(&dir);
+            return Ok(current);
+        }
+        self.close_project(window);
+        let sink: SharedSink = (self.sink_for)(window);
+        let settings = Arc::new(SettingsStore::load(&self.config_dir, None));
+        let effective = settings.effective();
+        let languages = Arc::new(self.languages.fork());
+        languages.set_file_types(FileTypes::from_settings(&effective.files, None));
+        let documents = {
+            let languages = languages.clone();
+            Arc::new(Documents::new(
+                sink.clone(),
+                Box::new(move |p: &Path, first: Option<&str>| languages.detect(p, first)),
+            ))
+        };
+        documents.set_file_defaults(ide_workspace::FileDefaults::from_settings(&effective, None));
+        let history = Arc::new(LocalHistory::open(&self.data_dir.join("history"), &dir)?);
+        let index = ProjectIndex::unindexed(&dir, languages.clone(), self.syntax(), sink.clone())?;
+        let lsp = LspManager::new(dir.clone(), languages.clone(), sink.clone());
+        lsp.set_servers_hook(Box::new(|_, _| Vec::new()));
+        let syntax = Arc::new(SyntaxCache::new(self.syntax()));
+        documents.add_observer(Arc::new(SyntaxObserver(syntax.clone())));
+        documents.add_observer(Arc::new(HistoryObserver(history.clone())));
+        let watcher = light_watcher(&dir, &sink, &documents, &history)?;
+        let project_key = project_key(&dir);
+        let (db, http_history, agents) = self.project_services(&dir, &project_key);
+        let project = Arc::new(Project {
+            sink,
+            languages,
+            settings,
+            documents,
+            history,
+            moves: FileMoves::new(),
+            index,
+            lsp,
+            repos: Arc::default(),
+            structure: Arc::new(StructureService::new(syntax.clone())),
+            syntax,
+            detected_roots: Arc::default(),
+            cache_dir: self.data_dir.join("cache").join(&project_key),
+            db,
+            http_history,
+            agents,
+            watcher,
+            content_watchers: Mutex::new(Vec::new()),
+            _scratch_watcher: None,
+            light: true,
+            root: dir,
+        });
+        tracing::info!("window {window} edits {} without a project", file.display());
+        self.insert_project(window, project.clone());
+        Ok(project)
+    }
+}
+
+impl Project {
+    /// LightEdit: follow external changes to the files of `dir` (its own entries only).
+    pub fn watch_light_dir(&self, dir: &Path) {
+        if !self.light {
+            return;
+        }
+        let dir = dunce::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
+        let mut watchers = self.content_watchers.lock();
+        if dir == self.root || watchers.iter().any(|(p, _)| *p == dir) {
+            return;
+        }
+        match light_watcher(&dir, &self.sink, &self.documents, &self.history) {
+            Ok(w) => watchers.push((dir, w)),
+            Err(e) => tracing::warn!("watching {}: {e}", dir.display()),
+        }
+    }
+}
+
+fn light_watcher(
+    dir: &Path,
+    sink: &SharedSink,
+    documents: &Arc<Documents>,
+    history: &Arc<LocalHistory>,
+) -> IdeResult<Watcher> {
+    let (documents, history) = (documents.clone(), history.clone());
+    Watcher::start_with(
+        dir,
+        Vec::new(),
+        sink.clone(),
+        Box::new(move |batch| {
+            let changed: Vec<PathBuf> = batch.created.iter().chain(&batch.modified).cloned().collect();
+            documents.on_disk_changed(&changed);
+            record_external_changes(&history, &changed, &batch.removed);
+        }),
+        ide_vfs::WatchMode::Flat,
+    )
 }
 
 /// Looks for repositories nested below the project (and the one containing it);
@@ -519,6 +648,9 @@ impl Project {
     /// Applies changed content roots and exclude settings to the index (which
     /// rescans in the background) and the file watchers, without reopening the project.
     pub fn refresh_index_scope(&self) {
+        if self.light {
+            return;
+        }
         let (roots, excludes) = (self.content_roots(), self.exclude_globs());
         self.index.set_scope(roots.clone(), excludes.clone());
         self.watcher.set_excludes(&excludes);

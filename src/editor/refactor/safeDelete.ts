@@ -10,10 +10,11 @@
  * Files (project view): references to the file's top-level symbols from other
  * files, when the language server can answer (`fileUsages`).
  */
+import { hasIdentifierBefore } from "@/platform/textBoundaries";
 import type { EditorView } from "@codemirror/view";
 import type { Text } from "@codemirror/state";
 import type { LocalSymbol, Location, OutlineItem, Pos, Range, SyntaxNode } from "@/bindings";
-import { call, commands, isCancelled, isTauri, nextRequestId } from "@/platform/ipc";
+import { call, commands, isCancelled, isTauri, nextRequestId, unavailableText } from "@/platform/ipc";
 import { executeAction } from "@/platform/actions";
 import { basename } from "@/platform/project";
 import { editorsFor, whenSynced, type EditorDocContext } from "@/editor/api";
@@ -253,7 +254,9 @@ async function findUsages(ctx: EditorDocContext, target: SafeDeleteTarget): Prom
     comparePos(range.start, target.range.end) > 0;
   if (target.local)
     return target.local.references.filter((r) => outside(ctx.path, r)).map((range) => ({ path: ctx.path, range }));
-  const { locations: refs } = await lspRequest(() => commands.lspReferences(nextRequestId(), ctx.doc, target.at, false, true));
+  const { locations: refs } = await lspRequest(() =>
+    commands.lspReferences(nextRequestId(), ctx.doc, target.at, false, true),
+  );
   return refs.filter((l) => outside(l.path, l.range));
 }
 
@@ -358,11 +361,12 @@ export function textOccurrences(
   exclude: { from: number; to: number },
 ): { from: number; to: number }[] {
   const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const re = new RegExp(`(?<![\\p{L}\\p{N}_$])${escaped}(?![\\p{L}\\p{N}_$])`, "gu");
+  const re = new RegExp(`${escaped}(?![\\p{L}\\p{N}_$])`, "gu");
   const ids = new Set(identifiers.map((o) => o.from));
   const out: { from: number; to: number }[] = [];
   for (let m = re.exec(text); m; m = re.exec(text)) {
     const from = m.index;
+    if (hasIdentifierBefore(text, from)) continue;
     if (ids.has(from) || (from >= exclude.from && from < exclude.to)) continue;
     out.push({ from, to: from + name.length });
   }
@@ -396,7 +400,12 @@ function previewTextOccurrences(
 ) {
   const occurrences: PreviewOccurrence[] = hits.map((h) => {
     const line = doc.lineAt(h.from);
-    return { line: line.number - 1, text: line.text, from: h.from - line.from, to: Math.min(h.to, line.to) - line.from };
+    return {
+      line: line.number - 1,
+      text: line.text,
+      from: h.from - line.from,
+      to: Math.min(h.to, line.to) - line.from,
+    };
   });
   openPopup({
     kind: "preview",
@@ -475,7 +484,12 @@ export async function safeDelete(view: EditorView): Promise<void> {
     applyDeletion(view, docBefore, target, comments);
   } catch (e) {
     if (isCancelled(e)) return;
-    showHint(view, isUnavailable(e) ? cannotPerform("No language server is available") : cannotPerform(errorText(e)));
+    showHint(
+      view,
+      isUnavailable(e)
+        ? cannotPerform(unavailableText(e, "No language server is available"))
+        : cannotPerform(errorText(e)),
+    );
   } finally {
     running = null;
   }
@@ -527,7 +541,11 @@ export async function fileUsages(paths: readonly string[], signal?: AbortSignal)
           let refs: Location[];
           try {
             // Every symbol of every file: the server's own scope (a project search each would be too slow).
-            refs = (await lspRequest(() => commands.lspReferences(nextRequestId(), doc, item.selection_range.start, false, false))).locations;
+            refs = (
+              await lspRequest(() =>
+                commands.lspReferences(nextRequestId(), doc, item.selection_range.start, false, false),
+              )
+            ).locations;
           } catch (e) {
             if (isUnavailable(e)) {
               reason = errorText(e);

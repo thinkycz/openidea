@@ -23,6 +23,7 @@ import {
   hideToolWindow,
   jumpToLastToolWindow,
   lastUsedToolWindow,
+  resizeActiveToolWindow,
   useToolWindowLayout,
   toggleMaximizeToolWindow,
 } from "./store";
@@ -53,7 +54,11 @@ function layoutActions(): Action[] {
   const pick = (title: string) =>
     chooseItem({ title, items: layoutNames(), empty: "No saved layouts. Use Save Current Layout as… first." });
   const free = (current?: string) => (v: string) =>
-    !v.trim() ? "Enter a layout name" : v.trim() !== current && layoutNames().includes(v.trim()) ? "A layout with this name exists" : null;
+    !v.trim()
+      ? "Enter a layout name"
+      : v.trim() !== current && layoutNames().includes(v.trim())
+        ? "A layout with this name exists"
+        : null;
   return [
     {
       id: "layout.save",
@@ -105,7 +110,13 @@ function layoutActions(): Action[] {
       run: async () => {
         const from = await pick("Rename Layout");
         if (!from) return;
-        const to = await promptInput({ title: "Rename Layout", label: "New name:", initial: from, okLabel: "Rename", validate: free(from) });
+        const to = await promptInput({
+          title: "Rename Layout",
+          label: "New name:",
+          initial: from,
+          okLabel: "Rename",
+          validate: free(from),
+        });
         if (to) renameLayout(from, to);
       },
     },
@@ -116,7 +127,15 @@ function layoutActions(): Action[] {
       when: "toolWindowLayoutsSaved",
       run: async () => {
         const name = await pick("Delete Layout");
-        if (name && (await confirm({ title: "Delete Layout", message: tx`Delete the layout '${name}'?`, ok: "Delete", icon: "warning" })))
+        if (
+          name &&
+          (await confirm({
+            title: "Delete Layout",
+            message: tx`Delete the layout '${name}'?`,
+            ok: "Delete",
+            icon: "warning",
+          }))
+        )
           deleteLayout(name);
       },
     },
@@ -224,6 +243,16 @@ export function installToolWindowActions(): () => void {
         if (id) toggleMaximizeToolWindow(id);
       },
     },
+    ...(["left", "right", "up", "down"] as const).map((dir): Action => ({
+      id: `toolwindow.resize${dir[0]!.toUpperCase()}${dir.slice(1)}`,
+      title: { left: "Stretch to Left", right: "Stretch to Right", up: "Stretch to Top", down: "Stretch to Bottom" }[
+        dir
+      ],
+      category: "Window",
+      keywords: ["resize tool window", "tool window size"],
+      when: "toolWindowFocus",
+      run: () => resizeActiveToolWindow(dir),
+    })),
   ]);
 
   return () => {

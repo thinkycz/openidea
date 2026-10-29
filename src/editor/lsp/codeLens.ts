@@ -13,7 +13,7 @@ import { commands, nextRequestId, type OutlineItem, type SymbolKind } from "@/pl
 import { useProject } from "@/platform/project";
 import { debounce, docOf, isUnavailable, lspRequest } from "./lsp";
 import { posToOffset } from "./positions";
-import { onLspRefresh, serverBackoff } from "./availability";
+import { featureBackoff, onLspRefresh } from "./availability";
 import { editorPrefs } from "@/platform/editorSettings";
 import { authorLabel, authorSummary, authorTooltip, blameFor, onBlameInvalidated } from "./authorLens";
 import { tx } from "@/platform/i18n";
@@ -35,6 +35,7 @@ const MAX_PER_PASS = 40;
 const CONCURRENCY = 4;
 /** Lines above/below the viewport that are counted too, so scrolling feels instant. */
 const MARGIN_LINES = 60;
+const usagesBackoff = featureBackoff();
 
 export interface LensTarget {
   name: string;
@@ -54,7 +55,8 @@ export function lensTargets(items: readonly OutlineItem[]): LensTarget[] {
   const out: LensTarget[] = [];
   const walk = (list: readonly OutlineItem[]) => {
     for (const it of list) {
-      if (LENS_KINDS.has(it.kind) && !anonymous(it.name)) out.push({
+      if (LENS_KINDS.has(it.kind) && !anonymous(it.name))
+        out.push({
           name: it.name,
           line: it.selection_range.start.line,
           col: it.selection_range.start.col,
@@ -137,7 +139,7 @@ class UsagesLensPlugin {
     const doc = docOf(view);
     if (!doc) return;
     const gen = ++this.generation;
-    const usages = usagesEnabled() && !serverBackoff.active(doc.doc);
+    const usages = usagesEnabled() && !usagesBackoff.active(doc.doc);
     const authors = authorEnabled() && !doc.virtual;
     if (!usages && !authors) {
       if (view.state.field(lensField).length) view.dispatch({ effects: setLenses.of([]) });
@@ -159,7 +161,9 @@ class UsagesLensPlugin {
       const { from, to } = view.viewport;
       const firstLine = Math.max(0, text.lineAt(from).number - 1 - MARGIN_LINES);
       const lastLine = text.lineAt(to).number - 1 + MARGIN_LINES;
-      const visible = this.outline.targets.filter((t) => t.line >= firstLine && t.line <= lastLine).slice(0, MAX_PER_PASS);
+      const visible = this.outline.targets
+        .filter((t) => t.line >= firstLine && t.line <= lastLine)
+        .slice(0, MAX_PER_PASS);
       const key = (t: LensTarget) => `${t.line}:${t.col}:${t.name}`;
       const todo = usages ? visible.filter((t) => !this.cache.has(key(t))) : [];
       let unavailable = false;
@@ -178,14 +182,15 @@ class UsagesLensPlugin {
         );
         if (gen !== this.generation || view.state.doc !== text) return;
       }
-      if (unavailable) serverBackoff.mark(doc.doc);
+      if (unavailable) usagesBackoff.mark(doc.doc);
       const lines = await blame;
       if (gen !== this.generation || view.state.doc !== text) return;
       const lenses: CodeLens[] = [];
       for (const t of visible) {
         const offset = posToOffset(text, { line: t.line, col: t.col });
         const who = lines && authorSummary(lines, t.startLine, t.endLine);
-        if (who) lenses.push({ pos: offset, title: authorLabel(who), tooltip: authorTooltip(who), icon: "user", order: 20 });
+        if (who)
+          lenses.push({ pos: offset, title: authorLabel(who), tooltip: authorTooltip(who), icon: "user", order: 20 });
         const n = usages ? this.cache.get(key(t)) : undefined;
         if (n === undefined) continue;
         lenses.push({
@@ -198,7 +203,7 @@ class UsagesLensPlugin {
       }
       if (!sameLenses(view.state.field(lensField), lenses)) view.dispatch({ effects: setLenses.of(lenses) });
     } catch (e) {
-      if (isUnavailable(e)) serverBackoff.mark(doc.doc);
+      if (isUnavailable(e)) usagesBackoff.mark(doc.doc);
     }
   }
 

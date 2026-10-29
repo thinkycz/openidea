@@ -2,10 +2,19 @@
  * IDEA-style Tab, smart Backspace and Tab out of auto-inserted brackets and
  * quotes.
  */
-import { EditorSelection, StateEffect, countColumn, StateField, type EditorState, type Extension, type Transaction } from "@codemirror/state";
+import {
+  EditorSelection,
+  StateEffect,
+  countColumn,
+  StateField,
+  type EditorState,
+  type Extension,
+  type Transaction,
+} from "@codemirror/state";
 import { EditorView, keymap, type Command } from "@codemirror/view";
 import { getIndentUnit, getIndentation, indentString, indentUnit, syntaxTree } from "@codemirror/language";
 import { indentMore } from "@codemirror/commands";
+import { visibleColumn } from "./visibleColumn";
 
 // --- Tab -------------------------------------------------------------------------------
 
@@ -24,7 +33,7 @@ export const insertTab: Command = (view) => {
   const size = Math.max(1, getIndentUnit(state));
   const tr = state.changeByRange((r) => {
     const line = state.doc.lineAt(r.from);
-    const col = countColumn(line.text.slice(0, r.from - line.from), state.tabSize);
+    const col = visibleColumn(line.text, r.from - line.from, state.tabSize);
     const insert = useTab ? "\t" : " ".repeat(size - (col % size));
     return { changes: { from: r.from, to: r.to, insert }, range: EditorSelection.cursor(r.from + insert.length) };
   });
@@ -38,14 +47,17 @@ export const tabKeymap: Extension = keymap.of([{ key: "Tab", run: insertTab }]);
 // --- Backspace -------------------------------------------------------------------------------
 
 /** Languages whose layout is indentation: IDEA keeps "to nearest indent position" there. */
-const NEAREST_INDENT_LANGS = new Set(["python", "yaml", "shellscript"]);
+const NEAREST_INDENT_LANGS = new Set(["python", "gdscript", "yaml", "shellscript"]);
 
 export function smartBackspaceApplies(mode: string, language: string | undefined): boolean {
   return mode === "autoindent" && !NEAREST_INDENT_LANGS.has(language ?? "");
 }
 
 /** The change one Backspace makes at `pos` in "To proper indent position" mode, or null to delete normally. */
-export function autoIndentBackspace(state: EditorState, pos: number): { from: number; to: number; insert: string } | null {
+export function autoIndentBackspace(
+  state: EditorState,
+  pos: number,
+): { from: number; to: number; insert: string } | null {
   const doc = state.doc;
   const line = doc.lineAt(pos);
   if (/[^ \t]/.test(doc.sliceString(line.from, pos))) return null;
@@ -128,7 +140,8 @@ function insertedPairs(tr: Transaction): Scope[] {
 export const tabOutOfScope: Command = (view) => {
   const { state } = view;
   const scopes = state.field(tabOutScopes, false);
-  if (!scopes?.length || state.selection.ranges.some((r) => !r.empty || !scopes.some((s) => s.to === r.head))) return false;
+  if (!scopes?.length || state.selection.ranges.some((r) => !r.empty || !scopes.some((s) => s.to === r.head)))
+    return false;
   view.dispatch({
     selection: EditorSelection.create(
       state.selection.ranges.map((r) => EditorSelection.cursor(Math.min(r.head + 1, state.doc.length))),
@@ -148,7 +161,11 @@ export const tabOut: Extension = tabOutScopes;
 /** `quote` at `pos` closes the string literal the caret is in (typed or not, the pair's end). */
 export function closesStringAt(state: EditorState, pos: number, quote: string): boolean {
   if (state.sliceDoc(pos, pos + 1) !== quote) return false;
-  for (let n: ReturnType<ReturnType<typeof syntaxTree>["resolveInner"]> | null = syntaxTree(state).resolveInner(pos, 1); n; n = n.parent) {
+  for (
+    let n: ReturnType<ReturnType<typeof syntaxTree>["resolveInner"]> | null = syntaxTree(state).resolveInner(pos, 1);
+    n;
+    n = n.parent
+  ) {
     if (n.to > pos + 1) break;
     if (n.to === pos + 1 && n.from < pos && /String|Char|Template|Rune/.test(n.type.name)) return true;
   }

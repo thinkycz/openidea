@@ -47,7 +47,9 @@ export function clipboardDiffData(path: string, clipboard: string, selection: st
     path,
     title: selection ? tx`Clipboard ↔ ${baseName(path)} (selection)` : tx`Clipboard ↔ ${baseName(path)}`,
     left: { type: "text", text: clipboard, label: "Clipboard" },
-    right: selection ? { type: "text", text: selection, label: "Selection" } : { type: "worktree", label: displayPath(path) },
+    right: selection
+      ? { type: "text", text: selection, label: "Selection" }
+      : { type: "worktree", label: displayPath(path) },
   };
 }
 
@@ -122,6 +124,49 @@ export function registerCompareActions(): () => void {
       icon: "arrow-up",
       when: "diffEditorFocus",
       run: () => focusedDiffNavigator()?.prev(),
+    },
+    {
+      id: "diff.showSettings",
+      title: "Diff Settings",
+      category: "Diff",
+      icon: "settings",
+      keywords: ["ignore whitespace", "highlighting", "side-by-side", "unified"],
+      when: "diffEditorFocus",
+      run: () => focusedDiffNavigator()?.showSettings(),
+    },
+    {
+      id: "diff.nextFile",
+      title: "Compare Next File",
+      category: "Diff",
+      icon: "arrow-right",
+      when: "diffEditorFocus",
+      run: () => focusedDiffNavigator()?.file(1),
+    },
+    {
+      id: "diff.prevFile",
+      title: "Compare Previous File",
+      category: "Diff",
+      icon: "arrow-left",
+      when: "diffEditorFocus",
+      run: () => focusedDiffNavigator()?.file(-1),
+    },
+    {
+      id: "diff.applyLeftSide",
+      title: "Accept Left Side",
+      description: "Copies the change at the caret from the left side to the right one",
+      category: "Diff",
+      icon: "arrow-right",
+      when: "diffEditorFocus",
+      run: () => void focusedDiffNavigator()?.applyChange("a"),
+    },
+    {
+      id: "diff.applyRightSide",
+      title: "Accept Right Side",
+      description: "Copies the change at the caret from the right side to the left one",
+      category: "Diff",
+      icon: "arrow-left",
+      when: "diffEditorFocus",
+      run: () => void focusedDiffNavigator()?.applyChange("b"),
     },
     {
       id: "diff.jumpToSource",

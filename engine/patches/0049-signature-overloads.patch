@@ -1,0 +1,2647 @@
+diff --git a/docs/CHANGELOG.md b/docs/CHANGELOG.md
+--- a/docs/CHANGELOG.md
++++ b/docs/CHANGELOG.md
+@@ -40,6 +40,8 @@
+ 
+ 
+ ### Added
++
++- **Overloaded parameter hints.** Signature help shows the available callable forms and selects a compatible form while typing, with each form’s parameter descriptions and return type. Contributed by @thinkycz.
+ 
+ - **Active PHP target snapshot.** Editors can read the version and extension profile already applied by the current service, even after saved settings change. Contributed by PHP Workbench (local downstream patch).
+ 
+diff --git a/docs/todo.md b/docs/todo.md
+--- a/docs/todo.md
++++ b/docs/todo.md
+@@ -151,7 +151,6 @@
+ | F19 | [Connect to a remote/TCP language server](todo/lsp-features.md#f19-connect-to-a-remotetcp-language-server-vs-code-extension)                                               | Low         | Medium      |
+ |     | **[Signature Help](todo/signature-help.md)**                                                                                                                                |             |             |
+ | S2  | [Closure / arrow function parameter signature help](todo/signature-help.md#s2-closure-arrow-function-parameter-signature-help)                                             | Medium      | Medium      |
+-| S3  | Multiple overloaded signatures                                                                                                                                              | Medium      | Medium-High |
+ | S4  | Named argument awareness in active parameter                                                                                                                                | Low-Medium  | Medium      |
+ | S5  | Language construct signature help and hover                                                                                                                                 | Low         | Medium      |
+ |     | **[Laravel](todo/laravel.md)**                                                                                                                                              |             |             |
+diff --git a/docs/todo/signature-help.md b/docs/todo/signature-help.md
+--- a/docs/todo/signature-help.md
++++ b/docs/todo/signature-help.md
+@@ -72,44 +72,6 @@
+ 
+ ---
+ 
+-## S3. Multiple overloaded signatures
+-**Impact: Low · Complexity: Medium-High**
+-
+-Some PHP functions have multiple signatures depending on argument count
+-or types.  For example, `array_map` can be called as:
+-
+-```php
+-array_map(callable $callback, array $array): array
+-array_map(null, array ...$arrays): array
+-```
+-
+-The LSP protocol supports returning multiple `SignatureInformation`
+-entries with an `activeSignature` index.  Today we return a single
+-signature.
+-
+-#### Current state
+-
+-phpstorm-stubs define multiple function entries (or parameter variants
+-annotated with `#[PhpStormStubsElementAvailable]`) for overloaded
+-functions.  Our PHP-version filtering selects one variant.  We don't
+-model true overloads.
+-
+-#### Implementation
+-
+-This is a deeper change:
+-
+-1. When a function has multiple stub entries (or when a class has
+-   multiple `__construct` signatures for different PHP versions),
+-   collect all applicable signatures.
+-2. Return them all in the `signatures` array.
+-3. Set `activeSignature` based on argument-count matching: pick the
+-   first signature whose parameter count accommodates the current
+-   argument count.
+-
+-**Deferred** — the single-signature approach covers 99% of real usage.
+-
+----
+-
+ ## S4. Named argument awareness in active parameter
+ **Impact: Low · Complexity: Medium**
+ 
+diff --git a/examples/php/scaffolding/assertions.php b/examples/php/scaffolding/assertions.php
+--- a/examples/php/scaffolding/assertions.php
++++ b/examples/php/scaffolding/assertions.php
+@@ -33,6 +33,10 @@
+ 
+ function runDemoAssertions(): void
+ {
++    $overloadSignature = new BuiltinOverloadSignatureDemo();
++    assert($overloadSignature->translatePairs() === 'zbc', 'the replacement-pairs overload returns the translated string');
++    assert($overloadSignature->translateCharacters() === 'zbc', 'the character-translation overload returns the translated string');
++    assert($overloadSignature->recurrenceDates() === ['2026-01-01', '2026-01-02', '2026-01-03'], 'two recurrences include the starting date and two following dates');
+     $unicodeSignature = new UnicodeSignatureHelpDemo();
+     assert($unicodeSignature->label('A', 'B') === 'AB', 'Unicode parameter names retain the declared string result');
+     assert($unicodeSignature->label(druhý: 'B', první: 'A') === 'AB', 'named Unicode arguments bind by declaration name');
+diff --git a/examples/php/signature_help.php b/examples/php/signature_help.php
+--- a/examples/php/signature_help.php
++++ b/examples/php/signature_help.php
+@@ -90,3 +90,39 @@
+         $this->label(druhý: 'B', první: 'A');
+     }
+ }
++
++
++// ── Built-in Overloads ──────────────────────────────────────────────────────
++
++class BuiltinOverloadSignatureDemo
++{
++    public function translatePairs(): string
++    {
++        // Try: parameter hints inside the array select the replacement-pairs
++        // form, with its own parameter description and string return type.
++        return strtr('abc', ['a' => 'z']);
++    }
++
++    public function translateCharacters(): string
++    {
++        // Try: the third argument selects the three-parameter form instead.
++        return strtr('abc', 'a', 'z');
++    }
++
++    /** @return list<string> */
++    public function recurrenceDates(): array
++    {
++        // Try: inspect the constructor alternatives at the third argument.
++        // Both a recurrence count and an end date have documented forms.
++        $period = new \DatePeriod(
++            new \DateTimeImmutable('2026-01-01T00:00:00+00:00'),
++            new \DateInterval('P1D'),
++            2,
++        );
++        $dates = [];
++        foreach ($period as $date) {
++            $dates[] = $date->format('Y-m-d');
++        }
++        return $dates;
++    }
++}
+diff --git a/src/call_args.rs b/src/call_args.rs
+--- a/src/call_args.rs
++++ b/src/call_args.rs
+@@ -197,6 +197,61 @@
+     }
+ 
+     bound
++}
++
++/// Remove whitespace and PHP comments before an argument without copying it.
++pub(crate) fn trim_argument_trivia(mut text: &str) -> &str {
++    loop {
++        text = text.trim_start();
++        match crate::text_scan::skip_php_comment(text.as_bytes(), 0) {
++            Some(end) => text = &text[end..],
++            None => return text,
++        }
++    }
++}
++
++/// Check PHP argument roles without copying or resolving expression values.
++/// A named argument cannot fill a non-variadic parameter already supplied by
++/// position, and a positional argument cannot follow a named one.
++pub(crate) fn text_args_have_compatible_roles(
++    params: &[ParameterInfo],
++    text_args: &[&str],
++) -> bool {
++    let mut occupied = vec![false; params.len()];
++    let variadic = params.iter().position(|parameter| parameter.is_variadic);
++    let mut next_positional = 0;
++    let mut saw_named = false;
++    for argument in text_args {
++        let argument = trim_argument_trivia(argument);
++        if argument.is_empty() {
++            continue;
++        }
++        let (name, _) = split_named_text_arg(argument);
++        let target = if let Some(name) = name {
++            saw_named = true;
++            params
++                .iter()
++                .position(|parameter| param_name_bare(parameter) == name)
++                .or(variadic)
++        } else {
++            if saw_named {
++                return false;
++            }
++            let target = (next_positional < params.len())
++                .then_some(next_positional)
++                .or(variadic);
++            next_positional += 1;
++            target
++        };
++        let Some(index) = target else {
++            return false;
++        };
++        if occupied[index] && !params[index].is_variadic {
++            return false;
++        }
++        occupied[index] = true;
++    }
++    true
+ }
+ 
+ /// Names (with the `$` prefix) of required parameters that no argument
+diff --git a/src/code_actions/extract_interface.rs b/src/code_actions/extract_interface.rs
+--- a/src/code_actions/extract_interface.rs
++++ b/src/code_actions/extract_interface.rs
+@@ -454,6 +454,7 @@
+ 
+     fn make_method(name: &str, is_static: bool) -> Arc<MethodInfo> {
+         Arc::new(MethodInfo {
++            overloads: Vec::new(),
+             name: Atom::from(name),
+             name_offset: 0,
+             parameters: vec![].into(),
+diff --git a/src/completion/source/throws_analysis_tests.rs b/src/completion/source/throws_analysis_tests.rs
+--- a/src/completion/source/throws_analysis_tests.rs
++++ b/src/completion/source/throws_analysis_tests.rs
+@@ -794,6 +794,7 @@
+     let method_infos: Vec<MethodInfo> = methods
+         .into_iter()
+         .map(|(method_name, throws)| MethodInfo {
++            overloads: Vec::new(),
+             name: crate::atom::atom(method_name),
+             name_offset: 0,
+             parameters: Vec::new().into(),
+diff --git a/src/diagnostics/argument_count.rs b/src/diagnostics/argument_count.rs
+--- a/src/diagnostics/argument_count.rs
++++ b/src/diagnostics/argument_count.rs
+@@ -308,6 +308,31 @@
+             let params = &resolved.parameters;
+             let actual_args = call_site.arg_count;
+ 
++            // A valid alternative is enough to accept the argument count.
++            // Keep the legacy primary-signature diagnostics and built-in
++            // minimum fallback when no alternative accommodates this call.
++            let positional_count =
++                actual_args.saturating_sub(call_site.named_arg_indices.len() as u32);
++            if resolved.overloads.iter().any(|overload| {
++                let parameters = &overload.parameters;
++                let required = parameters
++                    .iter()
++                    .filter(|parameter| parameter.is_required)
++                    .count() as u32;
++                let fits = actual_args >= required
++                    && (parameters.iter().any(|parameter| parameter.is_variadic)
++                        || actual_args <= parameters.len() as u32);
++                fits && (call_site.named_arg_indices.is_empty()
++                    || crate::call_args::missing_required_params(
++                        parameters,
++                        positional_count,
++                        &call_site.named_arg_names,
++                    )
++                    .is_empty())
++            }) {
++                continue;
++            }
++
+             let mut required_count = params.iter().filter(|p| p.is_required).count() as u32;
+ 
+             // Consult the overload map: if this function has an
+diff --git a/src/diagnostics/type_errors/mod.rs b/src/diagnostics/type_errors/mod.rs
+--- a/src/diagnostics/type_errors/mod.rs
++++ b/src/diagnostics/type_errors/mod.rs
+@@ -580,6 +580,134 @@
+                 class_loader(fqn).and_then(|cls| cls.parent_class.as_ref().map(|p| p.to_string()))
+             });
+ 
++            // One whole variant must admit the call. Per-argument fallback
++            // would incorrectly combine incompatible halves of two variants.
++            let alternative_args = if resolved.overloads.is_empty() {
++                Vec::new()
++            } else {
++                call_args_text
++                    .map(crate::type_engine::types::conditional::split_text_args)
++                    .unwrap_or_default()
++            };
++            let compatible_alternative = resolved.overloads.iter().any(|overload| {
++                let parameters = &overload.parameters;
++                if !crate::call_args::text_args_have_compatible_roles(parameters, &alternative_args)
++                {
++                    return false;
++                }
++                let positional_count = call_site
++                    .arg_count
++                    .saturating_sub(call_site.named_arg_indices.len() as u32);
++                if !crate::call_args::missing_required_params(
++                    parameters,
++                    positional_count,
++                    &call_site.named_arg_names,
++                )
++                .is_empty()
++                {
++                    return false;
++                }
++                let mut positional = 0;
++                resolved_args
++                    .args
++                    .iter()
++                    .enumerate()
++                    .all(|(index, argument)| {
++                        let parameter = if let Some(name_index) = call_site
++                            .named_arg_indices
++                            .iter()
++                            .position(|i| *i == index as u32)
++                        {
++                            let Some(name) = call_site.named_arg_names.get(name_index) else {
++                                return false;
++                            };
++                            parameters
++                                .iter()
++                                .find(|param| param.name.trim_start_matches('$') == name)
++                                .or_else(|| parameters.iter().find(|param| param.is_variadic))
++                        } else {
++                            let parameter = parameters
++                                .get(positional)
++                                .or_else(|| parameters.iter().find(|param| param.is_variadic));
++                            positional += 1;
++                            parameter
++                        };
++                        let Some(parameter) = parameter else {
++                            return false;
++                        };
++                        if parameter.is_variadic
++                            || (parameter.is_reference && parameter.defaults_to_null())
++                        {
++                            return true;
++                        }
++                        let bound = match overload.self_bound_params.get(&parameter.name) {
++                            Some(None) => return true,
++                            Some(Some(bound)) => Some(bound),
++                            None => None,
++                        };
++                        let Some(parameter_type) = bound.or(parameter.type_hint.as_ref()) else {
++                            return true;
++                        };
++                        if parameter_type.is_untyped() || parameter_type.is_mixed() {
++                            return true;
++                        }
++                        let argument_type = &argument.ty;
++                        if argument_type.is_untyped()
++                            || argument_type.is_empty()
++                            || matches!(argument_type.kind(), TypeKind::Raw(s) if s.is_empty())
++                        {
++                            return true;
++                        }
++                        let bound_type;
++                        let effective = if parameter_type.contains_relative_class_ref()
++                            && let Some(owner) = &call_context_class
++                        {
++                            bound_type = parameter_type
++                                .resolve_self_refs_bounded(owner, ctx_parent_fqn.as_deref());
++                            &bound_type
++                        } else {
++                            parameter_type
++                        };
++                        if effective.is_view_string()
++                            && let TypeKind::Literal(literal) = argument_type.kind()
++                            && let Some(view) = literal.string_content()
++                            && self.view_string_literal_is_unknown(&view)
++                        {
++                            return false;
++                        }
++                        if argument.enumerates_all_keys
++                            && (!missing_required_shape_keys(argument_type, effective).is_empty()
++                                || shape_breaks_list_order(argument_type, effective))
++                        {
++                            return false;
++                        }
++                        if !is_type_compatible(argument_type, effective, class_loader, strict_types)
++                        {
++                            return false;
++                        }
++                        if !argument.array_string_literals.is_empty()
++                            && let Some(model) =
++                                extract_model_property_from_array_type(parameter_type)
++                            && let Some(class) = class_loader(&model)
++                        {
++                            let class = crate::virtual_members::resolve_class_fully_cached(
++                                &class,
++                                class_loader,
++                                &self.resolved_class_cache,
++                            );
++                            if argument.array_string_literals.iter().any(|(name, _, _)| {
++                                !class
++                                    .properties
++                                    .iter()
++                                    .any(|property| property.name.as_str() == name)
++                            }) {
++                                return false;
++                            }
++                        }
++                        true
++                    })
++            });
++
+             for (arg_idx, resolved_arg) in resolved_args.args.iter().enumerate() {
+                 // Skip spread arguments.
+                 if call_site.spread_arg_indices.contains(&(arg_idx as u32)) {
+@@ -776,49 +904,8 @@
+                     continue;
+                 }
+ 
+-                // When the function has overloaded signatures, check
+-                // whether the argument is compatible with the same
+-                // positional parameter in any overload.  Only emit the
+-                // diagnostic when ALL signatures reject it.
+-                if !resolved.overloads.is_empty() {
+-                    let compatible_with_overload = resolved.overloads.iter().any(|alt_params| {
+-                        if let Some(alt_param) = alt_params.get(positional_idx.saturating_sub(1)) {
+-                            if let Some(ref alt_type) = alt_param.type_hint
+-                                && !alt_type.is_untyped()
+-                                && !alt_type.is_mixed()
+-                            {
+-                                let resolved_alt;
+-                                let effective_alt = if alt_type.contains_relative_class_ref() {
+-                                    if let Some(ref fqn) = call_context_class {
+-                                        resolved_alt = alt_type.resolve_self_refs_bounded(
+-                                            fqn,
+-                                            ctx_parent_fqn.as_deref(),
+-                                        );
+-                                        &resolved_alt
+-                                    } else {
+-                                        alt_type
+-                                    }
+-                                } else {
+-                                    alt_type
+-                                };
+-                                return is_type_compatible(
+-                                    arg_type,
+-                                    effective_alt,
+-                                    class_loader,
+-                                    strict_types,
+-                                );
+-                            }
+-                            true // no type hint on alt param = compatible
+-                        } else {
+-                            // This overload has fewer params — the arg
+-                            // doesn't correspond to any parameter, so
+-                            // it's not relevant for this check.
+-                            false
+-                        }
+-                    });
+-                    if compatible_with_overload {
+-                        continue;
+-                    }
++                if compatible_alternative {
++                    continue;
+                 }
+ 
+                 let range = match self.offset_range_to_lsp_range(
+diff --git a/src/docblock/virtual_members.rs b/src/docblock/virtual_members.rs
+--- a/src/docblock/virtual_members.rs
++++ b/src/docblock/virtual_members.rs
+@@ -191,6 +191,7 @@
+         };
+ 
+         results.push(MethodInfo {
++            overloads: Vec::new(),
+             name: method_atom,
+             name_offset: 0,
+             parameters: parameters.into(),
+diff --git a/src/document_symbols.rs b/src/document_symbols.rs
+--- a/src/document_symbols.rs
++++ b/src/document_symbols.rs
+@@ -700,6 +700,7 @@
+     #[test]
+     fn build_method_detail_simple() {
+         let method = MethodInfo {
++            overloads: Vec::new(),
+             name: crate::atom::atom("foo"),
+             name_offset: 0,
+             parameters: vec![].into(),
+@@ -738,6 +739,7 @@
+     #[test]
+     fn build_method_detail_with_params() {
+         let method = MethodInfo {
++            overloads: Vec::new(),
+             name: crate::atom::atom("process"),
+             name_offset: 0,
+             parameters: vec![
+diff --git a/src/inheritance/generics.rs b/src/inheritance/generics.rs
+--- a/src/inheritance/generics.rs
++++ b/src/inheritance/generics.rs
+@@ -46,6 +46,7 @@
+     // actually references a substituted name — substitution usually
+     // rewrites just the return type.
+     let keys: Vec<String> = subs.keys().cloned().collect();
++    apply_substitution_to_overloads(&mut method.overloads, subs);
+     let any_param_referenced = method.parameters.iter().any(|p| {
+         p.type_hint
+             .as_ref()
+@@ -55,6 +56,68 @@
+         for param in method.parameters.make_mut() {
+             if let Some(ref mut hint) = param.type_hint {
+                 *hint = hint.substitute(subs);
++            }
++        }
++    }
++}
++
++/// Substitute applicable alternatives without copying unchanged shared records.
++pub(crate) fn apply_substitution_to_overloads(
++    overloads: &mut [std::sync::Arc<crate::types::CallableOverload>],
++    subs: &HashMap<String, PhpType>,
++) {
++    if overloads.is_empty() || subs.is_empty() {
++        return;
++    }
++    let keys: Vec<String> = subs.keys().cloned().collect();
++    for overload in overloads {
++        let template_references = overload.templates.as_ref().is_some_and(|templates| {
++            templates
++                .template_param_bounds
++                .values()
++                .any(|ty| ty.references_any_template_param(&keys))
++                || templates
++                    .template_param_defaults
++                    .iter()
++                    .any(|(_, ty)| ty.references_any_template_param(&keys))
++        });
++        let references = overload
++            .return_type
++            .as_ref()
++            .is_some_and(|hint| hint.references_any_template_param(&keys))
++            || overload.parameters.iter().any(|param| {
++                param
++                    .type_hint
++                    .as_ref()
++                    .is_some_and(|hint| hint.references_any_template_param(&keys))
++            })
++            || template_references;
++        if references {
++            let overload = std::sync::Arc::make_mut(overload);
++            if let Some(return_type) = &mut overload.return_type {
++                *return_type = return_type.substitute(subs);
++            }
++            let parameter_references = overload.parameters.iter().any(|param| {
++                param
++                    .type_hint
++                    .as_ref()
++                    .is_some_and(|hint| hint.references_any_template_param(&keys))
++            });
++            if parameter_references {
++                for param in overload.parameters.make_mut() {
++                    if let Some(hint) = &mut param.type_hint {
++                        *hint = hint.substitute(subs);
++                    }
++                }
++            }
++            if template_references && let Some(templates) = &mut overload.templates {
++                let templates = std::sync::Arc::make_mut(templates);
++                for bound in templates.template_param_bounds.values_mut() {
++                    *bound = bound.substitute(subs);
++                }
++                for (_, default) in templates.template_param_defaults.iter_mut() {
++                    *default = default.substitute(subs);
++                }
+             }
+         }
+     }
+@@ -75,6 +138,17 @@
+             .parameters
+             .iter()
+             .any(|p| p.type_hint.as_ref().is_some_and(|h| h.contains_bare_self()))
++        || method.overloads.iter().any(|overload| {
++            overload
++                .return_type
++                .as_ref()
++                .is_some_and(|ty| ty.contains_bare_self())
++                || overload.parameters.iter().any(|p| {
++                    p.type_hint
++                        .as_ref()
++                        .is_some_and(|ty| ty.contains_bare_self())
++                })
++        })
+ }
+ 
+ /// Whether an inheritance merge would rewrite a relative class keyword in
+@@ -96,6 +170,17 @@
+             p.type_hint
+                 .as_ref()
+                 .is_some_and(|h| h.contains_bare_parent())
++        })
++        || method.overloads.iter().any(|overload| {
++            overload
++                .return_type
++                .as_ref()
++                .is_some_and(|ty| ty.contains_bare_parent())
++                || overload.parameters.iter().any(|p| {
++                    p.type_hint
++                        .as_ref()
++                        .is_some_and(|ty| ty.contains_bare_parent())
++                })
+         })
+ }
+ 
+@@ -132,6 +217,9 @@
+             bind(&mut param.native_type_hint);
+         }
+     }
++    rewrite_overload_types(method, PhpType::contains_bare_parent, |ty| {
++        ty.replace_bare_parent(declaring_parent)
++    });
+ }
+ 
+ /// Whether an inheritance merge would rewrite a relative class keyword in
+@@ -200,6 +288,41 @@
+         for param in method.parameters.make_mut() {
+             bind(&mut param.type_hint);
+             bind(&mut param.native_type_hint);
++        }
++    }
++    rewrite_overload_types(method, PhpType::contains_bare_self, |ty| {
++        ty.replace_bare_self(class_name)
++    });
++}
++
++fn rewrite_overload_types(
++    method: &mut MethodInfo,
++    matches: impl Fn(&PhpType) -> bool,
++    rewrite: impl Fn(&PhpType) -> PhpType,
++) {
++    for overload in &mut method.overloads {
++        let return_matches = overload.return_type.as_ref().is_some_and(&matches);
++        let params_match = overload
++            .parameters
++            .iter()
++            .any(|param| param.type_hint.as_ref().is_some_and(&matches));
++        if !return_matches && !params_match {
++            continue;
++        }
++        let overload = std::sync::Arc::make_mut(overload);
++        if return_matches && let Some(ty) = &mut overload.return_type {
++            *ty = rewrite(ty);
++        }
++        if params_match {
++            for param in overload.parameters.make_mut() {
++                for ty in [&mut param.type_hint, &mut param.native_type_hint] {
++                    if let Some(ty) = ty
++                        && matches(ty)
++                    {
++                        *ty = rewrite(ty);
++                    }
++                }
++            }
+         }
+     }
+ }
+@@ -258,6 +381,28 @@
+             p.type_hint
+                 .as_ref()
+                 .is_some_and(|h| h.references_any_template_param(template_params))
++        })
++        || method.overloads.iter().any(|overload| {
++            overload
++                .return_type
++                .as_ref()
++                .is_some_and(|ty| ty.references_any_template_param(template_params))
++                || overload.parameters.iter().any(|param| {
++                    param
++                        .type_hint
++                        .as_ref()
++                        .is_some_and(|ty| ty.references_any_template_param(template_params))
++                })
++                || overload.templates.as_ref().is_some_and(|templates| {
++                    templates
++                        .template_param_bounds
++                        .values()
++                        .any(|ty| ty.references_any_template_param(template_params))
++                        || templates
++                            .template_param_defaults
++                            .iter()
++                            .any(|(_, ty)| ty.references_any_template_param(template_params))
++                })
+         })
+         || method
+             .template_param_defaults
+diff --git a/src/inheritance/inheritance_tests.rs b/src/inheritance/inheritance_tests.rs
+--- a/src/inheritance/inheritance_tests.rs
++++ b/src/inheritance/inheritance_tests.rs
+@@ -297,6 +297,7 @@
+     let subs = make_subs(&[("TValue", "Language"), ("TKey", "int")]);
+ 
+     let mut method = MethodInfo {
++        overloads: Vec::new(),
+         name: crate::atom::atom("first"),
+         name_offset: 0,
+         parameters: vec![crate::types::ParameterInfo {
+@@ -377,6 +378,7 @@
+         kind: ClassLikeKind::Trait,
+         template_params: vec![atom("TKey"), atom("TValue")],
+         methods: vec![Arc::new(MethodInfo {
++            overloads: Vec::new(),
+             name: crate::atom::atom("first"),
+             name_offset: 0,
+             parameters: vec![].into(),
+diff --git a/src/inheritance/mod.rs b/src/inheritance/mod.rs
+--- a/src/inheritance/mod.rs
++++ b/src/inheritance/mod.rs
+@@ -41,7 +41,7 @@
+ pub(crate) use generics::apply_substitution;
+ pub(crate) use generics::{
+     apply_generic_args, apply_substitution_to_conditional, apply_substitution_to_method,
+-    apply_substitution_to_property, bind_inherited_class_keywords,
++    apply_substitution_to_overloads, apply_substitution_to_property, bind_inherited_class_keywords,
+     bind_inherited_class_keywords_in_property, build_generic_subs, build_substitution_map,
+     class_scoped_template_values, default_type_args, extends_type_args, fill_template_bounds,
+     generic_arg_offset, method_has_inherited_class_keyword, method_references_params,
+diff --git a/src/mem_audit.rs b/src/mem_audit.rs
+--- a/src/mem_audit.rs
++++ b/src/mem_audit.rs
+@@ -24,9 +24,9 @@
+     TypeKind,
+ };
+ use crate::types::{
+-    ClassInfo, ConstantInfo, DocblockMembers, FunctionInfo, LaravelMetadata, MethodInfo,
+-    ParameterInfo, PropertyInfo, PropertySource, SharedVec, TraitAlias, TraitPrecedence,
+-    TypeAliasDef, TypeAssertion,
++    CallableOverload, CallableTemplateInfo, ClassInfo, ConstantInfo, DocblockMembers, FunctionInfo,
++    LaravelMetadata, MethodInfo, ParameterInfo, PropertyInfo, PropertySource, SharedVec,
++    TraitAlias, TraitPrecedence, TypeAliasDef, TypeAssertion,
+ };
+ 
+ // ─── Counting global allocator ──────────────────────────────────────────────
+@@ -700,6 +700,7 @@
+         self.m_docs += s(&m.deprecation_message);
+         self.m_docs += s(&m.deprecated_replacement);
+         self.params(&m.parameters);
++        self.overloads(&m.overloads);
+     }
+ 
+     fn property(&mut self, a: &Arc<PropertyInfo>) {
+@@ -889,14 +890,41 @@
+         self.m_docs += s(&f.deprecated_replacement);
+         self.m_docs += s(&f.namespace);
+         self.params(&f.parameters);
+-        let mut ov = Sz::default();
+-        ov.add(f.overloads.capacity() * size_of::<Vec<ParameterInfo>>());
+-        for o in &f.overloads {
+-            ov.add(o.capacity() * size_of::<ParameterInfo>());
+-        }
+-        self.par_vec += ov;
+-        for o in &f.overloads {
+-            self.param_slice(o);
++        self.overloads(&f.overloads);
++    }
++
++    fn overloads(&mut self, overloads: &Vec<Arc<CallableOverload>>) {
++        let mut storage = Sz::default();
++        storage.add(overloads.capacity() * size_of::<Arc<CallableOverload>>());
++        self.par_vec += storage;
++        for overload in overloads {
++            if !self.mark(Arc::as_ptr(overload) as usize) {
++                continue;
++            }
++            let mut record = Sz::default();
++            record.add(ARC + size_of::<CallableOverload>());
++            self.par_vec += record;
++            self.params(&overload.parameters);
++            self.m_types += opt_ty(&overload.return_type);
++            self.m_tmpl +=
++                map_buckets::<Atom, Option<PhpType>>(overload.self_bound_params.capacity());
++            for bound in overload.self_bound_params.values() {
++                self.m_types += opt_ty(bound);
++            }
++            if let Some(templates) = &overload.templates
++                && self.mark(Arc::as_ptr(templates) as usize)
++            {
++                let mut storage = Sz::default();
++                storage.add(ARC + size_of::<CallableTemplateInfo>());
++                storage.add(templates.template_params.capacity() * size_of::<Atom>());
++                storage.add(templates.template_bindings.capacity() * size_of::<(Atom, Atom)>());
++                storage.add(templates.template_param_defaults.len() * size_of::<(Atom, PhpType)>());
++                self.m_tmpl += storage;
++                self.m_tmpl += atom_map_ty(&templates.template_param_bounds);
++                for (_, default) in templates.template_param_defaults.iter() {
++                    self.m_types += ty(default);
++                }
++            }
+         }
+     }
+ 
+diff --git a/src/parser/classes.rs b/src/parser/classes.rs
+--- a/src/parser/classes.rs
++++ b/src/parser/classes.rs
+@@ -884,7 +884,7 @@
+             }
+         }
+ 
+-        let mut methods = Vec::new();
++        let mut methods: Vec<MethodInfo> = Vec::new();
+         let mut properties = Vec::new();
+         let mut constants = Vec::new();
+         let mut used_traits: Vec<Atom> = Vec::new();
+@@ -1336,7 +1336,31 @@
+                         .as_ref()
+                         .is_some_and(docblock::declares_impure);
+ 
++                    // Version-inapplicable declarations have already been
++                    // filtered. Constructors can have multiple applicable
++                    // stub signatures, including signatures with equal arity.
++                    if name.eq_ignore_ascii_case("__construct")
++                        && let Some(existing) = methods
++                            .iter_mut()
++                            .find(|method| method.name.eq_ignore_ascii_case(&name))
++                    {
++                        existing
++                            .overloads
++                            .push(std::sync::Arc::new(CallableOverload {
++                                parameters: parameters.into(),
++                                return_type,
++                                templates: CallableTemplateInfo::optional(
++                                    method_template_params,
++                                    method_template_param_bounds,
++                                    method_template_bindings,
++                                    method_template_param_defaults,
++                                ),
++                                self_bound_params: Default::default(),
++                            }));
++                        continue;
++                    }
+                     methods.push(MethodInfo {
++                        overloads: Vec::new(),
+                         name,
+                         name_offset,
+                         parameters: parameters.into(),
+diff --git a/src/parser/functions.rs b/src/parser/functions.rs
+--- a/src/parser/functions.rs
++++ b/src/parser/functions.rs
+@@ -357,18 +357,25 @@
+                     // function with the same name already exists (common
+                     // in phpstorm-stubs for functions like `strtr`,
+                     // `implode`, `array_keys`), add the new parameter
+-                    // list as an overload instead of pushing a duplicate.
++                    // signature as an overload instead of pushing a duplicate.
++                    // Version filters have already run; equal arity alone
++                    // does not distinguish a version variant from an overload.
+                     if let Some(existing) = functions.iter_mut().find(|f| {
+-                        f.name.eq_ignore_ascii_case(&name)
+-                                && f.namespace == *current_namespace
+-                                // Only merge when parameter counts differ —
+-                                // true overloads (strtr, implode) always
+-                                // differ in arity.  Same-name functions
+-                                // with the same param count are version
+-                                // variants, not overloads.
+-                                && f.parameters.len() != parameters.len()
++                        f.name.eq_ignore_ascii_case(&name) && f.namespace == *current_namespace
+                     }) {
+-                        existing.overloads.push(parameters);
++                        existing
++                            .overloads
++                            .push(std::sync::Arc::new(CallableOverload {
++                                parameters: parameters.into(),
++                                return_type,
++                                templates: CallableTemplateInfo::optional(
++                                    func_tpl_atoms,
++                                    func_template_param_bounds,
++                                    func_template_bindings,
++                                    func_template_param_defaults,
++                                ),
++                                self_bound_params: Default::default(),
++                            }));
+                     } else {
+                         functions.push(FunctionInfo {
+                             name,
+diff --git a/src/signature_help.rs b/src/signature_help.rs
+--- a/src/signature_help.rs
++++ b/src/signature_help.rs
+@@ -45,16 +45,6 @@
+ }
+ 
+ // ─── AST-based detection ────────────────────────────────────────────────────
+-
+-fn trim_argument_trivia(mut text: &str) -> &str {
+-    loop {
+-        text = text.trim_start();
+-        match crate::text_scan::skip_php_comment(text.as_bytes(), 0) {
+-            Some(end) => text = &text[end..],
+-            None => return text,
+-        }
+-    }
+-}
+ 
+ /// Detect the call site using precomputed [`CallSite`] data from the
+ /// symbol map.
+@@ -316,16 +306,19 @@
+ /// `resolve_signature` are retained.
+ struct ResolvedCallable {
+     /// The parameters of the callable.
+-    parameters: Vec<ParameterInfo>,
++    parameters: SharedVec<ParameterInfo>,
+     /// Optional return type (effective / docblock-enriched).
+     return_type: Option<PhpType>,
++    /// Applicable alternate declarations retain their own parameters and return.
++    overloads: Vec<std::sync::Arc<CallableOverload>>,
+ }
+ 
+ impl From<crate::types::ResolvedCallableTarget> for ResolvedCallable {
+     fn from(t: crate::types::ResolvedCallableTarget) -> Self {
+         Self {
+-            parameters: t.parameters.into_vec(),
++            parameters: t.parameters,
+             return_type: t.return_type,
++            overloads: t.overloads,
+         }
+     }
+ }
+@@ -643,17 +636,18 @@
+             .or_else(|| detect_call_site_text_fallback(content, position))?;
+         let text = content.get(site.args_start..cursor as usize)?;
+         let args = crate::type_engine::types::conditional::split_text_args(text);
+-        let current = trim_argument_trivia(args.last()?);
++        let current = crate::call_args::trim_argument_trivia(args.last()?);
+         let (name, value) = crate::call_args::split_named_text_arg(current);
+         // An outer parameter does not determine the type of a variable
+         // nested in an array, binary expression, interpolation or spread.
+-        if trim_argument_trivia(value) != prefix
++        if crate::call_args::trim_argument_trivia(value) != prefix
+             || !self.is_direct_variable_argument(content, position, prefix)
+         {
+             return None;
+         }
+         if args.iter().take(args.len() - 1).any(|arg| {
+-            crate::call_args::text_arg_value(trim_argument_trivia(arg)).starts_with("...")
++            crate::call_args::text_arg_value(crate::call_args::trim_argument_trivia(arg))
++                .starts_with("...")
+         }) {
+             return None;
+         }
+@@ -720,7 +714,8 @@
+         // An overload with a different parameter name cannot establish a
+         // reliable name preference. Positional type inference stays unchanged.
+         let name_known = !target.synthetic_parameter_names
+-            && target.overloads.iter().all(|parameters| {
++            && target.overloads.iter().all(|overload| {
++                let parameters = &overload.parameters;
+                 let alternate = if let Some(name) = name {
+                     parameters
+                         .iter()
+@@ -750,33 +745,66 @@
+     ) -> Option<SignatureHelp> {
+         let resolved = self.resolve_callable(&site.call_expression, content, position, ctx)?;
+ 
+-        // Named arguments can appear out of declaration order. The current
+-        // argument's name, not its comma ordinal, identifies the parameter.
+         let cursor = position_to_offset(content, position) as usize;
+-        let args = crate::type_engine::types::conditional::split_text_args(
+-            content.get(site.args_start..cursor)?,
+-        );
+-        let current = trim_argument_trivia(args.last().copied().unwrap_or_default());
++        let args_text = content.get(site.args_start..cursor)?;
++        let mut args = crate::type_engine::types::conditional::split_text_args(args_text);
++        for argument in &mut args {
++            *argument = crate::call_args::trim_argument_trivia(argument);
++        }
++        // The shared splitter omits an empty trailing slot after a comma.
++        let current = args
++            .get(site.active_parameter as usize)
++            .copied()
++            .unwrap_or_default();
+         let (name, _) = crate::call_args::split_named_text_arg(current);
+-        let active = if let Some(name) = name {
+-            resolved
+-                .parameters
+-                .iter()
+-                .position(|parameter| parameter.name.trim_start_matches('$') == name)
+-                .or_else(|| {
+-                    resolved
+-                        .parameters
+-                        .iter()
+-                        .position(|parameter| parameter.is_variadic)
+-                })? as u32
++        let has_named = args.iter().any(|arg| {
++            crate::call_args::split_named_text_arg(crate::call_args::trim_argument_trivia(arg))
++                .0
++                .is_some()
++        });
++        let count = if site.active_parameter == 0
++            && crate::call_args::trim_argument_trivia(args_text).is_empty()
++        {
++            0
+         } else {
+-            clamp_active_param(site.active_parameter, &resolved.parameters)
++            site.active_parameter as usize + 1
+         };
+-        let sig = build_signature(&resolved.parameters, resolved.return_type.as_ref());
++
++        let variants = std::iter::once((&resolved.parameters, resolved.return_type.as_ref()))
++            .chain(
++                resolved
++                    .overloads
++                    .iter()
++                    .map(|overload| (&overload.parameters, overload.return_type.as_ref())),
++            );
++        let mut signatures = Vec::with_capacity(1 + resolved.overloads.len());
++        let mut first_compatible = None;
++        let mut active_signature = None;
++        for (index, (parameters, return_type)) in variants.enumerate() {
++            let active = signature_active_parameter(parameters, name, site.active_parameter);
++            let names_match =
++                !has_named || crate::call_args::text_args_have_compatible_roles(parameters, &args);
++            if names_match {
++                first_compatible.get_or_insert(index);
++                // Prefer a complete count fit; retain a role-compatible fallback
++                // while required arguments are still being entered.
++                if active_signature.is_none() && signature_accepts_count(parameters, count) {
++                    active_signature = Some(index);
++                }
++            }
++            let mut signature = build_signature(parameters, return_type);
++            signature.active_parameter = active;
++            signatures.push(signature);
++        }
++        if has_named && first_compatible.is_none() {
++            return None;
++        }
++        let selected = active_signature.or(first_compatible).unwrap_or(0);
++        let active_parameter = signatures[selected].active_parameter;
+         Some(SignatureHelp {
+-            signatures: vec![sig],
+-            active_signature: Some(0),
+-            active_parameter: Some(active),
++            signatures,
++            active_signature: Some(selected as u32),
++            active_parameter,
+         })
+     }
+ 
+@@ -842,6 +870,33 @@
+     }
+ }
+ 
++/// Resolve a parameter independently for each applicable declaration.
++fn signature_active_parameter(
++    params: &[ParameterInfo],
++    name: Option<&str>,
++    ordinal: u32,
++) -> Option<u32> {
++    if let Some(name) = name {
++        params
++            .iter()
++            .position(|parameter| parameter.name.trim_start_matches('$') == name)
++            .or_else(|| params.iter().position(|parameter| parameter.is_variadic))
++            .map(|index| index as u32)
++    } else {
++        (!params.is_empty()).then(|| clamp_active_param(ordinal, params))
++    }
++}
++
++/// Match the current argument count without resolving argument expression types.
++fn signature_accepts_count(params: &[ParameterInfo], count: usize) -> bool {
++    let required = params
++        .iter()
++        .rposition(|parameter| parameter.is_required && !parameter.is_variadic)
++        .map_or(0, |index| index + 1);
++    count >= required
++        && (count <= params.len() || params.last().is_some_and(|parameter| parameter.is_variadic))
++}
++
+ /// Clamp the active parameter index so it doesn't exceed the parameter
+ /// count.  For variadic parameters, the index stays on the last parameter
+ /// even when the user types additional arguments.
+diff --git a/src/stub_patches/classes.rs b/src/stub_patches/classes.rs
+--- a/src/stub_patches/classes.rs
++++ b/src/stub_patches/classes.rs
+@@ -2,7 +2,7 @@
+ 
+ use crate::atom::atom;
+ use crate::php_type::PhpType;
+-use crate::types::ClassInfo;
++use crate::types::{ClassInfo, ParameterInfo};
+ 
+ /// Apply all registered stub patches to a freshly-parsed class.
+ ///
+@@ -15,6 +15,7 @@
+ pub fn apply_class_stub_patches(class: &mut ClassInfo) {
+     match class.name.as_str() {
+         "WeakMap" => patch_weak_map(class),
++        "DatePeriod" => patch_date_period_parameter_names(class),
+         "IteratorIterator" => patch_iterator_iterator(class),
+         "RecursiveIteratorIterator" => patch_recursive_iterator_iterator(class),
+         "FilterIterator" => patch_filter_iterator(class),
+@@ -34,6 +35,58 @@
+     }
+     mark_benevolent_methods(class);
+     mark_impure_methods(class);
++}
++
++fn date_period_names_need_patch(parameters: &[ParameterInfo]) -> bool {
++    (parameters.len() == 4
++        && parameters[0].name == "$start"
++        && parameters[1].name == "$interval"
++        && parameters[2].name == "$recurrences"
++        && parameters[3].name == "$options")
++        || (parameters.len() == 2
++            && matches!(parameters[0].name.as_str(), "$isostr" | "$start")
++            && matches!(parameters[1].name.as_str(), "$options" | "$interval")
++            && (parameters[0].name == "$isostr" || parameters[1].name == "$options"))
++}
++
++fn normalize_date_period_parameter_names(parameters: &mut [ParameterInfo]) {
++    if parameters.len() == 4 {
++        parameters[2].name = atom("$end");
++    } else {
++        parameters[0].name = atom("$start");
++        parameters[1].name = atom("$interval");
++    }
++}
++
++/// All constructor forms share PHP's native parameter slots. Legacy stub
++/// descriptions still describe the retained recurrence/ISO types correctly.
++fn patch_date_period_parameter_names(class: &mut ClassInfo) {
++    let Some(index) = class
++        .methods
++        .iter()
++        .position(|method| method.name.eq_ignore_ascii_case("__construct"))
++    else {
++        return;
++    };
++    let constructor = &class.methods[index];
++    if !date_period_names_need_patch(&constructor.parameters)
++        && !constructor
++            .overloads
++            .iter()
++            .any(|overload| date_period_names_need_patch(&overload.parameters))
++    {
++        return;
++    }
++    let constructor = std::sync::Arc::make_mut(&mut class.methods.make_mut()[index]);
++    if date_period_names_need_patch(&constructor.parameters) {
++        normalize_date_period_parameter_names(constructor.parameters.make_mut());
++    }
++    for overload in &mut constructor.overloads {
++        if date_period_names_need_patch(&overload.parameters) {
++            let overload = std::sync::Arc::make_mut(overload);
++            normalize_date_period_parameter_names(overload.parameters.make_mut());
++        }
++    }
+ }
+ 
+ /// Built-in methods that change their object's state while returning a
+diff --git a/src/stub_patches/functions.rs b/src/stub_patches/functions.rs
+--- a/src/stub_patches/functions.rs
++++ b/src/stub_patches/functions.rs
+@@ -13,6 +13,7 @@
+ pub fn apply_function_stub_patches(func: &mut FunctionInfo) {
+     match func.name.as_str() {
+         "range" => patch_range(func),
++        "strtr" => patch_strtr_parameter_names(func),
+         "str_word_count" => patch_str_word_count(func),
+         "stream_bucket_make_writeable" => patch_stream_bucket_make_writeable(func),
+         "array_map" => patch_array_map(func),
+@@ -60,6 +61,25 @@
+     }
+ }
+ 
++/// PHP's two-argument form keeps the native `string`/`from` names.
++/// The pinned alternate uses historical `str`/`replace_pairs` labels.
++fn patch_strtr_parameter_names(func: &mut FunctionInfo) {
++    for overload in &mut func.overloads {
++        let parameters = &overload.parameters;
++        if parameters.len() != 2
++            || !matches!(parameters[0].name.as_str(), "$str" | "$string")
++            || !matches!(parameters[1].name.as_str(), "$replace_pairs" | "$from")
++            || (parameters[0].name == "$string" && parameters[1].name == "$from")
++        {
++            continue;
++        }
++        let overload = std::sync::Arc::make_mut(overload);
++        let parameters = overload.parameters.make_mut();
++        parameters[0].name = atom("$string");
++        parameters[1].name = atom("$from");
++    }
++}
++
+ /// Tag a return type as one whose failure branch is not worth enforcing.
+ ///
+ /// The type is unchanged in every other respect — see
+diff --git a/src/type_engine/call_resolution/callable_target.rs b/src/type_engine/call_resolution/callable_target.rs
+--- a/src/type_engine/call_resolution/callable_target.rs
++++ b/src/type_engine/call_resolution/callable_target.rs
+@@ -20,6 +20,59 @@
+ use super::template_subs::evaluate_constant_operands;
+ 
+ impl Backend {
++    /// Bind each alternate from its own declaration using the shared type engine.
++    fn bind_overload_templates(
++        overloads: &mut [Arc<CallableOverload>],
++        args: &[&str],
++        rctx: &ResolutionCtx<'_>,
++        owner: Option<&ClassInfo>,
++    ) {
++        for overload in overloads {
++            let Some(templates) = overload.templates.as_deref() else {
++                continue;
++            };
++            let bounds = if let Some(owner) =
++                owner.filter(|owner| !owner.template_param_bounds.is_empty())
++            {
++                let mut bounds = owner.template_param_bounds.clone();
++                bounds.extend(templates.template_param_bounds.clone());
++                std::borrow::Cow::Owned(bounds)
++            } else {
++                std::borrow::Cow::Borrowed(&templates.template_param_bounds)
++            };
++            let callee = super::TemplateCallee {
++                parameters: &overload.parameters,
++                template_bindings: &templates.template_bindings,
++                template_param_bounds: &bounds,
++            };
++            let mut subs = super::bind_template_args(&callee, args, None, rctx);
++            super::finish_template_subs(
++                &mut subs,
++                &templates.template_params,
++                &bounds,
++                &templates.template_param_defaults,
++                overload.return_type.as_ref(),
++                rctx,
++            );
++            if subs.is_empty() {
++                continue;
++            }
++            let self_bound_params = super::self_bound_template_params(
++                &templates.template_bindings,
++                &overload.parameters,
++                args,
++                &|template| bounds.get(template).cloned(),
++            );
++            crate::inheritance::apply_substitution_to_overloads(
++                std::slice::from_mut(overload),
++                &subs,
++            );
++            if !self_bound_params.is_empty() {
++                Arc::make_mut(overload).self_bound_params = self_bound_params;
++            }
++        }
++    }
++
+     /// Bind a method's declaration to one call site: substitute the
+     /// method-level `@template` params the arguments decide, then collapse
+     /// any conditional left inside the return type against those same
+@@ -70,6 +123,7 @@
+         };
+ 
+         let split_args = crate::type_engine::types::conditional::split_text_args(at);
++        let overloads = std::mem::take(&mut bound.overloads);
+         let method_subs = Self::build_method_template_subs(owner, method_name, &split_args, rctx);
+         if !method_subs.is_empty() {
+             crate::inheritance::apply_substitution_to_method(&mut bound, &method_subs);
+@@ -86,6 +140,9 @@
+                 },
+             );
+         }
++
++        bound.overloads = overloads;
++        Self::bind_overload_templates(&mut bound.overloads, &split_args, rctx, Some(owner));
+ 
+         if let Some(ret) = bound
+             .return_type
+@@ -244,6 +301,7 @@
+                 let target = ResolvedCallableTarget {
+                     parameters: result_method.parameters.clone(),
+                     return_type: result_method.return_type.clone(),
++                    overloads: result_method.overloads.clone(),
+                     owner_class: Some(owner.fqn()),
+                     self_bound_params,
+                     ..Default::default()
+@@ -347,6 +405,7 @@
+         Some(ResolvedCallableTarget {
+             parameters: result_method.parameters.clone(),
+             return_type: result_method.return_type.clone(),
++            overloads: result_method.overloads.clone(),
+             owner_class: Some(owner.fqn()),
+             self_bound_params,
+             ..Default::default()
+@@ -373,14 +432,24 @@
+         args_text: Option<&str>,
+         rctx: &ResolutionCtx<'_>,
+     ) -> ResolvedCallableTarget {
+-        if let Some(at) = args_text
+-            && !func.template_params.is_empty()
++        let mut target = Self::function_to_callable(func);
++        let Some(at) = args_text else {
++            return target;
++        };
++        if func.template_params.is_empty()
++            && !func
++                .overloads
++                .iter()
++                .any(|overload| overload.templates.is_some())
+         {
+-            let split_args: Vec<String> =
+-                crate::type_engine::types::conditional::split_text_args(at)
+-                    .into_iter()
+-                    .map(|s| s.to_string())
+-                    .collect();
++            return target;
++        }
++        let split_args: Vec<String> = crate::type_engine::types::conditional::split_text_args(at)
++            .into_iter()
++            .map(str::to_owned)
++            .collect();
++        let arg_refs: Vec<&str> = split_args.iter().map(String::as_str).collect();
++        if !func.template_params.is_empty() {
+             let subs = crate::type_engine::variable::rhs_resolution::build_function_template_subs(
+                 func,
+                 &split_args,
+@@ -388,31 +457,22 @@
+                 rctx,
+             );
+             if !subs.is_empty() {
+-                let parameters: Vec<_> = func
+-                    .parameters
+-                    .iter()
+-                    .map(|p| {
+-                        let mut param = p.clone();
+-                        if let Some(ref mut hint) = param.type_hint {
+-                            *hint = hint.substitute(&subs);
+-                        }
+-                        param
+-                    })
+-                    .collect();
+-                return ResolvedCallableTarget {
+-                    parameters: parameters.into(),
+-                    return_type: func.return_type.clone(),
+-                    self_bound_params: super::template_subs::self_bound_template_params(
+-                        &func.template_bindings,
+-                        &func.parameters,
+-                        &split_args.iter().map(String::as_str).collect::<Vec<_>>(),
+-                        &|tpl| func.template_param_bounds.get(tpl).cloned(),
+-                    ),
+-                    ..Default::default()
+-                };
+-            }
+-        }
+-        Self::function_to_callable(func)
++                for param in target.parameters.make_mut() {
++                    if let Some(hint) = &mut param.type_hint {
++                        *hint = hint.substitute(&subs);
++                    }
++                }
++                target.return_type = func.return_type.as_ref().map(|ty| ty.substitute(&subs));
++                target.self_bound_params = super::self_bound_template_params(
++                    &func.template_bindings,
++                    &func.parameters,
++                    &arg_refs,
++                    &|template| func.template_param_bounds.get(template).cloned(),
++                );
++            }
++        }
++        Self::bind_overload_templates(&mut target.overloads, &arg_refs, rctx, None);
++        target
+     }
+ 
+     /// Resolve class name keywords (`self`, `static`, `parent`) to actual
+@@ -458,6 +518,14 @@
+             }
+         };
+ 
++        let mut overloads = ctor.overloads.clone();
++        if !overloads.is_empty()
++            && let Some(at) = args_text
++        {
++            let args = crate::type_engine::types::conditional::split_text_args(at);
++            Self::bind_overload_templates(&mut overloads, &args, rctx, Some(&merged));
++        }
++
+         // Apply class-level template substitutions from the call-site
+         // argument types when the constructor has template bindings.
+         if let Some(at) = args_text
+@@ -478,10 +546,12 @@
+                     },
+                 );
+                 let mut result_ctor = ctor;
++                result_ctor.overloads.clear();
+                 crate::inheritance::apply_substitution_to_method(&mut result_ctor, &subs);
+                 return Some(ResolvedCallableTarget {
+                     parameters: result_ctor.parameters.clone(),
+                     return_type: result_ctor.return_type.clone(),
++                    overloads,
+                     owner_class: Some(ci.fqn()),
+                     self_bound_params,
+                     ..Default::default()
+@@ -492,6 +562,7 @@
+         Some(ResolvedCallableTarget {
+             parameters: ctor.parameters.clone(),
+             return_type: ctor.return_type.clone(),
++            overloads,
+             owner_class: Some(ci.fqn()),
+             ..Default::default()
+         })
+diff --git a/src/type_engine/call_resolution/mod.rs b/src/type_engine/call_resolution/mod.rs
+--- a/src/type_engine/call_resolution/mod.rs
++++ b/src/type_engine/call_resolution/mod.rs
+@@ -88,7 +88,7 @@
+ pub(crate) use template_binding::{TemplateCallee, bind_template_args, instantiate_class};
+ pub(crate) use template_subs::{
+     array_literal_shape_type_with, build_call_template_subs, evaluate_constant_operands,
+-    finish_template_subs, generalize_object_template_arg,
++    finish_template_subs, generalize_object_template_arg, self_bound_template_params,
+ };
+ 
+ pub(crate) use callable_target::callable_type_as_target;
+diff --git a/src/type_engine/types/conditional.rs b/src/type_engine/types/conditional.rs
+--- a/src/type_engine/types/conditional.rs
++++ b/src/type_engine/types/conditional.rs
+@@ -1348,56 +1348,30 @@
+     }
+ }
+ 
+-/// Split a textual argument list by commas, respecting nested brackets
++/// Split a textual argument list by commas, respecting PHP comments and nested brackets
+ /// so that `"foo(a, b), c"` splits into `["foo(a, b)", "c"]`.
+ ///
+ /// Braces count as brackets too, so a closure argument written out in full
+ /// (`function ($a) { return [$a, 1]; }, $rest`) stays one argument.
+ pub fn split_text_args(text: &str) -> Vec<&str> {
++    use crate::text_scan::{ScanStep, scan_top_level};
++
+     let mut result = Vec::new();
+-    let mut depth = 0u32;
+     let mut start = 0;
+-    let mut in_single_quote = false;
+-    let mut in_double_quote = false;
+-    let mut prev_was_backslash = false;
+-
+-    for (i, ch) in text.char_indices() {
+-        if prev_was_backslash {
+-            prev_was_backslash = false;
+-            continue;
++    while let Some(offset) = scan_top_level(&text.as_bytes()[start..], |bytes, index| {
++        if bytes[index] == b',' {
++            ScanStep::Stop
++        } else {
++            ScanStep::Skip(1)
+         }
+-        match ch {
+-            '\\'
+-                // Only treat as escape if inside a quote
+-                if in_single_quote || in_double_quote =>
+-            {
+-                prev_was_backslash = true;
+-            }
+-            '\'' if !in_double_quote => {
+-                in_single_quote = !in_single_quote;
+-            }
+-            '"' if !in_single_quote => {
+-                in_double_quote = !in_double_quote;
+-            }
+-            '(' | '[' | '{' if !in_single_quote && !in_double_quote => {
+-                depth += 1;
+-            }
+-            ')' | ']' | '}' if !in_single_quote && !in_double_quote => {
+-                depth = depth.saturating_sub(1);
+-            }
+-            ',' if depth == 0 && !in_single_quote && !in_double_quote => {
+-                result.push(&text[start..i]);
+-                start = i + 1; // skip the comma
+-            }
+-            _ => {}
+-        }
+-    }
+-    // Push the last segment (or the only one if there were no commas).
+-    if start <= text.len() {
+-        let last = &text[start..];
+-        if !last.trim().is_empty() {
+-            result.push(last);
+-        }
++    }) {
++        let comma = start + offset;
++        result.push(&text[start..comma]);
++        start = comma + 1;
++    }
++    let last = &text[start..];
++    if !last.trim().is_empty() {
++        result.push(last);
+     }
+     result
+ }
+diff --git a/src/types/mod.rs b/src/types/mod.rs
+--- a/src/types/mod.rs
++++ b/src/types/mod.rs
+@@ -444,6 +444,8 @@
+ /// Stores extracted method information from a parsed PHP class.
+ #[derive(Debug, Clone)]
+ pub struct MethodInfo {
++    /// Applicable alternative signatures, shared with resolved call targets.
++    pub overloads: Vec<Arc<CallableOverload>>,
+     /// The method name (e.g. "updateText").
+     pub name: Atom,
+     /// Byte offset of the method's name token in the source file.
+@@ -660,6 +662,7 @@
+     /// order matters for signature help and call resolution.
+     pub fn signature_eq(&self, other: &MethodInfo) -> bool {
+         self.name == other.name
++            && overloads_eq(&self.overloads, &other.overloads)
+             && self.is_static == other.is_static
+             && self.visibility == other.visibility
+             && self.return_type == other.return_type
+@@ -726,6 +729,7 @@
+     /// round-trip when the caller already holds a `PhpType`.
+     pub fn virtual_method_typed(name: &str, return_type: Option<&PhpType>) -> Self {
+         Self {
++            overloads: Vec::new(),
+             name: crate::atom::atom(name),
+             name_offset: 0,
+             parameters: SharedVec::new(),
+@@ -1126,11 +1130,72 @@
+ 
+ // ─── Resolved Callable Target ───────────────────────────────────────────────
+ 
+-/// The result of resolving a call expression to its callable target.
+-///
+-/// Shared between signature help (`resolve_callable`) and named-argument
+-/// completion (`resolve_named_arg_params`).  Each caller projects the
+-/// fields it needs from the result.
++/// One applicable signature with its own return type and parameter documentation.
++#[derive(Debug, Clone)]
++pub struct CallableOverload {
++    /// Parameters retain native labels, effective types and per-parameter docs.
++    pub parameters: SharedVec<ParameterInfo>,
++    /// Effective return type for this declaration, independent of the primary.
++    pub return_type: Option<PhpType>,
++    /// This declaration's own generic contract, absent for non-generic variants.
++    pub templates: Option<Arc<CallableTemplateInfo>>,
++    /// Call-site constraints for templates bound solely by their own argument.
++    /// Empty on source declarations; populated when resolving this variant.
++    pub self_bound_params: AtomMap<Option<PhpType>>,
++}
++
++/// Generic metadata retained independently for each applicable declaration.
++#[derive(Debug, Clone, PartialEq)]
++pub struct CallableTemplateInfo {
++    /// Template names declared by this variant.
++    pub template_params: Vec<Atom>,
++    /// Upper bounds for this variant's templates.
++    pub template_param_bounds: AtomMap<PhpType>,
++    /// Parameter names that bind each template.
++    pub template_bindings: Vec<(Atom, Atom)>,
++    /// Declared defaults used for otherwise unbound templates.
++    pub template_param_defaults: Box<[(Atom, PhpType)]>,
++}
++
++impl CallableTemplateInfo {
++    pub(crate) fn optional(
++        template_params: Vec<Atom>,
++        template_param_bounds: AtomMap<PhpType>,
++        template_bindings: Vec<(Atom, Atom)>,
++        template_param_defaults: Box<[(Atom, PhpType)]>,
++    ) -> Option<Arc<Self>> {
++        if template_params.is_empty()
++            && template_param_bounds.is_empty()
++            && template_bindings.is_empty()
++            && template_param_defaults.is_empty()
++        {
++            None
++        } else {
++            Some(Arc::new(Self {
++                template_params,
++                template_param_bounds,
++                template_bindings,
++                template_param_defaults,
++            }))
++        }
++    }
++}
++
++fn overloads_eq(left: &[Arc<CallableOverload>], right: &[Arc<CallableOverload>]) -> bool {
++    left.len() == right.len()
++        && left.iter().zip(right).all(|(a, b)| {
++            a.return_type == b.return_type
++                && a.templates == b.templates
++                && a.parameters.len() == b.parameters.len()
++                && a.parameters.iter().zip(b.parameters.iter()).all(|(a, b)| {
++                    a.signature_eq(b)
++                        && a.native_type_hint == b.native_type_hint
++                        && a.description == b.description
++                })
++        })
++}
++
++/// Shared result for signature help, diagnostics and named-argument completion.
+ #[derive(Debug, Clone, Default)]
+ pub(crate) struct ResolvedCallableTarget {
+     /// Parameter labels synthesized from a type-only callable are not PHP names.
+@@ -1150,12 +1215,12 @@
+     /// the argument-count diagnostic must not flag extra arguments, while
+     /// signature help still shows the (empty) signature.
+     pub accepts_any_args: bool,
+-    /// Alternate parameter lists from overloaded function declarations.
++    /// Applicable alternate signatures from functions and constructors.
+     ///
+     /// Populated from `FunctionInfo::overloads` when resolving standalone
+     /// function calls.  The type checker tries each overload and only
+     /// emits a diagnostic when the call is incompatible with ALL.
+-    pub overloads: Vec<Vec<ParameterInfo>>,
++    pub overloads: Vec<Arc<CallableOverload>>,
+     /// FQN of the class the callable was resolved on, when it is a class
+     /// member (`None` for standalone functions and closures).
+     ///
+@@ -1325,7 +1390,7 @@
+     /// not shadow the stub's signature, deprecation status, or other
+     /// metadata.
+     pub is_polyfill: bool,
+-    /// Alternate parameter lists from overloaded function declarations.
++    /// Applicable alternate signatures after PHP-version filtering.
+     ///
+     /// Some PHP functions (e.g. `strtr`, `implode`, `array_keys`) have
+     /// multiple valid signatures that differ in parameter count and types.
+@@ -1335,7 +1400,7 @@
+     /// The type checker tries the primary `parameters` first, then each
+     /// overload.  A diagnostic is only emitted when the call is
+     /// incompatible with ALL signatures.
+-    pub overloads: Vec<Vec<ParameterInfo>>,
++    pub overloads: Vec<Arc<CallableOverload>>,
+     /// Whether the function is declared side-effect free via `@pure`,
+     /// `@phpstan-pure` or `@psalm-pure`.  See [`MethodInfo::is_pure`].
+     pub is_pure: bool,
+@@ -1401,7 +1466,7 @@
+             }
+         }
+ 
+-        if self.overloads.len() != other.overloads.len() {
++        if !overloads_eq(&self.overloads, &other.overloads) {
+             return false;
+         }
+ 
+diff --git a/src/types_tests.rs b/src/types_tests.rs
+--- a/src/types_tests.rs
++++ b/src/types_tests.rs
+@@ -1114,6 +1114,126 @@
+ }
+ 
+ // ── FunctionInfo::signature_eq ──────────────────────────────────
++
++#[test]
++fn overload_signature_changes_invalidate_at_constant_variant_count() {
++    let alternate = Arc::new(CallableOverload {
++        templates: None,
++        self_bound_params: Default::default(),
++        parameters: vec![param("$value", "string")].into(),
++        return_type: Some(PhpType::parse("string")),
++    });
++    let mut original = func("pick");
++    original.overloads.push(alternate.clone());
++    assert!(original.signature_eq(&original.clone()));
++    for change_return in [false, true] {
++        let mut changed = original.clone();
++        let changed_alternate = Arc::make_mut(&mut changed.overloads[0]);
++        if change_return {
++            changed_alternate.return_type = Some(PhpType::parse("int"));
++        } else {
++            changed_alternate.parameters.make_mut()[0].type_hint = Some(PhpType::parse("int"));
++        }
++        assert_eq!(original.overloads.len(), changed.overloads.len());
++        assert!(!original.signature_eq(&changed));
++        let mut original_method = method("__construct");
++        original_method.overloads = original.overloads.clone();
++        let mut changed_method = original_method.clone();
++        changed_method.overloads = changed.overloads;
++        assert!(!original_method.signature_eq(&changed_method));
++    }
++    assert_eq!(
++        alternate.parameters[0].type_hint,
++        Some(PhpType::parse("string"))
++    );
++}
++
++#[test]
++fn overload_substitution_preserves_shared_origin_and_parameter_docs() {
++    let mut parameter = param("$value", "T");
++    parameter.description = Some("The alternate value.".into());
++    let original = Arc::new(CallableOverload {
++        templates: None,
++        self_bound_params: Default::default(),
++        parameters: vec![parameter].into(),
++        return_type: Some(PhpType::parse("T")),
++    });
++    let unchanged = Arc::new(CallableOverload {
++        templates: None,
++        self_bound_params: Default::default(),
++        parameters: vec![param("$other", "int")].into(),
++        return_type: Some(PhpType::parse("int")),
++    });
++    let mut alternatives = vec![original.clone(), unchanged.clone()];
++    let mut owner = method("__construct");
++    owner.overloads = alternatives.clone();
++    assert!(crate::inheritance::method_references_params(
++        &owner,
++        &["T".into()]
++    ));
++    crate::inheritance::apply_substitution_to_overloads(
++        &mut alternatives,
++        &HashMap::from([("T".to_string(), PhpType::parse("string"))]),
++    );
++    assert!(!Arc::ptr_eq(&original, &alternatives[0]));
++    assert!(Arc::ptr_eq(&unchanged, &alternatives[1]));
++    assert_eq!(alternatives[0].return_type, Some(PhpType::parse("string")));
++    assert_eq!(
++        alternatives[0].parameters[0].type_hint,
++        Some(PhpType::parse("string"))
++    );
++    assert_eq!(
++        alternatives[0].parameters[0].description.as_deref(),
++        Some("The alternate value.")
++    );
++    assert_eq!(original.return_type, Some(PhpType::parse("T")));
++    assert_eq!(original.parameters[0].type_hint, Some(PhpType::parse("T")));
++}
++
++#[test]
++fn overload_generic_contract_changes_invalidate_but_callsite_constraints_do_not() {
++    let templates = CallableTemplateInfo::optional(
++        vec![atom("T")],
++        [(atom("T"), PhpType::parse("object"))]
++            .into_iter()
++            .collect(),
++        vec![(atom("T"), atom("$value"))],
++        vec![(atom("T"), PhpType::parse("object"))].into_boxed_slice(),
++    )
++    .unwrap();
++    let mut original = func("pick");
++    original.overloads.push(Arc::new(CallableOverload {
++        parameters: vec![param("$value", "T")].into(),
++        return_type: Some(PhpType::parse("T")),
++        templates: Some(templates),
++        self_bound_params: Default::default(),
++    }));
++    for change in 0..4 {
++        let mut changed = original.clone();
++        let alternate = Arc::make_mut(&mut changed.overloads[0]);
++        let metadata = Arc::make_mut(alternate.templates.as_mut().unwrap());
++        match change {
++            0 => metadata.template_params.push(atom("U")),
++            1 => {
++                metadata
++                    .template_param_bounds
++                    .insert(atom("T"), PhpType::parse("string"));
++            }
++            2 => metadata.template_bindings[0].1 = atom("$different"),
++            _ => metadata.template_param_defaults[0].1 = PhpType::parse("string"),
++        }
++        assert!(!original.signature_eq(&changed));
++    }
++    let mut resolved = original.clone();
++    Arc::make_mut(&mut resolved.overloads[0])
++        .self_bound_params
++        .insert(atom("$value"), None);
++    assert!(original.signature_eq(&resolved));
++    assert!(
++        CallableTemplateInfo::optional(Vec::new(), Default::default(), Vec::new(), Box::default())
++            .is_none()
++    );
++}
+ 
+ /// Helper: create a minimal FunctionInfo for testing signature_eq.
+ fn func(name: &str) -> FunctionInfo {
+diff --git a/tests/integration/php_version.rs b/tests/integration/php_version.rs
+--- a/tests/integration/php_version.rs
++++ b/tests/integration/php_version.rs
+@@ -571,11 +571,40 @@
+ "#;
+ 
+     let functions = backend.parse_functions_versioned(stub_content, None);
+-    assert_eq!(
+-        functions.len(),
+-        2,
+-        "without version filtering, both variants should be present"
+-    );
++    assert_eq!(functions.len(), 1, "variants share one callable identity");
++    assert_eq!(
++        functions[0].overloads.len(),
++        1,
++        "without version filtering, the alternate declaration must be retained"
++    );
++    assert_eq!(
++        functions[0].return_type_str().as_deref(),
++        Some("array|false")
++    );
++    assert_eq!(
++        functions[0].overloads[0]
++            .return_type
++            .as_ref()
++            .map(ToString::to_string)
++            .as_deref(),
++        Some("array")
++    );
++
++    for (version, expected_return) in [
++        (PhpVersion::new(7, 4), "array|false"),
++        (PhpVersion::new(8, 0), "array"),
++    ] {
++        let filtered = backend.parse_functions_versioned(stub_content, Some(version));
++        assert_eq!(filtered.len(), 1);
++        assert!(
++            filtered[0].overloads.is_empty(),
++            "excluded version must not survive as an overload"
++        );
++        assert_eq!(
++            filtered[0].return_type_str().as_deref(),
++            Some(expected_return)
++        );
++    }
+ }
+ 
+ // ─── Method parameter version filtering ─────────────────────────────────────
+diff --git a/tests/integration/signature_help.rs b/tests/integration/signature_help.rs
+--- a/tests/integration/signature_help.rs
++++ b/tests/integration/signature_help.rs
+@@ -2090,3 +2090,847 @@
+         "(string $label = 'plain', string ...$items): string"
+     );
+ }
++
++const OVERLOAD_NAMED_STUB: &str = r#"<?php
++function namedfit(string $first, int $count): int {}
++function namedfit(string $první, string $druhý): string {}
++"#;
++
++fn overload_backend(name: &'static str, source: &'static str) -> phpantom_lsp::Backend {
++    let backend = create_test_backend_with_function_stubs();
++    backend.stub_function_index_mut().insert(name, source);
++    backend
++}
++
++async fn overload_help(
++    backend: &phpantom_lsp::Backend,
++    name: &str,
++    marked_call: &str,
++) -> Option<SignatureHelp> {
++    let prefix = marked_call.split_once("<caret>").unwrap().0;
++    let text = format!("<?php\n{}\n", marked_call.replace("<caret>", ""));
++    let uri = Url::parse(&format!("file:///signature_overload_{name}.php")).unwrap();
++    sig_help_at(
++        backend,
++        &uri,
++        &text,
++        1,
++        prefix.encode_utf16().count() as u32,
++    )
++    .await
++}
++
++fn overload_parameter_labels(help: &SignatureHelp) -> Vec<Vec<String>> {
++    help.signatures
++        .iter()
++        .map(|signature| {
++            let utf16 = signature.label.encode_utf16().collect::<Vec<_>>();
++            signature
++                .parameters
++                .as_ref()
++                .unwrap()
++                .iter()
++                .map(|parameter| {
++                    let ParameterLabel::LabelOffsets([start, end]) = &parameter.label else {
++                        panic!("stub parameter labels must retain UTF-16 offset ranges");
++                    };
++                    let units = utf16
++                        .get(*start as usize..*end as usize)
++                        .expect("overload parameter range exceeds its own UTF-16 label");
++                    String::from_utf16(units)
++                        .expect("overload parameter range splits a surrogate pair")
++                })
++                .collect()
++        })
++        .collect()
++}
++
++#[tokio::test]
++async fn signature_overload_stub_variants_keep_utf16_labels_returns_and_parameter_docs() {
++    let backend = overload_backend(
++        "displayfit",
++        r#"<?php
++/**
++ * @param string $první First segment for the text variant.
++ * @param string $druhý Second segment for the text variant.
++ */
++function displayfit(string $první, string $druhý = '🐘'): string {}
++/**
++ * @param array $položky Items for the array variant.
++ */
++function displayfit(array $položky): array {}
++"#,
++    );
++    let help = overload_help(&backend, "docs", "displayfit('A', <caret>);")
++        .await
++        .unwrap();
++    assert_eq!(
++        help.signatures
++            .iter()
++            .map(|s| s.label.as_str())
++            .collect::<Vec<_>>(),
++        vec![
++            "(string $první, string $druhý = '🐘'): string",
++            "(array $položky): array"
++        ]
++    );
++    assert_eq!(
++        overload_parameter_labels(&help),
++        vec![
++            vec!["string $první", "string $druhý = '🐘'"],
++            vec!["array $položky"]
++        ]
++    );
++    assert_eq!(help.active_signature, Some(0));
++    assert_eq!(help.active_parameter, Some(1));
++    for (signature, expected_docs) in help.signatures.iter().zip([
++        vec![
++            "First segment for the text variant.",
++            "Second segment for the text variant.",
++        ],
++        vec!["Items for the array variant."],
++    ]) {
++        let docs = signature
++            .parameters
++            .as_ref()
++            .unwrap()
++            .iter()
++            .map(
++                |parameter| match parameter.documentation.as_ref().unwrap() {
++                    Documentation::MarkupContent(content) => content.value.as_str(),
++                    Documentation::String(content) => content.as_str(),
++                },
++            )
++            .collect::<Vec<_>>();
++        assert_eq!(docs, expected_docs);
++    }
++}
++
++#[tokio::test]
++async fn signature_overload_first_applicable_count_handles_required_optional_and_variadic() {
++    const SOURCE: &str = r#"<?php
++function countfit(int $first, int $second): int {}
++function countfit(string $only = 'default'): string {}
++function countfit(bool ...$tail): bool {}
++"#;
++    for (index, call, expected_signature, expected_active) in [
++        (0, "countfit(<caret>);", 1, 0),
++        (1, "countfit('one'<caret>);", 1, 0),
++        (2, "countfit(1, 2<caret>);", 0, 1),
++        (3, "countfit(true, false, true<caret>);", 2, 0),
++    ] {
++        let backend = overload_backend("countfit", SOURCE);
++        let help = overload_help(&backend, &format!("counts_{index}"), call)
++            .await
++            .unwrap();
++        assert_eq!(help.signatures.len(), 3);
++        assert_eq!(help.active_signature, Some(expected_signature), "{call}");
++        assert_eq!(help.active_parameter, Some(expected_active), "{call}");
++    }
++}
++
++#[tokio::test]
++async fn signature_overload_zero_argument_variant_is_selected_before_variadic_fallback() {
++    let backend = overload_backend(
++        "zerofit",
++        r#"<?php
++function zerofit(int $required): int {}
++function zerofit(): string {}
++function zerofit(string ...$tail): array {}
++"#,
++    );
++    let help = overload_help(&backend, "zero", "zerofit(<caret>);")
++        .await
++        .unwrap();
++    assert_eq!(
++        help.signatures
++            .iter()
++            .map(|s| s.label.as_str())
++            .collect::<Vec<_>>(),
++        vec![
++            "(int $required): int",
++            "(): string",
++            "(string ...$tail): array"
++        ]
++    );
++    assert_eq!(help.active_signature, Some(1));
++    assert_eq!(
++        help.active_parameter, None,
++        "zero-parameter active signatures have no parameter to highlight"
++    );
++    assert_eq!(help.signatures[1].active_parameter, None);
++}
++
++#[tokio::test]
++async fn signature_overload_each_signature_bounds_its_own_active_parameter() {
++    let backend = overload_backend(
++        "boundsfit",
++        r#"<?php
++function boundsfit(int $first, int $second): int {}
++function boundsfit(string $only): string {}
++function boundsfit(bool ...$tail): bool {}
++function boundsfit(): array {}
++"#,
++    );
++    let help = overload_help(&backend, "bounds", "boundsfit(true, false, true<caret>);")
++        .await
++        .unwrap();
++    assert_eq!(help.signatures.len(), 4);
++    assert_eq!(help.active_signature, Some(2));
++    assert_eq!(help.active_parameter, Some(0));
++    assert_eq!(
++        help.signatures
++            .iter()
++            .map(|s| s.active_parameter)
++            .collect::<Vec<_>>(),
++        vec![Some(1), Some(0), Some(0), None]
++    );
++    for signature in &help.signatures {
++        if let Some(active) = signature.active_parameter {
++            assert!((active as usize) < signature.parameters.as_ref().unwrap().len());
++        }
++    }
++}
++
++#[tokio::test]
++async fn signature_overload_named_argument_can_select_alternate_and_reordered_roles() {
++    for (index, call, expected_active) in [
++        (0, "namedfit(druhý: <caret>);", 1),
++        (1, "namedfit(druhý: 'B', první: <caret>);", 0),
++        (2, "namedfit(první: 'A', druhý: <caret>);", 1),
++    ] {
++        let backend = overload_backend("namedfit", OVERLOAD_NAMED_STUB);
++        let help = overload_help(&backend, &format!("named_{index}"), call)
++            .await
++            .expect("a named argument found in an alternate must retain signature help");
++        assert_eq!(help.signatures.len(), 2);
++        assert_eq!(help.active_signature, Some(1));
++        assert_eq!(help.active_parameter, Some(expected_active), "{call}");
++        assert_eq!(
++            overload_parameter_labels(&help)[1],
++            vec!["string $první", "string $druhý"]
++        );
++        assert_eq!(help.signatures[1].active_parameter, Some(expected_active));
++    }
++}
++
++#[tokio::test]
++async fn signature_overload_unknown_named_argument_control_does_not_select_unrelated_parameter() {
++    let backend = overload_backend("namedfit", OVERLOAD_NAMED_STUB);
++    assert!(
++        overload_help(&backend, "unknown_named", "namedfit(unknown: <caret>);")
++            .await
++            .is_none()
++    );
++}
++
++#[tokio::test]
++async fn signature_overload_version_filter_keeps_only_available_variants() {
++    const SOURCE: &str = r#"<?php
++use JetBrains\PhpStorm\Internal\PhpStormStubsElementAvailable;
++#[PhpStormStubsElementAvailable(to: '7.4')]
++function versionfit(string $legacy): string {}
++#[PhpStormStubsElementAvailable(from: '8.0')]
++function versionfit(int $modern): int {}
++#[PhpStormStubsElementAvailable(from: '8.0')]
++function versionfit(array $modern, array $options = []): array {}
++"#;
++    for (index, version, expected) in [
++        (
++            0,
++            phpantom_lsp::types::PhpVersion::new(7, 4),
++            vec!["(string $legacy): string"],
++        ),
++        (
++            1,
++            phpantom_lsp::types::PhpVersion::new(8, 3),
++            vec![
++                "(int $modern): int",
++                "(array $modern, array $options = []): array",
++            ],
++        ),
++    ] {
++        let backend = overload_backend("versionfit", SOURCE);
++        backend.set_php_version(version);
++        let help = overload_help(
++            &backend,
++            &format!("version_{index}"),
++            "versionfit(1<caret>);",
++        )
++        .await
++        .unwrap();
++        assert_eq!(
++            help.signatures
++                .iter()
++                .map(|s| s.label.as_str())
++                .collect::<Vec<_>>(),
++            expected
++        );
++        assert_eq!(help.active_signature, Some(0));
++        assert_eq!(help.active_parameter, Some(0));
++    }
++}
++
++#[tokio::test]
++async fn signature_overload_single_unicode_stub_control_retains_existing_behavior() {
++    let backend = overload_backend(
++        "singlefit",
++        r#"<?php
++function singlefit(string $první, string $druhý = '🐘'): string {}
++"#,
++    );
++    let help = overload_help(&backend, "single", "singlefit(druhý: <caret>);")
++        .await
++        .unwrap();
++    assert_eq!(help.signatures.len(), 1);
++    assert_eq!(
++        overload_parameter_labels(&help),
++        vec![vec!["string $první", "string $druhý = '🐘'"]]
++    );
++    assert_eq!(help.active_signature, Some(0));
++    assert_eq!(help.active_parameter, Some(1));
++}
++
++#[tokio::test]
++async fn signature_overload_equal_arity_function_variants_preserve_distinct_returns_and_docs() {
++    let backend = overload_backend(
++        "equalfit",
++        r#"<?php
++/** @param string $value Text variant input. */
++function equalfit(string $value): string {}
++/** @param array $value Array variant input. */
++function equalfit(array $value): array {}
++"#,
++    );
++    let help = overload_help(&backend, "equal_arity", "equalfit('text'<caret>);")
++        .await
++        .unwrap();
++    assert_eq!(
++        help.signatures
++            .iter()
++            .map(|s| s.label.as_str())
++            .collect::<Vec<_>>(),
++        vec!["(string $value): string", "(array $value): array"]
++    );
++    assert_eq!(
++        overload_parameter_labels(&help),
++        vec![vec!["string $value"], vec!["array $value"]]
++    );
++    assert_eq!(
++        help.active_signature,
++        Some(0),
++        "equal applicable arities retain declaration order"
++    );
++    for (signature, expected) in help
++        .signatures
++        .iter()
++        .zip(["Text variant input.", "Array variant input."])
++    {
++        let parameter = &signature.parameters.as_ref().unwrap()[0];
++        let actual = match parameter.documentation.as_ref().unwrap() {
++            Documentation::MarkupContent(content) => content.value.as_str(),
++            Documentation::String(content) => content.as_str(),
++        };
++        assert_eq!(actual, expected);
++    }
++}
++
++const OVERLOAD_CONSTRUCTOR_STUB: &str = r#"<?php
++class PeriodFit {
++    /**
++     * @param DateTimeInterface $start First date for an end-date period.
++     * @param DateInterval $interval Interval for an end-date period.
++     * @param DateTimeInterface $end Last date.
++     * @param int $options End-date flags.
++     */
++    public function __construct(DateTimeInterface $start, DateInterval $interval, DateTimeInterface $end, int $options = 0) {}
++    /**
++     * @param DateTimeInterface $start First date for a recurrence period.
++     * @param DateInterval $interval Interval for a recurrence period.
++     * @param int $recurrences Recurrence count.
++     * @param int $options Recurrence flags.
++     */
++    public function __construct(DateTimeInterface $start, DateInterval $interval, int $recurrences, int $options = 0) {}
++    /**
++     * @param string $isostr ISO period specification.
++     * @param int $options ISO period flags.
++     */
++    public function __construct(string $isostr, int $options = 0) {}
++}
++"#;
++
++fn overload_constructor_backend() -> phpantom_lsp::Backend {
++    phpantom_lsp::Backend::new_test_with_stubs(std::collections::HashMap::from([(
++        "PeriodFit",
++        OVERLOAD_CONSTRUCTOR_STUB,
++    )]))
++}
++
++#[tokio::test]
++async fn signature_overload_constructor_variants_keep_equal_arity_contracts_and_docs() {
++    let backend = overload_constructor_backend();
++    let help = overload_help(&backend, "constructor", "new PeriodFit(<caret>);")
++        .await
++        .unwrap();
++    assert_eq!(
++        overload_parameter_labels(&help),
++        vec![
++            vec![
++                "DateTimeInterface $start",
++                "DateInterval $interval",
++                "DateTimeInterface $end",
++                "int $options = 0"
++            ],
++            vec![
++                "DateTimeInterface $start",
++                "DateInterval $interval",
++                "int $recurrences",
++                "int $options = 0"
++            ],
++            vec!["string $isostr", "int $options = 0"],
++        ]
++    );
++    assert_eq!(
++        help.signatures
++            .iter()
++            .map(|s| s.label.as_str())
++            .collect::<Vec<_>>(),
++        vec![
++            "(DateTimeInterface $start, DateInterval $interval, DateTimeInterface $end, int $options = 0): mixed",
++            "(DateTimeInterface $start, DateInterval $interval, int $recurrences, int $options = 0): mixed",
++            "(string $isostr, int $options = 0): mixed",
++        ]
++    );
++    for (signature, expected_docs) in help.signatures.iter().zip([
++        vec![
++            "First date for an end-date period.",
++            "Interval for an end-date period.",
++            "Last date.",
++            "End-date flags.",
++        ],
++        vec![
++            "First date for a recurrence period.",
++            "Interval for a recurrence period.",
++            "Recurrence count.",
++            "Recurrence flags.",
++        ],
++        vec!["ISO period specification.", "ISO period flags."],
++    ]) {
++        let docs = signature
++            .parameters
++            .as_ref()
++            .unwrap()
++            .iter()
++            .map(
++                |parameter| match parameter.documentation.as_ref().unwrap() {
++                    Documentation::MarkupContent(content) => content.value.as_str(),
++                    Documentation::String(content) => content.as_str(),
++                },
++            )
++            .collect::<Vec<_>>();
++        assert_eq!(docs, expected_docs);
++    }
++}
++
++#[tokio::test]
++async fn signature_overload_constructor_named_parameters_select_alternate_variants() {
++    for (index, call, signature, active) in [
++        (0, "new PeriodFit(recurrences: <caret>);", 1, 2),
++        (1, "new PeriodFit(recurrences: 3, start: <caret>);", 1, 0),
++        (2, "new PeriodFit(isostr: <caret>);", 2, 0),
++        (3, "new PeriodFit(options: 0, isostr: <caret>);", 2, 0),
++    ] {
++        let backend = overload_constructor_backend();
++        let help = overload_help(&backend, &format!("constructor_named_{index}"), call)
++            .await
++            .expect("constructor alternate names must retain signature help");
++        assert_eq!(help.signatures.len(), 3);
++        assert_eq!(help.active_signature, Some(signature), "{call}");
++        assert_eq!(help.active_parameter, Some(active), "{call}");
++        assert_eq!(
++            help.signatures[signature as usize].active_parameter,
++            Some(active)
++        );
++    }
++}
++
++#[tokio::test]
++async fn signature_overload_inherited_constructor_keeps_all_parent_alternatives() {
++    const CHILD: &str = "<?php class ChildPeriodFit extends PeriodFit {}";
++    let backend = phpantom_lsp::Backend::new_test_with_stubs(std::collections::HashMap::from([
++        ("PeriodFit", OVERLOAD_CONSTRUCTOR_STUB),
++        ("ChildPeriodFit", CHILD),
++    ]));
++    let help = overload_help(
++        &backend,
++        "inherited_constructor",
++        "new ChildPeriodFit(isostr: <caret>);",
++    )
++    .await
++    .unwrap();
++    assert_eq!(
++        overload_parameter_labels(&help),
++        vec![
++            vec![
++                "DateTimeInterface $start",
++                "DateInterval $interval",
++                "DateTimeInterface $end",
++                "int $options = 0"
++            ],
++            vec![
++                "DateTimeInterface $start",
++                "DateInterval $interval",
++                "int $recurrences",
++                "int $options = 0"
++            ],
++            vec!["string $isostr", "int $options = 0"],
++        ]
++    );
++    assert_eq!(help.active_signature, Some(2));
++    assert_eq!(help.active_parameter, Some(0));
++    let description = &help.signatures[2].parameters.as_ref().unwrap()[0].documentation;
++    assert!(
++        matches!(description, Some(Documentation::MarkupContent(content)) if content.value.contains("ISO period specification."))
++    );
++}
++
++#[tokio::test]
++async fn signature_overload_constructor_version_exclusivity_filters_before_selection() {
++    const SOURCE: &str = r#"<?php
++use JetBrains\PhpStorm\Internal\PhpStormStubsElementAvailable;
++class VersionPeriodFit {
++    #[PhpStormStubsElementAvailable(to: '8.2')]
++    public function __construct(string $legacy) {}
++    #[PhpStormStubsElementAvailable(from: '8.3')]
++    public function __construct(string $isostr, int $options = 0) {}
++    public function __construct(array $segments) {}
++}
++"#;
++    for (index, version, call, expected) in [
++        (
++            0,
++            phpantom_lsp::types::PhpVersion::new(8, 2),
++            "new VersionPeriodFit(legacy: <caret>);",
++            vec![vec!["string $legacy"], vec!["array $segments"]],
++        ),
++        (
++            1,
++            phpantom_lsp::types::PhpVersion::new(8, 3),
++            "new VersionPeriodFit(isostr: <caret>);",
++            vec![
++                vec!["string $isostr", "int $options = 0"],
++                vec!["array $segments"],
++            ],
++        ),
++    ] {
++        let backend = phpantom_lsp::Backend::new_test_with_stubs(std::collections::HashMap::from(
++            [("VersionPeriodFit", SOURCE)],
++        ));
++        backend.set_php_version(version);
++        let help = overload_help(&backend, &format!("constructor_version_{index}"), call)
++            .await
++            .unwrap();
++        assert_eq!(overload_parameter_labels(&help), expected);
++        assert_eq!(help.active_signature, Some(0));
++        assert_eq!(help.active_parameter, Some(0));
++    }
++}
++
++#[tokio::test]
++async fn signature_overload_generic_parent_constructor_substitutes_every_alternative() {
++    const SOURCE: &str = r#"<?php
++/** @template T */
++class TemplatePeriodFit {
++    /** @param T $value First generic value. */
++    public function __construct($value) {}
++    /**
++     * @param T $value Second generic value.
++     * @param int $options Generic period flags.
++     */
++    public function __construct($value, int $options) {}
++}
++/** @extends TemplatePeriodFit<string> */
++class StringPeriodFit extends TemplatePeriodFit {}
++"#;
++    let backend = phpantom_lsp::Backend::new_test_with_stubs(std::collections::HashMap::from([
++        ("TemplatePeriodFit", SOURCE),
++        ("StringPeriodFit", SOURCE),
++    ]));
++    let help = overload_help(
++        &backend,
++        "generic_constructor",
++        "new StringPeriodFit(value: 'text', options: <caret>);",
++    )
++    .await
++    .unwrap();
++    assert_eq!(
++        overload_parameter_labels(&help),
++        vec![vec!["$value"], vec!["$value", "int $options"]]
++    );
++    assert_eq!(help.active_signature, Some(1));
++    assert_eq!(help.active_parameter, Some(1));
++    for (signature, marker) in help
++        .signatures
++        .iter()
++        .zip(["First generic value.", "Second generic value."])
++    {
++        let docs = match signature.parameters.as_ref().unwrap()[0]
++            .documentation
++            .as_ref()
++            .unwrap()
++        {
++            Documentation::MarkupContent(content) => content.value.as_str(),
++            Documentation::String(content) => content.as_str(),
++        };
++        assert!(
++            docs.contains("`string`"),
++            "inherited generic must resolve in every alternative: {docs}"
++        );
++        assert!(
++            docs.contains(marker),
++            "alternate parameter description must survive: {docs}"
++        );
++    }
++}
++
++#[tokio::test]
++async fn signature_overload_mixed_positional_named_roles_skip_already_occupied_primary_parameter() {
++    let backend = overload_backend(
++        "rolefit",
++        r#"<?php
++/** @param int $value Primary declaration value. */
++function rolefit(int $value): int {}
++/**
++ * @param int $context Alternate positional context.
++ * @param string $value Alternate named value.
++ */
++function rolefit(int $context, string $value): string {}
++"#,
++    );
++    let help = overload_help(
++        &backend,
++        "mixed_positional_named_roles",
++        "rolefit(1, value: <caret>);",
++    )
++    .await
++    .unwrap();
++    assert_eq!(
++        overload_parameter_labels(&help),
++        vec![vec!["int $value"], vec!["int $context", "string $value"]]
++    );
++    let descriptions = help
++        .signatures
++        .iter()
++        .map(|signature| {
++            signature
++                .parameters
++                .as_ref()
++                .unwrap()
++                .iter()
++                .map(
++                    |parameter| match parameter.documentation.as_ref().unwrap() {
++                        Documentation::MarkupContent(content) => content.value.as_str(),
++                        Documentation::String(content) => content.as_str(),
++                    },
++                )
++                .collect::<Vec<_>>()
++        })
++        .collect::<Vec<_>>();
++    assert_eq!(
++        descriptions,
++        vec![
++            vec!["Primary declaration value."],
++            vec!["Alternate positional context.", "Alternate named value."],
++        ]
++    );
++    assert_eq!(
++        help.active_signature,
++        Some(1),
++        "the positional first argument already occupies the primary $value; only the alternate admits named value"
++    );
++    assert_eq!(help.active_parameter, Some(1));
++    assert_eq!(help.signatures[1].active_parameter, Some(1));
++    assert!(help.signatures[1].label.ends_with(": string"));
++}
++
++const REVIEW_GENERIC_OVERLOAD_STUB: &str = r#"<?php
++/**
++ * @template T
++ * @param T $first
++ * @return T
++ */
++function genericfit($first, string $second): mixed {}
++/**
++ * @template T
++ * @param T $second
++ * @return T
++ */
++function genericfit(int $first, $second): mixed {}
++"#;
++
++#[test]
++fn signature_overload_generic_alternate_binds_its_own_parameter_in_argument_diagnostics() {
++    let backend = overload_backend("genericfit", REVIEW_GENERIC_OVERLOAD_STUB);
++    let diagnostics = crate::common::collect_diagnostics_with(
++        &backend,
++        "<?php\nclass Payload {}\ngenericfit(1, new Payload());\n",
++        phpantom_lsp::Backend::collect_argument_type_diagnostics,
++    );
++    let mismatches = crate::common::messages_with_code(&diagnostics, "type_mismatch_argument");
++    assert!(
++        mismatches.is_empty(),
++        "the alternate binds T to Payload through its own second parameter, not the primary's first integer: {mismatches:?}"
++    );
++}
++
++#[test]
++fn signature_overload_generic_alternate_does_not_hide_call_rejected_by_every_declaration() {
++    let backend = overload_backend("genericfit", REVIEW_GENERIC_OVERLOAD_STUB);
++    let diagnostics = crate::common::collect_diagnostics_with(
++        &backend,
++        "<?php\nclass Payload {}\ngenericfit('bad', new Payload());\n",
++        phpantom_lsp::Backend::collect_argument_type_diagnostics,
++    );
++    let mismatches = crate::common::messages_with_code(&diagnostics, "type_mismatch_argument");
++    assert!(
++        !mismatches.is_empty(),
++        "primary rejects the Payload second argument and alternate rejects the string first argument; a generic alternate must not suppress both failures"
++    );
++}
++
++#[tokio::test]
++async fn signature_overload_optional_slot_does_not_legalize_duplicate_named_role() {
++    let backend = overload_backend(
++        "optionalrole",
++        r#"<?php
++function optionalrole(int $value, bool $flag = false): int {}
++function optionalrole(int $context, string $value): string {}
++"#,
++    );
++    let help = overload_help(
++        &backend,
++        "optional_role",
++        "optionalrole(1, value: <caret>);",
++    )
++    .await
++    .unwrap();
++    assert_eq!(help.signatures.len(), 2);
++    assert_eq!(help.active_signature, Some(1));
++    assert_eq!(help.active_parameter, Some(1));
++}
++
++#[test]
++fn signature_overload_commented_named_args_keep_valid_whole_alternative() {
++    let backend = overload_backend(
++        "commentfit",
++        r#"<?php
++function commentfit(int $label, string $count): int {}
++function commentfit(string $label, int $count): string {}
++"#,
++    );
++    let diagnostics = crate::common::collect_diagnostics_with(
++        &backend,
++        "<?php declare(strict_types=1); commentfit(/* note */ count: 1, label: 'x');",
++        phpantom_lsp::Backend::collect_argument_type_diagnostics,
++    );
++    assert!(
++        crate::common::messages_with_code(&diagnostics, "type_mismatch_argument").is_empty(),
++        "leading comment must not turn a named argument into an occupied positional role: {diagnostics:?}"
++    );
++}
++
++#[test]
++fn signature_overload_commented_named_args_retain_invalid_call_diagnostic() {
++    let backend = overload_backend(
++        "commentfit",
++        r#"<?php
++function commentfit(int $label, string $count): int {}
++function commentfit(string $label, int $count): string {}
++"#,
++    );
++    let diagnostics = crate::common::collect_diagnostics_with(
++        &backend,
++        "<?php declare(strict_types=1); class Payload {} commentfit(/* note */ count: new Payload(), label: new Payload());",
++        phpantom_lsp::Backend::collect_argument_type_diagnostics,
++    );
++    assert!(!crate::common::messages_with_code(&diagnostics, "type_mismatch_argument").is_empty());
++}
++
++#[tokio::test]
++async fn signature_overload_native_strtr_names_and_count_select_array_form() {
++    let backend = crate::common::create_test_backend_with_full_stubs();
++    let help = overload_help(
++        &backend,
++        "native_strtr",
++        "strtr(string: 'abc', from: <caret>);",
++    )
++    .await
++    .unwrap();
++    assert_eq!(help.signatures.len(), 2);
++    assert_eq!(help.active_signature, Some(1));
++    let labels = overload_parameter_labels(&help);
++    assert!(labels[1][1].contains("$from"), "{labels:?}");
++    assert!(
++        overload_help(
++            &backend,
++            "native_strtr_invalid",
++            "strtr(string: 'abc', replace_pairs: <caret>);"
++        )
++        .await
++        .is_none()
++    );
++}
++
++#[tokio::test]
++async fn signature_overload_native_dateperiod_uses_runtime_named_slots() {
++    let backend = crate::common::create_test_backend_with_full_stubs();
++    let help = overload_help(
++        &backend,
++        "native_period",
++        "new \\DatePeriod(start: <caret>);",
++    )
++    .await
++    .unwrap();
++    assert_eq!(help.signatures.len(), 3);
++    assert_eq!(help.active_signature, Some(2));
++    let labels = overload_parameter_labels(&help);
++    assert!(labels[1][2].contains("$end"), "{labels:?}");
++    assert!(labels[2][0].contains("$start"), "{labels:?}");
++    assert!(labels[2][1].contains("$interval"), "{labels:?}");
++    for call in [
++        "new \\DatePeriod(isostr: <caret>);",
++        "new \\DatePeriod(recurrences: <caret>);",
++    ] {
++        assert!(
++            overload_help(&backend, "native_period_invalid", call)
++                .await
++                .is_none()
++        );
++    }
++}
++
++#[test]
++fn signature_overload_comment_commas_preserve_whole_argument_roles() {
++    for call in [
++        "commentfit(/* note, extra */ count: 1, label: 'x');",
++        "commentfit(count /* note, extra */: 1, label: 'x');",
++        "commentfit(count: 1 /* note, extra */, label: 'x');",
++    ] {
++        let backend = overload_backend(
++            "commentfit",
++            r#"<?php
++function commentfit(int $label, string $count): int {}
++function commentfit(string $label, int $count): string {}
++"#,
++        );
++        let diagnostics = crate::common::collect_diagnostics_with(
++            &backend,
++            &format!("<?php declare(strict_types=1); {call}"),
++            phpantom_lsp::Backend::collect_argument_type_diagnostics,
++        );
++        assert!(
++            crate::common::messages_with_code(&diagnostics, "type_mismatch_argument").is_empty(),
++            "comment commas must not split argument roles: {call}: {diagnostics:?}"
++        );
++    }
++}

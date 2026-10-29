@@ -351,7 +351,7 @@ async fn initialize_and_incremental_sync() {
     let s = h.launcher.state("mock");
 
     let init = &s.requested("initialize")[0];
-    assert_eq!(init["clientInfo"]["name"], "OpenIDEA");
+    assert_eq!(init["clientInfo"]["name"], "OpenStorm");
     assert_eq!(init["capabilities"]["general"]["positionEncodings"], json!(["utf-16"]));
     assert_eq!(init["capabilities"]["textDocument"]["completion"]["completionItem"]["snippetSupport"], true);
     assert_eq!(init["initializationOptions"], json!({ "flag": true, "nested": { "deep": 1 } }));
@@ -1832,4 +1832,159 @@ async fn rename_edits_files_outside_the_analysis_scope() {
     paths.sort();
     assert_eq!(paths, vec![a, b.clone()]);
     eventually(|| uris(&s.notified("textDocument/didClose")) == vec![uri_of(&b)]).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn phpantom_builtins_keep_identity_and_target_context() {
+    let mut caps = incremental_caps();
+    caps["experimental"] = json!({"phpWorkbenchBuiltins": true, "phpWorkbenchActiveTarget": true});
+    let h = harness_for("php", "php", &[("phpantom", caps)], &[]);
+    let (doc, _) = h.open("main.php", "<?php new DateTime();\n");
+    h.wait_status("phpantom", ServerStatus::Ready).await;
+    let s = h.launcher.state("phpantom");
+    let uri = "phpantom-stub://DateTime";
+    s.respond("textDocument/definition", json!([{ "uri": uri, "range": php_range(2,6,2,14) }]));
+    let defs = h.mgr.goto(doc, Pos::new(0, 12), GotoKind::Definition).await.unwrap();
+    assert_eq!(defs[0].uri.as_deref(), Some(uri));
+    s.respond("phpWorkbench/builtin", json!({"uri": "phpantom-stub://Other", "content": "<?php class Other {}"}));
+    assert!(h.mgr.virtual_document(uri).await.is_err());
+    s.respond("phpWorkbench/builtin", json!({"uri": uri, "content": "<?php\n\nclass DateTime {}\n"}));
+    s.respond("phpWorkbench/activeTarget", json!({"php_version": "8.3", "engine_version": "0.11.1-workbench.114"}));
+    let vd = h.mgr.virtual_document(uri).await.unwrap();
+    assert_eq!(vd.title, "DateTime.php");
+    assert_eq!(vd.language_id.as_str(), "php");
+    assert_eq!(vd.description.as_deref(), Some("PHP 8.3 built-in declarations (PHPantom)"));
+    assert_eq!(s.requested("phpWorkbench/activeTarget")[0], json!({"uri": uri}));
+    assert_eq!(h.mgr.virtual_document(uri).await.unwrap(), vd);
+    assert_eq!(s.requested("phpWorkbench/builtin").len(), 2);
+    let vdoc = DocId::next();
+    h.mgr.did_open_virtual(vdoc, uri, &vd.language_id, 0, &vd.text);
+    eventually(|| s.docs.lock().contains_key(uri)).await;
+    h.mgr.did_close(vdoc);
+    assert!(s.notified("textDocument/didChange").is_empty());
+    assert!(h.mgr.virtual_document("phpantom-stub://const/FOO").await.is_err());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn php_rename_preserves_cross_file_utf16_ranges() {
+    let h = harness_for("php", "php", &[("phpantom", incremental_caps())], &[]);
+    let (doc, path) = h.open("main.php", "<?php $label = '😀'; $invoice->total();\n");
+    let (_, decl) = h.open("Invoice.php", "<?php class Invoice { function total() {} }\n");
+    h.wait_status("phpantom", ServerStatus::Ready).await;
+    let s = h.launcher.state("phpantom");
+    s.respond(
+        "textDocument/rename",
+        json!({"changes": {
+            uri_of(&path): [{"range":php_range(0,31,0,36),"newText":"subtotal"}],
+            uri_of(&decl): [{"range":php_range(0,31,0,36),"newText":"subtotal"}]
+        }}),
+    );
+    let edit = h.mgr.rename(doc, Pos::new(0, 31), "subtotal".into()).await.unwrap();
+    assert_eq!(edit.files.len(), 2);
+    assert!(edit.files.iter().all(|f| matches!(f, FileEdit::Edit { edits, .. } if edits[0].new_text == "subtotal" && edits[0].range == rng(0,31,0,36))));
+    assert_eq!(s.requested("textDocument/rename")[0]["newName"], "subtotal");
+}
+
+fn php_range(l0: u32, c0: u32, l1: u32, c1: u32) -> Value {
+    json!({"start":{"line":l0,"character":c0},"end":{"line":l1,"character":c1}})
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn php_checked_rename_sends_exact_open_and_transient_source_receipts() {
+    use sha2::{Digest, Sha256};
+    let mut caps = incremental_caps();
+    caps["experimental"] = json!({"phpWorkbenchRenameChecked":true});
+    let h = harness_for("php", "php", &[("phpantom", caps)], &[]);
+    let original = "<?php $label='😀'; total();\n";
+    let unsaved = "<?php $label='é😀'; total();\n";
+    let (doc, path) = h.open("main.php", original);
+    let other = h.root.join("helper.php");
+    let helper = "<?php function total() {}\n";
+    std::fs::write(&other, helper).unwrap();
+    let candidates = vec![path.clone(), other.clone()];
+    h.mgr.set_candidates_hook(Box::new(move |_, _| ide_lsp::CandidateFiles {
+        files: candidates.clone(),
+        limit_hit: false,
+    }));
+    h.wait_status("phpantom", ServerStatus::Ready).await;
+    h.mgr.did_change(doc, 2, &[ide_text::AppliedChange { range: rng(0, 0, 1, 0), text: unsaved.into() }], &|| {
+        unsaved.into()
+    });
+    let s = h.launcher.state("phpantom");
+    s.respond("phpWorkbench/renameChecked",json!({"changes": {uri_of(&path):[{"range":php_range(0,23,0,28),"newText":"subtotal"}],uri_of(&other):[{"range":php_range(0,15,0,20),"newText":"subtotal"}]}}));
+    let edit = h.mgr.rename(doc, Pos::new(0, 24), "subtotal".into()).await.unwrap();
+    assert_eq!(edit.files.len(), 2);
+    assert!(s.requested("textDocument/rename").is_empty());
+    let request = &s.requested("phpWorkbench/renameChecked")[0];
+    let receipts = request["expectedSources"].as_array().unwrap();
+    assert_eq!(receipts.len(), 2);
+    for (uri, version, text) in [(uri_of(&path), 2, unsaved), (uri_of(&other), 0, helper)] {
+        let receipt = receipts.iter().find(|r| r["uri"] == uri).unwrap();
+        assert_eq!(receipt["version"], version);
+        assert_eq!(receipt["sha256Utf8"], format!("{:x}", Sha256::digest(text.as_bytes())));
+    }
+    eventually(|| s.notified("textDocument/didClose").iter().any(|p| p["textDocument"]["uri"] == uri_of(&other))).await;
+    h.mgr.set_candidates_hook(Box::new(|_, _| ide_lsp::CandidateFiles { files: vec![], limit_hit: true }));
+    assert!(h.mgr.rename(doc, Pos::new(0, 24), "subtotal".into()).await.is_err());
+    assert_eq!(s.requested("phpWorkbench/renameChecked").len(), 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn php_optimize_imports_validates_the_source_receipt_and_target() {
+    let mut caps = incremental_caps();
+    caps["experimental"] = json!({"phpWorkbenchOptimizeImports":true});
+    let h = harness_for("php", "php", &[("phpantom", caps)], &[]);
+    let (doc, path) = h.open("main.php", "<?php use Z\\Unused;\n");
+    h.wait_status("phpantom", ServerStatus::Ready).await;
+    let s = h.launcher.state("phpantom");
+    let uri = uri_of(&path);
+    *s.responder.lock() = Some(Arc::new(move |_, method, params| {
+        (method=="phpWorkbench/optimizeImports").then(||json!({"source":params["expectedSource"],"edit":{"changes":{uri.clone():[{"range":php_range(0,6,0,19),"newText":""}]}}}))
+    }));
+    let query = h
+        .mgr
+        .code_action_query(
+            doc,
+            rng(0, 0, 1, 0),
+            vec!["source.organizeImports".into()],
+            ide_core::CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(query.actions.len(), 1);
+    assert_eq!(query.actions[0].edit.as_ref().unwrap().files.len(), 1);
+    assert!(s.requested("textDocument/codeAction").is_empty());
+    *s.responder.lock() = Some(Arc::new(|_, method, params| {
+        (method == "phpWorkbench/optimizeImports").then(|| {
+            let mut source = params["expectedSource"].clone();
+            source["version"] = json!(999);
+            json!({"source":source,"edit":null})
+        })
+    }));
+    assert!(h.mgr.code_actions(doc, rng(0, 0, 1, 0), vec!["source.organizeImports".into()]).await.is_err());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn php_disk_changes_use_typed_create_change_delete_notifications() {
+    let mut caps = incremental_caps();
+    caps["experimental"] = json!({"phpWorkbenchRenameChecked":true});
+    let h = harness_for("php", "php", &[("phpantom", caps)], &[]);
+    h.open("main.php", "<?php");
+    h.wait_status("phpantom", ServerStatus::Ready).await;
+    let created = h.root.join("new.php");
+    let modified = h.root.join("changed.php");
+    let removed = h.root.join("gone.php");
+    h.mgr.php_files_changed(
+        std::slice::from_ref(&created),
+        std::slice::from_ref(&modified),
+        std::slice::from_ref(&removed),
+    );
+    let s = h.launcher.state("phpantom");
+    eventually(|| !s.notified("workspace/didChangeWatchedFiles").is_empty()).await;
+    assert_eq!(
+        s.notified("workspace/didChangeWatchedFiles")[0],
+        json!({"changes":[
+            {"uri":uri_of(&created),"type":1},{"uri":uri_of(&modified),"type":2},{"uri":uri_of(&removed),"type":3}
+        ]})
+    );
 }

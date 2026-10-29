@@ -1,0 +1,80 @@
+diff --git a/docs/CHANGELOG.md b/docs/CHANGELOG.md
+index 929ebb3..921684f 100644
+--- a/docs/CHANGELOG.md
++++ b/docs/CHANGELOG.md
+@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
+ 
+ ### Fixed
+ 
++- **Type hierarchy opens PHP declarations.** Parent and child source ranges now include class, interface, trait and enum names.
++
+ - **Blade function diagnostics stay on user-written PHP.** Generated escape and directive helpers no longer invent undefined-function errors at template delimiters; actual unresolved functions retain their original positions and component attribute diagnostics remain visible. Contributed by PHP Workbench (local downstream patch).
+ 
+ ### Added
+diff --git a/src/type_hierarchy.rs b/src/type_hierarchy.rs
+index 4456166..144fa02 100644
+--- a/src/type_hierarchy.rs
++++ b/src/type_hierarchy.rs
+@@ -237,8 +237,12 @@ fn build_type_hierarchy_item(
+         let sel_range = Range::new(sel_start, sel_end);
+ 
+         let full_range = if class_info.end_offset > class_info.start_offset {
+-            let start = (class_info.start_offset as usize).min(content.len());
+-            let end = (class_info.end_offset as usize).min(content.len());
++            // Body offsets begin at `{`, after the declaration's name. The
++            // enclosing LSP range must also contain its selection range.
++            let start = kw_off.min(name_start);
++            let end = (class_info.end_offset as usize)
++                .max(name_end)
++                .min(content.len());
+             Range::new(
+                 offset_to_position(content, start),
+                 offset_to_position(content, end),
+diff --git a/tests/integration/type_hierarchy.rs b/tests/integration/type_hierarchy.rs
+index 014715a..9157ed9 100644
+--- a/tests/integration/type_hierarchy.rs
++++ b/tests/integration/type_hierarchy.rs
+@@ -1171,3 +1171,43 @@ async fn subtypes_forget_a_class_edited_to_extend_something_else() {
+ 
+     assert!(subtypes_of(&backend, &items[0]).await.is_empty());
+ }
++
++#[tokio::test]
++async fn hierarchy_ranges_enclose_type_names_for_every_class_like_kind() {
++    let backend = create_test_backend();
++    let uri = Url::parse("file:///hierarchy.php").unwrap();
++    let text = "<?php\n// café 🐘\ninterface Shape {}\ntrait Shared {}\nclass ParentType implements Shape {}\nfinal class Child extends ParentType {}\nenum Status implements Shape { case Ready; }\n";
++    open_php(&backend, &uri, text).await;
++    for (line, column) in [(2, 10), (3, 6), (4, 6), (5, 12), (6, 5)] {
++        let items = prepare_at(&backend, &uri, line, column).await;
++        assert_eq!(items.len(), 1);
++        let item = &items[0];
++        assert!(
++            item.range.start <= item.selection_range.start,
++            "{}: {:?}",
++            item.name,
++            item
++        );
++        assert!(
++            item.selection_range.end <= item.range.end,
++            "{}: {:?}",
++            item.name,
++            item
++        );
++    }
++}
++
++#[tokio::test]
++async fn related_type_ranges_enclose_parent_interface_and_child_names() {
++    let backend = create_test_backend();
++    let uri = Url::parse("file:///hierarchy.php").unwrap();
++    open_php(&backend,&uri,"<?php\ninterface Shape {}\nclass ParentType implements Shape {}\nclass Child extends ParentType {}\n").await;
++    let parent = prepare_at(&backend, &uri, 2, 6).await.remove(0);
++    let mut items = supertypes_of(&backend, &parent).await;
++    items.extend(subtypes_of(&backend, &parent).await);
++    assert_eq!(item_names(&items), vec!["Child", "Shape"]);
++    for item in items {
++        assert!(item.range.start <= item.selection_range.start);
++        assert!(item.selection_range.end <= item.range.end);
++    }
++}

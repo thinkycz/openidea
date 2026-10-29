@@ -249,11 +249,11 @@ pub struct UpdateCheck {
 }
 
 fn update_endpoint_env() -> Option<String> {
-    std::env::var("OPENIDEA_UPDATE_ENDPOINT").ok().filter(|s| !s.trim().is_empty())
+    std::env::var("OPENSTORM_UPDATE_ENDPOINT").ok().filter(|s| !s.trim().is_empty())
 }
 
 /// Whether an update endpoint is configured: `plugins.updater.endpoints` in
-/// tauri.conf.json, or the `OPENIDEA_UPDATE_ENDPOINT` environment variable. Empty by
+/// tauri.conf.json, or the `OPENSTORM_UPDATE_ENDPOINT` environment variable. Empty by
 /// default, and "Check for Updates…" is hidden then.
 pub fn updates_configured<R: tauri::Runtime>(app: &AppHandle<R>) -> bool {
     let in_config = app
@@ -275,7 +275,7 @@ fn updater(app: &AppHandle) -> IdeResult<Option<tauri_plugin_updater::Updater>> 
     let env = update_endpoint_env();
     let mut builder = app.updater_builder();
     if let Some(url) = env {
-        let url = url.parse().map_err(|e| IdeError::invalid(format!("OPENIDEA_UPDATE_ENDPOINT: {e}")))?;
+        let url = url.parse().map_err(|e| IdeError::invalid(format!("OPENSTORM_UPDATE_ENDPOINT: {e}")))?;
         builder = builder.endpoints(vec![url]).map_err(|e| IdeError::invalid(e.to_string()))?;
     }
     builder.build().map(Some).map_err(|e| IdeError::unavailable(e.to_string()))

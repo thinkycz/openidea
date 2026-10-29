@@ -1,0 +1,188 @@
+diff --git a/docs/CHANGELOG.md b/docs/CHANGELOG.md
+index 89efa10..2cf3e18 100644
+--- a/docs/CHANGELOG.md
++++ b/docs/CHANGELOG.md
+@@ -15,6 +15,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
+ 
+ ## [Unreleased]
+ 
++- **Open type hierarchy after declaration navigation.** Class, interface, trait and enum keywords identify their exact declared type, including read-only built-in source. Contributed by PHP Workbench downstream.
++
+ - **Keep built-in navigation consistent.** Call hierarchy and declaration tabs retain the selected PHP version’s signatures and source locations after other files are opened. Embedded declarations remain read-only. Contributed by PHP Workbench downstream.
+ 
+ - **Follow literal callable strings in call hierarchy.** Direct function and static-method strings retain their runtime target and exact invocation site, including deprecated public trait calls. Ordinary class calls outside a class now preserve the enclosing namespace when a global class has the same short name. Contributed by PHP Workbench downstream.
+diff --git a/examples/php/definition.php b/examples/php/definition.php
+index fc6f6ba..3f3536e 100644
+--- a/examples/php/definition.php
++++ b/examples/php/definition.php
+@@ -479,3 +479,10 @@ function builtinHierarchyNavigation(): void
+     \DateTimeImmutable::createFromFormat('!Y', '2026');
+     ('DateTimeImmutable::createFromFormat')('!Y', '2026');
+ }
++
++// Try: Go to Definition on RuntimeException below, then show Supertypes
++// from the declaration's class keyword in its read-only built-in source.
++function builtinTypeHierarchyNavigation(): \RuntimeException
++{
++    return new \RuntimeException('Hierarchy navigation example');
++}
+diff --git a/src/type_hierarchy.rs b/src/type_hierarchy.rs
+index e03152b..a79b3ca 100644
+--- a/src/type_hierarchy.rs
++++ b/src/type_hierarchy.rs
+@@ -65,7 +65,38 @@ impl Backend {
+             let item = self.build_anonymous_type_item(&mut files, class, uri)?;
+             return Some(vec![item]);
+         }
+-        let span = self.lookup_symbol_map(uri, offset)?;
++        let span = self.lookup_symbol_map(uri, offset).or_else(|| {
++            // Definition navigation can land on the class-like keyword rather
++            // than its name. Require the cached keyword and exact declaration
++            // span; an arbitrary point in the class must not select its type.
++            let classes = self.symbols.uri_classes_index.read();
++            classes.get(uri)?.iter().find_map(|class| {
++                if class.keyword_offset == 0 || class.name.starts_with(ANONYMOUS_CLASS_PREFIX) {
++                    return None;
++                }
++                let keyword = match class.kind {
++                    ClassLikeKind::Class => "class",
++                    ClassLikeKind::Interface => "interface",
++                    ClassLikeKind::Trait => "trait",
++                    ClassLikeKind::Enum => "enum",
++                };
++                let start = class.keyword_offset as usize;
++                let end = start.checked_add(keyword.len())?;
++                if !(start..end).contains(&(offset as usize))
++                    || !content.get(start..end)?.eq_ignore_ascii_case(keyword)
++                {
++                    return None;
++                }
++                let name_start = find_name_start(content.as_bytes(), start);
++                let name_end = name_start.checked_add(class.name.len())?;
++                let declaration = source.map.span_covering_exactly(
++                    u32::try_from(name_start).ok()?,
++                    u32::try_from(name_end).ok()?,
++                )?;
++                matches!(&declaration.kind, MapSymbolKind::ClassDeclaration { name } if name == &class.name)
++                    .then(|| declaration.clone())
++            })
++        })?;
+ 
+         let fqn = match &span.kind {
+             MapSymbolKind::ClassReference { name, is_fqn, .. } => {
+diff --git a/tests/integration/type_hierarchy.rs b/tests/integration/type_hierarchy.rs
+index e53a3f3..38a72ee 100644
+--- a/tests/integration/type_hierarchy.rs
++++ b/tests/integration/type_hierarchy.rs
+@@ -2128,3 +2128,111 @@ async fn type_hierarchy_full_stub_enum_publishes_each_direct_supertype_once() {
+         ["Contract", "Feature", "UnitEnum"]
+     );
+ }
++
++#[tokio::test]
++async fn type_keyword_prepare_builtin_definition_handoff_matches_name_and_expands() {
++    let backend = crate::common::create_test_backend_with_full_stubs();
++    let uri = Url::parse("file:///builtin-keyword-handoff.php").unwrap();
++    let content = "<?php\r\n/* café 🐘 */ RuntimeException::class;\r\n";
++    open_php(&backend, &uri, content).await;
++    let column = "/* café 🐘 */ ".encode_utf16().count() as u32;
++    let definition = backend
++        .goto_definition(GotoDefinitionParams {
++            text_document_position_params: TextDocumentPositionParams {
++                text_document: TextDocumentIdentifier { uri: uri.clone() },
++                position: Position::new(1, column),
++            },
++            work_done_progress_params: Default::default(),
++            partial_result_params: Default::default(),
++        })
++        .await
++        .unwrap()
++        .expect("actual definition navigation");
++    let location = match definition {
++        GotoDefinitionResponse::Scalar(location) => location,
++        GotoDefinitionResponse::Array(locations) => {
++            assert_eq!(locations.len(), 1);
++            locations.into_iter().next().unwrap()
++        }
++        GotoDefinitionResponse::Link(_) => panic!("expected actual class declaration Location"),
++    };
++    assert_eq!(location.uri.scheme(), "phpantom-stub");
++    let positive = prepare_at(&backend, &uri, 1, column).await;
++    assert_eq!(positive.len(), 1);
++    assert_eq!(positive[0].name, "RuntimeException");
++    let prepared = prepare_at(
++        &backend,
++        &location.uri,
++        location.range.start.line,
++        location.range.start.character,
++    )
++    .await;
++    assert_eq!(
++        prepared, positive,
++        "the actual GoToDefinition landing caret must prepare the same immutable class"
++    );
++    let supers = supertypes_of(&backend, &prepared[0]).await;
++    assert!(supers.iter().any(|parent| parent.name == "Exception"));
++}
++
++#[tokio::test]
++async fn type_keyword_prepare_named_declarations_use_exact_tokens_and_keep_reference_precedence() {
++    let backend = create_test_backend();
++    let uri = Url::parse("file:///named-type-keywords.php").unwrap();
++    let content = "<?php\r\nnamespace KeywordScope;\r\n/* café 🐘 class Fake {} */\r\ninterface BaseFace {}\r\ninterface NamedFace extends BaseFace {}\r\ntrait NamedTrait {}\r\nenum NamedEnum { case One; }\r\nclass BaseClass {}\r\n#[\\AllowDynamicProperties]\r\nClAsS /* class Decoy {} */ NamedClass extends BaseClass {}\r\n";
++    open_php(&backend, &uri, content).await;
++    let point = |offset: usize| {
++        let prefix = &content[..offset];
++        Position::new(
++            prefix.bytes().filter(|byte| *byte == b'\n').count() as u32,
++            prefix.rsplit('\n').next().unwrap().encode_utf16().count() as u32,
++        )
++    };
++    for (keyword, name) in [
++        ("interface", "NamedFace"),
++        ("trait", "NamedTrait"),
++        ("enum", "NamedEnum"),
++        ("ClAsS", "NamedClass"),
++    ] {
++        let name_offset = content.find(name).unwrap();
++        let at_name = point(name_offset);
++        let positive = prepare_at(&backend, &uri, at_name.line, at_name.character).await;
++        assert_eq!(positive.len(), 1, "{name}");
++        let keyword_offset = if name == "NamedClass" {
++            content.find("ClAsS").unwrap()
++        } else {
++            content[..name_offset].rfind(keyword).unwrap()
++        };
++        for offset in keyword_offset..keyword_offset + keyword.len() {
++            let at = point(offset);
++            assert_eq!(
++                prepare_at(&backend, &uri, at.line, at.character).await,
++                positive,
++                "every byte in the actual {keyword} token must identify {name}"
++            );
++        }
++        let after = point(keyword_offset + keyword.len());
++        assert!(
++            prepare_at(&backend, &uri, after.line, after.character)
++                .await
++                .is_empty(),
++            "keyword fallback must not claim following trivia for {name}"
++        );
++    }
++    for text in ["class Fake", "class Decoy"] {
++        let at = point(content.find(text).unwrap());
++        assert!(
++            prepare_at(&backend, &uri, at.line, at.character)
++                .await
++                .is_empty(),
++            "a comment token is never a declaration: {text}"
++        );
++    }
++    let at = point(content.rfind("BaseClass").unwrap());
++    let parent = prepare_at(&backend, &uri, at.line, at.character).await;
++    assert_eq!(parent.len(), 1);
++    assert_eq!(
++        parent[0].name, "BaseClass",
++        "an existing reference span retains precedence over declaration fallback"
++    );
++}

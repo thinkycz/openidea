@@ -1,0 +1,2 @@
+# Preserve the checksummed engine patch series, including unified-diff context spaces.
+engine/patches/*.patch -whitespace

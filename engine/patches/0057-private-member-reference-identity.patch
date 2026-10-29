@@ -1,0 +1,2123 @@
+diff --git a/docs/CHANGELOG.md b/docs/CHANGELOG.md
+index 7c538db..23e47f7 100644
+--- a/docs/CHANGELOG.md
++++ b/docs/CHANGELOG.md
+@@ -15,6 +15,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
+ 
+ ## [Unreleased]
+ 
++- **Keep Eloquent pivot suggestions current.** Concurrent relationship indexing no longer leaves target-model completion cached without its pivot accessor. New relationship edits supersede older rebuilds. Contributed by PHP Workbench downstream.
++
+ - **Completion after Unicode text.** Suggestions remain available when emoji precede the cursor, and incomplete-code recovery preserves line endings. Contributed by PHP Workbench downstream.
+ 
+ - **Composer directory references.** PHP completion and navigation follow local vendor and binary-directory setting references, including paths containing spaces. Contributed by @thinkycz
+@@ -53,6 +55,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
+ 
+ ### Fixed
+ 
++- **Private member identity.** References and rename distinguish a parent's private declaration from a child's independent namesake while retaining legal lexical access and public override families. Nested trait conflict selection preserves the selected implementation. Contributed by PHP Workbench downstream.
++
+ - **Rename refuses occupied names.** Member and class renames preserve distinct declarations, PHP case rules and private inheritance boundaries. Case-only changes and unrelated owners remain available. Parent trait members also follow their effective visibility and class declaration precedence, while inaccessible accesses still report their owning class. Contributed by PHP Workbench downstream.
+ 
+ - **Fresh suggestions after edits.** Background class resolution cannot restore outdated members after an unsaved dependency changes. Nested resolutions and generic specializations retain the same invalidation boundary. Contributed by PHP Workbench downstream.
+diff --git a/src/backend/laravel/pivots.rs b/src/backend/laravel/pivots.rs
+index c9fe8c3..10bd117 100644
+--- a/src/backend/laravel/pivots.rs
++++ b/src/backend/laravel/pivots.rs
+@@ -52,11 +52,7 @@ impl Backend {
+         }
+ 
+         if loaded > 0 {
+-            self.laravel_pivots_dirty
+-                .store(true, std::sync::atomic::Ordering::Relaxed);
+-            // A pivot accessor lands on the target model, whose cached
+-            // resolutions record no dependency on the relation's file.
+-            self.clear_resolved_member_files();
++            self.invalidate_laravel_pivot_index();
+         }
+ 
+         tracing::info!(
+diff --git a/src/inheritance/ancestry.rs b/src/inheritance/ancestry.rs
+index 4cf2249..0a1f078 100644
+--- a/src/inheritance/ancestry.rs
++++ b/src/inheritance/ancestry.rs
+@@ -55,7 +55,31 @@ pub(crate) fn find_declaring_ancestor(
+     class_loader: ClassLoader<'_>,
+     declares: &dyn Fn(&ClassInfo) -> bool,
+ ) -> Option<(Atom, Arc<ClassInfo>)> {
+-    if let Some(found) = find_declaring_trait(&class.used_traits, class_loader, declares) {
++    find_declaring_ancestor_with_member(class, class_loader, declares, None)
++}
++
++/// Trace a member's source through the shared ancestry walk, honoring
++/// per-use method precedence even when trait files share token offsets.
++pub(crate) fn find_declaring_member_ancestor(
++    class: &ClassInfo,
++    member_name: Option<&str>,
++    class_loader: ClassLoader<'_>,
++    declares: &dyn Fn(&ClassInfo) -> bool,
++) -> Option<(Atom, Arc<ClassInfo>)> {
++    find_declaring_ancestor_with_member(class, class_loader, declares, member_name)
++}
++
++fn find_declaring_ancestor_with_member(
++    class: &ClassInfo,
++    class_loader: ClassLoader<'_>,
++    declares: &dyn Fn(&ClassInfo) -> bool,
++    member_name: Option<&str>,
++) -> Option<(Atom, Arc<ClassInfo>)> {
++    let trait_source = |owner: &ClassInfo| match member_name {
++        Some(name) => find_declaring_member_trait(owner, name, class_loader, declares, 0),
++        None => find_declaring_trait(&owner.used_traits, class_loader, declares),
++    };
++    if let Some(found) = trait_source(class) {
+         return Some(found);
+     }
+ 
+@@ -67,7 +91,7 @@ pub(crate) fn find_declaring_ancestor(
+         if declares(&parent) {
+             return Some((name, parent));
+         }
+-        if let Some(found) = find_declaring_trait(&parent.used_traits, class_loader, declares) {
++        if let Some(found) = trait_source(&parent) {
+             return Some(found);
+         }
+         for iface in &parent.interfaces {
+@@ -83,6 +107,39 @@ pub(crate) fn find_declaring_ancestor(
+         .find_map(|iface| find_declaring_interface(*iface, class_loader, declares, &mut visited, 0))
+ }
+ 
++fn find_declaring_member_trait(
++    owner: &ClassInfo,
++    name: &str,
++    loader: ClassLoader<'_>,
++    declares: &dyn Fn(&ClassInfo) -> bool,
++    depth: u32,
++) -> Option<(Atom, Arc<ClassInfo>)> {
++    if depth > MAX_TRAIT_DEPTH {
++        return None;
++    }
++    for trait_name in &owner.used_traits {
++        if owner.trait_precedences.iter().any(|precedence| {
++            precedence.method_name.eq_ignore_ascii_case(name)
++                && precedence
++                    .insteadof
++                    .iter()
++                    .any(|excluded| excluded == trait_name)
++        }) {
++            continue;
++        }
++        let Some(used) = loader(trait_name) else {
++            continue;
++        };
++        if declares(&used) {
++            return Some((*trait_name, used));
++        }
++        if let Some(found) = find_declaring_member_trait(&used, name, loader, declares, depth + 1) {
++            return Some(found);
++        }
++    }
++    None
++}
++
+ /// The first of `trait_names`, or of the traits they use, for which
+ /// `declares` holds, with the name it was loaded by.
+ pub(crate) fn find_declaring_trait(
+diff --git a/src/inheritance/inheritance_tests.rs b/src/inheritance/inheritance_tests.rs
+index 8e6de9b..6258116 100644
+--- a/src/inheritance/inheritance_tests.rs
++++ b/src/inheritance/inheritance_tests.rs
+@@ -3,6 +3,45 @@ use crate::atom::{AtomMap, atom};
+ use crate::php_type::PhpType;
+ use crate::types::{ClassLikeKind, MethodInfo};
+ 
++#[test]
++fn nested_trait_outer_precedence_preserves_other_members_and_named_alias() {
++    let models = inherited_private_trait_models(concat!(
++        "<?php\n",
++        "trait NestedB { private function source(): string { return 'B'; } }\n",
++        "trait Wrapper {\n",
++        "    use NestedB { source as public retained; }\n",
++        "    public function other(): string { return 'other'; }\n",
++        "    public string $extra = 'extra';\n",
++        "    public const EXTRA = 'extra';\n",
++        "}\n",
++        "trait SelectedA { private function source(): string { return 'A'; } }\n",
++        "class Consumer { use Wrapper, SelectedA { SelectedA::source insteadof Wrapper; } }\n",
++    ));
++    let consumer = inherited_private_trait_resolved(&models, "Consumer");
++    let a = models
++        .get("SelectedA")
++        .unwrap()
++        .get_method("source")
++        .unwrap();
++    let b = models.get("NestedB").unwrap().get_method("source").unwrap();
++    let selected = consumer
++        .get_method("source")
++        .expect("selected method survives");
++    assert_eq!(
++        selected.name_offset, a.name_offset,
++        "outer precedence excludes nested B"
++    );
++    assert_ne!(selected.name_offset, b.name_offset);
++    let alias = consumer
++        .get_method("retained")
++        .expect("a distinct named alias survives");
++    assert_eq!(alias.visibility, Visibility::Public);
++    assert_eq!(alias.name_offset, b.name_offset);
++    assert!(consumer.has_method("other"));
++    assert!(consumer.has_property("extra"));
++    assert!(consumer.get_constant("EXTRA").is_some());
++}
++
+ #[test]
+ fn inherited_private_trait_parent_own_private_override_blocks_public_trait_method() {
+     let models = inherited_private_trait_models(concat!(
+diff --git a/src/inheritance/mod.rs b/src/inheritance/mod.rs
+index c84b811..17d9dec 100644
+--- a/src/inheritance/mod.rs
++++ b/src/inheritance/mod.rs
+@@ -33,7 +33,9 @@ use crate::virtual_members::{
+ };
+ 
+ // Re-export functions that are used internally
+-pub(crate) use ancestry::{ancestors, find_declaring_ancestor, find_declaring_trait};
++pub(crate) use ancestry::{
++    ancestors, find_declaring_ancestor, find_declaring_member_ancestor, find_declaring_trait,
++};
+ pub(crate) use enrichment::enrich_method_arc_from_ancestor;
+ pub(crate) use enrichment::enrich_property_arc_from_ancestor;
+ 
+@@ -82,6 +84,9 @@ pub(crate) struct TraitContext<'a> {
+     pub precedences: &'a [crate::types::TraitPrecedence],
+     /// `as` alias declarations.
+     pub aliases: &'a [crate::types::TraitAlias],
++    /// Method names excluded from the entire current trait composition by
++    /// an outer `insteadof`, including methods imported from nested traits.
++    pub excluded_methods: &'a [Atom],
+ }
+ 
+ /// Tracks member names already present during inheritance merging.
+@@ -294,6 +299,7 @@ pub(crate) fn resolve_class_with_inheritance(
+             use_generics: &class.use_generics,
+             precedences: &class.trait_precedences,
+             aliases: &class.trait_aliases,
++            excluded_methods: &[],
+         },
+         class_loader,
+         0,
+@@ -430,6 +436,7 @@ pub(crate) fn resolve_class_with_inheritance(
+                 use_generics: &substituted_use_generics,
+                 precedences: &parent.trait_precedences,
+                 aliases: &parent.trait_aliases,
++                excluded_methods: &[],
+             },
+             class_loader,
+             0,
+diff --git a/src/inheritance/traits.rs b/src/inheritance/traits.rs
+index 829046a..24d9703 100644
+--- a/src/inheritance/traits.rs
++++ b/src/inheritance/traits.rs
+@@ -59,6 +59,24 @@ pub(crate) fn merge_traits_into(
+             continue;
+         };
+ 
++        // Excluding a method from an outer trait also excludes the same
++        // method imported through that trait's nested composition. Keep
++        // this list separate from local adaptations so unrelated methods
++        // and independently named aliases can still be merged.
++        let mut excluded_methods = ctx.excluded_methods.to_vec();
++        for precedence in ctx.precedences {
++            if precedence
++                .insteadof
++                .iter()
++                .any(|excluded| excluded == trait_name)
++                && !excluded_methods
++                    .iter()
++                    .any(|excluded| excluded.eq_ignore_ascii_case(&precedence.method_name))
++            {
++                excluded_methods.push(precedence.method_name);
++            }
++        }
++
+         // Build a substitution map for this trait if the using class
+         // declared `@use TraitName<Type1, Type2>` and the trait has
+         // `@template` parameters.
+@@ -123,6 +141,7 @@ pub(crate) fn merge_traits_into(
+                     use_generics: &substituted_use_generics,
+                     precedences: &trait_info.trait_precedences,
+                     aliases: &trait_info.trait_aliases,
++                    excluded_methods: &excluded_methods,
+                 },
+                 class_loader,
+                 depth + 1,
+@@ -160,6 +179,7 @@ pub(crate) fn merge_traits_into(
+                         use_generics: &parent.use_generics,
+                         precedences: &parent.trait_precedences,
+                         aliases: &parent.trait_aliases,
++                        excluded_methods: &excluded_methods,
+                     },
+                     class_loader,
+                     parent_depth + 1,
+@@ -168,7 +188,27 @@ pub(crate) fn merge_traits_into(
+                 );
+             }
+ 
++            let method_start = merged.methods.len();
+             dedup.merge_visible_members(&parent, merged);
++            if !excluded_methods.is_empty() {
++                // Only names actually appended by this parent acquired a
++                // new dedup entry. Preserve prior declarations and all
++                // properties/constants while retiring excluded additions.
++                let mut index = 0;
++                merged.methods.make_mut().retain(|method| {
++                    let keep = index < method_start
++                        || !excluded_methods
++                            .iter()
++                            .any(|excluded| excluded.eq_ignore_ascii_case(&method.name));
++                    index += 1;
++                    if !keep {
++                        dedup
++                            .methods
++                            .remove(&crate::atom::ascii_lowercase_atom(&method.name));
++                    }
++                    keep
++                });
++            }
+ 
+             current = parent;
+         }
+@@ -188,16 +228,9 @@ pub(crate) fn merge_traits_into(
+         // Apply generic substitution if a `@use` mapping exists.
+         // Also skip methods excluded by `insteadof` declarations.
+         for method in &trait_info.methods {
+-            // Check if this method from this trait is excluded by an
+-            // `insteadof` declaration.  For example, if the class has
+-            // `TraitA::method insteadof TraitB`, then when merging
+-            // TraitB's methods, `method` should be skipped.
+-            let excluded = ctx.precedences.iter().any(|p| {
+-                p.method_name.eq_ignore_ascii_case(&method.name)
+-                    && p.insteadof
+-                        .iter()
+-                        .any(|excluded_trait| excluded_trait == trait_name)
+-            });
++            let excluded = excluded_methods
++                .iter()
++                .any(|excluded| excluded.eq_ignore_ascii_case(&method.name));
+             if excluded {
+                 continue;
+             }
+@@ -299,6 +332,16 @@ pub(crate) fn merge_traits_into(
+                 None => continue,
+             };
+ 
++            // The original method can be excluded while an independent
++            // alias remains available. Judge the resulting alias name,
++            // rather than whether its source method was merged above.
++            if excluded_methods
++                .iter()
++                .any(|excluded| excluded.eq_ignore_ascii_case(alias_name))
++            {
++                continue;
++            }
++
+             // Check trait name matches (if specified).
+             let name_matches = alias.trait_name.as_ref().is_none_or(|t| t == trait_name);
+             if !name_matches {
+diff --git a/src/lib.rs b/src/lib.rs
+index da84878..1210f5e 100644
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -858,10 +858,9 @@ pub struct Backend {
+     /// Fast gate for [`laravel_pivots`](Self::laravel_pivots): `true` only when
+     /// the index holds at least one many-to-many target.
+     pub(crate) laravel_has_pivots: Arc<std::sync::atomic::AtomicBool>,
+-    /// Whether [`laravel_pivots`](Self::laravel_pivots) needs rebuilding
+-    /// (a pivot-bearing file changed, or the index was never built). Starts
+-    /// `true` so the first class load builds it.
+-    pub(crate) laravel_pivots_dirty: Arc<std::sync::atomic::AtomicBool>,
++    /// Shared source/publication epochs and rebuild serialization. Initially
++    /// stale so the first class load builds the reverse pivot index.
++    pub(crate) laravel_pivot_state: Arc<virtual_members::laravel::LaravelPivotState>,
+     /// Index of Artisan console commands (project + vendor) keyed by command
+     /// name.  Built during `initialized` for Laravel projects and refreshed
+     /// when a command file changes.  Powers command-name completion,
+@@ -1341,7 +1340,7 @@ impl Backend {
+                 virtual_members::laravel::LaravelPivotIndex::default(),
+             )),
+             laravel_has_pivots: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+-            laravel_pivots_dirty: Arc::new(std::sync::atomic::AtomicBool::new(true)),
++            laravel_pivot_state: Arc::new(virtual_members::laravel::LaravelPivotState::default()),
+             laravel_commands: Arc::new(RwLock::new(
+                 virtual_members::laravel::LaravelCommandIndex::default(),
+             )),
+@@ -2190,7 +2189,7 @@ impl Backend {
+             laravel_has_macros: Arc::clone(&self.laravel_has_macros),
+             laravel_pivots: Arc::clone(&self.laravel_pivots),
+             laravel_has_pivots: Arc::clone(&self.laravel_has_pivots),
+-            laravel_pivots_dirty: Arc::clone(&self.laravel_pivots_dirty),
++            laravel_pivot_state: Arc::clone(&self.laravel_pivot_state),
+             laravel_commands: Arc::clone(&self.laravel_commands),
+             laravel_has_commands: Arc::clone(&self.laravel_has_commands),
+             laravel_morph_map: Arc::clone(&self.laravel_morph_map),
+diff --git a/src/parser/ast_update.rs b/src/parser/ast_update.rs
+index 5720d1a..680d699 100644
+--- a/src/parser/ast_update.rs
++++ b/src/parser/ast_update.rs
+@@ -796,24 +796,22 @@ impl Backend {
+             }
+         }
+ 
+-        // Invalidate the reverse pivot index when a background-indexed file
+-        // declares a many-to-many relationship, so its target models pick up
+-        // its pivot accessors on the next class load.
+-        if !self
+-            .laravel_pivots_dirty
+-            .load(std::sync::atomic::Ordering::Relaxed)
+-            && updates.iter().any(|u| {
+-                u.classes
+-                    .iter()
+-                    .any(crate::virtual_members::laravel::class_declares_pivot_relationship)
++        let affects_pivots = self.laravel_pivot_state.is_dirty() || {
++            let index = self.laravel_pivots.read();
++            updates.iter().any(|u| {
++                index.contributes(&u.uri)
++                    || u.classes
++                        .iter()
++                        .any(crate::virtual_members::laravel::class_declares_pivot_relationship)
+             })
+-        {
+-            self.laravel_pivots_dirty
+-                .store(true, std::sync::atomic::Ordering::Relaxed);
+-            self.clear_resolved_member_files();
++        };
++        let changed = self.apply_ast_index_updates_batch(updates);
++        // Invalidate after the declarations are actually visible, still
++        // inside the batch's existing publication boundary.
++        if affects_pivots {
++            self.invalidate_laravel_pivot_index();
+         }
+-
+-        self.apply_ast_index_updates_batch(updates)
++        changed
+     }
+ 
+     fn build_ast_index_update(&self, uri: &str, content: &str) -> AstIndexUpdate {
+diff --git a/src/references/dispatch.rs b/src/references/dispatch.rs
+index e988b3e..841c857 100644
+--- a/src/references/dispatch.rs
++++ b/src/references/dispatch.rs
+@@ -99,6 +99,32 @@ impl Backend {
+                 include_declaration,
+                 mode,
+             );
++            let private_bindings = self.private_reference_queries(uri, sym);
++            for binding in private_bindings
++                .iter()
++                .filter(|binding| binding.private || binding.expand)
++            {
++                if let Some(declaration_uri) =
++                    self.find_class_file_uri(binding.declaration.fqn().as_str(), uri)
++                    && let Some(declaration_content) =
++                        self.reference_file_content_arc(&declaration_uri)
++                    && let Some(declaration_span) =
++                        self.lookup_symbol_map(&declaration_uri, binding.offset)
++                {
++                    if declaration_uri == uri && declaration_span.start == sym.start {
++                        continue;
++                    }
++                    locations.extend(self.dispatch_symbol_references(
++                        &declaration_span.kind,
++                        &declaration_uri,
++                        &declaration_content,
++                        declaration_span.start,
++                        include_declaration,
++                        mode,
++                    ));
++                }
++            }
++            self.filter_private_reference_locations(&private_bindings, &mut locations);
+             // A YAML/XML occurrence is a reference the user can be shown,
+             // but not one an edit can be planned against: its text may be
+             // the escaped `App\\Handler` form the document's own quoting
+diff --git a/src/references/members.rs b/src/references/members.rs
+index 4e5bee4..8d1dab5 100644
+--- a/src/references/members.rs
++++ b/src/references/members.rs
+@@ -431,7 +431,11 @@ impl Backend {
+             }
+         }
+ 
+-        for query_locations in &mut locations {
++        for (query, query_locations) in queries.iter().zip(&mut locations) {
++            if let Some(span) = self.lookup_symbol_map(&query.uri, query.offset) {
++                let bindings = self.private_reference_queries(&query.uri, &span);
++                self.filter_private_reference_locations(&bindings, query_locations);
++            }
+             sort_locations_for_references(query_locations);
+         }
+ 
+diff --git a/src/references/mod.rs b/src/references/mod.rs
+index 76c6a64..a368a3a 100644
+--- a/src/references/mod.rs
++++ b/src/references/mod.rs
+@@ -36,7 +36,9 @@ mod eloquent;
+ mod functions;
+ mod member_scope;
+ mod members;
++mod private_identity;
+ mod receivers;
++pub(crate) use private_identity::ReferenceMemberKind;
+ mod variables;
+ 
+ pub(crate) use members::MemberDeclarationReferenceQuery;
+diff --git a/src/references/private_identity.rs b/src/references/private_identity.rs
+new file mode 100644
+index 0000000..4a36abc
+--- /dev/null
++++ b/src/references/private_identity.rs
+@@ -0,0 +1,341 @@
++//! Exact declaration identity at PHP private-member boundaries.
++//!
++//! Hierarchy membership alone cannot distinguish a parent's private method
++//! from a child's independent namesake. Lexical parent scope may nevertheless
++//! access its own private member through a child-typed receiver.
++use super::*;
++use crate::class_lookup::{find_class_at_offset, is_subtype_of};
++use crate::inheritance::{ancestors, find_declaring_member_ancestor};
++use crate::symbol_map::{SymbolKind, SymbolSpan};
++use crate::types::{ClassInfo, FileContext, Visibility};
++
++#[derive(Clone, Copy, PartialEq, Eq)]
++/// PHP namespaces that distinguish same-spelled class members.
++pub(crate) enum ReferenceMemberKind {
++    /// Case-insensitive method names.
++    Method,
++    /// Case-sensitive instance or static properties.
++    Property,
++    /// Case-sensitive class constants.
++    Constant,
++}
++
++/// A concrete declaration, with the effective access visibility at its receiver.
++#[derive(Clone)]
++pub(crate) struct MemberBinding {
++    /// Raw class or trait containing the source declaration.
++    pub(crate) declaration: Arc<ClassInfo>,
++    /// Original token offset within that declaration's file.
++    pub(crate) offset: u32,
++    /// The PHP member namespace selected by the access syntax.
++    pub(crate) kind: ReferenceMemberKind,
++    /// Whether this receiver's effective member is private.
++    pub(crate) private: bool,
++    /// A trait-private source imported with public visibility needs its own query.
++    pub(super) expand: bool,
++    name: crate::atom::Atom,
++    receiver: Arc<ClassInfo>,
++}
++
++impl MemberBinding {
++    /// Compare exact source identity rather than hierarchy or spelling.
++    pub(crate) fn same_declaration(&self, other: &Self) -> bool {
++        self.kind == other.kind
++            && self.offset == other.offset
++            && self
++                .declaration
++                .fqn()
++                .eq_ignore_ascii_case(&other.declaration.fqn())
++    }
++}
++
++fn member_info(
++    class: &ClassInfo,
++    name: &str,
++    kind: ReferenceMemberKind,
++) -> Option<(Visibility, u32)> {
++    match kind {
++        ReferenceMemberKind::Method => class
++            .get_method(name)
++            .map(|m| (m.visibility, m.name_offset)),
++        ReferenceMemberKind::Property => class
++            .properties
++            .iter()
++            .find(|p| p.name.trim_start_matches('$') == name.trim_start_matches('$'))
++            .map(|p| (p.visibility, p.name_offset)),
++        ReferenceMemberKind::Constant => class
++            .constants
++            .iter()
++            .find(|c| c.name == name)
++            .map(|c| (c.visibility, c.name_offset)),
++    }
++}
++
++impl Backend {
++    /// Resolve the concrete source behind a class's effective member. The
++    /// canonical inherited surface determines visibility; the shared ancestry
++    /// walk recovers the declaration that owns its source token.
++    pub(crate) fn reference_member_binding(
++        &self,
++        class: &Arc<ClassInfo>,
++        name: &str,
++        kind: ReferenceMemberKind,
++    ) -> Option<MemberBinding> {
++        let loader = |name: &str| self.find_or_load_class(name);
++        let effective = crate::virtual_members::resolve_class_fully_cached(
++            class,
++            &loader,
++            &self.resolved_class_cache,
++        );
++        let (visibility, effective_offset) = member_info(&effective, name, kind)?;
++        let declares = |candidate: &ClassInfo| {
++            member_info(candidate, name, kind).is_some_and(|(_, offset)| offset == effective_offset)
++        };
++        let declaring = if member_info(class, name, kind).is_some() {
++            Arc::clone(class)
++        } else {
++            find_declaring_member_ancestor(
++                class,
++                (kind == ReferenceMemberKind::Method).then_some(name),
++                &loader,
++                &declares,
++            )?
++            .1
++        };
++        let (source_visibility, offset) = member_info(&declaring, name, kind)?;
++        (offset != 0).then(|| MemberBinding {
++            declaration: declaring,
++            offset,
++            kind,
++            private: visibility == Visibility::Private,
++            expand: source_visibility == Visibility::Private && visibility != Visibility::Private,
++            name: crate::atom::atom(name),
++            receiver: Arc::clone(class),
++        })
++    }
++
++    /// A private source can become a public override family through a trait
++    /// visibility adaptation. Such descendants participate only across public
++    /// ancestry; a private parent declaration still breaks that family.
++    pub(crate) fn reference_binding_matches(
++        &self,
++        target: &MemberBinding,
++        candidate: &MemberBinding,
++    ) -> bool {
++        if target.same_declaration(candidate) {
++            return true;
++        }
++        if candidate.private {
++            return false;
++        }
++        let loader = |name: &str| self.find_or_load_class(name);
++        for (_, parent) in ancestors(&candidate.receiver, &loader) {
++            if let Some(binding) =
++                self.reference_member_binding(&parent, &candidate.name, candidate.kind)
++            {
++                if binding.private {
++                    return false;
++                }
++                if target.same_declaration(&binding) {
++                    return true;
++                }
++            }
++        }
++        false
++    }
++
++    fn reference_binding_file(&self, uri: &str, name: &str) -> Option<BindingFile> {
++        let file = CandidateFile::new(self, uri);
++        let content = self.reference_file_content_arc(uri)?;
++        let map = self.symbol_maps.read().get(uri).cloned()?;
++        let receivers = self.member_receivers_for(&file, &map, &[crate::atom::atom(name)]);
++        Some(BindingFile {
++            content,
++            map,
++            receivers,
++            context: self.file_context(uri),
++        })
++    }
++
++    fn reference_bindings_at(&self, file: &BindingFile, span: &SymbolSpan) -> Vec<MemberBinding> {
++        match &span.kind {
++            SymbolKind::MemberDeclaration { name, .. } | SymbolKind::Variable { name } => {
++                let Some(class) = binding_lexical_class(file, span.start) else {
++                    return Vec::new();
++                };
++                for kind in [
++                    ReferenceMemberKind::Method,
++                    ReferenceMemberKind::Property,
++                    ReferenceMemberKind::Constant,
++                ] {
++                    if let Some((visibility, offset)) = member_info(&class, name, kind)
++                        && offset == span.start
++                    {
++                        return vec![MemberBinding {
++                            declaration: Arc::clone(&class),
++                            offset,
++                            kind,
++                            private: visibility == Visibility::Private,
++                            expand: false,
++                            name: *name,
++                            receiver: Arc::clone(&class),
++                        }];
++                    }
++                }
++                Vec::new()
++            }
++            SymbolKind::MemberAccess {
++                member_name,
++                is_static,
++                is_method_call,
++                ..
++            } => {
++                let targets = file
++                    .map
++                    .member_access_indices(member_name)
++                    .iter()
++                    .find(|&&i| file.map.spans[i].start == span.start)
++                    .and_then(|&i| file.receivers.as_ref()?.resolved_access(i))
++                    .map(|(_, targets)| targets)
++                    .unwrap_or_default();
++                let lexical = binding_lexical_class(file, span.start);
++                let loader = |name: &str| self.find_or_load_class(name);
++                targets
++                    .iter()
++                    .filter_map(|fqn| {
++                        let receiver = loader(fqn)?;
++                        let kind = if *is_method_call {
++                            ReferenceMemberKind::Method
++                        } else if *is_static
++                            && !member_name.starts_with('$')
++                            && crate::virtual_members::resolve_class_fully_cached(
++                                &receiver,
++                                &loader,
++                                &self.resolved_class_cache,
++                            )
++                            .get_constant(member_name)
++                            .is_some()
++                        {
++                            ReferenceMemberKind::Constant
++                        } else {
++                            ReferenceMemberKind::Property
++                        };
++                        // PHP binds a parent's private access to lexical scope,
++                        // even when the receiver's class declares a public namesake.
++                        if !*is_static
++                            && let Some(lexical) = lexical.as_ref()
++                            && (receiver.fqn().eq_ignore_ascii_case(&lexical.fqn())
++                                || is_subtype_of(&receiver, lexical.fqn().as_str(), &loader))
++                            && let Some(binding) =
++                                self.reference_member_binding(lexical, member_name, kind)
++                            && binding.private
++                        {
++                            return Some(binding);
++                        }
++                        self.reference_member_binding(&receiver, member_name, kind)
++                    })
++                    .collect()
++            }
++            _ => Vec::new(),
++        }
++    }
++
++    /// Attribute results by source identity wherever a private declaration
++    /// breaks the ordinary public override family. Return extra source queries
++    /// for lexical private bindings that the receiver-only search could miss.
++    pub(super) fn private_reference_queries(
++        &self,
++        uri: &str,
++        span: &SymbolSpan,
++    ) -> Vec<MemberBinding> {
++        let Some(name) = member_name(span) else {
++            return Vec::new();
++        };
++        // Constructor queries use instantiation spans, not member accesses.
++        if name.eq_ignore_ascii_case("__construct") {
++            return Vec::new();
++        }
++        if matches!(span.kind, SymbolKind::Variable { .. }) {
++            let context = self.file_context(uri);
++            if !find_class_at_offset(&context.classes, span.start)
++                .is_some_and(|class| class.properties.iter().any(|p| p.name_offset == span.start))
++            {
++                return Vec::new();
++            }
++        }
++        self.reference_binding_file(uri, name)
++            .map(|file| self.reference_bindings_at(&file, span))
++            .unwrap_or_default()
++    }
++
++    /// Keep inherited public families while separating concrete private
++    /// declarations and the independent namesakes below them.
++    pub(super) fn filter_private_reference_locations(
++        &self,
++        selected: &[MemberBinding],
++        locations: &mut Vec<Location>,
++    ) {
++        if selected.is_empty() {
++            return;
++        }
++        let only_private = selected.iter().all(|b| b.private);
++        let mut files = std::collections::HashMap::new();
++        locations.retain(|location| {
++            let uri = location.uri.as_str();
++            let file = files
++                .entry(uri.to_owned())
++                .or_insert_with(|| self.reference_binding_file(uri, &selected[0].name));
++            let Some(file) = file else {
++                return !only_private;
++            };
++            let offset =
++                crate::text_position::position_to_offset(&file.content, location.range.start);
++            let Some(span) = file.map.lookup(offset) else {
++                return !only_private;
++            };
++            let candidates = self.reference_bindings_at(file, span);
++            if only_private {
++                return candidates.iter().any(|candidate| {
++                    selected
++                        .iter()
++                        .any(|target| self.reference_binding_matches(target, candidate))
++                });
++            }
++            // Public override families retain their existing hierarchy rules.
++            // A positively identified private binding belongs only to its own
++            // declaration, rather than to a same-named descendant declaration.
++            candidates.is_empty()
++                || candidates.iter().any(|candidate| {
++                    selected.iter().any(|target| target.kind == candidate.kind)
++                        && (!candidate.private
++                            || selected
++                                .iter()
++                                .any(|target| self.reference_binding_matches(target, candidate)))
++                })
++        });
++    }
++}
++
++struct BindingFile {
++    content: Arc<String>,
++    map: Arc<SymbolMap>,
++    receivers: Option<Arc<crate::reference_index::ResolvedMemberFile>>,
++    context: FileContext,
++}
++
++fn binding_lexical_class(file: &BindingFile, offset: u32) -> Option<Arc<ClassInfo>> {
++    let class = find_class_at_offset(&file.context.classes, offset)?;
++    file.context
++        .classes
++        .iter()
++        .find(|candidate| std::ptr::eq(candidate.as_ref(), class))
++        .cloned()
++}
++
++fn member_name(span: &SymbolSpan) -> Option<&str> {
++    match &span.kind {
++        SymbolKind::MemberDeclaration { name, .. } | SymbolKind::Variable { name } => Some(name),
++        SymbolKind::MemberAccess { member_name, .. } => Some(member_name),
++        _ => None,
++    }
++}
+diff --git a/src/rename/collisions.rs b/src/rename/collisions.rs
+index 9a08f72..020d630 100644
+--- a/src/rename/collisions.rs
++++ b/src/rename/collisions.rs
+@@ -100,6 +100,28 @@ impl Backend {
+                     let Some(class) = loader(&receiver) else {
+                         continue;
+                     };
++                    if visibility == Visibility::Private {
++                        let reference_kind = match kind {
++                            MemberKind::Method => crate::references::ReferenceMemberKind::Method,
++                            MemberKind::Property => {
++                                crate::references::ReferenceMemberKind::Property
++                            }
++                            MemberKind::Constant => {
++                                crate::references::ReferenceMemberKind::Constant
++                            }
++                        };
++                        let source = self.reference_member_binding(owner, old_name, reference_kind);
++                        let receiver_source =
++                            self.reference_member_binding(&class, old_name, reference_kind);
++                        if !source
++                            .zip(receiver_source)
++                            .is_some_and(|(source, receiver)| {
++                                self.reference_binding_matches(&source, &receiver)
++                            })
++                        {
++                            continue;
++                        }
++                    }
+                     let effective = resolve_class_with_inheritance(&class, &loader);
+                     // Private trait members stop at their consuming class; an
+                     // indexed descendant that does not inherit the old member
+diff --git a/src/resolution.rs b/src/resolution.rs
+index ee117e2..bb7d4cb 100644
+--- a/src/resolution.rs
++++ b/src/resolution.rs
+@@ -343,42 +343,40 @@ impl Backend {
+         crate::virtual_members::laravel::inject_macros(&index, class)
+     }
+ 
+-    /// Add Eloquent pivot accessors to `class` when it is the target of a
+-    /// many-to-many relationship somewhere in the project.
+-    ///
+-    /// The reverse index is rebuilt lazily when a pivot-bearing file has
+-    /// changed (`laravel_pivots_dirty`), then a cheap atomic gates the lock so
+-    /// the hot loader path is untouched when the project has no such relations.
++    /// Add reverse-indexed Eloquent pivot accessors. Other threads wait for
++    /// the completed index; only recursion on the builder's own thread may
++    /// see its previous map, and publication retires those cached results.
+     fn inject_laravel_pivot(&self, class: Arc<ClassInfo>) -> Arc<ClassInfo> {
+         use std::sync::atomic::Ordering;
+-        if self.laravel_pivots_dirty.swap(false, Ordering::Relaxed) {
++        if self.laravel_pivot_state.is_dirty() && !self.laravel_pivot_state.is_building() {
+             self.rebuild_laravel_pivot_index();
+         }
+-        if !self.laravel_has_pivots.load(Ordering::Relaxed) {
++        if !self.laravel_has_pivots.load(Ordering::Acquire) {
+             return class;
+         }
+         let index = self.laravel_pivots.read();
+         crate::virtual_members::laravel::inject_pivot(&index, class)
+     }
+ 
+-    /// Mark the reverse pivot index stale when `content` (at `uri`) affects
+-    /// many-to-many relationships — either it now looks like it declares
+-    /// one, or it previously contributed one (an edit may have
+-    /// removed the last such relation). A no-op for unrelated edits.
++    /// Invalidate reverse relationships, including a rebuild already in flight.
++    pub(crate) fn invalidate_laravel_pivot_index(&self) {
++        self.laravel_pivot_state
++            .source
++            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
++        self.clear_resolved_class_cache();
++    }
++
++    /// Include changes while an earlier invalidation is still unpublished:
++    /// that earlier build may already have taken its class snapshot.
+     pub(crate) fn refresh_laravel_pivots(&self, uri: &str, content: &str) {
+-        use std::sync::atomic::Ordering;
+-        if self.laravel_pivots_dirty.load(Ordering::Relaxed) {
+-            return;
+-        }
+         let has_m2m = crate::virtual_members::laravel::source_may_declare_pivot_relationship(
+             content.as_bytes(),
+         );
+-        if has_m2m || self.laravel_pivots.read().contributes(uri) {
+-            self.laravel_pivots_dirty.store(true, Ordering::Relaxed);
+-            // A pivot accessor is attached to the *target* model, which the
+-            // file declaring the relation never has to be looked up for, so a
+-            // cached receiver resolution records no dependency on this index.
+-            self.clear_resolved_member_files();
++        if self.laravel_pivot_state.is_dirty()
++            || has_m2m
++            || self.laravel_pivots.read().contributes(uri)
++        {
++            self.invalidate_laravel_pivot_index();
+         }
+     }
+ 
+@@ -398,28 +396,62 @@ impl Backend {
+         self.clear_resolved_member_files();
+     }
+ 
+-    /// Rebuild the reverse pivot index from every parsed class.
+-    ///
+-    /// Collects an `(uri, class)` snapshot, releases the index lock, then
+-    /// resolves related/pivot class names via the normal loader. A no-op-shaped
+-    /// empty index is stored for non-Laravel projects so the gate stays off.
++    /// Build without publication locks: a class lookup can wait for another
++    /// parser, which itself may be populating classes through this loader.
++    /// Only completed-map publication is serialized. Concurrent dirty readers
++    /// may duplicate a build, but never consume a half-built reverse index.
+     pub(crate) fn rebuild_laravel_pivot_index(&self) {
+-        let index = if self.resolved_class_cache.read().is_laravel() {
+-            let classes: Vec<(String, Arc<ClassInfo>)> = {
+-                let idx = self.symbols.uri_classes_index.read();
+-                idx.iter()
+-                    .flat_map(|(uri, list)| list.iter().map(move |c| (uri.clone(), Arc::clone(c))))
+-                    .collect()
++        use std::sync::atomic::Ordering;
++        let state = &self.laravel_pivot_state;
++        if state.is_building() {
++            return;
++        }
++        let started_clean = !state.is_dirty();
++        let _marker = state.enter();
++        loop {
++            let generation = state.source.load(Ordering::Acquire);
++            let index = if self.resolved_class_cache.read().is_laravel() {
++                let classes: Vec<(String, Arc<ClassInfo>)> = {
++                    let idx = self.symbols.uri_classes_index.read();
++                    idx.iter()
++                        .flat_map(|(uri, list)| {
++                            list.iter().map(move |c| (uri.clone(), Arc::clone(c)))
++                        })
++                        .collect()
++                };
++                // Preserve configured class aliases. Owner-thread recursion
++                // uses the previous pivot map, retired at publication below.
++                let loader = |name: &str| self.find_or_load_class(name);
++                crate::virtual_members::laravel::build_pivot_index(&classes, &loader)
++            } else {
++                crate::virtual_members::laravel::LaravelPivotIndex::default()
+             };
+-            let loader = |name: &str| self.find_or_load_class(name);
+-            crate::virtual_members::laravel::build_pivot_index(&classes, &loader)
+-        } else {
+-            crate::virtual_members::laravel::LaravelPivotIndex::default()
+-        };
+-        let non_empty = !index.is_empty();
+-        *self.laravel_pivots.write() = index;
+-        self.laravel_has_pivots
+-            .store(non_empty, std::sync::atomic::Ordering::Relaxed);
++            #[cfg(test)]
++            if let Some(waiting) = state.waiting.lock().as_ref() {
++                let _ = waiting.send(());
++            }
++            let publication = state.build.lock();
++            if state.source.load(Ordering::Acquire) != generation {
++                drop(publication);
++                continue;
++            }
++            // A competing dirty-path builder already completed this epoch.
++            // Explicit rebuilds invoked while clean still refresh the map.
++            if !started_clean && state.published.load(Ordering::Acquire) == generation {
++                return;
++            }
++            let non_empty = !index.is_empty();
++            *self.laravel_pivots.write() = index;
++            self.laravel_has_pivots.store(non_empty, Ordering::Release);
++            // Retire partial recursive resolutions and fence old calculations
++            // before readers are allowed to consider this generation ready.
++            self.clear_resolved_class_cache();
++            state.published.store(generation, Ordering::Release);
++            drop(publication);
++            if !state.is_dirty() {
++                break;
++            }
++        }
+     }
+ 
+     /// Shared implementation used by [`find_or_load_class`].
+@@ -2730,3 +2762,236 @@ mod workbench_class_introduction_boundaries {
+         assert!(backend.find_or_load_class("Mentioned").is_some());
+     }
+ }
++
++#[cfg(test)]
++mod pivot_publication_tests {
++    use super::*;
++    use std::sync::atomic::Ordering;
++
++    #[test]
++    fn publishing_pivot_index_retires_a_class_cached_during_its_build() {
++        let backend = Backend::new_test();
++        let source = r#"<?php
++namespace Demo;
++class Role {}
++class RoleUser {}
++class User {
++    /** @return \Illuminate\Database\Eloquent\Relations\BelongsToMany<Role, $this, RoleUser> */
++    public function roles(): \Illuminate\Database\Eloquent\Relations\BelongsToMany {}
++}
++"#;
++        backend.update_ast("file:///pivot-publication.php", source);
++        backend.clear_resolved_class_cache();
++        *backend.laravel_pivots.write() = Default::default();
++        backend.laravel_has_pivots.store(false, Ordering::Relaxed);
++        backend.invalidate_laravel_pivot_index();
++        // Recursive class loading is allowed to consult the previous
++        // map on the builder thread. Its derived cache must still be retired.
++        let recursive_build = backend.laravel_pivot_state.enter();
++        let loader = |name: &str| backend.find_or_load_class(name);
++        let role = loader("Demo\\Role").expect("fixture Role must be indexed");
++        let before = crate::virtual_members::resolve_class_fully_cached(
++            &role,
++            &loader,
++            &backend.resolved_class_cache,
++        );
++        assert!(
++            !before.has_property("pivot"),
++            "fixture represents the unpublished index"
++        );
++
++        drop(recursive_build);
++        backend.rebuild_laravel_pivot_index();
++        assert!(
++            backend
++                .laravel_pivots
++                .read()
++                .get("Demo\\Role", "pivot")
++                .is_some(),
++            "the completed reverse index must contain the relation target"
++        );
++        let current_role = loader("Demo\\Role").expect("Role remains loadable");
++        assert!(
++            current_role.has_property("pivot"),
++            "the current decorated loader sees the completed pivot index"
++        );
++        let fresh = crate::virtual_members::resolve_class_fully_cached(
++            &current_role,
++            &loader,
++            &backend.resolved_class_cache,
++        );
++        assert!(
++            fresh.has_property("pivot"),
++            "completed pivot publication must retire the earlier partial Role resolution"
++        );
++    }
++
++    #[test]
++    fn dirty_reader_waits_for_publication_and_retries_an_invalidated_build() {
++        use std::sync::mpsc;
++        use std::time::Duration;
++
++        let backend = Backend::new_test();
++        let source = r#"<?php
++namespace Demo;
++class Role {}
++class RoleUser {}
++class User {
++    /** @return \Illuminate\Database\Eloquent\Relations\BelongsToMany<Role, $this, RoleUser> */
++    public function roles(): \Illuminate\Database\Eloquent\Relations\BelongsToMany {}
++}
++"#;
++        backend.update_ast("file:///pivot-concurrent.php", source);
++        backend.invalidate_laravel_pivot_index();
++        *backend.laravel_pivots.write() = Default::default();
++        backend.laravel_has_pivots.store(false, Ordering::Relaxed);
++        let (waiting_tx, waiting_rx) = mpsc::channel();
++        let (finished_tx, finished_rx) = mpsc::channel();
++        *backend.laravel_pivot_state.waiting.lock() = Some(waiting_tx);
++        let publication = backend.laravel_pivot_state.build.lock();
++        std::thread::scope(|scope| {
++            scope.spawn(|| {
++                let loader = |name: &str| backend.find_or_load_class(name);
++                let role = loader("Demo\\Role").expect("fixture Role");
++                let resolved = crate::virtual_members::resolve_class_fully_cached(
++                    &role,
++                    &loader,
++                    &backend.resolved_class_cache,
++                );
++                finished_tx
++                    .send((
++                        resolved.has_property("membership"),
++                        resolved.has_property("pivot"),
++                    ))
++                    .unwrap();
++            });
++            // This hook witnesses a completed build reaching the publication
++            // gate. The held guard, rather than a timing sleep, prevents it
++            // from declaring readiness or returning an incomplete Role.
++            waiting_rx
++                .recv_timeout(Duration::from_secs(10))
++                .expect("reader reached publication");
++            assert!(backend.laravel_pivot_state.is_dirty());
++            assert!(finished_rx.try_recv().is_err());
++            // Parse separately: update_ast on this backend would populate
++            // through the same held publication gate. Swap only the already
++            // parsed declarations, then invalidate, exactly at the publication seam.
++            let replacement = Backend::new_test();
++            let replacement_source = source.replace(
++                "BelongsToMany<Role, $this, RoleUser>",
++                "BelongsToMany<Role, $this, RoleUser, 'membership'>",
++            );
++            replacement.update_ast("file:///pivot-concurrent.php", &replacement_source);
++            let replacement_classes = replacement
++                .symbols
++                .uri_classes_index
++                .read()
++                .get("file:///pivot-concurrent.php")
++                .expect("replacement classes")
++                .clone();
++            backend.symbols.uri_classes_index.write().insert(
++                "file:///pivot-concurrent.php".to_string(),
++                replacement_classes,
++            );
++            let previous = backend.laravel_pivot_state.source.load(Ordering::Acquire);
++            backend.invalidate_laravel_pivot_index();
++            assert!(backend.laravel_pivot_state.source.load(Ordering::Acquire) > previous);
++            drop(publication);
++            assert_eq!(
++                finished_rx
++                    .recv_timeout(Duration::from_secs(10))
++                    .expect("reader completes"),
++                (true, false)
++            );
++        });
++        assert!(!backend.laravel_pivot_state.is_dirty());
++        assert!(
++            backend
++                .laravel_pivots
++                .read()
++                .get("Demo\\Role", "membership")
++                .is_some()
++        );
++        assert!(
++            backend
++                .laravel_pivots
++                .read()
++                .get("Demo\\Role", "pivot")
++                .is_none()
++        );
++        // Explicit rebuild must still work without a pending invalidation.
++        *backend.laravel_pivots.write() = Default::default();
++        backend.rebuild_laravel_pivot_index();
++        assert!(
++            backend
++                .laravel_pivots
++                .read()
++                .get("Demo\\Role", "membership")
++                .is_some()
++        );
++        assert!(
++            backend
++                .laravel_pivots
++                .read()
++                .get("Demo\\Role", "pivot")
++                .is_none()
++        );
++    }
++
++    #[test]
++    fn pivot_rebuild_preserves_configured_related_and_pivot_class_aliases() {
++        let backend = Backend::new_test();
++        let directory = tempfile::tempdir().unwrap();
++        std::fs::create_dir(directory.path().join("config")).unwrap();
++        std::fs::write(
++            directory.path().join("config/app.php"),
++            r#"<?php
++return ['aliases' => [
++    'RoleAlias' => \Demo\Role::class,
++    'RoleUserAlias' => \Demo\RoleUser::class,
++]];
++"#,
++        )
++        .unwrap();
++        *backend.workspace.workspace_root.write() = Some(directory.path().to_path_buf());
++        let source = r#"<?php
++namespace Demo;
++class Role {}
++class RoleUser {}
++class User {
++    /** @return \Illuminate\Database\Eloquent\Relations\BelongsToMany<\RoleAlias, $this, RoleUser, 'relatedAlias'> */
++    public function relatedAlias(): \Illuminate\Database\Eloquent\Relations\BelongsToMany {}
++    /** @return \Illuminate\Database\Eloquent\Relations\BelongsToMany<Role, $this, \RoleUserAlias, 'pivotAlias'> */
++    public function pivotAlias(): \Illuminate\Database\Eloquent\Relations\BelongsToMany {}
++}
++"#;
++        backend.update_ast("file:///pivot-aliases.php", source);
++        // Use the actual shared alias slot and config/app.php discovery path.
++        backend.laravel_aliases.invalidate();
++        backend.invalidate_laravel_pivot_index();
++        for (alias, expected) in [
++            ("RoleAlias", "Demo\\Role"),
++            ("RoleUserAlias", "Demo\\RoleUser"),
++        ] {
++            assert_eq!(
++                backend
++                    .find_or_load_class(alias)
++                    .expect("configured alias resolves")
++                    .fqn()
++                    .as_str(),
++                expected
++            );
++        }
++        backend.rebuild_laravel_pivot_index();
++        let expected = PhpType::named(crate::atom::atom("Demo\\RoleUser"));
++        let index = backend.laravel_pivots.read();
++        assert_eq!(
++            (
++                index.get("Demo\\Role", "relatedAlias"),
++                index.get("Demo\\Role", "pivotAlias")
++            ),
++            (Some(&expected), Some(&expected)),
++            "related targets and pivot types retain configured class-alias identity",
++        );
++    }
++}
+diff --git a/src/virtual_members/laravel/mod.rs b/src/virtual_members/laravel/mod.rs
+index 71a8ef3..3a216da 100644
+--- a/src/virtual_members/laravel/mod.rs
++++ b/src/virtual_members/laravel/mod.rs
+@@ -221,7 +221,7 @@ use accessors::{
+ pub(crate) use magic_uses::{MagicMemberKind, declaring_method_names};
+ pub(crate) use where_property::where_property_method_to_column;
+ 
+-pub(crate) use pivots::{LaravelPivotIndex, build_pivot_index, inject_pivot};
++pub(crate) use pivots::{LaravelPivotIndex, LaravelPivotState, build_pivot_index, inject_pivot};
+ pub(crate) use relationships::class_has_relation_method_ci;
+ pub(crate) use relationships::classify_relationship_typed;
+ pub(crate) use relationships::count_property_to_relationship_method;
+diff --git a/src/virtual_members/laravel/pivots.rs b/src/virtual_members/laravel/pivots.rs
+index 84bff7f..2a002b8 100644
+--- a/src/virtual_members/laravel/pivots.rs
++++ b/src/virtual_members/laravel/pivots.rs
+@@ -30,6 +30,73 @@ use super::relationships::{
+     resolve_related_fqn,
+ };
+ 
++/// Shared readiness state. Keeping source and publication epochs separate means
++/// an invalidation arriving during a build can never be cleared by that build.
++pub(crate) struct LaravelPivotState {
++    /// Latest accepted source invalidation.
++    pub(crate) source: std::sync::atomic::AtomicU64,
++    /// Source generation represented by the completed map.
++    pub(crate) published: std::sync::atomic::AtomicU64,
++    /// Serializes completed-map publication without holding a loader lock.
++    pub(crate) build: parking_lot::Mutex<()>,
++    /// Test witness for a completed build reaching publication.
++    #[cfg(test)]
++    pub(crate) waiting: parking_lot::Mutex<Option<std::sync::mpsc::Sender<()>>>,
++}
++
++impl Default for LaravelPivotState {
++    fn default() -> Self {
++        Self {
++            source: std::sync::atomic::AtomicU64::new(1),
++            published: std::sync::atomic::AtomicU64::new(0),
++            build: parking_lot::Mutex::new(()),
++            #[cfg(test)]
++            waiting: parking_lot::Mutex::new(None),
++        }
++    }
++}
++
++thread_local! {
++    static BUILDING_PIVOTS: std::cell::RefCell<Vec<usize>> = const { std::cell::RefCell::new(Vec::new()) };
++}
++
++/// Marks only this thread as a recursive pivot builder until dropped.
++pub(crate) struct PivotBuildMarker(usize);
++
++impl LaravelPivotState {
++    /// Whether accepted source changes still need a completed index.
++    pub(crate) fn is_dirty(&self) -> bool {
++        use std::sync::atomic::Ordering;
++        self.source.load(Ordering::Acquire) != self.published.load(Ordering::Acquire)
++    }
++
++    /// Whether this thread is already constructing this particular index.
++    pub(crate) fn is_building(&self) -> bool {
++        let identity = self as *const Self as usize;
++        BUILDING_PIVOTS.with(|slots| slots.borrow().contains(&identity))
++    }
++
++    /// Permit recursive lookups to use the previous map on this thread only.
++    pub(crate) fn enter(&self) -> PivotBuildMarker {
++        let identity = self as *const Self as usize;
++        BUILDING_PIVOTS.with(|slots| slots.borrow_mut().push(identity));
++        PivotBuildMarker(identity)
++    }
++}
++
++impl Drop for PivotBuildMarker {
++    fn drop(&mut self) {
++        BUILDING_PIVOTS.with(|slots| {
++            let mut slots = slots.borrow_mut();
++            let position = slots
++                .iter()
++                .rposition(|slot| *slot == self.0)
++                .expect("active pivot build");
++            slots.remove(position);
++        });
++    }
++}
++
+ struct PivotProperty {
+     name: Atom,
+     ty: PhpType,
+diff --git a/tests/integration/rename_member.rs b/tests/integration/rename_member.rs
+index 7ba012c..88cd419 100644
+--- a/tests/integration/rename_member.rs
++++ b/tests/integration/rename_member.rs
+@@ -2,9 +2,10 @@
+ //! class, and enum cases.
+ 
+ use crate::common::{
+-    apply_edits, create_test_backend, edits_for_uri, line_char_of, open_php, prepare_rename,
+-    rename, rename_result,
++    apply_edits, create_psr4_workspace, create_test_backend, edits_for_uri, line_char_of, open_php,
++    prepare_rename, rename, rename_result,
+ };
++use tower_lsp::LanguageServer;
+ use tower_lsp::lsp_types::*;
+ 
+ const RENAME_COLLISION_METHOD_SOURCE: &str = concat!(
+@@ -277,6 +278,774 @@ async fn rename_collision_missing_method_rejects_sigil_name() {
+     rename_collision_refuses_occupied_member(source, "$box->missing", "missing", "$other").await;
+ }
+ 
++async fn private_trait_capture_fixture(
++    nested: bool,
++    parent_receiver: bool,
++) -> (phpantom_lsp::Backend, Url, String) {
++    let backend = create_test_backend();
++    let uri = Url::parse("file:///private-trait-capture.php").unwrap();
++    let source = private_trait_capture_source(nested, parent_receiver);
++    open_php(&backend, &uri, &source).await;
++    (backend, uri, source)
++}
++
++fn private_trait_capture_source(nested: bool, parent_receiver: bool) -> String {
++    let composition = if nested {
++        "trait OuterSource { use PrivateSource; }\nclass Consumer { use OuterSource;\n"
++    } else {
++        "class Consumer { use PrivateSource;\n"
++    };
++    let parent_call = if parent_receiver {
++        "    public function read(ConsumerChild $child): void { $note = 'ž🐘'; $child->source(); }\n"
++    } else {
++        ""
++    };
++    format!(
++        concat!(
++            "<?php\n",
++            "trait PrivateSource {{ private function source(): void {{}} }}\n",
++            "{}",
++            "    public function invoke(): void {{ $note = 'ž🐘'; $this->source(); }}\n",
++            "{}",
++            "}}\n",
++            "class ConsumerChild extends Consumer {{\n",
++            "    public function source(): void {{}}\n",
++            "    public function target(): void {{}}\n",
++            "    public function childScope(): void {{ $this->source(); }}\n",
++            "}}\n",
++            "function demo(ConsumerChild $child): void {{ $child->source(); $child->target(); }}\n",
++        ),
++        composition, parent_call,
++    )
++}
++
++fn private_trait_capture_range(source: &str, occurrence: &str) -> Range {
++    private_identity_token_range(source, occurrence, "source")
++}
++
++fn private_identity_token_range(source: &str, occurrence: &str, token: &str) -> Range {
++    let start = source.find(occurrence).unwrap() + occurrence.rfind(token).unwrap();
++    let position = |offset| {
++        let before = &source[..offset];
++        Position::new(
++            before.bytes().filter(|byte| *byte == b'\n').count() as u32,
++            before.rsplit('\n').next().unwrap().encode_utf16().count() as u32,
++        )
++    };
++    Range::new(position(start), position(start + token.len()))
++}
++
++async fn private_trait_capture_assert_references(nested: bool, parent_receiver: bool) {
++    let (backend, uri, source) = private_trait_capture_fixture(nested, parent_receiver).await;
++    let declaration = private_trait_capture_range(&source, "private function source");
++    let call = private_trait_capture_range(&source, "$this->source");
++    let parent_call =
++        parent_receiver.then(|| private_trait_capture_range(&source, "$child->source"));
++    for query in [declaration, call].into_iter().chain(parent_call) {
++        for include_declaration in [false, true] {
++            let mut actual = crate::common::find_references(
++                &backend,
++                &uri,
++                Position::new(query.start.line, query.start.character + 1),
++                include_declaration,
++            )
++            .await;
++            let mut expected = vec![Location::new(uri.clone(), call)];
++            if let Some(parent_call) = parent_call {
++                expected.push(Location::new(uri.clone(), parent_call));
++            }
++            if include_declaration {
++                expected.push(Location::new(uri.clone(), declaration));
++            }
++            let key = |location: &Location| {
++                (
++                    location.range.start.line,
++                    location.range.start.character,
++                    location.range.end.line,
++                    location.range.end.character,
++                )
++            };
++            actual.sort_by_key(key);
++            expected.sort_by_key(key);
++            assert_eq!(
++                actual, expected,
++                "private trait references follow the consuming lexical scope, not a child's independent namesake; nested={nested}, parent_receiver={parent_receiver}, declarations={include_declaration}, query={query:?}"
++            );
++        }
++    }
++}
++
++#[tokio::test]
++async fn rename_collision_private_trait_capture_excludes_child_namesake_references() {
++    for nested in [false, true] {
++        private_trait_capture_assert_references(nested, false).await;
++    }
++}
++
++#[tokio::test]
++async fn rename_collision_private_trait_capture_parent_scope_keeps_child_typed_receiver() {
++    for nested in [false, true] {
++        private_trait_capture_assert_references(nested, true).await;
++    }
++}
++
++#[tokio::test]
++async fn rename_collision_private_trait_capture_child_scope_keeps_its_own_references() {
++    for nested in [false, true] {
++        let (backend, uri, source) = private_trait_capture_fixture(nested, true).await;
++        let declaration = private_trait_capture_range(&source, "public function source");
++        let child_call =
++            private_trait_capture_range(&source, "function childScope(): void { $this->source");
++        let outside_call = private_trait_capture_range(
++            &source,
++            "function demo(ConsumerChild $child): void { $child->source",
++        );
++        for query in [declaration, child_call, outside_call] {
++            for include_declaration in [false, true] {
++                let mut actual = crate::common::find_references(
++                    &backend,
++                    &uri,
++                    Position::new(query.start.line, query.start.character + 1),
++                    include_declaration,
++                )
++                .await;
++                let mut expected = vec![
++                    Location::new(uri.clone(), child_call),
++                    Location::new(uri.clone(), outside_call),
++                ];
++                if include_declaration {
++                    expected.push(Location::new(uri.clone(), declaration));
++                }
++                let key = |location: &Location| {
++                    (
++                        location.range.start.line,
++                        location.range.start.character,
++                        location.range.end.line,
++                        location.range.end.character,
++                    )
++                };
++                actual.sort_by_key(key);
++                expected.sort_by_key(key);
++                assert_eq!(
++                    actual, expected,
++                    "the child's public symbol excludes the consuming parent's private lexical calls; nested={nested}, declarations={include_declaration}, query={query:?}"
++                );
++            }
++        }
++    }
++}
++
++async fn private_trait_capture_assert_rename(
++    nested: bool,
++    parent_receiver: bool,
++    destination: &str,
++) {
++    let (backend, uri, source) = private_trait_capture_fixture(nested, parent_receiver).await;
++    let declaration = private_trait_capture_range(&source, "private function source");
++    let call = private_trait_capture_range(&source, "$this->source");
++    let parent_call =
++        parent_receiver.then(|| private_trait_capture_range(&source, "$child->source"));
++    for query in [declaration, call].into_iter().chain(parent_call) {
++        let edit = rename_result(
++            &backend,
++            &uri,
++            query.start.line,
++            query.start.character + 1,
++            destination,
++        )
++        .await
++        .expect("a child's independent namesake is not a private-owner collision")
++        .expect("private trait rename must preserve its lexical uses");
++        let edits = edits_for_uri(&edit, &uri);
++        assert_eq!(
++            edits.len(),
++            if parent_receiver { 3 } else { 2 },
++            "no descendant namesake declaration/call edits; nested={nested}, parent_receiver={parent_receiver}"
++        );
++        assert!(
++            edits.iter().all(|edit| edit.range == declaration
++                || edit.range == call
++                || Some(edit.range) == parent_call),
++            "only the trait token and consuming scope's calls belong to this rename: {edits:?}"
++        );
++        assert!(edits.iter().all(|edit| edit.new_text == destination));
++        let mut expected = source
++            .replacen("function source(", &format!("function {destination}("), 1)
++            .replacen("$this->source()", &format!("$this->{destination}()"), 1);
++        if parent_receiver {
++            expected =
++                expected.replacen("$child->source()", &format!("$child->{destination}()"), 1);
++        }
++        assert_eq!(
++            apply_edits(&source, &edits),
++            expected,
++            "ConsumerChild declarations, its lexical call and the outside calls stay byte-exact; nested={nested}, parent_receiver={parent_receiver}"
++        );
++    }
++}
++
++#[tokio::test]
++async fn rename_collision_private_trait_capture_allows_child_independent_destination() {
++    for nested in [false, true] {
++        private_trait_capture_assert_rename(nested, false, "target").await;
++    }
++}
++
++#[tokio::test]
++async fn rename_collision_private_trait_capture_fresh_name_does_not_rename_child_namesake() {
++    for nested in [false, true] {
++        private_trait_capture_assert_rename(nested, false, "fresh").await;
++    }
++}
++
++#[tokio::test]
++async fn rename_collision_private_trait_capture_parent_scope_rename_keeps_child_typed_receiver() {
++    for nested in [false, true] {
++        for destination in ["target", "fresh"] {
++            private_trait_capture_assert_rename(nested, true, destination).await;
++        }
++    }
++}
++
++#[tokio::test]
++async fn rename_collision_private_trait_capture_child_rename_preserves_parent_private_symbol() {
++    for nested in [false, true] {
++        let (backend, uri, source) = private_trait_capture_fixture(nested, true).await;
++        let declaration = private_trait_capture_range(&source, "public function source");
++        let edit = rename_result(
++            &backend,
++            &uri,
++            declaration.start.line,
++            declaration.start.character + 1,
++            "freshChild",
++        )
++        .await
++        .expect("a child can rename its independent public symbol")
++        .expect("the child declaration and its own calls need edits");
++        let edits = edits_for_uri(&edit, &uri);
++        assert_eq!(edits.len(), 3, "only the child's declaration and calls");
++        let expected = source
++            .replace("public function source(", "public function freshChild(")
++            .replace(
++                "function childScope(): void { $this->source()",
++                "function childScope(): void { $this->freshChild()",
++            )
++            .replace(
++                "function demo(ConsumerChild $child): void { $child->source()",
++                "function demo(ConsumerChild $child): void { $child->freshChild()",
++            );
++        assert_eq!(
++            apply_edits(&source, &edits),
++            expected,
++            "trait declaration, parent $this call and parent Child-typed call remain byte-exact; nested={nested}"
++        );
++    }
++}
++
++async fn private_identity_assert_exact_references(
++    backend: &phpantom_lsp::Backend,
++    queries: &[Location],
++    declarations: &[Location],
++    calls: &[Location],
++) {
++    for query in queries {
++        for include_declaration in [false, true] {
++            let mut actual = crate::common::find_references(
++                backend,
++                &query.uri,
++                Position::new(query.range.start.line, query.range.start.character + 1),
++                include_declaration,
++            )
++            .await;
++            let mut expected = calls.to_vec();
++            if include_declaration {
++                expected.extend_from_slice(declarations);
++            }
++            let key = |location: &Location| {
++                (
++                    location.uri.to_string(),
++                    location.range.start.line,
++                    location.range.start.character,
++                    location.range.end.line,
++                    location.range.end.character,
++                )
++            };
++            actual.sort_by_key(key);
++            expected.sort_by_key(key);
++            assert_eq!(
++                actual, expected,
++                "exact private/public binding from {query:?}, declarations={include_declaration}"
++            );
++        }
++    }
++}
++
++#[tokio::test]
++async fn rename_collision_private_trait_capture_insteadof_uses_selected_cross_file_origin() {
++    let a = "<?php\nnamespace App;\ntrait A { private function source(): void {} }\n";
++    let b = "<?php\nnamespace App;\ntrait B { private function source(): void {} }\n";
++    let consumer = concat!(
++        "<?php\nnamespace App;\n",
++        "class Consumer {\n",
++        "    use A, B { B::source insteadof A; }\n",
++        "    public function run(): void { $note = 'ž🐘'; $this->source(); }\n",
++        "}\n",
++    );
++    let (backend, directory) = create_psr4_workspace(
++        r#"{"autoload":{"psr-4":{"App\\":"src/"}}}"#,
++        &[
++            ("src/A.php", a),
++            ("src/B.php", b),
++            ("src/Consumer.php", consumer),
++        ],
++    );
++    let a_uri = Url::from_file_path(directory.path().join("src/A.php")).unwrap();
++    let b_uri = Url::from_file_path(directory.path().join("src/B.php")).unwrap();
++    let consumer_uri = Url::from_file_path(directory.path().join("src/Consumer.php")).unwrap();
++    for (uri, source) in [(&a_uri, a), (&b_uri, b), (&consumer_uri, consumer)] {
++        open_php(&backend, uri, source).await;
++    }
++    let a_range = private_trait_capture_range(a, "function source");
++    let b_range = private_trait_capture_range(b, "function source");
++    assert_eq!(
++        a_range, b_range,
++        "offsets alone cannot distinguish the two origins"
++    );
++    let declaration = Location::new(b_uri.clone(), b_range);
++    let adaptation = Location::new(
++        consumer_uri.clone(),
++        private_trait_capture_range(consumer, "B::source"),
++    );
++    let call = Location::new(
++        consumer_uri.clone(),
++        private_trait_capture_range(consumer, "$this->source"),
++    );
++    private_identity_assert_exact_references(
++        &backend,
++        &[declaration.clone(), adaptation.clone(), call.clone()],
++        std::slice::from_ref(&declaration),
++        &[adaptation, call],
++    )
++    .await;
++    let edit = rename_result(
++        &backend,
++        &b_uri,
++        b_range.start.line,
++        b_range.start.character + 1,
++        "selected",
++    )
++    .await
++    .expect("the selected trait method can be renamed")
++    .expect("selected trait method needs edits");
++    assert!(
++        edits_for_uri(&edit, &a_uri).is_empty(),
++        "the rejected origin remains untouched"
++    );
++    let b_edits = edits_for_uri(&edit, &b_uri);
++    let consumer_edits = edits_for_uri(&edit, &consumer_uri);
++    assert_eq!(b_edits.len(), 1);
++    assert_eq!(consumer_edits.len(), 2);
++    assert_eq!(
++        apply_edits(b, &b_edits),
++        b.replace("function source(", "function selected(")
++    );
++    assert_eq!(
++        apply_edits(consumer, &consumer_edits),
++        consumer
++            .replace("B::source", "B::selected")
++            .replace("$this->source()", "$this->selected()")
++    );
++}
++
++#[tokio::test]
++async fn rename_collision_private_trait_capture_outer_insteadof_overrides_nested_trait_origin() {
++    let source = concat!(
++        "<?php\n",
++        "trait NestedB { private function source(): string { return 'B'; } }\n",
++        "trait Wrapper {\n",
++        "    use NestedB;\n",
++        "    public function other(): string { return 'other'; }\n",
++        "}\n",
++        "trait SelectedA { private function source(): string { return 'A'; } }\n",
++        "class Consumer {\n",
++        "    use Wrapper, SelectedA { SelectedA::source insteadof Wrapper; }\n",
++        "    public function invoke(): string { $note = 'ž🐘'; return $this->source(); }\n",
++        "}\n",
++        "function demo(Consumer $consumer): string { return $consumer->other(); }\n",
++    );
++    let backend = create_test_backend();
++    let uri = Url::parse("file:///nested-trait-precedence.php").unwrap();
++    open_php(&backend, &uri, source).await;
++    let selected = Location::new(
++        uri.clone(),
++        private_trait_capture_range(source, "trait SelectedA { private function source"),
++    );
++    let rejected = Location::new(
++        uri.clone(),
++        private_trait_capture_range(source, "trait NestedB { private function source"),
++    );
++    assert_ne!(selected.range, rejected.range);
++    let adaptation = Location::new(
++        uri.clone(),
++        private_trait_capture_range(source, "SelectedA::source"),
++    );
++    let call = Location::new(
++        uri.clone(),
++        private_trait_capture_range(source, "$this->source"),
++    );
++    private_identity_assert_exact_references(
++        &backend,
++        &[selected.clone(), adaptation.clone(), call.clone()],
++        std::slice::from_ref(&selected),
++        &[adaptation, call],
++    )
++    .await;
++    private_identity_assert_exact_references(
++        &backend,
++        std::slice::from_ref(&rejected),
++        std::slice::from_ref(&rejected),
++        &[],
++    )
++    .await;
++    let other_declaration = Location::new(
++        uri.clone(),
++        private_identity_token_range(source, "function other", "other"),
++    );
++    let other_call = Location::new(
++        uri.clone(),
++        private_identity_token_range(source, "$consumer->other", "other"),
++    );
++    private_identity_assert_exact_references(
++        &backend,
++        &[other_declaration.clone(), other_call.clone()],
++        &[other_declaration],
++        &[other_call],
++    )
++    .await;
++    let edit = rename_result(
++        &backend,
++        &uri,
++        selected.range.start.line,
++        selected.range.start.character + 1,
++        "selected",
++    )
++    .await
++    .expect("the outer selected trait is a valid rename target")
++    .expect("the selected declaration, adaptation and call need edits");
++    let edits = edits_for_uri(&edit, &uri);
++    assert_eq!(edits.len(), 3);
++    let expected = source
++        .replace(
++            "trait SelectedA { private function source(",
++            "trait SelectedA { private function selected(",
++        )
++        .replace("SelectedA::source", "SelectedA::selected")
++        .replace("$this->source()", "$this->selected()");
++    assert_eq!(
++        apply_edits(source, &edits),
++        expected,
++        "the rejected nested origin and Wrapper's unrelated method stay byte-exact"
++    );
++}
++
++#[tokio::test]
++async fn rename_collision_private_trait_capture_public_promotion_retains_override_family() {
++    let source = concat!(
++        "<?php\n",
++        "trait PrivateSource { private function source(): void {} }\n",
++        "class Consumer {\n",
++        "    use PrivateSource { source as public; }\n",
++        "    public function run(): void { $note = 'ž🐘'; $this->source(); }\n",
++        "}\n",
++        "class ConsumerChild extends Consumer {\n",
++        "    public function source(): void {}\n",
++        "    public function childScope(): void { $this->source(); }\n",
++        "}\n",
++        "function demo(ConsumerChild $child): void { $child->source(); }\n",
++    );
++    let backend = create_test_backend();
++    let uri = Url::parse("file:///public-trait-promotion.php").unwrap();
++    open_php(&backend, &uri, source).await;
++    let declarations: Vec<_> = ["private function source", "public function source"]
++        .iter()
++        .map(|needle| Location::new(uri.clone(), private_trait_capture_range(source, needle)))
++        .collect();
++    let calls: Vec<_> = [
++        "use PrivateSource { source",
++        "function run(): void { $note = 'ž🐘'; $this->source",
++        "function childScope(): void { $this->source",
++        "$child->source",
++    ]
++    .iter()
++    .map(|needle| Location::new(uri.clone(), private_trait_capture_range(source, needle)))
++    .collect();
++    let origin_queries = [declarations[0].clone(), calls[0].clone(), calls[1].clone()];
++    private_identity_assert_exact_references(&backend, &origin_queries, &declarations, &calls)
++        .await;
++    let child_queries = [declarations[1].clone(), calls[2].clone(), calls[3].clone()];
++    private_identity_assert_exact_references(
++        &backend,
++        &child_queries,
++        &declarations[1..],
++        &calls[2..],
++    )
++    .await;
++    let edit = rename_result(
++        &backend,
++        &uri,
++        declarations[0].range.start.line,
++        declarations[0].range.start.character + 1,
++        "promoted",
++    )
++    .await
++    .expect("effective public visibility retains the override family")
++    .expect("promoted trait method needs edits");
++    let edits = edits_for_uri(&edit, &uri);
++    assert_eq!(edits.len(), declarations.len() + calls.len());
++    assert_eq!(
++        apply_edits(source, &edits),
++        source.replace("source", "promoted")
++    );
++    for query in child_queries {
++        let edit = rename_result(
++            &backend,
++            &uri,
++            query.range.start.line,
++            query.range.start.character + 1,
++            "childBranch",
++        )
++        .await
++        .expect("the child override can be renamed independently of its ancestors")
++        .expect("the child declaration and its descendant calls need edits");
++        let edits = edits_for_uri(&edit, &uri);
++        assert_eq!(edits.len(), 3);
++        let expected = source
++            .replace("public function source(", "public function childBranch(")
++            .replace(
++                "function childScope(): void { $this->source()",
++                "function childScope(): void { $this->childBranch()",
++            )
++            .replace("$child->source()", "$child->childBranch()");
++        assert_eq!(
++            apply_edits(source, &edits),
++            expected,
++            "a child query preserves the promoted ancestor declaration, adaptation and parent call"
++        );
++    }
++}
++
++const PRIVATE_IDENTITY_STATIC_SOURCE: &str = concat!(
++    "<?php\n",
++    "class ParentScope {\n",
++    "    private static function source(): void {}\n",
++    "    private static string $source = 'parent';\n",
++    "    private const TOKEN = 'parent';\n",
++    "    public function read(ChildScope $child): void {\n",
++    "        $note = 'ž🐘'; $child->source();\n",
++    "        ChildScope::source();\n",
++    "        $child::source();\n",
++    "        echo self::$source;\n",
++    "        echo ChildScope::$source;\n",
++    "        echo $child::$source;\n",
++    "        echo self::TOKEN;\n",
++    "        echo ChildScope::TOKEN;\n",
++    "        echo $child::TOKEN;\n",
++    "    }\n",
++    "}\n",
++    "class ChildScope extends ParentScope {\n",
++    "    public static function source(): void {}\n",
++    "    public static string $source = 'child';\n",
++    "    public const TOKEN = 'child';\n",
++    "}\n",
++);
++
++async fn private_identity_assert_static_kind(
++    token: &str,
++    parent_declaration: &str,
++    child_declaration: &str,
++    parent_call: &str,
++    child_calls: &[&str],
++) {
++    let source = PRIVATE_IDENTITY_STATIC_SOURCE;
++    let backend = create_test_backend();
++    let uri = Url::parse("file:///private-static-binding.php").unwrap();
++    open_php(&backend, &uri, source).await;
++    let location = |needle| {
++        Location::new(
++            uri.clone(),
++            private_identity_token_range(source, needle, token),
++        )
++    };
++    let parent_declaration = location(parent_declaration);
++    let child_declaration = location(child_declaration);
++    let parent_call = location(parent_call);
++    let child_calls: Vec<_> = child_calls.iter().map(|needle| location(needle)).collect();
++    private_identity_assert_exact_references(
++        &backend,
++        &[parent_declaration.clone(), parent_call.clone()],
++        &[parent_declaration],
++        &[parent_call],
++    )
++    .await;
++    let queries: Vec<_> = std::iter::once(child_declaration.clone())
++        .chain(child_calls.iter().cloned())
++        .collect();
++    private_identity_assert_exact_references(
++        &backend,
++        &queries,
++        &[child_declaration],
++        &child_calls,
++    )
++    .await;
++}
++
++#[tokio::test]
++async fn rename_collision_private_trait_capture_static_method_explicit_subject_keeps_child_identity()
++ {
++    private_identity_assert_static_kind(
++        "source",
++        "private static function source",
++        "public static function source",
++        "$child->source",
++        &["ChildScope::source", "$child::source"],
++    )
++    .await;
++}
++
++#[tokio::test]
++async fn rename_collision_private_trait_capture_static_property_explicit_subject_keeps_child_identity()
++ {
++    private_identity_assert_static_kind(
++        "$source",
++        "private static string $source",
++        "public static string $source",
++        "self::$source",
++        &["ChildScope::$source", "$child::$source"],
++    )
++    .await;
++}
++
++#[tokio::test]
++async fn rename_collision_private_trait_capture_constant_explicit_subject_keeps_child_identity() {
++    private_identity_assert_static_kind(
++        "TOKEN",
++        "private const TOKEN",
++        "public const TOKEN",
++        "self::TOKEN",
++        &["ChildScope::TOKEN", "$child::TOKEN"],
++    )
++    .await;
++}
++
++#[tokio::test]
++async fn rename_collision_private_trait_capture_private_constructor_keeps_new_self_reference() {
++    let source = concat!(
++        "<?php\n",
++        "class PrivateFactory {\n",
++        "    private function __construct() {}\n",
++        "    public static function make(): self { return new self(); }\n",
++        "}\n",
++    );
++    let backend = create_test_backend();
++    let uri = Url::parse("file:///private-constructor.php").unwrap();
++    open_php(&backend, &uri, source).await;
++    let declaration = Location::new(
++        uri.clone(),
++        private_identity_token_range(source, "function __construct", "__construct"),
++    );
++    let call = Location::new(
++        uri,
++        private_identity_token_range(source, "new self", "self"),
++    );
++    private_identity_assert_exact_references(
++        &backend,
++        std::slice::from_ref(&declaration),
++        std::slice::from_ref(&declaration),
++        &[call],
++    )
++    .await;
++}
++
++#[tokio::test]
++async fn rename_collision_private_trait_capture_child_reference_lens_excludes_parent_private_calls()
++{
++    for nested in [false, true] {
++        let source = private_trait_capture_source(nested, true).replacen(
++            "<?php\n",
++            "<?php\nnamespace App;\n",
++            1,
++        );
++        let (backend, directory) = create_psr4_workspace(
++            r#"{"autoload":{"psr-4":{"App\\":"src/"}}}"#,
++            &[("src/ConsumerChild.php", &source)],
++        );
++        let uri = Url::from_file_path(directory.path().join("src/ConsumerChild.php")).unwrap();
++        open_php(&backend, &uri, &source).await;
++        let declaration = private_trait_capture_range(&source, "public function source");
++        let expected = vec![
++            Location::new(
++                uri.clone(),
++                private_trait_capture_range(&source, "function childScope(): void { $this->source"),
++            ),
++            Location::new(
++                uri.clone(),
++                private_trait_capture_range(
++                    &source,
++                    "function demo(ConsumerChild $child): void { $child->source",
++                ),
++            ),
++        ];
++        let references =
++            crate::common::find_references(&backend, &uri, declaration.start, false).await;
++        assert_eq!(
++            references, expected,
++            "the lens must agree with exact references"
++        );
++        let lenses = backend
++            .code_lens(CodeLensParams {
++                text_document: TextDocumentIdentifier { uri: uri.clone() },
++                work_done_progress_params: WorkDoneProgressParams::default(),
++                partial_result_params: PartialResultParams::default(),
++            })
++            .await
++            .unwrap()
++            .expect("expected public declaration reference lenses");
++        let lens = lenses
++            .iter()
++            .find(|lens| {
++                lens.range.start.line == declaration.start.line
++                    && (lens
++                        .data
++                        .as_ref()
++                        .is_some_and(|data| data["kind"] == "phpMemberReferences")
++                        || lens
++                            .command
++                            .as_ref()
++                            .is_some_and(|command| command.title.ends_with("references")))
++            })
++            .unwrap_or_else(|| panic!("expected a public child reference lens, got {lenses:#?}"))
++            .clone();
++        let resolved = backend.code_lens_resolve(lens).await.unwrap();
++        let command = resolved
++            .command
++            .expect("resolved reference lens has a command");
++        assert_eq!(command.title, "2 references");
++        let locations: Vec<Location> = serde_json::from_value(
++            command
++                .arguments
++                .unwrap()
++                .get(2)
++                .cloned()
++                .expect("reference locations"),
++        )
++        .unwrap();
++        assert_eq!(
++            locations, expected,
++            "private parent lexical calls do not inflate the child badge"
++        );
++    }
++}
++
+ // ─── Method Rename ──────────────────────────────────────────────────────────
+ 
+ #[tokio::test]

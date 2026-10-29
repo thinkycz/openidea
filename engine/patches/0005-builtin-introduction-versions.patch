@@ -1,0 +1,290 @@
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -2278,8 +2278,13 @@
+                 .entry(source.as_ptr() as usize)
+                 .or_insert_with(|| source.contains("@removed"))
+         };
++        let mut mentions_since: HashMap<usize, bool> = HashMap::new();
+         self.stub_function_index.write().retain(|name, source| {
+-            !may_be_removed(source) || !stubs::is_stub_function_removed(source, name, version)
++            (!may_be_removed(source) || !stubs::is_stub_function_removed(source, name, version))
++                && (!*mentions_since
++                    .entry(source.as_ptr() as usize)
++                    .or_insert_with(|| source.contains("@since"))
++                    || !stubs::is_stub_function_introduced_after(source, name, version))
+         });
+         self.stub_index.write().retain(|name, source| {
+             !may_be_removed(source) || !stubs::is_stub_class_removed(source, name, version)
+--- a/src/stubs.rs
++++ b/src/stubs.rs
+@@ -161,6 +161,82 @@
+     is_preceding_docblock_removed(source, pos, php_version)
+ }
+ 
++/// Whether a built-in function's PHP introduction version is newer than the target.
++/// Only numeric PHP `@since` tags are used; extension release notes such as
++/// `@since PECL 1.0` are not PHP language-version constraints.
++pub fn is_stub_function_introduced_after(
++    source: &str,
++    func_name: &str,
++    php_version: crate::types::PhpVersion,
++) -> bool {
++    let short = func_name.rsplit('\\').next().unwrap_or(func_name);
++    let needle = format!("function {short}(");
++    let position = source
++        .find(&needle)
++        .or_else(|| source.find(&format!("function {short} ")));
++    position.is_some_and(|position| introduced_after_at(source, position, php_version))
++}
++
++/// Check a parsed stub function using its identifier offset, avoiding another
++/// whole-file name search while its sibling declarations are cached.
++pub(crate) fn is_stub_function_introduced_after_offset(
++    source: &str,
++    name_offset: usize,
++    php_version: crate::types::PhpVersion,
++) -> bool {
++    source
++        .get(..name_offset)
++        .and_then(|before| before.rfind("function"))
++        .is_some_and(|position| introduced_after_at(source, position, php_version))
++}
++
++fn introduced_after_at(source: &str, position: usize, version: crate::types::PhpVersion) -> bool {
++    let Some(docblock) = preceding_docblock(source, position) else {
++        return false;
++    };
++    let body = docblock
++        .get(3..docblock.len().saturating_sub(2))
++        .unwrap_or("");
++    body.lines().any(|line| {
++        let line = line.trim().trim_start_matches('*').trim();
++        let Some(since) = line
++            .strip_prefix("@since")
++            .and_then(|s| s.strip_prefix(char::is_whitespace))
++        else {
++            return false;
++        };
++        let Some(token) = since.split_whitespace().next() else {
++            return false;
++        };
++        let mut parts = token.split('.');
++        let (Some(major), Some(minor)) = (
++            parts.next().and_then(|v| v.parse::<u8>().ok()),
++            parts.next().and_then(|v| v.parse::<u8>().ok()),
++        ) else {
++            return false;
++        };
++        // Numeric PECL releases below PHP's major-version range are not PHP targets.
++        major >= 4 && version < crate::types::PhpVersion::new(major, minor)
++    })
++}
++
++fn preceding_docblock(source: &str, decl_pos: usize) -> Option<&str> {
++    let before = source.get(..decl_pos)?;
++    let doc_end = before.rfind("*/")?;
++    let between = &source[doc_end + 2..decl_pos];
++    if between.contains("function ")
++        || between.contains("class ")
++        || between.contains("interface ")
++        || between.contains("trait ")
++        || between.contains("enum ")
++        || between.contains("const ")
++    {
++        return None;
++    }
++    let doc_start = source[..doc_end].rfind("/**")?;
++    Some(&source[doc_start..doc_end + 2])
++}
++
+ /// Shared helper: check if the docblock immediately preceding the
+ /// declaration at `decl_pos` contains `@removed X.Y` where
+ /// `php_version >= X.Y`.
+@@ -169,25 +245,9 @@
+     decl_pos: usize,
+     php_version: crate::types::PhpVersion,
+ ) -> bool {
+-    let before = &source[..decl_pos];
+-    let Some(doc_end) = before.rfind("*/") else {
++    let Some(docblock) = preceding_docblock(source, decl_pos) else {
+         return false;
+     };
+-
+-    // Make sure there is no intervening declaration between the
+-    // docblock end and our target — otherwise the docblock belongs
+-    // to a different element.
+-    let between = &source[doc_end + 2..decl_pos];
+-    if between.contains("function ") || between.contains("class ") || between.contains("interface ")
+-    {
+-        return false;
+-    }
+-
+-    let Some(doc_start) = source[..doc_end].rfind("/**") else {
+-        return false;
+-    };
+-
+-    let docblock = &source[doc_start..doc_end + 2];
+ 
+     // Simple line-by-line scan for `@removed X.Y` instead of a full
+     // docblock parse.  This is called for every stub entry during
+@@ -267,6 +327,53 @@
+     use crate::types::PhpVersion;
+ 
+     #[test]
++    fn since_versions_obey_boundaries_and_inline_docblocks() {
++        let source = "<?php /** @since 8.4 */ function future() {}";
++        assert!(!is_stub_function_introduced_after(
++            "<?php /**/ function legacy() {}",
++            "legacy",
++            PhpVersion::new(7, 4)
++        ));
++        assert!(is_stub_function_introduced_after(
++            source,
++            "future",
++            PhpVersion::new(8, 3)
++        ));
++        assert!(!is_stub_function_introduced_after(
++            source,
++            "future",
++            PhpVersion::new(8, 4)
++        ));
++        assert!(is_stub_function_introduced_after_offset(
++            source,
++            source.find("future").unwrap(),
++            PhpVersion::new(8, 3)
++        ));
++    }
++
++    #[test]
++    fn since_tag_does_not_leak_from_an_earlier_declaration() {
++        let source = "<?php /** @since 8.4 */ function future() {} function legacy() {}";
++        assert!(!is_stub_function_introduced_after(
++            source,
++            "legacy",
++            PhpVersion::new(7, 4)
++        ));
++    }
++
++    #[test]
++    fn extension_release_and_non_version_since_tags_are_not_php_targets() {
++        for tag in ["PECL 9.0", "1.0", "unknown", "8.x"] {
++            let source = format!("<?php /** @since {tag} */ function extension_fn() {{}}");
++            assert!(!is_stub_function_introduced_after(
++                &source,
++                "extension_fn",
++                PhpVersion::new(7, 4)
++            ));
++        }
++    }
++
++    #[test]
+     fn constant_removed_single_quote() {
+         let source = r#"<?php
+ /**
+--- a/src/resolution.rs
++++ b/src/resolution.rs
+@@ -1177,6 +1177,16 @@
+             if let Some(&stub_content) = stub_fn_idx.get(name) {
+                 let ver = Some(self.php_version());
+                 let mut functions = self.parse_functions_versioned(stub_content, ver);
++                if stub_content.contains("@since") {
++                    let version = self.php_version();
++                    functions.retain(|function| {
++                        !crate::stubs::is_stub_function_introduced_after_offset(
++                            stub_content,
++                            function.name_offset as usize,
++                            version,
++                        )
++                    });
++                }
+ 
+                 if functions.is_empty() {
+                     continue;
+--- a/tests/integration/php_version.rs
++++ b/tests/integration/php_version.rs
+@@ -1217,3 +1217,74 @@
+         "OLD_CONST (@removed 8.0) should survive when targeting PHP 7.4"
+     );
+ }
++
++// Built-in introduction versions must apply before lazy parsing and after it.
++#[tokio::test]
++async fn builtin_since_versions_filter_completion_and_lazy_cache() {
++    use crate::common::complete_at;
++    use std::collections::HashMap;
++    use tower_lsp::lsp_types::Url;
++    const SOURCE: &str = "<?php\n/** @since 4.0 */\nfunction array_filter($array) {}\n/**\n * @since 8.4\n */\nfunction array_find($array, $callback) {}\n/**\n * @since 8.5\n */\nfunction array_first($array) {}\n";
++    for (version, find, first) in [
++        (PhpVersion::new(7, 4), false, false),
++        (PhpVersion::new(8, 4), true, false),
++        (PhpVersion::new(8, 5), true, true),
++    ] {
++        let functions = ["array_filter", "array_find", "array_first"]
++            .into_iter()
++            .map(|name| (name, SOURCE))
++            .collect();
++        let backend = Backend::new_test_with_all_stubs(HashMap::new(), functions, HashMap::new());
++        backend.set_php_version(version);
++        let uri = Url::parse("file:///target.php").unwrap();
++        let items = complete_at(&backend, &uri, "<?php\narray_f", 1, 7).await;
++        let labels: Vec<_> = items.iter().map(|i| i.label.as_str()).collect();
++        assert!(labels.contains(&"array_filter"));
++        assert_eq!(labels.contains(&"array_find"), find, "target {version:?}");
++        assert_eq!(labels.contains(&"array_first"), first, "target {version:?}");
++        assert!(backend.find_or_load_function(&["array_filter"]).is_some());
++        assert_eq!(
++            backend.find_or_load_function(&["array_find"]).is_some(),
++            find
++        );
++        assert_eq!(
++            backend.find_or_load_function(&["array_first"]).is_some(),
++            first
++        );
++        let items = complete_at(&backend, &uri, "<?php\nuse function array_f", 1, 20).await;
++        assert_eq!(
++            items
++                .iter()
++                .any(|i| i.filter_text.as_deref() == Some("array_find")),
++            find
++        );
++        assert_eq!(
++            items
++                .iter()
++                .any(|i| i.filter_text.as_deref() == Some("array_first")),
++            first
++        );
++    }
++}
++
++#[tokio::test]
++async fn user_polyfills_are_not_hidden_by_php_since_filter() {
++    use crate::common::complete_at;
++    use tower_lsp::lsp_types::Url;
++    let backend = create_test_backend();
++    backend.set_php_version(PhpVersion::new(7, 4));
++    let uri = Url::parse("file:///polyfill.php").unwrap();
++    let items = complete_at(
++        &backend,
++        &uri,
++        "<?php\n/** @since 99.0 */\nfunction array_find($array,$callback) {}\narray_f",
++        3,
++        7,
++    )
++    .await;
++    assert!(
++        items
++            .iter()
++            .any(|i| i.filter_text.as_deref() == Some("array_find"))
++    );
++}
+--- a/docs/CHANGELOG.md
++++ b/docs/CHANGELOG.md
+@@ -18,6 +18,8 @@
+ ### Changed
+ 
+ ### Fixed
++
++- **Built-in function suggestions respect their PHP introduction version.** Functions introduced after the project target stay out of completion and lazy stub caches; user polyfills remain available. Contributed by PHP Workbench downstream.
+ 
+ - **Named-argument signature help.** Reordered named arguments highlight their declared parameter, including named variadic values. Contributed by PHP Workbench (local downstream build).
+ 

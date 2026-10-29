@@ -1,0 +1,439 @@
+diff --git a/docs/CHANGELOG.md b/docs/CHANGELOG.md
+index 563346e..edcd312 100644
+--- a/docs/CHANGELOG.md
++++ b/docs/CHANGELOG.md
+@@ -15,6 +15,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
+ 
+ ## [Unreleased]
+ 
++- **Explain ambiguous accessor names.** Generation refuses grouped properties that would create duplicate PHP method names and identifies the properties to rename. Independent non-conflicting accessors remain available. Contributed by PHP Workbench downstream.
++
+ - **Match generated method layout to its class.** Constructor and accessor actions preserve relative indentation and source line endings without rewriting captured defaults or documentation. Contributed by PHP Workbench downstream.
+ 
+ - **Respect inherited generation contracts.** Generated accessors preserve inherited methods and compatible interface signatures. Constructor actions refuse to bypass inherited initialization or final constructor restrictions. Contributed by PHP Workbench downstream.
+diff --git a/src/code_actions/generate_getter_setter.rs b/src/code_actions/generate_getter_setter.rs
+index 50b6d73..361d837 100644
+--- a/src/code_actions/generate_getter_setter.rs
++++ b/src/code_actions/generate_getter_setter.rs
+@@ -233,6 +233,8 @@ impl Backend {
+                 }
+             }
+         }
++        let getter_collision = accessor_name_collision(&available, true);
++        let setter_collision = accessor_name_collision(&available, false);
+         let any_can_getter = available.iter().any(|candidate| candidate.can_getter);
+         let any_can_setter = available.iter().any(|candidate| candidate.can_setter);
+         if getter_refused && !any_can_getter {
+@@ -251,8 +253,29 @@ impl Backend {
+             ));
+         }
+ 
++        for (title, reason) in [
++            ("Generate getter", getter_collision.as_deref()),
++            ("Generate setter", setter_collision.as_deref()),
++            (
++                "Generate getter and setter",
++                if any_can_getter && any_can_setter {
++                    getter_collision.as_deref().or(setter_collision.as_deref())
++                } else {
++                    None
++                },
++            ),
++        ] {
++            if let Some(reason) = reason {
++                out.push(super::helpers::disabled_generation(
++                    title,
++                    CodeActionKind::REFACTOR,
++                    reason,
++                ));
++            }
++        }
++
+         // ── Generate getter ─────────────────────────────────────────────
+-        if any_can_getter {
++        if any_can_getter && getter_collision.is_none() {
+             let mut methods_text = String::new();
+             for avail in &available {
+                 if avail.can_getter {
+@@ -284,7 +307,7 @@ impl Backend {
+         }
+ 
+         // ── Generate setter ─────────────────────────────────────────────
+-        if any_can_setter {
++        if any_can_setter && setter_collision.is_none() {
+             let mut methods_text = String::new();
+             for avail in &available {
+                 if avail.can_setter {
+@@ -316,7 +339,11 @@ impl Backend {
+         }
+ 
+         // ── Generate getter and setter ──────────────────────────────────
+-        if any_can_getter && any_can_setter {
++        if any_can_getter
++            && any_can_setter
++            && getter_collision.is_none()
++            && setter_collision.is_none()
++        {
+             let mut methods_text = String::new();
+             for avail in &available {
+                 if avail.can_getter {
+@@ -351,6 +378,35 @@ impl Backend {
+ 
+ // ── Helpers ─────────────────────────────────────────────────────────────────
+ 
++// Reserve only admitted candidates: an existing/inherited accessor may leave
++// an independent member available, but a collision refuses the whole action.
++fn accessor_name_collision(available: &[AvailableAccessors], getter: bool) -> Option<String> {
++    let mut names = std::collections::HashMap::new();
++    for candidate in available {
++        if !(if getter {
++            candidate.can_getter
++        } else {
++            candidate.can_setter
++        }) {
++            continue;
++        }
++        let name = if getter {
++            getter_method_name(&candidate.prop.name, candidate.prop.type_hint.as_ref())
++        } else {
++            setter_method_name(&candidate.prop.name)
++        };
++        if let Some(previous) =
++            names.insert(name.to_ascii_lowercase(), candidate.prop.name.as_str())
++        {
++            return Some(format!(
++                "Generated method {name} is ambiguous between ${previous} and ${}. Rename a property so that each accessor has a unique name.",
++                candidate.prop.name
++            ));
++        }
++    }
++    None
++}
++
+ /// Collect accessor-eligible properties from a single property declaration
+ /// node (which may declare multiple variables, e.g. `private int $a, $b;`).
+ fn collect_accessor_properties<'a>(
+diff --git a/tests/integration/code_action_generate_getter_setter.rs b/tests/integration/code_action_generate_getter_setter.rs
+index 8b54079..24a73cc 100644
+--- a/tests/integration/code_action_generate_getter_setter.rs
++++ b/tests/integration/code_action_generate_getter_setter.rs
+@@ -1044,3 +1044,319 @@ fn generation_layout_compact_accessor_uses_structural_indentation_after_literal(
+         assert_accessor_layout(&source, member, body, "\n");
+     }
+ }
++
++fn accessor_collision_disabled(
++    actions: &[CodeActionOrCommand],
++    title: &str,
++    properties: &[&str],
++    method: &str,
++) {
++    for item in actions {
++        if let CodeActionOrCommand::Command(command) = item {
++            assert_ne!(
++                command.title, title,
++                "ambiguous generation must not execute"
++            );
++        }
++    }
++    let matching: Vec<_> = actions
++        .iter()
++        .filter_map(|item| match item {
++            CodeActionOrCommand::CodeAction(action) if action.title == title => Some(action),
++            _ => None,
++        })
++        .collect();
++    assert_eq!(matching.len(), 1, "{title} needs one explicit refusal");
++    let action = matching[0];
++    let refusal = action
++        .disabled
++        .as_ref()
++        .expect("ambiguous action is disabled");
++    assert!(
++        action.edit.is_none(),
++        "disabled action must have no workspace edit"
++    );
++    assert!(
++        action.command.is_none(),
++        "disabled action must have no command"
++    );
++    let reason = refusal.reason.to_ascii_lowercase();
++    assert!(
++        reason.contains(&method.to_ascii_lowercase()),
++        "identify the conflicting method: {}",
++        refusal.reason
++    );
++    for property in properties {
++        assert!(
++            refusal.reason.contains(property),
++            "identify conflicting property {property}: {}",
++            refusal.reason
++        );
++    }
++    assert!(
++        ["rename", "separate", "split"]
++            .iter()
++            .any(|repair| reason.contains(repair)),
++        "explain how to resolve the ambiguity: {}",
++        refusal.reason
++    );
++}
++
++type AccessorCollisionSignature<'a> = (&'a str, &'a str, Option<(&'a str, &'a str)>);
++
++fn accessor_collision_assert_generated(
++    backend: &phpantom_lsp::Backend,
++    source: &str,
++    action: &CodeAction,
++    expected: &[AccessorCollisionSignature<'_>],
++) {
++    assert!(action.disabled.is_none() && action.command.is_none());
++    let edits = extract_edits(action);
++    assert!(!edits.is_empty());
++    let result = apply_edits(source, &edits);
++    let classes = backend.parse_php(&result);
++    let owner = classes
++        .iter()
++        .find(|class| class.name == "CollisionCase")
++        .expect("generated methods remain owned by the target class");
++    let original = backend.parse_php(source);
++    let original_owner = original
++        .iter()
++        .find(|class| class.name == "CollisionCase")
++        .unwrap();
++    let generated: Vec<_> = owner
++        .methods
++        .iter()
++        .filter(|method| {
++            !original_owner
++                .methods
++                .iter()
++                .any(|existing| existing.name == method.name)
++        })
++        .collect();
++    assert_eq!(
++        generated.len(),
++        expected.len(),
++        "unexpected generated methods"
++    );
++    let mut names = std::collections::HashSet::new();
++    for method in &owner.methods {
++        assert!(
++            names.insert(method.name.to_ascii_lowercase()),
++            "duplicate PHP method {}",
++            method.name
++        );
++    }
++    for (name, return_type, parameter) in expected {
++        let method = generated
++            .iter()
++            .find(|method| method.name == *name)
++            .unwrap_or_else(|| panic!("missing generated {name}"));
++        assert_eq!(
++            method
++                .native_return_type
++                .as_ref()
++                .map(ToString::to_string)
++                .as_deref(),
++            Some(*return_type)
++        );
++        if let Some((parameter_name, parameter_type)) = parameter {
++            assert_eq!(method.parameters.len(), 1);
++            assert_eq!(method.parameters[0].name.as_str(), *parameter_name);
++            assert_eq!(
++                method.parameters[0]
++                    .native_type_hint
++                    .as_ref()
++                    .map(ToString::to_string)
++                    .as_deref(),
++                Some(*parameter_type)
++            );
++        } else {
++            assert!(method.parameters.is_empty());
++        }
++    }
++    for class in classes.iter().filter(|class| class.name != "CollisionCase") {
++        assert!(
++            class
++                .methods
++                .iter()
++                .all(|method| !expected.iter().any(|(name, _, _)| method.name == *name)),
++            "accessors must not land in neighboring class {}",
++            class.name
++        );
++    }
++}
++
++#[test]
++fn accessor_name_collision_snake_and_camel_group_refuses_all_ambiguous_actions() {
++    let backend = create_test_backend();
++    for declaration in ["$foo_bar, $fooBar", "$fooBar, $foo_bar"] {
++        let source = format!("<?php\nclass CollisionCase {{\n    private int {declaration};\n}}\n");
++        for needle in ["private int", "$foo_bar", "$fooBar"] {
++            let actions = actions_at(&backend, &source, needle);
++            for (title, method) in [
++                ("Generate getter", "getFooBar"),
++                ("Generate setter", "setFooBar"),
++                ("Generate getter and setter", "getFooBar"),
++            ] {
++                accessor_collision_disabled(&actions, title, &["$foo_bar", "$fooBar"], method);
++            }
++        }
++    }
++}
++
++#[test]
++fn accessor_name_collision_case_distinct_properties_refuse_case_insensitive_methods() {
++    let backend = create_test_backend();
++    for declaration in ["$foo, $Foo", "$Foo, $foo"] {
++        let source = format!("<?php\nclass CollisionCase {{ private int {declaration}; }}\n");
++        let actions = actions_at(&backend, &source, "private int");
++        for (title, method) in [
++            ("Generate getter", "getFoo"),
++            ("Generate setter", "setFoo"),
++            ("Generate getter and setter", "getFoo"),
++        ] {
++            accessor_collision_disabled(&actions, title, &["$foo", "$Foo"], method);
++        }
++    }
++}
++
++#[test]
++fn accessor_name_collision_does_not_silently_keep_unique_property_from_ambiguous_action() {
++    let backend = create_test_backend();
++    let source = "<?php\nclass CollisionCase { private int $foo_bar, $unique, $fooBar; }\n";
++    let actions = actions_at(&backend, source, "$unique");
++    for (title, method) in [
++        ("Generate getter", "getFooBar"),
++        ("Generate setter", "setFooBar"),
++        ("Generate getter and setter", "getFooBar"),
++    ] {
++        accessor_collision_disabled(&actions, title, &["$foo_bar", "$fooBar"], method);
++    }
++}
++
++#[test]
++fn accessor_name_collision_existing_getter_leaves_unique_getter_but_refuses_setter_batch() {
++    let backend = create_test_backend();
++    let source = "<?php\nclass CollisionCase {\n    private int $foo_bar, $fooBar, $unique;\n    public function GETFOOBAR(): int { return $this->foo_bar; }\n}\nclass Neighbor {}\n";
++    let actions = actions_at(&backend, source, "private int");
++    let getter =
++        find_action_titled(&actions, "Generate getter").expect("unique getter remains available");
++    accessor_collision_assert_generated(&backend, source, getter, &[("getUnique", "int", None)]);
++    for title in ["Generate setter", "Generate getter and setter"] {
++        accessor_collision_disabled(&actions, title, &["$foo_bar", "$fooBar"], "setFooBar");
++    }
++}
++
++#[test]
++fn accessor_name_collision_existing_setter_leaves_unique_setter_but_refuses_getter_batch() {
++    let backend = create_test_backend();
++    let source = "<?php\nclass CollisionCase {\n    private int $foo_bar, $fooBar, $unique;\n    public function SETFOOBAR(int $value): self { return $this; }\n}\nclass Neighbor {}\n";
++    let actions = actions_at(&backend, source, "private int");
++    let setter =
++        find_action_titled(&actions, "Generate setter").expect("unique setter remains available");
++    accessor_collision_assert_generated(
++        &backend,
++        source,
++        setter,
++        &[("setUnique", "self", Some(("$unique", "int")))],
++    );
++    for title in ["Generate getter", "Generate getter and setter"] {
++        accessor_collision_disabled(&actions, title, &["$foo_bar", "$fooBar"], "getFooBar");
++    }
++}
++
++#[test]
++fn accessor_name_collision_readonly_groups_refuse_only_ambiguous_getter() {
++    let backend = create_test_backend();
++    backend.set_php_version(phpantom_lsp::types::PhpVersion::new(8, 3));
++    for (class_kind, declaration, method) in [
++        (
++            "readonly class",
++            "private int $foo_bar, $fooBar",
++            "getFooBar",
++        ),
++        (
++            "class",
++            "private readonly int $foo_bar, $fooBar",
++            "getFooBar",
++        ),
++        (
++            "readonly class",
++            "private bool $foo_bar, $fooBar",
++            "isFooBar",
++        ),
++    ] {
++        let source = format!("<?php\n{class_kind} CollisionCase {{ {declaration}; }}\n");
++        let actions = actions_at(&backend, &source, declaration);
++        accessor_collision_disabled(
++            &actions,
++            "Generate getter",
++            &["$foo_bar", "$fooBar"],
++            method,
++        );
++        assert!(find_action_titled(&actions, "Generate setter").is_none());
++        assert!(find_action_titled(&actions, "Generate getter and setter").is_none());
++    }
++}
++
++#[test]
++fn accessor_name_collision_noncolliding_group_preserves_typed_accessors_and_owner() {
++    let backend = create_test_backend();
++    for (native_type, first, second, getter_first, getter_second) in [
++        ("int", "foo_bar", "bazQux", "getFooBar", "getBazQux"),
++        ("bool", "foo_bar", "bazQux", "isFooBar", "isBazQux"),
++        ("string", "foo_bar", "bazQux", "getFooBar", "getBazQux"),
++    ] {
++        let source = format!(
++            "<?php\nclass CollisionCase {{ private {native_type} ${first}, ${second}; }}\nclass Neighbor {{}}\n"
++        );
++        let actions = actions_at(&backend, &source, "private");
++        let parameter_first = format!("${first}");
++        let parameter_second = format!("${second}");
++        for title in [
++            "Generate getter",
++            "Generate setter",
++            "Generate getter and setter",
++        ] {
++            let mut expected = Vec::new();
++            if title != "Generate setter" {
++                expected.extend([
++                    (getter_first, native_type, None),
++                    (getter_second, native_type, None),
++                ]);
++            }
++            if title != "Generate getter" {
++                expected.extend([
++                    (
++                        "setFooBar",
++                        "self",
++                        Some((parameter_first.as_str(), native_type)),
++                    ),
++                    (
++                        "setBazQux",
++                        "self",
++                        Some((parameter_second.as_str(), native_type)),
++                    ),
++                ]);
++            }
++            let action =
++                find_action_titled(&actions, title).expect("noncolliding group stays available");
++            accessor_collision_assert_generated(&backend, &source, action, &expected);
++        }
++    }
++}
++
++#[test]
++fn accessor_name_collision_inherited_getter_exclusion_leaves_unique_getter() {
++    let backend = create_test_backend();
++    let source = "<?php\nclass ParentCase { public function GETFOOBAR(): int { return 1; } }\nclass CollisionCase extends ParentCase { private int $foo_bar, $fooBar, $unique; }\nclass Neighbor {}\n";
++    backend.update_ast("file:///test.php", source);
++    let actions = actions_at(&backend, source, "private int");
++    let getter = find_action_titled(&actions, "Generate getter")
++        .expect("independent getter remains available");
++    accessor_collision_assert_generated(&backend, source, getter, &[("getUnique", "int", None)]);
++    for title in ["Generate setter", "Generate getter and setter"] {
++        accessor_collision_disabled(&actions, title, &["$foo_bar", "$fooBar"], "setFooBar");
++    }
++}

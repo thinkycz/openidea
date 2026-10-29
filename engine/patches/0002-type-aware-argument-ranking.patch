@@ -1,0 +1,842 @@
+diff --git a/docs/CHANGELOG.md b/docs/CHANGELOG.md
+--- a/docs/CHANGELOG.md
++++ b/docs/CHANGELOG.md
+@@ -9,11 +9,15 @@
+ 
+ ### Added
+ 
++- **Type-aware argument suggestions.** Compatible variables are shown before other local variables while entering function and method arguments. Contributed by PHP Workbench (local downstream build).
++
+ - **Restricted project-tool mode.** `--no-project-tools` keeps static intelligence and built-in formatting available while refusing external project processes, including after configuration reloads. Contributed by PHP Workbench (local downstream build).
+ 
+ ### Changed
+ 
+ ### Fixed
++
++- **Functions in global namespace blocks stay available.** Calls and parameter types resolve correctly when a file also contains named namespace blocks. Contributed by PHP Workbench (local downstream build).
+ 
+ ## [0.11.1] - 2026-10-07
+ 
+diff --git a/examples/php/completion.php b/examples/php/completion.php
+--- a/examples/php/completion.php
++++ b/examples/php/completion.php
+@@ -5781,3 +5781,20 @@
+         return $pen?->color() ?? '';
+     }
+ }
++
++
++// ── Type-aware argument suggestions ────────────────────────────────────────
++class ArgumentRankingDemo
++{
++    public function sample(int $aCount, string $zRecipient): string
++    {
++        // Try: replace `$zRecipient` below with `$` and invoke completion.
++        // The compatible recipient is offered before the unrelated count.
++        return $this->send($zRecipient);
++    }
++
++    private function send(string $recipient): string
++    {
++        return $recipient;
++    }
++}
+diff --git a/examples/php/scaffolding/assertions.php b/examples/php/scaffolding/assertions.php
+--- a/examples/php/scaffolding/assertions.php
++++ b/examples/php/scaffolding/assertions.php
+@@ -33,6 +33,7 @@
+ 
+ function runDemoAssertions(): void
+ {
++    assert((new ArgumentRankingDemo())->sample(42, 'Ada') === 'Ada', 'The suggested string argument must be accepted');
+     // ── Body Return Type Inference ──────────────────────────────────────
+     $factory = new Scaffolding\ScaffoldingUntypedFactory();
+     $pen = $factory->createPen();
+diff --git a/src/call_args.rs b/src/call_args.rs
+--- a/src/call_args.rs
++++ b/src/call_args.rs
+@@ -119,7 +119,7 @@
+ /// The named-argument `name:` prefix is distinguished from a `::` static
+ /// access and from a ternary `?:` by requiring a leading identifier followed
+ /// by a single `:` (not `::`). Both returned slices are trimmed.
+-fn split_named_text_arg(arg: &str) -> (Option<&str>, &str) {
++pub(crate) fn split_named_text_arg(arg: &str) -> (Option<&str>, &str) {
+     let trimmed = arg.trim();
+     let bytes = trimmed.as_bytes();
+     let mut i = 0;
+diff --git a/src/completion/handler/mod.rs b/src/completion/handler/mod.rs
+--- a/src/completion/handler/mod.rs
++++ b/src/completion/handler/mod.rs
+@@ -543,7 +543,8 @@
+                 // ── Variable name completion ────────────────────────────
+                 // Placed before the interpolation guard so that `"$`
+                 // and `"{$` both offer variable suggestions.
+-                if let Some(response) = self.try_variable_name_completion(&content, position, &uri)
++                if let Some(response) =
++                    self.try_variable_name_completion(&content, position, &uri, &ctx)
+                 {
+                     return Ok(Some(response));
+                 }
+@@ -681,12 +682,43 @@
+         content: &str,
+         position: Position,
+         uri: &str,
++        ctx: &FileContext,
+     ) -> Option<CompletionResponse> {
+         let partial = Self::extract_partial_variable_name(content, position)?;
+-        let symbol_maps = self.symbol_maps.read();
+-        let symbol_map = symbol_maps.get(uri).map(|arc| arc.as_ref());
+-        let (var_items, var_incomplete) =
+-            Self::build_variable_completions(content, &partial, position, symbol_map);
++        let patched = Self::patch_variable_at_eof(content, position);
++        let recovered_ctx;
++        let recovered_map;
++        let content = patched.as_deref().unwrap_or(content);
++        let (ctx, symbol_map) = if patched.is_some() {
++            recovered_ctx = FileContext {
++                classes: self
++                    .parse_php(content)
++                    .into_iter()
++                    .map(std::sync::Arc::new)
++                    .collect(),
++                use_map: ctx.use_map.clone(),
++                namespace: ctx.namespace.clone(),
++                namespace_spans: ctx.namespace_spans.clone(),
++                resolved_names: ctx.resolved_names.clone(),
++            };
++            recovered_map = crate::parser::with_parsed_program(
++                content,
++                "variable_completion_recovery",
++                |program, source| {
++                    Some(std::sync::Arc::new(
++                        crate::symbol_map::extraction::extract_symbol_map(program, source),
++                    ))
++                },
++            );
++            (&recovered_ctx, recovered_map)
++        } else {
++            (ctx, self.symbol_maps.read().get(uri).cloned())
++        };
++        let (mut var_items, var_incomplete) =
++            Self::build_variable_completions(content, &partial, position, symbol_map.as_deref());
++        self.rank_variable_arguments(&mut var_items, uri, content, position, ctx, &partial);
++        var_items.sort_by(|a, b| a.sort_text.cmp(&b.sort_text));
++        var_items.truncate(Self::MAX_VARIABLE_COMPLETIONS);
+ 
+         if var_items.is_empty() {
+             None
+diff --git a/src/completion/handler/patching.rs b/src/completion/handler/patching.rs
+--- a/src/completion/handler/patching.rs
++++ b/src/completion/handler/patching.rs
+@@ -8,6 +8,54 @@
+ use crate::Backend;
+ 
+ impl Backend {
++    /// Close unfinished delimiters at EOF for a query-local variable scope.
++    /// Appending preserves every original cursor and definition offset.
++    pub(super) fn patch_variable_at_eof(content: &str, position: Position) -> Option<String> {
++        let offset = crate::text_position::position_to_offset(content, position) as usize;
++        if !content.get(offset..)?.trim().is_empty() {
++            return None;
++        }
++        let prefix = content.get(..offset)?;
++        let bytes = prefix.as_bytes();
++        let mut stack = Vec::new();
++        let mut at = 0;
++        while at < bytes.len() {
++            if let Some(end) = crate::text_scan::skip_php_comment(bytes, at) {
++                at = end;
++                continue;
++            }
++            match bytes[at] {
++                b'\'' | b'"' => {
++                    at = crate::text_scan::skip_string_forward(bytes, at);
++                    continue;
++                }
++                b'(' => stack.push(')'),
++                b'[' => stack.push(']'),
++                b'{' => stack.push('}'),
++                b')' | b']' | b'}' if stack.pop()? != bytes[at] as char => {
++                    return None;
++                }
++                _ => {}
++            }
++            at += 1;
++        }
++        if stack.is_empty() {
++            return None;
++        }
++        let mut patched = prefix.to_owned();
++        if prefix.ends_with('$') {
++            patched.push_str("__phpantom_completion");
++        }
++        for close in stack.into_iter().rev() {
++            if close == '}' {
++                patched.push(';');
++            }
++            patched.push(close);
++        }
++        patched.push(';');
++        Some(patched)
++    }
++
+     /// Patch incomplete member-access expressions for parser recovery.
+     ///
+     /// When the cursor is right after `->` or `?->` and the line has no
+diff --git a/src/completion/variable/completion.rs b/src/completion/variable/completion.rs
+--- a/src/completion/variable/completion.rs
++++ b/src/completion/variable/completion.rs
+@@ -30,7 +30,7 @@
+     ];
+ 
+     /// Maximum number of variable completions to return.
+-    const MAX_VARIABLE_COMPLETIONS: usize = 100;
++    pub(crate) const MAX_VARIABLE_COMPLETIONS: usize = 100;
+ 
+     /// Extract the partial variable name (including `$`) that the user
+     /// is currently typing at the given cursor position.
+@@ -59,7 +59,15 @@
+             (last, last.chars().count())
+         } else {
+             let l = lines[position.line as usize];
+-            (l, (position.character as usize).min(l.chars().count()))
++            let col = l
++                .chars()
++                .scan(0, |units, ch| {
++                    *units += ch.len_utf16();
++                    Some(*units)
++                })
++                .take_while(|units| *units <= position.character as usize)
++                .count();
++            (l, col)
+         };
+ 
+         let chars: Vec<char> = line.chars().collect();
+@@ -131,7 +139,7 @@
+         // to the cursor position.  Using `text_edit` with an explicit range
+         // prevents the double-dollar problem in editors (Helix, Neovim)
+         // that don't consider `$` part of a word boundary.
+-        let prefix_char_len = prefix.chars().count() as u32;
++        let prefix_char_len = prefix.encode_utf16().count() as u32;
+         let replace_range = Range {
+             start: Position {
+                 line: position.line,
+@@ -188,11 +196,7 @@
+         }
+ 
+         let is_incomplete = items.len() > Self::MAX_VARIABLE_COMPLETIONS;
+-        if is_incomplete {
+-            items.sort_by(|a, b| a.sort_text.cmp(&b.sort_text));
+-            items.truncate(Self::MAX_VARIABLE_COMPLETIONS);
+-        }
+-
++        // The handler ranks compatible arguments before applying the limit.
+         (items, is_incomplete)
+     }
+ }
+diff --git a/src/completion/variable/mod.rs b/src/completion/variable/mod.rs
+--- a/src/completion/variable/mod.rs
++++ b/src/completion/variable/mod.rs
+@@ -5,3 +5,4 @@
+ /// Variable *type* resolution lives in the shared type engine under
+ /// `crate::type_engine::variable`, not here.
+ pub(crate) mod completion;
++mod ranking;
+diff --git a/src/completion/variable/ranking.rs b/src/completion/variable/ranking.rs
+new file mode 100644
+--- /dev/null
++++ b/src/completion/variable/ranking.rs
+@@ -0,0 +1,70 @@
++//! Argument ranking over the shared forward walker's scope snapshot.
++
++use tower_lsp::lsp_types::{CompletionItem, Position};
++
++use crate::Backend;
++use crate::class_lookup::is_subtype_of_typed;
++use crate::text_position::position_to_offset;
++use crate::type_engine::resolver::LendsLoaders;
++use crate::type_engine::variable::forward_walk;
++use crate::types::{FileContext, ResolvedType};
++
++impl Backend {
++    /// Promote variables known to satisfy the active parameter, retaining
++    /// unknown and incompatible variables as ordinary fallback suggestions.
++    pub(crate) fn rank_variable_arguments(
++        &self,
++        items: &mut [CompletionItem],
++        uri: &str,
++        content: &str,
++        position: Position,
++        ctx: &FileContext,
++        prefix: &str,
++    ) {
++        let Some(expected) =
++            self.expected_variable_argument_type(uri, content, position, ctx, prefix)
++        else {
++            return;
++        };
++        let offset = position_to_offset(content, position);
++        let class_loader = self.class_loader(ctx);
++        let class_loaders = self.class_loaders(ctx);
++        let owned_loaders = self.diagnostic_loaders(ctx);
++        let _scope_guard = forward_walk::with_diagnostic_scope_cache();
++        // Walk the enclosing body once, rather than re-running inference for
++        // every visible candidate. The cache is dropped with this request.
++        forward_walk::build_diagnostic_scopes_for_offsets(
++            content,
++            &ctx.classes,
++            &class_loaders.as_dyn(),
++            Some(self),
++            owned_loaders.loaders(),
++            Some(&self.resolved_class_cache),
++            &[offset],
++        );
++        for item in items {
++            if item
++                .sort_text
++                .as_deref()
++                .is_some_and(|key| key.starts_with("z_"))
++            {
++                continue;
++            }
++            let mut compatible = false;
++            if let Some(types) = forward_walk::lookup_diagnostic_scope(&item.label, offset)
++                && !types.is_empty()
++            {
++                let actual = ResolvedType::types_joined(&types);
++                compatible = !actual.contains_mixed()
++                    && !actual.is_never()
++                    && is_subtype_of_typed(&actual, &expected, &class_loader);
++                item.detail = Some(actual.to_string());
++            }
++            item.sort_text = Some(format!(
++                "0_{}_{}",
++                u8::from(!compatible),
++                item.label.to_lowercase()
++            ));
++        }
++    }
++}
+diff --git a/src/signature_help.rs b/src/signature_help.rs
+--- a/src/signature_help.rs
++++ b/src/signature_help.rs
+@@ -29,6 +29,8 @@
+ /// Information about a signature help call site, extracted from the source
+ /// text around the cursor.
+ struct CallSiteContext {
++    /// Byte offset immediately after the opening parenthesis.
++    args_start: usize,
+     /// The call expression in a format suitable for resolution (same
+     /// format as [`NamedArgContext::call_expression`]).
+     call_expression: String,
+@@ -38,6 +40,16 @@
+ }
+ 
+ // ─── AST-based detection ────────────────────────────────────────────────────
++
++fn trim_argument_trivia(mut text: &str) -> &str {
++    loop {
++        text = text.trim_start();
++        match crate::text_scan::skip_php_comment(text.as_bytes(), 0) {
++            Some(end) => text = &text[end..],
++            None => return text,
++        }
++    }
++}
+ 
+ /// Detect the call site using precomputed [`CallSite`] data from the
+ /// symbol map.
+@@ -58,6 +70,7 @@
+         .filter(|&&comma| comma < cursor_byte_offset)
+         .count() as u32;
+     Some(CallSiteContext {
++        args_start: cs.args_start as usize,
+         call_expression: cs.call_expression.clone(),
+         active_parameter: active,
+     })
+@@ -129,6 +142,7 @@
+     };
+ 
+     Some(CallSiteContext {
++        args_start: chars[..open_paren + 1].iter().map(|c| c.len_utf8()).sum(),
+         call_expression: call_expr,
+         active_parameter: active,
+     })
+@@ -599,6 +613,89 @@
+         }
+ 
+         None
++    }
++
++    /// Resolve the declared type of a directly entered variable argument.
++    /// Reuses signature-help call detection and the shared callable resolver.
++    pub(crate) fn expected_variable_argument_type(
++        &self,
++        uri: &str,
++        content: &str,
++        position: Position,
++        ctx: &FileContext,
++        prefix: &str,
++    ) -> Option<PhpType> {
++        let cursor = position_to_offset(content, position);
++        let map = self.symbol_maps.read().get(uri).cloned();
++        if let Some(map) = &map
++            && let Some(call) = map.find_enclosing_call_site(cursor)
++            && map.is_inside_nested_scope_of_call(cursor, call)
++        {
++            return None;
++        }
++        let site = map
++            .as_ref()
++            .and_then(|map| detect_call_site_from_map(map, content, position))
++            .or_else(|| detect_call_site_text_fallback(content, position))?;
++        let text = content.get(site.args_start..cursor as usize)?;
++        let args = crate::type_engine::types::conditional::split_text_args(text);
++        let current = trim_argument_trivia(args.last()?);
++        let (name, value) = crate::call_args::split_named_text_arg(current);
++        // An outer parameter does not determine the type of a variable
++        // nested in an array, binary expression, interpolation or spread.
++        if trim_argument_trivia(value) != prefix {
++            return None;
++        }
++        if args.iter().take(args.len() - 1).any(|arg| {
++            crate::call_args::text_arg_value(trim_argument_trivia(arg)).starts_with("...")
++        }) {
++            return None;
++        }
++        let target = self
++            .resolve_callable_target(&site.call_expression, content, position, ctx)
++            .or_else(|| {
++                // Callable types retain positional parameter types, but not
++                // PHP parameter names. Use them only for positional ranking;
++                // they must not invent names for diagnostics or named calls.
++                if name.is_some() {
++                    return None;
++                }
++                let parsed =
++                    crate::type_engine::subject_expr::SubjectExpr::parse(&site.call_expression);
++                let crate::type_engine::subject_expr::SubjectExpr::Variable(variable) = &parsed
++                else {
++                    return None;
++                };
++                use crate::type_engine::resolver::LendsLoaders;
++                let class_loader = self.class_loader(ctx);
++                let loaders = self.diagnostic_loaders(ctx);
++                let ty = crate::type_engine::variable::resolution::resolve_variable_php_type(
++                    variable,
++                    content,
++                    cursor,
++                    crate::class_lookup::find_class_at_offset(&ctx.classes, cursor),
++                    &ctx.classes,
++                    &class_loader,
++                    Some(self),
++                    loaders.loaders(),
++                )?;
++                crate::type_engine::call_resolution::callable_type_as_target(&ty)
++            })?;
++        let parameter = if let Some(name) = name {
++            target
++                .parameters
++                .iter()
++                .find(|param| param.name.trim_start_matches('$') == name)?
++        } else {
++            target
++                .parameters
++                .get(site.active_parameter as usize)
++                .or_else(|| target.parameters.last().filter(|param| param.is_variadic))?
++        };
++        parameter
++            .type_hint
++            .clone()
++            .filter(|hint| !hint.contains_mixed() && !hint.is_never())
+     }
+ 
+     fn resolve_signature(
+diff --git a/src/symbol_map/extraction/mod.rs b/src/symbol_map/extraction/mod.rs
+--- a/src/symbol_map/extraction/mod.rs
++++ b/src/symbol_map/extraction/mod.rs
+@@ -179,7 +179,6 @@
+ ///
+ /// Walks every statement recursively and emits [`SymbolSpan`] entries for
+ /// every navigable symbol occurrence.
+-#[cfg(test)]
+ pub(crate) fn extract_symbol_map(program: &Program<'_>, content: &str) -> SymbolMap {
+     extract_symbol_map_inner(program, content, None)
+ }
+diff --git a/src/parser/ast_update.rs b/src/parser/ast_update.rs
+--- a/src/parser/ast_update.rs
++++ b/src/parser/ast_update.rs
+@@ -860,7 +860,7 @@
+                     // Use the function's own namespace (not the file-level one)
+                     // so that multi-namespace files resolve return types
+                     // against the correct namespace block.
+-                    let func_ns = func.namespace.clone().or_else(|| namespace.clone());
++                    let func_ns = func.namespace.clone();
+                     let func_use_map = if multi_block {
+                         namespace_spans
+                             .iter()
+diff --git a/src/parser/functions.rs b/src/parser/functions.rs
+--- a/src/parser/functions.rs
++++ b/src/parser/functions.rs
+@@ -404,14 +404,10 @@
+                         .map(|ident| bytes_to_str(ident.value()).to_string())
+                         .filter(|s| !s.is_empty());
+ 
+-                    // Merge: if we already have a namespace and the inner
+-                    // one is set, use the inner one; otherwise keep current.
+-                    let effective_ns = ns_name.or_else(|| current_namespace.clone());
+-
+                     Self::extract_functions_from_statements(
+                         namespace.statements().iter(),
+                         functions,
+-                        &effective_ns,
++                        &ns_name,
+                         doc_ctx,
+                     );
+                 }
+diff --git a/src/type_engine/call_resolution/mod.rs b/src/type_engine/call_resolution/mod.rs
+--- a/src/type_engine/call_resolution/mod.rs
++++ b/src/type_engine/call_resolution/mod.rs
+@@ -90,3 +90,5 @@
+     array_literal_shape_type_with, build_call_template_subs, evaluate_constant_operands,
+     finish_template_subs, generalize_object_template_arg,
+ };
++
++pub(crate) use callable_target::callable_type_as_target;
+diff --git a/src/type_engine/call_resolution/callable_target.rs b/src/type_engine/call_resolution/callable_target.rs
+--- a/src/type_engine/call_resolution/callable_target.rs
++++ b/src/type_engine/call_resolution/callable_target.rs
+@@ -828,7 +828,7 @@
+ ///   callable without parameter specification) -> returns a target with
+ ///   `accepts_any_args: true` so diagnostics are suppressed.
+ /// - Other types -> returns `None` (not a callable).
+-fn callable_type_as_target(return_type: &PhpType) -> Option<ResolvedCallableTarget> {
++pub(crate) fn callable_type_as_target(return_type: &PhpType) -> Option<ResolvedCallableTarget> {
+     match return_type.kind() {
+         TypeKind::Callable(c) => {
+             let (params, return_type) = (&c.params, &c.return_type);
+diff --git a/tests/integration/completion_variable_names.rs b/tests/integration/completion_variable_names.rs
+--- a/tests/integration/completion_variable_names.rs
++++ b/tests/integration/completion_variable_names.rs
+@@ -1,6 +1,58 @@
+ use crate::common::{complete_at, create_test_backend};
+ use phpantom_lsp::Backend;
+ use tower_lsp::lsp_types::*;
++
++async fn ranked_variables(text: &str) -> Vec<CompletionItem> {
++    let backend = create_test_backend();
++    ranked_variables_with_backend(&backend, text).await
++}
++
++async fn ranked_variables_with_backend(backend: &Backend, text: &str) -> Vec<CompletionItem> {
++    let uri = Url::parse("file:///argument-ranking.php").unwrap();
++    let position = crate::common::position_after(text, "/*complete*/$");
++    let mut items = complete_at(backend, &uri, text, position.line, position.character).await;
++    items.retain(|item| item.kind == Some(CompletionItemKind::VARIABLE));
++    items.sort_by(|a, b| a.sort_text.cmp(&b.sort_text));
++    items
++}
++
++#[tokio::test]
++async fn test_argument_ranking_promotes_compatible_scalar_variable() {
++    let items = ranked_variables(
++        r#"<?php
++function greet(string $name): void {}
++function demo(int $aCount, string $zText): void {
++    greet(/*complete*/$);
++}
++"#,
++    )
++    .await;
++    assert_eq!(
++        items.first().map(|item| item.label.as_str()),
++        Some("$zText")
++    );
++    assert!(items.iter().any(|item| item.label == "$aCount"));
++}
++
++#[tokio::test]
++async fn test_argument_ranking_promotes_interface_implementation_for_named_argument() {
++    let items = ranked_variables(
++        r#"<?php
++interface Recipient {}
++class User implements Recipient {}
++class Mailer { public function send(int $count, Recipient $recipient): void {} }
++function demo(Mailer $mailer, int $aCount, User $zUser): void {
++    $mailer->send(recipient: /*complete*/$);
++}
++"#,
++    )
++    .await;
++    assert_eq!(
++        items.first().map(|item| item.label.as_str()),
++        Some("$zUser")
++    );
++    assert!(items.iter().any(|item| item.label == "$aCount"));
++}
+ 
+ // ─── extract_partial_variable_name unit tests ───────────────────────────────
+ 
+@@ -3721,3 +3773,235 @@
+         var_labels
+     );
+ }
++
++#[tokio::test]
++async fn test_argument_ranking_call_forms_and_type_relationships() {
++    let cases = [
++        (
++            "function take(string $v): void {}",
++            "int $aCount, string $zText",
++            "take(/*complete*/$)",
++            "$zText",
++        ),
++        (
++            "function take(int $n, string $v): void {}",
++            "int $aCount, string $zText",
++            "take(1, /*complete*/$)",
++            "$zText",
++        ),
++        (
++            "function take(string ...$v): void {}",
++            "int $aCount, string $zText",
++            "take('a', 'b', /*complete*/$)",
++            "$zText",
++        ),
++        (
++            "function take(?string $v): void {}",
++            "bool $aFlag, ?string $zText",
++            "take(/*complete*/$)",
++            "$zText",
++        ),
++        (
++            "function take(string $v): void {}",
++            "int|string $aMaybe, string $zText",
++            "take(/*complete*/$)",
++            "$zText",
++        ),
++        (
++            "class Target { public static function take(string $v): void {} }",
++            "int $aCount, string $zText",
++            "Target::take(/*complete*/$)",
++            "$zText",
++        ),
++        (
++            "class Target { public function __construct(string $v) {} }",
++            "int $aCount, string $zText",
++            "new Target(/*complete*/$)",
++            "$zText",
++        ),
++        (
++            "function take(string $v): void {}",
++            "mixed $aUnknown, string $zText",
++            "take(/*complete*/$)",
++            "$zText",
++        ),
++    ];
++    for (decl, params, call, first) in cases {
++        let source = format!("<?php\n{decl}\nfunction demo({params}): void {{\n    {call};\n}}\n");
++        let items = ranked_variables(&source).await;
++        assert_eq!(
++            items.first().map(|item| item.label.as_str()),
++            Some(first),
++            "{call}"
++        );
++    }
++}
++
++#[tokio::test]
++async fn test_argument_ranking_does_not_apply_outer_types_to_nested_values() {
++    for call in [
++        "take([/*complete*/$])",
++        "take('prefix' . /*complete*/$)",
++        "take(fn() => /*complete*/$)",
++        "take(function () use ($aCount, $zText) { return /*complete*/$; })",
++    ] {
++        let source = format!(
++            "<?php\nfunction take(string $v): void {{}}\nfunction demo(int $aCount, string $zText): void {{\n    {call};\n}}\n"
++        );
++        let items = ranked_variables(&source).await;
++        assert_eq!(
++            items.first().map(|item| item.label.as_str()),
++            Some("$aCount"),
++            "{call}"
++        );
++    }
++}
++
++#[tokio::test]
++async fn test_argument_ranking_unknown_or_mixed_expectations_keep_fallback_order() {
++    for decl in [
++        "function take($v): void {}",
++        "function take(mixed $v): void {}",
++        "",
++    ] {
++        let source = format!(
++            "<?php\n{decl}\nfunction demo(int $aCount, string $zText): void {{\n    take(/*complete*/$);\n}}\n"
++        );
++        let items = ranked_variables(&source).await;
++        assert_eq!(
++            items.first().map(|item| item.label.as_str()),
++            Some("$aCount")
++        );
++        assert!(items.iter().any(|item| item.label == "$zText"));
++    }
++}
++
++#[tokio::test]
++async fn test_argument_ranking_respects_narrowing_at_the_cursor() {
++    let items = ranked_variables(
++        r#"<?php
++function take(string $v): void {}
++function demo(int $aCount, ?string $zText): void {
++    if ($zText === null) { return; }
++    take(/*complete*/$);
++}
++"#,
++    )
++    .await;
++    assert_eq!(
++        items.first().map(|item| item.label.as_str()),
++        Some("$zText")
++    );
++}
++
++#[tokio::test]
++async fn test_argument_ranking_before_truncating_large_scope() {
++    let mut source = String::from(
++        "<?php\nfunction take(string $v): void {}\nfunction demo(string $zText): void {\n",
++    );
++    for i in 0..150 {
++        source.push_str(&format!("$a{i:03} = {i};\n"));
++    }
++    source.push_str("take(/*complete*/$);\n}\n");
++    let items = ranked_variables(&source).await;
++    assert_eq!(items.len(), 100);
++    assert_eq!(
++        items.first().map(|item| item.label.as_str()),
++        Some("$zText")
++    );
++}
++
++#[tokio::test]
++async fn test_argument_ranking_incomplete_call_and_unicode_position() {
++    for source in [
++        "<?php\nfunction take(string $v): void {}\nfunction demo(int $aCount, string $zText): void {\n take(/*complete*/$",
++        "<?php\nfunction take(string $v): void {}\nfunction demo(int $aCount, string $zText): void {\n /*😀*/ take(/*complete*/$);\n}\n",
++    ] {
++        let items = ranked_variables(source).await;
++        assert_eq!(
++            items.first().map(|item| item.label.as_str()),
++            Some("$zText"),
++            "{source}"
++        );
++        let edit = match items.first().unwrap().text_edit.as_ref().unwrap() {
++            CompletionTextEdit::Edit(edit) => edit,
++            _ => panic!("expected variable replacement edit"),
++        };
++        let position = crate::common::position_after(source, "/*complete*/$");
++        assert_eq!(edit.range.end, position);
++        assert_eq!(edit.range.start.character + 1, position.character);
++    }
++}
++
++#[tokio::test]
++async fn test_argument_ranking_uses_builtin_signature() {
++    let backend = crate::common::create_test_backend_with_full_stubs();
++    let items = ranked_variables_with_backend(
++        &backend,
++        "<?php\nfunction demo(int $aCount, string $zText): void { strlen(/*complete*/$); }\n",
++    )
++    .await;
++    assert_eq!(
++        items.first().map(|item| item.label.as_str()),
++        Some("$zText")
++    );
++}
++
++#[tokio::test]
++async fn test_argument_ranking_preserves_generic_receiver_and_nominal_identity() {
++    for source in [
++        r#"<?php
++class User {}
++/** @template T */
++class Box { /** @param T $value */ public function take($value): void {} }
++/** @param Box<User> $box */
++function demo(Box $box, int $aCount, User $zUser): void { $box->take(/*complete*/$); }
++"#,
++        r#"<?php
++namespace One { class User {} }
++namespace Two { class User {} }
++namespace {
++    function take(\One\User $v): void {}
++    function demo(\Two\User $aWrong, \One\User $zUser): void { take(/*complete*/$); }
++}
++"#,
++    ] {
++        let items = ranked_variables(source).await;
++        assert_eq!(
++            items.first().map(|item| item.label.as_str()),
++            Some("$zUser")
++        );
++    }
++}
++
++#[tokio::test]
++async fn test_argument_ranking_resolves_callable_variable_signature() {
++    let items = ranked_variables(
++        r#"<?php
++function demo(int $aCount, string $zText): void {
++    $callback = function(string $value): void {};
++    $callback(/*complete*/$);
++}
++"#,
++    )
++    .await;
++    assert_eq!(
++        items.first().map(|item| item.label.as_str()),
++        Some("$zText")
++    );
++}
++
++#[tokio::test]
++async fn test_argument_ranking_variable_prefix_uses_utf16_range() {
++    let backend = create_test_backend();
++    let uri = Url::parse("file:///unicode-argument.php").unwrap();
++    let text = "<?php\nfunction take(string $v): void {}\nfunction demo(string $𐐀name): void { take(/*complete*/$𐐀); }\n";
++    let pos = crate::common::position_after(text, "/*complete*/$𐐀");
++    let items = complete_at(&backend, &uri, text, pos.line, pos.character).await;
++    let item = items.iter().find(|item| item.label == "$𐐀name").unwrap();
++    let CompletionTextEdit::Edit(edit) = item.text_edit.as_ref().unwrap() else {
++        panic!("expected variable edit")
++    };
++    assert_eq!(edit.range.end, pos);
++    assert_eq!(edit.range.start.character + 3, pos.character);
++}
+diff --git a/tests/integration/diagnostics_return_type_errors.rs b/tests/integration/diagnostics_return_type_errors.rs
+--- a/tests/integration/diagnostics_return_type_errors.rs
++++ b/tests/integration/diagnostics_return_type_errors.rs
+@@ -3012,7 +3012,10 @@
+     let php = format!(
+         "<?php\n{CARBON_SCAFFOLD}\nnamespace App {{\n    class Job {{\n        public function a(): \\DateTime {{ return now(); }}\n        public function b(): \\DateTime {{ return today(); }}\n    }}\n}}\n"
+     );
+-    let diags = collect(&php);
++    let backend = create_test_backend();
++    // Laravel startup has selected the date factory's default concrete class.
++    *backend.laravel_date_class().write() = Some(None);
++    let diags = collect_diagnostics_with(&backend, &php, Backend::collect_return_type_diagnostics);
+     assert!(
+         messages_with_code(&diags, "type_mismatch_return").is_empty(),
+         "now()/today() resolve to Illuminate\\Support\\Carbon (a \\DateTime), so returning them \
+@@ -3029,7 +3032,10 @@
+     let php = format!(
+         "<?php\n{CARBON_SCAFFOLD}\nnamespace App {{\n    class Job {{\n        public function retryUntil(): \\DateTime {{ return now()->addHours(1); }}\n    }}\n}}\n"
+     );
+-    let diags = collect(&php);
++    let backend = create_test_backend();
++    // Laravel startup has selected the date factory's default concrete class.
++    *backend.laravel_date_class().write() = Some(None);
++    let diags = collect_diagnostics_with(&backend, &php, Backend::collect_return_type_diagnostics);
+     assert!(
+         messages_with_code(&diags, "type_mismatch_return").is_empty(),
+         "now()->addHours(1) should resolve to the concrete Carbon (a \\DateTime), got: {}",

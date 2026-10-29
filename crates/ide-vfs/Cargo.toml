@@ -8,6 +8,7 @@ license.workspace = true
 [dependencies]
 dunce.workspace = true
 ide-core.workspace = true
+blake3.workspace = true
 serde.workspace = true
 specta.workspace = true
 ignore.workspace = true

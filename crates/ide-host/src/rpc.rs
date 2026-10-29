@@ -181,6 +181,9 @@ impl Dispatcher {
             ops::doc::edit(&c.host, &c.window, c.arg("doc")?, c.arg("baseVersion")?, c.arg("changes")?)
         })
         .add("doc_save", |c| async move { ops::doc::save(&c.host, &c.window, c.arg("doc")?).await })
+        .add("doc_save_checked", |c| async move {
+            ops::doc::save_checked(&c.host, &c.window, c.arg("doc")?, c.arg("overwriteRevision")?).await
+        })
         .add("doc_save_all", |c| async move { ops::doc::save_all(&c.host, &c.window).await })
         .add("doc_snapshot", |c| async move { ops::doc::snapshot(&c.host, &c.window, c.arg("doc")?).await })
         .add("search_start", |c| async move {

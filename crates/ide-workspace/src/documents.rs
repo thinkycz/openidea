@@ -1,3 +1,4 @@
+mod guarded_edits;
 use crate::editorconfig::{EditorConfig, EditorConfigProps};
 use crate::file_defaults::FileDefaults;
 use ide_core::error::ErrorKind;
@@ -119,6 +120,8 @@ struct DocState {
     /// Disk state we last loaded or wrote; changes matching it are our own.
     disk_mtime: f64,
     disk_len: u64,
+    /// Exact bytes last loaded/saved; watcher warnings never advance this baseline.
+    disk_revision: String,
     closed: bool,
     /// URI of a virtual document (no file behind it).
     uri: Option<String>,
@@ -288,6 +291,7 @@ impl Documents {
             dirty: false,
             disk_mtime: loaded.mtime_ms,
             disk_len: disk_len(path),
+            disk_revision: loaded.disk_revision,
             closed: false,
             uri: None,
         };
@@ -344,6 +348,7 @@ impl Documents {
             dirty: false,
             disk_mtime: 0.0,
             disk_len: 0,
+            disk_revision: String::new(),
             closed: false,
             uri: Some(uri.to_owned()),
         };
@@ -493,14 +498,37 @@ impl Documents {
 
     /// Writes the document with its original encoding, BOM and line ending.
     /// A clean document is not rewritten.
+    /// Internal callers cannot bypass conflict protection.
     pub fn save(&self, doc: DocId) -> IdeResult<()> {
+        match self.save_checked(doc, None)? {
+            None => Ok(()),
+            Some(_) => Err(IdeError::new(
+                ErrorKind::AlreadyExists,
+                "File changed on disk. Save in the editor to review the conflict.",
+            )),
+        }
+    }
+
+    /// None = saved, Some(revision) = conflict, no bytes written. An overwrite
+    /// authorizes only the disk revision the user actually reviewed.
+    pub fn save_checked(&self, doc: DocId, overwrite_revision: Option<&str>) -> IdeResult<Option<String>> {
         self.with_doc(doc, |st| {
             if !st.dirty || st.uri.is_some() {
-                return Ok(());
+                return Ok(None);
             }
-            let mtime = ide_vfs::save_text(&st.path, &st.doc.text_for_save(), &st.encoding, st.has_bom)?;
+            let bytes = ide_vfs::encode(&st.doc.text_for_save(), &st.encoding, st.has_bom)?;
+            let current = match std::fs::read(&st.path) {
+                Ok(bytes) => blake3::hash(&bytes).to_hex().to_string(),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => "missing".to_owned(),
+                Err(e) => return Err(e.into()),
+            };
+            if current != st.disk_revision && overwrite_revision != Some(current.as_str()) {
+                return Ok(Some(current));
+            }
+            let mtime = ide_vfs::write_atomic(&st.path, &bytes)?;
+            st.disk_revision = blake3::hash(&bytes).to_hex().to_string();
             st.disk_mtime = mtime;
-            st.disk_len = disk_len(&st.path);
+            st.disk_len = bytes.len() as u64;
             self.set_dirty(doc, st, false);
             if st.observed {
                 let text = st.doc.text();
@@ -508,7 +536,7 @@ impl Documents {
                     o.saved(doc, &st.path, &text);
                 }
             }
-            Ok(())
+            Ok(None)
         })
     }
 
@@ -648,6 +676,7 @@ impl Documents {
                 st.encoding = loaded.encoding.clone();
                 st.has_bom = loaded.has_bom;
                 st.disk_mtime = loaded.mtime_ms;
+                st.disk_revision = loaded.disk_revision;
                 self.replace_locked(doc, st, &loaded.text)?;
                 // Reloading is not an edit: the buffer matches the file again.
                 self.set_dirty(doc, st, false);
@@ -688,7 +717,7 @@ impl Documents {
                         title: format!("{name} changed on disk"),
                         body: Some(format!(
                             "{} was modified externally but has unsaved changes in the editor. \
-                             Saving will overwrite the external changes.",
+                             Autosave is paused. Save to review before overwriting the external changes.",
                             st.path.display()
                         )),
                     });
@@ -700,6 +729,7 @@ impl Documents {
                 if loaded.binary || st.binary {
                     return Ok(());
                 }
+                st.disk_revision = loaded.disk_revision;
                 st.encoding = loaded.encoding;
                 st.has_bom = loaded.has_bom;
                 st.large = loaded.large;

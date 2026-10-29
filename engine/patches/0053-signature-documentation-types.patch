@@ -1,0 +1,1610 @@
+diff --git a/src/diagnostics/mod.rs b/src/diagnostics/mod.rs
+index c939112..2e155a1 100644
+--- a/src/diagnostics/mod.rs
++++ b/src/diagnostics/mod.rs
+@@ -264,6 +264,7 @@ pub(crate) mod suppression;
+ mod syntax_errors;
+ pub(crate) mod transport_clock;
+ mod type_errors;
++pub(crate) use type_errors::{has_strict_types, is_type_compatible};
+ pub(crate) mod undefined_variables;
+ pub(crate) mod unknown_classes;
+ pub(crate) mod unknown_functions;
+diff --git a/src/diagnostics/type_errors/mod.rs b/src/diagnostics/type_errors/mod.rs
+index 5fce67d..59d8a9d 100644
+--- a/src/diagnostics/type_errors/mod.rs
++++ b/src/diagnostics/type_errors/mod.rs
+@@ -11,7 +11,7 @@
+ 
+ pub(super) mod compatibility;
+ 
+-pub(super) use compatibility::is_type_compatible;
++pub(crate) use compatibility::is_type_compatible;
+ use compatibility::{
+     first_rejected_callable_param, missing_required_shape_keys, shape_breaks_list_order,
+ };
+@@ -79,7 +79,7 @@ struct ResolvedCallArgs {
+ /// `declare(strict_types=1)` directive.  In PHP this must appear as
+ /// the very first statement (after `<?php`), but we check all
+ /// top-level statements for robustness.
+-pub(super) fn has_strict_types(program: &Program<'_>) -> bool {
++pub(crate) fn has_strict_types(program: &Program<'_>) -> bool {
+     for stmt in program.statements.iter() {
+         if let Statement::Declare(declare) = stmt {
+             for item in declare.items.iter() {
+diff --git a/src/lib.rs b/src/lib.rs
+index 3e1444a..da84878 100644
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -328,6 +328,7 @@ mod server;
+ mod source_authority;
+ pub use project_router::{ProjectRouter, ProjectTargetQuery};
+ mod signature_help;
++mod signature_overloads;
+ pub mod stub_patches;
+ pub mod stubs;
+ mod symbol_index;
+diff --git a/src/parser/classes.rs b/src/parser/classes.rs
+index 51449a3..60761c0 100644
+--- a/src/parser/classes.rs
++++ b/src/parser/classes.rs
+@@ -1349,6 +1349,8 @@ impl Backend {
+                             .push(std::sync::Arc::new(CallableOverload {
+                                 parameters: parameters.into(),
+                                 return_type,
++                                description: method_description,
++                                return_description,
+                                 templates: CallableTemplateInfo::optional(
+                                     method_template_params,
+                                     method_template_param_bounds,
+diff --git a/src/parser/functions.rs b/src/parser/functions.rs
+index 6629edf..6beeb74 100644
+--- a/src/parser/functions.rs
++++ b/src/parser/functions.rs
+@@ -368,6 +368,8 @@ impl Backend {
+                             .push(std::sync::Arc::new(CallableOverload {
+                                 parameters: parameters.into(),
+                                 return_type,
++                                description,
++                                return_description,
+                                 templates: CallableTemplateInfo::optional(
+                                     func_tpl_atoms,
+                                     func_template_param_bounds,
+diff --git a/src/signature_help.rs b/src/signature_help.rs
+index 2801cd5..d2203d8 100644
+--- a/src/signature_help.rs
++++ b/src/signature_help.rs
+@@ -245,6 +245,38 @@ fn build_param_documentation(param: &ParameterInfo) -> Option<Documentation> {
+     }))
+ }
+ 
++/// Use the same Markdown summary/return vocabulary as hover, without repeating
++/// parameter descriptions already attached to their individual LSP entries.
++fn build_callable_documentation(
++    description: Option<&str>,
++    return_description: Option<&str>,
++    return_type: Option<&PhpType>,
++) -> Option<Documentation> {
++    let mut sections = Vec::new();
++    if let Some(description) = description.map(str::trim).filter(|value| !value.is_empty()) {
++        sections.push(description.to_owned());
++    }
++    if let Some(description) = return_description
++        .map(str::trim)
++        .filter(|value| !value.is_empty())
++    {
++        let mut returned = String::from("**return**");
++        if let Some(ty) = return_type.filter(|ty| !ty.is_mixed()) {
++            returned.push_str(&format!(" `{}`", crate::hover::shorten_php_type(ty)));
++        }
++        returned.push(' ');
++        returned.push_str(description);
++        sections.push(returned);
++    }
++    if sections.is_empty() {
++        return None;
++    }
++    Some(Documentation::MarkupContent(MarkupContent {
++        kind: MarkupKind::Markdown,
++        value: sections.join("\n\n"),
++    }))
++}
++
+ /// Build a `SignatureInformation` from a callable's metadata.
+ ///
+ /// The label uses **native** PHP types for parameters and a shortened
+@@ -298,31 +330,6 @@ fn build_signature(
+ 
+ // ─── Resolution ─────────────────────────────────────────────────────────────
+ 
+-/// Resolved callable information ready to be turned into a
+-/// `SignatureHelp` response.
+-///
+-/// This is a thin projection of [`ResolvedCallableTarget`] kept for
+-/// local use within this module.  Only the fields actually consumed by
+-/// `resolve_signature` are retained.
+-struct ResolvedCallable {
+-    /// The parameters of the callable.
+-    parameters: SharedVec<ParameterInfo>,
+-    /// Optional return type (effective / docblock-enriched).
+-    return_type: Option<PhpType>,
+-    /// Applicable alternate declarations retain their own parameters and return.
+-    overloads: Vec<std::sync::Arc<CallableOverload>>,
+-}
+-
+-impl From<crate::types::ResolvedCallableTarget> for ResolvedCallable {
+-    fn from(t: crate::types::ResolvedCallableTarget) -> Self {
+-        Self {
+-            parameters: t.parameters,
+-            return_type: t.return_type,
+-            overloads: t.overloads,
+-        }
+-    }
+-}
+-
+ // ─── First-class callable target extraction (AST-based) ────────────────────
+ 
+ use mago_span::HasSpan;
+@@ -743,15 +750,15 @@ impl Backend {
+         position: Position,
+         ctx: &FileContext,
+     ) -> Option<SignatureHelp> {
+-        let resolved = self.resolve_callable(&site.call_expression, content, position, ctx)?;
+-
++        // Keep the original declaration metadata for stable/unknown calls.
++        let original =
++            self.resolve_callable_target(&site.call_expression, content, position, ctx)?;
+         let cursor = position_to_offset(content, position) as usize;
+         let args_text = content.get(site.args_start..cursor)?;
+         let mut args = crate::type_engine::types::conditional::split_text_args(args_text);
+         for argument in &mut args {
+             *argument = crate::call_args::trim_argument_trivia(argument);
+         }
+-        // The shared splitter omits an empty trailing slot after a comma.
+         let current = args
+             .get(site.active_parameter as usize)
+             .copied()
+@@ -770,36 +777,77 @@ impl Backend {
+             site.active_parameter as usize + 1
+         };
+ 
+-        let variants = std::iter::once((&resolved.parameters, resolved.return_type.as_ref()))
+-            .chain(
+-                resolved
+-                    .overloads
+-                    .iter()
+-                    .map(|overload| (&overload.parameters, overload.return_type.as_ref())),
+-            );
+-        let mut signatures = Vec::with_capacity(1 + resolved.overloads.len());
+-        let mut first_compatible = None;
+-        let mut active_signature = None;
+-        for (index, (parameters, return_type)) in variants.enumerate() {
+-            let active = signature_active_parameter(parameters, name, site.active_parameter);
+-            let names_match =
+-                !has_named || crate::call_args::text_args_have_compatible_roles(parameters, &args);
+-            if names_match {
+-                first_compatible.get_or_insert(index);
+-                // Prefer a complete count fit; retain a role-compatible fallback
+-                // while required arguments are still being entered.
+-                if active_signature.is_none() && signature_accepts_count(parameters, count) {
+-                    active_signature = Some(index);
++        let mut role_candidates = Vec::new();
++        let mut count_candidates = Vec::new();
++        for (index, parameters) in std::iter::once(&original.parameters)
++            .chain(original.overloads.iter().map(|variant| &variant.parameters))
++            .enumerate()
++        {
++            if !has_named || crate::call_args::text_args_have_compatible_roles(parameters, &args) {
++                role_candidates.push(index);
++                if signature_accepts_count(parameters, count) {
++                    count_candidates.push(index);
+                 }
+             }
+-            let mut signature = build_signature(parameters, return_type);
+-            signature.active_parameter = active;
+-            signatures.push(signature);
+         }
+-        if has_named && first_compatible.is_none() {
++        if has_named && role_candidates.is_empty() {
+             return None;
+         }
+-        let selected = active_signature.or(first_compatible).unwrap_or(0);
++        let eligible = if count_candidates.is_empty() {
++            &role_candidates
++        } else {
++            &count_candidates
++        };
++        // Do not bind every generic callable merely to display its signature.
++        // Extra inference applies only to bounded competing alternatives.
++        let bound = if eligible.len() >= 2
++            && crate::signature_overloads::arguments_admit_type_preference(args_text, &args)
++            && crate::signature_overloads::target_admits_type_preference(&original)
++        {
++            self.resolve_callable_target_with_args_at_offset(
++                &site.call_expression,
++                content,
++                cursor as u32,
++                ctx,
++                Some(args_text),
++            )
++        } else {
++            None
++        };
++        let preferred = bound.as_ref().and_then(|target| {
++            self.signature_type_preference(target, &args, eligible, content, cursor as u32, ctx)
++        });
++        let selected = preferred.or_else(|| eligible.first().copied()).unwrap_or(0);
++        let resolved = if preferred.is_some() {
++            bound.as_ref().unwrap()
++        } else {
++            &original
++        };
++        let signatures = std::iter::once((
++            &resolved.parameters,
++            resolved.return_type.as_ref(),
++            resolved.description.as_deref(),
++            resolved.return_description.as_deref(),
++        ))
++        .chain(resolved.overloads.iter().map(|variant| {
++            (
++                &variant.parameters,
++                variant.return_type.as_ref(),
++                variant.description.as_deref(),
++                variant.return_description.as_deref(),
++            )
++        }))
++        .map(
++            |(parameters, return_type, description, return_description)| {
++                let mut signature = build_signature(parameters, return_type);
++                signature.documentation =
++                    build_callable_documentation(description, return_description, return_type);
++                signature.active_parameter =
++                    signature_active_parameter(parameters, name, site.active_parameter);
++                signature
++            },
++        )
++        .collect::<Vec<_>>();
+         let active_parameter = signatures[selected].active_parameter;
+         Some(SignatureHelp {
+             signatures,
+@@ -808,21 +856,6 @@ impl Backend {
+         })
+     }
+ 
+-    /// Resolve a call expression string to the callable's metadata.
+-    ///
+-    /// Delegates to the shared [`Backend::resolve_callable_target`] and
+-    /// converts the result into the local [`ResolvedCallable`] type.
+-    fn resolve_callable(
+-        &self,
+-        expr: &str,
+-        content: &str,
+-        position: Position,
+-        ctx: &FileContext,
+-    ) -> Option<ResolvedCallable> {
+-        self.resolve_callable_target(expr, content, position, ctx)
+-            .map(ResolvedCallable::from)
+-    }
+-
+     /// Find the callable target for a first-class callable assignment
+     /// like `$fn = someTarget(...)` and return the callable target string
+     /// (e.g. `"makePen"`, `"$obj->method"`, `"ClassName::method"`).
+diff --git a/src/signature_help_tests.rs b/src/signature_help_tests.rs
+index 48c5809..b446d79 100644
+--- a/src/signature_help_tests.rs
++++ b/src/signature_help_tests.rs
+@@ -1,6 +1,28 @@
+ use super::*;
+ use crate::php_type::PhpType;
+ 
++#[test]
++fn callable_documentation_omits_empty_text_and_shortens_return_type() {
++    assert!(
++        build_callable_documentation(Some(" \n"), Some("\t"), Some(&PhpType::parse("int")))
++            .is_none()
++    );
++    let docs = build_callable_documentation(
++        Some("Summary **bold**."),
++        Some("The record."),
++        Some(&PhpType::parse("\\App\\Record")),
++    )
++    .unwrap();
++    let Documentation::MarkupContent(content) = docs else {
++        panic!("expected Markdown")
++    };
++    assert_eq!(content.kind, MarkupKind::Markdown);
++    assert_eq!(
++        content.value,
++        "Summary **bold**.\n\n**return** `Record` The record."
++    );
++}
++
+ // ── detect_call_site_text_fallback ──────────────────────────────
+ 
+ #[test]
+diff --git a/src/signature_overloads.rs b/src/signature_overloads.rs
+new file mode 100644
+index 0000000..6d3fe1c
+--- /dev/null
++++ b/src/signature_overloads.rs
+@@ -0,0 +1,610 @@
++//! Conservative type preference for otherwise applicable signature alternatives.
++use crate::php_type::{PhpType, TypeKind};
++use crate::type_engine::resolver::CtxLoaders;
++use crate::{
++    Backend,
++    types::{FileContext, ResolvedCallableTarget},
++};
++use std::cell::Cell;
++
++const MAX_ARGS: usize = 64;
++const MAX_ALTERNATIVES: usize = 64;
++const MAX_TEXT: usize = 16 * 1024;
++
++/// Shared admission before either argument-aware binding or extra inference.
++/// The standalone ranking API also checks aggregate slices when no raw span is
++/// supplied; the production adapter supplies the complete argument span.
++pub(crate) fn arguments_admit_type_preference(args_text: &str, args: &[&str]) -> bool {
++    args.len() <= MAX_ARGS
++        && args_text.len() <= MAX_TEXT
++        && args
++            .iter()
++            .try_fold(0usize, |n, arg| n.checked_add(arg.len()))
++            .is_some_and(|n| n <= MAX_TEXT)
++        && !args.iter().any(|argument| {
++            let argument = crate::call_args::trim_argument_trivia(argument);
++            let value = crate::call_args::text_arg_value(argument);
++            crate::call_args::trim_argument_trivia(value).starts_with("...")
++        })
++}
++
++/// Bound argument-aware substitution across the whole target before it runs.
++pub(crate) fn target_admits_type_preference(target: &ResolvedCallableTarget) -> bool {
++    !target.overloads.is_empty()
++        && target.overloads.len() < MAX_ALTERNATIVES
++        && target.parameters.len() <= MAX_ARGS
++        && target
++            .overloads
++            .iter()
++            .all(|variant| variant.parameters.len() <= MAX_ARGS)
++}
++
++thread_local! { static RESOLVING: Cell<bool> = const { Cell::new(false) }; }
++struct Resolving;
++impl Drop for Resolving {
++    fn drop(&mut self) {
++        RESOLVING.with(|value| value.set(false));
++    }
++}
++
++fn informative(ty: &PhpType) -> bool {
++    !ty.is_mixed()
++        && !ty.is_untyped()
++        && !ty.is_empty()
++        && !ty.is_never()
++        && !matches!(ty.kind(), TypeKind::Raw(value) if value.is_empty())
++}
++
++impl Backend {
++    #[allow(clippy::too_many_arguments)]
++    pub(crate) fn signature_type_preference(
++        &self,
++        target: &ResolvedCallableTarget,
++        args: &[&str],
++        eligible: &[usize],
++        content: &str,
++        offset: u32,
++        ctx: &FileContext,
++    ) -> Option<usize> {
++        if !arguments_admit_type_preference("", args)
++            || eligible.len() < 2
++            || eligible.len() > MAX_ALTERNATIVES
++            || offset as usize > content.len()
++            || !content.is_char_boundary(offset as usize)
++        {
++            return None;
++        }
++        let mut indices = eligible.to_vec();
++        indices.sort_unstable();
++        indices.dedup();
++        if indices.len() < 2 || indices.iter().any(|index| *index > target.overloads.len()) {
++            return None;
++        }
++        let values = args
++            .iter()
++            .map(|argument| {
++                let (name, value) = crate::call_args::split_named_text_arg(
++                    crate::call_args::trim_argument_trivia(argument),
++                );
++                (name, crate::call_args::trim_argument_trivia(value))
++            })
++            .collect::<Vec<_>>();
++        // An unpack can change cardinality and named roles. Do not guess which
++        // parameter receives it or any subsequent argument.
++        if values.iter().any(|(_, value)| value.starts_with("...")) {
++            return None;
++        }
++        if RESOLVING.with(|value| value.replace(true)) {
++            return None;
++        }
++        let _resolving = Resolving;
++        let namespace = ctx.namespace_at(offset);
++        let imports = ctx.use_map_at(offset);
++        let class_loader = self.class_loader_with(&ctx.classes, imports, namespace);
++        let function_loader =
++            self.function_loader_with(ctx.resolved_names.as_deref(), imports, namespace);
++        let macro_resolver = self.laravel_macro_this_resolver(&class_loader);
++        let current_class = crate::class_lookup::find_class_at_offset(&ctx.classes, offset);
++        let rctx = self.resolution_ctx_at(
++            current_class,
++            &ctx.classes,
++            content,
++            offset,
++            CtxLoaders::new(&class_loader, &function_loader, &macro_resolver),
++        );
++        let types = values
++            .iter()
++            .map(|(_, value)| {
++                if value.is_empty() {
++                    None
++                } else {
++                    Self::resolve_arg_text_to_type(value, &rctx).filter(informative)
++                }
++            })
++            .collect::<Vec<_>>();
++        if types.iter().all(Option::is_none) {
++            return None;
++        }
++        let strict = crate::parser::with_parsed_program(
++            content,
++            "signature_type_preference",
++            |program, _| crate::diagnostics::has_strict_types(program),
++        );
++        let parent = target
++            .owner_class
++            .as_ref()
++            .and_then(|owner| class_loader(owner))
++            .and_then(|owner| owner.parent_class.as_ref().map(|parent| parent.to_string()));
++        let mut survivor = None;
++        let mut surviving_count = 0;
++        let mut type_rejected = false;
++        for index in indices {
++            let (parameters, constraints) = if index == 0 {
++                (&target.parameters, &target.self_bound_params)
++            } else {
++                let variant = &target.overloads[index - 1];
++                (&variant.parameters, &variant.self_bound_params)
++            };
++            if parameters.len() > MAX_ARGS {
++                return None;
++            }
++            if !crate::call_args::text_args_have_compatible_roles(parameters, args) {
++                return None;
++            }
++            let variadic = parameters
++                .iter()
++                .position(|parameter| parameter.is_variadic);
++            let mut positional = 0;
++            let mut rejected = false;
++            for ((name, value), argument_type) in values.iter().zip(&types) {
++                if value.is_empty() {
++                    continue;
++                }
++                let parameter = if let Some(name) = name {
++                    parameters
++                        .iter()
++                        .position(|parameter| parameter.name.trim_start_matches('$') == *name)
++                        .or(variadic)
++                } else {
++                    let result = (positional < parameters.len())
++                        .then_some(positional)
++                        .or(variadic);
++                    positional += 1;
++                    result
++                }
++                .and_then(|index| parameters.get(index));
++                let parameter = parameter?;
++                let Some(argument_type) = argument_type else {
++                    continue;
++                };
++                let parameter_type = match constraints.get(&parameter.name) {
++                    Some(None) => continue,
++                    Some(Some(bound)) => bound,
++                    None => match parameter.type_hint.as_ref() {
++                        Some(ty) => ty,
++                        None => continue,
++                    },
++                };
++                if !informative(parameter_type)
++                    || (parameter.is_reference && parameter.defaults_to_null())
++                {
++                    continue;
++                }
++                let relative;
++                let effective = if parameter_type.contains_relative_class_ref() {
++                    let Some(owner) = &target.owner_class else {
++                        continue;
++                    };
++                    relative = parameter_type.resolve_self_refs_bounded(owner, parent.as_deref());
++                    &relative
++                } else {
++                    parameter_type
++                };
++                if !crate::diagnostics::is_type_compatible(
++                    argument_type,
++                    effective,
++                    &class_loader,
++                    strict,
++                ) {
++                    rejected = true;
++                    type_rejected = true;
++                    break;
++                }
++            }
++            if !rejected {
++                survivor = Some(index);
++                surviving_count += 1;
++            }
++        }
++        if surviving_count == 1 && type_rejected {
++            survivor
++        } else {
++            None
++        }
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use crate::{
++        php_type::PhpType,
++        test_fixtures::{make_backend, make_param},
++        types::{CallableOverload, ParameterInfo},
++    };
++    use std::sync::Arc;
++
++    fn target(
++        primary: Vec<ParameterInfo>,
++        alternatives: Vec<Vec<ParameterInfo>>,
++    ) -> ResolvedCallableTarget {
++        ResolvedCallableTarget {
++            parameters: primary.into(),
++            overloads: alternatives
++                .into_iter()
++                .map(|parameters| {
++                    Arc::new(CallableOverload {
++                        parameters: parameters.into(),
++                        return_type: None,
++                        templates: None,
++                        description: None,
++                        return_description: None,
++                        self_bound_params: Default::default(),
++                    })
++                })
++                .collect(),
++            ..Default::default()
++        }
++    }
++
++    fn context(backend: &Backend, content: &str) -> FileContext {
++        FileContext {
++            classes: backend
++                .parse_and_cache_content(content, "file:///signature-overloads-unit.php")
++                .expect("prepared file context"),
++            use_map: backend.parse_use_statements(content),
++            namespace: backend.parse_namespace(content),
++            namespace_spans: None,
++            resolved_names: None,
++        }
++    }
++
++    fn preference(target: &ResolvedCallableTarget, args: &[&str], prefix: &str) -> Option<usize> {
++        let backend = make_backend();
++        let content = format!("{prefix}\npick({});", args.join(", "));
++        let ctx = context(&backend, &content);
++        let eligible = (0..=target.overloads.len()).collect::<Vec<_>>();
++        backend.signature_type_preference(
++            target,
++            args,
++            &eligible,
++            &content,
++            content.len() as u32,
++            &ctx,
++        )
++    }
++
++    #[test]
++    fn signature_type_preference_known_types_override_both_declaration_orders() {
++        for (first, second, expected) in [("array", "int", 1), ("int", "array", 0)] {
++            let target = target(
++                vec![make_param("$x", Some(first), true)],
++                vec![vec![make_param("$x", Some(second), true)]],
++            );
++            assert_eq!(
++                preference(&target, &["42"], "<?php declare(strict_types=1);"),
++                Some(expected)
++            );
++        }
++    }
++
++    #[test]
++    fn signature_type_preference_named_roles_and_every_variadic_value_matter() {
++        let mut ints = make_param("$values", Some("int"), false);
++        ints.is_variadic = true;
++        let mut strings = make_param("$values", Some("string"), false);
++        strings.is_variadic = true;
++        let alternatives = target(vec![ints], vec![vec![strings]]);
++        assert_eq!(
++            preference(
++                &alternatives,
++                &["'one'", "'two'"],
++                "<?php declare(strict_types=1);"
++            ),
++            Some(1)
++        );
++        assert_eq!(
++            preference(
++                &alternatives,
++                &["label: 'one'", "other: 'two'"],
++                "<?php declare(strict_types=1);"
++            ),
++            Some(1)
++        );
++        assert_eq!(
++            preference(
++                &alternatives,
++                &["1", "'two'"],
++                "<?php declare(strict_types=1);"
++            ),
++            None,
++            "no whole alternative admits both values"
++        );
++        let alternatives = target(
++            vec![
++                make_param("$a", Some("array"), true),
++                make_param("$b", Some("int"), true),
++            ],
++            vec![vec![
++                make_param("$a", Some("int"), true),
++                make_param("$b", Some("array"), true),
++            ]],
++        );
++        assert_eq!(
++            preference(&alternatives, &["b /* trivia */: []", "a: 3"], "<?php"),
++            Some(1)
++        );
++    }
++
++    #[test]
++    fn signature_type_preference_resolves_variables_and_nullable_union_values() {
++        let alternatives = target(
++            vec![make_param("$x", Some("array"), true)],
++            vec![vec![make_param("$x", Some("int"), true)]],
++        );
++        assert_eq!(
++            preference(
++                &alternatives,
++                &["$value"],
++                "<?php declare(strict_types=1); $value = 17;"
++            ),
++            Some(1)
++        );
++        let alternatives = target(
++            vec![make_param("$x", Some("int"), true)],
++            vec![vec![make_param("$x", Some("?int"), true)]],
++        );
++        assert_eq!(preference(&alternatives, &["null"], "<?php"), Some(1));
++        let alternatives = target(
++            vec![make_param("$x", Some("array"), true)],
++            vec![vec![make_param("$x", Some("int|string"), true)]],
++        );
++        assert_eq!(
++            preference(&alternatives, &["'name'"], "<?php declare(strict_types=1);"),
++            Some(1)
++        );
++    }
++
++    #[test]
++    fn signature_type_preference_unknown_ambiguous_unpack_and_limits_keep_fallback() {
++        let alternatives = target(
++            vec![make_param("$x", Some("array"), true)],
++            vec![vec![make_param("$x", Some("int"), true)]],
++        );
++        for args in [
++            vec!["$unresolved"],
++            vec![""],
++            vec!["...$values"],
++            vec!["value: ...$values"],
++            vec!["42"; 65],
++        ] {
++            assert_eq!(preference(&alternatives, &args, "<?php"), None);
++        }
++        let ambiguous = target(
++            vec![make_param("$x", Some("int"), true)],
++            vec![vec![make_param("$x", Some("mixed"), true)]],
++        );
++        assert_eq!(
++            preference(&ambiguous, &["1"], "<?php declare(strict_types=1);"),
++            None
++        );
++        assert_eq!(
++            preference(&alternatives, &[&" ".repeat(16 * 1024 + 1)], "<?php"),
++            None
++        );
++        let many = target(
++            vec![make_param("$x", Some("array"), true)],
++            vec![vec![make_param("$x", Some("int"), true)]; 64],
++        );
++        assert_eq!(preference(&many, &["1"], "<?php"), None);
++    }
++
++    #[test]
++    fn signature_type_preference_uses_actual_weak_and_strict_scalar_policy() {
++        let alternatives = target(
++            vec![make_param("$x", Some("string"), true)],
++            vec![vec![make_param("$x", Some("int"), true)]],
++        );
++        assert_eq!(
++            preference(&alternatives, &["7"], "<?php declare(strict_types=1);"),
++            Some(1)
++        );
++        assert_eq!(
++            preference(&alternatives, &["7"], "<?php"),
++            None,
++            "weak coercion keeps both possible"
++        );
++    }
++
++    #[test]
++    fn signature_type_preference_self_bound_constraint_is_not_its_own_inference() {
++        let mut alternatives = target(
++            vec![make_param("$x", Some("array"), true)],
++            vec![vec![make_param("$x", Some("array"), true)]],
++        );
++        Arc::make_mut(&mut alternatives.overloads[0])
++            .self_bound_params
++            .insert(crate::atom::atom("$x"), Some(PhpType::parse("int")));
++        assert_eq!(
++            preference(&alternatives, &["9"], "<?php declare(strict_types=1);"),
++            Some(1)
++        );
++        Arc::make_mut(&mut alternatives.overloads[0])
++            .self_bound_params
++            .insert(crate::atom::atom("$x"), None);
++        assert_eq!(
++            preference(&alternatives, &["9"], "<?php declare(strict_types=1);"),
++            Some(1)
++        );
++    }
++
++    #[test]
++    fn signature_type_preference_namespace_class_and_relative_owner_use_real_loaders() {
++        let backend = make_backend();
++        let prepared = context(
++            &backend,
++            r"<?php namespace App; use App\Child as Alias; class Base {} class Child extends Base {}",
++        );
++        let child = prepared
++            .classes
++            .iter()
++            .find(|class| class.name == crate::atom::atom("Child"))
++            .unwrap();
++        assert_eq!(child.fqn().to_string(), r"App\Child");
++        assert_eq!(child.parent_class.as_deref(), Some(r"App\Base"));
++        let loader =
++            backend.class_loader_with(&prepared.classes, &prepared.use_map, &prepared.namespace);
++        assert_eq!(loader("Child").unwrap().fqn().to_string(), r"App\Child");
++        assert_eq!(loader("Alias").unwrap().fqn().to_string(), r"App\Child");
++        assert_eq!(loader("Base").unwrap().fqn().to_string(), r"App\Base");
++        let mut alternatives = target(
++            vec![make_param("$x", Some("array"), true)],
++            vec![vec![make_param("$x", Some("self"), true)]],
++        );
++        alternatives.owner_class = Some(crate::atom::atom("App\\Base"));
++        assert_eq!(
++            preference(
++                &alternatives,
++                &["new Child()"],
++                "<?php namespace App; class Base {} class Child extends Base {}"
++            ),
++            Some(1)
++        );
++        alternatives.overloads = vec![Arc::new(CallableOverload {
++            parameters: vec![make_param("$x", Some("App\\Child"), true)].into(),
++            return_type: None,
++            templates: None,
++            self_bound_params: Default::default(),
++            description: None,
++            return_description: None,
++        })];
++        assert_eq!(
++            preference(
++                &alternatives,
++                &["new Alias()"],
++                "<?php namespace App; use App\\Child as Alias; class Base {} class Child extends Base {}"
++            ),
++            Some(1)
++        );
++    }
++
++    #[test]
++    fn signature_type_preference_exact_resource_edges_still_rank() {
++        let mut first = make_param("$values", Some("array"), false);
++        first.is_variadic = true;
++        let mut second = make_param("$values", Some("int"), false);
++        second.is_variadic = true;
++        let alternatives = target(vec![first], vec![vec![second]]);
++        assert_eq!(
++            preference(
++                &alternatives,
++                &vec!["1"; MAX_ARGS],
++                "<?php declare(strict_types=1);"
++            ),
++            Some(1)
++        );
++        let text = format!("'{}'", "a".repeat(MAX_TEXT - 2));
++        let alternatives = target(
++            vec![make_param("$x", Some("array"), true)],
++            vec![vec![make_param("$x", Some("string"), true)]],
++        );
++        assert_eq!(
++            preference(&alternatives, &[&text], "<?php declare(strict_types=1);"),
++            Some(1)
++        );
++        let mut variants = vec![vec![make_param("$x", Some("array"), true)]; MAX_ALTERNATIVES - 2];
++        variants.push(vec![make_param("$x", Some("int"), true)]);
++        let alternatives = target(vec![make_param("$x", Some("array"), true)], variants);
++        assert_eq!(
++            preference(&alternatives, &["1"], "<?php declare(strict_types=1);"),
++            Some(MAX_ALTERNATIVES - 1)
++        );
++    }
++
++    #[test]
++    fn signature_type_preference_never_escapes_supplied_eligible_indices() {
++        let backend = make_backend();
++        let content = "<?php declare(strict_types=1); pick(1);";
++        let ctx = context(&backend, content);
++        let alternatives = target(
++            vec![make_param("$x", Some("array"), true)],
++            vec![
++                vec![make_param("$x", Some("string"), true)],
++                vec![make_param("$x", Some("int"), true)],
++            ],
++        );
++        assert_eq!(
++            backend.signature_type_preference(
++                &alternatives,
++                &["1"],
++                &[0, 1],
++                content,
++                content.len() as u32,
++                &ctx
++            ),
++            None
++        );
++        assert_eq!(
++            backend.signature_type_preference(
++                &alternatives,
++                &["1"],
++                &[0, 2],
++                content,
++                content.len() as u32,
++                &ctx
++            ),
++            Some(2)
++        );
++        assert_eq!(
++            backend.signature_type_preference(
++                &alternatives,
++                &["1"],
++                &[2, 2],
++                content,
++                content.len() as u32,
++                &ctx
++            ),
++            None
++        );
++    }
++
++    #[test]
++    fn signature_type_preference_shared_admission_rejects_commented_unpack_and_raw_span_excess() {
++        assert!(arguments_admit_type_preference("1, 'a'", &["1", "'a'"]));
++        for argument in ["...$xs", "/*before*/ ...$xs", "name: /*value*/ ...$xs"] {
++            assert!(!arguments_admit_type_preference(argument, &[argument]));
++        }
++        assert!(!arguments_admit_type_preference(
++            &" ".repeat(MAX_TEXT + 1),
++            &["1"]
++        ));
++        assert!(arguments_admit_type_preference(
++            &" ".repeat(MAX_TEXT),
++            &["1"]
++        ));
++    }
++    #[test]
++    fn signature_type_preference_target_admission_bounds_binding_before_ranking() {
++        let params = vec![make_param("$value", Some("int"), true)];
++        let mut admitted = target(params.clone(), vec![params.clone(); 63]);
++        assert!(target_admits_type_preference(&admitted));
++        admitted.overloads.push(admitted.overloads[0].clone());
++        assert!(!target_admits_type_preference(&admitted));
++        let mut admitted = target(vec![params[0].clone(); 64], vec![params.clone()]);
++        assert!(target_admits_type_preference(&admitted));
++        admitted.parameters.make_mut().push(params[0].clone());
++        assert!(!target_admits_type_preference(&admitted));
++        let rejected = target(params.clone(), vec![vec![params[0].clone(); 65]]);
++        assert!(!target_admits_type_preference(&rejected));
++    }
++}
+diff --git a/src/type_engine/call_resolution/callable_target.rs b/src/type_engine/call_resolution/callable_target.rs
+index e484169..69c5691 100644
+--- a/src/type_engine/call_resolution/callable_target.rs
++++ b/src/type_engine/call_resolution/callable_target.rs
+@@ -301,6 +301,8 @@ impl Backend {
+                 let target = ResolvedCallableTarget {
+                     parameters: result_method.parameters.clone(),
+                     return_type: result_method.return_type.clone(),
++                    description: result_method.description.clone(),
++                    return_description: result_method.return_description.clone(),
+                     overloads: result_method.overloads.clone(),
+                     owner_class: Some(owner.fqn()),
+                     self_bound_params,
+@@ -328,6 +330,8 @@ impl Backend {
+                 let target = ResolvedCallableTarget {
+                     parameters: m.parameters.clone(),
+                     return_type: m.return_type.clone(),
++                    description: m.description.clone(),
++                    return_description: m.return_description.clone(),
+                     owner_class: Some(owner.fqn()),
+                     ..Default::default()
+                 };
+@@ -405,6 +409,8 @@ impl Backend {
+         Some(ResolvedCallableTarget {
+             parameters: result_method.parameters.clone(),
+             return_type: result_method.return_type.clone(),
++            description: result_method.description.clone(),
++            return_description: result_method.return_description.clone(),
+             overloads: result_method.overloads.clone(),
+             owner_class: Some(owner.fqn()),
+             self_bound_params,
+@@ -417,6 +423,8 @@ impl Backend {
+         ResolvedCallableTarget {
+             parameters: func.parameters.clone(),
+             return_type: func.return_type.clone(),
++            description: func.description.clone(),
++            return_description: func.return_description.clone(),
+             overloads: func.overloads.clone(),
+             ..Default::default()
+         }
+@@ -551,6 +559,8 @@ impl Backend {
+                 return Some(ResolvedCallableTarget {
+                     parameters: result_ctor.parameters.clone(),
+                     return_type: result_ctor.return_type.clone(),
++                    description: result_ctor.description.clone(),
++                    return_description: result_ctor.return_description.clone(),
+                     overloads,
+                     owner_class: Some(ci.fqn()),
+                     self_bound_params,
+@@ -562,6 +572,8 @@ impl Backend {
+         Some(ResolvedCallableTarget {
+             parameters: ctor.parameters.clone(),
+             return_type: ctor.return_type.clone(),
++            description: ctor.description.clone(),
++            return_description: ctor.return_description.clone(),
+             overloads,
+             owner_class: Some(ci.fqn()),
+             ..Default::default()
+diff --git a/src/types/mod.rs b/src/types/mod.rs
+index 6e3ab22..c9a142f 100644
+--- a/src/types/mod.rs
++++ b/src/types/mod.rs
+@@ -1137,6 +1137,10 @@ pub struct CallableOverload {
+     pub parameters: SharedVec<ParameterInfo>,
+     /// Effective return type for this declaration, independent of the primary.
+     pub return_type: Option<PhpType>,
++    /// Summary belonging to this declaration, never borrowed from the primary.
++    pub description: Option<String>,
++    /// Description of this declaration's return value.
++    pub return_description: Option<String>,
+     /// This declaration's own generic contract, absent for non-generic variants.
+     pub templates: Option<Arc<CallableTemplateInfo>>,
+     /// Call-site constraints for templates bound solely by their own argument.
+@@ -1185,6 +1189,8 @@ fn overloads_eq(left: &[Arc<CallableOverload>], right: &[Arc<CallableOverload>])
+     left.len() == right.len()
+         && left.iter().zip(right).all(|(a, b)| {
+             a.return_type == b.return_type
++                && a.description == b.description
++                && a.return_description == b.return_description
+                 && a.templates == b.templates
+                 && a.parameters.len() == b.parameters.len()
+                 && a.parameters.iter().zip(b.parameters.iter()).all(|(a, b)| {
+@@ -1209,6 +1215,9 @@ pub(crate) struct ResolvedCallableTarget {
+     pub parameters: SharedVec<ParameterInfo>,
+     /// Optional return type.
+     pub return_type: Option<PhpType>,
++    /// Display metadata from the resolved declaration (including inheritance).
++    pub description: Option<String>,
++    pub return_description: Option<String>,
+     /// Whether the callable accepts any number of arguments without error,
+     /// regardless of `parameters`. Set for a class with no explicit
+     /// constructor: PHP silently ignores arguments to `new Foo(...)`, so
+diff --git a/src/types_tests.rs b/src/types_tests.rs
+index 40e8909..62ea077 100644
+--- a/src/types_tests.rs
++++ b/src/types_tests.rs
+@@ -1118,6 +1118,8 @@ fn replace_type_clears_when_no_class_info() {
+ #[test]
+ fn overload_signature_changes_invalidate_at_constant_variant_count() {
+     let alternate = Arc::new(CallableOverload {
++        description: None,
++        return_description: None,
+         templates: None,
+         self_bound_params: Default::default(),
+         parameters: vec![param("$value", "string")].into(),
+@@ -1126,13 +1128,14 @@ fn overload_signature_changes_invalidate_at_constant_variant_count() {
+     let mut original = func("pick");
+     original.overloads.push(alternate.clone());
+     assert!(original.signature_eq(&original.clone()));
+-    for change_return in [false, true] {
++    for change in 0..4 {
+         let mut changed = original.clone();
+         let changed_alternate = Arc::make_mut(&mut changed.overloads[0]);
+-        if change_return {
+-            changed_alternate.return_type = Some(PhpType::parse("int"));
+-        } else {
+-            changed_alternate.parameters.make_mut()[0].type_hint = Some(PhpType::parse("int"));
++        match change {
++            0 => changed_alternate.return_type = Some(PhpType::parse("int")),
++            1 => changed_alternate.parameters.make_mut()[0].type_hint = Some(PhpType::parse("int")),
++            2 => changed_alternate.description = Some("Updated summary.".into()),
++            _ => changed_alternate.return_description = Some("Updated return docs.".into()),
+         }
+         assert_eq!(original.overloads.len(), changed.overloads.len());
+         assert!(!original.signature_eq(&changed));
+@@ -1153,12 +1156,16 @@ fn overload_substitution_preserves_shared_origin_and_parameter_docs() {
+     let mut parameter = param("$value", "T");
+     parameter.description = Some("The alternate value.".into());
+     let original = Arc::new(CallableOverload {
++        description: Some("The alternate summary.".into()),
++        return_description: Some("The alternate result.".into()),
+         templates: None,
+         self_bound_params: Default::default(),
+         parameters: vec![parameter].into(),
+         return_type: Some(PhpType::parse("T")),
+     });
+     let unchanged = Arc::new(CallableOverload {
++        description: None,
++        return_description: None,
+         templates: None,
+         self_bound_params: Default::default(),
+         parameters: vec![param("$other", "int")].into(),
+@@ -1188,6 +1195,14 @@ fn overload_substitution_preserves_shared_origin_and_parameter_docs() {
+     );
+     assert_eq!(original.return_type, Some(PhpType::parse("T")));
+     assert_eq!(original.parameters[0].type_hint, Some(PhpType::parse("T")));
++    assert_eq!(
++        alternatives[0].description.as_deref(),
++        Some("The alternate summary.")
++    );
++    assert_eq!(
++        alternatives[0].return_description.as_deref(),
++        Some("The alternate result.")
++    );
+ }
+ 
+ #[test]
+@@ -1203,6 +1218,8 @@ fn overload_generic_contract_changes_invalidate_but_callsite_constraints_do_not(
+     .unwrap();
+     let mut original = func("pick");
+     original.overloads.push(Arc::new(CallableOverload {
++        description: None,
++        return_description: None,
+         parameters: vec![param("$value", "T")].into(),
+         return_type: Some(PhpType::parse("T")),
+         templates: Some(templates),
+diff --git a/tests/integration/main.rs b/tests/integration/main.rs
+index dc7217e..fc1f39c 100644
+--- a/tests/integration/main.rs
++++ b/tests/integration/main.rs
+@@ -269,6 +269,7 @@ mod semantic_tokens;
+ mod server_lifecycle;
+ mod signature_from_call_site;
+ mod signature_help;
++mod signature_type_selection;
+ mod smoke;
+ mod type_definition;
+ mod type_hierarchy;
+diff --git a/tests/integration/signature_help.rs b/tests/integration/signature_help.rs
+index febbde2..7eb87ca 100644
+--- a/tests/integration/signature_help.rs
++++ b/tests/integration/signature_help.rs
+@@ -2,6 +2,277 @@ use crate::common::{create_test_backend, create_test_backend_with_function_stubs
+ use tower_lsp::LanguageServer;
+ use tower_lsp::lsp_types::*;
+ 
++async fn callable_doc_help(
++    backend: &phpantom_lsp::Backend,
++    name: &str,
++    marked: &str,
++) -> SignatureHelp {
++    let prefix = marked.split_once("<caret>").unwrap().0;
++    let line = prefix.bytes().filter(|byte| *byte == b'\n').count() as u32;
++    let character = prefix.rsplit('\n').next().unwrap().encode_utf16().count() as u32;
++    let uri = Url::parse(&format!(
++        "file:///signature_callable_documentation_{name}.php"
++    ))
++    .unwrap();
++    sig_help_at(
++        backend,
++        &uri,
++        &marked.replace("<caret>", ""),
++        line,
++        character,
++    )
++    .await
++    .unwrap()
++}
++
++fn callable_markdown(signature: &SignatureInformation) -> &str {
++    match signature
++        .documentation
++        .as_ref()
++        .expect("callable description must survive signature projection")
++    {
++        Documentation::MarkupContent(content) => {
++            assert_eq!(content.kind, MarkupKind::Markdown);
++            &content.value
++        }
++        other => panic!("expected Markdown signature docs, got {other:?}"),
++    }
++}
++
++#[tokio::test]
++async fn signature_callable_documentation_function_retains_parameter_docs_and_utf16_ranges() {
++    let backend = create_test_backend();
++    let help = callable_doc_help(
++        &backend,
++        "function",
++        r#"<?php
++/**
++ * Build **records**.
++ *
++ * Details with žluť.
++ * @param string $první Record label.
++ * @return string Saved identifier.
++ */
++function docfit(string $první = '🐘'): string { return $první; }
++docfit(<caret>);
++"#,
++    )
++    .await;
++    let docs = callable_markdown(&help.signatures[0]);
++    assert!(docs.contains("Build **records**."));
++    assert!(docs.contains("Details with žluť."));
++    assert!(docs.contains("**return**") && docs.contains("Saved identifier."));
++    assert_eq!(param_labels(&help), vec!["string $první = '🐘'"]);
++    assert_eq!(param_docs(&help)[0].as_deref(), Some("Record label."));
++    assert_eq!(help.active_parameter, Some(0));
++}
++
++#[tokio::test]
++async fn signature_callable_documentation_return_only_is_markdown() {
++    let backend = create_test_backend();
++    let help = callable_doc_help(
++        &backend,
++        "return_only",
++        r#"<?php
++/** @return string The saved identifier. */
++function returnfit(): string { return 'id'; }
++returnfit(<caret>);
++"#,
++    )
++    .await;
++    let docs = callable_markdown(&help.signatures[0]);
++    assert!(docs.contains("**return**") && docs.contains("The saved identifier."));
++}
++
++#[tokio::test]
++async fn signature_callable_documentation_instance_static_and_inherited_methods() {
++    for (name, call) in [
++        ("instance", "$child->run(<caret>);"),
++        ("static", "ChildDoc::fetch(<caret>);"),
++    ] {
++        let backend = create_test_backend();
++        let source = format!(
++            r#"<?php
++class ParentDoc {{
++    /**
++     * Execute inherited work.
++     * @param int $count Work count.
++     * @return string Work result.
++     */
++    public function run(int $count): string {{ return 'ok'; }}
++    /**
++     * Fetch static work.
++     * @return string Static result.
++     */
++    public static function fetch(int $count): string {{ return 'ok'; }}
++}}
++class ChildDoc extends ParentDoc {{}}
++$child = new ChildDoc();
++{call}
++"#
++        );
++        let help = callable_doc_help(&backend, name, &source).await;
++        let docs = callable_markdown(&help.signatures[0]);
++        if name == "instance" {
++            assert!(docs.contains("Execute inherited work.") && docs.contains("Work result."));
++            assert_eq!(param_docs(&help)[0].as_deref(), Some("Work count."));
++        } else {
++            assert!(docs.contains("Fetch static work.") && docs.contains("Static result."));
++        }
++    }
++}
++
++#[tokio::test]
++async fn signature_callable_documentation_inherited_constructor_uses_constructor_not_class_summary()
++{
++    let backend = create_test_backend();
++    let help = callable_doc_help(
++        &backend,
++        "constructor",
++        r#"<?php
++/** Parent class summary must not replace constructor docs. */
++class ParentCtorDoc {
++    /**
++     * Construct a named record.
++     * @param string $name Constructor name.
++     */
++    public function __construct(string $name) {}
++}
++/** Child class summary must not replace constructor docs. */
++class ChildCtorDoc extends ParentCtorDoc {}
++new ChildCtorDoc(<caret>);
++"#,
++    )
++    .await;
++    let docs = callable_markdown(&help.signatures[0]);
++    assert!(docs.contains("Construct a named record."));
++    assert!(!docs.contains("class summary"));
++    assert_eq!(param_docs(&help)[0].as_deref(), Some("Constructor name."));
++}
++
++#[tokio::test]
++async fn signature_callable_documentation_overloads_keep_own_summaries_and_undocumented_alternative()
++ {
++    let backend = overload_backend(
++        "docvariant",
++        r#"<?php
++/**
++ * Text declaration summary.
++ * @param string $value Text input.
++ * @return string Text result.
++ */
++function docvariant(string $value): string {}
++/**
++ * Array declaration summary.
++ * @param array $value Array input.
++ * @return array Array result.
++ */
++function docvariant(array $value): array {}
++/** @param int $value Integer input. */
++function docvariant(int $value): int {}
++"#,
++    );
++    let help = overload_help(&backend, "docvariant", "docvariant([]<caret>);")
++        .await
++        .unwrap();
++    assert_eq!(help.signatures.len(), 3);
++    for (index, own, other, returned) in [
++        (
++            0,
++            "Text declaration summary.",
++            "Array declaration summary.",
++            "Text result.",
++        ),
++        (
++            1,
++            "Array declaration summary.",
++            "Text declaration summary.",
++            "Array result.",
++        ),
++    ] {
++        let docs = callable_markdown(&help.signatures[index]);
++        assert!(docs.contains(own) && docs.contains(returned));
++        assert!(!docs.contains(other));
++    }
++    assert!(
++        help.signatures[2].documentation.is_none(),
++        "an alternate without a summary or return description must not borrow primary docs"
++    );
++    assert_eq!(
++        overload_parameter_labels(&help),
++        vec![
++            vec!["string $value"],
++            vec!["array $value"],
++            vec!["int $value"]
++        ]
++    );
++}
++
++#[tokio::test]
++async fn signature_callable_documentation_undocumented_callable_control() {
++    let backend = create_test_backend();
++    let help = callable_doc_help(
++        &backend,
++        "undocumented",
++        "<?php\nfunction plainfit(int $value): int { return $value; }\nplainfit(<caret>);\n",
++    )
++    .await;
++    assert!(help.signatures[0].documentation.is_none());
++    let help = callable_doc_help(&backend, "no_constructor", "<?php\n/** Class docs are not constructor docs. */\nclass EmptyDoc {}\nnew EmptyDoc(<caret>);\n").await;
++    assert!(help.signatures[0].documentation.is_none());
++}
++
++#[tokio::test]
++async fn signature_callable_documentation_first_class_callable_retains_original_summary() {
++    let backend = create_test_backend();
++    let help = callable_doc_help(
++        &backend,
++        "first_class",
++        r#"<?php
++/**
++ * Original callable summary.
++ * @return string Original callable result.
++ */
++function firstdoc(int $value): string { return (string)$value; }
++$fn = firstdoc(...);
++$fn(<caret>);
++"#,
++    )
++    .await;
++    let docs = callable_markdown(&help.signatures[0]);
++    assert!(
++        docs.contains("Original callable summary.") && docs.contains("Original callable result.")
++    );
++}
++
++#[tokio::test]
++async fn signature_callable_documentation_constructor_overloads_have_independent_summaries() {
++    let backend = create_test_backend();
++    let help = callable_doc_help(
++        &backend,
++        "ctor_overloads",
++        r#"<?php
++class MultiDoc {
++    /** Construct from text. */
++    public function __construct(string $value) {}
++    /** Construct from list. */
++    public function __construct(array $value) {}
++}
++new MultiDoc(<caret>);
++"#,
++    )
++    .await;
++    assert_eq!(help.signatures.len(), 2);
++    assert_eq!(
++        callable_markdown(&help.signatures[0]),
++        "Construct from text."
++    );
++    assert_eq!(
++        callable_markdown(&help.signatures[1]),
++        "Construct from list."
++    );
++}
++
+ /// Helper: open a file and request signature help at the given line/character.
+ async fn sig_help_at(
+     backend: &phpantom_lsp::Backend,
+@@ -1472,8 +1743,9 @@ async fn combined_defaults_and_docs() {
+     assert_eq!(pdocs[0].as_deref(), Some("Current page number."));
+     assert_eq!(pdocs[1].as_deref(), Some("Items per page."));
+ 
+-    // Signature-level documentation is always None.
+-    assert!(sh.signatures[0].documentation.is_none());
++    // Callable docs complement the parameter entries without changing labels.
++    let docs = callable_markdown(&sh.signatures[0]);
++    assert!(docs.contains("Paginate results.") && docs.contains("The paginated results."));
+ }
+ 
+ #[tokio::test]
+diff --git a/tests/integration/signature_type_selection.rs b/tests/integration/signature_type_selection.rs
+new file mode 100644
+index 0000000..d5b0285
+--- /dev/null
++++ b/tests/integration/signature_type_selection.rs
+@@ -0,0 +1,192 @@
++use crate::common::create_test_backend_with_function_stubs;
++use tower_lsp::{LanguageServer, lsp_types::*};
++
++async fn help(name: &'static str, stubs: &'static str, call: &str) -> SignatureHelp {
++    let backend = create_test_backend_with_function_stubs();
++    backend.stub_function_index_mut().insert(name, stubs);
++    let marked = format!("<?php\ndeclare(strict_types=1);\n{call}\n");
++    let prefix = marked.split_once("<caret>").unwrap().0;
++    let uri = Url::parse("file:///signature_type_selection.php").unwrap();
++    backend
++        .did_open(DidOpenTextDocumentParams {
++            text_document: TextDocumentItem::new(
++                uri.clone(),
++                "php".into(),
++                1,
++                marked.replace("<caret>", ""),
++            ),
++        })
++        .await;
++    backend
++        .signature_help(SignatureHelpParams {
++            text_document_position_params: TextDocumentPositionParams {
++                text_document: TextDocumentIdentifier::new(uri),
++                position: Position::new(
++                    prefix.bytes().filter(|byte| *byte == b'\n').count() as u32,
++                    prefix.rsplit('\n').next().unwrap().encode_utf16().count() as u32,
++                ),
++            },
++            work_done_progress_params: Default::default(),
++            context: None,
++        })
++        .await
++        .unwrap()
++        .expect("signature help")
++}
++
++fn selected(help: &SignatureHelp) -> &SignatureInformation {
++    &help.signatures[help.active_signature.unwrap_or(0) as usize]
++}
++
++fn docs(signature: &SignatureInformation) -> &str {
++    match signature
++        .documentation
++        .as_ref()
++        .expect("selected declaration docs")
++    {
++        Documentation::MarkupContent(content) => &content.value,
++        Documentation::String(content) => content,
++    }
++}
++
++#[tokio::test]
++async fn signature_type_selection_full_route_uses_types_and_keeps_own_docs_in_both_orders() {
++    for (source, expected) in [
++        (
++            "<?php\n/** Array declaration. */ function typedfit(array $value): array {}\n/** Integer declaration. */ function typedfit(int $value): int {}",
++            1,
++        ),
++        (
++            "<?php\n/** Integer declaration. */ function typedfit(int $value): int {}\n/** Array declaration. */ function typedfit(array $value): array {}",
++            0,
++        ),
++    ] {
++        let result = help("typedfit", source, "typedfit(3<caret>);").await;
++        assert_eq!(result.active_signature, Some(expected));
++        assert!(selected(&result).label.ends_with(": int"));
++        assert!(docs(selected(&result)).contains("Integer declaration."));
++        assert!(!docs(selected(&result)).contains("Array declaration."));
++        assert_eq!(result.active_parameter, Some(0));
++    }
++}
++
++#[tokio::test]
++async fn signature_type_selection_full_route_maps_reordered_unicode_named_arguments() {
++    let source = "<?php\nfunction namefit(array $první, int $second): array {}\nfunction namefit(int $první, array $second): int {}";
++    let result = help(
++        "namefit",
++        source,
++        "namefit(second /* label */: [], první: 3<caret>);",
++    )
++    .await;
++    assert_eq!(result.active_signature, Some(1));
++    assert_eq!(result.active_parameter, Some(0));
++    assert_eq!(selected(&result).active_parameter, Some(0));
++}
++
++#[tokio::test]
++async fn signature_type_selection_full_route_checks_every_variadic_argument_and_named_key() {
++    let source = "<?php\nfunction varfit(int ...$values): int {}\nfunction varfit(array ...$values): array {}";
++    for call in [
++        "varfit([], ['x']<caret>);",
++        "varfit(label: [], other: ['x']<caret>);",
++    ] {
++        let result = help("varfit", source, call).await;
++        assert_eq!(result.active_signature, Some(1));
++        assert_eq!(result.active_parameter, Some(0));
++    }
++    let result = help("varfit", source, "varfit(1, []<caret>);").await;
++    assert_eq!(
++        result.active_signature,
++        Some(0),
++        "incompatible whole variants retain stable fallback"
++    );
++}
++
++#[tokio::test]
++async fn signature_type_selection_full_route_preserves_unknown_ambiguous_and_unpack_fallback() {
++    let source = "<?php\nfunction unknownfit(array $value): array {}\nfunction unknownfit(int $value): int {}";
++    for call in [
++        "unknownfit($unknown<caret>);",
++        "unknownfit(<caret>);",
++        "unknownfit(...$values<caret>);",
++    ] {
++        let result = help("unknownfit", source, call).await;
++        assert_eq!(result.active_signature, Some(0));
++    }
++    let result = help("ambiguousfit", "<?php\nfunction ambiguousfit(int $value): int {}\nfunction ambiguousfit(mixed $value): mixed {}", "ambiguousfit(3<caret>);").await;
++    assert_eq!(result.active_signature, Some(0));
++}
++
++#[tokio::test]
++async fn signature_type_selection_full_route_retains_each_variants_generic_constraints() {
++    let source = r#"<?php
++/** Array generic.
++ * @template T of array
++ * @param T $value
++ * @return T
++ */
++function generictyped($value) {}
++/** Integer generic.
++ * @template U of int
++ * @param U $value
++ * @return U
++ */
++function generictyped($value) {}
++"#;
++    let result = help("generictyped", source, "generictyped(9<caret>);").await;
++    assert_eq!(result.active_signature, Some(1));
++    assert!(docs(selected(&result)).contains("Integer generic."));
++    // The shared generic binder preserves the integer literal as its exact
++    // return type rather than widening it to the native scalar category.
++    assert_eq!(selected(&result).label, "($value): 9");
++    for call in ["generictyped(<caret>);", "generictyped($unknown<caret>);"] {
++        let result = help("generictyped", source, call).await;
++        assert_eq!(result.active_signature, Some(0));
++        assert_eq!(selected(&result).label, "($value): T");
++    }
++}
++
++#[tokio::test]
++async fn signature_type_selection_documentation_follows_current_unsaved_source() {
++    let backend = create_test_backend_with_function_stubs();
++    let uri = Url::parse("file:///signature_current_documentation.php").unwrap();
++    let first = "<?php\n/** First callable summary. */\nfunction currentdoc(string $value): string { return $value; }\ncurrentdoc(";
++    backend
++        .did_open(DidOpenTextDocumentParams {
++            text_document: TextDocumentItem::new(uri.clone(), "php".into(), 1, first.into()),
++        })
++        .await;
++    let request = || SignatureHelpParams {
++        text_document_position_params: TextDocumentPositionParams {
++            text_document: TextDocumentIdentifier::new(uri.clone()),
++            position: Position::new(3, "currentdoc(".len() as u32),
++        },
++        work_done_progress_params: Default::default(),
++        context: None,
++    };
++    let result = backend.signature_help(request()).await.unwrap().unwrap();
++    assert!(docs(selected(&result)).contains("First callable summary."));
++    backend
++        .did_change(DidChangeTextDocumentParams {
++            text_document: VersionedTextDocumentIdentifier::new(uri.clone(), 2),
++            content_changes: vec![TextDocumentContentChangeEvent {
++                range: None,
++                range_length: None,
++                text: first.replace("First callable summary.", "Current unsaved summary."),
++            }],
++        })
++        .await;
++    let result = backend.signature_help(request()).await.unwrap().unwrap();
++    let current = docs(selected(&result));
++    assert!(current.contains("Current unsaved summary."));
++    assert!(!current.contains("First callable summary."));
++}
++
++#[tokio::test]
++async fn signature_type_selection_full_route_resolves_current_namespace_and_imported_class() {
++    let source = "<?php\nfunction classfit(\\Vendor\\First $value): int {}\nfunction classfit(\\Vendor\\Second $value): string {}";
++    let result = help("classfit", source, "namespace Vendor; class First {} class Second {} namespace App; use Vendor\\Second as Picked; classfit(new Picked()<caret>);").await;
++    assert_eq!(result.active_signature, Some(1));
++    assert!(selected(&result).label.ends_with(": string"));
++}

@@ -1,0 +1,437 @@
+diff --git a/src/backend/semantic_snapshot.rs b/src/backend/semantic_snapshot.rs
+index 6a3767b..78b6883 100644
+--- a/src/backend/semantic_snapshot.rs
++++ b/src/backend/semantic_snapshot.rs
+@@ -28,21 +28,46 @@ impl Backend {
+             if let Some(content) = self.get_file_content(uri) {
+                 self.update_resource_symbol_index(uri, &content);
+             } else {
+-                self.clear_file_maps(uri);
++                self.retire_closed_semantic_source(uri);
+             }
+-        } else if let Some(path) = self.workspace_index_path(uri) {
+-            match std::fs::read_to_string(path) {
+-                Ok(content) => {
+-                    self.update_ast(uri, &content);
+-                }
+-                Err(_) => self.clear_file_maps(uri),
++        } else if let Some(content) = self.get_file_content(uri) {
++            // Workspace filters govern discovery, not the source of an
++            // explicitly opened file. Closing must discard its overlay even
++            // for external, excluded and standalone PHP documents.
++            self.update_ast(uri, &content);
++            if self.workspace_index_path(uri).is_none() {
++                // Keep the restored declaration metadata for resolution, but
++                // release per-file maps for sources outside workspace indexing.
++                self.clear_file_maps(uri);
+             }
+         } else {
+-            self.clear_file_maps(uri);
++            self.retire_closed_semantic_source(uri);
+         }
+         self.diag.documents.lock().finish_closed(uri, opening)
+     }
+ 
++    /// Remove both parsed declarations and discovery entries for an overlay
++    /// with no backing source. Empty publication uses the normal declaration
++    /// diff, duplicate-owner promotion, cache invalidation and consumer fanout;
++    /// the existing deletion purge then drops discovery/per-URI bookkeeping.
++    fn retire_closed_semantic_source(&self, uri: &str) {
++        self.update_ast(uri, "");
++        if let Some(path) = tower_lsp::lsp_types::Url::parse(uri)
++            .ok()
++            .and_then(|url| url.to_file_path().ok())
++        {
++            self.reindex_files_batch(&[(
++                uri.to_owned(),
++                path,
++                tower_lsp::lsp_types::FileChangeType::DELETED,
++            )]);
++        } else {
++            self.clear_file_maps(uri);
++            self.parsed_uris.write().remove(uri);
++            self.forget_laravel_file_contributions(uri);
++        }
++    }
++
+     /// Refresh pending sources on the existing request blocking worker, then
+     /// reject the result if an opening or text changes during its computation.
+     /// No source payload is added to a persistent cache by this guard.
+@@ -169,3 +194,358 @@ mod tests {
+         assert_eq!(result.unwrap_err().code, ErrorCode::ServerError(-32801));
+     }
+ }
++
++#[cfg(test)]
++mod discarded_overlay_tests {
++    use crate::Backend;
++    use std::sync::atomic::Ordering;
++    use tower_lsp::lsp_types::*;
++
++    const ORIGINAL: &str = "<?php namespace App; class Dependency { public function message(): string { return 'ready'; } } function value(): int { return 7; } const FLAG = 1;";
++    const CALLER: &str = "<?php namespace App; class Caller { function read(Dependency $dep): string { value(); FLAG; return $dep->message(); } }";
++    enum Location {
++        Workspace,
++        External,
++        Excluded,
++        Standalone,
++    }
++    struct Fixture {
++        backend: Backend,
++        _dir: tempfile::TempDir,
++        helper: Url,
++        caller: Url,
++    }
++
++    async fn fixture(location: Location) -> Fixture {
++        let dir = tempfile::tempdir().unwrap();
++        let base = dir.path().canonicalize().unwrap();
++        let root = base.join("workspace");
++        std::fs::create_dir_all(&root).unwrap();
++        let backend = if matches!(location, Location::Standalone) {
++            Backend::new_test()
++        } else {
++            Backend::new_test_with_workspace(root.clone(), vec![])
++        };
++        if matches!(location, Location::Excluded) {
++            backend.set_client_indexing_options(crate::config::ClientIndexingOptions {
++                exclude: vec!["excluded".into()],
++                ..Default::default()
++            });
++        }
++        let helper_path = match location {
++            Location::External => base.join("external/Dependency.php"),
++            Location::Excluded => root.join("excluded/Dependency.php"),
++            _ => root.join("Dependency.php"),
++        };
++        std::fs::create_dir_all(helper_path.parent().unwrap()).unwrap();
++        let helper = Url::from_file_path(&helper_path).unwrap();
++        let caller_path = root.join("Caller.php");
++        let caller = Url::from_file_path(&caller_path).unwrap();
++        for (uri, source) in [(&helper, ORIGINAL), (&caller, CALLER)] {
++            std::fs::write(uri.to_file_path().unwrap(), source).unwrap();
++            backend
++                .on_did_open(DidOpenTextDocumentParams {
++                    text_document: TextDocumentItem {
++                        uri: uri.clone(),
++                        language_id: "php".into(),
++                        version: 1,
++                        text: source.into(),
++                    },
++                })
++                .await;
++        }
++        backend.workspace_indexed.store(true, Ordering::Release);
++        backend.init_complete.store(true, Ordering::Release);
++        backend.diag.pending_uris.lock().clear();
++        Fixture {
++            backend,
++            _dir: dir,
++            helper,
++            caller,
++        }
++    }
++    async fn change(f: &Fixture) {
++        let text = ORIGINAL
++            .replace("message", "removed")
++            .replace("function value", "function changed_value")
++            .replace("FLAG", "CHANGED_FLAG");
++        f.backend
++            .on_did_change(DidChangeTextDocumentParams {
++                text_document: VersionedTextDocumentIdentifier {
++                    uri: f.helper.clone(),
++                    version: 2,
++                },
++                content_changes: vec![TextDocumentContentChangeEvent {
++                    range: None,
++                    range_length: None,
++                    text,
++                }],
++            })
++            .await;
++        assert!(
++            f.backend
++                .find_class_in_uri_classes_index("App\\Dependency")
++                .unwrap()
++                .has_method("removed")
++        );
++        f.backend.diag.pending_uris.lock().clear();
++    }
++    async fn close(f: &Fixture) {
++        f.backend
++            .on_did_close(DidCloseTextDocumentParams {
++                text_document: TextDocumentIdentifier {
++                    uri: f.helper.clone(),
++                },
++            })
++            .await;
++    }
++    fn restored(f: &Fixture) {
++        let class = f
++            .backend
++            .find_class_in_uri_classes_index("App\\Dependency")
++            .unwrap();
++        assert!(
++            class.has_method("message"),
++            "the disk method must replace the unsaved declaration"
++        );
++        assert!(!class.has_method("removed"));
++        let funcs = f.backend.symbols.global_functions.read();
++        assert!(funcs.contains_key("App\\value"));
++        assert!(!funcs.contains_key("App\\changed_value"));
++        drop(funcs);
++        let constants = f.backend.symbols.global_defines.read();
++        assert!(constants.contains_key("App\\FLAG"));
++        assert!(!constants.contains_key("App\\CHANGED_FLAG"));
++        assert!(
++            f.backend
++                .diag
++                .pending_uris
++                .lock()
++                .contains(f.caller.as_str())
++        );
++    }
++    #[tokio::test]
++    async fn missing_disk_close_retires_class_function_and_constant() {
++        let f = fixture(Location::Workspace).await;
++        assert!(
++            f.backend
++                .find_class_in_uri_classes_index("App\\Dependency")
++                .is_some()
++        );
++        assert!(
++            f.backend
++                .symbols
++                .global_functions
++                .read()
++                .contains_key("App\\value")
++        );
++        assert!(
++            f.backend
++                .symbols
++                .global_defines
++                .read()
++                .contains_key("App\\FLAG")
++        );
++        std::fs::remove_file(f.helper.to_file_path().unwrap()).unwrap();
++        close(&f).await;
++        assert!(
++            f.backend
++                .find_class_in_uri_classes_index("App\\Dependency")
++                .is_none(),
++            "discarded source has no backing class"
++        );
++        assert!(
++            !f.backend
++                .symbols
++                .global_functions
++                .read()
++                .contains_key("App\\value")
++        );
++        assert!(
++            !f.backend
++                .symbols
++                .global_defines
++                .read()
++                .contains_key("App\\FLAG")
++        );
++        assert!(
++            f.backend
++                .diag
++                .pending_uris
++                .lock()
++                .contains(f.caller.as_str())
++        );
++    }
++    #[tokio::test]
++    async fn external_disk_close_restores_actual_declarations() {
++        let f = fixture(Location::External).await;
++        assert!(f.backend.workspace_index_path(f.helper.as_str()).is_none());
++        change(&f).await;
++        close(&f).await;
++        restored(&f);
++    }
++    #[tokio::test]
++    async fn excluded_disk_close_restores_actual_declarations() {
++        let f = fixture(Location::Excluded).await;
++        assert!(f.backend.workspace_index_path(f.helper.as_str()).is_none());
++        change(&f).await;
++        close(&f).await;
++        restored(&f);
++    }
++    #[tokio::test]
++    async fn standalone_disk_close_restores_actual_declarations() {
++        let f = fixture(Location::Standalone).await;
++        change(&f).await;
++        close(&f).await;
++        restored(&f);
++    }
++    #[tokio::test]
++    async fn missing_close_preserves_surviving_duplicate_owners() {
++        let f = fixture(Location::Workspace).await;
++        let survivor = f._dir.path().join("workspace/ZSurvivor.php");
++        let survivor_uri = Url::from_file_path(&survivor).unwrap();
++        let source = ORIGINAL.replace("message", "surviving");
++        std::fs::write(&survivor, &source).unwrap();
++        f.backend.update_ast(survivor_uri.as_str(), &source);
++        std::fs::remove_file(f.helper.to_file_path().unwrap()).unwrap();
++        close(&f).await;
++        let class = f
++            .backend
++            .find_class_in_uri_classes_index("App\\Dependency")
++            .unwrap();
++        assert!(
++            class.has_method("surviving"),
++            "survivor must be promoted after source retirement"
++        );
++        assert_eq!(
++            f.backend
++                .symbols
++                .global_functions
++                .read()
++                .get("App\\value")
++                .unwrap()
++                .0,
++            survivor_uri.as_str()
++        );
++    }
++    #[tokio::test]
++    async fn delayed_old_restore_does_not_overwrite_reopened_source() {
++        let f = fixture(Location::Workspace).await;
++        f.backend.diag.documents.lock().close(f.helper.as_str());
++        f.backend.open_files.write().remove(f.helper.as_str());
++        let text = ORIGINAL.replace("message", "reopened");
++        f.backend
++            .on_did_open(DidOpenTextDocumentParams {
++                text_document: TextDocumentItem {
++                    uri: f.helper.clone(),
++                    language_id: "php".into(),
++                    version: 1,
++                    text,
++                },
++            })
++            .await;
++        // The original opening is 1; its detached restore must be inert.
++        assert!(
++            f.backend
++                .restore_closed_semantic_source(f.helper.as_str(), 1)
++        );
++        assert!(
++            f.backend
++                .find_class_in_uri_classes_index("App\\Dependency")
++                .unwrap()
++                .has_method("reopened")
++        );
++    }
++    #[tokio::test]
++    async fn missing_disk_close_purges_startup_discovery_entries() {
++        let f = fixture(Location::Workspace).await;
++        let path = f.helper.to_file_path().unwrap();
++        f.backend.symbols.with_class_declarations(|decls| {
++            decls.note_discovered("App\\Dependency", f.helper.to_string())
++        });
++        f.backend
++            .symbols
++            .autoload_function_index
++            .write()
++            .insert("App\\value", path.clone());
++        f.backend
++            .symbols
++            .autoload_constant_index
++            .write()
++            .insert("App\\FLAG".into(), path.clone());
++        std::fs::remove_file(path).unwrap();
++        close(&f).await;
++        assert!(
++            !f.backend
++                .symbols
++                .fqn_uri_index
++                .read()
++                .contains_key("App\\Dependency")
++        );
++        assert!(
++            !f.backend
++                .symbols
++                .autoload_function_index
++                .read()
++                .contains_key("App\\value")
++        );
++        assert!(
++            !f.backend
++                .symbols
++                .autoload_constant_index
++                .read()
++                .contains_key("App\\FLAG")
++        );
++        assert!(!f.backend.parsed_uris.read().contains(f.helper.as_str()));
++    }
++    #[tokio::test]
++    async fn virtual_overlay_close_retires_declarations_and_bookkeeping() {
++        let backend = Backend::new_test();
++        let helper = Url::parse("untitled:Dependency.php").unwrap();
++        let caller = Url::parse("untitled:Caller.php").unwrap();
++        for (uri, text) in [(&helper, ORIGINAL), (&caller, CALLER)] {
++            backend
++                .on_did_open(DidOpenTextDocumentParams {
++                    text_document: TextDocumentItem {
++                        uri: uri.clone(),
++                        language_id: "php".into(),
++                        version: 1,
++                        text: text.into(),
++                    },
++                })
++                .await;
++        }
++        backend.workspace_indexed.store(true, Ordering::Release);
++        backend.init_complete.store(true, Ordering::Release);
++        backend.diag.pending_uris.lock().clear();
++        backend
++            .on_did_close(DidCloseTextDocumentParams {
++                text_document: TextDocumentIdentifier {
++                    uri: helper.clone(),
++                },
++            })
++            .await;
++        assert!(
++            backend
++                .find_class_in_uri_classes_index("App\\Dependency")
++                .is_none()
++        );
++        assert!(
++            !backend
++                .symbols
++                .global_functions
++                .read()
++                .contains_key("App\\value")
++        );
++        assert!(
++            !backend
++                .symbols
++                .global_defines
++                .read()
++                .contains_key("App\\FLAG")
++        );
++        assert!(!backend.symbol_maps.read().contains_key(helper.as_str()));
++        assert!(!backend.parsed_uris.read().contains(helper.as_str()));
++        assert!(backend.diag.pending_uris.lock().contains(caller.as_str()));
++    }
++}
+diff --git a/tests/integration/server_lifecycle.rs b/tests/integration/server_lifecycle.rs
+index e9bc1f1..7f6df18 100644
+--- a/tests/integration/server_lifecycle.rs
++++ b/tests/integration/server_lifecycle.rs
+@@ -147,8 +147,13 @@ async fn test_did_change_updates_content() {
+ async fn test_did_close_removes_file() {
+     let backend = create_test_backend();
+ 
+-    let uri = Url::parse("file:///test.php").unwrap();
++    // Retaining navigation on close requires a real backing source. A
++    // missing backing file must retire its declarations instead.
++    let directory = tempfile::tempdir().unwrap();
++    let path = directory.path().join("test.php");
++    let uri = Url::from_file_path(&path).unwrap();
+     let text = "<?php\nclass Z { function z() {} }\n".to_string();
++    std::fs::write(&path, &text).unwrap();
+ 
+     let open_params = DidOpenTextDocumentParams {
+         text_document: TextDocumentItem {

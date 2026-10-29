@@ -1,0 +1,738 @@
+diff --git a/docs/CHANGELOG.md b/docs/CHANGELOG.md
+index 7c23e81..8c525e5 100644
+--- a/docs/CHANGELOG.md
++++ b/docs/CHANGELOG.md
+@@ -15,6 +15,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
+ 
+ ## [Unreleased]
+ 
++- **Search and replace named PHP arguments.** Structural patterns capture named values while retaining exact labels and written order. Reviewed replacements preserve captured expressions and keep positional argument tails distinct. Contributed by PHP Workbench downstream.
++
+ - **Follow literal array callbacks accurately.** Call hierarchy resolves known class names, object receivers and keyed arrays at their exact method selectors, respecting the selected PHP version and method visibility. Late-bound class names keep overridable implementations unresolved. Contributed by PHP Workbench downstream.
+ 
+ - **Open type hierarchy after declaration navigation.** Class, interface, trait and enum keywords identify their exact declared type, including read-only built-in source. Contributed by PHP Workbench downstream.
+diff --git a/examples/php/definition.php b/examples/php/definition.php
+index 6636d76..ede566c 100644
+--- a/examples/php/definition.php
++++ b/examples/php/definition.php
+@@ -501,3 +501,13 @@ function arrayCallableNavigation(): void
+         }
+     }, 'label'])();
+ }
++
++// Try: PHP: Structural Search with
++// json_decode(json: $__ss_value, associative: $__ss_flag)
++// Then review a replacement with flags: JSON_THROW_ON_ERROR. Named labels and
++// their written order are literal syntax; captures retain each value expression.
++function namedArgumentStructuralSearch(): void
++{
++    json_decode(json: '{"ready":true}', associative: true);
++    json_decode(json: '{"ready":false}', associative: false);
++}
+diff --git a/src/structural_search.rs b/src/structural_search.rs
+index bf2853e..4e97dc5 100644
+--- a/src/structural_search.rs
++++ b/src/structural_search.rs
+@@ -146,6 +146,20 @@ enum Term {
+     Exact(Vec<OwnedToken>),
+ }
+ 
++#[derive(Clone, Debug)]
++enum PatternArgument {
++    Positional(Term),
++    Named { name: Vec<u8>, value: Term },
++}
++
++impl PatternArgument {
++    fn term(&self) -> &Term {
++        match self {
++            Self::Positional(value) | Self::Named { value, .. } => value,
++        }
++    }
++}
++
+ #[derive(Clone, Debug)]
+ enum Head {
+     Function(Vec<OwnedToken>),
+@@ -162,7 +176,7 @@ enum Head {
+ #[derive(Clone, Debug)]
+ pub(crate) struct Pattern {
+     head: Head,
+-    arguments: Vec<Term>,
++    arguments: Vec<PatternArgument>,
+     tail: Option<String>,
+ }
+ 
+@@ -422,25 +436,45 @@ impl Pattern {
+         }
+         let mut arguments = Vec::new();
+         let mut tail = None;
++        let mut named_labels = std::collections::BTreeSet::new();
+         for (index, argument) in list.arguments.iter().enumerate() {
+-            let Argument::Positional(argument) = argument else {
+-                return Err(SearchError::UnsupportedPattern(
+-                    "Named argument patterns are not supported.",
+-                ));
+-            };
+-            if argument.ellipsis.is_some() {
+-                if index + 1 != list.arguments.len() {
+-                    return Err(SearchError::UnsupportedPattern(
+-                        "A variadic capture must be the final argument.",
+-                    ));
++            match argument {
++                Argument::Named(argument) => {
++                    if !named_labels.insert(argument.name.value) {
++                        return Err(SearchError::UnsupportedPattern(
++                            "Named argument labels must be unique in a pattern.",
++                        ));
++                    }
++                    arguments.push(PatternArgument::Named {
++                        name: argument.name.value.to_vec(),
++                        value: term(argument.value, tokens)?,
++                    });
++                }
++                Argument::Positional(argument) if argument.ellipsis.is_some() => {
++                    if !named_labels.is_empty() {
++                        return Err(SearchError::UnsupportedPattern(
++                            "Argument-tail captures cannot follow named arguments.",
++                        ));
++                    }
++                    if index + 1 != list.arguments.len() {
++                        return Err(SearchError::UnsupportedPattern(
++                            "A variadic capture must be the final argument.",
++                        ));
++                    }
++                    tail = Some(capture_name(argument.value)?.ok_or(
++                        SearchError::UnsupportedPattern(
++                            "Only ...$__ss_name may unpack a pattern argument.",
++                        ),
++                    )?);
++                }
++                Argument::Positional(argument) => {
++                    if !named_labels.is_empty() {
++                        return Err(SearchError::UnsupportedPattern(
++                            "Positional pattern arguments must precede named arguments.",
++                        ));
++                    }
++                    arguments.push(PatternArgument::Positional(term(argument.value, tokens)?));
+                 }
+-                tail = Some(capture_name(argument.value)?.ok_or(
+-                    SearchError::UnsupportedPattern(
+-                        "Only ...$__ss_name may unpack a pattern argument.",
+-                    ),
+-                )?);
+-            } else {
+-                arguments.push(term(argument.value, tokens)?);
+             }
+         }
+         let mut roles = BTreeMap::new();
+@@ -451,8 +485,8 @@ impl Pattern {
+         {
+             roles.insert(name.clone(), false);
+         }
+-        for term in &arguments {
+-            if let Term::Capture(name) = term {
++        for argument in &arguments {
++            if let Term::Capture(name) = argument.term() {
+                 roles.insert(name.clone(), false);
+             }
+         }
+@@ -687,9 +721,12 @@ impl Search<'_, '_, '_> {
+         if list.arguments.len() > MAX_ARGUMENTS {
+             return Err(SearchError::Budget("candidate arguments"));
+         }
+-        // A candidate sequence has fixed known positional arity only. Do not
+-        // reinterpret named keys or runtime unpacking as positional expressions.
+-        if list.arguments.iter().any(|argument| !matches!(argument, Argument::Positional(argument) if argument.ellipsis.is_none())) {
++        // Runtime unpacking cannot establish fixed argument slots. Existing
++        // positional tails must never absorb named labels or discard them.
++        if list.arguments.iter().any(|argument| match argument {
++            Argument::Positional(argument) => argument.ellipsis.is_some(),
++            Argument::Named(_) => self.pattern.tail.is_some(),
++        }) {
+             return Ok(None);
+         }
+         let minimum = self.pattern.arguments.len();
+@@ -722,7 +759,17 @@ impl Search<'_, '_, '_> {
+             return Ok(None);
+         }
+         for (expected, actual) in pattern.arguments.iter().zip(list.arguments.iter()) {
+-            if !self.match_term(expected, actual.value(), &mut bindings)? {
++            match (expected, actual) {
++                (PatternArgument::Positional(_), Argument::Positional(_)) => {}
++                (PatternArgument::Named { name, .. }, Argument::Named(actual)) => {
++                    self.charge(1, name.len() + actual.name.value.len())?;
++                    if name.as_slice() != actual.name.value {
++                        return Ok(None);
++                    }
++                }
++                _ => return Ok(None),
++            }
++            if !self.match_term(expected.term(), actual.value(), &mut bindings)? {
+                 return Ok(None);
+             }
+         }
+diff --git a/src/structural_search_replacement.rs b/src/structural_search_replacement.rs
+index 6f8c41b..a63cdcb 100644
+--- a/src/structural_search_replacement.rs
++++ b/src/structural_search_replacement.rs
+@@ -103,7 +103,7 @@ fn roles(pattern: &Pattern) -> BTreeMap<String, bool> {
+         result.insert(name.clone(), false);
+     }
+     for argument in &pattern.arguments {
+-        if let Term::Capture(name) = argument {
++        if let Term::Capture(name) = argument.term() {
+             result.insert(name.clone(), false);
+         }
+     }
+@@ -296,6 +296,10 @@ impl<'ast, 'arena> MutWalker<'ast, 'arena, ()> for Compiler<'_> {
+             return;
+         }
+         let list = call.get_argument_list();
++        let has_named = list
++            .arguments
++            .iter()
++            .any(|argument| matches!(argument, Argument::Named(_)));
+         for (index, argument) in list.arguments.iter().enumerate() {
+             let Argument::Positional(argument) = argument else {
+                 continue;
+@@ -306,6 +310,12 @@ impl<'ast, 'arena> MutWalker<'ast, 'arena, ()> for Compiler<'_> {
+             let Ok(Some(name)) = capture_name(argument.value) else {
+                 continue;
+             };
++            if has_named && self.roles.get(&name) == Some(&true) {
++                self.error = Some(ReplaceError::Template(
++                    "Argument-tail captures cannot be combined with named template arguments.",
++                ));
++                return;
++            }
+             if self.roles.get(&name) != Some(&true) || index + 1 != list.arguments.len() {
+                 self.error = Some(ReplaceError::Template(
+                     "Only a known argument capture may occupy the final unpacked slot.",
+diff --git a/src/structural_search_replacement_tests.rs b/src/structural_search_replacement_tests.rs
+index 065b771..5a7047e 100644
+--- a/src/structural_search_replacement_tests.rs
++++ b/src/structural_search_replacement_tests.rs
+@@ -846,3 +846,86 @@ fn replace_destructuring_compound_assignment_is_not_treated_as_plain_assignment(
+     let edits = prepare("old($__ss_x)", "[$__ss_x] = $values", source, &[0]).unwrap();
+     assert_eq!(apply(source, &edits), "<?php ([$x] = $values);");
+ }
++
++#[test]
++fn replace_named_values_retains_capture_bytes_external_crlf_and_reviewed_fixed_labels() {
++    let source = "<?php\r\n$note = 'café🐘'; decode(json: $json /* inside */ ?? '{}', associative: $assoc); keep();\r\n";
++    let edits = prepare(
++        "decode(json: $__ss_value, associative: $__ss_flag)",
++        "decode(json: $__ss_value, associative: true, flags: JSON_THROW_ON_ERROR)",
++        source,
++        &[0],
++    )
++    .unwrap();
++    assert_eq!(edits.edits.len(), 1);
++    assert_eq!(edits.edits[0].source.range.start.line, 1);
++    assert_eq!(
++        edits.edits[0].source.range.start.character,
++        "$note = 'café🐘'; ".encode_utf16().count() as u32
++    );
++    assert_eq!(
++        apply(source, &edits),
++        "<?php\r\n$note = 'café🐘'; (decode(json: ($json /* inside */ ?? '{}'), associative: true, flags: JSON_THROW_ON_ERROR)); keep();\r\n"
++    );
++}
++
++#[test]
++fn replace_named_repeated_values_and_captured_receiver_keep_expression_roles() {
++    let source = "<?php same(first: $a + 1, second: $a/* note */+1);";
++    let edits = prepare(
++        "same(first: $__ss_x, second: $__ss_x)",
++        "triple(first: $__ss_x, second: $__ss_x, third: $__ss_x)",
++        source,
++        &[0],
++    )
++    .unwrap();
++    assert_eq!(
++        apply(source, &edits),
++        "<?php (triple(first: ($a + 1), second: ($a/* note */+1), third: ($a + 1)));"
++    );
++    let source = "<?php factory()->save(value: $payload ? $a : $b);";
++    let edits = prepare(
++        "$__ss_receiver->save(value: $__ss_value)",
++        "emit(target: $__ss_receiver, value: $__ss_value)",
++        source,
++        &[0],
++    )
++    .unwrap();
++    assert_eq!(
++        apply(source, &edits),
++        "<?php (emit(target: (factory()), value: ($payload ? $a : $b)));"
++    );
++}
++
++#[test]
++fn replace_named_templates_refuse_unknown_or_sequence_roles_and_keep_positional_tails() {
++    let named = Pattern::compile("old(value: $__ss_x)").unwrap();
++    for template in [
++        "newer(value: $__ss_unknown)",
++        "newer(...$__ss_x)",
++        "newer(value: $__ss_x); evil()",
++    ] {
++        assert!(Template::compile(&named, template).is_err(), "{template}");
++    }
++    let positional_tail = Pattern::compile("old(1, ...$__ss_rest)").unwrap();
++    for template in ["newer(value: $__ss_rest)", "newer(value: 1, ...$__ss_rest)"] {
++        assert!(
++            Template::compile(&positional_tail, template).is_err(),
++            "named destination cannot reinterpret positional tail: {template}"
++        );
++    }
++    for source in ["<?php old(1);", "<?php old(1, /* keep */ $a, $b);"] {
++        let edits = prepare(
++            "old(1, ...$__ss_rest)",
++            "newer(9, ...$__ss_rest)",
++            source,
++            &[0],
++        )
++        .unwrap();
++        let result = apply(source, &edits);
++        assert!(!result.contains("newer(9,)"));
++        if source.contains("keep") {
++            assert!(result.contains("/* keep */ $a, $b"));
++        }
++    }
++}
+diff --git a/src/structural_search_tests.rs b/src/structural_search_tests.rs
+index 62209cf..14c715b 100644
+--- a/src/structural_search_tests.rs
++++ b/src/structural_search_tests.rs
+@@ -201,7 +201,10 @@ fn structural_patterns_admit_optional_tag_terminator_and_trailing_comments() {
+ #[test]
+ fn structural_patterns_refuse_unsupported_or_ambiguous_grammar() {
+     for pattern in [
+-        "render(value: $__ss_value)",
++        "render(value: $__ss_value, ...$__ss_tail)",
++        "render(...$__ss_tail, value: 1)",
++        "render(value: $__ss_value, 1)",
++        "render(value: $__ss_value, value: $__ss_other)",
+         "render(...$values)",
+         "render(...$__ss_values, 1)",
+         "$__ss_target($__ss_value)",
+@@ -539,3 +542,156 @@ fn structural_dropped_owner_stops_matching_after_lexing() {
+     assert!(checks.load(Ordering::Relaxed) > lex_checks.load(Ordering::Relaxed));
+     assert_eq!(pattern.find_in(source, Limits::default()).unwrap().len(), 2);
+ }
++
++#[test]
++fn structural_named_fixed_sequences_require_exact_labels_case_order_and_arity() {
++    let source = r#"<?php
++render(value: $wanted, mode: true);
++render(Value: $case, mode: true);
++render(other: $label, mode: true);
++render(mode: true, value: $reordered);
++render($positional, true);
++render(value: $short);
++render(value: $extra, mode: true, extra: 1);
++render(...$runtime);
++// render(value: $comment, mode: true);
++$text = 'render(value: $string, mode: true)';
++"#;
++    let matches = find("render(value: $__ss_value, mode: true)", source);
++    assert_eq!(matches.len(), 1);
++    assert_eq!(
++        expression_texts(&matches[0], "value", source),
++        vec!["$wanted"]
++    );
++    assert_eq!(
++        &source[matches[0].call.bytes.clone()],
++        "render(value: $wanted, mode: true)"
++    );
++}
++
++#[test]
++fn structural_named_values_and_positional_prefix_preserve_written_argument_roles() {
++    let source = "<?php emit('topic', value: $a, count: 2); emit(topic: 'topic', value: $b, count: 2); emit('topic', count: 2, value: $c); emit('topic', $d, 2); emit('topic', ...$runtime);";
++    let matches = find(
++        "emit('topic', value: $__ss_value, count: $__ss_count)",
++        source,
++    );
++    assert_eq!(matches.len(), 1);
++    assert_eq!(expression_texts(&matches[0], "value", source), vec!["$a"]);
++    assert_eq!(expression_texts(&matches[0], "count", source), vec!["2"]);
++    assert!(
++        find("emit('topic', ...$__ss_tail)", source)
++            .iter()
++            .all(|found| { &source[found.call.bytes.clone()] == "emit('topic', $d, 2)" })
++    );
++    assert_eq!(find("emit('topic', ...$__ss_tail)", source).len(), 1);
++}
++
++#[test]
++fn structural_named_repeated_whole_expressions_reuse_token_equality() {
++    let source = "<?php same(first: $a + 1, second: $a/* note */+1); same(first: $a+1, second: $a-1); same(first: ($a+1), second: $a+1); same(first: 'a b', second: 'ab');";
++    let matches = find("same(first: $__ss_value, second: $__ss_value)", source);
++    assert_eq!(matches.len(), 1);
++    assert_eq!(
++        expression_texts(&matches[0], "value", source),
++        vec!["$a + 1", "$a/* note */+1"]
++    );
++    let mixed = "<?php same($a + 1, second: $a/*same*/+1); same($a + 1, second: $b+1);";
++    let matches = find("same($__ss_value, second: $__ss_value)", mixed);
++    assert_eq!(matches.len(), 1);
++    assert_eq!(
++        expression_texts(&matches[0], "value", mixed),
++        vec!["$a + 1", "$a/*same*/+1"]
++    );
++}
++
++#[test]
++fn structural_named_instance_static_and_receiver_captures_keep_distinct_heads() {
++    let source = "<?php factory()->save(value: factory()); factory()->save(value: other()); Store::save(value: $x); save(value: $x); $a?->save(value: $a);";
++    let matches = find("$__ss_value->save(value: $__ss_value)", source);
++    assert_eq!(matches.len(), 1);
++    assert_eq!(
++        expression_texts(&matches[0], "value", source),
++        vec!["factory()", "factory()"]
++    );
++    let static_matches = find("Store::save(value: $__ss_value)", source);
++    assert_eq!(static_matches.len(), 1);
++    assert_eq!(
++        &source[static_matches[0].call.bytes.clone()],
++        "Store::save(value: $x)"
++    );
++}
++
++#[test]
++fn structural_named_capture_bytes_exclude_label_colon_and_leading_trivia_with_utf16_crlf() {
++    let prefix = "$note = 'café🐘'; ";
++    let call = "send(value: /* leading */ $ž /* inside */ + ['🐘'], enabled: true)";
++    let source = format!("<?php\r\n{prefix}{call};\r\n");
++    let matches = find("send(value: $__ss_value, enabled: true)", &source);
++    assert_eq!(matches.len(), 1);
++    let found = &matches[0];
++    let captured = "$ž /* inside */ + ['🐘']";
++    assert_eq!(expression_texts(found, "value", &source), vec![captured]);
++    assert_eq!(
++        found.call.bytes,
++        source.find(call).unwrap()..source.find(call).unwrap() + call.len()
++    );
++    assert_eq!(
++        found.call.range.start,
++        tower_lsp::lsp_types::Position::new(1, prefix.encode_utf16().count() as u32)
++    );
++    assert_eq!(
++        found.call.range.end,
++        tower_lsp::lsp_types::Position::new(
++            1,
++            format!("{prefix}{call}").encode_utf16().count() as u32
++        )
++    );
++    let Capture::Expression(occurrences) = &found.captures["value"] else {
++        panic!("named value is an expression, never an argument tail");
++    };
++    assert_eq!(occurrences.len(), 1);
++    let value = &occurrences[0];
++    let before_value = format!("{prefix}send(value: /* leading */ ");
++    assert_eq!(
++        value.bytes,
++        source.find(captured).unwrap()..source.find(captured).unwrap() + captured.len()
++    );
++    assert_eq!(
++        value.range.start,
++        tower_lsp::lsp_types::Position::new(1, before_value.encode_utf16().count() as u32)
++    );
++    assert_eq!(
++        value.range.end,
++        tower_lsp::lsp_types::Position::new(
++            1,
++            format!("{before_value}{captured}").encode_utf16().count() as u32
++        )
++    );
++}
++
++#[test]
++fn structural_named_nested_real_calls_still_match_and_reserved_label_is_literal_syntax() {
++    let source = "<?php render(value: render(value: $inner)); render(__ss_label: $wanted); render(other: $wrong);";
++    let matches = find("render(value: $__ss_value)", source);
++    assert_eq!(
++        matches
++            .iter()
++            .map(|found| &source[found.call.bytes.clone()])
++            .collect::<Vec<_>>(),
++        vec![
++            "render(value: render(value: $inner))",
++            "render(value: $inner)"
++        ]
++    );
++    let labelled = find("render(__ss_label: $__ss_value)", source);
++    assert_eq!(labelled.len(), 1);
++    assert_eq!(
++        labelled[0]
++            .captures
++            .keys()
++            .map(String::as_str)
++            .collect::<Vec<_>>(),
++        vec!["value"]
++    );
++}
+diff --git a/tests/integration/structural_replace.rs b/tests/integration/structural_replace.rs
+index 3b1af4f..d355c08 100644
+--- a/tests/integration/structural_replace.rs
++++ b/tests/integration/structural_replace.rs
+@@ -389,3 +389,89 @@ async fn structural_replace_public_aggregate_output_limit_across_files() {
+     );
+     f.finish().await;
+ }
++
++#[tokio::test]
++async fn structural_named_public_replacement_checks_selected_dirty_source_and_roles() {
++    let f = Fixture::new().await;
++    let live = "<?php\r\n/* café🐘 */ foo(value: $ž /* note */ + 1); foo(value: $other);\r\n";
++    f.router
++        .did_change(DidChangeTextDocumentParams {
++            text_document: VersionedTextDocumentIdentifier {
++                uri: uri(&f.source),
++                version: 2,
++            },
++            content_changes: vec![TextDocumentContentChangeEvent {
++                range: None,
++                range_length: None,
++                text: live.into(),
++            }],
++        })
++        .await;
++    let search = json!({"uri":uri(&f.source),"generation":401,"scope":"document",
++        "pattern":"foo(value: $__ss_value)",
++        "expectedSources":[{"uri":uri(&f.source),"version":2,"sha256Utf8":sha(live)}]});
++    let found = serde_json::to_value(
++        f.router
++            .workbench_structural_search(serde_json::from_value(search.clone()).unwrap())
++            .await
++            .unwrap(),
++    )
++    .unwrap();
++    assert_eq!(found["files"][0]["matches"].as_array().unwrap().len(), 2);
++    let selected = &found["files"][0]["matches"][0];
++    assert_eq!(selected["captures"]["value"]["kind"], "expression");
++    assert_eq!(
++        selected["call"]["range"]["start"]["character"],
++        "/* café🐘 */ ".encode_utf16().count() as u32
++    );
++    let query = json!({"search":search,"replacement":"bar(payload: $__ss_value, strict: true)",
++        "selections":[{"stamp":found["files"][0]["stamp"],"calls":[selected["call"]]}]});
++    let reply = f.replace(query.clone()).await.unwrap();
++    assert_eq!(reply["kind"], "parenthesizedExpression");
++    assert_eq!(reply["edits"].as_array().unwrap().len(), 1);
++    assert_eq!(reply["edits"][0]["edits"].as_array().unwrap().len(), 1);
++    assert_eq!(reply["edits"][0]["edits"][0]["call"], selected["call"]);
++    assert_eq!(
++        reply["edits"][0]["edits"][0]["newText"],
++        "(bar(payload: ($ž /* note */ + 1), strict: true))"
++    );
++    assert_eq!(
++        apply(live, &reply["edits"][0]["edits"]),
++        "<?php\r\n/* café🐘 */ (bar(payload: ($ž /* note */ + 1), strict: true)); foo(value: $other);\r\n"
++    );
++    for replacement in ["bar(payload: $__ss_missing)", "bar(...$__ss_value)"] {
++        let mut invalid = query.clone();
++        invalid["replacement"] = json!(replacement);
++        assert_eq!(
++            f.replace(invalid).await.unwrap_err().code,
++            ErrorCode::InvalidParams
++        );
++    }
++    let changed = live.replace("$ž", "$fresh");
++    f.router
++        .did_change(DidChangeTextDocumentParams {
++            text_document: VersionedTextDocumentIdentifier {
++                uri: uri(&f.source),
++                version: 3,
++            },
++            content_changes: vec![TextDocumentContentChangeEvent {
++                range: None,
++                range_length: None,
++                text: changed.clone(),
++            }],
++        })
++        .await;
++    assert_eq!(
++        f.replace(query.clone()).await.unwrap_err().code,
++        ErrorCode::ServerError(-32801)
++    );
++    let mut stale_selection = query;
++    stale_selection["search"]["expectedSources"][0]["version"] = json!(3);
++    stale_selection["search"]["expectedSources"][0]["sha256Utf8"] = json!(sha(&changed));
++    assert_eq!(
++        f.replace(stale_selection).await.unwrap_err().code,
++        ErrorCode::ServerError(-32801)
++    );
++    assert_eq!(std::fs::read(&f.closed).unwrap(), f.disk.as_bytes());
++    f.finish().await;
++}
+diff --git a/tests/integration/structural_search.rs b/tests/integration/structural_search.rs
+index df6ab30..5debbc2 100644
+--- a/tests/integration/structural_search.rs
++++ b/tests/integration/structural_search.rs
+@@ -413,3 +413,164 @@ async fn structural_public_mixed_template_search_reports_incomplete_and_replacem
+     assert_eq!(fs::read(&blade).unwrap(), template.as_bytes());
+     router.shutdown().await.unwrap();
+ }
++
++#[tokio::test]
++async fn structural_named_public_search_uses_dirty_utf16_source_and_selected_project() {
++    use sha2::{Digest, Sha256};
++    let temp = TempDir::new().unwrap();
++    let root = temp.path().canonicalize().unwrap();
++    project(&root);
++    let nested = root.join("nested");
++    project(&nested);
++    let path = root.join("index.php");
++    let disk = "<?php render(value: 'disk', mode: true);\r\n";
++    fs::write(&path, disk).unwrap();
++    let closed = root.join("closed.php");
++    fs::write(&closed, "<?php render(value: 'closed', mode: true);").unwrap();
++    fs::write(
++        nested.join("index.php"),
++        "<?php render(value: 'child', mode: true);",
++    )
++    .unwrap();
++    let router = router(&[&root]).await;
++    let uri = Url::from_file_path(&path).unwrap();
++    router
++        .did_open(DidOpenTextDocumentParams {
++            text_document: TextDocumentItem {
++                uri: uri.clone(),
++                language_id: "php".into(),
++                version: 1,
++                text: disk.into(),
++            },
++        })
++        .await;
++    let prefix = "/* café🐘 */ ";
++    let live = format!(
++        "<?php\r\n{prefix}render(value: $ž + 1, mode: true); outer(render(value: $nested, mode: true));\r\nrender(Value: $case, mode: true); render(mode: true, value: $order); render($positional, true);\r\n"
++    );
++    router
++        .did_change(DidChangeTextDocumentParams {
++            text_document: VersionedTextDocumentIdentifier {
++                uri: uri.clone(),
++                version: 2,
++            },
++            content_changes: vec![TextDocumentContentChangeEvent {
++                range: None,
++                range_length: None,
++                text: live.clone(),
++            }],
++        })
++        .await;
++    let hash = format!("{:x}", Sha256::digest(live.as_bytes()));
++    let request = json!({"uri":uri,"generation":301,"scope":"project",
++        "pattern":"render(value: $__ss_value, mode: true)",
++        "expectedSources":[{"uri":uri,"version":2,"sha256Utf8":hash}]});
++    let reply = router
++        .workbench_structural_search(serde_json::from_value(request.clone()).unwrap())
++        .await
++        .unwrap();
++    assert!(!reply.incomplete);
++    assert_eq!(
++        reply
++            .files
++            .iter()
++            .map(|file| file.matches.len())
++            .sum::<usize>(),
++        3
++    );
++    assert!(
++        reply
++            .files
++            .iter()
++            .all(|file| !file.stamp.uri.to_file_path().unwrap().starts_with(&nested))
++    );
++    let file = reply
++        .files
++        .iter()
++        .find(|file| file.stamp.uri == uri)
++        .unwrap();
++    assert_eq!(file.matches.len(), 2);
++    assert_eq!(file.stamp.utf8_bytes, live.len() as u64);
++    assert_eq!(file.stamp.sha256_utf8, hash);
++    let stamp = serde_json::to_value(&file.stamp).unwrap();
++    assert_eq!(stamp["source"]["kind"], "open");
++    assert_eq!(stamp["source"]["version"], 2);
++    let first = &file.matches[0];
++    assert_eq!(
++        &live[first.call.start_byte as usize..first.call.end_byte as usize],
++        "render(value: $ž + 1, mode: true)"
++    );
++    assert_eq!(
++        first.call.range.start,
++        Position::new(1, prefix.encode_utf16().count() as u32)
++    );
++    assert_eq!(
++        first.call.range.end,
++        Position::new(
++            1,
++            format!("{prefix}render(value: $ž + 1, mode: true)")
++                .encode_utf16()
++                .count() as u32
++        )
++    );
++    let capture = serde_json::to_value(&first.captures["value"]).unwrap();
++    assert_eq!(capture["kind"], "expression");
++    let range = &capture["ranges"][0];
++    assert_eq!(
++        &live[range["startByte"].as_u64().unwrap() as usize
++            ..range["endByte"].as_u64().unwrap() as usize],
++        "$ž + 1"
++    );
++    assert_eq!(
++        range["range"]["start"]["character"],
++        format!("{prefix}render(value: ").encode_utf16().count() as u32
++    );
++    let newer = live.replace("$ž", "$fresh");
++    router
++        .did_change(DidChangeTextDocumentParams {
++            text_document: VersionedTextDocumentIdentifier {
++                uri: uri.clone(),
++                version: 3,
++            },
++            content_changes: vec![TextDocumentContentChangeEvent {
++                range: None,
++                range_length: None,
++                text: newer.clone(),
++            }],
++        })
++        .await;
++    assert_eq!(
++        router
++            .workbench_structural_search(serde_json::from_value(request.clone()).unwrap())
++            .await
++            .unwrap_err()
++            .code,
++        tower_lsp::jsonrpc::ErrorCode::ServerError(-32801)
++    );
++    let mut fresh = request;
++    fresh["expectedSources"][0]["version"] = json!(3);
++    fresh["expectedSources"][0]["sha256Utf8"] =
++        json!(format!("{:x}", Sha256::digest(newer.as_bytes())));
++    let reply = router
++        .workbench_structural_search(serde_json::from_value(fresh).unwrap())
++        .await
++        .unwrap();
++    let file = reply
++        .files
++        .iter()
++        .find(|file| file.stamp.uri == uri)
++        .unwrap();
++    let capture = serde_json::to_value(&file.matches[0].captures["value"]).unwrap();
++    let range = &capture["ranges"][0];
++    assert_eq!(
++        &newer[range["startByte"].as_u64().unwrap() as usize
++            ..range["endByte"].as_u64().unwrap() as usize],
++        "$fresh + 1"
++    );
++    assert_eq!(fs::read_to_string(&path).unwrap(), disk);
++    assert_eq!(
++        fs::read_to_string(&closed).unwrap(),
++        "<?php render(value: 'closed', mode: true);"
++    );
++    router.shutdown().await.unwrap();
++}

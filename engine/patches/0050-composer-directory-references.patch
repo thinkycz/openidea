@@ -1,0 +1,391 @@
+diff --git a/docs/CHANGELOG.md b/docs/CHANGELOG.md
+--- a/docs/CHANGELOG.md
++++ b/docs/CHANGELOG.md
+@@ -14,6 +14,8 @@
+ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+ 
+ ## [Unreleased]
++
++- **Composer directory references.** PHP completion and navigation follow local vendor and binary-directory setting references, including paths containing spaces. Contributed by @thinkycz
+ 
+ - **Name extracted declarations.** Clients can supply a name for an extracted variable, constant, function or method before reviewing the proposal. Conflicting or invalid names are refused, and omitted names retain automatic naming. Contributed by PHP Workbench downstream.
+ 
+diff --git a/docs/todo.md b/docs/todo.md
+--- a/docs/todo.md
++++ b/docs/todo.md
+@@ -35,6 +35,7 @@
+ | #   | Item                                                                                                                                                            | Impact      | Complexity  |
+ | --- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------- | ----------- |
+ |     | Clear [refactoring gate](todo/refactor.md)                                                                                                                      | —           | —           |
++| X18 | [Isolate declarations belonging to different Composer projects](todo/indexing.md#x18-isolate-declarations-belonging-to-different-composer-projects) | High | High |
+ | X17  | [Index the workspace's other folders](todo/indexing.md#x17-index-the-workspaces-other-folders)                              | Medium      | Medium      |
+ | X14  | [Ask Zed to expose `file_scan_exclusions` and `file_types` to extensions](todo/indexing.md#x14-ask-zed-to-expose-file_scan_exclusions-and-file_types-to-extensions) (upstream request) | Low | Low |
+ | E1  | [External stub packages (ide-helper, etc.)](todo/external-stubs.md#e1-project-level-phpstorm-stubs-for-gtd)                                                     | Medium-High | Low         |
+diff --git a/docs/todo/indexing.md b/docs/todo/indexing.md
+--- a/docs/todo/indexing.md
++++ b/docs/todo/indexing.md
+@@ -493,3 +493,29 @@
+ configured. Maintainer's call on the semantics; whichever way it
+ goes, the chosen behaviour needs a test and a sentence in
+ [`configuration.md`](../configuration.md).
++
++
++## X18. Isolate declarations belonging to different Composer projects
++
++**Impact: High · Complexity: High**
++
++Monorepo discovery merges independent Composer roots into shared symbol and PHP
++configuration state. Two apps using the normal `App\Service` name therefore
++compete for one global FQN entry. A real-proxy witness opens app B before app A:
++B receives A's `fromA()` member, omits its own `fromB()`, and cannot navigate the
++B-only method to its declaration. Both apps use valid PSR-4 maps; no declaration
++file is opened before the queries. The app-A control passes.
++
++Preserve project ownership throughout class, function and constant discovery,
++resolution, parsed caches, imports, dependencies and invalidation. Choose the
++requesting document's Composer context; explicitly shared path packages must
++still resolve through each project's dependency graph. Independent project PHP
++targets and configuration cannot leak through a shared symbol winner.
++
++Verify both query orders, opened and closed declarations, unsaved edits and Undo,
++shared namespaces with different vendor versions, exact definition locations and
++repeated requests. Keep the first-wins witness failing until ownership is fixed;
++monorepo discovery and distinct-name fixtures do not establish isolation.
++
++This is separate from forwarding additional include folders in X17. The original
++Composer workspace acceptance gate remains open.
+diff --git a/examples/php/README.md b/examples/php/README.md
+--- a/examples/php/README.md
++++ b/examples/php/README.md
+@@ -70,3 +70,33 @@
+ 4. Run `php -d zend.assertions=1 scaffolding/assertions.php` to verify the
+    type claims made in the demo comments against real PHP runtime
+    behaviour.
++
++## Composer directory references
++
++This showcase stays dependency-free. In a Composer project, directory settings
++can refer to one another. For example:
++
++```json
++{
++  "config": {
++    "vendor-dir": "{$bin-dir}/packages",
++    "bin-dir": "tools with spaces"
++  }
++}
++```
++
++Composer resolves the vendor directory to `tools with spaces/packages`. Its
++installed package metadata and generated autoload maps belong in that directory;
++completion and navigation read them there without executing PHP bootstrap files.
++The resolved setting can be checked with
++`composer --no-plugins --no-scripts config --absolute vendor-dir`.
++
++For an already installed project using this layout, generate optimized maps with
++`composer --no-plugins --no-scripts dump-autoload --no-dev --optimize`. The
++`none` indexing strategy still resolves classes listed in those maps and helpers
++listed in `autoload_files.php`; it does not scan missing classes into existence.
++
++Local references between `vendor-dir` and `bin-dir` are supported. Unknown,
++malformed, cyclic or over-budget references retain their explicit values rather
++than silently choosing the default vendor directory. This does not add global
++Composer configuration or environment-variable expansion.
+diff --git a/src/composer.rs b/src/composer.rs
+--- a/src/composer.rs
++++ b/src/composer.rs
+@@ -155,13 +155,10 @@
+ /// Read the configured vendor directory from a parsed [`ComposerPackage`].
+ ///
+ /// Looks at `config.vendor-dir`; defaults to `"vendor"` when absent.
++/// Known local directory references are expanded; unsupported or invalid
++/// references preserve the explicit setting instead of selecting a default.
+ pub(crate) fn get_vendor_dir(package: &ComposerPackage) -> String {
+-    package
+-        .config
+-        .as_ref()
+-        .and_then(|c| c.vendor_dir.as_deref())
+-        .map(|s| s.trim_end_matches('/').to_string())
+-        .unwrap_or_else(|| "vendor".to_string())
++    composer_directory(package, 0)
+ }
+ 
+ /// Read the configured bin directory from a parsed [`ComposerPackage`].
+@@ -169,11 +166,83 @@
+ /// Looks at `config.bin-dir`; defaults to `"<vendor-dir>/bin"` when absent,
+ /// where `<vendor-dir>` is itself resolved via [`get_vendor_dir`].
+ pub(crate) fn get_bin_dir(package: &ComposerPackage) -> String {
+-    if let Some(explicit) = package.config.as_ref().and_then(|c| c.bin_dir.as_deref()) {
+-        explicit.trim_end_matches('/').to_string()
++    if package
++        .config
++        .as_ref()
++        .and_then(|c| c.bin_dir.as_deref())
++        .is_some()
++    {
++        composer_directory(package, 1)
+     } else {
+         format!("{}/bin", get_vendor_dir(package))
+     }
++}
++
++// This is deliberately local Composer configuration expansion, not Composer's
++// environment/home/global-configuration machinery. Bound substitutions and
++// output independently; on failure this String API retains the original value.
++const COMPOSER_DIR_SUBSTITUTIONS: usize = 64;
++const COMPOSER_DIR_BYTES: usize = 64 * 1024;
++
++fn composer_directory(package: &ComposerPackage, key: usize) -> String {
++    let config = package.config.as_ref();
++    let values = [
++        config
++            .and_then(|config| config.vendor_dir.as_deref())
++            .unwrap_or("vendor"),
++        config
++            .and_then(|config| config.bin_dir.as_deref())
++            .unwrap_or("{$vendor-dir}/bin"),
++    ];
++    let mut substitutions = COMPOSER_DIR_SUBSTITUTIONS;
++    expand_composer_directory(&values, key, 0, &mut substitutions)
++        .unwrap_or_else(|| values[key].trim_end_matches('/').to_owned())
++}
++
++fn expand_composer_directory(
++    values: &[&str; 2],
++    key: usize,
++    visiting: u8,
++    substitutions: &mut usize,
++) -> Option<String> {
++    let bit = 1 << key;
++    if visiting & bit != 0 {
++        return None;
++    }
++    let visiting = visiting | bit;
++    let mut remaining = values[key].trim_end_matches('/');
++    if remaining.len() > COMPOSER_DIR_BYTES {
++        return None;
++    }
++    let mut expanded = String::new();
++    while let Some(start) = remaining.find("{$") {
++        push_composer_directory(&mut expanded, &remaining[..start])?;
++        let reference = &remaining[start + 2..];
++        let end = reference.find('}')?;
++        let target = match &reference[..end] {
++            "vendor-dir" => 0,
++            "bin-dir" => 1,
++            _ => return None,
++        };
++        if *substitutions == 0 {
++            return None;
++        }
++        *substitutions -= 1;
++        let replacement = expand_composer_directory(values, target, visiting, substitutions)?;
++        push_composer_directory(&mut expanded, &replacement)?;
++        remaining = &reference[end + 1..];
++    }
++    push_composer_directory(&mut expanded, remaining)?;
++    expanded.truncate(expanded.trim_end_matches('/').len());
++    Some(expanded)
++}
++
++fn push_composer_directory(output: &mut String, text: &str) -> Option<()> {
++    if output.len().checked_add(text.len())? > COMPOSER_DIR_BYTES {
++        return None;
++    }
++    output.push_str(text);
++    Some(())
+ }
+ 
+ /// The package list from `vendor/composer/installed.json`, together with
+@@ -1687,6 +1756,102 @@
+         assert_eq!(get_bin_dir(&p), "bin");
+     }
+ 
++    #[test]
++    fn composer_directories_expand_known_references_in_both_directions() {
++        let p = pkg(
++            r#"{"config":{"vendor-dir":"{$bin-dir}/packages/","bin-dir":"tools with spaces/"}}"#,
++        );
++        assert_eq!(get_vendor_dir(&p), "tools with spaces/packages");
++        assert_eq!(get_bin_dir(&p), "tools with spaces");
++        let p = pkg(
++            r#"{"config":{"vendor-dir":"/absolute/🐘 libraries/","bin-dir":"{$vendor-dir}/tools/"}}"#,
++        );
++        assert_eq!(get_vendor_dir(&p), "/absolute/🐘 libraries");
++        assert_eq!(get_bin_dir(&p), "/absolute/🐘 libraries/tools");
++        let p = pkg(r#"{"config":{"bin-dir":"{$vendor-dir}/tools"}}"#);
++        assert_eq!(get_vendor_dir(&p), "vendor");
++        assert_eq!(get_bin_dir(&p), "vendor/tools");
++    }
++
++    #[test]
++    fn composer_default_bin_follows_literal_or_unresolved_explicit_vendor() {
++        let p = pkg(r#"{"config":{"vendor-dir":"custom libraries/"}}"#);
++        assert_eq!(get_bin_dir(&p), "custom libraries/bin");
++        let p = pkg(r#"{"config":{"vendor-dir":"{$unknown}/packages/"}}"#);
++        assert_eq!(get_vendor_dir(&p), "{$unknown}/packages");
++        assert_eq!(get_bin_dir(&p), "{$unknown}/packages/bin");
++        // The implicit bin default also participates in cycle detection.
++        let p = pkg(r#"{"config":{"vendor-dir":"{$bin-dir}/packages"}}"#);
++        assert_eq!(get_vendor_dir(&p), "{$bin-dir}/packages");
++        assert_eq!(get_bin_dir(&p), "{$bin-dir}/packages/bin");
++    }
++
++    #[test]
++    fn composer_directory_references_normalize_before_adjacent_substitution() {
++        for (vendor, bin, expected) in [
++            (
++                "{$bin-dir}packages",
++                "tools with spaces/",
++                "tools with spacespackages",
++            ),
++            (
++                "{$bin-dir}/packages",
++                "tools with spaces/",
++                "tools with spaces/packages",
++            ),
++            ("{$bin-dir}packages", "/", "packages"),
++        ] {
++            let p =
++                pkg(&serde_json::json!({"config":{"vendor-dir":vendor,"bin-dir":bin}}).to_string());
++            assert_eq!(get_vendor_dir(&p), expected);
++        }
++    }
++
++    #[test]
++    fn composer_directory_cycles_unknown_and_malformed_references_keep_original() {
++        for (vendor, bin) in [
++            ("{$bin-dir}/packages", "{$vendor-dir}/tools"),
++            ("{$vendor-dir}/packages", "{$bin-dir}/tools"),
++            ("{$unknown}/packages", "{$vendor-dir}/tools"),
++            ("{$bin-dir/packages", "{$vendor-dir}/tools"),
++        ] {
++            let source =
++                serde_json::json!({"config":{"vendor-dir":vendor,"bin-dir":bin}}).to_string();
++            let p = pkg(&source);
++            assert_eq!(get_vendor_dir(&p), vendor);
++            assert_eq!(get_bin_dir(&p), bin);
++        }
++        let p = pkg(r#"{"config":{"vendor-dir":"{$bin-dir}/{$unknown}","bin-dir":"tools"}}"#);
++        assert_eq!(
++            get_vendor_dir(&p),
++            "{$bin-dir}/{$unknown}",
++            "failure must not publish a partially expanded value"
++        );
++    }
++
++    #[test]
++    fn composer_directory_expansion_budgets_preserve_explicit_values() {
++        let at_limit = "{$bin-dir}".repeat(COMPOSER_DIR_SUBSTITUTIONS);
++        let source =
++            serde_json::json!({"config":{"vendor-dir":at_limit,"bin-dir":"x"}}).to_string();
++        assert_eq!(
++            get_vendor_dir(&pkg(&source)),
++            "x".repeat(COMPOSER_DIR_SUBSTITUTIONS)
++        );
++        let repeated = "{$bin-dir}".repeat(COMPOSER_DIR_SUBSTITUTIONS + 1);
++        let source =
++            serde_json::json!({"config":{"vendor-dir":repeated,"bin-dir":"tools"}}).to_string();
++        let p = pkg(&source);
++        assert_eq!(get_vendor_dir(&p), repeated);
++        let repeated = "{$bin-dir}".repeat(2);
++        let large = "x".repeat(COMPOSER_DIR_BYTES / 2 + 1);
++        let source =
++            serde_json::json!({"config":{"vendor-dir":repeated,"bin-dir":large}}).to_string();
++        let p = pkg(&source);
++        assert_eq!(get_vendor_dir(&p), repeated);
++        assert_eq!(get_bin_dir(&p), large);
++    }
++
+     // ── detect_drupal_web_root ──────────────────────────────────────
+ 
+     #[test]
+diff --git a/tests/integration/composer_autoload_edge_cases.rs b/tests/integration/composer_autoload_edge_cases.rs
+--- a/tests/integration/composer_autoload_edge_cases.rs
++++ b/tests/integration/composer_autoload_edge_cases.rs
+@@ -359,3 +359,85 @@
+         );
+     }
+ }
++
++async fn configured_vendor_members(vendor_setting: &str, expression: &str) -> Vec<String> {
++    let composer = serde_json::json!({
++        "config": {"vendor-dir": vendor_setting, "bin-dir": "tools with spaces"},
++        "autoload": {"psr-4": {"App\\": "src/"}}
++    })
++    .to_string();
++    let content = format!("<?php\n$x = {expression};\n$x->\n");
++    let (backend, dir) = create_psr4_workspace(
++        &composer,
++        &[
++            (".phpantom.toml", "[indexing]\nstrategy = \"none\"\n"),
++            (".gitignore", "/tools with spaces/packages/\n"),
++            (
++                "tools with spaces/packages/acme/pkg/src/Service.php",
++                r#"<?php
++namespace Vendor\Package;
++class Service { public function vendorAction(): string { return 'ok'; } }
++"#,
++            ),
++            (
++                "tools with spaces/packages/acme/pkg/helpers.php",
++                r#"<?php
++namespace Vendor\Package;
++file_put_contents(__DIR__ . '/executed', 'never');
++function vendor_helper(): Service { return new Service(); }
++"#,
++            ),
++            (
++                "tools with spaces/packages/composer/autoload_classmap.php",
++                r#"<?php
++$vendorDir = dirname(__DIR__);
++return array(
++    'Vendor\\Package\\Service' => $vendorDir . '/acme/pkg/src/Service.php',
++);
++"#,
++            ),
++            (
++                "tools with spaces/packages/composer/autoload_files.php",
++                r#"<?php
++$vendorDir = dirname(__DIR__);
++return array(
++    'helper' => $vendorDir . '/acme/pkg/helpers.php',
++);
++"#,
++            ),
++            ("caller.php", &content),
++        ],
++    );
++    let uri = open_initialized_php(&backend, "caller.php").await;
++    let position = position_after(&content, "$x->");
++    let labels = complete_labels_at_opened(&backend, &uri, position.line, position.character).await;
++    assert!(
++        !dir.path()
++            .join("tools with spaces/packages/acme/pkg/executed")
++            .exists(),
++        "metadata discovery must not execute helper PHP"
++    );
++    labels
++}
++
++#[tokio::test]
++async fn composer_path_reference_resolves_vendor_class_from_optimized_map() {
++    for setting in ["tools with spaces/packages", "{$bin-dir}/packages"] {
++        let labels = configured_vendor_members(setting, "new \\Vendor\\Package\\Service()").await;
++        assert!(
++            offers(&labels, "vendorAction"),
++            "vendor path {setting:?} must use the installed classmap: {labels:?}"
++        );
++    }
++}
++
++#[tokio::test]
++async fn composer_path_reference_resolves_vendor_helper_from_autoload_files() {
++    for setting in ["tools with spaces/packages", "{$bin-dir}/packages"] {
++        let labels = configured_vendor_members(setting, "\\Vendor\\Package\\vendor_helper()").await;
++        assert!(
++            offers(&labels, "vendorAction"),
++            "vendor path {setting:?} must resolve helper return types: {labels:?}"
++        );
++    }
++}

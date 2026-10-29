@@ -135,3 +135,14 @@ pub fn history_list(window: Window, state: State<'_, AppState>, path: PathBuf) -
 pub fn history_content(window: Window, state: State<'_, AppState>, id: String) -> IdeResult<String> {
     ide_host::ops::doc::history_content(&state.host, window.label(), id)
 }
+
+#[tauri::command]
+#[specta::specta]
+pub async fn doc_save_checked(
+    window: Window,
+    state: State<'_, AppState>,
+    doc: DocId,
+    overwrite_revision: Option<String>,
+) -> IdeResult<Option<String>> {
+    ide_host::ops::doc::save_checked(&state.host, window.label(), doc, overwrite_revision).await
+}

@@ -1,0 +1,3190 @@
+diff --git a/docs/CHANGELOG.md b/docs/CHANGELOG.md
+index aaab40d..ec4fa5e 100644
+--- a/docs/CHANGELOG.md
++++ b/docs/CHANGELOG.md
+@@ -15,6 +15,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
+ 
+ ## [Unreleased]
+ 
++- **Keep neighboring code during import cleanup.** Removing an unused import preserves other statements, used imports and comments sharing its line. Contributed by PHP Workbench downstream.
++
++- **Optimize PHP imports in one reviewed operation.** Workbench can remove unused imports and sort surviving standalone import blocks together, with one review and one Undo step. Source changes require a fresh request. Contributed by PHP Workbench downstream.
++
++- **Report incomplete workspace indexes honestly.** Unreadable PHP files leave the index partial, and single-file sessions do not claim a complete project scan. Reference lookup retains its fallback while analysis is incomplete. Contributed by PHP Workbench downstream.
++
+ - **Check return statements against their native declaration.** Nullable PHPDoc accepts an implicit null return when no native hint is present. Native `mixed`, `void` and `never` retain PHP’s return-statement rules while supported PHPDoc refinements continue to check returned values. Contributed by PHP Workbench downstream.
+ 
+ - **Keep configured Storage adapters precise.** Completion, hover and navigation recognize adapter methods supplied by custom drivers even when their service provider stays closed. Unresolved drivers and ordinary filesystem contracts retain their declared limits. Contributed by PHP Workbench downstream.
+diff --git a/docs/todo.md b/docs/todo.md
+index e41cde0..c00a1b5 100644
+--- a/docs/todo.md
++++ b/docs/todo.md
+@@ -51,6 +51,7 @@ contributor even though it's short.
+ | E2  | [Project-level stubs as type resolution source](todo/external-stubs.md#e2-project-level-stubs-as-resolution-source) (depends on E1)                             | Medium      | High        |
+ | F24 | [Preserve unresolved hierarchy target alternatives](todo/lsp-features.md#f24-preserve-unresolved-hierarchy-target-alternatives) | Medium | High |
+ | F25 | [Account for unavailable workspace hierarchy sources](todo/lsp-features.md#f25-account-for-unavailable-workspace-hierarchy-sources) | Medium | Medium-High |
++| F26 | [Complete import cleanup across embedded and comment-owned boundaries](todo/lsp-features.md#f26-complete-import-cleanup-across-embedded-and-comment-owned-boundaries) | Medium | Medium-High |
+ | F20 | [Migrate to the maintained `tower-lsp` fork](todo/lsp-features.md#f20-migrate-to-the-maintained-tower-lsp-fork)                                              | Low-Medium  | Very High   |
+ | F21 | [Static `typeHierarchyProvider` advertisement](todo/lsp-features.md#f21-static-typehierarchyprovider-advertisement-depends-on-f20) (depends on F20; also needs an upstream `lsp-types` fix) | Low-Medium  |
+ | BL1  | [Blade-aware code actions](todo/blade.md#bl1-blade-aware-code-actions)                                                      | Medium     | Medium-High | Low         |
+diff --git a/docs/todo/lsp-features.md b/docs/todo/lsp-features.md
+index 1100aca..3c63ddf 100644
+--- a/docs/todo/lsp-features.md
++++ b/docs/todo/lsp-features.md
+@@ -629,3 +629,15 @@ then report partial workspace coverage without reading excluded files or
+ inventing caller nodes. The invocation coverage budget bounds analysis after
+ index construction; whole-file parsing and legacy edge resolution still need
+ independent performance/resource acceptance.
++
++## F26. Complete import cleanup across embedded and comment-owned boundaries
++
++**Impact: Medium · Complexity: Medium-High**
++
++The checked Workbench action and shared CLI planner refuse unproven deletion ownership rather than remove unrelated source. Complete these remaining syntax/source-map cases without weakening that ownership:
++
++- Remove unused closing-tag-terminated PHP imports while keeping execution boundaries and inline output exact; sorting must treat output as a barrier.
++- Preserve or detach comments inside a removed declaration/member instead of refusing the operation.
++- Distinguish unsupported cleanup from verified-clean/no-op in the CLI result contract, without reporting invented fixes.
++
++Protect exact Unicode/CRLF source, all used siblings, cancellation and one reviewed transaction; add real legacy/CLI/checked endpoint regressions. These are deferred breadth, not a completed universal-import claim.
+diff --git a/examples/php/code_actions.php b/examples/php/code_actions.php
+index 899235c..380559a 100644
+--- a/examples/php/code_actions.php
++++ b/examples/php/code_actions.php
+@@ -56,6 +56,12 @@ class ImportQualifiedNameDemo
+ }
+ 
+ 
++// ── Workbench: Optimize Imports ────────────────────────────────────────────
++// Ctrl+Alt+O (Control+Option+O on macOS) removes unused imports and sorts
++// surviving standalone import blocks in one reviewed proposal. Try it on this
++// file's intentionally unused ReflectionClass import below. Cancel keeps the
++// source unchanged; Apply remains unsaved and one Undo restores the original.
++
+ // ── Code Action: Remove Unused Import ───────────────────────────────────────
+ // The `use ReflectionClass;` below is unused — it appears dimmed in the editor.
+ // Place cursor on it and press Ctrl+. → "Remove unused import 'ReflectionClass'"
+diff --git a/src/backend/startup.rs b/src/backend/startup.rs
+index 56659c2..7ce8ec7 100644
+--- a/src/backend/startup.rs
++++ b/src/backend/startup.rs
+@@ -282,7 +282,7 @@ impl Backend {
+                     ..ExecuteCommandOptions::default()
+                 }),
+                 experimental: Some(
+-                    serde_json::json!({"phpWorkbenchRoutes": true, "phpWorkbenchViews": true, "phpWorkbenchBuiltins": true, "phpWorkbenchActiveTarget": true, "phpWorkbenchRenameChecked": true, "phpWorkbenchCallHierarchyAnalysis": true, (crate::structural_search::wire::EXPERIMENTAL_CAPABILITY): true, (crate::structural_search::wire::REPLACE_EXPERIMENTAL_CAPABILITY): true}),
++                    serde_json::json!({"phpWorkbenchRoutes": true, "phpWorkbenchViews": true, "phpWorkbenchBuiltins": true, "phpWorkbenchActiveTarget": true, "phpWorkbenchRenameChecked": true, (crate::workbench_optimize_imports::CAPABILITY): true, "phpWorkbenchCallHierarchyAnalysis": true, (crate::structural_search::wire::EXPERIMENTAL_CAPABILITY): true, (crate::structural_search::wire::REPLACE_EXPERIMENTAL_CAPABILITY): true}),
+                 ),
+                 ..ServerCapabilities::default()
+             },
+@@ -658,14 +658,14 @@ impl Backend {
+         let progress_backend = self.clone_for_blocking();
+         tokio::spawn(async move {
+             let worker_state = Arc::clone(&progress_state);
+-            let indexed_files = run_blocking_cancel_safe("full_background_index", move || {
++            let index_result = run_blocking_cancel_safe("full_background_index", move || {
+                 let report_progress =
+                     |percentage, message: String| worker_state.set_percentage(percentage, message);
+-                parse_backend.ensure_workspace_indexed_with_progress(Some(&report_progress));
+-                parse_backend.symbol_maps.read().len()
++                let outcome =
++                    parse_backend.ensure_workspace_indexed_with_progress(Some(&report_progress));
++                (outcome, parse_backend.symbol_maps.read().len())
+             })
+-            .await
+-            .unwrap_or(0);
++            .await;
+ 
+             if let Some(poller) = poller {
+                 poller.finish().await;
+@@ -683,9 +683,15 @@ impl Backend {
+             progress_backend.reregister_watched_files_if_changed();
+ 
+             if let Some(tok) = progress_token {
+-                progress_backend
+-                    .progress_end(&tok, Some(format!("Parsed {} files", indexed_files)))
+-                    .await;
++                let message = match index_result {
++                    Some((
++                        crate::indexing::preload::WorkspaceIndexOutcome::Complete,
++                        indexed_files,
++                    )) => format!("Parsed {indexed_files} files"),
++                    Some((outcome, _)) => outcome.message(),
++                    None => "Workspace indexing failed".to_string(),
++                };
++                progress_backend.progress_end(&tok, Some(message)).await;
+             }
+ 
+             progress_backend.request_diagnostic_refresh().await;
+@@ -696,6 +702,11 @@ impl Backend {
+             // stale zeros.  Now that it's complete, ask for a re-pull.
+             progress_backend.request_inlay_hint_refresh().await;
+             progress_backend.request_code_lens_refresh().await;
++            // Re-pull consumers of the failed outcome too; do not launch
++            // optional warm-up/diagnostic work after a failed index task.
++            if index_result.is_none() {
++                return;
++            }
+ 
+             // With the whole workspace parsed, eagerly resolve every
+             // class so interactive requests hit a warm cache.  This
+diff --git a/src/code_actions/mod.rs b/src/code_actions/mod.rs
+index 6003f89..f9b0de0 100644
+--- a/src/code_actions/mod.rs
++++ b/src/code_actions/mod.rs
+@@ -119,7 +119,7 @@ mod promote_constructor_param;
+ mod remove_unused_import;
+ mod requested_name;
+ pub(crate) use remove_unused_import::{
+-    build_line_deletion_edit, build_use_directive_deletion_edit, cursor_on_use_import_line,
++    build_use_directive_deletion_edit, cursor_on_use_import_line, plan_unused_import_deletions,
+ };
+ mod replace_deprecated;
+ mod replace_fqcn;
+diff --git a/src/code_actions/remove_unused_import.rs b/src/code_actions/remove_unused_import.rs
+index 161b85b..c6f0b8a 100644
+--- a/src/code_actions/remove_unused_import.rs
++++ b/src/code_actions/remove_unused_import.rs
+@@ -19,7 +19,6 @@
+ //! published set so the squiggly lines disappear before the text edit
+ //! is applied.
+ 
+-use std::cmp::Reverse;
+ use std::collections::HashSet;
+ 
+ use tower_lsp::lsp_types::*;
+@@ -147,43 +146,244 @@ impl Backend {
+                 return None;
+             }
+ 
+-            let removed_import_lines: HashSet<usize> = fresh_diags
+-                .iter()
+-                .map(|d| d.range.start.line as usize)
+-                .collect();
+-            let all_ranges: Vec<Range> = fresh_diags.iter().map(|d| d.range).collect();
+-
+-            let mut edits: Vec<TextEdit> = fresh_diags
+-                .iter()
+-                .map(|d| {
+-                    build_line_deletion_edit(content, &d.range, &removed_import_lines, &all_ranges)
+-                })
+-                .collect();
+-
+-            // Sort edits in reverse order so that byte offsets remain
+-            // valid as we apply deletions from bottom to top, and drop
+-            // duplicate edits produced when several diagnostics collapse
+-            // to one whole-group-statement removal.
+-            edits.sort_by_key(|e| Reverse(e.range.start));
+-            edits.dedup_by(|a, b| a.range == b.range);
++            let ranges: Vec<Range> = fresh_diags.iter().map(|diag| diag.range).collect();
++            let edits = plan_unused_import_deletions(content, &ranges)?;
+ 
+             Some(crate::code_actions::single_file_edit(doc_uri, edits))
+         } else {
+             let diag = &diags[0];
+-            let removed_import_lines = HashSet::from([diag.range.start.line as usize]);
+-            let removal_edit = build_line_deletion_edit(
+-                content,
+-                &diag.range,
+-                &removed_import_lines,
+-                std::slice::from_ref(&diag.range),
+-            );
++            let mut fresh = Vec::new();
++            self.collect_unused_import_diagnostics(&data.uri, content, &mut fresh);
++            if !fresh.iter().any(|current| current.range == diag.range) {
++                return None;
++            }
++            let edits = plan_unused_import_deletions(content, &[diag.range])?;
++            Some(crate::code_actions::single_file_edit(doc_uri, edits))
++        }
++    }
++}
+ 
+-            Some(crate::code_actions::single_file_edit(
+-                doc_uri,
+-                vec![removal_edit],
+-            ))
++/// Plan unused-import removals from exact CST statement/member owners. No
++/// source outside a diagnosed member/declaration can be consumed as a line.
++pub(crate) fn plan_unused_import_deletions(
++    content: &str,
++    ranges: &[Range],
++) -> Option<Vec<TextEdit>> {
++    use crate::text_position::{LineIndex, utf16_col_to_byte_offset};
++    use mago_span::HasSpan;
++    use mago_syntax::cst::{Statement, UseItems};
++    use std::collections::HashMap;
++    const LIMIT: usize = 10_000;
++    if content.len() > 8 * 1024 * 1024 || ranges.len() > LIMIT {
++        return None;
++    }
++    struct Owner {
++        start: usize,
++        end: usize,
++        members: Vec<(usize, usize)>,
++    }
++    fn collect<'a>(
++        statements: impl Iterator<Item = &'a Statement<'a>>,
++        owners: &mut Vec<Owner>,
++        members: &mut usize,
++    ) -> Option<()> {
++        for statement in statements {
++            match statement {
++                Statement::Namespace(namespace) => {
++                    collect(namespace.statements().iter(), owners, members)?
++                }
++                Statement::Use(statement) => {
++                    let spans: Vec<_> = match &statement.items {
++                        UseItems::Sequence(sequence) => sequence
++                            .items
++                            .iter()
++                            .take(LIMIT + 1)
++                            .map(|item| item.span())
++                            .collect(),
++                        UseItems::TypedSequence(sequence) => sequence
++                            .items
++                            .iter()
++                            .take(LIMIT + 1)
++                            .map(|item| item.span())
++                            .collect(),
++                        UseItems::TypedList(list) => list
++                            .items
++                            .iter()
++                            .take(LIMIT + 1)
++                            .map(|item| item.span())
++                            .collect(),
++                        UseItems::MixedList(list) => list
++                            .items
++                            .iter()
++                            .take(LIMIT + 1)
++                            .map(|item| item.span())
++                            .collect(),
++                    };
++                    *members = members.checked_add(spans.len())?;
++                    if owners.len() >= LIMIT || *members > LIMIT {
++                        return None;
++                    }
++                    let span = statement.span();
++                    owners.push(Owner {
++                        start: span.start.offset as usize,
++                        end: span.end.offset as usize,
++                        members: spans
++                            .into_iter()
++                            .map(|span| (span.start.offset as usize, span.end.offset as usize))
++                            .collect(),
++                    });
++                }
++                _ => {}
++            }
++        }
++        Some(())
++    }
++    let owners =
++        crate::parser::with_parsed_program(content, "unused_import_plan", |program, _| {
++            if !program.errors.is_empty() {
++                return None;
++            }
++            let mut owners = Vec::new();
++            let mut members = 0;
++            collect(program.statements.iter(), &mut owners, &mut members)?;
++            Some(owners)
++        })?;
++    let index = LineIndex::new(content);
++    let offset = |position: Position| {
++        let start = index.line_start(position.line as usize);
++        let end = index.line_start(position.line as usize + 1);
++        let line = content.get(start..end)?;
++        let at = start.checked_add(utf16_col_to_byte_offset(line, position.character))?;
++        (at <= content.len() && content.is_char_boundary(at) && index.position(at) == position)
++            .then_some(at)
++    };
++    let mut lookup = HashMap::new();
++    let mut removed: Vec<Vec<bool>> = owners
++        .iter()
++        .map(|owner| vec![false; owner.members.len()])
++        .collect();
++    for (owner_index, owner) in owners.iter().enumerate() {
++        if owner.start >= owner.end || owner.end > content.len() {
++            return None;
++        }
++        // Canonical diagnostics highlight the whole declaration when it has
++        // exactly one member, and the exact member otherwise.
++        if owner.members.len() == 1
++            && lookup
++                .insert((owner.start, owner.end), (owner_index, 0))
++                .is_some()
++        {
++            return None;
++        }
++        for (member_index, &span) in owner.members.iter().enumerate() {
++            if span.0 < span.1 && owner.start <= span.0 && span.1 <= owner.end {
++                if lookup.insert(span, (owner_index, member_index)).is_some() {
++                    return None;
++                }
++            } else {
++                return None;
++            }
++        }
++    }
++    let mut original_ranges = HashMap::new();
++    for range in ranges {
++        let span = (offset(range.start)?, offset(range.end)?);
++        let &(owner, member) = lookup.get(&span)?;
++        removed[owner][member] = true;
++        original_ranges.entry(owner).or_insert(range);
++    }
++    let removed_lines: HashSet<usize> = ranges
++        .iter()
++        .map(|range| range.start.line as usize)
++        .collect();
++    let comment = |text: &str| text.contains("//") || text.contains("/*") || text.contains('#');
++    let mut edits = Vec::new();
++    for (owner_index, owner) in owners.iter().enumerate() {
++        let mask = &removed[owner_index];
++        if !mask.iter().any(|removed| *removed) {
++            continue;
++        }
++        if mask.iter().all(|removed| *removed) {
++            // Closing-tag terminators are execution boundaries, not removable
++            // declaration punctuation. Refuse rather than consuming a tag.
++            if content.as_bytes().get(owner.end - 1) != Some(&b';') {
++                return None;
++            }
++            if comment(&content[owner.start..owner.end]) {
++                return None;
++            }
++            let range = *original_ranges.get(&owner_index)?;
++            let raw = build_line_deletion_edit(content, range, &removed_lines, ranges);
++            let (raw_start, raw_end) = (offset(raw.range.start)?, offset(raw.range.end)?);
++            let only_trivia = raw_start <= owner.start
++                && owner.end <= raw_end
++                && content
++                    .get(raw_start..owner.start)?
++                    .bytes()
++                    .all(|byte| byte.is_ascii_whitespace())
++                && content
++                    .get(owner.end..raw_end)?
++                    .bytes()
++                    .all(|byte| byte.is_ascii_whitespace());
++            let (start, end) = if only_trivia {
++                (raw_start, raw_end)
++            } else {
++                (owner.start, owner.end)
++            };
++            edits.push(TextEdit {
++                range: Range::new(index.position(start), index.position(end)),
++                new_text: String::new(),
++            });
++        } else {
++            for (member, &is_removed) in mask.iter().enumerate() {
++                if !is_removed {
++                    continue;
++                }
++                let span = owner.members[member];
++                let (start, end) = if mask[..member].contains(&false) {
++                    (owner.members[member - 1].1, span.1)
++                } else {
++                    (span.0, owner.members.get(member + 1)?.0)
++                };
++                if start > span.0
++                    || end < span.1
++                    || start < owner.start
++                    || end > owner.end
++                    || comment(&content[start..end])
++                {
++                    return None;
++                }
++                // Apart from this exact member, consume only its separator and
++                // whitespace; a neighboring used member is never part of it.
++                if !content[start..span.0]
++                    .bytes()
++                    .chain(content[span.1..end].bytes())
++                    .all(|byte| byte.is_ascii_whitespace() || byte == b',')
++                {
++                    return None;
++                }
++                edits.push(TextEdit {
++                    range: Range::new(index.position(start), index.position(end)),
++                    new_text: String::new(),
++                });
++            }
++        }
++    }
++    edits.sort_by_key(|edit| (edit.range.start, edit.range.end));
++    edits.dedup_by(|a, b| a.range == b.range);
++    // Raw blank-line policies may overlap only after each deletion has
++    // independently proved its declaration/member and surrounding trivia.
++    let mut merged: Vec<TextEdit> = Vec::new();
++    for edit in edits {
++        if let Some(previous) = merged.last_mut()
++            && previous.range.end >= edit.range.start
++        {
++            previous.range.end = previous.range.end.max(edit.range.end);
++        } else {
++            merged.push(edit);
+         }
+     }
++    Some(merged)
+ }
+ 
+ /// Check whether the cursor line belongs to a namespace-level `use` import.
+@@ -206,6 +406,7 @@ pub(crate) fn cursor_on_use_import_line(content: &str, line: u32) -> bool {
+     })
+ }
+ 
++/// Raw line policy. Production callers must use the CST-owned batch planner.
+ /// Build a `TextEdit` that deletes the full line(s) covered by `range`,
+ /// including the trailing newline.
+ ///
+@@ -215,7 +416,7 @@ pub(crate) fn cursor_on_use_import_line(content: &str, line: u32) -> bool {
+ /// unless every member of that group is being removed in this same
+ /// batch (`all_removed_ranges`), in which case the whole statement is
+ /// deleted, the same way a lone `use Foo\Bar;` line would be.
+-pub(crate) fn build_line_deletion_edit(
++fn build_line_deletion_edit(
+     content: &str,
+     range: &Range,
+     removed_import_lines: &HashSet<usize>,
+@@ -664,6 +865,7 @@ pub(crate) fn extend_range_for_group_member(content: &str, range: &Range) -> Opt
+ mod tests {
+     use super::*;
+     use crate::text_position::position_to_byte_offset;
++    use std::cmp::Reverse;
+ 
+     /// Test-only wrapper: builds a deletion edit treating only the
+     /// diagnostic's own line as removed (single-import scenario).
+diff --git a/src/code_lens.rs b/src/code_lens.rs
+index 249d2bf..1256a3b 100644
+--- a/src/code_lens.rs
++++ b/src/code_lens.rs
+@@ -457,9 +457,7 @@ impl Backend {
+     ) -> Option<Vec<Arc<ClassInfo>>> {
+         if !(class.kind == ClassLikeKind::Interface || class.is_abstract)
+             || class.keyword_offset == 0
+-            || !self
+-                .workspace_indexed
+-                .load(std::sync::atomic::Ordering::Acquire)
++            || !self.workspace_index_complete()
+         {
+             return None;
+         }
+@@ -821,3 +819,35 @@ impl Backend {
+         })
+     }
+ }
++
++// Draft append to src/code_lens.rs; existing Backend/parser, not fake counts.
++#[cfg(test)]
++mod incomplete_index_lens_tests {
++    use crate::Backend;
++    #[test]
++    fn incomplete_workspace_implementation_lens_does_not_claim_zero() {
++        let dir = tempfile::tempdir().unwrap();
++        std::fs::write(
++            dir.path().join("Contract.php"),
++            "<?php namespace App; interface Contract {}\n",
++        )
++        .unwrap();
++        std::fs::write(dir.path().join("Hidden.php"), b"<?php class Hidden {}\xff").unwrap();
++        let backend = Backend::new_test_with_workspace(dir.path().to_path_buf(), Vec::new());
++        backend.ensure_workspace_indexed_with_progress(None);
++        let class = backend
++            .symbols
++            .fqn_class_index
++            .read()
++            .get("App\\Contract")
++            .cloned()
++            .unwrap();
++        assert!(class.keyword_offset > 0);
++        assert!(
++            backend
++                .implementation_lens_descendants(&class, &|name| backend.find_or_load_class(name))
++                .is_none(),
++            "the existing unavailable path must remain available while indexed files were omitted"
++        );
++    }
++}
+diff --git a/src/definition/implementation.rs b/src/definition/implementation.rs
+index abae895..573bbb6 100644
+--- a/src/definition/implementation.rs
++++ b/src/definition/implementation.rs
+@@ -590,7 +590,7 @@ impl Backend {
+         {
+             self.ensure_workspace_indexed_for_request();
+         }
+-        let workspace_index_ready = self.workspace_indexed.load(Ordering::Acquire);
++        let workspace_index_ready = self.workspace_index_complete();
+ 
+         // Use the same configured URI membership as workspace indexing,
+         // references and rename. Prefixes include raw/canonical aliases and a
+diff --git a/src/diagnostics/unused_imports.rs b/src/diagnostics/unused_imports.rs
+index a97ca9a..cb29713 100644
+--- a/src/diagnostics/unused_imports.rs
++++ b/src/diagnostics/unused_imports.rs
+@@ -20,9 +20,7 @@ use crate::symbol_map::SymbolKind;
+ use crate::text_position::byte_range_to_lsp_range;
+ 
+ use super::helpers::{ByteRange, is_offset_in_ranges, make_tagged_diagnostic};
+-use super::use_statements::{
+-    compute_use_line_ranges, compute_use_statement_spans, find_use_statement,
+-};
++use super::use_statements::{compute_use_statement_spans, find_use_statement};
+ 
+ impl Backend {
+     /// Collect unused-import diagnostics for a single file.
+@@ -61,7 +59,7 @@ impl Backend {
+         // We need to exclude ClassReference spans that are part of `use`
+         // statements themselves — those are the *import declarations*, not
+         // actual usages of the imported name.
+-        let use_line_ranges = compute_use_line_ranges(content);
++        let use_line_ranges = namespace_import_declaration_ranges(content);
+ 
+         // ── Compute byte spans of whole `use` statements ────────────────
+         // Unlike `use_line_ranges` these are not brace-depth filtered (the
+@@ -237,7 +235,7 @@ impl Backend {
+ /// The byte ranges of a file's `use` statements and class declaration
+ /// lines, computed once and shared by every `namespace` block.
+ struct UseRanges<'a> {
+-    /// Namespace-level `use` lines (see [`compute_use_line_ranges`]).
++    /// Exact namespace-import declaration byte ranges.
+     use_lines: &'a [ByteRange],
+     /// Whole `use` statements (see [`compute_use_statement_spans`]).
+     use_statements: &'a [ByteRange],
+@@ -469,10 +467,60 @@ fn find_use_statement_range(
+     backend.offset_range_to_lsp_range(uri, content, start, end)
+ }
+ 
++/// Exact declaration ownership, never a line-wide usage exclusion. This also
++/// visits namespace imports in Blade's generated wrapper. Trait composition
++/// uses ClassLikeMember::TraitUse and must remain a real alias reference.
++fn namespace_import_declaration_ranges(content: &str) -> Vec<ByteRange> {
++    use mago_span::HasSpan;
++    use mago_syntax::{
++        cst::{Statement, Terminator},
++        walker::Walker,
++    };
++    struct Declarations;
++    impl<'ast, 'arena> Walker<'ast, 'arena, Vec<ByteRange>> for Declarations {
++        fn walk_in_statement(&self, node: &'ast Statement<'arena>, out: &mut Vec<ByteRange>) {
++            if let Statement::Use(import) = node {
++                // An invented/missing terminator cannot grant exclusion over
++                // the following expression. Other parse errors do not disable
++                // the whole collector or hide independently owned imports.
++                if matches!(import.terminator, Terminator::Missing(_)) {
++                    return;
++                }
++                let span = import.span();
++                out.push((span.start.offset as usize, span.end.offset as usize));
++            }
++        }
++        // Namespace import declarations cannot occur inside expressions.
++        // In particular closure `use ($x)` is not a Statement::Use. Avoid
++        // walking large literal/expression trees just to find declarations.
++        fn walk_expression(
++            &self,
++            _node: &'ast mago_syntax::cst::Expression<'arena>,
++            _out: &mut Vec<ByteRange>,
++        ) {
++        }
++    }
++    crate::parser::with_parsed_program(content, "unused_import_declaration_owners", |program, _| {
++        let mut ranges = Vec::new();
++        for statement in program.statements.iter() {
++            Declarations.walk_statement(statement, &mut ranges);
++        }
++        ranges.retain(|&(a, b)| {
++            a < b
++                && b <= content.len()
++                && content.is_char_boundary(a)
++                && content.is_char_boundary(b)
++        });
++        ranges.sort_unstable();
++        ranges.dedup();
++        ranges
++    })
++}
++
+ #[cfg(test)]
+ mod tests {
+     use super::*;
+-    use crate::diagnostics::use_statements::find_use_member;
++    use crate::diagnostics::use_statements::{compute_use_line_ranges, find_use_member};
+ 
+     /// Helper: no use-statement or declaration ranges to exclude.
+     fn referenced(content: &str, alias: &str) -> bool {
+diff --git a/src/fix.rs b/src/fix.rs
+index dd43b80..c1bb68a 100644
+--- a/src/fix.rs
++++ b/src/fix.rs
+@@ -31,7 +31,7 @@
+ //! rules use a `phpstan.` prefix (`phpstan.return.unusedType`). PHPStan
+ //! rules are only available when `--with-phpstan` is passed.
+ 
+-use std::collections::{BTreeMap, HashSet};
++use std::collections::BTreeMap;
+ use std::path::PathBuf;
+ 
+ use serde::Serialize;
+@@ -42,7 +42,8 @@ use crate::analyse::{
+     Colour, OpenedProject, OutputFormat, TableRow, dispatch_report, github_annotation,
+     note_plain_php_project, open_project, print_box, print_success_box, print_table, progress_bar,
+ };
+-use crate::code_actions::{build_line_deletion_edit, build_use_directive_deletion_edit};
++use crate::code_actions::plan_unused_import_deletions;
++mod blade_import_cleanup;
+ use crate::parser::with_parse_cache;
+ use crate::text_position::apply_text_edits;
+ use crate::virtual_members::with_active_resolved_class_cache;
+@@ -164,35 +165,19 @@ pub fn fix_unused_imports(
+         return (content.to_string(), Vec::new());
+     }
+ 
+-    // Collect which import lines are being removed (for blank-line
+-    // collapsing logic).
+-    let removed_import_lines: HashSet<usize> = diagnostics
+-        .iter()
+-        .map(|d| d.range.start.line as usize)
+-        .collect();
+     let all_ranges: Vec<Range> = diagnostics.iter().map(|d| d.range).collect();
+ 
+     // A template's `@use` directive is removed as the directive it is
+     // written as, not as a line of PHP.
+     let template = backend.is_blade_file(uri);
+-    let mut edits: Vec<TextEdit> = diagnostics
+-        .iter()
+-        .map(|d| {
+-            template
+-                .then(|| {
+-                    build_use_directive_deletion_edit(
+-                        content,
+-                        &d.range,
+-                        &removed_import_lines,
+-                        &all_ranges,
+-                    )
+-                })
+-                .flatten()
+-                .unwrap_or_else(|| {
+-                    build_line_deletion_edit(content, &d.range, &removed_import_lines, &all_ranges)
+-                })
+-        })
+-        .collect();
++    let planned = if template {
++        blade_import_cleanup::plan(backend, uri, content, &all_ranges)
++    } else {
++        plan_unused_import_deletions(content, &all_ranges)
++    };
++    let Some(mut edits) = planned else {
++        return (content.to_owned(), Vec::new());
++    };
+ 
+     // Sort edits in reverse order so byte offsets remain valid as we
+     // apply deletions from bottom to top, and drop duplicate edits
+diff --git a/src/fix/blade_import_cleanup.rs b/src/fix/blade_import_cleanup.rs
+new file mode 100644
+index 0000000..896d181
+--- /dev/null
++++ b/src/fix/blade_import_cleanup.rs
+@@ -0,0 +1,272 @@
++//! Original-template edits from shared CST ownership, never virtual line edits.
++use crate::{
++    Backend,
++    blade::source_map::BladeSourceMap,
++    code_actions::{build_use_directive_deletion_edit, plan_unused_import_deletions},
++    text_position::{LineIndex, utf16_col_to_byte_offset},
++};
++use mago_syntax::{
++    cst::{Block, Function, Method, MethodBody},
++    walker::Walker,
++};
++use sha2::{Digest, Sha256};
++use std::collections::HashSet;
++use tower_lsp::lsp_types::{Position, Range, TextEdit};
++
++const MAX_BYTES: usize = 8 * 1024 * 1024;
++const MAX_RANGES: usize = 10_000;
++const PROOF_BUDGET: usize = 100_000;
++const PREFIX: &str = "<?php\n";
++
++fn offset(text: &str, index: &LineIndex<'_>, position: Position) -> Option<usize> {
++    let start = index.line_start(position.line as usize);
++    let end = index.line_start(position.line as usize + 1);
++    let at = start.checked_add(utf16_col_to_byte_offset(
++        text.get(start..end)?,
++        position.character,
++    ))?;
++    (at <= text.len() && text.is_char_boundary(at) && index.position(at) == position).then_some(at)
++}
++
++/// Verify the complete piecewise mapping, not just two endpoints. All source
++/// bytes and both-direction anchors in the affected interval must agree with
++/// one contiguous original PHP substring; generated helper text is no owner.
++fn mapped_span(
++    template: &str,
++    php: &str,
++    map: &BladeSourceMap,
++    ti: &LineIndex<'_>,
++    pi: &LineIndex<'_>,
++    bytes: std::ops::Range<usize>,
++    budget: &mut usize,
++) -> Option<(usize, usize)> {
++    let (start, end) = (bytes.start, bytes.end);
++    if start >= end || end > template.len() {
++        return None;
++    }
++    let first = ti.position(start);
++    let last = ti.position(end);
++    let ps = offset(php, pi, map.blade_to_php(first))?;
++    let pe = offset(php, pi, map.blade_to_php(last))?;
++    if template.get(start..end)? != php.get(ps..pe)? {
++        return None;
++    }
++    let verify = |b: Position, p: Position| -> Option<()> {
++        let bo = offset(template, ti, b)?;
++        let po = offset(php, pi, p)?;
++        if bo < start
++            || bo > end
++            || po < ps
++            || po > pe
++            || po - ps != bo - start
++            || map.blade_to_php(b) != p
++            || (bo < end && map.try_php_to_blade(p) != Some(b))
++        {
++            return None;
++        }
++        Some(())
++    };
++    for line in first.line..=last.line {
++        if *budget == 0 {
++            return None;
++        }
++        *budget -= 1;
++        let lo = start.max(ti.line_start(line as usize));
++        let hi = end.min(ti.line_start(line as usize + 1));
++        if lo > hi {
++            return None;
++        }
++        for at in [lo, hi] {
++            let b = ti.position(at);
++            verify(b, pi.position(ps.checked_add(at - start)?))?;
++        }
++        if let Some(anchors) = map.adjustments.get(line as usize) {
++            for &(bc, pc) in anchors {
++                if *budget == 0 {
++                    return None;
++                }
++                *budget -= 1;
++                let b = Position::new(line, bc);
++                let p = Position::new(line.checked_add(map.prologue_lines)?, pc);
++                // Check either side so a generated zero-width segment cannot
++                // hide between matching original endpoints.
++                let bo = offset(template, ti, b);
++                let po = offset(php, pi, p);
++                let relevant = bo.is_some_and(|at| start <= at && at < end)
++                    || po.is_some_and(|at| ps <= at && at < pe);
++                if relevant {
++                    verify(b, p)?;
++                }
++            }
++        }
++    }
++    Some((ps, pe))
++}
++
++struct Found {
++    scope: u32,
++    body: Option<(usize, usize)>,
++    duplicate: bool,
++}
++impl Found {
++    fn body(&mut self, body: &Block<'_>) {
++        if self.body.is_some() {
++            self.duplicate = true;
++        }
++        self.body = Some((
++            body.left_brace.end.offset as usize,
++            body.right_brace.start.offset as usize,
++        ));
++    }
++}
++struct FindWrapper;
++impl<'ast, 'arena> Walker<'ast, 'arena, Found> for FindWrapper {
++    fn walk_in_function(&self, node: &'ast Function<'arena>, found: &mut Found) {
++        if crate::atom::bytes_to_str(node.name.value) == crate::blade::WRAPPER_FUNCTION
++            && node.parameter_list.parameters.is_empty()
++            && node.body.left_brace.start.offset == found.scope
++        {
++            found.body(&node.body);
++        }
++    }
++    fn walk_in_method(&self, node: &'ast Method<'arena>, found: &mut Found) {
++        if crate::atom::bytes_to_str(node.name.value) == crate::blade::WRAPPER_FUNCTION
++            && node.parameter_list.parameters.is_empty()
++            && let MethodBody::Concrete(body) = &node.body
++            && body.left_brace.start.offset == found.scope
++        {
++            found.body(body);
++        }
++    }
++}
++
++pub(super) fn plan(
++    backend: &Backend,
++    uri: &str,
++    template: &str,
++    ranges: &[Range],
++) -> Option<Vec<TextEdit>> {
++    if template.len() > MAX_BYTES || ranges.len() > MAX_RANGES {
++        return None;
++    }
++    let removed_lines: HashSet<_> = ranges.iter().map(|r| r.start.line as usize).collect();
++    let mut edits = Vec::new();
++    let mut island_ranges = Vec::new();
++    for range in ranges {
++        if let Some(edit) =
++            build_use_directive_deletion_edit(template, range, &removed_lines, ranges)
++        {
++            edits.push(edit);
++        } else {
++            island_ranges.push(*range);
++        }
++    }
++    if !island_ranges.is_empty() {
++        let php = backend.blade_virtual_php_arc(uri)?;
++        let map = backend.blade_source_maps.read().get(uri).cloned()?;
++        let projection = map.hierarchy_projection?;
++        if php.len() > MAX_BYTES
++            || <[u8; 32]>::from(Sha256::digest(php.as_bytes())) != projection.virtual_sha256
++            || <[u8; 32]>::from(Sha256::digest(template.as_bytes())) != projection.template_sha256
++        {
++            return None;
++        }
++        let body = crate::parser::with_parsed_program(&php, "blade_import_owner", |program, _| {
++            if !program.errors.is_empty() {
++                return None;
++            }
++            let mut found = Found {
++                scope: projection.wrapper_scope_start,
++                body: None,
++                duplicate: false,
++            };
++            for statement in program.statements.iter() {
++                FindWrapper.walk_statement(statement, &mut found);
++            }
++            if found.duplicate { None } else { found.body }
++        })?;
++        // Strip only the producer-owned wrapper braces. The shared planner
++        // now sees real island imports at top level, while generated prologue
++        // imports remain outside this owned body and cannot be edited here.
++        let synthetic = format!("{}{}", PREFIX, php.get(body.0..body.1)?);
++        if synthetic.len() > MAX_BYTES {
++            return None;
++        }
++        let ti = LineIndex::new(template);
++        let pi = LineIndex::new(&php);
++        let si = LineIndex::new(&synthetic);
++        let mut proof = PROOF_BUDGET;
++        let mut projected = Vec::new();
++        for range in island_ranges {
++            let a = offset(template, &ti, range.start)?;
++            let b = offset(template, &ti, range.end)?;
++            let (a, b) = mapped_span(template, &php, &map, &ti, &pi, a..b, &mut proof)?;
++            if a < body.0 || b > body.1 {
++                return None;
++            }
++            projected.push(Range::new(
++                si.position(PREFIX.len() + a - body.0),
++                si.position(PREFIX.len() + b - body.0),
++            ));
++        }
++        let planned = plan_unused_import_deletions(&synthetic, &projected)?;
++        for edit in planned {
++            if !edit.new_text.is_empty() {
++                return None;
++            }
++            let a = offset(&synthetic, &si, edit.range.start)?;
++            let b = offset(&synthetic, &si, edit.range.end)?;
++            // The shared plan may expand into harmless virtual blank lines.
++            // Keep that whitespace in the template: it may represent @endphp
++            // or generated boilerplate rather than user PHP. This only
++            // narrows an already CST-authorized deletion, never adds bytes.
++            let raw = synthetic.get(a..b)?;
++            let trimmed = raw.trim_matches(|c: char| c.is_ascii_whitespace());
++            if trimmed.is_empty() {
++                return None;
++            }
++            let left = raw.len()
++                - raw
++                    .trim_start_matches(|c: char| c.is_ascii_whitespace())
++                    .len();
++            let a = a + left;
++            let b = a + trimmed.len();
++            if a < PREFIX.len() {
++                return None;
++            }
++            let pa = body.0 + a - PREFIX.len();
++            let pb = body.0 + b - PREFIX.len();
++            if pa < body.0 || pb > body.1 {
++                return None;
++            }
++            let ba = map.try_php_to_blade(pi.position(pa))?;
++            let ta = offset(template, &ti, ba)?;
++            let tb = ta.checked_add(pb.checked_sub(pa)?)?;
++            if tb > template.len() || !template.is_char_boundary(tb) {
++                return None;
++            }
++            // The exclusive end can share an anchor with @endphp. Derive it
++            // from byte identity, then prove its forward mapping, rather than
++            // accepting the lossy reverse map's later directive boundary.
++            let bb = ti.position(tb);
++            if mapped_span(template, &php, &map, &ti, &pi, ta..tb, &mut proof)? != (pa, pb) {
++                return None;
++            }
++            edits.push(TextEdit {
++                range: Range::new(ba, bb),
++                new_text: String::new(),
++            });
++        }
++    }
++    // Mixed @use/island batches are atomic: one unmappable diagnostic above
++    // refused the entire plan. Validate all original-coordinate edits jointly.
++    edits.sort_by_key(|e| (e.range.start, e.range.end));
++    edits.dedup_by(|a, b| a.range == b.range);
++    if edits
++        .windows(2)
++        .any(|pair| pair[0].range.end > pair[1].range.start)
++    {
++        return None;
++    }
++    Some(edits)
++}
+diff --git a/src/indexing/preload.rs b/src/indexing/preload.rs
+index b20ad3f..de177eb 100644
+--- a/src/indexing/preload.rs
++++ b/src/indexing/preload.rs
+@@ -18,6 +18,224 @@ use tower_lsp::lsp_types::Url;
+ 
+ use crate::Backend;
+ 
++#[derive(Clone, Copy, Debug, PartialEq, Eq)]
++pub(crate) enum WorkspaceIndexOutcome {
++    Complete,
++    Unavailable,
++    Partial {
++        unreadable_files: usize,
++        overflow: bool,
++    },
++    Failed,
++    Running,
++}
++
++impl WorkspaceIndexOutcome {
++    pub(crate) fn message(self) -> String {
++        match self {
++            Self::Complete => "Workspace index ready".into(),
++            Self::Unavailable => "Workspace index is not available".into(),
++            Self::Partial {
++                unreadable_files: 1,
++                overflow: false,
++            } => "Workspace index partial: 1 file could not be read".into(),
++            Self::Partial {
++                unreadable_files,
++                overflow: false,
++            } => format!("Workspace index partial: {unreadable_files} files could not be read"),
++            Self::Partial {
++                unreadable_files,
++                overflow: true,
++            } => format!(
++                "Workspace index partial: at least {unreadable_files} files could not be read"
++            ),
++            Self::Failed => "Workspace indexing failed".into(),
++            Self::Running => "Workspace indexing is still running".into(),
++        }
++    }
++}
++
++/// Completeness is separate from the cached completed-attempt flag.
++/// Only failed logical URIs allocate entries; source contents are not retained.
++#[derive(Default)]
++pub(crate) struct WorkspaceIndexState {
++    running: bool,
++    failed: bool,
++    unreadable: HashSet<String>,
++    unreadable_overflow: bool,
++}
++
++impl WorkspaceIndexState {
++    fn outcome(&self) -> WorkspaceIndexOutcome {
++        if self.running {
++            WorkspaceIndexOutcome::Running
++        } else if self.failed {
++            WorkspaceIndexOutcome::Failed
++        } else if !self.unreadable.is_empty() || self.unreadable_overflow {
++            WorkspaceIndexOutcome::Partial {
++                unreadable_files: self.unreadable.len(),
++                overflow: self.unreadable_overflow,
++            }
++        } else {
++            WorkspaceIndexOutcome::Complete
++        }
++    }
++    fn retain_failure(&mut self, uri: &str) {
++        const MAX_RETAINED_FAILURES: usize = 4096;
++        if self.unreadable.contains(uri) {
++            return;
++        }
++        if self.unreadable.len() < MAX_RETAINED_FAILURES {
++            self.unreadable.insert(uri.to_owned());
++        } else {
++            self.unreadable_overflow = true;
++        }
++    }
++}
++
++/// Declared after the pass lock so unwind records failure before unlocking it.
++struct WorkspaceIndexPass<'a> {
++    backend: &'a Backend,
++    had_workspace_root: bool,
++    finished: bool,
++}
++
++impl<'a> WorkspaceIndexPass<'a> {
++    fn begin(backend: &'a Backend) -> Self {
++        let had_workspace_root = backend.workspace.workspace_root.read().is_some();
++        let mut state = backend.workspace_index_outcome.lock();
++        state.running = true;
++        state.failed = false;
++        state.unreadable.clear();
++        state.unreadable_overflow = false;
++        Self {
++            backend,
++            had_workspace_root,
++            finished: false,
++        }
++    }
++    fn finish(mut self) -> WorkspaceIndexOutcome {
++        let mut state = self.backend.workspace_index_outcome.lock();
++        state.running = false;
++        let outcome = match state.outcome() {
++            WorkspaceIndexOutcome::Complete if !self.had_workspace_root => {
++                WorkspaceIndexOutcome::Unavailable
++            }
++            outcome => outcome,
++        };
++        self.finished = true;
++        outcome
++    }
++}
++
++impl Drop for WorkspaceIndexPass<'_> {
++    fn drop(&mut self) {
++        if !self.finished {
++            let mut state = self.backend.workspace_index_outcome.lock();
++            state.running = false;
++            state.failed = true;
++            if self.had_workspace_root {
++                self.backend
++                    .workspace_indexed
++                    .store(true, Ordering::Release);
++            }
++            *self.backend.workspace_index_status.lock() = None;
++        }
++    }
++}
++
++enum IndexRead {
++    Content(String),
++    Vanished,
++    Unavailable,
++}
++
++fn read_index_path(path: &Path) -> IndexRead {
++    match std::fs::read_to_string(path) {
++        Ok(content) => IndexRead::Content(content),
++        Err(error) if error.kind() == std::io::ErrorKind::NotFound => IndexRead::Vanished,
++        Err(_) => IndexRead::Unavailable,
++    }
++}
++
++impl Backend {
++    pub(crate) fn workspace_index_complete(&self) -> bool {
++        self.workspace_indexed.load(Ordering::Acquire)
++            && self.workspace_index_outcome.lock().outcome() == WorkspaceIndexOutcome::Complete
++    }
++    pub(crate) fn workspace_index_outcome(&self) -> WorkspaceIndexOutcome {
++        let outcome = self.workspace_index_outcome.lock().outcome();
++        if outcome == WorkspaceIndexOutcome::Complete
++            && !self.workspace_indexed.load(Ordering::Acquire)
++        {
++            WorkspaceIndexOutcome::Unavailable
++        } else {
++            outcome
++        }
++    }
++    fn read_index_uri(&self, uri: &str, supplied: Option<String>) -> IndexRead {
++        if let Some(content) = supplied.or_else(|| self.get_file_content(uri)) {
++            return IndexRead::Content(content);
++        }
++        // Classify only after the existing URI/source-authority reader failed.
++        let preferred = self.symbols.source_authority.preferred(uri);
++        let uri = preferred.as_deref().unwrap_or(uri);
++        if Url::parse(uri)
++            .ok()
++            .and_then(|url| url.to_file_path().ok())
++            .is_some_and(|path| {
++                std::fs::metadata(path)
++                    .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
++            })
++        {
++            IndexRead::Vanished
++        } else {
++            IndexRead::Unavailable
++        }
++    }
++    fn retain_owned_index_read_failures<T>(
++        &self,
++        items: &[T],
++        uri_of: &impl Fn(&T) -> &str,
++        tickets: &[Arc<()>],
++        failed: Vec<usize>,
++    ) {
++        if failed.is_empty() {
++            return;
++        }
++        let _merge = self.index_merge_gate.lock();
++        // Resolve physical-source authority before taking document/read-state
++        // locks. An alias disk failure does not invalidate its current overlay.
++        let failed: Vec<_> = failed
++            .into_iter()
++            .map(|index| {
++                let preferred = self
++                    .symbols
++                    .source_authority
++                    .preferred(uri_of(&items[index]));
++                (index, preferred)
++            })
++            .collect();
++        let open = self.open_files.read();
++        let documents = self.diag.documents.lock();
++        let mut state = self.workspace_index_outcome.lock();
++        for (index, preferred) in failed {
++            let uri = uri_of(&items[index]);
++            let current_preferred_overlay = preferred.as_deref().is_some_and(|owner| {
++                open.get(owner).is_some_and(|text| {
++                    matches!(documents.capture_source(owner, text), Ok(Some(_)))
++                })
++            });
++            if !open.contains_key(uri)
++                && !current_preferred_overlay
++                && documents.index_current(uri, &tickets[index])
++            {
++                state.retain_failure(uri);
++            }
++        }
++    }
++}
++
+ impl Backend {
+     /// Eagerly full-parse the given autoload helper files in parallel.
+     ///
+@@ -68,7 +286,8 @@ impl Backend {
+             &files,
+             |(uri, _)| uri.as_str(),
+             |(_, path)| index_progress_weight_for_path(path),
+-            |(_, path)| std::fs::read_to_string(path).ok(),
++            |(_, path)| read_index_path(path),
++            false,
+             Some(&|done, _, _, _| {
+                 if let Some(progress) = progress {
+                     let previous = reported.fetch_max(done, Ordering::Relaxed);
+@@ -133,7 +352,9 @@ impl Backend {
+                 };
+                 self.ensure_workspace_index_ready_with_progress(Some(&forward));
+             }
+-            None => self.ensure_workspace_index_ready_with_progress(None),
++            None => {
++                self.ensure_workspace_index_ready_with_progress(None);
++            }
+         }
+     }
+ 
+@@ -204,29 +425,35 @@ impl Backend {
+     pub(crate) fn ensure_workspace_indexed_with_progress(
+         &self,
+         progress: Option<&(dyn Fn(u32, String) + Sync)>,
+-    ) {
+-        self.ensure_workspace_indexed_with_progress_mode(progress, true);
++    ) -> WorkspaceIndexOutcome {
++        self.ensure_workspace_indexed_with_progress_mode(progress, true)
+     }
+ 
+     pub(crate) fn ensure_workspace_index_ready_with_progress(
+         &self,
+         progress: Option<&(dyn Fn(u32, String) + Sync)>,
+-    ) {
+-        self.ensure_workspace_indexed_with_progress_mode(progress, false);
++    ) -> WorkspaceIndexOutcome {
++        self.ensure_workspace_indexed_with_progress_mode(progress, false)
+     }
+ 
+     fn ensure_workspace_indexed_with_progress_mode(
+         &self,
+         progress: Option<&(dyn Fn(u32, String) + Sync)>,
+         refresh_completed: bool,
+-    ) {
++    ) -> WorkspaceIndexOutcome {
+         // Reference counts and CodeLens resolution can ask for the complete
+         // index once per declaration.  Once the initial pass has published
+         // every batch, those requests must reuse it instead of walking the
+         // workspace again.  Watched-file notifications keep the completed
+         // index current after this point.
+         if !refresh_completed && self.workspace_indexed.load(Ordering::Acquire) {
+-            return;
++            let outcome = self.workspace_index_outcome();
++            if outcome != WorkspaceIndexOutcome::Running {
++                if let Some(progress) = progress {
++                    progress(100, outcome.message());
++                }
++                return outcome;
++            }
+         }
+ 
+         let _workspace_index_guard = self.acquire_workspace_index_lock(progress);
+@@ -234,12 +461,14 @@ impl Backend {
+         // Another request may have completed the index while this one was
+         // waiting for the single-flight lock.
+         if !refresh_completed && self.workspace_indexed.load(Ordering::Acquire) {
++            let outcome = self.workspace_index_outcome();
+             if let Some(progress) = progress {
+-                progress(100, "Workspace index ready".to_string());
++                progress(100, outcome.message());
+             }
+-            return;
++            return outcome;
+         }
+ 
++        let pass = WorkspaceIndexPass::begin(self);
+         let start = std::time::Instant::now();
+         // A refresh of a finished index must not re-infer every Blade
+         // template when the walk finds nothing new. Captured before the
+@@ -254,7 +483,7 @@ impl Backend {
+         let vendor_prefixes = self.workspace_vendor_uri_prefixes();
+ 
+         // ── Phase 1: fqn_uri_index files (user only) ─────────────────────
+-        let index_uris: Vec<String> = self
++        let index_uris: HashSet<String> = self
+             .symbols
+             .fqn_uri_index
+             .read()
+@@ -410,10 +639,9 @@ impl Backend {
+                 self.index_resource_paths_batch(&resource_work);
+             }
+             self.report_workspace_index_progress(progress, 99, "Finalizing workspace index");
+-            // Release pairs with the Acquire loads in
+-            // `reference_candidate_uris_for_keys` and `find_implementors`.
+-            self.workspace_indexed
+-                .store(true, std::sync::atomic::Ordering::Release);
++            // Preserve the existing attempted-index lifecycle while the
++            // separate Running outcome still fences conclusive consumers.
++            self.workspace_indexed.store(true, Ordering::Release);
+ 
+             // Blade templates parsed before their controllers saw no
+             // `view()` call sites; with the whole workspace indexed,
+@@ -434,9 +662,11 @@ impl Backend {
+                 );
+             }
+         }
+-        self.report_workspace_index_progress(progress, 100, "Workspace index ready");
++        let outcome = pass.finish();
++        self.report_workspace_index_progress(progress, 100, outcome.message());
+         *self.workspace_index_status.lock() = None;
+         tracing::info!("ensure_workspace_indexed: total time {:?}", start.elapsed());
++        outcome
+     }
+ 
+     /// Parse a batch of files in parallel using OS threads.
+@@ -457,7 +687,8 @@ impl Backend {
+             &files,
+             |(uri, _)| uri.as_str(),
+             |(uri, content)| self.index_progress_weight_for_uri(uri, content.as_deref()),
+-            |(uri, content)| content.clone().or_else(|| self.get_file_content(uri)),
++            |(uri, content)| self.read_index_uri(uri, content.clone()),
++            true,
+             progress,
+         );
+     }
+@@ -476,7 +707,8 @@ impl Backend {
+             files,
+             |(uri, _)| uri.as_str(),
+             |(_, path)| index_progress_weight_for_path(path),
+-            |(_, path)| std::fs::read_to_string(path).ok(),
++            |(_, path)| read_index_path(path),
++            true,
+             progress,
+         );
+     }
+@@ -495,7 +727,8 @@ impl Backend {
+         items: &[T],
+         uri_of: impl Fn(&T) -> &str + Sync,
+         weight_of: impl Fn(&T) -> u64 + Sync,
+-        content_of: impl Fn(&T) -> Option<String> + Sync,
++        content_of: impl Fn(&T) -> IndexRead + Sync,
++        track_workspace_reads: bool,
+         progress: Option<&(dyn Fn(usize, usize, u64, u64) + Sync)>,
+     ) {
+         if items.is_empty() {
+@@ -511,6 +744,15 @@ impl Backend {
+                 self.release_index_source_ticket(uri_of(item), &ticket);
+             }
+         };
++        let failed_reads = parking_lot::Mutex::new(Vec::new());
++        let read_content = |idx: usize| match content_of(&items[idx]) {
++            IndexRead::Content(content) => Some(content),
++            IndexRead::Vanished => None,
++            IndexRead::Unavailable => {
++                failed_reads.lock().push(idx);
++                None
++            }
++        };
+         let parsed = AtomicUsize::new(0);
+         let weights: Vec<u64> = items.iter().map(&weight_of).collect();
+         let total_units = weights.iter().copied().sum::<u64>().max(1);
+@@ -520,7 +762,7 @@ impl Backend {
+         if total <= 2 {
+             let mut results = Vec::with_capacity(total);
+             for (idx, item) in items.iter().enumerate() {
+-                if let Some(content) = content_of(item) {
++                if let Some(content) = read_content(idx) {
+                     results.push(self.parse_ast_index_update_for_ticket(
+                         uri_of(item),
+                         &content,
+@@ -538,6 +780,14 @@ impl Backend {
+             }
+             report_weighted_merge_progress(progress, total, total_units);
+             self.apply_ast_index_parse_results_batch(results);
++            if track_workspace_reads {
++                self.retain_owned_index_read_failures(
++                    items,
++                    &uri_of,
++                    &tickets,
++                    failed_reads.into_inner(),
++                );
++            }
+             release_tickets(tickets);
+             return;
+         }
+@@ -548,7 +798,7 @@ impl Backend {
+         let mut results = crate::parallel::map_indexed("workspace-parse", total, |_, work_idx| {
+             let idx = work_order[work_idx];
+             let item = &items[idx];
+-            let result = content_of(item).map(|content| {
++            let result = read_content(idx).map(|content| {
+                 (
+                     idx,
+                     self.parse_ast_index_update_for_ticket(
+@@ -573,6 +823,14 @@ impl Backend {
+         self.apply_ast_index_parse_results_batch(
+             results.into_iter().map(|(_, (_, result))| result).collect(),
+         );
++        if track_workspace_reads {
++            self.retain_owned_index_read_failures(
++                items,
++                &uri_of,
++                &tickets,
++                failed_reads.into_inner(),
++            );
++        }
+         release_tickets(tickets);
+     }
+ 
+@@ -649,3 +907,327 @@ pub(crate) fn largest_first_work_order(weights: &[u64]) -> Vec<usize> {
+ fn index_progress_weight_for_path(path: &Path) -> u64 {
+     path.metadata().map(|meta| meta.len()).unwrap_or(1).max(1)
+ }
++
++// Append to proposed preload.rs only AFTER production admission.
++#[cfg(test)]
++mod workspace_index_outcome_tests {
++    use super::*;
++
++    #[test]
++    fn workspace_index_outcome_failure_storage_is_bounded_and_overflow_stays_partial() {
++        let mut state = WorkspaceIndexState::default();
++        for n in 0..4097 {
++            state.retain_failure(&format!("file:///input-{n}.php"));
++        }
++        assert_eq!(state.unreadable.len(), 4096);
++        assert!(state.unreadable_overflow);
++        assert_eq!(
++            state.outcome(),
++            WorkspaceIndexOutcome::Partial {
++                unreadable_files: 4096,
++                overflow: true
++            }
++        );
++        state.retain_failure("file:///input-0.php");
++        assert_eq!(state.unreadable.len(), 4096);
++        assert_eq!(
++            state.outcome().message(),
++            "Workspace index partial: at least 4096 files could not be read"
++        );
++    }
++
++    #[test]
++    fn workspace_index_outcome_running_refresh_never_exposes_complete() {
++        let directory = tempfile::tempdir().unwrap();
++        let backend = Backend::new_test_with_workspace(directory.path().to_path_buf(), Vec::new());
++        assert_eq!(
++            backend.workspace_index_outcome(),
++            WorkspaceIndexOutcome::Unavailable
++        );
++        backend.mark_workspace_indexed();
++        backend
++            .workspace_index_outcome
++            .lock()
++            .retain_failure("file:///failed.php");
++        assert!(!backend.workspace_index_complete());
++        let _lock = backend.workspace_index_lock.lock();
++        let pass = WorkspaceIndexPass::begin(&backend);
++        assert_eq!(
++            backend.workspace_index_outcome(),
++            WorkspaceIndexOutcome::Running
++        );
++        assert!(!backend.workspace_index_complete());
++        assert_eq!(pass.finish(), WorkspaceIndexOutcome::Complete);
++        assert!(backend.workspace_index_complete());
++    }
++
++    #[test]
++    fn workspace_index_outcome_read_errors_distinguish_vanished_from_invalid_utf8() {
++        let dir = tempfile::tempdir().unwrap();
++        assert!(matches!(
++            read_index_path(&dir.path().join("missing.php")),
++            IndexRead::Vanished
++        ));
++        let path = dir.path().join("invalid.php");
++        std::fs::write(&path, b"<?php\xff").unwrap();
++        assert!(matches!(read_index_path(&path), IndexRead::Unavailable));
++        let backend = Backend::new_test();
++        backend.mark_workspace_indexed();
++        let missing = dir.path().join("vanished.php");
++        backend.parse_paths_parallel_with_progress(
++            &[(crate::util::path_to_uri(&missing), missing)],
++            None,
++        );
++        assert!(backend.workspace_index_complete());
++    }
++
++    #[test]
++    fn workspace_index_outcome_only_current_nonopen_failures_are_admitted() {
++        let backend = Backend::new_test();
++        let items = vec![
++            "file:///stale.php".to_owned(),
++            "file:///open.php".to_owned(),
++            "file:///current.php".to_owned(),
++        ];
++        let tickets = items
++            .iter()
++            .map(|uri| backend.index_source_ticket(uri))
++            .collect::<Vec<_>>();
++        backend.diag.documents.lock().retire_index_source(&items[0]);
++        backend
++            .open_files
++            .write()
++            .insert(items[1].clone(), Arc::new("<?php".into()));
++        backend.retain_owned_index_read_failures(
++            &items,
++            &|uri: &String| uri.as_str(),
++            &tickets,
++            vec![0, 1, 2],
++        );
++        let state = backend.workspace_index_outcome.lock();
++        assert_eq!(state.unreadable.len(), 1);
++        assert!(state.unreadable.contains(&items[2]));
++        drop(state);
++        for (uri, ticket) in items.iter().zip(tickets) {
++            backend.release_index_source_ticket(uri, &ticket);
++        }
++    }
++
++    #[tokio::test]
++    async fn workspace_index_outcome_task_failure_remains_failed_until_explicit_new_pass() {
++        let directory = tempfile::tempdir().unwrap();
++        let backend = Backend::new_test_with_workspace(directory.path().to_path_buf(), Vec::new());
++        let worker = backend.clone_for_blocking();
++        let result: Option<()> =
++            crate::server::run_blocking_cancel_safe("index-outcome-test", move || {
++                let _lock = worker.workspace_index_lock.lock();
++                let _pass = WorkspaceIndexPass::begin(&worker);
++                panic!("owned index worker failure");
++            })
++            .await;
++        assert!(result.is_none());
++        assert_eq!(
++            backend.workspace_index_outcome(),
++            WorkspaceIndexOutcome::Failed
++        );
++        assert!(backend.workspace_indexed.load(Ordering::Acquire));
++        assert!(!backend.workspace_index_complete());
++        assert_eq!(
++            backend.ensure_workspace_index_ready_with_progress(None),
++            WorkspaceIndexOutcome::Failed
++        );
++        assert_eq!(
++            backend.ensure_workspace_indexed_with_progress(None),
++            WorkspaceIndexOutcome::Complete
++        );
++    }
++}
++
++// Append as a separate private module to canonical src/indexing/preload.rs.
++#[cfg(all(test, unix))]
++mod workspace_index_alias_overlay_tests {
++    use super::*;
++    use tower_lsp::lsp_types::{DidOpenTextDocumentParams, TextDocumentItem};
++
++    #[tokio::test]
++    async fn workspace_index_alias_disk_failure_does_not_retire_current_preferred_overlay() {
++        let directory = tempfile::tempdir().unwrap();
++        let root = directory.path().canonicalize().unwrap();
++        let target = root.join("Target.php");
++        let alias = root.join("Alias.php");
++        std::fs::write(&target, b"<?php\xff").unwrap();
++        std::os::unix::fs::symlink(&target, &alias).unwrap();
++        let owner = Url::from_file_path(&target).unwrap();
++        let failed = Url::from_file_path(&alias).unwrap();
++        let backend = Backend::new_test_with_workspace(root.clone(), vec![]);
++        // The same source-authority lifecycle invoked by ProjectRouter before
++        // Backend.on_did_open; Backend alone does not own router admission.
++        backend.symbols.source_authority.open(owner.as_str());
++        let overlay =
++            "<?php class CurrentOverlay { public function overlayOnly(): int { return 42; } }\n";
++        backend
++            .on_did_open(DidOpenTextDocumentParams {
++                text_document: TextDocumentItem {
++                    uri: owner.clone(),
++                    language_id: "php".into(),
++                    version: 7,
++                    text: overlay.into(),
++                },
++            })
++            .await;
++        assert_eq!(
++            backend
++                .symbols
++                .source_authority
++                .preferred(failed.as_str())
++                .as_deref(),
++            Some(owner.as_str())
++        );
++        assert_eq!(
++            backend.get_file_content(failed.as_str()).as_deref(),
++            Some(overlay)
++        );
++        assert!(backend.parsed_uris.read().contains(owner.as_str()));
++        {
++            let open = backend.open_files.read();
++            let text = open.get(owner.as_str()).unwrap();
++            assert!(
++                matches!(
++                    backend
++                        .diag
++                        .documents
++                        .lock()
++                        .capture_source(owner.as_str(), text),
++                    Ok(Some(_))
++                ),
++                "actual accepted current overlay required"
++            );
++        }
++        backend.mark_workspace_indexed();
++        // Actual production batch deliberately reads the alias's invalid disk
++        // bytes, then must reconcile failure with current preferred ownership.
++        backend.parse_paths_parallel_with_progress(&[(failed.to_string(), alias)], None);
++        assert!(
++            backend.workspace_index_complete(),
++            "raw alias failure cannot make a valid preferred editor owner unavailable"
++        );
++        assert!(
++            !backend
++                .workspace_index_outcome
++                .lock()
++                .unreadable
++                .contains(failed.as_str())
++        );
++        assert_eq!(
++            backend.get_file_content(failed.as_str()).as_deref(),
++            Some(overlay)
++        );
++        assert!(backend.parsed_uris.read().contains(owner.as_str()));
++        // A separate genuinely unreadable source still makes the index partial.
++        let unrelated = root.join("Unrelated.php");
++        std::fs::write(&unrelated, b"<?php\xff").unwrap();
++        let unrelated_uri = Url::from_file_path(&unrelated).unwrap();
++        backend.parse_paths_parallel_with_progress(&[(unrelated_uri.to_string(), unrelated)], None);
++        assert_eq!(
++            backend.workspace_index_outcome(),
++            WorkspaceIndexOutcome::Partial {
++                unreadable_files: 1,
++                overflow: false
++            }
++        );
++        assert!(
++            backend
++                .workspace_index_outcome
++                .lock()
++                .unreadable
++                .contains(unrelated_uri.as_str())
++        );
++    }
++
++    #[tokio::test]
++    async fn workspace_index_preferred_name_without_current_open_source_is_not_proof() {
++        let directory = tempfile::tempdir().unwrap();
++        let root = directory.path().canonicalize().unwrap();
++        let target = root.join("Target.php");
++        let alias = root.join("Alias.php");
++        std::fs::write(&target, b"<?php\xff").unwrap();
++        std::os::unix::fs::symlink(&target, &alias).unwrap();
++        let backend = Backend::new_test_with_workspace(root, vec![]);
++        let owner = Url::from_file_path(&target).unwrap();
++        let failed = Url::from_file_path(&alias).unwrap();
++        backend.symbols.source_authority.open(owner.as_str());
++        backend.mark_workspace_indexed();
++        // A ledger alias alone (or orphaned open bytes without an accepted
++        // document incarnation) must never suppress an actual read failure.
++        backend
++            .open_files
++            .write()
++            .insert(owner.to_string(), Arc::new("<?php class Orphan {}".into()));
++        backend.parse_paths_parallel_with_progress(&[(failed.to_string(), alias)], None);
++        assert_eq!(
++            backend.workspace_index_outcome(),
++            WorkspaceIndexOutcome::Partial {
++                unreadable_files: 1,
++                overflow: false
++            }
++        );
++    }
++}
++
++#[cfg(test)]
++mod workspace_index_rootless_outcome_tests {
++    use super::*;
++
++    #[test]
++    fn workspace_index_outcome_rootless_success_and_unwind_do_not_admit_complete_index() {
++        let backend = Backend::new_test();
++        assert_eq!(
++            backend.workspace_index_outcome(),
++            WorkspaceIndexOutcome::Unavailable
++        );
++        let reports = std::sync::Mutex::new(Vec::new());
++        assert_eq!(
++            backend.ensure_workspace_indexed_with_progress(Some(&|percentage, message| {
++                reports.lock().unwrap().push((percentage, message));
++            })),
++            WorkspaceIndexOutcome::Unavailable
++        );
++        assert_eq!(
++            backend.workspace_index_outcome(),
++            WorkspaceIndexOutcome::Unavailable
++        );
++        assert_eq!(
++            reports
++                .lock()
++                .unwrap()
++                .last()
++                .map(|(_, message)| message.as_str()),
++            Some("Workspace index is not available")
++        );
++        assert!(
++            !reports
++                .lock()
++                .unwrap()
++                .iter()
++                .any(|(_, message)| message == "Workspace index ready")
++        );
++        assert!(!backend.workspace_indexed.load(Ordering::Acquire));
++        assert!(!backend.workspace_index_complete());
++        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
++            let _lock = backend.workspace_index_lock.lock();
++            let _pass = WorkspaceIndexPass::begin(&backend);
++            assert_eq!(
++                backend.workspace_index_outcome(),
++                WorkspaceIndexOutcome::Running
++            );
++            panic!("rootless index attempt failed");
++        }));
++        assert!(result.is_err());
++        assert_eq!(
++            backend.workspace_index_outcome(),
++            WorkspaceIndexOutcome::Failed
++        );
++        assert!(!backend.workspace_indexed.load(Ordering::Acquire));
++        assert!(!backend.workspace_index_complete());
++    }
++}
+diff --git a/src/lib.rs b/src/lib.rs
+index 3434fea..b9b858b 100644
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -87,6 +87,7 @@
+ 
+ pub mod workbench_active_target;
+ pub mod workbench_builtins;
++pub mod workbench_optimize_imports;
+ pub mod workbench_rename;
+ pub mod workbench_routes;
+ pub mod workbench_views;
+@@ -1149,6 +1150,8 @@ pub struct Backend {
+     /// update it incrementally, and an explicit reference search may refresh
+     /// it once to discover filesystem changes the editor did not report.
+     pub(crate) workspace_indexed: Arc<std::sync::atomic::AtomicBool>,
++    /// Retained failures/completeness, separately from a cached scan attempt.
++    pub(crate) workspace_index_outcome: Arc<Mutex<crate::indexing::preload::WorkspaceIndexState>>,
+     /// Serializes whole-workspace indexing so a foreground request does not
+     /// duplicate the background full-index parse.
+     pub(crate) workspace_index_lock: Arc<Mutex<()>>,
+@@ -1418,6 +1421,7 @@ impl Backend {
+             blade_injected_vars: Arc::new(RwLock::new(HashMap::new())),
+             typed_receiver_view_spans_cache: Arc::new(RwLock::new(HashMap::new())),
+             workspace_indexed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
++            workspace_index_outcome: Arc::new(Mutex::new(Default::default())),
+             workspace_index_lock: Arc::new(Mutex::new(())),
+             full_index_in_progress: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+             workspace_index_status: Arc::new(Mutex::new(None)),
+@@ -2262,6 +2266,7 @@ impl Backend {
+             blade_injected_vars: Arc::clone(&self.blade_injected_vars),
+             typed_receiver_view_spans_cache: Arc::clone(&self.typed_receiver_view_spans_cache),
+             workspace_indexed: Arc::clone(&self.workspace_indexed),
++            workspace_index_outcome: Arc::clone(&self.workspace_index_outcome),
+             workspace_index_lock: Arc::clone(&self.workspace_index_lock),
+             full_index_in_progress: Arc::clone(&self.full_index_in_progress),
+             workspace_index_status: Arc::clone(&self.workspace_index_status),
+diff --git a/src/main.rs b/src/main.rs
+index 43d25e3..2ace055 100644
+--- a/src/main.rs
++++ b/src/main.rs
+@@ -574,6 +574,10 @@ async fn async_main() {
+                         ProjectRouter::workbench_call_hierarchy_outgoing,
+                     )
+                     .custom_method("phpWorkbench/routes", ProjectRouter::workbench_routes)
++                    .custom_method(
++                        phpantom_lsp::workbench_optimize_imports::METHOD,
++                        ProjectRouter::workbench_optimize_imports,
++                    )
+                     .custom_method(
+                         "phpWorkbench/renameChecked",
+                         ProjectRouter::workbench_rename_checked,
+@@ -618,6 +622,10 @@ async fn async_main() {
+                         ProjectRouter::workbench_call_hierarchy_outgoing,
+                     )
+                     .custom_method("phpWorkbench/routes", ProjectRouter::workbench_routes)
++                    .custom_method(
++                        phpantom_lsp::workbench_optimize_imports::METHOD,
++                        ProjectRouter::workbench_optimize_imports,
++                    )
+                     .custom_method(
+                         "phpWorkbench/renameChecked",
+                         ProjectRouter::workbench_rename_checked,
+diff --git a/src/reference_index.rs b/src/reference_index.rs
+index 7007389..f3e39f3 100644
+--- a/src/reference_index.rs
++++ b/src/reference_index.rs
+@@ -9,6 +9,7 @@
+ use std::cell::OnceCell;
+ use std::collections::{HashMap, HashSet};
+ use std::sync::Arc;
++#[cfg(test)]
+ use std::sync::atomic::Ordering;
+ 
+ use parking_lot::RwLock;
+@@ -474,7 +475,7 @@ impl Backend {
+         &self,
+         keys: &[ReferenceIndexKey],
+     ) -> Option<HashSet<Arc<str>>> {
+-        if self.skip_reference_index || !self.workspace_indexed.load(Ordering::Acquire) {
++        if self.skip_reference_index || !self.workspace_index_complete() {
+             return None;
+         }
+ 
+@@ -494,7 +495,7 @@ impl Backend {
+     /// is conclusive: semantic filtering can remove name matches, but it
+     /// cannot create a reference that the symbol map did not index.
+     pub(crate) fn indexed_reference_count(&self, key: &ReferenceIndexKey) -> Option<usize> {
+-        if self.skip_reference_index || !self.workspace_indexed.load(Ordering::Acquire) {
++        if self.skip_reference_index || !self.workspace_index_complete() {
+             return None;
+         }
+ 
+@@ -511,7 +512,7 @@ impl Backend {
+     /// instance method on a custom builder; the exact search searches both
+     /// keys for exactly that reason (see `member_candidate_keys`).
+     pub(crate) fn indexed_member_reference_count(&self, member: &str) -> Option<usize> {
+-        if self.skip_reference_index || !self.workspace_indexed.load(Ordering::Acquire) {
++        if self.skip_reference_index || !self.workspace_index_complete() {
+             return None;
+         }
+ 
+@@ -540,7 +541,7 @@ impl Backend {
+         keys: &[ReferenceIndexKey],
+         uris: &mut Vec<String>,
+     ) -> bool {
+-        if !self.workspace_indexed.load(Ordering::Acquire) {
++        if !self.workspace_index_complete() {
+             return false;
+         }
+ 
+diff --git a/src/references/tests.rs b/src/references/tests.rs
+index a24d022..988bae9 100644
+--- a/src/references/tests.rs
++++ b/src/references/tests.rs
+@@ -1897,3 +1897,201 @@ fn keyword_constructor_references_refuse_same_length_stale_ast_roles() {
+         "fresh non-invocation map stays negative"
+     );
+ }
++
++fn incomplete_read_fixture() -> (tempfile::TempDir, Backend, std::path::PathBuf) {
++    let dir = tempfile::tempdir().expect("workspace");
++    let src = dir.path().join("src");
++    std::fs::create_dir(&src).unwrap();
++    std::fs::write(
++        src.join("Visible.php"),
++        "<?php namespace App; class Visible {}\n",
++    )
++    .unwrap();
++    let bad = src.join("Hidden.php");
++    std::fs::write(&bad, b"<?php namespace App; class Hidden {}\n\xff").unwrap();
++    assert!(bad.is_file());
++    assert_eq!(
++        std::fs::read_to_string(&bad).unwrap_err().kind(),
++        std::io::ErrorKind::InvalidData
++    );
++    let backend = Backend::new_test_with_workspace(dir.path().to_path_buf(), Vec::new());
++    (dir, backend, bad)
++}
++
++#[test]
++fn workspace_index_read_failure_reports_partial_for_small_and_parallel_batches() {
++    for extras in [0, 2] {
++        let (dir, backend, bad) = incomplete_read_fixture();
++        for n in 0..extras {
++            std::fs::write(
++                dir.path().join(format!("Extra{n}.php")),
++                format!("<?php class Extra{n} {{}}\n"),
++            )
++            .unwrap();
++        }
++        let reports = std::sync::Mutex::new(Vec::new());
++        backend.ensure_workspace_indexed_with_progress(Some(&|pct, message| {
++            reports.lock().unwrap().push((pct, message));
++        }));
++        assert!(
++            bad.is_file(),
++            "failure is an existing unreadable input, not a vanished file"
++        );
++        assert!(
++            backend
++                .symbols
++                .fqn_class_index
++                .read()
++                .contains_key("App\\Visible")
++        );
++        assert!(
++            !backend
++                .symbol_maps
++                .read()
++                .contains_key(&crate::util::path_to_uri(&bad))
++        );
++        assert!(
++            backend.workspace_indexed.load(Ordering::Acquire),
++            "completed attempt must remain cached; do not turn per-symbol reads into full rescans"
++        );
++        let rows = reports.lock().unwrap();
++        assert!(
++            !rows
++                .iter()
++                .any(|(_, message)| message == "Workspace index ready")
++        );
++        assert_eq!(
++            rows.last().map(|(_, message)| message.as_str()),
++            Some("Workspace index partial: 1 file could not be read")
++        );
++    }
++}
++
++#[test]
++fn workspace_index_read_failure_does_not_make_missing_reference_counts_conclusive() {
++    let (_dir, backend, _bad) = incomplete_read_fixture();
++    backend.ensure_workspace_indexed_with_progress(None);
++    let key = crate::reference_index::ReferenceIndexKey::Member {
++        name: "hiddenMember".into(),
++        is_static: false,
++    };
++    assert_eq!(backend.indexed_reference_count(&key), None);
++    assert_eq!(backend.indexed_member_reference_count("hiddenMember"), None);
++    assert_eq!(
++        backend.reference_candidate_uris_for_keys(std::slice::from_ref(&key)),
++        None
++    );
++    let mut candidates = vec!["file:///unindexed-consumer.php".to_owned()];
++    let before = candidates.clone();
++    assert!(!backend.retain_reference_candidates(&[key], &mut candidates));
++    assert_eq!(candidates, before);
++}
++
++#[test]
++fn cached_partial_workspace_does_not_retry_until_explicit_refresh() {
++    let (_dir, backend, bad) = incomplete_read_fixture();
++    backend.ensure_workspace_indexed_with_progress(None);
++    std::fs::write(&bad, "<?php namespace App; class Hidden {}\n").unwrap();
++    let reports = std::sync::Mutex::new(Vec::new());
++    backend.ensure_workspace_index_ready_with_progress(Some(&|pct, message| {
++        reports.lock().unwrap().push((pct, message));
++    }));
++    assert!(
++        !backend
++            .symbol_maps
++            .read()
++            .contains_key(&crate::util::path_to_uri(&bad)),
++        "cached-ready entry point must not silently rescan a partial attempt"
++    );
++    assert_eq!(
++        reports
++            .lock()
++            .unwrap()
++            .last()
++            .map(|(_, message)| message.as_str()),
++        Some("Workspace index partial: 1 file could not be read")
++    );
++    assert_eq!(backend.indexed_member_reference_count("hiddenMember"), None);
++    let repaired = std::sync::Mutex::new(Vec::new());
++    backend.ensure_workspace_indexed_with_progress(Some(&|pct, message| {
++        repaired.lock().unwrap().push((pct, message));
++    }));
++    assert!(
++        backend
++            .symbols
++            .fqn_class_index
++            .read()
++            .contains_key("App\\Hidden")
++    );
++    assert_eq!(
++        repaired
++            .lock()
++            .unwrap()
++            .last()
++            .map(|(_, message)| message.as_str()),
++        Some("Workspace index ready")
++    );
++    assert_eq!(
++        backend.indexed_member_reference_count("hiddenMember"),
++        Some(0)
++    );
++}
++
++#[test]
++fn incomplete_workspace_does_not_take_complete_implementation_fast_path() {
++    let (_dir, backend, bad) = incomplete_read_fixture();
++    backend
++        .symbols
++        .fqn_uri_index
++        .write()
++        .insert("App\\Hidden", crate::util::path_to_uri(&bad));
++    backend.ensure_workspace_indexed_with_progress(None);
++    std::fs::write(
++        &bad,
++        "<?php namespace App; class Hidden extends Visible {}\n",
++    )
++    .unwrap();
++    let found = backend.find_implementors(
++        "Visible",
++        "App\\Visible",
++        &|name| backend.find_or_load_class(name),
++        false,
++        false,
++        true,
++    );
++    assert!(
++        found.iter().any(|class| class.fqn() == "App\\Hidden"),
++        "an incomplete index must use existing discovery fallback, not return its empty GTI as complete"
++    );
++}
++
++#[test]
++fn watcher_read_failure_does_not_leave_reference_zero_conclusive() {
++    let (dir, backend, bad) = incomplete_read_fixture();
++    std::fs::write(&bad, "<?php namespace App; class Hidden {}\n").unwrap();
++    backend.ensure_workspace_indexed_with_progress(None);
++    assert_eq!(
++        backend.indexed_member_reference_count("hiddenMember"),
++        Some(0)
++    );
++    let visible = dir.path().join("src/Visible.php");
++    std::fs::write(&visible, b"<?php namespace App; class Visible {}\xff").unwrap();
++    backend.reindex_files_batch(&[(
++        crate::util::path_to_uri(&visible),
++        visible,
++        FileChangeType::CHANGED,
++    )]);
++    assert_eq!(backend.indexed_member_reference_count("hiddenMember"), None);
++    let reports = std::sync::Mutex::new(Vec::new());
++    backend.ensure_workspace_index_ready_with_progress(Some(&|pct, message| {
++        reports.lock().unwrap().push((pct, message))
++    }));
++    assert_eq!(
++        reports
++            .lock()
++            .unwrap()
++            .last()
++            .map(|(_, message)| message.as_str()),
++        Some("Workspace index partial: 1 file could not be read")
++    );
++}
+diff --git a/src/workbench_optimize_imports.rs b/src/workbench_optimize_imports.rs
+new file mode 100644
+index 0000000..663eced
+--- /dev/null
++++ b/src/workbench_optimize_imports.rs
+@@ -0,0 +1,487 @@
++//! Checked, source-only Optimize Imports; temporary text is never published.
++use crate::diagnostics::use_statements::scan_use_statements;
++use crate::text_position::{offset_to_position, position_to_byte_offset};
++use crate::{Backend, project_router::ProjectRouter, workbench_rename::ExpectedSource};
++use serde::{Deserialize, Serialize};
++use std::{collections::HashSet, sync::Arc};
++use tower_lsp::jsonrpc::{Error, ErrorCode, Result};
++use tower_lsp::lsp_types::{
++    DocumentChanges, OneOf, OptionalVersionedTextDocumentIdentifier, Range, TextDocumentEdit,
++    TextEdit, WorkspaceEdit,
++};
++
++/// Selected-provider protocol name.
++pub const METHOD: &str = "phpWorkbench/optimizeImports";
++/// Capability advertised only when this handler is registered.
++pub const CAPABILITY: &str = "phpWorkbenchOptimizeImports";
++const MAX_BYTES: usize = 8 * 1024 * 1024;
++const MAX_IMPORTS: usize = 10_000;
++
++/// One exact editor-owned source; URI also selects the project authority.
++#[derive(Clone, Debug, Deserialize, Serialize)]
++#[serde(rename_all = "camelCase", deny_unknown_fields)]
++pub struct OptimizeImportsParams {
++    /// Exact open wire version and unnormalized UTF-8 hash.
++    pub expected_source: ExpectedSource,
++}
++
++/// One immutable source receipt and final proposal, or checked no-op.
++#[derive(Clone, Debug, Deserialize, Serialize)]
++#[serde(rename_all = "camelCase")]
++pub struct OptimizeImportsResult {
++    /// Original source that both passes actually checked.
++    pub source: ExpectedSource,
++    /// Final original-coordinate, single-source proposal; None means no change.
++    pub edit: Option<WorkspaceEdit>,
++}
++
++fn changed() -> Error {
++    Error {
++        code: ErrorCode::ServerError(-32801),
++        message: "PHP import source changed or is not open".into(),
++        data: None,
++    }
++}
++fn unsafe_plan(message: &'static str) -> Error {
++    Error {
++        code: ErrorCode::InvalidRequest,
++        message: message.into(),
++        data: None,
++    }
++}
++impl OptimizeImportsParams {
++    fn validate_shape(&self) -> Result<()> {
++        let source = &self.expected_source;
++        if source.uri.as_str().len() > 1024 * 1024
++            || source.uri.scheme() != "file"
++            || source.uri.query().is_some()
++            || source.uri.fragment().is_some()
++            || !source
++                .uri
++                .to_file_path()
++                .is_ok_and(|path| path.is_absolute())
++        {
++            return Err(Error::invalid_params(
++                "Expected an absolute local source URI",
++            ));
++        }
++        if source.sha256_utf8.len() != 64
++            || !source.sha256_utf8.bytes().all(|b| b.is_ascii_hexdigit())
++        {
++            return Err(Error::invalid_params(
++                "sha256Utf8 must contain exactly 64 hexadecimal digits",
++            ));
++        }
++        Ok(())
++    }
++}
++impl ProjectRouter {
++    /// Optimize the same preferred document authority as other source requests.
++    pub async fn workbench_optimize_imports(
++        &self,
++        params: OptimizeImportsParams,
++    ) -> Result<OptimizeImportsResult> {
++        params.validate_shape()?;
++        let _request = self.request_guard().await;
++        let project = self.project_for(&params.expected_source.uri).await?;
++        project.backend.workbench_optimize_imports(params).await
++    }
++}
++impl Backend {
++    /// Compute both passes while source verification and semantics remain held.
++    pub async fn workbench_optimize_imports(
++        &self,
++        params: OptimizeImportsParams,
++    ) -> Result<OptimizeImportsResult> {
++        params.validate_shape()?;
++        let backend = self.clone_for_blocking();
++        crate::server::run_blocking_cancel_safe("optimize_imports", move || {
++            crate::workbench_rename::authority_path(&params.expected_source.uri)
++                .map_err(|_| changed())?;
++            backend.with_prepared_current_semantics(|| {
++                let expected = std::slice::from_ref(&params.expected_source);
++                backend
++                    .verify_rename_sources(expected)
++                    .map_err(|_| changed())?;
++                let uri = params.expected_source.uri.as_str();
++                if backend.is_blade_file(uri) {
++                    return Err(unsafe_plan(
++                        "Optimize Imports requires a PHP source document",
++                    ));
++                }
++                let original = backend
++                    .open_files
++                    .read()
++                    .get(uri)
++                    .cloned()
++                    .ok_or_else(changed)?;
++                let _parse = crate::parser::with_parse_cache_arc(Arc::clone(&original));
++                let final_text = backend.plan_optimized_imports(uri, &original)?;
++                let edit = if final_text.as_str() == original.as_str() {
++                    None
++                } else {
++                    Some(WorkspaceEdit {
++                        document_changes: Some(DocumentChanges::Edits(vec![TextDocumentEdit {
++                            text_document: OptionalVersionedTextDocumentIdentifier {
++                                uri: params.expected_source.uri.clone(),
++                                version: Some(params.expected_source.version),
++                            },
++                            edits: vec![OneOf::Left(TextEdit {
++                                range: Range::new(
++                                    offset_to_position(&original, 0),
++                                    offset_to_position(&original, original.len()),
++                                ),
++                                new_text: final_text,
++                            })],
++                        }])),
++                        ..WorkspaceEdit::default()
++                    })
++                };
++                backend
++                    .verify_rename_sources(expected)
++                    .map_err(|_| changed())?;
++                Ok(OptimizeImportsResult {
++                    source: params.expected_source.clone(),
++                    edit,
++                })
++            })
++        })
++        .await
++        .ok_or_else(Error::internal_error)?
++    }
++
++    fn plan_optimized_imports(&self, uri: &str, original: &str) -> Result<String> {
++        if original.len() > MAX_BYTES {
++            return Err(unsafe_plan("Optimize Imports supports sources up to 8 MiB"));
++        }
++        require_valid_php(original)?;
++        let statements = scan_use_statements(original);
++        if statements.len() > MAX_IMPORTS {
++            return Err(unsafe_plan("Too many import statements"));
++        }
++        if !statements.iter().any(|statement| statement.top_level) {
++            return Ok(original.to_owned());
++        }
++        let map = self
++            .symbol_maps
++            .read()
++            .get(uri)
++            .cloned()
++            .ok_or_else(changed)?;
++        if map.source(original).is_none() {
++            return Err(changed());
++        }
++        let mut diagnostics = Vec::new();
++        self.collect_unused_import_diagnostics(uri, original, &mut diagnostics);
++        if diagnostics.len() > MAX_IMPORTS {
++            return Err(unsafe_plan("Too many unused import edits"));
++        }
++        let all_ranges: Vec<_> = diagnostics
++            .iter()
++            .map(|diagnostic| diagnostic.range)
++            .collect();
++        let edits = crate::code_actions::plan_unused_import_deletions(original, &all_ranges)
++            .ok_or_else(|| unsafe_plan("Import removal ownership could not be proven safely"))?;
++        let intermediate = apply_edits_checked(original, &edits)?;
++        require_valid_php(&intermediate)?;
++        let sorted = sort_surviving_imports(&intermediate)?;
++        require_valid_php(&sorted)?;
++        Ok(sorted)
++    }
++}
++
++fn require_valid_php(text: &str) -> Result<()> {
++    if !crate::parser::with_parsed_program(text, "optimize_imports", |program, _| {
++        program.errors.is_empty()
++    }) {
++        return Err(unsafe_plan(
++            "Resolve PHP syntax errors before optimizing imports",
++        ));
++    }
++    Ok(())
++}
++fn strict_range(text: &str, range: &Range) -> Result<(usize, usize)> {
++    let start = position_to_byte_offset(text, range.start);
++    let end = position_to_byte_offset(text, range.end);
++    if start > end
++        || end > text.len()
++        || !text.is_char_boundary(start)
++        || !text.is_char_boundary(end)
++        || offset_to_position(text, start) != range.start
++        || offset_to_position(text, end) != range.end
++    {
++        return Err(unsafe_plan("Invalid import edit range"));
++    }
++    Ok((start, end))
++}
++fn apply_edits_checked(text: &str, edits: &[TextEdit]) -> Result<String> {
++    let mut spans = edits
++        .iter()
++        .map(|edit| strict_range(text, &edit.range).map(|(a, b)| (a, b, edit.new_text.as_str())))
++        .collect::<Result<Vec<_>>>()?;
++    spans.sort_by_key(|(a, b, _)| (*a, *b));
++    let mut previous = 0;
++    for (start, end, _) in &spans {
++        if *start < previous {
++            return Err(unsafe_plan("Overlapping import edits"));
++        }
++        previous = *end;
++    }
++    let mut result = text.to_owned();
++    for (start, end, replacement) in spans.into_iter().rev() {
++        result.replace_range(start..end, replacement);
++    }
++    Ok(result)
++}
++
++fn namespace_declarations(text: &str) -> Result<HashSet<(usize, usize)>> {
++    use mago_span::HasSpan;
++    use mago_syntax::cst::Statement;
++    fn collect<'a>(
++        statements: impl Iterator<Item = &'a Statement<'a>>,
++        out: &mut HashSet<(usize, usize)>,
++    ) -> Option<()> {
++        for statement in statements {
++            match statement {
++                Statement::Namespace(namespace) => collect(namespace.statements().iter(), out)?,
++                Statement::Use(statement) => {
++                    if out.len() >= MAX_IMPORTS {
++                        return None;
++                    }
++                    let span = statement.span();
++                    out.insert((span.start.offset as usize, span.end.offset as usize));
++                }
++                _ => {}
++            }
++        }
++        Some(())
++    }
++    crate::parser::with_parsed_program(text, "optimize_import_spans", |program, _| {
++        if !program.errors.is_empty() {
++            return None;
++        }
++        let mut result = HashSet::new();
++        collect(program.statements.iter(), &mut result)?;
++        Some(result)
++    })
++    .ok_or_else(|| unsafe_plan("Import declaration ownership could not be proven safely"))
++}
++
++struct Import<'a> {
++    start: usize,
++    end: usize,
++    body: &'a str,
++    ending: &'a str,
++    key: (u8, String),
++}
++fn sort_surviving_imports(text: &str) -> Result<String> {
++    let owners = namespace_declarations(text)?;
++    let statements = scan_use_statements(text);
++    if statements.len() > MAX_IMPORTS {
++        return Err(unsafe_plan("Too many import statements"));
++    }
++    let mut imports = Vec::new();
++    for statement in statements.into_iter().filter(|s| s.top_level) {
++        // A lexer candidate can bridge close/open tags to a later semicolon.
++        // Only the exact CST declaration with an explicit semicolon may move.
++        if !owners.contains(&(statement.keyword_start, statement.statement_end))
++            || text
++                .as_bytes()
++                .get(statement.statement_end.saturating_sub(1))
++                != Some(&b';')
++        {
++            continue;
++        }
++        let start = text[..statement.keyword_start]
++            .rfind('\n')
++            .map_or(0, |at| at + 1);
++        let body_end = statement.end;
++        let mut end = body_end;
++        if text.as_bytes().get(end) == Some(&b'\r') {
++            end += 1;
++        }
++        if text.as_bytes().get(end) == Some(&b'\n') {
++            end += 1;
++        }
++        let prefix = text[..start].strip_suffix('\n').unwrap_or(&text[..start]);
++        let prefix = prefix.strip_suffix('\r').unwrap_or(prefix);
++        let previous = prefix.rsplit('\n').next().unwrap_or("").trim();
++        let leading_comment = previous.starts_with("//")
++            || previous.starts_with('#')
++            || previous.starts_with("/*")
++            || previous.starts_with('*')
++            || previous.ends_with("*/");
++        if leading_comment
++            || !text[start..statement.keyword_start].trim().is_empty()
++            || !text[statement.statement_end..body_end].trim().is_empty()
++        {
++            continue;
++        }
++        let mut name = text[statement.keyword_start + 3..statement.statement_end].trim_start();
++        let first = name.split_whitespace().next().unwrap_or("");
++        let kind = if first.eq_ignore_ascii_case("function") {
++            1
++        } else if first.eq_ignore_ascii_case("const") {
++            2
++        } else {
++            0
++        };
++        if kind != 0 {
++            name = name[first.len()..].trim_start();
++        }
++        let key = name
++            .split(|c: char| c.is_whitespace() || matches!(c, ';' | ',' | '{'))
++            .next()
++            .unwrap_or("")
++            .trim_start_matches('\\');
++        if key.is_empty() || key.starts_with('/') {
++            continue;
++        }
++        imports.push(Import {
++            start,
++            end,
++            body: &text[start..body_end],
++            ending: &text[body_end..end],
++            key: (kind, key.to_ascii_lowercase()),
++        });
++    }
++    let mut edits = Vec::new();
++    let mut at = 0;
++    while at < imports.len() {
++        let mut end = at + 1;
++        while end < imports.len() && imports[end - 1].end == imports[end].start {
++            end += 1;
++        }
++        let run = &imports[at..end];
++        let mut ordered: Vec<_> = run.iter().collect();
++        ordered.sort_by(|a, b| a.key.cmp(&b.key));
++        let mut replacement = String::new();
++        for (slot, entry) in run.iter().zip(ordered) {
++            replacement.push_str(entry.body);
++            replacement.push_str(slot.ending);
++        }
++        if text[run[0].start..run[run.len() - 1].end] != replacement {
++            edits.push(TextEdit {
++                range: Range::new(
++                    offset_to_position(text, run[0].start),
++                    offset_to_position(text, run[run.len() - 1].end),
++                ),
++                new_text: replacement,
++            });
++        }
++        at = end;
++    }
++    apply_edits_checked(text, &edits)
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use tower_lsp::lsp_types::Position;
++    #[test]
++    fn optimize_imports_sort_preserves_crlf_alias_group_comments_and_eof() {
++        let before = "<?php\r\nuse Zoo\\{B, /* owned */ A as Alias};\r\nuse Alpha\\One as Other;";
++        let after = "<?php\r\nuse Alpha\\One as Other;\r\nuse Zoo\\{B, /* owned */ A as Alias};";
++        assert_eq!(sort_surviving_imports(before).unwrap(), after);
++        assert_eq!(sort_surviving_imports(after).unwrap(), after);
++    }
++    #[test]
++    fn optimize_imports_sort_respects_comment_blank_namespace_trait_and_closure_boundaries() {
++        let before = "<?php\nnamespace First {\n// owned by Zoo\nuse Zoo\\Z;\nuse Delta\\D;\nuse Beta\\B;\n\nuse Y\\Y; // attached\nuse X\\X;\ntrait T {} class C { use T; }\n$f=function() use ($x) {};\n}\nnamespace Second {\nuse D\\D;\nuse A\\A;\n}\n";
++        let after = before
++            .replace("use Delta\\D;\nuse Beta\\B;", "use Beta\\B;\nuse Delta\\D;")
++            .replace("use D\\D;\nuse A\\A;", "use A\\A;\nuse D\\D;");
++        assert_eq!(sort_surviving_imports(before).unwrap(), after);
++    }
++    #[test]
++    fn optimize_imports_internal_range_validation_rejects_surrogate_and_overlap() {
++        let text = "//🐘\r\n";
++        assert!(strict_range(text, &Range::new(Position::new(0, 3), Position::new(0, 4))).is_err());
++        let edits = [
++            TextEdit {
++                range: Range::new(Position::new(0, 0), Position::new(0, 2)),
++                new_text: String::new(),
++            },
++            TextEdit {
++                range: Range::new(Position::new(0, 1), Position::new(0, 2)),
++                new_text: String::new(),
++            },
++        ];
++        assert!(apply_edits_checked(text, &edits).is_err());
++        assert_eq!(text, "//🐘\r\n");
++    }
++}
++
++#[cfg(test)]
++mod pending_source_tests {
++    use super::*;
++    use sha2::{Digest, Sha256};
++    use tower_lsp::{LanguageServer, lsp_types::*};
++    #[tokio::test]
++    async fn optimize_imports_checked_reconciles_real_pending_source_before_unused_analysis() {
++        let dir = tempfile::tempdir().unwrap();
++        let path = dir.path().join("pending.php");
++        let before = "<?php\nuse DateTimeImmutable;\nfunction demo() {}\n";
++        let after = "<?php\nuse DateTimeImmutable;\nfunction demo(DateTimeImmutable $value): DateTimeImmutable { return $value; }\n";
++        std::fs::write(&path, before).unwrap();
++        let uri = Url::from_file_path(path).unwrap();
++        let backend = Backend::new_test();
++        backend
++            .did_open(DidOpenTextDocumentParams {
++                text_document: TextDocumentItem {
++                    uri: uri.clone(),
++                    language_id: "php".into(),
++                    version: 1,
++                    text: before.into(),
++                },
++            })
++            .await;
++        // Actual didChange publication boundary, before the parser worker: the
++        // current wire source is committed while old semantic maps remain.
++        let text = Arc::new(after.to_owned());
++        {
++            let _merge = backend.index_merge_gate.lock();
++            let mut documents = backend.diag.documents.lock();
++            assert!(documents.change(uri.as_str(), 2, &text));
++            backend
++                .open_files
++                .write()
++                .insert(uri.to_string(), Arc::clone(&text));
++            let revision = documents
++                .capture_source(uri.as_str(), &text)
++                .unwrap()
++                .unwrap();
++            assert!(!documents.parsed(uri.as_str(), Some(&revision)));
++        }
++        let result = backend
++            .workbench_optimize_imports(OptimizeImportsParams {
++                expected_source: ExpectedSource {
++                    uri: uri.clone(),
++                    version: 2,
++                    sha256_utf8: format!("{:x}", Sha256::digest(after.as_bytes())),
++                },
++            })
++            .await
++            .unwrap();
++        assert!(result.edit.is_none(), "the now-used import must survive");
++        let documents = backend.diag.documents.lock();
++        let revision = documents
++            .capture_source(uri.as_str(), &text)
++            .unwrap()
++            .unwrap();
++        assert!(documents.parsed(uri.as_str(), Some(&revision)));
++        assert!(
++            backend
++                .symbol_maps
++                .read()
++                .get(uri.as_str())
++                .unwrap()
++                .source(after)
++                .is_some()
++        );
++        assert_eq!(
++            std::fs::read_to_string(uri.to_file_path().unwrap()).unwrap(),
++            before
++        );
++    }
++}
+diff --git a/src/workbench_rename.rs b/src/workbench_rename.rs
+index 7c0420e..2e27102 100644
+--- a/src/workbench_rename.rs
++++ b/src/workbench_rename.rs
+@@ -44,7 +44,7 @@ fn modified() -> Error {
+     }
+ }
+ 
+-fn authority_path(uri: &Url) -> Result<PathBuf> {
++pub(crate) fn authority_path(uri: &Url) -> Result<PathBuf> {
+     if uri.scheme() != "file" || uri.query().is_some() || uri.fragment().is_some() {
+         return Err(Error::invalid_params("Expected a local file URI"));
+     }
+@@ -123,7 +123,7 @@ impl ProjectRouter {
+ }
+ 
+ impl Backend {
+-    fn verify_rename_sources(&self, expected_sources: &[ExpectedSource]) -> Result<()> {
++    pub(crate) fn verify_rename_sources(&self, expected_sources: &[ExpectedSource]) -> Result<()> {
+         for expected in expected_sources {
+             let uri = expected.uri.as_str();
+             if self
+diff --git a/tests/integration/code_action_remove_unused_import_ownership.rs b/tests/integration/code_action_remove_unused_import_ownership.rs
+new file mode 100644
+index 0000000..3012540
+--- /dev/null
++++ b/tests/integration/code_action_remove_unused_import_ownership.rs
+@@ -0,0 +1,124 @@
++//! Exercise actual legacy code-action resolve and CLI planning without disk writes.
++use crate::common::{
++    apply_edits, create_test_backend, extract_edits, find_action, find_action_containing,
++    get_code_actions_at, resolve_action,
++};
++use std::sync::Arc;
++const URI: &str = "file:///owned-import.php";
++fn legacy(source: &str, single: bool) -> String {
++    let backend = create_test_backend();
++    backend.update_ast(URI, source);
++    let actions = get_code_actions_at(&backend, URI, source, 1, 4);
++    let action = if single {
++        find_action_containing(&actions, "Remove unused import")
++    } else {
++        find_action(&actions, "Remove all unused imports")
++    }
++    .expect("actual unused-import action");
++    let resolved = resolve_action(&backend, URI, source, action);
++    apply_edits(source, &extract_edits(&resolved))
++}
++#[test]
++fn unused_import_ownership_legacy_bulk_and_single_preserve_same_line_assignment() {
++    let source = "<?php\nuse stdClass as Spare; $kept = 42;\necho $kept;\n";
++    let expected = "<?php\n $kept = 42;\necho $kept;\n";
++    assert_eq!(legacy(source, false), expected);
++    assert_eq!(legacy(source, true), expected);
++}
++#[test]
++fn unused_import_ownership_legacy_preserves_used_second_statement_and_comma_member() {
++    for (source, expected) in [
++        (
++            "<?php\nuse stdClass as Spare; use DateTimeImmutable as Clock;\nfunction demo(Clock $clock): Clock { return $clock; }\n",
++            "<?php\n use DateTimeImmutable as Clock;\nfunction demo(Clock $clock): Clock { return $clock; }\n",
++        ),
++        (
++            "<?php\nuse stdClass as Spare, DateTimeImmutable as Clock;\nfunction demo(Clock $clock): Clock { return $clock; }\n",
++            "<?php\nuse DateTimeImmutable as Clock;\nfunction demo(Clock $clock): Clock { return $clock; }\n",
++        ),
++    ] {
++        assert_eq!(legacy(source, false), expected);
++    }
++}
++#[test]
++fn unused_import_ownership_multiple_unused_same_line_are_constrained_before_dedup() {
++    let source =
++        "<?php\nuse stdClass as Spare; use DateTimeZone as Other; $kept = 42;\necho $kept;\n";
++    assert_eq!(legacy(source, false), "<?php\n  $kept = 42;\necho $kept;\n");
++}
++#[test]
++fn unused_import_ownership_preserves_trailing_comment_bytes() {
++    let source = "<?php\nuse stdClass as Spare; // keep café 🐘\necho 1;\n";
++    assert_eq!(legacy(source, false), "<?php\n // keep café 🐘\necho 1;\n");
++}
++#[test]
++fn unused_import_ownership_actual_cli_planner_preserves_code_tags_and_used_members() {
++    for (source, expected) in [
++        (
++            "<?php\nuse stdClass as Spare; $kept = 42;\necho $kept;\n",
++            "<?php\n $kept = 42;\necho $kept;\n",
++        ),
++        (
++            "<?php use stdClass as Spare; $kept = 42;\necho $kept;\n",
++            "<?php  $kept = 42;\necho $kept;\n",
++        ),
++        (
++            "<?php\nuse stdClass as Spare, DateTimeImmutable as Clock;\nfunction demo(Clock $c): Clock { return $c; }\n",
++            "<?php\nuse DateTimeImmutable as Clock;\nfunction demo(Clock $c): Clock { return $c; }\n",
++        ),
++    ] {
++        let backend = create_test_backend();
++        backend.update_ast(URI, source);
++        backend
++            .open_files()
++            .write()
++            .insert(URI.into(), Arc::new(source.into()));
++        let (result, fixes) = phpantom_lsp::fix::fix_unused_imports(&backend, URI, source);
++        assert!(!fixes.is_empty());
++        assert_eq!(result, expected);
++    }
++}
++
++#[test]
++fn unused_import_ownership_single_member_group_accepts_full_statement_diagnostic() {
++    let source = "<?php\nuse App\\Models\\{User};\n";
++    assert_eq!(legacy(source, false), "<?php\n");
++    assert_eq!(legacy(source, true), "<?php\n");
++}
++#[test]
++fn unused_import_ownership_indented_namespace_keeps_exact_statement_identity() {
++    let source = "<?php\nnamespace App {\n    use stdClass as Spare;\n    echo 1;\n}\n";
++    let backend = create_test_backend();
++    backend.update_ast(URI, source);
++    let actions = get_code_actions_at(&backend, URI, source, 2, 8);
++    let action =
++        find_action(&actions, "Remove all unused imports").expect("actual indented import action");
++    let resolved = resolve_action(&backend, URI, source, action);
++    assert_eq!(
++        apply_edits(source, &extract_edits(&resolved)),
++        "<?php\nnamespace App {\n    echo 1;\n}\n"
++    );
++}
++
++#[test]
++fn unused_import_ownership_keeps_used_same_line_aliases() {
++    for source in [
++        "<?php\nuse stdClass as Kept; $value = new Kept;\n",
++        "<?php\n$prefix = 42; use stdClass as Kept; $value = new Kept;\n",
++        "<?php\nuse function strlen as kept_strlen; $value = kept_strlen('abc');\n",
++        "<?php\nuse const PHP_VERSION as KEPT_VERSION; echo KEPT_VERSION;\n",
++    ] {
++        let backend = create_test_backend();
++        backend.update_ast(URI, source);
++        backend
++            .open_files()
++            .write()
++            .insert(URI.into(), Arc::new(source.into()));
++        let (after, fixes) = phpantom_lsp::fix::fix_unused_imports(&backend, URI, source);
++        assert_eq!(
++            after, source,
++            "a real same-line reference must retain its import"
++        );
++        assert!(fixes.is_empty());
++    }
++}
+diff --git a/tests/integration/fix_cli.rs b/tests/integration/fix_cli.rs
+index 4e9f717..1983f0d 100644
+--- a/tests/integration/fix_cli.rs
++++ b/tests/integration/fix_cli.rs
+@@ -731,3 +731,70 @@ fn unused_use_directives_are_removed_from_the_template() {
+          <div>{{ User::query()->count() }} {{ Team::first() }}</div>\n"
+     );
+ }
++
++// Append to existing tests/integration/fix_cli.rs; keep original Blade test.
++
++#[test]
++fn blade_cli_php_island_same_line_assignment_used_sibling_and_crlf_stay_exact() {
++    let backend = create_test_backend();
++    let source = "@php\r\nuse App\\Models\\Post; $kept = 42; use App\\Models\\User; // keep café 🐘\r\n@endphp\r\n<div>{{ User::query()->count() }} {{ $kept }}</div>\r\n";
++    let expected = source.replacen("use App\\Models\\Post;", "", 1);
++    assert_eq!(
++        fix_unused_imports(&backend, "file:///views/island-inline.blade.php", source),
++        expected
++    );
++}
++
++#[test]
++fn blade_cli_php_island_group_member_preserves_used_member_and_html() {
++    let backend = create_test_backend();
++    let source = "<p>café 🐘</p>\r\n@php\r\nuse App\\Models\\{User, Post};\r\n@endphp\r\n<div>{{ User::query()->count() }}</div>\r\n";
++    let expected = source.replace("{User, Post}", "{User}");
++    assert_eq!(
++        fix_unused_imports(&backend, "file:///views/island-group.blade.php", source),
++        expected
++    );
++}
++
++#[test]
++fn blade_cli_inline_php_block_retains_directive_and_expression_boundaries() {
++    let backend = create_test_backend();
++    let source =
++        "<b>before</b>@php use App\\Models\\Post; $kept = 42; @endphp<div>{{ $kept }}</div>\r\n";
++    let expected = source.replace("use App\\Models\\Post;", "");
++    assert_eq!(
++        fix_unused_imports(&backend, "file:///views/island-boundary.blade.php", source),
++        expected
++    );
++}
++
++#[test]
++fn blade_cli_use_directive_and_php_island_share_one_safe_batch() {
++    let backend = create_test_backend();
++    let source = "@use('App\\Models\\Post')\n@php\nuse App\\Models\\Comment;\n$kept = 42;\n@endphp\n<div>{{ $kept }}</div>\n";
++    // @use diagnostics intentionally read the original template URI, as in
++    // the existing directive integration fixture; supply actual disk bytes.
++    let directory = tempfile::tempdir().unwrap();
++    let path = directory.path().join("mixed.blade.php");
++    std::fs::write(&path, source).unwrap();
++    let uri = tower_lsp::lsp_types::Url::from_file_path(&path).unwrap();
++    let result = fix_unused_imports(&backend, uri.as_str(), source);
++    assert!(!result.contains("@use("));
++    assert!(!result.contains("use App\\Models\\Comment;"));
++    assert!(result.contains("@php\n\n$kept = 42;\n@endphp\n<div>{{ $kept }}</div>\n"));
++}
++
++#[test]
++fn blade_cli_stale_projection_cannot_delete_new_template_bytes() {
++    let backend = create_test_backend();
++    let uri = "file:///views/island-stale.blade.php";
++    let old = "@php\nuse App\\Models\\Post;\n@endphp\n<div>original</div>\n";
++    backend.update_ast(uri, old);
++    let current = "@php\nuse App\\Models\\Post;\n@endphp\n<div>changed café 🐘</div>\n";
++    let (result, fixes) = phpantom_lsp::fix::fix_unused_imports(&backend, uri, current);
++    assert_eq!(result, current);
++    assert!(
++        fixes.is_empty(),
++        "old virtual source is no authority to edit current template"
++    );
++}
+diff --git a/tests/integration/main.rs b/tests/integration/main.rs
+index cec84a9..77ee3df 100644
+--- a/tests/integration/main.rs
++++ b/tests/integration/main.rs
+@@ -48,6 +48,7 @@ mod code_action_promote_constructor_param;
+ mod code_action_remove_override;
+ mod code_action_remove_unreachable;
+ mod code_action_remove_unused_import;
++mod code_action_remove_unused_import_ownership;
+ mod code_action_remove_unused_return_type;
+ mod code_action_replace_fqcn;
+ mod code_action_requested_callable_names;
+@@ -299,6 +300,7 @@ mod laravel_config_completion_identity;
+ 
+ mod laravel_config_reference_identity;
+ 
++mod workbench_optimize_imports;
+ mod workbench_rename;
+ mod workbench_rename_project_compat;
+ 
+diff --git a/tests/integration/workbench_optimize_imports.rs b/tests/integration/workbench_optimize_imports.rs
+new file mode 100644
+index 0000000..c109a9b
+--- /dev/null
++++ b/tests/integration/workbench_optimize_imports.rs
+@@ -0,0 +1,401 @@
++//! Public checked Optimize Imports regressions; root owns execution.
++use crate::common::{apply_edits, create_test_backend};
++use phpantom_lsp::{
++    ProjectRouter,
++    workbench_optimize_imports::{OptimizeImportsParams, OptimizeImportsResult},
++    workbench_rename::ExpectedSource,
++};
++use sha2::{Digest, Sha256};
++use tower_lsp::{LanguageServer, jsonrpc::ErrorCode, lsp_types::*};
++
++const BEFORE: &str = "<?php\r\nnamespace Demo;\r\nuse DateTimeZone as Zone;\r\nuse ArrayObject;\r\nuse stdClass as Spare;\r\nuse DateTimeImmutable as Clock;\r\nuse function strrev as UnusedReverse;\r\nuse function strlen;\r\nuse const PHP_VERSION;\r\n// café 🐘\r\nfunction stamp(Clock $clock, Zone $zone): ArrayObject { strlen($clock->format('c')); return new ArrayObject([PHP_VERSION, $zone]); }\r\n";
++const AFTER: &str = "<?php\r\nnamespace Demo;\r\nuse ArrayObject;\r\nuse DateTimeImmutable as Clock;\r\nuse DateTimeZone as Zone;\r\nuse function strlen;\r\nuse const PHP_VERSION;\r\n// café 🐘\r\nfunction stamp(Clock $clock, Zone $zone): ArrayObject { strlen($clock->format('c')); return new ArrayObject([PHP_VERSION, $zone]); }\r\n";
++fn fixture(text: &str) -> (tempfile::TempDir, Url) {
++    let dir = tempfile::tempdir().unwrap();
++    let path = dir.path().join("source.php");
++    std::fs::write(&path, text).unwrap();
++    (dir, Url::from_file_path(path).unwrap())
++}
++async fn open(server: &impl LanguageServer, uri: &Url, text: &str, version: i32) {
++    server
++        .did_open(DidOpenTextDocumentParams {
++            text_document: TextDocumentItem {
++                uri: uri.clone(),
++                language_id: "php".into(),
++                version,
++                text: text.into(),
++            },
++        })
++        .await;
++}
++fn params(uri: &Url, text: &str, version: i32) -> OptimizeImportsParams {
++    OptimizeImportsParams {
++        expected_source: ExpectedSource {
++            uri: uri.clone(),
++            version,
++            sha256_utf8: format!("{:x}", Sha256::digest(text.as_bytes())),
++        },
++    }
++}
++fn applied(uri: &Url, text: &str, result: &OptimizeImportsResult, version: i32) -> String {
++    assert_eq!(result.source.uri, *uri);
++    assert_eq!(result.source.version, version);
++    assert_eq!(
++        result.source.sha256_utf8,
++        format!("{:x}", Sha256::digest(text.as_bytes()))
++    );
++    let edit = result.edit.as_ref().expect("actual combined edit expected");
++    assert!(edit.changes.is_none());
++    let Some(DocumentChanges::Edits(documents)) = &edit.document_changes else {
++        panic!("only source text edits")
++    };
++    assert_eq!(documents.len(), 1);
++    let document = &documents[0];
++    assert_eq!(document.text_document.uri, *uri);
++    assert_eq!(document.text_document.version, Some(version));
++    let edits: Vec<_> = document
++        .edits
++        .iter()
++        .map(|edit| match edit {
++            OneOf::Left(edit) => edit.clone(),
++            _ => panic!("no annotations/operations"),
++        })
++        .collect();
++    apply_edits(text, &edits)
++}
++#[tokio::test]
++async fn optimize_imports_checked_combines_cleanup_sort_crlf_unicode_and_never_publishes_temporary_source()
++ {
++    let (_dir, uri) = fixture(BEFORE);
++    let backend = create_test_backend();
++    open(&backend, &uri, BEFORE, 0).await;
++    let first = backend
++        .workbench_optimize_imports(params(&uri, BEFORE, 0))
++        .await
++        .unwrap();
++    assert_eq!(applied(&uri, BEFORE, &first, 0), AFTER);
++    let repeated = backend
++        .workbench_optimize_imports(params(&uri, BEFORE, 0))
++        .await
++        .unwrap();
++    assert_eq!(
++        applied(&uri, BEFORE, &repeated, 0),
++        AFTER,
++        "original open source still owns the same hash/version"
++    );
++    assert_eq!(
++        std::fs::read_to_string(uri.to_file_path().unwrap()).unwrap(),
++        BEFORE
++    );
++    backend
++        .did_change(DidChangeTextDocumentParams {
++            text_document: VersionedTextDocumentIdentifier {
++                uri: uri.clone(),
++                version: 1,
++            },
++            content_changes: vec![TextDocumentContentChangeEvent {
++                range: None,
++                range_length: None,
++                text: AFTER.into(),
++            }],
++        })
++        .await;
++    assert!(
++        backend
++            .workbench_optimize_imports(params(&uri, AFTER, 1))
++            .await
++            .unwrap()
++            .edit
++            .is_none()
++    );
++}
++#[tokio::test]
++async fn optimize_imports_checked_hash_and_version_refuse_independently_then_fresh_unsaved_source_succeeds()
++ {
++    let (_dir, uri) = fixture(BEFORE);
++    let backend = create_test_backend();
++    open(&backend, &uri, BEFORE, 1).await;
++    let changed = BEFORE.replace("café", "cafè");
++    assert_eq!(changed.len(), BEFORE.len());
++    backend
++        .did_change(DidChangeTextDocumentParams {
++            text_document: VersionedTextDocumentIdentifier {
++                uri: uri.clone(),
++                version: 2,
++            },
++            content_changes: vec![TextDocumentContentChangeEvent {
++                range: None,
++                range_length: None,
++                text: changed.clone(),
++            }],
++        })
++        .await;
++    assert_eq!(
++        backend
++            .workbench_optimize_imports(params(&uri, BEFORE, 2))
++            .await
++            .unwrap_err()
++            .code,
++        ErrorCode::ServerError(-32801)
++    );
++    assert_eq!(
++        backend
++            .workbench_optimize_imports(params(&uri, &changed, 1))
++            .await
++            .unwrap_err()
++            .code,
++        ErrorCode::ServerError(-32801)
++    );
++    let reply = backend
++        .workbench_optimize_imports(params(&uri, &changed, 2))
++        .await
++        .unwrap();
++    assert_eq!(
++        applied(&uri, &changed, &reply, 2),
++        AFTER.replace("café", "cafè")
++    );
++    assert_eq!(
++        std::fs::read_to_string(uri.to_file_path().unwrap()).unwrap(),
++        BEFORE
++    );
++}
++#[tokio::test]
++async fn optimize_imports_checked_missing_closed_malformed_and_syntax_error_are_not_noops() {
++    let (_dir, uri) = fixture(BEFORE);
++    let backend = create_test_backend();
++    assert_eq!(
++        backend
++            .workbench_optimize_imports(params(&uri, BEFORE, 1))
++            .await
++            .unwrap_err()
++            .code,
++        ErrorCode::ServerError(-32801)
++    );
++    open(&backend, &uri, BEFORE, 1).await;
++    let mut bad = params(&uri, BEFORE, 1);
++    bad.expected_source.sha256_utf8 = "x".repeat(64);
++    assert_eq!(
++        backend
++            .workbench_optimize_imports(bad)
++            .await
++            .unwrap_err()
++            .code,
++        ErrorCode::InvalidParams
++    );
++    let mut bad = params(&uri, BEFORE, 1);
++    bad.expected_source.uri = Url::parse("https://invalid.example/source.php").unwrap();
++    assert_eq!(
++        backend
++            .workbench_optimize_imports(bad)
++            .await
++            .unwrap_err()
++            .code,
++        ErrorCode::InvalidParams
++    );
++    backend
++        .did_close(DidCloseTextDocumentParams {
++            text_document: TextDocumentIdentifier { uri: uri.clone() },
++        })
++        .await;
++    assert_eq!(
++        backend
++            .workbench_optimize_imports(params(&uri, BEFORE, 1))
++            .await
++            .unwrap_err()
++            .code,
++        ErrorCode::ServerError(-32801)
++    );
++    let broken = "<?php\nuse DateTime;\nfunction {";
++    open(&backend, &uri, broken, 3).await;
++    assert_eq!(
++        backend
++            .workbench_optimize_imports(params(&uri, broken, 3))
++            .await
++            .unwrap_err()
++            .code,
++        ErrorCode::InvalidRequest
++    );
++}
++#[tokio::test]
++async fn optimize_imports_checked_group_member_cleanup_and_trailing_comment_preservation() {
++    let source = "<?php\nnamespace Vendor { class C {} class B {} }\nnamespace App {\nuse Vendor\\{C, B as Bee};\nuse stdClass as Spare; // keep café 🐘\nfunction demo(Bee $b): Bee { return $b; }\n}\n";
++    let (_dir, uri) = fixture(source);
++    let backend = create_test_backend();
++    open(&backend, &uri, source, 1).await;
++    let reply = backend
++        .workbench_optimize_imports(params(&uri, source, 1))
++        .await
++        .unwrap();
++    let result = applied(&uri, source, &reply, 1);
++    assert!(result.contains("use Vendor\\{B as Bee};"));
++    assert!(!result.contains("stdClass"));
++    assert!(result.contains("// keep café 🐘"));
++    assert!(result.contains("function demo(Bee $b): Bee { return $b; }"));
++}
++#[tokio::test]
++async fn optimize_imports_router_uses_actual_document_authority() {
++    let (_dir, uri) = fixture(BEFORE);
++    let router = ProjectRouter::new_test();
++    open(&router, &uri, BEFORE, 1).await;
++    let result = router
++        .workbench_optimize_imports(params(&uri, BEFORE, 1))
++        .await
++        .unwrap();
++    assert_eq!(applied(&uri, BEFORE, &result, 1), AFTER);
++    let mut bad = params(&uri, BEFORE, 1);
++    bad.expected_source.sha256_utf8 = "0".repeat(64);
++    assert_eq!(
++        router
++            .workbench_optimize_imports(bad)
++            .await
++            .unwrap_err()
++            .code,
++        ErrorCode::ServerError(-32801)
++    );
++}
++#[cfg(unix)]
++#[tokio::test]
++async fn optimize_imports_router_rejects_passive_alias_without_borrowing_active_grant() {
++    let (dir, uri) = fixture(BEFORE);
++    let path = dir.path().join("alias.php");
++    std::os::unix::fs::symlink(uri.to_file_path().unwrap(), &path).unwrap();
++    let alias = Url::from_file_path(path).unwrap();
++    let router = ProjectRouter::new_test();
++    open(&router, &uri, BEFORE, 1).await;
++    open(&router, &alias, BEFORE, 1).await;
++    assert_eq!(
++        router
++            .workbench_optimize_imports(params(&alias, BEFORE, 1))
++            .await
++            .unwrap_err()
++            .code,
++        ErrorCode::ServerError(-32801)
++    );
++    assert!(
++        router
++            .workbench_optimize_imports(params(&uri, BEFORE, 1))
++            .await
++            .unwrap()
++            .edit
++            .is_some()
++    );
++}
++
++#[tokio::test]
++async fn optimize_imports_checked_verified_noop_serializes_explicit_null_and_capability() {
++    let source = "<?php\n$value = 1;\n";
++    let (_dir, uri) = fixture(source);
++    let backend = create_test_backend();
++    let initialized = backend
++        .initialize(InitializeParams::default())
++        .await
++        .unwrap();
++    assert_eq!(
++        initialized.capabilities.experimental.unwrap()["phpWorkbenchOptimizeImports"],
++        true
++    );
++    open(&backend, &uri, source, 1).await;
++    let reply = backend
++        .workbench_optimize_imports(params(&uri, source, 1))
++        .await
++        .unwrap();
++    assert!(reply.edit.is_none());
++    let wire = serde_json::to_value(reply).unwrap();
++    assert_eq!(wire["source"]["uri"], uri.as_str());
++    assert!(wire.get("edit").unwrap().is_null());
++    assert!(wire["source"].get("sha256Utf8").is_some());
++}
++#[tokio::test]
++async fn optimize_imports_checked_never_consumes_internal_group_comment() {
++    let source = "<?php\nnamespace Vendor { class C {} class B {} }\nnamespace App {\nuse Vendor\\{C /* retain */, B as Bee};\nfunction demo(Bee $b): Bee { return $b; }\n}\n";
++    let (_dir, uri) = fixture(source);
++    let backend = create_test_backend();
++    open(&backend, &uri, source, 1).await;
++    assert_eq!(
++        backend
++            .workbench_optimize_imports(params(&uri, source, 1))
++            .await
++            .unwrap_err()
++            .code,
++        ErrorCode::InvalidRequest
++    );
++    assert_eq!(
++        std::fs::read_to_string(uri.to_file_path().unwrap()).unwrap(),
++        source
++    );
++}
++
++#[tokio::test]
++async fn optimize_imports_checked_preserves_inline_code_and_used_import_siblings() {
++    for (source, expected) in [
++        (
++            "<?php\nuse stdClass as Spare; $kept = 42;\necho $kept;\n",
++            "<?php\n $kept = 42;\necho $kept;\n",
++        ),
++        (
++            "<?php\nuse stdClass as Spare; use DateTimeImmutable as Clock;\nfunction demo(Clock $clock): Clock { return $clock; }\n",
++            "<?php\n use DateTimeImmutable as Clock;\nfunction demo(Clock $clock): Clock { return $clock; }\n",
++        ),
++        (
++            "<?php\nuse stdClass as Spare, DateTimeImmutable as Clock;\nfunction demo(Clock $clock): Clock { return $clock; }\n",
++            "<?php\nuse DateTimeImmutable as Clock;\nfunction demo(Clock $clock): Clock { return $clock; }\n",
++        ),
++    ] {
++        let (_dir, uri) = fixture(source);
++        let backend = create_test_backend();
++        open(&backend, &uri, source, 1).await;
++        let result = backend
++            .workbench_optimize_imports(params(&uri, source, 1))
++            .await
++            .unwrap();
++        assert_eq!(applied(&uri, source, &result, 1), expected);
++        assert_eq!(
++            std::fs::read_to_string(uri.to_file_path().unwrap()).unwrap(),
++            source
++        );
++    }
++}
++
++#[tokio::test]
++async fn optimize_imports_checked_never_reorders_inline_output_across_php_tag_terminators() {
++    let source = "<?php\nuse stdClass as Zed ?>one<?php ;\nuse DateTimeImmutable as Alpha ?>two<?php ;\nnew Zed; new Alpha;\n";
++    let (_dir, uri) = fixture(source);
++    let backend = create_test_backend();
++    open(&backend, &uri, source, 1).await;
++    match backend
++        .workbench_optimize_imports(params(&uri, source, 1))
++        .await
++    {
++        Ok(result) => {
++            if result.edit.is_some() {
++                assert_eq!(applied(&uri, source, &result, 1), source);
++            }
++        }
++        Err(error) => assert_eq!(error.code, ErrorCode::InvalidRequest),
++    }
++    assert_eq!(
++        std::fs::read_to_string(uri.to_file_path().unwrap()).unwrap(),
++        source
++    );
++}
++
++#[tokio::test]
++async fn optimize_imports_checked_keeps_used_same_line_aliases() {
++    for source in [
++        "<?php\nuse stdClass as Kept; $value = new Kept;\n",
++        "<?php\nuse function strlen as kept_strlen; $value = kept_strlen('abc');\n",
++        "<?php\nuse const PHP_VERSION as KEPT_VERSION; echo KEPT_VERSION;\n",
++    ] {
++        let (_dir, uri) = fixture(source);
++        let backend = create_test_backend();
++        open(&backend, &uri, source, 0).await;
++        let result = backend
++            .workbench_optimize_imports(params(&uri, source, 0))
++            .await
++            .unwrap();
++        assert!(
++            result.edit.is_none(),
++            "used same-line alias must not be removed: {source}"
++        );
++    }
++}

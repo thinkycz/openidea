@@ -1,0 +1,2428 @@
+diff --git a/docs/CHANGELOG.md b/docs/CHANGELOG.md
+--- a/docs/CHANGELOG.md
++++ b/docs/CHANGELOG.md
+@@ -14,6 +14,12 @@
+ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+ 
+ ## [Unreleased]
++
++- **Name extracted declarations.** Clients can supply a name for an extracted variable, constant, function or method before reviewing the proposal. Conflicting or invalid names are refused, and omitted names retain automatic naming. Contributed by PHP Workbench downstream.
++
++- **Extraction preserves the surrounding program.** Moving statements retains multiline string values, static class context and unselected statements or comments on shared lines. Contributed by PHP Workbench downstream.
++
++- **Extraction uses current dependency types.** Resolving a proposal observes accepted unsaved dependency changes and Undo before inferring its signature. Extraction also preserves CRLF layout and refuses unavailable names without silently choosing a different declaration. Contributed by PHP Workbench downstream.
+ 
+ - **Code actions prepare pending inherited source.** The first request in an unchanged child sees an unsaved parent signature edit or undo before background diagnostics finish.
+ 
+diff --git a/examples/php/code_actions.php b/examples/php/code_actions.php
+--- a/examples/php/code_actions.php
++++ b/examples/php/code_actions.php
+@@ -326,6 +326,21 @@
+         echo $result;
+     }
+ 
++    public function namedExtraction(int $quantity, int $price): int
++    {
++        // Select the assignment and extract it as calculateTotal.
++        // Alternatively, select the product and name the variable subtotal.
++        // Leaving Name empty keeps the suggested name.
++        $total = ($quantity * $price) * 2;
++        return $total;
++    }
++
++    public function namedConstantExtraction(): string
++    {
++        // Select the literal, extract a constant, and name it GREETING.
++        return 'hello';
++    }
++
+     public static function staticExtraction(): void
+     {
+         // Select these lines and extract:
+diff --git a/examples/php/scaffolding/assertions.php b/examples/php/scaffolding/assertions.php
+--- a/examples/php/scaffolding/assertions.php
++++ b/examples/php/scaffolding/assertions.php
+@@ -2127,6 +2127,10 @@
+ 
+     assert((new ExplicitOverrideDemo('blue'))->color() === 'blue', 'the override playground inherits the parent native color contract');
+ 
++    $namedExtraction = new ExtractFunctionDemo();
++    assert($namedExtraction->namedExtraction(3, 4) === 24, 'extracting the named subtotal must retain the multiplication result');
++    assert($namedExtraction->namedConstantExtraction() === 'hello', 'extracting the named greeting must retain its literal value');
++
+     echo "All assertions passed.\n";
+ }
+ 
+diff --git a/src/code_actions/extract_constant.rs b/src/code_actions/extract_constant.rs
+--- a/src/code_actions/extract_constant.rs
++++ b/src/code_actions/extract_constant.rs
+@@ -321,6 +321,37 @@
+     crate::code_actions::naming::deduplicate_name(name, "_", |candidate| {
+         existing.iter().any(|e| e == candidate)
+     })
++}
++
++/// The shared inheritance merge supplies class/trait constants. Interface
++/// constants are checked through the same resolved class graph, including
++/// interfaces inherited through a parent, without performing type inference.
++fn interface_constant_collision(
++    class: &crate::types::ClassInfo,
++    name: &str,
++    loader: &dyn Fn(&str) -> Option<std::sync::Arc<crate::types::ClassInfo>>,
++    visited: &mut std::collections::HashSet<String>,
++) -> bool {
++    let fqn = class.fqn();
++    if !visited.insert(fqn.to_ascii_lowercase()) {
++        return false;
++    }
++    for interface in &class.interfaces {
++        if let Some(interface) = crate::class_lookup::load_ancestor(&fqn, interface, loader)
++            && (interface
++                .constants
++                .iter()
++                .any(|constant| constant.name == name)
++                || interface_constant_collision(&interface, name, loader, visited))
++        {
++            return true;
++        }
++    }
++    class
++        .parent_class
++        .as_ref()
++        .and_then(|parent| crate::class_lookup::load_ancestor(&fqn, parent, loader))
++        .is_some_and(|parent| interface_constant_collision(&parent, name, loader, visited))
+ }
+ 
+ // ─── AST helpers ────────────────────────────────────────────────────────────
+@@ -431,8 +462,6 @@
+     let mut existing_constants = Vec::new();
+     let mut after_last_constant: Option<usize> = None;
+     let mut context_visibility = "private";
+-    // Byte offset of the start of the first non-constant member, if any.
+-    let mut first_non_const_start: Option<usize> = None;
+ 
+     for member in members.iter() {
+         match member {
+@@ -444,50 +473,39 @@
+                 let end = constant.span().end.offset as usize;
+                 after_last_constant = Some(end);
+             }
+-            other => {
+-                // Track the first non-constant member for blank-line logic.
+-                if first_non_const_start.is_none() {
+-                    first_non_const_start = Some(other.span().start.offset as usize);
+-                }
+-
+-                match other {
+-                    ClassLikeMember::Method(method) => {
+-                        let method_span = method.span();
+-                        if cursor >= method_span.start.offset && cursor <= method_span.end.offset {
+-                            for m in method.modifiers.iter() {
+-                                match m {
+-                                    modifier::Modifier::Public(_) => context_visibility = "public",
+-                                    modifier::Modifier::Protected(_) => {
+-                                        context_visibility = "protected"
+-                                    }
+-                                    modifier::Modifier::Private(_) => {
+-                                        context_visibility = "private"
+-                                    }
+-                                    _ => {}
++            other => match other {
++                ClassLikeMember::Method(method) => {
++                    let method_span = method.span();
++                    if cursor >= method_span.start.offset && cursor <= method_span.end.offset {
++                        for m in method.modifiers.iter() {
++                            match m {
++                                modifier::Modifier::Public(_) => context_visibility = "public",
++                                modifier::Modifier::Protected(_) => {
++                                    context_visibility = "protected"
+                                 }
++                                modifier::Modifier::Private(_) => context_visibility = "private",
++                                _ => {}
+                             }
+                         }
+                     }
+-                    ClassLikeMember::Property(property) => {
+-                        let prop_span = property.span();
+-                        if cursor >= prop_span.start.offset && cursor <= prop_span.end.offset {
+-                            for m in property.modifiers().iter() {
+-                                match m {
+-                                    modifier::Modifier::Public(_) => context_visibility = "public",
+-                                    modifier::Modifier::Protected(_) => {
+-                                        context_visibility = "protected"
+-                                    }
+-                                    modifier::Modifier::Private(_) => {
+-                                        context_visibility = "private"
+-                                    }
+-                                    _ => {}
++                }
++                ClassLikeMember::Property(property) => {
++                    let prop_span = property.span();
++                    if cursor >= prop_span.start.offset && cursor <= prop_span.end.offset {
++                        for m in property.modifiers().iter() {
++                            match m {
++                                modifier::Modifier::Public(_) => context_visibility = "public",
++                                modifier::Modifier::Protected(_) => {
++                                    context_visibility = "protected"
+                                 }
++                                modifier::Modifier::Private(_) => context_visibility = "private",
++                                _ => {}
+                             }
+                         }
+                     }
+-                    _ => {}
+                 }
+-            }
++                _ => {}
++            },
+         }
+     }
+ 
+@@ -496,10 +514,16 @@
+     //  - There are no existing constants (we're inserting at the top
+     //    of the class body, before non-constant members), OR
+     //  - There are existing constants but the text between the last
+-    //    constant and the first non-constant member doesn't already
++    //    constant and the next non-constant member doesn't already
+     //    contain a blank line.
+-    let needs_trailing_blank_line = if let Some(non_const_start) = first_non_const_start {
+-        let gap_from = after_last_constant.unwrap_or(body_start);
++    let gap_from = after_last_constant.unwrap_or(body_start);
++    let next_non_const_start = members
++        .iter()
++        .filter(|member| !matches!(member, ClassLikeMember::Constant(_)))
++        .map(|member| member.span().start.offset as usize)
++        .filter(|start| *start >= gap_from)
++        .min();
++    let needs_trailing_blank_line = if let Some(non_const_start) = next_non_const_start {
+         let gap = &content[gap_from..non_const_start];
+         // A "blank line" means two consecutive newlines (possibly with
+         // whitespace between them).
+@@ -699,33 +723,75 @@
+ 
+         let class_info = find_class_body_info(content, start_offset as u32)?;
+ 
+-        let base_name = generate_constant_name(trimmed);
+-        let const_name = deduplicate_constant_name(&base_name, &class_info.existing_constants);
++        let const_name = match super::requested_name::requested_name(&data.extra).ok()? {
++            Some(name) => {
++                if name.eq_ignore_ascii_case("class")
++                    || class_info
++                        .existing_constants
++                        .iter()
++                        .any(|existing| existing == name)
++                {
++                    return None;
++                }
++                let context = self.file_context_at(&data.uri, start_offset as u32);
++                let class = crate::class_lookup::find_class_at_offset(
++                    &context.classes,
++                    start_offset as u32,
++                )?;
++                let loader = super::override_methods::canonical_loader(self, &context);
++                let merged = crate::inheritance::resolve_class_with_inheritance(class, &loader);
++                if merged
++                    .constants
++                    .iter()
++                    .any(|constant| constant.name == name)
++                    || interface_constant_collision(
++                        class,
++                        name,
++                        &loader,
++                        &mut std::collections::HashSet::new(),
++                    )
++                {
++                    return None;
++                }
++                name.to_owned()
++            }
++            None => {
++                let base_name = generate_constant_name(trimmed);
++                deduplicate_constant_name(&base_name, &class_info.existing_constants)
++            }
++        };
+ 
+         let visibility = class_info.context_visibility;
+         let indent = detect_member_indent(content, class_info.body_start);
+         let php_version = self.php_version();
+ 
+-        let insert_offset = if let Some(after_const) = class_info.after_last_constant {
+-            let rest = &content[after_const..];
+-            if let Some(nl) = rest.find('\n') {
+-                after_const + nl + 1
+-            } else {
+-                after_const
+-            }
+-        } else {
+-            let rest = &content[class_info.body_start..];
+-            if let Some(nl) = rest.find('\n') {
+-                class_info.body_start + nl + 1
+-            } else {
+-                class_info.body_start + 1
+-            }
+-        };
++        let anchor = class_info
++            .after_last_constant
++            .unwrap_or(class_info.body_start + 1);
++        let rest = content.get(anchor..class_info.body_end.saturating_sub(1))?;
++        // Advance across layout whitespace only. The first newline may instead
++        // be inside a member or its literal on an otherwise compact class.
++        let insert_offset = rest
++            .find('\n')
++            .filter(|newline| {
++                rest[..*newline]
++                    .bytes()
++                    .all(|byte| matches!(byte, b' ' | b'\t' | b'\r'))
++            })
++            .map_or(anchor, |newline| anchor + newline + 1);
+ 
+         // Build the constant declaration with optional type annotation.
+         let type_name = literal_type_name(trimmed);
++        let newline = if content
++            .find('\n')
++            .is_some_and(|at| at > 0 && content.as_bytes()[at - 1] == b'\r')
++        {
++            "\r\n"
++        } else {
++            "\n"
++        };
+         let trailing_blank = if class_info.needs_trailing_blank_line {
+-            "\n"
++            newline
+         } else {
+             ""
+         };
+@@ -734,19 +800,19 @@
+             if php_version >= (PhpVersion::new(8, 3)) {
+                 // PHP 8.3+: typed constant syntax.
+                 format!(
+-                    "{}{} const {} {} = {};\n{}",
++                    "{}{} const {} {} = {};{newline}{}",
+                     indent, visibility, ty, const_name, trimmed, trailing_blank
+                 )
+             } else {
+                 // PHP < 8.3: use a docblock annotation.
+                 format!(
+-                    "{}/** @var {} */\n{}{} const {} = {};\n{}",
++                    "{}/** @var {} */{newline}{}{} const {} = {};{newline}{}",
+                     indent, ty, indent, visibility, const_name, trimmed, trailing_blank
+                 )
+             }
+         } else {
+             format!(
+-                "{}{} const {} = {};\n{}",
++                "{}{} const {} = {};{newline}{}",
+                 indent, visibility, const_name, trimmed, trailing_blank
+             )
+         };
+diff --git a/src/code_actions/extract_function/codegen.rs b/src/code_actions/extract_function/codegen.rs
+--- a/src/code_actions/extract_function/codegen.rs
++++ b/src/code_actions/extract_function/codegen.rs
+@@ -157,15 +157,27 @@
+ }
+ 
+ /// Build the definition text of the extracted function or method.
++#[cfg(test)]
+ pub(crate) fn build_extracted_definition(info: &ExtractionInfo) -> String {
++    build_extracted_definition_with_newline(info, "\n").expect("valid extraction test body")
++}
++
++/// Render synthesized layout with the target newline, preserving literal bytes.
++pub(crate) fn build_extracted_definition_with_newline(
++    info: &ExtractionInfo,
++    newline: &str,
++) -> Option<String> {
+     let mut out = String::new();
+ 
+     // Blank line before the new definition.
+-    out.push('\n');
++    out.push_str(newline);
+ 
+     // Prepend PHPDoc block if types need enrichment.
+     if !info.docblock.is_empty() {
+-        out.push_str(&info.docblock);
++        for line in info.docblock.lines() {
++            out.push_str(line);
++            out.push_str(newline);
++        }
+     }
+ 
+     let param_list = build_param_list(&info.params);
+@@ -187,9 +199,10 @@
+                 out.push_str(": ");
+                 out.push_str(&return_type);
+             }
+-            out.push('\n');
++            out.push_str(newline);
+             out.push_str(&info.member_indent);
+-            out.push_str("{\n");
++            out.push('{');
++            out.push_str(newline);
+         }
+         ExtractionTarget::Function => {
+             out.push_str(&info.member_indent);
+@@ -202,9 +215,10 @@
+                 out.push_str(": ");
+                 out.push_str(&return_type);
+             }
+-            out.push('\n');
++            out.push_str(newline);
+             out.push_str(&info.member_indent);
+-            out.push_str("{\n");
++            out.push('{');
++            out.push_str(newline);
+         }
+     }
+ 
+@@ -233,26 +247,10 @@
+         _ => info.body.clone(),
+     };
+ 
+-    // Re-indent the body to match the new function's body indentation.
+-    let body_lines = body_text.lines().collect::<Vec<_>>();
+-    let min_indent = body_lines
+-        .iter()
+-        .filter(|l| !l.trim().is_empty())
+-        .map(|l| l.len() - l.trim_start().len())
+-        .min()
+-        .unwrap_or(0);
+-
+-    for line in &body_lines {
+-        if line.trim().is_empty() {
+-            out.push('\n');
+-        } else {
+-            out.push_str(&info.body_indent);
+-            if line.len() > min_indent {
+-                out.push_str(&line[min_indent..]);
+-            }
+-            out.push('\n');
+-        }
+-    }
++    // Preserve multiline literal continuation bytes and their original line
++    // endings while reindenting only PHP layout outside those literal spans.
++    let protected = literal_ranges(&body_text)?;
++    append_body(&mut out, &body_text, &info.body_indent, newline, &protected);
+ 
+     // Add return/sentinel after the body based on the strategy.
+     match &info.return_strategy {
+@@ -263,7 +261,8 @@
+             // All guards are bare `return;`.  Add `return true;` as the
+             // fall-through (meaning "no early exit, keep going").
+             out.push_str(&info.body_indent);
+-            out.push_str("return true;\n");
++            out.push_str("return true;");
++            out.push_str(newline);
+         }
+         ReturnStrategy::UniformGuards(value) => {
+             // All guards return the same value.  The extracted function
+@@ -283,12 +282,14 @@
+             out.push_str(&info.body_indent);
+             out.push_str("return ");
+             out.push_str(sentinel);
+-            out.push_str(";\n");
++            out.push(';');
++            out.push_str(newline);
+         }
+         ReturnStrategy::SentinelNull => {
+             // Different non-null values — null = "no early exit".
+             out.push_str(&info.body_indent);
+-            out.push_str("return null;\n");
++            out.push_str("return null;");
++            out.push_str(newline);
+         }
+         ReturnStrategy::NullGuardWithValue(_) => {
+             // Guards return null (or were rewritten from bare return;),
+@@ -298,7 +299,8 @@
+                 out.push_str(&info.body_indent);
+                 out.push_str("return ");
+                 out.push_str(&info.returns[0].0);
+-                out.push_str(";\n");
++                out.push(';');
++                out.push_str(newline);
+             }
+         }
+         ReturnStrategy::None | ReturnStrategy::Unsafe => {
+@@ -307,21 +309,24 @@
+                 out.push_str(&info.body_indent);
+                 out.push_str("return ");
+                 out.push_str(&info.returns[0].0);
+-                out.push_str(";\n");
++                out.push(';');
++                out.push_str(newline);
+             } else if info.returns.len() > 1 {
+                 out.push_str(&info.body_indent);
+                 out.push_str("return [");
+                 let names: Vec<&str> = info.returns.iter().map(|(n, _)| n.as_str()).collect();
+                 out.push_str(&names.join(", "));
+-                out.push_str("];\n");
++                out.push_str("];");
++                out.push_str(newline);
+             }
+         }
+     }
+ 
+     out.push_str(&info.member_indent);
+-    out.push_str("}\n");
+-
+-    out
++    out.push('}');
++    out.push_str(newline);
++
++    Some(out)
+ }
+ 
+ /// Rewrite guard-clause return statements in the body text.
+@@ -539,7 +544,18 @@
+ }
+ 
+ /// Build the call-site text that replaces the selected statements.
++#[cfg(test)]
+ pub(crate) fn build_call_site(info: &ExtractionInfo, call_indent: &str) -> String {
++    build_call_site_with_newline(info, call_indent, "\n", None)
++}
++
++/// Render a call site without normalizing dynamic guard expressions.
++pub(crate) fn build_call_site_with_newline(
++    info: &ExtractionInfo,
++    call_indent: &str,
++    newline: &str,
++    function_call_name: Option<&str>,
++) -> String {
+     let mut out = String::new();
+ 
+     let args: Vec<&str> = info.params.iter().map(|(n, _)| n.as_str()).collect();
+@@ -555,7 +571,7 @@
+             }
+         }
+         ExtractionTarget::Function => {
+-            format!("{}({})", info.name, arg_list)
++            format!("{}({})", function_call_name.unwrap_or(&info.name), arg_list)
+         }
+     };
+ 
+@@ -566,7 +582,8 @@
+             out.push_str(call_indent);
+             out.push_str("return ");
+             out.push_str(&call_expr);
+-            out.push_str(";\n");
++            out.push(';');
++            out.push_str(newline);
+         }
+         ReturnStrategy::VoidGuards => {
+             // Extracted function returns bool (true = continue).
+@@ -574,7 +591,8 @@
+             out.push_str(call_indent);
+             out.push_str("if (!");
+             out.push_str(&call_expr);
+-            out.push_str(") return;\n");
++            out.push_str(") return;");
++            out.push_str(newline);
+         }
+         ReturnStrategy::UniformGuards(value) => {
+             // Extracted function returns bool (true = continue).
+@@ -584,7 +602,8 @@
+             out.push_str(&call_expr);
+             out.push_str(") return ");
+             out.push_str(value);
+-            out.push_str(";\n");
++            out.push(';');
++            out.push_str(newline);
+         }
+         ReturnStrategy::SentinelNull => {
+             // Extracted function returns null on fall-through, or the
+@@ -595,9 +614,11 @@
+             out.push_str(call_indent);
+             out.push_str("$result = ");
+             out.push_str(&call_expr);
+-            out.push_str(";\n");
++            out.push(';');
++            out.push_str(newline);
+             out.push_str(call_indent);
+-            out.push_str("if ($result !== null) return $result;\n");
++            out.push_str("if ($result !== null) return $result;");
++            out.push_str(newline);
+         }
+         ReturnStrategy::NullGuardWithValue(void_guards) => {
+             // Guards return null (or were void), the function also
+@@ -610,14 +631,17 @@
+                 out.push_str(&info.returns[0].0);
+                 out.push_str(" = ");
+                 out.push_str(&call_expr);
+-                out.push_str(";\n");
++                out.push(';');
++                out.push_str(newline);
+                 out.push_str(call_indent);
+                 out.push_str("if (");
+                 out.push_str(&info.returns[0].0);
+                 if *void_guards {
+-                    out.push_str(" === null) return;\n");
++                    out.push_str(" === null) return;");
++                    out.push_str(newline);
+                 } else {
+-                    out.push_str(" === null) return null;\n");
++                    out.push_str(" === null) return null;");
++                    out.push_str(newline);
+                 }
+             }
+         }
+@@ -627,14 +651,16 @@
+                 // No return values — just call the function.
+                 out.push_str(call_indent);
+                 out.push_str(&call_expr);
+-                out.push_str(";\n");
++                out.push(';');
++                out.push_str(newline);
+             } else if info.returns.len() == 1 {
+                 // Single return value — assign it.
+                 out.push_str(call_indent);
+                 out.push_str(&info.returns[0].0);
+                 out.push_str(" = ");
+                 out.push_str(&call_expr);
+-                out.push_str(";\n");
++                out.push(';');
++                out.push_str(newline);
+             } else {
+                 // Multiple return values — destructure from array.
+                 let vars: Vec<&str> = info.returns.iter().map(|(n, _)| n.as_str()).collect();
+@@ -643,10 +669,98 @@
+                 out.push_str(&vars.join(", "));
+                 out.push_str("] = ");
+                 out.push_str(&call_expr);
+-                out.push_str(";\n");
++                out.push(';');
++                out.push_str(newline);
+             }
+         }
+     }
+ 
+     out
+ }
++
++fn literal_ranges(body: &str) -> Option<Vec<(usize, usize)>> {
++    let prefix = "<?php function __extraction_body__() {\n";
++    let wrapper = format!("{prefix}{body}\n}}");
++    crate::parser::with_parsed_program(&wrapper, "extraction_literal_layout", |program, _| {
++        if !program.errors.is_empty() {
++            return None;
++        }
++        let mut ranges = Vec::new();
++        for statement in program.statements.iter() {
++            collect_literal_ranges(Node::Statement(statement), prefix.len(), &mut ranges);
++        }
++        ranges.sort_unstable_by_key(|(start, _)| *start);
++        Some(ranges)
++    })
++}
++
++fn collect_literal_ranges(node: Node<'_, '_>, prefix: usize, ranges: &mut Vec<(usize, usize)>) {
++    if let Node::Expression(expression) = node
++        && matches!(
++            expression,
++            Expression::Literal(literal::Literal::String(_)) | Expression::CompositeString(_)
++        )
++    {
++        let span = expression.span();
++        ranges.push((
++            (span.start.offset as usize).saturating_sub(prefix),
++            (span.end.offset as usize).saturating_sub(prefix),
++        ));
++        return;
++    }
++    node.visit_children(|child| collect_literal_ranges(child, prefix, ranges));
++}
++
++fn in_literal(literals: &[(usize, usize)], offset: usize, include_start: bool) -> bool {
++    let index = literals.partition_point(|(start, _)| {
++        if include_start {
++            *start <= offset
++        } else {
++            *start < offset
++        }
++    });
++    index
++        .checked_sub(1)
++        .and_then(|index| literals.get(index))
++        .is_some_and(|(_, end)| offset < *end)
++}
++
++fn append_body(
++    out: &mut String,
++    body: &str,
++    indent: &str,
++    newline: &str,
++    literals: &[(usize, usize)],
++) {
++    let protected_start = |offset: usize| in_literal(literals, offset, false);
++    let mut offset = 0;
++    let mut min_indent = None;
++    for piece in body.split_inclusive('\n') {
++        let without_lf = piece.strip_suffix('\n').unwrap_or(piece);
++        let line = without_lf.strip_suffix('\r').unwrap_or(without_lf);
++        if !protected_start(offset) && !line.trim().is_empty() {
++            let width = line.len() - line.trim_start_matches([' ', '\t']).len();
++            min_indent = Some(min_indent.map_or(width, |current: usize| current.min(width)));
++        }
++        offset += piece.len();
++    }
++    let min_indent = min_indent.unwrap_or(0);
++    offset = 0;
++    for piece in body.split_inclusive('\n') {
++        let without_lf = piece.strip_suffix('\n').unwrap_or(piece);
++        let line = without_lf.strip_suffix('\r').unwrap_or(without_lf);
++        if protected_start(offset) {
++            out.push_str(line);
++        } else if !line.trim().is_empty() {
++            out.push_str(indent);
++            out.push_str(&line[min_indent.min(line.len())..]);
++        }
++        let break_start = offset + line.len();
++        if piece.len() > line.len() && in_literal(literals, break_start, true) {
++            out.push_str(&piece[line.len()..]);
++        } else {
++            out.push_str(newline);
++        }
++        offset += piece.len();
++    }
++}
+diff --git a/src/code_actions/extract_function/mod.rs b/src/code_actions/extract_function/mod.rs
+--- a/src/code_actions/extract_function/mod.rs
++++ b/src/code_actions/extract_function/mod.rs
+@@ -36,6 +36,7 @@
+ mod codegen;
+ mod context;
+ mod naming;
++mod requested;
+ mod returns;
+ mod scope;
+ 
+@@ -189,11 +190,13 @@
+             return None;
+         }
+ 
+-        let uses_this = if scope_map.has_this_or_self {
+-            classification.uses_this
+-        } else {
+-            false
+-        };
++        let uses_this = scope_map.has_this_or_self
++            && classification.uses_this
++            && scope_map.accesses.iter().any(|access| {
++                access.name == "$this"
++                    && access.offset >= start as u32
++                    && access.offset < end as u32
++            });
+ 
+         // Writing to a `&$var` inside the selection mutates whatever the
+         // reference aliases.  The extracted function would receive a
+@@ -209,9 +212,12 @@
+         // ── Enclosing context ───────────────────────────────────────
+         let enclosing = find_enclosing_context(content, start as u32, uses_this)?;
+ 
++        // Keep only selected statements in the new body. A physical line can
++        // also contain unselected statements before or after the selection.
++        let call_indent = indent_of_line_at(content, start);
++        let body_text = format!("{call_indent}{}", &content[start..end]);
++
+         // ── Naming ──────────────────────────────────────────────────
+-        let body_line_start_for_naming = find_line_start(content, start);
+-        let body_text_for_naming = &content[body_line_start_for_naming..end];
+         let pre_trailing_return_type = if matches!(return_strategy, ReturnStrategy::TrailingReturn)
+         {
+             resolve_enclosing_return_type(content, start as u32)
+@@ -221,11 +227,26 @@
+         let naming_ctx = NamingContext {
+             enclosing_name: &enclosing.enclosing_name,
+             return_strategy: &return_strategy,
+-            body_text: body_text_for_naming,
++            body_text: &body_text,
+             return_var_names: &classification.return_values,
+             trailing_return_type: &pre_trailing_return_type,
+         };
+-        let fn_name = generate_function_name(content, &enclosing, &naming_ctx);
++        let fn_name = match crate::code_actions::requested_name::requested_name(&data.extra).ok()? {
++            Some(name) => {
++                if !requested::requested_callable_name(
++                    self,
++                    content,
++                    uri,
++                    start as u32,
++                    &enclosing,
++                    name,
++                ) {
++                    return None;
++                }
++                name.to_owned()
++            }
++            None => generate_function_name(content, &enclosing, &naming_ctx),
++        };
+ 
+         // ── Type resolution ─────────────────────────────────────────
+         let typed_params =
+@@ -236,7 +257,6 @@
+             self.resolve_param_types(uri, content, start as u32, &classification.return_values);
+ 
+         // ── Indentation ─────────────────────────────────────────────
+-        let call_indent = indent_of_line_at(content, start);
+         let (member_indent, body_indent) = match enclosing.target {
+             ExtractionTarget::Method => {
+                 let member = indent_of_line_at(content, enclosing.body_start);
+@@ -250,10 +270,6 @@
+                 (member, unit.to_string())
+             }
+         };
+-
+-        // ── Body text ───────────────────────────────────────────────
+-        let body_line_start = find_line_start(content, start);
+-        let body_text = content[body_line_start..end].to_string();
+ 
+         // ── Return type resolution ──────────────────────────────────
+         let trailing_return_type = if matches!(
+@@ -325,13 +341,54 @@
+         };
+ 
+         // ── Build edits ─────────────────────────────────────────────
+-        let definition = build_extracted_definition(&info);
+-        let call_site = build_call_site(&info, &call_indent);
++        let newline = if content
++            .find('\n')
++            .is_some_and(|offset| offset > 0 && content.as_bytes()[offset - 1] == b'\r')
++        {
++            "\r\n"
++        } else {
++            "\n"
++        };
++        let definition = build_extracted_definition_with_newline(&info, newline)?;
++        // PHP's contextual readonly token can bypass a namespaced function
++        // on an unqualified call. An explicit namespace-relative call reaches
++        // the extracted declaration in both global and named namespaces.
++        let function_call_name = (info.target == ExtractionTarget::Function
++            && info.name.eq_ignore_ascii_case("readonly")
++            && self.php_version() >= crate::types::PhpVersion::new(5, 3))
++        .then(|| format!("namespace\\{}", info.name));
++        let call_site = build_call_site_with_newline(
++            &info,
++            &call_indent,
++            newline,
++            function_call_name.as_deref(),
++        );
+ 
+         let doc_uri: Url = uri.parse().ok()?;
+ 
+-        let replace_start = find_line_start(content, start);
+-        let replace_end = find_line_end(content, end.saturating_sub(1).max(start));
++        let line_start = find_line_start(content, start);
++        let line_end = find_line_end(content, end.saturating_sub(1).max(start));
++        let prefix = &content[line_start..start];
++        let suffix = &content[end..line_end];
++        let suffix_without_ending = suffix
++            .strip_suffix("\r\n")
++            .or_else(|| suffix.strip_suffix('\n'))
++            .unwrap_or(suffix);
++        let horizontal = |text: &str| text.bytes().all(|byte| matches!(byte, b' ' | b'\t'));
++        let (replace_start, replace_end, call_site) =
++            if horizontal(prefix) && horizontal(suffix_without_ending) {
++                // Retain normal whole-line formatting when the expanded range
++                // contains only indentation and its original line ending.
++                (line_start, line_end, call_site)
++            } else {
++                // Preserve every unselected byte. The surrounding source already
++                // owns first-line indentation and the final separator/line ending.
++                let first = call_site
++                    .strip_prefix(call_indent.as_str())
++                    .unwrap_or(&call_site);
++                let exact = first.strip_suffix(newline).unwrap_or(first).to_owned();
++                (start, end, exact)
++            };
+ 
+         let replace_start_pos = offset_to_position(content, replace_start);
+         let replace_end_pos = offset_to_position(content, replace_end);
+diff --git a/src/code_actions/extract_function/requested.rs b/src/code_actions/extract_function/requested.rs
+new file mode 100644
+--- /dev/null
++++ b/src/code_actions/extract_function/requested.rs
+@@ -0,0 +1,221 @@
++use super::*;
++use crate::types::PhpVersion;
++
++/// Admit an explicit name in its declaration context, without suffixing it.
++pub(super) fn requested_callable_name(
++    backend: &Backend,
++    content: &str,
++    uri: &str,
++    offset: u32,
++    enclosing: &EnclosingContext,
++    name: &str,
++) -> bool {
++    if !keyword_allowed(name, enclosing.target, backend.php_version()) {
++        return false;
++    }
++    let context = backend.file_context_at(uri, offset);
++    match enclosing.target {
++        ExtractionTarget::Method => {
++            // Refuse actual magic contracts, while preserving legal ordinary
++            // double-underscore names and magic-constant-token method names.
++            if magic_method(name) {
++                return false;
++            }
++            let Some(class) = find_class_at_offset(&context.classes, offset) else {
++                return false;
++            };
++            let loader = crate::code_actions::override_methods::canonical_loader(backend, &context);
++            let resolved = crate::inheritance::resolve_class_with_inheritance(class, &loader);
++            if resolved.get_method_ci(name).is_some() {
++                return false;
++            }
++            // Interfaces and unresolved ancestry must also be considered: a
++            // private extracted helper cannot satisfy an existing public contract.
++            let mut pending = class
++                .parent_class
++                .iter()
++                .chain(&class.interfaces)
++                .chain(&class.used_traits)
++                .copied()
++                .collect::<Vec<_>>();
++            let mut seen = std::collections::HashSet::new();
++            while let Some(ancestor) = pending.pop() {
++                if !seen.insert(ancestor) {
++                    continue;
++                }
++                if seen.len() > 1000 {
++                    return false;
++                }
++                let Some(owner) = loader(ancestor.as_str()) else {
++                    return false;
++                };
++                if owner.get_method_ci(name).is_some() {
++                    return false;
++                }
++                pending.extend(
++                    owner
++                        .parent_class
++                        .iter()
++                        .chain(&owner.interfaces)
++                        .chain(&owner.used_traits)
++                        .copied(),
++                );
++            }
++            true
++        }
++        ExtractionTarget::Function => {
++            if name.eq_ignore_ascii_case("__autoload")
++                && backend.php_version() >= PhpVersion::new(8, 0)
++                && context
++                    .namespace
++                    .as_ref()
++                    .is_none_or(|namespace| namespace.is_empty())
++            {
++                return false;
++            }
++            if imported_function_collision(content, offset, name) {
++                return false;
++            }
++            let qualified = context
++                .namespace
++                .as_ref()
++                .filter(|namespace| !namespace.is_empty())
++                .map_or_else(
++                    || name.to_owned(),
++                    |namespace| format!("{namespace}\\{name}"),
++                );
++            // A new namespaced declaration also wins over an existing global
++            // fallback. Refuse that shadowing rather than changing old calls
++            // (or making an extracted call to the builtin recurse).
++            if name.eq_ignore_ascii_case("__autoload")
++                && backend.php_version() >= PhpVersion::new(8, 0)
++            {
++                // The removed global autoloader is not a visible fallback on
++                // PHP8; a namespaced ordinary function of this name is legal.
++                backend.find_or_load_function(&[&qualified]).is_none()
++            } else {
++                backend.find_or_load_function(&[&qualified, name]).is_none()
++            }
++        }
++    }
++}
++
++fn magic_method(name: &str) -> bool {
++    matches!(
++        name.to_ascii_lowercase().as_str(),
++        "__construct"
++            | "__destruct"
++            | "__call"
++            | "__callstatic"
++            | "__get"
++            | "__set"
++            | "__isset"
++            | "__unset"
++            | "__sleep"
++            | "__wakeup"
++            | "__serialize"
++            | "__unserialize"
++            | "__tostring"
++            | "__invoke"
++            | "__set_state"
++            | "__clone"
++            | "__debuginfo"
++    )
++}
++
++fn keyword_allowed(name: &str, target: ExtractionTarget, version: PhpVersion) -> bool {
++    let lower = name.to_ascii_lowercase();
++    if target == ExtractionTarget::Method && version >= PhpVersion::new(7, 0) {
++        return lower != "__halt_compiler";
++    }
++    // Contextual names are legal function identifiers, even though the lexer
++    // recognizes them as keywords or literal tokens in other contexts.
++    if matches!(
++        lower.as_str(),
++        "enum" | "readonly" | "from" | "true" | "false" | "null" | "self" | "parent"
++    ) {
++        return true;
++    }
++    // The parser uses the latest grammar. These names were ordinary function
++    // identifiers before their token was introduced in the project target.
++    let introduced = match lower.as_str() {
++        "__property__" => Some(PhpVersion::new(8, 4)),
++        "match" => Some(PhpVersion::new(8, 0)),
++        "fn" => Some(PhpVersion::new(7, 4)),
++        "yield" | "finally" => Some(PhpVersion::new(5, 5)),
++        "trait" | "insteadof" | "callable" | "__trait__" => Some(PhpVersion::new(5, 4)),
++        "namespace" | "goto" | "__dir__" | "__namespace__" => Some(PhpVersion::new(5, 3)),
++        _ => None,
++    };
++    if let Some(introduced) = introduced {
++        return version < introduced;
++    }
++    // The expression grammar permits list as a soft identifier, but PHP
++    // forbids it as a function declaration in every supported target.
++    if lower == "list" {
++        return false;
++    }
++    // Declaration parsing deliberately accepts reserved local identifiers for
++    // both methods and functions. Inspect the expression grammar instead:
++    // ordinary names remain Identifier; magic constants, language constructs
++    // and statements do not. This avoids accepting `function class(...)` merely
++    // because the permissive declaration parser reports no error.
++    let wrapper = format!("<?php {name};");
++    crate::parser::with_parsed_program(&wrapper, "requested_callable_keyword", |program, _| {
++        if !program.errors.is_empty() {
++            return false;
++        }
++        let mut statements = program
++            .statements
++            .iter()
++            .filter(|statement| !matches!(statement, Statement::OpeningTag(_)));
++        matches!(statements.next(), Some(Statement::Expression(statement))
++            if matches!(statement.expression, Expression::Identifier(_) | Expression::ConstantAccess(_)))
++            && statements.next().is_none()
++    })
++}
++
++fn imported_function_collision(content: &str, offset: u32, name: &str) -> bool {
++    crate::parser::with_parsed_program(content, "requested_function_import", |program, _| {
++        let namespace = program
++            .statements
++            .iter()
++            .find_map(|statement| match statement {
++                Statement::Namespace(namespace)
++                    if offset >= namespace.span().start.offset
++                        && offset <= namespace.span().end.offset =>
++                {
++                    Some(namespace)
++                }
++                _ => None,
++            });
++        let statements = namespace.map_or(&program.statements, |namespace| namespace.statements());
++        let collides = |item: &UseItem<'_>| {
++            let imported = bytes_to_str(item.name.value());
++            let alias = item
++                .alias
++                .as_ref()
++                .map(|alias| bytes_to_str(alias.identifier.value))
++                .unwrap_or_else(|| imported.rsplit('\\').next().unwrap_or(imported));
++            alias.eq_ignore_ascii_case(name)
++        };
++        statements.iter().any(|statement| {
++            let Statement::Use(statement) = statement else {
++                return false;
++            };
++            match &statement.items {
++                UseItems::TypedSequence(sequence) if sequence.r#type.is_function() => {
++                    sequence.items.iter().any(&collides)
++                }
++                UseItems::TypedList(list) if list.r#type.is_function() => {
++                    list.items.iter().any(&collides)
++                }
++                UseItems::MixedList(list) => list.items.iter().any(|item| {
++                    item.r#type.as_ref().is_some_and(|kind| kind.is_function())
++                        && collides(&item.item)
++                }),
++                _ => false,
++            }
++        })
++    })
++}
+diff --git a/src/code_actions/extract_variable.rs b/src/code_actions/extract_variable.rs
+--- a/src/code_actions/extract_variable.rs
++++ b/src/code_actions/extract_variable.rs
+@@ -13,7 +13,7 @@
+ use crate::code_actions::naming::{snake_to_camel, to_camel_case};
+ use crate::code_actions::{CodeActionData, make_code_action_data};
+ use crate::parser::with_parsed_program;
+-use crate::scope_collector::ScopeMap;
++use crate::scope_collector::{FrameKind, ScopeMap};
+ use crate::text_position::{offset_to_position, position_to_byte_offset};
+ 
+ // ─── Name generation ────────────────────────────────────────────────────────
+@@ -728,10 +728,74 @@
+             return None;
+         }
+ 
+-        let base_name = generate_variable_name(selected_text);
+         let scope_map = build_scope_map(content, start_offset as u32);
+-        let existing_vars = scope_map.variables_in_scope(start_offset as u32);
+-        let var_name = deduplicate_name(&base_name, &existing_vars);
++        let var_name = match super::requested_name::requested_name(&data.extra).ok()? {
++            Some(name) => {
++                if matches!(
++                    name,
++                    "this"
++                        | "GLOBALS"
++                        | "_SERVER"
++                        | "_GET"
++                        | "_POST"
++                        | "_FILES"
++                        | "_COOKIE"
++                        | "_SESSION"
++                        | "_REQUEST"
++                        | "_ENV"
++                ) {
++                    return None;
++                }
++                let dollar_name = format!("${name}");
++                // Catch blocks share their enclosing PHP variable scope.
++                let frame = scope_map.frames.iter().rev().find(|frame| {
++                    frame.kind != FrameKind::Catch
++                        && start_offset as u32 >= frame.start
++                        && start_offset as u32 <= frame.end
++                })?;
++                if frame
++                    .parameters
++                    .iter()
++                    .any(|parameter| parameter == &dollar_name)
++                    || frame
++                        .captures
++                        .iter()
++                        .any(|(captured, _)| captured == &dollar_name)
++                    || scope_map
++                        .accesses_in_frame(&dollar_name, frame)
++                        .iter()
++                        .any(|access| {
++                            // Parameter writes precede a nested callable's opening
++                            // brace, so body-only frame exclusion does not remove
++                            // them. They still belong to that nested callable.
++                            !scope_map.frames.iter().any(|nested| {
++                                nested.kind != FrameKind::Catch
++                                    && nested.start > frame.start
++                                    && nested.end < frame.end
++                                    && nested.parameter_range.is_some_and(|(start, end)| {
++                                        access.offset >= start && access.offset < end
++                                    })
++                            })
++                        })
++                {
++                    return None;
++                }
++                name.to_owned()
++            }
++            None => {
++                let base_name = generate_variable_name(selected_text);
++                let existing_vars = scope_map.variables_in_scope(start_offset as u32);
++                deduplicate_name(&base_name, &existing_vars)
++            }
++        };
++        let newline = if content
++            .find('\n')
++            .is_some_and(|at| at > 0 && content.as_bytes()[at - 1] == b'\r')
++        {
++            "\r\n"
++        } else {
++            "\n"
++        };
+ 
+         let rhs = strip_outer_parens(trimmed);
+         let replacement_text = format!("${}", var_name);
+@@ -770,7 +834,7 @@
+             let (first_start, _) = all_offsets[0];
+             let (first_line_start, first_indent) =
+                 find_enclosing_statement_line(content, first_start);
+-            let insert_text = format!("{}${} = {};\n", first_indent, var_name, rhs);
++            let insert_text = format!("{}${} = {};{newline}", first_indent, var_name, rhs);
+             let insert_pos = offset_to_position(content, first_line_start);
+ 
+             let mut edits = vec![TextEdit {
+@@ -797,7 +861,7 @@
+         } else {
+             // ── Single occurrence mode ──────────────────────────────
+             let (line_start, indentation) = find_enclosing_statement_line(content, start_offset);
+-            let insert_text = format!("{}${} = {};\n", indentation, var_name, rhs);
++            let insert_text = format!("{}${} = {};{newline}", indentation, var_name, rhs);
+             let insert_pos = offset_to_position(content, line_start);
+ 
+             let edit_insert = TextEdit {
+diff --git a/src/code_actions/mod.rs b/src/code_actions/mod.rs
+--- a/src/code_actions/mod.rs
++++ b/src/code_actions/mod.rs
+@@ -117,6 +117,7 @@
+ pub(crate) mod phpstan;
+ mod promote_constructor_param;
+ mod remove_unused_import;
++mod requested_name;
+ pub(crate) use remove_unused_import::{
+     build_line_deletion_edit, build_use_directive_deletion_edit, cursor_on_use_import_line,
+ };
+@@ -322,6 +323,30 @@
+             Err(_) => return (action, None),
+         };
+ 
++        let named_extraction = matches!(
++            data.action_kind.as_str(),
++            "refactor.extractVariable"
++                | "refactor.extractVariableAll"
++                | "refactor.extractConstant"
++                | "refactor.extractConstantAll"
++                | "refactor.extractFunction"
++        );
++        let has_requested_name = if named_extraction {
++            match requested_name::requested_name(&data.extra) {
++                Ok(name) => name.is_some(),
++                Err(reason) => {
++                    action.edit = None;
++                    action.command = None;
++                    action.disabled = Some(CodeActionDisabled {
++                        reason: reason.into(),
++                    });
++                    return (action, None);
++                }
++            }
++        } else {
++            false
++        };
++
+         // A template's action was planned against its virtual PHP, so the
+         // resolve reads the same text.
+         let Some(content) = self.analysable_content(&data.uri) else {
+@@ -416,6 +441,12 @@
+         if let Some(mut edit) = result {
+             self.translate_workspace_edit(&mut edit);
+             action.edit = Some(edit);
++        } else if has_requested_name {
++            action.edit = None;
++            action.command = None;
++            action.disabled = Some(CodeActionDisabled {
++                reason: "That name is unavailable in this scope, or the selected code cannot be extracted safely. Choose another name or adjust the selection.".into(),
++            });
+         }
+ 
+         // Resolving produces a proposal, not acknowledgement of an applied edit.
+diff --git a/src/code_actions/requested_name.rs b/src/code_actions/requested_name.rs
+new file mode 100644
+--- /dev/null
++++ b/src/code_actions/requested_name.rs
+@@ -0,0 +1,27 @@
++//! Syntax shared by explicit extraction names; scope and declaration rules stay
++//! with the individual planners.
++
++pub(super) fn requested_name(extra: &serde_json::Value) -> Result<Option<&str>, &'static str> {
++    let Some(value) = extra.get("requested_name") else {
++        return Ok(None);
++    };
++    let Some(name) = value.as_str() else {
++        return Err("Use a PHP identifier for the extracted name.");
++    };
++    if name.is_empty() {
++        return Err("Enter a name for the extracted declaration.");
++    }
++    if name.len() > 256 {
++        return Err("Use at most 256 UTF-8 bytes for the extracted name.");
++    }
++    let mut chars = name.chars();
++    let start = chars.next().unwrap();
++    let first = start == '_' || start.is_ascii_alphabetic() || !start.is_ascii();
++    let rest = chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric() || !ch.is_ascii());
++    if !first || !rest {
++        return Err(
++            "Use one PHP identifier without a dollar sign, spaces, or namespace separators.",
++        );
++    }
++    Ok(Some(name))
++}
+diff --git a/src/server.rs b/src/server.rs
+--- a/src/server.rs
++++ b/src/server.rs
+@@ -561,7 +561,9 @@
+         let fallback = action.clone();
+         let (resolved, republish_uri) =
+             run_blocking_cancel_safe("code_action_resolve", move || {
+-                backend.with_semantic_epoch(|| Ok(backend.resolve_code_action(action)))
++                backend.with_prepared_current_semantics(|| {
++                    Ok(backend.resolve_code_action(action.clone()))
++                })
+             })
+             .await
+             .unwrap_or(Ok((fallback, None)))?;
+@@ -1507,4 +1509,84 @@
+         );
+         assert!(!labels.contains(&"newMember".to_owned()));
+     }
++    #[tokio::test]
++    async fn requested_extraction_resolve_refreshes_pending_dependency_before_inferring_signature()
++    {
++        let backend = Backend::new_test();
++        let old = "<?php\nclass Dependency { public function fetch(): int { return 1; } }\n";
++        let new = "<?php\nclass Dependency { public function fetch(): string { return 'new'; } }\n";
++        let caller = "<?php\nfunction demo(Dependency $value): void {\n    $result = $value->fetch();\n    echo $result;\n}\n";
++        install(&backend, DEP, old);
++        install(&backend, MAIN, caller);
++        let selection = Range::new(
++            Position::new(2, 4),
++            Position::new(2, 4 + "$result = $value->fetch();".len() as u32),
++        );
++        let params = serde_json::from_value(json!({
++            "textDocument":{"uri":MAIN}, "range":selection,
++            "context":{"diagnostics":[],"only":["refactor.extract"]}
++        }))
++        .unwrap();
++        let offered = LanguageServer::code_action(&backend, params)
++            .await
++            .unwrap()
++            .unwrap();
++        let action = offered
++            .into_iter()
++            .find_map(|action| match action {
++                CodeActionOrCommand::CodeAction(action)
++                    if action
++                        .data
++                        .as_ref()
++                        .and_then(|data| data.get("action_kind"))
++                        .and_then(|kind| kind.as_str())
++                        == Some("refactor.extractFunction") =>
++                {
++                    Some(action)
++                }
++                _ => None,
++            })
++            .expect("complete statement extraction must be offered");
++        let text = |action: &CodeAction| {
++            action
++                .edit
++                .as_ref()
++                .expect("resolved extraction edit")
++                .changes
++                .as_ref()
++                .expect("source changes")
++                .values()
++                .flatten()
++                .map(|edit| edit.new_text.as_str())
++                .collect::<String>()
++        };
++        let before = LanguageServer::code_action_resolve(&backend, action.clone())
++            .await
++            .unwrap();
++        assert!(
++            text(&before).contains("): int"),
++            "baseline must infer int: {}",
++            text(&before)
++        );
++        pending(&backend, DEP, new);
++        let after = LanguageServer::code_action_resolve(&backend, action.clone())
++            .await
++            .unwrap();
++        assert!(
++            text(&after).contains("): string"),
++            "resolve must prepare the accepted pending dependency: {}",
++            text(&after)
++        );
++        let original = Arc::new(old.to_owned());
++        assert!(backend.diag.documents.lock().change(DEP, 3, &original));
++        backend.open_files.write().insert(DEP.to_owned(), original);
++        let undo = LanguageServer::code_action_resolve(&backend, action)
++            .await
++            .unwrap();
++        assert!(
++            text(&undo).contains("): int"),
++            "resolve after Undo must use restored signature: {}",
++            text(&undo)
++        );
++    }
+ }
+diff --git a/tests/integration/code_action_requested_callable_names.rs b/tests/integration/code_action_requested_callable_names.rs
+new file mode 100644
+--- /dev/null
++++ b/tests/integration/code_action_requested_callable_names.rs
+@@ -0,0 +1,601 @@
++//! Requested extraction names must be semantic inputs, never edit-text rewrites.
++use crate::common::{apply_workspace_edit, create_test_backend, get_code_actions_in_range};
++use phpantom_lsp::{Backend, types::PhpVersion};
++use serde_json::{Value, json};
++use std::sync::Arc;
++use tower_lsp::lsp_types::*;
++
++const URI: &str = "file:///requested-callable.php";
++
++fn position(source: &str, offset: usize) -> Position {
++    let prefix = &source[..offset];
++    Position::new(
++        prefix.bytes().filter(|byte| *byte == b'\n').count() as u32,
++        prefix.rsplit('\n').next().unwrap().encode_utf16().count() as u32,
++    )
++}
++
++fn proposal(
++    marked: &str,
++    requested: Option<Value>,
++    version: PhpVersion,
++) -> (Backend, String, CodeAction) {
++    let start = marked.find("<start>").unwrap();
++    let end = marked.find("<end>").unwrap() - "<start>".len();
++    let source = marked.replace("<start>", "").replace("<end>", "");
++    let backend = create_test_backend();
++    backend.set_php_version(version);
++    backend
++        .open_files()
++        .write()
++        .insert(URI.into(), Arc::new(source.clone()));
++    backend.update_ast(URI, &source);
++    let actions = get_code_actions_in_range(
++        &backend,
++        URI,
++        &source,
++        Range::new(position(&source, start), position(&source, end)),
++    );
++    let mut action = actions
++        .into_iter()
++        .find_map(|item| match item {
++            CodeActionOrCommand::CodeAction(action)
++                if action
++                    .data
++                    .as_ref()
++                    .and_then(|data| data.get("action_kind"))
++                    .and_then(Value::as_str)
++                    == Some("refactor.extractFunction") =>
++            {
++                Some(action)
++            }
++            _ => None,
++        })
++        .expect("callable extraction candidate");
++    if let Some(name) = requested {
++        action.data.as_mut().unwrap()["extra"]["requested_name"] = name;
++    }
++    (backend, source, action)
++}
++
++fn resolved(marked: &str, requested: Option<Value>, version: PhpVersion) -> (String, CodeAction) {
++    let (backend, source, action) = proposal(marked, requested, version);
++    (source, backend.resolve_code_action(action).0)
++}
++
++fn extract(marked: &str, requested: Option<Value>) -> String {
++    let (source, action) = resolved(marked, requested, PhpVersion::new(8, 4));
++    apply_workspace_edit(
++        &source,
++        action.edit.as_ref().expect("named extraction edit"),
++    )
++}
++
++fn refuse(marked: &str, requested: Value) {
++    let (_, action) = resolved(marked, Some(requested), PhpVersion::new(8, 4));
++    assert!(
++        action.edit.is_none(),
++        "unsafe name must not fall back to automatic extraction: {action:?}"
++    );
++}
++
++const FUNCTION: &str = "<?php\nfunction run(int $value): int {\n    <start>$result = $value + 1;<end>\n    return $result;\n}\n";
++const METHOD: &str = "<?php\nclass Worker {\n    public int $value = 3;\n    public function run(): int {\n        <start>$result = $this->value + 1;<end>\n        return $result;\n    }\n}\n";
++
++#[test]
++fn requested_extraction_function_name_controls_declaration_and_call() {
++    let output = extract(FUNCTION, Some(json!("calculate")));
++    assert!(output.contains("function calculate("), "{output}");
++    assert!(output.contains("$result = calculate($value);"), "{output}");
++    assert!(!output.contains("function computeResult("), "{output}");
++}
++
++#[test]
++fn requested_extraction_instance_method_name_controls_declaration_and_call() {
++    let output = extract(METHOD, Some(json!("calculate")));
++    assert!(output.contains("private function calculate("), "{output}");
++    assert!(output.contains("$result = $this->calculate();"), "{output}");
++}
++
++#[test]
++fn requested_extraction_static_method_name_preserves_static_target() {
++    let marked = "<?php\nclass Worker {\n    public const VALUE = 3;\n    public static function run(): int {\n        <start>$result = self::VALUE + 1;<end>\n        return $result;\n    }\n}\n";
++    let output = extract(marked, Some(json!("calculate")));
++    assert!(
++        output.contains("private static function calculate("),
++        "{output}"
++    );
++    assert!(output.contains("$result = self::calculate();"), "{output}");
++}
++
++#[test]
++fn requested_extraction_omitted_name_preserves_automatic_callable_behavior() {
++    let (backend, source, action) = proposal(FUNCTION, None, PhpVersion::new(8, 4));
++    let original = backend
++        .resolve_code_action(action.clone())
++        .0
++        .edit
++        .expect("automatic edit");
++    let again = backend
++        .resolve_code_action(action)
++        .0
++        .edit
++        .expect("automatic repeat edit");
++    assert_eq!(original, again);
++    assert!(apply_workspace_edit(&source, &original).contains("function computeResult("));
++}
++
++#[test]
++fn requested_extraction_rejects_nonstring_empty_invalid_and_injection_names() {
++    for name in [
++        json!(null),
++        json!(false),
++        json!(42),
++        json!([]),
++        json!({}),
++        json!(""),
++        json!(" "),
++        json!("$calculate"),
++        json!("1calculate"),
++        json!("App\\calculate"),
++        json!("calculate(); evil();"),
++        json!("bad\nname"),
++        json!("bad\0name"),
++        json!("x".repeat(257)),
++    ] {
++        refuse(FUNCTION, name);
++    }
++}
++
++#[test]
++fn requested_extraction_rejects_reserved_function_and_magic_method_names() {
++    for name in [
++        "class",
++        "function",
++        "return",
++        "match",
++        "fn",
++        "__halt_compiler",
++    ] {
++        refuse(FUNCTION, json!(name));
++    }
++    for name in [
++        "__construct",
++        "__destruct",
++        "__call",
++        "__callStatic",
++        "__get",
++        "__set",
++        "__invoke",
++        "__toString",
++        "__clone",
++        "__serialize",
++        "__unserialize",
++        "__debugInfo",
++        "__sleep",
++        "__wakeup",
++        "__set_state",
++    ] {
++        refuse(METHOD, json!(name));
++    }
++}
++
++#[test]
++fn requested_extraction_keyword_rules_respect_php_target_and_method_context() {
++    let (source, action) = resolved(FUNCTION, Some(json!("match")), PhpVersion::new(7, 4));
++    let output = apply_workspace_edit(
++        &source,
++        action
++            .edit
++            .as_ref()
++            .expect("match is not a PHP7.4 function keyword"),
++    );
++    assert!(output.contains("function match("), "{output}");
++    let output = extract(METHOD, Some(json!("match")));
++    assert!(output.contains("private function match("), "{output}");
++    assert!(output.contains("$this->match()"), "{output}");
++}
++
++#[test]
++fn requested_extraction_rejects_case_only_own_and_inherited_method_collisions() {
++    let own = METHOD.replace(
++        "    public int $value",
++        "    public function CaLcUlAtE(): int { return 0; }\n    public int $value",
++    );
++    refuse(&own, json!("calculate"));
++    for parent in [
++        "class ParentWorker { public function CaLcUlAtE(): int { return 0; } }",
++        "class ParentWorker { final public function CaLcUlAtE(): int { return 0; } }",
++        "trait SharedWorker { public function CaLcUlAtE(): int { return 0; } }\nclass ParentWorker { use SharedWorker; }",
++    ] {
++        let marked = METHOD
++            .replace("class Worker {", "class Worker extends ParentWorker {")
++            .replacen("<?php\n", &format!("<?php\n{parent}\n"), 1);
++        refuse(&marked, json!("calculate"));
++        let output = extract(&marked, Some(json!("availableName")));
++        assert!(
++            output.contains("private function availableName("),
++            "{output}"
++        );
++    }
++}
++
++#[test]
++fn requested_extraction_rejects_trait_adapted_alias_method_collision() {
++    let marked = METHOD.replace("class Worker {", "trait SharedWorker { public function original(): int { return 0; } }\nclass Worker {\n    use SharedWorker { original as protected CaLcUlAtE; }");
++    refuse(&marked, json!("calculate"));
++    assert!(extract(&marked, Some(json!("availableName"))).contains("function availableName("));
++}
++
++#[test]
++fn requested_extraction_resolves_function_collisions_by_namespace_and_import_identity() {
++    let same_namespace = FUNCTION.replacen(
++        "<?php\n",
++        "<?php\nnamespace App;\nfunction CaLcUlAtE(): int { return 0; }\n",
++        1,
++    );
++    refuse(&same_namespace, json!("calculate"));
++    let imported = "<?php\nnamespace Library { function original(): int { return 0; } }\nnamespace App {\nuse function Library\\original as CaLcUlAtE;\nfunction run(int $value): int {\n    <start>$result = $value + 1;<end>\n    return $result;\n}\n}\n";
++    refuse(imported, json!("calculate"));
++    let distinct = "<?php\nnamespace Library { function calculate(): int { return 0; } }\nnamespace App {\nfunction run(int $value): int {\n    <start>$result = $value + 1;<end>\n    return $result;\n}\n}\n";
++    let output = extract(distinct, Some(json!("calculate")));
++    assert_eq!(output.matches("function calculate(").count(), 2, "{output}");
++}
++
++#[test]
++fn requested_extraction_does_not_treat_function_text_in_strings_or_comments_as_a_collision() {
++    let marked = FUNCTION.replace("    <start>", "    $description = 'function calculate(';\n    // function calculate( is not a declaration\n    <start>");
++    let output = extract(&marked, Some(json!("calculate")));
++    assert!(output.contains("$result = calculate($value);"), "{output}");
++    assert!(!output.contains("function calculate2("), "{output}");
++}
++
++#[test]
++fn requested_extraction_callable_name_preserves_unicode_crlf_and_statement_bytes() {
++    let marked = "<?php\nfunction run(int $hodnota): int {\n    $poznámka = '🐘';\n    <start>$výsledek = $hodnota + 1;<end>\n    return $výsledek;\n}\n".replace('\n', "\r\n");
++    let output = extract(&marked, Some(json!("vypočítej")));
++    assert!(output.contains("function vypočítej("), "{output}");
++    assert!(output.contains("vypočítej($hodnota)"), "{output}");
++    assert!(output.contains("$poznámka = '🐘';"), "{output}");
++    assert!(output.contains("$výsledek = $hodnota + 1;"), "{output}");
++    assert!(!output.replace("\r\n", "").contains('\n'), "{output:?}");
++}
++
++#[test]
++fn requested_extraction_names_do_not_bypass_reference_and_control_flow_refusals() {
++    let references = "<?php\nfunction run(int &$value): int {\n    <start>$value += 1;<end>\n    return $value;\n}\n";
++    let unsafe_returns = "<?php\nfunction run($a, $b) {\n    <start>if ($a) return 1;\n    if ($b) return null;\n    echo 'done';<end>\n}\n";
++    for marked in [references, unsafe_returns] {
++        refuse(marked, json!("calculate"));
++    }
++}
++
++#[test]
++fn requested_extraction_does_not_shadow_visible_global_functions_or_builtins() {
++    let user_global = "<?php\nnamespace { function calculate(int $value): int { return $value; } }\nnamespace App {\nfunction run(int $value): int {\n    <start>$result = $value + 1;<end>\n    return $result;\n}\n}\n";
++    refuse(user_global, json!("calculate"));
++    let builtin = FUNCTION.replacen("<?php\n", "<?php\nnamespace App;\n", 1);
++    let (backend, _, mut action) = proposal(&builtin, Some(json!("strlen")), PhpVersion::new(8, 4));
++    // Ensure the builtin is actually known in this fixture, independently of
++    // the minimal backend's optional stub setup.
++    let stub = "<?php function strlen(string $string): int {}";
++    backend.update_ast("file:///known-strlen.php", stub);
++    action = backend.resolve_code_action(action).0;
++    assert!(
++        action.edit.is_none(),
++        "a visible global fallback must not be shadowed"
++    );
++}
++
++#[test]
++fn requested_extraction_preserves_raw_multiline_literal_bytes_with_crlf_layout() {
++    let marked = "<?php\nfunction run(): string {\n    <start>$result = <literal>;<end>\n    return $result;\n}\n".replace('\n', "\r\n").replace("<literal>", "'a\n  b'");
++    let output = extract(&marked, Some(json!("calculate")));
++    assert!(
++        output.contains("'a\n  b'"),
++        "literal continuation bytes changed: {output:?}"
++    );
++    assert!(
++        !output
++            .replace("'a\n  b'", "'literal'")
++            .replace("\r\n", "")
++            .contains('\n'),
++        "only literal line endings may differ from CRLF: {output:?}"
++    );
++}
++
++#[test]
++fn requested_extraction_distinguishes_class_imports_from_grouped_function_imports() {
++    let base = "<?php\nnamespace Library { class Calculate {} function original(): int { return 0; } }\nnamespace App {\n<imports>\nfunction run(int $value): int {\n    <start>$result = $value + 1;<end>\n    return $result;\n}\n}\n";
++    let class_only = base.replace("<imports>", "use Library\\Calculate as calculate;");
++    assert!(extract(&class_only, Some(json!("calculate"))).contains("function calculate("));
++    let grouped = base.replace(
++        "<imports>",
++        "use function Library\\{original as CaLcUlAtE};",
++    );
++    refuse(&grouped, json!("calculate"));
++    let mixed = base.replace(
++        "<imports>",
++        "use Library\\{Calculate, function original as CaLcUlAtE};",
++    );
++    refuse(&mixed, json!("calculate"));
++}
++
++#[test]
++fn requested_extraction_automatic_layout_preserves_multiline_literal_value_bytes() {
++    let marked = "<?php\nfunction run(): string {\n    <start>$result = <literal>;<end>\n    return $result;\n}\n".replace('\n', "\r\n").replace("<literal>", "'a\n  b'");
++    let output = extract(&marked, None);
++    // Exact quote/continuation bytes determine the value 61 0a 20 20 62;
++    // changing continuation indentation would change the returned PHP string.
++    assert!(
++        output.contains("'a\n  b'"),
++        "literal value bytes changed: {output:?}"
++    );
++    assert!(
++        !output
++            .replace("'a\n  b'", "'literal'")
++            .replace("\r\n", "")
++            .contains('\n'),
++        "literal LF must remain opaque while layout uses CRLF: {output:?}"
++    );
++}
++
++#[test]
++fn requested_extraction_preserves_document_string_continuations_and_terminator_indent() {
++    for opening in ["<<<'TXT'", "<<<TXT"] {
++        let literal = format!("{opening}\n  a\n    b\n  TXT");
++        let marked = "<?php\nfunction run(): string {\n    <start>$result = <literal>;<end>\n    return $result;\n}\n".replace('\n', "\r\n").replace("<literal>", &literal);
++        let output = extract(&marked, Some(json!("calculate")));
++        assert!(
++            output.contains(&literal),
++            "document string bytes/terminator indentation changed: {output:?}"
++        );
++        assert!(output.contains("function calculate("), "{output}");
++        assert!(
++            !output
++                .replace(&literal, "'literal'")
++                .replace("\r\n", "")
++                .contains('\n'),
++            "document string LF must remain opaque: {output:?}"
++        );
++    }
++}
++
++#[test]
++fn requested_extraction_static_relative_access_retains_class_scope_with_automatic_name() {
++    let marked = "<?php\nclass Worker {\n    public const VALUE = 3;\n    public static function run(): int {\n        <start>$result = self::VALUE + 1;<end>\n        return $result;\n    }\n}\n";
++    let output = extract(marked, None);
++    assert!(
++        output.contains("private static function computeResult("),
++        "static relative access escaped its class: {output}"
++    );
++    assert!(
++        output.contains("$result = self::computeResult();"),
++        "{output}"
++    );
++}
++
++#[test]
++fn requested_extraction_shared_line_preserves_unselected_side_effects_and_comment() {
++    let marked = "<?php\nfunction run(int $value): array {\n    $events = [];\n    $events[] = 'before'; <start>$result = $value + 1;<end> $events[] = 'after'; // keep 🐘 comment\n    return [$events, $result];\n}\n";
++    for requested in [None, Some(json!("calculate"))] {
++        let (source, action) = resolved(marked, requested.clone(), PhpVersion::new(8, 4));
++        let edit = action
++            .edit
++            .as_ref()
++            .expect("shared-line extraction is supported");
++        let edits = edit
++            .changes
++            .as_ref()
++            .unwrap()
++            .values()
++            .flatten()
++            .collect::<Vec<_>>();
++        let replacement = edits
++            .iter()
++            .find(|edit| edit.range.start != edit.range.end)
++            .unwrap();
++        let start = source.find("$result = $value + 1;").unwrap();
++        let end = start + "$result = $value + 1;".len();
++        assert_eq!(
++            replacement.range,
++            Range::new(position(&source, start), position(&source, end))
++        );
++        let definition = edits
++            .iter()
++            .find(|edit| edit.range.start == edit.range.end)
++            .unwrap();
++        assert!(
++            !definition.new_text.contains("$events"),
++            "unselected side effects moved into helper: {}",
++            definition.new_text
++        );
++        assert!(!definition.new_text.contains("keep 🐘"));
++        let output = apply_workspace_edit(&source, edit);
++        let name = if requested.is_some() {
++            "calculate"
++        } else {
++            "computeResult"
++        };
++        assert!(output.contains(&format!("    $events[] = 'before'; $result = {name}($value); $events[] = 'after'; // keep 🐘 comment\n")), "{output}");
++        assert_eq!(output.matches("'before'").count(), 1);
++        assert_eq!(output.matches("'after'").count(), 1);
++        assert_eq!(output.matches("keep 🐘 comment").count(), 1);
++    }
++}
++
++#[test]
++fn requested_extraction_preserves_unselected_trailing_comment_with_named_or_auto_call() {
++    let marked = "<?php\nfunction run(int $value): int {\n    <start>$result = $value + 1;<end> // retain this comment\n    return $result;\n}\n".replace('\n', "\r\n");
++    for requested in [None, Some(json!("calculate"))] {
++        let (source, action) = resolved(&marked, requested.clone(), PhpVersion::new(8, 4));
++        let output = apply_workspace_edit(
++            &source,
++            action.edit.as_ref().expect("comment-preserving extraction"),
++        );
++        let name = if requested.is_some() {
++            "calculate"
++        } else {
++            "computeResult"
++        };
++        assert!(
++            output.contains(&format!(
++                "    $result = {name}($value); // retain this comment\r\n"
++            )),
++            "{output:?}"
++        );
++        assert_eq!(output.matches("retain this comment").count(), 1);
++        assert!(!output.replace("\r\n", "").contains('\n'));
++    }
++}
++
++#[test]
++fn requested_extraction_shared_multiline_range_preserves_prefix_and_suffix_statements() {
++    let marked = "<?php\nfunction run(int $value): array {\n    $before = 10; <start>$first = $value + 1;\n    $second = $first * 2;<end> $after = 100;\n    return [$before, $first, $second, $after];\n}\n";
++    for requested in [None, Some(json!("calculate"))] {
++        let (source, action) = resolved(marked, requested, PhpVersion::new(8, 4));
++        let edit = action.edit.as_ref().expect("shared multiline extraction");
++        let definition = edit
++            .changes
++            .as_ref()
++            .unwrap()
++            .values()
++            .flatten()
++            .find(|edit| edit.range.start == edit.range.end)
++            .unwrap();
++        assert!(
++            !definition.new_text.contains("$before") && !definition.new_text.contains("$after"),
++            "unselected variables moved: {}",
++            definition.new_text
++        );
++        let output = apply_workspace_edit(&source, edit);
++        assert!(
++            output.contains("    $before = 10; ["),
++            "prefix statement changed: {output}"
++        );
++        assert!(
++            output.contains("($value); $after = 100;\n"),
++            "suffix statement changed: {output}"
++        );
++        assert_eq!(output.matches("$before = 10;").count(), 1);
++        assert_eq!(output.matches("$after = 100;").count(), 1);
++    }
++}
++
++#[test]
++fn requested_extraction_permits_ordinary_double_underscore_and_magic_constant_method_names() {
++    for name in [
++        "__custom",
++        "__CLASS__",
++        "__FUNCTION__",
++        "__METHOD__",
++        "class",
++        "match",
++        "static",
++        "readonly",
++    ] {
++        let output = extract(METHOD, Some(json!(name)));
++        assert!(
++            output.contains(&format!("private function {name}(")),
++            "legal method {name} refused: {output}"
++        );
++        assert!(output.contains(&format!("$this->{name}()")), "{output}");
++    }
++    let output = extract(FUNCTION, Some(json!("__custom")));
++    assert!(output.contains("function __custom("));
++    for name in ["__CALL", "__ToString", "__Construct"] {
++        refuse(METHOD, json!(name));
++    }
++}
++
++#[test]
++fn requested_extraction_function_keywords_preserve_legal_contextual_and_type_names() {
++    for name in [
++        "readonly", "enum", "from", "true", "false", "null", "self", "parent", "iterable", "never",
++        "void", "bool", "string", "int", "float", "object", "mixed",
++    ] {
++        let output = extract(FUNCTION, Some(json!(name)));
++        assert!(
++            output.contains(&format!("function {name}(")),
++            "legal function {name} refused: {output}"
++        );
++        let call = if name == "readonly" {
++            "namespace\\readonly"
++        } else {
++            name
++        };
++        assert!(
++            output.contains(&format!("$result = {call}($value);")),
++            "{output}"
++        );
++    }
++    for name in [
++        "class",
++        "list",
++        "die",
++        "exit",
++        "callable",
++        "static",
++        "__CLASS__",
++        "__FUNCTION__",
++        "__halt_compiler",
++    ] {
++        refuse(FUNCTION, json!(name));
++    }
++}
++
++#[test]
++fn requested_extraction_autoload_function_restriction_is_namespace_and_target_aware() {
++    refuse(FUNCTION, json!("__autoload"));
++    let namespaced = FUNCTION.replacen("<?php\n", "<?php\nnamespace App;\n", 1);
++    let output = extract(&namespaced, Some(json!("__autoload")));
++    assert!(output.contains("function __autoload("));
++    assert!(output.contains("$result = __autoload($value);"));
++    let (source, action) = resolved(FUNCTION, Some(json!("__autoload")), PhpVersion::new(7, 4));
++    let output = apply_workspace_edit(
++        &source,
++        action
++            .edit
++            .as_ref()
++            .expect("global __autoload is supported before PHP8"),
++    );
++    assert!(output.contains("function __autoload("));
++}
++
++#[test]
++fn requested_extraction_magic_constant_function_names_follow_introduction_version() {
++    let (source, action) = resolved(FUNCTION, Some(json!("__PROPERTY__")), PhpVersion::new(8, 3));
++    assert!(
++        apply_workspace_edit(
++            &source,
++            action
++                .edit
++                .as_ref()
++                .expect("not a magic constant before PHP8.4")
++        )
++        .contains("function __PROPERTY__(")
++    );
++    refuse(FUNCTION, json!("__PROPERTY__"));
++}
++
++#[test]
++fn requested_extraction_readonly_function_calls_are_explicitly_namespace_relative() {
++    for marked in [
++        FUNCTION.to_owned(),
++        FUNCTION.replacen("<?php\n", "<?php\nnamespace App;\n", 1),
++    ] {
++        let output = extract(&marked, Some(json!("readonly")));
++        assert!(
++            output.contains("function readonly("),
++            "declaration name changed: {output}"
++        );
++        assert!(
++            output.contains("$result = namespace\\readonly($value);"),
++            "readonly call may bypass its declaration: {output}"
++        );
++        assert!(!output.contains("$result = readonly($value);"));
++    }
++    let method = extract(METHOD, Some(json!("readonly")));
++    assert!(method.contains("$this->readonly()"));
++    assert!(!method.contains("namespace\\readonly"));
++}
+diff --git a/tests/integration/code_action_requested_expression_names.rs b/tests/integration/code_action_requested_expression_names.rs
+new file mode 100644
+--- /dev/null
++++ b/tests/integration/code_action_requested_expression_names.rs
+@@ -0,0 +1,447 @@
++//! Requested expression-extraction names are validated before any edit is proposed.
++use crate::common::{
++    apply_workspace_edit, create_test_backend, extract_edits, get_code_actions_in_range,
++    position_after, position_of,
++};
++use serde_json::{Value, json};
++use std::sync::Arc;
++use tower_lsp::lsp_types::{CodeAction, CodeActionOrCommand, Range};
++
++fn resolve(content: &str, selected: &str, kind: &str, requested: Option<Value>) -> CodeAction {
++    let backend = create_test_backend();
++    let uri = "file:///requested-expression.php";
++    backend.update_ast(uri, content);
++    backend
++        .open_files()
++        .write()
++        .insert(uri.into(), Arc::new(content.into()));
++    let actions = get_code_actions_in_range(
++        &backend,
++        uri,
++        content,
++        Range::new(
++            position_of(content, selected),
++            position_after(content, selected),
++        ),
++    );
++    let mut action = actions
++        .into_iter()
++        .find_map(|action| match action {
++            CodeActionOrCommand::CodeAction(action)
++                if action
++                    .data
++                    .as_ref()
++                    .and_then(|data| data.get("action_kind"))
++                    .and_then(Value::as_str)
++                    == Some(kind) =>
++            {
++                Some(action)
++            }
++            _ => None,
++        })
++        .unwrap_or_else(|| panic!("missing fixture action {kind}: {content}"));
++    if let Some(requested) = requested {
++        action.data.as_mut().unwrap().get_mut("extra").unwrap()["requested_name"] = requested;
++    }
++    backend.resolve_code_action(action).0
++}
++
++fn accepted(content: &str, selected: &str, kind: &str, name: &str) -> (CodeAction, String) {
++    let action = resolve(content, selected, kind, Some(json!(name)));
++    assert!(
++        action.disabled.is_none(),
++        "requested name {name} unexpectedly refused: {:?}",
++        action.disabled
++    );
++    let result = apply_workspace_edit(
++        content,
++        action
++            .edit
++            .as_ref()
++            .expect("custom name must produce an edit"),
++    );
++    (action, result)
++}
++
++fn refused(content: &str, selected: &str, kind: &str, name: Value) {
++    let action = resolve(content, selected, kind, Some(name.clone()));
++    assert!(
++        action.edit.is_none(),
++        "invalid/colliding name {name} must not propose edits"
++    );
++    assert!(
++        action
++            .disabled
++            .as_ref()
++            .is_some_and(|disabled| !disabled.reason.trim().is_empty()),
++        "refusal for {name} must explain why the action is unavailable"
++    );
++}
++
++const VARIABLE: &str = "<?php\nfunction calculate()\n{\n    return 1 + 2;\n}\n";
++const VARIABLE_ALL: &str =
++    "<?php\nfunction calculate()\n{\n    echo 1 + 2;\n    return 1 + 2;\n}\n";
++const CONSTANT: &str = "<?php\nclass Example\n{\n    public function run(): string\n    {\n        return 'hello';\n    }\n}\n";
++const CONSTANT_ALL: &str = "<?php\nclass Example\n{\n    public function run(): string\n    {\n        echo 'hello';\n        return 'hello';\n    }\n}\n";
++
++#[test]
++fn requested_extraction_variable_single_uses_exact_custom_name() {
++    let (_, result) = accepted(VARIABLE, "1 + 2", "refactor.extractVariable", "total");
++    assert!(result.contains("$total = 1 + 2;"));
++    assert!(result.contains("return $total;"));
++    assert!(!result.contains("$variable"));
++}
++
++#[test]
++fn requested_extraction_variable_all_uses_one_custom_declaration_and_every_replacement() {
++    let (_, result) = accepted(
++        VARIABLE_ALL,
++        "1 + 2",
++        "refactor.extractVariableAll",
++        "total",
++    );
++    assert_eq!(result.matches("$total = 1 + 2;").count(), 1);
++    assert_eq!(result.matches("$total").count(), 3);
++    assert!(result.contains("echo $total;") && result.contains("return $total;"));
++}
++
++#[test]
++fn requested_extraction_constant_single_uses_exact_custom_name() {
++    let (_, result) = accepted(CONSTANT, "'hello'", "refactor.extractConstant", "GREETING");
++    assert!(result.contains("GREETING = 'hello';"));
++    assert!(result.contains("return self::GREETING;"));
++    assert!(!result.contains("const string HELLO") && !result.contains("const HELLO"));
++}
++
++#[test]
++fn requested_extraction_constant_all_uses_one_custom_declaration_and_every_replacement() {
++    let (_, result) = accepted(
++        CONSTANT_ALL,
++        "'hello'",
++        "refactor.extractConstantAll",
++        "GREETING",
++    );
++    assert_eq!(result.matches("GREETING = 'hello';").count(), 1);
++    assert_eq!(result.matches("self::GREETING").count(), 2);
++    assert!(result.contains("echo self::GREETING;") && result.contains("return self::GREETING;"));
++}
++
++#[test]
++fn requested_extraction_omitted_name_retains_variable_and_constant_auto_names() {
++    let variable = resolve(VARIABLE, "1 + 2", "refactor.extractVariable", None);
++    let result = apply_workspace_edit(VARIABLE, variable.edit.as_ref().unwrap());
++    assert!(result.contains("$variable = 1 + 2;") && result.contains("return $variable;"));
++    let constant = resolve(CONSTANT, "'hello'", "refactor.extractConstant", None);
++    let result = apply_workspace_edit(CONSTANT, constant.edit.as_ref().unwrap());
++    assert!(result.contains("HELLO = 'hello';") && result.contains("return self::HELLO;"));
++}
++
++#[test]
++fn requested_extraction_invalid_json_types_never_fall_back_to_auto_names() {
++    for name in [
++        Value::Null,
++        json!(true),
++        json!(42),
++        json!([]),
++        json!({"name":"total"}),
++    ] {
++        refused(VARIABLE, "1 + 2", "refactor.extractVariable", name.clone());
++        refused(CONSTANT, "'hello'", "refactor.extractConstant", name);
++    }
++}
++
++#[test]
++fn requested_extraction_invalid_identifiers_and_injection_never_produce_edits() {
++    for name in [
++        "",
++        " total",
++        "total ",
++        "$total",
++        "1total",
++        "a\\b",
++        "\\total",
++        "a-b",
++        "x; echo 'injected'",
++        "x\ny",
++        "x\0y",
++        "x/*comment*/",
++        "a.b",
++    ] {
++        refused(VARIABLE, "1 + 2", "refactor.extractVariable", json!(name));
++        refused(CONSTANT, "'hello'", "refactor.extractConstant", json!(name));
++    }
++}
++
++#[test]
++fn requested_extraction_name_limit_is_utf8_bytes_not_character_count() {
++    refused(
++        VARIABLE,
++        "1 + 2",
++        "refactor.extractVariable",
++        json!("a".repeat(257)),
++    );
++    refused(
++        CONSTANT,
++        "'hello'",
++        "refactor.extractConstant",
++        json!("ž".repeat(129)),
++    );
++    let name = "ž".repeat(128);
++    let (_, result) = accepted(VARIABLE, "1 + 2", "refactor.extractVariable", &name);
++    assert!(result.contains(&format!("${name} = 1 + 2;")));
++}
++
++#[test]
++fn requested_extraction_special_variables_are_not_writable_extraction_targets() {
++    for name in [
++        "this", "GLOBALS", "_SERVER", "_GET", "_POST", "_FILES", "_COOKIE", "_SESSION", "_REQUEST",
++        "_ENV",
++    ] {
++        refused(VARIABLE, "1 + 2", "refactor.extractVariable", json!(name));
++    }
++}
++
++#[test]
++fn requested_extraction_variable_names_can_use_keywords_and_distinct_case() {
++    let (_, result) = accepted(VARIABLE, "1 + 2", "refactor.extractVariable", "class");
++    assert!(result.contains("$class = 1 + 2;"));
++    let content = "<?php\nfunction run() {\n    $Total = 9;\n    return 1 + 2;\n}\n";
++    let (_, result) = accepted(content, "1 + 2", "refactor.extractVariable", "total");
++    assert!(result.contains("$Total = 9;") && result.contains("$total = 1 + 2;"));
++}
++
++#[test]
++fn requested_extraction_variable_parameter_collision_is_refused_not_suffixed() {
++    refused(
++        "<?php\nfunction run(int $total) {\n    return 1 + 2;\n}\n",
++        "1 + 2",
++        "refactor.extractVariable",
++        json!("total"),
++    );
++}
++
++#[test]
++fn requested_extraction_variable_prior_assignment_collision_is_refused_not_suffixed() {
++    refused(
++        "<?php\nfunction run() {\n    $total = 9;\n    return 1 + 2;\n}\n",
++        "1 + 2",
++        "refactor.extractVariable",
++        json!("total"),
++    );
++}
++
++#[test]
++fn requested_extraction_variable_later_assignment_collision_is_refused_not_suffixed() {
++    refused(
++        "<?php\nfunction run() {\n    echo 1 + 2;\n    $total = 9;\n}\n",
++        "1 + 2",
++        "refactor.extractVariable",
++        json!("total"),
++    );
++}
++
++#[test]
++fn requested_extraction_variable_all_occurrences_checks_later_scope_collision() {
++    refused(
++        "<?php\nfunction run() {\n    echo 1 + 2;\n    echo 1 + 2;\n    $total = 9;\n}\n",
++        "1 + 2",
++        "refactor.extractVariableAll",
++        json!("total"),
++    );
++}
++
++#[test]
++fn requested_extraction_variables_in_other_functions_and_child_closures_do_not_collide() {
++    let content = "<?php\nfunction other() { $total = 9; }\nfunction run() {\n    $callback = function () { $total = 5; };\n    return 1 + 2;\n}\n";
++    let (_, result) = accepted(content, "1 + 2", "refactor.extractVariable", "total");
++    assert!(result.contains("$total = 1 + 2;") && result.contains("return $total;"));
++}
++
++#[test]
++fn requested_extraction_constant_class_keyword_is_refused() {
++    refused(
++        CONSTANT,
++        "'hello'",
++        "refactor.extractConstant",
++        json!("class"),
++    );
++    refused(
++        CONSTANT,
++        "'hello'",
++        "refactor.extractConstant",
++        json!("CLASS"),
++    );
++}
++
++#[test]
++fn requested_extraction_constant_own_collision_is_refused_not_suffixed() {
++    let content = CONSTANT.replace(
++        "class Example\n{",
++        "class Example\n{\n    public const GREETING = 'existing';",
++    );
++    refused(
++        &content,
++        "'hello'",
++        "refactor.extractConstant",
++        json!("GREETING"),
++    );
++}
++
++#[test]
++fn requested_extraction_constant_later_class_declaration_collision_is_refused() {
++    let content = "<?php\nclass Example\n{\n    public function run() { return 'hello'; }\n    public const GREETING = 'existing';\n}\n";
++    refused(
++        content,
++        "'hello'",
++        "refactor.extractConstant",
++        json!("GREETING"),
++    );
++}
++
++#[test]
++fn requested_extraction_constant_parent_public_and_protected_collisions_are_refused() {
++    for visibility in ["public", "protected"] {
++        let content = format!(
++            "<?php\nclass ParentExample {{ {visibility} const GREETING = 'existing'; }}\nclass Example extends ParentExample\n{{\n    public function run() {{ return 'hello'; }}\n}}\n"
++        );
++        refused(
++            &content,
++            "'hello'",
++            "refactor.extractConstant",
++            json!("GREETING"),
++        );
++    }
++}
++
++#[test]
++fn requested_extraction_constant_interface_and_trait_collisions_are_refused() {
++    let interface = "<?php\ninterface GreetingContract { const GREETING = 'existing'; }\nclass Example implements GreetingContract\n{\n    public function run() { return 'hello'; }\n}\n";
++    refused(
++        interface,
++        "'hello'",
++        "refactor.extractConstant",
++        json!("GREETING"),
++    );
++    let trait_source = "<?php\ntrait GreetingTrait { public const GREETING = 'existing'; }\nclass Example\n{\n    use GreetingTrait;\n    public function run() { return 'hello'; }\n}\n";
++    refused(
++        trait_source,
++        "'hello'",
++        "refactor.extractConstant",
++        json!("GREETING"),
++    );
++}
++
++#[test]
++fn requested_extraction_constant_all_occurrences_refuses_inherited_collision() {
++    let content = "<?php\nclass GreetingParent { public const GREETING = 'existing'; }\nclass Example extends GreetingParent\n{\n    public function run() {\n        echo 'hello';\n        return 'hello';\n    }\n}\n";
++    refused(
++        content,
++        "'hello'",
++        "refactor.extractConstantAll",
++        json!("GREETING"),
++    );
++}
++
++#[test]
++fn requested_extraction_constant_distinct_case_and_unrelated_class_are_available() {
++    let content = "<?php\nclass Unrelated { public const GREETING = 'other'; }\nclass Example\n{\n    public const greeting = 'lowercase';\n    public function run() { return 'hello'; }\n}\n";
++    let (_, result) = accepted(content, "'hello'", "refactor.extractConstant", "GREETING");
++    assert!(result.contains("GREETING = 'hello';") && result.contains("return self::GREETING;"));
++}
++
++#[test]
++fn requested_extraction_unicode_names_and_crlf_are_preserved_for_both_targets() {
++    let variable = "<?php\r\n// žluťoučký 🐘\r\nfunction run()\r\n{\r\n    return 1 + 2;\r\n}\r\n";
++    let (action, result) = accepted(variable, "1 + 2", "refactor.extractVariable", "výsledek🐘");
++    assert!(result.contains("$výsledek🐘 = 1 + 2;\r\n") && result.contains("return $výsledek🐘;"));
++    assert!(
++        extract_edits(&action)
++            .iter()
++            .all(|edit| !edit.new_text.replace("\r\n", "").contains('\n'))
++    );
++    let constant = CONSTANT.replace('\n', "\r\n");
++    let (action, result) = accepted(
++        &constant,
++        "'hello'",
++        "refactor.extractConstant",
++        "POZDRAV🐘",
++    );
++    assert!(result.contains("POZDRAV🐘 = 'hello';") && result.contains("return self::POZDRAV🐘;"));
++    assert!(
++        extract_edits(&action)
++            .iter()
++            .all(|edit| !edit.new_text.replace("\r\n", "").contains('\n'))
++    );
++}
++
++#[test]
++fn requested_extraction_nested_callable_parameters_do_not_reserve_outer_names() {
++    let content = "<?php\nfunction run() {\n    $callback = function ($total) { return $total; };\n    return 1 + 2;\n}\n";
++    let (_, result) = accepted(content, "1 + 2", "refactor.extractVariable", "total");
++    assert!(result.contains("$total = 1 + 2;") && result.contains("return $total;"));
++}
++
++#[test]
++fn requested_extraction_catch_bindings_share_the_enclosing_variable_scope() {
++    let content = "<?php\nfunction run() {\n    try {\n        echo 1 + 2;\n    } catch (Exception $total) {\n    }\n}\n";
++    refused(content, "1 + 2", "refactor.extractVariable", json!("total"));
++}
++
++#[test]
++fn requested_extraction_private_parent_constant_is_not_an_inherited_collision() {
++    let content = "<?php\nclass PrivateParent { private const GREETING = 'private'; }\nclass Example extends PrivateParent\n{\n    public function run() { return 'hello'; }\n}\n";
++    let (_, result) = accepted(content, "'hello'", "refactor.extractConstant", "GREETING");
++    assert!(result.contains("GREETING = 'hello';") && result.contains("return self::GREETING;"));
++}
++
++#[test]
++fn requested_extraction_parent_interface_constants_still_reserve_the_name() {
++    let content = "<?php\ninterface ParentContract { const GREETING = 'existing'; }\nclass ContractParent implements ParentContract {}\nclass Example extends ContractParent\n{\n    public function run() { return 'hello'; }\n}\n";
++    refused(
++        content,
++        "'hello'",
++        "refactor.extractConstant",
++        json!("GREETING"),
++    );
++}
++
++#[test]
++fn requested_extraction_auto_constant_insertion_handles_constants_after_methods() {
++    let content = "<?php\nclass Example\n{\n    public function run() { return 'hello'; }\n    public const OTHER = 1;\n}\n";
++    let action = resolve(content, "'hello'", "refactor.extractConstant", None);
++    let result = apply_workspace_edit(content, action.edit.as_ref().unwrap());
++    assert!(
++        result.contains("OTHER = 1;\n    public const string HELLO = 'hello';")
++            || result
++                .contains("OTHER = 1;\n    /** @var string */\n    public const HELLO = 'hello';")
++    );
++    assert!(result.contains("return self::HELLO;"));
++}
++
++#[test]
++fn requested_extraction_crlf_layout_does_not_rewrite_multiline_literal_bytes() {
++    let variable = "<?php\r\nfunction run()\r\n{\r\n    return 'a\nb';\r\n}\r\n";
++    let (action, result) = accepted(variable, "'a\nb'", "refactor.extractVariable", "text");
++    assert!(
++        extract_edits(&action)
++            .iter()
++            .any(|edit| edit.new_text.contains("$text = 'a\nb';\r\n"))
++    );
++    assert!(result.contains("return $text;"));
++    let constant = "<?php\r\nclass Example\r\n{\r\n    public function run()\r\n    {\r\n        return 'a\nb';\r\n    }\r\n}\r\n";
++    let (action, result) = accepted(constant, "'a\nb'", "refactor.extractConstant", "TEXT");
++    assert!(
++        extract_edits(&action)
++            .iter()
++            .any(|edit| edit.new_text.contains("TEXT = 'a\nb';\r\n"))
++    );
++    assert!(result.contains("return self::TEXT;"));
++}
++
++#[test]
++fn requested_extraction_constant_in_compact_class_never_inserts_inside_literal() {
++    let content = "<?php\nclass Example { public function run() { return 'a\nb'; } }\n";
++    let (_, result) = accepted(content, "'a\nb'", "refactor.extractConstant", "TEXT");
++    assert!(result.find("TEXT = 'a\nb';").unwrap() < result.find("public function run").unwrap());
++    assert!(result.contains("return self::TEXT;"));
++}
+diff --git a/tests/integration/main.rs b/tests/integration/main.rs
+--- a/tests/integration/main.rs
++++ b/tests/integration/main.rs
+@@ -48,6 +48,8 @@
+ mod code_action_remove_unused_import;
+ mod code_action_remove_unused_return_type;
+ mod code_action_replace_fqcn;
++mod code_action_requested_callable_names;
++mod code_action_requested_expression_names;
+ mod code_action_simplify_null;
+ mod code_action_sort_use_statements;
+ mod code_action_update_docblock;

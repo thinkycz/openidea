@@ -1,0 +1,283 @@
+diff --git a/src/rename/class/imports.rs b/src/rename/class/imports.rs
+index 6cf1437..93be3b8 100644
+--- a/src/rename/class/imports.rs
++++ b/src/rename/class/imports.rs
+@@ -111,6 +111,8 @@ pub(super) struct RenameTarget<'a> {
+     /// Whether the new short name collides with another import already in
+     /// the file, so the rewritten import needs an alias.
+     pub(super) has_collision: bool,
++    /// Occupied import/declaration names used when choosing a fresh alias.
++    pub(super) collision_map: &'a HashMap<String, String>,
+ }
+ 
+ /// Plan the edit(s) needed to bring a file's `use` import for a renamed or
+@@ -150,6 +152,7 @@ pub(super) fn build_use_statement_edit(
+         new_fqn,
+         new_short_name,
+         has_collision,
++        collision_map,
+     } = target;
+ 
+     // The import may spell the class in different casing than its
+@@ -178,7 +181,7 @@ pub(super) fn build_use_statement_edit(
+     let whole_statement_edit = |range: Range| {
+         let new_line = format!(
+             "use {};",
+-            build_member_text(new_fqn, info, has_collision, new_short_name, use_map)
++            build_member_text(new_fqn, info, has_collision, new_short_name, collision_map)
+         );
+         (
+             range,
+@@ -206,7 +209,8 @@ pub(super) fn build_use_statement_edit(
+     };
+ 
+     if let Some(relative) = strip_matching_prefix(new_fqn, location.prefix) {
+-        let new_text = build_member_text(relative, info, has_collision, new_short_name, use_map);
++        let new_text =
++            build_member_text(relative, info, has_collision, new_short_name, collision_map);
+         return Some((
+             member_range,
+             vec![TextEdit {
+@@ -230,10 +234,10 @@ pub(super) fn build_use_statement_edit(
+         new_text: String::new(),
+     }];
+ 
+-    let alias_for_new = if has_collision {
+-        Some(pick_collision_alias(new_short_name, use_map))
+-    } else if info.has_explicit_alias {
++    let alias_for_new = if info.has_explicit_alias {
+         Some(info.alias.clone())
++    } else if has_collision {
++        Some(pick_collision_alias(new_short_name, collision_map))
+     } else {
+         None
+     };
+@@ -265,11 +269,11 @@ fn build_member_text(
+     new_short_name: &str,
+     use_map: &HashMap<String, String>,
+ ) -> String {
+-    if has_collision {
++    if import_info.has_explicit_alias {
++        format!("{} as {}", name, import_info.alias)
++    } else if has_collision {
+         let alias = pick_collision_alias(new_short_name, use_map);
+         format!("{} as {}", name, alias)
+-    } else if import_info.has_explicit_alias {
+-        format!("{} as {}", name, import_info.alias)
+     } else {
+         name.to_string()
+     }
+diff --git a/src/rename/class/mod.rs b/src/rename/class/mod.rs
+index 29ceea2..5e4451c 100644
+--- a/src/rename/class/mod.rs
++++ b/src/rename/class/mod.rs
+@@ -385,9 +385,9 @@ impl Backend {
+         // unrelated import, in which case the added import has to be
+         // aliased and the references rewritten to that alias.
+         let new_import_alias = if needs_new_import
+-            && has_import_collision(&file.use_map, mv.old_fqn, mv.new_short_name)
++            && has_import_collision(&file.collision_map, mv.old_fqn, mv.new_short_name)
+         {
+-            Some(pick_collision_alias(mv.new_short_name, &file.use_map))
++            Some(pick_collision_alias(mv.new_short_name, &file.collision_map))
+         } else {
+             None
+         };
+diff --git a/src/rename/class/rewrite.rs b/src/rename/class/rewrite.rs
+index a6a38cd..cc2044c 100644
+--- a/src/rename/class/rewrite.rs
++++ b/src/rename/class/rewrite.rs
+@@ -13,6 +13,7 @@ use tower_lsp::lsp_types::*;
+ 
+ use crate::Backend;
+ use crate::text_position::{position_to_byte_offset, ranges_overlap};
++use crate::util::build_fqn;
+ 
+ use super::super::parse_edit_target_uri;
+ use super::imports::{
+@@ -38,6 +39,9 @@ pub(super) struct FileRewrite {
+     pub(super) block: Option<(usize, usize)>,
+     /// The block's `alias → FQN` import table.
+     pub(super) use_map: HashMap<String, String>,
++    /// Imports and class-like declarations occupying names in this namespace.
++    /// Kept separate so declarations are never mistaken for use statements.
++    pub(super) collision_map: HashMap<String, String>,
+     /// The block's import of the class, when it has one.
+     pub(super) import_info: Option<ImportInfo>,
+ }
+@@ -72,13 +76,21 @@ impl Backend {
+         };
+         self.import_blocks(uri)
+             .into_iter()
+-            .map(|block| FileRewrite {
+-                content: Arc::clone(&content),
+-                target_uri: target_uri.clone(),
+-                import_info: find_import_for_fqn(&block.use_map, old_fqn),
+-                namespace: block.namespace,
+-                block: block.range,
+-                use_map: block.use_map,
++            .map(|block| {
++                let mut collision_map = block.use_map.clone();
++                for name in self.local_class_names(uri, block.namespace.as_deref()) {
++                    let fqn = build_fqn(&name, block.namespace.as_deref());
++                    collision_map.entry(name).or_insert(fqn);
++                }
++                FileRewrite {
++                    content: Arc::clone(&content),
++                    target_uri: target_uri.clone(),
++                    import_info: find_import_for_fqn(&block.use_map, old_fqn),
++                    namespace: block.namespace,
++                    block: block.range,
++                    use_map: block.use_map,
++                    collision_map,
++                }
+             })
+             .collect()
+     }
+@@ -130,13 +142,17 @@ impl FileRewrite {
+     ) -> ReferenceRewrite {
+         let class_name_changed = old_short_name != new_short_name;
+         let has_collision = class_name_changed
+-            && self.import_info.is_some()
+-            && has_import_collision(&self.use_map, old_fqn, new_short_name);
++            && self
++                .import_info
++                .as_ref()
++                .is_some_and(|info| !info.has_explicit_alias)
++            && has_import_collision(&self.collision_map, old_fqn, new_short_name);
+         let (skip_alias_refs, in_code_replacement) = match &self.import_info {
+             Some(info) if info.has_explicit_alias => (true, info.alias.clone()),
+-            Some(_) if has_collision => {
+-                (false, pick_collision_alias(new_short_name, &self.use_map))
+-            }
++            Some(_) if has_collision => (
++                false,
++                pick_collision_alias(new_short_name, &self.collision_map),
++            ),
+             _ => match new_import_alias {
+                 Some(alias) => (false, alias.to_string()),
+                 None if class_name_changed => (false, new_short_name.to_string()),
+@@ -171,6 +187,7 @@ impl FileRewrite {
+                 new_fqn,
+                 new_short_name,
+                 has_collision: rewrite.has_collision,
++                collision_map: &self.collision_map,
+             },
+             info,
+             &self.use_map,
+diff --git a/src/rename/tests.rs b/src/rename/tests.rs
+index 76b7069..0e36dbe 100644
+--- a/src/rename/tests.rs
++++ b/src/rename/tests.rs
+@@ -654,3 +654,111 @@ async fn rename_macro_chain_typed_return_updates_registration_string() {
+         "{caller_result}"
+     );
+ }
++
++/// Exercise the real reference discovery and class rewrite pipeline, preserving
++/// exact unrelated caller text while applying the returned edit once.
++async fn renamed_alias_policy_caller(caller: &str, new_name: &str) -> String {
++    let dir = tempfile::tempdir().expect("alias policy workspace");
++    let backend = Backend::new_test_with_workspace(dir.path().to_path_buf(), Vec::new());
++    let source_uri = Url::from_file_path(dir.path().join("User.php")).unwrap();
++    let caller_uri = Url::from_file_path(dir.path().join("caller.php")).unwrap();
++    let source = "<?php\nnamespace App;\nclass User {}\n";
++    std::fs::write(dir.path().join("User.php"), source).unwrap();
++    std::fs::write(dir.path().join("caller.php"), caller).unwrap();
++    open_file(&backend, &source_uri, source).await;
++    open_file(&backend, &caller_uri, caller).await;
++    let (line, character) = line_char_of(source, "User {}");
++    let edit = rename(&backend, &source_uri, line, character, new_name)
++        .await
++        .expect("class rename proposal");
++    let edits = edits_for_uri(&edit, &caller_uri);
++    assert!(!edits.is_empty(), "caller must participate in class rename");
++    apply_edits(caller, &edits)
++}
++
++#[tokio::test]
++async fn rename_class_alias_policy_keeps_explicit_alias_despite_new_short_import() {
++    let caller = "<?php\nnamespace Client;\nuse App\\User as Actor;\nuse Other\\Person;\nfunction make(): Actor { return new Actor(); }\n";
++    let actual = renamed_alias_policy_caller(caller, "Person").await;
++    assert_eq!(actual, caller.replace("App\\User", "App\\Person"));
++}
++
++#[tokio::test]
++async fn rename_class_alias_policy_move_preserves_group_alias_despite_collision() {
++    let caller = "<?php\nnamespace Client;\nuse App\\{User as Actor, Other};\nuse Other\\Person;\nfunction make(): Actor { return new Actor(); }\n";
++    let actual = renamed_alias_policy_caller(caller, "Domain\\Person").await;
++    assert!(actual.contains("use Domain\\Person as Actor;"), "{actual}");
++    assert!(actual.contains("use Other\\Person;"), "{actual}");
++    assert!(
++        actual.contains("function make(): Actor { return new Actor(); }"),
++        "{actual}"
++    );
++    assert!(!actual.contains("PersonAlias"), "{actual}");
++    assert!(!actual.contains("User as Actor"), "{actual}");
++}
++
++#[tokio::test]
++async fn rename_class_alias_policy_avoids_local_class_and_trait_alias_names() {
++    let caller = "<?php\nnamespace Client;\nuse App\\User;\nclass Person {}\ntrait PersonAlias {}\nfunction make(): User { return new User(); }\n";
++    let actual = renamed_alias_policy_caller(caller, "Person").await;
++    let expected = caller
++        .replace("use App\\User;", "use App\\Person as PersonAlias2;")
++        .replace(
++            "make(): User { return new User(); }",
++            "make(): PersonAlias2 { return new PersonAlias2(); }",
++        );
++    assert_eq!(actual, expected);
++}
++
++#[tokio::test]
++async fn rename_class_alias_policy_local_collision_is_case_insensitive() {
++    let caller = "<?php\nnamespace Client;\nuse App\\User;\nclass pErSoN {}\ninterface PERSONALIAS {}\nfunction make(): User { return new User(); }\n";
++    let actual = renamed_alias_policy_caller(caller, "Person").await;
++    let expected = caller
++        .replace("use App\\User;", "use App\\Person as PersonAlias2;")
++        .replace(
++            "make(): User { return new User(); }",
++            "make(): PersonAlias2 { return new PersonAlias2(); }",
++        );
++    assert_eq!(actual, expected);
++}
++
++#[tokio::test]
++async fn rename_class_alias_policy_other_namespace_declaration_does_not_collide() {
++    let caller = "<?php\nnamespace Client {\nuse App\\User;\nfunction make(): User { return new User(); }\n}\nnamespace Elsewhere { class Person {} }\n";
++    let actual = renamed_alias_policy_caller(caller, "Person").await;
++    let expected = caller.replace("App\\User", "App\\Person").replace(
++        "make(): User { return new User(); }",
++        "make(): Person { return new Person(); }",
++    );
++    assert_eq!(actual, expected);
++}
++
++#[tokio::test]
++async fn rename_class_alias_policy_import_only_collision_still_picks_free_alias() {
++    let caller = "<?php\nnamespace Client;\nuse App\\User;\nuse Other\\Person;\nuse Third\\PersonAlias;\nfunction make(): User { return new User(); }\n";
++    let actual = renamed_alias_policy_caller(caller, "Person").await;
++    let expected = caller
++        .replace("use App\\User;", "use App\\Person as PersonAlias2;")
++        .replace(
++            "make(): User { return new User(); }",
++            "make(): PersonAlias2 { return new PersonAlias2(); }",
++        );
++    assert_eq!(actual, expected);
++}
++
++#[tokio::test]
++async fn rename_class_alias_policy_move_adds_import_without_shadowing_local_class() {
++    let caller =
++        "<?php\nnamespace App;\nclass Person {}\nfunction make(): User { return new User(); }\n";
++    let actual = renamed_alias_policy_caller(caller, "Domain\\Person").await;
++    assert!(
++        actual.contains("use Domain\\Person as PersonAlias;"),
++        "{actual}"
++    );
++    assert!(actual.contains("class Person {}"), "{actual}");
++    assert!(
++        actual.contains("function make(): PersonAlias { return new PersonAlias(); }"),
++        "{actual}"
++    );
++}

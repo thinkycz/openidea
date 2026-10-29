@@ -1,0 +1,1112 @@
+diff --git a/docs/CHANGELOG.md b/docs/CHANGELOG.md
+index beb9918..563346e 100644
+--- a/docs/CHANGELOG.md
++++ b/docs/CHANGELOG.md
+@@ -15,6 +15,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
+ 
+ ## [Unreleased]
+ 
++- **Match generated method layout to its class.** Constructor and accessor actions preserve relative indentation and source line endings without rewriting captured defaults or documentation. Contributed by PHP Workbench downstream.
++
+ - **Respect inherited generation contracts.** Generated accessors preserve inherited methods and compatible interface signatures. Constructor actions refuse to bypass inherited initialization or final constructor restrictions. Contributed by PHP Workbench downstream.
+ 
+ - **Generate constructors without losing surrounding code.** Compact declarations and grouped properties retain neighboring members. Promotion preserves original native property types and documentation and requires PHP 8.0; documentation-only return types are not used as constructor parameter types. Contributed by PHP Workbench downstream.
+diff --git a/src/code_actions/generate_constructor.rs b/src/code_actions/generate_constructor.rs
+index 837c083..1369c59 100644
+--- a/src/code_actions/generate_constructor.rs
++++ b/src/code_actions/generate_constructor.rs
+@@ -21,7 +21,7 @@ use mago_syntax::cst::*;
+ use tower_lsp::lsp_types::*;
+ 
+ use super::cursor_context::{CursorContext, MemberContext, find_cursor_context};
+-use super::detect_indent_from_members;
++use super::helpers::GenerationLayout;
+ use crate::Backend;
+ use crate::atom::bytes_to_str;
+ use crate::docblock::{extract_var_type, get_docblock_text_for_node};
+@@ -79,7 +79,7 @@ impl Backend {
+ 
+         // Resolve the cursor context and gather the (owned) data needed to
+         // build the edits.  The borrowed AST does not escape the closure.
+-        let Some((props, indent, insert_offset, promotion_refusal)) =
++        let Some((props, member_offset, newline, fallback_unit, insert_offset, promotion_refusal)) =
+             crate::parser::with_parsed_program(
+                 content,
+                 "generate_constructor",
+@@ -114,12 +114,26 @@ impl Backend {
+                         return None;
+                     }
+ 
+-                    let indent = detect_indent_from_members(all_members, content);
++                    let member_offset = all_members
++                        .first()
++                        .map(|member| member.span().start.offset)
++                        .unwrap_or(body_end);
++                    let newline =
++                        super::helpers::generation_newline(content, trivia, member_offset);
++
++                    let fallback_unit = super::helpers::generation_indent_unit(content, trivia);
+ 
+                     let insert_offset =
+                         find_insertion_offset(all_members, content, trivia, body_end);
+                     let promotion_refusal = promotion_refusal(all_members, content, trivia);
+-                    Some((props, indent, insert_offset, promotion_refusal))
++                    Some((
++                        props,
++                        member_offset,
++                        newline,
++                        fallback_unit,
++                        insert_offset,
++                        promotion_refusal,
++                    ))
+                 },
+             )
+         else {
+@@ -149,10 +163,11 @@ impl Backend {
+             }
+             return;
+         }
++        let layout = inheritance.layout(content, member_offset, newline, fallback_unit);
+         let insert_pos = offset_to_position(content, insert_offset);
+ 
+         // ── Traditional constructor ─────────────────────────────────────
+-        let constructor_text = build_constructor(&props, &indent);
++        let constructor_text = build_constructor_with_layout(&props, &layout);
+         if self.generated_signature_admitted(
+             uri,
+             content,
+@@ -208,7 +223,7 @@ impl Backend {
+             }));
+             return;
+         }
+-        let constructor_text = build_promoted_constructor(&props, &indent);
++        let constructor_text = build_promoted_constructor_with_layout(&props, &layout);
+         if !self.generated_signature_admitted(
+             uri,
+             content,
+@@ -480,10 +495,14 @@ fn find_line_end(content: &str, offset: usize) -> usize {
+ /// Build the traditional constructor source text from the qualifying
+ /// properties.  Each property becomes a parameter with matching type
+ /// hint and an assignment in the body.
+-fn build_constructor(props: &[QualifyingProperty], indent: &str) -> String {
++fn build_constructor_with_layout(
++    props: &[QualifyingProperty],
++    layout: &GenerationLayout,
++) -> String {
++    let indent = &layout.member_indent;
+     let mut result = String::new();
+ 
+-    result.push('\n');
++    result.push_str(layout.newline);
+     result.push_str(indent);
+     result.push_str("public function __construct(");
+ 
+@@ -521,24 +540,27 @@ fn build_constructor(props: &[QualifyingProperty], indent: &str) -> String {
+         .collect();
+ 
+     result.push_str(&all_params.join(", "));
+-    result.push_str(")\n");
++    result.push(')');
++    result.push_str(layout.newline);
+     result.push_str(indent);
+-    result.push_str("{\n");
++    result.push('{');
++    result.push_str(layout.newline);
+ 
+     // Build assignment body — use declaration order for assignments,
+     // not the reordered parameter order.
+     for prop in props {
+-        result.push_str(indent);
+-        result.push_str(indent);
++        result.push_str(&layout.body_indent);
+         result.push_str("$this->");
+         result.push_str(&prop.name);
+         result.push_str(" = $");
+         result.push_str(&prop.name);
+-        result.push_str(";\n");
++        result.push(';');
++        result.push_str(layout.newline);
+     }
+ 
+     result.push_str(indent);
+-    result.push_str("}\n");
++    result.push('}');
++    result.push_str(layout.newline);
+ 
+     result
+ }
+@@ -546,12 +568,17 @@ fn build_constructor(props: &[QualifyingProperty], indent: &str) -> String {
+ /// Build the promoted constructor source text.  Each property becomes a
+ /// promoted parameter (`visibility [readonly] type $name [= default]`)
+ /// and the property declarations are removed by the caller.
+-fn build_promoted_constructor(props: &[QualifyingProperty], indent: &str) -> String {
++fn build_promoted_constructor_with_layout(
++    props: &[QualifyingProperty],
++    layout: &GenerationLayout,
++) -> String {
++    let indent = &layout.member_indent;
+     let mut result = String::new();
+ 
+-    result.push('\n');
++    result.push_str(layout.newline);
+     result.push_str(indent);
+-    result.push_str("public function __construct(\n");
++    result.push_str("public function __construct(");
++    result.push_str(layout.newline);
+ 
+     // Parameters with default values must come after required parameters.
+     let mut required_params = Vec::new();
+@@ -559,13 +586,11 @@ fn build_promoted_constructor(props: &[QualifyingProperty], indent: &str) -> Str
+ 
+     for prop in props {
+         let mut param = String::new();
+-        param.push_str(indent);
+-        param.push_str(indent);
++        param.push_str(&layout.body_indent);
+         if let Some(docblock) = &prop.docblock {
+             param.push_str(docblock);
+-            param.push('\n');
+-            param.push_str(indent);
+-            param.push_str(indent);
++            param.push_str(layout.newline);
++            param.push_str(&layout.body_indent);
+         }
+ 
+         param.push_str(prop.visibility);
+@@ -597,11 +622,13 @@ fn build_promoted_constructor(props: &[QualifyingProperty], indent: &str) -> Str
+         .map(|s| s.as_str())
+         .collect();
+ 
+-    result.push_str(&all_params.join(",\n"));
+-    result.push_str(",\n");
++    result.push_str(&all_params.join(&format!(",{}", layout.newline)));
++    result.push(',');
++    result.push_str(layout.newline);
+ 
+     result.push_str(indent);
+-    result.push_str(") {}\n");
++    result.push_str(") {}");
++    result.push_str(layout.newline);
+ 
+     result
+ }
+@@ -632,6 +659,16 @@ fn is_static(property: &Property<'_>) -> bool {
+ 
+ // ── Tests ───────────────────────────────────────────────────────────────────
+ 
++#[cfg(test)]
++fn build_constructor(props: &[QualifyingProperty], indent: &str) -> String {
++    build_constructor_with_layout(props, &GenerationLayout::legacy(indent))
++}
++
++#[cfg(test)]
++fn build_promoted_constructor(props: &[QualifyingProperty], indent: &str) -> String {
++    build_promoted_constructor_with_layout(props, &GenerationLayout::legacy(indent))
++}
++
+ #[cfg(test)]
+ mod tests {
+     use super::*;
+diff --git a/src/code_actions/generate_getter_setter.rs b/src/code_actions/generate_getter_setter.rs
+index 9bd6847..50b6d73 100644
+--- a/src/code_actions/generate_getter_setter.rs
++++ b/src/code_actions/generate_getter_setter.rs
+@@ -26,7 +26,7 @@ use mago_syntax::cst::*;
+ use tower_lsp::lsp_types::*;
+ 
+ use super::cursor_context::{CursorContext, MemberContext, find_cursor_context};
+-use super::detect_indent_from_members;
++use super::helpers::GenerationLayout;
+ use super::naming::to_pascal_case;
+ use crate::Backend;
+ use crate::atom::bytes_to_str;
+@@ -88,78 +88,93 @@ impl Backend {
+ 
+         // Resolve the cursor context and gather the (owned) accessor data.
+         // The borrowed AST does not escape the closure.
+-        let Some((mut available, indent, insert_offset)) = crate::parser::with_parsed_program(
+-            content,
+-            "generate_getter_setter",
+-            |program, content| {
+-                let ctx = find_cursor_context(&program.statements, cursor_offset);
+-
+-                let (property, all_members, class_readonly, body_end) = match &ctx {
+-                    CursorContext::InClassLike {
+-                        member: MemberContext::Property(prop),
+-                        all_members,
+-                        class_readonly,
+-                        body_end,
+-                        ..
+-                    } => (*prop, *all_members, *class_readonly, *body_end),
+-                    _ => return None,
+-                };
++        let Some((mut available, member_offset, newline, fallback_unit, insert_offset)) =
++            crate::parser::with_parsed_program(
++                content,
++                "generate_getter_setter",
++                |program, content| {
++                    let ctx = find_cursor_context(&program.statements, cursor_offset);
++
++                    let (property, all_members, class_readonly, body_end) = match &ctx {
++                        CursorContext::InClassLike {
++                            member: MemberContext::Property(prop),
++                            all_members,
++                            class_readonly,
++                            body_end,
++                            ..
++                        } => (*prop, *all_members, *class_readonly, *body_end),
++                        _ => return None,
++                    };
+ 
+-                let trivia = program.trivia.as_slice();
++                    let trivia = program.trivia.as_slice();
+ 
+-                let props = collect_accessor_properties(property, content, trivia);
+-                if props.is_empty() {
+-                    return None;
+-                }
++                    let props = collect_accessor_properties(property, content, trivia);
++                    if props.is_empty() {
++                        return None;
++                    }
+ 
+-                let existing_methods = collect_existing_method_names(all_members);
+-
+-                // Determine available accessors for each property.
+-                let mut available: Vec<AvailableAccessors> = Vec::new();
+-                for prop in props {
+-                    let getter_name = getter_method_name(&prop.name, prop.type_hint.as_ref());
+-                    let setter_name = setter_method_name(&prop.name);
+-
+-                    let has_getter = existing_methods
+-                        .iter()
+-                        .any(|m| m.eq_ignore_ascii_case(&getter_name));
+-                    let has_setter = existing_methods
+-                        .iter()
+-                        .any(|m| m.eq_ignore_ascii_case(&setter_name));
+-
+-                    // For bool properties, also check the `isX` variant.
+-                    let has_is = if is_bool_type(prop.type_hint.as_ref()) {
+-                        let is_name = is_method_name(&prop.name);
+-                        existing_methods
+-                            .iter()
+-                            .any(|m| m.eq_ignore_ascii_case(&is_name))
+-                    } else {
+-                        false
+-                    };
++                    let existing_methods = collect_existing_method_names(all_members);
+ 
+-                    let can_getter = !has_getter && !has_is;
+-                    let can_setter = !has_setter && !prop.is_readonly && !class_readonly;
++                    // Determine available accessors for each property.
++                    let mut available: Vec<AvailableAccessors> = Vec::new();
++                    for prop in props {
++                        let getter_name = getter_method_name(&prop.name, prop.type_hint.as_ref());
++                        let setter_name = setter_method_name(&prop.name);
+ 
+-                    if can_getter || can_setter {
+-                        available.push(AvailableAccessors {
+-                            prop,
+-                            can_getter,
+-                            can_setter,
+-                        });
++                        let has_getter = existing_methods
++                            .iter()
++                            .any(|m| m.eq_ignore_ascii_case(&getter_name));
++                        let has_setter = existing_methods
++                            .iter()
++                            .any(|m| m.eq_ignore_ascii_case(&setter_name));
++
++                        // For bool properties, also check the `isX` variant.
++                        let has_is = if is_bool_type(prop.type_hint.as_ref()) {
++                            let is_name = is_method_name(&prop.name);
++                            existing_methods
++                                .iter()
++                                .any(|m| m.eq_ignore_ascii_case(&is_name))
++                        } else {
++                            false
++                        };
++
++                        let can_getter = !has_getter && !has_is;
++                        let can_setter = !has_setter && !prop.is_readonly && !class_readonly;
++
++                        if can_getter || can_setter {
++                            available.push(AvailableAccessors {
++                                prop,
++                                can_getter,
++                                can_setter,
++                            });
++                        }
+                     }
+-                }
+-
+-                if available.is_empty() {
+-                    return None;
+-                }
+ 
+-                let indent = detect_indent_from_members(all_members, content);
++                    if available.is_empty() {
++                        return None;
++                    }
+ 
+-                let insert_offset =
+-                    find_accessor_insertion_offset(all_members, content, trivia, body_end);
+-                Some((available, indent, insert_offset))
+-            },
+-        ) else {
++                    let member_offset = all_members
++                        .first()
++                        .map(|member| member.span().start.offset)
++                        .unwrap_or(body_end);
++                    let newline =
++                        super::helpers::generation_newline(content, trivia, member_offset);
++
++                    let fallback_unit = super::helpers::generation_indent_unit(content, trivia);
++
++                    let insert_offset =
++                        find_accessor_insertion_offset(all_members, content, trivia, body_end);
++                    Some((
++                        available,
++                        member_offset,
++                        newline,
++                        fallback_unit,
++                        insert_offset,
++                    ))
++                },
++            )
++        else {
+             return;
+         };
+ 
+@@ -182,6 +197,7 @@ impl Backend {
+                 return;
+             }
+         };
++        let layout = inheritance.layout(content, member_offset, newline, fallback_unit);
+         let mut getter_refused = false;
+         let mut setter_refused = false;
+         for candidate in &mut available {
+@@ -194,7 +210,7 @@ impl Backend {
+                         content,
+                         &inheritance,
+                         &name,
+-                        &build_getter(&candidate.prop, &indent),
++                        &build_getter_with_layout(&candidate.prop, &layout),
+                     )
+                 {
+                     candidate.can_getter = false;
+@@ -209,7 +225,7 @@ impl Backend {
+                         content,
+                         &inheritance,
+                         &name,
+-                        &build_setter(&candidate.prop, &indent),
++                        &build_setter_with_layout(&candidate.prop, &layout),
+                     )
+                 {
+                     candidate.can_setter = false;
+@@ -240,7 +256,7 @@ impl Backend {
+             let mut methods_text = String::new();
+             for avail in &available {
+                 if avail.can_getter {
+-                    methods_text.push_str(&build_getter(&avail.prop, &indent));
++                    methods_text.push_str(&build_getter_with_layout(&avail.prop, &layout));
+                 }
+             }
+ 
+@@ -272,7 +288,7 @@ impl Backend {
+             let mut methods_text = String::new();
+             for avail in &available {
+                 if avail.can_setter {
+-                    methods_text.push_str(&build_setter(&avail.prop, &indent));
++                    methods_text.push_str(&build_setter_with_layout(&avail.prop, &layout));
+                 }
+             }
+ 
+@@ -304,10 +320,10 @@ impl Backend {
+             let mut methods_text = String::new();
+             for avail in &available {
+                 if avail.can_getter {
+-                    methods_text.push_str(&build_getter(&avail.prop, &indent));
++                    methods_text.push_str(&build_getter_with_layout(&avail.prop, &layout));
+                 }
+                 if avail.can_setter {
+-                    methods_text.push_str(&build_setter(&avail.prop, &indent));
++                    methods_text.push_str(&build_setter_with_layout(&avail.prop, &layout));
+                 }
+             }
+ 
+@@ -436,11 +452,12 @@ fn is_bool_type(type_hint: Option<&PhpType>) -> bool {
+ }
+ 
+ /// Build the getter method source text for a property.
+-fn build_getter(prop: &AccessorProperty, indent: &str) -> String {
++fn build_getter_with_layout(prop: &AccessorProperty, layout: &GenerationLayout) -> String {
++    let indent = &layout.member_indent;
+     let mut result = String::new();
+     let method_name = getter_method_name(&prop.name, prop.type_hint.as_ref());
+ 
+-    result.push('\n');
++    result.push_str(layout.newline);
+ 
+     // If the type came from a docblock, add a @return tag.
+     if prop.type_from_docblock
+@@ -448,13 +465,15 @@ fn build_getter(prop: &AccessorProperty, indent: &str) -> String {
+     {
+         let hint_str = hint.to_string();
+         result.push_str(indent);
+-        result.push_str("/**\n");
++        result.push_str("/**");
++        result.push_str(layout.newline);
+         result.push_str(indent);
+         result.push_str(" * @return ");
+         result.push_str(&hint_str);
+-        result.push('\n');
++        result.push_str(layout.newline);
+         result.push_str(indent);
+-        result.push_str(" */\n");
++        result.push_str(" */");
++        result.push_str(layout.newline);
+     }
+ 
+     result.push_str(indent);
+@@ -475,12 +494,12 @@ fn build_getter(prop: &AccessorProperty, indent: &str) -> String {
+         result.push_str(&hint.to_string());
+     }
+ 
+-    result.push('\n');
++    result.push_str(layout.newline);
+     result.push_str(indent);
+-    result.push_str("{\n");
++    result.push('{');
++    result.push_str(layout.newline);
+ 
+-    result.push_str(indent);
+-    result.push_str(indent);
++    result.push_str(&layout.body_indent);
+     result.push_str("return ");
+     if prop.is_static {
+         result.push_str("self::$");
+@@ -488,10 +507,12 @@ fn build_getter(prop: &AccessorProperty, indent: &str) -> String {
+         result.push_str("$this->");
+     }
+     result.push_str(&prop.name);
+-    result.push_str(";\n");
++    result.push(';');
++    result.push_str(layout.newline);
+ 
+     result.push_str(indent);
+-    result.push_str("}\n");
++    result.push('}');
++    result.push_str(layout.newline);
+ 
+     result
+ }
+@@ -500,11 +521,12 @@ fn build_getter(prop: &AccessorProperty, indent: &str) -> String {
+ ///
+ /// The setter returns `$this` (or `static` for static) for fluent chaining,
+ /// with a return type of `self`.
+-fn build_setter(prop: &AccessorProperty, indent: &str) -> String {
++fn build_setter_with_layout(prop: &AccessorProperty, layout: &GenerationLayout) -> String {
++    let indent = &layout.member_indent;
+     let mut result = String::new();
+     let method_name = setter_method_name(&prop.name);
+ 
+-    result.push('\n');
++    result.push_str(layout.newline);
+ 
+     // If the type came from a docblock, add a @param tag.
+     if prop.type_from_docblock
+@@ -512,15 +534,17 @@ fn build_setter(prop: &AccessorProperty, indent: &str) -> String {
+     {
+         let hint_str = hint.to_string();
+         result.push_str(indent);
+-        result.push_str("/**\n");
++        result.push_str("/**");
++        result.push_str(layout.newline);
+         result.push_str(indent);
+         result.push_str(" * @param ");
+         result.push_str(&hint_str);
+         result.push_str(" $");
+         result.push_str(&prop.name);
+-        result.push('\n');
++        result.push_str(layout.newline);
+         result.push_str(indent);
+-        result.push_str(" */\n");
++        result.push_str(" */");
++        result.push_str(layout.newline);
+     }
+ 
+     result.push_str(indent);
+@@ -548,12 +572,12 @@ fn build_setter(prop: &AccessorProperty, indent: &str) -> String {
+         result.push_str("self");
+     }
+ 
+-    result.push('\n');
++    result.push_str(layout.newline);
+     result.push_str(indent);
+-    result.push_str("{\n");
++    result.push('{');
++    result.push_str(layout.newline);
+ 
+-    result.push_str(indent);
+-    result.push_str(indent);
++    result.push_str(&layout.body_indent);
+     if prop.is_static {
+         result.push_str("self::$");
+     } else {
+@@ -562,17 +586,19 @@ fn build_setter(prop: &AccessorProperty, indent: &str) -> String {
+     result.push_str(&prop.name);
+     result.push_str(" = $");
+     result.push_str(&prop.name);
+-    result.push_str(";\n");
++    result.push(';');
++    result.push_str(layout.newline);
+ 
+     if !prop.is_static {
+-        result.push('\n');
+-        result.push_str(indent);
+-        result.push_str(indent);
+-        result.push_str("return $this;\n");
++        result.push_str(layout.newline);
++        result.push_str(&layout.body_indent);
++        result.push_str("return $this;");
++        result.push_str(layout.newline);
+     }
+ 
+     result.push_str(indent);
+-    result.push_str("}\n");
++    result.push('}');
++    result.push_str(layout.newline);
+ 
+     result
+ }
+@@ -613,6 +639,16 @@ fn has_static<'a>(modifiers: impl Iterator<Item = &'a Modifier<'a>>) -> bool {
+ 
+ // ── Tests ───────────────────────────────────────────────────────────────────
+ 
++#[cfg(test)]
++fn build_getter(prop: &AccessorProperty, indent: &str) -> String {
++    build_getter_with_layout(prop, &GenerationLayout::legacy(indent))
++}
++
++#[cfg(test)]
++fn build_setter(prop: &AccessorProperty, indent: &str) -> String {
++    build_setter_with_layout(prop, &GenerationLayout::legacy(indent))
++}
++
+ #[cfg(test)]
+ mod tests {
+     use super::*;
+diff --git a/src/code_actions/helpers.rs b/src/code_actions/helpers.rs
+index 9eaf62f..2017a97 100644
+--- a/src/code_actions/helpers.rs
++++ b/src/code_actions/helpers.rs
+@@ -581,3 +581,118 @@ pub(super) fn disabled_generation(
+         ..CodeAction::default()
+     })
+ }
++
++/// Layout owned by generated tokens, separate from captured source fragments.
++pub(super) struct GenerationLayout {
++    /// Absolute indentation of the generated member header and closing brace.
++    pub member_indent: String,
++    /// One source indentation unit beyond the member indentation.
++    pub body_indent: String,
++    /// Line ending for generated layout tokens, excluding captured source bytes.
++    pub newline: &'static str,
++}
++
++impl GenerationLayout {
++    #[cfg(test)]
++    pub(super) fn legacy(indent: &str) -> Self {
++        Self {
++            member_indent: indent.to_owned(),
++            body_indent: format!("{indent}{indent}"),
++            newline: "\n",
++        }
++    }
++}
++
++impl GenerationInheritance {
++    /// Derive indentation from the canonical class and first member positions.
++    pub(super) fn layout(
++        &self,
++        content: &str,
++        member: u32,
++        newline: &'static str,
++        fallback_unit: &str,
++    ) -> GenerationLayout {
++        let class_indent = indent_of_line_at(content, self.target.keyword_offset as usize);
++        let offset = member as usize;
++        let start = content[..offset]
++            .rfind('\n')
++            .map_or(0, |newline| newline + 1);
++        let prefix = &content[start..offset];
++        let relative = prefix.strip_prefix(class_indent.as_str()).filter(|unit| {
++            !unit.is_empty() && prefix.bytes().all(|byte| matches!(byte, b' ' | b'\t'))
++        });
++        let (member_indent, unit) = match relative {
++            Some(unit) => (prefix.to_owned(), unit),
++            None => (format!("{class_indent}{fallback_unit}"), fallback_unit),
++        };
++        let body_indent = format!("{member_indent}{unit}");
++        GenerationLayout {
++            member_indent,
++            body_indent,
++            newline,
++        }
++    }
++}
++
++/// Infer a generation fallback unit from structural whitespace only.
++pub(super) fn generation_indent_unit(content: &str, trivia: &[Trivia<'_>]) -> &'static str {
++    for item in trivia
++        .iter()
++        .filter(|item| matches!(item.kind, TriviaKind::WhiteSpace))
++    {
++        let text = &content[item.span.start.offset as usize..item.span.end.offset as usize];
++        let Some((_, indent)) = text.rsplit_once('\n') else {
++            continue;
++        };
++        if indent.starts_with('\t') {
++            return "\t";
++        }
++        let spaces = indent.bytes().take_while(|byte| *byte == b' ').count();
++        if spaces >= 2 {
++            return if spaces.is_multiple_of(4) {
++                "    "
++            } else {
++                "  "
++            };
++        }
++    }
++    "    "
++}
++
++/// Choose a layout newline from lexer-owned whitespace, never literal/doc bytes.
++pub(super) fn generation_newline(
++    content: &str,
++    trivia: &[Trivia<'_>],
++    anchor: u32,
++) -> &'static str {
++    for item in trivia.iter().rev().filter(|item| {
++        item.span.start.offset < anchor && matches!(item.kind, TriviaKind::WhiteSpace)
++    }) {
++        let end = item.span.end.offset.min(anchor) as usize;
++        let start = item.span.start.offset as usize;
++        if let Some(newline) = content[start..end].rfind('\n') {
++            let newline = start + newline;
++            return if newline > 0 && content.as_bytes()[newline - 1] == b'\r' {
++                "\r\n"
++            } else {
++                "\n"
++            };
++        }
++    }
++    for item in trivia
++        .iter()
++        .filter(|item| item.span.end.offset > anchor && matches!(item.kind, TriviaKind::WhiteSpace))
++    {
++        let start = item.span.start.offset.max(anchor) as usize;
++        let end = item.span.end.offset as usize;
++        if let Some(newline) = content[start..end].find('\n') {
++            let newline = start + newline;
++            return if newline > 0 && content.as_bytes()[newline - 1] == b'\r' {
++                "\r\n"
++            } else {
++                "\n"
++            };
++        }
++    }
++    "\n"
++}
+diff --git a/tests/integration/code_action_generate_constructor.rs b/tests/integration/code_action_generate_constructor.rs
+index 71221ae..bc95923 100644
+--- a/tests/integration/code_action_generate_constructor.rs
++++ b/tests/integration/code_action_generate_constructor.rs
+@@ -1515,3 +1515,192 @@ fn inherited_generation_compatible_abstract_trait_constructor_remains_available(
+         );
+     }
+ }
++
++fn constructor_layout_fragment(source: &str, title: &str, needle: &str) -> (String, String) {
++    let backend = create_test_backend();
++    let point = position_of(source, needle);
++    let actions = get_code_actions_in_range(
++        &backend,
++        "file:///layout.php",
++        source,
++        Range::new(point, point),
++    );
++    let action = find_action_titled(&actions, title).expect("layout action");
++    assert!(action.disabled.is_none() && action.command.is_none());
++    let edits = extract_edits(action);
++    let nonempty: Vec<_> = edits
++        .iter()
++        .filter(|edit| !edit.new_text.is_empty())
++        .collect();
++    assert_eq!(nonempty.len(), 1, "one constructor fragment");
++    let fragment = nonempty[0].new_text.clone();
++    let mut ranges: Vec<_> = edits
++        .iter()
++        .map(|edit| {
++            (
++                lsp_pos_to_offset(source, edit.range.start),
++                lsp_pos_to_offset(source, edit.range.end),
++            )
++        })
++        .collect();
++    ranges.sort_unstable();
++    assert!(
++        ranges
++            .windows(2)
++            .all(|pair| pair[0].1 <= pair[1].0 && pair[0] != pair[1])
++    );
++    let result = apply_workspace_edit(source, action.edit.as_ref().unwrap());
++    let classes = backend.parse_php(&result);
++    let owner = classes
++        .iter()
++        .find(|class| class.name == "LayoutCase")
++        .expect("owning class survives");
++    assert_eq!(
++        owner
++            .methods
++            .iter()
++            .filter(|method| method.name.as_str() == "__construct")
++            .count(),
++        1
++    );
++    (fragment, result)
++}
++
++fn assert_constructor_layout(source: &str, member: &str, body: &str, newline: &str) {
++    for title in ["Generate constructor", "Generate promoted constructor"] {
++        let (fragment, _) = constructor_layout_fragment(source, title, "private int $value");
++        assert!(
++            fragment.contains(&format!("{newline}{member}public function __construct(")),
++            "member indent: {fragment:?}"
++        );
++        if title == "Generate constructor" {
++            assert!(
++                fragment.contains(&format!("{newline}{body}$this->value = $value;{newline}")),
++                "constructor body adds one relative unit: {fragment:?}"
++            );
++        } else {
++            assert!(
++                fragment.contains(&format!("{newline}{body}private int $value,{newline}")),
++                "promoted parameter adds one relative unit: {fragment:?}"
++            );
++        }
++    }
++}
++
++#[test]
++fn generation_layout_nested_namespace_constructors_use_relative_four_space_unit() {
++    assert_constructor_layout(
++        "<?php\nnamespace Demo {\n    class LayoutCase {\n        private int $value;\n    }\n}\n",
++        "        ",
++        "            ",
++        "\n",
++    );
++}
++
++#[test]
++fn generation_layout_nested_tab_constructors_use_three_tabs_for_body_or_parameter() {
++    assert_constructor_layout(
++        "<?php\nnamespace Demo {\n\tclass LayoutCase {\n\t\tprivate int $value;\n\t}\n}\n",
++        "\t\t",
++        "\t\t\t",
++        "\n",
++    );
++}
++
++#[test]
++fn generation_layout_nested_two_space_constructors_use_six_space_body() {
++    assert_constructor_layout(
++        "<?php\nnamespace Demo {\n  class LayoutCase {\n    private int $value;\n  }\n}\n",
++        "    ",
++        "      ",
++        "\n",
++    );
++}
++
++#[test]
++fn generation_layout_crlf_constructor_fragments_use_only_structural_crlf() {
++    let source = "<?php\r\n// ž🐘\r\nnamespace Demo {\r\n    class LayoutCase {\r\n        private int $value;\r\n    }\r\n}\r\n";
++    assert_constructor_layout(source, "        ", "            ", "\r\n");
++    for title in ["Generate constructor", "Generate promoted constructor"] {
++        let (fragment, _) = constructor_layout_fragment(source, title, "private int $value");
++        assert!(
++            !fragment.replace("\r\n", "").contains('\n'),
++            "generated structural newline must match source: {fragment:?}"
++        );
++    }
++}
++
++#[test]
++fn generation_layout_top_level_and_compact_constructors_preserve_existing_defaults() {
++    assert_constructor_layout(
++        "<?php\nclass LayoutCase {\n    private int $value;\n}\n",
++        "    ",
++        "        ",
++        "\n",
++    );
++    let source = "<?php class LayoutCase { private int $value; } $outside = 'ž🐘';\n";
++    assert_constructor_layout(source, "    ", "        ", "\n");
++    for title in ["Generate constructor", "Generate promoted constructor"] {
++        let (_, result) = constructor_layout_fragment(source, title, "private int $value");
++        assert!(result.starts_with("<?php class LayoutCase {"));
++        assert!(result.ends_with("} $outside = 'ž🐘';\n"));
++    }
++}
++
++#[test]
++fn generation_layout_preserves_raw_multiline_default_and_promoted_phpdoc_bytes() {
++    let documentation = "/** first line\n     * raw ž🐘\r\n     */";
++    let literal = "'first\nsecond'";
++    let source = format!(
++        "<?php\r\nclass LayoutCase {{\r\n    {documentation}\r\n    private string $value = {literal};\r\n}}\r\n"
++    );
++    for title in ["Generate constructor", "Generate promoted constructor"] {
++        let (fragment, result) =
++            constructor_layout_fragment(&source, title, "private string $value");
++        assert!(
++            fragment.contains(literal),
++            "captured PHP literal is not newline-normalized: {fragment:?}"
++        );
++        assert!(
++            result.contains(documentation),
++            "property documentation survives with exact captured bytes"
++        );
++        if title == "Generate promoted constructor" {
++            assert!(
++                fragment.contains(documentation),
++                "transferred documentation stays exact"
++            );
++            assert_eq!(result.matches(documentation).count(), 1);
++        }
++        let structural = fragment.replace(literal, "").replace(documentation, "");
++        assert!(
++            !structural.replace("\r\n", "").contains('\n'),
++            "only generated separators change newline style: {fragment:?}"
++        );
++        assert!(result.starts_with("<?php\r\nclass LayoutCase {"));
++        assert!(result.ends_with("}\r\n"));
++    }
++}
++
++#[test]
++fn generation_layout_compact_constructor_ignores_literal_and_phpdoc_indentation() {
++    for captured in [
++        "$captured = 'first\n\tsecond';",
++        "$captured = 'first\n  second';",
++        "/** first\n\tsecond\n */",
++        "/** first\n  second\n */",
++    ] {
++        let source = format!("<?php\n{captured}\nclass LayoutCase {{ private int $value; }}\n");
++        assert_constructor_layout(&source, "    ", "        ", "\n");
++    }
++}
++
++#[test]
++fn generation_layout_compact_constructor_uses_structural_indentation_after_literal() {
++    for (unit, member, body) in [("\t", "\t\t", "\t\t\t"), ("  ", "    ", "      ")] {
++        let source = format!(
++            "<?php\nnamespace {{ $captured = 'first\n    second'; }}\nnamespace Demo {{\n{unit}class LayoutCase {{ private int $value; }}\n}}\n"
++        );
++        assert_constructor_layout(&source, member, body, "\n");
++    }
++}
+diff --git a/tests/integration/code_action_generate_getter_setter.rs b/tests/integration/code_action_generate_getter_setter.rs
+index 1e4e5f6..8b54079 100644
+--- a/tests/integration/code_action_generate_getter_setter.rs
++++ b/tests/integration/code_action_generate_getter_setter.rs
+@@ -859,3 +859,188 @@ fn inherited_generation_ancestor_fulfilled_private_trait_contract_does_not_bind_
+     );
+     assert!(inherited_accessor_enabled(&actions, "Generate setter").is_some());
+ }
++
++fn accessor_layout_fragment(source: &str, title: &str) -> (String, String) {
++    let backend = create_test_backend();
++    let point = position_of(source, "private int $value");
++    let actions = get_code_actions_in_range(
++        &backend,
++        "file:///layout.php",
++        source,
++        Range::new(point, point),
++    );
++    let action = find_action_titled(&actions, title).expect("layout action");
++    assert!(action.disabled.is_none() && action.command.is_none());
++    let edits = extract_edits(action);
++    assert_eq!(edits.len(), 1);
++    assert_eq!(edits[0].range.start, edits[0].range.end);
++    let offset = lsp_pos_to_offset(source, edits[0].range.start);
++    let fragment = edits[0].new_text.clone();
++    let result = apply_edits(source, &edits);
++    assert_eq!(&result[..offset], &source[..offset]);
++    assert_eq!(&result[offset + fragment.len()..], &source[offset..]);
++    let classes = backend.parse_php(&result);
++    let owner = classes
++        .iter()
++        .find(|class| class.name == "LayoutCase")
++        .expect("owning class survives");
++    let wanted = if title == "Generate getter and setter" {
++        2
++    } else {
++        1
++    };
++    assert_eq!(
++        owner
++            .methods
++            .iter()
++            .filter(|method| ["getValue", "setValue"].contains(&method.name.as_str()))
++            .count(),
++        wanted
++    );
++    (fragment, result)
++}
++
++fn assert_accessor_layout(source: &str, member: &str, body: &str, newline: &str) {
++    for title in [
++        "Generate getter",
++        "Generate setter",
++        "Generate getter and setter",
++    ] {
++        let (fragment, _) = accessor_layout_fragment(source, title);
++        if title != "Generate setter" {
++            assert!(
++                fragment.contains(&format!(
++                    "{newline}{member}public function getValue(): int{newline}"
++                )),
++                "{title}: {fragment:?}"
++            );
++            assert!(
++                fragment.contains(&format!("{newline}{body}return $this->value;{newline}")),
++                "body must be one indent unit beyond member: {fragment:?}"
++            );
++        }
++        if title != "Generate getter" {
++            assert!(
++                fragment.contains(&format!(
++                    "{newline}{member}public function setValue(int $value): self{newline}"
++                )),
++                "{title}: {fragment:?}"
++            );
++            assert!(
++                fragment.contains(&format!("{newline}{body}$this->value = $value;{newline}")),
++                "body must be one indent unit beyond member: {fragment:?}"
++            );
++        }
++    }
++}
++
++#[test]
++fn generation_layout_nested_namespace_accessors_use_relative_four_space_unit() {
++    assert_accessor_layout(
++        "<?php\nnamespace Demo {\n    class LayoutCase {\n        private int $value;\n    }\n}\n",
++        "        ",
++        "            ",
++        "\n",
++    );
++}
++
++#[test]
++fn generation_layout_nested_tab_accessors_use_three_tabs_in_body() {
++    assert_accessor_layout(
++        "<?php\nnamespace Demo {\n\tclass LayoutCase {\n\t\tprivate int $value;\n\t}\n}\n",
++        "\t\t",
++        "\t\t\t",
++        "\n",
++    );
++}
++
++#[test]
++fn generation_layout_nested_two_space_accessors_use_six_space_body() {
++    assert_accessor_layout(
++        "<?php\nnamespace Demo {\n  class LayoutCase {\n    private int $value;\n  }\n}\n",
++        "    ",
++        "      ",
++        "\n",
++    );
++}
++
++#[test]
++fn generation_layout_crlf_accessor_fragments_use_only_structural_crlf() {
++    let source = "<?php\r\n// ž🐘\r\nnamespace Demo {\r\n    class LayoutCase {\r\n        private int $value;\r\n    }\r\n}\r\n";
++    assert_accessor_layout(source, "        ", "            ", "\r\n");
++    for title in [
++        "Generate getter",
++        "Generate setter",
++        "Generate getter and setter",
++    ] {
++        let (fragment, _) = accessor_layout_fragment(source, title);
++        assert!(
++            !fragment.replace("\r\n", "").contains('\n'),
++            "generated structural newline must match source: {fragment:?}"
++        );
++    }
++}
++
++#[test]
++fn generation_layout_top_level_and_compact_accessors_preserve_existing_defaults() {
++    assert_accessor_layout(
++        "<?php\nclass LayoutCase {\n    private int $value;\n}\n",
++        "    ",
++        "        ",
++        "\n",
++    );
++    let source = "<?php class LayoutCase { private int $value; } $outside = 'ž🐘';\n";
++    assert_accessor_layout(source, "    ", "        ", "\n");
++    for title in [
++        "Generate getter",
++        "Generate setter",
++        "Generate getter and setter",
++    ] {
++        assert!(
++            accessor_layout_fragment(source, title)
++                .1
++                .ends_with("} $outside = 'ž🐘';\n")
++        );
++    }
++}
++
++#[test]
++fn generation_layout_accessor_insertion_does_not_normalize_existing_phpdoc_or_literal() {
++    let documentation = "/** first line\n     * raw ž🐘\r\n     */";
++    let source = format!(
++        "<?php\r\nclass LayoutCase {{\r\n    {documentation}\r\n    private int $value;\r\n    private string $literal = 'first\nsecond';\r\n}}\r\n"
++    );
++    for title in [
++        "Generate getter",
++        "Generate setter",
++        "Generate getter and setter",
++    ] {
++        let (fragment, result) = accessor_layout_fragment(&source, title);
++        assert!(result.contains(documentation));
++        assert!(result.contains("'first\nsecond'"));
++        assert!(!fragment.replace("\r\n", "").contains('\n'));
++    }
++}
++
++#[test]
++fn generation_layout_compact_accessor_ignores_literal_and_phpdoc_indentation() {
++    for captured in [
++        "$captured = 'first\n\tsecond';",
++        "$captured = 'first\n  second';",
++        "/** first\n\tsecond\n */",
++        "/** first\n  second\n */",
++    ] {
++        let source = format!("<?php\n{captured}\nclass LayoutCase {{ private int $value; }}\n");
++        assert_accessor_layout(&source, "    ", "        ", "\n");
++    }
++}
++
++#[test]
++fn generation_layout_compact_accessor_uses_structural_indentation_after_literal() {
++    for (unit, member, body) in [("\t", "\t\t", "\t\t\t"), ("  ", "    ", "      ")] {
++        let source = format!(
++            "<?php\nnamespace {{ $captured = 'first\n    second'; }}\nnamespace Demo {{\n{unit}class LayoutCase {{ private int $value; }}\n}}\n"
++        );
++        assert_accessor_layout(&source, member, body, "\n");
++    }
++}

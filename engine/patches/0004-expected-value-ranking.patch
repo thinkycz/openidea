@@ -1,0 +1,710 @@
+diff --git a/docs/CHANGELOG.md b/docs/CHANGELOG.md
+index aabd00b..74ea7fe 100644
+--- a/docs/CHANGELOG.md
++++ b/docs/CHANGELOG.md
+@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
+ 
+ ### Added
+ 
++- **Type-aware value suggestions.** Compatible variables appear first in direct returns, typed arrow bodies and declared property assignments. Other variables remain available, and nested arrays, concatenations and untyped closures keep their normal ordering. Contributed by PHP Workbench (local downstream build).
++
+ - **Type-aware argument suggestions.** Compatible variables are shown before other local variables while entering function and method arguments. Contributed by PHP Workbench (local downstream build).
+ 
+ - **Restricted project-tool mode.** `--no-project-tools` keeps static intelligence and built-in formatting available while refusing external project processes, including after configuration reloads. Contributed by PHP Workbench (local downstream build).
+diff --git a/examples/php/completion.php b/examples/php/completion.php
+index 6efb660..a106d97 100644
+--- a/examples/php/completion.php
++++ b/examples/php/completion.php
+@@ -5798,3 +5798,28 @@ class ArgumentRankingDemo
+         return $recipient;
+     }
+ }
++
++// ── Type-aware return and property value suggestions ───────────────────────
++class ExpectedValueRankingDemo
++{
++    public string $label = '';
++
++    public function returned(int $aCount, string $zLabel): string
++    {
++        // Try: replace `$zLabel` with `$`; string values precede the count.
++        return $zLabel;
++    }
++
++    public function assigned(int $aCount, string $zLabel): void
++    {
++        // The declared string property supplies the same preference here.
++        $this->label = $zLabel;
++    }
++
++    public function deferred(int $aCount, string $zLabel): string
++    {
++        // Try the arrow body: its own return hint supplies the preference.
++        $label = fn(): string => $zLabel;
++        return $label();
++    }
++}
+diff --git a/examples/php/scaffolding/assertions.php b/examples/php/scaffolding/assertions.php
+index bfb0145..2d8b483 100644
+--- a/examples/php/scaffolding/assertions.php
++++ b/examples/php/scaffolding/assertions.php
+@@ -2092,6 +2092,13 @@ function runDemoAssertions(): void
+     assert($nested->ternaryBranch(true) === 'black', 'the ternary branch that assigns $pen types it as a Pen');
+     assert($nested->ternaryBranch(false) === '', 'the else branch leaves $pen unset');
+ 
++    // ── Type-aware return and property values ───────────────────────────
++    $expectedValue = new ExpectedValueRankingDemo();
++    assert($expectedValue->returned(42, 'recipient') === 'recipient', 'the returned value is the declared string');
++    $expectedValue->assigned(42, 'label');
++    assert($expectedValue->label === 'label', 'the assigned value satisfies the declared property');
++    assert($expectedValue->deferred(42, 'deferred') === 'deferred', 'the typed arrow returns a string');
++
+     // ── Member visibility ───────────────────────────────────────────────
+     // The diagnostics demo claims which members of ScaffoldingVault are out
+     // of reach from outside; reflection is what makes that claim checkable
+diff --git a/src/completion/variable/expected.rs b/src/completion/variable/expected.rs
+new file mode 100644
+index 0000000..1c810ff
+--- /dev/null
++++ b/src/completion/variable/expected.rs
+@@ -0,0 +1,371 @@
++//! Value-position context over the shared callable/property type metadata.
++
++use crate::atom::bytes_to_str;
++use crate::php_type::{PhpType, TypeKind};
++use crate::text_position::position_to_offset;
++use crate::type_engine::resolver::CtxLoaders;
++use crate::types::FileContext;
++use crate::{AccessKind, Backend};
++use mago_span::HasSpan;
++use mago_syntax::cst::*;
++use mago_syntax::walker::Walker;
++use std::borrow::Cow;
++use tower_lsp::lsp_types::Position;
++
++/// A value constraint discovered without walking the receiver's variable scope.
++pub(crate) enum ExpectedValue {
++    Declared(PhpType),
++    Property {
++        receiver: String,
++        name: String,
++        access: AccessKind,
++    },
++}
++
++impl ExpectedValue {
++    pub(crate) fn resolve(
++        self,
++        backend: &Backend,
++        content: &str,
++        position: Position,
++        file: &FileContext,
++    ) -> Option<PhpType> {
++        match self {
++            Self::Declared(ty) => Some(ty),
++            Self::Property {
++                receiver,
++                name,
++                access,
++            } => {
++                let cursor = position_to_offset(content, position);
++                let class_loader = backend.class_loader_with(
++                    &file.classes,
++                    file.use_map_at(cursor),
++                    file.namespace_at(cursor),
++                );
++                let function_loader = backend.function_loader(file);
++                let current = crate::class_lookup::find_class_at_offset(&file.classes, cursor);
++                let resolution = backend.resolution_ctx_at(
++                    current,
++                    &file.classes,
++                    content,
++                    cursor,
++                    CtxLoaders::without_macro_this(&class_loader, &function_loader),
++                );
++                let owners = crate::type_engine::resolver::resolve_target_classes(
++                    &receiver,
++                    access,
++                    &resolution,
++                );
++                if owners.is_empty() {
++                    return None;
++                }
++                let mut expected = None;
++                for owner in owners {
++                    let class = owner.class_info.as_ref()?;
++                    let args = match owner.type_string.kind() {
++                        TypeKind::Generic(generic) => generic.args.clone(),
++                        _ => crate::inheritance::default_type_args(class),
++                    };
++                    let strings: Vec<_> = args.iter().map(ToString::to_string).collect();
++                    let class = crate::virtual_members::resolve_class_fully_with_generics(
++                        class,
++                        &class_loader,
++                        Some(&backend.resolved_class_cache),
++                        &strings,
++                        &args,
++                    );
++                    let hint = crate::inheritance::resolve_property_type_hint(
++                        &class,
++                        &name,
++                        &class_loader,
++                    )?;
++                    // A union receiver must agree on the declaration. Choosing one
++                    // arm would advertise a preference that fails another arm.
++                    if expected.as_ref().is_some_and(|previous| *previous != hint) {
++                        return None;
++                    }
++                    expected = Some(hint);
++                }
++                expected.filter(usable_hint)
++            }
++        }
++    }
++}
++
++fn usable_hint(hint: &PhpType) -> bool {
++    !hint.contains_mixed() && !hint.is_never() && !hint.is_void() && !hint.is_untyped()
++}
++
++struct CallableValue {
++    ty: Option<PhpType>,
++    generator: bool,
++}
++
++struct ValueContext<'a> {
++    backend: &'a Backend,
++    file: &'a FileContext,
++    content: &'a str,
++    cursor: u32,
++    position: Position,
++    prefix: &'a str,
++    callables: Vec<CallableValue>,
++    expected: Option<ExpectedValue>,
++}
++
++impl ValueContext<'_> {
++    fn direct(&self, expr: &Expression<'_>) -> bool {
++        matches!(expr, Expression::Variable(Variable::Direct(variable))
++            if variable.span().start.offset as usize + self.prefix.len() == self.cursor as usize)
++    }
++
++    fn hint(&self, hint: Option<&FunctionLikeReturnTypeHint<'_>>) -> Option<PhpType> {
++        let ty = crate::parser::extract_hint_type(&hint?.hint);
++        let class = crate::class_lookup::find_class_at_offset(&self.file.classes, self.cursor);
++        let ty = if let Some(class) = class {
++            ty.resolve_self_refs(class.fqn().as_str(), class.parent_class.as_deref())
++        } else {
++            ty
++        };
++        let loader = self.backend.class_loader_with(
++            &self.file.classes,
++            self.file.use_map_at(self.cursor),
++            self.file.namespace_at(self.cursor),
++        );
++        Some(ty.resolve_names(&|name| {
++            loader(name).map_or_else(
++                || self.file.resolve_name_at(name, self.cursor),
++                |class| class.fqn().to_string(),
++            )
++        }))
++    }
++
++    fn return_value(&self) -> Option<PhpType> {
++        let callable = self.callables.last()?;
++        let ty = callable.ty.as_ref()?;
++        if callable.generator {
++            // A generator's function return hint describes the generator object;
++            // its `return` statement instead produces the fourth PHPDoc argument.
++            if let TypeKind::Generic(generic) = ty.kind()
++                && generic
++                    .name
++                    .as_str()
++                    .trim_start_matches('\\')
++                    .eq_ignore_ascii_case("Generator")
++                && generic.args.len() == 4
++            {
++                return Some(generic.args[3].clone());
++            }
++            return None;
++        }
++        Some(ty.clone())
++    }
++
++    fn property(&self, lhs: &Expression<'_>) -> Option<ExpectedValue> {
++        let (receiver, name, access) = match lhs {
++            Expression::Access(Access::Property(property)) => {
++                let ClassLikeMemberSelector::Identifier(name) = &property.property else {
++                    return None;
++                };
++                (property.object, bytes_to_str(name.value), AccessKind::Arrow)
++            }
++            Expression::Access(Access::StaticProperty(property)) => {
++                let Variable::Direct(name) = &property.property else {
++                    return None;
++                };
++                (
++                    property.class,
++                    bytes_to_str(name.name).trim_start_matches('$'),
++                    AccessKind::DoubleColon,
++                )
++            }
++            _ => return None,
++        };
++        let span = receiver.span();
++        let receiver = self
++            .content
++            .get(span.start.offset as usize..span.end.offset as usize)?;
++        Some(ExpectedValue::Property {
++            receiver: receiver.to_owned(),
++            name: name.to_owned(),
++            access,
++        })
++    }
++}
++
++struct YieldFinder;
++impl<'ast, 'arena> Walker<'ast, 'arena, bool> for YieldFinder {
++    fn walk_in_yield(&self, _: &'ast Yield<'arena>, found: &mut bool) {
++        *found = true;
++    }
++    fn walk_function(&self, _: &'ast Function<'arena>, _: &mut bool) {}
++    fn walk_method(&self, _: &'ast Method<'arena>, _: &mut bool) {}
++    fn walk_closure(&self, _: &'ast Closure<'arena>, _: &mut bool) {}
++    fn walk_arrow_function(&self, _: &'ast ArrowFunction<'arena>, _: &mut bool) {}
++}
++fn generator(body: &Block<'_>) -> bool {
++    let mut found = false;
++    for statement in body.statements.iter() {
++        YieldFinder.walk_statement(statement, &mut found);
++    }
++    found
++}
++
++struct ExpectedValueWalker;
++impl<'ast, 'arena, 'a> Walker<'ast, 'arena, ValueContext<'a>> for ExpectedValueWalker {
++    fn walk_statement(&self, node: &'ast Statement<'arena>, ctx: &mut ValueContext<'a>) {
++        let span = node.span();
++        if span.start.offset <= ctx.cursor && ctx.cursor <= span.end.offset {
++            mago_syntax::walker::walk_statement(self, node, ctx);
++        }
++    }
++    fn walk_expression(&self, node: &'ast Expression<'arena>, ctx: &mut ValueContext<'a>) {
++        let span = node.span();
++        if span.start.offset <= ctx.cursor && ctx.cursor <= span.end.offset {
++            mago_syntax::walker::walk_expression(self, node, ctx);
++        }
++    }
++    fn walk_method(&self, node: &'ast Method<'arena>, ctx: &mut ValueContext<'a>) {
++        let span = node.span();
++        if span.start.offset <= ctx.cursor && ctx.cursor <= span.end.offset {
++            mago_syntax::walker::walk_method(self, node, ctx);
++        }
++    }
++    fn walk_in_function(&self, node: &'ast Function<'arena>, ctx: &mut ValueContext<'a>) {
++        let ty = ctx
++            .backend
++            .resolve_callable_target(
++                bytes_to_str(node.name.value),
++                ctx.content,
++                ctx.position,
++                ctx.file,
++            )
++            .and_then(|callable| callable.return_type)
++            .or_else(|| ctx.hint(node.return_type_hint.as_ref()));
++        ctx.callables.push(CallableValue {
++            ty,
++            generator: generator(&node.body),
++        });
++    }
++    fn walk_out_function(&self, _: &'ast Function<'arena>, ctx: &mut ValueContext<'a>) {
++        ctx.callables.pop();
++    }
++    fn walk_in_method(&self, node: &'ast Method<'arena>, ctx: &mut ValueContext<'a>) {
++        let ty = ctx
++            .backend
++            .resolve_callable_target(
++                &format!("self::{}", bytes_to_str(node.name.value)),
++                ctx.content,
++                ctx.position,
++                ctx.file,
++            )
++            .and_then(|callable| callable.return_type)
++            .or_else(|| ctx.hint(node.return_type_hint.as_ref()));
++        let is_generator = match &node.body {
++            MethodBody::Concrete(body) => generator(body),
++            _ => false,
++        };
++        ctx.callables.push(CallableValue {
++            ty,
++            generator: is_generator,
++        });
++    }
++    fn walk_out_method(&self, _: &'ast Method<'arena>, ctx: &mut ValueContext<'a>) {
++        ctx.callables.pop();
++    }
++    fn walk_in_closure(&self, node: &'ast Closure<'arena>, ctx: &mut ValueContext<'a>) {
++        ctx.callables.push(CallableValue {
++            ty: ctx.hint(node.return_type_hint.as_ref()),
++            generator: generator(&node.body),
++        });
++    }
++    fn walk_out_closure(&self, _: &'ast Closure<'arena>, ctx: &mut ValueContext<'a>) {
++        ctx.callables.pop();
++    }
++    fn walk_in_arrow_function(
++        &self,
++        node: &'ast ArrowFunction<'arena>,
++        ctx: &mut ValueContext<'a>,
++    ) {
++        let ty = ctx.hint(node.return_type_hint.as_ref());
++        ctx.callables.push(CallableValue {
++            ty,
++            generator: false,
++        });
++        if ctx.direct(node.expression) {
++            ctx.expected = ctx
++                .return_value()
++                .filter(usable_hint)
++                .map(ExpectedValue::Declared);
++        }
++    }
++    fn walk_out_arrow_function(&self, _: &'ast ArrowFunction<'arena>, ctx: &mut ValueContext<'a>) {
++        ctx.callables.pop();
++    }
++    fn walk_in_property_hook(&self, _: &'ast PropertyHook<'arena>, ctx: &mut ValueContext<'a>) {
++        ctx.callables.push(CallableValue {
++            ty: None,
++            generator: false,
++        });
++    }
++    fn walk_out_property_hook(&self, _: &'ast PropertyHook<'arena>, ctx: &mut ValueContext<'a>) {
++        ctx.callables.pop();
++    }
++    fn walk_in_return(&self, node: &'ast Return<'arena>, ctx: &mut ValueContext<'a>) {
++        if node.value.is_some_and(|value| ctx.direct(value)) {
++            ctx.expected = ctx
++                .return_value()
++                .filter(usable_hint)
++                .map(ExpectedValue::Declared);
++        }
++    }
++    fn walk_in_assignment(&self, node: &'ast Assignment<'arena>, ctx: &mut ValueContext<'a>) {
++        if node.operator.is_assign() && ctx.direct(node.rhs) {
++            ctx.expected = ctx.property(node.lhs);
++        }
++    }
++}
++
++impl Backend {
++    /// The expected type of a directly entered variable in a value position.
++    pub(crate) fn expected_variable_value_context(
++        &self,
++        content: &str,
++        position: Position,
++        file: &FileContext,
++        prefix: &str,
++    ) -> Option<ExpectedValue> {
++        let cursor = position_to_offset(content, position);
++        // A bare `$` is incomplete PHP. Recovery stays after the cursor and never
++        // changes the original content, candidate inference or replacement range.
++        let source = if prefix == "$" {
++            let mut patched = String::with_capacity(content.len() + 19);
++            patched.push_str(&content[..cursor as usize]);
++            patched.push_str("_workbench_expected");
++            patched.push_str(&content[cursor as usize..]);
++            Cow::Owned(patched)
++        } else {
++            Cow::Borrowed(content)
++        };
++        crate::parser::with_parsed_program(
++            &source,
++            "expected_variable_value_context",
++            |program, _| {
++                let mut ctx = ValueContext {
++                    backend: self,
++                    file,
++                    content,
++                    cursor,
++                    position,
++                    prefix,
++                    callables: Vec::new(),
++                    expected: None,
++                };
++                for statement in program.statements.iter() {
++                    ExpectedValueWalker.walk_statement(statement, &mut ctx);
++                }
++                ctx.expected
++            },
++        )
++    }
++}
+diff --git a/src/completion/variable/mod.rs b/src/completion/variable/mod.rs
+index 8b4f284..0da4cb9 100644
+--- a/src/completion/variable/mod.rs
++++ b/src/completion/variable/mod.rs
+@@ -5,4 +5,5 @@
+ /// Variable *type* resolution lives in the shared type engine under
+ /// `crate::type_engine::variable`, not here.
+ pub(crate) mod completion;
++mod expected;
+ mod ranking;
+diff --git a/src/completion/variable/ranking.rs b/src/completion/variable/ranking.rs
+index 2e92cb1..321fe9e 100644
+--- a/src/completion/variable/ranking.rs
++++ b/src/completion/variable/ranking.rs
+@@ -1,4 +1,4 @@
+-//! Argument ranking over the shared forward walker's scope snapshot.
++//! Expected-type ranking over the shared forward walker's scope snapshot.
+ 
+ use tower_lsp::lsp_types::{CompletionItem, Position};
+ 
+@@ -10,7 +10,7 @@ use crate::type_engine::variable::forward_walk;
+ use crate::types::{FileContext, ResolvedType};
+ 
+ impl Backend {
+-    /// Promote variables known to satisfy the active parameter, retaining
++    /// Promote variables known to satisfy the active value constraint, retaining
+     /// unknown and incompatible variables as ordinary fallback suggestions.
+     pub(crate) fn rank_variable_arguments(
+         &self,
+@@ -21,9 +21,11 @@ impl Backend {
+         ctx: &FileContext,
+         prefix: &str,
+     ) {
+-        let Some(expected) =
+-            self.expected_variable_argument_type(uri, content, position, ctx, prefix)
+-        else {
++        let expected = self
++            .expected_variable_argument_type(uri, content, position, ctx, prefix)
++            .map(super::expected::ExpectedValue::Declared)
++            .or_else(|| self.expected_variable_value_context(content, position, ctx, prefix));
++        let Some(expected) = expected else {
+             return;
+         };
+         let offset = position_to_offset(content, position);
+@@ -42,6 +44,11 @@ impl Backend {
+             Some(&self.resolved_class_cache),
+             &[offset],
+         );
++        // Receiver resolution reuses that same scope cache, so a property
++        // assignment does not add a second forward walk of the function body.
++        let Some(expected) = expected.resolve(self, content, position, ctx) else {
++            return;
++        };
+         for item in items {
+             if item
+                 .sort_text
+diff --git a/tests/integration/completion_variable_names.rs b/tests/integration/completion_variable_names.rs
+index 7331584..c25a343 100644
+--- a/tests/integration/completion_variable_names.rs
++++ b/tests/integration/completion_variable_names.rs
+@@ -4005,3 +4005,208 @@ async fn test_argument_ranking_variable_prefix_uses_utf16_range() {
+     assert_eq!(edit.range.end, pos);
+     assert_eq!(edit.range.start.character + 3, pos.character);
+ }
++
++#[tokio::test]
++async fn test_expected_value_ranking_function_return() {
++    let items = ranked_variables(
++        "<?php function demo(int $aCount, string $zText): string { return /*complete*/$; }",
++    )
++    .await;
++    assert_eq!(items.first().map(|i| i.label.as_str()), Some("$zText"));
++    assert!(items.iter().any(|i| i.label == "$aCount"));
++}
++
++#[tokio::test]
++async fn test_expected_value_ranking_method_return() {
++    let items = ranked_variables("<?php interface Recipient {} class User implements Recipient {} class Factory { public function make(int $aCount, User $zUser): Recipient { return /*complete*/$; } }").await;
++    assert_eq!(items.first().map(|i| i.label.as_str()), Some("$zUser"));
++}
++
++#[tokio::test]
++async fn test_expected_value_ranking_property_assignment() {
++    let items = ranked_variables("<?php class Box { public string $name; public function set(int $aCount, string $zText): void { $this->name = /*complete*/$; } }").await;
++    assert_eq!(items.first().map(|i| i.label.as_str()), Some("$zText"));
++}
++
++#[tokio::test]
++async fn test_expected_value_ranking_arrow_return() {
++    let items = ranked_variables("<?php function demo(int $aCount, string $zText): void { $fn = fn(): string => /*complete*/$; }").await;
++    assert_eq!(items.first().map(|i| i.label.as_str()), Some("$zText"));
++}
++
++#[tokio::test]
++async fn test_expected_value_ranking_typed_closure() {
++    let items = ranked_variables("<?php function demo(int $aCount, string $zText): int { $f = function() use ($aCount, $zText): string { return /*complete*/$; }; return 1; }").await;
++    assert_eq!(items.first().map(|i| i.label.as_str()), Some("$zText"));
++    assert!(items.iter().any(|i| i.label == "$aCount"));
++}
++
++#[tokio::test]
++async fn test_expected_value_ranking_untyped_closure() {
++    let items = ranked_variables("<?php function demo(int $aCount, string $zText): string { $f = function() use ($aCount, $zText) { return /*complete*/$; }; return \"\"; }").await;
++    assert_eq!(items.first().map(|i| i.label.as_str()), Some("$aCount"));
++    assert!(items.iter().any(|i| i.label == "$aCount"));
++}
++
++#[tokio::test]
++async fn test_expected_value_ranking_array_element() {
++    let items = ranked_variables(
++        "<?php function demo(int $aCount, array $zItems): array { return [/*complete*/$]; }",
++    )
++    .await;
++    assert_eq!(items.first().map(|i| i.label.as_str()), Some("$aCount"));
++    assert!(items.iter().any(|i| i.label == "$aCount"));
++}
++
++#[tokio::test]
++async fn test_expected_value_ranking_concatenation() {
++    let items = ranked_variables("<?php function demo(int $aCount, string $zText): string { return \"prefix\" . /*complete*/$; }").await;
++    assert_eq!(items.first().map(|i| i.label.as_str()), Some("$aCount"));
++    assert!(items.iter().any(|i| i.label == "$aCount"));
++}
++
++#[tokio::test]
++async fn test_expected_value_ranking_local_assignment() {
++    let items = ranked_variables("<?php function demo(int $aCount, string $zText): void { $value = \"old\"; $value = /*complete*/$; }").await;
++    assert_eq!(items.first().map(|i| i.label.as_str()), Some("$aCount"));
++    assert!(items.iter().any(|i| i.label == "$aCount"));
++}
++
++#[tokio::test]
++async fn test_expected_value_ranking_compound_assignment() {
++    let items = ranked_variables("<?php class Box { public string $name; public function set(int $aCount, string $zText): void { $this->name .= /*complete*/$; } }").await;
++    assert_eq!(items.first().map(|i| i.label.as_str()), Some("$aCount"));
++    assert!(items.iter().any(|i| i.label == "$aCount"));
++}
++
++#[tokio::test]
++async fn test_expected_value_ranking_static_property() {
++    let items = ranked_variables("<?php class Box { public static string $name; public static function set(int $aCount, string $zText): void { self::$name = /*complete*/$; } }").await;
++    assert_eq!(items.first().map(|i| i.label.as_str()), Some("$zText"));
++    assert!(items.iter().any(|i| i.label == "$aCount"));
++}
++
++#[tokio::test]
++async fn test_expected_value_ranking_external_property() {
++    let items = ranked_variables("<?php class Box { public string $label; } function demo(Box $holder, int $aCount, string $zText): void { $holder->label = /*complete*/$; }").await;
++    assert_eq!(items.first().map(|i| i.label.as_str()), Some("$zText"));
++    assert!(items.iter().any(|i| i.label == "$aCount"));
++}
++
++#[tokio::test]
++async fn test_expected_value_ranking_inherited_property() {
++    let items = ranked_variables("<?php class BaseBox { public string $label; } class Box extends BaseBox {} function demo(Box $holder, int $aCount, string $zText): void { $holder->label = /*complete*/$; }").await;
++    assert_eq!(items.first().map(|i| i.label.as_str()), Some("$zText"));
++    assert!(items.iter().any(|i| i.label == "$aCount"));
++}
++
++#[tokio::test]
++async fn test_expected_value_ranking_generic_property() {
++    let items = ranked_variables("<?php /** @template T */ class Box { /** @var T */ public $label; } /** @param Box<string> $holder */ function demo(Box $holder, int $aCount, string $zText): void { $holder->label = /*complete*/$; }").await;
++    assert_eq!(items.first().map(|i| i.label.as_str()), Some("$zText"));
++    assert!(items.iter().any(|i| i.label == "$aCount"));
++}
++
++#[tokio::test]
++async fn test_expected_value_ranking_union_disagreement() {
++    let items = ranked_variables("<?php class Box { public string $label; } class Other { public int $label; } function demo(Box|Other $holder, int $aCount, string $zText): void { $holder->label = /*complete*/$; }").await;
++    assert_eq!(items.first().map(|i| i.label.as_str()), Some("$aCount"));
++    assert!(items.iter().any(|i| i.label == "$aCount"));
++}
++
++#[tokio::test]
++async fn test_expected_value_ranking_union_agreement() {
++    let items = ranked_variables("<?php class Box { public string $label; } class Other { public string $label; } function demo(Box|Other $holder, int $aCount, string $zText): void { $holder->label = /*complete*/$; }").await;
++    assert_eq!(items.first().map(|i| i.label.as_str()), Some("$zText"));
++    assert!(items.iter().any(|i| i.label == "$aCount"));
++}
++
++#[tokio::test]
++async fn test_expected_value_ranking_docblock_return() {
++    let items = ranked_variables("<?php /** @param list<int> $zItems\n * @return list<int> */ function demo(int $aCount, array $zItems): array { return /*complete*/$; }").await;
++    assert_eq!(items.first().map(|i| i.label.as_str()), Some("$zItems"));
++    assert!(items.iter().any(|i| i.label == "$aCount"));
++}
++
++#[tokio::test]
++async fn test_expected_value_ranking_alias_return() {
++    let items = ranked_variables("<?php namespace App; use Lib\\Recipient as Result; function demo(int $aCount, Result $zResult): Result { return /*complete*/$; } namespace Lib; class Recipient {}").await;
++    assert_eq!(items.first().map(|i| i.label.as_str()), Some("$zResult"));
++    assert!(items.iter().any(|i| i.label == "$aCount"));
++}
++
++#[tokio::test]
++async fn test_expected_value_ranking_generator_return() {
++    let items = ranked_variables("<?php /** @return \\Generator<int,int,void,string> */ function demo(int $aCount, string $zText): \\Generator { yield 1; return /*complete*/$; }").await;
++    assert_eq!(items.first().map(|i| i.label.as_str()), Some("$zText"));
++    assert!(items.iter().any(|i| i.label == "$aCount"));
++}
++
++#[tokio::test]
++async fn test_expected_value_ranking_native_generator() {
++    let items = ranked_variables("<?php function demo(int $aCount, \\Generator $zGenerator): \\Generator { yield 1; return /*complete*/$; }").await;
++    assert_eq!(items.first().map(|i| i.label.as_str()), Some("$aCount"));
++    assert!(items.iter().any(|i| i.label == "$aCount"));
++}
++
++#[tokio::test]
++async fn test_expected_value_ranking_nested_yield() {
++    let items = ranked_variables("<?php function demo(int $aCount, string $zText): string { $f = function() { yield 1; }; return /*complete*/$; }").await;
++    assert_eq!(items.first().map(|i| i.label.as_str()), Some("$zText"));
++    assert!(items.iter().any(|i| i.label == "$aCount"));
++}
++
++#[tokio::test]
++async fn test_expected_value_ranking_inner_argument() {
++    let items = ranked_variables("<?php function accept(int $count): string { return \"\"; } function demo(int $aCount, string $zText): string { return accept(/*complete*/$); }").await;
++    assert_eq!(items.first().map(|i| i.label.as_str()), Some("$aCount"));
++    assert!(items.iter().any(|i| i.label == "$aCount"));
++}
++
++#[tokio::test]
++async fn test_expected_value_ranking_mixed_return() {
++    let items = ranked_variables(
++        "<?php function demo(int $aCount, string $zText): mixed { return /*complete*/$; }",
++    )
++    .await;
++    assert_eq!(items.first().map(|i| i.label.as_str()), Some("$aCount"));
++    assert!(items.iter().any(|i| i.label == "$aCount"));
++}
++
++#[tokio::test]
++async fn test_expected_value_ranking_incomplete_eof() {
++    let items = ranked_variables(
++        "<?php function demo(int $aCount, string $zText): string { return /*complete*/$",
++    )
++    .await;
++    assert_eq!(items.first().map(|i| i.label.as_str()), Some("$zText"));
++    assert!(items.iter().any(|i| i.label == "$aCount"));
++}
++
++#[tokio::test]
++async fn test_expected_value_ranking_unicode_crlf() {
++    let items = ranked_variables("<?php\r\nfunction demo(int $aCount, string $zText): string {\r\n    /* café 🐘 */ return /*complete*/$;\r\n}").await;
++    assert_eq!(items.first().map(|i| i.label.as_str()), Some("$zText"));
++    assert!(items.iter().any(|i| i.label == "$aCount"));
++}
++
++#[tokio::test]
++async fn test_expected_value_ranking_declared_property_after_narrowing() {
++    let items = ranked_variables("<?php class ParentItem {} class ChildItem extends ParentItem {} class Box { public ParentItem $item; public function set(ParentItem $aCount, ChildItem $zChild): void { $this->item = $zChild; $this->item = /*complete*/$; } }").await;
++    assert_eq!(items.first().map(|i| i.label.as_str()), Some("$aCount"));
++    assert!(items.iter().any(|i| i.label == "$zChild"));
++}
++
++#[tokio::test]
++async fn test_expected_value_ranking_property_array_element() {
++    let items = ranked_variables("<?php class Box { public array $items; public function set(int $aCount, array $zItems): void { $this->items = [/*complete*/$]; } }").await;
++    assert_eq!(items.first().map(|i| i.label.as_str()), Some("$aCount"));
++    assert!(items.iter().any(|i| i.label == "$zItems"));
++}
++
++#[tokio::test]
++async fn test_expected_value_ranking_nested_untyped_arrow() {
++    let items = ranked_variables("<?php function demo(int $aCount, string $zText): string { $f = fn() => /*complete*/$; return \"\"; }").await;
++    assert_eq!(items.first().map(|i| i.label.as_str()), Some("$aCount"));
++    assert!(items.iter().any(|i| i.label == "$zText"));
++}

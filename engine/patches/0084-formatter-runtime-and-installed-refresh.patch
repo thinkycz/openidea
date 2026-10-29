@@ -1,0 +1,1008 @@
+diff --git a/docs/CHANGELOG.md b/docs/CHANGELOG.md
+index 09c46214b4cf45b693fe46a08eb5340d30ca7e2a..2a396d4245d84377af214c98bde9591aa0a64ab8 100644
+--- a/docs/CHANGELOG.md
++++ b/docs/CHANGELOG.md
+@@ -15,6 +15,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
+ 
+ ## [Unreleased]
+ 
++- **Use selected PHP for external formatting.** Editor formatting with PHP-script Pint, php-cs-fixer and phpcbf, including Pint Blade, uses the selected local interpreter. Invalid selections refuse PHP execution; standalone CLI formatting keeps its inherited interpreter. Contributed by PHP Workbench downstream.
++
++- **Refresh dependencies when installed metadata changes.** Composer dependency completion and navigation refresh after the project's installed metadata is created, changed or removed, including configured vendor directories. Unsaved project files are retained. Contributed by PHP Workbench downstream.
++
+ - **Readable documentation tables.** PHP hover documentation displays supported HTML tables as readable rows, retaining their captions and explanations. Unsupported markup stays visible. Contributed by PHP Workbench downstream.
+ 
+ - **Use the selected PHP for analyzer scripts.** PHPStan, PHPCS and PHPMD script diagnostics use the editor-selected local interpreter for file and project analysis. Invalid selections report an error; native tools and custom launchers keep their own execution policy. Contributed by PHP Workbench downstream.
+diff --git a/src/formatting/blade/mod.rs b/src/formatting/blade/mod.rs
+index ff6d53638683391c618a5e62ac0d192692f533e7..211514250e94bc119c62071d6e63ada7049c9eef 100644
+--- a/src/formatting/blade/mod.rs
++++ b/src/formatting/blade/mod.rs
+@@ -158,17 +158,37 @@ pub fn format_blade_content(
+     config: &FormattingConfig,
+     options: &BladeFormatOptions,
+     cancelled: &AtomicBool,
++) -> Result<Option<String>, String> {
++    format_blade_content_with_runtime(
++        strategy,
++        content,
++        file_path,
++        workspace_root,
++        config,
++        options,
++        (cancelled, &crate::php_runtime::PhpRuntime::Inherited),
++    )
++}
++
++fn format_blade_content_with_runtime(
++    strategy: &BladeFormattingStrategy,
++    content: &str,
++    file_path: &Path,
++    workspace_root: Option<&Path>,
++    config: &FormattingConfig,
++    options: &BladeFormatOptions,
++    execution: (&AtomicBool, &crate::php_runtime::PhpRuntime),
+ ) -> Result<Option<String>, String> {
+     let formatted = match strategy {
+         BladeFormattingStrategy::Disabled => return Ok(None),
+-        BladeFormattingStrategy::Pint { tool, flag } => external::run_pint_on_blade(
++        BladeFormattingStrategy::Pint { tool, flag } => external::run_pint_on_blade_with_runtime(
+             tool,
+             content,
+             file_path,
+             workspace_root,
+             *flag,
+             config,
+-            cancelled,
++            execution,
+         )?,
+         BladeFormattingStrategy::BuiltIn(php) => {
+             if is_whitespace_sensitive(file_path, content) {
+@@ -238,14 +258,14 @@ impl Backend {
+         cancelled: &AtomicBool,
+     ) -> Result<Option<String>, String> {
+         let inputs = self.formatting_inputs();
+-        format_blade_content(
++        format_blade_content_with_runtime(
+             strategy,
+             content,
+             file_path,
+             inputs.workspace_root.as_deref(),
+             &inputs.config.formatting,
+             options,
+-            cancelled,
++            (cancelled, self.php_runtime()),
+         )
+     }
+ }
+diff --git a/src/formatting/external.rs b/src/formatting/external.rs
+index 10a78fe4ec5c8542d356e460d37589b25a2bfa44..63406391edacb28af818bd3cfafa0a279c3a88be 100644
+--- a/src/formatting/external.rs
++++ b/src/formatting/external.rs
+@@ -14,7 +14,6 @@
+ use std::ffi::OsString;
+ use std::io::Write;
+ use std::path::Path;
+-use std::process::Command;
+ use std::sync::atomic::AtomicBool;
+ use std::time::Duration;
+ 
+@@ -87,18 +86,20 @@ struct Run<'a> {
+     workspace_root: Option<&'a Path>,
+     timeout: Duration,
+     cancelled: &'a AtomicBool,
++    runtime: &'a crate::php_runtime::PhpRuntime,
+ }
+ 
+ impl<'a> Run<'a> {
+     fn new(
+         workspace_root: Option<&'a Path>,
+         config: &FormattingConfig,
+-        cancelled: &'a AtomicBool,
++        execution: (&'a AtomicBool, &'a crate::php_runtime::PhpRuntime),
+     ) -> Self {
+         Self {
+             workspace_root,
+             timeout: Duration::from_millis(config.timeout.unwrap_or(DEFAULT_TIMEOUT_MS)),
+-            cancelled,
++            cancelled: execution.0,
++            runtime: execution.1,
+         }
+     }
+ }
+@@ -111,6 +112,7 @@ impl<'a> Run<'a> {
+ /// `file_path` is the real path of the file on disk, used so that
+ /// sibling temp files land in the correct directory for tool config
+ /// discovery.
++#[cfg(test)]
+ pub(super) fn run_external_pipeline(
+     tools: &[ResolvedTool],
+     content: &str,
+@@ -119,7 +121,25 @@ pub(super) fn run_external_pipeline(
+     config: &FormattingConfig,
+     cancelled: &AtomicBool,
+ ) -> Result<String, String> {
+-    let run = Run::new(workspace_root, config, cancelled);
++    run_external_pipeline_with_runtime(
++        tools,
++        content,
++        file_path,
++        workspace_root,
++        config,
++        (cancelled, &crate::php_runtime::PhpRuntime::Inherited),
++    )
++}
++
++pub(super) fn run_external_pipeline_with_runtime(
++    tools: &[ResolvedTool],
++    content: &str,
++    file_path: &Path,
++    workspace_root: Option<&Path>,
++    config: &FormattingConfig,
++    execution: (&AtomicBool, &crate::php_runtime::PhpRuntime),
++) -> Result<String, String> {
++    let run = Run::new(workspace_root, config, execution);
+     let mut current = content.to_string();
+     for tool in tools {
+         current = run_tool(tool, &current, file_path, &run)?;
+@@ -133,6 +153,7 @@ pub(super) fn run_external_pipeline(
+ /// when the project's `pint.json` does not.  Pint refuses the run (exit
+ /// code 1, nothing written) when the Node dependencies the rule needs
+ /// are not installed, which surfaces as an error rather than as output.
++#[cfg(test)]
+ pub(super) fn run_pint_on_blade(
+     tool: &ResolvedTool,
+     content: &str,
+@@ -141,12 +162,32 @@ pub(super) fn run_pint_on_blade(
+     blade_flag: bool,
+     config: &FormattingConfig,
+     cancelled: &AtomicBool,
++) -> Result<String, String> {
++    run_pint_on_blade_with_runtime(
++        tool,
++        content,
++        file_path,
++        workspace_root,
++        blade_flag,
++        config,
++        (cancelled, &crate::php_runtime::PhpRuntime::Inherited),
++    )
++}
++
++pub(super) fn run_pint_on_blade_with_runtime(
++    tool: &ResolvedTool,
++    content: &str,
++    file_path: &Path,
++    workspace_root: Option<&Path>,
++    blade_flag: bool,
++    config: &FormattingConfig,
++    execution: (&AtomicBool, &crate::php_runtime::PhpRuntime),
+ ) -> Result<String, String> {
+     let mut arguments = Tool::Pint.arguments(file_path);
+     if blade_flag {
+         arguments.push("--blade".into());
+     }
+-    let run = Run::new(workspace_root, config, cancelled);
++    let run = Run::new(workspace_root, config, execution);
+     let output = execute(tool, &arguments, Some(content), &run)?;
+     reject_empty_result(tool.tool, content, output.stdout)
+ }
+@@ -203,7 +244,11 @@ fn execute(
+     } else {
+         tool.path.clone()
+     };
+-    let mut command = Command::new(program);
++    // program already preserves the legacy server-relative explicit-path rule.
++    let mut command = run.runtime.command(
++        &program,
++        run.workspace_root.unwrap_or_else(|| Path::new(".")),
++    )?;
+     command.args(arguments);
+     if let Some(root) = run.workspace_root {
+         command.current_dir(root);
+diff --git a/src/formatting/mod.rs b/src/formatting/mod.rs
+index ab7b2cacee1daa496e396c0b4e506e9f7bee1c99..bd4d4a1fe97c1913d123e5ec3d575d4083c8190f 100644
+--- a/src/formatting/mod.rs
++++ b/src/formatting/mod.rs
+@@ -308,14 +308,14 @@ impl Backend {
+         cancelled: &AtomicBool,
+     ) -> Result<Option<String>, String> {
+         let inputs = self.formatting_inputs();
+-        format_content(
++        format_content_with_runtime(
+             strategy,
+             content,
+             file_path,
+             inputs.workspace_root.as_deref(),
+             &inputs.config.formatting,
+             self.php_version(),
+-            cancelled,
++            (cancelled, self.php_runtime()),
+         )
+     }
+ }
+@@ -335,16 +335,37 @@ pub fn format_content(
+     config: &FormattingConfig,
+     php_version: crate::types::PhpVersion,
+     cancelled: &AtomicBool,
++) -> Result<Option<String>, String> {
++    format_content_with_runtime(
++        strategy,
++        content,
++        file_path,
++        workspace_root,
++        config,
++        php_version,
++        (cancelled, &crate::php_runtime::PhpRuntime::Inherited),
++    )
++}
++
++/// Backend-only runtime-bearing entry; the public CLI API retains inherited PHP.
++fn format_content_with_runtime(
++    strategy: &FormattingStrategy,
++    content: &str,
++    file_path: &Path,
++    workspace_root: Option<&Path>,
++    config: &FormattingConfig,
++    php_version: crate::types::PhpVersion,
++    execution: (&AtomicBool, &crate::php_runtime::PhpRuntime),
+ ) -> Result<Option<String>, String> {
+     let formatted = match strategy {
+         FormattingStrategy::Disabled => return Ok(None),
+-        FormattingStrategy::External(tools) => external::run_external_pipeline(
++        FormattingStrategy::External(tools) => external::run_external_pipeline_with_runtime(
+             tools,
+             content,
+             file_path,
+             workspace_root,
+             config,
+-            cancelled,
++            execution,
+         )?,
+         FormattingStrategy::BuiltIn(config_path) => {
+             let mago_version = mago::to_mago_php_version(php_version);
+diff --git a/src/formatting/tests.rs b/src/formatting/tests.rs
+index 1cbcd61bb1c9df8d722f5dcddb79f3d8a7953a22..3ef0813d267428f4144622b32e1c6bd81d3c7e69 100644
+--- a/src/formatting/tests.rs
++++ b/src/formatting/tests.rs
+@@ -936,3 +936,291 @@ fn compute_edits_does_not_split_crlf_when_line_ending_changes() {
+     assert_eq!(edits[0].new_text, "\n");
+     assert_eq!(apply_computed_format_edits(original, &edits), formatted);
+ }
++
++#[cfg(unix)]
++mod selected_formatter_runtime_tests {
++    use super::*;
++    use crate::formatting::ResolvedTool;
++    use std::path::{Path, PathBuf};
++    use tower_lsp::lsp_types::{InitializeParams, Url};
++
++    fn executable(root: &Path, name: &str, source: &str) -> PathBuf {
++        use std::os::unix::fs::PermissionsExt;
++        let path = root.join(name);
++        std::fs::write(&path, source).unwrap();
++        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
++        path.canonicalize().unwrap()
++    }
++    fn php_quote(value: &Path) -> String {
++        format!(
++            "'{}'",
++            value
++                .to_str()
++                .unwrap()
++                .replace('\\', "\\\\")
++                .replace('\'', "\\'")
++        )
++    }
++    fn tool(root: &Path, kind: Tool, receipt: &Path) -> ResolvedTool {
++        let stdin = matches!(kind, Tool::Pint);
++        let source = format!(
++            "#!/usr/bin/env php\n<?php\n$stdin=stream_get_contents(STDIN); $file=end($argv); $input={input}; file_put_contents({receipt},json_encode(['php'=>PHP_BINARY,'cwd'=>getcwd(),'argv'=>array_slice($argv,1),'stdin'=>$stdin,'input'=>$input])); $output=str_replace('bad','good',$input); {output} exit({exit});\n",
++            input = if stdin {
++                "$stdin"
++            } else {
++                "file_get_contents($file)"
++            },
++            receipt = php_quote(receipt),
++            output = if stdin {
++                "echo $output;"
++            } else {
++                "file_put_contents($file,$output);"
++            },
++            exit = if matches!(kind, Tool::Phpcbf) { 1 } else { 0 },
++        );
++        ResolvedTool {
++            tool: kind,
++            path: executable(root, &format!("{} café tool", kind.name()), &source),
++        }
++    }
++    #[allow(deprecated)]
++    async fn backend(root: &Path, interpreter: &str) -> crate::Backend {
++        let backend = crate::Backend::new_test();
++        backend
++            .on_initialize(InitializeParams {
++                root_uri: Some(Url::from_directory_path(root).unwrap()),
++                initialization_options: Some(
++                    serde_json::json!({"phpRuntime":{"interpreter":interpreter}}),
++                ),
++                ..Default::default()
++            })
++            .await
++            .unwrap();
++        backend
++    }
++    fn receipt(path: &Path, php: &Path, root: &Path, input: &str) -> serde_json::Value {
++        let value: serde_json::Value =
++            serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
++        assert_eq!(
++            Path::new(value["php"].as_str().unwrap())
++                .canonicalize()
++                .unwrap(),
++            php.canonicalize().unwrap()
++        );
++        assert_eq!(
++            Path::new(value["cwd"].as_str().unwrap())
++                .canonicalize()
++                .unwrap(),
++            root.canonicalize().unwrap()
++        );
++        assert_eq!(value["input"], input);
++        value
++    }
++    fn no_sibling_temps(root: &Path) {
++        assert!(!std::fs::read_dir(root).unwrap().any(|entry| {
++            entry
++                .unwrap()
++                .file_name()
++                .to_string_lossy()
++                .starts_with("phpantom-fmt-")
++        }));
++    }
++
++    #[tokio::test]
++    #[ignore = "Root supplies selected PHP83 and controlled PATH PHP82 for actual formatter receipts"]
++    async fn selected_formatter_runtime_backend_php_and_blade_receipts_preserve_cli_legacy() {
++        let selected = PathBuf::from(
++            std::env::var("PHP_WORKBENCH_TEST_PHP").expect("owned selected PHP required"),
++        );
++        let inherited = PathBuf::from(
++            std::env::var("PHP_WORKBENCH_TEST_PATH_PHP").expect("controlled PATH PHP required"),
++        );
++        assert_ne!(
++            selected.canonicalize().unwrap(),
++            inherited.canonicalize().unwrap()
++        );
++        let directory = tempfile::tempdir().unwrap();
++        let root = directory.path().canonicalize().unwrap();
++        let backend = backend(&root, selected.to_str().unwrap()).await;
++        let file = root.join("Driver café.php");
++        let input = "<?php\r\n// café 🐘 bad\r\n";
++        std::fs::write(&file, input).unwrap();
++        let output = input.replace("bad", "good");
++        let marker = root.join("receipt.json");
++        let cancel = AtomicBool::new(false);
++        for kind in Tool::ALL {
++            let tool = tool(&root, kind, &marker);
++            let strategy = FormattingStrategy::External(vec![tool]);
++            let formatted = backend
++                .format_content(&strategy, &file, input, &cancel)
++                .unwrap();
++            assert_eq!(formatted.as_deref(), Some(output.as_str()));
++            let actual = receipt(&marker, &selected, &root, input);
++            let args = actual["argv"].as_array().unwrap();
++            match kind {
++                Tool::Pint => assert_eq!(
++                    args,
++                    &vec![serde_json::json!(format!(
++                        "--stdin-filename={}",
++                        file.display()
++                    ))]
++                ),
++                Tool::PhpCsFixer | Tool::Phpcbf => {
++                    let path = Path::new(args.last().unwrap().as_str().unwrap());
++                    assert_eq!(path.parent().unwrap(), root);
++                    assert!(!path.exists(), "owned sibling temp must be removed");
++                    assert_ne!(path, file);
++                    let prefix: Vec<&str> = args[..args.len() - 1]
++                        .iter()
++                        .map(|value| value.as_str().unwrap())
++                        .collect();
++                    assert_eq!(
++                        prefix,
++                        if matches!(kind, Tool::PhpCsFixer) {
++                            vec!["fix", "--using-cache=no", "--quiet", "--no-interaction"]
++                        } else {
++                            vec!["--no-colors", "-q"]
++                        }
++                    );
++                }
++            }
++            assert_eq!(std::fs::read_to_string(&file).unwrap(), input);
++            no_sibling_temps(&root);
++            // Actual public API used by format_cli remains inherited, even after Backend selection.
++            let legacy = super::super::format_content(
++                &strategy,
++                input,
++                &file,
++                Some(&root),
++                &FormattingConfig::default(),
++                backend.php_version(),
++                &cancel,
++            )
++            .unwrap();
++            assert_eq!(legacy.as_deref(), Some(output.as_str()));
++            receipt(&marker, &inherited, &root, input);
++        }
++        let blade = root.join("View café.blade.php");
++        let markup = "<div>bad café 🐘</div>\r\n";
++        std::fs::write(&blade, markup).unwrap();
++        let strategy = crate::formatting::blade::BladeFormattingStrategy::Pint {
++            tool: tool(&root, Tool::Pint, &marker),
++            flag: true,
++        };
++        let formatted = backend
++            .format_blade_content(&strategy, &blade, markup, &Default::default(), &cancel)
++            .unwrap();
++        assert_eq!(
++            formatted.as_deref(),
++            Some(markup.replace("bad", "good").as_str())
++        );
++        let actual = receipt(&marker, &selected, &root, markup);
++        assert_eq!(
++            actual["argv"],
++            serde_json::json!([format!("--stdin-filename={}", blade.display()), "--blade"])
++        );
++        let legacy = crate::formatting::blade::format_blade_content(
++            &strategy,
++            markup,
++            &blade,
++            Some(&root),
++            &FormattingConfig::default(),
++            &Default::default(),
++            &cancel,
++        )
++        .unwrap();
++        assert_eq!(
++            legacy.as_deref(),
++            Some(markup.replace("bad", "good").as_str())
++        );
++        receipt(&marker, &inherited, &root, markup);
++        assert_eq!(std::fs::read_to_string(&blade).unwrap(), markup);
++        no_sibling_temps(&root);
++    }
++
++    #[tokio::test]
++    #[ignore = "Root supplies controlled PATH PHP for positive legacy preflight then invalid-selection refusal"]
++    async fn selected_formatter_runtime_invalid_refuses_without_php_execution_and_cleans_temps() {
++        let inherited = PathBuf::from(
++            std::env::var("PHP_WORKBENCH_TEST_PATH_PHP").expect("controlled PATH PHP required"),
++        );
++        let directory = tempfile::tempdir().unwrap();
++        let root = directory.path().canonicalize().unwrap();
++        let backend = backend(&root, "/owned/missing/selected/php").await;
++        let file = root.join("Driver.php");
++        let input = "<?php // bad café 🐘\r\n";
++        std::fs::write(&file, input).unwrap();
++        let marker = root.join("receipt.json");
++        let cancel = AtomicBool::new(false);
++        for kind in Tool::ALL {
++            let strategy = FormattingStrategy::External(vec![tool(&root, kind, &marker)]);
++            super::super::format_content(
++                &strategy,
++                input,
++                &file,
++                Some(&root),
++                &FormattingConfig::default(),
++                backend.php_version(),
++                &cancel,
++            )
++            .unwrap()
++            .unwrap();
++            receipt(&marker, &inherited, &root, input);
++            std::fs::remove_file(&marker).unwrap();
++            assert!(
++                backend
++                    .format_content(&strategy, &file, input, &cancel)
++                    .is_err()
++            );
++            assert!(
++                !marker.exists(),
++                "invalid selected PHP must not launch through PATH"
++            );
++            assert_eq!(std::fs::read_to_string(&file).unwrap(), input);
++            no_sibling_temps(&root);
++        }
++        let strategy = crate::formatting::blade::BladeFormattingStrategy::Pint {
++            tool: tool(&root, Tool::Pint, &marker),
++            flag: true,
++        };
++        assert!(
++            backend
++                .format_blade_content(
++                    &strategy,
++                    &file,
++                    "<div>bad</div>",
++                    &Default::default(),
++                    &cancel
++                )
++                .is_err()
++        );
++        assert!(!marker.exists());
++        no_sibling_temps(&root);
++    }
++
++    #[tokio::test]
++    async fn selected_formatter_runtime_invalid_preserves_non_php_shell_wrapper() {
++        let directory = tempfile::tempdir().unwrap();
++        let root = directory.path().canonicalize().unwrap();
++        let backend = backend(&root, "/owned/missing/selected/php").await;
++        let file = root.join("Driver.php");
++        let input = "<?php // bad\n";
++        std::fs::write(&file, input).unwrap();
++        let strategy = FormattingStrategy::External(vec![ResolvedTool {
++            tool: Tool::Pint,
++            path: executable(
++                &root,
++                "shell wrapper",
++                "#!/bin/sh\nprintf '<?php // good\\n'\n",
++            ),
++        }]);
++        assert_eq!(
++            backend
++                .format_content(&strategy, &file, input, &AtomicBool::new(false))
++                .unwrap()
++                .as_deref(),
++            Some("<?php // good\n")
++        );
++        assert_eq!(std::fs::read_to_string(&file).unwrap(), input);
++    }
++}
+diff --git a/src/indexing/watch.rs b/src/indexing/watch.rs
+index 732524f35e18828a86cad81950008a659a209322..3c4c39607f853c4a5d1c33ec62e1bf92340b8dc2 100644
+--- a/src/indexing/watch.rs
++++ b/src/indexing/watch.rs
+@@ -429,6 +429,8 @@ impl Backend {
+             ("**/*.{yaml,yml,xml}.dist".to_string(), watch_all),
+             ("**/composer.json".to_string(), watch_all),
+             ("**/composer.lock".to_string(), watch_all),
++            // Event admission is exact per-context; this glob only requests delivery.
++            ("**/composer/installed.json".to_string(), watch_all),
+             ("**/.phpantom.toml".to_string(), watch_all),
+         ]);
+         if is_laravel {
+@@ -595,7 +597,11 @@ mod tests {
+         let (registration, _) = backend.build_watched_file_registration();
+         let options: DidChangeWatchedFilesRegistrationOptions =
+             serde_json::from_value(registration.register_options.unwrap()).unwrap();
+-        for pattern in ["**/composer.json", "**/composer.lock"] {
++        for pattern in [
++            "**/composer.json",
++            "**/composer.lock",
++            "**/composer/installed.json",
++        ] {
+             let watcher = options
+                 .watchers
+                 .iter()
+diff --git a/src/project_router.rs b/src/project_router.rs
+index f0590b34f23f0873f2bdf949bfc759cffbf5bb84..e5b64ab810b2f8b1f2fdbf6d3d7c9addeb5dcda7 100644
+--- a/src/project_router.rs
++++ b/src/project_router.rs
+@@ -26,10 +26,18 @@ pub(crate) struct ProjectContext {
+     pub(crate) root: Option<PathBuf>,
+     pub(crate) backend: Arc<Backend>,
+     dependencies: Vec<PathBuf>,
++    installed_metadata: Option<InstalledMetadata>,
+     dependency_files: HashSet<PathBuf>,
+     ready: OnceCell<()>,
+ }
+ 
++// Keep the declared spelling for live alias changes and the physical identity
++// observed while it exists for delete events, when canonicalize cannot resolve it.
++struct InstalledMetadata {
++    declared: PathBuf,
++    physical: PathBuf,
++}
++
+ #[derive(Clone)]
+ struct DocumentRouting {
+     physical: Option<PathBuf>,
+@@ -83,6 +91,17 @@ fn contains(root: &Path, path: &Path) -> bool {
+ }
+ 
+ impl ProjectContext {
++    fn owns_installed_metadata(&self, path: &Path) -> bool {
++        if path.file_name().is_none_or(|name| name != "installed.json") {
++            return false;
++        }
++        self.installed_metadata.as_ref().is_some_and(|expected| {
++            path == expected.declared
++                || path == expected.physical
++                || normalized(path) == normalized(&expected.declared)
++        })
++    }
++
+     fn consumes(&self, uri: &Url) -> bool {
+         let Ok(path) = uri.to_file_path() else {
+             return false;
+@@ -133,6 +152,7 @@ impl ProjectRouter {
+             root: None,
+             backend: Arc::new(backend),
+             dependencies: Vec::new(),
++            installed_metadata: None,
+             dependency_files: HashSet::new(),
+             ready: OnceCell::new(),
+         });
+@@ -218,9 +238,15 @@ impl ProjectRouter {
+                 excluded,
+             ));
+             let mut dependencies = Vec::new();
++            let mut installed_metadata = None;
+             let mut dependency_files = HashSet::new();
+             if let Some(package) = composer::read_composer_package(root) {
+                 let vendor = composer::get_vendor_dir(&package);
++                let declared = root.join(&vendor).join("composer/installed.json");
++                installed_metadata = Some(InstalledMetadata {
++                    physical: normalized(&declared),
++                    declared,
++                });
+                 dependencies.push(root.join(&vendor));
+                 let mappings = composer::extract_psr4_mappings_from_package(&package);
+                 dependencies.extend(
+@@ -259,6 +285,7 @@ impl ProjectRouter {
+                 root: Some(root.clone()),
+                 backend: Arc::new(backend),
+                 dependencies,
++                installed_metadata,
+                 dependency_files,
+                 ready: OnceCell::new(),
+             }));
+@@ -281,6 +308,7 @@ impl ProjectRouter {
+                 root: None,
+                 backend: Arc::new(backend),
+                 dependencies: Vec::new(),
++                installed_metadata: None,
+                 dependency_files: HashSet::new(),
+                 ready: OnceCell::new(),
+             }));
+@@ -768,8 +796,13 @@ impl ProjectRouter {
+                 .to_file_path()
+                 .ok()
+                 .and_then(|path| path.file_name().map(|n| n.to_os_string()));
+-            name.is_some_and(|name| name == "composer.json" || name == "composer.lock")
+-                && contexts.iter().any(|c| c.consumes(&event.uri))
++            (name.is_some_and(|name| name == "composer.json" || name == "composer.lock")
++                && contexts.iter().any(|c| c.consumes(&event.uri)))
++                || event.uri.to_file_path().is_ok_and(|path| {
++                    contexts
++                        .iter()
++                        .any(|context| context.owns_installed_metadata(&path))
++                })
+         });
+         if topology_changed {
+             let params = self.params.read().clone();
+@@ -1336,6 +1369,7 @@ mod tests {
+                 root: Some(root),
+                 backend: Arc::new(backend),
+                 dependencies: Vec::new(),
++                installed_metadata: None,
+                 dependency_files: HashSet::from([normalized(&shared)]),
+                 ready: OnceCell::new(),
+             }));
+diff --git a/tests/integration/composer_project_contexts.rs b/tests/integration/composer_project_contexts.rs
+index 8605d159be06b1e134d199c2a858eae4e26b044e..90a4bc2bb6a2d797e9b69742d2d8bcc5f46eef7d 100644
+--- a/tests/integration/composer_project_contexts.rs
++++ b/tests/integration/composer_project_contexts.rs
+@@ -773,3 +773,314 @@ async fn composer_project_contexts_builtin_documents_retain_target_and_reject_re
+     assert_eq!(fresh_document.content, a_document.content);
+     router.shutdown().await.unwrap();
+ }
++
++// Only installed.json changes below; both alternative source trees preexist.
++struct InstalledRefresh {
++    fixture: Projects,
++    vendor: &'static str,
++}
++impl InstalledRefresh {
++    fn new(vendor: &'static str, installed: bool) -> Self {
++        let value = Self {
++            fixture: Projects::new(),
++            vendor,
++        };
++        value.fixture.write(
++            "apps/a/composer.json",
++            &serde_json::json!({
++                "name":"fixture/a", "require":{"fixture/dependency":"*"},
++                "config":{"vendor-dir":vendor},
++                "autoload":{"psr-4":{"App\\":"src/"}}
++            })
++            .to_string(),
++        );
++        value
++            .fixture
++            .write("apps/a/composer.lock", "{\"packages\":[]}\n");
++        value.fixture.write(
++            "apps/a/.phpantom.toml",
++            "[indexing]\nstrategy = \"composer\"\n",
++        );
++        value
++            .fixture
++            .write("apps/a/.gitignore", &format!("/{vendor}/\n"));
++        for (tree, name) in [("old", "oldOnly"), ("new", "newOnly")] {
++            value.fixture.write(&format!("apps/a/{vendor}/fixture/dependency/{tree}/Service.php"),
++                &format!("<?php\r\nnamespace Installed;\r\nclass Service {{ /** café 🐘 {name} docs */ public function {name}(): void {{}} }}\r\n"));
++        }
++        value.fixture.write(
++            "apps/a/dependency.php",
++            "<?php\r\n// café 🐘\r\n$service = new \\Installed\\Service();\r\n$service->\r\n",
++        );
++        if installed {
++            value.set("old");
++        }
++        value
++    }
++    fn metadata(&self) -> PathBuf {
++        self.fixture
++            .path("a", &format!("{}/composer/installed.json", self.vendor))
++    }
++    fn set(&self, tree: &str) {
++        self.fixture.write(&format!("apps/a/{}/composer/installed.json", self.vendor),
++            &serde_json::json!({"packages":[{"name":"fixture/dependency","version":format!("1.0.0-{tree}"),
++                "install-path":"../fixture/dependency", "autoload":{"psr-4":{"Installed\\":format!("{tree}/")}}}]}).to_string());
++    }
++    async fn event(&self, router: &ProjectRouter, path: &Path, typ: FileChangeType) {
++        router
++            .did_change_watched_files(DidChangeWatchedFilesParams {
++                changes: vec![FileEvent {
++                    uri: Url::from_file_path(path).unwrap(),
++                    typ,
++                }],
++            })
++            .await;
++    }
++    async fn current(&self, router: &ProjectRouter, source: &str, name: &str, absent: &[&str]) {
++        let path = self.fixture.path("a", "dependency.php");
++        assert_members(router, &path, source, name, absent).await;
++        let result = items(router, &path, source).await;
++        let item = result
++            .into_iter()
++            .find(|item| has(std::slice::from_ref(item), name))
++            .unwrap();
++        let resolved = router.completion_resolve(item).await.unwrap();
++        assert!(
++            serde_json::to_string(&resolved.documentation)
++                .unwrap()
++                .contains(&format!("{name} docs"))
++        );
++        let tree = if name == "oldOnly" { "old" } else { "new" };
++        assert_definition(
++            router,
++            &path,
++            source,
++            "Service",
++            &self
++                .fixture
++                .path(
++                    "a",
++                    &format!("{}/fixture/dependency/{tree}/Service.php", self.vendor),
++                )
++                .canonicalize()
++                .unwrap(),
++        )
++        .await;
++        let definition = router
++            .goto_definition(GotoDefinitionParams {
++                text_document_position_params: TextDocumentPositionParams {
++                    text_document: TextDocumentIdentifier {
++                        uri: Url::from_file_path(&path).unwrap(),
++                    },
++                    position: position_of(source, "Service"),
++                },
++                work_done_progress_params: Default::default(),
++                partial_result_params: Default::default(),
++            })
++            .await
++            .unwrap();
++        let locations = definition_locations(definition);
++        assert_eq!(locations[0].range.start, Position::new(2, 0));
++    }
++}
++
++#[tokio::test]
++async fn composer_installed_refresh_custom_vendor_current_source_and_retired_resolve() {
++    let value = InstalledRefresh::new("dependencies with spaces", true);
++    let root_manifest = fs::read(value.fixture.path("a", "composer.json")).unwrap();
++    let root_lock = fs::read(value.fixture.path("a", "composer.lock")).unwrap();
++    let router = value.fixture.router().await;
++    let path = value.fixture.path("a", "dependency.php");
++    let source = open(&router, &path).await;
++    value
++        .current(&router, &source, "oldOnly", &["newOnly"])
++        .await;
++    let old_item = items(&router, &path, &source)
++        .await
++        .into_iter()
++        .find(|i| has(std::slice::from_ref(i), "oldOnly"))
++        .unwrap();
++    let bpath = value.fixture.path("b", "index.php");
++    let bsource = open(&router, &bpath).await;
++    assert_members(&router, &bpath, &bsource, "fromB", &["oldOnly", "newOnly"]).await;
++    // Retained unsaved sibling text must be replayed into its own fresh context.
++    let declaration = value.fixture.path("b", "src/Service.php");
++    let before = open(&router, &declaration).await;
++    replace(
++        &router,
++        &declaration,
++        2,
++        &before.replace("fromB", "fromBUnsaved"),
++    )
++    .await;
++    value.set("new");
++    value
++        .event(&router, &value.metadata(), FileChangeType::CHANGED)
++        .await;
++    value
++        .current(&router, &source, "newOnly", &["oldOnly"])
++        .await;
++    assert!(
++        router.completion_resolve(old_item).await.is_err(),
++        "retired graph token must refuse"
++    );
++    assert_members(
++        &router,
++        &bpath,
++        &bsource,
++        "fromBUnsaved",
++        &["fromB", "oldOnly", "newOnly"],
++    )
++    .await;
++    assert_eq!(
++        fs::read(value.fixture.path("a", "composer.json")).unwrap(),
++        root_manifest
++    );
++    assert_eq!(
++        fs::read(value.fixture.path("a", "composer.lock")).unwrap(),
++        root_lock
++    );
++    assert_eq!(fs::read_to_string(&path).unwrap(), source);
++    assert_eq!(fs::read_to_string(&declaration).unwrap(), before);
++    router.shutdown().await.unwrap();
++}
++
++#[tokio::test]
++async fn composer_installed_refresh_default_vendor_create_and_delete() {
++    let value = InstalledRefresh::new("vendor", false);
++    let router = value.fixture.router().await;
++    let path = value.fixture.path("a", "dependency.php");
++    let source = open(&router, &path).await;
++    assert!(!has(&items(&router, &path, &source).await, "oldOnly"));
++    value.set("old");
++    value
++        .event(&router, &value.metadata(), FileChangeType::CREATED)
++        .await;
++    value
++        .current(&router, &source, "oldOnly", &["newOnly"])
++        .await;
++    fs::remove_file(value.metadata()).unwrap();
++    value
++        .event(&router, &value.metadata(), FileChangeType::DELETED)
++        .await;
++    let result = items(&router, &path, &source).await;
++    assert!(!has(&result, "oldOnly") && !has(&result, "newOnly"));
++    router.shutdown().await.unwrap();
++}
++
++#[tokio::test]
++async fn composer_installed_refresh_unowned_same_basename_does_not_retire_graph() {
++    let value = InstalledRefresh::new("dependencies with spaces", true);
++    let router = value.fixture.router().await;
++    let path = value.fixture.path("a", "dependency.php");
++    let source = open(&router, &path).await;
++    let selected = items(&router, &path, &source)
++        .await
++        .into_iter()
++        .find(|i| has(std::slice::from_ref(i), "oldOnly"))
++        .unwrap();
++    let unrelated = value.fixture.path("a", "notes/composer/installed.json");
++    value.fixture.write(
++        "apps/a/notes/composer/installed.json",
++        "{\"packages\":[]}\n",
++    );
++    value
++        .event(&router, &unrelated, FileChangeType::CHANGED)
++        .await;
++    assert!(
++        router.completion_resolve(selected).await.is_ok(),
++        "unowned basename must not retire context"
++    );
++    value
++        .current(&router, &source, "oldOnly", &["newOnly"])
++        .await;
++    router.shutdown().await.unwrap();
++}
++
++#[tokio::test]
++async fn composer_installed_refresh_external_custom_vendor_is_owned_by_consumer() {
++    let value = InstalledRefresh::new("../external dependencies", true);
++    let router = value.fixture.router().await;
++    let path = value.fixture.path("a", "dependency.php");
++    let source = open(&router, &path).await;
++    value
++        .current(&router, &source, "oldOnly", &["newOnly"])
++        .await;
++    value.set("new");
++    value
++        .event(&router, &value.metadata(), FileChangeType::CHANGED)
++        .await;
++    value
++        .current(&router, &source, "newOnly", &["oldOnly"])
++        .await;
++    router.shutdown().await.unwrap();
++}
++
++#[tokio::test]
++async fn composer_installed_refresh_external_vendor_canonical_deletion_retires_source() {
++    let value = InstalledRefresh::new("../external dependencies", true);
++    // Real watchers can deliver the physical spelling, without the configured ../.
++    let physical_metadata = value.metadata().canonicalize().unwrap();
++    assert_ne!(physical_metadata, value.metadata());
++    let router = value.fixture.router().await;
++    let path = value.fixture.path("a", "dependency.php");
++    let source = open(&router, &path).await;
++    value
++        .current(&router, &source, "oldOnly", &["newOnly"])
++        .await;
++    let old_item = items(&router, &path, &source)
++        .await
++        .into_iter()
++        .find(|item| has(std::slice::from_ref(item), "oldOnly"))
++        .unwrap();
++    fs::remove_file(value.metadata()).unwrap();
++    assert!(!physical_metadata.exists());
++    value
++        .event(&router, &physical_metadata, FileChangeType::DELETED)
++        .await;
++    let result = items(&router, &path, &source).await;
++    assert!(
++        !has(&result, "oldOnly") && !has(&result, "newOnly"),
++        "removed metadata must retire dependency selection, even with a normalized event URI"
++    );
++    assert!(
++        router.completion_resolve(old_item).await.is_err(),
++        "physical metadata deletion must retire the prior resolve token"
++    );
++    assert_eq!(fs::read_to_string(&path).unwrap(), source);
++    router.shutdown().await.unwrap();
++}
++
++#[cfg(unix)]
++#[tokio::test]
++async fn composer_installed_refresh_symlink_vendor_physical_deletion_retires_source() {
++    let value = InstalledRefresh::new("vendor alias", true);
++    let vendor = value.fixture.path("a", "vendor alias");
++    let physical_vendor = value.fixture.path("a", "physical vendor");
++    fs::rename(&vendor, &physical_vendor).unwrap();
++    std::os::unix::fs::symlink(&physical_vendor, &vendor).unwrap();
++    let physical_metadata = value.metadata().canonicalize().unwrap();
++    assert_ne!(physical_metadata, value.metadata());
++    let router = value.fixture.router().await;
++    let path = value.fixture.path("a", "dependency.php");
++    let source = open(&router, &path).await;
++    // Definitions use the scanner's physical source identity here.
++    assert_members(&router, &path, &source, "oldOnly", &["newOnly"]).await;
++    let old_item = items(&router, &path, &source)
++        .await
++        .into_iter()
++        .find(|item| has(std::slice::from_ref(item), "oldOnly"))
++        .unwrap();
++    fs::remove_file(&physical_metadata).unwrap();
++    value
++        .event(&router, &physical_metadata, FileChangeType::DELETED)
++        .await;
++    let result = items(&router, &path, &source).await;
++    assert!(
++        !has(&result, "oldOnly") && !has(&result, "newOnly"),
++        "physical deletion through a configured vendor directory alias must retire dependencies"
++    );
++    assert!(router.completion_resolve(old_item).await.is_err());
++    assert_eq!(fs::read_to_string(&path).unwrap(), source);
++    router.shutdown().await.unwrap();
++}

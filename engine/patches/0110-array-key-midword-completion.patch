@@ -1,0 +1,1086 @@
+--- a/src/completion/array_shape.rs
++++ b/src/completion/array_shape.rs
+@@ -107,6 +107,8 @@
+     /// The quote character used (`'` or `"`), or `None` if the user
+     /// typed `[` without a quote yet.
+     pub quote_char: Option<char>,
++    /// Opening quote immediately after the cursor, if the key is empty.
++    pub next_quote: Option<char>,
+     /// The UTF-16 column (0-based) where the key text begins on the cursor line.
+     /// This is right after the opening quote (if any) or right after `[`.
+     pub key_start_col: u32,
+@@ -115,6 +117,13 @@
+     /// For `$response['meta']['page'][`, this would be `["meta", "page"]`
+     /// so the resolver can walk through nested array shapes.
+     pub prefix_keys: Vec<String>,
++}
++
++#[derive(Clone, Copy, Debug, PartialEq, Eq)]
++pub(super) enum KeyEditMode {
++    Complete,
++    PrefixOnly,
++    CloseQuote,
+ }
+ 
+ /// Resolve an LSP UTF-16 column to a scalar index only at an exact character
+@@ -264,6 +273,14 @@
+         var_name,
+         partial_key,
+         quote_char,
++        next_quote: if quote_char.is_none() && partial_start == partial_end {
++            chars
++                .get(col)
++                .copied()
++                .filter(|ch| *ch == '\'' || *ch == '"')
++        } else {
++            None
++        },
+         key_start_col,
+         prefix_keys,
+     })
+@@ -392,10 +409,12 @@
+ 
+         // Compute the text edit range that covers the partial key and any
+         // trailing auto-inserted characters after the cursor.
+-        let (range, _) = self.compute_edit_range(ctx, content, position);
++        let Some((range, edit_mode)) = self.compute_edit_range(ctx, content, position) else {
++            return Vec::new();
++        };
+ 
+         // Build completion items, filtering by partial key.
+-        let quote = ctx.quote_char.unwrap_or('\'');
++        let quote = ctx.quote_char.or(ctx.next_quote).unwrap_or('\'');
+         let mut items = Vec::new();
+ 
+         for (sort_idx, entry) in entries.iter().enumerate() {
+@@ -412,17 +431,23 @@
+                 continue;
+             }
+ 
++            // Escape the selected key for its actual PHP quote style.
++            let Some(escaped_key) = escape_literal_key(key_name, quote) else {
++                continue;
++            };
+             let optional_marker = if entry.optional { "?" } else { "" };
+             let detail = format!("{}{}: {}", key_name, optional_marker, entry.value_type);
+ 
+-            // The new_text always produces the complete `key']` or `'key']`
+-            // fragment. The text_edit range is set to cover any existing
+-            // partial key text *and* any trailing auto-closed chars, so
+-            // accepting the completion replaces everything cleanly.
+-            let new_text = if ctx.quote_char.is_some() {
+-                format!("{}{}]", key_name, quote)
++            // Ambiguous suffixes use a prefix-only edit; otherwise the
++            // existing close delimiters are replaced with a complete key.
++            let new_text = if edit_mode == KeyEditMode::PrefixOnly {
++                escaped_key
++            } else if edit_mode == KeyEditMode::CloseQuote {
++                format!("{}{}", escaped_key, quote)
++            } else if ctx.quote_char.is_some() {
++                format!("{}{}]", escaped_key, quote)
+             } else {
+-                format!("{}{}{}]", quote, key_name, quote)
++                format!("{}{}{}]", quote, escaped_key, quote)
+             };
+ 
+             items.push(CompletionItem {
+@@ -446,8 +471,10 @@
+         content: &str,
+         position: Position,
+     ) -> Vec<CompletionItem> {
+-        let (range, _) = self.compute_edit_range(ctx, content, position);
+-        let quote = ctx.quote_char.unwrap_or('\'');
++        let Some((range, edit_mode)) = self.compute_edit_range(ctx, content, position) else {
++            return Vec::new();
++        };
++        let quote = ctx.quote_char.or(ctx.next_quote).unwrap_or('\'');
+         let mut items = Vec::new();
+ 
+         for (sort_idx, &(key, detail)) in SERVER_KEYS.iter().enumerate() {
+@@ -459,7 +486,11 @@
+                 continue;
+             }
+ 
+-            let new_text = if ctx.quote_char.is_some() {
++            let new_text = if edit_mode == KeyEditMode::PrefixOnly {
++                key.to_string()
++            } else if edit_mode == KeyEditMode::CloseQuote {
++                format!("{}{}", key, quote)
++            } else if ctx.quote_char.is_some() {
+                 format!("{}{}]", key, quote)
+             } else {
+                 format!("{}{}{}]", quote, key, quote)
+@@ -485,38 +516,134 @@
+     /// or `[`) and extends past any trailing auto-inserted characters
+     /// (closing quote + `]`) that the IDE may have inserted.
+     ///
+-    /// Returns `(range, trailing_count)` where `trailing_count` is the
+-    /// number of characters consumed after the cursor.
+-    fn compute_edit_range(
++    /// Returns the edit range and how much syntax the replacement supplies.
++    pub(super) fn compute_edit_range(
+         &self,
+         ctx: &ArrayKeyContext,
+         content: &str,
+         position: Position,
+-    ) -> (Range, usize) {
+-        let lines: Vec<&str> = content.lines().collect();
+-        let line_idx = position.line as usize;
+-        let trailing_count = if line_idx < lines.len() {
+-            let line = lines[line_idx];
+-            let chars: Vec<char> = line.chars().collect();
+-            utf16_column_to_char_index(&chars, position.character)
+-                .map(|cursor_col| count_trailing_close_chars(&chars, cursor_col, ctx.quote_char))
+-                .unwrap_or(0)
++    ) -> Option<(Range, KeyEditMode)> {
++        let line = content.lines().nth(position.line as usize)?;
++        let chars: Vec<char> = line.chars().collect();
++        let cursor = utf16_column_to_char_index(&chars, position.character)?;
++        let remainder = content.get(position_to_offset(content, position) as usize..)?;
++        if let Some(quote) = ctx.next_quote {
++            let after = remainder.strip_prefix(quote)?;
++            let tail_is_closers = |tail: &str| {
++                tail.len() <= 4096
++                    && tail
++                        .bytes()
++                        .all(|b| b.is_ascii_whitespace() || matches!(b, b';' | b'}' | b')'))
++            };
++            // Only an empty pair, an apparent auto-bracket, or a lone
++            // opening quote followed by a structural tail may be adopted.
++            let consumed = if let Some(tail) = after.strip_prefix(quote) {
++                if tail.starts_with(']') {
++                    3
++                } else if tail.is_empty() || tail.starts_with(';') {
++                    2
++                } else {
++                    return None;
++                }
++            } else if let Some(tail) = after.strip_prefix(']') {
++                if !tail_is_closers(tail) {
++                    return None;
++                }
++                2
++            } else if after.is_empty()
++                || ((after.starts_with('\n') || after.starts_with("\r\n"))
++                    && tail_is_closers(after))
++            {
++                1
++            } else {
++                return None;
++            };
++            let end = position.character.checked_add(consumed)?;
++            return Some((
++                Range {
++                    start: Position {
++                        line: position.line,
++                        character: ctx.key_start_col,
++                    },
++                    end: Position {
++                        line: position.line,
++                        character: end,
++                    },
++                },
++                KeyEditMode::Complete,
++            ));
++        }
++        // A single terminal line ending contains no unseen key suffix.
++        // Preserve it while completing the literal at the caret.
++        let only_terminal_newline = matches!(remainder, "\n" | "\r\n");
++        // Bounded recovery heuristic: a trailing sequence of block closers
++        // without quotes or expressions probably belongs to the surrounding
++        // incomplete method. This cannot prove intent in an unclosed string.
++        let structural_tail = remainder.len() <= 4096
++            && (remainder.starts_with('\n') || remainder.starts_with("\r\n"))
++            && remainder
++                .bytes()
++                .all(|b| b.is_ascii_whitespace() || b == b'}' || b == b';');
++        let at_nonfinal_line_end = cursor == chars.len()
++            && !remainder.is_empty()
++            && !only_terminal_newline
++            && !structural_tail;
++        let quote_ends_nonfinal_line = ctx.quote_char.is_some_and(|quote| {
++            chars.get(cursor) == Some(&quote)
++                && cursor + 1 == chars.len()
++                && position.character.checked_add(1).is_some_and(|col| {
++                    (position_to_offset(
++                        content,
++                        Position {
++                            line: position.line,
++                            character: col,
++                        },
++                    ) as usize)
++                        < content.len()
++                })
++        });
++        let trailing = if at_nonfinal_line_end || quote_ends_nonfinal_line {
++            None
+         } else {
+-            0
++            safe_key_suffix_units(&chars, cursor, ctx.quote_char)
+         };
+-
+-        let range = Range {
+-            start: Position {
+-                line: position.line,
+-                character: ctx.key_start_col,
++        // An immediate closing quote before concatenation or a line break
++        // may precede more syntax. Replace only the key prefix, preserving
++        // the quote and all following content.
++        let concatenation = ctx.quote_char.is_some_and(|quote| {
++            chars.get(cursor) == Some(&quote) && chars.get(cursor + 1) == Some(&'.')
++        });
++        // An empty quoted prefix before a lone auto-inserted bracket may
++        // close the quote while keeping the bracket itself untouched.
++        let empty_auto_bracket = ctx.quote_char.is_some()
++            && ctx.partial_key.is_empty()
++            && remainder.starts_with(']')
++            && remainder.len() <= 4096
++            && remainder[1..]
++                .bytes()
++                .all(|b| b.is_ascii_whitespace() || matches!(b, b';' | b'}' | b')'));
++        let (trailing, edit_mode) = match trailing {
++            _ if empty_auto_bracket => (0, KeyEditMode::CloseQuote),
++            Some(n) => (n, KeyEditMode::Complete),
++            None if concatenation || quote_ends_nonfinal_line => (0, KeyEditMode::PrefixOnly),
++            None => return None,
++        };
++        let end = position
++            .character
++            .checked_add(u32::try_from(trailing).ok()?)?;
++        Some((
++            Range {
++                start: Position {
++                    line: position.line,
++                    character: ctx.key_start_col,
++                },
++                end: Position {
++                    line: position.line,
++                    character: end,
++                },
+             },
+-            end: Position {
+-                line: position.line,
+-                character: position.character + trailing_count as u32,
+-            },
+-        };
+-
+-        (range, trailing_count)
++            edit_mode,
++        ))
+     }
+ 
+     /// Walk through `prefix_keys` to resolve the inner type of a nested
+@@ -697,44 +824,74 @@
+ ///   - `'` or `"` alone after the cursor (1 char) — when the bracket is absent
+ ///   - `]` after the cursor (1 char) — when only `[` was typed
+ ///
+-/// This function looks at the characters starting at `cursor_col` and
+-/// returns how many should be consumed by the text edit range.
+-fn count_trailing_close_chars(
+-    chars: &[char],
+-    cursor_col: usize,
+-    quote_char: Option<char>,
+-) -> usize {
+-    if cursor_col >= chars.len() {
+-        return 0;
+-    }
+-
+-    let remaining = &chars[cursor_col..];
+-
+-    match quote_char {
+-        Some(q) => {
+-            // Expect closing quote + `]`
+-            if remaining.len() >= 2 && remaining[0] == q && remaining[1] == ']' {
+-                2
+-            } else if remaining[0] == q {
+-                // A closing quote may already exist even when the bracket
+-                // was not inserted. The completion supplies both.
+-                1
+-            } else if !remaining.is_empty() && remaining[0] == ']' {
+-                // Just a `]` even though we had a quote — still consume it
+-                1
+-            } else {
+-                0
+-            }
+-        }
+-        None => {
+-            // Expect just `]`
+-            if !remaining.is_empty() && remaining[0] == ']' {
+-                1
+-            } else {
+-                0
+-            }
+-        }
+-    }
++/// Escape literal key bytes for the PHP string delimiter being inserted.
++/// Nonprintable controls are refused rather than inventing escape semantics.
++fn escape_literal_key(key: &str, quote: char) -> Option<String> {
++    let mut escaped = String::with_capacity(key.len());
++    for ch in key.chars() {
++        if ch.is_control() {
++            return None;
++        }
++        if ch == '\\' || ch == quote || (quote == '"' && ch == '$') {
++            escaped.push('\\');
++        }
++        escaped.push(ch);
++    }
++    Some(escaped)
++}
++
++/// Extend the edit across a complete static key, but never across an
++/// ambiguous or interpolated suffix. The bound keeps live completion cheap.
++fn safe_key_suffix_units(chars: &[char], cursor: usize, quote: Option<char>) -> Option<usize> {
++    const MAX_SUFFIX_CHARS: usize = 4096;
++    let suffix = chars.get(cursor..)?;
++    if suffix.is_empty() {
++        return Some(0);
++    }
++    let Some(quote) = quote else {
++        return if suffix[0] == ']' { Some(1) } else { None };
++    };
++    // A bracket inside an unclosed quoted key may be literal data.
++    if suffix[0] == ']' {
++        return None;
++    }
++    let mut escaped = false;
++    let mut units = 0usize;
++    for (index, ch) in suffix.iter().copied().enumerate() {
++        if index >= MAX_SUFFIX_CHARS {
++            return None;
++        }
++        units = units.checked_add(ch.len_utf16())?;
++        if escaped {
++            // A narrow grammar avoids crossing PHP punctuation after an
++            // unfinished literal. Ambiguous escapes are not consumed.
++            if ch != quote && ch != '\\' {
++                return None;
++            }
++            escaped = false;
++            continue;
++        }
++        if ch == '\\' {
++            escaped = true;
++            continue;
++        }
++        if ch == quote {
++            let next = suffix.get(index + 1).copied();
++            if next == Some(']') {
++                return units.checked_add(1);
++            }
++            // Existing auto-inserted lone closing quote remains supported;
++            // a suffix followed by other syntax is ambiguous and declined.
++            if index == 0 && matches!(next, None | Some(';')) {
++                return Some(units);
++            }
++            return None;
++        }
++        if !(ch.is_alphanumeric() || ch == '_') {
++            return None;
++        }
++    }
++    None
+ }
+ 
+ /// Extract spread expressions from an array literal.
+--- a/src/completion/array_shape_tests.rs
++++ b/src/completion/array_shape_tests.rs
+@@ -192,8 +192,8 @@
+         crate::text_position::offset_to_position(source, start).character
+     );
+     let backend = Backend::new_test();
+-    let (range, trailing) = backend.compute_edit_range(&ctx, source, position);
+-    assert_eq!(trailing, 2);
++    let (range, trailing) = backend.compute_edit_range(&ctx, source, position).unwrap();
++    assert_eq!(trailing, KeyEditMode::Complete);
+     assert_eq!(
+         range.start,
+         crate::text_position::offset_to_position(source, start)
+@@ -248,3 +248,62 @@
+         }
+     }
+ }
++
++#[test]
++fn midkey_suffix_scan_handles_escaped_quotes_unicode_and_limits() {
++    for (suffix, expected_units) in [
++        ("UEST_METHOD']", Some(13)),
++        ("é𐐀\\'suffix']", Some(13)),
++        ("']", Some(2)),
++        ("'", Some(1)),
++        ("", Some(0)),
++    ] {
++        let chars: Vec<char> = suffix.chars().collect();
++        assert_eq!(
++            safe_key_suffix_units(&chars, 0, Some('\'')),
++            expected_units,
++            "{suffix:?}"
++        );
++    }
++    let boundary = format!("{}']", "a".repeat(4095));
++    assert_eq!(
++        safe_key_suffix_units(&boundary.chars().collect::<Vec<_>>(), 0, Some('\'')),
++        Some(4097)
++    );
++    let too_long = format!("{}']", "a".repeat(4096));
++    assert_eq!(
++        safe_key_suffix_units(&too_long.chars().collect::<Vec<_>>(), 0, Some('\'')),
++        None
++    );
++}
++
++#[test]
++fn midkey_server_replaces_escaped_quote_and_keeps_following_code() {
++    let backend = Backend::new_test();
++    let source = "<?php\r\n/* 🐘 */ $_SERVER['REQU\\'EST_METHOD']; next();\r\n";
++    let caret = source.find("REQ").unwrap() + 3;
++    let position = crate::text_position::offset_to_position(source, caret);
++    let ctx = detect_array_key_context(source, position).unwrap();
++    let item = backend
++        .build_server_key_completions(&ctx, source, position)
++        .into_iter()
++        .find(|i| i.label == "REQUEST_METHOD")
++        .unwrap();
++    let Some(CompletionTextEdit::Edit(edit)) = item.text_edit else {
++        panic!("edit")
++    };
++    let start = crate::text_position::position_to_offset(source, edit.range.start) as usize;
++    let end = crate::text_position::position_to_offset(source, edit.range.end) as usize;
++    assert_eq!(
++        format!("{}{}{}", &source[..start], edit.new_text, &source[end..]),
++        "<?php\r\n/* 🐘 */ $_SERVER['REQUEST_METHOD']; next();\r\n"
++    );
++}
++
++#[test]
++fn midkey_literal_keys_use_php_string_escaping() {
++    assert_eq!(escape_literal_key("a'b", '\''), Some("a\\'b".into()));
++    assert_eq!(escape_literal_key("a\\b", '\''), Some("a\\\\b".into()));
++    assert_eq!(escape_literal_key("a\"$b", '"'), Some("a\\\"\\$b".into()));
++    assert_eq!(escape_literal_key("a\nb", '\''), None);
++}
+--- a/src/completion/handler/mod.rs
++++ b/src/completion/handler/mod.rs
+@@ -660,6 +660,21 @@
+         ctx: &FileContext,
+     ) -> Option<CompletionResponse> {
+         let ak_ctx = crate::completion::array_shape::detect_array_key_context(content, position)?;
++        if self
++            .compute_edit_range(&ak_ctx, content, position)
++            .is_none()
++        {
++            // An unquoted identifier inside brackets may be a constant or
++            // function expression, not an array-shape string key. Leave
++            // ordinary PHP completion to the later strategies.
++            if ak_ctx.quote_char.is_none()
++                && ak_ctx.next_quote.is_none()
++                && !ak_ctx.partial_key.is_empty()
++            {
++                return None;
++            }
++            return Some(CompletionResponse::Array(Vec::new()));
++        }
+         let items = self.build_array_key_completions(&ak_ctx, content, position, ctx);
+         if items.is_empty() {
+             None
+--- /dev/null
++++ b/tests/integration/completion_array_midkey.rs
+@@ -0,0 +1,110 @@
++//! UTF-16 and applied-edit regression coverage for array shape completion.
++use crate::common::create_test_backend;
++use tower_lsp::{LanguageServer, lsp_types::*};
++
++fn unmark(s: &str) -> String {
++    s.replace("<start>", "")
++        .replace("<caret>", "")
++        .replace("<end>", "")
++}
++fn marker_position(marked: &str, marker: &str) -> Position {
++    assert_eq!(marked.matches(marker).count(), 1);
++    let prefix = unmark(&marked[..marked.find(marker).unwrap()]);
++    Position::new(
++        prefix.bytes().filter(|&byte| byte == b'\n').count() as u32,
++        prefix.rsplit('\n').next().unwrap().encode_utf16().count() as u32,
++    )
++}
++fn byte_offset(text: &str, position: Position) -> usize {
++    let mut line = 0;
++    let mut column = 0;
++    for (offset, c) in text.char_indices() {
++        if line == position.line && column == position.character {
++            return offset;
++        }
++        if c == '\n' {
++            line += 1;
++            column = 0;
++        } else {
++            column += c.len_utf16() as u32;
++        }
++    }
++    assert_eq!((line, column), (position.line, position.character));
++    text.len()
++}
++
++async fn complete(marked: &str, label: &str) -> (String, TextEdit) {
++    let backend = create_test_backend();
++    let uri = Url::parse("file:///array_utf16.php").unwrap();
++    let source = unmark(marked);
++    backend
++        .did_open(DidOpenTextDocumentParams {
++            text_document: TextDocumentItem {
++                uri: uri.clone(),
++                language_id: "php".into(),
++                version: 1,
++                text: source.clone(),
++            },
++        })
++        .await;
++    let response = backend
++        .completion(CompletionParams {
++            text_document_position: TextDocumentPositionParams {
++                text_document: TextDocumentIdentifier { uri },
++                position: marker_position(marked, "<caret>"),
++            },
++            work_done_progress_params: WorkDoneProgressParams::default(),
++            partial_result_params: PartialResultParams::default(),
++            context: None,
++        })
++        .await
++        .unwrap()
++        .expect("completion response");
++    let items = match response {
++        CompletionResponse::Array(items) => items,
++        CompletionResponse::List(list) => list.items,
++    };
++    let item = items
++        .into_iter()
++        .find(|item| item.label == label)
++        .unwrap_or_else(|| panic!("missing {label}"));
++    let Some(CompletionTextEdit::Edit(edit)) = item.text_edit else {
++        panic!("plain edit expected")
++    };
++    (source, edit)
++}
++
++async fn assert_applied(marked: &str, label: &str, expected: &str) {
++    let (source, edit) = complete(marked, label).await;
++    assert_eq!(edit.range.start, marker_position(marked, "<start>"));
++    assert_eq!(edit.range.end, marker_position(marked, "<end>"));
++    let start = byte_offset(&source, edit.range.start);
++    let end = byte_offset(&source, edit.range.end);
++    assert_eq!(
++        format!("{}{}{}", &source[..start], edit.new_text, &source[end..]),
++        expected
++    );
++}
++
++#[tokio::test]
++async fn midkey_server_applied_edits_replace_suffix_for_both_quotes_and_utf16() {
++    for (marked, expected) in [
++        (
++            "<?php\n$_SERVER['<start>REQ<caret>UEST_METHOD']<end>;\n",
++            "<?php\n$_SERVER['REQUEST_METHOD'];\n",
++        ),
++        (
++            "<?php\r\n/* 🐘 */ $_SERVER[\"<start>REQ<caret>UEST_METHOD\"]<end>;\r\n",
++            "<?php\r\n/* 🐘 */ $_SERVER[\"REQUEST_METHOD\"];\r\n",
++        ),
++    ] {
++        assert_applied(marked, "REQUEST_METHOD", expected).await;
++    }
++}
++
++#[tokio::test]
++async fn midkey_shape_applied_edits_replace_suffix_and_preserve_code() {
++    let marked = "<?php\r\n/** @var array{name: string, age: int} $data */\r\n$data = getData();\r\n/* 🐘 */ $data['<start>na<caret>me']<end>; doSomething();\r\n";
++    let expected = "<?php\r\n/** @var array{name: string, age: int} $data */\r\n$data = getData();\r\n/* 🐘 */ $data['name']; doSomething();\r\n";
++    assert_applied(marked, "name", expected).await;
++}
+--- /dev/null
++++ b/tests/integration/completion_array_midkey_safety.rs
+@@ -0,0 +1,357 @@
++use crate::common::create_test_backend;
++use tower_lsp::{LanguageServer, lsp_types::*};
++
++async fn complete(marked: &str) -> Vec<CompletionItem> {
++    let (before, after) = marked.split_once('|').unwrap();
++    let source = format!("{before}{after}");
++    let position = Position::new(
++        before.bytes().filter(|b| *b == b'\n').count() as u32,
++        before.rsplit('\n').next().unwrap().encode_utf16().count() as u32,
++    );
++    let backend = create_test_backend();
++    let uri = Url::parse("file:///array_midkey_safety.php").unwrap();
++    backend
++        .did_open(DidOpenTextDocumentParams {
++            text_document: TextDocumentItem {
++                uri: uri.clone(),
++                language_id: "php".into(),
++                version: 1,
++                text: source,
++            },
++        })
++        .await;
++    match backend
++        .completion(CompletionParams {
++            text_document_position: TextDocumentPositionParams {
++                text_document: TextDocumentIdentifier { uri },
++                position,
++            },
++            work_done_progress_params: WorkDoneProgressParams::default(),
++            partial_result_params: PartialResultParams::default(),
++            context: None,
++        })
++        .await
++        .unwrap()
++    {
++        Some(CompletionResponse::Array(items)) => items,
++        Some(CompletionResponse::List(list)) => list.items,
++        None => vec![],
++    }
++}
++
++fn byte_offset(text: &str, position: Position) -> usize {
++    let mut line = 0u32;
++    let mut column = 0u32;
++    for (offset, ch) in text.char_indices() {
++        if line == position.line && column == position.character {
++            return offset;
++        }
++        if ch == '\n' {
++            line += 1;
++            column = 0;
++        } else {
++            column += ch.len_utf16() as u32;
++        }
++    }
++    assert_eq!((line, column), (position.line, position.character));
++    text.len()
++}
++
++async fn applied(marked: &str, label: &str) -> String {
++    let items = complete(marked).await;
++    let item = items
++        .into_iter()
++        .find(|item| item.label == label)
++        .unwrap_or_else(|| panic!("missing {label}: {marked:?}"));
++    let Some(CompletionTextEdit::Edit(edit)) = item.text_edit else {
++        panic!("plain edit required")
++    };
++    let source = marked.replacen('|', "", 1);
++    let start = byte_offset(&source, edit.range.start);
++    let end = byte_offset(&source, edit.range.end);
++    format!("{}{}{}", &source[..start], edit.new_text, &source[end..])
++}
++
++#[tokio::test]
++async fn uncertain_suffix_declines_all_completion_and_fallback() {
++    for source in [
++        "<?php\n$_SERVER['REQ|UEST-METHOD'];\n",
++        "<?php\n$_SERVER[\"REQ|UEST-METHOD\"];\n",
++        "<?php\n$_SERVER['REQ|; doSomething('x');\n",
++        "<?php\n$_SERVER[\"REQ|; doSomething(\"x\");\n",
++        "<?php\n$_SERVER[\"REQ|{$suffix}\"];\n",
++        "<?php\n$_SERVER[\"REQ|$suffix\"];\n",
++        "<?php\n$_SERVER[\"REQ|${suffix}\"];\n",
++        "<?php\n$_SERVER['REQ|\\-unsafe'];\n",
++        "<?php\n$_SERVER['REQ|;\n",
++        "<?php\n$_SERVER['REQ|]\n",
++        "<?php\n$_SERVER['REQ|\nrest'];\n",
++        "<?php\r\n/* 🐘 */ $_SERVER['REQ|\r\nrest'];\r\n",
++        "<?php\n/** @var array{name: string} $data */\n$data = getData();\n$data['na|; doSomething('x');\n",
++    ] {
++        assert!(
++            complete(source).await.is_empty(),
++            "unsafe suffix must not fall through: {source:?}"
++        );
++    }
++}
++
++#[tokio::test]
++async fn separate_concatenation_expression_keeps_every_suffix_byte() {
++    for (marked, expected) in [
++        (
++            "<?php\n$_SERVER['REQ|'.$suffix];\n",
++            "<?php\n$_SERVER['REQUEST_METHOD'.$suffix];\n",
++        ),
++        (
++            "<?php\n$_SERVER[\"REQ|\".$suffix];\n",
++            "<?php\n$_SERVER[\"REQUEST_METHOD\".$suffix];\n",
++        ),
++    ] {
++        assert_eq!(applied(marked, "REQUEST_METHOD").await, expected);
++    }
++}
++
++#[tokio::test]
++async fn incomplete_true_eof_still_closes_server_key() {
++    assert_eq!(
++        applied("<?php\n$_SERVER['REQ|", "REQUEST_METHOD").await,
++        "<?php\n$_SERVER['REQUEST_METHOD']"
++    );
++}
++
++#[tokio::test]
++async fn shape_literal_keys_are_escaped_for_chosen_quote() {
++    for (source, label, expected) in [
++        (
++            "<?php\n/** @var array{\"a'b\": string} $data */\n$data = getData();\n$data['|'];\n",
++            "a'b",
++            "<?php\n/** @var array{\"a'b\": string} $data */\n$data = getData();\n$data['a\\'b'];\n",
++        ),
++        (
++            "<?php\n/** @var array{'a$b': string} $data */\n$data = getData();\n$data[\"|\"];\n",
++            "a$b",
++            "<?php\n/** @var array{'a$b': string} $data */\n$data = getData();\n$data[\"a\\$b\"];\n",
++        ),
++        (
++            r#"<?php
++/** @var array{"a\\b": string} $data */
++$data = getData();
++$data['|'];
++"#,
++            "a\\b",
++            r#"<?php
++/** @var array{"a\\b": string} $data */
++$data = getData();
++$data['a\\b'];
++"#,
++        ),
++        (
++            r#"<?php
++/** @var array{'a"b': string} $data */
++$data = getData();
++$data["|"];
++"#,
++            "a\"b",
++            r#"<?php
++/** @var array{'a"b': string} $data */
++$data = getData();
++$data["a\"b"];
++"#,
++        ),
++    ] {
++        assert_eq!(applied(source, label).await, expected);
++    }
++}
++
++#[tokio::test]
++async fn unquoted_multiline_expression_declines_all_completion_without_mutating_text() {
++    let source = "<?php\n$_SERVER[|\n$key];\n";
++    assert!(
++        complete(source).await.is_empty(),
++        "unquoted suffix must not fall through to a destructive completion"
++    );
++}
++
++#[tokio::test]
++async fn closing_quote_before_multiline_bracket_preserves_newlines_and_following_code() {
++    for (marked, expected) in [
++        (
++            "<?php\n$_SERVER['REQ|'\n]; doSomething();\n",
++            "<?php\n$_SERVER['REQUEST_METHOD'\n]; doSomething();\n",
++        ),
++        (
++            "<?php\r\n/* 🐘 */ $_SERVER[\"REQ|\"\r\n]; next();\r\n",
++            "<?php\r\n/* 🐘 */ $_SERVER[\"REQUEST_METHOD\"\r\n]; next();\r\n",
++        ),
++    ] {
++        assert_eq!(applied(marked, "REQUEST_METHOD").await, expected);
++    }
++}
++
++#[tokio::test]
++async fn multiline_bracket_after_nonempty_suffix_is_declined() {
++    assert!(
++        complete("<?php\n$_SERVER['REQ|UEST_METHOD'\n]; doSomething();\n")
++            .await
++            .is_empty()
++    );
++}
++
++#[tokio::test]
++async fn terminal_line_ending_after_unclosed_key_is_preserved() {
++    for (marked, expected) in [
++        (
++            "<?php\n$_SERVER['REQ|\n",
++            "<?php\n$_SERVER['REQUEST_METHOD']\n",
++        ),
++        (
++            "<?php\r\n/* 🐘 */ $_SERVER[\"REQ|\r\n",
++            "<?php\r\n/* 🐘 */ $_SERVER[\"REQUEST_METHOD\"]\r\n",
++        ),
++        ("<?php\n$_SERVER[|\n", "<?php\n$_SERVER['REQUEST_METHOD']\n"),
++    ] {
++        assert_eq!(applied(marked, "REQUEST_METHOD").await, expected);
++    }
++}
++
++#[tokio::test]
++async fn unfinished_multiline_literal_remains_ambiguous() {
++    for marked in ["<?php\n$_SERVER['REQ|\nrest'];\n"] {
++        assert!(
++            complete(marked).await.is_empty(),
++            "cannot distinguish literal suffix from structural code: {marked:?}"
++        );
++    }
++}
++
++#[tokio::test]
++async fn unfinished_method_with_structural_tail_completes_without_erasing_code() {
++    for (marked, expected) in [
++        (
++            "<?php\nfunction f() {\n    $_SERVER['REQ|\n}\n",
++            "<?php\nfunction f() {\n    $_SERVER['REQUEST_METHOD']\n}\n",
++        ),
++        (
++            "<?php\r\nfunction f() {\r\n    /* 🐘 */ $_SERVER[\"REQ|\r\n}\r\n",
++            "<?php\r\nfunction f() {\r\n    /* 🐘 */ $_SERVER[\"REQUEST_METHOD\"]\r\n}\r\n",
++        ),
++        (
++            "<?php\nfunction f() {\n    $_SERVER[|\n}\n",
++            "<?php\nfunction f() {\n    $_SERVER['REQUEST_METHOD']\n}\n",
++        ),
++        (
++            "<?php\nfunction f() {\n    $_SERVER['REQ|\n};\n",
++            "<?php\nfunction f() {\n    $_SERVER['REQUEST_METHOD']\n};\n",
++        ),
++    ] {
++        assert_eq!(applied(marked, "REQUEST_METHOD").await, expected);
++    }
++}
++
++#[tokio::test]
++async fn empty_open_quote_before_lone_auto_bracket_preserves_that_bracket() {
++    for (marked, expected) in [
++        (
++            "<?php\n$_SERVER['|];\n",
++            "<?php\n$_SERVER['REQUEST_METHOD'];\n",
++        ),
++        (
++            "<?php\r\n/* 🐘 */ $_SERVER[\"|];\r\n",
++            "<?php\r\n/* 🐘 */ $_SERVER[\"REQUEST_METHOD\"];\r\n",
++        ),
++        (
++            "<?php\n$_SERVER[|];\n",
++            "<?php\n$_SERVER['REQUEST_METHOD'];\n",
++        ),
++    ] {
++        assert_eq!(applied(marked, "REQUEST_METHOD").await, expected);
++    }
++    for marked in [
++        "<?php\n$_SERVER['REQ|];\n",
++        "<?php\n$_SERVER['|]some literal'];\n",
++        "<?php\n$_SERVER['|]; echo 'later';\n",
++    ] {
++        assert!(
++            complete(marked).await.is_empty(),
++            "ambiguous bracket must not be rewritten: {marked:?}"
++        );
++    }
++}
++
++#[tokio::test]
++async fn bounded_recovery_declines_existing_multiline_literal_and_unquoted_expression() {
++    for marked in [
++        "<?php\nfunction f() {\n$_SERVER['REQ|\ntext'];\n}\n",
++        "<?php\r\nfunction f() {\r\n$_SERVER[\"REQ|\r\ntext\"];\r\n}\r\n",
++        "<?php\n$_SERVER[|\n$key];\n",
++    ] {
++        assert!(
++            complete(marked).await.is_empty(),
++            "continued expression must be untouched: {marked:?}"
++        );
++    }
++    let long = format!("<?php\n$_SERVER['REQ|\n{}", "}".repeat(4097));
++    assert!(
++        complete(&long).await.is_empty(),
++        "bounded lookahead must refuse long tail"
++    );
++}
++
++#[tokio::test]
++async fn unfinished_typed_shape_inside_method_preserves_later_braces() {
++    let marked = "<?php\r\n/** @param array{name: string} $data */\r\nfunction f(array $data) {\r\n    /* 🐘 */ $data['na|\r\n}\r\n";
++    let expected = "<?php\r\n/** @param array{name: string} $data */\r\nfunction f(array $data) {\r\n    /* 🐘 */ $data['name']\r\n}\r\n";
++    assert_eq!(applied(marked, "name").await, expected);
++}
++
++#[tokio::test]
++async fn leading_quote_before_cursor_is_preserved_in_applied_edits() {
++    for (marked, expected) in [
++        (
++            "<?php\n$_SERVER[|']\n",
++            "<?php\n$_SERVER['REQUEST_METHOD']\n",
++        ),
++        (
++            "<?php\r\n/* 🐘 */ $_SERVER[|\"] ;\r\n",
++            "<?php\r\n/* 🐘 */ $_SERVER[\"REQUEST_METHOD\"] ;\r\n",
++        ),
++        (
++            "<?php\n$_SERVER[|''] ;\n",
++            "<?php\n$_SERVER['REQUEST_METHOD'] ;\n",
++        ),
++        (
++            "<?php\nfunction f() {\n    $_SERVER[|'\n}\n",
++            "<?php\nfunction f() {\n    $_SERVER['REQUEST_METHOD']\n}\n",
++        ),
++        (
++            "<?php\r\nfunction f() {\r\n    /* 🐘 */ $_SERVER[|\"\r\n}\r\n",
++            "<?php\r\nfunction f() {\r\n    /* 🐘 */ $_SERVER[\"REQUEST_METHOD\"]\r\n}\r\n",
++        ),
++    ] {
++        assert_eq!(applied(marked, "REQUEST_METHOD").await, expected);
++    }
++}
++
++#[tokio::test]
++async fn leading_quote_in_typed_nested_shape_preserves_following_code() {
++    let marked = "<?php\nfunction f() {\n    $data = ['db' => ['host' => 'localhost']];\n    $data['db'][|']\n}\n";
++    let expected = "<?php\nfunction f() {\n    $data = ['db' => ['host' => 'localhost']];\n    $data['db']['host']\n}\n";
++    assert_eq!(applied(marked, "host").await, expected);
++}
++
++#[tokio::test]
++async fn leading_quote_with_existing_key_or_uncertain_suffix_declines_completion() {
++    for marked in [
++        "<?php\n$_SERVER[|'existing'];\n",
++        "<?php\n$_SERVER[|\"existing\"];\n",
++        "<?php\n$_SERVER[|']literal'];\n",
++        "<?php\n$_SERVER[|'\ntext'];\n",
++        "<?php\n$_SERVER[|'\n$key];\n",
++    ] {
++        assert!(
++            complete(marked).await.is_empty(),
++            "unsafe suffix should be untouched: {marked:?}"
++        );
++    }
++}
+--- /dev/null
++++ b/tests/integration/completion_unquoted_index.rs
+@@ -0,0 +1,114 @@
++//! Isolated LSP regression for ordinary PHP expressions in array indices.
++use crate::common::create_test_backend;
++use tower_lsp::{LanguageServer, lsp_types::*};
++
++async fn selected(marked: &str, label: &str) -> (String, CompletionItem) {
++    let (prefix, suffix) = marked.split_once('|').expect("caret marker");
++    let source = format!("{prefix}{suffix}");
++    let position = Position::new(
++        prefix.bytes().filter(|&b| b == b'\n').count() as u32,
++        prefix.rsplit('\n').next().unwrap().encode_utf16().count() as u32,
++    );
++    let backend = create_test_backend();
++    backend.stub_constant_index_mut().insert(
++        "INDEX_REGRESSION_KEY",
++        "<?php const INDEX_REGRESSION_KEY = 1;",
++    );
++    backend.stub_function_index_mut().insert(
++        "index_regression_pick",
++        "<?php function index_regression_pick() {} ",
++    );
++    let uri = Url::parse("file:///unquoted-index-regression.php").unwrap();
++    backend
++        .did_open(DidOpenTextDocumentParams {
++            text_document: TextDocumentItem {
++                uri: uri.clone(),
++                language_id: "php".into(),
++                version: 1,
++                text: source.clone(),
++            },
++        })
++        .await;
++    let response = backend
++        .completion(CompletionParams {
++            text_document_position: TextDocumentPositionParams {
++                text_document: TextDocumentIdentifier { uri },
++                position,
++            },
++            work_done_progress_params: WorkDoneProgressParams::default(),
++            partial_result_params: Default::default(),
++            context: None,
++        })
++        .await
++        .unwrap();
++    let items = match response {
++        Some(CompletionResponse::Array(v)) => v,
++        Some(CompletionResponse::List(v)) => v.items,
++        None => vec![],
++    };
++    let item = items
++        .into_iter()
++        .find(|i| i.label == label)
++        .unwrap_or_else(|| panic!("missing {label} at {marked:?}"));
++    (source, item)
++}
++
++// Models the workbench fallback for unqualified identifier items without a
++// server range: replace the entire current word, not only the typed prefix.
++// This is not a test of the host's actual snippet renderer or additional edits.
++fn apply_word_fallback(source: &str, item: &CompletionItem, word: &str) -> String {
++    assert!(
++        item.text_edit.is_none(),
++        "test requires an item without server edit: {item:?}"
++    );
++    assert!(
++        item.additional_text_edits
++            .as_deref()
++            .unwrap_or_default()
++            .is_empty(),
++        "unexpected extra edits: {item:?}"
++    );
++    let start = source.rfind(word).expect("index word");
++    let inserted = item.insert_text.as_deref().unwrap_or(&item.label);
++    let rendered = if item.insert_text_format == Some(InsertTextFormat::SNIPPET) {
++        // The stub has no parameters; reject unhandled snippet constructs.
++        let text = inserted.replace("$0", "").replace("${0}", "");
++        assert!(!text.contains('$'), "unsupported snippet: {inserted}");
++        text
++    } else {
++        inserted.to_string()
++    };
++    format!(
++        "{}{}{}",
++        &source[..start],
++        rendered,
++        &source[start + word.len()..]
++    )
++}
++
++#[tokio::test]
++async fn ordinary_constant_inside_index_is_available_and_replaces_whole_word() {
++    let (source, item) = selected(
++        "<?php\n/* 🐘 */ $lookup[INDEX_REG|RESSION_KEY];\n",
++        "INDEX_REGRESSION_KEY",
++    )
++    .await;
++    assert_eq!(
++        apply_word_fallback(&source, &item, "INDEX_REGRESSION_KEY"),
++        source
++    );
++}
++
++#[tokio::test]
++async fn ordinary_function_inside_index_is_available_and_replaces_whole_word() {
++    let (source, item) = selected(
++        "<?php\n/* 🐘 */ $lookup[index_reg|ression_pick];\n",
++        "index_regression_pick",
++    )
++    .await;
++    let result = apply_word_fallback(&source, &item, "index_regression_pick");
++    assert_eq!(
++        result,
++        "<?php\n/* 🐘 */ $lookup[index_regression_pick()];\n"
++    );
++}
+--- a/tests/integration/main.rs
++++ b/tests/integration/main.rs
+@@ -315,4 +315,8 @@
+ 
+ mod laravel_route_named_parameters;
+ 
++mod completion_array_midkey;
++mod completion_array_midkey_safety;
+ mod completion_array_utf16;
++
++mod completion_unquoted_index;

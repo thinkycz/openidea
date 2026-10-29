@@ -1,0 +1,466 @@
+diff --git a/src/code_actions/mod.rs b/src/code_actions/mod.rs
+index 1bf50ec..bc8ecc2 100644
+--- a/src/code_actions/mod.rs
++++ b/src/code_actions/mod.rs
+@@ -85,8 +85,8 @@
+ //!    action, the editor sends it back and the server fills in `edit`.
+ //!
+ //! This avoids computing workspace edits on every cursor movement.
+-//! For PHPStan quickfixes, resolve also eagerly clears the matched
+-//! diagnostic from the cache and pushes updated diagnostics.
++//! Resolution is read-only: diagnostics stay until an applied document change
++//! or a real analyzer refresh recomputes them. A cancelled review changes nothing.
+ 
+ mod change_visibility;
+ mod convert_switch_to_match;
+@@ -304,9 +304,8 @@ impl Backend {
+     /// field but no `edit`.  This method deserializes the data, computes
+     /// the full workspace edit, and returns the completed action.
+     ///
+-    /// For PHPStan quickfixes the matched diagnostic is also eagerly
+-    /// removed from the cache and updated diagnostics are returned via
+-    /// the `diagnostics_to_republish` output parameter.
++    /// Resolution does not acknowledge application and never clears diagnostics.
++    /// The optional republish URI is retained for API compatibility and is None.
+     pub fn resolve_code_action(&self, mut action: CodeAction) -> (CodeAction, Option<String>) {
+         let data_value = match &action.data {
+             Some(v) => v.clone(),
+@@ -344,7 +343,7 @@ impl Backend {
+                 // Adding a @throws tag for an exception resolves the
+                 // diagnostic for *every* throw of that exception in
+                 // the same function/method body.  Expand the action's
+-                // diagnostic list so they all get cleared at once.
++                // diagnostic list so the proposal retains its related problem metadata.
+                 if edit.is_some() {
+                     self.expand_sibling_checked_exception_diags(&data, &content, &mut action);
+                 }
+@@ -414,40 +413,11 @@ impl Backend {
+             action.edit = Some(edit);
+         }
+ 
+-        // Only clear diagnostics and republish when the resolve
+-        // actually produced an edit.  If the file changed between
+-        // Phase 1 and Phase 2 the resolve may return None, and we
+-        // must not remove a diagnostic that wasn't actually fixed.
+-        //
+-        // This applies to all quickfix actions that attach diagnostics
+-        // (PHPStan and unused-import alike).  The eager clear+republish
+-        // removes the squiggly line before the text edit is applied,
+-        // so the editor doesn't have to guess where to move it.
+-        let republish_uri = if let Some(ref diags) = action.diagnostics
+-            && !diags.is_empty()
+-            && action.edit.is_some()
+-        {
+-            if data.action_kind.starts_with("phpstan.")
+-                || data.action_kind == "refactor.changeVisibility"
+-            {
+-                // PHPStan diagnostics live in a separate cache.
+-                self.clear_phpstan_diagnostics_after_resolve(&data.uri, diags);
+-            }
+-
+-            // Push all resolved diagnostics to the suppression list
+-            // so that `publish_diagnostics_for_file` filters them out.
+-            // This handles both PHPStan (cached) and native (recomputed)
+-            // diagnostics uniformly.
+-            {
+-                let mut suppressed = self.diag.suppressed.lock();
+-                suppressed.extend(diags.iter().cloned());
+-            }
+-
+-            Some(data.uri.clone())
+-        } else {
+-            None
+-        };
++        // Resolving produces a proposal, not acknowledgement of an applied edit.
++        // Reviews can be cancelled or rejected after this reply. Retain native
++        // diagnostics and external-analyzer caches until actual document/tool
++        // notifications recompute them. Keep the tuple API for existing callers.
+ 
+-        (action, republish_uri)
++        (action, None)
+     }
+ }
+diff --git a/src/code_actions/phpstan/mod.rs b/src/code_actions/phpstan/mod.rs
+index fa0546c..b187092 100644
+--- a/src/code_actions/phpstan/mod.rs
++++ b/src/code_actions/phpstan/mod.rs
+@@ -569,25 +569,6 @@ impl Backend {
+             existing_diags.push(cached_d.clone());
+         }
+     }
+-
+-    /// Remove specific diagnostics from the PHPStan cache after a
+-    /// quickfix has been applied via `codeAction/resolve`.
+-    pub(crate) fn clear_phpstan_diagnostics_after_resolve(
+-        &self,
+-        uri: &str,
+-        resolved_diags: &[Diagnostic],
+-    ) {
+-        let mut cache = self.phpstan_tool.last_diags.lock();
+-        if let Some(cached) = cache.get_mut(uri) {
+-            cached.retain(|cached_d| {
+-                !resolved_diags.iter().any(|resolved_d| {
+-                    cached_d.range == resolved_d.range
+-                        && cached_d.message == resolved_d.message
+-                        && cached_d.code == resolved_d.code
+-                })
+-            });
+-        }
+-    }
+ }
+ 
+ #[cfg(test)]
+diff --git a/src/diagnostics/stale.rs b/src/diagnostics/stale.rs
+index 9f73e76..7d85e44 100644
+--- a/src/diagnostics/stale.rs
++++ b/src/diagnostics/stale.rs
+@@ -24,8 +24,8 @@ use tower_lsp::lsp_types::*;
+ ///
+ /// A few identifiers are deliberately not covered here: `throws.unusedType`,
+ /// `missingType.checkedException`, and `method.missingOverride` are
+-/// cleared eagerly by `codeAction/resolve` instead (see
+-/// `clear_phpstan_diagnostics_after_resolve` in `code_actions`);
++/// retained until a real analyzer refresh; resolving a proposal cannot prove
++/// that its reviewed edit was accepted;
+ /// `return.type` has no heuristic at all because no content-based check
+ /// can tell whether the right fix is to change the type or the code.
+ pub(crate) fn is_stale_phpstan_diagnostic(diag: &Diagnostic, content: &str) -> bool {
+@@ -398,14 +398,14 @@ mod tests {
+     // ── Per-identifier heuristics removed ───────────────────────────
+     //
+     // throws.unusedType, missingType.checkedException, and
+-    // method.missingOverride are cleared by `codeAction/resolve` instead
+-    // (see `clear_phpstan_diagnostics_after_resolve`), not by content
+-    // heuristics here.  The tests below verify that.
++    // method.missingOverride await a real analyzer refresh, rather than
++    // speculative code-action resolution or content heuristics.
++    // The tests below retain that policy.
+ 
+     #[test]
+     fn throws_unused_type_not_stale_via_heuristic() {
+         // Previously this was detected as stale because the @throws
+-        // tag was removed.  Now only codeAction/resolve clears it.
++        // tag was removed.  A real analyzer refresh must clear it.
+         let content = "<?php\nclass Foo {\n    public function bar(): void {}\n}\n";
+         let diag = make_phpstan_diag(
+             2,
+@@ -414,7 +414,7 @@ mod tests {
+         );
+         assert!(
+             !is_stale_phpstan_diagnostic(&diag, content),
+-            "throws.unusedType should NOT be stale via heuristic (cleared by resolve instead)"
++            "throws.unusedType should NOT be stale via heuristic (awaits a real analyzer refresh)"
+         );
+     }
+ 
+@@ -455,7 +455,7 @@ mod tests {
+     #[test]
+     fn missing_checked_exception_not_stale_via_heuristic() {
+         // Previously this was detected as stale because a @throws
+-        // tag was added.  Now only codeAction/resolve clears it.
++        // tag was added.  A real analyzer refresh must clear it.
+         let content = "<?php\nclass Foo {\n    /**\n     * @throws FooException\n     */\n    public function bar(): void {}\n}\n";
+         let diag = make_phpstan_diag(
+             5,
+@@ -464,7 +464,7 @@ mod tests {
+         );
+         assert!(
+             !is_stale_phpstan_diagnostic(&diag, content),
+-            "missingType.checkedException should NOT be stale via heuristic (cleared by resolve instead)"
++            "missingType.checkedException should NOT be stale via heuristic (awaits a real analyzer refresh)"
+         );
+     }
+ 
+@@ -530,7 +530,7 @@ mod tests {
+         );
+         assert!(
+             !is_stale_phpstan_diagnostic(&diag, content),
+-            "method.missingOverride should NOT be stale via heuristic (cleared by resolve instead)"
++            "method.missingOverride should NOT be stale via heuristic (awaits a real analyzer refresh)"
+         );
+     }
+ 
+diff --git a/src/server.rs b/src/server.rs
+index 1e5aafb..668f2f0 100644
+--- a/src/server.rs
++++ b/src/server.rs
+@@ -550,9 +550,8 @@ impl LanguageServer for Backend {
+             .await
+             .unwrap_or((fallback, None));
+ 
+-        // If a PHPStan quickfix was resolved, reassemble diagnostics so the
+-        // cleared diagnostic disappears immediately. In pull mode nothing is
+-        // pushed, so ask the editor to re-pull the freshly cached set.
++        // The resolver is read-only and currently returns no republish URI.
++        // Preserve the response API; document/tool updates own diagnostic refresh.
+         if let Some(uri_str) = republish_uri {
+             self.assemble_and_refresh(&uri_str).await;
+         }
+diff --git a/tests/integration/code_action_add_throws.rs b/tests/integration/code_action_add_throws.rs
+index dbee862..15962c9 100644
+--- a/tests/integration/code_action_add_throws.rs
++++ b/tests/integration/code_action_add_throws.rs
+@@ -434,15 +434,15 @@ class FooController {
+     );
+ }
+ 
+-// ── Sibling diagnostic clearing ─────────────────────────────────────────────
++// ── Sibling diagnostic proposal metadata ─────────────────────────────────────────────
+ 
+ /// When a method throws the same exception on multiple lines, PHPStan
+ /// reports a separate `missingType.checkedException` for each `throw`.
+ /// Adding `@throws` once fixes all of them, so resolving the action on
+-/// any one diagnostic must clear every sibling diagnostic for the same
++/// any one diagnostic must include every sibling diagnostic for the same
+ /// exception within that method body.
+ #[test]
+-fn clears_sibling_checked_exception_diags_in_same_method() {
++fn proposal_retains_sibling_checked_exception_diags_in_same_method() {
+     let backend = create_test_backend();
+     let uri = "file:///test.php";
+     let content = r#"<?php
+@@ -473,7 +473,13 @@ class BadgeHelper {
+     let actions = get_code_actions_at(&backend, uri, content, 11, 10);
+     let action = find_action(&actions, "Add @throws").expect("should offer Add @throws action");
+ 
+-    // Resolve — this should clear BOTH diagnostics from the cache.
++    let cached_before = backend
++        .phpstan_last_diags()
++        .lock()
++        .get(uri)
++        .cloned()
++        .unwrap_or_default();
++    // Resolve a proposal; preserve cached diagnostics until real analysis refresh.
+     let resolved = resolve_action(&backend, uri, content, action);
+     let edits = extract_edits(&resolved);
+     let result = apply_edits(content, &edits);
+@@ -484,7 +490,7 @@ class BadgeHelper {
+         result
+     );
+ 
+-    // Both diagnostics must have been removed from the PHPStan cache.
++    // Resolving does not acknowledge that the editor applied anything.
+     let remaining: Vec<_> = {
+         let cache = backend.phpstan_last_diags().lock();
+         cache
+@@ -500,21 +506,25 @@ class BadgeHelper {
+             })
+             .collect()
+     };
+-    assert!(
+-        remaining.is_empty(),
+-        "both sibling diagnostics should be cleared, but {} remain: {:?}",
+-        remaining.len(),
+-        remaining
++    assert_eq!(
++        remaining, cached_before,
++        "A proposed edit must retain every cached diagnostic"
++    );
++    let related = resolved.diagnostics.as_ref().unwrap();
++    assert_eq!(related.len(), 2);
++    assert_eq!(
++        related
+             .iter()
+             .map(|d| d.range.start.line)
+-            .collect::<Vec<_>>()
++            .collect::<Vec<_>>(),
++        vec![11, 13]
+     );
+ }
+ 
+-/// Sibling clearing must NOT clear diagnostics for a *different*
++/// Sibling proposal metadata must NOT include diagnostics for a *different*
+ /// exception class, even if they are in the same method.
+ #[test]
+-fn does_not_clear_sibling_diags_for_different_exception() {
++fn proposal_metadata_does_not_include_different_exception() {
+     let backend = create_test_backend();
+     let uri = "file:///test.php";
+     let content = r#"<?php
+@@ -552,10 +562,16 @@ class BadgeHelper {
+         "missingType.checkedException",
+     );
+ 
++    let cached_before = backend
++        .phpstan_last_diags()
++        .lock()
++        .get(uri)
++        .cloned()
++        .unwrap_or_default();
+     // Resolve only the RuntimeException action.
+     let actions = get_code_actions_at(&backend, uri, content, 12, 10);
+     let action = find_action(&actions, "Add @throws").expect("should offer Add @throws action");
+-    let _resolved = resolve_action(&backend, uri, content, action);
++    let resolved = resolve_action(&backend, uri, content, action);
+ 
+     // The InvalidArgumentException diagnostic must still be in the cache.
+     let remaining: Vec<_> = {
+@@ -574,20 +590,18 @@ class BadgeHelper {
+             .collect()
+     };
+     assert_eq!(
+-        remaining.len(),
+-        1,
+-        "only the InvalidArgumentException diagnostic should remain"
+-    );
+-    assert!(
+-        remaining[0].message.contains("InvalidArgumentException"),
+-        "remaining diagnostic should be for InvalidArgumentException"
++        remaining, cached_before,
++        "A proposed edit must retain every cached diagnostic"
+     );
++    let related = resolved.diagnostics.as_ref().unwrap();
++    assert_eq!(related.len(), 1);
++    assert!(related[0].message.contains("RuntimeException"));
++    assert!(!related[0].message.contains("InvalidArgumentException"));
+ }
+ 
+-/// Sibling clearing must NOT cross method boundaries: a diagnostic in
+-/// a different method for the same exception must not be cleared.
++/// Sibling proposal metadata must not cross method boundaries.
+ #[test]
+-fn does_not_clear_diags_in_different_method() {
++fn proposal_metadata_does_not_cross_method_boundaries() {
+     let backend = create_test_backend();
+     let uri = "file:///test.php";
+     let content = r#"<?php
+@@ -624,10 +638,16 @@ class BadgeHelper {
+         "missingType.checkedException",
+     );
+ 
++    let cached_before = backend
++        .phpstan_last_diags()
++        .lock()
++        .get(uri)
++        .cloned()
++        .unwrap_or_default();
+     // Resolve the action for first() only.
+     let actions = get_code_actions_at(&backend, uri, content, 10, 10);
+     let action = find_action(&actions, "Add @throws").expect("should offer Add @throws action");
+-    let _resolved = resolve_action(&backend, uri, content, action);
++    let resolved = resolve_action(&backend, uri, content, action);
+ 
+     // The diagnostic in second() must still be in the cache.
+     let remaining: Vec<_> = {
+@@ -646,12 +666,10 @@ class BadgeHelper {
+             .collect()
+     };
+     assert_eq!(
+-        remaining.len(),
+-        1,
+-        "the diagnostic in second() should remain"
+-    );
+-    assert_eq!(
+-        remaining[0].range.start.line, 17,
+-        "remaining diagnostic should be on line 17 (second method)"
++        remaining, cached_before,
++        "A proposed edit must retain every cached diagnostic"
+     );
++    let related = resolved.diagnostics.as_ref().unwrap();
++    assert_eq!(related.len(), 1);
++    assert_eq!(related[0].range.start.line, 10);
+ }
+diff --git a/tests/integration/code_action_change_visibility.rs b/tests/integration/code_action_change_visibility.rs
+index fcd96f1..3cff1d1 100644
+--- a/tests/integration/code_action_change_visibility.rs
++++ b/tests/integration/code_action_change_visibility.rs
+@@ -1121,7 +1121,7 @@ class Child extends Base {
+ // ═══════════════════════════════════════════════════════════════════════════
+ 
+ #[test]
+-fn phpstan_diag_on_attribute_line_attaches_and_clears() {
++fn phpstan_diag_on_attribute_line_attaches_and_remains_until_application() {
+     let backend = create_test_backend();
+     let uri = "file:///test.php";
+     let content = r#"<?php
+@@ -1159,10 +1159,16 @@ class Child extends Base {
+     assert_eq!(vis_actions[0].kind, Some(CodeActionKind::QUICKFIX));
+     assert!(
+         vis_actions[0].diagnostics.is_some(),
+-        "diagnostic must be attached so it gets cleared on resolve"
++        "diagnostic must remain associated with the proposal"
+     );
+ 
+-    // Resolve and verify the diagnostic is cleared from the cache.
++    // Resolve without acknowledging application or mutating analyzer caches.
++    let cached_before = backend
++        .phpstan_last_diags()
++        .lock()
++        .get(uri)
++        .cloned()
++        .unwrap_or_default();
+     let resolved = resolve_action(&backend, uri, content, vis_actions[0]);
+     let edits = extract_edits(&resolved);
+     let result = apply_edits(content, &edits);
+@@ -1173,16 +1179,16 @@ class Child extends Base {
+         result
+     );
+ 
+-    // The PHPStan diagnostic cache should now be empty for this URI.
++    // The cached analyzer result remains until real source/tool refresh.
+     let remaining: Vec<_> = {
+         let cache = backend.phpstan_last_diags().lock();
+         cache.get(uri).cloned().unwrap_or_default()
+     };
+-    assert!(
+-        remaining.is_empty(),
+-        "diagnostic should be cleared from cache after resolve, but found: {:?}",
+-        remaining.iter().map(|d| &d.message).collect::<Vec<_>>()
++    assert_eq!(
++        remaining, cached_before,
++        "A review may still be cancelled after resolve"
+     );
++    assert_eq!(resolved.diagnostics.as_ref().unwrap().len(), 1);
+ }
+ 
+ #[test]
+diff --git a/tests/integration/code_action_remove_unused_import.rs b/tests/integration/code_action_remove_unused_import.rs
+index 97f60fd..a76cfe8 100644
+--- a/tests/integration/code_action_remove_unused_import.rs
++++ b/tests/integration/code_action_remove_unused_import.rs
+@@ -210,3 +210,45 @@ fn an_import_used_only_in_another_namespace_block_is_unused() {
+     let lines: Vec<u32> = diags.iter().map(|d| d.range.start.line).collect();
+     assert_eq!(lines, [2], "only block A's import is unused: {diags:?}");
+ }
++
++#[test]
++fn quick_fix_resolution_does_not_publish_or_clear_diagnostics_before_application() {
++    let backend = create_test_backend();
++    let source = "<?php\nuse Foo\\Bar;\nfunction demo(): int { return 1; }\n";
++    let actions = actions_at(&backend, source, 1, 6);
++    let action = find_action(&actions, SINGLE).unwrap();
++    let diagnostic = action.diagnostics.clone().unwrap();
++    backend
++        .open_files()
++        .write()
++        .insert(URI.to_owned(), std::sync::Arc::new(source.to_owned()));
++    let (resolved, republish) = backend.resolve_code_action(action.clone());
++    assert!(resolved.edit.is_some());
++    assert_eq!(
++        republish, None,
++        "Resolving a proposal is not edit acceptance"
++    );
++    assert_eq!(resolved.diagnostics, Some(diagnostic));
++    let (again, republish) = backend.resolve_code_action(action.clone());
++    assert_eq!(again.edit, resolved.edit);
++    assert_eq!(republish, None);
++}
++
++#[test]
++fn quick_fix_applied_source_recomputes_native_diagnostics() {
++    let backend = create_test_backend();
++    let source = "<?php\nuse Foo\\Bar;\nfunction demo(): int { return 1; }\n";
++    let actions = actions_at(&backend, source, 1, 6);
++    let action = find_action(&actions, SINGLE).unwrap();
++    backend
++        .open_files()
++        .write()
++        .insert(URI.to_owned(), std::sync::Arc::new(source.to_owned()));
++    let (resolved, _) = backend.resolve_code_action(action.clone());
++    let edited = apply_edits(source, &extract_edits(&resolved));
++    assert!(!edited.contains("use Foo"));
++    backend.update_ast(URI, &edited);
++    let mut diagnostics = Vec::new();
++    backend.collect_unused_import_diagnostics(URI, &edited, &mut diagnostics);
++    assert!(diagnostics.is_empty());
++}

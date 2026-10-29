@@ -180,7 +180,7 @@ function WeightRows() {
   );
 }
 
-const SAMPLE = `OpenIDEA is a full-featured IDE
+const SAMPLE = `OpenStorm is a full-featured IDE
 with a high level of usability and outstanding
 advanced code editing and refactoring support.
 

@@ -1,4 +1,4 @@
-//! OpenIDEA desktop shell: wires the backend crates into Tauri.
+//! OpenStorm desktop shell: wires the backend crates into Tauri.
 //!
 //! This crate is glue only. Each `commands/<domain>.rs` is a thin, typed
 //! adapter from IPC to a backend crate; no domain logic lives here.
@@ -114,7 +114,7 @@ pub fn run() {
             _ => {}
         })
         .build(context)
-        .expect("error while running OpenIDEA")
+        .expect("error while running OpenStorm")
         .run(|app, event| {
             // Quit after installing an update (`app_install_update`): relaunch.
             if let tauri::RunEvent::Exit = event

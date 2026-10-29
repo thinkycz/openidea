@@ -1,0 +1,462 @@
+diff --git a/src/definition/member/mod.rs b/src/definition/member/mod.rs
+index e2ce66d..a5d7440 100644
+--- a/src/definition/member/mod.rs
++++ b/src/definition/member/mod.rs
+@@ -49,7 +49,7 @@ use crate::virtual_members::laravel::{
+ /// Pre-extracted context for a member definition lookup.
+ ///
+ /// Bundles the four values that the caller assembles from the cursor
+-/// context so that [`Backend::resolve_member_definition_with`] does not
++/// context so that [`Backend::resolve_member_definitions_with`] does not
+ /// need seven separate parameters (plus `&self`).
+ pub(super) struct MemberDefinitionCtx<'a> {
+     /// The member name under the cursor (e.g. `"method"`, `"prop"`).
+@@ -122,18 +122,18 @@ impl Backend {
+         )
+     }
+ 
+-    /// Resolve a member access to its definition using pre-extracted context.
++    /// Resolve a member access to all valid declarations using pre-extracted context.
+     ///
+     /// The caller provides a [`MemberDefinitionCtx`] bundling the subject
+     /// text, access kind, and access hint so that the symbol-map path can
+     /// drive resolution without re-extracting context from the source text.
+-    pub(super) fn resolve_member_definition_with(
++    pub(super) fn resolve_member_definitions_with(
+         &self,
+         uri: &str,
+         content: &str,
+         position: Position,
+         mctx: &MemberDefinitionCtx<'_>,
+-    ) -> Option<Location> {
++    ) -> Option<Vec<Location>> {
+         let member_name = mctx.member_name;
+         let subject = mctx.subject;
+         let access_kind = mctx.access_kind;
+@@ -170,8 +170,10 @@ impl Backend {
+             return None;
+         }
+ 
+-        // 4. Try each candidate class and pick the first one where the
+-        //    member actually exists (directly or via inheritance).
++        // 4. Keep one valid declaration per candidate, preserving each
++        //    candidate's framework/trait fallback order. Union alternatives
++        //    must not silently collapse to whichever class resolves first.
++        let mut locations = Vec::new();
+         for target_class in &candidates {
+             // Candidates from resolve_target_classes may be fully-resolved
+             // (merged) classes that include virtual/mixin members directly
+@@ -223,7 +225,8 @@ impl Backend {
+                         MemberKind::Method,
+                     )
+                 {
+-                    return Some(location);
++                    locations.push(location);
++                    continue;
+                 }
+             }
+ 
+@@ -247,7 +250,8 @@ impl Backend {
+                     MemberKind::Constant,
+                 )
+             {
+-                return Some(location);
++                locations.push(location);
++                continue;
+             }
+ 
+             // ── Scope method mapping ────────────────────────────────
+@@ -281,7 +285,8 @@ impl Backend {
+                     MemberKind::Method,
+                 )
+             {
+-                return Some(location);
++                locations.push(location);
++                continue;
+             }
+ 
+             // ── Eloquent array entry fallback (pre-classify) ─────────────────
+@@ -305,7 +310,8 @@ impl Backend {
+                     ),
+                 )
+             {
+-                return Some(location);
++                locations.push(location);
++                continue;
+             }
+ 
+             // ── where{Property} method → column entry fallback ───────────────
+@@ -329,7 +335,8 @@ impl Backend {
+                     ),
+                 )
+             {
+-                return Some(location);
++                locations.push(location);
++                continue;
+             }
+ 
+             let member_kind =
+@@ -345,7 +352,8 @@ impl Backend {
+                 && let Some(location) =
+                     self.macro_definition_location(declaring_class.fqn().as_str(), &search_name)
+             {
+-                return Some(location);
++                locations.push(location);
++                continue;
+             }
+ 
+             if let Some(location) = self.member_position_location(
+@@ -356,7 +364,8 @@ impl Backend {
+                 &search_name,
+                 member_kind,
+             ) {
+-                return Some(location);
++                locations.push(location);
++                continue;
+             }
+ 
+             // ── Object shape property fallback ──────────────────────
+@@ -367,7 +376,8 @@ impl Backend {
+                 && let Some(location) =
+                     self.object_shape_property_location(uri, content, &search_name, cursor_offset)
+             {
+-                return Some(location);
++                locations.push(location);
++                continue;
+             }
+ 
+             // ── Eloquent array entry fallback ───────────────────────
+@@ -387,10 +397,23 @@ impl Backend {
+                     ),
+                 )
+             {
+-                return Some(location);
++                locations.push(location);
++                continue;
+             }
+         }
+ 
++        if !locations.is_empty() {
++            locations.sort_unstable_by(|a, b| {
++                (a.uri.as_str(), a.range.start, a.range.end).cmp(&(
++                    b.uri.as_str(),
++                    b.range.start,
++                    b.range.end,
++                ))
++            });
++            locations.dedup();
++            return Some(locations);
++        }
++
+         // No candidate had the member — fall back to the first candidate
+         // and try the original (non-iterating) logic so we at least get
+         // partial results when possible.
+@@ -412,7 +435,7 @@ impl Backend {
+                 MemberKind::Method,
+             )
+         {
+-            return Some(location);
++            return Some(vec![location]);
+         }
+ 
+         // Try with scope mapping in the fallback path too.
+@@ -436,12 +459,12 @@ impl Backend {
+                     && let Some(location) =
+                         self.eloquent_array_entry_location(&fqn, uri, content, &column, bounds)
+                 {
+-                    return Some(location);
++                    return Some(vec![location]);
+                 }
+                 if let Some(location) =
+                     self.eloquent_array_entry_location(&fqn, uri, content, &effective_name, bounds)
+                 {
+-                    return Some(location);
++                    return Some(vec![location]);
+                 }
+             }
+             return None;
+@@ -454,7 +477,7 @@ impl Backend {
+             && let Some(location) =
+                 self.macro_definition_location(declaring_class.fqn().as_str(), &search_name)
+         {
+-            return Some(location);
++            return Some(vec![location]);
+         }
+ 
+         // ── Object shape property fallback (fallback path) ──────
+@@ -462,7 +485,7 @@ impl Backend {
+             && let Some(location) =
+                 self.object_shape_property_location(uri, content, &search_name, cursor_offset)
+         {
+-            return Some(location);
++            return Some(vec![location]);
+         }
+ 
+         self.member_position_location(
+@@ -473,6 +496,7 @@ impl Backend {
+             &search_name,
+             member_kind,
+         )
++        .map(|location| vec![location])
+     }
+ 
+     /// Look up a member's declaration position given its declaring class
+diff --git a/src/definition/member/file_lookup.rs b/src/definition/member/file_lookup.rs
+index dc17443..3a54a19 100644
+--- a/src/definition/member/file_lookup.rs
++++ b/src/definition/member/file_lookup.rs
+@@ -2,7 +2,7 @@
+ //!
+ //! These functions locate the source file for a class and find the exact
+ //! position of a member declaration within it.  They are used by
+-//! `resolve_member_definition_with` after the declaring class has been
++//! `resolve_member_definitions_with` after the declaring class has been
+ //! identified by the `declaring` module.
+ 
+ use std::sync::Arc;
+diff --git a/src/definition/resolve.rs b/src/definition/resolve.rs
+index 93cf57b..8fa391a 100644
+--- a/src/definition/resolve.rs
++++ b/src/definition/resolve.rs
+@@ -296,8 +296,7 @@ impl Backend {
+                     access_hint,
+                 };
+ 
+-                self.resolve_member_definition_with(uri, content, position, &mctx)
+-                    .map(|loc| vec![loc])
++                self.resolve_member_definitions_with(uri, content, position, &mctx)
+             }
+ 
+             SymbolKind::SelfStaticParent(ssp_kind) => self
+@@ -370,10 +369,10 @@ impl Backend {
+                             _ => MemberAccessHint::PropertyAccess,
+                         },
+                     };
+-                    if let Some(loc) =
+-                        self.resolve_member_definition_with(uri, content, position, &mctx)
++                    if let Some(locations) =
++                        self.resolve_member_definitions_with(uri, content, position, &mctx)
+                     {
+-                        return Some(vec![loc]);
++                        return Some(locations);
+                     }
+                 }
+ 
+diff --git a/tests/integration/main.rs b/tests/integration/main.rs
+index 91dc358..1d363c2 100644
+--- a/tests/integration/main.rs
++++ b/tests/integration/main.rs
+@@ -257,3 +257,5 @@ mod watched_files;
+ mod workspace_symbols;
+ 
+ mod workbench_routes;
++
++mod definition_ambiguous_members;
+diff --git a/tests/integration/definition_ambiguous_members.rs b/tests/integration/definition_ambiguous_members.rs
+new file mode 100644
+index 0000000..1575168
+--- /dev/null
++++ b/tests/integration/definition_ambiguous_members.rs
+@@ -0,0 +1,63 @@
++use super::common::{create_test_backend, definition_locations, goto_definition_at, open_php};
++use tower_lsp::lsp_types::{Position, Url};
++
++async fn definitions(source: &str, marker: &str) -> Vec<tower_lsp::lsp_types::Location> {
++    let backend = create_test_backend();
++    let uri = Url::parse("file:///app/main.php").unwrap();
++    open_php(&backend, &uri, source).await;
++    backend.update_ast(uri.as_str(), source);
++    let offset = source.find(marker).unwrap() + marker.len() - 1;
++    let prefix = &source[..offset];
++    let position = Position::new(
++        prefix.matches('\n').count() as u32,
++        prefix.rsplit('\n').next().unwrap().encode_utf16().count() as u32,
++    );
++    definition_locations(
++        goto_definition_at(&backend, &uri, position.line, position.character).await,
++    )
++}
++
++#[tokio::test]
++async fn definition_ambiguous_methods_retains_every_union_target() {
++    let source = "<?php\nclass A { public function run(): void {} }\nclass B { public function run(): void {} }\nfunction demo(A|B $value): void { $value->run(); }\n";
++    let locations = definitions(source, "$value->run").await;
++    assert_eq!(
++        locations.len(),
++        2,
++        "Both concrete method declarations are valid targets"
++    );
++    assert_eq!(
++        locations
++            .iter()
++            .map(|location| location.range.start.line)
++            .collect::<Vec<_>>(),
++        vec![1, 2]
++    );
++}
++
++#[tokio::test]
++async fn definition_ambiguous_properties_retains_every_union_target() {
++    let source = "<?php\nclass A { public string $name; }\nclass B { public string $name; }\nfunction demo(A|B $value): void { echo $value->name; }\n";
++    let locations = definitions(source, "$value->name").await;
++    assert_eq!(
++        locations.len(),
++        2,
++        "Both concrete property declarations are valid targets"
++    );
++}
++
++#[tokio::test]
++async fn definition_ambiguous_inherited_member_deduplicates_one_declaration() {
++    let source = "<?php\nclass Base { public function run(): void {} }\nclass A extends Base {}\nclass B extends Base {}\nfunction demo(A|B $value): void { $value->run(); }\n";
++    let locations = definitions(source, "$value->run").await;
++    assert_eq!(locations.len(), 1);
++    assert_eq!(locations[0].range.start.line, 1);
++}
++
++#[tokio::test]
++async fn definition_ambiguous_trait_alias_deduplicates_original_member() {
++    let source = "<?php\ntrait Shared { public function run(): void {} }\nclass A { use Shared { run as execute; } }\nclass B { use Shared { run as execute; } }\nfunction demo(A|B $value): void { $value->execute(); }\n";
++    let locations = definitions(source, "$value->execute").await;
++    assert_eq!(locations.len(), 1);
++    assert_eq!(locations[0].range.start.line, 1);
++}
+diff --git a/tests/integration/definition_variables.rs b/tests/integration/definition_variables.rs
+index 6215b3b..6d90f93 100644
+--- a/tests/integration/definition_variables.rs
++++ b/tests/integration/definition_variables.rs
+@@ -85,32 +85,32 @@ async fn test_goto_definition_ambiguous_variable_if_block() {
+     }
+ }
+ 
+-/// When both candidate types share a method, the first candidate (original
+-/// assignment) should win.
++/// Both possible conditional types share a method, so navigation must keep
++/// both declarations instead of choosing the original assignment.
+ #[tokio::test]
+ async fn test_goto_definition_ambiguous_variable_both_have_method() {
+     let backend = create_test_backend();
+ 
+     let uri = Url::parse("file:///test.php").unwrap();
+     let text = concat!(
+-        "<?php\n",                                // 0
+-        "class Alpha {\n",                        // 1
+-        "    public function greet(): void {}\n", // 2
+-        "}\n",                                    // 3
+-        "\n",                                     // 4
+-        "class Beta {\n",                         // 5
+-        "    public function greet(): void {}\n", // 6
+-        "}\n",                                    // 7
+-        "\n",                                     // 8
+-        "class App {\n",                          // 9
+-        "    public function run(): void {\n",    // 10
+-        "        $obj = new Alpha();\n",          // 11
+-        "        if (true) {\n",                  // 12
+-        "            $obj = new Beta();\n",       // 13
+-        "        }\n",                            // 14
+-        "        $obj->greet();\n",               // 15
+-        "    }\n",                                // 16
+-        "}\n",                                    // 17
++        "<?php\n",                                            // 0
++        "class Alpha {\n",                                    // 1
++        "    public function greet(): void {}\n",             // 2
++        "}\n",                                                // 3
++        "\n",                                                 // 4
++        "class Beta {\n",                                     // 5
++        "    public function greet(): void {}\n",             // 6
++        "}\n",                                                // 7
++        "\n",                                                 // 8
++        "class App {\n",                                      // 9
++        "    public function run(bool $condition): void {\n", // 10
++        "        $obj = new Alpha();\n",                      // 11
++        "        if ($condition) {\n",                        // 12
++        "            $obj = new Beta();\n",                   // 13
++        "        }\n",                                        // 14
++        "        $obj->greet();\n",                           // 15
++        "    }\n",                                            // 16
++        "}\n",                                                // 17
+     );
+ 
+     let open_params = DidOpenTextDocumentParams {
+@@ -143,16 +143,18 @@ async fn test_goto_definition_ambiguous_variable_both_have_method() {
+     );
+ 
+     match result.unwrap() {
+-        GotoDefinitionResponse::Scalar(location) => {
+-            assert_eq!(location.uri, uri);
+-            // The merged union lists the branches in source order, so the
+-            // pre-`if` assignment `$obj = new Alpha()` is the first candidate.
++        GotoDefinitionResponse::Array(locations) => {
++            assert_eq!(locations.len(), 2);
++            assert!(locations.iter().all(|location| location.uri == uri));
+             assert_eq!(
+-                location.range.start.line, 2,
+-                "greet() should resolve to Alpha (line 2) as the forward walker's first candidate"
++                locations
++                    .iter()
++                    .map(|location| location.range.start.line)
++                    .collect::<Vec<_>>(),
++                vec![2, 6]
+             );
+         }
+-        other => panic!("Expected Scalar location, got: {:?}", other),
++        other => panic!("Expected both conditional targets, got: {:?}", other),
+     }
+ }
+ 
+diff --git a/docs/CHANGELOG.md b/docs/CHANGELOG.md
+index dcc6983..80372df 100644
+--- a/docs/CHANGELOG.md
++++ b/docs/CHANGELOG.md
+@@ -21,6 +21,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
+ 
+ ### Fixed
+ 
++- **Union member navigation keeps every declaration.** Go to Definition offers each matching method or property instead of choosing one union alternative. Shared inherited declarations appear once. Contributed by PHP Workbench (local downstream build).
++
+ - **Built-in function suggestions respect their PHP introduction version.** Functions introduced after the project target stay out of completion and lazy stub caches; user polyfills remain available. Contributed by PHP Workbench downstream.
+ 
+ - **Named-argument signature help.** Reordered named arguments highlight their declared parameter, including named variadic values. Contributed by PHP Workbench (local downstream build).
+diff --git a/docs/ARCHITECTURE.md b/docs/ARCHITECTURE.md
+index 26fe2ee..974df96 100644
+--- a/docs/ARCHITECTURE.md
++++ b/docs/ARCHITECTURE.md
+@@ -209,6 +209,11 @@ equivalent:
+ 
+ ## Go-to-Definition Architecture
+ 
++Member navigation uses the shared subject resolver's candidate classes and keeps
++one valid declaration per candidate, preserving each candidate's trait/framework
++fallback order. Identical inherited declarations are deduplicated; multiple
++concrete declarations are returned to the client as alternatives.
++
+ The definition subsystem uses a **three-tier** approach, from fastest to slowest:
+ 
+ ### Tier 1: Precomputed Symbol Map (primary)
+diff --git a/examples/php/definition.php b/examples/php/definition.php
+index 0ffe90f..3e03e50 100644
+--- a/examples/php/definition.php
++++ b/examples/php/definition.php
+@@ -153,6 +153,8 @@ class TypeHintGtdDemo
+ 
+     public function paramTypes(GtdAlpha $item): GtdAlpha { return $item; }                             // Ctrl+Click GtdAlpha
+     public function unionTypes(GtdAlpha|GtdBeta $item): GtdAlpha|GtdBeta { return $item; }             // Ctrl+Click either
++    // Ctrl+Click label offers both GtdAlpha::label and GtdBeta::label.
++    public function ambiguousMember(GtdAlpha|GtdBeta $item): string { return $item->label(); }
+     public function intersectionTypes(GtdShape&GtdColor $item): GtdShape&GtdColor { return $item; }    // Ctrl+Click either
+     public function returnType(): GtdResult { return new GtdResult(); }                                // Ctrl+Click GtdResult
+ 
+diff --git a/examples/php/scaffolding/assertions.php b/examples/php/scaffolding/assertions.php
+index 2d8b483..6b3e693 100644
+--- a/examples/php/scaffolding/assertions.php
++++ b/examples/php/scaffolding/assertions.php
+@@ -33,6 +33,9 @@ final class RequireExtendsConsumer extends Scaffolding\RequireExtendsTestCase
+ 
+ function runDemoAssertions(): void
+ {
++    $navigation = new TypeHintGtdDemo();
++    assert($navigation->ambiguousMember(new GtdAlpha()) === 'alpha');
++    assert($navigation->ambiguousMember(new GtdBeta()) === 'beta');
+     assert((new ArgumentRankingDemo())->sample(42, 'Ada') === 'Ada', 'The suggested string argument must be accepted');
+     // ── Body Return Type Inference ──────────────────────────────────────
+     $factory = new Scaffolding\ScaffoldingUntypedFactory();

@@ -1,0 +1,786 @@
+diff --git a/Cargo.lock b/Cargo.lock
+index a70e0b9..9e0dffe 100644
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -1656,6 +1656,7 @@ dependencies = [
+  "serde",
+  "serde_json",
+  "sha2",
++ "similar",
+  "sqlparser",
+  "tar",
+  "tempfile",
+@@ -2150,6 +2151,15 @@ version = "0.3.10"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "3a219298ac11a56ea9a6d2120044824d6f01aeb034955e7af7bc16858527deea"
+ 
++[[package]]
++name = "similar"
++version = "3.2.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "4f66ca1f7aca2474dc10c942eb22feffc897735f54cd1db90138c2fddb490987"
++dependencies = [
++ "bstr",
++]
++
+ [[package]]
+ name = "slab"
+ version = "0.4.12"
+diff --git a/Cargo.toml b/Cargo.toml
+index 721789f..517ef18 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -40,6 +40,7 @@ parking_lot = "0.12"
+ tempfile = "3"
+ toml = "1"
+ etcetera = "0.11"
++similar = { version = "=3.2.0", default-features = false, features = ["std"] }
+ 
+ # musl's built-in malloc is very slow under the multi-threaded,
+ # allocation-heavy load of parallel indexing and parse workers (4-6x
+diff --git a/src/formatting/edits.rs b/src/formatting/edits.rs
+new file mode 100644
+index 0000000..0702ffc
+--- /dev/null
++++ b/src/formatting/edits.rs
+@@ -0,0 +1,383 @@
++//! Bounded scalar alignment for formatting, retaining equal source islands.
++use similar::algorithms::{Algorithm, DiffHook, Replace, diff_slices_deadline};
++use std::time::{Duration, Instant};
++use tower_lsp::lsp_types::{Range, TextEdit};
++
++const BUDGET_ERROR: &str = "Formatting could not produce edits within the document work limit. Your source was not changed. Retry or use Save Without Formatting.";
++const CRLF: u32 = 0x11_0000;
++
++#[derive(Clone, Copy)]
++struct Limits {
++    original_bytes: usize,
++    formatted_bytes: usize,
++    tokens: usize,
++    edits: usize,
++    deadline: Instant,
++}
++impl Limits {
++    fn standard() -> Self {
++        Self {
++            original_bytes: 8 * 1024 * 1024,
++            formatted_bytes: 16 * 1024 * 1024,
++            tokens: 2_000_000,
++            edits: 10_000,
++            deadline: Instant::now() + Duration::from_secs(1),
++        }
++    }
++    fn check(self) -> Result<(), String> {
++        if Instant::now() >= self.deadline {
++            Err(BUDGET_ERROR.into())
++        } else {
++            Ok(())
++        }
++    }
++}
++
++struct Tokens {
++    values: Vec<u32>,
++    offsets: Vec<usize>,
++}
++fn tokenize(
++    source: &str,
++    base: usize,
++    remaining: &mut usize,
++    limits: Limits,
++) -> Result<Tokens, String> {
++    let mut values = Vec::new();
++    let mut offsets = Vec::new();
++    let mut chars = source.char_indices().peekable();
++    while let Some((offset, ch)) = chars.next() {
++        if *remaining == 0 {
++            return Err(BUDGET_ERROR.into());
++        }
++        *remaining -= 1;
++        if values.len() % 1024 == 0 {
++            limits.check()?;
++        }
++        offsets.push(base + offset);
++        let value = if ch == '\r' && chars.peek().is_some_and(|(_, ch)| *ch == '\n') {
++            chars.next();
++            CRLF
++        } else {
++            ch as u32
++        };
++        values.push(value);
++    }
++    offsets.push(base + source.len());
++    Ok(Tokens { values, offsets })
++}
++
++#[derive(Debug)]
++struct ByteEdit {
++    old_start: usize,
++    old_end: usize,
++    new_start: usize,
++    new_end: usize,
++}
++struct Edits<'a> {
++    old: &'a [usize],
++    new: &'a [usize],
++    spans: Vec<ByteEdit>,
++    limits: Limits,
++}
++impl Edits<'_> {
++    fn change(
++        &mut self,
++        old: usize,
++        old_len: usize,
++        new: usize,
++        new_len: usize,
++    ) -> Result<(), String> {
++        self.limits.check()?;
++        if self.spans.len() == self.limits.edits {
++            return Err(BUDGET_ERROR.into());
++        }
++        self.spans.push(ByteEdit {
++            old_start: self.old[old],
++            old_end: self.old[old + old_len],
++            new_start: self.new[new],
++            new_end: self.new[new + new_len],
++        });
++        Ok(())
++    }
++}
++impl DiffHook for Edits<'_> {
++    type Error = String;
++    fn equal(&mut self, _: usize, _: usize, _: usize) -> Result<(), String> {
++        self.limits.check()
++    }
++    fn delete(&mut self, old: usize, len: usize, new: usize) -> Result<(), String> {
++        self.change(old, len, new, 0)
++    }
++    fn insert(&mut self, old: usize, new: usize, len: usize) -> Result<(), String> {
++        self.change(old, 0, new, len)
++    }
++    fn replace(
++        &mut self,
++        old: usize,
++        old_len: usize,
++        new: usize,
++        new_len: usize,
++    ) -> Result<(), String> {
++        self.change(old, old_len, new, new_len)
++    }
++}
++
++fn splits_crlf(text: &str, offset: usize) -> bool {
++    offset > 0
++        && text.as_bytes()[offset - 1] == b'\r'
++        && text.as_bytes().get(offset) == Some(&b'\n')
++}
++fn changed_window(old: &str, new: &str) -> (usize, usize, usize) {
++    let mut start: usize = old
++        .chars()
++        .zip(new.chars())
++        .take_while(|(a, b)| a == b)
++        .map(|(ch, _)| ch.len_utf8())
++        .sum();
++    let suffix: usize = old[start..]
++        .chars()
++        .rev()
++        .zip(new[start..].chars().rev())
++        .take_while(|(a, b)| a == b)
++        .map(|(ch, _)| ch.len_utf8())
++        .sum();
++    let (mut old_end, mut new_end) = (old.len() - suffix, new.len() - suffix);
++    if splits_crlf(old, start) || splits_crlf(new, start) {
++        start -= 1;
++    }
++    if splits_crlf(old, old_end) || splits_crlf(new, new_end) {
++        old_end += 1;
++        new_end += 1;
++    }
++    (start, old_end, new_end)
++}
++
++pub(super) fn compute(original: &str, formatted: &str) -> Result<Vec<TextEdit>, String> {
++    compute_bounded(original, formatted, Limits::standard())
++}
++fn compute_bounded(
++    original: &str,
++    formatted: &str,
++    limits: Limits,
++) -> Result<Vec<TextEdit>, String> {
++    limits.check()?;
++    if original.len() > limits.original_bytes || formatted.len() > limits.formatted_bytes {
++        return Err(BUDGET_ERROR.into());
++    }
++    if original == formatted {
++        return Ok(Vec::new());
++    }
++    let (start, old_end, new_end) = changed_window(original, formatted);
++    let mut remaining = limits.tokens;
++    let old = tokenize(&original[start..old_end], start, &mut remaining, limits)?;
++    let new = tokenize(&formatted[start..new_end], start, &mut remaining, limits)?;
++    let mut collected = Edits {
++        old: &old.offsets,
++        new: &new.offsets,
++        spans: Vec::new(),
++        limits,
++    };
++    // RawMyers does not use readability heuristics that can discard equal
++    // islands. The library's deadline fallback is NEVER published: our hook
++    // and final admission both reject any result after that deadline.
++    diff_slices_deadline(
++        Algorithm::RawMyers,
++        &mut Replace::new(&mut collected),
++        &old.values,
++        &new.values,
++        Some(limits.deadline),
++    )?;
++    limits.check()?;
++    let index = crate::text_position::LineIndex::new(original);
++    let mut result = Vec::with_capacity(collected.spans.len());
++    let (mut old_cursor, mut new_cursor) = (0, 0);
++    for span in collected.spans {
++        limits.check()?;
++        if span.old_start < old_cursor
++            || span.new_start < new_cursor
++            || original[old_cursor..span.old_start] != formatted[new_cursor..span.new_start]
++        {
++            return Err(
++                "Formatting produced inconsistent edit coordinates. Your source was not changed."
++                    .into(),
++            );
++        }
++        result.push(TextEdit {
++            range: Range::new(index.position(span.old_start), index.position(span.old_end)),
++            new_text: formatted[span.new_start..span.new_end].to_owned(),
++        });
++        old_cursor = span.old_end;
++        new_cursor = span.new_end;
++    }
++    if original[old_cursor..] != formatted[new_cursor..] {
++        return Err("Formatting omitted a source change. Your source was not changed.".into());
++    }
++    limits.check()?;
++    Ok(result)
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    fn limits() -> Limits {
++        Limits {
++            deadline: Instant::now() + Duration::from_secs(5),
++            ..Limits::standard()
++        }
++    }
++    #[test]
++    fn budget_refusals_never_publish_a_partial_or_hull_edit() {
++        let cases = [
++            Limits {
++                original_bytes: 1,
++                ..limits()
++            },
++            Limits {
++                formatted_bytes: 1,
++                ..limits()
++            },
++            Limits {
++                tokens: 1,
++                ..limits()
++            },
++            Limits {
++                edits: 1,
++                ..limits()
++            },
++            Limits {
++                deadline: Instant::now() - Duration::from_secs(1),
++                ..limits()
++            },
++        ];
++        for limit in cases {
++            assert!(compute_bounded("aXbYc", "aZbWc", limit).is_err());
++        }
++        assert!(compute_bounded("aXbYc", "aZbWc", limits()).is_ok());
++    }
++    #[test]
++    fn raw_diff_matches_small_lcs_oracle_and_reconstructs_all_inputs() {
++        let alphabet = ['a', 'b', '🐘', '\r', '\n'];
++        let mut strings = vec![String::new()];
++        for a in alphabet {
++            strings.push(a.to_string());
++            for b in alphabet {
++                strings.push(format!("{a}{b}"));
++            }
++        }
++        fn token_values(s: &str) -> Vec<u32> {
++            tokenize(s, 0, &mut 100, limits()).unwrap().values
++        }
++        for old in &strings {
++            for new in &strings {
++                let edits = compute_bounded(old, new, limits()).unwrap();
++                assert_eq!(crate::text_position::apply_text_edits(old, &edits), *new);
++                let a = token_values(old);
++                let b = token_values(new);
++                let mut table = vec![vec![0; b.len() + 1]; a.len() + 1];
++                for i in 0..a.len() {
++                    for j in 0..b.len() {
++                        table[i + 1][j + 1] = if a[i] == b[j] {
++                            table[i][j] + 1
++                        } else {
++                            table[i][j + 1].max(table[i + 1][j])
++                        };
++                    }
++                }
++                let expected = a.len() + b.len() - 2 * table[a.len()][b.len()];
++                let actual: usize = edits
++                    .iter()
++                    .map(|e| {
++                        let start =
++                            crate::text_position::position_to_byte_offset(old, e.range.start);
++                        let end = crate::text_position::position_to_byte_offset(old, e.range.end);
++                        token_values(&old[start..end]).len() + token_values(&e.new_text).len()
++                    })
++                    .sum();
++                assert_eq!(actual, expected, "{old:?} → {new:?}");
++            }
++        }
++    }
++    #[test]
++    fn expired_raw_myers_fallback_is_refused_by_actual_edit_collector() {
++        use similar::{DiffOp, algorithms::Capture};
++        let original = vec![b'a' as u32; 128];
++        let formatted = vec![b'b' as u32; 128];
++        let expired = Instant::now() - Duration::from_secs(1);
++
++        // Control: the actual library does NOT signal deadline exhaustion as an
++        // error. With nonempty/dissimilar inputs and this expired deadline its
++        // raw search emits a delete/insert approximation, merged into Replace.
++        let mut capture = Capture::new();
++        diff_slices_deadline(
++            Algorithm::RawMyers,
++            &mut Replace::new(&mut capture),
++            &original,
++            &formatted,
++            Some(expired),
++        )
++        .expect("library fallback itself is successful");
++        let operations = capture.into_ops();
++        assert!(
++            matches!(
++                operations.as_slice(),
++                [DiffOp::Replace {
++                    old_index: 0,
++                    old_len: 128,
++                    new_index: 0,
++                    new_len: 128,
++                }]
++            ),
++            "control must actually exercise fallback replacement: {operations:?}"
++        );
++
++        // Production collector: skip compute_bounded's entry check so this test
++        // reaches precisely the library fallback -> hook admission boundary.
++        let offsets: Vec<usize> = (0..=128).collect();
++        let mut collected = Edits {
++            old: &offsets,
++            new: &offsets,
++            spans: Vec::new(),
++            limits: Limits {
++                deadline: expired,
++                ..limits()
++            },
++        };
++        let result = diff_slices_deadline(
++            Algorithm::RawMyers,
++            &mut Replace::new(&mut collected),
++            &original,
++            &formatted,
++            Some(expired),
++        );
++        assert_eq!(result, Err(BUDGET_ERROR.to_owned()));
++        assert!(
++            collected.spans.is_empty(),
++            "expired fallback must not record a publishable hull"
++        );
++
++        // Live-deadline control proves the actual collector is usable for the
++        // same inputs; refusal is specifically the expired ownership budget.
++        let live = limits();
++        let mut allowed = Edits {
++            old: &offsets,
++            new: &offsets,
++            spans: Vec::new(),
++            limits: live,
++        };
++        diff_slices_deadline(
++            Algorithm::RawMyers,
++            &mut Replace::new(&mut allowed),
++            &original,
++            &formatted,
++            Some(live.deadline),
++        )
++        .expect("same bounded input is admitted with a live deadline");
++        assert_eq!(allowed.spans.len(), 1);
++        let edit = &allowed.spans[0];
++        assert_eq!(
++            (edit.old_start, edit.old_end, edit.new_start, edit.new_end),
++            (0, 128, 0, 128)
++        );
++    }
++}
+diff --git a/src/formatting/mod.rs b/src/formatting/mod.rs
+index 9ead238..ab7b2ca 100644
+--- a/src/formatting/mod.rs
++++ b/src/formatting/mod.rs
+@@ -68,8 +68,11 @@ use crate::composer::{self, ComposerPackage};
+ use crate::config::FormattingConfig;
+ 
+ pub mod blade;
++mod edits;
+ mod external;
+ mod mago;
++#[cfg(test)]
++mod multihunk_tests;
+ mod pint;
+ #[cfg(test)]
+ mod tests;
+@@ -375,49 +378,12 @@ pub fn execute_strategy(
+         php_version,
+         cancelled,
+     )?;
+-    Ok(formatted.map(|formatted| compute_edits(content, &formatted)))
++    formatted
++        .map(|formatted| compute_edits(content, &formatted))
++        .transpose()
+ }
+ 
+-/// Compute a single bounded edit that transforms original into formatted.
+-///
+-/// Shared leading and trailing text stays outside the replacement. Separate
+-/// changes can still include unchanged text between them; no global diff is
+-/// computed. Edges are Unicode scalar boundaries and never split CRLF pairs.
+-pub(crate) fn compute_edits(original: &str, formatted: &str) -> Vec<TextEdit> {
+-    if original == formatted {
+-        return Vec::new();
+-    }
+-
+-    let mut prefix: usize = original
+-        .chars()
+-        .zip(formatted.chars())
+-        .take_while(|(a, b)| a == b)
+-        .map(|(ch, _)| ch.len_utf8())
+-        .sum();
+-    let suffix: usize = original[prefix..]
+-        .chars()
+-        .rev()
+-        .zip(formatted[prefix..].chars().rev())
+-        .take_while(|(a, b)| a == b)
+-        .map(|(ch, _)| ch.len_utf8())
+-        .sum();
+-    let mut original_end = original.len() - suffix;
+-    let mut formatted_end = formatted.len() - suffix;
+-    let splits_crlf = |text: &str, offset: usize| {
+-        offset > 0
+-            && text.as_bytes()[offset - 1] == b'\r'
+-            && text.as_bytes().get(offset) == Some(&b'\n')
+-    };
+-    if splits_crlf(original, prefix) || splits_crlf(formatted, prefix) {
+-        prefix -= 1;
+-    }
+-    if splits_crlf(original, original_end) || splits_crlf(formatted, formatted_end) {
+-        original_end += 1;
+-        formatted_end += 1;
+-    }
+-
+-    vec![TextEdit {
+-        range: crate::text_position::byte_range_to_lsp_range(original, prefix, original_end),
+-        new_text: formatted[prefix..formatted_end].to_string(),
+-    }]
++/// Compute bounded, disjoint edits, retaining equal source islands.
++pub(crate) fn compute_edits(original: &str, formatted: &str) -> Result<Vec<TextEdit>, String> {
++    edits::compute(original, formatted)
+ }
+diff --git a/src/formatting/multihunk_tests.rs b/src/formatting/multihunk_tests.rs
+new file mode 100644
+index 0000000..9608c51
+--- /dev/null
++++ b/src/formatting/multihunk_tests.rs
+@@ -0,0 +1,149 @@
++use super::compute_edits;
++use std::ops::Range;
++use tower_lsp::lsp_types::TextEdit;
++
++fn checked_edits(before: &str, after: &str) -> Vec<TextEdit> {
++    let edits = compute_edits(before, after).unwrap();
++    let mut previous_end = 0;
++    for edit in &edits {
++        let start = crate::text_position::position_to_byte_offset(before, edit.range.start);
++        let end = crate::text_position::position_to_byte_offset(before, edit.range.end);
++        assert!(start >= previous_end && start <= end && end <= before.len());
++        assert!(before.is_char_boundary(start) && before.is_char_boundary(end));
++        assert_eq!(
++            crate::text_position::offset_to_position(before, start),
++            edit.range.start
++        );
++        assert_eq!(
++            crate::text_position::offset_to_position(before, end),
++            edit.range.end
++        );
++        for boundary in [start, end] {
++            assert!(
++                !(boundary > 0
++                    && before.as_bytes()[boundary - 1] == b'\r'
++                    && before.as_bytes().get(boundary) == Some(&b'\n')),
++                "LSP endpoint splits CRLF"
++            );
++        }
++        previous_end = end;
++    }
++    assert_eq!(
++        crate::text_position::apply_text_edits(before, &edits),
++        after
++    );
++    edits
++}
++
++fn assert_island_untouched(before: &str, edits: &[TextEdit], island: Range<usize>) {
++    for edit in edits {
++        let start = crate::text_position::position_to_byte_offset(before, edit.range.start);
++        let end = crate::text_position::position_to_byte_offset(before, edit.range.end);
++        assert!(
++            !(start < island.end && end > island.start)
++                && !(start == end && start > island.start && start < island.end),
++            "unchanged island {island:?} was replaced/inserted into: {edit:?}"
++        );
++    }
++}
++
++fn island(before: &str, text: &str) -> Range<usize> {
++    let start = before.find(text).expect("fixture island exists");
++    start..start + text.len()
++}
++
++// Exact source and actual Mago PHP8.3 output retained in .66
++// work/php-format-acceptance/middle-island-report.json.
++const CAPTURED_BEFORE: &str = "<?php\nfunction changed() { $text = \"hello\"; return (new Example())->run(); }\n\n// unchanged café 🐘\nfunction untouched(): string\n{\n    return 'keep';\n}\n\nfunction changedAfter() { return \"later\"; }\n";
++const CAPTURED_AFTER: &str = "<?php\n\nfunction changed()\n{\n    $text = 'hello';\n    return ( new Example() )->run();\n}\n\n// unchanged café 🐘\nfunction untouched(): string\n{\n    return 'keep';\n}\n\nfunction changedAfter()\n{\n    return 'later';\n}\n";
++const MIDDLE: &str =
++    "// unchanged café 🐘\nfunction untouched(): string\n{\n    return 'keep';\n}\n";
++
++#[test]
++fn format_hunks_actual_mago_keeps_unchanged_middle_function() {
++    for crlf in [false, true] {
++        let (before, after, middle) = if crlf {
++            (
++                CAPTURED_BEFORE.replace('\n', "\r\n"),
++                CAPTURED_AFTER.replace('\n', "\r\n"),
++                MIDDLE.replace('\n', "\r\n"),
++            )
++        } else {
++            (CAPTURED_BEFORE.into(), CAPTURED_AFTER.into(), MIDDLE.into())
++        };
++        let edits = checked_edits(&before, &after);
++        assert!(
++            edits.len() >= 2,
++            "separate changed regions need separate edits"
++        );
++        assert_island_untouched(&before, &edits, island(&before, &middle));
++    }
++}
++
++#[test]
++fn format_hunks_duplicate_lines_do_not_swallow_middle_run() {
++    for ending in ["\n", "\r\n"] {
++        let before = "<?php\n$a=\"a\";\necho 'same';\necho 'same';\necho 'same';\n$b=\"b\";\n"
++            .replace('\n', ending);
++        let after = "<?php\n$a = 'a';\necho 'same';\necho 'same';\necho 'same';\n$b = 'b';\n"
++            .replace('\n', ending);
++        let middle = "echo 'same';\necho 'same';\necho 'same';\n".replace('\n', ending);
++        let edits = checked_edits(&before, &after);
++        assert_island_untouched(&before, &edits, island(&before, &middle));
++    }
++}
++
++#[test]
++fn format_hunks_same_line_unicode_island_has_live_original_anchors() {
++    let before = "<?php\r\n$a=\"a\"; /* stable café 🐘 e\u{301} */ $b=\"b\";\r\n";
++    let after = "<?php\r\n$a = 'a'; /* stable café 🐘 e\u{301} */ $b = 'b';\r\n";
++    let edits = checked_edits(before, after);
++    assert_island_untouched(
++        before,
++        &edits,
++        island(before, "/* stable café 🐘 e\u{301} */"),
++    );
++}
++
++#[test]
++fn format_hunks_separate_insert_delete_preserve_internal_island() {
++    for (before, after, stable) in [
++        (
++            "A\nKEEP café 🐘\nB\n",
++            "A\ninserted\nKEEP café 🐘\nB\ninserted-end\n",
++            "KEEP café 🐘\n",
++        ),
++        (
++            "remove\nA\nKEEP café 🐘\nB\nremove-end\n",
++            "A\nKEEP café 🐘\nB\n",
++            "KEEP café 🐘\n",
++        ),
++        (
++            "remove\r\nKEEP café 🐘\r\nB",
++            "KEEP café 🐘\r\nB\r\ninsert",
++            "KEEP café 🐘\r\n",
++        ),
++    ] {
++        let edits = checked_edits(before, after);
++        assert_island_untouched(before, &edits, island(before, stable));
++    }
++}
++
++#[test]
++fn format_hunks_empty_identity_eof_and_line_ending_controls() {
++    for (before, after) in [
++        ("", ""),
++        ("", "🐘\r\n"),
++        ("café 🐘\r\n", ""),
++        ("same", "same"),
++        ("same", "same\n"),
++        ("same\r\n", "same"),
++        ("A\r\nB", "A\nB"),
++        ("A\nB", "A\r\nB"),
++    ] {
++        let edits = checked_edits(before, after);
++        if before == after {
++            assert!(edits.is_empty());
++        }
++    }
++}
+diff --git a/src/formatting/tests.rs b/src/formatting/tests.rs
+index 6d25e94..1cbcd61 100644
+--- a/src/formatting/tests.rs
++++ b/src/formatting/tests.rs
+@@ -12,7 +12,7 @@ use super::{FormattingStrategy, Tool, compute_edits, execute_strategy, resolve_s
+ #[test]
+ fn compute_edits_no_change() {
+     let content = "<?php\necho 'hello';\n";
+-    let edits = compute_edits(content, content);
++    let edits = compute_edits(content, content).unwrap();
+     assert!(edits.is_empty());
+ }
+ 
+@@ -20,7 +20,7 @@ fn compute_edits_no_change() {
+ fn compute_edits_with_change() {
+     let original = "<?php\necho 'hello';\n";
+     let formatted = "<?php\n\necho 'hello';\n";
+-    let edits = compute_edits(original, formatted);
++    let edits = compute_edits(original, formatted).unwrap();
+     assert_eq!(edits.len(), 1);
+     let edit = &edits[0];
+     assert_eq!(edit.range.start.line, 1);
+@@ -34,7 +34,7 @@ fn compute_edits_with_change() {
+ fn compute_edits_empty_original() {
+     let original = "";
+     let formatted = "<?php\n";
+-    let edits = compute_edits(original, formatted);
++    let edits = compute_edits(original, formatted).unwrap();
+     assert_eq!(edits.len(), 1);
+     let edit = &edits[0];
+     assert_eq!(edit.range.start.line, 0);
+@@ -47,7 +47,7 @@ fn compute_edits_empty_original() {
+ fn compute_edits_no_trailing_newline() {
+     let original = "<?php\necho 'hello';";
+     let formatted = "<?php\necho 'hello';\n";
+-    let edits = compute_edits(original, formatted);
++    let edits = compute_edits(original, formatted).unwrap();
+     assert_eq!(edits.len(), 1);
+     let edit = &edits[0];
+     assert_eq!(edit.range.end.line, 1);
+@@ -858,7 +858,6 @@ fn apply_computed_format_edits(original: &str, edits: &[tower_lsp::lsp_types::Te
+ 
+ #[test]
+ fn compute_edits_captured_mago_output_excludes_unchanged_function() {
+-    use tower_lsp::lsp_types::{Position, Range};
+     // Actual captured PHP 8.3/8.4 Mago output; CRLF variants test edit
+     // encoding without asserting that Mago itself preserves line endings.
+     for output in [CAPTURED_FORMAT_PHP83, CAPTURED_FORMAT_PHP84] {
+@@ -873,14 +872,15 @@ fn compute_edits_captured_mago_output_excludes_unchanged_function() {
+             } else {
+                 output.to_string()
+             };
+-            let edits = compute_edits(&original, &formatted);
+-            assert_eq!(edits.len(), 1);
+-            assert_eq!(
+-                edits[0].range,
+-                Range::new(Position::new(1, 0), Position::new(1, 69))
+-            );
+-            assert!(!edits[0].new_text.contains("untouched"));
+-            assert!(!edits[0].new_text.contains("unchanged café 🐘"));
++            let edits = compute_edits(&original, &formatted).unwrap();
++            assert!(!edits.is_empty());
++            for edit in &edits {
++                assert_eq!(edit.range.start.line, 1);
++                assert_eq!(edit.range.end.line, 1);
++                assert!(edit.range.end.character <= 69);
++                assert!(!edit.new_text.contains("untouched"));
++                assert!(!edit.new_text.contains("unchanged café 🐘"));
++            }
+             assert_eq!(apply_computed_format_edits(&original, &edits), formatted);
+         }
+     }
+@@ -890,13 +890,28 @@ fn compute_edits_captured_mago_output_excludes_unchanged_function() {
+ fn compute_edits_unicode_boundaries_have_exact_utf16_columns() {
+     use tower_lsp::lsp_types::{Position, Range};
+     let original = "<?php\r\n$text = 'café 🐘'; $count=1;\r\n\r\nfunction untouched(): string { return 'keep'; }\r\n";
++    let spaced = original.replace("$count=1", "$count = 1");
++    let edits = compute_edits(original, &spaced).unwrap();
++    assert_eq!(
++        edits,
++        vec![
++            tower_lsp::lsp_types::TextEdit::new(
++                Range::new(Position::new(1, 25), Position::new(1, 25)),
++                " ".into()
++            ),
++            tower_lsp::lsp_types::TextEdit::new(
++                Range::new(Position::new(1, 26), Position::new(1, 26)),
++                " ".into()
++            ),
++        ]
++    );
++    assert_eq!(apply_computed_format_edits(original, &edits), spaced);
+     let cases = [
+-        (original.replace("$count=1", "$count = 1"), 25, 26, " = "),
+         (original.replace("café", "cafè"), 12, 13, "è"),
+         (original.replace('🐘', "🐈"), 14, 16, "🐈"),
+     ];
+     for (formatted, start, end, replacement) in cases {
+-        let edits = compute_edits(original, &formatted);
++        let edits = compute_edits(original, &formatted).unwrap();
+         assert_eq!(edits.len(), 1);
+         assert_eq!(
+             edits[0].range,
+@@ -912,7 +927,7 @@ fn compute_edits_does_not_split_crlf_when_line_ending_changes() {
+     use tower_lsp::lsp_types::{Position, Range};
+     let original = "A\r\nB";
+     let formatted = "A\nB";
+-    let edits = compute_edits(original, formatted);
++    let edits = compute_edits(original, formatted).unwrap();
+     assert_eq!(edits.len(), 1);
+     assert_eq!(
+         edits[0].range,
+diff --git a/src/server.rs b/src/server.rs
+index 1b71afd..2f0f64c 100644
+--- a/src/server.rs
++++ b/src/server.rs
+@@ -1090,8 +1090,11 @@ impl LanguageServer for Backend {
+                 let strategy = backend.resolve_formatting_strategy();
+                 backend.format_content(&strategy, &file_path, &content, &backend.shutdown_flag)
+             };
+-            formatted
+-                .map(|formatted| formatted.map(|text| formatting::compute_edits(&content, &text)))
++            formatted.and_then(|formatted| {
++                formatted
++                    .map(|text| formatting::compute_edits(&content, &text))
++                    .transpose()
++            })
+         })
+         .await;
+ 

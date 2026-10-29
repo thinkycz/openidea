@@ -1,3 +1,16 @@
+# OpenStorm
+
+PHP and Laravel IDE based on [OpenIDEA](https://github.com/l0ng-ai/openidea).
+Keeps the upstream appearance, keybindings and autosave. Local macOS Apple Silicon
+builds bundle PHPantom; Intelephense and Phpactor remain optional alternatives.
+
+See [implementation and acceptance](docs/OPENSTORM.md) and bundled engine
+[provenance](src-tauri/resources/phpantom/provenance.json).
+OpenStorm uses separate application data while retaining `.openidea` project settings.
+Automatic updates are disabled until an OpenStorm release feed is configured.
+
+## Upstream README
+
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="src-tauri/icons/source/openidea-wordmark-dark.svg">

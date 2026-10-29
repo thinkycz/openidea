@@ -1,0 +1,449 @@
+diff --git a/docs/CHANGELOG.md b/docs/CHANGELOG.md
+index cce00d243ae646677e329ca2a95fa79d17330a36..aaab40d15af10e281c9184e1c177a125502b9362 100644
+--- a/docs/CHANGELOG.md
++++ b/docs/CHANGELOG.md
+@@ -15,6 +15,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
+ 
+ ## [Unreleased]
+ 
++- **Check return statements against their native declaration.** Nullable PHPDoc accepts an implicit null return when no native hint is present. Native `mixed`, `void` and `never` retain PHP’s return-statement rules while supported PHPDoc refinements continue to check returned values. Contributed by PHP Workbench downstream.
++
+ - **Keep configured Storage adapters precise.** Completion, hover and navigation recognize adapter methods supplied by custom drivers even when their service provider stays closed. Unresolved drivers and ordinary filesystem contracts retain their declared limits. Contributed by PHP Workbench downstream.
+ 
+ - **Complete the original item after Laravel's higher-order `sole`.** Property and method predicates preserve the matching item's type for completion, hover and navigation on framework versions that advertise the proxy. Missing or multiple matches throw rather than adding a nullable result. Contributed by PHP Workbench downstream.
+diff --git a/examples/php/diagnostics.php b/examples/php/diagnostics.php
+index 28606001c4b0525a15a283fd2126b5ff50367b9d..85761703d836dfe808233ddbf383cdb969fc2cad 100644
+--- a/examples/php/diagnostics.php
++++ b/examples/php/diagnostics.php
+@@ -532,6 +532,42 @@ class UnreachableCodeDemo
+ }
+ 
+ 
++// ── Nullable and Void Return Contracts ──────────────────────────────────────
++// A PHPDoc-only nullable result may use a bare return, which yields null.
++// A native nullable declaration requires an explicit null expression instead.
++// All three methods below are valid PHP and need no return-type diagnostic.
++
++class NullableReturnContractDemo
++{
++    public bool $voidReachedReturn = false;
++
++    /** @return string|null */
++    public function documentedNullable(bool $hasValue)
++    {
++        if (!$hasValue) {
++            return;
++        }
++
++        return 'ready';
++    }
++
++    public function nativeNullable(bool $hasValue): ?string
++    {
++        if (!$hasValue) {
++            return null;
++        }
++
++        return 'ready';
++    }
++
++    public function nativeVoid(): void
++    {
++        $this->voidReachedReturn = true;
++        return;
++    }
++}
++
++
+ // ── Diagnostic: Docblock Contradicts the Type Hint ──────────────────────────
+ // A `@param` or `@return` tag refines the native declaration; it must not
+ // disagree with it.  When the signature admits `null` and the tag does not,
+diff --git a/examples/php/scaffolding/assertions.php b/examples/php/scaffolding/assertions.php
+index 85b4506d377185d21b43549a224e6efef9706424..115a6f6e5d64c28398dec04ecfc748174b2fd2aa 100644
+--- a/examples/php/scaffolding/assertions.php
++++ b/examples/php/scaffolding/assertions.php
+@@ -2112,6 +2112,15 @@ function runDemoAssertions(): void
+     assert($nested->ternaryBranch(true) === 'black', 'the ternary branch that assigns $pen types it as a Pen');
+     assert($nested->ternaryBranch(false) === '', 'the else branch leaves $pen unset');
+ 
++    // ── Nullable and void return contracts ──────────────────────────────
++    $returnContract = new NullableReturnContractDemo();
++    assert($returnContract->documentedNullable(false) === null, 'a PHPDoc-only nullable bare return yields null');
++    assert($returnContract->documentedNullable(true) === 'ready', 'the PHPDoc-only value branch returns its string');
++    assert($returnContract->nativeNullable(false) === null, 'a native nullable declaration accepts explicit null');
++    assert($returnContract->nativeNullable(true) === 'ready', 'the native nullable value branch returns its string');
++    $returnContract->nativeVoid();
++    assert($returnContract->voidReachedReturn, 'the native void method reaches its valid bare return');
++
+     // ── Type-aware return and property values ───────────────────────────
+     $expectedValue = new ExpectedValueRankingDemo();
+     assert($expectedValue->returned(42, 'recipient') === 'recipient', 'the returned value is the declared string');
+diff --git a/src/diagnostics/return_type_errors.rs b/src/diagnostics/return_type_errors.rs
+index 50ea0cd0167b8bcdcaa7e1d49ca033f700a0978a..698a4cc08b81eb37c10e7bfe16cf9c016e0e3424 100644
+--- a/src/diagnostics/return_type_errors.rs
++++ b/src/diagnostics/return_type_errors.rs
+@@ -45,6 +45,8 @@ struct ResolvedReturn {
+     end: usize,
+     /// The declared return type of the enclosing function/method.
+     declared_type: PhpType,
++    /// Exact native hint, kept separate from the effective PHPDoc contract.
++    native_type: Option<PhpType>,
+ }
+ 
+ // ── AST walkers ─────────────────────────────────────────────────────────────
+@@ -196,19 +198,37 @@ impl Backend {
+                 })
+             },
+             |ret, ctx| {
++                let native = ret.native_type.as_ref();
+                 let message = match &ret.ty {
+-                    // Bare `return;` in a void function — OK.
+-                    None if ret.declared_type.is_void() => return None,
+-                    // Bare `return;` in a non-void function — error.
+-                    None => format!(
++                    _ if native.is_some_and(PhpType::is_never) => {
++                        "Never-returning function must not contain a return statement".to_string()
++                    }
++                    None if native.is_some_and(PhpType::is_void) => return None,
++                    None if native.is_some() => format!(
+                         "Function with return type {} must not return without a value",
++                        native.unwrap(),
++                    ),
++                    // Without a native hint, a bare return produces null and
++                    // must satisfy the same PHPDoc contract as explicit null.
++                    None if ret.declared_type.is_void()
++                        || is_type_compatible(
++                            &PhpType::null(),
++                            &ret.declared_type,
++                            ctx.class_loader_at(ret.start as u32),
++                            ctx.strict_types,
++                        ) =>
++                    {
++                        return None;
++                    }
++                    None => format!(
++                        "Implicit null return is incompatible with declared return type {}",
+                         ret.declared_type,
+                     ),
+-                    // `return $expr;` in a void function — error.
+-                    Some(_) if ret.declared_type.is_void() => {
++                    Some(_)
++                        if native.is_some_and(PhpType::is_void) || ret.declared_type.is_void() =>
++                    {
+                         "Void function must not return a value".to_string()
+                     }
+-                    // `return $expr;` with a compatible type — OK.
+                     Some(ty)
+                         if is_type_compatible(
+                             ty,
+@@ -219,7 +239,6 @@ impl Backend {
+                     {
+                         return None;
+                     }
+-                    // `return $expr;` with an incompatible type — error.
+                     Some(ty) => format!(
+                         "Return type {} is incompatible with declared return type {}",
+                         ty, ret.declared_type,
+@@ -274,6 +293,7 @@ fn resolve_return_and_push(
+     end: usize,
+     stmt_start: usize,
+     declared_return: &PhpType,
++    native_return: Option<&PhpType>,
+     template_bounds: &HashMap<String, PhpType>,
+     current_class: &ClassInfo,
+     content: &str,
+@@ -291,21 +311,29 @@ fn resolve_return_and_push(
+                 start,
+                 end,
+                 declared_type: declared_return.clone(),
++                native_type: native_return.cloned(),
+             });
+         }
+         Some(expr) => {
+-            // `return $expr;` — skip void-declared functions here;
+-            // they'll be flagged regardless of the expression type.
+-            if declared_return.is_void() {
++            // Native void/never syntax is invalid independently of whether
++            // the expression can be resolved; PHPDoc void forbids values too.
++            if declared_return.is_void()
++                || native_return.is_some_and(|ty| ty.is_void() || ty.is_never())
++            {
+                 out.push(ResolvedReturn {
+                     ty: Some(PhpType::untyped()), // placeholder; message ignores it
+                     start,
+                     end,
+                     declared_type: declared_return.clone(),
++                    native_type: native_return.cloned(),
+                 });
+                 return;
+             }
+ 
++            if declared_return.is_mixed() {
++                return;
++            }
++
+             let resolve_class_names = |ty: PhpType| {
+                 let ty = if template_bounds.is_empty() {
+                     ty
+@@ -346,6 +374,7 @@ fn resolve_return_and_push(
+                     start,
+                     end,
+                     declared_type: declared_return.clone(),
++                    native_type: native_return.cloned(),
+                 });
+                 return;
+             }
+@@ -382,6 +411,7 @@ fn resolve_return_and_push(
+                 start,
+                 end,
+                 declared_type: declared_return.clone(),
++                native_type: native_return.cloned(),
+             });
+         }
+     }
+@@ -545,19 +575,18 @@ fn process_top_level_statement(
+             // against `array<string, int>` rather than bare `array`.  Falling
+             // back to the AST hint covers a function the index has not caught
+             // up with yet.
++            let native_return = func
++                .return_type_hint
++                .as_ref()
++                .map(|rth| crate::parser::extract_hint_type(&rth.hint));
+             let (declared_return, template_bounds) =
+                 match indexed_return_type(backend, file_ctx, uri, func_name, func_offset) {
+                     Some((ret, bounds)) => (Some(ret), bounds),
+-                    None => (
+-                        func.return_type_hint
+-                            .as_ref()
+-                            .map(|rth| crate::parser::extract_hint_type(&rth.hint)),
+-                        HashMap::new(),
+-                    ),
++                    None => (native_return.clone(), HashMap::new()),
+                 };
+ 
+             let declared_return = match declared_return {
+-                Some(t) if !t.is_untyped() && !t.is_mixed() => t,
++                Some(t) if !t.is_untyped() && (!t.is_mixed() || native_return.is_some()) => t,
+                 _ => return,
+             };
+             let declared_return = if template_bounds.is_empty() {
+@@ -611,6 +640,7 @@ fn process_top_level_statement(
+                     end,
+                     stmt_start,
+                     &declared_return,
++                    native_return.as_ref(),
+                     &template_bounds,
+                     current_class,
+                     content,
+@@ -696,10 +726,16 @@ fn process_class_member(
+ 
+     // Look up the method's declared return type from the parsed MethodInfo.
+     let method_info = current_class.get_method(method_name);
+-    let declared_return = method_info.and_then(|mi| mi.return_type.clone());
++    let native_return = method
++        .return_type_hint
++        .as_ref()
++        .map(|rth| crate::parser::extract_hint_type(&rth.hint));
++    let declared_return = method_info
++        .and_then(|mi| mi.return_type.clone())
++        .or_else(|| native_return.clone());
+ 
+     let declared_return = match declared_return {
+-        Some(t) if !t.is_untyped() && !t.is_mixed() => t,
++        Some(t) if !t.is_untyped() && (!t.is_mixed() || native_return.is_some()) => t,
+         _ => return,
+     };
+     let mut bounds = template_bounds(
+@@ -773,6 +809,7 @@ fn process_class_member(
+             end,
+             stmt_start,
+             &declared_return,
++            native_return.as_ref(),
+             &template_bounds,
+             current_class,
+             content,
+diff --git a/tests/integration/diagnostics_return_type_errors.rs b/tests/integration/diagnostics_return_type_errors.rs
+index dadd3c1c72954b3d4d700f0a258005caf1fad2cf..09d743827a1ff6787bfc2593356a48b4fee08bd8 100644
+--- a/tests/integration/diagnostics_return_type_errors.rs
++++ b/tests/integration/diagnostics_return_type_errors.rs
+@@ -4978,3 +4978,180 @@ namespace Second {
+         "Short names should resolve against the commented namespace block, got: {diags:?}"
+     );
+ }
++
++fn assert_return_contract_case(
++    doc_type: Option<&str>,
++    native_type: Option<&str>,
++    statement: &str,
++    diagnosed: bool,
++) {
++    for method in [false, true] {
++        let doc = doc_type.map_or_else(String::new, |ty| format!("/** @return {ty} */\n"));
++        let native = native_type.map_or_else(String::new, |ty| format!(": {ty}"));
++        let declaration = if method {
++            format!(
++                "class ReturnContractFixture {{\n{doc}public function result(){native} {{\n    {statement}\n}}\n}}\n"
++            )
++        } else {
++            format!("{doc}function result(){native} {{\n    {statement}\n}}\n")
++        };
++        let php = format!("<?php\n{declaration}");
++        let diags = collect(&php);
++        let messages = messages_with_code(&diags, "type_mismatch_return");
++        assert_eq!(
++            messages.len(),
++            usize::from(diagnosed),
++            "method={method}, doc={doc_type:?}, native={native_type:?}, statement={statement}: {diags:?}"
++        );
++        if diagnosed {
++            let diagnostic = diags
++                .iter()
++                .find(|diag| {
++                    diag.code == Some(NumberOrString::String("type_mismatch_return".into()))
++                })
++                .unwrap();
++            let return_start = php.rfind("    return").unwrap() + 4;
++            let (start, length) = if statement == "return;" {
++                (return_start, "return".len())
++            } else {
++                let expression = statement
++                    .strip_prefix("return ")
++                    .unwrap()
++                    .strip_suffix(';')
++                    .unwrap();
++                (return_start + "return ".len(), expression.len())
++            };
++            let preceding = &php[..start];
++            let line = preceding.bytes().filter(|byte| *byte == b'\n').count() as u32;
++            let character = preceding
++                .rsplit('\n')
++                .next()
++                .unwrap()
++                .encode_utf16()
++                .count() as u32;
++            assert_eq!(
++                diagnostic.range,
++                Range::new(
++                    Position::new(line, character),
++                    Position::new(line, character + length as u32),
++                ),
++                "diagnostic must identify this return keyword or expression: {php}"
++            );
++        }
++    }
++}
++
++#[test]
++fn return_contract_doc_only_nullable_bare_return_is_implicit_null() {
++    for doc in ["?string", "string|null", "null", "mixed"] {
++        assert_return_contract_case(Some(doc), None, "return;", false);
++    }
++}
++
++#[test]
++fn return_contract_doc_only_nonnullable_bare_return_is_still_diagnosed() {
++    for doc in ["string", "int", "array<string, int>", "never"] {
++        assert_return_contract_case(Some(doc), None, "return;", true);
++    }
++}
++
++#[test]
++fn return_contract_native_nullable_or_mixed_still_requires_a_value() {
++    for native in ["?string", "string|null", "null", "mixed"] {
++        assert_return_contract_case(None, Some(native), "return;", true);
++    }
++}
++
++#[test]
++fn return_contract_native_void_bare_return_survives_conflicting_doc() {
++    for doc in [None, Some("string"), Some("?string"), Some("mixed")] {
++        assert_return_contract_case(doc, Some("void"), "return;", false);
++    }
++}
++
++#[test]
++fn return_contract_native_void_value_is_illegal_despite_doc() {
++    for doc in [None, Some("int"), Some("mixed"), Some("null")] {
++        for statement in [
++            "return 42;",
++            "return null;",
++            "return unresolvedReturnValue();",
++        ] {
++            assert_return_contract_case(doc, Some("void"), statement, true);
++        }
++    }
++}
++
++#[test]
++fn return_contract_nullable_or_void_doc_cannot_legalize_native_string_bare_return() {
++    for doc in ["?string", "string|null", "null", "mixed", "void"] {
++        assert_return_contract_case(Some(doc), Some("string"), "return;", true);
++    }
++}
++
++#[test]
++fn return_contract_explicit_null_is_valid_for_nullable_contracts() {
++    for ty in ["?string", "string|null", "null", "mixed"] {
++        assert_return_contract_case(Some(ty), None, "return null;", false);
++        assert_return_contract_case(None, Some(ty), "return null;", false);
++    }
++}
++
++#[test]
++fn return_contract_value_expressions_still_obey_doc_refinement() {
++    // Bare scalar PHPDoc retains native nullability under the shared merge policy.
++    assert_return_contract_case(Some("string"), Some("?string"), "return null;", false);
++    assert_return_contract_case(
++        Some("array<string, int>"),
++        Some("array"),
++        "return ['key' => 'wrong'];",
++        true,
++    );
++    assert_return_contract_case(
++        Some("array<string, int>"),
++        Some("array"),
++        "return ['key' => 42];",
++        false,
++    );
++}
++
++#[test]
++fn return_contract_native_never_rejects_bare_return_despite_doc() {
++    for doc in [
++        None,
++        Some("never"),
++        Some("void"),
++        Some("mixed"),
++        Some("?string"),
++    ] {
++        assert_return_contract_case(doc, Some("never"), "return;", true);
++    }
++}
++
++#[test]
++fn return_contract_native_never_rejects_return_throw_despite_doc() {
++    for doc in [
++        None,
++        Some("never"),
++        Some("void"),
++        Some("mixed"),
++        Some("?string"),
++    ] {
++        assert_return_contract_case(
++            doc,
++            Some("never"),
++            "return throw new \\RuntimeException();",
++            true,
++        );
++    }
++}
++
++#[test]
++fn return_contract_doc_only_never_accepts_return_throw() {
++    assert_return_contract_case(
++        Some("never"),
++        None,
++        "return throw new \\RuntimeException();",
++        false,
++    );
++}

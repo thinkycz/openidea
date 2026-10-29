@@ -67,7 +67,7 @@ impl<R> Widened<R> {
 }
 
 /// The name a search is about: the word at `pos` (a PHP `$` sigil dropped).
-fn search_word(snap: &DocSnap, pos: Pos) -> Option<String> {
+pub(crate) fn search_word(snap: &DocSnap, pos: Pos) -> Option<String> {
     let r = snap.text.word_range_at(pos)?;
     let text = snap.text.as_str();
     let word = text.get(snap.text.byte_offset(r.start)..snap.text.byte_offset(r.end))?.trim_start_matches('$');
@@ -80,7 +80,12 @@ impl LspManager {
         *self.candidates_hook.write() = Some(Arc::from(hook));
     }
 
-    async fn candidates(&self, t: &Target, word: String, cancel: &CancellationToken) -> Option<CandidateFiles> {
+    pub(crate) async fn candidates(
+        &self,
+        t: &Target,
+        word: String,
+        cancel: &CancellationToken,
+    ) -> Option<CandidateFiles> {
         let hook = self.candidates_hook.read().clone()?;
         let query = CandidateQuery {
             word,
@@ -161,7 +166,12 @@ impl LspManager {
 
     /// Opens `files` on `t` (read from disk) unless the user has them open;
     /// they are closed when the returned guard drops.
-    async fn open_transient(&self, t: &Target, files: Vec<PathBuf>, cancel: &CancellationToken) -> TransientFiles<'_> {
+    pub(crate) async fn open_transient(
+        &self,
+        t: &Target,
+        files: Vec<PathBuf>,
+        cancel: &CancellationToken,
+    ) -> TransientFiles<'_> {
         let read = {
             let cancel = cancel.clone();
             tokio::task::spawn_blocking(move || {
@@ -175,7 +185,13 @@ impl LspManager {
             .await
             .unwrap_or_default()
         };
-        let mut guard = TransientFiles { mgr: self, server: t.server.clone(), run: t.run.clone(), files: Vec::new() };
+        let mut guard = TransientFiles {
+            mgr: self,
+            server: t.server.clone(),
+            run: t.run.clone(),
+            files: Vec::new(),
+            sources: Vec::new(),
+        };
         if cancel.is_cancelled() {
             return guard;
         }
@@ -194,6 +210,7 @@ impl LspManager {
                     tracing::debug!("{}: didOpen: {e}", t.server.name);
                 }
             }
+            guard.sources.push(crate::php::ExpectedSource::new(&uri, 0, &text));
             guard.files.push((path, uri));
         }
         guard
@@ -206,6 +223,7 @@ pub(crate) struct TransientFiles<'a> {
     server: Arc<Server>,
     run: Running,
     pub files: Vec<(PathBuf, lsp::Uri)>,
+    pub sources: Vec<crate::php::ExpectedSource>,
 }
 
 impl TransientFiles<'_> {
@@ -220,13 +238,14 @@ impl TransientFiles<'_> {
                 tracing::debug!("{}: didOpen: {e}", self.server.name);
             }
         }
+        self.sources.push(crate::php::ExpectedSource::new(&uri, 0, text));
         self.files.push((path.to_owned(), uri));
     }
 }
 
 impl<'a> TransientFiles<'a> {
     pub(crate) fn empty(mgr: &'a LspManager, t: &Target) -> Self {
-        Self { mgr, server: t.server.clone(), run: t.run.clone(), files: Vec::new() }
+        Self { mgr, server: t.server.clone(), run: t.run.clone(), files: Vec::new(), sources: Vec::new() }
     }
 }
 

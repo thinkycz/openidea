@@ -1,0 +1,888 @@
+diff --git a/docs/CHANGELOG.md b/docs/CHANGELOG.md
+index dd95666..1cfbe57 100644
+--- a/docs/CHANGELOG.md
++++ b/docs/CHANGELOG.md
+@@ -15,6 +15,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
+ 
+ ## [Unreleased]
+ 
++- **Generate constructors without losing surrounding code.** Compact declarations and grouped properties retain neighboring members. Promotion preserves original native property types and documentation and requires PHP 8.0; documentation-only return types are not used as constructor parameter types. Contributed by PHP Workbench downstream.
++
+ - **Keep generated accessors inside compact classes.** Getter and setter generation preserves following members and comments, including compact traits and readonly classes. Contributed by PHP Workbench downstream.
+ 
+ - **Readonly-class accessors.** Getter generation remains available for readonly classes, while setter actions are omitted for their readonly properties. Contributed by PHP Workbench downstream.
+diff --git a/src/code_actions/generate_constructor.rs b/src/code_actions/generate_constructor.rs
+index de4b587..79baa08 100644
+--- a/src/code_actions/generate_constructor.rs
++++ b/src/code_actions/generate_constructor.rs
+@@ -27,6 +27,7 @@ use crate::atom::bytes_to_str;
+ use crate::docblock::{extract_var_type, get_docblock_text_for_node};
+ use crate::parser::extract_hint_type;
+ use crate::php_type::{PhpType, TypeKind};
++use crate::symbol_map::docblock::get_docblock_text_with_offset;
+ use crate::text_position::offset_to_position;
+ 
+ // ── Data types ──────────────────────────────────────────────────────────────
+@@ -37,6 +38,8 @@ struct QualifyingProperty {
+     name: String,
+     /// Structured type hint for the constructor parameter, if available.
+     type_hint: Option<PhpType>,
++    /// Only the original native property hint may become a promoted hint.
++    native_type_hint: Option<PhpType>,
+     /// Default value text (e.g. `'active'`, `[]`), if the property has one.
+     default_value: Option<String>,
+     /// Visibility keyword (`"public"`, `"protected"`, `"private"`).
+@@ -44,9 +47,11 @@ struct QualifyingProperty {
+     visibility: &'static str,
+     is_readonly: bool,
+     /// Byte span of the entire property declaration (for deletion in the
+-    /// promoted variant).  `(start, end)` where `end` is past the trailing
+-    /// newline so that removing the declaration leaves no blank line.
++    /// promoted variant), including attached documentation. Layout whitespace
++    /// is included only when it shares no line with other source tokens.
+     declaration_span: (usize, usize),
++    /// Original property documentation, retained by the promoted property.
++    docblock: Option<String>,
+ }
+ 
+ // ── Public API ──────────────────────────────────────────────────────────────
+@@ -74,45 +79,50 @@ impl Backend {
+ 
+         // Resolve the cursor context and gather the (owned) data needed to
+         // build the edits.  The borrowed AST does not escape the closure.
+-        let Some((props, indent, insert_offset)) = crate::parser::with_parsed_program(
+-            content,
+-            "generate_constructor",
+-            |program, content| {
+-                let ctx = find_cursor_context(&program.statements, cursor_offset);
+-
+-                let all_members = match &ctx {
+-                    CursorContext::InClassLike {
+-                        member: MemberContext::Property(prop),
+-                        all_members,
+-                        ..
+-                    } => {
+-                        // Only offer on non-static properties — static
+-                        // properties won't be included in the constructor.
+-                        if prop.modifiers().iter().any(|m| m.is_static()) {
+-                            return None;
++        let Some((props, indent, insert_offset, promotion_refusal)) =
++            crate::parser::with_parsed_program(
++                content,
++                "generate_constructor",
++                |program, content| {
++                    let ctx = find_cursor_context(&program.statements, cursor_offset);
++
++                    let (all_members, body_end) = match &ctx {
++                        CursorContext::InClassLike {
++                            member: MemberContext::Property(prop),
++                            all_members,
++                            body_end,
++                            ..
++                        } => {
++                            // Only offer on non-static properties — static
++                            // properties won't be included in the constructor.
++                            if prop.modifiers().iter().any(|m| m.is_static()) {
++                                return None;
++                            }
++                            (*all_members, *body_end)
+                         }
+-                        *all_members
+-                    }
+-                    _ => return None,
+-                };
++                        _ => return None,
++                    };
+ 
+-                if has_constructor(all_members) {
+-                    return None;
+-                }
++                    if has_constructor(all_members) {
++                        return None;
++                    }
+ 
+-                let trivia = program.trivia.as_slice();
++                    let trivia = program.trivia.as_slice();
+ 
+-                let props = collect_qualifying_properties(all_members, content, trivia);
+-                if props.is_empty() {
+-                    return None;
+-                }
++                    let props = collect_qualifying_properties(all_members, content, trivia);
++                    if props.is_empty() {
++                        return None;
++                    }
+ 
+-                let indent = detect_indent_from_members(all_members, content);
++                    let indent = detect_indent_from_members(all_members, content);
+ 
+-                let insert_offset = find_insertion_offset(all_members, content);
+-                Some((props, indent, insert_offset))
+-            },
+-        ) else {
++                    let insert_offset =
++                        find_insertion_offset(all_members, content, trivia, body_end);
++                    let promotion_refusal = promotion_refusal(all_members, content, trivia);
++                    Some((props, indent, insert_offset, promotion_refusal))
++                },
++            )
++        else {
+             return;
+         };
+ 
+@@ -146,27 +156,49 @@ impl Backend {
+         }
+ 
+         // ── Promoted constructor ────────────────────────────────────────
+-        {
+-            let constructor_text = build_promoted_constructor(&props, &indent);
+-
+-            // Build the list of edits: one deletion per property
+-            // declaration, plus one insertion for the constructor.
+-            // Sort deletions back-to-front so byte offsets stay valid.
+-            let mut edits: Vec<TextEdit> = Vec::new();
+-
+-            for prop in props.iter().rev() {
+-                let start = offset_to_position(content, prop.declaration_span.0);
+-                let end = offset_to_position(content, prop.declaration_span.1);
+-                edits.push(TextEdit {
+-                    range: Range { start, end },
+-                    new_text: String::new(),
+-                });
+-            }
+-
+-            // Insert the constructor after all property declarations
+-            // (same position as the traditional constructor).  This
+-            // keeps static properties above the constructor rather
+-            // than displacing them below it.
++        let promotion_refusal = if self.php_version() < crate::types::PhpVersion::new(8, 0) {
++            Some(
++                "Constructor property promotion requires PHP 8.0 or newer. The traditional constructor remains available.",
++            )
++        } else {
++            promotion_refusal
++        };
++        if let Some(reason) = promotion_refusal {
++            out.push(CodeActionOrCommand::CodeAction(CodeAction {
++                title: "Generate promoted constructor".to_string(),
++                kind: Some(CodeActionKind::REFACTOR_REWRITE),
++                disabled: Some(CodeActionDisabled {
++                    reason: reason.to_string(),
++                }),
++                ..CodeAction::default()
++            }));
++            return;
++        }
++        let constructor_text = build_promoted_constructor(&props, &indent);
++        let mut spans: Vec<(usize, usize)> =
++            props.iter().map(|prop| prop.declaration_span).collect();
++        spans.sort_unstable();
++        spans.dedup();
++        let mut edits = Vec::new();
++        let mut inserted = false;
++        for (start, end) in spans {
++            // Combining an endpoint insertion with its deletion avoids
++            // ambiguous equal-position edit ordering in client implementations.
++            let replacement = if !inserted && start <= insert_offset && insert_offset <= end {
++                inserted = true;
++                constructor_text.clone()
++            } else {
++                String::new()
++            };
++            edits.push(TextEdit {
++                range: Range {
++                    start: offset_to_position(content, start),
++                    end: offset_to_position(content, end),
++                },
++                new_text: replacement,
++            });
++        }
++        if !inserted {
+             edits.push(TextEdit {
+                 range: Range {
+                     start: insert_pos,
+@@ -174,18 +206,14 @@ impl Backend {
+                 },
+                 new_text: constructor_text,
+             });
+-
+-            out.push(CodeActionOrCommand::CodeAction(CodeAction {
+-                title: "Generate promoted constructor".to_string(),
+-                kind: Some(CodeActionKind::REFACTOR_REWRITE),
+-                diagnostics: None,
+-                edit: Some(crate::code_actions::single_file_edit(doc_uri, edits)),
+-                command: None,
+-                is_preferred: Some(false),
+-                disabled: None,
+-                data: None,
+-            }));
+         }
++        out.push(CodeActionOrCommand::CodeAction(CodeAction {
++            title: "Generate promoted constructor".to_string(),
++            kind: Some(CodeActionKind::REFACTOR_REWRITE),
++            edit: Some(crate::code_actions::single_file_edit(doc_uri, edits)),
++            is_preferred: Some(false),
++            ..CodeAction::default()
++        }));
+     }
+ }
+ 
+@@ -236,12 +264,32 @@ fn collect_qualifying_properties<'a>(
+         let docblock_type =
+             get_docblock_text_for_node(trivia, content, plain).and_then(extract_var_type);
+ 
+-        // Compute the declaration span for deletion (promoted variant).
+-        // Start from the beginning of the line containing the property
+-        // (to include leading whitespace), end past the trailing newline.
++        let docblock = get_docblock_text_with_offset(trivia, content, plain);
+         let prop_span = member.span();
+-        let decl_start = find_line_start(content, prop_span.start.offset as usize);
+-        let decl_end = find_line_end(content, prop_span.end.offset as usize);
++        let token_start = docblock
++            .map(|(_, start)| start)
++            .unwrap_or(prop_span.start.offset) as usize;
++        let token_end = prop_span.end.offset as usize;
++        let line_start = find_line_start(content, token_start);
++        let line_end = find_line_end(content, token_end);
++        // Only consume indentation/newline when no sibling, brace or comment
++        // shares the corresponding side of this declaration's physical line.
++        let decl_start = if content[line_start..token_start]
++            .bytes()
++            .all(|b| matches!(b, b' ' | b'\t'))
++        {
++            line_start
++        } else {
++            token_start
++        };
++        let decl_end = if content[token_end..line_end]
++            .bytes()
++            .all(|b| matches!(b, b' ' | b'\t' | b'\r' | b'\n'))
++        {
++            line_end
++        } else {
++            token_end
++        };
+ 
+         for item in plain.items.iter() {
+             let var_name = bytes_to_str(item.variable().name);
+@@ -273,10 +321,12 @@ fn collect_qualifying_properties<'a>(
+             result.push(QualifyingProperty {
+                 name: bare_name.to_string(),
+                 type_hint,
++                native_type_hint: native_hint.clone(),
+                 default_value,
+                 visibility,
+                 is_readonly,
+                 declaration_span: (decl_start, decl_end),
++                docblock: docblock.map(|(text, _)| text.to_string()),
+             });
+         }
+     }
+@@ -291,57 +341,75 @@ fn collect_qualifying_properties<'a>(
+ /// intersections, array shapes, generics, etc.  A late-static type is
+ /// rejected as well: PHP allows `static` as a return type only, and its
+ /// bounded display form (`static(App\Foo)`) is not source syntax at all, so
+-/// writing either into a parameter list would not parse.
++/// writing either into a parameter list would not parse. Return-only `void`
++/// and `never` are likewise excluded from documentation-derived parameters.
+ fn is_simple_php_type(ty: &PhpType) -> bool {
+     match ty.kind() {
+-        TypeKind::Named(_) => true,
+-        TypeKind::Nullable(inner) => matches!(inner.kind(), TypeKind::Named(_)),
++        TypeKind::Named(name) => {
++            !name.eq_ignore_ascii_case("void") && !name.eq_ignore_ascii_case("never")
++        }
++        TypeKind::Nullable(inner) => {
++            matches!(inner.kind(), TypeKind::Named(_)) && is_simple_php_type(inner)
++        }
+         _ => false,
+     }
+ }
+ 
+-/// Find the byte offset where the constructor should be inserted.
+-///
+-/// The constructor is inserted after the last property declaration and
+-/// before any methods or other non-property members.  If there are no
+-/// properties before any methods, it's inserted after the class opening
+-/// brace.
+-fn find_insertion_offset<'a>(members: &Sequence<'a, ClassLikeMember<'a>>, content: &str) -> usize {
+-    let mut last_property_end: Option<u32> = None;
+-    let mut first_non_property_start: Option<u32> = None;
+-
++/// Insert after the last property, without crossing its next sibling/body boundary.
++fn find_insertion_offset<'a>(
++    members: &Sequence<'a, ClassLikeMember<'a>>,
++    content: &str,
++    trivia: &[Trivia<'a>],
++    body_end: u32,
++) -> usize {
++    let mut end = body_end;
+     for member in members.iter() {
+-        match member {
+-            ClassLikeMember::Property(_) => {
+-                let span = member.span();
+-                last_property_end = Some(span.end.offset);
+-            }
+-            ClassLikeMember::Method(_)
+-            | ClassLikeMember::Constant(_)
+-            | ClassLikeMember::TraitUse(_)
+-            | ClassLikeMember::EnumCase(_) => {
+-                if first_non_property_start.is_none() && last_property_end.is_some() {
+-                    first_non_property_start = Some(member.span().start.offset);
+-                }
+-                // If we haven't seen any properties yet, record this as
+-                // the first non-property so we know where to insert
+-                // relative to the class opening brace.
+-                if last_property_end.is_none() && first_non_property_start.is_none() {
+-                    first_non_property_start = Some(member.span().start.offset);
+-                }
+-            }
++        if matches!(member, ClassLikeMember::Property(_)) {
++            end = member.span().end.offset;
+         }
+     }
++    super::helpers::member_insertion_offset(end, members, content, trivia, body_end)
++}
+ 
+-    if let Some(end) = last_property_end {
+-        // Insert after the last property.  Find the end of the line
+-        // containing the property's semicolon.
+-        find_line_end(content, end as usize)
+-    } else {
+-        // No properties at all — shouldn't happen because we check for
+-        // qualifying properties, but handle gracefully.
+-        0
++/// Refuse promotion when declaration metadata cannot be faithfully transferred.
++/// The traditional constructor leaves these declarations unchanged.
++fn promotion_refusal<'a>(
++    members: &Sequence<'a, ClassLikeMember<'a>>,
++    content: &str,
++    trivia: &[Trivia<'a>],
++) -> Option<&'static str> {
++    for member in members.iter() {
++        let ClassLikeMember::Property(Property::Plain(plain)) = member else {
++            continue;
++        };
++        if plain.modifiers.iter().any(|modifier| modifier.is_static()) {
++            continue;
++        }
++        if !plain.attribute_lists.is_empty() {
++            return Some(
++                "Property attributes require target-aware promotion; use the traditional constructor to retain them.",
++            );
++        }
++        let span = plain.span();
++        let documentation = get_docblock_text_with_offset(trivia, content, plain);
++        let start = documentation
++            .map(|(_, start)| start)
++            .unwrap_or(span.start.offset);
++        let first = trivia.partition_point(|item| item.span.end.offset <= start);
++        if trivia[first..]
++            .iter()
++            .take_while(|item| item.span.start.offset < span.end.offset)
++            .any(|item| {
++                !matches!(item.kind, TriviaKind::WhiteSpace)
++                    && documentation.is_none_or(|(_, offset)| item.span.start.offset != offset)
++            })
++        {
++            return Some(
++                "Comments within the property declaration require explicit placement; use the traditional constructor to retain them.",
++            );
++        }
+     }
++    None
+ }
+ 
+ fn find_line_start(content: &str, offset: usize) -> usize {
+@@ -444,6 +512,12 @@ fn build_promoted_constructor(props: &[QualifyingProperty], indent: &str) -> Str
+         let mut param = String::new();
+         param.push_str(indent);
+         param.push_str(indent);
++        if let Some(docblock) = &prop.docblock {
++            param.push_str(docblock);
++            param.push('\n');
++            param.push_str(indent);
++            param.push_str(indent);
++        }
+ 
+         param.push_str(prop.visibility);
+ 
+@@ -451,7 +525,7 @@ fn build_promoted_constructor(props: &[QualifyingProperty], indent: &str) -> Str
+             param.push_str(" readonly");
+         }
+ 
+-        if let Some(ref hint) = prop.type_hint {
++        if let Some(ref hint) = prop.native_type_hint {
+             param.push(' ');
+             param.push_str(&hint.to_string());
+         }
+@@ -579,10 +653,12 @@ mod tests {
+         QualifyingProperty {
+             name: name.to_string(),
+             type_hint: type_hint.map(PhpType::parse),
++            native_type_hint: type_hint.map(PhpType::parse),
+             default_value: default.map(|s| s.to_string()),
+             visibility: "public",
+             is_readonly: false,
+             declaration_span: (0, 0),
++            docblock: None,
+         }
+     }
+ 
+@@ -690,10 +766,12 @@ mod tests {
+         QualifyingProperty {
+             name: name.to_string(),
+             type_hint: type_hint.map(PhpType::parse),
++            native_type_hint: type_hint.map(PhpType::parse),
+             default_value: default.map(|s| s.to_string()),
+             visibility,
+             is_readonly,
+             declaration_span: (0, 0),
++            docblock: None,
+         }
+     }
+ 
+diff --git a/src/code_actions/generate_getter_setter.rs b/src/code_actions/generate_getter_setter.rs
+index cda6b41..7336918 100644
+--- a/src/code_actions/generate_getter_setter.rs
++++ b/src/code_actions/generate_getter_setter.rs
+@@ -33,7 +33,6 @@ use crate::atom::bytes_to_str;
+ use crate::docblock::{extract_var_type, get_docblock_text_for_node};
+ use crate::parser::extract_hint_type;
+ use crate::php_type::PhpType;
+-use crate::symbol_map::docblock::get_docblock_text_with_offset;
+ use crate::text_position::offset_to_position;
+ 
+ // ── Data types ──────────────────────────────────────────────────────────────
+@@ -530,32 +529,7 @@ fn find_accessor_insertion_offset<'a>(
+         }
+     }
+     let end = last_method_end.or(last_member_end).unwrap_or(body_end);
+-    let next = members
+-        .iter()
+-        .filter(|member| member.span().start.offset >= end)
+-        .min_by_key(|member| member.span().start.offset);
+-    let boundary = next
+-        .map(|member| {
+-            get_docblock_text_with_offset(trivia, content, member)
+-                .map(|(_, offset)| offset)
+-                .filter(|offset| *offset >= end)
+-                .unwrap_or_else(|| member.span().start.offset)
+-        })
+-        .unwrap_or(body_end)
+-        .min(body_end);
+-    // A following member's docblock belongs to that member. Also never split
+-    // an intervening multi-line comment merely to reach the first newline.
+-    let Some(newline) = content[end as usize..boundary as usize].find('\n') else {
+-        return end as usize;
+-    };
+-    let newline = end as usize + newline;
+-    let index = trivia.partition_point(|item| item.span.end.offset <= newline as u32);
+-    if trivia.get(index).is_some_and(|item| {
+-        item.span.start.offset <= newline as u32 && !matches!(item.kind, TriviaKind::WhiteSpace)
+-    }) {
+-        return end as usize;
+-    }
+-    newline + 1
++    super::helpers::member_insertion_offset(end, members, content, trivia, body_end)
+ }
+ 
+ /// Check if the modifier list includes `readonly`.
+diff --git a/src/code_actions/helpers.rs b/src/code_actions/helpers.rs
+index fda7526..ecf2016 100644
+--- a/src/code_actions/helpers.rs
++++ b/src/code_actions/helpers.rs
+@@ -4,9 +4,11 @@
+ 
+ use std::collections::HashMap;
+ 
++use crate::symbol_map::docblock::get_docblock_text_with_offset;
+ use mago_span::HasSpan;
+ use mago_syntax::cst::class_like::member::ClassLikeMember;
+ use mago_syntax::cst::sequence::Sequence;
++use mago_syntax::cst::{Trivia, TriviaKind};
+ use serde::{Deserialize, Serialize};
+ use tower_lsp::lsp_types::*;
+ 
+@@ -281,3 +283,39 @@ pub(crate) fn find_identical_occurrences(
+     }
+     results
+ }
++
++/// Reach a line end after a member only within its canonical body/sibling boundary.
++pub(super) fn member_insertion_offset<'a>(
++    end: u32,
++    members: &Sequence<'a, ClassLikeMember<'a>>,
++    content: &str,
++    trivia: &[Trivia<'a>],
++    body_end: u32,
++) -> usize {
++    let next = members
++        .iter()
++        .filter(|member| member.span().start.offset >= end)
++        .min_by_key(|member| member.span().start.offset);
++    let boundary = next
++        .map(|member| {
++            get_docblock_text_with_offset(trivia, content, member)
++                .map(|(_, offset)| offset)
++                .filter(|offset| *offset >= end)
++                .unwrap_or_else(|| member.span().start.offset)
++        })
++        .unwrap_or(body_end)
++        .min(body_end);
++    // A following member's docblock belongs to that member. Also never split
++    // an intervening multi-line comment merely to reach the first newline.
++    let Some(newline) = content[end as usize..boundary as usize].find('\n') else {
++        return end as usize;
++    };
++    let newline = end as usize + newline;
++    let index = trivia.partition_point(|item| item.span.end.offset <= newline as u32);
++    if trivia.get(index).is_some_and(|item| {
++        item.span.start.offset <= newline as u32 && !matches!(item.kind, TriviaKind::WhiteSpace)
++    }) {
++        return end as usize;
++    }
++    newline + 1
++}
+diff --git a/tests/integration/code_action_generate_constructor.rs b/tests/integration/code_action_generate_constructor.rs
+index cce246d..abb8585 100644
+--- a/tests/integration/code_action_generate_constructor.rs
++++ b/tests/integration/code_action_generate_constructor.rs
+@@ -7,7 +7,8 @@
+ //! in the constructor).
+ 
+ use crate::common::{
+-    apply_workspace_edit, create_test_backend, find_action_titled, get_code_actions_at,
++    apply_workspace_edit, create_test_backend, extract_edits, find_action_titled,
++    get_code_actions_at, get_code_actions_in_range, lsp_pos_to_offset, position_of,
+ };
+ use tower_lsp::lsp_types::*;
+ 
+@@ -1032,3 +1033,327 @@ class Foo {
+         "static property should appear above the constructor:\n{result}"
+     );
+ }
++
++fn constructor_span_action(content: &str, title: &str) -> CodeAction {
++    let backend = create_test_backend();
++    let point = position_of(content, "$value");
++    let actions = get_code_actions_in_range(
++        &backend,
++        "file:///test.php",
++        content,
++        Range::new(point, point),
++    );
++    find_action_titled(&actions, title)
++        .expect("constructor action")
++        .clone()
++}
++
++fn assert_disjoint_constructor_edits(content: &str, action: &CodeAction) {
++    let edits = extract_edits(action);
++    let mut ranges: Vec<_> = edits
++        .iter()
++        .map(|edit| {
++            (
++                lsp_pos_to_offset(content, edit.range.start),
++                lsp_pos_to_offset(content, edit.range.end),
++            )
++        })
++        .collect();
++    ranges.sort_unstable();
++    for pair in ranges.windows(2) {
++        assert!(
++            pair[0].1 <= pair[1].0,
++            "constructor edits must not overlap: {ranges:?}"
++        );
++        assert_ne!(pair[0], pair[1], "duplicate declaration edit: {ranges:?}");
++    }
++}
++
++fn assert_owned_constructor(result: &str) {
++    let backend = create_test_backend();
++    let classes = backend.parse_php(result);
++    let owner = classes
++        .iter()
++        .find(|class| class.name == "SpanCase")
++        .expect("owning class must survive promotion");
++    assert_eq!(
++        owner
++            .methods
++            .iter()
++            .filter(|method| method.name == "__construct")
++            .count(),
++        1,
++        "exactly one constructor must belong to its original class: {result}"
++    );
++}
++
++#[test]
++fn constructor_span_compact_traditional_stays_inside_class() {
++    let content = "<?php class SpanCase { private int $value = 1; } $outside = 42;\n";
++    let action = constructor_span_action(content, "Generate constructor");
++    let edits = extract_edits(&action);
++    let expected = content.find("; }").unwrap() + 1;
++    assert_eq!(lsp_pos_to_offset(content, edits[0].range.start), expected);
++    let result = apply_workspace_edit(content, action.edit.as_ref().unwrap());
++    assert!(result.ends_with("} $outside = 42;\n"));
++    assert_owned_constructor(&result);
++}
++
++#[test]
++fn constructor_span_compact_promotion_preserves_class_and_outside_code() {
++    let content = "<?php class SpanCase { private int $value = 1; } $outside = 42;\n";
++    let action = constructor_span_action(content, "Generate promoted constructor");
++    assert_disjoint_constructor_edits(content, &action);
++    let result = apply_workspace_edit(content, action.edit.as_ref().unwrap());
++    assert!(
++        result.starts_with("<?php class SpanCase {"),
++        "class must survive: {result}"
++    );
++    assert!(
++        result.ends_with("} $outside = 42;\n"),
++        "outside code must survive: {result}"
++    );
++    assert_owned_constructor(&result);
++}
++
++#[test]
++fn constructor_span_grouped_properties_have_one_disjoint_declaration_edit() {
++    let content = "<?php\nclass SpanCase {\n    private int $value, $other;\n}\n";
++    let action = constructor_span_action(content, "Generate promoted constructor");
++    assert_disjoint_constructor_edits(content, &action);
++    let result = apply_workspace_edit(content, action.edit.as_ref().unwrap());
++    assert_eq!(result.matches("private int $value").count(), 1);
++    assert_eq!(result.matches("private int $other").count(), 1);
++    assert_owned_constructor(&result);
++}
++
++#[test]
++fn constructor_span_promotion_preserves_same_line_static_and_method() {
++    let content = "<?php class SpanCase { private int $value = 1; public static string $marker = 'keep'; public function existing() { return self::$marker; } } $outside = 42;\n";
++    let action = constructor_span_action(content, "Generate promoted constructor");
++    assert_disjoint_constructor_edits(content, &action);
++    let result = apply_workspace_edit(content, action.edit.as_ref().unwrap());
++    assert!(
++        result.contains("public static string $marker = 'keep';"),
++        "static property must survive: {result}"
++    );
++    assert!(
++        result.contains("public function existing() { return self::$marker; }"),
++        "method must survive: {result}"
++    );
++    assert_owned_constructor(&result);
++}
++
++#[test]
++fn constructor_span_traditional_preserves_following_multiline_docblock() {
++    let content = "<?php class SpanCase { private int $value = 1; /** existing }\n * @return int\n */ public function existing(): int { return $this->value; } }\n";
++    let action = constructor_span_action(content, "Generate constructor");
++    let edits = extract_edits(&action);
++    assert_eq!(
++        lsp_pos_to_offset(content, edits[0].range.start),
++        content.find("; /**").unwrap() + 1
++    );
++    let result = apply_workspace_edit(content, action.edit.as_ref().unwrap());
++    assert!(result.contains("/** existing }\n * @return int\n */ public function existing(): int"));
++    assert_owned_constructor(&result);
++}
++
++#[test]
++fn constructor_span_promotion_transfers_property_docblock_to_parameter() {
++    let content =
++        "<?php\nclass SpanCase {\n    /** @var positive-int */\n    private int $value;\n}\n";
++    let action = constructor_span_action(content, "Generate promoted constructor");
++    assert_disjoint_constructor_edits(content, &action);
++    let result = apply_workspace_edit(content, action.edit.as_ref().unwrap());
++    let constructor = result
++        .find("public function __construct")
++        .expect("constructor");
++    let docblock = result
++        .find("/** @var positive-int */")
++        .expect("property documentation preserved");
++    let parameter = result
++        .find("private int $value")
++        .expect("promoted parameter");
++    assert!(
++        constructor < docblock && docblock < parameter,
++        "documentation belongs to promoted parameter: {result}"
++    );
++    assert_eq!(result.matches("/** @var positive-int */").count(), 1);
++    assert_owned_constructor(&result);
++}
++
++#[test]
++fn constructor_span_unicode_crlf_promotion_keeps_following_comment() {
++    let content = "<?php\r\n// café 🐘\r\nclass SpanCase { private int $value = 1; /* preserve }\r\n tail */ }\r\n";
++    let action = constructor_span_action(content, "Generate promoted constructor");
++    assert_disjoint_constructor_edits(content, &action);
++    let result = apply_workspace_edit(content, action.edit.as_ref().unwrap());
++    assert!(result.starts_with("<?php\r\n// café 🐘\r\nclass SpanCase {"));
++    assert!(result.contains("/* preserve }\r\n tail */ }\r\n"));
++    assert_owned_constructor(&result);
++}
++
++#[test]
++fn constructor_span_attributed_property_keeps_traditional_and_explains_promotion_limit() {
++    let content = "<?php class SpanCase { #[Example] private int $value; }";
++    let traditional = constructor_span_action(content, "Generate constructor");
++    assert!(traditional.disabled.is_none());
++    let result = apply_workspace_edit(content, traditional.edit.as_ref().unwrap());
++    assert!(result.contains("#[Example] private int $value;"));
++    assert_owned_constructor(&result);
++    let promoted = constructor_span_action(content, "Generate promoted constructor");
++    let refusal = promoted
++        .disabled
++        .expect("must explain unsafe attribute transfer");
++    assert!(!refusal.reason.is_empty());
++    assert!(
++        promoted.edit.is_none(),
++        "no destructive proposal when metadata cannot be transferred"
++    );
++}
++
++#[test]
++fn constructor_span_internal_comment_never_silently_disappears() {
++    let content = "<?php class SpanCase { private int /* keep this explanation */ $value; }";
++    let traditional = constructor_span_action(content, "Generate constructor");
++    assert!(traditional.disabled.is_none());
++    let result = apply_workspace_edit(content, traditional.edit.as_ref().unwrap());
++    assert!(result.contains("private int /* keep this explanation */ $value;"));
++    assert_owned_constructor(&result);
++    let promoted = constructor_span_action(content, "Generate promoted constructor");
++    assert!(promoted.disabled.is_some());
++    assert!(promoted.edit.is_none());
++}
++
++#[test]
++fn constructor_span_docblock_gap_comment_is_retained_by_traditional_action() {
++    let content =
++        "<?php class SpanCase { /** @var positive-int */ /* keep gap */ private int $value; }";
++    let traditional = constructor_span_action(content, "Generate constructor");
++    let result = apply_workspace_edit(content, traditional.edit.as_ref().unwrap());
++    assert!(result.contains("/** @var positive-int */ /* keep gap */ private int $value;"));
++    assert_owned_constructor(&result);
++    let promoted = constructor_span_action(content, "Generate promoted constructor");
++    assert!(promoted.disabled.is_some());
++    assert!(promoted.edit.is_none());
++}
++
++#[test]
++fn constructor_span_attribute_on_static_sibling_does_not_disable_safe_promotion() {
++    let content =
++        "<?php class SpanCase { private int $value; #[Example] public static int $other = 42; }";
++    let promoted = constructor_span_action(content, "Generate promoted constructor");
++    assert!(promoted.disabled.is_none());
++    assert_disjoint_constructor_edits(content, &promoted);
++    let result = apply_workspace_edit(content, promoted.edit.as_ref().unwrap());
++    assert!(result.contains("#[Example] public static int $other = 42;"));
++    assert_owned_constructor(&result);
++}
++
++#[test]
++fn constructor_span_compact_trait_keeps_constructor_in_trait() {
++    let content =
++        "<?php trait SpanCase { private int $value = 1; } class TraitUser { use SpanCase; }\n";
++    for title in ["Generate constructor", "Generate promoted constructor"] {
++        let action = constructor_span_action(content, title);
++        assert_disjoint_constructor_edits(content, &action);
++        let result = apply_workspace_edit(content, action.edit.as_ref().unwrap());
++        assert!(result.starts_with("<?php trait SpanCase {"));
++        assert!(result.ends_with("class TraitUser { use SpanCase; }\n"));
++        assert_owned_constructor(&result);
++    }
++}
++
++#[test]
++fn constructor_span_readonly_grouped_properties_keep_readonly_owner() {
++    let content = "<?php readonly class SpanCase { private int $value, $other; }\n";
++    for title in ["Generate constructor", "Generate promoted constructor"] {
++        let action = constructor_span_action(content, title);
++        assert_disjoint_constructor_edits(content, &action);
++        let result = apply_workspace_edit(content, action.edit.as_ref().unwrap());
++        assert!(result.starts_with("<?php readonly class SpanCase {"));
++        assert!(result.contains("int $value"));
++        assert!(result.contains("int $other"));
++        assert_owned_constructor(&result);
++    }
++}
++
++fn assert_promoted_doc_only_type(doc_type: &str) {
++    let content =
++        format!("<?php\nclass SpanCase {{\n    /** @var {doc_type} */\n    private $value;\n}}\n");
++    let action = constructor_span_action(&content, "Generate promoted constructor");
++    let result = apply_workspace_edit(&content, action.edit.as_ref().unwrap());
++    let backend = create_test_backend();
++    let original = backend.parse_php(&content);
++    let generated = backend.parse_php(&result);
++    let original_property = &original[0].properties[0];
++    let generated_property = &generated[0].properties[0];
++    assert!(original_property.native_type_hint.is_none());
++    assert!(
++        generated_property.native_type_hint.is_none(),
++        "promotion must preserve originally untyped property semantics: {result}"
++    );
++    assert_eq!(
++        generated_property.type_hint, original_property.type_hint,
++        "effective PHPDoc type must survive on promoted property: {result}"
++    );
++    assert!(result.contains(&format!("/** @var {doc_type} */")));
++}
++
++#[test]
++fn constructor_legality_callable_doc_does_not_become_illegal_property_hint() {
++    assert_promoted_doc_only_type("callable");
++}
++
++#[test]
++fn constructor_legality_int_doc_does_not_strengthen_untyped_property() {
++    assert_promoted_doc_only_type("int");
++}
++
++#[test]
++fn constructor_legality_shape_doc_keeps_effective_promoted_property_type() {
++    assert_promoted_doc_only_type("array{key: int}");
++}
++
++#[test]
++fn constructor_legality_promotion_respects_php80_syntax_boundary() {
++    let content = "<?php\nclass SpanCase {\n    private int $value;\n}\n";
++    let point = position_of(content, "$value");
++    for (version, supported) in [
++        (phpantom_lsp::types::PhpVersion::new(7, 4), false),
++        (phpantom_lsp::types::PhpVersion::new(8, 0), true),
++    ] {
++        let backend = create_test_backend();
++        backend.set_php_version(version);
++        let actions = get_code_actions_in_range(
++            &backend,
++            "file:///test.php",
++            content,
++            Range::new(point, point),
++        );
++        let traditional = find_action_titled(&actions, "Generate constructor")
++            .expect("traditional remains available");
++        assert!(traditional.disabled.is_none());
++        let promoted = find_action_titled(&actions, "Generate promoted constructor")
++            .expect("promotion result");
++        assert_eq!(promoted.disabled.is_none(), supported, "target {version:?}");
++        if !supported {
++            assert!(promoted.edit.is_none());
++        }
++    }
++}
++
++#[test]
++fn constructor_legality_doc_only_void_never_are_not_parameter_types() {
++    for doc_type in ["void", "never", "VOID", "Never", "?void", "?never"] {
++        let content = format!(
++            "<?php\nclass SpanCase {{\n    /** @var {doc_type} */\n    private $value;\n}}\n"
++        );
++        let action = constructor_span_action(&content, "Generate constructor");
++        let result = apply_workspace_edit(&content, action.edit.as_ref().unwrap());
++        assert!(
++            result.contains("function __construct($value)"),
++            "doc-only {doc_type} cannot be a parameter type: {result}"
++        );
++    }
++}

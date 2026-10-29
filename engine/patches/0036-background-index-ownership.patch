@@ -1,0 +1,1297 @@
+diff --git a/docs/CHANGELOG.md b/docs/CHANGELOG.md
+index bd7cdaa..8e45d20 100644
+--- a/docs/CHANGELOG.md
++++ b/docs/CHANGELOG.md
+@@ -29,6 +29,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
+ 
+ ### Fixed
+ 
++- **Background indexing follows current project sources.** Delayed discovery results no longer replace newer editor text or restore deleted declarations. Autocomplete and diagnostics refresh when background indexing publishes new symbols. Contributed by PHP Workbench (local downstream patch).
++
+ - **Results follow external project changes.** Autocomplete and native diagnostics discard results computed before watched PHP, Composer or resource updates finish, while open editor text is preserved. Contributed by PHP Workbench (local downstream patch).
+ 
+ - **Laravel route helper identity.** References, navigation, hover and unknown-route checks distinguish project helpers from Laravel's global helpers, including unsaved namespace-function changes. Contributed by PHP Workbench (local downstream patch).
+diff --git a/src/backend/documents.rs b/src/backend/documents.rs
+index 45c4039..a4b63bf 100644
+--- a/src/backend/documents.rs
++++ b/src/backend/documents.rs
+@@ -47,6 +47,7 @@ impl Backend {
+         }
+ 
+         {
++            let _merge = self.index_merge_gate.lock();
+             let mut documents = self.diag.documents.lock();
+             documents.open(&uri, doc.version, &text);
+             self.open_files
+@@ -144,6 +145,7 @@ impl Backend {
+         };
+ 
+         {
++            let _merge = self.index_merge_gate.lock();
+             let mut documents = self.diag.documents.lock();
+             if !documents.change(&uri, params.text_document.version, &text) {
+                 return;
+@@ -240,6 +242,7 @@ impl Backend {
+         let uri = params.text_document.uri.to_string();
+ 
+         let opening = {
++            let _merge = self.index_merge_gate.lock();
+             let mut documents = self.diag.documents.lock();
+             documents.close(&uri);
+             self.open_files.write().remove(&uri);
+diff --git a/src/backend/semantic_snapshot.rs b/src/backend/semantic_snapshot.rs
+index d10f279..c6b9e5e 100644
+--- a/src/backend/semantic_snapshot.rs
++++ b/src/backend/semantic_snapshot.rs
+@@ -38,6 +38,71 @@ impl Backend {
+         SemanticPublication(self)
+     }
+ 
++    pub(crate) fn begin_background_index_publication(&self) -> impl Drop + '_ {
++        self.diag.documents.lock().begin_background_index_change();
++        SemanticPublication(self)
++    }
++
++    /// A cold read may discover required framework symbols while resolving.
++    /// Discard that attempt and retry once against the published index, only
++    /// while editor/configuration/watch inputs still match the original call.
++    pub(crate) fn with_prepared_current_semantics<T>(
++        &self,
++        mut body: impl FnMut() -> Result<T>,
++    ) -> Result<T> {
++        let (input, before) = {
++            let documents = self.diag.documents.lock();
++            (documents.input_epoch(), documents.semantic_epoch())
++        };
++        let first = self.with_current_semantics(&mut body);
++        if !first
++            .as_ref()
++            .is_err_and(|error| error.code == ErrorCode::ServerError(-32801))
++        {
++            return first;
++        }
++        {
++            let documents = self.diag.documents.lock();
++            if !documents.input_matches(&input)
++                || (documents.epoch_matches(&before) && !documents.configuration_changing())
++            {
++                return first;
++            }
++        }
++        // A first lookup can arrive during the synchronous merge of a batch
++        // already parsed by startup. Wait at that boundary, then revalidate
++        // inputs before considering a new query attempt.
++        {
++            // A full workspace pass can publish several batches. Waiting only
++            // for one merge lets the next batch retire the retry immediately.
++            // Join an existing pass without starting a new filesystem scan.
++            let _index = self.workspace_index_lock.lock();
++            let _merge = self.index_merge_gate.lock();
++            let documents = self.diag.documents.lock();
++            if !documents.input_matches(&input)
++                || documents.configuration_changing()
++                || documents.epoch_matches(&before)
++            {
++                return first;
++            }
++        }
++        self.with_current_semantics(|| {
++            if !self.diag.documents.lock().input_matches(&input) {
++                return Err(content_modified());
++            }
++            body()
++        })
++    }
++
++    pub(crate) fn index_source_ticket(&self, uri: &str) -> Arc<()> {
++        let _merge = self.index_merge_gate.lock();
++        self.diag.documents.lock().index_ticket(uri)
++    }
++    pub(crate) fn release_index_source_ticket(&self, uri: &str, ticket: &Arc<()>) {
++        let _merge = self.index_merge_gate.lock();
++        self.diag.documents.lock().release_index_ticket(uri, ticket);
++    }
++
+     /// Guard already-prepared, read-only results without reparsing open files.
+     /// Request handlers retain their own source/range validation and index prep.
+     pub(crate) fn with_semantic_epoch<T>(&self, body: impl FnOnce() -> Result<T>) -> Result<T> {
+@@ -1457,3 +1522,561 @@ mod watched_disk_ownership_tests {
+         assert!(!f.backend.diag.last_full.lock().contains_key(&f.uri));
+     }
+ }
++
++#[cfg(test)]
++mod background_index_ownership_tests {
++    use super::*;
++    use std::sync::atomic::{AtomicBool, Ordering};
++    use tower_lsp::lsp_types::*;
++    const OLD: &str = "<?php\nclass Widget { function oldMember(): int { return 1; } }\n";
++    const NEW: &str = "<?php\nclass Widget { function freshMember(): int { return 2; } }\n";
++    fn methods(b: &Backend, uri: &str) -> Vec<String> {
++        b.symbols
++            .uri_classes_index
++            .read()
++            .get(uri)
++            .into_iter()
++            .flatten()
++            .flat_map(|class| class.methods.iter().map(|method| method.name.to_string()))
++            .collect()
++    }
++    #[tokio::test]
++    async fn diagnostic_worker_recovers_open_and_changed_parses_interrupted_by_publication() {
++        for changed in [false, true] {
++            let b = Backend::new_test();
++            let uri = "file:///Widget.php";
++            let old = Arc::new(OLD.to_owned());
++            b.diag.documents.lock().open(uri, 1, &old);
++            b.open_files.write().insert(uri.into(), Arc::clone(&old));
++            let text = if changed {
++                assert!(b.parse_diagnostic_snapshot(uri, &old));
++                let text = Arc::new(NEW.to_owned());
++                assert!(b.diag.documents.lock().change(uri, 2, &text));
++                b.open_files.write().insert(uri.into(), Arc::clone(&text));
++                text
++            } else {
++                old
++            };
++            let publication = b.begin_background_index_publication();
++            assert!(!b.parse_diagnostic_snapshot(uri, &text));
++            drop(publication);
++            b.publish_diagnostics_for_file(uri, &text).await;
++            let documents = b.diag.documents.lock();
++            let revision = documents.capture(uri, &text).unwrap();
++            assert!(
++                documents.parsed(uri, revision.as_ref()),
++                "changed={changed}"
++            );
++            assert!(documents.phase_current(uri, revision.as_ref(), false));
++            assert!(documents.phase_current(uri, revision.as_ref(), true));
++            assert!(b.diag.last_fast.lock().contains_key(uri));
++            assert!(b.diag.last_slow.lock().contains_key(uri));
++        }
++    }
++    #[test]
++    fn delayed_background_parse_cannot_replace_a_newer_closed_source_publication() {
++        let b = Backend::new_test();
++        let uri = "file:///Widget.php";
++        let old = b.parse_ast_index_update_for_index(uri, OLD);
++        b.update_ast(uri, NEW);
++        b.apply_ast_index_parse_results_batch(vec![old]);
++        assert_eq!(methods(&b, uri), vec!["freshMember"]);
++    }
++    #[test]
++    fn delayed_background_parse_cannot_resurrect_a_watched_deletion() {
++        let dir = tempfile::tempdir().unwrap();
++        let root = dir.path().canonicalize().unwrap();
++        let path = root.join("Widget.php");
++        let uri = Url::from_file_path(&path).unwrap();
++        std::fs::write(&path, OLD).unwrap();
++        let b = Backend::new_test_with_workspace(root.clone(), vec![]);
++        let old = b.parse_ast_index_update_for_index(uri.as_str(), OLD);
++        std::fs::remove_file(&path).unwrap();
++        assert!(b.apply_watched_file_changes(
++            &DidChangeWatchedFilesParams {
++                changes: vec![FileEvent {
++                    uri: uri.clone(),
++                    typ: FileChangeType::DELETED
++                }],
++            },
++            &root
++        ));
++        b.apply_ast_index_parse_results_batch(vec![old]);
++        assert!(methods(&b, uri.as_str()).is_empty());
++        assert!(!b.symbol_maps.read().contains_key(uri.as_str()));
++    }
++    #[tokio::test]
++    async fn background_result_before_open_close_cannot_replace_restored_disk_source() {
++        let dir = tempfile::tempdir().unwrap();
++        let root = dir.path().canonicalize().unwrap();
++        let path = root.join("Widget.php");
++        let uri = Url::from_file_path(&path).unwrap();
++        std::fs::write(&path, OLD).unwrap();
++        let b = Backend::new_test_with_workspace(root, vec![]);
++        let old = b.parse_ast_index_update_for_index(uri.as_str(), OLD);
++        b.on_did_open(DidOpenTextDocumentParams {
++            text_document: TextDocumentItem {
++                uri: uri.clone(),
++                language_id: "php".into(),
++                version: 1,
++                text: OLD.into(),
++            },
++        })
++        .await;
++        std::fs::write(&path, NEW).unwrap();
++        b.on_did_close(DidCloseTextDocumentParams {
++            text_document: TextDocumentIdentifier { uri: uri.clone() },
++        })
++        .await;
++        b.with_current_semantics(|| Ok(())).unwrap();
++        b.apply_ast_index_parse_results_batch(vec![old]);
++        assert_eq!(methods(&b, uri.as_str()), vec!["freshMember"]);
++    }
++    #[tokio::test]
++    async fn unrelated_opening_preserves_a_valid_background_result() {
++        let b = Backend::new_test();
++        let uri = "file:///Widget.php";
++        let result = b.parse_ast_index_update_for_index(uri, NEW);
++        b.on_did_open(DidOpenTextDocumentParams {
++            text_document: TextDocumentItem {
++                uri: Url::parse("file:///Other.php").unwrap(),
++                language_id: "php".into(),
++                version: 1,
++                text: "<?php class Other {}".into(),
++            },
++        })
++        .await;
++        b.apply_ast_index_parse_results_batch(vec![result]);
++        assert_eq!(methods(&b, uri), vec!["freshMember"]);
++    }
++    #[test]
++    fn background_merge_retires_spanning_requests_and_old_native_runs() {
++        let b = Backend::new_test();
++        let uri = "file:///Caller.php";
++        let text = Arc::new("<?php class Caller {}".into());
++        b.diag.documents.lock().open(uri, 1, &text);
++        b.open_files.write().insert(uri.into(), Arc::clone(&text));
++        assert!(b.parse_diagnostic_snapshot(uri, &text));
++        b.init_complete.store(true, Ordering::Release);
++        b.workspace_indexed.store(true, Ordering::Release);
++        b.supports_pull_diagnostics.store(true, Ordering::Release);
++        b.diag.pending_uris.lock().clear();
++        b.diag
++            .last_full
++            .lock()
++            .insert(uri.into(), vec![Default::default()]);
++        let old_run = b
++            .diag
++            .documents
++            .lock()
++            .capture(uri, &text)
++            .unwrap()
++            .unwrap();
++        let result = b.parse_ast_index_update_for_index("file:///Widget.php", NEW);
++        let response = b.with_semantic_epoch(|| {
++            b.apply_ast_index_parse_results_batch(vec![result]);
++            Ok("old result")
++        });
++        assert_eq!(response.unwrap_err().code, ErrorCode::ServerError(-32801));
++        let mut docs = b.diag.documents.lock();
++        assert!(docs.parsed(uri, Some(&old_run)));
++        assert!(!docs.mark_phase(uri, Some(&old_run), false));
++        assert!(!docs.mark_phase(uri, Some(&old_run), true));
++        drop(docs);
++        assert!(b.diag.pending_uris.lock().contains(uri));
++        assert!(!b.diag.last_full.lock().contains_key(uri));
++    }
++    #[test]
++    fn real_parallel_batches_cannot_overwrite_a_watcher_update_after_the_read() {
++        for count in [1, 3] {
++            let dir = tempfile::tempdir().unwrap();
++            let root = dir.path().canonicalize().unwrap();
++            let path = root.join("Widget.php");
++            let uri = Url::from_file_path(&path).unwrap();
++            std::fs::write(&path, OLD).unwrap();
++            let b = Backend::new_test_with_workspace(root.clone(), vec![]);
++            b.update_ast(uri.as_str(), OLD);
++            b.workspace_indexed.store(true, Ordering::Release);
++            let mut paths = vec![(uri.to_string(), path.clone())];
++            for index in 1..count {
++                let path = root.join(format!("Other{index}.php"));
++                std::fs::write(&path, format!("<?php class Other{index} {{}}")).unwrap();
++                paths.push((Url::from_file_path(&path).unwrap().to_string(), path));
++            }
++            let changed = AtomicBool::new(false);
++            b.parse_paths_parallel_with_progress(
++                &paths,
++                Some(&|done, _, _, _| {
++                    if done == count && !changed.swap(true, Ordering::SeqCst) {
++                        std::fs::write(&path, NEW).unwrap();
++                        assert!(b.apply_watched_file_changes(
++                            &DidChangeWatchedFilesParams {
++                                changes: vec![FileEvent {
++                                    uri: uri.clone(),
++                                    typ: FileChangeType::CHANGED
++                                }],
++                            },
++                            &root
++                        ));
++                    }
++                }),
++            );
++            assert!(changed.load(Ordering::SeqCst));
++            assert_eq!(
++                methods(&b, uri.as_str()),
++                vec!["freshMember"],
++                "batch size {count}"
++            );
++        }
++    }
++    #[tokio::test]
++    async fn resource_background_batch_keeps_current_open_resource_symbols() {
++        let dir = tempfile::tempdir().unwrap();
++        let root = dir.path().canonicalize().unwrap();
++        let path = root.join("services.yaml");
++        let uri = Url::from_file_path(&path).unwrap();
++        std::fs::write(&path, "services:\n  App\\Old: ~\n").unwrap();
++        let b = Backend::new_test_with_workspace(root, vec![]);
++        b.on_did_open(DidOpenTextDocumentParams {
++            text_document: TextDocumentItem {
++                uri: uri.clone(),
++                language_id: "yaml".into(),
++                version: 1,
++                text: "services:\n  App\\Fresh: ~\n".into(),
++            },
++        })
++        .await;
++        b.index_resource_paths_batch(&[(uri.to_string(), path)]);
++        let maps = b.symbol_maps.read();
++        let names: Vec<_> = maps[uri.as_str()]
++            .spans
++            .iter()
++            .filter_map(|span| match &span.kind {
++                crate::symbol_map::SymbolKind::ClassReference { name, .. } => {
++                    Some(name.to_string())
++                }
++                _ => None,
++            })
++            .collect();
++        assert_eq!(names, vec!["App\\Fresh"]);
++    }
++    #[test]
++    fn resource_background_publication_retires_spanning_results() {
++        let dir = tempfile::tempdir().unwrap();
++        let root = dir.path().canonicalize().unwrap();
++        let path = root.join("services.yaml");
++        let uri = Url::from_file_path(&path).unwrap();
++        std::fs::write(&path, "services:\n  App\\Fresh: ~\n").unwrap();
++        let b = Backend::new_test_with_workspace(root, vec![]);
++        let result = b.with_semantic_epoch(|| {
++            b.index_resource_paths_batch(&[(uri.to_string(), path)]);
++            Ok("old resource result")
++        });
++        assert_eq!(result.unwrap_err().code, ErrorCode::ServerError(-32801));
++    }
++
++    #[test]
++    fn unreadable_duplicate_and_skipped_index_jobs_release_source_tickets() {
++        let b = Backend::new_test();
++        let missing = "file:///does-not-exist/Widget.php";
++        b.parse_files_parallel_with_progress(
++            vec![(missing.into(), None), (missing.into(), None)],
++            None,
++        );
++        assert_eq!(b.diag.documents.lock().pending_index_sources(), 0);
++        let uri = "file:///Widget.php";
++        b.open_files
++            .write()
++            .insert(uri.into(), Arc::new(NEW.into()));
++        let skipped = b.parse_ast_index_update_for_index(uri, OLD);
++        b.apply_ast_index_parse_results_batch(vec![skipped]);
++        assert_eq!(b.diag.documents.lock().pending_index_sources(), 0);
++    }
++    #[test]
++    fn accepted_opening_cannot_interleave_with_a_validated_background_merge() {
++        use std::{
++            sync::mpsc,
++            time::{Duration, Instant},
++        };
++        let b = Backend::new_test();
++        let uri = "file:///Widget.php";
++        let result = b.parse_ast_index_update_for_index(uri, OLD);
++        let classes = b.symbols.fqn_class_index.write();
++        let worker = b.clone_for_blocking();
++        let merging =
++            std::thread::spawn(move || worker.apply_ast_index_parse_results_batch(vec![result]));
++        let deadline = Instant::now() + Duration::from_secs(3);
++        while !b.diag.documents.lock().configuration_changing() && Instant::now() < deadline {
++            std::thread::yield_now();
++        }
++        assert!(b.diag.documents.lock().configuration_changing());
++        let opening = b.clone_for_blocking();
++        let (started, wait) = mpsc::channel();
++        let opened = std::thread::spawn(move || {
++            let runtime = tokio::runtime::Builder::new_current_thread()
++                .enable_all()
++                .build()
++                .unwrap();
++            started.send(()).unwrap();
++            runtime.block_on(opening.on_did_open(DidOpenTextDocumentParams {
++                text_document: TextDocumentItem {
++                    uri: Url::parse(uri).unwrap(),
++                    language_id: "php".into(),
++                    version: 1,
++                    text: NEW.into(),
++                },
++            }));
++        });
++        wait.recv_timeout(Duration::from_secs(3)).unwrap();
++        std::thread::sleep(Duration::from_millis(100));
++        let premature = b.open_files.read().contains_key(uri);
++        drop(classes);
++        merging.join().unwrap();
++        opened.join().unwrap();
++        assert!(
++            !premature,
++            "didOpen acceptance must follow the in-progress atomic merge"
++        );
++        assert_eq!(methods(&b, uri), vec!["freshMember"]);
++    }
++    #[test]
++    fn parallel_parse_progress_can_accept_open_text_before_the_merge() {
++        for count in [1, 3] {
++            let dir = tempfile::tempdir().unwrap();
++            let root = dir.path().canonicalize().unwrap();
++            let path = root.join("Widget.php");
++            let uri = Url::from_file_path(&path).unwrap();
++            std::fs::write(&path, OLD).unwrap();
++            let b = Backend::new_test_with_workspace(root.clone(), vec![]);
++            let runtime = tokio::runtime::Builder::new_current_thread()
++                .enable_all()
++                .build()
++                .unwrap();
++            let mut paths = vec![(uri.to_string(), path)];
++            for index in 1..count {
++                let path = root.join(format!("Other{index}.php"));
++                std::fs::write(&path, format!("<?php class Other{index} {{}}")).unwrap();
++                paths.push((Url::from_file_path(&path).unwrap().to_string(), path));
++            }
++            let opened = AtomicBool::new(false);
++            b.parse_paths_parallel_with_progress(
++                &paths,
++                Some(&|done, _, _, _| {
++                    if done == count && !opened.swap(true, Ordering::SeqCst) {
++                        runtime.block_on(b.on_did_open(DidOpenTextDocumentParams {
++                            text_document: TextDocumentItem {
++                                uri: uri.clone(),
++                                language_id: "php".into(),
++                                version: 1,
++                                text: NEW.into(),
++                            },
++                        }));
++                    }
++                }),
++            );
++            assert_eq!(methods(&b, uri.as_str()), vec!["freshMember"]);
++            assert_eq!(b.diag.documents.lock().pending_index_sources(), 0);
++        }
++    }
++    #[test]
++    fn autoload_preload_cannot_replace_accepted_but_not_yet_parsed_open_text() {
++        let dir = tempfile::tempdir().unwrap();
++        let root = dir.path().canonicalize().unwrap();
++        let path = root.join("Widget.php");
++        let uri = Url::from_file_path(&path).unwrap();
++        std::fs::write(&path, OLD).unwrap();
++        let b = Backend::new_test_with_workspace(root, vec![]);
++        let text = Arc::new(NEW.to_owned());
++        b.diag.documents.lock().open(uri.as_str(), 1, &text);
++        b.open_files
++            .write()
++            .insert(uri.to_string(), Arc::clone(&text));
++        b.preload_autoload_files(&[path]);
++        assert!(
++            methods(&b, uri.as_str()).is_empty(),
++            "disk parse must yield to the accepted, pending editor source"
++        );
++        b.with_current_semantics(|| Ok(())).unwrap();
++        assert_eq!(methods(&b, uri.as_str()), vec!["freshMember"]);
++        assert_eq!(b.diag.documents.lock().pending_index_sources(), 0);
++    }
++    #[test]
++    fn autoload_preload_retires_spanning_semantics_after_publishing_helpers() {
++        let dir = tempfile::tempdir().unwrap();
++        let root = dir.path().canonicalize().unwrap();
++        let path = root.join("Widget.php");
++        let uri = Url::from_file_path(&path).unwrap();
++        std::fs::write(&path, NEW).unwrap();
++        let b = Backend::new_test_with_workspace(root, vec![]);
++        let result = b.with_semantic_epoch(|| {
++            b.preload_autoload_files(&[path]);
++            Ok("older project result")
++        });
++        assert_eq!(result.unwrap_err().code, ErrorCode::ServerError(-32801));
++        assert_eq!(methods(&b, uri.as_str()), vec!["freshMember"]);
++        assert_eq!(b.diag.documents.lock().pending_index_sources(), 0);
++    }
++    #[test]
++    fn query_preparation_discards_discovery_attempt_before_returning_current_facts() {
++        let b = Backend::new_test();
++        let mut calls = 0;
++        let result = b
++            .with_prepared_current_semantics(|| {
++                calls += 1;
++                if calls == 1 {
++                    let parsed = b.parse_ast_index_update_for_index("file:///Widget.php", NEW);
++                    b.apply_ast_index_parse_results_batch(vec![parsed]);
++                }
++                Ok(methods(&b, "file:///Widget.php"))
++            })
++            .unwrap();
++        assert_eq!(calls, 2);
++        assert_eq!(result, vec!["freshMember"]);
++    }
++    #[test]
++    fn query_preparation_does_not_retry_changed_editor_configuration_or_watch_inputs() {
++        for kind in 0..3 {
++            let b = Backend::new_test();
++            let uri = "file:///Widget.php";
++            let text = Arc::new(OLD.to_owned());
++            b.diag.documents.lock().open(uri, 1, &text);
++            b.open_files.write().insert(uri.into(), Arc::clone(&text));
++            assert!(b.parse_diagnostic_snapshot(uri, &text));
++            let mut calls = 0;
++            let result = b.with_prepared_current_semantics(|| {
++                calls += 1;
++                match kind {
++                    0 => {
++                        let text = Arc::new(NEW.to_owned());
++                        assert!(b.diag.documents.lock().change(uri, 2, &text));
++                        b.open_files.write().insert(uri.into(), text);
++                    }
++                    1 => {
++                        drop(b.begin_configuration_publication());
++                    }
++                    _ => {
++                        drop(b.begin_semantic_publication());
++                    }
++                }
++                Ok("outdated query")
++            });
++            assert_eq!(result.unwrap_err().code, ErrorCode::ServerError(-32801));
++            assert_eq!(calls, 1, "input kind {kind}");
++        }
++    }
++    #[test]
++    fn query_preparation_is_bounded_to_one_retry() {
++        let b = Backend::new_test();
++        let mut calls = 0;
++        let result = b.with_prepared_current_semantics(|| {
++            calls += 1;
++            let uri = format!("file:///Widget{calls}.php");
++            let parsed = b.parse_ast_index_update_for_index(&uri, NEW);
++            b.apply_ast_index_parse_results_batch(vec![parsed]);
++            Ok("discard this attempt")
++        });
++        assert_eq!(calls, 2);
++        assert_eq!(result.unwrap_err().code, ErrorCode::ServerError(-32801));
++    }
++    #[test]
++    fn query_preparation_does_not_repeat_a_warm_query() {
++        let b = Backend::new_test();
++        let mut calls = 0;
++        assert_eq!(
++            b.with_prepared_current_semantics(|| {
++                calls += 1;
++                Ok(7)
++            })
++            .unwrap(),
++            7
++        );
++        assert_eq!(calls, 1);
++    }
++    #[test]
++    fn query_preparation_cannot_enter_a_pending_background_publication() {
++        let b = Backend::new_test();
++        let publication = b.begin_background_index_publication();
++        let mut calls = 0;
++        let result = b.with_prepared_current_semantics(|| {
++            calls += 1;
++            Ok("not ready")
++        });
++        assert_eq!(result.unwrap_err().code, ErrorCode::ServerError(-32801));
++        assert_eq!(calls, 0);
++        drop(publication);
++    }
++    #[test]
++    fn query_preparation_preserves_content_modified_without_index_publication() {
++        let b = Backend::new_test();
++        let mut calls = 0;
++        let result: Result<()> = b.with_prepared_current_semantics(|| {
++            calls += 1;
++            Err(content_modified())
++        });
++        assert_eq!(result.unwrap_err().code, ErrorCode::ServerError(-32801));
++        assert_eq!(calls, 1);
++    }
++    #[test]
++    fn query_preparation_waits_for_an_already_parsed_background_merge() {
++        use std::{sync::mpsc, time::Duration};
++        let b = Backend::new_test();
++        let worker = b.clone_for_blocking();
++        let (started, ready) = mpsc::channel();
++        let (finish, proceed) = mpsc::channel();
++        let merge = std::thread::spawn(move || {
++            let _merge = worker.index_merge_gate.lock();
++            let _publication = worker.begin_background_index_publication();
++            started.send(()).unwrap();
++            proceed.recv_timeout(Duration::from_secs(3)).unwrap();
++        });
++        ready.recv_timeout(Duration::from_secs(2)).unwrap();
++        let release = std::thread::spawn(move || {
++            std::thread::sleep(Duration::from_millis(100));
++            finish.send(()).unwrap();
++        });
++        let mut calls = 0;
++        let result = b.with_prepared_current_semantics(|| {
++            calls += 1;
++            Ok("published index")
++        });
++        release.join().unwrap();
++        merge.join().unwrap();
++        assert_eq!(result.unwrap(), "published index");
++        assert_eq!(calls, 1);
++    }
++    #[test]
++    fn query_preparation_waits_for_the_whole_inflight_workspace_pass() {
++        use std::{sync::mpsc, time::Duration};
++        let b = Backend::new_test();
++        let worker = b.clone_for_blocking();
++        let finished = Arc::new(AtomicBool::new(false));
++        let final_batch = Arc::clone(&finished);
++        let (started, ready) = mpsc::channel();
++        let (finish, proceed) = mpsc::channel();
++        let pass = std::thread::spawn(move || {
++            let _index = worker.workspace_index_lock.lock();
++            {
++                let _merge = worker.index_merge_gate.lock();
++                let _publication = worker.begin_background_index_publication();
++                started.send(()).unwrap();
++                proceed.recv_timeout(Duration::from_secs(3)).unwrap();
++            }
++            std::thread::sleep(Duration::from_millis(100));
++            let _merge = worker.index_merge_gate.lock();
++            let _publication = worker.begin_background_index_publication();
++            final_batch.store(true, Ordering::Release);
++        });
++        ready.recv_timeout(Duration::from_secs(2)).unwrap();
++        let release = std::thread::spawn(move || {
++            std::thread::sleep(Duration::from_millis(100));
++            finish.send(()).unwrap();
++        });
++        let result = b.with_prepared_current_semantics(|| Ok(finished.load(Ordering::Acquire)));
++        release.join().unwrap();
++        pass.join().unwrap();
++        assert!(
++            result.unwrap(),
++            "query admission must not stop between known index batches"
++        );
++    }
++}
+diff --git a/src/diagnostics/mod.rs b/src/diagnostics/mod.rs
+index 5e22269..9fd455b 100644
+--- a/src/diagnostics/mod.rs
++++ b/src/diagnostics/mod.rs
+@@ -627,6 +627,27 @@ impl Backend {
+         let Ok(revision) = self.diag.documents.lock().capture(uri_str, content) else {
+             return;
+         };
++        // A source accepted during a project publication may not have been
++        // parsed yet. Recover it here after publication, rather than dropping
++        // both diagnostic phases until another edit happens to trigger a parse.
++        let parsed = self
++            .diag
++            .documents
++            .lock()
++            .parsed(uri_str, revision.as_ref());
++        if !parsed {
++            let backend = self.clone_for_blocking();
++            let uri = uri_str.to_owned();
++            let text = Arc::clone(content);
++            let recovered = crate::server::run_blocking_cancel_safe(
++                "diagnostic pending source parse",
++                move || backend.parse_diagnostic_snapshot(&uri, &text),
++            )
++            .await;
++            if recovered != Some(true) {
++                return;
++            }
++        }
+         for slow in [false, true] {
+             let backend = self.clone_for_blocking();
+             let uri = uri_str.to_owned();
+diff --git a/src/diagnostics/revision.rs b/src/diagnostics/revision.rs
+index 8497fe4..ba61c38 100644
+--- a/src/diagnostics/revision.rs
++++ b/src/diagnostics/revision.rs
+@@ -28,11 +28,49 @@ struct Document {
+     fast: Option<Revision>,
+     slow: Option<Revision>,
+ }
+-// The final field counts overlapping live configuration publications.
++// The fourth field counts publications; the map owns pending index tickets.
++// The last stamp tracks external inputs separately from discovered index facts.
+ #[derive(Default)]
+-pub(crate) struct Revisions(HashMap<String, Document>, Arc<()>, HashSet<String>, usize);
++pub(crate) struct Revisions(
++    HashMap<String, Document>,
++    Arc<()>,
++    HashSet<String>,
++    usize,
++    HashMap<String, Arc<()>>,
++    Arc<()>,
++);
+ impl Revisions {
++    pub fn index_ticket(&mut self, uri: &str) -> Arc<()> {
++        Arc::clone(self.4.entry(uri.to_owned()).or_insert_with(|| Arc::new(())))
++    }
++    pub fn index_current(&self, uri: &str, ticket: &Arc<()>) -> bool {
++        self.4
++            .get(uri)
++            .is_some_and(|current| Arc::ptr_eq(current, ticket))
++    }
++    pub fn retire_index_source(&mut self, uri: &str) {
++        self.4.remove(uri);
++    }
++    pub fn release_index_ticket(&mut self, uri: &str, ticket: &Arc<()>) {
++        if self.index_current(uri, ticket) && Arc::strong_count(ticket) == 2 {
++            self.4.remove(uri);
++        }
++    }
++    #[cfg(test)]
++    pub fn pending_index_sources(&self) -> usize {
++        self.4.len()
++    }
++    pub fn input_epoch(&self) -> Arc<()> {
++        Arc::clone(&self.5)
++    }
++    pub fn input_matches(&self, epoch: &Arc<()>) -> bool {
++        Arc::ptr_eq(&self.5, epoch)
++    }
+     pub fn begin_configuration_change(&mut self) {
++        self.5 = Arc::new(());
++        self.begin_background_index_change();
++    }
++    pub fn begin_background_index_change(&mut self) {
+         self.3 += 1;
+         self.1 = Arc::new(());
+         for entry in self.0.values_mut() {
+@@ -53,7 +91,9 @@ impl Revisions {
+         self.3 != 0
+     }
+     pub fn open(&mut self, uri: &str, version: i32, text: &Arc<String>) {
++        self.retire_index_source(uri);
+         self.1 = Arc::new(());
++        self.5 = Arc::new(());
+         self.2.remove(uri);
+         let entry = self.0.entry(uri.to_owned()).or_default();
+         let Some(open) = entry.open.checked_add(1) else {
+@@ -92,16 +132,20 @@ impl Revisions {
+         });
+         entry.parsed = None;
+         self.1 = Arc::new(());
++        self.5 = Arc::new(());
++        self.retire_index_source(uri);
+         true
+     }
+     pub fn close(&mut self, uri: &str) {
+         if let Some(entry) = self.0.get_mut(uri) {
+             self.1 = Arc::new(());
++            self.5 = Arc::new(());
+             self.2.insert(uri.to_owned());
+             entry.current = None;
+             entry.parsed = None;
+             entry.fast = None;
+             entry.slow = None;
++            self.retire_index_source(uri);
+         }
+     }
+     /// Retire diagnostic work without retiring the unchanged parsed source.
+diff --git a/src/indexing/preload.rs b/src/indexing/preload.rs
+index 51c3f46..0eee499 100644
+--- a/src/indexing/preload.rs
++++ b/src/indexing/preload.rs
+@@ -11,6 +11,7 @@
+ 
+ use std::collections::HashSet;
+ use std::path::{Path, PathBuf};
++use std::sync::Arc;
+ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+ 
+ use tower_lsp::lsp_types::Url;
+@@ -58,17 +59,25 @@ impl Backend {
+             p.add_total(file_count as u64);
+         }
+ 
+-        crate::parallel::map_indexed("autoload-preload", file_count, |_, i| {
+-            if let Some(p) = progress {
+-                p.add_done(1);
+-            }
+-            let path = pending[i];
+-            if let Ok(content) = std::fs::read_to_string(path) {
+-                let uri = crate::util::path_to_uri(path);
+-                self.update_ast(&uri, &content);
+-            }
+-            None::<()>
+-        });
++        let files: Vec<_> = pending
++            .into_iter()
++            .map(|path| (crate::util::path_to_uri(path), path))
++            .collect();
++        let reported = AtomicUsize::new(0);
++        self.parse_batch_parallel(
++            &files,
++            |(uri, _)| uri.as_str(),
++            |(_, path)| index_progress_weight_for_path(path),
++            |(_, path)| std::fs::read_to_string(path).ok(),
++            Some(&|done, _, _, _| {
++                if let Some(progress) = progress {
++                    let previous = reported.fetch_max(done, Ordering::Relaxed);
++                    if done > previous {
++                        progress.add_done((done - previous) as u64);
++                    }
++                }
++            }),
++        );
+     }
+ 
+     /// Ensure all workspace PHP files have been parsed and have symbol maps.
+@@ -493,6 +502,15 @@ impl Backend {
+             return;
+         }
+         let total = items.len();
++        let tickets: Vec<_> = items
++            .iter()
++            .map(|item| self.index_source_ticket(uri_of(item)))
++            .collect();
++        let release_tickets = |tickets: Vec<Arc<()>>| {
++            for (item, ticket) in items.iter().zip(tickets) {
++                self.release_index_source_ticket(uri_of(item), &ticket);
++            }
++        };
+         let parsed = AtomicUsize::new(0);
+         let weights: Vec<u64> = items.iter().map(&weight_of).collect();
+         let total_units = weights.iter().copied().sum::<u64>().max(1);
+@@ -503,7 +521,11 @@ impl Backend {
+             let mut results = Vec::with_capacity(total);
+             for (idx, item) in items.iter().enumerate() {
+                 if let Some(content) = content_of(item) {
+-                    results.push(self.parse_ast_index_update_for_index(uri_of(item), &content));
++                    results.push(self.parse_ast_index_update_for_ticket(
++                        uri_of(item),
++                        &content,
++                        Arc::clone(&tickets[idx]),
++                    ));
+                 }
+                 report_weighted_parse_progress(
+                     progress,
+@@ -516,6 +538,7 @@ impl Backend {
+             }
+             report_weighted_merge_progress(progress, total, total_units);
+             self.apply_ast_index_parse_results_batch(results);
++            release_tickets(tickets);
+             return;
+         }
+ 
+@@ -528,7 +551,11 @@ impl Backend {
+             let result = content_of(item).map(|content| {
+                 (
+                     idx,
+-                    self.parse_ast_index_update_for_index(uri_of(item), &content),
++                    self.parse_ast_index_update_for_ticket(
++                        uri_of(item),
++                        &content,
++                        Arc::clone(&tickets[idx]),
++                    ),
+                 )
+             });
+             report_weighted_parse_progress(
+@@ -546,6 +573,7 @@ impl Backend {
+         self.apply_ast_index_parse_results_batch(
+             results.into_iter().map(|(_, (_, result))| result).collect(),
+         );
++        release_tickets(tickets);
+     }
+ 
+     pub(crate) fn index_progress_weight_for_uri(&self, uri: &str, content: Option<&str>) -> u64 {
+diff --git a/src/lib.rs b/src/lib.rs
+index adfa93a..4c92e5a 100644
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -116,7 +116,7 @@ use std::path::PathBuf;
+ use std::sync::Arc;
+ use std::sync::atomic::AtomicU64;
+ 
+-use parking_lot::{Mutex, RwLock};
++use parking_lot::{Mutex, ReentrantMutex, RwLock};
+ use tower_lsp::Client;
+ use tower_lsp::lsp_types::{CompletionItem, FileChangeType};
+ 
+@@ -706,6 +706,7 @@ pub struct Backend {
+     /// stale symbol state.  These locks serialize parse commits per URI; the
+     /// handler also verifies that the captured text is still current before
+     /// updating shared maps.
++    pub(crate) index_merge_gate: Arc<ReentrantMutex<()>>,
+     pub(crate) did_change_parse_locks: Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>,
+     /// Coalescing state for expensive whole-file requests. See
+     /// [`WholeFileCoalesce`] for why this exists.
+@@ -1297,6 +1298,7 @@ impl Backend {
+             symbols: SymbolIndex::new(),
+             workspace,
+             parse_errors: Arc::new(RwLock::new(HashMap::new())),
++            index_merge_gate: Arc::new(ReentrantMutex::new(())),
+             did_change_parse_locks: Arc::new(Mutex::new(HashMap::new())),
+             whole_file_coalesce: Arc::new(WholeFileCoalesce::default()),
+             client: None,
+@@ -1909,11 +1911,35 @@ impl Backend {
+             return false;
+         }
+ 
++        let merge = self.index_merge_gate.lock();
++        // Recheck accepted editor ownership at the destructive boundary. A
++        // watcher may have classified the path before didOpen arrived.
++        let changes: Vec<_> = {
++            let open = self.open_files.read();
++            changes
++                .iter()
++                .filter(|(uri, path, _)| {
++                    !open.contains_key(uri) && !open.contains_key(&crate::util::path_to_uri(path))
++                })
++                .cloned()
++                .collect()
++        };
++        if changes.is_empty() {
++            return false;
++        }
++        {
++            let mut documents = self.diag.documents.lock();
++            for (uri, path, _) in &changes {
++                documents.retire_index_source(uri);
++                documents.retire_index_source(&crate::util::path_to_uri(path));
++            }
++        }
++
+         // Index values are stored under either the editor URI or the
+         // canonical `file://` URI, so match both variants.
+         let mut uri_set: HashSet<String> = HashSet::new();
+         let mut path_set: HashSet<PathBuf> = HashSet::new();
+-        for (uri_str, path, _) in changes {
++        for (uri_str, path, _) in &changes {
+             uri_set.insert(uri_str.clone());
+             uri_set.insert(crate::util::path_to_uri(path));
+             path_set.insert(path.clone());
+@@ -1974,7 +2000,7 @@ impl Backend {
+         // background indexer stores.  Missing the canonical spelling would
+         // leave a stale symbol map that also blocks re-parsing (the
+         // workspace-index walk skips files that already have one).
+-        for (uri_str, path, change_type) in changes {
++        for (uri_str, path, change_type) in &changes {
+             let canonical_uri = crate::util::path_to_uri(path);
+             let spellings = if canonical_uri == *uri_str {
+                 vec![uri_str.as_str()]
+@@ -2005,9 +2031,11 @@ impl Backend {
+             }
+         }
+ 
++        drop(merge);
++
+         // Re-add current symbols for created/changed files.  Deleted files
+         // keep their entries purged.
+-        for (uri_str, path, change_type) in changes {
++        for (uri_str, path, change_type) in &changes {
+             if !matches!(
+                 *change_type,
+                 FileChangeType::CREATED | FileChangeType::CHANGED
+@@ -2015,7 +2043,21 @@ impl Backend {
+                 continue;
+             }
+ 
++            let ticket = self.index_source_ticket(uri_str);
+             let classes = crate::classmap_scanner::scan_file(path);
++            let scan = crate::classmap_scanner::scan_file_full(path);
++            let _merge = self.index_merge_gate.lock();
++            if !self.diag.documents.lock().index_current(uri_str, &ticket)
++                || self.open_files.read().contains_key(uri_str)
++                || self
++                    .open_files
++                    .read()
++                    .contains_key(&crate::util::path_to_uri(path))
++            {
++                self.release_index_source_ticket(uri_str, &ticket);
++                continue;
++            }
++            self.diag.documents.lock().retire_index_source(uri_str);
+             classes_changed |= !classes.is_empty();
+             self.symbols.with_class_declarations(|decls| {
+                 for fqn in classes {
+@@ -2032,7 +2074,6 @@ impl Backend {
+             // one fallback pass per still-missing name.
+             functions_retired = true;
+ 
+-            let scan = crate::classmap_scanner::scan_file_full(path);
+             {
+                 let mut fi = self.symbols.autoload_function_index.write();
+                 for fqn in scan.functions {
+@@ -2056,7 +2097,10 @@ impl Backend {
+         // The refreshed discovery indexes may add or remove a namespace-local
+         // `auth()` or a real global class that shadows a Laravel facade alias.
+         // Re-evaluate only maps that recorded one of those dormant candidates.
+-        self.refresh_all_published_laravel_candidates();
++        {
++            let _merge = self.index_merge_gate.lock();
++            self.refresh_all_published_laravel_candidates();
++        }
+         // The purge above took the files' symbol maps and reference-index
+         // entries with it, and a completed workspace index is never walked
+         // again to put them back, so the reference-count lenses would stop
+@@ -2114,6 +2158,7 @@ impl Backend {
+             skip_reference_index: self.skip_reference_index,
+             symbols: self.symbols.clone(),
+             parse_errors: Arc::clone(&self.parse_errors),
++            index_merge_gate: Arc::clone(&self.index_merge_gate),
+             did_change_parse_locks: Arc::clone(&self.did_change_parse_locks),
+             whole_file_coalesce: Arc::clone(&self.whole_file_coalesce),
+             // RwLock fields are shared by Arc::clone — the diagnostic
+diff --git a/src/parser/ast_update.rs b/src/parser/ast_update.rs
+index 5695db0..58b4d1c 100644
+--- a/src/parser/ast_update.rs
++++ b/src/parser/ast_update.rs
+@@ -64,12 +64,14 @@ pub(crate) enum AstIndexParseResult {
+     Update(Box<AstIndexUpdate>),
+     ParseFailed {
+         uri: String,
++        index_ticket: Option<Arc<()>>,
+         errors: Vec<ParseErrorEntry>,
+     },
+ }
+ 
+ pub(crate) struct AstIndexUpdate {
+     uri: String,
++    index_ticket: Option<Arc<()>>,
+     parse_errors: Vec<ParseErrorEntry>,
+     classes: Vec<ClassInfo>,
+     use_map: HashMap<String, String>,
+@@ -476,10 +478,21 @@ impl Backend {
+         })
+     }
+ 
++    #[cfg(test)]
+     pub(crate) fn parse_ast_index_update_for_index(
+         &self,
+         uri: &str,
+         content: &str,
++    ) -> AstIndexParseResult {
++        let ticket = self.index_source_ticket(uri);
++        self.parse_ast_index_update_for_ticket(uri, content, ticket)
++    }
++
++    pub(crate) fn parse_ast_index_update_for_ticket(
++        &self,
++        uri: &str,
++        content: &str,
++        ticket: Arc<()>,
+     ) -> AstIndexParseResult {
+         let uri_owned = uri.to_string();
+         // A template is indexed as the virtual PHP it lowers to, the same
+@@ -508,10 +521,12 @@ impl Backend {
+         }) {
+             Some(mut update) => {
+                 update.blade = blade;
++                update.index_ticket = Some(ticket);
+                 AstIndexParseResult::Update(Box::new(update))
+             }
+             None => AstIndexParseResult::ParseFailed {
+                 uri: uri_owned,
++                index_ticket: Some(ticket),
+                 errors: vec![("Parse failed (internal error)".to_string(), 0, 0)],
+             },
+         }
+@@ -525,6 +540,23 @@ impl Backend {
+             return false;
+         }
+ 
++        // The ownership check and the merge share the editor-acceptance gate.
++        // File reads and parallel parsing happen before this boundary.
++        let _merge = self.index_merge_gate.lock();
++        let results: Vec<_> = results
++            .into_iter()
++            .filter(|result| {
++                let (uri, ticket) = match result {
++                    AstIndexParseResult::Update(update) => (&update.uri, &update.index_ticket),
++                    AstIndexParseResult::ParseFailed {
++                        uri, index_ticket, ..
++                    } => (uri, index_ticket),
++                };
++                ticket
++                    .as_ref()
++                    .is_some_and(|ticket| self.diag.documents.lock().index_current(uri, ticket))
++            })
++            .collect();
+         // Drop any result whose file is currently open in the editor. This
+         // batch comes from a background/workspace parse that read the file
+         // straight from disk (or from a pre-edit buffer snapshot); the open
+@@ -553,6 +585,9 @@ impl Backend {
+             match result {
+                 AstIndexParseResult::Update(update) => {
+                     if open_uris.contains_key(&update.uri) {
++                        if let Some(ticket) = &update.index_ticket {
++                            self.release_index_source_ticket(&update.uri, ticket);
++                        }
+                         continue;
+                     }
+                     if let Some(blade) = &update.blade {
+@@ -562,15 +597,26 @@ impl Backend {
+                             None => blade.scope != BladeScope::default(),
+                         };
+                         if stale {
++                            if let Some(ticket) = &update.index_ticket {
++                                self.release_index_source_ticket(&update.uri, ticket);
++                            }
+                             continue;
+                         }
+                     }
+                     updates.push(*update);
+                 }
+-                AstIndexParseResult::ParseFailed { uri, errors } => {
++                AstIndexParseResult::ParseFailed {
++                    uri,
++                    errors,
++                    index_ticket,
++                } => {
+                     if open_uris.contains_key(&uri) {
++                        if let Some(ticket) = &index_ticket {
++                            self.release_index_source_ticket(&uri, ticket);
++                        }
+                         continue;
+                     }
++                    self.diag.documents.lock().retire_index_source(&uri);
+                     failures.push((uri, errors));
+                 }
+             }
+@@ -578,6 +624,10 @@ impl Backend {
+         drop(open_uris);
+         drop(injected_vars);
+ 
++        if updates.is_empty() && failures.is_empty() {
++            return false;
++        }
++        let _publication = self.begin_background_index_publication();
+         if !failures.is_empty() {
+             let mut parse_errors = self.parse_errors.write();
+             for (uri, errors) in failures {
+@@ -1010,6 +1060,7 @@ impl Backend {
+ 
+             AstIndexUpdate {
+                 uri: uri.to_string(),
++                index_ticket: None,
+                 parse_errors,
+                 classes,
+                 use_map,
+@@ -1028,6 +1079,14 @@ impl Backend {
+             return false;
+         }
+ 
++        let _merge = self.index_merge_gate.lock();
++        {
++            let mut documents = self.diag.documents.lock();
++            for update in &updates {
++                documents.retire_index_source(&update.uri);
++            }
++        }
++
+         struct PreparedAstIndexUpdate {
+             uri: String,
+             parse_errors: Vec<ParseErrorEntry>,
+@@ -3120,6 +3179,7 @@ class User extends Model {
+         let changed =
+             backend.apply_ast_index_parse_results_batch(vec![AstIndexParseResult::ParseFailed {
+                 uri: uri.to_string(),
++                index_ticket: Some(backend.index_source_ticket(uri)),
+                 errors: vec![("Parse failed (internal error)".to_string(), 10, 20)],
+             }]);
+ 
+diff --git a/src/resource_navigation.rs b/src/resource_navigation.rs
+index bf4018b..10a44d3 100644
+--- a/src/resource_navigation.rs
++++ b/src/resource_navigation.rs
+@@ -79,6 +79,8 @@ impl Backend {
+     /// contributions.
+     pub(crate) fn update_resource_symbol_index(&self, uri: &str, content: &str) {
+         let symbol_map = Arc::new(self.resource_symbol_map(content));
++        let _merge = self.index_merge_gate.lock();
++        self.diag.documents.lock().retire_index_source(uri);
+         self.symbol_maps
+             .write()
+             .insert(uri.to_string(), Arc::clone(&symbol_map));
+@@ -87,17 +89,39 @@ impl Backend {
+ 
+     /// Index resource files discovered during the workspace walk.
+     pub(crate) fn index_resource_paths_batch(&self, files: &[(String, PathBuf)]) {
+-        let maps: Vec<(String, Arc<SymbolMap>)> = files
++        let maps: Vec<_> = files
+             .iter()
+             .filter_map(|(uri, path)| {
+-                let content = std::fs::read_to_string(path).ok()?;
+-                Some((uri.clone(), Arc::new(self.resource_symbol_map(&content))))
++                let ticket = self.index_source_ticket(uri);
++                let Ok(content) = std::fs::read_to_string(path) else {
++                    self.release_index_source_ticket(uri, &ticket);
++                    return None;
++                };
++                Some((
++                    uri.clone(),
++                    Arc::new(self.resource_symbol_map(&content)),
++                    ticket,
++                ))
++            })
++            .collect();
++        let _merge = self.index_merge_gate.lock();
++        let maps: Vec<_> = maps
++            .into_iter()
++            .filter_map(|(uri, map, ticket)| {
++                if !self.diag.documents.lock().index_current(&uri, &ticket)
++                    || self.open_files.read().contains_key(&uri)
++                {
++                    self.release_index_source_ticket(&uri, &ticket);
++                    return None;
++                }
++                self.diag.documents.lock().retire_index_source(&uri);
++                Some((uri, map))
+             })
+             .collect();
+         if maps.is_empty() {
+             return;
+         }
+-
++        let _publication = self.begin_background_index_publication();
+         {
+             let mut symbol_maps = self.symbol_maps.write();
+             for (uri, map) in &maps {
+diff --git a/src/server.rs b/src/server.rs
+index 000774f..cb51454 100644
+--- a/src/server.rs
++++ b/src/server.rs
+@@ -115,12 +115,12 @@ impl Backend {
+     ) -> Result<Option<T>>
+     where
+         T: Send + 'static,
+-        F: FnOnce(&Backend, &str, Position) -> Result<Option<T>> + Send + 'static,
++        F: Fn(&Backend, &str, Position) -> Result<Option<T>> + Send + 'static,
+     {
+         let backend = self.clone_for_blocking();
+         let uri_clone = uri.clone();
+         let result = run_blocking_cancel_safe(name, move || {
+-            backend.with_current_semantics(|| body(&backend, &uri_clone, position))
++            backend.with_prepared_current_semantics(|| body(&backend, &uri_clone, position))
+         })
+         .await
+         .unwrap_or(Ok(None));
+@@ -436,7 +436,7 @@ impl LanguageServer for Backend {
+         // instead of queueing behind a synchronous resolution.
+         let backend = self.clone_for_blocking();
+         let result = run_blocking_cancel_safe("completion", move || {
+-            backend.with_current_semantics(|| backend.handle_completion(params))
++            backend.with_prepared_current_semantics(|| backend.handle_completion(params.clone()))
+         })
+         .await
+         .unwrap_or(Ok(None));
+@@ -464,7 +464,9 @@ impl LanguageServer for Backend {
+         let backend = self.clone_for_blocking();
+         let fallback = params.clone();
+         let item = run_blocking_cancel_safe("completion_resolve", move || {
+-            backend.with_current_semantics(|| Ok(backend.handle_completion_resolve(params)))
++            backend.with_prepared_current_semantics(|| {
++                Ok(backend.handle_completion_resolve(params.clone()))
++            })
+         })
+         .await
+         .unwrap_or(Ok(fallback))?;

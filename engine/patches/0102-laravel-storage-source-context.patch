@@ -1,0 +1,546 @@
+diff --git a/docs/CHANGELOG.md b/docs/CHANGELOG.md
+index 08cb43bb28f5d1755564e9fc75431cb4c5b8c9c4..cce00d243ae646677e329ca2a95fa79d17330a36 100644
+--- a/docs/CHANGELOG.md
++++ b/docs/CHANGELOG.md
+@@ -15,6 +15,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
+ 
+ ## [Unreleased]
+ 
++- **Keep configured Storage adapters precise.** Completion, hover and navigation recognize adapter methods supplied by custom drivers even when their service provider stays closed. Unresolved drivers and ordinary filesystem contracts retain their declared limits. Contributed by PHP Workbench downstream.
++
+ - **Complete the original item after Laravel's higher-order `sole`.** Property and method predicates preserve the matching item's type for completion, hover and navigation on framework versions that advertise the proxy. Missing or multiple matches throw rather than adding a nullable result. Contributed by PHP Workbench downstream.
+ 
+ - **Keep Laravel view data accurate while editing.** Nested `compact()` arrays retain their PHP key semantics, and view-owned data takes precedence over shared defaults. Accepted caller edits refresh dependent Blade templates while preserving unsaved template text. Contributed by PHP Workbench downstream.
+diff --git a/docs/todo.md b/docs/todo.md
+index 0ee142474b54bf78e2d30611624f7e97788637cc..e41cde0f44ab5ede0bfe3117b55e47607a67eaa1 100644
+--- a/docs/todo.md
++++ b/docs/todo.md
+@@ -36,7 +36,6 @@ contributor even though it's short.
+ | --- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------- | ----------- |
+ |     | Clear [refactoring gate](todo/refactor.md)                                                                                                                      | —           | —           |
+ | BL2 | [Accurate cyclic Blade data transformations](todo/blade.md#bl2-accurate-cyclic-blade-data-transformations) | Medium | High |
+-| L61 | [Configured Storage adapter types in real Laravel analysis](todo/laravel.md#l61-configured-storage-adapter-types-in-real-laravel-analysis) | Medium | Medium |
+ | X17  | [Index the workspace's other folders](todo/indexing.md#x17-index-the-workspaces-other-folders)                              | Medium      | Medium      |
+ | X14  | [Ask Zed to expose `file_scan_exclusions` and `file_types` to extensions](todo/indexing.md#x14-ask-zed-to-expose-file_scan_exclusions-and-file_types-to-extensions) (upstream request) | Low | Low |
+ | E1  | [External stub packages (ide-helper, etc.)](todo/external-stubs.md#e1-project-level-phpstorm-stubs-for-gtd)                                                     | Medium-High | Low         |
+diff --git a/docs/todo/laravel.md b/docs/todo/laravel.md
+index 25211527b0af7b613f875063ce99b3931e4b6622..f5f4f97f6d499671a99f781fb36319932d21c522 100644
+--- a/docs/todo/laravel.md
++++ b/docs/todo/laravel.md
+@@ -799,37 +799,3 @@ constructor injection doesn't apply.
+ **Where to look:** `code_actions/` for the promote-to-constructor
+ pattern already used elsewhere; `virtual_members/laravel/facade.rs`
+ for the facade-to-concrete-class resolution to reuse.
+-
+-#### L61. Configured Storage adapter types in real Laravel analysis
+-
+-**Impact: Medium · Complexity: Medium**
+-
+-The isolated real-Laravel13.37 analyzer emits three unexpected `unknown_member`
+-diagnostics in the Laravel example: `Storage::disk('s3')->download`,
+-`Storage::cloud()->assertExists`, and the registered `pantry` disk's `download`.
+-Verified114/engine99 and fresh engine100 emit the same six total diagnostics:
+-three intentional examples plus these three. The broader analyzer gate remains
+-failed; do not change its expected count to six or suppress these warnings.
+-
+-Laravel's concrete adapters provide these methods, and pantry's provider
+-explicitly returns FilesystemAdapter. The engine already refines configured
+-disk returns, but the real cold analyzer retains the facade's Filesystem/Cloud
+-contracts. Determine the actual missing fact or lost refinement through the
+-existing config/provider/shared resolver path before implementing a fix.
+-
+-Acceptance:
+-
+-- Preserve the current real-dependency failing receipt and reproduce the three
+-  warnings through the actual analyzer route, with owned isolated examples.
+-- Baseline/current examples then produce only the three intentional diagnostics;
+-  verify no added diagnostic and report actual counts without suppression.
+-- Public completion, hover, and definition retain the known adapter result for
+-  s3, default cloud, and the discovered pantry closure; cover cold/warm lookup
+-  and config/provider edits without stale cached contract/adapter results.
+-- Preserve ordinary contract-typed receiver negatives, unresolved custom-driver
+-  conservatism, and discovered custom adapters that return another concrete type.
+-- Reuse shared type inference; do not cast every Filesystem/Cloud value to the
+-  adapter, alter borrowed vendor, or treat network/filesystem execution as proved.
+-
+-Evidence and source inventory: `work/typed-view-freshness/laravel-gate/`
+-`storage-baseline-investigation.md`.
+diff --git a/examples/laravel/app/Demo.php b/examples/laravel/app/Demo.php
+index c239156beebfecc88ab23a7fcdf319ea373fadda..38d6fc4e322c705fc7d5bb78ec61cfbe49fd45fa 100644
+--- a/examples/laravel/app/Demo.php
++++ b/examples/laravel/app/Demo.php
+@@ -1405,8 +1405,9 @@ class Demo
+         // The 'pantry' disk uses a driver the framework does not ship.  Its
+         // Storage::extend() closure in DemoServiceProvider builds a
+         // FilesystemAdapter too, so a custom driver does not cost the rest of
+-        // the project its precise disk type.
+-        Storage::disk('pantry')->download('sourdough.pdf');
++        // the project its precise disk type, even while the provider is closed.
++        $pantry = Storage::disk('pantry');     // → FilesystemAdapter
++        $pantry->download('sourdough.pdf');
+ 
+         // A disk configured at runtime is configured all the same: nothing in
+         // config/filesystems.php declares 'ondemand' or 'scratch', and neither
+diff --git a/src/backend/file_access.rs b/src/backend/file_access.rs
+index cfb716ae51bdc865f1db6b00a3336aed7db54f3f..ae718a79ff999b383d44b4527bdcc84196dc3d1d 100644
+--- a/src/backend/file_access.rs
++++ b/src/backend/file_access.rs
+@@ -198,6 +198,47 @@ impl Backend {
+             .unwrap_or_default()
+     }
+ 
++    /// Recover classes and lexical names from the supplied source without
++    /// publishing editor metadata. Closed provider files may have lazily
++    /// cached classes while their imports and namespace remain uncached.
++    pub(crate) fn source_file_context(&self, content: &str) -> FileContext {
++        let _parse = crate::parser::with_parse_cache(content);
++        let (mut classes, blocks) = Self::parse_php_classes_by_block(content, None, false, true);
++        let (use_map, namespace, resolved_names) =
++            crate::parser::with_parsed_program(content, "source_file_context", |program, _| {
++                let mut use_map = std::collections::HashMap::new();
++                Self::extract_use_statements_from_statements(
++                    program.statements.iter(),
++                    &mut use_map,
++                );
++                let namespace = Self::extract_namespace_from_statements(program.statements.iter());
++                let arena = mago_allocator::LocalArena::new();
++                let names = mago_names::resolver::NameResolver::new(&arena).resolve(program);
++                (
++                    use_map,
++                    namespace,
++                    Some(Arc::new(crate::names::OwnedResolvedNames::from_resolved(
++                        &names,
++                    ))),
++                )
++            });
++        Self::resolve_parent_class_names_by_block(&mut classes, &blocks, &use_map, &namespace);
++        let classes = classes
++            .into_iter()
++            .map(|(mut class, namespace, _)| {
++                class.file_namespace = namespace.as_deref().map(crate::atom::atom);
++                Arc::new(class)
++            })
++            .collect();
++        FileContext {
++            classes,
++            use_map,
++            namespace,
++            namespace_spans: (!blocks.is_empty()).then_some(blocks),
++            resolved_names,
++        }
++    }
++
+     /// Gather the per-file context (classes, use-map, namespace) in one call.
+     ///
+     /// This replaces the repeated lock-and-unwrap boilerplate that was
+diff --git a/src/backend/laravel/macros.rs b/src/backend/laravel/macros.rs
+index 4198f39c7784a5890bd83db1946c6efda75c492a..4532f6b399ff8eb4cf99edf84475d6b0ebba8d06 100644
+--- a/src/backend/laravel/macros.rs
++++ b/src/backend/laravel/macros.rs
+@@ -101,7 +101,7 @@ impl Backend {
+                 if regs.is_empty() {
+                     return;
+                 }
+-                self.infer_storage_driver_return_types(&mut regs, uri, content);
++                self.infer_storage_driver_return_types(&mut regs, content);
+                 drivers.files.set_file(uri.to_string(), regs);
+             };
+ 
+diff --git a/src/backend/laravel/storage.rs b/src/backend/laravel/storage.rs
+index b571ea0f587acfbd87f5516545be82c8d541c85f..485fa3d46ee9d860fa98b601658288697fa19f0c 100644
+--- a/src/backend/laravel/storage.rs
++++ b/src/backend/laravel/storage.rs
+@@ -59,7 +59,7 @@ impl Backend {
+         let touched = refresh_file(&self.laravel_storage_drivers, uri, true, || {
+             let mut regs =
+                 crate::virtual_members::laravel::extract_storage_driver_registrations(content);
+-            self.infer_storage_driver_return_types(&mut regs, uri, content);
++            self.infer_storage_driver_return_types(&mut regs, content);
+             regs
+         });
+         if config_changed || touched {
+@@ -76,13 +76,12 @@ impl Backend {
+     pub(super) fn infer_storage_driver_return_types(
+         &self,
+         regs: &mut [crate::virtual_members::laravel::StorageDriverRegistration],
+-        uri: &str,
+         content: &str,
+     ) {
+         if regs.iter().all(|reg| reg.return_type.is_some()) {
+             return;
+         }
+-        let file_ctx = self.file_context(uri);
++        let file_ctx = self.source_file_context(content);
+         let class_loaders = self.class_loaders(&file_ctx);
+         let function_loaders = self.function_loaders(&file_ctx);
+         for reg in regs.iter_mut() {
+@@ -109,3 +108,7 @@ impl Backend {
+         }
+     }
+ }
++
++#[cfg(test)]
++#[path = "storage_tests.rs"]
++mod tests;
+diff --git a/src/backend/laravel/storage_tests.rs b/src/backend/laravel/storage_tests.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..26a0076a8dcaa65747e8ca6498cd47045d639139
+--- /dev/null
++++ b/src/backend/laravel/storage_tests.rs
+@@ -0,0 +1,305 @@
++use crate::Backend;
++use crate::composer::Psr4Mapping;
++use crate::types::ClassInfo;
++use crate::virtual_members::laravel::{
++    StorageDriverRegistration, extract_storage_driver_registrations,
++};
++use std::sync::Arc;
++use tower_lsp::lsp_types::Url;
++
++const IMPORTED_PROVIDER: &str = r#"<?php
++namespace App\Providers;
++use Illuminate\Support\Facades\Storage;
++use Illuminate\Filesystem\FilesystemAdapter as DiskAdapter;
++class StorageProvider {
++    public function boot(): void {
++        Storage::extend('pantry', function ($app, $config) {
++            return new DiskAdapter();
++        });
++    }
++}
++"#;
++
++struct Fixture {
++    backend: Backend,
++    _directory: tempfile::TempDir,
++    provider_uri: String,
++    source: String,
++}
++
++impl Fixture {
++    fn new(source: &str) -> Self {
++        let directory = tempfile::tempdir().unwrap();
++        let root = directory.path().canonicalize().unwrap();
++        for (name, content) in [
++            (
++                "vendor/illuminate/Filesystem/FilesystemAdapter.php",
++                "<?php namespace Illuminate\\Filesystem; class FilesystemAdapter {}",
++            ),
++            (
++                "app/Providers/RelativeAdapter.php",
++                "<?php namespace App\\Providers; class RelativeAdapter {}",
++            ),
++            (
++                "app/Adapters/FirstAdapter.php",
++                "<?php namespace App\\Adapters; class FirstAdapter {}",
++            ),
++            (
++                "app/Adapters/SecondAdapter.php",
++                "<?php namespace App\\Adapters; class SecondAdapter {}",
++            ),
++            ("app/Providers/StorageProvider.php", source),
++        ] {
++            let path = root.join(name);
++            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
++            std::fs::write(path, content).unwrap();
++        }
++        let backend = Backend::new_test_with_workspace(
++            root.clone(),
++            vec![
++                Psr4Mapping {
++                    prefix: "App\\".into(),
++                    base_path: "app/".into(),
++                },
++                Psr4Mapping {
++                    prefix: "Illuminate\\".into(),
++                    base_path: "vendor/illuminate/".into(),
++                },
++            ],
++        );
++        Self {
++            backend,
++            _directory: directory,
++            provider_uri: Url::from_file_path(root.join("app/Providers/StorageProvider.php"))
++                .unwrap()
++                .to_string(),
++            source: source.to_owned(),
++        }
++    }
++
++    fn assert_no_editor_metadata(&self) {
++        // Ordinary lazy class caching is allowed, but recovery must not
++        // publish editor metadata even under a synthetic/recovery URI.
++        assert!(self.backend.open_files.read().is_empty());
++        assert!(self.backend.file_imports.read().is_empty());
++        assert!(self.backend.file_namespaces.read().is_empty());
++        assert!(self.backend.resolved_names.read().is_empty());
++        assert!(self.backend.symbol_maps.read().is_empty());
++        let uri = self.provider_uri.as_str();
++        assert!(
++            !self.backend.open_files.read().contains_key(uri),
++            "inference must not invent didOpen"
++        );
++        assert!(
++            !self.backend.file_imports.read().contains_key(uri),
++            "source imports must remain transient"
++        );
++        assert!(
++            !self.backend.file_namespaces.read().contains_key(uri),
++            "source namespaces must remain transient"
++        );
++        assert!(
++            !self.backend.resolved_names.read().contains_key(uri),
++            "source name map must remain transient"
++        );
++        assert!(
++            !self.backend.symbol_maps.read().contains_key(uri),
++            "inference must not publish a provider symbol map"
++        );
++    }
++
++    fn infer(&self) -> Vec<StorageDriverRegistration> {
++        self.assert_no_editor_metadata();
++        let before: Vec<Arc<ClassInfo>> = self
++            .backend
++            .symbols
++            .uri_classes_index
++            .read()
++            .get(&self.provider_uri)
++            .cloned()
++            .unwrap_or_default();
++        let parsed_before = self.backend.parsed_uris.read().contains(&self.provider_uri);
++        let mut registrations = extract_storage_driver_registrations(&self.source);
++        assert!(
++            !registrations.is_empty(),
++            "the actual registration extractor must recognize this fixture"
++        );
++        assert!(
++            registrations.iter().all(|reg| reg.return_type.is_none()),
++            "fixtures must exercise closure body inference, not annotations"
++        );
++        self.backend
++            .infer_storage_driver_return_types(&mut registrations, &self.source);
++        self.assert_no_editor_metadata();
++        let after = self
++            .backend
++            .symbols
++            .uri_classes_index
++            .read()
++            .get(&self.provider_uri)
++            .cloned()
++            .unwrap_or_default();
++        assert_eq!(
++            before.len(),
++            after.len(),
++            "transient recovery must not index the provider"
++        );
++        assert!(
++            before.iter().zip(&after).all(|(a, b)| Arc::ptr_eq(a, b)),
++            "existing lazy provider classes must not be replaced"
++        );
++        assert_eq!(
++            parsed_before,
++            self.backend.parsed_uris.read().contains(&self.provider_uri)
++        );
++        let path = Url::parse(&self.provider_uri)
++            .unwrap()
++            .to_file_path()
++            .unwrap();
++        assert_eq!(std::fs::read_to_string(path).unwrap(), self.source);
++        registrations
++    }
++}
++
++fn assert_type(registrations: &[StorageDriverRegistration], driver: &str, expected: &str) {
++    let reg = registrations
++        .iter()
++        .find(|reg| reg.driver == driver)
++        .expect("expected literal driver registration");
++    assert_eq!(
++        reg.return_type.as_ref().and_then(|ty| ty.base_name()),
++        Some(expected),
++        "driver {driver}: {:?}",
++        reg.return_type
++    );
++}
++
++#[test]
++fn storage_source_context_cold_imported_closure_return() {
++    let fixture = Fixture::new(IMPORTED_PROVIDER);
++    assert!(
++        fixture
++            .backend
++            .file_context(&fixture.provider_uri)
++            .classes
++            .is_empty()
++    );
++    assert_type(
++        &fixture.infer(),
++        "pantry",
++        "Illuminate\\Filesystem\\FilesystemAdapter",
++    );
++}
++
++#[test]
++fn storage_source_context_lazy_provider_still_recovers_missing_imports() {
++    let fixture = Fixture::new(IMPORTED_PROVIDER);
++    assert!(
++        fixture
++            .backend
++            .find_or_load_class("App\\Providers\\StorageProvider")
++            .is_some()
++    );
++    let old_context = fixture.backend.file_context(&fixture.provider_uri);
++    assert_eq!(
++        old_context.classes.len(),
++        1,
++        "exercise the real lazy class parser"
++    );
++    assert!(old_context.use_map.is_empty());
++    assert!(old_context.namespace.is_none());
++    fixture.assert_no_editor_metadata();
++    assert_type(
++        &fixture.infer(),
++        "pantry",
++        "Illuminate\\Filesystem\\FilesystemAdapter",
++    );
++}
++
++#[test]
++fn storage_source_context_cold_namespace_relative_arrow_return() {
++    let fixture = Fixture::new(
++        r#"<?php
++namespace App\Providers;
++use Illuminate\Support\Facades\Storage;
++class StorageProvider {
++    public function boot(): void {
++        Storage::extend('relative', fn ($app, $config) => new RelativeAdapter());
++    }
++}
++"#,
++    );
++    assert_type(
++        &fixture.infer(),
++        "relative",
++        "App\\Providers\\RelativeAdapter",
++    );
++}
++
++#[test]
++fn storage_source_context_alias_collision_uses_each_closure_namespace() {
++    let fixture = Fixture::new(
++        r#"<?php
++namespace App\First {
++    use Illuminate\Support\Facades\Storage;
++    use App\Adapters\FirstAdapter as Disk;
++    class FirstProvider {
++        public function boot(): void {
++            Storage::extend('first', fn ($app, $config) => new Disk());
++        }
++    }
++}
++namespace App\Second {
++    use Illuminate\Support\Facades\Storage;
++    use App\Adapters\SecondAdapter as Disk;
++    class SecondProvider {
++        public function boot(): void {
++            Storage::extend('second', function ($app, $config) { return new Disk(); });
++        }
++    }
++}
++"#,
++    );
++    let registrations = fixture.infer();
++    assert_eq!(registrations.len(), 2);
++    assert_ne!(
++        registrations[0].closure_offset,
++        registrations[1].closure_offset
++    );
++    assert_type(&registrations, "first", "App\\Adapters\\FirstAdapter");
++    assert_type(&registrations, "second", "App\\Adapters\\SecondAdapter");
++}
++
++#[test]
++fn storage_source_context_fully_qualified_body_is_a_positive_control() {
++    let fixture = Fixture::new(
++        r#"<?php
++use Illuminate\Support\Facades\Storage;
++Storage::extend('qualified', fn ($app, $config) => new \Illuminate\Filesystem\FilesystemAdapter());
++"#,
++    );
++    assert_type(
++        &fixture.infer(),
++        "qualified",
++        "Illuminate\\Filesystem\\FilesystemAdapter",
++    );
++}
++
++#[test]
++fn storage_source_context_unresolved_custom_driver_stays_unknown() {
++    let fixture = Fixture::new(
++        r#"<?php
++namespace App\Providers;
++use Illuminate\Support\Facades\Storage;
++Storage::extend('unknown', fn ($app, $config) => $config['adapter']);
++"#,
++    );
++    let registrations = fixture.infer();
++    assert_eq!(registrations.len(), 1);
++    assert_eq!(registrations[0].driver, "unknown");
++    assert!(
++        registrations[0].return_type.is_none(),
++        "an unresolved config value must not invent a concrete adapter: {:?}",
++        registrations[0].return_type
++    );
++}
+diff --git a/src/completion/array_shape.rs b/src/completion/array_shape.rs
+index b214a894de60e1ec5cb7af9ff25f052626881dd2..21526d0722766067a2dd1e4eef1af6073663f622 100644
+--- a/src/completion/array_shape.rs
++++ b/src/completion/array_shape.rs
+@@ -542,45 +542,7 @@ impl Backend {
+         position: Position,
+     ) -> FileContext {
+         let offset = position_to_offset(content, position);
+-        let _parse = crate::parser::with_parse_cache(content);
+-        let (mut classes, blocks) = Self::parse_php_classes_by_block(content, None, false, true);
+-        let (use_map, namespace, resolved_names) = crate::parser::with_parsed_program(
+-            content,
+-            "array_key_recovery_context",
+-            |program, _| {
+-                let mut use_map = std::collections::HashMap::new();
+-                Self::extract_use_statements_from_statements(
+-                    program.statements.iter(),
+-                    &mut use_map,
+-                );
+-                let namespace = Self::extract_namespace_from_statements(program.statements.iter());
+-                let arena = mago_allocator::LocalArena::new();
+-                let names = mago_names::resolver::NameResolver::new(&arena).resolve(program);
+-                (
+-                    use_map,
+-                    namespace,
+-                    Some(Arc::new(crate::names::OwnedResolvedNames::from_resolved(
+-                        &names,
+-                    ))),
+-                )
+-            },
+-        );
+-        Self::resolve_parent_class_names_by_block(&mut classes, &blocks, &use_map, &namespace);
+-        let classes = classes
+-            .into_iter()
+-            .map(|(mut class, namespace, _)| {
+-                class.file_namespace = namespace.as_deref().map(crate::atom::atom);
+-                Arc::new(class)
+-            })
+-            .collect();
+-        FileContext {
+-            classes,
+-            use_map,
+-            namespace,
+-            namespace_spans: (!blocks.is_empty()).then_some(blocks),
+-            resolved_names,
+-        }
+-        .at(offset)
++        self.source_file_context(content).at(offset)
+     }
+ 
+     /// Resolve the raw (uncleaned) type annotation for a variable.

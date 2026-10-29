@@ -1,0 +1,77 @@
+diff --git a/docs/CHANGELOG.md b/docs/CHANGELOG.md
+index 8e45d20..807d071 100644
+--- a/docs/CHANGELOG.md
++++ b/docs/CHANGELOG.md
+@@ -29,6 +29,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
+ 
+ ### Fixed
+ 
++- **Workspace search follows current editor text.** Newly opened, edited and closed files are reconciled before symbol search, and startup indexing no longer causes the first lookup to fail. Contributed by PHP Workbench (local downstream patch).
++
+ - **Background indexing follows current project sources.** Delayed discovery results no longer replace newer editor text or restore deleted declarations. Autocomplete and diagnostics refresh when background indexing publishes new symbols. Contributed by PHP Workbench (local downstream patch).
+ 
+ - **Results follow external project changes.** Autocomplete and native diagnostics discard results computed before watched PHP, Composer or resource updates finish, while open editor text is preserved. Contributed by PHP Workbench (local downstream patch).
+diff --git a/src/server.rs b/src/server.rs
+index cb51454..074e18a 100644
+--- a/src/server.rs
++++ b/src/server.rs
+@@ -729,7 +729,9 @@ impl LanguageServer for Backend {
+         // this walks the whole workspace index.
+         let backend = self.clone_for_blocking();
+         run_blocking_cancel_safe("symbol", move || {
+-            backend.with_semantic_epoch(|| Ok(backend.handle_workspace_symbol(&params.query)))
++            backend.with_prepared_current_semantics(|| {
++                Ok(backend.handle_workspace_symbol(&params.query))
++            })
+         })
+         .await
+         .unwrap_or(Ok(None))
+@@ -1168,6 +1170,48 @@ fn wrap_locations(locations: Vec<Location>) -> Option<GotoDefinitionResponse> {
+ mod tests {
+     use super::*;
+ 
++    #[tokio::test]
++    async fn workspace_symbol_prepares_pending_open_change_and_close_sources() {
++        for changed in [false, true] {
++            let dir = tempfile::tempdir().unwrap();
++            let path = dir.path().join("Widget.php");
++            let uri = Url::from_file_path(&path).unwrap().to_string();
++            let disk = std::sync::Arc::new("<?php\nclass DiskWidget {}\n".to_owned());
++            let current = std::sync::Arc::new("<?php\nclass CurrentWidget {}\n".to_owned());
++            std::fs::write(&path, disk.as_str()).unwrap();
++            let backend = Backend::new_test();
++            backend.update_ast(&uri, &disk);
++            if changed {
++                backend.diag.documents.lock().open(&uri, 1, &disk);
++                backend.open_files.write().insert(uri.clone(), disk.clone());
++                assert!(backend.parse_diagnostic_snapshot(&uri, &disk));
++                assert!(backend.diag.documents.lock().change(&uri, 2, &current));
++            } else {
++                backend.diag.documents.lock().open(&uri, 1, &current);
++            }
++            backend
++                .open_files
++                .write()
++                .insert(uri.clone(), current.clone());
++            let query = || WorkspaceSymbolParams {
++                query: "Widget".to_owned(),
++                ..Default::default()
++            };
++            let symbols = backend.symbol(query()).await.unwrap().unwrap_or_default();
++            assert!(
++                symbols.iter().any(|s| s.name == "CurrentWidget"),
++                "changed={changed}"
++            );
++            assert!(!symbols.iter().any(|s| s.name == "DiskWidget"));
++            backend.diag.documents.lock().close(&uri);
++            backend.open_files.write().remove(&uri);
++            let symbols = backend.symbol(query()).await.unwrap().unwrap_or_default();
++            assert!(symbols.iter().any(|s| s.name == "DiskWidget"));
++            assert!(!symbols.iter().any(|s| s.name == "CurrentWidget"));
++            assert_eq!(std::fs::read_to_string(path).unwrap(), *disk);
++        }
++    }
++
+     #[test]
+     fn type_hierarchy_registration_includes_php_document_selector() {
+         let registration = type_hierarchy_registration();

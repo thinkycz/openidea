@@ -11,6 +11,7 @@
 
 pub mod archive;
 pub mod jdk;
+pub mod phpantom;
 pub mod platform;
 mod process;
 pub mod registry;
@@ -452,16 +453,23 @@ impl Tools {
         let Some(spec) = spec else {
             let u = usage?;
             let command = u.command.clone()?;
-            let path = self.which(&command).or_else(|| self.found.get(&command).cloned());
+            let bundled = (command == phpantom::COMMAND).then(phpantom::bundled).flatten();
+            let path = bundled.clone().or_else(|| self.which(&command)).or_else(|| self.found.get(&command).cloned());
             return Some(ToolInfo {
                 name: name.to_string(),
                 display_name: name.to_string(),
                 kind: u.kind.unwrap_or(ToolKind::LanguageServer),
-                status: if path.is_some() { ToolStatus::OnPath } else { ToolStatus::Missing },
+                status: if bundled.is_some() {
+                    ToolStatus::Installed
+                } else if path.is_some() {
+                    ToolStatus::OnPath
+                } else {
+                    ToolStatus::Missing
+                },
                 command,
                 languages,
                 path: path.map(Into::into),
-                version: None,
+                version: bundled.map(|_| phpantom::VERSION.to_owned()),
                 install_method: None,
                 can_install: false,
                 unavailable_reason: None,

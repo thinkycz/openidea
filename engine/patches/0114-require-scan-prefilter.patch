@@ -1,0 +1,184 @@
+--- a/src/composer.rs
++++ b/src/composer.rs
+@@ -922,9 +922,39 @@
+ /// Scan actual PHP source with tag-aware lexing; tagless HTML is not PHP.
+ pub fn extract_require_once_paths_from_php(content: &str) -> Vec<String> {
+     extract_literal_requires(content, true)
++}
++
++// The lexer remains authoritative. This byte search only proves where its
++// final possible keyword can occur; matches inside strings/comments are harmless.
++fn last_possible_require_once(content: &str) -> Option<usize> {
++    let bytes = content.as_bytes();
++    memchr::memchr_iter(b'_', bytes)
++        .rev()
++        .find_map(|underscore| {
++            let start = underscore.checked_sub(7)?;
++            let end = underscore.checked_add(5)?;
++            let candidate = bytes.get(start..end)?;
++            candidate
++                .eq_ignore_ascii_case(b"require_once")
++                .then_some(start)
++        })
+ }
+ 
+ fn extract_literal_requires(content: &str, tagged: bool) -> Vec<String> {
++    if content.len() > u32::MAX as usize {
++        return Vec::new();
++    }
++    let Some(last_keyword) = last_possible_require_once(content) else {
++        return Vec::new();
++    };
++    extract_literal_requires_inner(content, tagged, Some(last_keyword))
++}
++
++fn extract_literal_requires_inner(
++    content: &str,
++    tagged: bool,
++    last_keyword: Option<usize>,
++) -> Vec<String> {
+     use mago_syntax::{lexer::Lexer, settings::LexerSettings, token::TokenKind};
+     use mago_syntax_core::input::Input;
+ 
+@@ -957,6 +987,9 @@
+         if content.get(start..end).is_none() {
+             return Vec::new();
+         }
++        if last_keyword.is_some_and(|last| start > last) && pending.is_none() {
++            break;
++        }
+         let kind = token.kind;
+         if documents != 0 {
+             match kind {
+@@ -2692,3 +2725,131 @@
+         assert_eq!(independent_projects(&roots), vec![false, true, true]);
+     }
+ }
++
++#[cfg(test)]
++mod require_prefilter_regression_tests {
++    use super::{
++        extract_literal_requires, extract_literal_requires_inner, last_possible_require_once,
++    };
++
++    #[test]
++    fn optimized_scanner_matches_full_lexer_across_contexts() {
++        let cases = [
++            ("<?php\nrequire_once 'a.php';\nfunction later() {}\n", true),
++            (
++                "<?php\nfunction before() {}\nrequire_once 'last.php';\n",
++                true,
++            ),
++            (
++                "<?php\nrequire_once 'one.php'; require_once 'two.php';\n",
++                true,
++            ),
++            ("<?php\nREQUIRE_ONCE 'upper.php';\n", true),
++            ("<?php\nReQuIrE_OnCe 'mixed.php';\n", true),
++            (
++                "HTML require_once 'fake.php';\n<?php\nrequire_once 'real.php';\n?>\n",
++                true,
++            ),
++            (
++                "<?php\n/* require_once 'fake.php'; */\nrequire_once 'real.php';\n",
++                true,
++            ),
++            (
++                "<?php\n$x = <<<'DOC'\nrequire_once 'fake.php';\nDOC;\nrequire_once 'real.php';\n",
++                true,
++            ),
++            (
++                "<?php\nrequire_once 'a.php';\n$broken = 'unterminated",
++                true,
++            ),
++            ("<?php\nrequire_once 'a.php';\n/* unterminated", true),
++            (
++                "<?php\nrequire_once 'a.php'; __halt_compiler(); require_once 'hidden.php';",
++                true,
++            ),
++            ("require_once 'snippet.php';\n", false),
++            ("<?php\nfunction no_require() {}\n", true),
++            (
++                "<?php\nrequire_once 'tag.php' // comment\n// another ?>",
++                true,
++            ),
++        ];
++        for (source, tagged) in cases {
++            assert_eq!(
++                extract_literal_requires(source, tagged),
++                extract_literal_requires_inner(source, tagged, None),
++                "input: {source:?}"
++            );
++        }
++    }
++
++    #[test]
++    fn byte_prefilter_covers_case_and_multiple_occurrences() {
++        assert_eq!(
++            last_possible_require_once("x REQUIRE_ONCE y ReQuIrE_OnCe"),
++            Some(17)
++        );
++        assert_eq!(last_possible_require_once("no keyword here"), None);
++        assert_eq!(last_possible_require_once("require_onc"), None);
++    }
++
++    #[test]
++    fn generated_require_prefilter_matches_full_lexer_for_context_cross_product() {
++        // Deterministic, bounded coverage: every source is compared to the
++        // same scanner with prefiltering disabled, including malformed suffixes.
++        let prefixes = [
++            "",
++            "// require_once 'fake.php';\n",
++            "/* require_once 'fake.php'; */\n",
++            "$s = '🐘 require_once fake';\n",
++            "$s = \"café require_once fake\";\n",
++            "$s = <<<'DOC'\nrequire_once 'fake.php';\nDOC;\n",
++            "érequire_once('identifier.php');\n",
++            "__halt_compiler();\n",
++        ];
++        let bodies = [
++            "require_once 'real.php';\n",
++            "require_once('real.php');\n",
++            "require_once __DIR__ . '/real.php';\n",
++            "require_once 'real.php' // first\n# second ?>\n<?php\n",
++            "require_once 'prefix' // comment\n . $suffix;\n",
++            "require_once 'one.php'; require_once 'two.php';\n",
++            "REQUIRE_ONCE 'upper.php';\n",
++            "$x = 1;\n",
++        ];
++        let suffixes = [
++            "",
++            "// require_once 'fake.php';\n",
++            "/* unfinished require_once",
++            "$broken = 'unfinished",
++            "$broken = \"unfinished",
++            "$broken = <<<DOC\nunfinished",
++            "?>\nHTML require_once 'fake.php';\n",
++            "\n/* é🐘 */ $f = 'done';\n",
++        ];
++        for prefix in prefixes {
++            for body in bodies {
++                for suffix in suffixes {
++                    let source = format!("<?php\n{prefix}{body}{suffix}");
++                    assert_eq!(
++                        extract_literal_requires(&source, true),
++                        extract_literal_requires_inner(&source, true, None),
++                        "prefilter changed result for {source:?}",
++                    );
++                }
++            }
++        }
++        // Tagless snippets follow the scripting lexer, while strings with no
++        // keyword exercise the fast return path explicitly.
++        for body in bodies {
++            for suffix in suffixes {
++                let source = format!("{body}{suffix}");
++                assert_eq!(
++                    extract_literal_requires(&source, false),
++                    extract_literal_requires_inner(&source, false, None),
++                    "tagless input: {source:?}",
++                );
++            }
++        }
++    }
++}

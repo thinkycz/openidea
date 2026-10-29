@@ -1,0 +1,975 @@
+diff --git a/docs/CHANGELOG.md b/docs/CHANGELOG.md
+index fa54748..36bb965 100644
+--- a/docs/CHANGELOG.md
++++ b/docs/CHANGELOG.md
+@@ -15,6 +15,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
+ 
+ ## [Unreleased]
+ 
++- **Follow quoted method selectors.** Navigation, references and call hierarchy recognize fixed string method names. Rename includes escaped names while preserving quotes and refuses references whose source changed. Contributed by PHP Workbench downstream.
++
+ - **Follow immediately invoked objects in call hierarchy.** Construction and invocation retain separate caller sites and navigate to the concrete method, including inherited and trait implementations. Creating a callable remains distinct from invoking it. Contributed by PHP Workbench downstream.
+ 
+ - **Keep hierarchy nodes and relationships accurate.** Anonymous-class construction follows its concrete constructor, trait composition is reciprocal, and declaration navigation handles comments. Expanding a changed declaration requires a fresh selection; Composer dependency discovery honors its configured folder. Contributed by PHP Workbench downstream.
+diff --git a/examples/php/definition.php b/examples/php/definition.php
+index bf3db2b..61b83eb 100644
+--- a/examples/php/definition.php
++++ b/examples/php/definition.php
+@@ -440,3 +440,14 @@ function immediateObjectNavigation(): void
+         }
+     })();
+ }
++
++// Try: navigate, find references, rename or show Callers on label below.
++// Quoted selectors name the same method; escaped names retain their whole
++// source range. Creating a callable remains a reference without a caller edge.
++function literalMethodNavigation(GtdTarget $target): void
++{
++    $target->{'label'}();
++    $target->{"\x6cabel"}();
++    $target->{(b'label')}();
++    $callback = $target->{B"\x6cabel"}(...);
++}
+diff --git a/src/call_hierarchy.rs b/src/call_hierarchy.rs
+index b847fef..a630082 100644
+--- a/src/call_hierarchy.rs
++++ b/src/call_hierarchy.rs
+@@ -687,7 +687,8 @@ impl Backend {
+         if (!symbol_map.call_execution_regions.is_empty()
+             || !symbol_map.keyword_constructor_spans.is_empty()
+             || !symbol_map.anonymous_class_constructions.is_empty()
+-            || !symbol_map.immediate_object_invocations.is_empty())
++            || !symbol_map.immediate_object_invocations.is_empty()
++            || !symbol_map.literal_method_selectors.is_empty())
+             && source_hash.is_none()
+         {
+             return None;
+@@ -1205,7 +1206,8 @@ impl Backend {
+             if (!symbol_map.call_execution_regions.is_empty()
+                 || !symbol_map.keyword_constructor_spans.is_empty()
+                 || !symbol_map.anonymous_class_constructions.is_empty()
+-                || !symbol_map.immediate_object_invocations.is_empty())
++                || !symbol_map.immediate_object_invocations.is_empty()
++                || !symbol_map.literal_method_selectors.is_empty())
+                 && source_hash.is_none()
+             {
+                 return None;
+diff --git a/src/rename/prepare.rs b/src/rename/prepare.rs
+index 45614d2..77bd371 100644
+--- a/src/rename/prepare.rs
++++ b/src/rename/prepare.rs
+@@ -18,7 +18,7 @@ use crate::util::build_fqn;
+ 
+ use super::RenameOutcome;
+ use super::namespace::find_namespace_segment_at_offset;
+-use super::validate::{is_valid_new_name, range_text, span_spells_its_name};
++use super::validate::{LiteralMethodContext, is_valid_new_name, range_text};
+ 
+ /// The text a single function or constant reference should be replaced
+ /// with, or `None` when it must be left exactly as it is.
+@@ -102,7 +102,8 @@ impl Backend {
+         // The range below is built from this span's byte offsets, and the
+         // editor shows it as the text about to be replaced.  A map that
+         // predates the buffer would put it over unrelated code.
+-        if !self.rename_map_matches(uri, content) || !span_spells_its_name(content, &span) {
++        if !self.rename_map_matches(uri, content) || !self.rename_span_verified(uri, content, &span)
++        {
+             return None;
+         }
+ 
+@@ -214,7 +215,8 @@ impl Backend {
+         // from this span.  If the map it came from predates the buffer the
+         // whole response is nonsense, so drop it rather than rename the
+         // wrong symbol.
+-        if !self.rename_map_matches(uri, content) || !span_spells_its_name(content, &span) {
++        if !self.rename_map_matches(uri, content) || !self.rename_span_verified(uri, content, &span)
++        {
+             return Ok(None);
+         }
+ 
+@@ -349,6 +351,8 @@ impl Backend {
+ 
+         // Build the workspace edit.  Group text edits by document URI.
+         let mut changes: HashMap<Url, Vec<TextEdit>> = HashMap::new();
++        let mut literal_magic_contexts: HashMap<String, Option<LiteralMethodContext>> =
++            HashMap::new();
+ 
+         for location in &locations {
+             let loc_uri_str = location.uri.to_string();
+@@ -387,6 +391,17 @@ impl Backend {
+                 continue;
+             }
+ 
++            let literal_magic_use = magic_rename.as_ref().is_some_and(|(old_use, _)| {
++                let Some(text) = loc_content.as_deref() else {
++                    return false;
++                };
++                let context = literal_magic_contexts
++                    .entry(loc_uri_str.clone())
++                    .or_insert_with(|| self.rename_literal_method_context(&loc_uri_str, text));
++                context.as_ref().is_some_and(|context| {
++                    context.range_verdict(text, location.range, old_use) == Some(true)
++                })
++            });
+             let edit_text = if is_variable {
+                 let bare_name = new_name.strip_prefix('$').unwrap_or(new_name);
+                 let loc_symbol = loc_content.as_deref().and_then(|c| {
+@@ -420,10 +435,11 @@ impl Backend {
+                     bare_name.to_string()
+                 }
+             } else if let Some((old_use, new_use)) = &magic_rename
+-                && loc_content
+-                    .as_deref()
+-                    .and_then(|c| range_text(c, location.range))
+-                    .is_some_and(|text| text == old_use.as_str())
++                && (literal_magic_use
++                    || loc_content
++                        .as_deref()
++                        .and_then(|c| range_text(c, location.range))
++                        .is_some_and(|text| text == old_use.as_str()))
+             {
+                 new_use.clone()
+             } else {
+diff --git a/src/rename/validate.rs b/src/rename/validate.rs
+index ba02d54..43405fd 100644
+--- a/src/rename/validate.rs
++++ b/src/rename/validate.rs
+@@ -28,7 +28,7 @@ use std::sync::Arc;
+ use tower_lsp::lsp_types::{Location, Range};
+ 
+ use crate::Backend;
+-use crate::symbol_map::{SymbolKind, SymbolSpan};
++use crate::symbol_map::{SymbolKind, SymbolMap, SymbolSpan};
+ use crate::text_position::position_to_byte_offset;
+ 
+ /// What the source text at a reference range must still look like.
+@@ -49,6 +49,51 @@ enum Expected<'a> {
+     Key(&'a str),
+ }
+ 
++/// Request-local literal-role snapshot; fingerprint is checked once per URI.
++pub(super) struct LiteralMethodContext {
++    map: Arc<SymbolMap>,
++    source_matches: bool,
++}
++
++impl LiteralMethodContext {
++    pub(super) fn range_verdict(
++        &self,
++        content: &str,
++        range: Range,
++        expected: &str,
++    ) -> Option<bool> {
++        // A shifted UTF16 range must not evade an old literal role and then
++        // fall through to ordinary raw-name validation.
++        if !self.source_matches {
++            return Some(false);
++        }
++        let (Ok(start), Ok(end)) = (
++            u32::try_from(position_to_byte_offset(content, range.start)),
++            u32::try_from(position_to_byte_offset(content, range.end)),
++        ) else {
++            return Some(false);
++        };
++        self.byte_verdict(content, start, end, expected)
++    }
++
++    fn byte_verdict(&self, content: &str, start: u32, end: u32, expected: &str) -> Option<bool> {
++        if !self.source_matches {
++            return Some(false);
++        }
++        let index = self
++            .map
++            .literal_method_selectors
++            .binary_search_by_key(&(start, end), |site| (site.start, site.end))
++            .ok()?;
++        let site = &self.map.literal_method_selectors[index];
++        Some(
++            site.name.eq_ignore_ascii_case(expected)
++                && content.get(site.literal_start as usize..site.literal_end as usize)
++                    == Some(site.raw_literal.as_ref()),
++        )
++    }
++}
++
+ impl Backend {
+     /// Whether the symbol map for `uri` still describes `content`.
+     ///
+@@ -62,6 +107,47 @@ impl Backend {
+             .is_none_or(|map| map.matches_source(content))
+     }
+ 
++    /// Snapshot only AST method-literal roles. Ordinary files keep their raw
++    /// identifier validation path and pay no whole-source fingerprint hash.
++    pub(super) fn rename_literal_method_context(
++        &self,
++        uri: &str,
++        content: &str,
++    ) -> Option<LiteralMethodContext> {
++        let map = self.symbol_maps.read().get(uri).cloned()?;
++        if map.literal_method_selectors.is_empty() {
++            return None;
++        }
++        let source_matches = map.matches_source_fingerprint(content);
++        Some(LiteralMethodContext {
++            map,
++            source_matches,
++        })
++    }
++
++    /// Literal roles must use their full source/AST receipt even when the raw
++    /// interior happens to spell the decoded name without escapes.
++    pub(super) fn rename_span_verified(&self, uri: &str, content: &str, span: &SymbolSpan) -> bool {
++        if let Some(context) = self.rename_literal_method_context(uri, content)
++            && let Some(valid) = context.byte_verdict(
++                content,
++                span.start,
++                span.end,
++                span_name(&span.kind).unwrap_or(""),
++            )
++        {
++            return valid
++                && matches!(
++                    span.kind,
++                    SymbolKind::MemberAccess {
++                        is_method_call: true,
++                        ..
++                    }
++                );
++        }
++        span_spells_its_name(content, span)
++    }
++
+     /// Verify every reference location before it is turned into an edit.
+     ///
+     /// Returns `false` as soon as one location fails, which drops the
+@@ -82,6 +168,7 @@ impl Backend {
+         // cache the content per URI rather than re-reading it (and, for a
+         // file on disk, re-hitting the filesystem) once per occurrence.
+         let mut contents: HashMap<&str, Option<Arc<String>>> = HashMap::new();
++        let mut literal_contexts: HashMap<&str, Option<LiteralMethodContext>> = HashMap::new();
+ 
+         for location in locations {
+             let uri = location.uri.as_str();
+@@ -94,6 +181,24 @@ impl Backend {
+             if !self.rename_map_matches(uri, content) {
+                 return false;
+             }
++            let literal = literal_contexts
++                .entry(uri)
++                .or_insert_with(|| self.rename_literal_method_context(uri, content));
++            if let Some(context) = literal.as_ref() {
++                let wanted = match &expected {
++                    Expected::Exact(name) => *name,
++                    _ => "",
++                };
++                if let Some(valid) = context.range_verdict(content, location.range, wanted) {
++                    let magic_valid = magic_use.is_some_and(|name| {
++                        context.range_verdict(content, location.range, name) == Some(true)
++                    });
++                    if !valid && !magic_valid {
++                        return false;
++                    }
++                    continue;
++                }
++            }
+             if !range_matches(content, location.range, &expected)
+                 && !magic_expected
+                     .as_ref()
+diff --git a/src/symbol_map/extraction/expressions/calls.rs b/src/symbol_map/extraction/expressions/calls.rs
+index 62c19e9..4770dc2 100644
+--- a/src/symbol_map/extraction/expressions/calls.rs
++++ b/src/symbol_map/extraction/expressions/calls.rs
+@@ -2,6 +2,69 @@ use mago_span::HasSpan;
+ 
+ use super::*;
+ 
++/// A fixed selector's semantic name and exact raw source range.
++struct KnownMethodSelector {
++    name: crate::atom::Atom,
++    start: u32,
++    end: u32,
++}
++
++/// Only identifiers and plain quoted literals inside brace selectors are fixed.
++/// Mago supplies decoding; source bytes supply quote/prefix/interior boundaries.
++fn known_method_selector<'a>(
++    selector: &'a ClassLikeMemberSelector<'a>,
++    ctx: &mut ExtractionCtx<'a>,
++) -> Option<KnownMethodSelector> {
++    if let ClassLikeMemberSelector::Identifier(ident) = selector {
++        return Some(KnownMethodSelector {
++            name: crate::atom::atom_bytes(ident.value),
++            start: ident.span.start.offset,
++            end: ident.span.end.offset,
++        });
++    }
++    let ClassLikeMemberSelector::Expression(selector) = selector else {
++        return None;
++    };
++    let mut expression = selector.expression;
++    while let Expression::Parenthesized(parenthesized) = expression {
++        expression = parenthesized.expression;
++    }
++    let Expression::Literal(literal::Literal::String(literal)) = expression else {
++        return None;
++    };
++    let name = literal.value.and_then(literal_bytes_to_str)?;
++    if name.is_empty() {
++        return None;
++    }
++    let raw = ctx
++        .content
++        .get(literal.span.start.offset as usize..literal.span.end.offset as usize)?;
++    let bytes = raw.as_bytes();
++    let (prefix_len, quote) = match bytes {
++        [quote @ (b'\'' | b'"'), ..] => (1, *quote),
++        [b'b' | b'B', quote @ (b'\'' | b'"'), ..] => (2, *quote),
++        _ => return None,
++    };
++    if bytes.last() != Some(&quote) {
++        return None;
++    }
++    let start = literal.span.start.offset.checked_add(prefix_len)?;
++    let end = literal.span.end.offset.checked_sub(1)?;
++    if start >= end {
++        return None;
++    }
++    let name = crate::atom::atom(name);
++    ctx.literal_method_selectors.push(LiteralMethodSelector {
++        start,
++        end,
++        literal_start: literal.span.start.offset,
++        literal_end: literal.span.end.offset,
++        raw_literal: raw.into(),
++        name,
++    });
++    Some(KnownMethodSelector { name, start, end })
++}
++
+ // ─── Instantiation: `new Foo(...)` ──────────────────────────────────────────
+ 
+ pub(super) fn extract_instantiation_expr<'a>(
+@@ -545,8 +608,8 @@ fn extract_call<'a>(
+             }
+ 
+             extract_dynamic_member_selector(&method_call.method, ctx, scope_start);
+-            if let ClassLikeMemberSelector::Identifier(ident) = &method_call.method {
+-                let member_name = crate::atom::atom_bytes(ident.value);
++            if let Some(selector) = known_method_selector(&method_call.method, ctx) {
++                let member_name = selector.name;
+                 if member_name.eq_ignore_ascii_case("macro") {
+                     try_emit_laravel_macro_string_span(
+                         &method_call.argument_list,
+@@ -731,8 +794,8 @@ fn extract_call<'a>(
+                 );
+                 let object_span = method_call.object.span();
+                 ctx.spans.push(SymbolSpan {
+-                    start: ident.span.start.offset,
+-                    end: ident.span.end.offset,
++                    start: selector.start,
++                    end: selector.end,
+                     kind: SymbolKind::MemberAccess {
+                         subject_text: SubjectText::new(
+                             subject_text,
+@@ -751,7 +814,7 @@ fn extract_call<'a>(
+                 // Laravel: if this is a ->group() call, check for
+                 // ->controller(X::class) in the chain and emit MemberAccess
+                 // spans for route method-name strings inside the closure.
+-                if ident.value.eq_ignore_ascii_case(b"group")
++                if member_name.eq_ignore_ascii_case("group")
+                     && let Some(controller) =
+                         laravel_route_find_controller_in_chain(method_call.object)
+                 {
+@@ -784,8 +847,8 @@ fn extract_call<'a>(
+             }
+ 
+             extract_dynamic_member_selector(&method_call.method, ctx, scope_start);
+-            if let ClassLikeMemberSelector::Identifier(ident) = &method_call.method {
+-                let member_name = crate::atom::atom_bytes(ident.value);
++            if let Some(selector) = known_method_selector(&method_call.method, ctx) {
++                let member_name = selector.name;
+                 if is_laravel_config_repository_call(
+                     method_call.object,
+                     &member_name,
+@@ -814,8 +877,8 @@ fn extract_call<'a>(
+                 );
+                 let object_span = method_call.object.span();
+                 ctx.spans.push(SymbolSpan {
+-                    start: ident.span.start.offset,
+-                    end: ident.span.end.offset,
++                    start: selector.start,
++                    end: selector.end,
+                     kind: SymbolKind::MemberAccess {
+                         subject_text: SubjectText::new(
+                             subject_text,
+@@ -828,7 +891,7 @@ fn extract_call<'a>(
+                         is_method_call: true,
+                         docblock_ref: DocblockMemberRef::No,
+                         is_array_callable: false,
+-                        is_nullsafe: false,
++                        is_nullsafe: true,
+                     },
+                 });
+             }
+@@ -843,8 +906,8 @@ fn extract_call<'a>(
+             emit_class_expr_span(static_call.class, ctx, scope_start);
+ 
+             extract_dynamic_member_selector(&static_call.method, ctx, scope_start);
+-            if let ClassLikeMemberSelector::Identifier(ident) = &static_call.method {
+-                let member_name = crate::atom::atom_bytes(ident.value);
++            if let Some(selector) = known_method_selector(&static_call.method, ctx) {
++                let member_name = selector.name;
+                 if member_name.eq_ignore_ascii_case("macro") {
+                     try_emit_laravel_macro_string_span(
+                         &static_call.argument_list,
+@@ -860,8 +923,8 @@ fn extract_call<'a>(
+                 );
+                 let class_span = static_call.class.span();
+                 ctx.spans.push(SymbolSpan {
+-                    start: ident.span.start.offset,
+-                    end: ident.span.end.offset,
++                    start: selector.start,
++                    end: selector.end,
+                     kind: SymbolKind::MemberAccess {
+                         subject_text: SubjectText::new(
+                             subject_text.clone(),
+@@ -1296,13 +1359,13 @@ pub(super) fn extract_partial_application_expr<'a>(
+             );
+             extract_from_expression(method_pa.object, ctx, scope_start);
+             extract_dynamic_member_selector(&method_pa.method, ctx, scope_start);
+-            if let ClassLikeMemberSelector::Identifier(ident) = &method_pa.method {
+-                let member_name = crate::atom::atom_bytes(ident.value);
++            if let Some(selector) = known_method_selector(&method_pa.method, ctx) {
++                let member_name = selector.name;
+                 ctx.non_invoked_callable_spans
+-                    .push((ident.span.start.offset, ident.span.end.offset));
++                    .push((selector.start, selector.end));
+                 ctx.spans.push(SymbolSpan {
+-                    start: ident.span.start.offset,
+-                    end: ident.span.end.offset,
++                    start: selector.start,
++                    end: selector.end,
+                     kind: SymbolKind::MemberAccess {
+                         subject_text,
+                         member_name,
+@@ -1325,13 +1388,13 @@ pub(super) fn extract_partial_application_expr<'a>(
+             );
+             emit_class_expr_span(static_pa.class, ctx, scope_start);
+             extract_dynamic_member_selector(&static_pa.method, ctx, scope_start);
+-            if let ClassLikeMemberSelector::Identifier(ident) = &static_pa.method {
+-                let member_name = crate::atom::atom_bytes(ident.value);
++            if let Some(selector) = known_method_selector(&static_pa.method, ctx) {
++                let member_name = selector.name;
+                 ctx.non_invoked_callable_spans
+-                    .push((ident.span.start.offset, ident.span.end.offset));
++                    .push((selector.start, selector.end));
+                 ctx.spans.push(SymbolSpan {
+-                    start: ident.span.start.offset,
+-                    end: ident.span.end.offset,
++                    start: selector.start,
++                    end: selector.end,
+                     kind: SymbolKind::MemberAccess {
+                         subject_text,
+                         member_name,
+diff --git a/src/symbol_map/extraction/mod.rs b/src/symbol_map/extraction/mod.rs
+index 5f97b5a..143eb5c 100644
+--- a/src/symbol_map/extraction/mod.rs
++++ b/src/symbol_map/extraction/mod.rs
+@@ -14,9 +14,9 @@ use super::docblock::{
+ use super::{
+     AnonymousCallable, AnonymousCallableKind, AnonymousClassConstruction, AnonymousInvocation,
+     CallExecutionOwner, CallExecutionRegion, CallSite, ClassRefContext, DocblockMemberRef,
+-    ImmediateObjectInvocation, ImmediateObjectReceiver, SelfStaticParentKind, SubjectText,
+-    SymbolKind, SymbolMap, SymbolSpan, TemplateParamDef, UntypedClosureSite, VarDefKind,
+-    VarDefSite, ViewReceiverClass, ViewReceiverSite,
++    ImmediateObjectInvocation, ImmediateObjectReceiver, LiteralMethodSelector,
++    SelfStaticParentKind, SubjectText, SymbolKind, SymbolMap, SymbolSpan, TemplateParamDef,
++    UntypedClosureSite, VarDefKind, VarDefSite, ViewReceiverClass, ViewReceiverSite,
+ };
+ use crate::atom::{bytes_to_str, literal_bytes_to_str};
+ use crate::names::OwnedResolvedNames;
+@@ -44,6 +44,7 @@ struct ExtractionCtx<'a> {
+     anonymous_invocations: Vec<AnonymousInvocation>,
+     anonymous_class_constructions: Vec<AnonymousClassConstruction>,
+     immediate_object_invocations: Vec<ImmediateObjectInvocation>,
++    literal_method_selectors: Vec<LiteralMethodSelector>,
+     non_invoked_callable_spans: Vec<(u32, u32)>,
+     keyword_constructor_spans: Vec<(u32, u32)>,
+     /// Scope start offsets of arrow functions (inheriting scopes).
+@@ -229,6 +230,7 @@ fn extract_symbol_map_inner(
+         anonymous_invocations: Vec::new(),
+         anonymous_class_constructions: Vec::new(),
+         immediate_object_invocations: Vec::new(),
++        literal_method_selectors: Vec::new(),
+         non_invoked_callable_spans: Vec::new(),
+         keyword_constructor_spans: Vec::new(),
+         arrow_fn_scopes: Vec::new(),
+@@ -340,6 +342,9 @@ fn extract_symbol_map_inner(
+ 
+     // Sort call_sites by args_start for reverse-scan lookup.
+     ctx.call_sites.sort_by_key(|cs| cs.args_start);
++    ctx.literal_method_selectors
++        .sort_unstable_by_key(|selector| (selector.start, selector.end));
++    ctx.literal_method_selectors.dedup();
+     ctx.non_invoked_callable_spans.sort_unstable();
+     ctx.non_invoked_callable_spans.dedup();
+     ctx.keyword_constructor_spans.sort_unstable();
+@@ -383,6 +388,7 @@ fn extract_symbol_map_inner(
+         anonymous_invocations: ctx.anonymous_invocations,
+         anonymous_class_constructions: ctx.anonymous_class_constructions,
+         immediate_object_invocations: ctx.immediate_object_invocations,
++        literal_method_selectors: ctx.literal_method_selectors,
+         non_invoked_callable_spans: ctx.non_invoked_callable_spans,
+         keyword_constructor_spans: ctx.keyword_constructor_spans,
+         arrow_fn_scopes: ctx.arrow_fn_scopes,
+diff --git a/src/symbol_map/mod.rs b/src/symbol_map/mod.rs
+index a380f33..aca1c99 100644
+--- a/src/symbol_map/mod.rs
++++ b/src/symbol_map/mod.rs
+@@ -1084,6 +1084,20 @@ pub(crate) struct ImmediateObjectInvocation {
+     pub invocation_end: u32,
+ }
+ 
++/// Exact AST method-selector string role, with decoded name and raw source receipt.
++#[derive(Debug, Clone, PartialEq, Eq)]
++pub(crate) struct LiteralMethodSelector {
++    /// Raw interior bytes replaced on rename (whole escapes, excluding quotes/prefix).
++    pub start: u32,
++    pub end: u32,
++    /// Full quoted literal, including an optional binary-string prefix.
++    pub literal_start: u32,
++    pub literal_end: u32,
++    /// Exact quoted source bytes and Mago's decoded semantic method name.
++    pub raw_literal: Box<str>,
++    pub name: crate::atom::Atom,
++}
++
+ /// Execution ownership of an initializer, independently of variable lexical scope.
+ #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+ pub(crate) enum CallExecutionOwner {
+@@ -1168,6 +1182,8 @@ pub(crate) struct SymbolMap {
+     pub anonymous_class_constructions: Vec<AnonymousClassConstruction>,
+     /// Direct literal-object calls from the same AST/source publication.
+     pub immediate_object_invocations: Vec<ImmediateObjectInvocation>,
++    /// Sorted AST string method-selector roles for verified semantic rename.
++    pub literal_method_selectors: Vec<LiteralMethodSelector>,
+     /// Sorted reference-only callee tokens, including metadata, imports and callable values.
+     pub non_invoked_callable_spans: Vec<(u32, u32)>,
+     /// Sorted exact self/static/parent operands from actual new AST nodes.
+diff --git a/tests/integration/call_hierarchy.rs b/tests/integration/call_hierarchy.rs
+index 9d674d2..1a0b719 100644
+--- a/tests/integration/call_hierarchy.rs
++++ b/tests/integration/call_hierarchy.rs
+@@ -4370,3 +4370,202 @@ async fn immediate_boundary_callable_creation_allocates_without_invoking_the_obj
+         );
+     }
+ }
++
++const LITERAL_METHOD_SOURCE: &str = concat!(
++    "<?php\r\n",
++    "class LiteralObjectTarget { public function run(): void {} }\r\n",
++    "class LiteralStaticTarget { public static function run(): void {} }\r\n",
++    "function ordinaryLiteralHost(LiteralObjectTarget $object): void {\r\n",
++    " /* café 🐘 */ $object->run();\r\n",
++    " /* café 🐘 */ $object->{'run'}();\r\n",
++    " /* café 🐘 */ $object->{\"\\x72un\"}();\r\n",
++    "}\r\n",
++    "function nullsafeLiteralHost(?LiteralObjectTarget $object): void {\r\n",
++    " /* café 🐘 */ $object?->run();\r\n",
++    " /* café 🐘 */ $object?->{'run'}();\r\n",
++    " /* café 🐘 */ $object?->{\"\\x72un\"}();\r\n",
++    "}\r\n",
++    "function staticLiteralHost(): void {\r\n",
++    " /* café 🐘 */ LiteralStaticTarget::run();\r\n",
++    " /* café 🐘 */ LiteralStaticTarget::{'run'}();\r\n",
++    " /* café 🐘 */ LiteralStaticTarget::{\"\\x72un\"}();\r\n",
++    "}\r\n",
++    "function dynamicSelectorHost(LiteralObjectTarget $object, ?LiteralObjectTarget $nullable, string $method): void {\r\n",
++    " $object->{$method}(); $nullable?->{$method}(); LiteralStaticTarget::{$method}();\r\n",
++    "}\r\n",
++    "function creationSelectorHost(LiteralObjectTarget $object): void {\r\n",
++    " $ordinary = $object->{'run'}(...); $static = LiteralStaticTarget::{'run'}(...);\r\n",
++    "}\r\n",
++    // PHP single-quoted strings do not decode hexadecimal escapes.
++    "function singleQuotedEscapeHost(LiteralObjectTarget $object): void { $object->{'\\x72un'}(); }\r\n",
++);
++
++async fn literal_method_fixture() -> (Backend, Url) {
++    let backend = create_test_backend();
++    let uri = Url::parse("file:///literal-method-selector-hierarchy.php").unwrap();
++    open_php(&backend, &uri, LITERAL_METHOD_SOURCE).await;
++    (backend, uri)
++}
++
++fn literal_method_range(context: &str, token: &str) -> Range {
++    let offset = LITERAL_METHOD_SOURCE
++        .find(context)
++        .expect("unique source context")
++        + context.rfind(token).expect("source token");
++    let prefix = &LITERAL_METHOD_SOURCE[..offset];
++    let start = Position::new(
++        prefix.bytes().filter(|byte| *byte == b'\n').count() as u32,
++        prefix.rsplit('\n').next().unwrap().encode_utf16().count() as u32,
++    );
++    Range::new(
++        start,
++        Position::new(
++            start.line,
++            start.character + token.encode_utf16().count() as u32,
++        ),
++    )
++}
++
++fn literal_method_sorted_ranges(mut ranges: Vec<Range>) -> Vec<Range> {
++    ranges.sort_by_key(|range| {
++        (
++            range.start.line,
++            range.start.character,
++            range.end.line,
++            range.end.character,
++        )
++    });
++    ranges
++}
++
++async fn literal_method_target(
++    backend: &Backend,
++    uri: &Url,
++    static_target: bool,
++) -> CallHierarchyItem {
++    let context = if static_target {
++        "class LiteralStaticTarget { public static function run"
++    } else {
++        "class LiteralObjectTarget { public function run"
++    };
++    let range = literal_method_range(context, "run");
++    let items = prepare_at(backend, uri, range.start.line, range.start.character).await;
++    assert_eq!(items.len(), 1, "literal target declaration positive");
++    assert_eq!(items[0].selection_range, range);
++    items[0].clone()
++}
++
++fn literal_method_expected(static_target: bool, nullsafe: bool) -> Vec<Range> {
++    let receiver = if static_target {
++        "LiteralStaticTarget::"
++    } else if nullsafe {
++        "$object?->"
++    } else {
++        "$object->"
++    };
++    vec![
++        literal_method_range(&format!("{receiver}run();"), "run"),
++        literal_method_range(&format!("{receiver}{{'run'}}();"), "run"),
++        // The target is decoded run, but the invocation range retains the six
++        // raw source characters \x72un, never a fabricated 3-character span.
++        literal_method_range(&format!("{receiver}{{\"\\x72un\"}}();"), "\\x72un"),
++    ]
++}
++
++#[tokio::test]
++async fn literal_method_identifier_positives_cover_ordinary_nullsafe_and_static_receivers() {
++    let (backend, uri) = literal_method_fixture().await;
++    for (name, static_target, nullsafe) in [
++        ("ordinaryLiteralHost", false, false),
++        ("nullsafeLiteralHost", false, true),
++        ("staticLiteralHost", true, false),
++    ] {
++        let host = anonymous_hierarchy_prepare(&backend, &uri, LITERAL_METHOD_SOURCE, name).await;
++        let target = literal_method_target(&backend, &uri, static_target).await;
++        let edges = outgoing(&backend, &host).await;
++        assert_eq!(edges.len(), 1);
++        assert_eq!(edges[0].to.uri, uri);
++        assert_eq!(edges[0].to.selection_range, target.selection_range);
++        assert!(
++            edges[0]
++                .from_ranges
++                .contains(&literal_method_expected(static_target, nullsafe)[0]),
++            "existing Identifier positive: {name}"
++        );
++    }
++}
++
++#[tokio::test]
++async fn literal_method_string_selectors_have_exact_ordinary_nullsafe_and_static_outgoing_sites() {
++    let (backend, uri) = literal_method_fixture().await;
++    for (name, static_target, nullsafe) in [
++        ("ordinaryLiteralHost", false, false),
++        ("nullsafeLiteralHost", false, true),
++        ("staticLiteralHost", true, false),
++    ] {
++        let host = anonymous_hierarchy_prepare(&backend, &uri, LITERAL_METHOD_SOURCE, name).await;
++        let target = literal_method_target(&backend, &uri, static_target).await;
++        let edges = outgoing(&backend, &host).await;
++        assert_eq!(
++            edges.len(),
++            1,
++            "one real method, not one node per spelling: {name}"
++        );
++        assert_eq!(edges[0].to.uri, uri);
++        assert_eq!(edges[0].to.selection_range, target.selection_range);
++        assert_eq!(
++            literal_method_sorted_ranges(edges[0].from_ranges.clone()),
++            literal_method_expected(static_target, nullsafe),
++            "all actual invocation spellings: {name}"
++        );
++    }
++}
++
++#[tokio::test]
++async fn literal_method_string_selectors_have_reciprocal_exact_incoming_sites() {
++    let (backend, uri) = literal_method_fixture().await;
++    for (static_target, names) in [
++        (false, vec!["ordinaryLiteralHost", "nullsafeLiteralHost"]),
++        (true, vec!["staticLiteralHost"]),
++    ] {
++        let target = literal_method_target(&backend, &uri, static_target).await;
++        let callers = incoming(&backend, &target).await;
++        assert_eq!(
++            callers.len(),
++            names.len(),
++            "no creation/dynamic/incorrectly decoded extra callers"
++        );
++        for name in names {
++            let host =
++                anonymous_hierarchy_prepare(&backend, &uri, LITERAL_METHOD_SOURCE, name).await;
++            let matches = callers
++                .iter()
++                .filter(|call| {
++                    call.from.uri == uri && call.from.selection_range == host.selection_range
++                })
++                .collect::<Vec<_>>();
++            assert_eq!(matches.len(), 1);
++            assert_eq!(
++                literal_method_sorted_ranges(matches[0].from_ranges.clone()),
++                literal_method_expected(static_target, name == "nullsafeLiteralHost")
++            );
++        }
++    }
++}
++
++#[tokio::test]
++async fn literal_method_dynamic_selectors_callable_creation_and_single_quote_escapes_do_not_invent_run()
++ {
++    let (backend, uri) = literal_method_fixture().await;
++    for name in [
++        "dynamicSelectorHost",
++        "creationSelectorHost",
++        "singleQuotedEscapeHost",
++    ] {
++        let host = anonymous_hierarchy_prepare(&backend, &uri, LITERAL_METHOD_SOURCE, name).await;
++        assert!(
++            outgoing(&backend, &host).await.is_empty(),
++            "not a proven invocation of run: {name}"
++        );
++    }
++}
+diff --git a/tests/integration/rename_symbols.rs b/tests/integration/rename_symbols.rs
+index eb694e3..55e47fe 100644
+--- a/tests/integration/rename_symbols.rs
++++ b/tests/integration/rename_symbols.rs
+@@ -1193,3 +1193,204 @@ class Consumer
+         );
+     }
+ }
++
++const LITERAL_RENAME_SOURCE: &str = concat!(
++    "<?php\r\n",
++    "class LiteralRenameTarget { public function run(int $value): void {} }\r\n",
++    "function literalRenameHost(LiteralRenameTarget $object, ?LiteralRenameTarget $nullable): void {\r\n",
++    " /* café 🐘 */ $object->{'run'}(1);\r\n",
++    " $object->{\"\\x72un\"}(2);\r\n",
++    " $nullable?->{B\"\\x72un\"}(3);\r\n",
++    " $object->{(b'run')}(4);\r\n",
++    " $created = $object->{B\"\\x72un\"}(...);\r\n",
++    "}\r\n",
++);
++
++fn literal_rename_expected(source: &str) -> String {
++    source
++        .replace("function run(", "function execute(")
++        .replace("{'run'}", "{'execute'}")
++        .replace("{\"\\x72un\"}", "{\"execute\"}")
++        .replace("{B\"\\x72un\"}", "{B\"execute\"}")
++        .replace("{(b'run')}", "{(b'execute')}")
++}
++
++#[tokio::test]
++async fn literal_selector_declaration_rename_rewrites_decoded_refs_and_preserves_raw_wrappers() {
++    let backend = create_test_backend();
++    let uri = Url::parse("file:///literal-rename-declaration.php").unwrap();
++    open_php(&backend, &uri, LITERAL_RENAME_SOURCE).await;
++    let (line, character) = line_char_of(LITERAL_RENAME_SOURCE, "function run(");
++    let edit = rename(&backend, &uri, line, character + 9, "execute")
++        .await
++        .expect("declaration rename must include every known literal selector");
++    let edits = edits_for_uri(&edit, &uri);
++    assert_eq!(
++        edits.len(),
++        6,
++        "declaration plus five literal references, including callable creation"
++    );
++    assert_eq!(
++        apply_edits(LITERAL_RENAME_SOURCE, &edits),
++        literal_rename_expected(LITERAL_RENAME_SOURCE)
++    );
++}
++
++#[tokio::test]
++async fn literal_selector_prepare_and_use_site_rename_select_full_raw_interior() {
++    let backend = create_test_backend();
++    let uri = Url::parse("file:///literal-rename-use.php").unwrap();
++    open_php(&backend, &uri, LITERAL_RENAME_SOURCE).await;
++    let (line, character) = line_char_of(LITERAL_RENAME_SOURCE, "\\x72un");
++    let prepared = prepare_rename(&backend, &uri, line, character + 1)
++        .await
++        .expect("escaped selector is a statically named method");
++    match prepared {
++        PrepareRenameResponse::RangeWithPlaceholder { range, placeholder } => {
++            assert_eq!(placeholder, "run");
++            assert_eq!(
++                range,
++                Range::new(
++                    Position::new(line, character),
++                    Position::new(line, character + 6)
++                )
++            );
++        }
++        other => panic!("expected decoded placeholder and full raw interior, got {other:?}"),
++    }
++    let edit = rename(&backend, &uri, line, character + 1, "execute")
++        .await
++        .expect("renaming from encoded selector must retain declaration identity");
++    assert_eq!(
++        apply_edits(LITERAL_RENAME_SOURCE, &edits_for_uri(&edit, &uri)),
++        literal_rename_expected(LITERAL_RENAME_SOURCE)
++    );
++}
++
++#[tokio::test]
++async fn static_literal_selector_rename_preserves_binary_prefixes_and_parentheses() {
++    let backend = create_test_backend();
++    let uri = Url::parse("file:///literal-static-rename.php").unwrap();
++    let source = concat!(
++        "<?php\n",
++        "namespace Library { class Target { public static function run(): void {} } }\n",
++        "namespace Consumer { use Library\\Target as Alias; function host(): void { Alias::{b\"\\x72un\"}(); Alias::{(B'run')}(); $created = Alias::{'run'}(...); } }\n"
++    );
++    open_php(&backend, &uri, source).await;
++    let (line, character) = line_char_of(source, "\\x72un");
++    let prepared = prepare_rename(&backend, &uri, line, character + 2)
++        .await
++        .expect("binary escaped static selector can prepare rename");
++    assert!(
++        matches!(prepared, PrepareRenameResponse::RangeWithPlaceholder { placeholder, .. } if placeholder == "run")
++    );
++    let edit = rename(&backend, &uri, line, character + 2, "execute")
++        .await
++        .unwrap();
++    let expected = source
++        .replace("function run(", "function execute(")
++        .replace("{b\"\\x72un\"}", "{b\"execute\"}")
++        .replace("{(B'run')}", "{(B'execute')}")
++        .replace("{'run'}", "{'execute'}");
++    assert_eq!(apply_edits(source, &edits_for_uri(&edit, &uri)), expected);
++}
++
++#[tokio::test]
++async fn literal_selector_stale_encoded_reference_refuses_all_edits_then_exact_restore_recovers() {
++    let backend = create_test_backend();
++    let definition_uri = Url::parse("file:///literal-stale-declaration.php").unwrap();
++    let usage_uri = Url::parse("file:///literal-stale-usage.php").unwrap();
++    let definition = "<?php\nclass LiteralStaleTarget { public function run(): void {} public function sun(): void {} }\n";
++    let before = "<?php\nfunction useLiteral(LiteralStaleTarget $object): void { $object->{\"\\x72un\"}(); }\n";
++    let after = before.replace("\\x72un", "\\x73un");
++    assert_eq!(before.len(), after.len());
++    open_php(&backend, &definition_uri, definition).await;
++    open_php(&backend, &usage_uri, before).await;
++    let (decl_line, decl_character) = line_char_of(definition, "function run(");
++    let (use_line, use_character) = line_char_of(before, "\\x72un");
++    assert!(
++        prepare_rename(&backend, &usage_uri, use_line, use_character + 1)
++            .await
++            .is_some()
++    );
++    // Reuse the existing deterministic stale-buffer seam, not a timing race.
++    set_buffer_without_reparsing(&backend, &usage_uri, &after);
++    assert!(
++        prepare_rename(&backend, &usage_uri, use_line, use_character + 1)
++            .await
++            .is_none()
++    );
++    assert!(
++        rename(
++            &backend,
++            &definition_uri,
++            decl_line,
++            decl_character + 9,
++            "execute"
++        )
++        .await
++        .is_none(),
++        "one stale decoded reference refuses the whole declaration rename"
++    );
++    set_buffer_without_reparsing(&backend, &usage_uri, before);
++    let edit = rename(
++        &backend,
++        &definition_uri,
++        decl_line,
++        decl_character + 9,
++        "execute",
++    )
++    .await
++    .expect("exact source restoration satisfies retained role receipt");
++    assert_eq!(
++        apply_edits(before, &edits_for_uri(&edit, &usage_uri)),
++        before.replace("\\x72un", "execute")
++    );
++    assert_eq!(
++        apply_edits(definition, &edits_for_uri(&edit, &definition_uri)),
++        definition.replace("function run(", "function execute(")
++    );
++}
++
++#[tokio::test]
++async fn stale_plain_literal_role_cannot_bypass_receipt_when_raw_name_still_matches() {
++    let backend = create_test_backend();
++    let uri = Url::parse("file:///literal-stale-role.php").unwrap();
++    let before = "<?php\nclass PlainLiteralTarget { public function run(): void {} }\nfunction usePlain(PlainLiteralTarget $object): void {\n $object->{'run'}();      \n}\n";
++    // The old method-name bytes AND complete quoted literal remain at their
++    // original offsets, but are now inside a comment, not an invocation AST.
++    let after = before
++        .replace("$object->", "/*       ")
++        .replace(";      \n", ";    */\n");
++    assert_eq!(before.len(), after.len());
++    let (line, character) = line_char_of(before, "'run'");
++    open_php(&backend, &uri, before).await;
++    assert!(
++        prepare_rename(&backend, &uri, line, character + 1)
++            .await
++            .is_some()
++    );
++    set_buffer_without_reparsing(&backend, &uri, &after);
++    assert!(
++        prepare_rename(&backend, &uri, line, character + 1)
++            .await
++            .is_none(),
++        "generic raw 'run' spelling cannot override stale literal-role fingerprint"
++    );
++    let (decl_line, decl_character) = line_char_of(before, "function run(");
++    assert!(
++        rename(&backend, &uri, decl_line, decl_character + 9, "execute")
++            .await
++            .is_none()
++    );
++    set_buffer_without_reparsing(&backend, &uri, before);
++    let edit = rename(&backend, &uri, decl_line, decl_character + 9, "execute")
++        .await
++        .unwrap();
++    assert_eq!(
++        apply_edits(before, &edits_for_uri(&edit, &uri)),
++        before
++            .replace("function run(", "function execute(")
++            .replace("{'run'}", "{'execute'}")
++    );
++}

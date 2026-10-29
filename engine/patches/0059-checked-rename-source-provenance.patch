@@ -1,0 +1,1761 @@
+diff --git a/Cargo.lock b/Cargo.lock
+index 7d24f04..63ce176 100644
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -1654,6 +1654,7 @@ dependencies = [
+  "self-replace",
+  "serde",
+  "serde_json",
++ "sha2",
+  "sqlparser",
+  "tar",
+  "tempfile",
+@@ -2106,6 +2107,17 @@ dependencies = [
+  "digest",
+ ]
+ 
++[[package]]
++name = "sha2"
++version = "0.10.9"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "a7507d819769d01a365ab707794a4084392c824f54a7a6a7862f8c3d0892b283"
++dependencies = [
++ "cfg-if",
++ "cpufeatures 0.2.17",
++ "digest",
++]
++
+ [[package]]
+ name = "sharded-slab"
+ version = "0.1.7"
+diff --git a/Cargo.toml b/Cargo.toml
+index 238f5bc..6c157fc 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -14,6 +14,7 @@ clap = { version = "4.5", features = ["derive", "wrap_help"] }
+ tower-lsp = { version = "0.20", features = ["proposed"] }
+ serde = { version = "1.0", features = ["derive"] }
+ serde_json = "1.0"
++sha2 = "0.10"
+ sqlparser = "0.62"
+ tracing = "0.1"
+ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+diff --git a/docs/CHANGELOG.md b/docs/CHANGELOG.md
+index 23e47f7..d998161 100644
+--- a/docs/CHANGELOG.md
++++ b/docs/CHANGELOG.md
+@@ -15,6 +15,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
+ 
+ ## [Unreleased]
+ 
++- **Rename against current files.** Checked editor requests reject stale source versions and contents before preparing changes. Cross-file rename also refreshes newly discovered callers after pending edits. Files outside a project keep their own symbol context instead of selecting a same-name declaration inside it. Contributed by PHP Workbench downstream.
++
+ - **Keep Eloquent pivot suggestions current.** Concurrent relationship indexing no longer leaves target-model completion cached without its pivot accessor. New relationship edits supersede older rebuilds. Contributed by PHP Workbench downstream.
+ 
+ - **Completion after Unicode text.** Suggestions remain available when emoji precede the cursor, and incomplete-code recovery preserves line endings. Contributed by PHP Workbench downstream.
+diff --git a/src/backend/startup.rs b/src/backend/startup.rs
+index f13c5eb..9e5cec4 100644
+--- a/src/backend/startup.rs
++++ b/src/backend/startup.rs
+@@ -279,7 +279,7 @@ impl Backend {
+                     ..ExecuteCommandOptions::default()
+                 }),
+                 experimental: Some(
+-                    serde_json::json!({"phpWorkbenchRoutes": true, "phpWorkbenchViews": true, "phpWorkbenchBuiltins": true, "phpWorkbenchActiveTarget": true}),
++                    serde_json::json!({"phpWorkbenchRoutes": true, "phpWorkbenchViews": true, "phpWorkbenchBuiltins": true, "phpWorkbenchActiveTarget": true, "phpWorkbenchRenameChecked": true}),
+                 ),
+                 ..ServerCapabilities::default()
+             },
+diff --git a/src/lib.rs b/src/lib.rs
+index 1210f5e..252ccb6 100644
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -87,6 +87,7 @@
+ 
+ pub mod workbench_active_target;
+ pub mod workbench_builtins;
++pub mod workbench_rename;
+ pub mod workbench_routes;
+ pub mod workbench_views;
+ 
+diff --git a/src/main.rs b/src/main.rs
+index b91ba28..2c1e1d0 100644
+--- a/src/main.rs
++++ b/src/main.rs
+@@ -566,6 +566,10 @@ async fn async_main() {
+                 let (read, write) = tokio::io::split(stream);
+                 let (service, socket) = LspService::build(ProjectRouter::new)
+                     .custom_method("phpWorkbench/routes", ProjectRouter::workbench_routes)
++                    .custom_method(
++                        "phpWorkbench/renameChecked",
++                        ProjectRouter::workbench_rename_checked,
++                    )
+                     .custom_method("phpWorkbench/views", ProjectRouter::workbench_views)
+                     .custom_method("phpWorkbench/builtin", ProjectRouter::workbench_builtin)
+                     .custom_method(
+@@ -590,6 +594,10 @@ async fn async_main() {
+ 
+                 let (service, socket) = LspService::build(ProjectRouter::new)
+                     .custom_method("phpWorkbench/routes", ProjectRouter::workbench_routes)
++                    .custom_method(
++                        "phpWorkbench/renameChecked",
++                        ProjectRouter::workbench_rename_checked,
++                    )
+                     .custom_method("phpWorkbench/views", ProjectRouter::workbench_views)
+                     .custom_method("phpWorkbench/builtin", ProjectRouter::workbench_builtin)
+                     .custom_method(
+diff --git a/src/project_router.rs b/src/project_router.rs
+index 0cc318b..60f99be 100644
+--- a/src/project_router.rs
++++ b/src/project_router.rs
+@@ -249,14 +249,19 @@ impl ProjectRouter {
+                 ready: OnceCell::new(),
+             }));
+         }
+-        if contexts.is_empty() {
++        // External documents share the existing unscoped semantic context,
++        // independently of active Composer graphs. Keep it last so rootless
++        // action defaults continue to use the first rooted context.
++        {
+             let mut backend = Self::backend(self.client.clone(), self.full_stubs);
+             backend.symbols.source_authority = Arc::clone(&self.sources);
+             backend.diag.transport_clock = Some(Arc::clone(&self.diagnostic_clock));
+             backend.diag.publication_sequence = Arc::clone(&self.diagnostic_clock.sequence);
+             backend.project_scope =
+                 Arc::new(ProjectScope::virtual_context(Arc::clone(&self.owners)));
+-            backend.on_initialize(params.clone()).await?;
++            backend
++                .on_initialize(params_for_root(&params, None))
++                .await?;
+             contexts.push(Arc::new(ProjectContext {
+                 id: backend.project_scope.id(),
+                 root: None,
+@@ -346,7 +351,13 @@ impl ProjectRouter {
+                 return Arc::clone(context);
+             }
+         }
+-        Arc::clone(&contexts[0])
++        // Root and installed dependency consumers above retain precedence.
++        Arc::clone(
++            contexts
++                .iter()
++                .find(|context| context.root.is_none())
++                .unwrap_or(&contexts[0]),
++        )
+     }
+     fn contextual_builtin(&self, uri: &Url) -> Result<Option<Arc<ProjectContext>>> {
+         if !matches!(uri.scheme(), "phpantom-stub" | "phpantom-stub-fn") {
+@@ -899,15 +910,24 @@ impl ProjectRouter {
+                 self.owners.write().insert(uri, context.id);
+             }
+         }
+-        for context in contexts {
+-            self.ready(&context).await;
+-        }
+         let open_uris: Vec<_> = self
+             .documents
+             .read()
+             .values()
+             .map(|doc| doc.uri.clone())
+             .collect();
++        // The unscoped context deliberately consumes no project paths. Assign
++        // remaining owners before ready() replays documents, including external
++        // dirty overlays and files whose consuming topology has changed.
++        for uri in &open_uris {
++            if !self.owners.read().contains_key(uri.as_str()) {
++                let owner = self.selected_document(uri)?;
++                self.owners.write().insert(uri.to_string(), owner.id);
++            }
++        }
++        for context in contexts {
++            self.ready(&context).await;
++        }
+         self.document_routing.write().clear();
+         for uri in open_uris {
+             self.record_routing(&uri, &self.consumers(&uri));
+@@ -1120,19 +1140,32 @@ impl ProjectRouter {
+         if let Some(uri) = uri {
+             return self.project_for(&uri).await;
+         }
+-        let contexts = self.contexts.read().clone();
++        let mut contexts = self.contexts.read().clone();
++        let ids: HashSet<u64> = {
++            let documents = self.documents.read();
++            let owners = self.owners.read();
++            documents
++                .keys()
++                .filter_map(|uri| owners.get(uri).copied())
++                .collect()
++        };
++        // A dormant virtual context must not make the single rooted project
++        // ambiguous before any external document has been opened.
++        let active: Vec<_> = contexts
++            .iter()
++            .filter(|context| context.root.is_some() || ids.contains(&context.id))
++            .cloned()
++            .collect();
++        if !active.is_empty() {
++            contexts = active;
++        }
+         let project = if contexts.len() == 1 {
+             Arc::clone(&contexts[0])
+         } else {
+-            let documents = self.documents.read();
+-            let mut ids: HashSet<u64> = documents
+-                .keys()
+-                .filter_map(|uri| self.owners.read().get(uri).copied())
+-                .collect();
+             if ids.len() != 1 {
+                 return Err(Error::invalid_params("Select a Composer project document"));
+             }
+-            let id = ids.drain().next().unwrap();
++            let id = *ids.iter().next().unwrap();
+             contexts
+                 .into_iter()
+                 .find(|c| c.id == id)
+@@ -1222,6 +1255,10 @@ fn params_for_root(params: &InitializeParams, root: Option<&Path>) -> Initialize
+     let mut params = params.clone();
+     if let Some(root) = root {
+         params.root_uri = Url::from_directory_path(root).ok();
++    } else {
++        // An unscoped backend must never index the active workspace by accident.
++        params.root_uri = None;
++        params.workspace_folders = None;
+     }
+     params
+ }
+@@ -1317,4 +1354,28 @@ mod tests {
+             "an open document retains its chosen dependency graph"
+         );
+     }
++    #[test]
++    fn unscoped_initialization_strips_root_and_workspace_folders_only() {
++        let root = std::env::temp_dir().join("checked-external-authority");
++        let uri = Url::from_directory_path(&root).unwrap();
++        let params = InitializeParams {
++            root_uri: Some(uri.clone()),
++            workspace_folders: Some(vec![WorkspaceFolder {
++                uri: uri.clone(),
++                name: "active".into(),
++            }]),
++            initialization_options: Some(serde_json::json!({"fixture": true})),
++            ..InitializeParams::default()
++        };
++        let unscoped = params_for_root(&params, None);
++        assert!(unscoped.root_uri.is_none());
++        assert!(unscoped.workspace_folders.is_none());
++        assert_eq!(
++            unscoped.initialization_options,
++            params.initialization_options
++        );
++        let rooted = params_for_root(&params, Some(&root));
++        assert_eq!(rooted.root_uri, Some(uri));
++        assert_eq!(rooted.workspace_folders, params.workspace_folders);
++    }
+ }
+diff --git a/src/workbench_rename.rs b/src/workbench_rename.rs
+new file mode 100644
+index 0000000..7c0420e
+--- /dev/null
++++ b/src/workbench_rename.rs
+@@ -0,0 +1,428 @@
++//! Rename against explicit editor-owned source versions, without trusting disk hydration.
++use std::collections::HashSet;
++use std::path::PathBuf;
++use std::sync::Arc;
++
++use serde::{Deserialize, Serialize};
++use sha2::{Digest, Sha256};
++use tower_lsp::jsonrpc::{Error, ErrorCode, Result};
++use tower_lsp::lsp_types::{MessageType, RenameParams, Url, WorkspaceEdit};
++
++use crate::{Backend, project_router::ProjectRouter};
++
++const MAX_SOURCES: usize = 1024;
++const MAX_URI_BYTES: usize = 1024 * 1024;
++
++/// An exact UTF-8 source the editor owns at request start.
++#[derive(Clone, Debug, Deserialize, Serialize)]
++#[serde(rename_all = "camelCase")]
++pub struct ExpectedSource {
++    /// Open document URI, using its active source-authority spelling.
++    pub uri: Url,
++    /// The exact version sent in didOpen or didChange, including version zero.
++    pub version: i32,
++    /// SHA-256 of the complete UTF-8 text; no newline or Unicode normalization.
++    pub sha256_utf8: String,
++}
++
++/// Standard rename fields plus the immutable sources captured by the caller.
++#[derive(Clone, Debug, Deserialize, Serialize)]
++#[serde(rename_all = "camelCase")]
++pub struct RenameCheckedParams {
++    /// Standard textDocument, position, newName and optional progress token.
++    #[serde(flatten)]
++    pub rename: RenameParams,
++    /// Nonempty, physically distinct open sources; must include textDocument.
++    pub expected_sources: Vec<ExpectedSource>,
++}
++
++fn modified() -> Error {
++    Error {
++        code: ErrorCode::ServerError(-32801),
++        message: "PHP rename source changed or is not open".into(),
++        data: None,
++    }
++}
++
++fn authority_path(uri: &Url) -> Result<PathBuf> {
++    if uri.scheme() != "file" || uri.query().is_some() || uri.fragment().is_some() {
++        return Err(Error::invalid_params("Expected a local file URI"));
++    }
++    let path = uri
++        .to_file_path()
++        .map_err(|_| Error::invalid_params("Expected a local file URI"))?;
++    if !path.is_absolute() {
++        return Err(Error::invalid_params("Expected an absolute source path"));
++    }
++    path.canonicalize()
++        .or_else(|_| -> std::io::Result<PathBuf> {
++            let parent = path
++                .parent()
++                .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::InvalidInput))?;
++            let leaf = path
++                .file_name()
++                .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::InvalidInput))?;
++            Ok(parent.canonicalize()?.join(leaf))
++        })
++        .map_err(|_| modified())
++}
++
++impl RenameCheckedParams {
++    fn validate(&self) -> Result<()> {
++        if self.expected_sources.is_empty() || self.expected_sources.len() > MAX_SOURCES {
++            return Err(Error::invalid_params("Expected between 1 and 1024 sources"));
++        }
++        let source = authority_path(&self.rename.text_document_position.text_document.uri)?;
++        let mut paths = HashSet::with_capacity(self.expected_sources.len());
++        let mut bytes = 0usize;
++        for expected in &self.expected_sources {
++            bytes = bytes
++                .checked_add(expected.uri.as_str().len())
++                .ok_or_else(|| Error::invalid_params("Source URI budget exceeded"))?;
++            if bytes > MAX_URI_BYTES {
++                return Err(Error::invalid_params("Source URI budget exceeded"));
++            }
++            if expected.sha256_utf8.len() != 64
++                || !expected.sha256_utf8.bytes().all(|b| b.is_ascii_hexdigit())
++            {
++                return Err(Error::invalid_params(
++                    "sha256Utf8 must contain exactly 64 hexadecimal digits",
++                ));
++            }
++            if !paths.insert(authority_path(&expected.uri)?) {
++                return Err(Error::invalid_params(
++                    "Duplicate canonical source authority",
++                ));
++            }
++        }
++        if !paths.contains(&source)
++            || !self.expected_sources.iter().any(|expected| {
++                expected.uri == self.rename.text_document_position.text_document.uri
++            })
++        {
++            return Err(Error::invalid_params(
++                "Expected sources must include the exact textDocument URI",
++            ));
++        }
++        Ok(())
++    }
++}
++
++impl ProjectRouter {
++    /// Route checked rename to the same document authority as ordinary rename.
++    pub async fn workbench_rename_checked(
++        &self,
++        params: RenameCheckedParams,
++    ) -> Result<Option<WorkspaceEdit>> {
++        let _request = self.request_guard().await;
++        let project = self
++            .project_for(&params.rename.text_document_position.text_document.uri)
++            .await?;
++        project.backend.workbench_rename_checked(params).await
++    }
++}
++
++impl Backend {
++    fn verify_rename_sources(&self, expected_sources: &[ExpectedSource]) -> Result<()> {
++        for expected in expected_sources {
++            let uri = expected.uri.as_str();
++            if self
++                .symbols
++                .source_authority
++                .preferred(uri)
++                .is_some_and(|active| active != uri)
++            {
++                return Err(modified());
++            }
++            // Keep the established documents -> open_files lock order, and
++            // retain the exact Arc while hashing outside these locks.
++            let text = {
++                let documents = self.diag.documents.lock();
++                let open_files = self.open_files.read();
++                let text = open_files.get(uri).ok_or_else(modified)?;
++                let revision = documents
++                    .capture_source(uri, text)
++                    .map_err(|_| modified())?
++                    .ok_or_else(modified)?;
++                if revision.version != expected.version {
++                    return Err(modified());
++                }
++                Arc::clone(text)
++            };
++            let actual = format!("{:x}", Sha256::digest(text.as_bytes()));
++            if !actual.eq_ignore_ascii_case(&expected.sha256_utf8) {
++                return Err(modified());
++            }
++        }
++        Ok(())
++    }
++
++    /// Rename only while all supplied open versions and UTF-8 hashes agree.
++    /// Additional edited targets still require caller-side discovery and a new
++    /// checked request: this method does not attest unseen project files.
++    pub async fn workbench_rename_checked(
++        &self,
++        params: RenameCheckedParams,
++    ) -> Result<Option<WorkspaceEdit>> {
++        let backend = self.clone_for_blocking();
++        let outcome = crate::server::run_blocking_cancel_safe("rename_checked", move || {
++            params.validate()?;
++            let uri = params
++                .rename
++                .text_document_position
++                .text_document
++                .uri
++                .to_string();
++            let position = params.rename.text_document_position.position;
++            backend.ensure_workspace_index_ready_for_request();
++            // Refresh classification itself reads symbol kinds. Reconcile pending
++            // open parses before deciding whether this rename can cross files;
++            // an old local-variable map must not suppress the filesystem refresh.
++            let needs_refresh = backend.with_current_semantics(|| {
++                backend
++                    .handle_with_position("rename_checked", &uri, position, |content, pos| {
++                        Some(backend.rename_needs_workspace_refresh(&uri, content, pos))
++                    })
++                    .map(|needs| needs.unwrap_or(false))
++            })?;
++            if needs_refresh {
++                backend.ensure_workspace_indexed_for_request();
++            }
++            // No await, second request, or semantic-guard reacquisition may
++            // separate source verification from the actual rename computation.
++            backend.with_current_semantics(|| {
++                backend.verify_rename_sources(&params.expected_sources)?;
++                let result = backend.handle_with_position(
++                    "rename_checked",
++                    &uri,
++                    position,
++                    |content, pos| {
++                        Some(backend.handle_rename(&uri, content, pos, &params.rename.new_name))
++                    },
++                )?;
++                // Source authority can be shared across project contexts. Check
++                // it again before delivery as well as the semantic epoch fence.
++                backend.verify_rename_sources(&params.expected_sources)?;
++                Ok(result)
++            })
++        })
++        .await
++        .ok_or_else(Error::internal_error)??;
++        match outcome {
++            Some(Err(message)) => {
++                self.log(MessageType::WARNING, message.clone()).await;
++                Err(Error {
++                    code: ErrorCode::InvalidRequest,
++                    message: message.into(),
++                    data: None,
++                })
++            }
++            Some(Ok(edit)) => Ok(edit),
++            None => Ok(None),
++        }
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use tower_lsp::{LanguageServer, lsp_types::*};
++
++    #[tokio::test]
++    async fn checked_rename_reconciles_exact_pending_open_parse_before_computing() {
++        let dir = tempfile::tempdir().unwrap();
++        let path = dir.path().join("source.php");
++        let before = "<?php\nfunction demo() { $user = 1; echo $user; }\n";
++        let after = before.replace("user", "post");
++        std::fs::write(&path, before).unwrap();
++        let uri = Url::from_file_path(&path).unwrap();
++        let backend = Backend::new_test();
++        backend
++            .did_open(DidOpenTextDocumentParams {
++                text_document: TextDocumentItem {
++                    uri: uri.clone(),
++                    language_id: "php".into(),
++                    version: 1,
++                    text: before.into(),
++                },
++            })
++            .await;
++        // Construct the exact real didChange publication boundary: current
++        // wire revision and open Arc are committed, old symbol maps remain,
++        // and the asynchronous parser has not run. No edit result is mocked.
++        let text = Arc::new(after.clone());
++        {
++            let _merge = backend.index_merge_gate.lock();
++            let mut documents = backend.diag.documents.lock();
++            assert!(documents.change(uri.as_str(), 2, &text));
++            backend
++                .open_files
++                .write()
++                .insert(uri.to_string(), Arc::clone(&text));
++            let revision = documents
++                .capture_source(uri.as_str(), &text)
++                .unwrap()
++                .unwrap();
++            assert!(!documents.parsed(uri.as_str(), Some(&revision)));
++        }
++        let request = RenameCheckedParams {
++            rename: RenameParams {
++                text_document_position: TextDocumentPositionParams {
++                    text_document: TextDocumentIdentifier { uri: uri.clone() },
++                    position: Position::new(1, 20),
++                },
++                new_name: "$person".into(),
++                work_done_progress_params: WorkDoneProgressParams::default(),
++            },
++            expected_sources: vec![ExpectedSource {
++                uri: uri.clone(),
++                version: 2,
++                sha256_utf8: format!("{:x}", Sha256::digest(after.as_bytes())),
++            }],
++        };
++        let edit = backend
++            .workbench_rename_checked(request)
++            .await
++            .unwrap()
++            .unwrap();
++        // Require actual current-parse readiness, rather than allowing a
++        // passing response to hide unchanged stale symbol maps.
++        let documents = backend.diag.documents.lock();
++        let revision = documents
++            .capture_source(uri.as_str(), &text)
++            .unwrap()
++            .unwrap();
++        assert!(documents.parsed(uri.as_str(), Some(&revision)));
++        let json = serde_json::to_string(&edit).unwrap();
++        assert!(json.contains("$person"));
++        assert!(!json.contains("$user"));
++    }
++
++    #[tokio::test]
++    async fn checked_rename_refresh_classification_reconciles_pending_local_to_class_and_finds_missed_consumer()
++     {
++        let dir = tempfile::tempdir().unwrap();
++        let source_path = dir.path().join("User.php");
++        let before = "<?php\n      $User = 1;\n";
++        let current = "<?php\nclass User {}\n";
++        let position = Position::new(1, 7); // local variable before; class name after
++        std::fs::write(&source_path, before).unwrap();
++        let source_uri = Url::from_file_path(&source_path).unwrap();
++        let backend = Backend::new_test_with_workspace(dir.path().to_path_buf(), Vec::new());
++        backend
++            .did_open(DidOpenTextDocumentParams {
++                text_document: TextDocumentItem {
++                    uri: source_uri.clone(),
++                    language_id: "php".into(),
++                    version: 1,
++                    text: before.into(),
++                },
++            })
++            .await;
++        backend.ensure_workspace_indexed_for_request();
++        assert!(
++            backend
++                .workspace_indexed
++                .load(std::sync::atomic::Ordering::Acquire),
++            "the initial full workspace index must already be completed"
++        );
++        assert!(
++            !backend.rename_needs_workspace_refresh(source_uri.as_str(), before, position),
++            "the old source site is intentionally local and does not request a disk refresh"
++        );
++
++        // Create a real unopened consumer only AFTER the index completed. No
++        // watcher notification, didOpen, manual parse, or fabricated edit is used.
++        let consumer_path = dir.path().join("consumer.php");
++        let consumer = "<?php\nfunction make(): User { return new User(); }\n";
++        std::fs::write(&consumer_path, consumer).unwrap();
++        let consumer_uri = Url::from_file_path(&consumer_path).unwrap();
++        assert!(
++            !backend
++                .symbol_maps
++                .read()
++                .contains_key(consumer_uri.as_str())
++        );
++        assert!(!backend.parsed_uris.read().contains(consumer_uri.as_str()));
++
++        // Publish exactly the accepted didChange boundary while leaving the old
++        // parsed local-variable map intact. No parser task is scheduled here.
++        let text = Arc::new(current.to_owned());
++        {
++            let _merge = backend.index_merge_gate.lock();
++            let mut documents = backend.diag.documents.lock();
++            assert!(documents.change(source_uri.as_str(), 2, &text));
++            backend
++                .open_files
++                .write()
++                .insert(source_uri.to_string(), Arc::clone(&text));
++            let revision = documents
++                .capture_source(source_uri.as_str(), &text)
++                .unwrap()
++                .unwrap();
++            assert!(!documents.parsed(source_uri.as_str(), Some(&revision)));
++        }
++        assert!(
++            !backend.rename_needs_workspace_refresh(source_uri.as_str(), current, position),
++            "before reconciliation the cached local span still suppresses the full refresh"
++        );
++        let request = RenameCheckedParams {
++            rename: RenameParams {
++                text_document_position: TextDocumentPositionParams {
++                    text_document: TextDocumentIdentifier {
++                        uri: source_uri.clone(),
++                    },
++                    position,
++                },
++                new_name: "Person".into(),
++                work_done_progress_params: WorkDoneProgressParams::default(),
++            },
++            expected_sources: vec![ExpectedSource {
++                uri: source_uri.clone(),
++                version: 2,
++                sha256_utf8: format!("{:x}", Sha256::digest(current.as_bytes())),
++            }],
++        };
++        let edit = backend
++            .workbench_rename_checked(request)
++            .await
++            .unwrap()
++            .expect("actual class rename proposal");
++        let changes = edit
++            .changes
++            .as_ref()
++            .expect("resource rename capability is disabled in this backend fixture");
++        let consumer_edits = changes.get(&consumer_uri).expect(
++            "a current class rename must refresh and include the real consumer created without a watcher event");
++        assert_eq!(
++            consumer_edits.len(),
++            2,
++            "both real type and constructor uses must be renamed"
++        );
++        let after = crate::text_position::apply_text_edits(consumer, consumer_edits);
++        assert_eq!(
++            after,
++            "<?php\nfunction make(): Person { return new Person(); }\n"
++        );
++        let source_edits = changes
++            .get(&source_uri)
++            .expect("current source declaration edit");
++        assert_eq!(
++            crate::text_position::apply_text_edits(current, source_edits),
++            "<?php\nclass Person {}\n"
++        );
++        assert!(
++            backend
++                .symbol_maps
++                .read()
++                .contains_key(consumer_uri.as_str())
++        );
++        assert!(backend.parsed_uris.read().contains(consumer_uri.as_str()));
++        assert_eq!(
++            std::fs::read_to_string(source_path).unwrap(),
++            before,
++            "engine only proposes edits"
++        );
++        assert_eq!(std::fs::read_to_string(consumer_path).unwrap(), consumer);
++    }
++}
+diff --git a/tests/integration/main.rs b/tests/integration/main.rs
+index fc1f39c..77c1f22 100644
+--- a/tests/integration/main.rs
++++ b/tests/integration/main.rs
+@@ -293,3 +293,8 @@ mod native_type_php_target;
+ mod laravel_config_completion_identity;
+ 
+ mod laravel_config_reference_identity;
++
++mod workbench_rename;
++mod workbench_rename_project_compat;
++
++mod workbench_rename_external_authority;
+diff --git a/tests/integration/workbench_rename.rs b/tests/integration/workbench_rename.rs
+new file mode 100644
+index 0000000..d944373
+--- /dev/null
++++ b/tests/integration/workbench_rename.rs
+@@ -0,0 +1,513 @@
++//! Behavioral acceptance of the actual checked-rename method, not fabricated edits.
++use crate::common::{apply_edits, create_test_backend, edits_for_uri};
++use phpantom_lsp::{
++    ProjectRouter,
++    workbench_rename::{ExpectedSource, RenameCheckedParams},
++};
++use sha2::{Digest, Sha256};
++use tower_lsp::{LanguageServer, jsonrpc::ErrorCode, lsp_types::*};
++
++const TEXT: &str = "<?php\nfunction demo() { $user = 1; echo $user; }\n";
++
++fn params(uri: &Url, text: &str, version: i32) -> RenameCheckedParams {
++    RenameCheckedParams {
++        rename: RenameParams {
++            text_document_position: TextDocumentPositionParams {
++                text_document: TextDocumentIdentifier { uri: uri.clone() },
++                position: Position::new(1, 20),
++            },
++            new_name: "$person".into(),
++            work_done_progress_params: WorkDoneProgressParams::default(),
++        },
++        expected_sources: vec![ExpectedSource {
++            uri: uri.clone(),
++            version,
++            sha256_utf8: format!("{:x}", Sha256::digest(text.as_bytes())),
++        }],
++    }
++}
++fn fixture() -> (tempfile::TempDir, Url) {
++    let dir = tempfile::tempdir().unwrap();
++    let path = dir.path().join("source.php");
++    std::fs::write(&path, TEXT).unwrap();
++    let uri = Url::from_file_path(path).unwrap();
++    (dir, uri)
++}
++async fn open(backend: &impl LanguageServer, uri: &Url, text: &str, version: i32) {
++    backend
++        .did_open(DidOpenTextDocumentParams {
++            text_document: TextDocumentItem {
++                uri: uri.clone(),
++                language_id: "php".into(),
++                version,
++                text: text.into(),
++            },
++        })
++        .await;
++}
++
++#[tokio::test]
++async fn checked_rename_uses_exact_dirty_open_text_and_wire_version_zero() {
++    let (_dir, uri) = fixture();
++    let backend = create_test_backend();
++    let dirty = TEXT.replace("= 1", "= 9");
++    open(&backend, &uri, &dirty, 0).await;
++    let request = params(&uri, &dirty, 0);
++    let edit = backend
++        .workbench_rename_checked(request.clone())
++        .await
++        .unwrap()
++        .unwrap();
++    let result = apply_edits(&dirty, &edits_for_uri(&edit, &uri));
++    assert!(result.contains("$person = 9; echo $person"));
++    // Ordinary rename is still the original public method and computes the
++    // same real edit for the same dirty document.
++    let ordinary = backend.rename(request.rename).await.unwrap().unwrap();
++    assert_eq!(
++        serde_json::to_value(edit).unwrap(),
++        serde_json::to_value(ordinary).unwrap()
++    );
++}
++
++#[tokio::test]
++async fn checked_rename_rejects_same_width_changed_open_text() {
++    let (_dir, uri) = fixture();
++    let backend = create_test_backend();
++    open(&backend, &uri, TEXT, 1).await;
++    let request = params(&uri, TEXT, 1);
++    backend
++        .did_change(DidChangeTextDocumentParams {
++            text_document: VersionedTextDocumentIdentifier {
++                uri: uri.clone(),
++                version: 2,
++            },
++            content_changes: vec![TextDocumentContentChangeEvent {
++                range: None,
++                range_length: None,
++                text: TEXT.replace("user", "post"),
++            }],
++        })
++        .await;
++    let mut hash_only = request.clone();
++    hash_only.expected_sources[0].version = 2;
++    for stale in [hash_only, request] {
++        assert_eq!(
++            backend
++                .workbench_rename_checked(stale)
++                .await
++                .unwrap_err()
++                .code,
++            ErrorCode::ServerError(-32801)
++        );
++    }
++    assert!(
++        backend
++            .workbench_rename_checked(params(&uri, &TEXT.replace("user", "post"), 2))
++            .await
++            .unwrap()
++            .is_some()
++    );
++}
++
++#[tokio::test]
++async fn checked_rename_requires_every_expected_source_to_remain_open() {
++    let (dir, uri) = fixture();
++    let backend = create_test_backend();
++    open(&backend, &uri, TEXT, 1).await;
++    let other_path = dir.path().join("other.php");
++    std::fs::write(&other_path, "<?php // disk only").unwrap();
++    let other = Url::from_file_path(other_path).unwrap();
++    let mut request = params(&uri, TEXT, 1);
++    request.expected_sources.push(
++        params(&other, "<?php // disk only", 1)
++            .expected_sources
++            .remove(0),
++    );
++    assert_eq!(
++        backend
++            .workbench_rename_checked(request.clone())
++            .await
++            .unwrap_err()
++            .code,
++        ErrorCode::ServerError(-32801)
++    );
++    open(&backend, &other, "<?php // disk only", 1).await;
++    assert!(
++        backend
++            .workbench_rename_checked(request.clone())
++            .await
++            .unwrap()
++            .is_some()
++    );
++    backend
++        .did_close(DidCloseTextDocumentParams {
++            text_document: TextDocumentIdentifier { uri: other },
++        })
++        .await;
++    assert_eq!(
++        backend
++            .workbench_rename_checked(request)
++            .await
++            .unwrap_err()
++            .code,
++        ErrorCode::ServerError(-32801)
++    );
++}
++
++#[tokio::test]
++async fn checked_rename_rejects_malformed_payloads_without_renaming() {
++    let (dir, uri) = fixture();
++    let backend = create_test_backend();
++    open(&backend, &uri, TEXT, 1).await;
++    let valid = params(&uri, TEXT, 1);
++    let mut cases = Vec::new();
++    let mut empty = valid.clone();
++    empty.expected_sources.clear();
++    cases.push(empty);
++    let mut duplicate = valid.clone();
++    duplicate
++        .expected_sources
++        .push(duplicate.expected_sources[0].clone());
++    cases.push(duplicate);
++    let mut bad_hash = valid.clone();
++    bad_hash.expected_sources[0].sha256_utf8 = "z".repeat(64);
++    cases.push(bad_hash);
++    let mut short_hash = valid.clone();
++    short_hash.expected_sources[0].sha256_utf8.pop();
++    cases.push(short_hash);
++    let mut oversized = valid.clone();
++    oversized.expected_sources = vec![valid.expected_sources[0].clone(); 1025];
++    cases.push(oversized);
++    let mut missing_source = valid.clone();
++    missing_source.expected_sources[0].uri =
++        Url::from_file_path(dir.path().join("other.php")).unwrap();
++    cases.push(missing_source);
++    for invalid in cases {
++        assert_eq!(
++            backend
++                .workbench_rename_checked(invalid)
++                .await
++                .unwrap_err()
++                .code,
++            ErrorCode::InvalidParams
++        );
++    }
++    assert!(
++        backend
++            .workbench_rename_checked(valid)
++            .await
++            .unwrap()
++            .is_some()
++    );
++}
++
++#[cfg(unix)]
++#[tokio::test]
++async fn checked_rename_rejects_duplicate_symlink_authority() {
++    let (dir, uri) = fixture();
++    let alias_path = dir.path().join("alias.php");
++    std::os::unix::fs::symlink(uri.to_file_path().unwrap(), &alias_path).unwrap();
++    let backend = create_test_backend();
++    open(&backend, &uri, TEXT, 1).await;
++    let mut request = params(&uri, TEXT, 1);
++    let mut alias = request.expected_sources[0].clone();
++    alias.uri = Url::from_file_path(alias_path).unwrap();
++    request.expected_sources.push(alias);
++    assert_eq!(
++        backend
++            .workbench_rename_checked(request)
++            .await
++            .unwrap_err()
++            .code,
++        ErrorCode::InvalidParams
++    );
++}
++
++#[tokio::test]
++async fn router_checked_rename_uses_document_authority_and_validates_hash() {
++    let (_dir, uri) = fixture();
++    let router = ProjectRouter::new_test();
++    router
++        .did_open(DidOpenTextDocumentParams {
++            text_document: TextDocumentItem {
++                uri: uri.clone(),
++                language_id: "php".into(),
++                version: 1,
++                text: TEXT.into(),
++            },
++        })
++        .await;
++    let valid = params(&uri, TEXT, 1);
++    let json = serde_json::to_value(&valid).unwrap();
++    assert!(json.get("textDocument").is_some());
++    assert!(json.get("rename").is_none());
++    assert!(json["expectedSources"][0].get("sha256Utf8").is_some());
++    let decoded: RenameCheckedParams = serde_json::from_value(json).unwrap();
++    assert!(
++        router
++            .workbench_rename_checked(decoded)
++            .await
++            .unwrap()
++            .is_some()
++    );
++    let mut stale = valid;
++    stale.expected_sources[0].sha256_utf8 = "0".repeat(64);
++    assert_eq!(
++        router
++            .workbench_rename_checked(stale)
++            .await
++            .unwrap_err()
++            .code,
++        ErrorCode::ServerError(-32801)
++    );
++}
++
++#[tokio::test]
++async fn checked_rename_is_advertised_explicitly() {
++    let backend = create_test_backend();
++    let initialized = backend
++        .initialize(InitializeParams::default())
++        .await
++        .unwrap();
++    assert_eq!(
++        initialized.capabilities.experimental.unwrap()["phpWorkbenchRenameChecked"],
++        true
++    );
++}
++
++#[cfg(unix)]
++#[tokio::test]
++async fn checked_rename_cannot_grant_source_admission_through_another_alias() {
++    let (dir, uri) = fixture();
++    let alias_path = dir.path().join("alias.php");
++    std::os::unix::fs::symlink(uri.to_file_path().unwrap(), &alias_path).unwrap();
++    let alias = Url::from_file_path(alias_path).unwrap();
++    let backend = create_test_backend();
++    open(&backend, &uri, TEXT, 1).await;
++    let mut borrowed_grant = params(&uri, TEXT, 1);
++    borrowed_grant
++        .rename
++        .text_document_position
++        .text_document
++        .uri = alias.clone();
++    assert_eq!(
++        backend
++            .workbench_rename_checked(borrowed_grant)
++            .await
++            .unwrap_err()
++            .code,
++        ErrorCode::InvalidParams
++    );
++    // Shared physical-alias ownership is published by the real router lifecycle.
++    let router = ProjectRouter::new_test();
++    open(&router, &uri, TEXT, 1).await;
++    open(&router, &alias, TEXT, 1).await;
++    assert_eq!(
++        router
++            .workbench_rename_checked(params(&alias, TEXT, 1))
++            .await
++            .unwrap_err()
++            .code,
++        ErrorCode::ServerError(-32801)
++    );
++    assert!(
++        router
++            .workbench_rename_checked(params(&uri, TEXT, 1))
++            .await
++            .unwrap()
++            .is_some()
++    );
++}
++
++#[tokio::test]
++async fn checked_rename_reports_removed_authority_parent_as_content_modified() {
++    let dir = tempfile::tempdir().unwrap();
++    let parent = dir.path().join("removed");
++    std::fs::create_dir(&parent).unwrap();
++    let path = parent.join("source.php");
++    std::fs::write(&path, TEXT).unwrap();
++    let uri = Url::from_file_path(&path).unwrap();
++    let backend = create_test_backend();
++    open(&backend, &uri, TEXT, 1).await;
++    std::fs::remove_file(path).unwrap();
++    std::fs::remove_dir(parent).unwrap();
++    assert_eq!(
++        backend
++            .workbench_rename_checked(params(&uri, TEXT, 1))
++            .await
++            .unwrap_err()
++            .code,
++        ErrorCode::ServerError(-32801)
++    );
++}
++
++#[tokio::test]
++async fn checked_rename_rejects_wrong_version_with_identical_text() {
++    let (_dir, uri) = fixture();
++    let backend = create_test_backend();
++    open(&backend, &uri, TEXT, 1).await;
++    let mut wrong_version = params(&uri, TEXT, 1);
++    wrong_version.expected_sources[0].version = 0;
++    assert_eq!(
++        backend
++            .workbench_rename_checked(wrong_version)
++            .await
++            .unwrap_err()
++            .code,
++        ErrorCode::ServerError(-32801)
++    );
++    assert!(
++        backend
++            .workbench_rename_checked(params(&uri, TEXT, 1))
++            .await
++            .unwrap()
++            .is_some()
++    );
++}
++
++// Real PSR-4 cross-file controls exercise the checked semantic computation,
++// explicit import aliases and actual resource-capability negotiation.
++async fn checked_cross_file_class_control(resource_support: bool) {
++    use crate::common::{create_psr4_workspace, extract_rename_file, lsp_pos_to_offset};
++    let source_disk = "<?php\r\nnamespace App;\r\nclass User {}\r\n";
++    let caller_disk = "<?php\nnamespace App;\nuse App\\User as Account;\nfunction make(): Account { return new Account(); }\n";
++    let source_dirty =
++        "<?php\r\nnamespace App;\r\n/* 😀 */ class User { public string $tag = 'dirty'; }\r\n";
++    let caller_dirty = "<?php\r\nnamespace App;\r\nuse App\\User as Account;\r\nfunction make(): Account { $label = '😀'; $direct = new \\App\\User(); return new Account(); }\r\n";
++    let (backend, dir) = create_psr4_workspace(
++        r#"{"autoload":{"psr-4":{"App\\":"src/"}}}"#,
++        &[
++            ("src/User.php", source_disk),
++            ("src/Caller.php", caller_disk),
++        ],
++    );
++    backend
++        .initialize(InitializeParams {
++            capabilities: ClientCapabilities {
++                workspace: Some(WorkspaceClientCapabilities {
++                    workspace_edit: Some(WorkspaceEditClientCapabilities {
++                        document_changes: Some(resource_support),
++                        resource_operations: Some(if resource_support {
++                            vec![ResourceOperationKind::Rename, ResourceOperationKind::Create]
++                        } else {
++                            Vec::new()
++                        }),
++                        ..Default::default()
++                    }),
++                    ..Default::default()
++                }),
++                ..Default::default()
++            },
++            ..Default::default()
++        })
++        .await
++        .unwrap();
++    let source_uri = Url::from_file_path(dir.path().join("src/User.php")).unwrap();
++    let caller_uri = Url::from_file_path(dir.path().join("src/Caller.php")).unwrap();
++    let destination = dir.path().join("src/Customer.php");
++    let destination_uri = Url::from_file_path(&destination).unwrap();
++    open(&backend, &source_uri, source_dirty, 3).await;
++    open(&backend, &caller_uri, caller_dirty, 7).await;
++    let mut request = params(&source_uri, source_dirty, 3);
++    let source_line = source_dirty.lines().nth(2).unwrap();
++    let declaration_byte = source_line.find("User").unwrap();
++    let declaration_utf16 = source_line[..declaration_byte].encode_utf16().count() as u32;
++    request.rename.text_document_position.position = Position::new(2, declaration_utf16 + 1);
++    request.rename.new_name = "Customer".into();
++    request.expected_sources.push(
++        params(&caller_uri, caller_dirty, 7)
++            .expected_sources
++            .remove(0),
++    );
++    // Checked request runs before ordinary rename so this is a fresh class
++    // computation, rather than a control warmed by the ordinary method.
++    let checked = backend
++        .workbench_rename_checked(request.clone())
++        .await
++        .unwrap()
++        .unwrap();
++    let source_target = if resource_support {
++        &destination_uri
++    } else {
++        &source_uri
++    };
++    if resource_support {
++        let Some(DocumentChanges::Operations(operations)) = &checked.document_changes else {
++            panic!("resource-capable client must receive ordered operations");
++        };
++        let Some(DocumentChangeOperation::Op(ResourceOp::Rename(first))) = operations.first()
++        else {
++            panic!("the real file rename must precede all text edits");
++        };
++        assert_eq!(first.old_uri, source_uri);
++        assert_eq!(first.new_uri, destination_uri);
++        assert!(checked.changes.is_none());
++        assert!(edits_for_uri(&checked, &source_uri).is_empty());
++    } else {
++        assert!(extract_rename_file(&checked).is_none());
++        assert!(checked.document_changes.is_none());
++        assert!(checked.changes.is_some());
++    }
++    let source_edits = edits_for_uri(&checked, source_target);
++    let caller_edits = edits_for_uri(&checked, &caller_uri);
++    assert!(!source_edits.is_empty());
++    assert!(!caller_edits.is_empty());
++    assert_eq!(
++        apply_edits(source_dirty, &source_edits),
++        source_dirty.replace("class User", "class Customer")
++    );
++    assert_eq!(
++        apply_edits(caller_dirty, &caller_edits),
++        caller_dirty.replace("App\\User", "App\\Customer")
++    );
++    // Declaration lies after a non-BMP scalar on the same CRLF line.
++    // Confirm actual edit coordinates bind to the intended original token.
++    assert!(source_edits.iter().any(|edit| {
++        edit.range.start == Position::new(2, declaration_utf16)
++            && &source_dirty[lsp_pos_to_offset(source_dirty, edit.range.start)
++                ..lsp_pos_to_offset(source_dirty, edit.range.end)]
++                == "User"
++    }));
++    let caller_line = caller_dirty.lines().nth(3).unwrap();
++    let direct_byte = caller_line.find("\\App\\User").unwrap();
++    let direct_utf16 = caller_line[..direct_byte].encode_utf16().count() as u32;
++    assert!(
++        caller_edits
++            .iter()
++            .any(|edit| edit.range.start.line == 3 && edit.range.start.character >= direct_utf16)
++    );
++    // Method parity is secondary to the complete expected strings above.
++    let ordinary = backend.rename(request.rename).await.unwrap().unwrap();
++    assert_eq!(
++        extract_rename_file(&ordinary).map(|rename| (&rename.old_uri, &rename.new_uri)),
++        extract_rename_file(&checked).map(|rename| (&rename.old_uri, &rename.new_uri))
++    );
++    assert_eq!(
++        apply_edits(source_dirty, &edits_for_uri(&ordinary, source_target)),
++        source_dirty.replace("class User", "class Customer")
++    );
++    assert_eq!(
++        apply_edits(caller_dirty, &edits_for_uri(&ordinary, &caller_uri)),
++        caller_dirty.replace("App\\User", "App\\Customer")
++    );
++    // Computing/applying an in-memory result must never mutate fixture disk.
++    assert_eq!(
++        std::fs::read_to_string(dir.path().join("src/User.php")).unwrap(),
++        source_disk
++    );
++    assert_eq!(
++        std::fs::read_to_string(dir.path().join("src/Caller.php")).unwrap(),
++        caller_disk
++    );
++    assert!(!destination.exists());
++}
++
++#[tokio::test]
++async fn checked_cross_file_dirty_class_rename_with_resources() {
++    checked_cross_file_class_control(true).await;
++}
++
++#[tokio::test]
++async fn checked_cross_file_dirty_class_rename_without_resources() {
++    checked_cross_file_class_control(false).await;
++}
+diff --git a/tests/integration/workbench_rename_external_authority.rs b/tests/integration/workbench_rename_external_authority.rs
+new file mode 100644
+index 0000000..576c2c5
+--- /dev/null
++++ b/tests/integration/workbench_rename_external_authority.rs
+@@ -0,0 +1,240 @@
++//! Real router ownership and overlay replay for non-project PHP documents.
++#![cfg(unix)]
++
++use std::{collections::HashSet, fs, path::Path};
++
++use phpantom_lsp::{
++    ProjectRouter, ProjectTargetQuery,
++    workbench_rename::{ExpectedSource, RenameCheckedParams},
++};
++use sha2::{Digest, Sha256};
++use tower_lsp::{LanguageServer, lsp_types::*};
++
++use super::composer_project_aliases::{close_alias, open, replace, write};
++use crate::common::{apply_edits, edits_for_uri, position_of};
++
++async fn router(root: Option<&Path>) -> ProjectRouter {
++    let router = ProjectRouter::new_test();
++    let uri = root.map(|root| Url::from_directory_path(root).unwrap());
++    router
++        .initialize(InitializeParams {
++            root_uri: uri.clone(),
++            workspace_folders: uri.map(|uri| {
++                vec![WorkspaceFolder {
++                    uri,
++                    name: "external-authority".into(),
++                }]
++            }),
++            capabilities: ClientCapabilities {
++                workspace: Some(WorkspaceClientCapabilities {
++                    workspace_edit: Some(WorkspaceEditClientCapabilities {
++                        document_changes: Some(true),
++                        resource_operations: Some(vec![ResourceOperationKind::Rename]),
++                        ..Default::default()
++                    }),
++                    ..Default::default()
++                }),
++                ..Default::default()
++            },
++            ..Default::default()
++        })
++        .await
++        .unwrap();
++    router.initialized(InitializedParams {}).await;
++    router
++}
++
++async fn target(router: &ProjectRouter, path: Option<&Path>) -> String {
++    router
++        .workbench_active_target(ProjectTargetQuery {
++            uri: path.map(|path| Url::from_file_path(path).unwrap()),
++        })
++        .await
++        .unwrap()
++        .php_version
++}
++
++fn setup(root: &Path) -> (std::path::PathBuf, std::path::PathBuf) {
++    write(
++        root,
++        "active-app/composer.json",
++        r#"{"name":"fixture/active","require":{"php":"^7.4"},"autoload":{"psr-4":{"App\\":"src/"}}}"#,
++    );
++    write(
++        root,
++        "active-app/.phpantom.toml",
++        "[php]\nversion = \"7.4\"\n[indexing]\nstrategy = \"none\"\n",
++    );
++    write(root, "active-app/src/User.php", "<?php\nclass User {}\n");
++    write(
++        root,
++        "outside/User.php",
++        "<?php\nclass User {}\nfunction make(): User { return new User(); }\n",
++    );
++    (root.join("active-app"), root.join("outside/User.php"))
++}
++
++async fn assert_external_rename(router: &ProjectRouter, source: &Path, text: &str, version: i32) {
++    let old_uri = Url::from_file_path(source).unwrap();
++    let new_uri = Url::from_file_path(source.with_file_name("Person.php")).unwrap();
++    let edit = router
++        .workbench_rename_checked(RenameCheckedParams {
++            rename: RenameParams {
++                text_document_position: TextDocumentPositionParams {
++                    text_document: TextDocumentIdentifier {
++                        uri: old_uri.clone(),
++                    },
++                    position: position_of(text, "User {}"),
++                },
++                new_name: "Person".into(),
++                work_done_progress_params: Default::default(),
++            },
++            expected_sources: vec![ExpectedSource {
++                uri: old_uri.clone(),
++                version,
++                sha256_utf8: format!("{:x}", Sha256::digest(text.as_bytes())),
++            }],
++        })
++        .await
++        .expect("actual checked endpoint must retain current external authority")
++        .expect("external class proposal");
++    let Some(DocumentChanges::Operations(operations)) = &edit.document_changes else {
++        panic!("real resource proposal")
++    };
++    let Some(DocumentChangeOperation::Op(ResourceOp::Rename(rename))) = operations.first() else {
++        panic!("leading RenameFile")
++    };
++    assert_eq!(rename.old_uri, old_uri);
++    assert_eq!(rename.new_uri, new_uri);
++    assert!(rename.options.is_none());
++    let uris: HashSet<_> = operations
++        .iter()
++        .filter_map(|operation| match operation {
++            DocumentChangeOperation::Edit(document) => {
++                assert!(document.text_document.version.is_none());
++                Some(document.text_document.uri.clone())
++            }
++            _ => None,
++        })
++        .collect();
++    assert_eq!(
++        uris,
++        HashSet::from([new_uri.clone()]),
++        "workspace same-name class must remain outside this proposal"
++    );
++    assert!(edits_for_uri(&edit, &old_uri).is_empty());
++    assert_eq!(
++        apply_edits(text, &edits_for_uri(&edit, &new_uri)),
++        text.replace("User", "Person")
++    );
++}
++
++#[tokio::test]
++async fn checked_rename_external_authority_dormant_virtual_preserves_single_root_query_default() {
++    let directory = tempfile::tempdir().unwrap();
++    let root = directory.path().canonicalize().unwrap();
++    let (workspace, _) = setup(&root);
++    let router = router(Some(&workspace)).await;
++    assert_eq!(
++        target(&router, None).await,
++        "7.4",
++        "no open documents still selects the sole rooted project"
++    );
++    open(&router, &workspace.join("src/User.php")).await;
++    assert_eq!(target(&router, None).await, "7.4");
++    router.shutdown().await.unwrap();
++}
++
++#[tokio::test]
++async fn checked_rename_external_authority_dirty_source_survives_topology_rebuild_and_close_reopen()
++{
++    let directory = tempfile::tempdir().unwrap();
++    let root = directory.path().canonicalize().unwrap();
++    let (workspace, source) = setup(&root);
++    let disk = fs::read_to_string(&source).unwrap();
++    let active = workspace.join("src/User.php");
++    let active_disk = fs::read(&active).unwrap();
++    // Obtain the existing no-workspace policy's target instead of hard-coding
++    // whichever default PHP version the declaration corpus currently supports.
++    let unscoped = router(None).await;
++    let default_target = target(&unscoped, None).await;
++    unscoped.shutdown().await.unwrap();
++    assert_ne!(
++        default_target, "7.4",
++        "fixture must distinguish root and virtual settings"
++    );
++    let router = router(Some(&workspace)).await;
++    open(&router, &active).await;
++    open(&router, &source).await;
++    let dirty = "<?php\r\n/* external café 🐘 */ class User {}\r\nfunction make(): User { return new User(); }\r\n";
++    replace(&router, &source, 2, dirty).await;
++    assert_eq!(target(&router, Some(&active)).await, "7.4");
++    assert_eq!(
++        target(&router, Some(&source)).await,
++        default_target,
++        "external source must not inherit active workspace config"
++    );
++    assert_external_rename(&router, &source, dirty, 2).await;
++    // Real folder add/remove invokes router retirement/reconfiguration. The
++    // second root intentionally owns another same-name class as well.
++    write(
++        &root,
++        "second/composer.json",
++        r#"{"name":"fixture/second","autoload":{"psr-4":{"Second\\":"src/"}}}"#,
++    );
++    write(
++        &root,
++        "second/.phpantom.toml",
++        "[indexing]\nstrategy = \"none\"\n",
++    );
++    write(&root, "second/src/User.php", "<?php\nclass User {}\n");
++    let folder = WorkspaceFolder {
++        uri: Url::from_directory_path(root.join("second")).unwrap(),
++        name: "second".into(),
++    };
++    router
++        .did_change_workspace_folders(DidChangeWorkspaceFoldersParams {
++            event: WorkspaceFoldersChangeEvent {
++                added: vec![folder.clone()],
++                removed: vec![],
++            },
++        })
++        .await;
++    assert_external_rename(&router, &source, dirty, 2).await;
++    assert_eq!(target(&router, Some(&source)).await, default_target);
++    assert_eq!(target(&router, Some(&active)).await, "7.4");
++    router
++        .did_change_workspace_folders(DidChangeWorkspaceFoldersParams {
++            event: WorkspaceFoldersChangeEvent {
++                added: vec![],
++                removed: vec![folder],
++            },
++        })
++        .await;
++    assert_external_rename(&router, &source, dirty, 2).await;
++    close_alias(&router, &source).await;
++    assert_eq!(
++        target(&router, None).await,
++        "7.4",
++        "closed external owner must not crowd root defaults"
++    );
++    assert_eq!(open(&router, &source).await, disk);
++    assert_external_rename(&router, &source, &disk, 1).await;
++    assert_eq!(target(&router, Some(&source)).await, default_target);
++    assert_eq!(fs::read(&source).unwrap(), disk.as_bytes());
++    assert_eq!(fs::read(&active).unwrap(), active_disk);
++    assert!(!source.with_file_name("Person.php").exists());
++    router.shutdown().await.unwrap();
++}
++
++#[tokio::test]
++async fn checked_rename_external_authority_rootless_existing_policy_control() {
++    let directory = tempfile::tempdir().unwrap();
++    let root = directory.path().canonicalize().unwrap();
++    let (_, source) = setup(&root);
++    let router = router(None).await;
++    let disk = open(&router, &source).await;
++    assert_external_rename(&router, &source, &disk, 1).await;
++    router.shutdown().await.unwrap();
++    assert_eq!(fs::read(&source).unwrap(), disk.as_bytes());
++}
+diff --git a/tests/integration/workbench_rename_project_compat.rs b/tests/integration/workbench_rename_project_compat.rs
+new file mode 100644
+index 0000000..fb721f3
+--- /dev/null
++++ b/tests/integration/workbench_rename_project_compat.rs
+@@ -0,0 +1,288 @@
++//! Actual router ownership for checked rename across external and installed sources.
++#![cfg(unix)]
++
++use super::composer_project_aliases::{open, replace, write};
++use crate::common::{apply_edits, edits_for_uri, position_of};
++use phpantom_lsp::{
++    ProjectRouter, ProjectTargetQuery,
++    workbench_rename::{ExpectedSource, RenameCheckedParams},
++};
++use sha2::{Digest, Sha256};
++use std::{collections::HashSet, fs, path::Path};
++use tower_lsp::{LanguageServer, lsp_types::*};
++
++async fn router(root: &Path) -> ProjectRouter {
++    let router = ProjectRouter::new_test();
++    router
++        .initialize(InitializeParams {
++            root_uri: Some(Url::from_directory_path(root).unwrap()),
++            workspace_folders: Some(vec![WorkspaceFolder {
++                uri: Url::from_directory_path(root).unwrap(),
++                name: "checked-project-compat".into(),
++            }]),
++            capabilities: ClientCapabilities {
++                workspace: Some(WorkspaceClientCapabilities {
++                    workspace_edit: Some(WorkspaceEditClientCapabilities {
++                        document_changes: Some(true),
++                        resource_operations: Some(vec![ResourceOperationKind::Rename]),
++                        ..Default::default()
++                    }),
++                    ..Default::default()
++                }),
++                ..Default::default()
++            },
++            ..InitializeParams::default()
++        })
++        .await
++        .unwrap();
++    router.initialized(InitializedParams {}).await;
++    router
++}
++
++fn expected(path: &Path, text: &str) -> ExpectedSource {
++    ExpectedSource {
++        uri: Url::from_file_path(path).unwrap(),
++        version: 2,
++        sha256_utf8: format!("{:x}", Sha256::digest(text.as_bytes())),
++    }
++}
++
++fn params(
++    path: &Path,
++    text: &str,
++    needle: &str,
++    sources: Vec<ExpectedSource>,
++) -> RenameCheckedParams {
++    RenameCheckedParams {
++        rename: RenameParams {
++            text_document_position: TextDocumentPositionParams {
++                text_document: TextDocumentIdentifier {
++                    uri: Url::from_file_path(path).unwrap(),
++                },
++                position: position_of(text, needle),
++            },
++            new_name: "Person".into(),
++            work_done_progress_params: WorkDoneProgressParams::default(),
++        },
++        expected_sources: sources,
++    }
++}
++
++fn edit_uris(edit: &WorkspaceEdit) -> HashSet<Url> {
++    let Some(DocumentChanges::Operations(operations)) = &edit.document_changes else {
++        panic!("Rename capability must produce a real resource proposal: {edit:?}");
++    };
++    assert!(edit.changes.is_none());
++    operations
++        .iter()
++        .filter_map(|operation| match operation {
++            DocumentChangeOperation::Edit(document) => {
++                assert!(
++                    document.text_document.version.is_none(),
++                    "real engine uses null versions"
++                );
++                Some(document.text_document.uri.clone())
++            }
++            _ => None,
++        })
++        .collect()
++}
++
++fn assert_move(edit: &WorkspaceEdit, source: &Path) -> Url {
++    let Some(DocumentChanges::Operations(operations)) = &edit.document_changes else {
++        panic!("resource proposal")
++    };
++    let Some(DocumentChangeOperation::Op(ResourceOp::Rename(rename))) = operations.first() else {
++        panic!("a real leading RenameFile is required: {edit:?}");
++    };
++    let old = Url::from_file_path(source).unwrap();
++    let new = Url::from_file_path(source.with_file_name("Person.php")).unwrap();
++    assert_eq!(
++        rename.old_uri, old,
++        "active physical source spelling owns the declaration"
++    );
++    assert_eq!(rename.new_uri, new);
++    assert!(rename.options.is_none());
++    assert!(
++        operations[1..]
++            .iter()
++            .all(|operation| matches!(operation, DocumentChangeOperation::Edit(_)))
++    );
++    assert!(
++        edits_for_uri(edit, &old).is_empty(),
++        "source edits must use the new URI after the leading move"
++    );
++    new
++}
++
++#[tokio::test]
++async fn checked_rename_project_compat_explicit_external_php_keeps_active_workspace_separate() {
++    let directory = tempfile::tempdir().unwrap();
++    let root = directory.path().canonicalize().unwrap();
++    let workspace = root.join("active-app");
++    write(
++        &root,
++        "active-app/composer.json",
++        r#"{"name":"fixture/active","require":{"php":"^8.2"},"autoload":{"psr-4":{"App\\":"src/"}}}"#,
++    );
++    write(
++        &root,
++        "active-app/.phpantom.toml",
++        "[indexing]\nstrategy = \"none\"\n",
++    );
++    let app_source = "<?php\nclass User {}\n";
++    write(&root, "active-app/src/User.php", app_source);
++    let disk_external = "<?php\nclass User {}\nfunction make(): User { return new User(); }\n";
++    write(&root, "outside/User.php", disk_external);
++    let source = root.join("outside/User.php");
++    assert!(!source.starts_with(&workspace));
++    let dirty = "<?php\r\n/* external café 🐘 */ class User {}\r\nfunction make(): User { return new User(); }\r\n";
++    let router = router(&workspace).await;
++    let active = workspace.join("src/User.php");
++    open(&router, &active).await;
++    open(&router, &source).await;
++    replace(&router, &source, 2, dirty).await;
++    let response = router
++        .workbench_rename_checked(params(
++            &source,
++            dirty,
++            "User {}",
++            vec![expected(&source, dirty)],
++        ))
++        .await;
++    // Explicitly shut down even if the actual checked call refused. Do not turn
++    // refusal into a successful compatibility result or call a standard fallback.
++    router.shutdown().await.unwrap();
++    let edit = response
++        .expect("checked external source must retain its real open authority")
++        .expect("external class rename edit");
++    let new_uri = assert_move(&edit, &source);
++    assert_eq!(edit_uris(&edit), HashSet::from([new_uri.clone()]));
++    assert_eq!(
++        apply_edits(dirty, &edits_for_uri(&edit, &new_uri)),
++        dirty.replace("User", "Person")
++    );
++    assert!(
++        edits_for_uri(&edit, &Url::from_file_path(&active).unwrap()).is_empty(),
++        "active workspace's same-name class must not enter standalone source authority"
++    );
++    assert_eq!(fs::read(&source).unwrap(), disk_external.as_bytes());
++    assert_eq!(fs::read(&active).unwrap(), app_source.as_bytes());
++    assert!(!source.with_file_name("Person.php").exists());
++}
++
++#[tokio::test]
++async fn checked_rename_project_compat_installed_path_package_replays_both_open_sources_into_consumer()
++ {
++    let directory = tempfile::tempdir().unwrap();
++    let root = directory.path().canonicalize().unwrap();
++    // Match composer_project_nested's real installed symlink path fixture. The
++    // package's own PHP target differs, and physical source lies outside app.
++    write(
++        &root,
++        "apps/z-app/composer.json",
++        r#"{"name":"fixture/consumer","require":{"php":"^8.2","acme/pkg":"@dev"},"autoload":{"psr-4":{"App\\":"src/"}},"repositories":[{"type":"path","url":"../../packages/shared","options":{"symlink":true}}]}"#,
++    );
++    write(
++        &root,
++        "apps/z-app/.phpantom.toml",
++        "[indexing]\nstrategy = \"none\"\n",
++    );
++    write(
++        &root,
++        "packages/shared/composer.json",
++        r#"{"name":"acme/pkg","require":{"php":"^7.4"},"autoload":{"psr-4":{"Library\\":"src/"}}}"#,
++    );
++    write(
++        &root,
++        "packages/shared/.phpantom.toml",
++        "[php]\nversion = \"7.4\"\n[indexing]\nstrategy = \"none\"\n",
++    );
++    let package_disk = "<?php\nnamespace Library;\nclass User {}\n";
++    let caller_disk = "<?php\nuse Library\\User as Account;\nfunction make(): Account { return new Account(); }\n";
++    write(&root, "packages/shared/src/User.php", package_disk);
++    write(&root, "apps/z-app/index.php", caller_disk);
++    write(
++        &root,
++        "apps/z-app/vendor/composer/installed.json",
++        r#"{"packages":[{"name":"acme/pkg","version":"dev-main","install-path":"../acme/pkg","dist":{"type":"path","url":"../../packages/shared"},"transport-options":{"symlink":true},"autoload":{"psr-4":{"Library\\":"src/"}}}]}"#,
++    );
++    write(
++        &root,
++        "apps/z-app/vendor/composer/autoload_classmap.php",
++        "<?php\n$vendorDir = dirname(__DIR__);\nreturn array(\n    'Library\\\\User' => $vendorDir . '/acme/pkg/src/User.php',\n);\n",
++    );
++    let vendor = root.join("apps/z-app/vendor/acme/pkg");
++    fs::create_dir_all(vendor.parent().unwrap()).unwrap();
++    std::os::unix::fs::symlink(root.join("packages/shared"), &vendor).unwrap();
++    let package = root.join("packages/shared/src/User.php");
++    let caller = root.join("apps/z-app/index.php");
++    assert_eq!(
++        vendor.join("src/User.php").canonicalize().unwrap(),
++        package.canonicalize().unwrap()
++    );
++    assert!(!package.starts_with(root.join("apps/z-app")));
++    let package_dirty =
++        "<?php\r\nnamespace Library;\r\n/* package žluťoučký 🐘 */ class User {}\r\n";
++    let caller_dirty = "<?php\r\n/* caller café 🐘 */ use Library\\User as Account;\r\nfunction make(): Account { return new Account(); }\r\n";
++    let router = router(&root).await;
++    // Real physical source is opened first; the consuming app is subsequently
++    // opened. The checked endpoint must work through actual project ownership
++    // and overlay replay, not direct Backend::open_files injection.
++    open(&router, &package).await;
++    replace(&router, &package, 2, package_dirty).await;
++    open(&router, &caller).await;
++    replace(&router, &caller, 2, caller_dirty).await;
++    let request = params(
++        &caller,
++        caller_dirty,
++        "User as Account",
++        vec![
++            expected(&package, package_dirty),
++            expected(&caller, caller_dirty),
++        ],
++    );
++    let response = router.workbench_rename_checked(request).await;
++    let package_target = router
++        .workbench_active_target(ProjectTargetQuery {
++            uri: Some(Url::from_file_path(&package).unwrap()),
++        })
++        .await;
++    let caller_target = router
++        .workbench_active_target(ProjectTargetQuery {
++            uri: Some(Url::from_file_path(&caller).unwrap()),
++        })
++        .await;
++    router.shutdown().await.unwrap();
++    let edit = response.expect("checked package rename must verify both real open inputs in the selected consuming context")
++        .expect("installed path package class rename edit");
++    assert_eq!(
++        package_target.unwrap().php_version,
++        "8.2",
++        "physical installed package retains consuming config, not its own 7.4 context"
++    );
++    assert_eq!(caller_target.unwrap().php_version, "8.2");
++    let new_uri = assert_move(&edit, &package);
++    let caller_uri = Url::from_file_path(&caller).unwrap();
++    assert_eq!(
++        edit_uris(&edit),
++        HashSet::from([new_uri.clone(), caller_uri.clone()])
++    );
++    assert_eq!(
++        apply_edits(package_dirty, &edits_for_uri(&edit, &new_uri)),
++        package_dirty.replace("class User", "class Person")
++    );
++    assert_eq!(
++        apply_edits(caller_dirty, &edits_for_uri(&edit, &caller_uri)),
++        caller_dirty.replace("Library\\User", "Library\\Person"),
++        "explicit Account import alias and call sites remain stable"
++    );
++    assert_eq!(fs::read(&package).unwrap(), package_disk.as_bytes());
++    assert_eq!(fs::read(&caller).unwrap(), caller_disk.as_bytes());
++    assert_eq!(
++        fs::read(vendor.join("src/User.php")).unwrap(),
++        package_disk.as_bytes()
++    );
++    assert!(!package.with_file_name("Person.php").exists());
++    assert!(!vendor.join("src/Person.php").exists());
++}

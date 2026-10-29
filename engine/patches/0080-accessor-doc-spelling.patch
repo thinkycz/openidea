@@ -1,0 +1,208 @@
+diff --git a/src/code_actions/generate_getter_setter.rs b/src/code_actions/generate_getter_setter.rs
+index 15ee6cb..a197fc1 100644
+--- a/src/code_actions/generate_getter_setter.rs
++++ b/src/code_actions/generate_getter_setter.rs
+@@ -30,7 +30,7 @@ use super::helpers::GenerationLayout;
+ use super::naming::to_pascal_case;
+ use crate::Backend;
+ use crate::atom::bytes_to_str;
+-use crate::docblock::{extract_var_type, get_docblock_text_for_node};
++use crate::docblock::{TagKind, get_docblock_text_for_node, parse_docblock_for_tags};
+ use crate::parser::extract_hint_type;
+ use crate::php_type::PhpType;
+ use crate::text_position::offset_to_position;
+@@ -47,6 +47,8 @@ struct AccessorProperty {
+     /// type declaration.  When `true`, generated methods use `@return` /
+     /// `@param` tags instead of native type hints.
+     type_from_docblock: bool,
++    /// Exact source spelling, never a decoded PhpType display inside a PHPDoc.
++    doc_type_spelling: Option<String>,
+     /// Whether the property has the `readonly` modifier.
+     is_readonly: bool,
+     /// Whether the property has the `static` modifier.
+@@ -141,19 +143,27 @@ impl Backend {
+                             // property. PHPDoc-only shapes/generics remain docs,
+                             // just as for ordinary property declarations.
+                             let documented = get_docblock_text_for_node(trivia, content, param)
+-                                .and_then(extract_var_type)
++                                .and_then(|doc| accessor_documented_type(doc, TagKind::Var, None))
+                                 .or_else(|| {
+                                     get_docblock_text_for_node(trivia, content, *method).and_then(
+                                         |doc| {
+-                                            crate::docblock::extract_param_raw_type(doc, raw_name)
++                                            accessor_documented_type(
++                                                doc,
++                                                TagKind::Param,
++                                                Some(raw_name),
++                                            )
+                                         },
+                                     )
+                                 });
+                             let type_from_docblock = native_hint.is_none() && documented.is_some();
++                            let (documented_hint, doc_type_spelling) = documented
++                                .map(|(hint, spelling)| (Some(hint), Some(spelling)))
++                                .unwrap_or_default();
+                             let property = AccessorProperty {
+                                 name: raw_name.strip_prefix('$').unwrap_or(raw_name).to_string(),
+-                                type_hint: native_hint.or(documented),
++                                type_hint: native_hint.or(documented_hint),
+                                 type_from_docblock,
++                                doc_type_spelling,
+                                 is_readonly: has_readonly(param.modifiers.iter()),
+                                 is_static: false,
+                             };
+@@ -459,6 +469,26 @@ fn accessor_name_collision(available: &[AvailableAccessors], getter: bool) -> Op
+     None
+ }
+ 
++/// Preserve the canonical tag parser's spelling alongside its semantic type.
++/// PhpType display can decode escaped shape keys into PHP comment delimiters.
++fn accessor_documented_type(
++    doc: &str,
++    kind: TagKind,
++    variable: Option<&str>,
++) -> Option<(PhpType, String)> {
++    let info = parse_docblock_for_tags(doc)?;
++    for tag in info.tags_by_kind_vendor_first(kind) {
++        if variable.is_some_and(|name| tag.variable().as_deref() != Some(name)) {
++            continue;
++        }
++        if let Some(spelling) = tag.type_text() {
++            let parsed = crate::docblock::sanitise_and_parse_docblock_type(&spelling)?;
++            return Some((parsed, spelling.into_owned()));
++        }
++    }
++    None
++}
++
+ /// Collect accessor-eligible properties from a single property declaration
+ /// node (which may declare multiple variables, e.g. `private int $a, $b;`).
+ fn collect_accessor_properties<'a>(
+@@ -477,8 +507,11 @@ fn collect_accessor_properties<'a>(
+             let native_hint = plain.hint.as_ref().map(|h| extract_hint_type(h));
+ 
+             // Try to get a docblock @var type if there's no native hint.
+-            let docblock_type =
+-                get_docblock_text_for_node(trivia, content, plain).and_then(extract_var_type);
++            let documented = get_docblock_text_for_node(trivia, content, plain)
++                .and_then(|doc| accessor_documented_type(doc, TagKind::Var, None));
++            let (docblock_type, doc_type_spelling) = documented
++                .map(|(hint, spelling)| (Some(hint), Some(spelling)))
++                .unwrap_or_default();
+ 
+             for item in plain.items.iter() {
+                 let var_name = bytes_to_str(item.variable().name);
+@@ -496,6 +529,7 @@ fn collect_accessor_properties<'a>(
+                     name: bare_name.to_string(),
+                     type_hint,
+                     type_from_docblock,
++                    doc_type_spelling: doc_type_spelling.clone(),
+                     is_readonly,
+                     is_static,
+                 });
+@@ -569,15 +603,14 @@ fn build_getter_with_layout(prop: &AccessorProperty, layout: &GenerationLayout)
+ 
+     // If the type came from a docblock, add a @return tag.
+     if prop.type_from_docblock
+-        && let Some(ref hint) = prop.type_hint
++        && let Some(ref hint_str) = prop.doc_type_spelling
+     {
+-        let hint_str = hint.to_string();
+         result.push_str(indent);
+         result.push_str("/**");
+         result.push_str(layout.newline);
+         result.push_str(indent);
+         result.push_str(" * @return ");
+-        result.push_str(&hint_str);
++        result.push_str(hint_str);
+         result.push_str(layout.newline);
+         result.push_str(indent);
+         result.push_str(" */");
+@@ -638,15 +671,14 @@ fn build_setter_with_layout(prop: &AccessorProperty, layout: &GenerationLayout)
+ 
+     // If the type came from a docblock, add a @param tag.
+     if prop.type_from_docblock
+-        && let Some(ref hint) = prop.type_hint
++        && let Some(ref hint_str) = prop.doc_type_spelling
+     {
+-        let hint_str = hint.to_string();
+         result.push_str(indent);
+         result.push_str("/**");
+         result.push_str(layout.newline);
+         result.push_str(indent);
+         result.push_str(" * @param ");
+-        result.push_str(&hint_str);
++        result.push_str(hint_str);
+         result.push_str(" $");
+         result.push_str(&prop.name);
+         result.push_str(layout.newline);
+@@ -868,6 +900,7 @@ mod tests {
+             name: name.to_string(),
+             type_hint: type_hint.map(PhpType::parse),
+             type_from_docblock,
++            doc_type_spelling: type_hint.map(str::to_string),
+             is_readonly,
+             is_static,
+         }
+diff --git a/tests/integration/code_action_generate_getter_setter.rs b/tests/integration/code_action_generate_getter_setter.rs
+index 032c5fc..18e7a03 100644
+--- a/tests/integration/code_action_generate_getter_setter.rs
++++ b/tests/integration/code_action_generate_getter_setter.rs
+@@ -1577,3 +1577,57 @@ fn promoted_accessor_default_expression_does_not_select_outer_property() {
+         assert!(generate_titles(&actions_at(&backend, content, needle)).is_empty());
+     }
+ }
++
++#[test]
++fn accessor_doc_spelling_escaped_shape_preserves_comment_boundary_for_all_properties() {
++    let backend = create_test_backend();
++    let spelling = r#"array{"*\x2f public function injected($value) {} \x2f*": int}"#;
++    let sources = [
++        r#"<?php class Subject { /** @param array{"*\x2f public function injected($value) {} \x2f*": int} $value */ public function __construct(private $value) {} public function injected($value) {} }"#,
++        r#"<?php class Subject { public function __construct(/** @var array{"*\x2f public function injected($value) {} \x2f*": int} */ private $value) {} public function injected($value) {} }"#,
++        r#"<?php class Subject { /** @var array{"*\x2f public function injected($value) {} \x2f*": int} */ private $value; public function injected($value) {} }"#,
++    ];
++    for content in sources {
++        let actions = actions_at(&backend, content, "private $value");
++        let setter = find_action_titled(&actions, "Generate setter")
++            .expect("legitimate shape-valued property retains its setter");
++        let edits = extract_edits(setter);
++        assert!(!edits.is_empty());
++        let inserted = edits
++            .iter()
++            .map(|edit| edit.new_text.as_str())
++            .collect::<String>();
++        assert!(
++            inserted.contains(spelling),
++            "PHPDoc type spelling must remain escaped: {inserted}"
++        );
++        assert!(
++            !inserted.contains("*/ public function injected"),
++            "must not decode a comment terminator into executable PHP: {inserted}"
++        );
++    }
++}
++
++#[test]
++fn accessor_doc_spelling_escaped_shape_keeps_valid_getter_and_combined_actions() {
++    let backend = create_test_backend();
++    let content = r#"<?php class Subject { /** @param array{"*\x2f public function injected($value) {} \x2f*": int} $value */ public function __construct(private $value) {} public function injected($value) {} }"#;
++    let actions = actions_at(&backend, content, "private $value");
++    for title in ["Generate getter", "Generate getter and setter"] {
++        let action = find_action_titled(&actions, title).expect("matching action exists");
++        assert!(
++            action.disabled.is_none(),
++            "valid escaped PHPDoc must not be rejected as an inherited contract conflict: {action:?}"
++        );
++        let edits = extract_edits(action);
++        assert!(!edits.is_empty());
++        let inserted = edits
++            .iter()
++            .map(|edit| edit.new_text.as_str())
++            .collect::<String>();
++        assert!(
++            !inserted.contains("*/ public function injected"),
++            "{inserted}"
++        );
++    }
++}

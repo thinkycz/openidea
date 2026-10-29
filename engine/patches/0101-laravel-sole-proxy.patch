@@ -1,0 +1,427 @@
+diff --git a/docs/CHANGELOG.md b/docs/CHANGELOG.md
+index 9218e271217e980211c2226f4e9053eeb5b9d3f7..08cb43bb28f5d1755564e9fc75431cb4c5b8c9c4 100644
+--- a/docs/CHANGELOG.md
++++ b/docs/CHANGELOG.md
+@@ -15,6 +15,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
+ 
+ ## [Unreleased]
+ 
++- **Complete the original item after Laravel's higher-order `sole`.** Property and method predicates preserve the matching item's type for completion, hover and navigation on framework versions that advertise the proxy. Missing or multiple matches throw rather than adding a nullable result. Contributed by PHP Workbench downstream.
++
+ - **Keep Laravel view data accurate while editing.** Nested `compact()` arrays retain their PHP key semantics, and view-owned data takes precedence over shared defaults. Accepted caller edits refresh dependent Blade templates while preserving unsaved template text. Contributed by PHP Workbench downstream.
+ 
+ - **Explain incomplete call hierarchies.** Editors using the Workbench hierarchy extension receive known calls together with unresolved source locations and analysis limits. Empty results distinguish inspected code from unavailable analysis. Contributed by PHP Workbench downstream.
+diff --git a/docs/todo.md b/docs/todo.md
+index ef4e8214586f17881de8efe2826c6af8abf7c788..0ee142474b54bf78e2d30611624f7e97788637cc 100644
+--- a/docs/todo.md
++++ b/docs/todo.md
+@@ -36,7 +36,7 @@ contributor even though it's short.
+ | --- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------- | ----------- |
+ |     | Clear [refactoring gate](todo/refactor.md)                                                                                                                      | —           | —           |
+ | BL2 | [Accurate cyclic Blade data transformations](todo/blade.md#bl2-accurate-cyclic-blade-data-transformations) | Medium | High |
+-| L60 | [Laravel 13 higher-order `sole` proxy](todo/laravel.md#l60-laravel-13-higher-order-sole-proxy) | Low-Medium | Medium |
++| L61 | [Configured Storage adapter types in real Laravel analysis](todo/laravel.md#l61-configured-storage-adapter-types-in-real-laravel-analysis) | Medium | Medium |
+ | X17  | [Index the workspace's other folders](todo/indexing.md#x17-index-the-workspaces-other-folders)                              | Medium      | Medium      |
+ | X14  | [Ask Zed to expose `file_scan_exclusions` and `file_types` to extensions](todo/indexing.md#x14-ask-zed-to-expose-file_scan_exclusions-and-file_types-to-extensions) (upstream request) | Low | Low |
+ | E1  | [External stub packages (ide-helper, etc.)](todo/external-stubs.md#e1-project-level-phpstorm-stubs-for-gtd)                                                     | Medium-High | Low         |
+diff --git a/docs/todo/laravel.md b/docs/todo/laravel.md
+index 02e0b94b01b1275f5c7f11c2c1d2c4a609ca0071..25211527b0af7b613f875063ce99b3931e4b6622 100644
+--- a/docs/todo/laravel.md
++++ b/docs/todo/laravel.md
+@@ -800,17 +800,36 @@ constructor injection doesn't apply.
+ pattern already used elsewhere; `virtual_members/laravel/facade.rs`
+ for the facade-to-concrete-class resolution to reuse.
+ 
+-#### L60. Laravel 13 higher-order `sole` proxy
++#### L61. Configured Storage adapter types in real Laravel analysis
+ 
+-**Impact: Low-Medium · Complexity: Medium**
+-
+-Laravel 13.37 adds `sole` to `Collection::$proxies`. The example assertion's
+-expected proxy list matches Laravel 12.70, but misses this installed-version
+-addition. `virtual_members/laravel/higher_order_proxy.rs::plan_result` also
+-falls through to `mixed` for `sole`, rather than the matched item type.
++**Impact: Medium · Complexity: Medium**
+ 
+-Add installed-version-aware coverage and preserve the method's real success
+-return type and exception behavior. Verify property and method proxy forms
+-on support/Eloquent collections and distinguish Laravel versions that do not
+-offer this proxy. Update the example assertion with the implementation;
+-removing the failing comparison alone would conceal the inference gap.
++The isolated real-Laravel13.37 analyzer emits three unexpected `unknown_member`
++diagnostics in the Laravel example: `Storage::disk('s3')->download`,
++`Storage::cloud()->assertExists`, and the registered `pantry` disk's `download`.
++Verified114/engine99 and fresh engine100 emit the same six total diagnostics:
++three intentional examples plus these three. The broader analyzer gate remains
++failed; do not change its expected count to six or suppress these warnings.
++
++Laravel's concrete adapters provide these methods, and pantry's provider
++explicitly returns FilesystemAdapter. The engine already refines configured
++disk returns, but the real cold analyzer retains the facade's Filesystem/Cloud
++contracts. Determine the actual missing fact or lost refinement through the
++existing config/provider/shared resolver path before implementing a fix.
++
++Acceptance:
++
++- Preserve the current real-dependency failing receipt and reproduce the three
++  warnings through the actual analyzer route, with owned isolated examples.
++- Baseline/current examples then produce only the three intentional diagnostics;
++  verify no added diagnostic and report actual counts without suppression.
++- Public completion, hover, and definition retain the known adapter result for
++  s3, default cloud, and the discovered pantry closure; cover cold/warm lookup
++  and config/provider edits without stale cached contract/adapter results.
++- Preserve ordinary contract-typed receiver negatives, unresolved custom-driver
++  conservatism, and discovered custom adapters that return another concrete type.
++- Reuse shared type inference; do not cast every Filesystem/Cloud value to the
++  adapter, alter borrowed vendor, or treat network/filesystem execution as proved.
++
++Evidence and source inventory: `work/typed-view-freshness/laravel-gate/`
++`storage-baseline-investigation.md`.
+diff --git a/examples/laravel/app/Demo.php b/examples/laravel/app/Demo.php
+index a931c4ef371271f4b442c9e7b478975dfc18faf8..c239156beebfecc88ab23a7fcdf319ea373fadda 100644
+--- a/examples/laravel/app/Demo.php
++++ b/examples/laravel/app/Demo.php
+@@ -512,6 +512,30 @@ class Demo
+         $reviews->filter->getRating()->count();     // → int
+     }
+ 
++    /**
++     * Laravel's higher-order `sole` uses the member as a predicate, then
++     * returns the original matching review, not the property's bool value.
++     * Zero matches throw ItemNotFoundException; multiple matches throw
++     * MultipleItemsFoundException, so the result does not fall through to null.
++     *
++     * @param  Collection<int, Review>  $reviews
++     */
++    public function soleProxyProperty(Collection $reviews): Review
++    {
++        return $reviews->sole->published;    // → Review
++    }
++
++    /**
++     * Method predicates preserve the original item on Eloquent collections too.
++     * These proxy examples require a Laravel version that advertises `sole`.
++     *
++     * @param  \Illuminate\Database\Eloquent\Collection<int, Review>  $reviews
++     */
++    public function soleProxyMethod(\Illuminate\Database\Eloquent\Collection $reviews): Review
++    {
++        return $reviews->sole->getRating();  // → Review, not int or Review|null
++    }
++
+     /**
+      * The proxy remembers which collection it came from, so a method that
+      * returns `static` stays on the custom collection.  Mapping to a scalar
+diff --git a/examples/laravel/assertions.php b/examples/laravel/assertions.php
+index d3bb0c401000cf5da783d5850925501af9a2a3ba..d5d5ac5ff558c56489964dabb0cda91b727e2cb1 100644
+--- a/examples/laravel/assertions.php
++++ b/examples/laravel/assertions.php
+@@ -1101,6 +1101,22 @@ check(
+ // every proxyable method must be one the LSP knows how to type — otherwise
+ // `$reviews->somethingElse->x` would resolve against a proxy Laravel never
+ // creates, or a real proxy would fall through to `mixed`.
++// BEGIN sole proxy runtime oracle
++// The declared API and known installed versions decide this expectation,
++// independently of the runtime array being checked below.
++$frameworkVersion = \Illuminate\Foundation\Application::VERSION;
++$enumeratesValues = new ReflectionClass(\Illuminate\Support\Traits\EnumeratesValues::class);
++$declaresSoleProxy = preg_match(
++    '/@property-read[^\r\n]*\$sole(?:\s|$)/',
++    $enumeratesValues->getDocComment() ?: ''
++) === 1;
++$expectsSoleProxy = match ($frameworkVersion) {
++    '12.70.0' => false,
++    '13.37.0' => true,
++    default => $declaresSoleProxy,
++};
++check('installed framework declares the expected sole proxy API', $declaresSoleProxy === $expectsSoleProxy);
++
+ $proxiesProperty = new ReflectionProperty(
+     \Illuminate\Support\Collection::class,
+     'proxies'
+@@ -1113,6 +1129,13 @@ $typedProxies = [
+     'skipWhile', 'some', 'sortBy', 'sortByDesc', 'sum', 'takeUntil',
+     'takeWhile', 'unique', 'unless', 'until', 'when',
+ ];
++if ($expectsSoleProxy) {
++    $typedProxies[] = 'sole';
++}
++check(
++    'installed collection advertises the expected sole proxy independently of its runtime list',
++    in_array('sole', $runtimeProxies, true) === $expectsSoleProxy
++);
+ sort($runtimeProxies);
+ sort($typedProxies);
+ check(
+@@ -1120,6 +1143,73 @@ check(
+     $runtimeProxies === $typedProxies
+ );
+ 
++// Both base and Eloquent collections must return the exact original model.
++// In-memory attributes avoid database or application-bootstrap dependencies.
++$soleItem = static function (bool $published, int $rating): \App\Models\Review {
++    $review = new class extends \App\Models\Review {
++        public function getRating(): int { return (int) $this->getAttribute('rating'); }
++    };
++    $review->setRawAttributes(['published' => $published, 'rating' => $rating]);
++    return $review;
++};
++$soleMatch = $soleItem(true, 5);
++$soleOther = $soleItem(false, 0);
++$soleSecondMatch = $soleItem(true, 7);
++$soleThrows = static function (string $label, callable $operation, string $expected): void {
++    try {
++        $operation();
++        check($label . ' throws instead of returning a nullable result', false);
++    } catch (\Throwable $exception) {
++        check($label . ' throws ' . $expected, $exception instanceof $expected);
++    }
++};
++foreach ([
++    \Illuminate\Support\Collection::class,
++    \Illuminate\Database\Eloquent\Collection::class,
++] as $soleCollectionClass) {
++    $soleUnique = new $soleCollectionClass([$soleOther, $soleMatch]);
++    check($soleCollectionClass . ' direct sole predicate fixture selects the original item',
++        $soleUnique->sole(static fn ($review) => $review->published) === $soleMatch);
++    if (!$expectsSoleProxy) {
++        foreach (['property', 'method'] as $soleAccess) {
++            try {
++                $soleAccess === 'property'
++                    ? $soleUnique->sole->published
++                    : $soleUnique->sole->getRating();
++                check($soleCollectionClass . ' does not offer an undeclared sole proxy', false);
++            } catch (\Throwable $exception) {
++                check($soleCollectionClass . ' refuses unsupported sole ' . $soleAccess,
++                    $exception::class === \Exception::class
++                    && str_contains($exception->getMessage(), 'Property [sole]'));
++            }
++        }
++        continue;
++    }
++    check($soleCollectionClass . ' sole property returns original item, not bool',
++        $soleUnique->sole->published === $soleMatch);
++    check($soleCollectionClass . ' sole method returns original item, not int',
++        $soleUnique->sole->getRating() === $soleMatch);
++    foreach ([
++        'empty' => [[], \Illuminate\Support\ItemNotFoundException::class],
++        'zero match' => [[$soleOther], \Illuminate\Support\ItemNotFoundException::class],
++        'multiple matches' => [[$soleMatch, $soleSecondMatch], \Illuminate\Support\MultipleItemsFoundException::class],
++    ] as $soleCase => [$soleItems, $soleException]) {
++        $soleCollection = new $soleCollectionClass($soleItems);
++        $soleThrows($soleCollectionClass . ' sole property ' . $soleCase,
++            static fn () => $soleCollection->sole->published, $soleException);
++        $soleThrows($soleCollectionClass . ' sole method ' . $soleCase,
++            static fn () => $soleCollection->sole->getRating(), $soleException);
++    }
++}
++if ($expectsSoleProxy) {
++    $soleDemo = new \App\Demo();
++    check('sole property demo returns the same Support collection review',
++        $soleDemo->soleProxyProperty(new \Illuminate\Support\Collection([$soleOther, $soleMatch])) === $soleMatch);
++    check('sole method demo returns the same Eloquent collection review',
++        $soleDemo->soleProxyMethod(new \Illuminate\Database\Eloquent\Collection([$soleOther, $soleMatch])) === $soleMatch);
++}
++// END sole proxy runtime oracle
++
+ // `map` collects the accessed member, so a proxy over a scalar member
+ // produces a collection of scalars rather than of the original items.
+ $proxied = new \Illuminate\Support\Collection([
+diff --git a/src/virtual_members/laravel/higher_order_proxy.rs b/src/virtual_members/laravel/higher_order_proxy.rs
+index da0b5b9ad7d474adf09da0f32e33b06e6b575e01..a88ccfe6563314dcea5d0f200abb36ea5203c6ef 100644
+--- a/src/virtual_members/laravel/higher_order_proxy.rs
++++ b/src/virtual_members/laravel/higher_order_proxy.rs
+@@ -449,6 +449,9 @@ fn plan_result(method: &str, key: &PhpType, value: &PhpType, collection: Atom) -
+         // Single item, or `null` when nothing matched.
+         "first" | "last" => value.clone().or_null(),
+ 
++        // Missing or multiple matches throw instead of producing a value.
++        "sole" => value.clone(),
++
+         // Predicates.
+         "contains" | "doesntContain" | "every" | "hasMany" | "hasSole" | "some" => PhpType::bool(),
+ 
+diff --git a/tests/integration/completion_laravel_higher_order_proxies.rs b/tests/integration/completion_laravel_higher_order_proxies.rs
+index 73e0ffdb3261191c888bbd735d73e7d7f8abac78..7f56bc6e26e5e51918203fba65cefe1ce67643c0 100644
+--- a/tests/integration/completion_laravel_higher_order_proxies.rs
++++ b/tests/integration/completion_laravel_higher_order_proxies.rs
+@@ -4,7 +4,10 @@
+ //! `HigherOrderCollectionProxy`, whose `__get` / `__call` run the proxied
+ //! collection method with a closure that performs the access on every item.
+ 
+-use crate::common::create_psr4_workspace;
++use crate::common::{
++    complete_labels_at_opened, create_psr4_workspace, definition_locations, goto_definition_at,
++    hover_text_at, open_php_at, position_after, position_of,
++};
+ use phpantom_lsp::Backend;
+ use tower_lsp::LanguageServer;
+ use tower_lsp::lsp_types::*;
+@@ -201,13 +204,17 @@ class UserCollection extends EloquentCollection
+ // ─── Harness ────────────────────────────────────────────────────────────────
+ 
+ fn workspace() -> (Backend, tempfile::TempDir) {
++    workspace_with_trait(COMPOSER_JSON, ENUMERATES_VALUES_PHP)
++}
++
++fn workspace_with_trait(composer: &str, enumerates_values: &str) -> (Backend, tempfile::TempDir) {
+     create_psr4_workspace(
+-        COMPOSER_JSON,
++        composer,
+         &[
+             ("vendor/illuminate/Support/Enumerable.php", ENUMERABLE_PHP),
+             (
+                 "vendor/illuminate/Support/Traits/EnumeratesValues.php",
+-                ENUMERATES_VALUES_PHP,
++                enumerates_values,
+             ),
+             (
+                 "vendor/illuminate/Support/HigherOrderCollectionProxy.php",
+@@ -618,3 +625,147 @@ fn a_name_that_is_not_a_proxy_is_still_reported() {
+         messages
+     );
+ }
++
++// ─── Version-advertised sole proxy ─────────────────────────────────────────
++
++fn sole_workspace(advertised: bool) -> (Backend, tempfile::TempDir) {
++    let composer = COMPOSER_JSON.replace("^11.0", if advertised { "^13.0" } else { "^12.0" });
++    let trait_source = if advertised {
++        ENUMERATES_VALUES_PHP.replace(
++            " * @property-read HigherOrderCollectionProxy<TKey, TValue> $some",
++            " * @property-read HigherOrderCollectionProxy<TKey, TValue> $sole\n * @property-read HigherOrderCollectionProxy<TKey, TValue> $some",
++        )
++    } else {
++        ENUMERATES_VALUES_PHP.to_string()
++    };
++    workspace_with_trait(&composer, &trait_source)
++}
++
++async fn assert_sole_item_type(collection: &str, expression: &str) {
++    let (backend, dir) = sole_workspace(true);
++    let content = probe_source(collection, expression);
++    let uri = open_php_at(&backend, &dir, "src/SoleProbe.php", &content).await;
++    let position = position_after(&content, "$res");
++    let hover = hover_text_at(&backend, &uri, position.line, position.character)
++        .await
++        .expect("the assigned sole result must hover");
++    let ty = hover
++        .lines()
++        .find_map(|line| line.strip_prefix("$result = "))
++        .unwrap_or_else(|| panic!("missing result type for {expression}: {hover}"));
++    assert_eq!(ty, "User", "{collection}: {expression}: {hover}");
++    assert!(
++        hover.contains("namespace App;"),
++        "the original application item must be returned: {hover}"
++    );
++}
++
++#[tokio::test]
++async fn sole_support_property_returns_original_item_without_implicit_null() {
++    for predicate in ["email", "age", "discount"] {
++        assert_sole_item_type(SUPPORT, &format!("$items->sole->{predicate}")).await;
++    }
++}
++
++#[tokio::test]
++async fn sole_support_method_returns_original_item_not_predicate_result() {
++    for predicate in ["isActive()", "displayName()", "latestPost()"] {
++        assert_sole_item_type(SUPPORT, &format!("$items->sole->{predicate}")).await;
++    }
++}
++
++#[tokio::test]
++async fn sole_eloquent_property_returns_original_model_without_implicit_null() {
++    for predicate in ["email", "discount"] {
++        assert_sole_item_type(ELOQUENT, &format!("$items->sole->{predicate}")).await;
++    }
++}
++
++#[tokio::test]
++async fn sole_eloquent_method_returns_original_model_not_predicate_result() {
++    for predicate in ["isActive()", "displayName()", "latestPost()"] {
++        assert_sole_item_type(ELOQUENT, &format!("$items->sole->{predicate}")).await;
++    }
++}
++
++#[tokio::test]
++async fn sole_result_chains_complete_and_navigate_to_original_item() {
++    for collection in [SUPPORT, ELOQUENT] {
++        for predicate in ["email", "isActive()"] {
++            let (backend, dir) = sole_workspace(true);
++            let content = format!(
++                "{}$result->email;\n$result->\n",
++                probe_source(collection, &format!("$items->sole->{predicate}"))
++            );
++            let uri = open_php_at(&backend, &dir, "src/SoleChain.php", &content).await;
++            let completion_line = content.lines().count() as u32 - 1;
++            let labels = complete_labels_at_opened(
++                &backend,
++                &uri,
++                completion_line,
++                "$result->".len() as u32,
++            )
++            .await;
++            for expected in ["email", "age", "isActive()", "displayName()"] {
++                assert!(
++                    labels.iter().any(|label| label == expected),
++                    "{collection}: sole->{predicate} must return item members, got {labels:?}"
++                );
++            }
++            assert!(
++                !labels.iter().any(|label| label == "count()"),
++                "sole returns one original item, not its collection: {labels:?}"
++            );
++            let mut at = position_after(&content, "$result->em");
++            at.character -= 1;
++            let locations = definition_locations(
++                goto_definition_at(&backend, &uri, at.line, at.character).await,
++            );
++            let expected_uri = Url::from_file_path(dir.path().join("src/User.php")).unwrap();
++            let expected_line = position_of(USER_PHP, "public string $email").line;
++            assert_eq!(
++                locations.len(),
++                1,
++                "expected one original property: {locations:?}"
++            );
++            assert_eq!(locations[0].uri, expected_uri);
++            assert_eq!(locations[0].range.start.line, expected_line);
++        }
++    }
++}
++
++#[tokio::test]
++async fn sole_is_not_invented_when_laravel_twelve_trait_does_not_advertise_it() {
++    for collection in [SUPPORT, ELOQUENT] {
++        let (backend, dir) = sole_workspace(false);
++        let content = format!(
++            "{}$items->\n",
++            probe_source(collection, "$items->sole->email")
++        );
++        let uri = open_php_at(&backend, &dir, "src/NoSole.php", &content).await;
++        let labels = complete_labels_at_opened(
++            &backend,
++            &uri,
++            content.lines().count() as u32 - 1,
++            "$items->".len() as u32,
++        )
++        .await;
++        assert!(
++            labels.iter().any(|label| label == "map"),
++            "fixture must expose existing proxies: {labels:?}"
++        );
++        assert!(
++            !labels.iter().any(|label| label == "sole"),
++            "unadvertised sole was invented: {labels:?}"
++        );
++        let mut diagnostics = Vec::new();
++        backend.collect_slow_diagnostics(uri.as_str(), &content, &mut diagnostics);
++        assert!(
++            diagnostics.iter().any(|diagnostic| {
++                matches!(diagnostic.code.as_ref(), Some(NumberOrString::String(code)) if code == "unknown_member")
++                    && diagnostic.message.contains("sole")
++            }),
++            "unadvertised sole must remain an unknown collection member: {diagnostics:?}"
++        );
++    }
++}

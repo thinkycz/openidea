@@ -1,0 +1,3314 @@
+diff --git a/docs/CHANGELOG.md b/docs/CHANGELOG.md
+index 6b164e3..ddd70c2 100644
+--- a/docs/CHANGELOG.md
++++ b/docs/CHANGELOG.md
+@@ -15,6 +15,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
+ 
+ ## [Unreleased]
+ 
++- **Follow stored callable values.** Call hierarchy follows locally stored callbacks through value copies, reference cells, branch alternatives and known array-selector changes while keeping callable creation separate from later invocation. Captured receivers retain their creation-time target. Contributed by PHP Workbench downstream.
++
+ - **Refresh changed call hierarchy declarations.** Expanding a retained function or method after its source changes now requires a fresh hierarchy selection. Unchanged declarations remain usable when another file is edited. Contributed by PHP Workbench downstream.
+ 
+ - **Search and replace named PHP arguments.** Structural patterns capture named values while retaining exact labels and written order. Reviewed replacements preserve captured expressions and keep positional argument tails distinct. Contributed by PHP Workbench downstream.
+diff --git a/examples/php/definition.php b/examples/php/definition.php
+index 083dd04..93e9efa 100644
+--- a/examples/php/definition.php
++++ b/examples/php/definition.php
+@@ -519,3 +519,30 @@ function hierarchyReceiptNavigation(): void
+ {
+     gtdHelper();
+ }
++
++// Try: Show Callees on storedCallableNavigation. Follow the later variable
++// calls to their stored function, anonymous body, object method or array target.
++// The scalar copy keeps strlen while the shared reference changes to strtolower.
++function storedCallableNavigation(): array
++{
++    $scalar = 'strlen';
++    $copy = $scalar;
++    $reference =& $scalar;
++    $reference = 'strtolower';
++    $firstClass = strlen(...);
++    $closure = static function (string $value): int { return strlen($value); };
++    $arrow = static fn(string $value): int => strlen($value);
++    $object = new class {
++        public function __invoke(string $value): int { return strlen($value); }
++    };
++    $array = [\DateTimeImmutable::class, 'createFromFormat'];
++    return [
++        'reference' => $scalar('A'),
++        'copy' => $copy('A'),
++        'firstClass' => $firstClass('A'),
++        'closure' => $closure('A'),
++        'arrow' => $arrow('A'),
++        'object' => $object('A'),
++        'array' => $array('!Y', '2026') instanceof \DateTimeImmutable,
++    ];
++}
+diff --git a/examples/php/scaffolding/assertions.php b/examples/php/scaffolding/assertions.php
+index f3869a0..85b4506 100644
+--- a/examples/php/scaffolding/assertions.php
++++ b/examples/php/scaffolding/assertions.php
+@@ -33,6 +33,10 @@ final class RequireExtendsConsumer extends Scaffolding\RequireExtendsTestCase
+ 
+ function runDemoAssertions(): void
+ {
++    assert(storedCallableNavigation() === [
++        'reference' => 'a', 'copy' => 1, 'firstClass' => 1,
++        'closure' => 1, 'arrow' => 1, 'object' => 1, 'array' => true,
++    ], 'stored callable copies, reference cells and value forms retain their runtime targets');
+     assert(is_object((new AnonymousGenerationDemo())->make()));
+     $overloadSignature = new BuiltinOverloadSignatureDemo();
+     assert($overloadSignature->translatePairs() === 'zbc', 'the replacement-pairs overload returns the translated string');
+diff --git a/src/call_hierarchy.rs b/src/call_hierarchy.rs
+index c6d75d1..17caeb3 100644
+--- a/src/call_hierarchy.rs
++++ b/src/call_hierarchy.rs
+@@ -19,6 +19,8 @@ use tower_lsp::lsp_types::{
+     Range, SymbolKind as LspSymbolKind, Url,
+ };
+ 
++mod stored;
++
+ use crate::Backend;
+ use crate::symbol_map::{
+     AnonymousCallable, AnonymousClassConstruction, ArrayCallableInvocation, CallExecutionOwner,
+@@ -66,6 +68,14 @@ type ParsedFile = (Arc<String>, Arc<SymbolMap>, Option<[u8; 32]>);
+ struct FileCache {
+     files: HashMap<String, Option<ParsedFile>>,
+     blade_files: HashMap<String, Option<crate::blade::source_map::BladeHierarchyProjection>>,
++    /// Stored-value flow only; this is not a completeness claim for all calls.
++    stored_value_flow_complete: Option<bool>,
++}
++impl FileCache {
++    fn record_stored_completeness(&mut self, complete: bool) {
++        self.stored_value_flow_complete =
++            Some(self.stored_value_flow_complete.unwrap_or(true) && complete);
++    }
+ }
+ 
+ impl Backend {
+@@ -423,6 +433,8 @@ impl Backend {
+             }
+         }
+ 
++        let stored_complete = self.collect_stored_incoming(&mut cache, &target, &mut grouped);
++        cache.record_stored_completeness(stored_complete);
+         let mut calls: Vec<_> = grouped
+             .into_values()
+             .map(|(mut from, mut from_ranges)| {
+@@ -669,6 +681,8 @@ impl Backend {
+             }
+         }
+ 
++        let stored_complete = self.collect_stored_outgoing(&mut cache, &callable, &mut grouped);
++        cache.record_stored_completeness(stored_complete);
+         let mut calls: Vec<_> = grouped
+             .into_values()
+             .map(|(mut to, mut from_ranges)| {
+@@ -869,7 +883,9 @@ impl Backend {
+             || !symbol_map.immediate_object_invocations.is_empty()
+             || !symbol_map.literal_callable_invocations.is_empty()
+             || !symbol_map.literal_method_selectors.is_empty()
+-            || !symbol_map.array_callable_invocations.is_empty())
++            || !symbol_map.array_callable_invocations.is_empty()
++            || !symbol_map.variable_callable_invocations.is_empty()
++            || !symbol_map.callable_value_sites.is_empty())
+             && source_hash.is_none()
+         {
+             return None;
+@@ -1383,13 +1399,32 @@ impl Backend {
+                 }
+             }
+         }
++        self.concrete_array_candidates(
++            cache,
++            uri,
++            (&ctx.classes, lexical),
++            subject,
++            member_name,
++            candidates,
++        )
++    }
++
++    #[allow(clippy::too_many_arguments)]
++    fn concrete_array_candidates(
++        &self,
++        cache: &mut FileCache,
++        uri: &str,
++        (classes, lexical): (&[Arc<ClassInfo>], Option<&ClassInfo>),
++        subject: &str,
++        member_name: &crate::atom::Atom,
++        candidates: Vec<(Arc<ClassInfo>, bool, bool)>,
++    ) -> Vec<PhpCallable> {
+         let loader = |name: &str| self.find_or_load_class(name);
+         let mut callees = Vec::new();
+         for (candidate, require_static, late_static) in candidates {
+             // Shared expression resolution may carry merged/virtual surfaces.
+             // Concrete ownership must start from the actual parsed declaration.
+-            let class = ctx
+-                .classes
++            let class = classes
+                 .iter()
+                 .find(|class| class.fqn().eq_ignore_ascii_case(&candidate.fqn()))
+                 .cloned()
+@@ -1759,10 +1794,20 @@ impl Backend {
+                 .and_modify(|(_, ranges)| push_unique_range(ranges, range))
+                 .or_insert_with(|| (caller.item, vec![range]));
+         }
++        let stored_complete = self.collect_stored_incoming(cache, target, &mut grouped);
++        cache.record_stored_completeness(stored_complete);
+         let mut calls: Vec<_> = grouped
+             .into_values()
+             .map(|(mut from, mut from_ranges)| {
+-                self.translate_ranges_to_blade(uri, &mut from_ranges);
++                self.translate_ranges_to_blade(from.uri.as_str(), &mut from_ranges);
++                from_ranges.sort_unstable_by_key(|range| {
++                    (
++                        range.start.line,
++                        range.start.character,
++                        range.end.line,
++                        range.end.character,
++                    )
++                });
+                 self.translate_item_to_blade(&mut from);
+                 CallHierarchyIncomingCall { from, from_ranges }
+             })
+@@ -1790,7 +1835,9 @@ impl Backend {
+                 || !symbol_map.immediate_object_invocations.is_empty()
+                 || !symbol_map.literal_callable_invocations.is_empty()
+                 || !symbol_map.literal_method_selectors.is_empty()
+-                || !symbol_map.array_callable_invocations.is_empty())
++                || !symbol_map.array_callable_invocations.is_empty()
++                || !symbol_map.variable_callable_invocations.is_empty()
++                || !symbol_map.callable_value_sites.is_empty())
+                 && source_hash.is_none()
+             {
+                 return None;
+@@ -2080,8 +2127,7 @@ fn build_anonymous_callable(
+             kind: LspSymbolKind::FUNCTION,
+             tags: None,
+             detail: Some(
+-                "Anonymous callable; other value-flow invocation callers are not inferred"
+-                    .to_owned(),
++                "Anonymous callable; additional runtime callers may be unresolved".to_owned(),
+             ),
+             uri: Url::parse(uri).ok()?,
+             range: byte_range_to_lsp_range(content, expression.start, expression.end),
+diff --git a/src/call_hierarchy/stored.rs b/src/call_hierarchy/stored.rs
+new file mode 100644
+index 0000000..fd434a0
+--- /dev/null
++++ b/src/call_hierarchy/stored.rs
+@@ -0,0 +1,473 @@
++//! Stored callable targets reuse source-qualified variable flow and syntax receipts.
++use super::*;
++use crate::symbol_map::{CallableValueSite, CallableValueSyntax, VariableCallableInvocation};
++use crate::type_engine::resolver::{Loaders, VarResolutionCtx};
++use crate::types::{CallableValueOrigin, CallableValueSource, ResolvedType};
++
++#[derive(Default)]
++struct StoredCallResolution {
++    callees: Vec<PhpCallable>,
++    complete: bool,
++}
++
++impl Backend {
++    fn variable_callables(
++        &self,
++        cache: &mut FileCache,
++        uri: &str,
++        site: &VariableCallableInvocation,
++    ) -> StoredCallResolution {
++        let Some((content, _, Some(hash))) = self.cached_file(cache, uri) else {
++            return StoredCallResolution::default();
++        };
++        let Ok(source_length) = u32::try_from(content.len()) else {
++            return StoredCallResolution::default();
++        };
++        if site.invocation_start >= site.invocation_end
++            || content
++                .get(site.invocation_start as usize..site.invocation_end as usize)
++                .is_none()
++        {
++            return StoredCallResolution::default();
++        }
++        let context = self.file_context_at(uri, site.invocation_start);
++        let placeholder =
++            crate::class_lookup::class_context_placeholder(&content, site.invocation_start);
++        let current_class =
++            crate::class_lookup::find_class_at_offset(&context.classes, site.invocation_start)
++                .unwrap_or(&placeholder);
++        let class_loader = self.class_loader(&context);
++        let function_loader = self.function_loader(&context);
++        let ctx = VarResolutionCtx {
++            backend: Some(self),
++            loaders: Loaders::with_function(Some(&function_loader)),
++            ..VarResolutionCtx::new(
++                &site.variable,
++                current_class,
++                &context.classes,
++                &content,
++                site.invocation_start,
++                &class_loader,
++            )
++        };
++        let values =
++            crate::type_engine::variable::resolution::resolve_variable_types_with_callable_source(
++                &ctx,
++                Arc::new(CallableValueSource {
++                    uri: uri.to_owned(),
++                    source_sha256: hash,
++                    source_length,
++                }),
++            );
++        let Some(origins) = ResolvedType::joined_callable_origins(&values) else {
++            return StoredCallResolution::default();
++        };
++        let mut result = StoredCallResolution {
++            callees: Vec::new(),
++            complete: origins.complete,
++        };
++        for origin in &origins.origins {
++            let resolved = self.stored_origin_callables(cache, origin);
++            result.complete &= resolved.complete;
++            for callee in resolved.callees {
++                if !result
++                    .callees
++                    .iter()
++                    .any(|existing| php_item_key(&existing.item) == php_item_key(&callee.item))
++                {
++                    result.callees.push(callee);
++                }
++            }
++        }
++        result
++    }
++
++    fn stored_origin_callables(
++        &self,
++        cache: &mut FileCache,
++        origin: &CallableValueOrigin,
++    ) -> StoredCallResolution {
++        let uri = origin.source.uri.as_str();
++        let Some((content, map, Some(hash))) = self.cached_file(cache, uri) else {
++            return StoredCallResolution::default();
++        };
++        if hash != origin.source.source_sha256
++            || usize::try_from(origin.source.source_length).ok() != Some(content.len())
++            || origin.expression_start >= origin.expression_end
++            || content
++                .get(origin.expression_start as usize..origin.expression_end as usize)
++                .is_none()
++        {
++            return StoredCallResolution::default();
++        }
++        if let Some(snapshot) = &origin.array_snapshot
++            && snapshot.transformed
++        {
++            return self.stored_array_snapshot_callables(cache, uri, origin, &snapshot.shape);
++        }
++        let start = map
++            .callable_value_sites
++            .partition_point(|site| site.expression_start < origin.expression_start);
++        let records = map.callable_value_sites[start..]
++            .iter()
++            .take_while(|site| site.expression_start == origin.expression_start)
++            .filter(|site| site.expression_end == origin.expression_end);
++        let mut result = StoredCallResolution::default();
++        for record in records {
++            if let CallableValueSyntax::Array(array) = &record.kind
++                && array.php80.is_some_and(|mode| {
++                    mode != (self.php_version() >= crate::types::PhpVersion::new(8, 0))
++                })
++            {
++                continue;
++            }
++            let callees = self.stored_value_callables(cache, uri, &content, &map, &hash, record);
++            if callees.is_empty() {
++                result.complete = false;
++                return result;
++            }
++            result.complete = true;
++            for callee in callees {
++                if !result
++                    .callees
++                    .iter()
++                    .any(|existing| php_item_key(&existing.item) == php_item_key(&callee.item))
++                {
++                    result.callees.push(callee);
++                }
++            }
++        }
++        result
++    }
++
++    /// A source-qualified write transforms an already proven array value.
++    /// Only a sealed, complete pair grants an edge; no annotation-only shape
++    /// or independently joined receiver/method keys enter this path.
++    fn stored_array_snapshot_callables(
++        &self,
++        cache: &mut FileCache,
++        uri: &str,
++        origin: &CallableValueOrigin,
++        shape: &crate::php_type::PhpType,
++    ) -> StoredCallResolution {
++        let crate::php_type::TypeKind::ArrayShape(entries) = shape.kind() else {
++            return StoredCallResolution::default();
++        };
++        if shape.as_unsealed_shape().is_some()
++            || entries.len() != 2
++            || entries.iter().any(|entry| entry.optional)
++        {
++            return StoredCallResolution::default();
++        }
++        let slot = |wanted: &str| {
++            entries.iter().enumerate().find_map(|(index, entry)| {
++                let positional = index.to_string();
++                (entry.key.as_deref().unwrap_or(&positional) == wanted).then_some(&entry.value_type)
++            })
++        };
++        let (Some(receiver), Some(method)) = (slot("0"), slot("1")) else {
++            return StoredCallResolution::default();
++        };
++        let Some(crate::php_type::LiteralValue::String(raw)) = method.as_literal() else {
++            return StoredCallResolution::default();
++        };
++        let Some(method) = crate::util::unescape_php_string_literal(raw) else {
++            return StoredCallResolution::default();
++        };
++        let member = crate::atom::atom(&method);
++        let context = self.file_context_at(uri, origin.expression_start);
++        let lexical =
++            crate::class_lookup::find_class_at_offset(&context.classes, origin.expression_start);
++        let class_loader = self.class_loader(&context);
++        let mut candidates = Vec::new();
++        let mut complete = true;
++        for receiver in receiver.union_members() {
++            if let Some(name) = receiver.as_class_name_literal() {
++                if let Some(class) = self.find_or_load_class(name) {
++                    candidates.push((class, true, false));
++                } else {
++                    complete = false;
++                }
++            } else if let Some(crate::php_type::LiteralValue::String(raw)) = receiver.as_literal() {
++                if let Some(name) = crate::util::unescape_php_string_literal(raw)
++                    && let Some(class) = self.find_or_load_class(name.trim_start_matches('\\'))
++                    && class
++                        .fqn()
++                        .eq_ignore_ascii_case(name.trim_start_matches('\\'))
++                {
++                    candidates.push((class, true, false));
++                } else {
++                    complete = false;
++                }
++            } else if matches!(receiver.kind(), crate::php_type::TypeKind::ClassString(_)) {
++                let classes = crate::type_engine::resolver::resolve_class_string_inner_classes(
++                    receiver,
++                    lexical.map_or("", |class| class.name.as_str()),
++                    &context.classes,
++                    &class_loader,
++                );
++                if classes.is_empty() {
++                    complete = false;
++                }
++                candidates.extend(classes.into_iter().map(|class| (class, true, true)));
++            } else if let Some(name) = receiver.class_name()
++                && !name.starts_with(crate::types::ANONYMOUS_CLASS_PREFIX)
++                && let Some(class) = self.find_or_load_class(name)
++            {
++                candidates.push((class, false, false));
++            } else {
++                complete = false;
++            }
++        }
++        let callees = self.concrete_array_candidates(
++            cache,
++            uri,
++            (&context.classes, lexical),
++            "",
++            &member,
++            candidates,
++        );
++        StoredCallResolution {
++            complete: complete && !callees.is_empty(),
++            callees,
++        }
++    }
++
++    fn stored_value_callables(
++        &self,
++        cache: &mut FileCache,
++        uri: &str,
++        content: &str,
++        map: &SymbolMap,
++        source_hash: &[u8; 32],
++        value: &CallableValueSite,
++    ) -> Vec<PhpCallable> {
++        match &value.kind {
++            CallableValueSyntax::RuntimeString { target } => self
++                .literal_callable(
++                    cache,
++                    uri,
++                    &LiteralCallableInvocation {
++                        target: *target,
++                        invoking_scope_start: map.find_enclosing_scope(value.expression_start),
++                        invocation_start: value.expression_start,
++                        invocation_end: value.expression_end,
++                    },
++                )
++                .into_iter()
++                .collect(),
++            CallableValueSyntax::Anonymous { keyword_start } => {
++                let Some(record) = map.anonymous_callables.iter().find(|record| {
++                    record.keyword_start == *keyword_start
++                        && record.expression_start == value.expression_start
++                        && record.expression_end == value.expression_end
++                }) else {
++                    return Vec::new();
++                };
++                build_anonymous_callable(uri, content, record, source_hash)
++                    .into_iter()
++                    .collect()
++            }
++            CallableValueSyntax::Object { receiver } => {
++                let Some((class, late_static)) = self.immediate_object_receiver_class(
++                    uri,
++                    map,
++                    receiver,
++                    value.expression_start,
++                ) else {
++                    return Vec::new();
++                };
++                self.concrete_method_callable(cache, uri, &class, "__invoke", late_static)
++                    .into_iter()
++                    .collect()
++            }
++            CallableValueSyntax::Array(array) => {
++                self.array_callables(cache, uri, content, map, array)
++            }
++            CallableValueSyntax::FirstClass {
++                callee_start,
++                callee_end,
++            } => {
++                if self.php_version() < crate::types::PhpVersion::new(8, 1)
++                    || *callee_start < value.expression_start
++                    || *callee_end > value.expression_end
++                    || callee_start >= callee_end
++                {
++                    return Vec::new();
++                }
++                let span = map
++                    .spans
++                    .iter()
++                    .filter(|span| {
++                        span.start >= *callee_start
++                            && (span.end == *callee_end
++                                || map.literal_method_selectors.iter().any(|selector| {
++                                    selector.start == span.start
++                                        && selector.end == span.end
++                                        && selector.literal_end == *callee_end
++                                }))
++                            && matches!(
++                                span.kind,
++                                SymbolKind::FunctionCall { .. }
++                                    | SymbolKind::MemberAccess {
++                                        is_method_call: true,
++                                        is_array_callable: false,
++                                        ..
++                                    }
++                            )
++                    })
++                    .max_by_key(|span| span.end);
++                let Some(span) = span else {
++                    return Vec::new();
++                };
++                if let SymbolKind::MemberAccess {
++                    subject_text,
++                    member_name,
++                    is_static,
++                    ..
++                } = &span.kind
++                {
++                    return self.array_callables(
++                        cache,
++                        uri,
++                        content,
++                        map,
++                        &ArrayCallableInvocation {
++                            selector_start: span.start,
++                            selector_end: span.end,
++                            subject_text: subject_text.clone(),
++                            member_name: *member_name,
++                            is_static: *is_static,
++                            php80: None,
++                            allocation: None,
++                            invoking_scope_start: map.find_enclosing_scope(value.expression_start),
++                            invocation_start: value.expression_start,
++                            invocation_end: value.expression_end,
++                        },
++                    );
++                }
++                let position = offset_to_position(content, span.start as usize);
++                // Definition resolves the lexical function head at creation,
++                // never the later variable or a rebound method receiver.
++                self.resolve_definition(uri, content, position)
++                    .into_iter()
++                    .filter_map(|location| self.php_callable_at_location(cache, &location))
++                    .collect()
++            }
++        }
++    }
++
++    pub(super) fn collect_stored_incoming(
++        &self,
++        cache: &mut FileCache,
++        target: &PhpCallable,
++        grouped: &mut HashMap<String, (CallHierarchyItem, Vec<Range>)>,
++    ) -> bool {
++        let mut complete = true;
++        for (uri, _) in self
++            .user_file_symbol_maps()
++            .into_iter()
++            .filter(|(_, map)| !map.variable_callable_invocations.is_empty())
++        {
++            let Some((content, map, Some(hash))) = self.cached_file(cache, &uri) else {
++                complete = false;
++                continue;
++            };
++            for site in &map.variable_callable_invocations {
++                if matches!(
++                    map.call_execution_owner(site.invocation_start),
++                    Some(CallExecutionOwner::Deferred)
++                ) {
++                    continue;
++                }
++                let Some(caller) = self.syntactic_call_site_caller(
++                    cache,
++                    &uri,
++                    &content,
++                    &map,
++                    &hash,
++                    SyntacticCallSite {
++                        start: site.invocation_start,
++                        end: site.invocation_end,
++                        scope: site.invoking_scope_start,
++                    },
++                ) else {
++                    complete = false;
++                    continue;
++                };
++                let resolved = self.variable_callables(cache, &uri, site);
++                complete &= resolved.complete;
++                if !resolved
++                    .callees
++                    .iter()
++                    .any(|callee| php_item_key(&callee.item) == php_item_key(&target.item))
++                {
++                    continue;
++                }
++                let range = byte_range_to_lsp_range(
++                    &content,
++                    site.invocation_start as usize,
++                    site.invocation_end as usize,
++                );
++                grouped
++                    .entry(php_item_key(&caller.item))
++                    .and_modify(|(_, ranges)| push_unique_range(ranges, range))
++                    .or_insert_with(|| (caller.item, vec![range]));
++            }
++        }
++        complete
++    }
++
++    pub(super) fn collect_stored_outgoing(
++        &self,
++        cache: &mut FileCache,
++        target: &PhpCallable,
++        grouped: &mut HashMap<String, (CallHierarchyItem, Vec<Range>)>,
++    ) -> bool {
++        let uri = target.item.uri.as_str();
++        let Some((content, map, Some(hash))) = self.cached_file(cache, uri) else {
++            return false;
++        };
++        let mut complete = true;
++        for site in &map.variable_callable_invocations {
++            if matches!(
++                map.call_execution_owner(site.invocation_start),
++                Some(CallExecutionOwner::Deferred)
++            ) {
++                continue;
++            }
++            let Some(caller) = self.syntactic_call_site_caller(
++                cache,
++                uri,
++                &content,
++                &map,
++                &hash,
++                SyntacticCallSite {
++                    start: site.invocation_start,
++                    end: site.invocation_end,
++                    scope: site.invoking_scope_start,
++                },
++            ) else {
++                complete = false;
++                continue;
++            };
++            if php_item_key(&caller.item) != php_item_key(&target.item) {
++                continue;
++            }
++            let resolved = self.variable_callables(cache, uri, site);
++            complete &= resolved.complete;
++            let range = byte_range_to_lsp_range(
++                &content,
++                site.invocation_start as usize,
++                site.invocation_end as usize,
++            );
++            for callee in resolved.callees {
++                grouped
++                    .entry(php_item_key(&callee.item))
++                    .and_modify(|(_, ranges)| push_unique_range(ranges, range))
++                    .or_insert_with(|| (callee.item, vec![range]));
++            }
++        }
++        complete
++    }
++}
+diff --git a/src/symbol_map/extraction/array_callable.rs b/src/symbol_map/extraction/array_callable.rs
+index 04c98a8..77f68b0 100644
+--- a/src/symbol_map/extraction/array_callable.rs
++++ b/src/symbol_map/extraction/array_callable.rs
+@@ -54,7 +54,9 @@ fn php_identifier(name: &str) -> bool {
+ }
+ 
+ /// Allocation metadata is source-local and does not grant a global synthetic name.
+-fn array_callable_allocation(expression: &Expression<'_>) -> Option<ImmediateObjectReceiver> {
++pub(super) fn immediate_object_receiver(
++    expression: &Expression<'_>,
++) -> Option<ImmediateObjectReceiver> {
+     match unparenthesized_expression(expression) {
+         Expression::Instantiation(inst) => match inst.class {
+             Expression::Identifier(_)
+@@ -89,17 +91,74 @@ fn same_values(left: [&Expression<'_>; 2], right: [&Expression<'_>; 2]) -> bool
+     std::ptr::eq(left[0], right[0]) && std::ptr::eq(left[1], right[1])
+ }
+ 
+-pub(super) fn try_emit_array_callable_span<'a>(
++fn array_callable_variants<'a>(
++    elements: &TokenSeparatedSequence<'a, ArrayElement<'a>>,
++) -> [(Option<[&'a Expression<'a>; 2]>, Option<bool>); 2] {
++    let before = array_callable_values(elements, false);
++    let since = array_callable_values(elements, true);
++    match (before, since) {
++        (Some(before), Some(since)) if same_values(before, since) => {
++            [(Some(before), None), (None, None)]
++        }
++        (before, since) => [(before, Some(false)), (since, Some(true))],
++    }
++}
++
++fn array_callable_record(
++    description: ArrayCallableDescription,
++    php80: Option<bool>,
++    scope_start: u32,
++    start: u32,
++    end: u32,
++) -> ArrayCallableInvocation {
++    ArrayCallableInvocation {
++        selector_start: description.selector.start,
++        selector_end: description.selector.end,
++        subject_text: description.subject_text,
++        member_name: description.selector.name,
++        is_static: description.is_static,
++        php80,
++        allocation: description.allocation,
++        invoking_scope_start: scope_start,
++        invocation_start: start,
++        invocation_end: end,
++    }
++}
++
++/// Reuse the same normalization and receiver eligibility as immediate calls.
++/// A value record is inert; its extent is creation syntax, never an invocation.
++pub(super) fn extract_array_callable_value_sites<'a>(
+     elements: &TokenSeparatedSequence<'a, ArrayElement<'a>>,
+     ctx: &mut ExtractionCtx<'a>,
+-) -> Option<(u32, u32)> {
+-    let before = array_callable_values(elements, false)?;
+-    let since = array_callable_values(elements, true)?;
+-    if !same_values(before, since) {
+-        return None;
++    scope_start: u32,
++    expression_start: u32,
++    expression_end: u32,
++) {
++    for (values, php80) in array_callable_variants(elements) {
++        let Some(values) = values else {
++            continue;
++        };
++        if php80.is_none()
++            && let Some(description) = describe_array_callable(values, ctx.content, false)
++        {
++            let range = emit_array_callable_reference(&description, ctx, None);
++            ctx.non_invoked_callable_spans.push(range);
++        }
++        let Some(description) = describe_array_callable(values, ctx.content, true) else {
++            continue;
++        };
++        ctx.callable_value_sites.push(CallableValueSite {
++            expression_start,
++            expression_end,
++            kind: CallableValueSyntax::Array(array_callable_record(
++                description,
++                php80,
++                scope_start,
++                expression_start,
++                expression_end,
++            )),
++        });
+     }
+-    let description = describe_array_callable(before, ctx.content, false)?;
+-    Some(emit_array_callable_reference(&description, ctx, None))
+ }
+ 
+ /// Each PHP target selects its own normalized slots. Generic references never
+@@ -112,15 +171,7 @@ pub(super) fn extract_array_callable_invocations<'a>(
+     invocation_start: u32,
+     invocation_end: u32,
+ ) {
+-    let before = array_callable_values(elements, false);
+-    let since = array_callable_values(elements, true);
+-    let variants = match (before, since) {
+-        (Some(before), Some(since)) if same_values(before, since) => {
+-            [(Some(before), None), (None, None)]
+-        }
+-        (before, since) => [(before, Some(false)), (since, Some(true))],
+-    };
+-    for (values, php80) in variants {
++    for (values, php80) in array_callable_variants(elements) {
+         let Some(description) =
+             values.and_then(|values| describe_array_callable(values, ctx.content, true))
+         else {
+@@ -155,19 +206,13 @@ pub(super) fn extract_array_callable_invocations<'a>(
+             }
+         }
+         ctx.literal_method_selectors.push(selector.clone());
+-        ctx.array_callable_invocations
+-            .push(ArrayCallableInvocation {
+-                selector_start: selector.start,
+-                selector_end: selector.end,
+-                subject_text: description.subject_text,
+-                member_name: selector.name,
+-                is_static: description.is_static,
+-                php80,
+-                allocation: description.allocation,
+-                invoking_scope_start: scope_start,
+-                invocation_start,
+-                invocation_end,
+-            });
++        ctx.array_callable_invocations.push(array_callable_record(
++            description,
++            php80,
++            scope_start,
++            invocation_start,
++            invocation_end,
++        ));
+     }
+ }
+ 
+@@ -278,6 +323,6 @@ fn describe_array_callable(
+         ),
+         selector,
+         is_static,
+-        allocation: array_callable_allocation(receiver),
++        allocation: immediate_object_receiver(receiver),
+     })
+ }
+diff --git a/src/symbol_map/extraction/expressions/calls.rs b/src/symbol_map/extraction/expressions/calls.rs
+index 9e296b5..95765d0 100644
+--- a/src/symbol_map/extraction/expressions/calls.rs
++++ b/src/symbol_map/extraction/expressions/calls.rs
+@@ -37,7 +37,7 @@ fn known_method_selector<'a>(
+ 
+ /// Accept only names PHP declarations can spell, with one optional root slash.
+ /// Do not normalize malformed runtime strings into existing symbols.
+-fn valid_literal_callable_target(target: &str) -> bool {
++pub(super) fn valid_literal_callable_target(target: &str) -> bool {
+     fn identifier(name: &str) -> bool {
+         let mut bytes = name.bytes();
+         let Some(first) = bytes.next() else {
+@@ -332,6 +332,16 @@ fn extract_call<'a>(
+             while let Expression::Parenthesized(parenthesized) = literal {
+                 literal = parenthesized.expression;
+             }
++            if let Expression::Variable(Variable::Direct(variable)) = literal {
++                let raw = bytes_to_str(variable.name);
++                ctx.variable_callable_invocations
++                    .push(VariableCallableInvocation {
++                        variable: crate::atom::atom(raw.strip_prefix('$').unwrap_or(raw)),
++                        invoking_scope_start: scope_start,
++                        invocation_start: func_call.argument_list.left_parenthesis.start.offset,
++                        invocation_end: func_call.argument_list.right_parenthesis.end.offset,
++                    });
++            }
+             // A fixed runtime callable string does not use the lexical use-map.
+             // PartialApplication has its own AST path and never enters here.
+             if let Expression::Literal(literal::Literal::String(string)) = literal
+@@ -346,27 +356,7 @@ fn extract_call<'a>(
+                         invocation_end: func_call.argument_list.right_parenthesis.end.offset,
+                     });
+             }
+-            let object_receiver = match literal {
+-                Expression::Instantiation(inst) => match inst.class {
+-                    Expression::Identifier(_)
+-                    | Expression::Self_(_)
+-                    | Expression::Static(_)
+-                    | Expression::Parent(_) => {
+-                        let span = inst.class.span();
+-                        Some(ImmediateObjectReceiver::Instantiation {
+-                            operand_start: span.start.offset,
+-                            operand_end: span.end.offset,
+-                        })
+-                    }
+-                    _ => None,
+-                },
+-                Expression::AnonymousClass(anon) => Some(ImmediateObjectReceiver::AnonymousClass {
+-                    body_start: anon.left_brace.start.offset,
+-                    body_end: anon.right_brace.end.offset,
+-                    keyword_start: anon.class.span.start.offset,
+-                }),
+-                _ => None,
+-            };
++            let object_receiver = immediate_object_receiver(literal);
+             if let Some(receiver) = object_receiver {
+                 ctx.immediate_object_invocations
+                     .push(ImmediateObjectInvocation {
+diff --git a/src/symbol_map/extraction/expressions/mod.rs b/src/symbol_map/extraction/expressions/mod.rs
+index 0c03b97..b7faaf9 100644
+--- a/src/symbol_map/extraction/expressions/mod.rs
++++ b/src/symbol_map/extraction/expressions/mod.rs
+@@ -22,6 +22,62 @@ use call_sites::emit_call_site;
+ pub(in crate::symbol_map::extraction) use call_sites::emit_partial_call_site;
+ 
+ // ─── Expression extractor ───────────────────────────────────────────────────
++/// Record only concrete callable creation syntax. Parentheses recurse to one
++/// exact inner expression, while arrays share their existing normalizer below.
++fn extract_callable_value_site(expr: &Expression<'_>, ctx: &mut ExtractionCtx<'_>) {
++    let kind = match expr {
++        Expression::Literal(literal::Literal::String(string)) => {
++            let Some(target) = string.value.and_then(literal_bytes_to_str) else {
++                return;
++            };
++            if !valid_literal_callable_target(target) {
++                return;
++            }
++            CallableValueSyntax::RuntimeString {
++                target: crate::atom::atom(target),
++            }
++        }
++        Expression::PartialApplication(partial) if partial.is_first_class_callable() => {
++            let (start, end) = match partial {
++                PartialApplication::Function(call) => {
++                    let span = call.function.span();
++                    (span.start.offset, span.end.offset)
++                }
++                PartialApplication::Method(call) => (
++                    call.object.span().start.offset,
++                    call.method.span().end.offset,
++                ),
++                PartialApplication::StaticMethod(call) => (
++                    call.class.span().start.offset,
++                    call.method.span().end.offset,
++                ),
++            };
++            CallableValueSyntax::FirstClass {
++                callee_start: start,
++                callee_end: end,
++            }
++        }
++        Expression::Closure(closure) => CallableValueSyntax::Anonymous {
++            keyword_start: closure.function.span.start.offset,
++        },
++        Expression::ArrowFunction(arrow) => CallableValueSyntax::Anonymous {
++            keyword_start: arrow.r#fn.span.start.offset,
++        },
++        Expression::Instantiation(_) | Expression::AnonymousClass(_) => {
++            let Some(receiver) = immediate_object_receiver(expr) else {
++                return;
++            };
++            CallableValueSyntax::Object { receiver }
++        }
++        _ => return,
++    };
++    let span = expr.span();
++    ctx.callable_value_sites.push(CallableValueSite {
++        expression_start: span.start.offset,
++        expression_end: span.end.offset,
++        kind,
++    });
++}
+ 
+ pub(super) fn extract_variable_symbol_spans<'a>(
+     var: &'a Variable<'a>,
+@@ -122,6 +178,7 @@ pub(super) fn extract_from_expression<'a>(
+     ctx: &mut ExtractionCtx<'a>,
+     scope_start: u32,
+ ) {
++    extract_callable_value_site(expr, ctx);
+     // A method-call spine is a chain, not a tree: each call's receiver is the
+     // call before it.  Visiting the outermost call and recursing into its
+     // receiver costs a stack frame per link, and a generated fluent chain has
+@@ -286,15 +343,25 @@ pub(super) fn extract_from_expression<'a>(
+ 
+         // ── Array ──
+         Expression::Array(array) => {
+-            if let Some(range) = try_emit_array_callable_span(&array.elements, ctx) {
+-                ctx.non_invoked_callable_spans.push(range);
+-            }
++            let span = expr.span();
++            extract_array_callable_value_sites(
++                &array.elements,
++                ctx,
++                scope_start,
++                span.start.offset,
++                span.end.offset,
++            );
+             extract_from_array_elements(&array.elements, ctx, scope_start);
+         }
+         Expression::LegacyArray(array) => {
+-            if let Some(range) = try_emit_array_callable_span(&array.elements, ctx) {
+-                ctx.non_invoked_callable_spans.push(range);
+-            }
++            let span = expr.span();
++            extract_array_callable_value_sites(
++                &array.elements,
++                ctx,
++                scope_start,
++                span.start.offset,
++                span.end.offset,
++            );
+             extract_from_array_elements(&array.elements, ctx, scope_start);
+         }
+         Expression::List(list) => {
+diff --git a/src/symbol_map/extraction/mod.rs b/src/symbol_map/extraction/mod.rs
+index 457dd0f..feafdcb 100644
+--- a/src/symbol_map/extraction/mod.rs
++++ b/src/symbol_map/extraction/mod.rs
+@@ -13,11 +13,12 @@ use super::docblock::{
+ };
+ use super::{
+     AnonymousCallable, AnonymousCallableKind, AnonymousClassConstruction, AnonymousInvocation,
+-    ArrayCallableInvocation, CallExecutionOwner, CallExecutionRegion, CallSite, ClassRefContext,
+-    DocblockMemberRef, ImmediateObjectInvocation, ImmediateObjectReceiver,
+-    LiteralCallableInvocation, LiteralMethodSelector, SelfStaticParentKind, SubjectText,
+-    SymbolKind, SymbolMap, SymbolSpan, TemplateParamDef, UntypedClosureSite, VarDefKind,
+-    VarDefSite, ViewReceiverClass, ViewReceiverSite,
++    ArrayCallableInvocation, CallExecutionOwner, CallExecutionRegion, CallSite, CallableValueSite,
++    CallableValueSyntax, ClassRefContext, DocblockMemberRef, ImmediateObjectInvocation,
++    ImmediateObjectReceiver, LiteralCallableInvocation, LiteralMethodSelector,
++    SelfStaticParentKind, SubjectText, SymbolKind, SymbolMap, SymbolSpan, TemplateParamDef,
++    UntypedClosureSite, VarDefKind, VarDefSite, VariableCallableInvocation, ViewReceiverClass,
++    ViewReceiverSite,
+ };
+ use crate::atom::{bytes_to_str, literal_bytes_to_str};
+ use crate::names::OwnedResolvedNames;
+@@ -47,6 +48,8 @@ struct ExtractionCtx<'a> {
+     immediate_object_invocations: Vec<ImmediateObjectInvocation>,
+     literal_callable_invocations: Vec<LiteralCallableInvocation>,
+     array_callable_invocations: Vec<ArrayCallableInvocation>,
++    variable_callable_invocations: Vec<VariableCallableInvocation>,
++    callable_value_sites: Vec<CallableValueSite>,
+     literal_method_selectors: Vec<LiteralMethodSelector>,
+     non_invoked_callable_spans: Vec<(u32, u32)>,
+     keyword_constructor_spans: Vec<(u32, u32)>,
+@@ -239,6 +242,8 @@ fn extract_symbol_map_inner(
+         immediate_object_invocations: Vec::new(),
+         literal_callable_invocations: Vec::new(),
+         array_callable_invocations: Vec::new(),
++        variable_callable_invocations: Vec::new(),
++        callable_value_sites: Vec::new(),
+         literal_method_selectors: Vec::new(),
+         non_invoked_callable_spans: Vec::new(),
+         keyword_constructor_spans: Vec::new(),
+@@ -363,6 +368,10 @@ fn extract_symbol_map_inner(
+     ctx.switch_scopes.sort_by_key(|s| s.0);
+     ctx.static_method_scopes.sort_by_key(|s| s.0);
+     ctx.view_receiver_sites.sort_by_key(|s| s.start);
++    ctx.callable_value_sites
++        .sort_by_key(|site| (site.expression_start, site.expression_end));
++    ctx.variable_callable_invocations
++        .sort_by_key(|site| (site.invocation_start, site.invocation_end));
+ 
+     let mut member_access_indices: crate::atom::AtomMap<Vec<usize>> =
+         crate::atom::AtomMap::default();
+@@ -391,14 +400,18 @@ fn extract_symbol_map_inner(
+         scopes: ctx.scopes,
+         call_execution_regions,
+         call_execution_region_parents,
+-        anonymous_source_sha256: (!ctx.anonymous_callables.is_empty())
+-            .then(|| AnonymousCallable::source_hash(content)),
++        anonymous_source_sha256: (!ctx.anonymous_callables.is_empty()
++            || !ctx.callable_value_sites.is_empty()
++            || !ctx.variable_callable_invocations.is_empty())
++        .then(|| AnonymousCallable::source_hash(content)),
+         anonymous_callables: ctx.anonymous_callables,
+         anonymous_invocations: ctx.anonymous_invocations,
+         anonymous_class_constructions: ctx.anonymous_class_constructions,
+         immediate_object_invocations: ctx.immediate_object_invocations,
+         literal_callable_invocations: ctx.literal_callable_invocations,
+         array_callable_invocations: ctx.array_callable_invocations,
++        variable_callable_invocations: ctx.variable_callable_invocations,
++        callable_value_sites: ctx.callable_value_sites,
+         literal_method_selectors: ctx.literal_method_selectors,
+         non_invoked_callable_spans: ctx.non_invoked_callable_spans,
+         keyword_constructor_spans: ctx.keyword_constructor_spans,
+diff --git a/src/symbol_map/mod.rs b/src/symbol_map/mod.rs
+index a96c415..6ff17df 100644
+--- a/src/symbol_map/mod.rs
++++ b/src/symbol_map/mod.rs
+@@ -1103,6 +1103,46 @@ pub(crate) struct ArrayCallableInvocation {
+     pub invocation_end: u32,
+ }
+ 
++/// A direct variable function call; assignment and first-class creation are not execution.
++#[derive(Debug, Clone, Copy)]
++pub(crate) struct VariableCallableInvocation {
++    /// Existing variable identity convention, excluding the leading `$`.
++    pub variable: crate::atom::Atom,
++    pub invoking_scope_start: u32,
++    /// Actual argument-list extent, including its parentheses.
++    pub invocation_start: u32,
++    pub invocation_end: u32,
++}
++
++/// Source syntax that can create a callable value, without inferring value flow.
++#[derive(Debug, Clone)]
++pub(crate) enum CallableValueSyntax {
++    RuntimeString {
++        target: crate::atom::Atom,
++    },
++    /// Exact lexical call head, excluding the first-class `(...)` argument list.
++    FirstClass {
++        callee_start: u32,
++        callee_end: u32,
++    },
++    Anonymous {
++        keyword_start: u32,
++    },
++    Object {
++        receiver: ImmediateObjectReceiver,
++    },
++    /// Normalized per-target slots; creation coordinates do not grant an invocation.
++    Array(ArrayCallableInvocation),
++}
++
++/// One unparenthesized CST expression from this exact source publication.
++#[derive(Debug, Clone)]
++pub(crate) struct CallableValueSite {
++    pub expression_start: u32,
++    pub expression_end: u32,
++    pub kind: CallableValueSyntax,
++}
++
+ /// A fixed scalar callable string from an actual Call::Function AST node.
+ /// Names are runtime FQNs, independent of lexical namespace/import aliases.
+ #[derive(Debug, Clone, Copy)]
+@@ -1216,13 +1256,17 @@ pub(crate) struct SymbolMap {
+     pub literal_callable_invocations: Vec<LiteralCallableInvocation>,
+     /// Literal array calls with exact selector and invocation ownership.
+     pub array_callable_invocations: Vec<ArrayCallableInvocation>,
++    /// Direct variable calls; targets require separate source-proven value flow.
++    pub variable_callable_invocations: Vec<VariableCallableInvocation>,
++    /// Inert callable creation syntax, sorted by exact expression coordinates.
++    pub callable_value_sites: Vec<CallableValueSite>,
+     /// Sorted AST string method-selector roles for verified semantic rename.
+     pub literal_method_selectors: Vec<LiteralMethodSelector>,
+     /// Sorted reference-only callee tokens, including metadata, imports and callable values.
+     pub non_invoked_callable_spans: Vec<(u32, u32)>,
+     /// Sorted exact self/static/parent operands from actual new AST nodes.
+     pub keyword_constructor_spans: Vec<(u32, u32)>,
+-    /// Exact source authority for anonymous offsets; absent in closure-free maps.
++    /// Exact source authority for anonymous and stored-callable syntax coordinates.
+     pub anonymous_source_sha256: Option<[u8; 32]>,
+     /// Scope start offsets of arrow functions.  Arrow functions inherit
+     /// the enclosing scope's variables (unlike closures which isolate
+diff --git a/src/type_engine/call_resolution/template_subs.rs b/src/type_engine/call_resolution/template_subs.rs
+index 4ed62c8..73efea8 100644
+--- a/src/type_engine/call_resolution/template_subs.rs
++++ b/src/type_engine/call_resolution/template_subs.rs
+@@ -681,6 +681,7 @@ fn walk_closure_body_locals(
+                 current_class,
+                 all_classes: ctx.all_classes,
+                 content,
++                callable_source: None,
+                 cursor_offset: u32::MAX,
+                 class_loader: ctx.class_loader,
+                 backend: ctx.backend,
+diff --git a/src/type_engine/resolver/context.rs b/src/type_engine/resolver/context.rs
+index c378f87..693a00a 100644
+--- a/src/type_engine/resolver/context.rs
++++ b/src/type_engine/resolver/context.rs
+@@ -334,6 +334,8 @@ pub(crate) struct VarResolutionCtx<'a> {
+     pub current_class: &'a ClassInfo,
+     pub all_classes: &'a [Arc<ClassInfo>],
+     pub content: &'a str,
++    /// Exact source authority for optional callable-value provenance.
++    pub callable_source: Option<Arc<crate::types::CallableValueSource>>,
+     pub cursor_offset: u32,
+     pub class_loader: &'a dyn Fn(&str) -> Option<Arc<ClassInfo>>,
+     /// See [`ResolutionCtx::backend`].
+@@ -414,6 +416,7 @@ impl<'a> VarResolutionCtx<'a> {
+             current_class,
+             all_classes,
+             content,
++            callable_source: None,
+             cursor_offset,
+             class_loader,
+             backend: None,
+diff --git a/src/type_engine/variable/forward_walk/array_assignment.rs b/src/type_engine/variable/forward_walk/array_assignment.rs
+index f68ffa9..22b787c 100644
+--- a/src/type_engine/variable/forward_walk/array_assignment.rs
++++ b/src/type_engine/variable/forward_walk/array_assignment.rs
+@@ -200,7 +200,15 @@ pub(crate) fn process_array_key_write<'b>(
+     if let Some((base_name, key_chain)) =
+         super::super::array_shape_writes::extract_nested_array_access_chain(array_access)
+     {
+-        apply_array_write(&base_name, &key_chain, false, value_types, scope, ctx);
++        apply_array_write(
++            &base_name,
++            &key_chain,
++            false,
++            value_types,
++            array_access.span(),
++            scope,
++            ctx,
++        );
+     }
+ }
+ 
+@@ -215,7 +223,15 @@ pub(crate) fn process_array_append<'b>(
+         Expression::Variable(Variable::Direct(dv)) => {
+             let base_name = bytes_to_str(dv.name).to_string();
+             let rhs_types = resolve_rhs_with_scope(assignment.rhs, scope, ctx);
+-            apply_array_write(&base_name, &[], true, rhs_types, scope, ctx);
++            apply_array_write(
++                &base_name,
++                &[],
++                true,
++                rhs_types,
++                array_append.span(),
++                scope,
++                ctx,
++            );
+         }
+         // `$var['a'][$i][] = …` — the append lands on the innermost level
+         // of an array-access chain rather than on the variable itself.
+@@ -224,7 +240,15 @@ pub(crate) fn process_array_append<'b>(
+                 super::super::array_shape_writes::extract_nested_array_access_chain(inner)
+             {
+                 let rhs_types = resolve_rhs_with_scope(assignment.rhs, scope, ctx);
+-                apply_array_write(&base_name, &key_chain, true, rhs_types, scope, ctx);
++                apply_array_write(
++                    &base_name,
++                    &key_chain,
++                    true,
++                    rhs_types,
++                    array_append.span(),
++                    scope,
++                    ctx,
++                );
+             }
+         }
+         _ => {}
+@@ -481,6 +505,7 @@ fn apply_array_write<'b>(
+     key_chain: &[&Expression<'b>],
+     append: bool,
+     rhs_types: Vec<ResolvedType>,
++    write_span: mago_span::Span,
+     scope: &mut ScopeState,
+     ctx: &ForwardWalkCtx<'_>,
+ ) {
+@@ -587,7 +612,58 @@ fn apply_array_write<'b>(
+         &value_php_type,
+         ctx.in_loop,
+     );
+-    scope.set(base_name, vec![ResolvedType::from_type_string(merged)]);
++    let mut updated = ResolvedType::from_type_string(merged);
++    if let Some(source) = &ctx.callable_source
++        && source.source_length as usize == ctx.content.len()
++        && write_span.start.offset < write_span.end.offset
++        && ctx
++            .content
++            .get(write_span.start.offset as usize..write_span.end.offset as usize)
++            .is_some()
++        && let Some(previous) = ResolvedType::joined_callable_origins(scope.get(base_name))
++    {
++        let mut transformed = crate::types::CallableOriginSet {
++            origins: Vec::new(),
++            complete: previous.complete,
++        };
++        for origin in &previous.origins {
++            if origin.source.as_ref() != source.as_ref() {
++                transformed.complete = false;
++                continue;
++            }
++            let Some(snapshot) = &origin.array_snapshot else {
++                transformed.complete = false;
++                continue;
++            };
++            // Transform each correlated array alternative, never the merged
++            // base_type whose independent key unions can invent cross pairs.
++            let shape = super::super::array_shape_writes::merge_nested_array_write(
++                &snapshot.shape,
++                &write_keys,
++                &value_php_type,
++                ctx.in_loop,
++            );
++            let next = crate::types::CallableValueOrigin {
++                source: std::sync::Arc::clone(source),
++                expression_start: write_span.start.offset,
++                expression_end: write_span.end.offset,
++                array_snapshot: Some(crate::types::CallableArraySnapshot {
++                    shape,
++                    transformed: true,
++                }),
++            };
++            if transformed.origins.contains(&next) {
++                continue;
++            }
++            if transformed.origins.len() == 32 {
++                transformed.complete = false;
++            } else {
++                transformed.origins.push(next);
++            }
++        }
++        updated.callable_origins = Some(std::sync::Arc::new(transformed));
++    }
++    scope.set(base_name, vec![updated]);
+     note_element_write(base_name, &subjects, &write_keys, append, scope);
+ 
+     forget_overwritten_offsets(base_name, key_chain, append, scope);
+diff --git a/src/type_engine/variable/forward_walk/assignment.rs b/src/type_engine/variable/forward_walk/assignment.rs
+index f2355c9..e6bcbf0 100644
+--- a/src/type_engine/variable/forward_walk/assignment.rs
++++ b/src/type_engine/variable/forward_walk/assignment.rs
+@@ -694,6 +694,29 @@ pub(crate) fn process_assignment_expr<'b>(
+             return;
+         }
+ 
++        // Binding a reference changes the variable's cell; ordinary assignment
++        // below writes through its existing cell. Keep the metadata opt-in so
++        // source-qualified callable analysis does not change normal inference.
++        if ctx.callable_source.is_some()
++            && let Expression::UnaryPrefix(reference) = crate::parser::unwrap_parens(assignment.rhs)
++            && matches!(reference.operator, UnaryPrefixOperator::Reference(_))
++        {
++            if let Expression::Variable(Variable::Direct(target)) =
++                crate::parser::unwrap_parens(reference.operand)
++            {
++                scope.bind_reference(&lhs_name, bytes_to_str(target.name));
++            } else {
++                // A property/element cell is outside the direct-local model.
++                // Rebinding must still detach the old local reference cell.
++                scope.mark_references_opaque();
++                scope.detach_reference(&lhs_name);
++                scope.invalidate_dependent_keys(&lhs_name);
++                scope.invalidate_proofs(&lhs_name);
++                scope.set_untyped(&lhs_name);
++            }
++            return;
++        }
++
+         let rhs_types = resolve_rhs_with_scope(assignment.rhs, scope, ctx);
+         // `$show = $limit !== null && …` makes `$show` stand for what the
+         // expression proves, read off the scope the value was computed in.
+@@ -1144,6 +1167,13 @@ pub(crate) fn resolve_rhs_with_scope<'b>(
+     scope: &ScopeState,
+     ctx: &ForwardWalkCtx<'_>,
+ ) -> Vec<ResolvedType> {
++    if ctx.callable_source.is_some()
++        && let Expression::UnaryPrefix(reference) = crate::parser::unwrap_parens(rhs)
++        && matches!(reference.operator, UnaryPrefixOperator::Reference(_))
++    {
++        return resolve_rhs_with_scope(reference.operand, scope, ctx);
++    }
++
+     // Chain assignment: `$a = $b = expr` — the value of an assignment
+     // expression is the value of its RHS.  Recurse into the inner RHS
+     // so that `$a` resolves to the same type as `$b`.  The RHS may be
+diff --git a/src/type_engine/variable/forward_walk/assignment_deps.rs b/src/type_engine/variable/forward_walk/assignment_deps.rs
+index 9180236..2fdff25 100644
+--- a/src/type_engine/variable/forward_walk/assignment_deps.rs
++++ b/src/type_engine/variable/forward_walk/assignment_deps.rs
+@@ -445,6 +445,9 @@ pub(crate) fn collect_arglist_variables(
+ /// `before` count as changes, but variables in `before` that aren't
+ /// in `after` do not (they were just not assigned in the loop body).
+ pub(crate) fn scope_has_changes(before: &ScopeState, after: &ScopeState) -> bool {
++    if !before.same_reference_state_as(after) {
++        return true;
++    }
+     let changed = after
+         .locals
+         .diff(&before.locals, |_, after_types, before_types| {
+diff --git a/src/type_engine/variable/forward_walk/by_ref.rs b/src/type_engine/variable/forward_walk/by_ref.rs
+index 229d50e..fb69efc 100644
+--- a/src/type_engine/variable/forward_walk/by_ref.rs
++++ b/src/type_engine/variable/forward_walk/by_ref.rs
+@@ -528,11 +528,21 @@ pub(crate) fn process_pass_by_ref<'b>(
+     }
+ 
+     for (name, before) in assigned_before {
+-        let key = atom(name);
+-        match before {
+-            Some(types) => scope.locals.insert(key, types),
+-            None => scope.locals.remove(&key),
+-        };
++        if scope.has_reference_peers(name) {
++            // The final assignment wins for the whole reference cell,
++            // including peers transiently changed by the out-parameter pass.
++            match before {
++                Some(types) if !types.is_empty() => scope.set(name, types),
++                Some(_) => scope.set_untyped(name),
++                None => scope.remove(name),
++            }
++        } else {
++            let key = atom(name);
++            match before {
++                Some(types) => scope.locals.insert(key, types),
++                None => scope.locals.remove(&key),
++            };
++        }
+     }
+ }
+ 
+diff --git a/src/type_engine/variable/forward_walk/cond_narrowing/assertions.rs b/src/type_engine/variable/forward_walk/cond_narrowing/assertions.rs
+index b19ad29..9cd382e 100644
+--- a/src/type_engine/variable/forward_walk/cond_narrowing/assertions.rs
++++ b/src/type_engine/variable/forward_walk/cond_narrowing/assertions.rs
+@@ -211,10 +211,9 @@ fn discard_shapes_excluding(base_var: &str, key: &str, narrowed: &PhpType, scope
+         } else {
+             PhpType::union(surviving)
+         };
+-        kept.push(ResolvedType {
+-            type_string,
+-            ..rt.clone()
+-        });
++        let mut value = rt.clone();
++        value.replace_type(type_string);
++        kept.push(value);
+     }
+     if changed && !kept.is_empty() {
+         scope.set(base_var, kept);
+diff --git a/src/type_engine/variable/forward_walk/cond_narrowing/emptiness.rs b/src/type_engine/variable/forward_walk/cond_narrowing/emptiness.rs
+index 741e92d..a0b60ff 100644
+--- a/src/type_engine/variable/forward_walk/cond_narrowing/emptiness.rs
++++ b/src/type_engine/variable/forward_walk/cond_narrowing/emptiness.rs
+@@ -468,10 +468,9 @@ fn retain_literals_in_scope(
+             Some(ty) if ty == rt.type_string => narrowed.push(rt.clone()),
+             Some(ty) => {
+                 changed = true;
+-                narrowed.push(ResolvedType {
+-                    type_string: ty,
+-                    ..rt.clone()
+-                });
++                let mut value = rt.clone();
++                value.replace_type(ty);
++                narrowed.push(value);
+             }
+             None => changed = true,
+         }
+diff --git a/src/type_engine/variable/forward_walk/cond_narrowing/instanceof.rs b/src/type_engine/variable/forward_walk/cond_narrowing/instanceof.rs
+index 2ea24e5..479312f 100644
+--- a/src/type_engine/variable/forward_walk/cond_narrowing/instanceof.rs
++++ b/src/type_engine/variable/forward_walk/cond_narrowing/instanceof.rs
+@@ -672,6 +672,7 @@ pub(super) fn commit_instanceof_narrowing(
+             });
+             filtered.push(ResolvedType {
+                 type_string: both,
++                callable_origins: rt.callable_origins.clone(),
+                 ..checked.clone()
+             });
+         }
+diff --git a/src/type_engine/variable/forward_walk/diagnostic_walk.rs b/src/type_engine/variable/forward_walk/diagnostic_walk.rs
+index 8085b59..66e59e1 100644
+--- a/src/type_engine/variable/forward_walk/diagnostic_walk.rs
++++ b/src/type_engine/variable/forward_walk/diagnostic_walk.rs
+@@ -1099,6 +1099,7 @@ pub(crate) fn walk_top_level_statements<'a, 'b: 'a>(
+         current_class: default_class,
+         all_classes: diag_ctx.local_classes,
+         content: diag_ctx.content,
++        callable_source: None,
+         cursor_offset: u32::MAX,
+         class_loader: diag_ctx.class_loader,
+         backend: diag_ctx.backend,
+@@ -1449,6 +1450,7 @@ impl<'a> DiagnosticWalkCtx<'a> {
+             current_class,
+             all_classes: self.local_classes,
+             content: self.content,
++            callable_source: None,
+             cursor_offset: u32::MAX,
+             class_loader: self.class_loader,
+             backend: self.backend,
+@@ -1583,6 +1585,7 @@ pub(crate) fn walk_anonymous_class_member_bodies<'b>(
+         current_class: anon_class.as_ref(),
+         all_classes: ctx.all_classes,
+         content: ctx.content,
++        callable_source: None,
+         cursor_offset: ctx.cursor_offset,
+         class_loader: ctx.class_loader,
+         backend: ctx.backend,
+diff --git a/src/type_engine/variable/forward_walk/readonly_properties.rs b/src/type_engine/variable/forward_walk/readonly_properties.rs
+index 03cc738..7d2408f 100644
+--- a/src/type_engine/variable/forward_walk/readonly_properties.rs
++++ b/src/type_engine/variable/forward_walk/readonly_properties.rs
+@@ -140,6 +140,7 @@ fn constructor_narrowed_properties(
+         current_class: ctx.current_class,
+         all_classes: ctx.all_classes,
+         content: ctx.content,
++        callable_source: None,
+         cursor_offset: u32::MAX,
+         class_loader: ctx.class_loader,
+         backend: ctx.backend,
+diff --git a/src/type_engine/variable/forward_walk/scope_state/merge.rs b/src/type_engine/variable/forward_walk/scope_state/merge.rs
+index 1076f58..c7b7940 100644
+--- a/src/type_engine/variable/forward_walk/scope_state/merge.rs
++++ b/src/type_engine/variable/forward_walk/scope_state/merge.rs
+@@ -14,7 +14,8 @@ impl ScopeState {
+     /// the check that matters are clones of one another, so a shared
+     /// `class_info` compares by pointer and never walks a class.
+     fn describes_same_state_as(&self, other: &ScopeState) -> bool {
+-        if self.locals.len() != other.locals.len()
++        if self.reference_cells != other.reference_cells
++            || self.locals.len() != other.locals.len()
+             || self.unresolved != other.unresolved
+             || self.assertions != other.assertions
+             || self.non_null_implications != other.non_null_implications
+@@ -167,9 +168,15 @@ impl ScopeState {
+         for name in &differing {
+             if let Some(other_types) = other.locals.get(name) {
+                 self.merge_local(name, other_types, other);
++            } else if let Some(values) = self.locals.get_mut(name) {
++                // This surviving path did not establish a value for the name.
++                for value in values {
++                    value.mark_callable_origins_incomplete();
++                }
+             }
+         }
+ 
++        self.merge_reference_cells(other);
+         self.non_null_implications = implications;
+         self.implied_narrowings = narrowings;
+         self.ruled_out = exclusions;
+@@ -184,6 +191,11 @@ impl ScopeState {
+         // later join still knows the entry stands for a gap rather
+         // than for a value that could be anything.
+         if other_types.is_empty() && other.unresolved.contains_key(name) {
++            if let Some(values) = self.locals.get_mut(name) {
++                for value in values {
++                    value.mark_callable_origins_incomplete();
++                }
++            }
+             if !self.locals.contains_key(name) {
+                 self.locals.insert(*name, Vec::new());
+                 self.unresolved.insert(*name, ());
+@@ -220,6 +232,7 @@ impl ScopeState {
+             .get(name)
+             .is_some_and(|existing| same_type_strings(existing, other_types));
+ 
++        let missing_path = !self.locals.contains_key(name) || self_lost;
+         let entry = self.locals.get_or_insert_default(*name);
+ 
+         // Merge other_types into entry.  When an incoming entry
+@@ -268,6 +281,7 @@ impl ScopeState {
+                         // (or a collection) at the join when every
+                         // incoming path built the same thing.
+                         existing.factory_count = existing.factory_count.join(rt.factory_count);
++                        existing.join_callable_origins(rt);
+                         merged_into_existing = true;
+                         break;
+                     }
+@@ -288,6 +302,7 @@ impl ScopeState {
+                         && let Some(joined) = existing.type_string.join_shapes(&rt.type_string)
+                     {
+                         existing.type_string = joined;
++                        existing.join_callable_origins(rt);
+                         merged_into_existing = true;
+                         break;
+                     }
+@@ -329,6 +344,11 @@ impl ScopeState {
+         // that resolves to nothing, without any branch having narrowed
+         // anything.
+         ResolvedType::drop_subsumed_entries(entry, !agreed);
++        if missing_path {
++            for value in entry {
++                value.mark_callable_origins_incomplete();
++            }
++        }
+     }
+ }
+ 
+@@ -354,6 +374,7 @@ pub(super) fn same_types(a: &[ResolvedType], b: &[ResolvedType]) -> bool {
+     a.len() == b.len()
+         && a.iter().zip(b).all(|(x, y)| {
+             x.type_string == y.type_string
++                && x.callable_origins == y.callable_origins
+                 && match (&x.class_info, &y.class_info) {
+                     (Some(p), Some(q)) => Arc::ptr_eq(p, q),
+                     (None, None) => true,
+@@ -369,7 +390,10 @@ pub(super) fn same_types(a: &[ResolvedType], b: &[ResolvedType]) -> bool {
+ /// rebuilt its class along the way, and for deciding whether a join
+ /// brought anything new together the spelling is what matters.
+ fn same_type_strings(a: &[ResolvedType], b: &[ResolvedType]) -> bool {
+-    a.len() == b.len() && a.iter().zip(b).all(|(x, y)| x.type_string == y.type_string)
++    a.len() == b.len()
++        && a.iter().zip(b).all(|(x, y)| {
++            x.type_string == y.type_string && x.callable_origins == y.callable_origins
++        })
+ }
+ 
+ /// Drop virtual members from `existing`'s class_info that the `incoming`
+diff --git a/src/type_engine/variable/forward_walk/scope_state/mod.rs b/src/type_engine/variable/forward_walk/scope_state/mod.rs
+index 8165626..a1b24f9 100644
+--- a/src/type_engine/variable/forward_walk/scope_state/mod.rs
++++ b/src/type_engine/variable/forward_walk/scope_state/mod.rs
+@@ -3,6 +3,7 @@ mod locals;
+ mod merge;
+ mod proof_map;
+ mod proofs;
++mod references;
+ #[cfg(test)]
+ #[path = "tests.rs"]
+ mod tests;
+@@ -235,6 +236,9 @@ pub(crate) struct ScopeState {
+     /// current statement has an entry here.
+     pub locals: Locals,
+ 
++    /// PHP reference cells, activated only by the source-aware callable walk.
++    reference_cells: Option<Box<references::ReferenceCells>>,
++
+     /// Boolean variable name → the checks its value stands for.
+     ///
+     /// PHPStan calls these conditional expressions: the boolean carries
+@@ -351,6 +355,7 @@ impl ScopeState {
+     pub fn new() -> Self {
+         Self {
+             locals: Locals::default(),
++            reference_cells: None,
+             assertions: ProofMap::default(),
+             non_null_implications: ProofMap::default(),
+             implied_narrowings: ProofMap::default(),
+@@ -421,10 +426,12 @@ impl ScopeState {
+     /// Insert or overwrite a variable's types.  An empty type list is
+     /// ignored, leaving any existing entry untouched; use
+     /// [`Self::set_empty`] to record existence without types.
+-    pub fn set(&mut self, var_name: &str, types: Vec<ResolvedType>) {
++    pub fn set(&mut self, var_name: &str, mut types: Vec<ResolvedType>) {
+         if types.is_empty() {
+             return;
+         }
++        self.sanitize_reference_origins(&mut types);
++        self.write_reference_peers(var_name, &types, false);
+         let key = atom(var_name);
+         self.unresolved.remove(&key);
+         self.locals.insert(key, types);
+@@ -447,6 +454,7 @@ impl ScopeState {
+     /// The entry is flagged in [`Self::unresolved`], which is what keeps
+     /// it from erasing the other paths' types at the next join.
+     pub fn set_unknown(&mut self, var_name: &str) {
++        self.write_reference_peers(var_name, &[], true);
+         let key = atom(var_name);
+         self.locals.insert(key, Vec::new());
+         self.unresolved.insert(key, ());
+@@ -463,6 +471,7 @@ impl ScopeState {
+     /// lattice, so it absorbs at a join instead of standing aside the
+     /// way an unresolved entry does.
+     pub fn set_untyped(&mut self, var_name: &str) {
++        self.write_reference_peers(var_name, &[], false);
+         let key = atom(var_name);
+         self.locals.insert(key, Vec::new());
+         self.unresolved.remove(&key);
+@@ -480,6 +489,7 @@ impl ScopeState {
+ 
+     /// Remove a variable (e.g. after `unset($x)`).
+     pub fn remove(&mut self, var_name: &str) {
++        self.detach_reference(var_name);
+         let key = atom(var_name);
+         self.locals.remove(&key);
+         self.unresolved.remove(&key);
+diff --git a/src/type_engine/variable/forward_walk/scope_state/references.rs b/src/type_engine/variable/forward_walk/scope_state/references.rs
+new file mode 100644
+index 0000000..3172e72
+--- /dev/null
++++ b/src/type_engine/variable/forward_walk/scope_state/references.rs
+@@ -0,0 +1,223 @@
++//! Direct-local PHP reference cells for source-qualified callable provenance.
++//!
++//! `definite` is an equivalence relation represented by all pairs in each
++//! cell. `possible` contains direct pair alternatives from branch joins. It
++//! is deliberately not transitively closed: separate possible relationships
++//! need not hold on the same execution path.
++
++use super::*;
++
++#[derive(Clone, Debug, Default, PartialEq, Eq)]
++pub(super) struct ReferenceCells {
++    definite: Vec<(Atom, Atom)>,
++    possible: Vec<(Atom, Atom)>,
++    opaque: bool,
++}
++
++fn pair(a: Atom, b: Atom) -> (Atom, Atom) {
++    if a.as_str() < b.as_str() {
++        (a, b)
++    } else {
++        (b, a)
++    }
++}
++
++fn push_pair(pairs: &mut Vec<(Atom, Atom)>, a: Atom, b: Atom) {
++    if a != b {
++        let item = pair(a, b);
++        if !pairs.contains(&item) {
++            pairs.push(item);
++            pairs.sort_unstable_by(|a, b| {
++                (a.0.as_str(), a.1.as_str()).cmp(&(b.0.as_str(), b.1.as_str()))
++            });
++        }
++    }
++}
++
++fn peers(pairs: &[(Atom, Atom)], key: Atom) -> Vec<Atom> {
++    pairs
++        .iter()
++        .filter_map(|&(a, b)| {
++            if a == key {
++                Some(b)
++            } else if b == key {
++                Some(a)
++            } else {
++                None
++            }
++        })
++        .collect()
++}
++
++impl ScopeState {
++    pub(crate) fn same_reference_state_as(&self, other: &Self) -> bool {
++        self.reference_cells == other.reference_cells
++    }
++
++    pub(super) fn sanitize_reference_origins(&self, values: &mut [ResolvedType]) {
++        if self
++            .reference_cells
++            .as_ref()
++            .is_some_and(|cells| cells.opaque)
++        {
++            for value in values {
++                value.callable_origins = None;
++            }
++        }
++    }
++
++    /// An unmodelled cell (indexed/property/dynamic reference), or a reference
++    /// relation beyond the budget, makes subsequent callable values unknown.
++    /// Preserve normal type information, but never publish stale provenance.
++    pub(crate) fn mark_references_opaque(&mut self) {
++        let cells = self.reference_cells.get_or_insert_with(Default::default);
++        cells.opaque = true;
++        cells.definite.clear();
++        cells.possible.clear();
++        let keys: Vec<_> = self.locals.keys().copied().collect();
++        for key in keys {
++            if let Some(values) = self.locals.get_mut(&key) {
++                for value in values {
++                    value.callable_origins = None;
++                }
++            }
++        }
++    }
++
++    pub(crate) fn has_reference_peers(&self, name: &str) -> bool {
++        let key = atom(name);
++        self.reference_cells.as_ref().is_some_and(|cells| {
++            cells
++                .definite
++                .iter()
++                .chain(&cells.possible)
++                .any(|&(a, b)| a == key || b == key)
++        })
++    }
++
++    pub(crate) fn detach_reference(&mut self, name: &str) {
++        if let Some(cells) = self.reference_cells.as_mut() {
++            let key = atom(name);
++            cells.definite.retain(|&(a, b)| a != key && b != key);
++            cells.possible.retain(|&(a, b)| a != key && b != key);
++        }
++    }
++
++    pub(crate) fn bind_reference(&mut self, name: &str, target: &str) {
++        if name == target {
++            return;
++        }
++        self.detach_reference(name);
++        self.invalidate_dependent_keys(name);
++        self.invalidate_proofs(name);
++        let types = self.get(target).to_vec();
++        if types.is_empty() {
++            self.set_untyped(name);
++        } else {
++            self.set(name, types);
++        }
++        let key = atom(name);
++        let target = atom(target);
++        let cells = self.reference_cells.get_or_insert_with(Default::default);
++        if cells.opaque {
++            return;
++        }
++        let mut members = peers(&cells.definite, target);
++        members.push(target);
++        for member in members {
++            push_pair(&mut cells.definite, key, member);
++        }
++        for possible in peers(&cells.possible, target) {
++            push_pair(&mut cells.possible, key, possible);
++        }
++        if cells.definite.len() + cells.possible.len() > 512 {
++            self.mark_references_opaque();
++        }
++    }
++
++    /// Central setters already represent writes used by assignments, array
++    /// mutation and by-reference parameters. Propagate without recursively
++    /// calling them; ordinary scopes have no reference metadata and return.
++    pub(super) fn write_reference_peers(
++        &mut self,
++        name: &str,
++        types: &[ResolvedType],
++        unresolved: bool,
++    ) {
++        let Some(cells) = self.reference_cells.as_ref() else {
++            return;
++        };
++        let key = atom(name);
++        let definite = peers(&cells.definite, key);
++        let possible = peers(&cells.possible, key);
++        for peer in &definite {
++            self.invalidate_dependent_keys(peer.as_str());
++            self.invalidate_proofs(peer.as_str());
++            self.locals.insert(*peer, types.to_vec());
++            if unresolved {
++                self.unresolved.insert(*peer, ());
++            } else {
++                self.unresolved.remove(peer);
++            }
++        }
++        for peer in possible {
++            if definite.contains(&peer) {
++                continue;
++            }
++            self.invalidate_dependent_keys(peer.as_str());
++            self.invalidate_proofs(peer.as_str());
++            self.unresolved.remove(&peer);
++            // A possible write preserves both source-known alternatives. An
++            // unknown old/new value is top: keep the known alternatives only
++            // as incomplete provenance, never as a definite current value.
++            let values = self.locals.get_or_insert_default(peer);
++            for incoming in types {
++                if let Some(existing) = values.iter_mut().find(|value| {
++                    value.type_string == incoming.type_string
++                        && value.class_info.as_ref().map(|class| &class.name)
++                            == incoming.class_info.as_ref().map(|class| &class.name)
++                }) {
++                    existing.join_callable_origins(incoming);
++                } else {
++                    values.push(incoming.clone());
++                }
++            }
++            for value in values {
++                value.mark_callable_origins_incomplete();
++            }
++        }
++    }
++
++    pub(super) fn merge_reference_cells(&mut self, other: &ScopeState) {
++        if self.reference_cells.is_none() && other.reference_cells.is_none() {
++            return;
++        }
++        let mine = self.reference_cells.take().unwrap_or_default();
++        let theirs = other.reference_cells.as_deref();
++        let mut joined = ReferenceCells::default();
++        for &(a, b) in &mine.definite {
++            if theirs.is_some_and(|cells| cells.definite.contains(&(a, b))) {
++                push_pair(&mut joined.definite, a, b);
++            } else {
++                push_pair(&mut joined.possible, a, b);
++            }
++        }
++        for &(a, b) in &mine.possible {
++            push_pair(&mut joined.possible, a, b);
++        }
++        if let Some(theirs) = theirs {
++            for &(a, b) in theirs.definite.iter().chain(&theirs.possible) {
++                if !joined.definite.contains(&(a, b)) {
++                    push_pair(&mut joined.possible, a, b);
++                }
++            }
++        }
++        let opaque = mine.opaque
++            || theirs.is_some_and(|cells| cells.opaque)
++            || joined.definite.len() + joined.possible.len() > 512;
++        self.reference_cells = Some(Box::new(joined));
++        if opaque {
++            self.mark_references_opaque();
++        }
++    }
++}
+diff --git a/src/type_engine/variable/forward_walk/walk_ctx.rs b/src/type_engine/variable/forward_walk/walk_ctx.rs
+index fbfc068..829bb7c 100644
+--- a/src/type_engine/variable/forward_walk/walk_ctx.rs
++++ b/src/type_engine/variable/forward_walk/walk_ctx.rs
+@@ -23,6 +23,8 @@ pub(crate) struct ForwardWalkCtx<'a> {
+     pub all_classes: &'a [Arc<ClassInfo>],
+     /// Full source text of the current file.
+     pub content: &'a str,
++    /// Optional producer identity for source-derived callable values.
++    pub callable_source: Option<Arc<crate::types::CallableValueSource>>,
+     /// Byte offset of the cursor.  The walk stops when a statement's
+     /// start offset reaches or exceeds this value.
+     pub cursor_offset: u32,
+@@ -89,6 +91,7 @@ impl<'a> ForwardWalkCtx<'a> {
+             current_class: ctx.current_class,
+             all_classes: ctx.all_classes,
+             content: ctx.content,
++            callable_source: ctx.callable_source.clone(),
+             cursor_offset: ctx.cursor_offset,
+             class_loader: ctx.class_loader,
+             backend: ctx.backend,
+@@ -112,6 +115,7 @@ impl<'a> ForwardWalkCtx<'a> {
+             current_class: self.current_class,
+             all_classes: self.all_classes,
+             content: self.content,
++            callable_source: self.callable_source.clone(),
+             cursor_offset,
+             class_loader: self.class_loader,
+             backend: self.backend,
+@@ -131,6 +135,7 @@ impl<'a> ForwardWalkCtx<'a> {
+             current_class: self.current_class,
+             all_classes: self.all_classes,
+             content: self.content,
++            callable_source: self.callable_source.clone(),
+             cursor_offset: self.cursor_offset,
+             class_loader: self.class_loader,
+             backend: self.backend,
+@@ -155,6 +160,7 @@ impl<'a> ForwardWalkCtx<'a> {
+                 ),
+             enclosing_return_type: self.enclosing_return_type.clone(),
+             top_level_scope: self.top_level_scope.clone(),
++            callable_source: self.callable_source.clone(),
+             ..*self
+         }
+     }
+@@ -199,6 +205,7 @@ impl<'a> ForwardWalkCtx<'a> {
+         'a: 'b,
+     {
+         VarResolutionCtx {
++            callable_source: self.callable_source.clone(),
+             backend: self.backend,
+             loaders: self.loaders,
+             resolved_class_cache: self.resolved_class_cache,
+diff --git a/src/type_engine/variable/resolution.rs b/src/type_engine/variable/resolution.rs
+index 1e4378e..5eba21b 100644
+--- a/src/type_engine/variable/resolution.rs
++++ b/src/type_engine/variable/resolution.rs
+@@ -367,6 +367,47 @@ pub(crate) fn resolve_variable_types(
+     resolved
+ }
+ 
++/// Resolve source-derived callable values through the ordinary variable walker.
++///
++/// The caller supplies the exact parsed source receipt. Ordinary per-pass
++/// memos and diagnostic snapshots contain type-only values and must not stand
++/// in for this source-qualified lookup. Nested foreign-source lookups start
++/// without authority rather than inheriting the caller's URI.
++pub(crate) fn resolve_variable_types_with_callable_source(
++    ctx: &VarResolutionCtx<'_>,
++    source: Arc<crate::types::CallableValueSource>,
++) -> Vec<ResolvedType> {
++    if usize::try_from(source.source_length).ok() != Some(ctx.content.len())
++        || source.uri.is_empty()
++    {
++        return Vec::new();
++    }
++    let variable = if ctx.var_name.starts_with('$') {
++        std::borrow::Cow::Borrowed(ctx.var_name)
++    } else {
++        std::borrow::Cow::Owned(format!("${}", ctx.var_name))
++    };
++    let key = var_query_key(
++        ctx.content,
++        &variable,
++        ctx.cursor_offset,
++        ctx.current_class.name,
++    );
++    let Some(_guard) = try_acquire_var_guard(key) else {
++        return Vec::new();
++    };
++    let _diagnostics = super::forward_walk::suspend_diagnostic_scope();
++    let mut source_ctx = ctx.clone();
++    source_ctx.var_name = &variable;
++    source_ctx.callable_source = Some(source);
++    source_ctx.top_level_scope = None;
++    with_parsed_program(
++        ctx.content,
++        "resolve_callable_variable_values",
++        |program, _| resolve_variable_in_statements(program.statements.iter(), &source_ctx),
++    )
++}
++
+ /// The forward walk behind [`resolve_variable_types`], over a program the
+ /// caller has already parsed.
+ ///
+@@ -773,6 +814,7 @@ pub(in crate::type_engine) fn resolve_variable_in_statements<'b>(
+                 current_class: ctx.current_class,
+                 all_classes: ctx.all_classes,
+                 content: ctx.content,
++                callable_source: ctx.callable_source.clone(),
+                 cursor_offset: u32::MAX,
+                 class_loader: ctx.class_loader,
+                 backend: ctx.backend,
+@@ -931,6 +973,7 @@ pub(in crate::type_engine) fn resolve_variable_in_statements<'b>(
+             current_class: ctx.current_class,
+             all_classes: ctx.all_classes,
+             content: ctx.content,
++            callable_source: ctx.callable_source.clone(),
+             cursor_offset: ctx.cursor_offset,
+             class_loader: ctx.class_loader,
+             backend: ctx.backend,
+@@ -1201,6 +1244,7 @@ fn try_resolve_in_function(
+         current_class: ctx.current_class,
+         all_classes: ctx.all_classes,
+         content: ctx.content,
++        callable_source: ctx.callable_source.clone(),
+         cursor_offset: ctx.cursor_offset,
+         class_loader: ctx.class_loader,
+         backend: ctx.backend,
+@@ -1356,6 +1400,7 @@ fn resolve_variable_in_members<'b>(
+                         current_class: ctx.current_class,
+                         all_classes: ctx.all_classes,
+                         content: ctx.content,
++                        callable_source: ctx.callable_source.clone(),
+                         cursor_offset: ctx.cursor_offset,
+                         class_loader: ctx.class_loader,
+                         backend: ctx.backend,
+@@ -1424,6 +1469,7 @@ fn resolve_variable_in_property_hooks(
+             current_class: ctx.current_class,
+             all_classes: ctx.all_classes,
+             content: ctx.content,
++            callable_source: ctx.callable_source.clone(),
+             cursor_offset: ctx.cursor_offset,
+             class_loader: ctx.class_loader,
+             backend: ctx.backend,
+@@ -1479,6 +1525,7 @@ fn resolve_abstract_method_param(
+             current_class: ctx.current_class,
+             all_classes: ctx.all_classes,
+             content: ctx.content,
++            callable_source: ctx.callable_source.clone(),
+             cursor_offset: ctx.cursor_offset,
+             class_loader: ctx.class_loader,
+             backend: ctx.backend,
+diff --git a/src/type_engine/variable/resolution_tests.rs b/src/type_engine/variable/resolution_tests.rs
+index 08da436..af9197d 100644
+--- a/src/type_engine/variable/resolution_tests.rs
++++ b/src/type_engine/variable/resolution_tests.rs
+@@ -2380,3 +2380,211 @@ fn stub_function_info(name: &str, return_type: Option<PhpType>) -> crate::types:
+         is_impure: false,
+     }
+ }
++
++#[test]
++fn callable_source_lookup_partitions_identical_files_and_bypasses_type_only_memo() {
++    use crate::type_engine::resolver::VarResolutionCtx;
++    use crate::types::CallableValueSource;
++    use sha2::{Digest, Sha256};
++
++    let content = "<?php\r\n/* café 🐘 */ $stored = 'storedLeaf'; $stored(1);\r\n";
++    let offset = content.rfind("$stored(1)").unwrap() as u32;
++    let class = crate::class_lookup::class_context_placeholder(content, offset);
++    let loader = |_: &str| None;
++    let ctx = VarResolutionCtx::new("$stored", &class, &[], content, offset, &loader);
++    let _memo = super::with_var_type_memo();
++    let ordinary = super::resolve_variable_types(
++        "$stored",
++        &class,
++        &[],
++        content,
++        offset,
++        &loader,
++        None,
++        Loaders::default(),
++    );
++    assert!(!ordinary.is_empty());
++    assert!(
++        ordinary
++            .iter()
++            .all(|value| value.callable_origins.is_none())
++    );
++    let digest: [u8; 32] = Sha256::digest(content.as_bytes()).into();
++    for uri in ["file:///same-a.php", "file:///same-b.php"] {
++        let source = Arc::new(CallableValueSource {
++            uri: uri.to_owned(),
++            source_sha256: digest,
++            source_length: content.len() as u32,
++        });
++        let query_ctx = VarResolutionCtx {
++            var_name: if uri.ends_with("same-b.php") {
++                "stored"
++            } else {
++                "$stored"
++            },
++            ..ctx.clone()
++        };
++        let values =
++            super::resolve_variable_types_with_callable_source(&query_ctx, Arc::clone(&source));
++        assert!(!values.is_empty());
++        let origins = ResolvedType::joined_callable_origins(&values)
++            .expect("source-aware lookup mints an actual value origin");
++        assert!(origins.complete);
++        assert_eq!(origins.origins.len(), 1);
++        assert_eq!(origins.origins[0].source, source);
++        let origin = &origins.origins[0];
++        assert_eq!(
++            &content[origin.expression_start as usize..origin.expression_end as usize],
++            "'storedLeaf'"
++        );
++    }
++    let after = super::resolve_variable_types(
++        "$stored",
++        &class,
++        &[],
++        content,
++        offset,
++        &loader,
++        None,
++        Loaders::default(),
++    );
++    assert!(
++        after.iter().all(|value| value.callable_origins.is_none()),
++        "source-qualified results must never populate the ordinary type-only memo"
++    );
++}
++
++#[test]
++fn callable_source_lookup_refuses_missing_uri_and_mismatched_length() {
++    use crate::type_engine::resolver::VarResolutionCtx;
++    use crate::types::CallableValueSource;
++    use sha2::{Digest, Sha256};
++
++    let content = "<?php $stored = 'storedLeaf'; $stored();";
++    let offset = content.rfind("$stored()").unwrap() as u32;
++    let class = crate::class_lookup::class_context_placeholder(content, offset);
++    let loader = |_: &str| None;
++    let ctx = VarResolutionCtx::new("$stored", &class, &[], content, offset, &loader);
++    let digest: [u8; 32] = Sha256::digest(content.as_bytes()).into();
++    for (uri, source_length) in [
++        ("", content.len() as u32),
++        ("file:///wrong-length.php", content.len() as u32 + 1),
++    ] {
++        let source = Arc::new(CallableValueSource {
++            uri: uri.to_owned(),
++            source_sha256: digest,
++            source_length,
++        });
++        assert!(super::resolve_variable_types_with_callable_source(&ctx, source).is_empty());
++    }
++}
++
++#[test]
++fn callable_source_lookup_retains_distinct_same_signature_branch_closures() {
++    use crate::type_engine::resolver::VarResolutionCtx;
++    use crate::types::CallableValueSource;
++    use sha2::{Digest, Sha256};
++
++    let content = r#"<?php
++function storedBranch(bool $condition): void {
++    if ($condition) {
++        $stored = function (): int { return 1; };
++    } else {
++        $stored = function (): int { return 2; };
++    }
++    $stored();
++}
++"#;
++    let offset = content.rfind("$stored()").unwrap() as u32;
++    let class = crate::class_lookup::class_context_placeholder(content, offset);
++    let loader = |_: &str| None;
++    let ctx = VarResolutionCtx::new("$stored", &class, &[], content, offset, &loader);
++    let source = Arc::new(CallableValueSource {
++        uri: "file:///stored-branch-closures.php".to_owned(),
++        source_sha256: Sha256::digest(content.as_bytes()).into(),
++        source_length: content.len() as u32,
++    });
++    let values = super::resolve_variable_types_with_callable_source(&ctx, Arc::clone(&source));
++    let origins = ResolvedType::joined_callable_origins(&values)
++        .expect("both source-known branch closures retain identity");
++    assert!(
++        origins.complete,
++        "both surviving branches define known values"
++    );
++    assert_eq!(
++        origins.origins.len(),
++        2,
++        "equal signatures must not collapse closure identity"
++    );
++    let mut expressions: Vec<&str> = origins
++        .origins
++        .iter()
++        .map(|origin| {
++            assert_eq!(origin.source, source);
++            &content[origin.expression_start as usize..origin.expression_end as usize]
++        })
++        .collect();
++    expressions.sort_unstable();
++    assert_eq!(
++        expressions,
++        [
++            "function (): int { return 1; }",
++            "function (): int { return 2; }",
++        ]
++    );
++}
++
++#[test]
++fn callable_source_lookup_marks_unknown_branch_incomplete_and_reassignment_revokes_origin() {
++    use crate::type_engine::resolver::VarResolutionCtx;
++    use crate::types::CallableValueSource;
++    use sha2::{Digest, Sha256};
++
++    let content = r#"<?php
++function storedUnknownBranch(bool $condition, callable $unknown): void {
++    $stored = function (): int { return 1; };
++    if ($condition) {
++        $stored = $unknown;
++    }
++    $stored(); // merged
++    $stored = $unknown;
++    $stored(); // overwritten
++}
++"#;
++    let source = Arc::new(CallableValueSource {
++        uri: "file:///stored-unknown-branch.php".to_owned(),
++        source_sha256: Sha256::digest(content.as_bytes()).into(),
++        source_length: content.len() as u32,
++    });
++    let loader = |_: &str| None;
++    let merged_offset = content.find("$stored(); // merged").unwrap() as u32;
++    let class = crate::class_lookup::class_context_placeholder(content, merged_offset);
++    let ctx = VarResolutionCtx::new("$stored", &class, &[], content, merged_offset, &loader);
++    let values = super::resolve_variable_types_with_callable_source(&ctx, Arc::clone(&source));
++    let origins = ResolvedType::joined_callable_origins(&values)
++        .expect("known possibility survives alongside the unknown callable branch");
++    assert!(
++        !origins.complete,
++        "unknown callable value prevents exhaustive resolution"
++    );
++    assert_eq!(origins.origins.len(), 1);
++    let origin = &origins.origins[0];
++    assert_eq!(origin.source, source);
++    assert_eq!(
++        &content[origin.expression_start as usize..origin.expression_end as usize],
++        "function (): int { return 1; }"
++    );
++
++    let overwritten_offset = content.find("$stored(); // overwritten").unwrap() as u32;
++    let overwritten_ctx =
++        VarResolutionCtx::new("$stored", &class, &[], content, overwritten_offset, &loader);
++    let overwritten = super::resolve_variable_types_with_callable_source(&overwritten_ctx, source);
++    assert!(
++        !overwritten.is_empty(),
++        "the unknown parameter still has a callable type"
++    );
++    assert!(
++        ResolvedType::joined_callable_origins(&overwritten).is_none(),
++        "an unconditional unknown write must remove the old closure origin"
++    );
++}
+diff --git a/src/type_engine/variable/rhs_resolution/mod.rs b/src/type_engine/variable/rhs_resolution/mod.rs
+index ee1e01e..5e5e433 100644
+--- a/src/type_engine/variable/rhs_resolution/mod.rs
++++ b/src/type_engine/variable/rhs_resolution/mod.rs
+@@ -628,7 +628,7 @@ pub(in crate::type_engine) fn resolve_rhs_expression<'b>(
+     ctx: &VarResolutionCtx<'_>,
+ ) -> Vec<ResolvedType> {
+     let expr = peel_type_transparent(expr);
+-    match expr {
++    let mut resolved = match expr {
+         Expression::Binary(binary) if binary.operator.is_null_coalesce() => {
+             resolve_null_coalesce_chain(binary, ctx)
+         }
+@@ -638,7 +638,48 @@ pub(in crate::type_engine) fn resolve_rhs_expression<'b>(
+         }
+         Expression::Assignment(assignment) => resolve_assignment_as_value(assignment, ctx),
+         _ => resolve_rhs_expression_inner(expr, ctx),
++    };
++    if matches!(
++        expr,
++        Expression::Literal(Literal::String(_))
++            | Expression::PartialApplication(_)
++            | Expression::Closure(_)
++            | Expression::ArrowFunction(_)
++            | Expression::Instantiation(_)
++            | Expression::AnonymousClass(_)
++            | Expression::Array(_)
++            | Expression::LegacyArray(_)
++    ) && let Some(source) = &ctx.callable_source
++        && source.source_length as usize == ctx.content.len()
++    {
++        let span = expr.span();
++        if span.start.offset < span.end.offset
++            && ctx
++                .content
++                .get(span.start.offset as usize..span.end.offset as usize)
++                .is_some()
++        {
++            for value in &mut resolved {
++                let array_snapshot =
++                    matches!(expr, Expression::Array(_) | Expression::LegacyArray(_)).then(|| {
++                        crate::types::CallableArraySnapshot {
++                            shape: value.type_string.clone(),
++                            transformed: false,
++                        }
++                    });
++                value.callable_origins = Some(Arc::new(crate::types::CallableOriginSet {
++                    origins: vec![crate::types::CallableValueOrigin {
++                        source: Arc::clone(source),
++                        expression_start: span.start.offset,
++                        expression_end: span.end.offset,
++                        array_snapshot,
++                    }],
++                    complete: true,
++                }));
++            }
++        }
+     }
++    resolved
+ }
+ 
+ /// Resolve an assignment expression used as a value, not just a
+diff --git a/src/types/mod.rs b/src/types/mod.rs
+index 1764aef..1d3bea1 100644
+--- a/src/types/mod.rs
++++ b/src/types/mod.rs
+@@ -2692,6 +2692,38 @@ impl ClassInfo {
+ 
+ // ─── ResolvedType ───────────────────────────────────────────────────────────
+ 
++/// Source authority supplied by a caller resolving a value in this exact file.
++#[derive(Clone, Debug, PartialEq, Eq)]
++pub(crate) struct CallableValueSource {
++    pub(crate) uri: String,
++    pub(crate) source_sha256: [u8; 32],
++    pub(crate) source_length: u32,
++}
++
++/// Per-source array alternative, never the aggregate type of joined branches.
++#[derive(Clone, Debug, PartialEq, Eq)]
++pub(crate) struct CallableArraySnapshot {
++    pub(crate) shape: PhpType,
++    /// Untouched values use their original exact syntax/profile materializer.
++    pub(crate) transformed: bool,
++}
++
++/// Exact CST value expression; names and receivers are resolved separately.
++#[derive(Clone, Debug, PartialEq, Eq)]
++pub(crate) struct CallableValueOrigin {
++    pub(crate) source: Arc<CallableValueSource>,
++    pub(crate) expression_start: u32,
++    pub(crate) expression_end: u32,
++    pub(crate) array_snapshot: Option<CallableArraySnapshot>,
++}
++
++/// Possible source values, with an explicit indication of unresolved paths.
++#[derive(Clone, Debug, PartialEq, Eq)]
++pub(crate) struct CallableOriginSet {
++    pub(crate) origins: Vec<CallableValueOrigin>,
++    pub(crate) complete: bool,
++}
++
+ /// The result of resolving a single type reference.
+ ///
+ /// Carries the full PHPStan-style type string (preserving generics,
+@@ -2722,6 +2754,8 @@ pub struct ResolvedType {
+     /// which is what the constructors set.  See the enum's own
+     /// documentation for why the state travels with the value.
+     pub factory_count: FactoryCount,
++    /// None is untracked, never a proof of an empty callable target set.
++    pub(crate) callable_origins: Option<Arc<CallableOriginSet>>,
+ }
+ 
+ /// How many models an Eloquent factory chain builds.
+diff --git a/src/types/resolved_type.rs b/src/types/resolved_type.rs
+index 4e299a0..7ace886 100644
+--- a/src/types/resolved_type.rs
++++ b/src/types/resolved_type.rs
+@@ -3,6 +3,50 @@
+ use super::*;
+ 
+ impl ResolvedType {
++    /// Merge alternative values without confusing equal signatures with identity.
++    pub(crate) fn join_callable_origins(&mut self, other: &Self) {
++        match (&self.callable_origins, &other.callable_origins) {
++            (None, None) => {}
++            (Some(mine), Some(theirs)) if Arc::ptr_eq(mine, theirs) => {}
++            (mine, theirs) => {
++                let mut joined = CallableOriginSet {
++                    origins: Vec::new(),
++                    complete: mine.as_ref().is_some_and(|set| set.complete)
++                        && theirs.as_ref().is_some_and(|set| set.complete),
++                };
++                for set in [mine.as_ref(), theirs.as_ref()].into_iter().flatten() {
++                    for origin in &set.origins {
++                        if joined.origins.contains(origin) {
++                            continue;
++                        }
++                        if joined.origins.len() == 32 {
++                            joined.complete = false;
++                        } else {
++                            joined.origins.push(origin.clone());
++                        }
++                    }
++                }
++                self.callable_origins = Some(Arc::new(joined));
++            }
++        }
++    }
++
++    pub(crate) fn mark_callable_origins_incomplete(&mut self) {
++        if let Some(origins) = &mut self.callable_origins {
++            Arc::make_mut(origins).complete = false;
++        }
++    }
++
++    /// Collect alternatives for a consumer which resolves the whole value.
++    pub(crate) fn joined_callable_origins(values: &[Self]) -> Option<Arc<CallableOriginSet>> {
++        let (first, rest) = values.split_first()?;
++        let mut joined = first.clone();
++        for value in rest {
++            joined.join_callable_origins(value);
++        }
++        joined.callable_origins
++    }
++
+     /// Create a `ResolvedType` from a [`ClassInfo`], using its name as
+     /// the type string.
+     ///
+@@ -17,6 +61,7 @@ impl ResolvedType {
+             type_string,
+             class_info: Some(Arc::new(class)),
+             factory_count: FactoryCount::Unknown,
++            callable_origins: None,
+         }
+     }
+ 
+@@ -29,6 +74,7 @@ impl ResolvedType {
+             type_string,
+             class_info: Some(class),
+             factory_count: FactoryCount::Unknown,
++            callable_origins: None,
+         }
+     }
+ 
+@@ -42,6 +88,7 @@ impl ResolvedType {
+             type_string,
+             class_info: None,
+             factory_count: FactoryCount::Unknown,
++            callable_origins: None,
+         }
+     }
+ 
+@@ -57,6 +104,7 @@ impl ResolvedType {
+             type_string,
+             class_info: Some(Arc::new(class)),
+             factory_count: FactoryCount::Unknown,
++            callable_origins: None,
+         }
+     }
+ 
+@@ -68,6 +116,7 @@ impl ResolvedType {
+             type_string,
+             class_info: Some(class),
+             factory_count: FactoryCount::Unknown,
++            callable_origins: None,
+         }
+     }
+ 
+@@ -117,6 +166,18 @@ impl ResolvedType {
+         if !still_matches {
+             self.class_info = None;
+         }
++        if !new_type.is_subset_of(&self.type_string) {
++            self.callable_origins = None;
++        } else if new_type != self.type_string
++            && self
++                .callable_origins
++                .as_ref()
++                .is_some_and(|set| set.origins.len() > 1)
++        {
++            // A type-only filter cannot tell which of several source values
++            // survived. Keep the possibilities but revoke completeness.
++            self.mark_callable_origins_incomplete();
++        }
+         self.type_string = new_type;
+     }
+ 
+@@ -147,7 +208,8 @@ impl ResolvedType {
+             // The entry that stays speaks for the one that was dropped,
+             // so it may only keep a factory count both agreed on.
+             Some(existing) => {
+-                existing.factory_count = existing.factory_count.join(rt.factory_count)
++                existing.factory_count = existing.factory_count.join(rt.factory_count);
++                existing.join_callable_origins(&rt);
+             }
+             None => results.push(rt),
+         }
+@@ -605,13 +667,22 @@ impl ResolvedType {
+             return results;
+         }
+ 
++        let non_class_origins = Self::joined_callable_origins(
++            &results
++                .iter()
++                .filter(|rt| rt.class_info.is_none())
++                .cloned()
++                .collect::<Vec<_>>(),
++        );
+         let mut collapsed = Vec::with_capacity(results.len());
+         let mut inserted_non_class = false;
+         for result in results {
+             if result.class_info.is_some() {
+                 collapsed.push(result);
+             } else if !inserted_non_class {
+-                collapsed.push(ResolvedType::from_type_string(normalized.clone()));
++                let mut value = ResolvedType::from_type_string(normalized.clone());
++                value.callable_origins = non_class_origins.clone();
++                collapsed.push(value);
+                 inserted_non_class = true;
+             }
+         }
+@@ -663,6 +734,8 @@ impl ResolvedType {
+                         || array_snapshot_covered_by(&types[j], &types[i])
+                         || intersection_covered_by(&types[j], &types[i]))
+                 {
++                    let covered = entries[j].clone();
++                    entries[i].join_callable_origins(&covered);
+                     keep[j] = false;
+                 }
+             }
+diff --git a/tests/integration/call_hierarchy.rs b/tests/integration/call_hierarchy.rs
+index 0b9f3cf..5abb73e 100644
+--- a/tests/integration/call_hierarchy.rs
++++ b/tests/integration/call_hierarchy.rs
+@@ -6538,3 +6538,802 @@ async fn array_callable_exact_assigned_absolute_names_do_not_rebind_imports() {
+         array_exact_reverse(&backend, &root, edge).await;
+     }
+ }
++
++async fn stored_callable_observed_edges(
++    backend: &Backend,
++    caller: &CallHierarchyItem,
++    source: &str,
++) -> Vec<CallHierarchyOutgoingCall> {
++    let edges = outgoing(backend, caller).await;
++    let controls = edges
++        .iter()
++        .filter(|edge| edge.to.name == "storedPositiveControl")
++        .collect::<Vec<_>>();
++    assert_eq!(
++        controls.len(),
++        1,
++        "the public hierarchy must retain a real direct-call positive control"
++    );
++    assert_eq!(
++        controls[0].from_ranges,
++        [noncall_exact_range(
++            source,
++            "storedPositiveControl();",
++            "storedPositiveControl"
++        )]
++    );
++    array_exact_reverse(backend, caller, controls[0]).await;
++    edges
++}
++
++async fn stored_callable_assert_edge(
++    backend: &Backend,
++    caller: &CallHierarchyItem,
++    edges: &[CallHierarchyOutgoingCall],
++    target: &CallHierarchyItem,
++    expected: Vec<Range>,
++) {
++    let matching = edges
++        .iter()
++        .filter(|edge| {
++            edge.to.uri == target.uri && edge.to.selection_range == target.selection_range
++        })
++        .collect::<Vec<_>>();
++    assert_eq!(
++        matching.len(),
++        1,
++        "stored invocation must reach its actual declaration: {target:?}; {edges:?}"
++    );
++    let edge = matching[0];
++    assert_eq!(edge.to.name, target.name);
++    assert_eq!(edge.to.kind, target.kind);
++    assert_eq!(edge.to.range, target.range);
++    assert_eq!(
++        edge.from_ranges, expected,
++        "only later invocation sites may call this body"
++    );
++    array_exact_reverse(backend, caller, edge).await;
++}
++
++#[tokio::test]
++async fn stored_callable_literal_function_string_has_later_sites_and_reciprocal_callers() {
++    let backend = create_test_backend();
++    let uri = Url::parse("file:///stored-function-string.php").unwrap();
++    let source = concat!(
++        "<?php\r\n",
++        "function storedStringLeaf(int $n): int { return $n; }\r\n",
++        "function storedPositiveControl(): void {}\r\n",
++        "function storedStringHost(): void {\r\n",
++        " $stored = 'storedStringLeaf'; $uninvoked = 'storedStringLeaf';\r\n",
++        " /* café 🐘 */ $stored(101); $stored(102);\r\n",
++        " storedPositiveControl();\r\n}\r\n",
++    );
++    open_php(&backend, &uri, source).await;
++    let host = array_exact_root(&backend, &uri, source, "storedStringHost").await;
++    let target = array_exact_root(&backend, &uri, source, "storedStringLeaf").await;
++    let edges = stored_callable_observed_edges(&backend, &host, source).await;
++    stored_callable_assert_edge(
++        &backend,
++        &host,
++        &edges,
++        &target,
++        vec![
++            noncall_exact_range(source, "$stored(101)", "(101)"),
++            noncall_exact_range(source, "$stored(102)", "(102)"),
++        ],
++    )
++    .await;
++    assert_eq!(
++        edges.len(),
++        2,
++        "assigning a callable string does not execute it"
++    );
++    backend.shutdown().await.unwrap();
++}
++
++#[tokio::test]
++async fn stored_callable_first_class_named_function_creation_is_not_invocation() {
++    let backend = create_test_backend();
++    let uri = Url::parse("file:///stored-first-class-function.php").unwrap();
++    let source = concat!(
++        "<?php\r\n",
++        "function storedFirstLeaf(int $n): int { return $n; }\r\n",
++        "function storedPositiveControl(): void {}\r\n",
++        "function storedFirstHost(): void {\r\n",
++        " $stored = storedFirstLeaf(...); $uninvoked = storedFirstLeaf(...);\r\n",
++        " /* café 🐘 */ $stored(201); $stored(202);\r\n",
++        " storedPositiveControl();\r\n}\r\n",
++    );
++    open_php(&backend, &uri, source).await;
++    let host = array_exact_root(&backend, &uri, source, "storedFirstHost").await;
++    let target = array_exact_root(&backend, &uri, source, "storedFirstLeaf").await;
++    let edges = stored_callable_observed_edges(&backend, &host, source).await;
++    stored_callable_assert_edge(
++        &backend,
++        &host,
++        &edges,
++        &target,
++        vec![
++            noncall_exact_range(source, "$stored(201)", "(201)"),
++            noncall_exact_range(source, "$stored(202)", "(202)"),
++        ],
++    )
++    .await;
++    assert_eq!(edges.len(), 2);
++    backend.shutdown().await.unwrap();
++}
++
++#[tokio::test]
++async fn stored_callable_closure_keeps_its_body_and_only_later_invocation_sites() {
++    let backend = create_test_backend();
++    let uri = Url::parse("file:///stored-closure.php").unwrap();
++    let source = concat!(
++        "<?php\r\n",
++        "function storedClosureLeaf(): void {}\r\n",
++        "function storedUnusedClosureLeaf(): void {}\r\n",
++        "function storedPositiveControl(): void {}\r\n",
++        "function storedClosureHost(): void {\r\n",
++        " $stored = function (int $n): int { storedClosureLeaf(); return $n; };\r\n",
++        " $uninvoked = function () { storedUnusedClosureLeaf(); };\r\n",
++        " /* café 🐘 */ $stored(301); $stored(302);\r\n",
++        " storedPositiveControl();\r\n}\r\n",
++    );
++    open_php(&backend, &uri, source).await;
++    let host = array_exact_root(&backend, &uri, source, "storedClosureHost").await;
++    let target = anonymous_hierarchy_prepare(&backend, &uri, source, "function (int $n)").await;
++    let uninvoked = anonymous_hierarchy_prepare(
++        &backend,
++        &uri,
++        source,
++        "function () { storedUnusedClosureLeaf",
++    )
++    .await;
++    let body = outgoing(&backend, &target).await;
++    assert_eq!(body.len(), 1);
++    assert_eq!(body[0].to.name, "storedClosureLeaf");
++    assert_eq!(
++        body[0].from_ranges,
++        [noncall_exact_range(
++            source,
++            "{ storedClosureLeaf();",
++            "storedClosureLeaf"
++        )]
++    );
++    let unused_body = outgoing(&backend, &uninvoked).await;
++    assert_eq!(unused_body.len(), 1);
++    assert_eq!(unused_body[0].to.name, "storedUnusedClosureLeaf");
++    let edges = stored_callable_observed_edges(&backend, &host, source).await;
++    stored_callable_assert_edge(
++        &backend,
++        &host,
++        &edges,
++        &target,
++        vec![
++            noncall_exact_range(source, "$stored(301)", "(301)"),
++            noncall_exact_range(source, "$stored(302)", "(302)"),
++        ],
++    )
++    .await;
++    assert_eq!(
++        edges.len(),
++        2,
++        "nested body calls belong to the closures, not their creating host"
++    );
++    assert!(
++        incoming(&backend, &uninvoked).await.is_empty(),
++        "an uninvoked stored closure has no caller"
++    );
++    backend.shutdown().await.unwrap();
++}
++
++#[tokio::test]
++async fn stored_callable_arrow_keeps_its_body_and_only_later_invocation_sites() {
++    let backend = create_test_backend();
++    let uri = Url::parse("file:///stored-arrow.php").unwrap();
++    let source = concat!(
++        "<?php\r\n",
++        "function storedArrowLeaf(int $n): int { return $n; }\r\n",
++        "function storedUnusedArrowLeaf(): int { return 0; }\r\n",
++        "function storedPositiveControl(): void {}\r\n",
++        "function storedArrowHost(): void {\r\n",
++        " $stored = fn(int $n): int => storedArrowLeaf($n);\r\n",
++        " $uninvoked = fn() => storedUnusedArrowLeaf();\r\n",
++        " /* café 🐘 */ $stored(401); $stored(402);\r\n",
++        " storedPositiveControl();\r\n}\r\n",
++    );
++    open_php(&backend, &uri, source).await;
++    let host = array_exact_root(&backend, &uri, source, "storedArrowHost").await;
++    let target = anonymous_hierarchy_prepare(&backend, &uri, source, "fn(int $n)").await;
++    let uninvoked =
++        anonymous_hierarchy_prepare(&backend, &uri, source, "fn() => storedUnusedArrowLeaf").await;
++    let body = outgoing(&backend, &target).await;
++    assert_eq!(body.len(), 1);
++    assert_eq!(body[0].to.name, "storedArrowLeaf");
++    assert_eq!(
++        body[0].from_ranges,
++        [noncall_exact_range(
++            source,
++            "=> storedArrowLeaf($n)",
++            "storedArrowLeaf"
++        )]
++    );
++    let unused_body = outgoing(&backend, &uninvoked).await;
++    assert_eq!(unused_body.len(), 1);
++    assert_eq!(unused_body[0].to.name, "storedUnusedArrowLeaf");
++    let edges = stored_callable_observed_edges(&backend, &host, source).await;
++    stored_callable_assert_edge(
++        &backend,
++        &host,
++        &edges,
++        &target,
++        vec![
++            noncall_exact_range(source, "$stored(401)", "(401)"),
++            noncall_exact_range(source, "$stored(402)", "(402)"),
++        ],
++    )
++    .await;
++    assert_eq!(edges.len(), 2);
++    assert!(incoming(&backend, &uninvoked).await.is_empty());
++    backend.shutdown().await.unwrap();
++}
++
++#[tokio::test]
++async fn stored_callable_invokable_object_separates_assignment_construction_from_invocation() {
++    let backend = create_test_backend();
++    let uri = Url::parse("file:///stored-invokable-object.php").unwrap();
++    let source = concat!(
++        "<?php\r\n",
++        "function storedCtorLeaf(): void {} function storedInvokeLeaf(): void {}\r\n",
++        "function storedPositiveControl(): void {}\r\n",
++        "class StoredInvoker {\r\n",
++        " public function __construct() { storedCtorLeaf(); }\r\n",
++        " public function __invoke(int $n): int { storedInvokeLeaf(); return $n; }\r\n}\r\n",
++        "function storedObjectHost(): void {\r\n",
++        " $stored = new StoredInvoker(); $uninvoked = new StoredInvoker();\r\n",
++        " /* café 🐘 */ $stored(501); $stored(502);\r\n",
++        " storedPositiveControl();\r\n}\r\n",
++    );
++    open_php(&backend, &uri, source).await;
++    let host = array_exact_root(&backend, &uri, source, "storedObjectHost").await;
++    let constructor = literal_callable_target(
++        &backend,
++        &uri,
++        source,
++        "public function __construct",
++        "__construct",
++    )
++    .await;
++    let invoke = literal_callable_target(
++        &backend,
++        &uri,
++        source,
++        "public function __invoke",
++        "__invoke",
++    )
++    .await;
++    let ctor_body = outgoing(&backend, &constructor).await;
++    assert_eq!(ctor_body.len(), 1);
++    assert_eq!(ctor_body[0].to.name, "storedCtorLeaf");
++    let invoke_body = outgoing(&backend, &invoke).await;
++    assert_eq!(invoke_body.len(), 1);
++    assert_eq!(invoke_body[0].to.name, "storedInvokeLeaf");
++    let edges = stored_callable_observed_edges(&backend, &host, source).await;
++    stored_callable_assert_edge(
++        &backend,
++        &host,
++        &edges,
++        &constructor,
++        vec![
++            noncall_exact_range(source, "$stored = new StoredInvoker();", "StoredInvoker"),
++            noncall_exact_range(source, "$uninvoked = new StoredInvoker();", "StoredInvoker"),
++        ],
++    )
++    .await;
++    stored_callable_assert_edge(
++        &backend,
++        &host,
++        &edges,
++        &invoke,
++        vec![
++            noncall_exact_range(source, "$stored(501)", "(501)"),
++            noncall_exact_range(source, "$stored(502)", "(502)"),
++        ],
++    )
++    .await;
++    assert_eq!(
++        edges.len(),
++        3,
++        "object creation runs constructors but not __invoke or its nested body"
++    );
++    backend.shutdown().await.unwrap();
++}
++
++#[tokio::test]
++async fn stored_callable_static_array_creation_is_reference_until_later_invocation() {
++    let backend = create_test_backend();
++    let uri = Url::parse("file:///stored-static-array.php").unwrap();
++    let source = concat!(
++        "<?php\r\n",
++        "function storedArrayLeaf(): void {} function storedPositiveControl(): void {}\r\n",
++        "class StoredArrayTarget { public static function run(int $n): int { storedArrayLeaf(); return $n; } }\r\n",
++        "function storedArrayHost(): void {\r\n",
++        " $stored = [StoredArrayTarget::class, 'run'];\r\n",
++        " $uninvoked = [StoredArrayTarget::class, 'run'];\r\n",
++        " /* café 🐘 */ $stored(601); $stored(602);\r\n",
++        " storedPositiveControl();\r\n}\r\n",
++    );
++    open_php(&backend, &uri, source).await;
++    let host = array_exact_root(&backend, &uri, source, "storedArrayHost").await;
++    let target =
++        literal_callable_target(&backend, &uri, source, "public static function run", "run").await;
++    let body = outgoing(&backend, &target).await;
++    assert_eq!(body.len(), 1);
++    assert_eq!(body[0].to.name, "storedArrayLeaf");
++    let edges = stored_callable_observed_edges(&backend, &host, source).await;
++    stored_callable_assert_edge(
++        &backend,
++        &host,
++        &edges,
++        &target,
++        vec![
++            noncall_exact_range(source, "$stored(601)", "(601)"),
++            noncall_exact_range(source, "$stored(602)", "(602)"),
++        ],
++    )
++    .await;
++    assert_eq!(edges.len(), 2);
++    backend.shutdown().await.unwrap();
++}
++
++#[tokio::test]
++async fn stored_callable_reassignment_unknown_overwrite_and_branch_alternatives_keep_flow_identity()
++{
++    let backend = create_test_backend();
++    let uri = Url::parse("file:///stored-callable-flow.php").unwrap();
++    let source = concat!(
++        "<?php\r\n",
++        "function storedFlowA(int $n): int { return $n; }\r\n",
++        "function storedFlowB(int $n): int { return $n; }\r\n",
++        "function storedPositiveControl(): void {}\r\n",
++        "function storedFlowHost(callable $unknown, bool $flag): void {\r\n",
++        " $known = 'storedFlowA'; $known(701);\r\n",
++        " $known = 'storedFlowB'; $known(702);\r\n",
++        " $maybe = 'storedFlowA'; $maybe = $unknown; $maybe(703);\r\n",
++        " $branch = 'storedFlowA'; if ($flag) { $branch = 'storedFlowB'; }\r\n",
++        " /* café 🐘 */ $branch(704); $unknown(705);\r\n",
++        " $uninvoked = 'storedFlowA'; storedPositiveControl();\r\n}\r\n",
++    );
++    open_php(&backend, &uri, source).await;
++    let host = array_exact_root(&backend, &uri, source, "storedFlowHost").await;
++    let a = array_exact_root(&backend, &uri, source, "storedFlowA").await;
++    let b = array_exact_root(&backend, &uri, source, "storedFlowB").await;
++    let edges = stored_callable_observed_edges(&backend, &host, source).await;
++    let branch_site = noncall_exact_range(source, "$branch(704)", "(704)");
++    stored_callable_assert_edge(
++        &backend,
++        &host,
++        &edges,
++        &a,
++        vec![
++            noncall_exact_range(source, "$known(701)", "(701)"),
++            branch_site,
++        ],
++    )
++    .await;
++    stored_callable_assert_edge(
++        &backend,
++        &host,
++        &edges,
++        &b,
++        vec![
++            noncall_exact_range(source, "$known(702)", "(702)"),
++            branch_site,
++        ],
++    )
++    .await;
++    assert_eq!(
++        edges.len(),
++        3,
++        "known branch alternatives are possible callees; unknown values cannot inherit a stale known target"
++    );
++    backend.shutdown().await.unwrap();
++}
++
++#[tokio::test]
++async fn stored_callable_value_copy_and_reference_alias_have_distinct_mutation_semantics() {
++    let backend = create_test_backend();
++    let uri = Url::parse("file:///stored-reference-cell-mutation.php").unwrap();
++    let source = concat!(
++        "<?php\r\n",
++        "function mutationA(int $n): int { return $n; }\r\n",
++        "function mutationB(int $n): int { return $n; }\r\n",
++        "function storedPositiveControl(): void {}\r\n",
++        "function mutationAliasHost(): void {\r\n",
++        " $original = 'mutationA'; $copy = $original; $alias =& $original;\r\n",
++        " $alias = 'mutationB';\r\n",
++        " /* café 🐘 */ $original(101); $copy(102); $alias(103);\r\n",
++        " storedPositiveControl();\r\n}\r\n",
++    );
++    open_php(&backend, &uri, source).await;
++    let host = array_exact_root(&backend, &uri, source, "mutationAliasHost").await;
++    let a = array_exact_root(&backend, &uri, source, "mutationA").await;
++    let b = array_exact_root(&backend, &uri, source, "mutationB").await;
++    let edges = stored_callable_observed_edges(&backend, &host, source).await;
++    stored_callable_assert_edge(
++        &backend,
++        &host,
++        &edges,
++        &a,
++        vec![noncall_exact_range(source, "$copy(102)", "(102)")],
++    )
++    .await;
++    stored_callable_assert_edge(
++        &backend,
++        &host,
++        &edges,
++        &b,
++        vec![
++            noncall_exact_range(source, "$original(101)", "(101)"),
++            noncall_exact_range(source, "$alias(103)", "(103)"),
++        ],
++    )
++    .await;
++    assert_eq!(
++        edges.len(),
++        3,
++        "a copied scalar remains A; both names of the reference cell must reach B"
++    );
++    backend.shutdown().await.unwrap();
++}
++
++#[tokio::test]
++async fn stored_callable_byref_unknown_unset_and_compound_writes_cannot_reuse_old_origins() {
++    for (label, write, direct_mutator) in [
++        (
++            "typed-byref",
++            "mutationReplaceUnknown($stored, $unknown);",
++            true,
++        ),
++        (
++            "untyped-byref",
++            "mutationReplaceUntyped($stored, $unknown);",
++            true,
++        ),
++        ("unset", "unset($stored);", false),
++        ("compound", "$stored .= ' invalid';", false),
++    ] {
++        let backend = create_test_backend();
++        let uri = Url::parse(&format!("file:///stored-invalidation-{label}.php")).unwrap();
++        let source = [
++            "<?php\r\n",
++            "function mutationA(int $n): int { return $n; }\r\n",
++            "function mutationReplaceUnknown(string &$value, string $unknown): void { $value = $unknown; }\r\n",
++            "function mutationReplaceUntyped(&$value, string $unknown): void { $value = $unknown; }\r\n",
++            "function storedPositiveControl(): void {}\r\n",
++            "function mutationInvalidationHost(string $unknown): void {\r\n",
++            " storedPositiveControl(); $stored = 'mutationA'; /* café 🐘 */ $stored(201);\r\n ",
++            write,
++            " $stored(202);\r\n}\r\n",
++        ].concat();
++        open_php(&backend, &uri, &source).await;
++        let host = array_exact_root(&backend, &uri, &source, "mutationInvalidationHost").await;
++        let target = array_exact_root(&backend, &uri, &source, "mutationA").await;
++        let edges = stored_callable_observed_edges(&backend, &host, &source).await;
++        stored_callable_assert_edge(
++            &backend,
++            &host,
++            &edges,
++            &target,
++            vec![noncall_exact_range(&source, "$stored(201)", "(201)")],
++        )
++        .await;
++        let forbidden = noncall_exact_range(&source, "$stored(202)", "(202)");
++        assert!(
++            edges
++                .iter()
++                .all(|edge| !edge.from_ranges.contains(&forbidden)),
++            "{label}: unknown byref output, unset, and a string containing spaces cannot inherit an old callable target"
++        );
++        assert_eq!(edges.len(), if direct_mutator { 3 } else { 2 });
++        backend.shutdown().await.unwrap();
++    }
++}
++
++#[tokio::test]
++async fn stored_callable_array_selector_write_retargets_value_but_preserves_prior_copy() {
++    let backend = create_test_backend();
++    let uri = Url::parse("file:///stored-array-selector-mutation.php").unwrap();
++    let source = concat!(
++        "<?php\r\n",
++        "class MutationArrayTarget { public static function a(int $n): int { return $n; } public static function b(int $n): int { return $n; } }\r\n",
++        "function storedPositiveControl(): void {}\r\n",
++        "function mutationArrayHost(): void {\r\n",
++        " $stored = [MutationArrayTarget::class, 'a']; $copy = $stored;\r\n",
++        " $stored[1] = 'b'; /* café 🐘 */ $stored(301); $copy(302);\r\n",
++        " $broken = [MutationArrayTarget::class, 'a']; unset($broken[1]); $broken(303);\r\n",
++        " storedPositiveControl();\r\n}\r\n",
++    );
++    open_php(&backend, &uri, source).await;
++    let host = array_exact_root(&backend, &uri, source, "mutationArrayHost").await;
++    let a = anonymous_hierarchy_prepare(&backend, &uri, source, "a(int $n)").await;
++    let b = anonymous_hierarchy_prepare(&backend, &uri, source, "b(int $n)").await;
++    let edges = stored_callable_observed_edges(&backend, &host, source).await;
++    stored_callable_assert_edge(
++        &backend,
++        &host,
++        &edges,
++        &a,
++        vec![noncall_exact_range(source, "$copy(302)", "(302)")],
++    )
++    .await;
++    stored_callable_assert_edge(
++        &backend,
++        &host,
++        &edges,
++        &b,
++        vec![noncall_exact_range(source, "$stored(301)", "(301)")],
++    )
++    .await;
++    assert_eq!(
++        edges.len(),
++        3,
++        "known selector b must eventually resolve B, not be relabeled unknown; removed selector has no old A edge"
++    );
++    backend.shutdown().await.unwrap();
++}
++
++#[tokio::test]
++async fn stored_callable_branch_closures_keep_same_signature_distinct_body_origins() {
++    let backend = create_test_backend();
++    let uri = Url::parse("file:///stored-branch-same-signature.php").unwrap();
++    let source = concat!(
++        "<?php\r\n",
++        "function mutationA(int $n): int { return $n; }\r\n",
++        "function mutationB(int $n): int { return $n; }\r\n",
++        "function storedPositiveControl(): void {}\r\n",
++        "function mutationBranchHost(bool $flag): void {\r\n",
++        " $first = static function (int $n): int { return mutationA($n); };\r\n",
++        " $second = static function (int $n): int { return mutationB($n); };\r\n",
++        " $selected = $first; if ($flag) { $selected = $second; }\r\n",
++        " /* café 🐘 */ $selected(401); storedPositiveControl();\r\n}\r\n",
++    );
++    open_php(&backend, &uri, source).await;
++    let host = array_exact_root(&backend, &uri, source, "mutationBranchHost").await;
++    let first = anonymous_hierarchy_prepare(
++        &backend,
++        &uri,
++        source,
++        "function (int $n): int { return mutationA",
++    )
++    .await;
++    let second = anonymous_hierarchy_prepare(
++        &backend,
++        &uri,
++        source,
++        "function (int $n): int { return mutationB",
++    )
++    .await;
++    assert_ne!(first.selection_range, second.selection_range);
++    let edges = stored_callable_observed_edges(&backend, &host, source).await;
++    let site = noncall_exact_range(source, "$selected(401)", "(401)");
++    for (target, leaf, body_context) in [
++        (&first, "mutationA", "return mutationA($n)"),
++        (&second, "mutationB", "return mutationB($n)"),
++    ] {
++        stored_callable_assert_edge(&backend, &host, &edges, target, vec![site]).await;
++        let body = outgoing(&backend, target).await;
++        assert_eq!(body.len(), 1);
++        assert_eq!(body[0].to.name, leaf);
++        assert_eq!(
++            body[0].from_ranges,
++            [noncall_exact_range(source, body_context, leaf)]
++        );
++        array_exact_reverse(&backend, target, &body[0]).await;
++    }
++    assert_eq!(
++        edges.len(),
++        3,
++        "equal callable signatures do not merge distinct closure body identities"
++    );
++    backend.shutdown().await.unwrap();
++}
++
++#[tokio::test]
++async fn stored_callable_conditional_reference_cells_and_unset_keep_possible_targets() {
++    let backend = create_test_backend();
++    let uri = Url::parse("file:///stored-reference-branches.php").unwrap();
++    let source = concat!(
++        "<?php\r\n",
++        "function aliasChoiceA(int $n): void {} function aliasChoiceB(int $n): void {} function aliasChoiceC(int $n): void {}\r\n",
++        "function storedPositiveControl(): void {}\r\n",
++        "function aliasChoiceHost(bool $flag): void {\r\n",
++        " $left = 'aliasChoiceA'; $right = 'aliasChoiceB';\r\n",
++        " if ($flag) { $alias =& $left; } else { $alias =& $right; }\r\n",
++        " $alias = 'aliasChoiceC'; /* café 🐘 */ $left(801); $right(802); $alias(803);\r\n",
++        " $detached = 'aliasChoiceA'; $peer =& $detached; unset($peer); $peer = 'aliasChoiceB';\r\n",
++        " $detached(811); $peer(812); storedPositiveControl();\r\n}\r\n",
++    );
++    open_php(&backend, &uri, source).await;
++    let host = array_exact_root(&backend, &uri, source, "aliasChoiceHost").await;
++    let edges = stored_callable_observed_edges(&backend, &host, source).await;
++    for (name, sites) in [
++        (
++            "aliasChoiceA",
++            vec![("$left(801)", "(801)"), ("$detached(811)", "(811)")],
++        ),
++        (
++            "aliasChoiceB",
++            vec![("$right(802)", "(802)"), ("$peer(812)", "(812)")],
++        ),
++        (
++            "aliasChoiceC",
++            vec![
++                ("$left(801)", "(801)"),
++                ("$right(802)", "(802)"),
++                ("$alias(803)", "(803)"),
++            ],
++        ),
++    ] {
++        let target = array_exact_root(&backend, &uri, source, name).await;
++        stored_callable_assert_edge(
++            &backend,
++            &host,
++            &edges,
++            &target,
++            sites
++                .into_iter()
++                .map(|(context, token)| noncall_exact_range(source, context, token))
++                .collect(),
++        )
++        .await;
++    }
++    assert_eq!(edges.len(), 4);
++    backend.shutdown().await.unwrap();
++}
++
++#[tokio::test]
++async fn stored_callable_byref_mutation_retires_reference_peers_but_preserves_value_copy() {
++    let backend = create_test_backend();
++    let uri = Url::parse("file:///stored-reference-byref-output.php").unwrap();
++    let source = concat!(
++        "<?php\r\n",
++        "function aliasOutputA(int $n): void {} function storedPositiveControl(): void {}\r\n",
++        "function aliasOutputReplace(string &$value, string $unknown): void { $value = $unknown; }\r\n",
++        "function aliasOutputHost(string $unknown): void {\r\n",
++        " $left = 'aliasOutputA'; $copy = $left; $peer =& $left; $left(821);\r\n",
++        " aliasOutputReplace($peer, $unknown); $left(822); $peer(823); $copy(824);\r\n",
++        " storedPositiveControl();\r\n}\r\n",
++    );
++    open_php(&backend, &uri, source).await;
++    let host = array_exact_root(&backend, &uri, source, "aliasOutputHost").await;
++    let target = array_exact_root(&backend, &uri, source, "aliasOutputA").await;
++    let edges = stored_callable_observed_edges(&backend, &host, source).await;
++    stored_callable_assert_edge(
++        &backend,
++        &host,
++        &edges,
++        &target,
++        vec![
++            noncall_exact_range(source, "$left(821)", "(821)"),
++            noncall_exact_range(source, "$copy(824)", "(824)"),
++        ],
++    )
++    .await;
++    assert_eq!(edges.len(), 3);
++    backend.shutdown().await.unwrap();
++}
++
++#[tokio::test]
++async fn stored_callable_array_branch_mutation_preserves_correlated_receiver_pairs() {
++    let backend = create_test_backend();
++    let uri = Url::parse("file:///stored-array-branch-mutation.php").unwrap();
++    let source = concat!(
++        "<?php\r\n",
++        "class PairLeft { public static function initialLeft(int $n): void {} public static function initialRight(int $n): void {} public static function nextTarget(int $n): void {} }\r\n",
++        "class PairRight { public static function initialLeft(int $n): void {} public static function initialRight(int $n): void {} public static function nextTarget(int $n): void {} }\r\n",
++        "function storedPositiveControl(): void {}\r\n",
++        "function pairMutationHost(bool $flag): void {\r\n",
++        " $pair = [PairLeft::class, 'initialLeft']; if ($flag) { $pair = [PairRight::class, 'initialRight']; }\r\n",
++        " $copy = $pair; $pair[1] = 'nextTarget'; /* café 🐘 */ $pair(901); $copy(902);\r\n",
++        " storedPositiveControl();\r\n}\r\n",
++    );
++    open_php(&backend, &uri, source).await;
++    let host = array_exact_root(&backend, &uri, source, "pairMutationHost").await;
++    let edges = stored_callable_observed_edges(&backend, &host, source).await;
++    for (class, method, context, token) in [
++        ("PairLeft", "nextTarget", "$pair(901)", "(901)"),
++        ("PairRight", "nextTarget", "$pair(901)", "(901)"),
++        ("PairLeft", "initialLeft", "$copy(902)", "(902)"),
++        ("PairRight", "initialRight", "$copy(902)", "(902)"),
++    ] {
++        let declaration = source
++            .lines()
++            .find(|line| line.starts_with(&format!("class {class} {{")))
++            .unwrap();
++        let target = literal_callable_target(&backend, &uri, source, declaration, method).await;
++        stored_callable_assert_edge(
++            &backend,
++            &host,
++            &edges,
++            &target,
++            vec![noncall_exact_range(source, context, token)],
++        )
++        .await;
++    }
++    assert_eq!(
++        edges.len(),
++        5,
++        "branch pairs remain correlated before and after the selector write"
++    );
++    backend.shutdown().await.unwrap();
++}
++
++#[tokio::test]
++async fn stored_callable_captures_first_class_and_array_receiver_before_rebinding() {
++    let backend = create_test_backend();
++    let uri = Url::parse("file:///stored-captured-receiver.php").unwrap();
++    let source = concat!(
++        "<?php\r\n",
++        "class CapturedLeft { public function receiverTarget(int $n): void {} }\r\n",
++        "class CapturedRight { public function receiverTarget(int $n): void {} }\r\n",
++        "function storedPositiveControl(): void {}\r\n",
++        "function receiverCaptureHost(): void {\r\n",
++        " $receiver = new CapturedLeft(); $first = $receiver->receiverTarget(...);\r\n",
++        " $receiver = new CapturedRight(); $array = [$receiver, 'receiverTarget'];\r\n",
++        " $receiver = new CapturedLeft(); /* café 🐘 */ $first(1001); $array(1002);\r\n",
++        " storedPositiveControl();\r\n}\r\n",
++    );
++    open_php(&backend, &uri, source).await;
++    let host = array_exact_root(&backend, &uri, source, "receiverCaptureHost").await;
++    let edges = stored_callable_observed_edges(&backend, &host, source).await;
++    for (class, context, token) in [
++        ("CapturedLeft", "$first(1001)", "(1001)"),
++        ("CapturedRight", "$array(1002)", "(1002)"),
++    ] {
++        let declaration = source
++            .lines()
++            .find(|line| line.starts_with(&format!("class {class} {{")))
++            .unwrap();
++        let target =
++            literal_callable_target(&backend, &uri, source, declaration, "receiverTarget").await;
++        stored_callable_assert_edge(
++            &backend,
++            &host,
++            &edges,
++            &target,
++            vec![noncall_exact_range(source, context, token)],
++        )
++        .await;
++    }
++    assert_eq!(edges.len(), 3);
++    backend.shutdown().await.unwrap();
++}
++
++#[tokio::test]
++async fn stored_callable_loop_carried_closures_keep_first_and_later_iteration_targets() {
++    let backend = create_test_backend();
++    let uri = Url::parse("file:///stored-loop-carried-closure.php").unwrap();
++    let source = concat!(
++        "<?php\r\n",
++        "function loopValueA(int $n): int { return $n; } function loopValueB(int $n): int { return $n; }\r\n",
++        "function storedPositiveControl(): void {}\r\n",
++        "function loopValueHost(bool $flag): void {\r\n",
++        " $selected = static fn(int $n): int => loopValueA($n); $next = $selected;\r\n",
++        " while ($flag) { $selected(1101); $selected = $next; $next = static fn(int $n): int => loopValueB($n); }\r\n",
++        " storedPositiveControl();\r\n}\r\n",
++    );
++    open_php(&backend, &uri, source).await;
++    let host = array_exact_root(&backend, &uri, source, "loopValueHost").await;
++    let first =
++        anonymous_hierarchy_prepare(&backend, &uri, source, "fn(int $n): int => loopValueA").await;
++    let later =
++        anonymous_hierarchy_prepare(&backend, &uri, source, "fn(int $n): int => loopValueB").await;
++    let edges = stored_callable_observed_edges(&backend, &host, source).await;
++    let site = noncall_exact_range(source, "$selected(1101)", "(1101)");
++    for target in [&first, &later] {
++        stored_callable_assert_edge(&backend, &host, &edges, target, vec![site]).await;
++        assert_eq!(outgoing(&backend, target).await.len(), 1);
++    }
++    assert_eq!(edges.len(), 3);
++    backend.shutdown().await.unwrap();
++}

@@ -1,0 +1,617 @@
+--- a/src/completion/laravel_route_params.rs
++++ b/src/completion/laravel_route_params.rs
+@@ -9,7 +9,7 @@
+ 
+ use crate::Backend;
+ use crate::completion::source::code_context::CodeContext;
+-use crate::completion::source::helpers::enclosing_array_key_call;
++use crate::completion::source::helpers::split_trailing_ident;
+ use crate::text_position::{offset_to_position, position_to_offset};
+ use crate::virtual_members::laravel::route_uri_parameters;
+ 
+@@ -22,6 +22,8 @@
+     prefix: String,
+     /// Byte offset just after the opening quote of the key being typed.
+     content_start_offset: usize,
++    /// Replace the rest of a completed key too, avoiding duplicate suffixes.
++    content_end_offset: usize,
+ }
+ 
+ /// Detect the cursor inside a key of a route parameters array.
+@@ -40,7 +42,10 @@
+     code: &CodeContext<'_>,
+     route_role: Option<&crate::completion::laravel_route_calls::RouteCallRole<'_>>,
+ ) -> Option<RouteParamContext> {
+-    let (quote_pos, _) = code.open_string?;
++    let (quote_pos, quote) = code.open_string?;
++    if quote == '"' && content[quote_pos + 1..cursor_offset].contains('$') {
++        return None;
++    }
+ 
+     // The character before the key is `[` for the first key and `,` for the
+     // ones after it.
+@@ -48,33 +53,225 @@
+         return None;
+     }
+ 
+-    let call = enclosing_array_key_call(content, code)?;
+-    let receiver_is_call = call.before_callee.ends_with("::") || call.before_callee.ends_with("->");
+-    let names_a_route = if let Some(role) = route_role {
+-        role(call.callable).is_some()
++    let (array_open, paren_open) = code.nested_pair(b'[', b'(')?;
++    let callable = content[..paren_open].trim_end();
++    let (callee, before_callee) = split_trailing_ident(callable);
++    if callee.is_empty() {
++        return None;
++    }
++    let receiver_is_call =
++        before_callee.trim_end().ends_with("::") || before_callee.trim_end().ends_with("->");
++    let route_name_role = if let Some(role) = route_role {
++        role(callable)?
+     } else {
+-        match call.callee.as_str() {
++        match callee.to_ascii_lowercase().as_str() {
+             // `signedRoute()` / `temporarySignedRoute()` only exist on the `URL`
+             // facade and the URL generator, so the name alone identifies them.
+-            "signedroute" | "temporarysignedroute" => true,
++            "signedroute" | "temporarysignedroute" => "name",
+             // `route()` is the helper as well as a method on the `URL`, `Redirect`
+             // and `Response` facades and on the `redirect()`/`url()` helpers, all
+             // of which take the same `(name, parameters)` pair.
+-            "route" => true,
++            "route" => "name",
+             // `to_route()` is a helper function only.
+-            "to_route" => !receiver_is_call,
+-            _ => false,
++            "to_route" if !receiver_is_call => "route",
++            _ => return None,
+         }
+     };
+-    if !names_a_route {
+-        return None;
+-    }
++    let route_name = route_name_for_parameter_array(
++        content,
++        paren_open,
++        array_open,
++        cursor_offset,
++        route_name_role,
++        callee.eq_ignore_ascii_case("temporarySignedRoute"),
++    )?;
+ 
+     Some(RouteParamContext {
+-        route_name: call.name,
++        route_name,
+         prefix: content[quote_pos + 1..cursor_offset].to_string(),
+         content_start_offset: quote_pos + 1,
++        content_end_offset: route_key_edit_end(content, cursor_offset, quote as u8)?,
+     })
++}
++
++/// Bind literal route name and the active array to their actual argument roles.
++/// Unlike Artisan's shared array helper, Laravel route calls accept named and
++/// reordered arguments. Do not infer a route from dynamic names or an array
++/// occupying a different parameter slot.
++fn route_name_for_parameter_array(
++    content: &str,
++    paren_open: usize,
++    array_open: usize,
++    cursor_offset: usize,
++    route_name_role: &str,
++    temporary: bool,
++) -> Option<String> {
++    use crate::call_args::{split_named_text_arg, trim_argument_trivia};
++    use crate::text_scan::{ScanStep, find_matching_forward, scan_top_level};
++
++    const MAX_ROUTE_CALL_BYTES: usize = 64 * 1024;
++    let mut scan_end = paren_open
++        .saturating_add(MAX_ROUTE_CALL_BYTES)
++        .min(content.len());
++    while !content.is_char_boundary(scan_end) {
++        scan_end -= 1;
++    }
++    if cursor_offset > scan_end || (cursor_offset == scan_end && scan_end < content.len()) {
++        return None;
++    }
++    // The shared scanner is intentionally not heredoc-aware. Refuse ambiguous
++    // calls rather than treating punctuation in a heredoc/nowdoc as PHP code.
++    let bounded = content.get(paren_open..scan_end)?;
++    let end =
++        find_matching_forward(bounded, 0, b'(', b')').map_or(cursor_offset, |end| paren_open + end);
++    if content.get(paren_open..end)?.contains("<<<") {
++        return None;
++    }
++    let args_start = paren_open.checked_add(1)?;
++    if end < array_open || end > content.len() {
++        return None;
++    }
++    let args = content.get(args_start..end)?;
++    let target = array_open.checked_sub(args_start)?;
++    let mut start = 0;
++    let mut positional = 0;
++    let mut named_seen = false;
++    let mut route_name = None;
++    let mut parameters_seen = false;
++    let mut active_parameters = false;
++    let parameter_position = if temporary { 2 } else { 1 };
++    loop {
++        let remaining = &args[start..];
++        let end = scan_top_level(remaining.as_bytes(), |bytes, offset| {
++            if bytes[offset] == b',' {
++                ScanStep::Stop
++            } else {
++                ScanStep::Skip(1)
++            }
++        })
++        .map_or(args.len(), |offset| start + offset);
++        let argument = trim_argument_trivia(&args[start..end]);
++        if !argument.is_empty() {
++            let (name, value) = split_named_text_arg(argument);
++            let value = trim_argument_trivia(value);
++            let role = if let Some(name) = name {
++                named_seen = true;
++                if name == route_name_role {
++                    Some("route")
++                } else if name == "parameters" {
++                    Some("parameters")
++                } else {
++                    None
++                }
++            } else {
++                if named_seen || value.starts_with("...") {
++                    return None;
++                }
++                let role = if positional == 0 {
++                    Some("route")
++                } else if positional == parameter_position {
++                    Some("parameters")
++                } else {
++                    None
++                };
++                positional += 1;
++                role
++            };
++            if role == Some("route") {
++                if route_name.is_some() {
++                    return None;
++                }
++                route_name = Some(plain_route_name(value)?);
++            }
++            if role == Some("parameters") {
++                if parameters_seen {
++                    return None;
++                }
++                parameters_seen = true;
++                active_parameters = start <= target
++                    && target < end
++                    && std::ptr::eq(value.as_ptr(), content[array_open..].as_ptr());
++            }
++        }
++        if end == args.len() {
++            break;
++        }
++        start = end + 1;
++    }
++    active_parameters
++        .then_some(route_name?)
++        .filter(|name| !name.is_empty())
++}
++
++/// Extend through a plainly closed key only when the following token confirms
++/// that quote is the array key's end. Otherwise retain the old prefix edit.
++fn route_key_edit_end(content: &str, cursor_offset: usize, quote: u8) -> Option<usize> {
++    const MAX_KEY_SUFFIX_BYTES: usize = 4096;
++    let bytes = content.as_bytes();
++    let mut end = cursor_offset
++        .saturating_add(MAX_KEY_SUFFIX_BYTES)
++        .min(bytes.len());
++    while !content.is_char_boundary(end) {
++        end -= 1;
++    }
++    let preceding_slashes = bytes[..cursor_offset]
++        .iter()
++        .rev()
++        .take_while(|&&b| b == b'\\')
++        .count();
++    if preceding_slashes % 2 != 0 {
++        return None;
++    }
++    let mut pos = cursor_offset;
++    while pos < end {
++        match bytes[pos] {
++            b'\n' | b'\r' => return Some(cursor_offset),
++            b'$' if quote == b'"' => return None,
++            b'\\' => {
++                if quote == b'"' && bytes.get(pos + 1) == Some(&b'$') {
++                    return None;
++                }
++                pos = pos.saturating_add(2);
++            }
++            b if b == quote => {
++                let tail = crate::call_args::trim_argument_trivia(&content[pos + 1..end]);
++                if tail.starts_with("=>")
++                    || tail.starts_with(',')
++                    || tail.starts_with(']')
++                    || (end == bytes.len() && tail.is_empty())
++                {
++                    return Some(pos);
++                }
++                return Some(cursor_offset);
++            }
++            _ => pos += 1,
++        }
++    }
++    Some(cursor_offset)
++}
++
++/// Accept a complete plain PHP string literal, without dynamic interpolation.
++fn plain_route_name(value: &str) -> Option<String> {
++    let bytes = value.as_bytes();
++    let quote = *bytes.first()?;
++    if !matches!(quote, b'\'' | b'"') {
++        return None;
++    }
++    let mut pos = 1;
++    while pos < bytes.len() {
++        match bytes[pos] {
++            b'\\' => pos += 2,
++            b'$' if quote == b'"' => return None,
++            b if b == quote => {
++                if !crate::call_args::trim_argument_trivia(&value[pos + 1..]).is_empty() {
++                    return None;
++                }
++                return Some(value[1..pos].to_string());
++            }
++            _ => pos += 1,
++        }
++    }
++    None
+ }
+ 
+ impl Backend {
+@@ -125,7 +322,7 @@
+ 
+         let edit_range = Range {
+             start: offset_to_position(content, ctx.content_start_offset),
+-            end: position,
++            end: offset_to_position(content, ctx.content_end_offset),
+         };
+         let prefix_lower = ctx.prefix.to_lowercase();
+ 
+--- a/src/completion/laravel_route_params_tests.rs
++++ b/src/completion/laravel_route_params_tests.rs
+@@ -165,3 +165,220 @@
+         vec!["bakery".to_string()]
+     );
+ }
++
++#[test]
++fn named_route_parameter_call_handles_nested_arguments_and_comments() {
++    let content =
++        "<?php\nroute(absolute: fn() => [1, /* ), */ 2], name: 'users.show', parameters: ['us']);";
++    let ctx = ctx_at(content, "['us").expect("named role after nested expression");
++    assert_eq!(ctx.route_name, "users.show");
++    assert_eq!(ctx.prefix, "us");
++}
++
++#[test]
++fn named_route_parameter_call_refuses_heredoc_and_nowdoc_ambiguity() {
++    for body in [
++        "route(parameters: ['us'], absolute: <<<TXT\n), name: 'wrong'\nTXT, name: 'users.show');",
++        "route(parameters: ['us'], absolute: <<<'TXT'\n), name: 'wrong'\nTXT, name: 'users.show');",
++    ] {
++        let content = format!("<?php\n{body}\n");
++        assert!(ctx_at(&content, "['us").is_none(), "{body}");
++    }
++}
++
++#[test]
++fn named_route_parameter_call_refuses_oversized_unfinished_call() {
++    let content = format!(
++        "<?php\nroute(name: 'users.show', parameters: [/* {} */ 'us",
++        "x".repeat(70_000)
++    );
++    assert!(ctx_at(&content, "*/ 'us").is_none());
++}
++
++#[test]
++fn route_parameter_replaces_entire_existing_key_suffix() {
++    let backend =
++        backend_with_routes("<?php Route::get('/users/{user}', 'show')->name('users.show');");
++    let content = "<?php\nroute(name: 'users.show', parameters: ['user' => 1]);";
++    let cursor = content.find("['us").unwrap() + "['us".len();
++    let position = crate::text_position::offset_to_position(content, cursor);
++    let code = crate::completion::source::code_context::code_context_at(content, cursor).unwrap();
++    let Some(CompletionResponse::Array(items)) =
++        backend.try_route_param_completion(content, position, &code)
++    else {
++        panic!("parameter completion expected");
++    };
++    let item = items.into_iter().find(|item| item.label == "user").unwrap();
++    let Some(CompletionTextEdit::Edit(edit)) = item.text_edit else {
++        panic!("text edit")
++    };
++    let start = crate::text_position::position_to_offset(content, edit.range.start) as usize;
++    let end = crate::text_position::position_to_offset(content, edit.range.end) as usize;
++    let updated = format!("{}{}{}", &content[..start], edit.new_text, &content[end..]);
++    assert_eq!(updated, content);
++}
++
++#[test]
++fn named_redirect_route_parameter_role_uses_route_not_name() {
++    for callable in ["redirect()->route", "response()->redirectToRoute"] {
++        let content = format!("<?php\n{callable}(parameters: ['us'], route: 'users.show');");
++        let offset = content.find("['us").unwrap() + "['us".len();
++        let code =
++            crate::completion::source::code_context::code_context_at(&content, offset).unwrap();
++        let role = |_: &str| Some("route");
++        let ctx = detect_context_inner(&content, offset, &code, Some(&role)).expect("route role");
++        assert_eq!(ctx.route_name, "users.show");
++    }
++}
++
++#[test]
++fn named_route_parameter_uses_real_receiver_identity_and_imports() {
++    for call in [
++        "link_to(parameters: ['us'], name: 'users.show')",
++        "Link::route(parameters: ['us'], name: 'users.show')",
++        "redirect()->route(parameters: ['us'], route: 'users.show')",
++        "response()->redirectToRoute(parameters: ['us'], route: 'users.show')",
++    ] {
++        let backend =
++            backend_with_routes("<?php Route::get('/users/{user}', 'show')->name('users.show');");
++        let content = format!(
++            "<?php\nnamespace App; use function route as link_to; use Illuminate\\Support\\Facades\\URL as Link; {call};"
++        );
++        let cursor = content.find("['us").unwrap() + "['us".len();
++        let code =
++            crate::completion::source::code_context::code_context_at(&content, cursor).unwrap();
++        let file_ctx = backend.source_file_context(&content);
++        let result = backend.try_route_param_completion_in_file(
++            &content,
++            crate::text_position::offset_to_position(&content, cursor),
++            &code,
++            &file_ctx,
++        );
++        let Some(CompletionResponse::Array(items)) = result else {
++            panic!("{call}")
++        };
++        assert!(items.iter().any(|item| item.label == "user"), "{call}");
++    }
++}
++
++#[test]
++fn named_route_parameter_rejects_shadowed_local_helper_and_user_method() {
++    for call in [
++        "route(parameters: ['us'], name: 'users.show')",
++        "$fake->route(parameters: ['us'], name: 'users.show')",
++    ] {
++        let backend =
++            backend_with_routes("<?php Route::get('/users/{user}', 'show')->name('users.show');");
++        let content = format!(
++            "<?php\nnamespace App; function route($name, $parameters) {{}} class Fake {{ function route($name, $parameters) {{}} }} $fake = new Fake(); {call};"
++        );
++        backend.update_ast("file:///app/Fake.php", &content);
++        let cursor = content.find("['us").unwrap() + "['us".len();
++        let code =
++            crate::completion::source::code_context::code_context_at(&content, cursor).unwrap();
++        let file_ctx = backend.source_file_context(&content);
++        let result = backend.try_route_param_completion_in_file(
++            &content,
++            crate::text_position::offset_to_position(&content, cursor),
++            &code,
++            &file_ctx,
++        );
++        assert!(result.is_none(), "{call}");
++    }
++}
++
++#[test]
++fn unfinished_route_parameter_key_at_eof_remains_available() {
++    for content in [
++        "<?php\nroute('users.show', ['us",
++        "<?php\nroute(name: 'users.show', parameters: ['us",
++    ] {
++        let ctx = ctx_at(content, "['us").expect("unfinished EOF key");
++        assert_eq!(ctx.route_name, "users.show");
++    }
++}
++
++#[test]
++fn route_parameter_mid_key_edit_handles_non_bmp_crlf_and_escaped_suffix() {
++    let backend =
++        backend_with_routes("<?php Route::get('/users/{user}', 'show')->name('users.show');");
++    for (content, expected) in [
++        (
++            "<?php\r\n/* 🐘 */ route(name: 'users.show', parameters: ['user' => 1]);",
++            "<?php\r\n/* 🐘 */ route(name: 'users.show', parameters: ['user' => 1]);",
++        ),
++        (
++            "<?php\nroute(name: 'users.show', parameters: ['us\\'er' => 1]);",
++            "<?php\nroute(name: 'users.show', parameters: ['user' => 1]);",
++        ),
++    ] {
++        let cursor = content.find("['us").unwrap() + "['us".len();
++        let code =
++            crate::completion::source::code_context::code_context_at(content, cursor).unwrap();
++        let pos = crate::text_position::offset_to_position(content, cursor);
++        let Some(CompletionResponse::Array(items)) =
++            backend.try_route_param_completion(content, pos, &code)
++        else {
++            panic!("completion")
++        };
++        let item = items.into_iter().find(|item| item.label == "user").unwrap();
++        let Some(CompletionTextEdit::Edit(edit)) = item.text_edit else {
++            panic!("edit")
++        };
++        let start = crate::text_position::position_to_offset(content, edit.range.start) as usize;
++        let end = crate::text_position::position_to_offset(content, edit.range.end) as usize;
++        assert_eq!(
++            format!("{}{}{}", &content[..start], edit.new_text, &content[end..]),
++            expected
++        );
++    }
++}
++
++#[test]
++fn route_parameter_completion_refuses_dynamic_double_quoted_keys() {
++    for key in ["us$var", "us${var}", "us{$var}", "us\\$var"] {
++        let content = format!("<?php route('users.show', [\"{key}\" => 1]);");
++        assert!(ctx_at(&content, "[\"us").is_none(), "{key}");
++    }
++}
++
++#[test]
++fn route_parameter_incomplete_or_oversized_suffix_keeps_prefix_only_edit() {
++    for content in [
++        "<?php route('users.show', ['us_more".to_owned(),
++        format!(
++            "<?php route('users.show', ['us{}' => 1]);",
++            "x".repeat(4097)
++        ),
++    ] {
++        let cursor = content.find("['us").unwrap() + "['us".len();
++        let ctx = ctx_at(&content, "['us").expect("prefix completion");
++        assert_eq!(ctx.content_end_offset, cursor);
++    }
++}
++
++#[test]
++fn unclosed_key_before_newline_keeps_later_document_bytes() {
++    let backend =
++        backend_with_routes("<?php Route::get('/users/{user}', 'show')->name('users.show');");
++    let content = "<?php\nroute('users.show', ['us\n// keep next line\n";
++    let cursor = content.find("['us").unwrap() + "['us".len();
++    let code = crate::completion::source::code_context::code_context_at(content, cursor).unwrap();
++    let position = crate::text_position::offset_to_position(content, cursor);
++    let Some(CompletionResponse::Array(items)) =
++        backend.try_route_param_completion(content, position, &code)
++    else {
++        panic!("completion")
++    };
++    let item = items.into_iter().find(|item| item.label == "user").unwrap();
++    let Some(CompletionTextEdit::Edit(edit)) = item.text_edit else {
++        panic!("edit")
++    };
++    let start = crate::text_position::position_to_offset(content, edit.range.start) as usize;
++    let end = crate::text_position::position_to_offset(content, edit.range.end) as usize;
++    assert_eq!(end, cursor);
++    assert_eq!(
++        format!("{}{}{}", &content[..start], edit.new_text, &content[end..]),
++        "<?php\nroute('users.show', ['user\n// keep next line\n"
++    );
++}
+--- a/src/completion/source/helpers.rs
++++ b/src/completion/source/helpers.rs
+@@ -37,8 +37,6 @@
+ /// Recovered from `foo('name', ['key|' => …])`-shaped source text by
+ /// [`enclosing_array_key_call`].
+ pub(crate) struct ArrayKeyCall<'a> {
+-    /// Full source prefix ending at the callable, before its opening parenthesis.
+-    pub callable: &'a str,
+     /// The call's first argument, which must be a string literal — the name
+     /// the keys belong to (an Artisan command, a route, …).
+     pub name: String,
+@@ -72,7 +70,6 @@
+     }
+ 
+     Some(ArrayKeyCall {
+-        callable: content[..paren_open].trim_end(),
+         name,
+         callee: callee.to_ascii_lowercase(),
+         before_callee: before_callee.trim_end(),
+--- a/tests/integration/main.rs
++++ b/tests/integration/main.rs
+@@ -312,3 +312,5 @@
+ mod structural_search;
+ 
+ mod index_warning;
++
++mod laravel_route_named_parameters;
+--- /dev/null
++++ b/tests/integration/laravel_route_named_parameters.rs
+@@ -0,0 +1,84 @@
++//! Named/reordered Laravel route parameter array completion regressions.
++use crate::common::{
++    LARAVEL_SRC_COMPOSER, create_initialized_psr4_workspace, open_php_file, position_after,
++    response_labels,
++};
++use tower_lsp::{LanguageServer, lsp_types::*};
++
++const ROUTES: &str = "<?php use Illuminate\\Support\\Facades\\Route; Route::get('/users/{user}/posts/{post}', 'show')->name('users.posts.show');";
++
++async fn completion_after(body: &str, needle: &str) -> Option<CompletionResponse> {
++    let source = format!(
++        "<?php\nnamespace App;\nuse Illuminate\\Support\\Facades\\URL;\nuse function route as link_to;\nclass Runner {{ function go() {{ {body} }} }}"
++    );
++    let (backend, _dir, _) = create_initialized_psr4_workspace(
++        LARAVEL_SRC_COMPOSER,
++        &[("routes/web.php", ROUTES), ("src/Runner.php", &source)],
++        "routes/web.php",
++    )
++    .await;
++    let uri = open_php_file(&backend, "src/Runner.php").await;
++    backend
++        .completion(CompletionParams {
++            text_document_position: TextDocumentPositionParams {
++                text_document: TextDocumentIdentifier { uri },
++                position: position_after(&source, needle),
++            },
++            work_done_progress_params: WorkDoneProgressParams::default(),
++            partial_result_params: PartialResultParams::default(),
++            context: None,
++        })
++        .await
++        .unwrap()
++}
++
++#[tokio::test]
++async fn named_and_reordered_route_arguments_complete_parameter_keys() {
++    for body in [
++        "route(name: 'users.posts.show', parameters: ['us']);",
++        "route(parameters: ['us'], name: 'users.posts.show');",
++        "link_to(parameters: ['us'], name: 'users.posts.show');",
++        "to_route(parameters: ['us'], route: 'users.posts.show');",
++        "URL::temporarySignedRoute(parameters: ['us'], expiration: now(), name: 'users.posts.show');",
++    ] {
++        let labels = response_labels(completion_after(body, "['us").await);
++        assert!(labels.contains(&"user".to_owned()), "{body}: {labels:?}");
++    }
++}
++
++#[tokio::test]
++async fn unrelated_arguments_and_unrelated_methods_do_not_inherit_route_keys() {
++    for body in [
++        "route('users.posts.show', [], ['us']);",
++        "URL::temporarySignedRoute('users.posts.show', ['us'], []);",
++        "$custom->route(name: 'users.posts.show', parameters: ['us']);",
++        "route(name: $dynamic, parameters: ['us']);",
++        "route(name: 'users.posts.show', parameters: nested(['us']));",
++    ] {
++        let labels = response_labels(completion_after(body, "['us").await);
++        assert!(!labels.contains(&"user".to_owned()), "{body}: {labels:?}");
++    }
++}
++
++#[tokio::test]
++async fn named_route_edit_range_tracks_utf16_after_unicode() {
++    let body = "/* 🐘 */ route(parameters: ['us'], name: 'users.posts.show');";
++    let response = completion_after(body, "['us").await.expect("completion");
++    let items = match response {
++        CompletionResponse::Array(items) => items,
++        CompletionResponse::List(list) => list.items,
++    };
++    let user = items
++        .into_iter()
++        .find(|item| item.label == "user")
++        .expect("user parameter");
++    let Some(CompletionTextEdit::Edit(edit)) = user.text_edit else {
++        panic!("plain text edit expected")
++    };
++    let source = format!(
++        "<?php\nnamespace App;\nuse Illuminate\\Support\\Facades\\URL;\nuse function route as link_to;\nclass Runner {{ function go() {{ {body} }} }}"
++    );
++    assert_eq!(edit.range.start, position_after(&source, "['"));
++    assert_eq!(edit.range.end, position_after(&source, "['us"));
++    assert_eq!(edit.new_text, "user");
++}

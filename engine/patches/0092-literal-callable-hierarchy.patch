@@ -1,0 +1,1153 @@
+diff --git a/docs/CHANGELOG.md b/docs/CHANGELOG.md
+index 36bb965..8060f48 100644
+--- a/docs/CHANGELOG.md
++++ b/docs/CHANGELOG.md
+@@ -15,6 +15,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
+ 
+ ## [Unreleased]
+ 
++- **Follow literal callable strings in call hierarchy.** Direct function and static-method strings retain their runtime target and exact invocation site, including deprecated public trait calls. Ordinary class calls outside a class now preserve the enclosing namespace when a global class has the same short name. Contributed by PHP Workbench downstream.
++
+ - **Follow quoted method selectors.** Navigation, references and call hierarchy recognize fixed string method names. Rename includes escaped names while preserving quotes and refuses references whose source changed. Contributed by PHP Workbench downstream.
+ 
+ - **Follow immediately invoked objects in call hierarchy.** Construction and invocation retain separate caller sites and navigate to the concrete method, including inherited and trait implementations. Creating a callable remains distinct from invoking it. Contributed by PHP Workbench downstream.
+diff --git a/examples/php/definition.php b/examples/php/definition.php
+index 61b83eb..0ebd4c6 100644
+--- a/examples/php/definition.php
++++ b/examples/php/definition.php
+@@ -451,3 +451,20 @@ function literalMethodNavigation(GtdTarget $target): void
+     $target->{(b'label')}();
+     $callback = $target->{B"\x6cabel"}(...);
+ }
++
++// Try: Show Callees on literalStringNavigation. Literal runtime callable
++// strings keep their exact namespace instead of using this file's imports.
++// The stored callable creation below adds no invocation edge.
++class LiteralCallableNavigationTarget
++{
++    public static function ping(): void
++    {
++        gtdHelper();
++    }
++}
++function literalStringNavigation(): void
++{
++    ('Demo\gtdHelper')();
++    ('Demo\LiteralCallableNavigationTarget::ping')();
++    $created = ('Demo\gtdHelper')(...);
++}
+diff --git a/src/call_hierarchy.rs b/src/call_hierarchy.rs
+index a630082..960b0da 100644
+--- a/src/call_hierarchy.rs
++++ b/src/call_hierarchy.rs
+@@ -22,7 +22,8 @@ use tower_lsp::lsp_types::{
+ use crate::Backend;
+ use crate::symbol_map::{
+     AnonymousCallable, AnonymousClassConstruction, CallExecutionOwner, ClassRefContext,
+-    ImmediateObjectInvocation, ImmediateObjectReceiver, SymbolKind, SymbolMap, SymbolSpan,
++    ImmediateObjectInvocation, ImmediateObjectReceiver, LiteralCallableInvocation, SymbolKind,
++    SymbolMap, SymbolSpan,
+ };
+ use crate::text_position::{byte_range_to_lsp_range, offset_to_position, position_to_offset};
+ use crate::types::{ClassInfo, FunctionInfo, MethodInfo};
+@@ -316,6 +317,55 @@ impl Backend {
+             }
+         }
+ 
++        // Generic references intentionally do not interpret runtime string names.
++        // Only callable targets can match these records; ordinary fields never scan.
++        let literal_target = target.item.data.as_ref().is_some_and(|data| {
++            data.get("function").is_some()
++                || data
++                    .get("owner")
++                    .and_then(|owner| owner.as_str())
++                    .and_then(|owner| self.find_or_load_class(owner))
++                    .is_some_and(|owner| {
++                        data.get("method")
++                            .and_then(|method| method.as_str())
++                            .and_then(|method| owner.get_method(method))
++                            .is_some_and(|method| method.is_static)
++                    })
++        });
++        if literal_target {
++            for (uri, _) in self
++                .user_file_symbol_maps()
++                .into_iter()
++                .filter(|(_, map)| !map.literal_callable_invocations.is_empty())
++            {
++                let Some((content, map, Some(hash))) = self.cached_file(&mut cache, &uri) else {
++                    continue;
++                };
++                for site in &map.literal_callable_invocations {
++                    let Some(callee) = self.literal_callable(&mut cache, &uri, site) else {
++                        continue;
++                    };
++                    if php_item_key(&callee.item) != php_item_key(&target.item) {
++                        continue;
++                    }
++                    let Some(caller) =
++                        self.literal_callable_caller(&mut cache, &uri, &content, &map, &hash, site)
++                    else {
++                        continue;
++                    };
++                    let range = byte_range_to_lsp_range(
++                        &content,
++                        site.invocation_start as usize,
++                        site.invocation_end as usize,
++                    );
++                    grouped
++                        .entry(php_item_key(&caller.item))
++                        .and_modify(|(_, ranges)| push_unique_range(ranges, range))
++                        .or_insert_with(|| (caller.item, vec![range]));
++                }
++            }
++        }
++
+         let mut calls: Vec<_> = grouped
+             .into_values()
+             .map(|(mut from, mut from_ranges)| {
+@@ -500,6 +550,36 @@ impl Backend {
+             }
+         }
+ 
++        if let Some(hash) = source_hash.as_ref() {
++            for site in &symbol_map.literal_callable_invocations {
++                let Some(caller) = self.literal_callable_caller(
++                    &mut cache,
++                    uri,
++                    &content,
++                    &symbol_map,
++                    hash,
++                    site,
++                ) else {
++                    continue;
++                };
++                if php_item_key(&caller.item) != php_item_key(&callable.item) {
++                    continue;
++                }
++                let Some(callee) = self.literal_callable(&mut cache, uri, site) else {
++                    continue;
++                };
++                let range = byte_range_to_lsp_range(
++                    &content,
++                    site.invocation_start as usize,
++                    site.invocation_end as usize,
++                );
++                grouped
++                    .entry(php_item_key(&callee.item))
++                    .and_modify(|(_, ranges)| push_unique_range(ranges, range))
++                    .or_insert_with(|| (callee.item, vec![range]));
++            }
++        }
++
+         let mut calls: Vec<_> = grouped
+             .into_values()
+             .map(|(mut to, mut from_ranges)| {
+@@ -688,6 +768,7 @@ impl Backend {
+             || !symbol_map.keyword_constructor_spans.is_empty()
+             || !symbol_map.anonymous_class_constructions.is_empty()
+             || !symbol_map.immediate_object_invocations.is_empty()
++            || !symbol_map.literal_callable_invocations.is_empty()
+             || !symbol_map.literal_method_selectors.is_empty())
+             && source_hash.is_none()
+         {
+@@ -1026,6 +1107,122 @@ impl Backend {
+         )
+     }
+ 
++    fn literal_callable_caller(
++        &self,
++        cache: &mut FileCache,
++        uri: &str,
++        content: &str,
++        map: &SymbolMap,
++        hash: &[u8; 32],
++        site: &LiteralCallableInvocation,
++    ) -> Option<PhpCallable> {
++        self.syntactic_call_site_caller(
++            cache,
++            uri,
++            content,
++            map,
++            hash,
++            SyntacticCallSite {
++                start: site.invocation_start,
++                end: site.invocation_end,
++                scope: site.invoking_scope_start,
++            },
++        )
++    }
++
++    /// Runtime string names are absolute, including bare names inside namespaces.
++    fn literal_callable(
++        &self,
++        cache: &mut FileCache,
++        uri: &str,
++        site: &LiteralCallableInvocation,
++    ) -> Option<PhpCallable> {
++        let target = site.target.strip_prefix('\\').unwrap_or(&site.target);
++        let Some((class_name, method_name)) = target.split_once("::") else {
++            self.find_or_load_function(&[target])?;
++            let (fqn, owner_uri, function) = {
++                let functions = self.symbols.global_functions.read();
++                let (fqn, (uri, function)) = functions.get_key_value(target)?;
++                (fqn.to_owned(), uri.clone(), function.clone())
++            };
++            let (content, map, _) = self.cached_file(cache, &owner_uri)?;
++            return function_callable_at(
++                &owner_uri,
++                &content,
++                &map,
++                &fqn,
++                &function,
++                function.name_offset,
++            );
++        };
++        let class = self.find_or_load_class(class_name)?;
++        // No container bindings, lexical imports, or guessed trait consumers.
++        if !class.fqn().eq_ignore_ascii_case(class_name)
++            || !matches!(
++                class.kind,
++                crate::types::ClassLikeKind::Class
++                    | crate::types::ClassLikeKind::Enum
++                    | crate::types::ClassLikeKind::Trait
++            )
++        {
++            return None;
++        }
++        let loader = |name: &str| self.find_or_load_class(name);
++        let crate::inheritance::ancestry::MethodOrigin::Known { method, .. } =
++            crate::inheritance::ancestry::resolve_concrete_method_origin(
++                &class,
++                method_name,
++                &loader,
++            )
++        else {
++            return None;
++        };
++        if !method.is_static || method.is_abstract {
++            return None;
++        }
++        let effective = Arc::new(crate::inheritance::resolve_class_with_inheritance(
++            &class, &loader,
++        ));
++        // Direct public trait calls still execute with a PHP deprecation.
++        // Nonpublic trait bodies can run in the trait or a consuming class;
++        // this source-only node does not establish that runtime scope.
++        if class.kind == crate::types::ClassLikeKind::Trait
++            && effective
++                .get_method(method_name)
++                .is_none_or(|method| method.visibility != crate::types::Visibility::Public)
++        {
++            return None;
++        }
++        let classes = self
++            .symbols
++            .uri_classes_index
++            .read()
++            .get(uri)
++            .cloned()
++            .unwrap_or_default();
++        let lexical = crate::class_lookup::find_class_at_offset(&classes, site.invocation_start);
++        // The visibility helper intentionally treats a trait consumer as unknown.
++        if lexical.is_some_and(|scope| scope.kind == crate::types::ClassLikeKind::Trait)
++            && effective
++                .get_method(method_name)
++                .is_none_or(|method| method.visibility != crate::types::Visibility::Public)
++        {
++            return None;
++        }
++        if matches!(
++            crate::diagnostics::member_visibility::literal_static_access_verdict(
++                &effective,
++                method_name,
++                lexical,
++                &loader,
++            ),
++            crate::diagnostics::member_visibility::MemberAccessVerdict::Inaccessible(_)
++        ) {
++            return None;
++        }
++        self.concrete_method_callable(cache, uri, &class, method_name, false)
++    }
++
+     fn immediate_object_callable(
+         &self,
+         cache: &mut FileCache,
+@@ -1207,6 +1404,7 @@ impl Backend {
+                 || !symbol_map.keyword_constructor_spans.is_empty()
+                 || !symbol_map.anonymous_class_constructions.is_empty()
+                 || !symbol_map.immediate_object_invocations.is_empty()
++                || !symbol_map.literal_callable_invocations.is_empty()
+                 || !symbol_map.literal_method_selectors.is_empty())
+                 && source_hash.is_none()
+             {
+diff --git a/src/diagnostics/member_visibility.rs b/src/diagnostics/member_visibility.rs
+index 6be77bb..7fe0a15 100644
+--- a/src/diagnostics/member_visibility.rs
++++ b/src/diagnostics/member_visibility.rs
+@@ -206,6 +206,26 @@ pub(crate) fn constructor_access_verdict(
+     )
+ }
+ 
++/// Fixed runtime static calls share visibility rules without magic fallback.
++/// Existence/staticness are proved separately by concrete method resolution.
++pub(crate) fn literal_static_access_verdict(
++    merged: &Arc<ClassInfo>,
++    method: &str,
++    current_class: Option<&ClassInfo>,
++    class_loader: &dyn Fn(&str) -> Option<Arc<ClassInfo>>,
++) -> MemberAccessVerdict {
++    member_access_verdict_inner(
++        std::slice::from_ref(merged),
++        method,
++        true,
++        true,
++        current_class,
++        false,
++        class_loader,
++        false,
++    )
++}
++
+ // Keep policy centralized rather than duplicate trait/private-ancestor rules.
+ #[allow(clippy::too_many_arguments)]
+ fn member_access_verdict_inner(
+diff --git a/src/references/member_scope.rs b/src/references/member_scope.rs
+index 07f753a..ba42f7c 100644
+--- a/src/references/member_scope.rs
++++ b/src/references/member_scope.rs
+@@ -204,7 +204,19 @@ impl Backend {
+     ) -> Vec<String> {
+         match self.resolve_subject_type_at(subject_text, is_static, ctx, access_offset, content) {
+             Some(php_type) => {
+-                self.class_names_to_fqns(php_type.top_level_class_names(), ctx, access_offset)
++                let names = php_type.top_level_class_names();
++                let subject = subject_text.trim();
++                // These branches in resolve_subject_type already return canonical
++                // declaration FQNs. A slash-free global name must not pass through
++                // namespace/import resolution a second time (e.g. an imported
++                // alias resolving to a global class inside a namespace).
++                if matches!(subject, "$this" | "self" | "static" | "parent")
++                    || (is_static && !subject.starts_with('$'))
++                {
++                    names.into_iter().map(|name| normalize_fqn(&name)).collect()
++                } else {
++                    self.class_names_to_fqns(names, ctx, access_offset)
++                }
+             }
+             None => self.resolve_static_laravel_builder_subject_to_fqns(
+                 subject_text,
+diff --git a/src/symbol_map/extraction/expressions/calls.rs b/src/symbol_map/extraction/expressions/calls.rs
+index 4770dc2..c433127 100644
+--- a/src/symbol_map/extraction/expressions/calls.rs
++++ b/src/symbol_map/extraction/expressions/calls.rs
+@@ -65,6 +65,25 @@ fn known_method_selector<'a>(
+     Some(KnownMethodSelector { name, start, end })
+ }
+ 
++/// Accept only names PHP declarations can spell, with one optional root slash.
++/// Do not normalize malformed runtime strings into existing symbols.
++fn valid_literal_callable_target(target: &str) -> bool {
++    fn identifier(name: &str) -> bool {
++        let mut bytes = name.bytes();
++        let Some(first) = bytes.next() else {
++            return false;
++        };
++        (first == b'_' || first.is_ascii_alphabetic() || first >= 0x80)
++            && bytes.all(|b| b == b'_' || b.is_ascii_alphanumeric() || b >= 0x80)
++    }
++    let target = target.strip_prefix('\\').unwrap_or(target);
++    let (name, method) = match target.split_once("::") {
++        Some((name, method)) => (name, Some(method)),
++        None => (target, None),
++    };
++    name.split('\\').all(identifier) && method.is_none_or(identifier)
++}
++
+ // ─── Instantiation: `new Foo(...)` ──────────────────────────────────────────
+ 
+ pub(super) fn extract_instantiation_expr<'a>(
+@@ -343,6 +362,20 @@ fn extract_call<'a>(
+             while let Expression::Parenthesized(parenthesized) = literal {
+                 literal = parenthesized.expression;
+             }
++            // A fixed runtime callable string does not use the lexical use-map.
++            // PartialApplication has its own AST path and never enters here.
++            if let Expression::Literal(literal::Literal::String(string)) = literal
++                && let Some(target) = string.value.and_then(literal_bytes_to_str)
++                && valid_literal_callable_target(target)
++            {
++                ctx.literal_callable_invocations
++                    .push(LiteralCallableInvocation {
++                        target: crate::atom::atom(target),
++                        invoking_scope_start: scope_start,
++                        invocation_start: func_call.argument_list.left_parenthesis.start.offset,
++                        invocation_end: func_call.argument_list.right_parenthesis.end.offset,
++                    });
++            }
+             let object_receiver = match literal {
+                 Expression::Instantiation(inst) => match inst.class {
+                     Expression::Identifier(_)
+diff --git a/src/symbol_map/extraction/mod.rs b/src/symbol_map/extraction/mod.rs
+index 143eb5c..649a457 100644
+--- a/src/symbol_map/extraction/mod.rs
++++ b/src/symbol_map/extraction/mod.rs
+@@ -14,9 +14,10 @@ use super::docblock::{
+ use super::{
+     AnonymousCallable, AnonymousCallableKind, AnonymousClassConstruction, AnonymousInvocation,
+     CallExecutionOwner, CallExecutionRegion, CallSite, ClassRefContext, DocblockMemberRef,
+-    ImmediateObjectInvocation, ImmediateObjectReceiver, LiteralMethodSelector,
+-    SelfStaticParentKind, SubjectText, SymbolKind, SymbolMap, SymbolSpan, TemplateParamDef,
+-    UntypedClosureSite, VarDefKind, VarDefSite, ViewReceiverClass, ViewReceiverSite,
++    ImmediateObjectInvocation, ImmediateObjectReceiver, LiteralCallableInvocation,
++    LiteralMethodSelector, SelfStaticParentKind, SubjectText, SymbolKind, SymbolMap, SymbolSpan,
++    TemplateParamDef, UntypedClosureSite, VarDefKind, VarDefSite, ViewReceiverClass,
++    ViewReceiverSite,
+ };
+ use crate::atom::{bytes_to_str, literal_bytes_to_str};
+ use crate::names::OwnedResolvedNames;
+@@ -44,6 +45,7 @@ struct ExtractionCtx<'a> {
+     anonymous_invocations: Vec<AnonymousInvocation>,
+     anonymous_class_constructions: Vec<AnonymousClassConstruction>,
+     immediate_object_invocations: Vec<ImmediateObjectInvocation>,
++    literal_callable_invocations: Vec<LiteralCallableInvocation>,
+     literal_method_selectors: Vec<LiteralMethodSelector>,
+     non_invoked_callable_spans: Vec<(u32, u32)>,
+     keyword_constructor_spans: Vec<(u32, u32)>,
+@@ -230,6 +232,7 @@ fn extract_symbol_map_inner(
+         anonymous_invocations: Vec::new(),
+         anonymous_class_constructions: Vec::new(),
+         immediate_object_invocations: Vec::new(),
++        literal_callable_invocations: Vec::new(),
+         literal_method_selectors: Vec::new(),
+         non_invoked_callable_spans: Vec::new(),
+         keyword_constructor_spans: Vec::new(),
+@@ -388,6 +391,7 @@ fn extract_symbol_map_inner(
+         anonymous_invocations: ctx.anonymous_invocations,
+         anonymous_class_constructions: ctx.anonymous_class_constructions,
+         immediate_object_invocations: ctx.immediate_object_invocations,
++        literal_callable_invocations: ctx.literal_callable_invocations,
+         literal_method_selectors: ctx.literal_method_selectors,
+         non_invoked_callable_spans: ctx.non_invoked_callable_spans,
+         keyword_constructor_spans: ctx.keyword_constructor_spans,
+diff --git a/src/symbol_map/mod.rs b/src/symbol_map/mod.rs
+index aca1c99..a694f95 100644
+--- a/src/symbol_map/mod.rs
++++ b/src/symbol_map/mod.rs
+@@ -1084,6 +1084,17 @@ pub(crate) struct ImmediateObjectInvocation {
+     pub invocation_end: u32,
+ }
+ 
++/// A fixed scalar callable string from an actual Call::Function AST node.
++/// Names are runtime FQNs, independent of lexical namespace/import aliases.
++#[derive(Debug, Clone, Copy)]
++pub(crate) struct LiteralCallableInvocation {
++    pub target: crate::atom::Atom,
++    pub invoking_scope_start: u32,
++    /// The actual invocation's argument list, not the quoted target text.
++    pub invocation_start: u32,
++    pub invocation_end: u32,
++}
++
+ /// Exact AST method-selector string role, with decoded name and raw source receipt.
+ #[derive(Debug, Clone, PartialEq, Eq)]
+ pub(crate) struct LiteralMethodSelector {
+@@ -1182,6 +1193,8 @@ pub(crate) struct SymbolMap {
+     pub anonymous_class_constructions: Vec<AnonymousClassConstruction>,
+     /// Direct literal-object calls from the same AST/source publication.
+     pub immediate_object_invocations: Vec<ImmediateObjectInvocation>,
++    /// Fixed string invocations; intentionally not generic symbol references.
++    pub literal_callable_invocations: Vec<LiteralCallableInvocation>,
+     /// Sorted AST string method-selector roles for verified semantic rename.
+     pub literal_method_selectors: Vec<LiteralMethodSelector>,
+     /// Sorted reference-only callee tokens, including metadata, imports and callable values.
+diff --git a/src/text_scan.rs b/src/text_scan.rs
+index 9a77dc6..ce337c1 100644
+--- a/src/text_scan.rs
++++ b/src/text_scan.rs
+@@ -288,9 +288,12 @@ pub(crate) fn namespace_at_offset(content: &str, offset: usize) -> Option<&str>
+ 
+     let bytes = content.as_bytes();
+     let mut end = offset.min(bytes.len());
+-    while let Some(pos) = memchr::memmem::rfind(&bytes[..end], KEYWORD) {
++    while let Some(pos) = memchr::memrchr2(b'n', b'N', &bytes[..end]) {
++        let candidate = bytes[pos..end].get(..KEYWORD.len());
+         end = pos;
+-        if !is_namespace_statement(bytes, pos, KEYWORD.len()) {
++        if candidate.is_none_or(|word| !word.eq_ignore_ascii_case(KEYWORD))
++            || !is_namespace_statement(bytes, pos, KEYWORD.len())
++        {
+             continue;
+         }
+         return namespace_name_after(content, pos + KEYWORD.len());
+@@ -305,7 +308,10 @@ fn is_namespace_statement(bytes: &[u8], pos: usize, len: usize) -> bool {
+     // `namespace App;` and `namespace {` are the only two shapes; anything
+     // else (`namespaced`, `namespace\Foo`) is not a declaration.
+     match bytes.get(pos + len) {
+-        Some(b) if b.is_ascii_whitespace() || *b == b'{' => {}
++        Some(b)
++            if b.is_ascii_whitespace()
++                || *b == b'{'
++                || skip_php_comment(bytes, pos + len).is_some() => {}
+         _ => return false,
+     }
+ 
+@@ -360,10 +366,16 @@ fn is_namespace_statement(bytes: &[u8], pos: usize, len: usize) -> bool {
+ /// the global namespace.
+ fn namespace_name_after(content: &str, after_keyword: usize) -> Option<&str> {
+     let bytes = content.as_bytes();
+-    let start = after_keyword
+-        + bytes[after_keyword..]
+-            .iter()
+-            .position(|b| !b.is_ascii_whitespace())?;
++    let mut start = after_keyword;
++    loop {
++        while bytes.get(start).is_some_and(u8::is_ascii_whitespace) {
++            start += 1;
++        }
++        let Some(after_comment) = skip_php_comment(bytes, start) else {
++            break;
++        };
++        start = after_comment;
++    }
+     let len = bytes[start..]
+         .iter()
+         .position(|b| !(b.is_ascii_alphanumeric() || *b == b'_' || *b == b'\\' || *b >= 0x80))
+diff --git a/src/type_engine/resolver/mod.rs b/src/type_engine/resolver/mod.rs
+index 65f9347..75dfca9 100644
+--- a/src/type_engine/resolver/mod.rs
++++ b/src/type_engine/resolver/mod.rs
+@@ -456,7 +456,13 @@ fn resolve_target_classes_expr_inner(
+                 // unqualified name against the current namespace before
+                 // the global scope, so a same-namespace class must win
+                 // over a global class of the same short name.
+-                let ns = current_class.and_then(|c| c.file_namespace.as_deref());
++                let ns = match current_class {
++                    Some(class) => class.file_namespace.as_deref(),
++                    None => crate::text_scan::namespace_at_offset(
++                        ctx.content,
++                        ctx.cursor_offset as usize,
++                    ),
++                };
+                 let fqn =
+                     crate::util::resolve_source_class_name(class, ns, all_classes, class_loader);
+                 class_loader(&fqn).into_iter().collect()
+@@ -530,7 +536,12 @@ fn resolve_target_classes_expr_inner(
+             // unqualified name against the current namespace before the
+             // global scope, so a same-namespace class must win over a
+             // global stub of the same short name.
+-            let ns = current_class.and_then(|c| c.file_namespace.as_deref());
++            let ns = match current_class {
++                Some(class) => class.file_namespace.as_deref(),
++                None => {
++                    crate::text_scan::namespace_at_offset(ctx.content, ctx.cursor_offset as usize)
++                }
++            };
+             let fqn = crate::util::resolve_source_class_name(name, ns, all_classes, class_loader);
+             class_loader(&fqn)
+                 .map(ResolvedType::from_arc)
+diff --git a/tests/integration/call_hierarchy.rs b/tests/integration/call_hierarchy.rs
+index 1a0b719..8755b04 100644
+--- a/tests/integration/call_hierarchy.rs
++++ b/tests/integration/call_hierarchy.rs
+@@ -4569,3 +4569,507 @@ async fn literal_method_dynamic_selectors_callable_creation_and_single_quote_esc
+         );
+     }
+ }
++
++const LITERAL_CALLABLE_SOURCE: &str = concat!(
++    "<?php\r\nnamespace {\r\n",
++    " function scalarLeaf(): void {}\r\n",
++    " class ScalarTarget { public static function run(): void {} }\r\n",
++    "}\r\nnamespace CallScope {\r\n",
++    " use function \\scalarLeaf as importedLeaf; use \\ScalarTarget as ImportedTarget;\r\n",
++    " function scalarLeaf(): void {}\r\n",
++    " class ScalarTarget { public static function run(): void {} }\r\n",
++    " function literalCallableHost(): void {\r\n",
++    "  scalarLeaf(); importedLeaf(); ScalarTarget::run(); ImportedTarget::run();\r\n",
++    "  /* café 🐘 */ ((('scalarLeaf')))(11);\r\n",
++    "  /* café 🐘 */ ('\\scalarLeaf')(12);\r\n",
++    "  /* café 🐘 */ ('CallScope\\scalarLeaf')(13);\r\n",
++    "  /* café 🐘 */ ('SCALARLEAF')(14);\r\n",
++    "  /* café 🐘 */ (b\"\\x73calarLeaf\")(15);\r\n",
++    "  /* café 🐘 */ ('ScalarTarget::run')(21);\r\n",
++    "  /* café 🐘 */ ('\\ScalarTarget::run')(22);\r\n",
++    "  /* café 🐘 */ ('CallScope\\ScalarTarget::run')(23);\r\n",
++    "  /* café 🐘 */ ('SCALARTARGET::RUN')(24);\r\n",
++    " }\r\n",
++    " function literalCallableNegatives(callable $dynamic): void {\r\n",
++    "  $stored = 'scalarLeaf'; $dynamic(98);\r\n",
++    "  ('importedLeaf')(91); ('ImportedTarget::run')(92); ('\\x73calarLeaf')(93);\r\n",
++    "  $functionCreation = ('scalarLeaf')(...); $methodCreation = ('ScalarTarget::run')(...);\r\n",
++    " }\r\n}\r\n",
++);
++
++fn literal_callable_range(source: &str, context: &str, token: &str) -> Range {
++    let offset = source.find(context).expect("unique fixture context")
++        + context.rfind(token).expect("source token");
++    let prefix = &source[..offset];
++    let start = Position::new(
++        prefix.bytes().filter(|byte| *byte == b'\n').count() as u32,
++        prefix.rsplit('\n').next().unwrap().encode_utf16().count() as u32,
++    );
++    Range::new(
++        start,
++        Position::new(
++            start.line,
++            start.character + token.encode_utf16().count() as u32,
++        ),
++    )
++}
++fn literal_callable_sorted(mut ranges: Vec<Range>) -> Vec<Range> {
++    ranges.sort_by_key(|r| (r.start.line, r.start.character, r.end.line, r.end.character));
++    ranges
++}
++async fn literal_callable_target(
++    backend: &Backend,
++    uri: &Url,
++    source: &str,
++    context: &str,
++    token: &str,
++) -> CallHierarchyItem {
++    let range = literal_callable_range(source, context, token);
++    let items = prepare_at(backend, uri, range.start.line, range.start.character).await;
++    assert_eq!(items.len(), 1, "public declaration positive: {context}");
++    assert_eq!(items[0].uri, *uri);
++    assert_eq!(items[0].selection_range, range);
++    items[0].clone()
++}
++async fn literal_callable_fixture() -> (Backend, Url) {
++    let backend = create_test_backend();
++    let uri = Url::parse("file:///literal-callable-scope.php").unwrap();
++    open_php(&backend, &uri, LITERAL_CALLABLE_SOURCE).await;
++    (backend, uri)
++}
++
++fn literal_callable_expected(which: usize) -> Vec<Range> {
++    let sites: &[(&str, &str)] = match which {
++        0 => &[
++            ("scalarLeaf(); importedLeaf();", "importedLeaf"),
++            ("((('scalarLeaf')))(11)", "(11)"),
++            ("('\\scalarLeaf')(12)", "(12)"),
++            ("('SCALARLEAF')(14)", "(14)"),
++            ("(b\"\\x73calarLeaf\")(15)", "(15)"),
++        ],
++        1 => &[
++            ("scalarLeaf(); importedLeaf();", "scalarLeaf"),
++            ("('CallScope\\scalarLeaf')(13)", "(13)"),
++        ],
++        2 => &[
++            ("ImportedTarget::run();", "run"),
++            ("('ScalarTarget::run')(21)", "(21)"),
++            ("('\\ScalarTarget::run')(22)", "(22)"),
++            ("('SCALARTARGET::RUN')(24)", "(24)"),
++        ],
++        3 => &[
++            ("ScalarTarget::run(); ImportedTarget", "run"),
++            ("('CallScope\\ScalarTarget::run')(23)", "(23)"),
++        ],
++        _ => unreachable!(),
++    };
++    sites
++        .iter()
++        .map(|(context, token)| literal_callable_range(LITERAL_CALLABLE_SOURCE, context, token))
++        .collect()
++}
++async fn literal_callable_targets(backend: &Backend, uri: &Url) -> Vec<CallHierarchyItem> {
++    let mut items = Vec::new();
++    // Context includes namespace plus declaration so equal short names cannot
++    // choose whichever file-level declaration happens to be indexed first.
++    for (context, token) in [
++        ("namespace {\r\n function scalarLeaf", "scalarLeaf"),
++        (
++            "function scalarLeaf(): void {}\r\n class ScalarTarget { public static function run",
++            "run",
++        ),
++    ] {
++        items.push(
++            literal_callable_target(backend, uri, LITERAL_CALLABLE_SOURCE, context, token).await,
++        );
++    }
++    let local_function = literal_callable_target(backend, uri, LITERAL_CALLABLE_SOURCE,
++        "use function \\scalarLeaf as importedLeaf; use \\ScalarTarget as ImportedTarget;\r\n function scalarLeaf", "scalarLeaf").await;
++    let local_static = literal_callable_target(backend, uri, LITERAL_CALLABLE_SOURCE,
++        "class ScalarTarget { public static function run(): void {} }\r\n function literalCallableHost", "run").await;
++    // Expected order: global function, local function, global static, local static.
++    vec![
++        items.remove(0),
++        local_function,
++        items.remove(0),
++        local_static,
++    ]
++}
++
++#[tokio::test]
++async fn literal_callable_identifier_alias_and_namespace_controls_are_distinct() {
++    let (backend, uri) = literal_callable_fixture().await;
++    let host = anonymous_hierarchy_prepare(
++        &backend,
++        &uri,
++        LITERAL_CALLABLE_SOURCE,
++        "literalCallableHost",
++    )
++    .await;
++    let targets = literal_callable_targets(&backend, &uri).await;
++    let edges = outgoing(&backend, &host).await;
++    for (index, target) in targets.iter().enumerate() {
++        let found = edges
++            .iter()
++            .filter(|edge| edge.to.uri == uri && edge.to.selection_range == target.selection_range)
++            .collect::<Vec<_>>();
++        assert_eq!(found.len(), 1);
++        assert!(
++            found[0]
++                .from_ranges
++                .contains(&literal_callable_expected(index)[0]),
++            "explicit identifier/import positive {index}"
++        );
++    }
++    assert_ne!(targets[0].selection_range, targets[1].selection_range);
++    assert_ne!(targets[2].selection_range, targets[3].selection_range);
++}
++
++#[tokio::test]
++async fn literal_callable_function_and_static_strings_have_exact_resolved_outgoing_sites() {
++    let (backend, uri) = literal_callable_fixture().await;
++    let host = anonymous_hierarchy_prepare(
++        &backend,
++        &uri,
++        LITERAL_CALLABLE_SOURCE,
++        "literalCallableHost",
++    )
++    .await;
++    let targets = literal_callable_targets(&backend, &uri).await;
++    let edges = outgoing(&backend, &host).await;
++    assert_eq!(
++        edges.len(),
++        4,
++        "global/local function and static declarations stay distinct"
++    );
++    for (index, target) in targets.iter().enumerate() {
++        let found = edges
++            .iter()
++            .filter(|edge| edge.to.uri == uri && edge.to.selection_range == target.selection_range)
++            .collect::<Vec<_>>();
++        assert_eq!(found.len(), 1);
++        assert_eq!(
++            literal_callable_sorted(found[0].from_ranges.clone()),
++            literal_callable_expected(index),
++            "literal callable semantic identity {index}"
++        );
++    }
++}
++
++#[tokio::test]
++async fn literal_callable_function_and_static_strings_have_reciprocal_exact_origins() {
++    let (backend, uri) = literal_callable_fixture().await;
++    let host = anonymous_hierarchy_prepare(
++        &backend,
++        &uri,
++        LITERAL_CALLABLE_SOURCE,
++        "literalCallableHost",
++    )
++    .await;
++    for (index, target) in literal_callable_targets(&backend, &uri)
++        .await
++        .iter()
++        .enumerate()
++    {
++        let calls = incoming(&backend, target).await;
++        assert_eq!(
++            calls.len(),
++            1,
++            "only the real host, not creation/alias/dynamic/incorrectly decoded negatives"
++        );
++        assert_eq!(calls[0].from.uri, uri);
++        assert_eq!(calls[0].from.selection_range, host.selection_range);
++        assert_eq!(
++            literal_callable_sorted(calls[0].from_ranges.clone()),
++            literal_callable_expected(index)
++        );
++    }
++}
++
++#[tokio::test]
++async fn literal_callable_strings_do_not_borrow_imports_or_invoke_created_and_dynamic_values() {
++    let (backend, uri) = literal_callable_fixture().await;
++    let host = anonymous_hierarchy_prepare(
++        &backend,
++        &uri,
++        LITERAL_CALLABLE_SOURCE,
++        "literalCallableNegatives",
++    )
++    .await;
++    assert!(
++        outgoing(&backend, &host).await.is_empty(),
++        "string names use runtime global/FQN identity, never lexical use aliases or single-quote hex decoding"
++    );
++}
++
++#[tokio::test]
++async fn literal_callable_anonymous_source_receipts_reject_other_uri_and_same_length_edits() {
++    let backend = create_test_backend();
++    let target_uri = Url::parse("file:///literal-callable-guard-targets.php").unwrap();
++    let targets = "<?php\r\nnamespace Guard;\r\nfunction guardLeaf(): void {}\r\nfunction guardElse(): void {}\r\n";
++    open_php(&backend, &target_uri, targets).await;
++    let left = Url::parse("file:///literal-callable-guard-left.php").unwrap();
++    let right = Url::parse("file:///literal-callable-guard-right.php").unwrap();
++    let source = "<?php\r\n/* café 🐘 */ $guarded = function () { \\Guard\\guardLeaf(); ('Guard\\guardLeaf')(31); };\r\n";
++    for uri in [&left, &right] {
++        open_php(&backend, uri, source).await;
++    }
++    let first = anonymous_hierarchy_prepare(&backend, &left, source, "function ()").await;
++    let peer = anonymous_hierarchy_prepare(&backend, &right, source, "function ()").await;
++    for item in [&first, &peer] {
++        let edges = outgoing(&backend, item).await;
++        assert_eq!(
++            edges.len(),
++            1,
++            "genuine positive before deliberate source forgery"
++        );
++        assert_eq!(edges[0].to.uri, target_uri);
++        assert!(edges[0].from_ranges.contains(&literal_callable_range(
++            source,
++            "\\Guard\\guardLeaf();",
++            "\\Guard\\guardLeaf"
++        )));
++    }
++    let mut forged = first.clone();
++    forged.uri = right.clone();
++    assert!(
++        outgoing(&backend, &forged).await.is_empty(),
++        "same bytes/brace offsets do not authorize another URI"
++    );
++    let mut stripped = first.clone();
++    stripped
++        .data
++        .as_mut()
++        .unwrap()
++        .as_object_mut()
++        .unwrap()
++        .remove("anonymous");
++    assert!(
++        outgoing(&backend, &stripped).await.is_empty(),
++        "removing an anonymous source discriminator cannot bypass its current declaration guard"
++    );
++    let dirty = source.replace("('Guard\\guardLeaf')(31)", "('Guard\\guardElse')(31)");
++    assert_ne!(dirty, source);
++    assert_eq!(dirty.len(), source.len());
++    anonymous_hierarchy_change(&backend, &left, &dirty).await;
++    assert!(
++        outgoing(&backend, &first).await.is_empty(),
++        "retained exact source item cannot retarget after same-length edit"
++    );
++    let fresh = anonymous_hierarchy_prepare(&backend, &left, &dirty, "function ()").await;
++    let changed = outgoing(&backend, &fresh).await;
++    assert_eq!(
++        changed.len(),
++        2,
++        "fresh literal call reaches Else while explicit identifier still reaches Leaf"
++    );
++    let else_item = literal_callable_target(
++        &backend,
++        &target_uri,
++        targets,
++        "function guardElse",
++        "guardElse",
++    )
++    .await;
++    let found = changed
++        .iter()
++        .filter(|edge| {
++            edge.to.uri == target_uri && edge.to.selection_range == else_item.selection_range
++        })
++        .collect::<Vec<_>>();
++    assert_eq!(found.len(), 1);
++    assert_eq!(
++        found[0].from_ranges,
++        [literal_callable_range(
++            &dirty,
++            "('Guard\\guardElse')(31)",
++            "(31)"
++        )]
++    );
++    // The untouched peer keeps its original source identity and target.
++    assert_eq!(outgoing(&backend, &peer).await.len(), 1);
++}
++
++#[tokio::test]
++async fn literal_callable_identifier_incoming_preserves_namespace_and_import_origin_controls() {
++    let (backend, uri) = literal_callable_fixture().await;
++    let host = anonymous_hierarchy_prepare(
++        &backend,
++        &uri,
++        LITERAL_CALLABLE_SOURCE,
++        "literalCallableHost",
++    )
++    .await;
++    for (index, target) in literal_callable_targets(&backend, &uri)
++        .await
++        .iter()
++        .enumerate()
++    {
++        let callers = incoming(&backend, target).await;
++        let known = callers
++            .iter()
++            .filter(|call| {
++                call.from.uri == uri && call.from.selection_range == host.selection_range
++            })
++            .collect::<Vec<_>>();
++        assert_eq!(known.len(), 1);
++        assert!(
++            known[0]
++                .from_ranges
++                .contains(&literal_callable_expected(index)[0]),
++            "existing identifier-origin incoming control {index}, independent of newly missing strings"
++        );
++    }
++}
++
++#[tokio::test]
++async fn literal_callable_static_origin_access_and_invalid_relative_string_boundaries() {
++    let backend = create_test_backend();
++    let uri = Url::parse("file:///literal-callable-static-boundaries.php").unwrap();
++    let source = concat!(
++        "<?php\r\n",
++        "class StringParent { public static function run(): void {} }\r\n",
++        "class StringChild extends StringParent {}\r\n",
++        "class StringNonstatic { public function run(): void {} }\r\n",
++        "abstract class StringAbstract { public static function run(): void {} }\r\n",
++        "enum StringEnum { case Token; public static function run(): void {} }\r\n",
++        "class StringPrivate { private static function hidden(): void {} public static function factory(): void { /* café 🐘 */ ('StringPrivate::hidden')(41); } }\r\n",
++        "class StringPseudo extends StringParent { public static function invalid(): void { ('self::run')(51); ('static::run')(52); ('parent::run')(53); } }\r\n",
++        "function literalStaticBoundaryHost(): void { /* café 🐘 */ ('StringChild::run')(61); ('StringAbstract::run')(62); ('StringEnum::run')(63); }\r\n",
++        "function literalPrivateOutside(): void { ('StringPrivate::hidden')(42); }\r\n",
++        "function literalNonstaticOutside(): void { ('StringNonstatic::run')(43); }\r\n",
++    );
++    open_php(&backend, &uri, source).await;
++    let host =
++        anonymous_hierarchy_prepare(&backend, &uri, source, "literalStaticBoundaryHost").await;
++    let edges = outgoing(&backend, &host).await;
++    assert_eq!(edges.len(), 3);
++    for (context, site, arguments) in [
++        (
++            "class StringParent { public static function run",
++            "('StringChild::run')(61)",
++            "(61)",
++        ),
++        (
++            "abstract class StringAbstract { public static function run",
++            "('StringAbstract::run')(62)",
++            "(62)",
++        ),
++        (
++            "enum StringEnum { case Token; public static function run",
++            "('StringEnum::run')(63)",
++            "(63)",
++        ),
++    ] {
++        let target = literal_callable_target(&backend, &uri, source, context, "run").await;
++        let expected = literal_callable_range(source, site, arguments);
++        let found = edges
++            .iter()
++            .filter(|edge| edge.to.uri == uri && edge.to.selection_range == target.selection_range)
++            .collect::<Vec<_>>();
++        assert_eq!(found.len(), 1);
++        assert_eq!(found[0].from_ranges, [expected]);
++        let callers = incoming(&backend, &target).await;
++        assert_eq!(callers.len(), 1);
++        assert_eq!(callers[0].from.selection_range, host.selection_range);
++        assert_eq!(callers[0].from_ranges, [expected]);
++    }
++    let factory = literal_callable_target(
++        &backend,
++        &uri,
++        source,
++        "public static function factory",
++        "factory",
++    )
++    .await;
++    let private = literal_callable_target(
++        &backend,
++        &uri,
++        source,
++        "private static function hidden",
++        "hidden",
++    )
++    .await;
++    let allowed = outgoing(&backend, &factory).await;
++    assert_eq!(
++        allowed.len(),
++        1,
++        "actual exact declaring-class visibility, not blanket public-only"
++    );
++    assert_eq!(allowed[0].to.selection_range, private.selection_range);
++    let expected = literal_callable_range(source, "('StringPrivate::hidden')(41)", "(41)");
++    assert_eq!(allowed[0].from_ranges, [expected]);
++    let callers = incoming(&backend, &private).await;
++    assert_eq!(callers.len(), 1);
++    assert_eq!(callers[0].from.selection_range, factory.selection_range);
++    assert_eq!(callers[0].from_ranges, [expected]);
++    let outside =
++        anonymous_hierarchy_prepare(&backend, &uri, source, "literalPrivateOutside").await;
++    assert!(
++        outgoing(&backend, &outside).await.is_empty(),
++        "inaccessible private method is not a known invocable target outside its owner"
++    );
++    let nonstatic =
++        anonymous_hierarchy_prepare(&backend, &uri, source, "literalNonstaticOutside").await;
++    assert!(
++        outgoing(&backend, &nonstatic).await.is_empty(),
++        "a class-string callable must not admit a nonstatic instance method"
++    );
++    let pseudo = literal_callable_target(
++        &backend,
++        &uri,
++        source,
++        "public static function invalid",
++        "invalid",
++    )
++    .await;
++    assert!(
++        outgoing(&backend, &pseudo).await.is_empty(),
++        "self/static/parent string class names are invalid even in class scope"
++    );
++}
++
++#[tokio::test]
++async fn literal_callable_direct_public_trait_static_is_known_despite_deprecation() {
++    let backend = create_test_backend();
++    let uri = Url::parse("file:///literal-callable-direct-trait.php").unwrap();
++    let source = concat!(
++        "<?php\r\n",
++        "trait DirectStringTrait { public static function run(): void {} private static function hidden(): void {} protected static function guarded(): void {} }\r\n",
++        "function directTraitStringHost(): void { /* café 🐘 */ ('DirectStringTrait::run')(81); }\r\n",
++        "function directTraitStringCreation(): void { $created = ('DirectStringTrait::run')(...); }\r\n",
++        "function directTraitStringDenied(): void { ('DirectStringTrait::hidden')(); ('DirectStringTrait::guarded')(); }\r\n",
++    );
++    open_php(&backend, &uri, source).await;
++    let target =
++        literal_callable_target(&backend, &uri, source, "public static function run", "run").await;
++    let host = anonymous_hierarchy_prepare(&backend, &uri, source, "directTraitStringHost").await;
++    let expected = literal_callable_range(source, "('DirectStringTrait::run')(81)", "(81)");
++    let edges = outgoing(&backend, &host).await;
++    assert_eq!(
++        edges.len(),
++        1,
++        "deprecated public static trait call still executes"
++    );
++    assert_eq!(edges[0].to.uri, uri);
++    assert_eq!(edges[0].to.selection_range, target.selection_range);
++    assert_eq!(edges[0].from_ranges, [expected]);
++    let callers = incoming(&backend, &target).await;
++    assert_eq!(
++        callers.len(),
++        1,
++        "callable creation is not trait body execution"
++    );
++    assert_eq!(callers[0].from.uri, uri);
++    assert_eq!(callers[0].from.selection_range, host.selection_range);
++    assert_eq!(callers[0].from_ranges, [expected]);
++    let creation =
++        anonymous_hierarchy_prepare(&backend, &uri, source, "directTraitStringCreation").await;
++    assert!(outgoing(&backend, &creation).await.is_empty());
++    let denied =
++        anonymous_hierarchy_prepare(&backend, &uri, source, "directTraitStringDenied").await;
++    assert!(
++        outgoing(&backend, &denied).await.is_empty(),
++        "outside nonpublic trait calls cannot execute"
++    );
++}
+diff --git a/tests/integration/definition_classes.rs b/tests/integration/definition_classes.rs
+index c533ef0..59e8335 100644
+--- a/tests/integration/definition_classes.rs
++++ b/tests/integration/definition_classes.rs
+@@ -1385,3 +1385,87 @@ namespace B {
+         );
+     }
+ }
++
++#[tokio::test]
++async fn literal_callable_namespace_definition_controls_keep_local_and_explicit_global_owners() {
++    let backend = create_test_backend();
++    let uri = Url::parse("file:///namespace-callable-owner.php").unwrap();
++    let source = concat!(
++        "<?php\r\n",
++        "namespace {\r\n",
++        "enum NamespaceTwin { case Box; public static function run(): void {} public function leaf(): void {} }\r\n",
++        "}\r\n",
++        "namespace Scoped {\r\n",
++        "enum NamespaceTwin { case Box; public static function run(): void {} public function leaf(): void {} }\r\n",
++        "function ownerHost(): void {\r\n",
++        " // café 🐘\r\n",
++        " NamespaceTwin::run();\r\n",
++        " NamespaceTwin::Box->leaf();\r\n",
++        " \\NamespaceTwin::run();\r\n",
++        " \\NamespaceTwin::Box->leaf();\r\n",
++        "}\r\n",
++        "}\r\n",
++    );
++    open_php(&backend, &uri, source).await;
++    for (line, character, expected_line, expected_character) in [
++        (8, 17, 5, 54),
++        (9, 22, 5, 85),
++        (10, 18, 2, 54),
++        (11, 23, 2, 85),
++    ] {
++        let response = goto_definition_at(&backend, &uri, line, character)
++            .await
++            .expect("known method declaration");
++        let locations = match response {
++            GotoDefinitionResponse::Scalar(location) => vec![location],
++            GotoDefinitionResponse::Array(locations) => locations,
++            GotoDefinitionResponse::Link(_) => panic!("unexpected definition link"),
++        };
++        assert_eq!(locations.len(), 1, "one declaration for line {line}");
++        assert_eq!(locations[0].uri, uri);
++        assert_eq!(
++            locations[0].range.start,
++            Position::new(expected_line, expected_character),
++            "source namespace and explicit global references must keep distinct owners at line {line}"
++        );
++    }
++}
++
++#[tokio::test]
++async fn literal_callable_namespace_layout_keeps_comments_and_keyword_case() {
++    for header in [
++        "namespace Scoped {",
++        "namespace /* note */ Scoped {",
++        "namespace/**/Scoped {",
++        "namespace // note\r\nScoped {",
++        "namespace # note\r\nScoped {",
++        "NAMESPACE Scoped {",
++    ] {
++        let backend = create_test_backend();
++        let uri = Url::parse("file:///namespace-header-owner.php").unwrap();
++        let source = format!(
++            "<?php\r\nnamespace {{ class HeaderTwin {{ public static function run(): void {{}} }} }}\r\n{header}\r\nclass HeaderTwin {{ public static function run(): void {{}} }}\r\nfunction headerHost(): void {{ /* café 🐘 */ HeaderTwin::run(); }}\r\n}}\r\n"
++        );
++        open_php(&backend, &uri, &source).await;
++        let position_at = |offset: usize| {
++            let prefix = &source[..offset];
++            Position::new(
++                prefix.bytes().filter(|b| *b == b'\n').count() as u32,
++                prefix.rsplit('\n').next().unwrap().encode_utf16().count() as u32,
++            )
++        };
++        let expected = position_at(source.rfind("function run").unwrap() + 9);
++        let query = position_at(source.rfind("HeaderTwin::run").unwrap() + 13);
++        let response = goto_definition_at(&backend, &uri, query.line, query.character)
++            .await
++            .expect("known static method");
++        let GotoDefinitionResponse::Scalar(location) = response else {
++            panic!("one declaration required for {header:?}");
++        };
++        assert_eq!(location.uri, uri);
++        assert_eq!(
++            location.range.start, expected,
++            "namespace header {header:?}"
++        );
++    }
++}

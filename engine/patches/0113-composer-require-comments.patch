@@ -1,0 +1,527 @@
+--- a/src/composer.rs
++++ b/src/composer.rs
+@@ -916,68 +916,210 @@
+ /// `__DIR__ . '/'` is stripped).  The caller is responsible for
+ /// resolving them against that directory.
+ pub fn extract_require_once_paths(content: &str) -> Vec<String> {
++    extract_literal_requires(content, content.contains("<?"))
++}
++
++/// Scan actual PHP source with tag-aware lexing; tagless HTML is not PHP.
++pub fn extract_require_once_paths_from_php(content: &str) -> Vec<String> {
++    extract_literal_requires(content, true)
++}
++
++fn extract_literal_requires(content: &str, tagged: bool) -> Vec<String> {
++    use mago_syntax::{lexer::Lexer, settings::LexerSettings, token::TokenKind};
++    use mago_syntax_core::input::Input;
++
++    if content.len() > u32::MAX as usize {
++        return Vec::new();
++    }
++    let input = Input::new(
++        mago_database::file::FileId::new(b"requires.php"),
++        content.as_bytes(),
++    );
++    let mut lexer = if tagged {
++        Lexer::new(input, LexerSettings::default())
++    } else {
++        Lexer::scripting(input, LexerSettings::default())
++    };
+     let mut paths = Vec::new();
+-
+-    for line in content.lines() {
+-        let trimmed = line.trim();
+-
+-        // Quick reject: line must start with `require_once`.
+-        // (We don't support `require_once` buried in complex expressions.)
+-        if !trimmed.starts_with("require_once") {
++    let mut pending: Option<usize> = None;
++    let mut line_comment_start: Option<usize> = None;
++    let mut quote = None;
++    let mut interpolation_depth = 0usize;
++    let mut documents = 0usize;
++    while let Some(token) = lexer.advance() {
++        let Ok(token) = token else {
++            break;
++        };
++        let start = token.start.offset as usize;
++        let Some(end) = start.checked_add(token.value.len()) else {
++            return Vec::new();
++        };
++        if content.get(start..end).is_none() {
++            return Vec::new();
++        }
++        let kind = token.kind;
++        if documents != 0 {
++            match kind {
++                TokenKind::DocumentStart(_) => documents += 1,
++                TokenKind::DocumentEnd => documents -= 1,
++                _ => {}
++            }
+             continue;
+         }
+-
+-        let rest = trimmed["require_once".len()..].trim_start();
+-
+-        // Strip optional parentheses: `require_once('...')` → `'...'`
+-        // Also handles `require_once '...'` without parens.
+-        let rest = if let Some(inner) = rest.strip_prefix('(') {
+-            if let Some(end) = inner.rfind(')') {
+-                inner[..end].trim()
+-            } else {
+-                continue;
+-            }
+-        } else {
+-            rest
+-        };
+-
+-        let rest = rest.trim_end_matches(';').trim();
+-
+-        // `__DIR__ . '/x.php'` resolves the same as a bare relative
+-        // path, since the caller joins against the file's directory.
+-        let (rest, from_dir_const) = match rest.strip_prefix("__DIR__") {
+-            Some(after) => match after.trim_start().strip_prefix('.') {
+-                Some(after_dot) => (after_dot.trim_start(), true),
+-                None => continue,
+-            },
+-            None => (rest, false),
+-        };
+-
+-        // Extract string literal — single or double quoted
+-        let path = if (rest.starts_with('\'') && rest.ends_with('\''))
+-            || (rest.starts_with('"') && rest.ends_with('"'))
+-        {
+-            &rest[1..rest.len() - 1]
+-        } else {
+-            // Not a simple string literal — skip
++        if let Some(delimiter) = quote {
++            match kind {
++                TokenKind::LeftBrace | TokenKind::DollarLeftBrace => interpolation_depth += 1,
++                TokenKind::RightBrace => {
++                    interpolation_depth = interpolation_depth.saturating_sub(1)
++                }
++                _ if kind == delimiter && interpolation_depth == 0 => quote = None,
++                _ => {}
++            }
+             continue;
+-        };
+-
+-        // Strip the leading `/` left over from `__DIR__ . '/x.php'` so
+-        // the path stays relative (`Path::join` would otherwise treat
+-        // it as absolute and discard the base directory).
+-        let path = if from_dir_const {
+-            path.trim_start_matches('/')
+-        } else {
+-            path
+-        };
+-
+-        if !path.is_empty() {
+-            paths.push(path.to_string());
+-        }
+-    }
+-
++        }
++        if kind == TokenKind::PartialLiteralString {
++            break;
++        }
++        if kind.is_trivia() {
++            let raw = &content[start..end];
++            if raw.starts_with("/*") && !raw.ends_with("*/") {
++                break;
++            }
++            if pending.is_some()
++                && (raw.starts_with("//") || raw.starts_with('#'))
++                && line_comment_start.is_none()
++            {
++                line_comment_start = Some(start);
++            }
++            continue;
++        }
++        if !matches!(kind, TokenKind::CloseTag) {
++            line_comment_start = None;
++        }
++        match kind {
++            TokenKind::DocumentStart(_) => {
++                documents = 1;
++                pending = None;
++            }
++            TokenKind::DoubleQuote | TokenKind::Backtick => {
++                quote = Some(kind);
++                interpolation_depth = 0;
++            }
++            TokenKind::RequireOnce => {
++                pending = Some(start);
++                line_comment_start = None;
++            }
++            TokenKind::Semicolon => {
++                if let Some(begin) = pending.take()
++                    && end.saturating_sub(begin) <= 65536
++                    && let Some(path) = content.get(begin..end).and_then(parse_literal_require_once)
++                {
++                    paths.push(path);
++                }
++            }
++            TokenKind::CloseTag => {
++                if let Some(begin) = pending.take() {
++                    let expression_end = line_comment_start.take().unwrap_or(start);
++                    if expression_end.saturating_sub(begin) <= 65536
++                        && let Some(path) = content
++                            .get(begin..expression_end)
++                            .and_then(parse_literal_require_once)
++                    {
++                        paths.push(path);
++                    }
++                }
++            }
++            TokenKind::InlineText | TokenKind::InlineShebang => pending = None,
++            _ => {}
++        }
++    }
+     paths
++}
++
++// This intentionally accepts only a complete, single-line literal expression.
++// Comment markers inside the string are data, not statement terminators.
++fn parse_literal_require_once(line: &str) -> Option<String> {
++    let rest = line.trim().strip_prefix("require_once")?;
++    let mut rest = rest.trim_start();
++    let parenthesized = rest.starts_with('(');
++    if parenthesized {
++        rest = rest[1..].trim_start();
++    }
++    let from_dir_const = if let Some(after) = rest.strip_prefix("__DIR__") {
++        rest = after.trim_start().strip_prefix('.')?.trim_start();
++        true
++    } else {
++        false
++    };
++    let quote = rest.chars().next()?;
++    if quote != '\'' && quote != '"' {
++        return None;
++    }
++    let mut end = None;
++    let mut escaped = false;
++    for (offset, ch) in rest[1..].char_indices() {
++        if escaped {
++            escaped = false;
++        } else if ch == '\\' {
++            escaped = true;
++        } else if ch == quote {
++            end = Some(offset + 1);
++            break;
++        }
++    }
++    let end = end?;
++    let body = &rest[1..end];
++    let path = if quote == '\'' {
++        unescape_php_single_quoted(body)
++    } else {
++        // Double-quoted PHP strings can contain interpolation and numerous
++        // escape forms. Accept only forms whose static value is unambiguous.
++        let mut out = String::new();
++        let mut chars = body.chars();
++        while let Some(ch) = chars.next() {
++            match ch {
++                '$' => return None,
++                '\\' => match chars.next()? {
++                    '\\' => out.push('\\'),
++                    '"' => out.push('"'),
++                    '$' => out.push('$'),
++                    'n' | 'r' | 't' | 'v' | 'e' | 'f' | 'x' | 'u' | '0'..='7' => return None,
++                    ch => {
++                        out.push('\\');
++                        out.push(ch);
++                    }
++                },
++                _ => out.push(ch),
++            }
++        }
++        out
++    };
++    rest = rest[end + 1..].trim_start();
++    if parenthesized {
++        rest = rest.strip_prefix(')')?.trim_start();
++    }
++    if let Some(after) = rest.strip_prefix(';') {
++        rest = after.trim_start();
++        while let Some(comment) = rest.strip_prefix("/*") {
++            let Some((_, after)) = comment.split_once("*/") else {
++                // The remainder of this line belongs to a multiline comment.
++                rest = "";
++                break;
++            };
++            rest = after.trim_start();
++        }
++        if !rest.is_empty() && !rest.starts_with("//") && !rest.starts_with('#') {
++            return None;
++        }
++    } else if !rest.is_empty() {
++        return None;
++    }
++    let path = if from_dir_const {
++        path.trim_start_matches('/').to_string()
++    } else {
++        path
++    };
++    (!path.is_empty()).then_some(path)
+ }
+ 
+ /// Split only at commas outside PHP single-quoted strings. A malformed
+--- a/src/indexing/scan.rs
++++ b/src/indexing/scan.rs
+@@ -296,7 +296,7 @@
+                 }
+ 
+                 // Follow require_once statements to discover more files.
+-                let require_paths = composer::extract_require_once_paths(&content_str);
++                let require_paths = composer::extract_require_once_paths_from_php(&content_str);
+                 if let Some(file_dir) = canonical.parent() {
+                     for rel_path in require_paths {
+                         let resolved = file_dir.join(&rel_path);
+--- a/tests/unit/main.rs
++++ b/tests/unit/main.rs
+@@ -7,3 +7,4 @@
+ mod monorepo;
+ mod named_args_internals;
+ mod phpdoc_internals;
++mod require_once_comments;
+--- /dev/null
++++ b/tests/unit/require_once_comments.rs
+@@ -0,0 +1,128 @@
++use phpantom_lsp::composer::{extract_require_once_paths, extract_require_once_paths_from_php};
++
++#[test]
++fn require_once_trailing_comments_and_comment_markers_in_literals() {
++    let source = concat!(
++        "require_once __DIR__ . '/extra.php'; // shared\n",
++        "require_once(\"dir/#literal.php\"); # note\n",
++        "require_once 'dir//literal.php'; /* note */\n",
++        "require_once('dir/*literal*/.php'); /* one */ /* two */\n",
++        "require_once 'plain.php';\n",
++        "require_once __DIR__ . '/O\\'Brien.php'; // quoted\n",
++    );
++    assert_eq!(
++        extract_require_once_paths(source),
++        vec![
++            "extra.php",
++            "dir/#literal.php",
++            "dir//literal.php",
++            "dir/*literal*/.php",
++            "plain.php",
++            "O'Brien.php"
++        ]
++    );
++}
++
++#[test]
++fn require_once_refuses_dynamic_or_malformed_statements() {
++    let source = concat!(
++        "require_once 'prefix' . $suffix; // dynamic\n",
++        "require_once('prefix' . '/suffix'); // dynamic\n",
++        "require_once \"$variable.php\"; // interpolated\n",
++        "require_once 'x.php' // missing semicolon\n",
++        "require_once('x.php'; // missing parenthesis\n",
++        "require_once_suffix 'x.php'; // not the keyword\n",
++        "require_once 'unterminated; // not a comment\n",
++    );
++    assert!(extract_require_once_paths(source).is_empty());
++}
++
++#[test]
++fn ignores_require_lines_in_multiline_comments_strings_and_heredocs() {
++    let source = concat!(
++        "/* begin\n",
++        "require_once 'comment.php'; // not executable\n",
++        "*/\n",
++        "$s = 'quoted\n",
++        "require_once \"string.php\"; // not executable\n",
++        "end';\n",
++        "$text = <<<DOC\n",
++        "require_once 'heredoc.php'; // not executable\n",
++        "DOC;\n",
++        "$text = <<<'RAW'\n",
++        "require_once 'nowdoc.php'; // not executable\n",
++        "    RAW;\n",
++        "require_once 'real.php'; /* open\n",
++        "require_once 'nested.php'; // inside comment\n",
++        "close */\n",
++        "require_once \"dir/unknown\\q.php\"; // valid literal unknown escape\n",
++    );
++    assert_eq!(
++        extract_require_once_paths(source),
++        vec!["real.php", "dir/unknown\\q.php"]
++    );
++}
++
++#[test]
++fn heredoc_label_prefix_is_not_terminator() {
++    let source = concat!(
++        "$s = <<<DOC\n",
++        "DOC_suffix\n",
++        "require_once 'inside.php'; // still inside\n",
++        "DOC;\n",
++        "require_once 'outside.php'; // discovered\n",
++    );
++    assert_eq!(extract_require_once_paths(source), vec!["outside.php"]);
++}
++
++#[test]
++fn mixed_html_and_php_only_discovers_actual_php() {
++    let source = concat!(
++        "Bob's template\n",
++        "require_once 'html.php'; // plain HTML\n",
++        "<?php\n",
++        "require_once'real.php'; // compact\n",
++        "?>\n",
++        "require_once 'html2.php'; // HTML again\n",
++        "<?php\n",
++        "require_once 'second.php'; other_function();\n",
++        "?>\n",
++    );
++    assert_eq!(
++        extract_require_once_paths_from_php(source),
++        vec!["real.php", "second.php"]
++    );
++    assert!(
++        extract_require_once_paths_from_php("Bob's HTML\nrequire_once 'not-php.php';\n").is_empty()
++    );
++}
++
++#[test]
++fn close_tag_terminates_require_and_later_lexical_error_keeps_prefix() {
++    let source = "<?php\nrequire_once 'before.php';\nrequire_once 'closing.php' ?>\n<?php\n$broken = 'unterminated";
++    assert_eq!(
++        extract_require_once_paths_from_php(source),
++        vec!["before.php", "closing.php"]
++    );
++}
++
++#[test]
++fn close_tag_ends_php_line_comment_and_terminates_require() {
++    let source = "<?php\nrequire_once 'line.php' // comment ?>\nHTML\n<?php\nrequire_once 'hash.php' # comment ?>";
++    assert_eq!(
++        extract_require_once_paths_from_php(source),
++        vec!["line.php", "hash.php"]
++    );
++}
++
++#[test]
++fn line_comment_before_multiline_dynamic_expression_is_not_a_terminator() {
++    let source = "<?php\nrequire_once 'prefix' // keep reading\n . $suffix ?>";
++    assert!(extract_require_once_paths_from_php(source).is_empty());
++}
++
++#[test]
++fn close_tag_after_consecutive_line_comments_terminates_require() {
++    let source = "<?php require_once 'x.php' // first\n // second ?>";
++    assert_eq!(extract_require_once_paths_from_php(source), vec!["x.php"]);
++}
+--- a/tests/integration/main.rs
++++ b/tests/integration/main.rs
+@@ -322,3 +322,4 @@
+ mod completion_array_utf16;
+ 
+ mod completion_unquoted_index;
++mod require_once_comments_lsp;
+--- /dev/null
++++ b/tests/integration/require_once_comments_lsp.rs
+@@ -0,0 +1,98 @@
++use crate::common::{complete_labels_at_opened, create_psr4_workspace, open_document};
++use tower_lsp::{LanguageServer, lsp_types::*};
++
++#[tokio::test]
++async fn autoload_helper_require_once_with_comment_supports_completion_and_definition() {
++    for bootstrap in [
++        "<?php\nrequire_once __DIR__ . '/extra.php'; // shared helpers\n",
++        "<?php\nrequire_once __DIR__ . '/extra.php';\n",
++        "<?php\nrequire_once __DIR__ . '/extra.php' ?>\n",
++        "<?php\nrequire_once __DIR__ . '/extra.php';\n$broken = 'unfinished",
++        "<?php\nrequire_once __DIR__ . '/extra.php';\n/* unfinished",
++        "<?php\nrequire_once __DIR__ . '/extra.php';\n$broken = <<<DOC\nunfinished",
++        "Bob's HTML\nrequire_once 'fake.php';\n<?php\nrequire_once __DIR__ . '/extra.php'; // mixed template\n?>\n",
++    ] {
++        let source = "<?php\ncommented_helper_\ncommented_helper_function();\nhtml_fake_helper_\nhtml_fake_helper_function();\n";
++        let (backend, dir) = create_psr4_workspace(
++            r#"{"name":"fixture/require-comments","autoload":{"files":["bootstrap.php"]}}"#,
++            &[
++                (".phpantom.toml", "[indexing]\nstrategy = \"none\"\n"),
++                (
++                    "vendor/composer/autoload_files.php",
++                    "<?php\n$vendorDir = dirname(__DIR__);\n$baseDir = dirname($vendorDir);\nreturn array(\n    'fixture' => $baseDir . '/bootstrap.php',\n);\n",
++                ),
++                ("bootstrap.php", bootstrap),
++                (
++                    "extra.php",
++                    "<?php\nfunction commented_helper_function(): string { return 'ok'; }\n",
++                ),
++                (
++                    "fake.php",
++                    "<?php\nfunction html_fake_helper_function(): string { return 'fake'; }\n",
++                ),
++            ],
++        );
++        backend.initialized(InitializedParams {}).await;
++        let uri = Url::from_file_path(dir.path().join("consumer.php")).unwrap();
++        open_document(&backend, &uri, "php", source).await;
++        let labels =
++            complete_labels_at_opened(&backend, &uri, 1, "commented_helper_".len() as u32).await;
++        assert!(
++            labels
++                .iter()
++                .any(|label| label.starts_with("commented_helper_function")),
++            "helper must complete: {labels:?}"
++        );
++        let fake_labels =
++            complete_labels_at_opened(&backend, &uri, 3, "html_fake_helper_".len() as u32).await;
++        assert!(
++            !fake_labels
++                .iter()
++                .any(|label| label.starts_with("html_fake_helper_function")),
++            "HTML must not index fake helper: {fake_labels:?}"
++        );
++        let fake_result = backend
++            .goto_definition(GotoDefinitionParams {
++                text_document_position_params: TextDocumentPositionParams {
++                    text_document: TextDocumentIdentifier { uri: uri.clone() },
++                    position: Position::new(4, 8),
++                },
++                work_done_progress_params: WorkDoneProgressParams::default(),
++                partial_result_params: PartialResultParams::default(),
++            })
++            .await
++            .unwrap();
++        assert!(
++            fake_result.is_none(),
++            "HTML must not resolve fake helper: {fake_result:?}"
++        );
++        let result = backend
++            .goto_definition(GotoDefinitionParams {
++                text_document_position_params: TextDocumentPositionParams {
++                    text_document: TextDocumentIdentifier { uri },
++                    position: Position::new(2, 5),
++                },
++                work_done_progress_params: WorkDoneProgressParams::default(),
++                partial_result_params: PartialResultParams::default(),
++            })
++            .await
++            .unwrap()
++            .expect("helper definition");
++        let locations = match result {
++            GotoDefinitionResponse::Scalar(location) => vec![location],
++            GotoDefinitionResponse::Array(locations) => locations,
++            GotoDefinitionResponse::Link(links) => links
++                .into_iter()
++                .map(|link| Location {
++                    uri: link.target_uri,
++                    range: link.target_selection_range,
++                })
++                .collect(),
++        };
++        let expected = Url::from_file_path(dir.path().join("extra.php")).unwrap();
++        assert!(
++            locations.iter().any(|location| location.uri == expected),
++            "definition must target required helper: {locations:?}"
++        );
++    }
++}

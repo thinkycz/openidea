@@ -1,0 +1,220 @@
+diff --git a/src/definition/resolve.rs b/src/definition/resolve.rs
+--- a/src/definition/resolve.rs
++++ b/src/definition/resolve.rs
+@@ -24,11 +24,67 @@
+ use crate::Backend;
+ use crate::class_lookup::find_class_at_offset;
+ use crate::composer;
+-use crate::symbol_map::{SelfStaticParentKind, SymbolKind};
++use crate::symbol_map::{SelfStaticParentKind, SubjectText, SymbolKind, SymbolSpan};
+ use crate::text_position::position_to_offset;
+ use crate::types::{AccessKind, ClassInfo};
+ use crate::util::short_name;
+ use crate::virtual_members::laravel;
++
++// Mago drops a final expression statement when only its semicolon is missing.
++// Recover a request-local method span without publishing synthetic source or
++// changing the original diagnostics, reference index, or rename participants.
++fn recover_trailing_method_call(content: &str, position: Position) -> Option<SymbolSpan> {
++    const MAX_RECOVERY_BYTES: usize = 1024 * 1024;
++    if content.len() > MAX_RECOVERY_BYTES || !content.trim_end().ends_with(')') {
++        return None;
++    }
++    let offset = position_to_offset(content, position);
++    let identifier_byte = |byte: u8| byte.is_ascii_alphanumeric() || byte == b'_' || byte >= 0x80;
++    if !content
++        .as_bytes()
++        .get(offset as usize)
++        .is_some_and(|byte| identifier_byte(*byte))
++        && !offset
++            .checked_sub(1)
++            .and_then(|offset| content.as_bytes().get(offset as usize))
++            .is_some_and(|byte| identifier_byte(*byte))
++    {
++        return None;
++    }
++    let mut terminated = String::with_capacity(content.len() + 1);
++    terminated.push_str(content);
++    terminated.push(';');
++    crate::parser::with_parsed_program(
++        &terminated,
++        "definition_missing_semicolon",
++        |program, source| {
++            if !program.errors.is_empty() {
++                return None;
++            }
++            let map = crate::symbol_map::extraction::extract_symbol_map(program, source);
++            let mut symbol = map
++                .lookup(offset)
++                .or_else(|| offset.checked_sub(1).and_then(|offset| map.lookup(offset)))?
++                .clone();
++            if symbol.end as usize > content.len() {
++                return None;
++            }
++            let SymbolKind::MemberAccess {
++                subject_text,
++                is_method_call: true,
++                ..
++            } = &mut symbol.kind
++            else {
++                return None;
++            };
++            // Subject ranges belong to the temporary map. Own the recovered text
++            // before ordinary resolution validates the live original source map.
++            let subject = subject_text.as_str(map.source(source)?).to_owned();
++            *subject_text = SubjectText::owned(subject);
++            Some(symbol)
++        },
++    )
++}
+ 
+ impl Backend {
+     /// Handle a "go to definition" request.
+@@ -44,7 +100,9 @@
+     ) -> Vec<Location> {
+         // Consult precomputed symbol map (retries one byte earlier for
+         // end-of-token edge cases).
+-        let symbol = self.lookup_symbol_at_position(uri, content, position);
++        let symbol = self
++            .lookup_symbol_at_position(uri, content, position)
++            .or_else(|| recover_trailing_method_call(content, position));
+         if let Some(ref s) = symbol
+             && let Some(resolved) =
+                 self.resolve_from_symbol(&s.kind, uri, content, position, s.start)
+diff --git a/tests/integration/definition_members.rs b/tests/integration/definition_members.rs
+--- a/tests/integration/definition_members.rs
++++ b/tests/integration/definition_members.rs
+@@ -6029,3 +6029,109 @@
+         "self::LIMIT should resolve to Child::LIMIT"
+     );
+ }
++
++// A closed call at EOF is a common intermediate state after accepting completion.
++#[tokio::test]
++async fn test_definition_unterminated_final_method_cross_file_and_utf16() {
++    use crate::common::{definition_locations, goto_definition_at, position_after};
++    for ending in ["", "\n", "\r\n"] {
++        let backend = create_test_backend();
++        let declaration = Url::parse("file:///B.php").unwrap();
++        open_php(&backend, &declaration, "<?php\nclass RenameWitness { public function dirtyOverlay(): string { return 'live'; } }\n").await;
++        let uri = Url::parse("file:///consumer.php").unwrap();
++        let source = format!(
++            "<?php\n// café 🐘\n$instance = new RenameWitness();\n$instance->dirtyOverlay(){ending}"
++        );
++        open_php(&backend, &uri, &source).await;
++        for needle in ["$instance->dirty", "$instance->dirtyOverlay"] {
++            let position = position_after(&source, needle);
++            let locations = definition_locations(
++                goto_definition_at(&backend, &uri, position.line, position.character).await,
++            );
++            assert_eq!(
++                locations.len(),
++                1,
++                "closed call without terminator: {ending:?}"
++            );
++            assert_eq!(locations[0].uri, declaration);
++            assert_eq!(locations[0].range.start.line, 1);
++        }
++    }
++}
++
++#[tokio::test]
++async fn test_definition_unterminated_final_method_static_and_nullsafe() {
++    use crate::common::{definition_locations, goto_definition_at, position_after};
++    for (call, needle) in [
++        ("RenameWitness::dirtyOverlay()", "RenameWitness::dirty"),
++        ("$instance?->dirtyOverlay()", "$instance?->dirty"),
++    ] {
++        let backend = create_test_backend();
++        let declaration = Url::parse("file:///B.php").unwrap();
++        open_php(&backend, &declaration, "<?php\nclass RenameWitness { public static function dirtyOverlay(): string { return 'live'; } }\n").await;
++        let uri = Url::parse("file:///consumer.php").unwrap();
++        let source = format!("<?php\n$instance = new RenameWitness();\n{call}");
++        open_php(&backend, &uri, &source).await;
++        let position = position_after(&source, needle);
++        let locations = definition_locations(
++            goto_definition_at(&backend, &uri, position.line, position.character).await,
++        );
++        assert_eq!(locations.len(), 1, "unterminated {call}");
++        assert_eq!(locations[0].uri, declaration);
++    }
++}
++
++#[tokio::test]
++async fn test_definition_unterminated_final_method_updates_do_not_reuse_old_member() {
++    use crate::common::{definition_locations, goto_definition_at, position_after};
++    let backend = create_test_backend();
++    let declaration = Url::parse("file:///B.php").unwrap();
++    open_php(&backend, &declaration, "<?php\nclass RenameWitness { public function dirtyOverlay(): string { return 'live'; } }\n").await;
++    let uri = Url::parse("file:///consumer.php").unwrap();
++    let original = "<?php\n$instance = new RenameWitness();\n$instance->missingMember();\n";
++    open_php(&backend, &uri, original).await;
++    let changed = "<?php\n$instance = new RenameWitness();\n$instance->dirtyOverlay()";
++    backend
++        .did_change(DidChangeTextDocumentParams {
++            text_document: VersionedTextDocumentIdentifier {
++                uri: uri.clone(),
++                version: 2,
++            },
++            content_changes: vec![TextDocumentContentChangeEvent {
++                range: None,
++                range_length: None,
++                text: changed.into(),
++            }],
++        })
++        .await;
++    let position = position_after(changed, "$instance->dirty");
++    let locations = definition_locations(
++        goto_definition_at(&backend, &uri, position.line, position.character).await,
++    );
++    assert_eq!(locations.len(), 1);
++    assert_eq!(locations[0].uri, declaration);
++}
++
++#[tokio::test]
++async fn test_definition_unterminated_final_method_rejects_trivia_arguments_and_other_errors() {
++    use crate::common::{definition_locations, goto_definition_at, position_after};
++    for (tail, needle) in [
++        ("// $instance->dirtyOverlay()", "// $instance->dirty"),
++        ("echo '$instance->dirtyOverlay()'", "echo '$instance->dirty"),
++        ("$instance->dirtyOverlay('unfinished", "$instance->dirty"),
++        ("$broken = ;\n$instance->dirtyOverlay()", "$instance->dirty"),
++        ("$instance->dirtyOverlay()", "$instance->dirtyOverlay()"),
++    ] {
++        let backend = create_test_backend();
++        let declaration = Url::parse("file:///B.php").unwrap();
++        open_php(&backend, &declaration, "<?php\nclass RenameWitness { public function dirtyOverlay(): string { return 'live'; } }\n").await;
++        let uri = Url::parse("file:///consumer.php").unwrap();
++        let source = format!("<?php\n$instance = new RenameWitness();\n{tail}");
++        open_php(&backend, &uri, &source).await;
++        let position = position_after(&source, needle);
++        let locations = definition_locations(
++            goto_definition_at(&backend, &uri, position.line, position.character).await,
++        );
++        assert!(locations.is_empty(), "must not guess at {tail}");
++    }
++}
+diff --git a/examples/php/definition.php b/examples/php/definition.php
+--- a/examples/php/definition.php
++++ b/examples/php/definition.php
+@@ -346,3 +346,8 @@
+ 
+ // Try: Go to Definition on strlen to inspect its read-only PHP built-in declaration.
+ strlen("embedded declaration");
++
++// Try: remove only the final semicolon, then Go to Definition on label.
++// Navigation still reaches GtdTarget::label while the statement is unfinished.
++$definitionAtEof = new GtdTarget();
++$definitionAtEof->label();
+diff --git a/docs/CHANGELOG.md b/docs/CHANGELOG.md
+--- a/docs/CHANGELOG.md
++++ b/docs/CHANGELOG.md
+@@ -14,6 +14,8 @@
+ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+ 
+ ## [Unreleased]
++
++- **Navigation works before the final semicolon is typed.** Go to Definition can follow a completed method call at the end of a PHP file while its statement is unfinished. Contributed by PHP Workbench downstream.
+ 
+ - **Modern PHP keyword suggestions follow the project target.** Autocomplete hides newer `fn`, `match`, `enum` and `readonly` syntax on older PHP versions while retaining ordinary keywords and project functions.
+ 

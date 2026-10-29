@@ -1,0 +1,354 @@
+diff --git a/docs/CHANGELOG.md b/docs/CHANGELOG.md
+index ec4fa5e..1bbe9ff 100644
+--- a/docs/CHANGELOG.md
++++ b/docs/CHANGELOG.md
+@@ -15,6 +15,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
+ 
+ ## [Unreleased]
+ 
++- **Keep incomplete indexing visible.** When a workspace scan finishes with partial results or fails, show a warning with a recovery action after the progress indicator closes. Successful scans and scratch sessions stay quiet. Contributed by PHP Workbench downstream.
++
+ - **Keep neighboring code during import cleanup.** Removing an unused import preserves other statements, used imports and comments sharing its line. Contributed by PHP Workbench downstream.
+ 
+ - **Optimize PHP imports in one reviewed operation.** Workbench can remove unused imports and sort surviving standalone import blocks together, with one review and one Undo step. Source changes require a fresh request. Contributed by PHP Workbench downstream.
+diff --git a/src/backend/startup.rs b/src/backend/startup.rs
+index 7ce8ec7..4de369a 100644
+--- a/src/backend/startup.rs
++++ b/src/backend/startup.rs
+@@ -623,6 +623,31 @@ impl Backend {
+         });
+     }
+ 
++    /// Historical completion notice, not a current/global readiness authority.
++    /// Never include source paths, file contents, raw errors, or project data.
++    async fn notify_full_index_outcome(
++        &self,
++        outcome: Option<crate::indexing::preload::WorkspaceIndexOutcome>,
++    ) {
++        use crate::indexing::preload::WorkspaceIndexOutcome;
++        let message = match outcome {
++            Some(WorkspaceIndexOutcome::Partial { .. }) => {
++                "PHP workspace indexing finished with partial results. Some PHP files could not be read. Check file permissions and encoding, then restart the PHP language service."
++            }
++            Some(WorkspaceIndexOutcome::Failed) | None => {
++                "PHP workspace indexing did not finish. Some results may be incomplete. Restart the PHP language service."
++            }
++            Some(
++                WorkspaceIndexOutcome::Complete
++                | WorkspaceIndexOutcome::Unavailable
++                | WorkspaceIndexOutcome::Running,
++            ) => return,
++        };
++        if let Some(client) = &self.client {
++            client.show_message(MessageType::WARNING, message).await;
++        }
++    }
++
+     pub(crate) async fn start_full_background_index(&self) {
+         // Headless test backends have no client; skip so integration tests
+         // stay deterministic instead of racing a background index thread.
+@@ -694,6 +719,13 @@ impl Backend {
+                 progress_backend.progress_end(&tok, Some(message)).await;
+             }
+ 
++            // An operation End removes transient progress in clients. Report
++            // the finished attempt's limited outcome independently of progress
++            // capability; ordinary cached queries never call this pipeline.
++            progress_backend
++                .notify_full_index_outcome(index_result.map(|(outcome, _)| outcome))
++                .await;
++
+             progress_backend.request_diagnostic_refresh().await;
+ 
+             // Files opened before the index finished were annotated from a
+diff --git a/tests/integration/index_warning.rs b/tests/integration/index_warning.rs
+new file mode 100644
+index 0000000..ed944e7
+--- /dev/null
++++ b/tests/integration/index_warning.rs
+@@ -0,0 +1,275 @@
++//! Tests-only first: actual Backend initialization/full-index transport.
++use super::common::lsp_transport::{TransportClient, serve_backend};
++use serde_json::{Value, json};
++use std::time::{Duration, Instant};
++
++const PARTIAL: &str = "PHP workspace indexing finished with partial results. Some PHP files could not be read. Check file permissions and encoding, then restart the PHP language service.";
++
++async fn next(client: &mut TransportClient, deadline: Instant) -> Value {
++    tokio::time::timeout(
++        deadline.saturating_duration_since(Instant::now()),
++        client.read_until("next actual server frame", |_| true),
++    )
++    .await
++    .expect("bounded actual server response")
++}
++
++async fn pump(
++    client: &mut TransportClient,
++    trace: &mut Vec<Value>,
++    what: &str,
++    predicate: impl Fn(&Value) -> bool,
++) {
++    let deadline = Instant::now() + Duration::from_secs(30);
++    loop {
++        let msg = next(client, deadline).await;
++        let done = predicate(&msg);
++        // A real client acknowledges server-initiated progress/refresh requests.
++        // No response, diagnostic, source content or progress event is invented.
++        if msg.get("method").is_some() && msg.get("id").is_some() {
++            client
++                .send(
++                    "acknowledge actual server request",
++                    json!({"jsonrpc":"2.0","id":msg["id"],"result":null}),
++                )
++                .await;
++        }
++        trace.push(msg);
++        if done {
++            return;
++        }
++        assert!(Instant::now() < deadline, "did not observe {what}");
++    }
++}
++
++fn warnings(trace: &[Value]) -> Vec<&Value> {
++    trace
++        .iter()
++        .filter(|m| m["method"] == "window/showMessage" && m["params"]["type"] == 2)
++        .collect()
++}
++
++async fn run_case(progress: bool, unreadable: bool) {
++    let dir = tempfile::tempdir().unwrap();
++    std::fs::create_dir(dir.path().join("src")).unwrap();
++    std::fs::write(
++        dir.path().join("composer.json"),
++        br#"{"name":"owned/index-warning","autoload":{"psr-4":{"IndexWarning\\":"src/"}}}"#,
++    )
++    .unwrap();
++    std::fs::write(dir.path().join(".phpantom.toml"), "[indexing]\nstrategy = \"full\"\n[phpstan]\ncommand = \"\"\n[phpcs]\ncommand = \"\"\n[phpmd]\ncommand = \"\"\n[mago]\ncommand = \"\"\n[formatting]\nphp-cs-fixer = \"\"\nphpcbf = \"\"\npint = \"\"\n").unwrap();
++    let valid = b"<?php\nnamespace IndexWarning; final class Seed {}\n";
++    std::fs::write(dir.path().join("src/Seed.php"), valid).unwrap();
++    // Portable real read_to_string failure; works for root CI and Windows too.
++    let bad: &[u8] = if unreadable {
++        b"<?php\n\xff\xfe\n"
++    } else {
++        b"<?php\nnamespace IndexWarning; final class Good {}\n"
++    };
++    std::fs::write(dir.path().join("src/Unreadable.php"), bad).unwrap();
++    let driver = dir.path().join("Driver.php");
++    let text = "<?php\nuse IndexWarning\\Seed;\nfunction inspect(Seed $seed): void {}\n";
++    std::fs::write(&driver, text).unwrap();
++    let uri = tower_lsp::lsp_types::Url::from_file_path(dir.path()).unwrap();
++    let mut client = serve_backend();
++    let mut trace = Vec::new();
++    client.send("actual initialize", json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"rootUri":uri,"capabilities":{"window":{"workDoneProgress":progress},"workspace":{"codeLens":{"refreshSupport":true}}}}})).await;
++    pump(&mut client, &mut trace, "initialize response", |m| {
++        m.get("method").is_none() && m["id"] == 1
++    })
++    .await;
++    client
++        .send(
++            "actual initialized",
++            json!({"jsonrpc":"2.0","method":"initialized","params":{}}),
++        )
++        .await;
++    // This exact real pipeline sends codeLens/refresh AFTER the complete
++    // full-index attempt's End/notice. No wall-clock silence is used as proof.
++    pump(
++        &mut client,
++        &mut trace,
++        "full-index completion refresh",
++        |m| m["method"] == "workspace/codeLens/refresh",
++    )
++    .await;
++    let first = warnings(&trace);
++    if unreadable {
++        assert_eq!(
++            first.len(),
++            1,
++            "a finished partial startup must be visible independently of progress support: {trace:#?}"
++        );
++        assert_eq!(first[0]["params"]["message"], PARTIAL);
++        assert!(
++            !first[0]["params"]["message"]
++                .as_str()
++                .unwrap()
++                .contains(dir.path().to_string_lossy().as_ref())
++        );
++    } else {
++        assert!(
++            first.is_empty(),
++            "a complete index must not warn: {trace:#?}"
++        );
++    }
++    if progress {
++        let end = trace
++            .iter()
++            .position(|m| {
++                m["method"] == "$/progress"
++                    && m["params"]["token"]
++                        .as_str()
++                        .is_some_and(|s| s.starts_with("phpantom/full-index"))
++                    && m["params"]["value"]["kind"] == "end"
++            })
++            .expect("actual full-index End");
++        if unreadable {
++            assert_eq!(
++                trace[end]["params"]["value"]["message"],
++                "Workspace index partial: 1 file could not be read"
++            );
++            let notice = trace
++                .iter()
++                .position(|m| m["method"] == "window/showMessage" && m["params"]["type"] == 2)
++                .unwrap();
++            assert!(
++                notice > end,
++                "transient progress ends before the historical warning"
++            );
++        }
++    } else {
++        assert!(
++            !trace
++                .iter()
++                .any(|m| m["method"] == "window/workDoneProgress/create"
++                    || m["method"] == "$/progress"),
++            "no progress requests without capability"
++        );
++    }
++    let driver_uri = tower_lsp::lsp_types::Url::from_file_path(&driver).unwrap();
++    client.send("open readable source", json!({"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":driver_uri,"languageId":"php","version":1,"text":text}}})).await;
++    // Real references() calls ensure_workspace_indexed_for_request. The
++    // already-finished cached attempt must not trigger another startup notice.
++    for id in [20, 21] {
++        client.send("actual cached-index reference request",json!({"jsonrpc":"2.0","id":id,"method":"textDocument/references","params":{"textDocument":{"uri":driver_uri},"position":{"line":2,"character":18},"context":{"includeDeclaration":true}}})).await;
++        pump(&mut client, &mut trace, "references response", |m| {
++            m.get("method").is_none() && m["id"] == id
++        })
++        .await;
++        assert_eq!(
++            warnings(&trace).len(),
++            if unreadable { 1 } else { 0 },
++            "cached requests must not repeat the warning"
++        );
++    }
++    client
++        .send(
++            "normal shutdown",
++            json!({"jsonrpc":"2.0","id":99,"method":"shutdown","params":null}),
++        )
++        .await;
++    pump(&mut client, &mut trace, "shutdown response", |m| {
++        m.get("method").is_none() && m["id"] == 99
++    })
++    .await;
++    client
++        .send(
++            "normal exit",
++            json!({"jsonrpc":"2.0","method":"exit","params":null}),
++        )
++        .await;
++    assert_eq!(warnings(&trace).len(), if unreadable { 1 } else { 0 });
++    assert_eq!(
++        std::fs::read(dir.path().join("src/Seed.php")).unwrap(),
++        valid
++    );
++    assert_eq!(
++        std::fs::read(dir.path().join("src/Unreadable.php")).unwrap(),
++        bad
++    );
++    assert_eq!(std::fs::read_to_string(driver).unwrap(), text);
++}
++
++#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
++async fn index_warning_partial_with_progress() {
++    run_case(true, true).await;
++}
++#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
++async fn index_warning_partial_without_progress() {
++    run_case(false, true).await;
++}
++#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
++async fn index_warning_complete_with_progress_no_warning() {
++    run_case(true, false).await;
++}
++#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
++async fn index_warning_complete_without_progress_no_warning() {
++    run_case(false, false).await;
++}
++
++async fn rootless_case(progress: bool) {
++    let mut client = serve_backend();
++    let mut trace = Vec::new();
++    client.send("rootless initialize",json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"capabilities":{"window":{"workDoneProgress":progress},"workspace":{"codeLens":{"refreshSupport":true}}}}})).await;
++    pump(
++        &mut client,
++        &mut trace,
++        "rootless initialize response",
++        |m| m.get("method").is_none() && m["id"] == 1,
++    )
++    .await;
++    client
++        .send(
++            "rootless initialized",
++            json!({"jsonrpc":"2.0","method":"initialized","params":{}}),
++        )
++        .await;
++    pump(
++        &mut client,
++        &mut trace,
++        "rootless initialization notice",
++        |m| m["method"] == "window/logMessage" && m["params"]["message"] == "PHPantom initialized!",
++    )
++    .await;
++    client.send("scratch open",json!({"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"untitled:OwnedScratch.php","languageId":"php","version":1,"text":"<?php function scratch(): void {}"}}})).await;
++    client.send("rootless symbol barrier",json!({"jsonrpc":"2.0","id":20,"method":"workspace/symbol","params":{"query":"scratch"}})).await;
++    pump(&mut client, &mut trace, "rootless request response", |m| {
++        m.get("method").is_none() && m["id"] == 20
++    })
++    .await;
++    client
++        .send(
++            "rootless shutdown",
++            json!({"jsonrpc":"2.0","id":99,"method":"shutdown","params":null}),
++        )
++        .await;
++    pump(&mut client, &mut trace, "rootless shutdown response", |m| {
++        m.get("method").is_none() && m["id"] == 99
++    })
++    .await;
++    client
++        .send(
++            "rootless exit",
++            json!({"jsonrpc":"2.0","method":"exit","params":null}),
++        )
++        .await;
++    assert!(
++        warnings(&trace).is_empty(),
++        "a rootless/scratch session has no finished workspace attempt: {trace:#?}"
++    );
++    assert!(!trace.iter().any(|m| {
++        m["method"] == "$/progress"
++            && m["params"]["token"]
++                .as_str()
++                .is_some_and(|s| s.starts_with("phpantom/full-index"))
++    }));
++}
++#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
++async fn index_warning_rootless_scratch_with_progress_has_no_warning() {
++    rootless_case(true).await;
++}
++#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
++async fn index_warning_rootless_scratch_without_progress_has_no_warning() {
++    rootless_case(false).await;
++}
+diff --git a/tests/integration/main.rs b/tests/integration/main.rs
+index 77ee3df..7f4a24e 100644
+--- a/tests/integration/main.rs
++++ b/tests/integration/main.rs
+@@ -310,3 +310,5 @@ mod release_metadata_authority;
+ 
+ mod structural_replace;
+ mod structural_search;
++
++mod index_warning;

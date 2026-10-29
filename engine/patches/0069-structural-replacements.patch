@@ -1,0 +1,3777 @@
+diff --git a/docs/CHANGELOG.md b/docs/CHANGELOG.md
+index 7307f53..7908899 100644
+--- a/docs/CHANGELOG.md
++++ b/docs/CHANGELOG.md
+@@ -15,6 +15,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
+ 
+ ## [Unreleased]
+ 
++- **Preview PHP structural replacements.** Prepare selected call transformations against current editor text, with captured expressions and checked source identities. The editor reviews changes before applying them. Contributed by PHP Workbench downstream.
++
+ - **Document symbols follow unsaved edits immediately.** Outlines and breadcrumbs use the accepted editor revision even before its background parse finishes, including undo. Contributed by PHP Workbench downstream.
+ 
+ - **Search PHP call patterns.** Project structural search matches syntax and captured arguments against current editor text, with explicit incomplete-file reports and cancellation. Contributed by PHP Workbench downstream.
+diff --git a/src/backend/startup.rs b/src/backend/startup.rs
+index 03b39bf..47d3750 100644
+--- a/src/backend/startup.rs
++++ b/src/backend/startup.rs
+@@ -279,7 +279,7 @@ impl Backend {
+                     ..ExecuteCommandOptions::default()
+                 }),
+                 experimental: Some(
+-                    serde_json::json!({"phpWorkbenchRoutes": true, "phpWorkbenchViews": true, "phpWorkbenchBuiltins": true, "phpWorkbenchActiveTarget": true, "phpWorkbenchRenameChecked": true, (crate::structural_search::wire::EXPERIMENTAL_CAPABILITY): true}),
++                    serde_json::json!({"phpWorkbenchRoutes": true, "phpWorkbenchViews": true, "phpWorkbenchBuiltins": true, "phpWorkbenchActiveTarget": true, "phpWorkbenchRenameChecked": true, (crate::structural_search::wire::EXPERIMENTAL_CAPABILITY): true, (crate::structural_search::wire::REPLACE_EXPERIMENTAL_CAPABILITY): true}),
+                 ),
+                 ..ServerCapabilities::default()
+             },
+diff --git a/src/lib.rs b/src/lib.rs
+index af70c74..63e7c07 100644
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -328,8 +328,8 @@ mod semantic_tokens;
+ mod server;
+ mod source_authority;
+ pub use project_router::{
+-    ProjectRouter, ProjectTargetQuery, STRUCTURAL_SEARCH_METHOD, StructuralSearchQuery,
+-    StructuralSearchReply,
++    ProjectRouter, ProjectTargetQuery, STRUCTURAL_REPLACE_METHOD, STRUCTURAL_SEARCH_METHOD,
++    StructuralReplaceQuery, StructuralReplaceReply, StructuralSearchQuery, StructuralSearchReply,
+ };
+ mod signature_help;
+ mod signature_overloads;
+diff --git a/src/main.rs b/src/main.rs
+index 70344dd..dbc56ac 100644
+--- a/src/main.rs
++++ b/src/main.rs
+@@ -574,6 +574,10 @@ async fn async_main() {
+                         phpantom_lsp::STRUCTURAL_SEARCH_METHOD,
+                         ProjectRouter::workbench_structural_search,
+                     )
++                    .custom_method(
++                        phpantom_lsp::STRUCTURAL_REPLACE_METHOD,
++                        ProjectRouter::workbench_structural_replace,
++                    )
+                     .custom_method("phpWorkbench/views", ProjectRouter::workbench_views)
+                     .custom_method("phpWorkbench/builtin", ProjectRouter::workbench_builtin)
+                     .custom_method(
+@@ -606,6 +610,10 @@ async fn async_main() {
+                         phpantom_lsp::STRUCTURAL_SEARCH_METHOD,
+                         ProjectRouter::workbench_structural_search,
+                     )
++                    .custom_method(
++                        phpantom_lsp::STRUCTURAL_REPLACE_METHOD,
++                        ProjectRouter::workbench_structural_replace,
++                    )
+                     .custom_method("phpWorkbench/views", ProjectRouter::workbench_views)
+                     .custom_method("phpWorkbench/builtin", ProjectRouter::workbench_builtin)
+                     .custom_method(
+diff --git a/src/project_router.rs b/src/project_router.rs
+index 7aa7661..f13c329 100644
+--- a/src/project_router.rs
++++ b/src/project_router.rs
+@@ -14,7 +14,8 @@ use tower_lsp::{Client, LanguageServer};
+ 
+ pub use crate::structural_search::wire::{
+     METHOD as STRUCTURAL_SEARCH_METHOD, Query as StructuralSearchQuery,
+-    Reply as StructuralSearchReply,
++    REPLACE_METHOD as STRUCTURAL_REPLACE_METHOD, ReplaceQuery as StructuralReplaceQuery,
++    ReplaceReply as StructuralReplaceReply, Reply as StructuralSearchReply,
+ };
+ 
+ #[path = "project_router_structural_search.rs"]
+diff --git a/src/project_router_structural_replace.rs b/src/project_router_structural_replace.rs
+new file mode 100644
+index 0000000..47ed72e
+--- /dev/null
++++ b/src/project_router_structural_replace.rs
+@@ -0,0 +1,308 @@
++//! Checked read-only replacement proposal through authoritative structural snapshots.
++use std::collections::{HashMap, HashSet};
++use std::sync::Arc;
++use std::time::{Duration, Instant};
++
++use tower_lsp::jsonrpc::{Error, Result};
++use tower_lsp::lsp_types::Url;
++
++use super::{expected, scan_error, stopped};
++use crate::project_router::ProjectRouter;
++use crate::structural_search::replacement::{ReplaceError, ReplaceLimits, Template};
++use crate::structural_search::{Pattern, SearchError, control, scan, wire};
++
++const MAX_SELECTED: usize = 1000;
++const MAX_OUTPUT_BYTES: usize = 32 * 1024 * 1024;
++
++fn invalid(message: &'static str) -> Error {
++    Error::invalid_params(message)
++}
++fn changed() -> Error {
++    scan_error(scan::ScanError::ContentModified)
++}
++fn output_budget() -> Error {
++    scan_error(scan::ScanError::Budget(
++        "aggregate replacement output bytes",
++    ))
++}
++fn render_error(error: ReplaceError) -> Error {
++    match error {
++        ReplaceError::Search(error) => scan_error(scan::ScanError::Matcher(error)),
++        ReplaceError::Budget(reason) => scan_error(scan::ScanError::Budget(reason)),
++        error => Error::invalid_params(error.to_string()),
++    }
++}
++fn matcher_check(control: &control::Control) -> std::result::Result<(), SearchError> {
++    control.checkpoint().map_err(SearchError::from)
++}
++
++/// Shape admission only. Match/stamp authority comes from the subsequent scan.
++fn selected_uris(query: &wire::ReplaceQuery) -> Result<HashSet<Url>> {
++    if query.search.expected_sources.is_empty() {
++        return Err(invalid("Replacement requires checked expected sources"));
++    }
++    if query.selections.is_empty() || query.selections.len() > 512 {
++        return Err(invalid(
++            "Select one or more source-stamped matches in at most 512 files",
++        ));
++    }
++    let mut uris = HashSet::new();
++    let mut count = 0usize;
++    let mut uri_bytes = 0usize;
++    for selection in &query.selections {
++        let uri = &selection.stamp.uri;
++        uri_bytes = uri_bytes
++            .checked_add(uri.as_str().len())
++            .filter(|n| *n <= 1024 * 1024)
++            .ok_or_else(|| invalid("Selected source URI budget exceeded"))?;
++        if uri.scheme() != "file"
++            || uri.query().is_some()
++            || uri.fragment().is_some()
++            || uri.to_file_path().is_err()
++            || !uris.insert(uri.clone())
++        {
++            return Err(invalid("Selected sources require distinct local file URIs"));
++        }
++        if selection.stamp.sha256_utf8.len() != 64
++            || !selection
++                .stamp
++                .sha256_utf8
++                .bytes()
++                .all(|byte| byte.is_ascii_hexdigit())
++            || selection.stamp.utf8_bytes > 2 * 1024 * 1024
++        {
++            return Err(invalid("Invalid selected source hash or byte length"));
++        }
++        if selection.calls.is_empty() {
++            return Err(invalid("Each selected source requires at least one call"));
++        }
++        count = count
++            .checked_add(selection.calls.len())
++            .filter(|n| *n <= MAX_SELECTED)
++            .ok_or_else(|| invalid("Too many selected structural replacements"))?;
++        let mut calls: Vec<_> = selection.calls.iter().collect();
++        calls.sort_by_key(|call| (call.start_byte, call.end_byte));
++        if calls
++            .iter()
++            .any(|call| call.start_byte >= call.end_byte || call.range.start > call.range.end)
++            || calls
++                .windows(2)
++                .any(|pair| pair[0].end_byte > pair[1].start_byte)
++        {
++            return Err(invalid(
++                "Selected structural calls must be nonempty, disjoint and nonduplicated",
++            ));
++        }
++    }
++    Ok(uris)
++}
++
++fn render_selected(
++    captured: &scan::CapturedSearch,
++    query: &wire::ReplaceQuery,
++    pattern: &Pattern,
++    template: &Template,
++    control: &control::Control,
++) -> Result<Vec<wire::FileEdits>> {
++    let by_uri: HashMap<_, _> = captured
++        .prepared
++        .reply
++        .files
++        .iter()
++        .map(|file| (&file.stamp.uri, file))
++        .collect();
++    let mut output = Vec::new();
++    let mut inserted_bytes = 0usize;
++    let mut candidate_bytes = captured.input_bytes;
++    for selection in &query.selections {
++        control.checkpoint().map_err(stopped)?;
++        let file = by_uri.get(&selection.stamp.uri).ok_or_else(changed)?;
++        if file.stamp != selection.stamp {
++            return Err(changed());
++        }
++        // Exact byte AND UTF16 membership. Never accept an arbitrary substring
++        // or remap a selection to another preferred alias on behalf of a caller.
++        for selected in &selection.calls {
++            if !file.matches.iter().any(|found| found.call == *selected) {
++                return Err(changed());
++            }
++        }
++        let source = captured.source(&selection.stamp.uri).ok_or_else(changed)?;
++        let ranges: Vec<_> = selection
++            .calls
++            .iter()
++            .map(|call| call.start_byte as usize..call.end_byte as usize)
++            .collect();
++        let prepared = template
++            .prepare_selected_with_control(
++                pattern,
++                source,
++                &ranges,
++                ReplaceLimits::default(),
++                &|| matcher_check(control),
++            )
++            .map_err(render_error)?;
++        // Renderer contract includes no-op edits too; do not silently omit a
++        // user-selected match if an incompatible implementation drops no-ops.
++        if prepared.edits.len() != selection.calls.len() {
++            return Err(Error::internal_error());
++        }
++        let mut file_inserted = 0usize;
++        let mut removed = 0usize;
++        for edit in &prepared.edits {
++            control.checkpoint().map_err(stopped)?;
++            if !selection.calls.iter().any(|call| {
++                call.start_byte as usize == edit.source.bytes.start
++                    && call.end_byte as usize == edit.source.bytes.end
++                    && call.range == edit.source.range
++            }) {
++                return Err(Error::internal_error());
++            }
++            file_inserted = file_inserted
++                .checked_add(edit.new_text.len())
++                .ok_or_else(output_budget)?;
++            removed = removed
++                .checked_add(edit.source.bytes.len())
++                .ok_or_else(output_budget)?;
++        }
++        inserted_bytes = inserted_bytes
++            .checked_add(file_inserted)
++            .filter(|n| *n <= MAX_OUTPUT_BYTES)
++            .ok_or_else(output_budget)?;
++        let candidate = source
++            .len()
++            .checked_sub(removed)
++            .and_then(|n| n.checked_add(file_inserted))
++            .ok_or_else(output_budget)?;
++        candidate_bytes = candidate_bytes
++            .checked_sub(source.len())
++            .and_then(|n| n.checked_add(candidate))
++            .ok_or_else(output_budget)?;
++        // Account before retaining any per-file wire edit collection. The pure
++        // renderer itself bounds its single file/candidate allocation.
++        output.push(wire::FileEdits {
++            uri: selection.stamp.uri.clone(),
++            edits: prepared
++                .edits
++                .into_iter()
++                .map(|edit| wire::ReplacementEdit {
++                    call: edit.source.into(),
++                    new_text: edit.new_text,
++                })
++                .collect(),
++        });
++    }
++    if candidate_bytes > MAX_OUTPUT_BYTES {
++        return Err(output_budget());
++    }
++    control.checkpoint().map_err(stopped)?;
++    output.sort_by(|a, b| a.uri.as_str().cmp(b.uri.as_str()));
++    Ok(output)
++}
++
++impl ProjectRouter {
++    /// Produce edits only. No source writes or resource operations are admitted.
++    pub async fn workbench_structural_replace(
++        &self,
++        query: wire::ReplaceQuery,
++    ) -> Result<wire::ReplaceReply> {
++        let retained = selected_uris(&query)?;
++        let (_lifetime, control) = control::Lifetime::new(Instant::now() + Duration::from_secs(25));
++        let (project, expected) = {
++            let _gate = self.request_guard().await;
++            let expected = expected::Captured::capture(self, &query.search)?;
++            let project = self.query_project(Some(query.search.uri.clone())).await?;
++            (project, expected)
++        };
++        control.checkpoint().map_err(stopped)?;
++        let root = project
++            .root
++            .as_ref()
++            .map(Url::from_directory_path)
++            .transpose()
++            .map_err(|_| invalid("Invalid replacement project root"))?;
++        let wire_project = wire::Project {
++            id: project.id,
++            root,
++        };
++        let backend = Arc::clone(&project.backend);
++        let worker_control = control.clone();
++        #[cfg(test)]
++        let worker_barrier = self.structural_test_barrier.lock().take();
++        let (mut prepared, receipt, edits, replacement) =
++            crate::server::run_blocking_cancel_safe("structural_replace", move || -> Result<_> {
++                #[cfg(test)]
++                let _finished = worker_barrier
++                    .as_ref()
++                    .map(|barrier| barrier.finish_guard(&worker_control));
++                let result: Result<_> = (|| {
++                    worker_control.checkpoint().map_err(stopped)?;
++                    let pattern = Pattern::compile(&query.search.pattern)
++                        .map_err(|error| scan_error(scan::ScanError::Matcher(error)))?;
++                    let template =
++                        Template::compile(&pattern, &query.replacement).map_err(render_error)?;
++                    let expected =
++                        expected.hash(&backend.symbols.source_authority, &worker_control)?;
++                    let captured = backend.with_prepared_current_semantics(|| {
++                        backend
++                            .search_structural_captured_once(
++                                &query.search,
++                                wire_project.clone(),
++                                &pattern,
++                                &worker_control,
++                                &retained,
++                            )
++                            .map_err(scan_error)
++                    })?;
++                    let edits =
++                        render_selected(&captured, &query, &pattern, &template, &worker_control)?;
++                    let receipt = expected.check_reply(
++                        &captured.prepared.reply,
++                        &backend.symbols.source_authority,
++                        &worker_control,
++                    )?;
++                    Ok((captured, receipt, edits))
++                })();
++                // Pause after render+receipt with no routing or semantic locks held.
++                #[cfg(test)]
++                if let Some(barrier) = &worker_barrier {
++                    barrier.pause(&worker_control, result.is_ok());
++                }
++                let (captured, receipt, edits) = result?;
++                // Final full disk/hash/identity/source-set readback is deliberately
++                // after rendering and the test publication barrier, still blocking.
++                captured
++                    .validate_after_replacement(&backend, &query.search, &worker_control)
++                    .map_err(scan_error)?;
++                worker_control.checkpoint().map_err(stopped)?;
++                Ok((captured.prepared, receipt, edits, query.replacement))
++            })
++            .await
++            .ok_or_else(Error::internal_error)??;
++        let _gate = self.request_guard().await;
++        control.checkpoint().map_err(stopped)?;
++        if !self
++            .contexts
++            .read()
++            .iter()
++            .any(|current| Arc::ptr_eq(current, &project))
++        {
++            return Err(changed());
++        }
++        prepared
++            .validate_open_state(&project.backend)
++            .map_err(scan_error)?;
++        receipt.publish(self, &mut prepared.reply)?;
++        control.checkpoint().map_err(stopped)?;
++        Ok(wire::ReplaceReply {
++            kind: wire::ReplacementKind::ParenthesizedExpression,
++            search: prepared.reply,
++            replacement,
++            edits,
++        })
++    }
++}
++
++#[cfg(test)]
++#[path = "project_router_structural_replace_tests.rs"]
++mod tests;
+diff --git a/src/project_router_structural_replace_tests.rs b/src/project_router_structural_replace_tests.rs
+new file mode 100644
+index 0000000..24510a7
+--- /dev/null
++++ b/src/project_router_structural_replace_tests.rs
+@@ -0,0 +1,584 @@
++//! Public async handler controls; real router lifecycle and temporary files.
++use super::super::test_hook::WorkerBarrier;
++use super::*;
++use crate::structural_search::control::Stop;
++use sha2::{Digest, Sha256};
++use std::{
++    path::{Path, PathBuf},
++    time::Duration,
++};
++use tower_lsp::{LanguageServer, jsonrpc::ErrorCode, lsp_types::*};
++
++const TIMEOUT: Duration = Duration::from_secs(10);
++fn uri(path: &Path) -> Url {
++    Url::from_file_path(path).unwrap()
++}
++fn sha(text: &str) -> String {
++    format!("{:x}", Sha256::digest(text.as_bytes()))
++}
++fn expected(path: &Path, version: i32, text: &str) -> wire::ExpectedSource {
++    wire::ExpectedSource {
++        uri: uri(path),
++        version,
++        sha256_utf8: sha(text),
++    }
++}
++struct Fixture {
++    _temp: tempfile::TempDir,
++    router: Arc<ProjectRouter>,
++    root: PathBuf,
++    source: PathBuf,
++    peer: PathBuf,
++    closed: PathBuf,
++    text: String,
++    peer_text: String,
++    disk_text: String,
++}
++impl Fixture {
++    async fn new() -> Self {
++        let temp = tempfile::tempdir().unwrap();
++        let base = temp.path().canonicalize().unwrap();
++        let root = base.join("app");
++        let other = base.join("other");
++        for path in [&root, &other] {
++            std::fs::create_dir_all(path.join("src")).unwrap();
++            std::fs::write(path.join("composer.json"), r#"{}"#).unwrap();
++        }
++        let source = root.join("index.php");
++        let peer = other.join("index.php");
++        let closed = root.join("closed.php");
++        let text = "<?php\r\n/* ž🐘 */ foo($value); foo(foo($nested));\r\n".to_owned();
++        assert!(text.contains("\r\n"));
++        let peer_text = "<?php foo('peer');\r\n".to_owned();
++        let disk_text = "<?php /* disk */ foo('disk');\r\n".to_owned();
++        std::fs::write(&source, &text).unwrap();
++        std::fs::write(&peer, &peer_text).unwrap();
++        std::fs::write(&closed, &disk_text).unwrap();
++        let router = Arc::new(ProjectRouter::new_test());
++        router
++            .initialize(InitializeParams {
++                root_uri: Some(Url::from_directory_path(&root).unwrap()),
++                workspace_folders: Some(vec![
++                    WorkspaceFolder {
++                        uri: Url::from_directory_path(&root).unwrap(),
++                        name: "app".into(),
++                    },
++                    WorkspaceFolder {
++                        uri: Url::from_directory_path(&other).unwrap(),
++                        name: "other".into(),
++                    },
++                ]),
++                ..InitializeParams::default()
++            })
++            .await
++            .unwrap();
++        router.initialized(InitializedParams {}).await;
++        for (path, text) in [(&source, &text), (&peer, &peer_text)] {
++            router
++                .did_open(DidOpenTextDocumentParams {
++                    text_document: TextDocumentItem {
++                        uri: uri(path),
++                        version: 1,
++                        language_id: "php".into(),
++                        text: text.clone(),
++                    },
++                })
++                .await;
++        }
++        Self {
++            _temp: temp,
++            router,
++            root,
++            source,
++            peer,
++            closed,
++            text,
++            peer_text,
++            disk_text,
++        }
++    }
++    fn search(&self, scope: wire::Scope) -> wire::Query {
++        wire::Query {
++            uri: uri(&self.source),
++            generation: 73,
++            pattern: "foo($__ss_value)".into(),
++            scope,
++            expected_sources: vec![
++                expected(&self.source, 1, &self.text),
++                expected(&self.peer, 1, &self.peer_text),
++            ],
++        }
++    }
++    async fn proposal(&self, scope: wire::Scope, needle: &str) -> wire::ReplaceQuery {
++        let search = self.search(scope);
++        let found = self
++            .router
++            .workbench_structural_search(search.clone())
++            .await
++            .unwrap();
++        let (file, call) = found
++            .files
++            .iter()
++            .find_map(|file| {
++                let text = if file.stamp.uri == uri(&self.source) {
++                    &self.text
++                } else if file.stamp.uri == uri(&self.closed) {
++                    &self.disk_text
++                } else {
++                    return None;
++                };
++                file.matches
++                    .iter()
++                    .find(|m| &text[m.call.start_byte as usize..m.call.end_byte as usize] == needle)
++                    .map(|m| (file, m.call.clone()))
++            })
++            .expect("selected real search match");
++        wire::ReplaceQuery {
++            search,
++            replacement: "bar($__ss_value)".into(),
++            selections: vec![wire::Selection {
++                stamp: file.stamp.clone(),
++                calls: vec![call],
++            }],
++        }
++    }
++    async fn finish(&self) {
++        assert_eq!(std::fs::read(&self.source).unwrap(), self.text.as_bytes());
++        assert_eq!(
++            std::fs::read(&self.peer).unwrap(),
++            self.peer_text.as_bytes()
++        );
++        self.router.shutdown().await.unwrap();
++    }
++}
++fn apply(text: &str, edits: &[wire::ReplacementEdit]) -> String {
++    let mut out = text.to_owned();
++    for edit in edits.iter().rev() {
++        out.replace_range(
++            edit.call.start_byte as usize..edit.call.end_byte as usize,
++            &edit.new_text,
++        );
++    }
++    out
++}
++
++#[tokio::test]
++async fn structural_replace_route_current_checked_subset_preserves_unicode_crlf_and_disk() {
++    let f = Fixture::new().await;
++    let q = f.proposal(wire::Scope::Document, "foo($value)").await;
++    let expected = q.search.expected_sources.clone();
++    let reply = f
++        .router
++        .workbench_structural_replace(q.clone())
++        .await
++        .unwrap();
++    assert_eq!(reply.kind, wire::ReplacementKind::ParenthesizedExpression);
++    assert_eq!(reply.search.expected_sources, expected);
++    assert_eq!(reply.replacement, q.replacement);
++    assert_eq!(reply.edits.len(), 1);
++    assert_eq!(reply.edits[0].uri, uri(&f.source));
++    assert_eq!(reply.edits[0].edits.len(), 1);
++    assert_eq!(reply.edits[0].edits[0].call, q.selections[0].calls[0]);
++    assert_eq!(
++        apply(&f.text, &reply.edits[0].edits),
++        f.text.replacen("foo($value)", "(bar(($value)))", 1)
++    );
++    assert_eq!(std::fs::read(&f.closed).unwrap(), f.disk_text.as_bytes());
++    f.finish().await;
++}
++
++#[tokio::test]
++async fn structural_replace_route_requires_nonempty_manifest_and_selection() {
++    let f = Fixture::new().await;
++    let q = f.proposal(wire::Scope::Document, "foo($value)").await;
++    let mut empty = q.clone();
++    empty.search.expected_sources.clear();
++    assert_eq!(
++        f.router
++            .workbench_structural_replace(empty)
++            .await
++            .unwrap_err()
++            .code,
++        ErrorCode::InvalidParams
++    );
++    let mut empty = q;
++    empty.selections.clear();
++    assert_eq!(
++        f.router
++            .workbench_structural_replace(empty)
++            .await
++            .unwrap_err()
++            .code,
++        ErrorCode::InvalidParams
++    );
++    f.finish().await;
++}
++
++#[tokio::test]
++async fn structural_replace_route_exact_stamp_byte_and_utf16_membership_refuses_foreign() {
++    let f = Fixture::new().await;
++    let q = f.proposal(wire::Scope::Document, "foo($value)").await;
++    let mut cases = Vec::new();
++    let mut changed = q.clone();
++    changed.selections[0].stamp.sha256_utf8 = "0".repeat(64);
++    cases.push(changed);
++    let mut changed = q.clone();
++    changed.selections[0].calls[0].start_byte += 1;
++    cases.push(changed);
++    let mut changed = q.clone();
++    changed.selections[0].calls[0].range.start.character += 1;
++    cases.push(changed);
++    let mut changed = q.clone();
++    changed.selections[0].stamp.source = wire::SourceKind::Disk;
++    cases.push(changed);
++    let mut changed = q.clone();
++    changed.selections[0].stamp.uri = uri(&f.peer);
++    cases.push(changed);
++    for changed in cases {
++        assert_eq!(
++            f.router
++                .workbench_structural_replace(changed)
++                .await
++                .unwrap_err()
++                .code,
++            ErrorCode::ServerError(-32801)
++        );
++    }
++    f.finish().await;
++}
++
++#[tokio::test]
++async fn structural_replace_route_duplicates_and_overlap_refuse_but_outer_or_inner_subset_succeeds()
++{
++    let f = Fixture::new().await;
++    let q = f.proposal(wire::Scope::Document, "foo(foo($nested))").await;
++    let found = f
++        .router
++        .workbench_structural_search(q.search.clone())
++        .await
++        .unwrap();
++    let file = &found.files[0];
++    let inner = file
++        .matches
++        .iter()
++        .find(|m| &f.text[m.call.start_byte as usize..m.call.end_byte as usize] == "foo($nested)")
++        .unwrap()
++        .call
++        .clone();
++    let mut duplicate = q.clone();
++    duplicate.selections[0]
++        .calls
++        .push(q.selections[0].calls[0].clone());
++    assert_eq!(
++        f.router
++            .workbench_structural_replace(duplicate)
++            .await
++            .unwrap_err()
++            .code,
++        ErrorCode::InvalidParams
++    );
++    let mut overlap = q.clone();
++    overlap.selections[0].calls.push(inner.clone());
++    assert_eq!(
++        f.router
++            .workbench_structural_replace(overlap)
++            .await
++            .unwrap_err()
++            .code,
++        ErrorCode::InvalidParams
++    );
++    for selected in [q.selections[0].calls[0].clone(), inner] {
++        let mut choice = q.clone();
++        choice.selections[0].calls = vec![selected];
++        let reply = f.router.workbench_structural_replace(choice).await.unwrap();
++        assert_eq!(reply.edits[0].edits.len(), 1);
++    }
++    f.finish().await;
++}
++
++#[tokio::test]
++async fn structural_replace_route_stale_closed_stamp_refuses_without_rehydrating_it() {
++    let f = Fixture::new().await;
++    let q = f.proposal(wire::Scope::Project, "foo('disk')").await;
++    let external = f.disk_text.replace("'disk'", "'evil'");
++    std::fs::write(&f.closed, &external).unwrap();
++    assert_eq!(
++        f.router
++            .workbench_structural_replace(q)
++            .await
++            .unwrap_err()
++            .code,
++        ErrorCode::ServerError(-32801)
++    );
++    assert_eq!(std::fs::read(&f.closed).unwrap(), external.as_bytes());
++    f.finish().await;
++}
++
++#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
++async fn structural_replace_route_global_peer_change_after_render_refuses_final_receipt() {
++    let f = Fixture::new().await;
++    let q = f.proposal(wire::Scope::Document, "foo($value)").await;
++    let mut barrier = WorkerBarrier::arm(&f.router);
++    let router = f.router.clone();
++    let request = tokio::spawn(async move { router.workbench_structural_replace(q).await });
++    assert!(barrier.paused().await.prepared_ok);
++    tokio::time::timeout(
++        TIMEOUT,
++        f.router.did_change(DidChangeTextDocumentParams {
++            text_document: VersionedTextDocumentIdentifier {
++                uri: uri(&f.peer),
++                version: 2,
++            },
++            content_changes: vec![TextDocumentContentChangeEvent {
++                range: None,
++                range_length: None,
++                text: f.peer_text.replace("peer", "live"),
++            }],
++        }),
++    )
++    .await
++    .expect("router gate must be released while rendering is held");
++    barrier.release();
++    barrier.finished().await;
++    assert_eq!(
++        tokio::time::timeout(TIMEOUT, request)
++            .await
++            .unwrap()
++            .unwrap()
++            .unwrap_err()
++            .code,
++        ErrorCode::ServerError(-32801)
++    );
++    f.finish().await;
++}
++
++#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
++async fn structural_replace_route_disk_change_after_render_refuses_post_barrier_readback() {
++    let f = Fixture::new().await;
++    let q = f.proposal(wire::Scope::Project, "foo('disk')").await;
++    let mut barrier = WorkerBarrier::arm(&f.router);
++    let router = f.router.clone();
++    let request = tokio::spawn(async move { router.workbench_structural_replace(q).await });
++    assert!(barrier.paused().await.prepared_ok);
++    let external = f.disk_text.replace("disk", "next");
++    std::fs::write(&f.closed, &external).unwrap();
++    barrier.release();
++    barrier.finished().await;
++    assert_eq!(
++        tokio::time::timeout(TIMEOUT, request)
++            .await
++            .unwrap()
++            .unwrap()
++            .unwrap_err()
++            .code,
++        ErrorCode::ServerError(-32801)
++    );
++    assert_eq!(std::fs::read(&f.closed).unwrap(), external.as_bytes());
++    f.finish().await;
++}
++
++#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
++async fn structural_replace_route_new_source_after_render_refuses_source_set() {
++    let f = Fixture::new().await;
++    let q = f.proposal(wire::Scope::Project, "foo('disk')").await;
++    let mut barrier = WorkerBarrier::arm(&f.router);
++    let router = f.router.clone();
++    let request = tokio::spawn(async move { router.workbench_structural_replace(q).await });
++    assert!(barrier.paused().await.prepared_ok);
++    let added = f.root.join("later.php");
++    std::fs::write(&added, "<?php foo('later');").unwrap();
++    barrier.release();
++    barrier.finished().await;
++    assert_eq!(
++        request.await.unwrap().unwrap_err().code,
++        ErrorCode::ServerError(-32801)
++    );
++    assert_eq!(
++        std::fs::read_to_string(added).unwrap(),
++        "<?php foo('later');"
++    );
++    f.finish().await;
++}
++
++#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
++async fn structural_replace_route_aborted_actual_request_stops_worker_without_edits() {
++    let f = Fixture::new().await;
++    let q = f.proposal(wire::Scope::Document, "foo($value)").await;
++    let mut barrier = WorkerBarrier::arm(&f.router);
++    let router = f.router.clone();
++    let request = tokio::spawn(async move { router.workbench_structural_replace(q).await });
++    let paused = barrier.paused().await;
++    assert!(paused.prepared_ok);
++    request.abort();
++    assert!(request.await.unwrap_err().is_cancelled());
++    assert_eq!(paused.control.checkpoint(), Err(Stop::Cancelled));
++    barrier.release();
++    assert_eq!(barrier.finished().await.stopped, Some(Stop::Cancelled));
++    let fresh = f.proposal(wire::Scope::Document, "foo($value)").await;
++    assert!(f.router.workbench_structural_replace(fresh).await.is_ok());
++    f.finish().await;
++}
++
++#[cfg(unix)]
++#[tokio::test]
++async fn structural_replace_route_actual_preferred_alias_is_preserved_and_divergent_selector_refuses()
++ {
++    let f = Fixture::new().await;
++    let alias = f.root.join("Alias.php");
++    std::os::unix::fs::symlink(&f.source, &alias).unwrap();
++    f.router
++        .did_open(DidOpenTextDocumentParams {
++            text_document: TextDocumentItem {
++                uri: uri(&alias),
++                version: 7,
++                language_id: "php".into(),
++                text: f.text.clone(),
++            },
++        })
++        .await;
++    let mut search = f.search(wire::Scope::Document);
++    search.uri = uri(&alias);
++    search.expected_sources.push(expected(&alias, 7, &f.text));
++    let found = f
++        .router
++        .workbench_structural_search(search.clone())
++        .await
++        .unwrap();
++    assert_eq!(found.files[0].stamp.uri, uri(&f.source));
++    let query = wire::ReplaceQuery {
++        search: search.clone(),
++        replacement: "bar($__ss_value)".into(),
++        selections: vec![wire::Selection {
++            stamp: found.files[0].stamp.clone(),
++            calls: vec![found.files[0].matches[0].call.clone()],
++        }],
++    };
++    let reply = f.router.workbench_structural_replace(query).await.unwrap();
++    assert_eq!(reply.edits[0].uri, uri(&f.source));
++    let live = f.text.replace("$value", "$other");
++    f.router
++        .did_change(DidChangeTextDocumentParams {
++            text_document: VersionedTextDocumentIdentifier {
++                uri: uri(&alias),
++                version: 8,
++            },
++            content_changes: vec![TextDocumentContentChangeEvent {
++                range: None,
++                range_length: None,
++                text: live.clone(),
++            }],
++        })
++        .await;
++    search.expected_sources[2] = expected(&alias, 8, &live);
++    let found = f
++        .router
++        .workbench_structural_search(search.clone())
++        .await
++        .unwrap();
++    assert_eq!(found.files[0].stamp.uri, uri(&alias));
++    let query = wire::ReplaceQuery {
++        search: search.clone(),
++        replacement: "bar($__ss_value)".into(),
++        selections: vec![wire::Selection {
++            stamp: found.files[0].stamp.clone(),
++            calls: vec![found.files[0].matches[0].call.clone()],
++        }],
++    };
++    assert_eq!(
++        f.router
++            .workbench_structural_replace(query)
++            .await
++            .unwrap()
++            .edits[0]
++            .uri,
++        uri(&alias)
++    );
++    search.uri = uri(&f.source);
++    let stale = wire::ReplaceQuery {
++        search,
++        replacement: "bar($__ss_value)".into(),
++        selections: vec![wire::Selection {
++            stamp: found.files[0].stamp.clone(),
++            calls: vec![found.files[0].matches[0].call.clone()],
++        }],
++    };
++    assert_eq!(
++        f.router
++            .workbench_structural_replace(stale)
++            .await
++            .unwrap_err()
++            .code,
++        ErrorCode::ServerError(-32801)
++    );
++    f.finish().await;
++}
++
++#[tokio::test]
++async fn structural_replace_route_aggregate_rendered_output_is_bounded_across_files() {
++    let f = Fixture::new().await;
++    for index in 0..20 {
++        std::fs::write(
++            f.root.join(format!("large-{index}.php")),
++            format!("<?php foo('{}');", "x".repeat(100_000)),
++        )
++        .unwrap();
++    }
++    let search = f.search(wire::Scope::Project);
++    let found = f
++        .router
++        .workbench_structural_search(search.clone())
++        .await
++        .unwrap();
++    let selections = found
++        .files
++        .into_iter()
++        .filter(|file| file.stamp.uri.as_str().contains("large-"))
++        .map(|file| wire::Selection {
++            stamp: file.stamp,
++            calls: file.matches.into_iter().map(|m| m.call).collect(),
++        })
++        .collect::<Vec<_>>();
++    assert_eq!(selections.len(), 20);
++    let replacement = format!("many({})", vec!["$__ss_value"; 18].join(","));
++    let error = f
++        .router
++        .workbench_structural_replace(wire::ReplaceQuery {
++            search,
++            replacement,
++            selections,
++        })
++        .await
++        .unwrap_err();
++    assert_eq!(error.code, ErrorCode::ServerError(-32001));
++    assert!(
++        error.message.contains("aggregate replacement output bytes"),
++        "unexpected budget refusal: {error}"
++    );
++    f.finish().await;
++}
++
++#[tokio::test]
++async fn structural_replace_route_explicit_clean_selection_keeps_partial_syntax_ledger() {
++    let f = Fixture::new().await;
++    let broken = f.root.join("broken.php");
++    std::fs::write(&broken, "<?php foo(").unwrap();
++    let query = f.proposal(wire::Scope::Project, "foo($value)").await;
++    let reply = f.router.workbench_structural_replace(query).await.unwrap();
++    assert!(reply.search.incomplete);
++    assert!(
++        reply
++            .search
++            .issues
++            .iter()
++            .any(|issue| issue.uri.as_ref() == Some(&uri(&broken))
++                && matches!(issue.kind, wire::IssueKind::Syntax))
++    );
++    assert_eq!(reply.edits.len(), 1);
++    assert_eq!(reply.edits[0].uri, uri(&f.source));
++    assert_eq!(
++        apply(&f.text, &reply.edits[0].edits),
++        f.text.replacen("foo($value)", "(bar(($value)))", 1)
++    );
++    assert_eq!(std::fs::read_to_string(&broken).unwrap(), "<?php foo(");
++    f.finish().await;
++}
+diff --git a/src/project_router_structural_search.rs b/src/project_router_structural_search.rs
+index be22af9..164881e 100644
+--- a/src/project_router_structural_search.rs
++++ b/src/project_router_structural_search.rs
+@@ -147,3 +147,6 @@ impl ProjectRouter {
+         Ok(prepared.reply)
+     }
+ }
++
++#[path = "project_router_structural_replace.rs"]
++mod replacement_route;
+diff --git a/src/structural_scan.rs b/src/structural_scan.rs
+index 3891434..d6fed61 100644
+--- a/src/structural_scan.rs
++++ b/src/structural_scan.rs
+@@ -87,6 +87,20 @@ pub(crate) struct Prepared {
+     file_bytes: usize,
+ }
+ 
++/// Optional owned texts used only by checked replacement preparation.
++pub(crate) struct CapturedSearch {
++    pub prepared: Prepared,
++    pub input_bytes: usize,
++    sources: HashMap<Url, Arc<String>>,
++    source_set: HashSet<SourceIdentity>,
++    walk_issues: Vec<wire::FileIssue>,
++}
++
++struct ScanOptions<'a> {
++    budget: Budget,
++    retain: Option<&'a HashSet<Url>>,
++}
++
+ enum Loaded {
+     Open {
+         text: Arc<String>,
+@@ -250,6 +264,27 @@ impl Backend {
+         self.search_structural_inner(query, project, pattern, control, Budget::default(), || {})
+     }
+ 
++    pub(crate) fn search_structural_captured_once(
++        &self,
++        query: &wire::Query,
++        project: wire::Project,
++        pattern: &Pattern,
++        control: &Control,
++        retain: &HashSet<Url>,
++    ) -> Result<CapturedSearch> {
++        self.search_structural_captured(
++            query,
++            project,
++            pattern,
++            control,
++            ScanOptions {
++                budget: Budget::default(),
++                retain: Some(retain),
++            },
++            || {},
++        )
++    }
++
+     fn search_structural_inner(
+         &self,
+         query: &wire::Query,
+@@ -259,6 +294,31 @@ impl Backend {
+         budget: Budget,
+         before_validate: impl FnOnce(),
+     ) -> Result<Prepared> {
++        self.search_structural_captured(
++            query,
++            project,
++            pattern,
++            control,
++            ScanOptions {
++                budget,
++                retain: None,
++            },
++            before_validate,
++        )
++        .map(|captured| captured.prepared)
++    }
++
++    fn search_structural_captured(
++        &self,
++        query: &wire::Query,
++        project: wire::Project,
++        pattern: &Pattern,
++        control: &Control,
++        options: ScanOptions<'_>,
++        before_validate: impl FnOnce(),
++    ) -> Result<CapturedSearch> {
++        let budget = options.budget;
++        let mut retained = HashMap::new();
+         checkpoint(control)?;
+         let selector = file_path(&query.uri)?;
+         let filters = self.index_filters();
+@@ -277,6 +337,7 @@ impl Backend {
+         };
+         let mut issues = Vec::new();
+         let candidates = self.structural_candidates(query, budget, control, &mut issues)?;
++        let walk_issues = issues.clone();
+         let original_sources: HashSet<_> = candidates
+             .iter()
+             .map(|candidate| candidate.identity.clone())
+@@ -421,6 +482,18 @@ impl Backend {
+                             })
+                             .collect(),
+                     });
++                    if options
++                        .retain
++                        .is_some_and(|selected| selected.contains(&uri))
++                    {
++                        // Move the exact authoritative disk read, never reread
++                        // a source to render it after its match snapshot expired.
++                        let text = match loaded {
++                            Loaded::Open { text, .. } => text,
++                            Loaded::Disk(text) => Arc::new(text),
++                        };
++                        retained.insert(uri, text);
++                    }
+                 }
+                 Err(SearchError::SourceSyntax) => add_issue(
+                     &mut prepared.reply.issues,
+@@ -472,7 +545,13 @@ impl Backend {
+                 .then(a.message.cmp(&b.message))
+         });
+         prepared.reply.incomplete = !prepared.reply.issues.is_empty();
+-        Ok(prepared)
++        Ok(CapturedSearch {
++            prepared,
++            sources: retained,
++            source_set: original_sources,
++            walk_issues,
++            input_bytes: total_bytes,
++        })
+     }
+ 
+     fn structural_candidates(
+@@ -617,6 +696,47 @@ fn insert_candidate(
+     Ok(())
+ }
+ 
++fn same_walk_issues(a: &[wire::FileIssue], b: &[wire::FileIssue]) -> bool {
++    let equal = |issue: &wire::FileIssue, other: &wire::FileIssue| {
++        issue.uri == other.uri
++            && std::mem::discriminant(&issue.kind) == std::mem::discriminant(&other.kind)
++            && issue.message == other.message
++    };
++    a.len() == b.len()
++        && a.iter().all(|issue| {
++            a.iter().filter(|other| equal(issue, other)).count()
++                == b.iter().filter(|other| equal(issue, other)).count()
++        })
++}
++
++impl CapturedSearch {
++    pub(crate) fn source(&self, uri: &Url) -> Option<&str> {
++        self.sources.get(uri).map(|text| text.as_str())
++    }
++
++    /// Full readback AFTER rendering. Runs only on the blocking worker.
++    pub(crate) fn validate_after_replacement(
++        &self,
++        backend: &Backend,
++        query: &wire::Query,
++        control: &Control,
++    ) -> Result<()> {
++        self.prepared.validate_full(backend, control)?;
++        let mut issues = Vec::new();
++        let current =
++            backend.structural_candidates(query, Budget::default(), control, &mut issues)?;
++        let identities: HashSet<_> = current
++            .into_iter()
++            .map(|candidate| candidate.identity)
++            .collect();
++        if identities != self.source_set || !same_walk_issues(&issues, &self.walk_issues) {
++            return Err(ScanError::ContentModified);
++        }
++        checkpoint(control)?;
++        self.prepared.validate_open_state(backend)
++    }
++}
++
+ impl Prepared {
+     /// Cheap final admission after the router reacquires its read gate.
+     /// ProjectContext Arc/id membership is independently checked by the router.
+diff --git a/src/structural_scan_tests.rs b/src/structural_scan_tests.rs
+index 3e5f399..9026526 100644
+--- a/src/structural_scan_tests.rs
++++ b/src/structural_scan_tests.rs
+@@ -510,3 +510,21 @@ fn structural_scan_previews_are_bounded_unicode_safe_and_keep_full_navigation_sp
+         long_text
+     );
+ }
++
++#[test]
++fn structural_scan_replacement_walk_issue_multiset_preserves_duplicate_counts() {
++    let issue_a = issue(None, wire::IssueKind::WalkError);
++    let issue_b = issue(
++        Some(Url::parse("file:///tmp/b.php").unwrap()),
++        wire::IssueKind::WalkError,
++    );
++    assert!(same_walk_issues(&[], &[]));
++    assert!(same_walk_issues(
++        &[issue_a.clone(), issue_b.clone()],
++        &[issue_b.clone(), issue_a.clone()]
++    ));
++    assert!(!same_walk_issues(
++        &[issue_a.clone(), issue_a.clone()],
++        &[issue_a, issue_b]
++    ));
++}
+diff --git a/src/structural_search.rs b/src/structural_search.rs
+index 2e59992..bf2853e 100644
+--- a/src/structural_search.rs
++++ b/src/structural_search.rs
+@@ -796,3 +796,6 @@ pub(crate) mod control;
+ #[cfg(test)]
+ #[path = "structural_search_tests.rs"]
+ mod tests;
++
++#[path = "structural_search_replacement.rs"]
++pub(crate) mod replacement;
+diff --git a/src/structural_search_replacement.rs b/src/structural_search_replacement.rs
+new file mode 100644
+index 0000000..6f8c41b
+--- /dev/null
++++ b/src/structural_search_replacement.rs
+@@ -0,0 +1,1114 @@
++//! Checked, source-only replacement preparation. No filesystem writes.
++use std::collections::{BTreeMap, BTreeSet};
++
++use super::*;
++
++#[derive(Clone, Debug, Eq, PartialEq)]
++pub(crate) enum ReplaceError {
++    Search(SearchError),
++    Template(&'static str),
++    Selection(&'static str),
++    Budget(&'static str),
++    CandidateSyntax,
++}
++
++impl From<SearchError> for ReplaceError {
++    fn from(error: SearchError) -> Self {
++        Self::Search(error)
++    }
++}
++
++impl std::fmt::Display for ReplaceError {
++    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
++        match self {
++            Self::Search(error) => error.fmt(f),
++            Self::Template(message) | Self::Selection(message) | Self::Budget(message) => {
++                f.write_str(message)
++            }
++            Self::CandidateSyntax => {
++                f.write_str("Replacement would produce invalid PHP; no edits were prepared.")
++            }
++        }
++    }
++}
++impl std::error::Error for ReplaceError {}
++
++#[derive(Clone, Copy, Debug)]
++pub(crate) struct ReplaceLimits {
++    pub search: Limits,
++    pub selected: usize,
++    pub replacement_bytes: usize,
++    /// Full resulting document, including unchanged regions and all copies.
++    pub candidate_bytes: usize,
++}
++impl Default for ReplaceLimits {
++    fn default() -> Self {
++        Self {
++            search: Limits::default(),
++            selected: 1000,
++            replacement_bytes: 2 * 1024 * 1024,
++            candidate_bytes: 4 * 1024 * 1024,
++        }
++    }
++}
++
++#[derive(Clone, Debug, Eq, PartialEq)]
++pub(crate) struct Replacement {
++    pub source: SourceRange,
++    pub new_text: String,
++}
++#[derive(Clone, Debug, Eq, PartialEq)]
++pub(crate) struct PreparedEdits {
++    pub edits: Vec<Replacement>,
++}
++
++#[derive(Clone, Copy, Debug)]
++enum Requirement {
++    Value,
++    Writable,
++    Reference,
++    Isset,
++}
++#[derive(Clone, Debug)]
++enum SlotKind {
++    Expression(Requirement),
++    Tail {
++        before: String,
++        before_without_commas: String,
++        after: String,
++        fixed_prefix: bool,
++    },
++}
++#[derive(Clone, Debug)]
++struct Slot {
++    range: ByteRange<usize>,
++    name: String,
++    kind: SlotKind,
++}
++#[derive(Clone, Debug)]
++pub(crate) struct Template {
++    source: String,
++    input: ByteRange<usize>,
++    expression: ByteRange<usize>,
++    slots: Vec<Slot>,
++}
++
++fn roles(pattern: &Pattern) -> BTreeMap<String, bool> {
++    let mut result = BTreeMap::new();
++    if let Head::Instance {
++        receiver: Term::Capture(name),
++        ..
++    } = &pattern.head
++    {
++        result.insert(name.clone(), false);
++    }
++    for argument in &pattern.arguments {
++        if let Term::Capture(name) = argument {
++            result.insert(name.clone(), false);
++        }
++    }
++    if let Some(name) = &pattern.tail {
++        result.insert(name.clone(), true);
++    }
++    result
++}
++
++fn remove_commas(text: &str, start: usize, end: usize, tokens: &Tokens<'_>) -> String {
++    // Only punctuation tokens are removed. Commas in comments/strings survive.
++    let mut result = String::new();
++    let mut cursor = start;
++    for token in &tokens.tokens {
++        if token.bytes.start >= start && token.bytes.end <= end && token.kind == TokenKind::Comma {
++            result.push_str(&text[cursor..token.bytes.start]);
++            cursor = token.bytes.end;
++        }
++    }
++    result.push_str(&text[cursor..end]);
++    result
++}
++
++struct Compiler<'a> {
++    tokens: &'a Tokens<'a>,
++    roles: BTreeMap<String, bool>,
++    slots: Vec<Slot>,
++    tails: BTreeSet<(usize, usize)>,
++    error: Option<ReplaceError>,
++    depth: usize,
++    requirement: Requirement,
++}
++impl Compiler<'_> {
++    fn required<'ast, 'arena>(
++        &mut self,
++        expression: &'ast Expression<'arena>,
++        requirement: Requirement,
++    ) {
++        let previous = std::mem::replace(&mut self.requirement, requirement);
++        self.walk_expression(expression, &mut ());
++        self.requirement = previous;
++    }
++}
++impl<'ast, 'arena> MutWalker<'ast, 'arena, ()> for Compiler<'_> {
++    fn walk_statement(&mut self, statement: &'ast Statement<'arena>, context: &mut ()) {
++        if self.error.is_some() {
++            return;
++        }
++        match statement {
++            Statement::Foreach(foreach) => {
++                self.required(foreach.expression, Requirement::Value);
++                if let Some(key) = foreach.target.key() {
++                    self.required(key, Requirement::Writable);
++                }
++                self.required(foreach.target.value(), Requirement::Writable);
++                for statement in foreach.body.statements() {
++                    self.walk_statement(statement, context);
++                }
++            }
++            Statement::Unset(unset) => {
++                for value in unset.values.iter() {
++                    self.required(value, Requirement::Writable);
++                }
++            }
++            _ => walk_statement_mut(self, statement, context),
++        }
++    }
++    fn walk_expression(&mut self, expression: &'ast Expression<'arena>, context: &mut ()) {
++        if self.error.is_some() {
++            return;
++        }
++        if self.depth >= 128 {
++            self.error = Some(ReplaceError::Budget(
++                "Template expression nesting exceeds 128.",
++            ));
++            return;
++        }
++        if matches!(expression, Expression::CompositeString(_)) {
++            match self.tokens.owns_reserved_variable(bytes(expression.span())) {
++                Ok(true) => {
++                    self.error = Some(ReplaceError::Template(
++                        "Captures inside interpolated strings are not supported.",
++                    ));
++                    return;
++                }
++                Err(error) => {
++                    self.error = Some(error.into());
++                    return;
++                }
++                _ => {}
++            }
++        }
++        if matches!(
++            self.requirement,
++            Requirement::Writable | Requirement::Reference
++        ) && matches!(expression, Expression::Parenthesized(_))
++        {
++            self.error = Some(ReplaceError::Template(
++                "Remove parentheses around a writable/reference/isset operand.",
++            ));
++            return;
++        }
++        match capture_name(expression) {
++            Ok(Some(name)) => {
++                let range = bytes(expression.span());
++                if !self.tails.contains(&(range.start, range.end)) {
++                    match self.roles.get(&name) {
++                        Some(false) => self.slots.push(Slot {
++                            range,
++                            name,
++                            kind: SlotKind::Expression(self.requirement),
++                        }),
++                        Some(true) => {
++                            self.error = Some(ReplaceError::Template(
++                                "Argument captures require a final ...$__ss_name slot.",
++                            ))
++                        }
++                        None => {
++                            self.error = Some(ReplaceError::Template(
++                                "Template references an unknown capture.",
++                            ))
++                        }
++                    }
++                }
++            }
++            Err(error) => self.error = Some(error.into()),
++            _ => {}
++        }
++        if self.error.is_none() {
++            self.depth += 1;
++            // Requirements constrain the complete operand, not every descendant:
++            // a writable property may still contain an arbitrary receiver value.
++            let previous = std::mem::replace(&mut self.requirement, Requirement::Value);
++            match expression {
++                Expression::Assignment(assignment) => {
++                    self.required(assignment.lhs, Requirement::Writable);
++                    self.walk_expression(assignment.rhs, context);
++                }
++                Expression::UnaryPrefix(unary) if unary.operator.is_reference() => self.required(
++                    unary.operand,
++                    if matches!(previous, Requirement::Writable) {
++                        Requirement::Writable
++                    } else {
++                        Requirement::Reference
++                    },
++                ),
++                Expression::UnaryPrefix(unary) if unary.operator.is_increment_or_decrement() => {
++                    self.required(unary.operand, Requirement::Writable)
++                }
++                Expression::UnaryPostfix(unary) => {
++                    self.required(unary.operand, Requirement::Writable)
++                }
++                Expression::Construct(mago_syntax::cst::Construct::Isset(isset)) => {
++                    for value in isset.values.iter() {
++                        self.required(value, Requirement::Isset);
++                    }
++                }
++                Expression::Array(array) => {
++                    for element in array.elements.iter() {
++                        if matches!(previous, Requirement::Writable) {
++                            self.writable_element(element);
++                        } else {
++                            self.value_element(element);
++                        }
++                    }
++                }
++                Expression::LegacyArray(array) => {
++                    for element in array.elements.iter() {
++                        if matches!(previous, Requirement::Writable) {
++                            self.writable_element(element);
++                        } else {
++                            self.value_element(element);
++                        }
++                    }
++                }
++                Expression::List(list) if matches!(previous, Requirement::Writable) => {
++                    for element in list.elements.iter() {
++                        self.writable_element(element);
++                    }
++                }
++                _ => walk_expression_mut(self, expression, context),
++            }
++            self.requirement = previous;
++            self.depth -= 1;
++        }
++    }
++
++    fn walk_in_call(&mut self, call: &'ast Call<'arena>, _: &mut ()) {
++        if self.error.is_some() {
++            return;
++        }
++        let list = call.get_argument_list();
++        for (index, argument) in list.arguments.iter().enumerate() {
++            let Argument::Positional(argument) = argument else {
++                continue;
++            };
++            let Some(ellipsis) = argument.ellipsis else {
++                continue;
++            };
++            let Ok(Some(name)) = capture_name(argument.value) else {
++                continue;
++            };
++            if self.roles.get(&name) != Some(&true) || index + 1 != list.arguments.len() {
++                self.error = Some(ReplaceError::Template(
++                    "Only a known argument capture may occupy the final unpacked slot.",
++                ));
++                return;
++            }
++            let value = bytes(argument.value.span());
++            let start = if index == 0 {
++                list.left_parenthesis.end.offset as usize
++            } else {
++                bytes(list.arguments.nodes[index - 1].span()).end
++            };
++            let end = list.right_parenthesis.start.offset as usize;
++            let before = &self.tokens.source[start..ellipsis.start.offset as usize];
++            let before_without_commas = remove_commas(
++                self.tokens.source,
++                start,
++                ellipsis.start.offset as usize,
++                self.tokens,
++            );
++            let after = remove_commas(self.tokens.source, value.end, end, self.tokens);
++            self.tails.insert((value.start, value.end));
++            self.slots.push(Slot {
++                range: start..end,
++                name,
++                kind: SlotKind::Tail {
++                    before: before.to_owned(),
++                    before_without_commas,
++                    after,
++                    fixed_prefix: index != 0,
++                },
++            });
++        }
++    }
++}
++impl Compiler<'_> {
++    fn value_element<'ast, 'arena>(
++        &mut self,
++        element: &'ast mago_syntax::cst::ArrayElement<'arena>,
++    ) {
++        if let Some(key) = element.get_key() {
++            self.required(key, Requirement::Value);
++        }
++        if let Some(value) = element.get_value() {
++            let reference =
++                matches!(value, Expression::UnaryPrefix(unary) if unary.operator.is_reference());
++            self.required(
++                value,
++                if reference {
++                    Requirement::Writable
++                } else {
++                    Requirement::Value
++                },
++            );
++        }
++    }
++    fn writable_element<'ast, 'arena>(
++        &mut self,
++        element: &'ast mago_syntax::cst::ArrayElement<'arena>,
++    ) {
++        use mago_syntax::cst::ArrayElement;
++        match element {
++            ArrayElement::Value(element) => self.required(element.value, Requirement::Writable),
++            ArrayElement::KeyValue(element) => {
++                self.required(element.key, Requirement::Value);
++                self.required(element.value, Requirement::Writable);
++            }
++            ArrayElement::Missing(_) => {}
++            ArrayElement::Variadic(_) => {
++                self.error = Some(ReplaceError::Template(
++                    "A destructuring target cannot unpack an argument capture.",
++                ))
++            }
++        }
++    }
++}
++
++impl Template {
++    pub(crate) fn compile(pattern: &Pattern, input: &str) -> Result<Self, ReplaceError> {
++        if input.len() > MAX_PATTERN_BYTES {
++            return Err(ReplaceError::Budget("Template exceeds 4096 bytes."));
++        }
++        // Always require expression-only input. PHP tags and statement terminators
++        // supplied by the user are not silently trimmed into a different template.
++        let source = format!("<?php {}\n;", input);
++        let tokens = Tokens::read(
++            &source,
++            Limits {
++                source_bytes: MAX_PATTERN_BYTES + 16,
++                ..Limits::default()
++            },
++        )?;
++        with_parsed_program(&source, "structural_replace.compile", |program, _| {
++            Some((|| {
++                if program.has_errors() { return Err(ReplaceError::Template("Enter one valid PHP expression.")); }
++                let mut expression = None;
++                for statement in program.statements.iter() {
++                    match statement {
++                        Statement::OpeningTag(_) => {}
++                        Statement::Expression(statement) if expression.is_none() => expression = Some(statement.expression),
++                        _ => return Err(ReplaceError::Template("Enter exactly one PHP expression, without PHP tags or a semicolon.")),
++                    }
++                }
++                let expression = expression.ok_or(ReplaceError::Template("Enter a PHP expression."))?;
++                let mut compiler = Compiler { tokens: &tokens, roles: roles(pattern), slots: Vec::new(), tails: BTreeSet::new(), error: None, depth: 0, requirement: Requirement::Value };
++                compiler.walk_expression(expression, &mut ());
++                if let Some(error) = compiler.error { return Err(error); }
++                compiler.slots.sort_by_key(|slot| (slot.range.start, slot.range.end));
++                if compiler.slots.windows(2).any(|pair| pair[0].range.end > pair[1].range.start) {
++                    return Err(ReplaceError::Template("Overlapping template capture slots are unsupported."));
++                }
++                // Reserved variables in binding/name-only CST positions are not
++                // expression holes and must not leak into generated PHP as literals.
++                for token in &tokens.tokens {
++                    if token.kind == TokenKind::Variable && source.as_bytes()[token.bytes.clone()].starts_with(CAPTURE_PREFIX)
++                        && !compiler.slots.iter().any(|slot| slot.range.start <= token.bytes.start && token.bytes.end <= slot.range.end) {
++                        return Err(ReplaceError::Template("A capture must occupy an expression or final argument-sequence slot."));
++                    }
++                }
++                let expression = bytes(expression.span());
++                let input_range = "<?php ".len().."<?php ".len() + input.len();
++                if expression.start < input_range.start || expression.end > input_range.end {
++                    return Err(ReplaceError::Template("Template expression lies outside the supplied input."));
++                }
++                Ok(Self { source: source.clone(), input: input_range, expression, slots: compiler.slots })
++            })())
++        }).ok_or(SearchError::ParserFailure)?
++    }
++
++    pub(crate) fn prepare_selected_with_control(
++        &self,
++        pattern: &Pattern,
++        source: &str,
++        selected: &[ByteRange<usize>],
++        limits: ReplaceLimits,
++        checkpoint: &(dyn Fn() -> Result<(), SearchError> + Sync),
++    ) -> Result<PreparedEdits, ReplaceError> {
++        checkpoint()?;
++        if selected.len() > limits.selected {
++            return Err(ReplaceError::Budget("Too many selected replacements."));
++        }
++        let mut selected = selected.to_vec();
++        selected.sort_by_key(|range| (range.start, range.end));
++        if selected
++            .iter()
++            .any(|range| range.start >= range.end || source.get(range.clone()).is_none())
++            || selected.windows(2).any(|pair| pair[0].end > pair[1].start)
++        {
++            return Err(ReplaceError::Selection(
++                "Select distinct, nonoverlapping exact call matches.",
++            ));
++        }
++        let found = pattern.find_in_with_control(source, limits.search, checkpoint)?;
++        let by_span: BTreeMap<_, _> = found
++            .iter()
++            .map(|item| ((item.call.bytes.start, item.call.bytes.end), item))
++            .collect();
++        let mut chosen = Vec::new();
++        for range in selected {
++            chosen.push(
++                *by_span
++                    .get(&(range.start, range.end))
++                    .ok_or(ReplaceError::Selection(
++                        "A selected range is not a current pattern match.",
++                    ))?,
++            );
++        }
++        // Argument regions are derived from the same source's actual CST, not
++        // reconstructed from client captures or an argument-expression join.
++        let tails = tail_regions(pattern, source, &chosen, checkpoint)?;
++        let permissions = capture_permissions(source, &chosen, checkpoint)?;
++        let mut edits = Vec::new();
++        let removed = chosen
++            .iter()
++            .try_fold(0usize, |sum, found| sum.checked_add(found.call.bytes.len()))
++            .ok_or(ReplaceError::Budget("Selected source byte count overflow."))?;
++        let untouched = source
++            .len()
++            .checked_sub(removed)
++            .ok_or(SearchError::InvalidSpan)?;
++        let mut retained_output_bytes = 0usize;
++        if untouched > limits.candidate_bytes {
++            return Err(ReplaceError::Budget(
++                "Full proposed document exceeds the replacement budget.",
++            ));
++        }
++        for found in chosen {
++            checkpoint()?;
++            // Reserve unchanged bytes first. Each render is capped by the final
++            // remaining aggregate budget BEFORE copying, not after retaining it.
++            let remaining = limits.candidate_bytes - untouched - retained_output_bytes;
++            let render_limits = ReplaceLimits {
++                replacement_bytes: limits.replacement_bytes.min(remaining),
++                ..limits
++            };
++            let new_text = self.render(
++                source,
++                found,
++                tails.get(&(found.call.bytes.start, found.call.bytes.end)),
++                &permissions,
++                render_limits,
++                checkpoint,
++            )?;
++            retained_output_bytes =
++                retained_output_bytes
++                    .checked_add(new_text.len())
++                    .ok_or(ReplaceError::Budget(
++                        "Proposed document byte count overflow.",
++                    ))?;
++            edits.push(Replacement {
++                source: found.call.clone(),
++                new_text,
++            });
++        }
++        let candidate_bytes =
++            untouched
++                .checked_add(retained_output_bytes)
++                .ok_or(ReplaceError::Budget(
++                    "Proposed document byte count overflow.",
++                ))?;
++        let mut candidate = String::with_capacity(candidate_bytes);
++        let mut cursor = 0;
++        for edit in &edits {
++            checkpoint()?;
++            candidate.push_str(&source[cursor..edit.source.bytes.start]);
++            candidate.push_str(&edit.new_text);
++            cursor = edit.source.bytes.end;
++        }
++        candidate.push_str(&source[cursor..]);
++        let candidate_limits = Limits {
++            source_bytes: limits.candidate_bytes,
++            ..limits.search
++        };
++        Tokens::read_with_control(&candidate, candidate_limits, checkpoint).map_err(|error| {
++            if error == SearchError::SourceSyntax {
++                ReplaceError::CandidateSyntax
++            } else {
++                error.into()
++            }
++        })?;
++        checkpoint()?;
++        let valid =
++            with_parsed_program(&candidate, "structural_replace.candidate", |program, _| {
++                Some(!program.has_errors())
++            })
++            .ok_or(SearchError::ParserFailure)?;
++        if !valid {
++            return Err(ReplaceError::CandidateSyntax);
++        }
++        validate_candidate_operands(&candidate, candidate_limits, checkpoint)?;
++        checkpoint()?;
++        Ok(PreparedEdits { edits })
++    }
++
++    fn render(
++        &self,
++        source: &str,
++        found: &Match,
++        tail: Option<&TailRegion>,
++        permissions: &BTreeMap<(usize, usize), Permissions>,
++        limits: ReplaceLimits,
++        checkpoint: &(dyn Fn() -> Result<(), SearchError> + Sync),
++    ) -> Result<String, ReplaceError> {
++        let mut output = String::new();
++        let mut cursor = self.expression.start;
++        let mut occurrences: BTreeMap<&str, usize> = BTreeMap::new();
++        append(&mut output, "(", limits.replacement_bytes)?;
++        append(
++            &mut output,
++            &self.source[self.input.start..self.expression.start],
++            limits.replacement_bytes,
++        )?;
++        for slot in &self.slots {
++            checkpoint()?;
++            append(
++                &mut output,
++                &self.source[cursor..slot.range.start],
++                limits.replacement_bytes,
++            )?;
++            match (&slot.kind, found.captures.get(&slot.name)) {
++                (SlotKind::Expression(requirement), Some(Capture::Expression(ranges)))
++                    if !ranges.is_empty() =>
++                {
++                    let index = occurrences.entry(&slot.name).or_default();
++                    let range = &ranges.get(*index).unwrap_or(&ranges[0]).bytes;
++                    *index += 1;
++                    let grouped = matches!(requirement, Requirement::Value | Requirement::Isset);
++                    if !matches!(requirement, Requirement::Value) {
++                        let permitted =
++                            permissions
++                                .get(&(range.start, range.end))
++                                .is_some_and(|permissions| match requirement {
++                                    Requirement::Writable => permissions.writable,
++                                    Requirement::Reference => permissions.reference,
++                                    Requirement::Isset => permissions.isset,
++                                    Requirement::Value => true,
++                                });
++                        if !permitted {
++                            return Err(ReplaceError::Template(
++                                "A captured expression cannot be used in this writable/reference/isset position.",
++                            ));
++                        }
++                    }
++                    if grouped {
++                        append(&mut output, "(", limits.replacement_bytes)?;
++                    }
++                    append(
++                        &mut output,
++                        source.get(range.clone()).ok_or(SearchError::InvalidSpan)?,
++                        limits.replacement_bytes,
++                    )?;
++                    if grouped {
++                        append(&mut output, ")", limits.replacement_bytes)?;
++                    }
++                }
++                (
++                    SlotKind::Tail {
++                        before,
++                        before_without_commas,
++                        after,
++                        fixed_prefix,
++                    },
++                    Some(Capture::Arguments(arguments)),
++                ) => {
++                    let tail = tail.ok_or(SearchError::InvalidSpan)?;
++                    let use_source_comma =
++                        *fixed_prefix && !arguments.is_empty() && tail.comma.is_some();
++                    if arguments.is_empty() || use_source_comma {
++                        // Remove only the actual template comma; preserve comments
++                        // and whitespace, then the empty source sequence's trivia.
++                        append(&mut output, before_without_commas, limits.replacement_bytes)?;
++                    } else {
++                        if *fixed_prefix && !before.as_bytes().contains(&b',') {
++                            return Err(SearchError::InvalidSpan.into());
++                        }
++                        append(&mut output, before, limits.replacement_bytes)?;
++                    }
++                    if use_source_comma || tail.comma.is_none() {
++                        append(
++                            &mut output,
++                            &source[tail.range.clone()],
++                            limits.replacement_bytes,
++                        )?;
++                    } else if let Some(comma) = &tail.comma {
++                        append(
++                            &mut output,
++                            &source[tail.range.start..comma.start],
++                            limits.replacement_bytes,
++                        )?;
++                        append(
++                            &mut output,
++                            &source[comma.end..tail.range.end],
++                            limits.replacement_bytes,
++                        )?;
++                    }
++                    append(&mut output, after, limits.replacement_bytes)?;
++                }
++                _ => {
++                    return Err(ReplaceError::Template(
++                        "Capture role no longer agrees with the compiled pattern.",
++                    ));
++                }
++            }
++            cursor = slot.range.end;
++        }
++        append(
++            &mut output,
++            &self.source[cursor..self.expression.end],
++            limits.replacement_bytes,
++        )?;
++        let suffix = &self.source[self.expression.end..self.input.end];
++        append(&mut output, suffix, limits.replacement_bytes)?;
++        // A trailing // or # comment must not consume the protective closing
++        // parenthesis or the unchanged source suffix. Preserve all input bytes;
++        // a conservative extra newline also handles block-comment trivia.
++        if !suffix.trim().is_empty() {
++            append(&mut output, "\n", limits.replacement_bytes)?;
++        }
++        append(&mut output, ")", limits.replacement_bytes)?;
++        Ok(output)
++    }
++}
++
++fn append(output: &mut String, text: &str, limit: usize) -> Result<(), ReplaceError> {
++    if output
++        .len()
++        .checked_add(text.len())
++        .is_none_or(|size| size > limit)
++    {
++        return Err(ReplaceError::Budget(
++            "Rendered replacement exceeds the byte budget.",
++        ));
++    }
++    output.push_str(text);
++    Ok(())
++}
++
++#[derive(Clone, Copy, Debug)]
++struct Permissions {
++    writable: bool,
++    reference: bool,
++    isset: bool,
++}
++fn isset_operand(expression: &Expression<'_>) -> bool {
++    match expression {
++        Expression::Parenthesized(inner) => isset_operand(inner.expression),
++        Expression::Variable(_) | Expression::ArrayAccess(_) => true,
++        Expression::Access(
++            mago_syntax::cst::Access::Property(_)
++            | mago_syntax::cst::Access::StaticProperty(_)
++            | mago_syntax::cst::Access::NullSafeProperty(_),
++        ) => true,
++        _ => false,
++    }
++}
++
++// These are syntactic operand restrictions, not class/type resolution. Mago's
++// parser accepts expression nodes in write/isset positions that PHP rejects at
++// compile time. Check the WHOLE candidate, including literal template receivers
++// and descendants of constrained property chains, not only substituted holes.
++fn write_chain(expression: &Expression<'_>, depth: usize) -> bool {
++    use mago_syntax::cst::Access;
++    if depth == 0 {
++        return false;
++    }
++    match expression {
++        Expression::Parenthesized(inner) => write_chain(inner.expression, depth - 1),
++        Expression::Variable(_) => true,
++        Expression::ArrayAccess(access) => write_chain(access.array, depth - 1),
++        Expression::ArrayAppend(access) => write_chain(access.array, depth - 1),
++        Expression::Access(Access::Property(access)) => write_chain(access.object, depth - 1),
++        Expression::Access(Access::StaticProperty(_)) => true,
++        Expression::Call(call) => !call.is_null_safe() && !nullsafe_chain(expression, depth - 1),
++        _ => false,
++    }
++}
++
++fn nullsafe_chain(expression: &Expression<'_>, depth: usize) -> bool {
++    use mago_syntax::cst::Access;
++    if depth == 0 {
++        return true;
++    }
++    match expression {
++        Expression::Parenthesized(inner) => nullsafe_chain(inner.expression, depth - 1),
++        Expression::ArrayAccess(access) => nullsafe_chain(access.array, depth - 1),
++        Expression::ArrayAppend(access) => nullsafe_chain(access.array, depth - 1),
++        Expression::Access(Access::NullSafeProperty(_)) => true,
++        Expression::Access(Access::Property(access)) => nullsafe_chain(access.object, depth - 1),
++        Expression::Call(Call::NullSafeMethod(_)) => true,
++        Expression::Call(Call::Method(call)) => nullsafe_chain(call.object, depth - 1),
++        _ => false,
++    }
++}
++
++fn target_operand(
++    expression: &Expression<'_>,
++    reference_call: bool,
++    destructuring: bool,
++    depth: usize,
++) -> bool {
++    use mago_syntax::cst::{Access, ArrayElement};
++    if depth == 0 {
++        return false;
++    }
++    let target = |expression: &Expression<'_>| match expression {
++        Expression::UnaryPrefix(unary) if unary.operator.is_reference() => {
++            target_operand(unary.operand, false, false, depth - 1)
++        }
++        _ => target_operand(expression, false, true, depth - 1),
++    };
++    let element = |element: &ArrayElement<'_>| match element {
++        ArrayElement::Value(element) => target(element.value),
++        ArrayElement::KeyValue(element) => target(element.value),
++        ArrayElement::Missing(_) => true,
++        ArrayElement::Variadic(_) => false,
++    };
++    match expression {
++        Expression::Variable(_) => true,
++        Expression::ArrayAccess(access) => write_chain(access.array, depth - 1),
++        Expression::ArrayAppend(access) => write_chain(access.array, depth - 1),
++        Expression::Access(Access::Property(access)) => write_chain(access.object, depth - 1),
++        Expression::Access(Access::StaticProperty(_)) => true,
++        Expression::Call(call) => {
++            reference_call && !call.is_null_safe() && !nullsafe_chain(expression, depth - 1)
++        }
++        Expression::Array(array) if destructuring => array.elements.iter().all(element),
++        Expression::LegacyArray(array) if destructuring => array.elements.iter().all(element),
++        Expression::List(list) if destructuring => list.elements.iter().all(element),
++        _ => false,
++    }
++}
++
++fn array_references_valid(
++    array: &mago_syntax::cst::TokenSeparatedSequence<'_, mago_syntax::cst::ArrayElement<'_>>,
++    depth: usize,
++) -> bool {
++    array.iter().all(|element| match element.get_value() {
++        Some(Expression::UnaryPrefix(unary)) if unary.operator.is_reference() => {
++            target_operand(unary.operand, false, false, depth)
++        }
++        _ => true,
++    })
++}
++
++fn append_in_chain(expression: &Expression<'_>, depth: usize) -> bool {
++    use mago_syntax::cst::Access;
++    if depth == 0 {
++        return true;
++    }
++    match expression {
++        Expression::ArrayAppend(_) => true,
++        Expression::ArrayAccess(access) => append_in_chain(access.array, depth - 1),
++        Expression::Parenthesized(inner) => append_in_chain(inner.expression, depth - 1),
++        Expression::Access(Access::Property(access)) => append_in_chain(access.object, depth - 1),
++        Expression::Call(Call::Method(call)) => append_in_chain(call.object, depth - 1),
++        _ => false,
++    }
++}
++
++fn validate_candidate_operands(
++    source: &str,
++    limits: Limits,
++    checkpoint: &(dyn Fn() -> Result<(), SearchError> + Sync),
++) -> Result<(), ReplaceError> {
++    struct Grammar<'a> {
++        checkpoint: &'a (dyn Fn() -> Result<(), SearchError> + Sync),
++        error: Option<ReplaceError>,
++        nodes: usize,
++        limits: Limits,
++    }
++    impl<'ast, 'arena> MutWalker<'ast, 'arena, ()> for Grammar<'_> {
++        fn walk_expression(&mut self, expression: &'ast Expression<'arena>, context: &mut ()) {
++            if self.error.is_some() {
++                return;
++            }
++            if let Err(error) = (self.checkpoint)() {
++                self.error = Some(error.into());
++                return;
++            }
++            self.nodes += 1;
++            if self.nodes > self.limits.nodes {
++                self.error = Some(ReplaceError::Budget(
++                    "Candidate operand validation exceeded the node budget.",
++                ));
++                return;
++            }
++            let depth = self.limits.nesting;
++            let allowed = match expression {
++                Expression::Assignment(assignment) => {
++                    target_operand(assignment.lhs, false, true, depth)
++                        && (assignment.operator.is_assign()
++                            || !matches!(
++                                assignment.lhs,
++                                Expression::Array(_)
++                                    | Expression::LegacyArray(_)
++                                    | Expression::List(_)
++                            ))
++                }
++                Expression::Array(array) => array_references_valid(&array.elements, depth),
++                Expression::LegacyArray(array) => array_references_valid(&array.elements, depth),
++                Expression::UnaryPrefix(unary) if unary.operator.is_increment_or_decrement() => {
++                    target_operand(unary.operand, false, false, depth)
++                }
++                Expression::UnaryPostfix(unary) => {
++                    target_operand(unary.operand, false, false, depth)
++                }
++                Expression::UnaryPrefix(unary) if unary.operator.is_reference() => {
++                    target_operand(unary.operand, true, false, depth)
++                }
++                Expression::Construct(mago_syntax::cst::Construct::Isset(isset)) => {
++                    isset.values.iter().all(|value| isset_operand(value))
++                }
++                _ => true,
++            };
++            if !allowed {
++                self.error = Some(ReplaceError::CandidateSyntax);
++                return;
++            }
++            walk_expression_mut(self, expression, context);
++        }
++        fn walk_statement(&mut self, statement: &'ast Statement<'arena>, context: &mut ()) {
++            if self.error.is_some() {
++                return;
++            }
++            if let Err(error) = (self.checkpoint)() {
++                self.error = Some(error.into());
++                return;
++            }
++            let allowed =
++                match statement {
++                    Statement::Foreach(foreach) => {
++                        let value = foreach.target.value();
++                        let value = if let Expression::UnaryPrefix(unary) = value {
++                            if unary.operator.is_reference() {
++                                unary.operand
++                            } else {
++                                value
++                            }
++                        } else {
++                            value
++                        };
++                        foreach.target.key().is_none_or(|key| {
++                            target_operand(key, false, false, self.limits.nesting)
++                        }) && target_operand(value, false, true, self.limits.nesting)
++                    }
++                    Statement::Unset(unset) => unset.values.iter().all(|value| {
++                        target_operand(value, false, false, self.limits.nesting)
++                            && !append_in_chain(value, self.limits.nesting)
++                    }),
++                    _ => true,
++                };
++            if !allowed {
++                self.error = Some(ReplaceError::CandidateSyntax);
++                return;
++            }
++            walk_statement_mut(self, statement, context);
++        }
++    }
++    with_parsed_program(
++        source,
++        "structural_replace.candidate_operands",
++        |program, _| {
++            let mut grammar = Grammar {
++                checkpoint,
++                error: None,
++                nodes: 0,
++                limits,
++            };
++            grammar.walk_program(program, &mut ());
++            Some(grammar.error.map_or(Ok(()), Err))
++        },
++    )
++    .ok_or(SearchError::ParserFailure)?
++}
++fn capture_permissions(
++    source: &str,
++    selected: &[&Match],
++    checkpoint: &(dyn Fn() -> Result<(), SearchError> + Sync),
++) -> Result<BTreeMap<(usize, usize), Permissions>, ReplaceError> {
++    let wanted = selected
++        .iter()
++        .flat_map(|found| found.captures.values())
++        .filter_map(|capture| {
++            if let Capture::Expression(ranges) = capture {
++                Some(ranges)
++            } else {
++                None
++            }
++        })
++        .flatten()
++        .map(|range| (range.bytes.start, range.bytes.end))
++        .collect();
++    struct PermissionsWalker<'a> {
++        wanted: BTreeSet<(usize, usize)>,
++        result: BTreeMap<(usize, usize), Permissions>,
++        checkpoint: &'a (dyn Fn() -> Result<(), SearchError> + Sync),
++        error: Option<SearchError>,
++    }
++    impl<'ast, 'arena> MutWalker<'ast, 'arena, ()> for PermissionsWalker<'_> {
++        fn walk_expression(&mut self, expression: &'ast Expression<'arena>, context: &mut ()) {
++            if self.error.is_some() {
++                return;
++            }
++            if let Err(error) = (self.checkpoint)() {
++                self.error = Some(error);
++                return;
++            }
++            let range = bytes(expression.span());
++            let key = (range.start, range.end);
++            if self.wanted.contains(&key) {
++                let writable = target_operand(expression, false, true, Limits::default().nesting);
++                let reference = target_operand(expression, true, false, Limits::default().nesting);
++                let isset = isset_operand(expression);
++                self.result.insert(
++                    key,
++                    Permissions {
++                        writable,
++                        reference,
++                        isset,
++                    },
++                );
++            }
++            walk_expression_mut(self, expression, context);
++        }
++        fn walk_statement(&mut self, statement: &'ast Statement<'arena>, context: &mut ()) {
++            if self.error.is_some() {
++                return;
++            }
++            if let Err(error) = (self.checkpoint)() {
++                self.error = Some(error);
++                return;
++            }
++            walk_statement_mut(self, statement, context);
++        }
++    }
++    with_parsed_program(
++        source,
++        "structural_replace.capture_permissions",
++        |program, _| {
++            let mut visitor = PermissionsWalker {
++                wanted,
++                result: BTreeMap::new(),
++                checkpoint,
++                error: None,
++            };
++            visitor.walk_program(program, &mut ());
++            Some(match visitor.error {
++                Some(error) => Err(error.into()),
++                None => Ok(visitor.result),
++            })
++        },
++    )
++    .ok_or(SearchError::ParserFailure)?
++}
++
++#[derive(Clone, Debug)]
++struct TailRegion {
++    range: ByteRange<usize>,
++    comma: Option<ByteRange<usize>>,
++}
++fn tail_regions(
++    pattern: &Pattern,
++    source: &str,
++    selected: &[&Match],
++    checkpoint: &(dyn Fn() -> Result<(), SearchError> + Sync),
++) -> Result<BTreeMap<(usize, usize), TailRegion>, ReplaceError> {
++    if pattern.tail.is_none() {
++        return Ok(BTreeMap::new());
++    }
++    struct Regions<'a> {
++        selected: BTreeSet<(usize, usize)>,
++        minimum: usize,
++        result: BTreeMap<(usize, usize), TailRegion>,
++        checkpoint: &'a (dyn Fn() -> Result<(), SearchError> + Sync),
++        error: Option<SearchError>,
++    }
++    impl<'ast, 'arena> MutWalker<'ast, 'arena, ()> for Regions<'_> {
++        fn walk_expression(&mut self, expression: &'ast Expression<'arena>, context: &mut ()) {
++            if self.error.is_some() {
++                return;
++            }
++            if let Err(error) = (self.checkpoint)() {
++                self.error = Some(error);
++                return;
++            }
++            walk_expression_mut(self, expression, context);
++        }
++        fn walk_statement(&mut self, statement: &'ast Statement<'arena>, context: &mut ()) {
++            if self.error.is_some() {
++                return;
++            }
++            if let Err(error) = (self.checkpoint)() {
++                self.error = Some(error);
++                return;
++            }
++            walk_statement_mut(self, statement, context);
++        }
++        fn walk_in_call(&mut self, call: &'ast Call<'arena>, _: &mut ()) {
++            let span = bytes(call.span());
++            let key = (span.start, span.end);
++            if !self.selected.contains(&key) {
++                return;
++            }
++            let list = call.get_argument_list();
++            let mut start = list.left_parenthesis.end.offset as usize;
++            let end = list.right_parenthesis.start.offset as usize;
++            let mut comma = None;
++            if self.minimum > 0 {
++                start = bytes(list.arguments.nodes[self.minimum - 1].span()).end;
++                if let Some(token) = list.arguments.tokens.get(self.minimum - 1) {
++                    let offset = token.start.offset as usize;
++                    comma = Some(offset..offset + token.value.len());
++                }
++            }
++            self.result.insert(
++                key,
++                TailRegion {
++                    range: start..end,
++                    comma,
++                },
++            );
++        }
++    }
++    with_parsed_program(source, "structural_replace.tail_regions", |program, _| {
++        let mut visitor = Regions {
++            selected: selected
++                .iter()
++                .map(|found| (found.call.bytes.start, found.call.bytes.end))
++                .collect(),
++            minimum: pattern.arguments.len(),
++            result: BTreeMap::new(),
++            checkpoint,
++            error: None,
++        };
++        visitor.walk_program(program, &mut ());
++        Some(match visitor.error {
++            Some(error) => Err(error.into()),
++            None => Ok(visitor.result),
++        })
++    })
++    .ok_or(SearchError::ParserFailure)?
++}
++
++#[cfg(test)]
++#[path = "structural_search_replacement_tests.rs"]
++mod tests;
+diff --git a/src/structural_search_replacement_tests.rs b/src/structural_search_replacement_tests.rs
+new file mode 100644
+index 0000000..065b771
+--- /dev/null
++++ b/src/structural_search_replacement_tests.rs
+@@ -0,0 +1,848 @@
++use super::*;
++use std::sync::atomic::{AtomicUsize, Ordering};
++
++fn prepare(
++    pattern: &str,
++    template: &str,
++    source: &str,
++    indices: &[usize],
++) -> Result<PreparedEdits, ReplaceError> {
++    let pattern = Pattern::compile(pattern).unwrap();
++    let matched = pattern.find_in(source, Limits::default()).unwrap();
++    let selected = indices
++        .iter()
++        .map(|index| matched[*index].call.bytes.clone())
++        .collect::<Vec<_>>();
++    Template::compile(&pattern, template)?.prepare_selected_with_control(
++        &pattern,
++        source,
++        &selected,
++        ReplaceLimits::default(),
++        &|| Ok(()),
++    )
++}
++
++fn apply(source: &str, edits: &PreparedEdits) -> String {
++    let mut result = source.to_owned();
++    for edit in edits.edits.iter().rev() {
++        assert_eq!(
++            edit.source.range,
++            byte_range_to_lsp_range(source, edit.source.bytes.start, edit.source.bytes.end)
++        );
++        result.replace_range(edit.source.bytes.clone(), &edit.new_text);
++    }
++    result
++}
++
++#[test]
++fn replace_function_static_and_assignment_expression_templates() {
++    let source = "<?php decode($a + 1); untouched();";
++    let edits = prepare("decode($__ss_x)", "(array)decode($__ss_x)", source, &[0]).unwrap();
++    assert_eq!(
++        apply(source, &edits),
++        "<?php ((array)decode(($a + 1))); untouched();"
++    );
++    let source = "<?php Store::set($o, $v);";
++    let edits = prepare(
++        "Store::set($__ss_o, $__ss_v)",
++        "$__ss_o->field = $__ss_v",
++        source,
++        &[0],
++    )
++    .unwrap();
++    assert_eq!(apply(source, &edits), "<?php (($o)->field = ($v));");
++}
++
++#[test]
++fn replace_parent_context_and_capture_precedence_are_both_protected() {
++    let source = "<?php $r = f($a ? $b : $c) * 2; $s = ok() ? f($d) : 7;";
++    let edits = prepare("f($__ss_x)", "$__ss_x + 1", source, &[0, 1]).unwrap();
++    assert_eq!(
++        apply(source, &edits),
++        "<?php $r = (($a ? $b : $c) + 1) * 2; $s = ok() ? (($d) + 1) : 7;"
++    );
++}
++
++#[test]
++fn replace_every_review_subset_preserves_binary_conditional_and_receiver_contexts() {
++    let source = "<?php $a = old($x) * 2; $b = ok() ? old($y) : 7; $c = old($z)->run();";
++    for mask in 0..8usize {
++        let selected = (0..3)
++            .filter(|index| mask & (1 << index) != 0)
++            .collect::<Vec<_>>();
++        let edits = prepare("old($__ss_x)", "$__ss_x + 1", source, &selected).unwrap();
++        assert_eq!(edits.edits.len(), selected.len());
++        let candidate = apply(source, &edits);
++        let parsed = with_parsed_program(
++            &candidate,
++            "replacement.test.all_review_subsets",
++            |program, _| {
++                assert!(!program.has_errors(), "mask={mask}: {candidate}");
++                let statements = program
++                    .statements
++                    .iter()
++                    .filter_map(|statement| {
++                        let Statement::Expression(statement) = statement else {
++                            return None;
++                        };
++                        let Expression::Assignment(assignment) = statement.expression else {
++                            panic!("assignment outside replacement");
++                        };
++                        Some(assignment.rhs)
++                    })
++                    .collect::<Vec<_>>();
++                assert_eq!(statements.len(), 3);
++                let Expression::Binary(binary) = statements[0] else {
++                    panic!("outer multiplication changed");
++                };
++                assert!(matches!(binary.rhs, Expression::Literal(_)));
++                let Expression::Conditional(conditional) = statements[1] else {
++                    panic!("outer conditional changed");
++                };
++                assert!(matches!(conditional.condition, Expression::Call(_)));
++                assert!(matches!(conditional.r#else, Expression::Literal(_)));
++                let Expression::Call(Call::Method(method)) = statements[2] else {
++                    panic!("outer method call changed");
++                };
++                assert!(
++                    matches!(&method.method, ClassLikeMemberSelector::Identifier(name) if name.value == b"run")
++                );
++                for (index, expression) in [binary.lhs, conditional.then.unwrap(), method.object]
++                    .into_iter()
++                    .enumerate()
++                {
++                    if mask & (1 << index) != 0 {
++                        let Expression::Parenthesized(group) = expression else {
++                            panic!("selected replacement lost outer grouping");
++                        };
++                        assert!(matches!(group.expression, Expression::Binary(_)));
++                    } else {
++                        assert!(
++                            matches!(expression, Expression::Call(Call::Function(_))),
++                            "unselected context changed"
++                        );
++                    }
++                }
++                Some(())
++            },
++        );
++        assert_eq!(parsed, Some(()));
++    }
++}
++
++#[test]
++fn replace_receiver_capture_preserves_conditional_as_a_single_receiver() {
++    let source = "<?php ($a ? $b : $c)->old($v);";
++    let edits = prepare(
++        "$__ss_o->old($__ss_v)",
++        "$__ss_o->newer($__ss_v)",
++        source,
++        &[0],
++    )
++    .unwrap();
++    assert_eq!(
++        apply(source, &edits),
++        "<?php ((($a ? $b : $c))->newer(($v)));"
++    );
++}
++
++#[test]
++fn replace_selected_subset_does_not_reject_unselected_nested_matches() {
++    let source = "<?php f(f($a)); f($b);";
++    let edits = prepare("f($__ss_x)", "g($__ss_x)", source, &[1, 2]).unwrap();
++    assert_eq!(apply(source, &edits), "<?php f((g(($a)))); (g(($b)));");
++    let outer_only = prepare("f($__ss_x)", "g($__ss_x)", source, &[0]).unwrap();
++    assert_eq!(apply(source, &outer_only), "<?php (g((f($a)))); f($b);");
++}
++
++#[test]
++fn replace_selected_duplicates_overlap_and_unknown_ranges_refuse_atomically() {
++    let source = "<?php f(f($a));";
++    for indices in [&[0, 0][..], &[0, 1][..]] {
++        assert!(matches!(
++            prepare("f($__ss_x)", "g($__ss_x)", source, indices),
++            Err(ReplaceError::Selection(_))
++        ));
++    }
++    let pattern = Pattern::compile("f($__ss_x)").unwrap();
++    let template = Template::compile(&pattern, "g($__ss_x)").unwrap();
++    for ranges in [
++        std::iter::once(0..5).collect::<Vec<_>>(),
++        vec![ByteRange { start: 9, end: 8 }],
++        std::iter::once(0..source.len() + 1).collect::<Vec<_>>(),
++    ] {
++        assert!(matches!(
++            template.prepare_selected_with_control(
++                &pattern,
++                source,
++                &ranges,
++                ReplaceLimits::default(),
++                &|| Ok(())
++            ),
++            Err(ReplaceError::Selection(_))
++        ));
++    }
++}
++
++#[test]
++fn replace_repeated_capture_occurrences_keep_their_own_trivia_then_reuse_first() {
++    let source = "<?php same($a + 1, $a/* ž🐘 */+1);";
++    let edits = prepare(
++        "same($__ss_x, $__ss_x)",
++        "triple($__ss_x, $__ss_x, $__ss_x)",
++        source,
++        &[0],
++    )
++    .unwrap();
++    assert_eq!(
++        apply(source, &edits),
++        "<?php (triple(($a + 1), ($a/* ž🐘 */+1), ($a + 1)));"
++    );
++}
++
++#[test]
++fn replace_comments_inside_deliberately_replaced_call_can_be_omitted() {
++    let source = "<?php /* outside */ old /* head */ ($x /* edge */); // outside\r\n";
++    let edits = prepare("old($__ss_x)", "newer($__ss_x)", source, &[0]).unwrap();
++    assert_eq!(
++        apply(source, &edits),
++        "<?php /* outside */ (newer(($x))); // outside\r\n"
++    );
++}
++
++#[test]
++fn replace_tail_keeps_contiguous_comments_separators_and_crlf() {
++    let source =
++        "<?php old(1 /* before comma */, /* first */ $a,\r\n // second\r\n $b /* last */,);\r\n";
++    let edits = prepare(
++        "old(1, ...$__ss_rest)",
++        "newer(9, ...$__ss_rest)",
++        source,
++        &[0],
++    )
++    .unwrap();
++    let result = apply(source, &edits);
++    assert!(
++        result.contains("9  /* before comma */, /* first */ $a,\r\n // second\r\n $b /* last */,"),
++        "{result}"
++    );
++    assert_eq!(result.matches("/* before comma */").count(), 1);
++    assert!(result.ends_with(");\r\n"));
++}
++
++#[test]
++fn replace_empty_tail_removes_template_comma_but_retains_empty_source_trivia() {
++    for (source, pattern) in [
++        ("<?php old(1 /* edge */);", "old(1, ...$__ss_rest)"),
++        ("<?php old(/* empty ž🐘 */);", "old(...$__ss_rest)"),
++    ] {
++        let edits = prepare(pattern, "newer(9, ...$__ss_rest)", source, &[0]).unwrap();
++        let result = apply(source, &edits);
++        assert!(!result.contains("9,"), "{result}");
++        assert!(result.contains(if source.contains("edge") {
++            "/* edge */"
++        } else {
++            "/* empty ž🐘 */"
++        }));
++    }
++}
++
++#[test]
++fn replace_tail_can_be_only_argument_sequence_and_can_be_repeated() {
++    let source = "<?php old(1, /* leading */ $a, $b /* end */);";
++    let edits = prepare(
++        "old(1, ...$__ss_rest)",
++        "[newer(...$__ss_rest), newer(...$__ss_rest)]",
++        source,
++        &[0],
++    )
++    .unwrap();
++    let result = apply(source, &edits);
++    assert_eq!(result.matches("/* leading */ $a, $b /* end */").count(), 2);
++    assert!(!result.contains("newer(,"), "{result}");
++}
++
++#[test]
++fn replace_unicode_crlf_preserves_exact_external_bytes_and_ranges() {
++    let source = "<?php\r\n$note = 'ž🐘'; old($ž /* inside */ + 1); keep();\r\n";
++    let edits = prepare("old($__ss_x)", "newer($__ss_x)", source, &[0]).unwrap();
++    assert_eq!(
++        edits.edits[0].source.range.start.character,
++        "$note = 'ž🐘'; ".encode_utf16().count() as u32
++    );
++    assert_eq!(
++        apply(source, &edits),
++        "<?php\r\n$note = 'ž🐘'; (newer(($ž /* inside */ + 1))); keep();\r\n"
++    );
++}
++
++#[test]
++fn replace_unknown_role_invalid_expression_and_unsafe_holes_refuse() {
++    let pattern = Pattern::compile("old($__ss_x, ...$__ss_rest)").unwrap();
++    for template in [
++        "newer($__ss_unknown)",
++        "newer($__ss_rest)",
++        "newer(...$__ss_x)",
++        "newer(...$__ss_rest, 1)",
++        "\"{$__ss_x}\"",
++        "newer(); evil()",
++        "<?php newer()",
++    ] {
++        assert!(Template::compile(&pattern, template).is_err(), "{template}");
++    }
++}
++
++#[test]
++fn replace_result_cst_keeps_outer_binary_and_inner_template_as_distinct_nodes() {
++    let source = "<?php $r = old($x) * 2;";
++    let edits = prepare("old($__ss_x)", "$__ss_x + 1", source, &[0]).unwrap();
++    let candidate = apply(source, &edits);
++    let checked = with_parsed_program(
++        &candidate,
++        "replacement.test.parent_context",
++        |program, _| {
++            assert!(!program.has_errors());
++            let Statement::Expression(statement) = &program.statements[1] else {
++                panic!("expression statement");
++            };
++            let Expression::Assignment(assignment) = statement.expression else {
++                panic!("assignment");
++            };
++            let Expression::Binary(outer) = assignment.rhs else {
++                panic!("outer multiply");
++            };
++            let Expression::Parenthesized(inner) = outer.lhs else {
++                panic!("replacement must remain grouped");
++            };
++            assert!(matches!(inner.expression, Expression::Binary(_)));
++            assert!(matches!(outer.rhs, Expression::Literal(_)));
++            Some(())
++        },
++    );
++    assert_eq!(checked, Some(()));
++}
++
++#[test]
++fn replace_full_candidate_and_per_replacement_budgets_refuse_without_partial_edits() {
++    let source = "<?php old($x); /* retained document bytes */";
++    let pattern = Pattern::compile("old($__ss_x)").unwrap();
++    let template = Template::compile(&pattern, "newer($__ss_x, $__ss_x)").unwrap();
++    let selected = pattern.find_in(source, Limits::default()).unwrap()[0]
++        .call
++        .bytes
++        .clone();
++    for limits in [
++        ReplaceLimits {
++            replacement_bytes: 3,
++            ..ReplaceLimits::default()
++        },
++        ReplaceLimits {
++            candidate_bytes: source.len(),
++            ..ReplaceLimits::default()
++        },
++        ReplaceLimits {
++            selected: 0,
++            ..ReplaceLimits::default()
++        },
++    ] {
++        assert!(matches!(
++            template.prepare_selected_with_control(
++                &pattern,
++                source,
++                std::slice::from_ref(&selected),
++                limits,
++                &|| Ok(())
++            ),
++            Err(ReplaceError::Budget(_))
++        ));
++    }
++}
++
++#[test]
++fn replace_zero_selection_and_cancellation_do_not_publish_edits() {
++    assert_eq!(
++        prepare("old($__ss_x)", "newer($__ss_x)", "<?php keep();", &[])
++            .unwrap()
++            .edits,
++        []
++    );
++    let source = "<?php old($x);";
++    let pattern = Pattern::compile("old($__ss_x)").unwrap();
++    let template = Template::compile(&pattern, "newer($__ss_x)").unwrap();
++    let calls = AtomicUsize::new(0);
++    let control = || {
++        calls.fetch_add(1, Ordering::SeqCst);
++        Err(SearchError::Cancelled)
++    };
++    assert_eq!(
++        template.prepare_selected_with_control(
++            &pattern,
++            source,
++            std::slice::from_ref(&(6..13)),
++            ReplaceLimits::default(),
++            &control
++        ),
++        Err(ReplaceError::Search(SearchError::Cancelled))
++    );
++    assert_eq!(calls.load(Ordering::SeqCst), 1);
++}
++
++// Append to structural_search_replacement_tests.rs. Uses existing prepare/apply
++// helpers and actual production entry point. This file has NOT been executed.
++
++#[test]
++fn replace_writable_reference_and_isset_holes_keep_exact_raw_operands() {
++    let source = "<?php old($array['ž🐘']);";
++    for (template, expected) in [
++        ("++$__ss_x", "<?php (++$array['ž🐘']);"),
++        ("$__ss_x--", "<?php ($array['ž🐘']--);"),
++        ("isset($__ss_x)", "<?php (isset(($array['ž🐘'])));"),
++        ("$left =& $__ss_x", "<?php ($left =& $array['ž🐘']);"),
++        ("[&$__ss_x]", "<?php ([&$array['ž🐘']]);"),
++        ("$__ss_x = 2", "<?php ($array['ž🐘'] = 2);"),
++        ("[$__ss_x] = $values", "<?php ([$array['ž🐘']] = $values);"),
++        (
++            "[&$__ss_x] = $values",
++            "<?php ([&$array['ž🐘']] = $values);",
++        ),
++    ] {
++        let edits = prepare("old($__ss_x)", template, source, &[0]).unwrap();
++        assert_eq!(apply(source, &edits), expected, "{template}");
++    }
++}
++
++#[test]
++fn replace_nonreferenceable_captures_refuse_only_constrained_positions() {
++    let source = "<?php old($a + $b);";
++    for template in [
++        "++$__ss_x",
++        "$__ss_x--",
++        "isset($__ss_x)",
++        "$left =& $__ss_x",
++        "[&$__ss_x]",
++        "$__ss_x = 2",
++        "[$__ss_x] = $values",
++    ] {
++        assert!(
++            prepare("old($__ss_x)", template, source, &[0]).is_err(),
++            "{template}"
++        );
++    }
++    let edits = prepare("old($__ss_x)", "empty($__ss_x)", source, &[0]).unwrap();
++    assert_eq!(apply(source, &edits), "<?php (empty(($a + $b)));");
++    let source = "<?php old($object?->items['key']);";
++    let edits = prepare("old($__ss_x)", "isset($__ss_x)", source, &[0]).unwrap();
++    assert_eq!(
++        apply(source, &edits),
++        "<?php (isset(($object?->items['key'])));"
++    );
++    assert!(
++        prepare(
++            "old($__ss_x)",
++            "[&$__ss_x] = $values",
++            "<?php old(factory());",
++            &[0]
++        )
++        .is_err()
++    );
++}
++
++#[test]
++fn replace_property_assignment_receiver_uses_actual_php_write_context_rules() {
++    for value in ["$a ? $b : $c", "$o?->field", "new C()"] {
++        let source = format!("<?php old({value});");
++        assert!(
++            prepare("old($__ss_x)", "$__ss_x->field += 1", &source, &[0]).is_err(),
++            "{value}"
++        );
++    }
++    for value in ["$o", "$array[0]", "factory()"] {
++        let source = format!("<?php old({value});");
++        let edits = prepare("old($__ss_x)", "$__ss_x->field += 1", &source, &[0]).unwrap();
++        assert_eq!(
++            apply(&source, &edits),
++            format!("<?php (({value})->field += 1);")
++        );
++    }
++    let source = "<?php old($a ? $b : $c);";
++    for template in ["$__ss_x->field", "$__ss_x->run()"] {
++        assert!(
++            prepare("old($__ss_x)", template, source, &[0]).is_ok(),
++            "read/method context: {template}"
++        );
++    }
++}
++
++#[test]
++fn replace_binding_holes_do_not_leak_into_parameter_or_use_syntax() {
++    let pattern = Pattern::compile("old($__ss_x)").unwrap();
++    for template in [
++        "fn($__ss_x) => 1",
++        "function () use ($__ss_x) {}",
++        "function ($__ss_x) {}",
++    ] {
++        assert!(Template::compile(&pattern, template).is_err(), "{template}");
++    }
++    // This is a value use inside a closure body, not a binding declaration.
++    let edits = prepare(
++        "old($__ss_x)",
++        "fn() => $__ss_x + 1",
++        "<?php old($x);",
++        &[0],
++    )
++    .unwrap();
++    assert_eq!(apply("<?php old($x);", &edits), "<?php (fn() => ($x) + 1);");
++}
++
++#[test]
++fn replace_final_net_budget_allows_an_early_expansion_followed_by_a_larger_shrink() {
++    let source =
++        "<?php old(0); old('aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa');";
++    let pattern = Pattern::compile("old($__ss_x)").unwrap();
++    let template = Template::compile(&pattern, "'replacement'").unwrap();
++    let selected = pattern
++        .find_in(source, Limits::default())
++        .unwrap()
++        .iter()
++        .map(|found| found.call.bytes.clone())
++        .collect::<Vec<_>>();
++    let limits = ReplaceLimits {
++        candidate_bytes: source.len(),
++        ..ReplaceLimits::default()
++    };
++    let edits = template
++        .prepare_selected_with_control(&pattern, source, &selected, limits, &|| Ok(()))
++        .unwrap();
++    let result = apply(source, &edits);
++    assert_eq!(result, "<?php ('replacement'); ('replacement');");
++    assert!(result.len() < source.len());
++}
++
++#[test]
++fn replace_cumulative_output_cannot_hide_behind_per_edit_budgets() {
++    let source = "<?php old(1); old(2); old(3);";
++    let pattern = Pattern::compile("old($__ss_x)").unwrap();
++    let template =
++        Template::compile(&pattern, "'1234567890123456789012345678901234567890'").unwrap();
++    let selected = pattern
++        .find_in(source, Limits::default())
++        .unwrap()
++        .iter()
++        .map(|found| found.call.bytes.clone())
++        .collect::<Vec<_>>();
++    let limits = ReplaceLimits {
++        replacement_bytes: 64,
++        candidate_bytes: 100,
++        ..ReplaceLimits::default()
++    };
++    assert!(matches!(
++        template.prepare_selected_with_control(&pattern, source, &selected, limits, &|| Ok(())),
++        Err(ReplaceError::Budget(_))
++    ));
++}
++
++#[test]
++fn replace_mid_computation_cancel_and_deadline_never_publish_accumulated_edits() {
++    let source = "<?php old($x); old($y); old($z);";
++    let pattern = Pattern::compile("old($__ss_x)").unwrap();
++    let template = Template::compile(&pattern, "newer($__ss_x, $__ss_x)").unwrap();
++    let selected = pattern
++        .find_in(source, Limits::default())
++        .unwrap()
++        .iter()
++        .map(|found| found.call.bytes.clone())
++        .collect::<Vec<_>>();
++    let counter = AtomicUsize::new(0);
++    let baseline = || {
++        counter.fetch_add(1, Ordering::SeqCst);
++        Ok(())
++    };
++    assert_eq!(
++        template
++            .prepare_selected_with_control(
++                &pattern,
++                source,
++                &selected,
++                ReplaceLimits::default(),
++                &baseline
++            )
++            .unwrap()
++            .edits
++            .len(),
++        3
++    );
++    let total = counter.load(Ordering::SeqCst);
++    assert!(total > 20);
++    for threshold in [2, total / 2, total - 1] {
++        for error in [SearchError::Cancelled, SearchError::Deadline] {
++            counter.store(0, Ordering::SeqCst);
++            let control = || {
++                if counter.fetch_add(1, Ordering::SeqCst) + 1 >= threshold {
++                    Err(error.clone())
++                } else {
++                    Ok(())
++                }
++            };
++            assert_eq!(
++                template.prepare_selected_with_control(
++                    &pattern,
++                    source,
++                    &selected,
++                    ReplaceLimits::default(),
++                    &control
++                ),
++                Err(ReplaceError::Search(error.clone()))
++            );
++            assert!(counter.load(Ordering::SeqCst) > 1);
++        }
++    }
++}
++
++#[test]
++fn replace_tail_empty_trailing_comma_and_comment_commas_stay_distinct() {
++    let source = "<?php old(0 /* source , edge */,);\r\n";
++    let edits = prepare(
++        "old(0, ...$__ss_rest)",
++        "newer(9 /* template , */, ...$__ss_rest /* after , */ ,)",
++        source,
++        &[0],
++    )
++    .unwrap();
++    let result = apply(source, &edits);
++    for marker in ["/* source , edge */", "/* template , */", "/* after , */"] {
++        assert_eq!(result.matches(marker).count(), 1, "{result}");
++    }
++    assert!(result.ends_with(");\r\n"));
++}
++
++// Append to the actual replacement test module after the eight adversarial
++// tests. No test execution has been performed by the proposal worker.
++
++#[test]
++fn replace_template_leading_and_trailing_block_trivia_is_not_discarded() {
++    let source = "<?php old($x); keep();\r\n";
++    let template = " /* leading ž🐘 */ newer($__ss_x) /* trailing , $__ss_literal */ ";
++    let edits = prepare("old($__ss_x)", template, source, &[0]).unwrap();
++    assert_eq!(
++        apply(source, &edits),
++        "<?php ( /* leading ž🐘 */ newer(($x)) /* trailing , $__ss_literal */ \n); keep();\r\n"
++    );
++    // Prefix/suffix bytes and conservative closing newline are included in
++    // the same bounded renderer, not appended outside its accounting.
++    let pattern = Pattern::compile("old($__ss_x)").unwrap();
++    let compiled = Template::compile(&pattern, template).unwrap();
++    let selected = pattern.find_in(source, Limits::default()).unwrap()[0]
++        .call
++        .bytes
++        .clone();
++    let limits = ReplaceLimits {
++        replacement_bytes: edits.edits[0].new_text.len() - 1,
++        ..ReplaceLimits::default()
++    };
++    assert!(matches!(
++        compiled.prepare_selected_with_control(
++            &pattern,
++            source,
++            std::slice::from_ref(&selected),
++            limits,
++            &|| Ok(())
++        ),
++        Err(ReplaceError::Budget(_))
++    ));
++}
++
++#[test]
++fn replace_template_trailing_line_comments_cannot_swallow_group_or_source_suffix() {
++    let source = "<?php $a = old($x) * 2; keep();\r\n";
++    for comment in ["// trailing ž🐘", "# trailing ž🐘", "// trailing ž🐘\r\n"] {
++        let template = format!("newer($__ss_x) {comment}");
++        let edits = prepare("old($__ss_x)", &template, source, &[0]).unwrap();
++        let result = apply(source, &edits);
++        assert_eq!(
++            result,
++            format!("<?php $a = (newer(($x)) {comment}\n) * 2; keep();\r\n")
++        );
++        assert_eq!(result.matches("trailing ž🐘").count(), 1);
++        // Actual prepare has already re-lexed and parsed this whole candidate.
++        let shape = with_parsed_program(
++            &result,
++            "replacement.test.trailing_comment_shape",
++            |program, _| {
++                assert!(!program.has_errors());
++                let Statement::Expression(statement) = &program.statements[1] else {
++                    panic!("assignment statement");
++                };
++                let Expression::Assignment(assignment) = statement.expression else {
++                    panic!("assignment");
++                };
++                let Expression::Binary(binary) = assignment.rhs else {
++                    panic!("outer multiply retained");
++                };
++                assert!(matches!(binary.lhs, Expression::Parenthesized(_)));
++                assert!(matches!(binary.rhs, Expression::Literal(_)));
++                assert!(matches!(&program.statements[2], Statement::Expression(_)));
++                Some(())
++            },
++        );
++        assert_eq!(shape, Some(()));
++    }
++}
++
++// Append to the actual replacement test module. All grammar expectations below
++// match root's actual PHP8.3 controls; no worker execution is claimed.
++
++#[test]
++fn replace_literal_template_receivers_are_checked_on_whole_candidate_not_only_holes() {
++    let source = "<?php old($x); keep();";
++    for template in [
++        "($a ? $b : $c)->field += 1",
++        "($o?->field)->prop = 1",
++        "(new C())->field = 1",
++        "($a ?? $b)->field = 1",
++        "[&factory()] = $values",
++        "isset(($a + $b))",
++    ] {
++        let pattern = Pattern::compile("old($__ss_x)").unwrap();
++        // Canonical expression grammar accepts these templates. The PHP write
++        // and isset operand restrictions must be checked on rendered candidate.
++        let template = Template::compile(&pattern, template).unwrap();
++        let selected = pattern.find_in(source, Limits::default()).unwrap()[0]
++            .call
++            .bytes
++            .clone();
++        assert_eq!(
++            template.prepare_selected_with_control(
++                &pattern,
++                source,
++                &[selected],
++                ReplaceLimits::default(),
++                &|| Ok(())
++            ),
++            Err(ReplaceError::CandidateSyntax)
++        );
++    }
++}
++
++#[test]
++fn replace_parenthesized_isset_and_valid_literal_reference_receiver_controls_stay_admitted() {
++    let source = "<?php old($x);";
++    for template in [
++        "isset((($x)))",
++        "isset(($o?->field)[0])",
++        "($o)->field = $v",
++        "(factory())->field += 1",
++        "$left =& factory()",
++        "++factory()->field",
++        "($a ? $b : $c)->field",
++        "($a ? $b : $c)->run()",
++        "isset(($a ? $b : $c)->field)",
++    ] {
++        let edits = prepare("old($__ss_x)", template, source, &[0]).unwrap();
++        assert_eq!(apply(source, &edits), format!("<?php ({template});"));
++    }
++    let edits = prepare("old($__ss_x)", "isset(($__ss_x))", source, &[0]).unwrap();
++    assert_eq!(apply(source, &edits), "<?php (isset((($x))));");
++}
++
++#[test]
++fn replace_closure_foreach_and_unset_holes_use_writable_binding_contexts() {
++    let source = "<?php old($x);";
++    for (template, expected) in [
++        (
++            "function () { foreach ($xs as $__ss_x) {} }",
++            "<?php (function () { foreach ($xs as $x) {} });",
++        ),
++        (
++            "function () { foreach ($xs as $key => &$__ss_x) {} }",
++            "<?php (function () { foreach ($xs as $key => &$x) {} });",
++        ),
++        (
++            "function () { foreach ($xs as $__ss_x => $value) {} }",
++            "<?php (function () { foreach ($xs as $x => $value) {} });",
++        ),
++        (
++            "function () { unset($__ss_x); }",
++            "<?php (function () { unset($x); });",
++        ),
++    ] {
++        let edits = prepare("old($__ss_x)", template, source, &[0]).unwrap();
++        assert_eq!(apply(source, &edits), expected);
++        assert!(prepare("old($__ss_x)", template, "<?php old($a + $b);", &[0]).is_err());
++    }
++    let pattern = Pattern::compile("old($__ss_x)").unwrap();
++    for template in [
++        "function () { foreach ($xs as ($__ss_x)) {} }",
++        "function () { unset(($__ss_x)); }",
++    ] {
++        assert!(Template::compile(&pattern, template).is_err(), "{template}");
++    }
++}
++
++// Append to the replacement test module; tests-only first against v3.
++// Expectations are backed by root's actual PHP8.3 boundary controls.
++
++#[test]
++fn replace_array_literal_references_require_writable_elements_but_ordinary_ref_calls_survive() {
++    let source = "<?php old($x);";
++    for template in ["[&factory()]", "array(&factory())"] {
++        assert!(
++            prepare("old($__ss_x)", template, source, &[0]).is_err(),
++            "{template}"
++        );
++    }
++    assert!(prepare("old($__ss_x)", "[&$__ss_x]", "<?php old(factory());", &[0]).is_err());
++    for template in ["[&$__ss_x]", "array(&$__ss_x)"] {
++        let edits = prepare("old($__ss_x)", template, source, &[0]).unwrap();
++        let expected = template.replace("$__ss_x", "$x");
++        assert_eq!(apply(source, &edits), format!("<?php ({expected});"));
++    }
++    let edits = prepare(
++        "old($__ss_x)",
++        "$left =& $__ss_x",
++        "<?php old(factory());",
++        &[0],
++    )
++    .unwrap();
++    assert_eq!(
++        apply("<?php old(factory());", &edits),
++        "<?php ($left =& factory());"
++    );
++}
++
++#[test]
++fn replace_unset_append_refuses_without_disabling_valid_append_writes_or_isset_reads() {
++    let source = "<?php old($x);";
++    for template in [
++        "function () { unset($x[]); }",
++        "function () { unset($x[][0]); }",
++    ] {
++        assert!(
++            prepare("old($__ss_x)", template, source, &[0]).is_err(),
++            "{template}"
++        );
++    }
++    for template in [
++        "++$x[]",
++        "$x[] = 1",
++        "function () { unset($x[0]); }",
++        "isset([1][0])",
++        "isset((1+2)[0])",
++        "isset(foo()[0])",
++    ] {
++        let edits = prepare("old($__ss_x)", template, source, &[0]).unwrap();
++        assert_eq!(apply(source, &edits), format!("<?php ({template});"));
++    }
++}
++
++#[test]
++fn replace_destructuring_compound_assignment_is_not_treated_as_plain_assignment() {
++    let source = "<?php old($x);";
++    for template in ["[$x] += $values", "[$x] ??= $values", "list($x) += $values"] {
++        assert!(
++            prepare("old($__ss_x)", template, source, &[0]).is_err(),
++            "{template}"
++        );
++    }
++    let edits = prepare("old($__ss_x)", "[$__ss_x] = $values", source, &[0]).unwrap();
++    assert_eq!(apply(source, &edits), "<?php ([$x] = $values);");
++}
+diff --git a/src/structural_search_wire.rs b/src/structural_search_wire.rs
+index a13fc65..56e469e 100644
+--- a/src/structural_search_wire.rs
++++ b/src/structural_search_wire.rs
+@@ -6,6 +6,8 @@ use tower_lsp::lsp_types::{Range, Url};
+ 
+ pub const METHOD: &str = "phpWorkbench/structuralSearch";
+ pub const EXPERIMENTAL_CAPABILITY: &str = "phpWorkbenchStructuralSearch";
++pub const REPLACE_METHOD: &str = "phpWorkbench/structuralReplace";
++pub const REPLACE_EXPERIMENTAL_CAPABILITY: &str = "phpWorkbenchStructuralReplace";
+ 
+ #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize)]
+ #[serde(rename_all = "camelCase")]
+@@ -49,14 +51,14 @@ pub struct Project {
+     pub root: Option<Url>,
+ }
+ 
+-#[derive(Clone, Debug, Deserialize, Serialize)]
++#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
+ #[serde(tag = "kind", rename_all = "camelCase")]
+ pub enum SourceKind {
+     Open { version: i32, opening: u64 },
+     Disk,
+ }
+ 
+-#[derive(Clone, Debug, Deserialize, Serialize)]
++#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
+ #[serde(rename_all = "camelCase")]
+ pub struct SourceStamp {
+     /// The actual preferred source spelling used to produce all ranges.
+@@ -68,7 +70,7 @@ pub struct SourceStamp {
+     pub utf8_bytes: u64,
+ }
+ 
+-#[derive(Clone, Debug, Deserialize, Serialize)]
++#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
+ #[serde(rename_all = "camelCase")]
+ pub struct SourceRange {
+     pub start_byte: u32,
+@@ -136,6 +138,56 @@ pub struct Reply {
+     pub incomplete: bool,
+ }
+ 
++/// One source-stamped group of exact call ranges selected in a search result.
++#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
++#[serde(rename_all = "camelCase", deny_unknown_fields)]
++pub struct Selection {
++    pub stamp: SourceStamp,
++    pub calls: Vec<SourceRange>,
++}
++
++/// Prepare a reviewed proposal only. This endpoint never writes source files.
++#[derive(Clone, Debug, Deserialize, Serialize)]
++#[serde(rename_all = "camelCase", deny_unknown_fields)]
++pub struct ReplaceQuery {
++    pub search: Query,
++    pub replacement: String,
++    pub selections: Vec<Selection>,
++}
++
++#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
++#[serde(rename_all = "camelCase", deny_unknown_fields)]
++pub struct ReplacementEdit {
++    pub call: SourceRange,
++    pub new_text: String,
++}
++
++#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
++#[serde(rename_all = "camelCase", deny_unknown_fields)]
++pub struct FileEdits {
++    pub uri: Url,
++    /// Exactly one edit per selected call, including no-op replacements.
++    pub edits: Vec<ReplacementEdit>,
++}
++
++/// Each edit replaces one disjoint CST call with one parenthesized expression.
++/// This producer guarantee permits independently selecting reviewed edits.
++#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
++#[serde(rename_all = "camelCase")]
++pub enum ReplacementKind {
++    ParenthesizedExpression,
++}
++
++#[derive(Clone, Debug, Deserialize, Serialize)]
++#[serde(rename_all = "camelCase", deny_unknown_fields)]
++pub struct ReplaceReply {
++    pub kind: ReplacementKind,
++    /// Fresh authoritative ledger, project and validated expected-source receipt.
++    pub search: Reply,
++    pub replacement: String,
++    pub edits: Vec<FileEdits>,
++}
++
+ impl From<super::SourceRange> for SourceRange {
+     fn from(source: super::SourceRange) -> Self {
+         // The matcher admits at most u32::MAX bytes before constructing spans.
+@@ -286,3 +338,91 @@ mod tests {
+         );
+     }
+ }
++
++#[cfg(test)]
++mod replacement_wire_tests {
++    use super::*;
++    use serde_json::{Value, json};
++
++    fn request() -> Value {
++        json!({
++            "search": {"uri":"file:///tmp/%C5%BE.php", "generation":73,
++                "pattern":"foo($__ss_value)", "scope":"document",
++                "expectedSources":[{"uri":"file:///tmp/%C5%BE.php","version":2,"sha256Utf8":"a".repeat(64)}]},
++            "replacement":"bar($__ss_value)",
++            "selections":[{"stamp":{"uri":"file:///tmp/%C5%BE.php",
++                "source":{"kind":"open","version":2,"opening":91},
++                "sha256Utf8":"a".repeat(64),"utf8Bytes":45},
++                "calls":[{"startByte":12,"endByte":24,
++                    "range":{"start":{"line":1,"character":8},"end":{"line":1,"character":18}}}]}]
++        })
++    }
++
++    #[test]
++    fn structural_replacement_wire_preserves_exact_source_and_selected_coordinates() {
++        let value = request();
++        let query: ReplaceQuery = serde_json::from_value(value.clone()).unwrap();
++        assert_eq!(query.search.generation, 73);
++        assert_eq!(query.selections[0].calls[0].start_byte, 12);
++        assert_eq!(query.selections[0].calls[0].range.start.character, 8);
++        assert!(matches!(
++            query.selections[0].stamp.source,
++            SourceKind::Open {
++                version: 2,
++                opening: 91
++            }
++        ));
++        assert_eq!(serde_json::to_value(query).unwrap(), value);
++    }
++
++    #[test]
++    fn structural_replacement_wire_requires_template_selection_and_full_source_stamp() {
++        for path in ["replacement", "selections"] {
++            let mut value = request();
++            value.as_object_mut().unwrap().remove(path);
++            assert!(serde_json::from_value::<ReplaceQuery>(value).is_err());
++        }
++        for field in ["sha256Utf8", "utf8Bytes", "source"] {
++            let mut value = request();
++            value["selections"][0]["stamp"]
++                .as_object_mut()
++                .unwrap()
++                .remove(field);
++            assert!(serde_json::from_value::<ReplaceQuery>(value).is_err());
++        }
++        let mut value = request();
++        value["selections"][0]["stamp"]["source"]
++            .as_object_mut()
++            .unwrap()
++            .remove("opening");
++        assert!(serde_json::from_value::<ReplaceQuery>(value).is_err());
++    }
++
++    #[test]
++    fn structural_replacement_wire_refuses_resource_operation_and_unknown_request_fields() {
++        let mut value = request();
++        value["documentChanges"] =
++            json!([{"kind":"rename","oldUri":"file:///tmp/a.php","newUri":"file:///tmp/b.php"}]);
++        assert!(serde_json::from_value::<ReplaceQuery>(value).is_err());
++        let mut value = request();
++        value["selections"][0]["edits"] = json!([]);
++        assert!(serde_json::from_value::<ReplaceQuery>(value).is_err());
++    }
++
++    #[test]
++    fn structural_replacement_wire_reply_retains_receipt_selection_and_literal_new_text() {
++        let request = request();
++        let value = json!({"kind":"parenthesizedExpression","search":{"expectedSources":request["search"]["expectedSources"],
++            "generation":73,"project":{"id":8,"root":"file:///tmp/"},
++            "files":[],"issues":[],"incomplete":false},
++            "replacement":"bar($__ss_value)","edits":[{"uri":"file:///tmp/%C5%BE.php",
++                "edits":[{"call":request["selections"][0]["calls"][0],"newText":"(bar('ž🐘'))"}]}]});
++        let reply: ReplaceReply = serde_json::from_value(value.clone()).unwrap();
++        assert_eq!(reply.search.expected_sources[0].version, 2);
++        assert_eq!(reply.edits[0].edits[0].new_text, "(bar('ž🐘'))");
++        assert_eq!(serde_json::to_value(reply).unwrap(), value);
++        let mut forbidden = value;
++        forbidden["changes"] = json!({});
++        assert!(serde_json::from_value::<ReplaceReply>(forbidden).is_err());
++    }
++}
+diff --git a/tests/integration/main.rs b/tests/integration/main.rs
+index 95a2926..26c9e4a 100644
+--- a/tests/integration/main.rs
++++ b/tests/integration/main.rs
+@@ -304,4 +304,5 @@ mod workbench_rename_external_authority;
+ 
+ mod release_metadata_authority;
+ 
++mod structural_replace;
+ mod structural_search;
+diff --git a/tests/integration/structural_replace.rs b/tests/integration/structural_replace.rs
+new file mode 100644
+index 0000000..3b1af4f
+--- /dev/null
++++ b/tests/integration/structural_replace.rs
+@@ -0,0 +1,391 @@
++//! Public exported request/response API. No private hooks, injected models or direct scanner calls.
++use phpantom_lsp::{ProjectRouter, StructuralReplaceQuery, StructuralSearchQuery};
++use serde_json::{Value, json};
++use sha2::{Digest, Sha256};
++use std::{
++    path::{Path, PathBuf},
++    sync::Arc,
++};
++use tower_lsp::{LanguageServer, jsonrpc::ErrorCode, lsp_types::*};
++
++fn uri(path: &Path) -> Url {
++    Url::from_file_path(path).unwrap()
++}
++fn sha(text: &str) -> String {
++    format!("{:x}", Sha256::digest(text.as_bytes()))
++}
++struct Fixture {
++    _temp: tempfile::TempDir,
++    router: Arc<ProjectRouter>,
++    root: PathBuf,
++    source: PathBuf,
++    closed: PathBuf,
++    text: String,
++    disk: String,
++}
++impl Fixture {
++    async fn new() -> Self {
++        let temp = tempfile::tempdir().unwrap();
++        let root = temp.path().canonicalize().unwrap();
++        std::fs::write(root.join("composer.json"), "{}").unwrap();
++        let source = root.join("index.php");
++        let closed = root.join("closed.php");
++        let text = "<?php\r\n/* ž🐘 */ foo($value); foo(foo($nested));\r\n".to_owned();
++        assert!(text.contains("\r\n"));
++        let disk = "<?php foo('disk');\r\n".to_owned();
++        std::fs::write(&source, &text).unwrap();
++        std::fs::write(&closed, &disk).unwrap();
++        let router = Arc::new(ProjectRouter::new_test());
++        router
++            .initialize(InitializeParams {
++                root_uri: Some(Url::from_directory_path(&root).unwrap()),
++                workspace_folders: Some(vec![WorkspaceFolder {
++                    uri: Url::from_directory_path(&root).unwrap(),
++                    name: "fixture".into(),
++                }]),
++                ..InitializeParams::default()
++            })
++            .await
++            .unwrap();
++        router.initialized(InitializedParams {}).await;
++        router
++            .did_open(DidOpenTextDocumentParams {
++                text_document: TextDocumentItem {
++                    uri: uri(&source),
++                    version: 1,
++                    language_id: "php".into(),
++                    text: text.clone(),
++                },
++            })
++            .await;
++        Self {
++            _temp: temp,
++            router,
++            root,
++            source,
++            closed,
++            text,
++            disk,
++        }
++    }
++    fn search(&self, scope: &str) -> Value {
++        json!({"uri":uri(&self.source),"generation":81,
++        "scope":scope,"pattern":"foo($__ss_value)","expectedSources":[{"uri":uri(&self.source),"version":1,"sha256Utf8":sha(&self.text)}]})
++    }
++    async fn proposal(&self, scope: &str, needle: &str) -> Value {
++        let query = self.search(scope);
++        let search: StructuralSearchQuery = serde_json::from_value(query.clone()).unwrap();
++        let reply = serde_json::to_value(
++            self.router
++                .workbench_structural_search(search)
++                .await
++                .unwrap(),
++        )
++        .unwrap();
++        let (stamp, call) = reply["files"]
++            .as_array()
++            .unwrap()
++            .iter()
++            .find_map(|file| {
++                let path = Url::parse(file["stamp"]["uri"].as_str().unwrap())
++                    .unwrap()
++                    .to_file_path()
++                    .unwrap();
++                let text = if path == self.source {
++                    &self.text
++                } else if path == self.closed {
++                    &self.disk
++                } else {
++                    return None;
++                };
++                file["matches"]
++                    .as_array()
++                    .unwrap()
++                    .iter()
++                    .find(|m| {
++                        &text[m["call"]["startByte"].as_u64().unwrap() as usize
++                            ..m["call"]["endByte"].as_u64().unwrap() as usize]
++                            == needle
++                    })
++                    .map(|m| (file["stamp"].clone(), m["call"].clone()))
++            })
++            .expect("real public search match");
++        json!({"search":query,"replacement":"bar($__ss_value)","selections":[{"stamp":stamp,"calls":[call]}]})
++    }
++    async fn replace(&self, query: Value) -> Result<Value, tower_lsp::jsonrpc::Error> {
++        let query: StructuralReplaceQuery = serde_json::from_value(query).unwrap();
++        self.router
++            .workbench_structural_replace(query)
++            .await
++            .map(|reply| serde_json::to_value(reply).unwrap())
++    }
++    async fn finish(&self) {
++        assert_eq!(std::fs::read(&self.source).unwrap(), self.text.as_bytes());
++        self.router.shutdown().await.unwrap();
++    }
++}
++fn apply(text: &str, edits: &Value) -> String {
++    let mut text = text.to_owned();
++    for edit in edits.as_array().unwrap().iter().rev() {
++        let call = &edit["call"];
++        text.replace_range(
++            call["startByte"].as_u64().unwrap() as usize
++                ..call["endByte"].as_u64().unwrap() as usize,
++            edit["newText"].as_str().unwrap(),
++        );
++    }
++    text
++}
++
++#[tokio::test]
++async fn structural_replace_public_checked_subset_exact_utf16_crlf_and_read_only() {
++    let f = Fixture::new().await;
++    let q = f.proposal("document", "foo($value)").await;
++    let reply = f.replace(q.clone()).await.unwrap();
++    assert_eq!(reply["kind"], "parenthesizedExpression");
++    assert_eq!(
++        reply["search"]["expectedSources"],
++        q["search"]["expectedSources"]
++    );
++    assert_eq!(reply["edits"][0]["uri"], json!(uri(&f.source)));
++    assert_eq!(
++        reply["edits"][0]["edits"][0]["call"],
++        q["selections"][0]["calls"][0]
++    );
++    assert_eq!(reply["edits"].as_array().unwrap().len(), 1);
++    assert_eq!(
++        apply(&f.text, &reply["edits"][0]["edits"]),
++        f.text.replacen("foo($value)", "(bar(($value)))", 1)
++    );
++    assert_eq!(std::fs::read(&f.closed).unwrap(), f.disk.as_bytes());
++    f.finish().await;
++}
++
++#[tokio::test]
++async fn structural_replace_public_empty_manifest_and_selection_refuse() {
++    let f = Fixture::new().await;
++    let q = f.proposal("document", "foo($value)").await;
++    let mut empty = q.clone();
++    empty["search"]["expectedSources"] = json!([]);
++    assert_eq!(
++        f.replace(empty).await.unwrap_err().code,
++        ErrorCode::InvalidParams
++    );
++    let mut empty = q;
++    empty["selections"] = json!([]);
++    assert_eq!(
++        f.replace(empty).await.unwrap_err().code,
++        ErrorCode::InvalidParams
++    );
++    f.finish().await;
++}
++
++#[tokio::test]
++async fn structural_replace_public_exact_hash_bytes_utf16_and_source_kind_refuse() {
++    let f = Fixture::new().await;
++    let q = f.proposal("document", "foo($value)").await;
++    let mut cases = Vec::new();
++    let mut changed = q.clone();
++    changed["selections"][0]["stamp"]["sha256Utf8"] = json!("0".repeat(64));
++    cases.push(changed);
++    let mut changed = q.clone();
++    let n = changed["selections"][0]["calls"][0]["startByte"]
++        .as_u64()
++        .unwrap();
++    changed["selections"][0]["calls"][0]["startByte"] = json!(n + 1);
++    cases.push(changed);
++    let mut changed = q.clone();
++    let n = changed["selections"][0]["calls"][0]["range"]["start"]["character"]
++        .as_u64()
++        .unwrap();
++    changed["selections"][0]["calls"][0]["range"]["start"]["character"] = json!(n + 1);
++    cases.push(changed);
++    let mut changed = q.clone();
++    changed["selections"][0]["stamp"]["source"] = json!({"kind":"disk"});
++    cases.push(changed);
++    for changed in cases {
++        assert_eq!(
++            f.replace(changed).await.unwrap_err().code,
++            ErrorCode::ServerError(-32801)
++        );
++    }
++    f.finish().await;
++}
++
++#[tokio::test]
++async fn structural_replace_public_nested_disjoint_choice_and_duplicate_refusal() {
++    let f = Fixture::new().await;
++    let outer = f.proposal("document", "foo(foo($nested))").await;
++    let inner = f.proposal("document", "foo($nested)").await;
++    let mut duplicate = outer.clone();
++    duplicate["selections"][0]["calls"] = json!([
++        outer["selections"][0]["calls"][0],
++        outer["selections"][0]["calls"][0]
++    ]);
++    assert_eq!(
++        f.replace(duplicate).await.unwrap_err().code,
++        ErrorCode::InvalidParams
++    );
++    let mut overlap = outer.clone();
++    overlap["selections"][0]["calls"] = json!([
++        outer["selections"][0]["calls"][0],
++        inner["selections"][0]["calls"][0]
++    ]);
++    assert_eq!(
++        f.replace(overlap).await.unwrap_err().code,
++        ErrorCode::InvalidParams
++    );
++    for query in [outer, inner] {
++        assert_eq!(
++            f.replace(query).await.unwrap()["edits"][0]["edits"]
++                .as_array()
++                .unwrap()
++                .len(),
++            1
++        );
++    }
++    f.finish().await;
++}
++
++#[tokio::test]
++async fn structural_replace_public_closed_stale_disk_refuses_without_writing() {
++    let f = Fixture::new().await;
++    let q = f.proposal("project", "foo('disk')").await;
++    let external = f.disk.replace("'disk'", "'live'");
++    std::fs::write(&f.closed, &external).unwrap();
++    assert_eq!(
++        f.replace(q).await.unwrap_err().code,
++        ErrorCode::ServerError(-32801)
++    );
++    assert_eq!(std::fs::read(&f.closed).unwrap(), external.as_bytes());
++    f.finish().await;
++}
++
++#[tokio::test]
++async fn structural_replace_public_clean_selection_preserves_partial_issue_ledger() {
++    let f = Fixture::new().await;
++    let broken = f.root.join("broken.php");
++    std::fs::write(&broken, "<?php foo(").unwrap();
++    let q = f.proposal("project", "foo($value)").await;
++    let reply = f.replace(q).await.unwrap();
++    assert_eq!(reply["search"]["incomplete"], true);
++    assert!(
++        reply["search"]["issues"]
++            .as_array()
++            .unwrap()
++            .iter()
++            .any(|issue| issue["uri"] == json!(uri(&broken)) && issue["kind"] == "syntax")
++    );
++    assert_eq!(reply["edits"].as_array().unwrap().len(), 1);
++    assert_eq!(
++        apply(&f.text, &reply["edits"][0]["edits"]),
++        f.text.replacen("foo($value)", "(bar(($value)))", 1)
++    );
++    assert_eq!(std::fs::read_to_string(&broken).unwrap(), "<?php foo(");
++    f.finish().await;
++}
++
++#[cfg(unix)]
++#[tokio::test]
++async fn structural_replace_public_preferred_alias_and_divergent_selector_policy() {
++    let f = Fixture::new().await;
++    let alias = f.root.join("Alias.php");
++    std::os::unix::fs::symlink(&f.source, &alias).unwrap();
++    f.router
++        .did_open(DidOpenTextDocumentParams {
++            text_document: TextDocumentItem {
++                uri: uri(&alias),
++                version: 7,
++                language_id: "php".into(),
++                text: f.text.clone(),
++            },
++        })
++        .await;
++    let mut search = f.search("document");
++    search["uri"] = json!(uri(&alias));
++    search["expectedSources"]
++        .as_array_mut()
++        .unwrap()
++        .push(json!({"uri":uri(&alias),"version":7,"sha256Utf8":sha(&f.text)}));
++    let found = serde_json::to_value(
++        f.router
++            .workbench_structural_search(serde_json::from_value(search.clone()).unwrap())
++            .await
++            .unwrap(),
++    )
++    .unwrap();
++    assert_eq!(found["files"][0]["stamp"]["uri"], json!(uri(&f.source)));
++    let query = json!({"search":search.clone(),"replacement":"bar($__ss_value)","selections":[{"stamp":found["files"][0]["stamp"],"calls":[found["files"][0]["matches"][0]["call"]]}]});
++    assert_eq!(
++        f.replace(query).await.unwrap()["edits"][0]["uri"],
++        json!(uri(&f.source))
++    );
++    let live = f.text.replace("$value", "$other");
++    f.router
++        .did_change(DidChangeTextDocumentParams {
++            text_document: VersionedTextDocumentIdentifier {
++                uri: uri(&alias),
++                version: 8,
++            },
++            content_changes: vec![TextDocumentContentChangeEvent {
++                range: None,
++                range_length: None,
++                text: live.clone(),
++            }],
++        })
++        .await;
++    search["expectedSources"][1] = json!({"uri":uri(&alias),"version":8,"sha256Utf8":sha(&live)});
++    let found = serde_json::to_value(
++        f.router
++            .workbench_structural_search(serde_json::from_value(search.clone()).unwrap())
++            .await
++            .unwrap(),
++    )
++    .unwrap();
++    assert_eq!(found["files"][0]["stamp"]["uri"], json!(uri(&alias)));
++    let query = json!({"search":search,"replacement":"bar($__ss_value)","selections":[{"stamp":found["files"][0]["stamp"],"calls":[found["files"][0]["matches"][0]["call"]]}]});
++    assert_eq!(
++        f.replace(query.clone()).await.unwrap()["edits"][0]["uri"],
++        json!(uri(&alias))
++    );
++    let mut stale = query;
++    stale["search"]["uri"] = json!(uri(&f.source));
++    assert_eq!(
++        f.replace(stale).await.unwrap_err().code,
++        ErrorCode::ServerError(-32801)
++    );
++    f.finish().await;
++}
++
++#[tokio::test]
++async fn structural_replace_public_aggregate_output_limit_across_files() {
++    let f = Fixture::new().await;
++    for index in 0..20 {
++        std::fs::write(
++            f.root.join(format!("large-{index}.php")),
++            format!("<?php foo('{}');", "x".repeat(100_000)),
++        )
++        .unwrap();
++    }
++    let search = f.search("project");
++    let found = serde_json::to_value(
++        f.router
++            .workbench_structural_search(serde_json::from_value(search.clone()).unwrap())
++            .await
++            .unwrap(),
++    )
++    .unwrap();
++    let selections:Vec<Value>=found["files"].as_array().unwrap().iter().filter(|file|file["stamp"]["uri"].as_str().unwrap().contains("large-")).map(|file|json!({"stamp":file["stamp"],"calls":file["matches"].as_array().unwrap().iter().map(|m|m["call"].clone()).collect::<Vec<_>>()})).collect();
++    assert_eq!(selections.len(), 20);
++    let replacement = format!("many({})", vec!["$__ss_value"; 18].join(","));
++    let error = f
++        .replace(json!({"search":search,"replacement":replacement,"selections":selections}))
++        .await
++        .unwrap_err();
++    assert_eq!(error.code, ErrorCode::ServerError(-32001));
++    assert!(
++        error.message.contains("aggregate replacement output bytes"),
++        "unexpected budget refusal: {error}"
++    );
++    f.finish().await;
++}

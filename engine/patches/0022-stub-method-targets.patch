@@ -1,0 +1,292 @@
+diff --git a/docs/CHANGELOG.md b/docs/CHANGELOG.md
+index c111454..113820c 100644
+--- a/docs/CHANGELOG.md
++++ b/docs/CHANGELOG.md
+@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
+ 
+ ## [Unreleased]
+ 
++- **Built-in methods follow the project PHP target.** Autocomplete and navigation exclude methods introduced in a newer PHP release, including inherited methods. Project methods retain their own release annotations.
++
++
+ ### Added
+ 
+ - **Active PHP target snapshot.** Editors can read the version and extension profile already applied by the current service, even after saved settings change. Contributed by PHP Workbench (local downstream patch).
+diff --git a/src/parser/ast_update.rs b/src/parser/ast_update.rs
+index b924254..c32585e 100644
+--- a/src/parser/ast_update.rs
++++ b/src/parser/ast_update.rs
+@@ -623,6 +623,7 @@ impl Backend {
+                 trivias: program.trivia.as_slice(),
+                 content,
+                 php_version: Some(self.php_version()),
++                stub_introductions: false,
+                 use_map: HashMap::new(),
+                 namespace: None,
+             };
+@@ -790,6 +791,7 @@ impl Backend {
+                 trivias: doc_ctx.trivias,
+                 content: doc_ctx.content,
+                 php_version: doc_ctx.php_version,
++                stub_introductions: false,
+                 use_map: use_map.clone(),
+                 namespace: namespace.clone(),
+             };
+@@ -806,6 +808,7 @@ impl Backend {
+                     trivias: doc_ctx.trivias,
+                     content: doc_ctx.content,
+                     php_version: doc_ctx.php_version,
++                    stub_introductions: false,
+                     use_map: span.use_map.clone(),
+                     namespace: span.namespace.clone(),
+                 });
+diff --git a/src/parser/classes.rs b/src/parser/classes.rs
+index 0ee2e46..6f67433 100644
+--- a/src/parser/classes.rs
++++ b/src/parser/classes.rs
+@@ -954,6 +954,14 @@ impl Backend {
+                     let method_docblock_text = doc_ctx.and_then(|ctx| {
+                         docblock::get_docblock_text_for_node(ctx.trivias, ctx.content, method)
+                     });
++                    if doc_ctx.is_some_and(|ctx| ctx.stub_introductions)
++                        && let Some(version) = php_version
++                        && method_docblock_text.is_some_and(|text| {
++                            crate::stubs::docblock_introduced_after(text, version)
++                        })
++                    {
++                        continue;
++                    }
+                     let method_docblock_info =
+                         method_docblock_text.and_then(docblock::parse_docblock_for_tags);
+ 
+diff --git a/src/parser/mod.rs b/src/parser/mod.rs
+index 461b5bd..dd6e2a1 100644
+--- a/src/parser/mod.rs
++++ b/src/parser/mod.rs
+@@ -43,14 +43,12 @@ use crate::util::strip_fqn_prefix;
+ pub(crate) struct DocblockCtx<'a> {
+     pub trivias: &'a [Trivia<'a>],
+     pub content: &'a str,
+-    /// Target PHP version for version-aware stub filtering.
+-    ///
+-    /// When `Some`, elements annotated with
+-    /// `#[PhpStormStubsElementAvailable]` whose version range excludes
+-    /// this version are filtered out during extraction.  Set when
+-    /// parsing phpstorm-stubs; left as `None` for user code (where the
+-    /// attribute is never used).
++    /// Target PHP version for version-aware attributes and deprecation metadata.
++    /// Bundled PHP introduction tags additionally require `stub_introductions`:
++    /// project code also carries a target for its version-aware metadata.
+     pub php_version: Option<PhpVersion>,
++    /// Apply numeric PHP introduction tags only to bundled stubs.
++    pub stub_introductions: bool,
+     /// Use-statement map for the file being parsed.
+     ///
+     /// Maps short (imported or aliased) names to their fully-qualified
+@@ -1449,7 +1447,7 @@ impl Backend {
+         content: &str,
+         php_version: Option<PhpVersion>,
+     ) -> Vec<(ClassInfo, Option<String>)> {
+-        Self::parse_php_classes_by_block(content, php_version)
++        Self::parse_php_classes_by_block(content, php_version, false)
+             .0
+             .into_iter()
+             .map(|(cls, ns, _)| (cls, ns))
+@@ -1470,6 +1468,7 @@ impl Backend {
+     pub(crate) fn parse_php_classes_by_block(
+         content: &str,
+         php_version: Option<PhpVersion>,
++        stub_introductions: bool,
+     ) -> (
+         Vec<(ClassInfo, Option<String>, Option<usize>)>,
+         Vec<NamespaceSpan>,
+@@ -1508,6 +1507,7 @@ impl Backend {
+                 trivias: program.trivia.as_slice(),
+                 content,
+                 php_version,
++                stub_introductions,
+                 use_map,
+                 namespace,
+             };
+@@ -1530,6 +1530,7 @@ impl Backend {
+                             trivias: doc_ctx.trivias,
+                             content: doc_ctx.content,
+                             php_version: doc_ctx.php_version,
++                            stub_introductions: doc_ctx.stub_introductions,
+                             use_map: span.use_map.clone(),
+                             namespace: span.namespace.clone(),
+                         });
+@@ -1595,6 +1596,7 @@ impl Backend {
+                 trivias: program.trivia.as_slice(),
+                 content,
+                 php_version,
++                stub_introductions: false,
+                 use_map,
+                 namespace,
+             };
+diff --git a/src/resolution.rs b/src/resolution.rs
+index f0cd83c..fe77259 100644
+--- a/src/resolution.rs
++++ b/src/resolution.rs
+@@ -805,7 +805,11 @@ impl Backend {
+         // Parse classes with per-class namespace tracking so that
+         // multi-namespace files (e.g. PDO.php with both `namespace { }`
+         // and `namespace Pdo { }`) resolve parent names correctly.
+-        let (mut classes_with_ns, blocks) = Self::parse_php_classes_by_block(content, php_version);
++        let (mut classes_with_ns, blocks) = Self::parse_php_classes_by_block(
++            content,
++            php_version,
++            uri.starts_with("phpantom-stub://") || uri.starts_with("phpantom-stub-fn://"),
++        );
+         if (uri.starts_with("phpantom-stub://") || uri.starts_with("phpantom-stub-fn://"))
+             && content.contains("@since")
+         {
+diff --git a/src/stubs.rs b/src/stubs.rs
+index c2a7d10..4ebdc17 100644
+--- a/src/stubs.rs
++++ b/src/stubs.rs
+@@ -272,7 +272,7 @@ pub fn is_stub_class_introduced_after(
+     } else {
+         // Duplicate short names or unusual declaration layout need the same
+         // canonical parser used by resolution, not a second namespace parser.
+-        let (classes, _) = crate::Backend::parse_php_classes_by_block(source, None);
++        let (classes, _) = crate::Backend::parse_php_classes_by_block(source, None, false);
+         classes.into_iter().find_map(|(class, namespace, _)| {
+             let fqn = namespace.filter(|ns| !ns.is_empty()).map_or_else(
+                 || class.name.to_string(),
+@@ -311,6 +311,14 @@ fn introduced_after_at(source: &str, position: usize, version: crate::types::Php
+     let Some(docblock) = preceding_docblock(source, position) else {
+         return false;
+     };
++    docblock_introduced_after(docblock, version)
++}
++
++/// Check a declaration's own parsed PHPDoc, without searching nearby members.
++pub(crate) fn docblock_introduced_after(docblock: &str, version: crate::types::PhpVersion) -> bool {
++    if !docblock.contains("@since") {
++        return false;
++    }
+     let body = docblock
+         .get(3..docblock.len().saturating_sub(2))
+         .unwrap_or("");
+diff --git a/tests/integration/main.rs b/tests/integration/main.rs
+index 4b888e3..aa5609a 100644
+--- a/tests/integration/main.rs
++++ b/tests/integration/main.rs
+@@ -265,3 +265,5 @@ mod definition_ambiguous_members;
+ mod workbench_views;
+ 
+ mod blade_generated_diagnostics;
++
++mod stub_method_versions;
+diff --git a/tests/integration/stub_method_versions.rs b/tests/integration/stub_method_versions.rs
+new file mode 100644
+index 0000000..8316ba5
+--- /dev/null
++++ b/tests/integration/stub_method_versions.rs
+@@ -0,0 +1,105 @@
++//! Stub PHP method introduction tags must govern the shared class model.
++use crate::common::complete_at;
++use phpantom_lsp::{Backend, types::PhpVersion};
++use std::collections::HashMap;
++use tower_lsp::lsp_types::Url;
++
++const STUB: &str = r#"<?php
++class Clock {
++    public static function createLegacy() {}
++    /** @since 8.4 */
++    #[\JetBrains\PhpStorm\Pure]
++    public static function createFuture() {}
++    /** @since PECL 9.0 */
++    public static function createExtension() {}
++}
++class OtherClock {
++    /** @since 8.2 */
++    public static function createFuture() {}
++}
++"#;
++fn backend(version: u8) -> Backend {
++    let backend = Backend::new_test_with_all_stubs(
++        HashMap::from([("Clock", STUB), ("OtherClock", STUB)]),
++        HashMap::new(),
++        HashMap::new(),
++    );
++    backend.set_php_version(PhpVersion::new(8, version));
++    backend
++}
++async fn has(backend: &Backend, source: &str, name: &str) -> bool {
++    let line = source.lines().count() - 1;
++    let col = source.lines().last().unwrap().len();
++    complete_at(
++        backend,
++        &Url::parse("file:///method-target.php").unwrap(),
++        source,
++        line as u32,
++        col as u32,
++    )
++    .await
++    .iter()
++    .any(|i| {
++        i.filter_text
++            .as_deref()
++            .unwrap_or(i.label.split('(').next().unwrap())
++            == name
++    })
++}
++#[tokio::test]
++async fn stub_method_since_boundaries_preserve_legacy_and_extension_versions() {
++    for (version, expected) in [(3, false), (4, true), (5, true)] {
++        let b = backend(version);
++        assert!(has(&b, "<?php\nClock::create", "createLegacy").await);
++        assert!(has(&b, "<?php\nClock::create", "createExtension").await);
++        assert_eq!(
++            has(&b, "<?php\nClock::create", "createFuture").await,
++            expected,
++            "8.{version}"
++        );
++    }
++}
++#[tokio::test]
++async fn inherited_stub_methods_use_the_target_filtered_model() {
++    let b = backend(3);
++    assert!(
++        !has(
++            &b,
++            "<?php\nclass LocalClock extends Clock {}\nLocalClock::create",
++            "createFuture"
++        )
++        .await
++    );
++    assert!(
++        has(
++            &b,
++            "<?php\nclass LocalClock extends Clock {}\nLocalClock::create",
++            "createLegacy"
++        )
++        .await
++    );
++}
++#[tokio::test]
++async fn sibling_classes_with_equal_method_names_keep_their_own_tags() {
++    let b = backend(3);
++    assert!(has(&b, "<?php\nOtherClock::create", "createFuture").await);
++    assert!(!has(&b, "<?php\nClock::create", "createFuture").await);
++    assert!(has(&b, "<?php\nOtherClock::create", "createFuture").await);
++}
++#[tokio::test]
++async fn project_method_since_is_not_a_php_release_constraint() {
++    let b = backend(3);
++    assert!(has(&b,"<?php\nclass LocalClock { /** @since 99.0 */ public static function createFuture() {} }\nLocalClock::create", "createFuture").await);
++}
++#[tokio::test]
++async fn member_tags_do_not_leak_to_adjacent_undocumented_methods() {
++    const ADJACENT: &str = "<?php class Adjacent { /** @since 8.4 */ public $future; public static function createLegacy() {} /** @since 8.5 */ public const FUTURE = 1; public static function createOther() {} }";
++    let b = Backend::new_test_with_all_stubs(
++        HashMap::from([("Adjacent", ADJACENT)]),
++        HashMap::new(),
++        HashMap::new(),
++    );
++    b.set_php_version(PhpVersion::new(8, 3));
++    assert!(has(&b, "<?php\nAdjacent::create", "createLegacy").await);
++    assert!(has(&b, "<?php\nAdjacent::create", "createOther").await);
++}

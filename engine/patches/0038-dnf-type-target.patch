@@ -1,0 +1,574 @@
+diff --git a/docs/CHANGELOG.md b/docs/CHANGELOG.md
+index 807d071..facb18b 100644
+--- a/docs/CHANGELOG.md
++++ b/docs/CHANGELOG.md
+@@ -29,6 +29,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
+ 
+ ### Fixed
+ 
++- **Complete native DNF types while editing.** Parenthesized intersections and following scalar union members follow the selected PHP version and declaration kind, without repeating an existing type. Contributed by PHP Workbench (local downstream patch).
++
+ - **Workspace search follows current editor text.** Newly opened, edited and closed files are reconciled before symbol search, and startup indexing no longer causes the first lookup to fail. Contributed by PHP Workbench (local downstream patch).
+ 
+ - **Background indexing follows current project sources.** Delayed discovery results no longer replace newer editor text or restore deleted declarations. Autocomplete and diagnostics refresh when background indexing publishes new symbols. Contributed by PHP Workbench (local downstream patch).
+diff --git a/examples/php/completion.php b/examples/php/completion.php
+index a106d97..b2b9567 100644
+--- a/examples/php/completion.php
++++ b/examples/php/completion.php
+@@ -5823,3 +5823,19 @@ class ExpectedValueRankingDemo
+         return $label();
+     }
+ }
++
++
++// ── Native DNF type completion (PHP 8.2+) ───────────────────────────────────
++// Try: shorten `IteratorAggregate` after `&` and invoke completion; only
++// class/interface names belong in the intersection. Shorten the final
++// `string` after `|` to complete a scalar outside the intersection group.
++class DnfTypeCompletionDemo
++{
++    public (\Countable&\IteratorAggregate)|string $selection = '';
++
++    public function demo(
++        (\Countable&\IteratorAggregate)|string $value
++    ): (\Countable&\IteratorAggregate)|string {
++        return $value;
++    }
++}
+diff --git a/examples/php/scaffolding/assertions.php b/examples/php/scaffolding/assertions.php
+index 6b3e693..0ed2989 100644
+--- a/examples/php/scaffolding/assertions.php
++++ b/examples/php/scaffolding/assertions.php
+@@ -33,6 +33,10 @@ final class RequireExtendsConsumer extends Scaffolding\RequireExtendsTestCase
+ 
+ function runDemoAssertions(): void
+ {
++    $dnfCompletion = new DnfTypeCompletionDemo();
++    $dnfCollection = new \ArrayObject(['one']);
++    assert($dnfCompletion->demo($dnfCollection) === $dnfCollection, 'the intersection arm accepts an object implementing both interfaces');
++    assert($dnfCompletion->demo('scalar') === 'scalar', 'the scalar union arm remains independent of the intersection');
+     $navigation = new TypeHintGtdDemo();
+     assert($navigation->ambiguousMember(new GtdAlpha()) === 'alpha');
+     assert($navigation->ambiguousMember(new GtdBeta()) === 'beta');
+diff --git a/src/completion/context/type_hint_completion.rs b/src/completion/context/type_hint_completion.rs
+index 326fc51..a8540c9 100644
+--- a/src/completion/context/type_hint_completion.rs
++++ b/src/completion/context/type_hint_completion.rs
+@@ -43,19 +43,14 @@ struct TypeModifiers {
+     nullable: bool,
+     union: bool,
+     intersection: bool,
++    parenthesized: bool,
++    intersection_slot: bool,
++    invalid: bool,
+     has_non_literal_member: bool,
+ }
+ impl TypeModifiers {
+-    fn add(&mut self, operator: char) {
+-        match operator {
+-            '?' => self.nullable = true,
+-            '|' => self.union = true,
+-            '&' => self.intersection = true,
+-            _ => {}
+-        }
+-    }
+     fn is_plain(self) -> bool {
+-        !self.nullable && !self.union && !self.intersection
++        !self.nullable && !self.union && !self.intersection && !self.parenthesized
+     }
+ }
+ 
+@@ -74,6 +69,8 @@ pub(crate) struct TypeHintContext {
+     pub needs_space_prefix: bool,
+     position: TypeHintPosition,
+     modifiers: TypeModifiers,
++    completed_terms: Vec<Vec<String>>,
++    current_members: Vec<String>,
+ }
+ impl TypeHintContext {
+     fn plain(partial: String, needs_space_prefix: bool, position: TypeHintPosition) -> Self {
+@@ -82,6 +79,8 @@ impl TypeHintContext {
+             needs_space_prefix,
+             position,
+             modifiers: TypeModifiers::default(),
++            completed_terms: Vec::new(),
++            current_members: Vec::new(),
+         }
+     }
+     pub(crate) fn available_for_target(&self, version: PhpVersion) -> bool {
+@@ -91,13 +90,79 @@ impl TypeHintContext {
+             TypeHintPosition::Return => PhpVersion::new(7, 0),
+             TypeHintPosition::Parameter => PhpVersion::new(5, 0),
+         };
+-        version >= minimum
++        !self.modifiers.invalid
++            && version >= minimum
+             && (!self.modifiers.nullable || version >= PhpVersion::new(7, 1))
+             && (!self.modifiers.union || version >= PhpVersion::new(8, 0))
+             && (!self.modifiers.intersection || version >= PhpVersion::new(8, 1))
++            && (!self.modifiers.parenthesized || version >= PhpVersion::new(8, 2))
++    }
++    /// Compare resolved spelling only. Class inheritance is intentionally not
++    /// consulted: PHP does not autoload classes for type redundancy checks.
++    pub(crate) fn type_name_available(&self, name: &str, resolve: &dyn Fn(&str) -> String) -> bool {
++        if self.completed_terms.is_empty() && self.current_members.is_empty() {
++            return true;
++        }
++        let candidate = resolve(name);
++        let same = |member: &str| resolve(member).eq_ignore_ascii_case(&candidate);
++        if self.current_members.iter().any(|member| same(member)) {
++            return false;
++        }
++        if self.modifiers.intersection_slot {
++            return !self.completed_terms.iter().any(|term| {
++                term.iter().all(|member| {
++                    same(member)
++                        || self
++                            .current_members
++                            .iter()
++                            .any(|current| resolve(current).eq_ignore_ascii_case(&resolve(member)))
++                })
++            });
++        }
++        if self
++            .completed_terms
++            .iter()
++            .any(|term| term.iter().any(|member| same(member)))
++        {
++            return false;
++        }
++        let has_singleton = |expected: &str| {
++            self.completed_terms
++                .iter()
++                .any(|term| term.len() == 1 && term[0].eq_ignore_ascii_case(expected))
++        };
++        match name.to_ascii_lowercase().as_str() {
++            "bool" => !has_singleton("false") && !has_singleton("true"),
++            "false" => !has_singleton("bool") && !has_singleton("true"),
++            "true" => !has_singleton("bool") && !has_singleton("false"),
++            "array" => !has_singleton("iterable"),
++            "iterable" => {
++                !has_singleton("array")
++                    && !self.completed_terms.iter().flatten().any(|member| {
++                        resolve(member)
++                            .trim_start_matches('\\')
++                            .eq_ignore_ascii_case("Traversable")
++                    })
++            }
++            "object" => !self.completed_terms.iter().flatten().any(|member| {
++                is_class_type_atom(member)
++                    || ["self", "static", "parent"].contains(&member.as_str())
++            }),
++            _ if is_class_type_atom(name) => {
++                !has_singleton("object")
++                    && !(candidate
++                        .trim_start_matches('\\')
++                        .eq_ignore_ascii_case("Traversable")
++                        && has_singleton("iterable"))
++            }
++            _ => true,
++        }
+     }
+     pub(crate) fn native_type_available(&self, name: &str, version: PhpVersion) -> bool {
+-        if !self.available_for_target(version) || self.modifiers.intersection {
++        if !self.available_for_target(version)
++            || self.modifiers.intersection_slot
++            || !self.type_name_available(name, &|name| name.to_ascii_lowercase())
++        {
+             return false;
+         }
+         match name {
+@@ -242,16 +307,14 @@ pub(crate) fn detect_type_hint_context(
+         }
+     }
+ 
+-    // ── Check: type modifier `?`, `|`, `&` in a type context ────────
+-    if matches!(prev_char, '?' | '|' | '&')
+-        && let Some((position, modifiers)) = type_modifier_position(&chars, before - 1)
++    // Group parentheses belong to the native type expression, not the
++    // enclosing function's parameter list. Keep their intersection scope
++    // separate from a following scalar union member.
++    if matches!(prev_char, '?' | '|' | '&' | '(')
++        && let Some(mut context) = type_modifier_context(&chars, before)
+     {
+-        return Some(TypeHintContext {
+-            partial,
+-            needs_space_prefix: false,
+-            position,
+-            modifiers,
+-        });
++        context.partial = partial;
++        return Some(context);
+     }
+ 
+     // ── Check: after property / promoted-param modifier keyword ─────
+@@ -567,69 +630,146 @@ fn property_position(chars: &[char], before: usize) -> TypeHintPosition {
+     }
+ }
+ 
+-fn type_modifier_position(
+-    chars: &[char],
+-    mod_pos: usize,
+-) -> Option<(TypeHintPosition, TypeModifiers)> {
+-    let mut i = mod_pos;
+-    let mut modifiers = TypeModifiers::default();
+-    modifiers.add(chars[mod_pos]);
+-    loop {
+-        i = skip_whitespace_backward(chars, i);
+-        if i == 0 {
+-            return None;
+-        }
+-        let type_end = i;
+-        while i > 0 && (chars[i - 1].is_alphanumeric() || matches!(chars[i - 1], '_' | '\\')) {
+-            i -= 1;
+-        }
+-        // Before PHP 8.2, false|null alone is not a valid union. Inspect
+-        // existing names without allocating strings on the completion path.
+-        if i < type_end
+-            && !["null", "false", "true"].iter().any(|name| {
+-                chars[i..type_end]
+-                    .iter()
+-                    .map(char::to_ascii_lowercase)
+-                    .eq(name.chars())
+-            })
+-        {
+-            modifiers.has_non_literal_member = true;
+-        }
++fn type_modifier_context(chars: &[char], prefix_end: usize) -> Option<TypeHintContext> {
++    let mut i = prefix_end;
++    let (position, prefix_start) = loop {
+         i = skip_whitespace_backward(chars, i);
+         if i == 0 {
+             return None;
+         }
+         match chars[i - 1] {
+-            operator @ ('?' | '|' | '&') => {
+-                modifiers.add(operator);
+-                i -= 1;
++            '(' if is_function_definition_paren(chars, i - 1) => {
++                break (TypeHintPosition::Parameter, i);
+             }
+-            '(' => {
+-                return is_function_definition_paren(chars, i - 1)
+-                    .then_some((TypeHintPosition::Parameter, modifiers));
++            ':' if is_return_type_colon(chars, i - 1) => {
++                break (TypeHintPosition::Return, i);
+             }
+             ',' => {
+                 let open = find_enclosing_open_paren(chars, i - 1)?;
+-                if !is_function_definition_paren(chars, open) {
++                if !is_function_definition_paren(chars, open)
++                    || !chars[open + 1..i - 1].contains(&'$')
++                {
+                     return None;
+                 }
+-                let between: String = chars[open + 1..i - 1].iter().collect();
+-                return between
+-                    .rsplit(',')
+-                    .next()?
+-                    .contains('$')
+-                    .then_some((TypeHintPosition::Parameter, modifiers));
+-            }
+-            ':' => {
+-                return is_return_type_colon(chars, i - 1)
+-                    .then_some((TypeHintPosition::Return, modifiers));
++                break (TypeHintPosition::Parameter, i);
+             }
+-            prev if prev.is_alphabetic() && is_after_modifier_keyword(chars, i) => {
+-                return Some((property_position(chars, i), modifiers));
++            '?' | '|' | '&' | '(' | ')' => i -= 1,
++            c if c.is_alphanumeric() || matches!(c, '_' | '\\') => {
++                let end = i;
++                while i > 0
++                    && (chars[i - 1].is_alphanumeric() || matches!(chars[i - 1], '_' | '\\'))
++                {
++                    i -= 1;
++                }
++                let word: String = chars[i..end].iter().collect();
++                let preceding = skip_whitespace_backward(chars, i);
++                let static_modifier = word == "static"
++                    && (preceding == 0
++                        || !matches!(chars[preceding - 1], ':' | '?' | '|' | '&' | '('));
++                if matches!(
++                    word.as_str(),
++                    "public" | "protected" | "private" | "readonly"
++                ) || static_modifier
++                {
++                    break (property_position(chars, end), end);
++                }
+             }
+             _ => return None,
+         }
++    };
++    let mut context = TypeHintContext::plain(String::new(), false, position);
++    let mut expect_member = true;
++    let mut group_open = false;
++    let mut group_closed = false;
++    let mut i = prefix_start;
++    while i < prefix_end {
++        if chars[i].is_ascii_whitespace() {
++            i += 1;
++            continue;
++        }
++        match chars[i] {
++            '?' if expect_member
++                && context.current_members.is_empty()
++                && !context.modifiers.nullable
++                && !context.modifiers.union
++                && !context.modifiers.parenthesized =>
++            {
++                context.modifiers.nullable = true;
++            }
++            '(' if expect_member && !group_open && !context.modifiers.nullable => {
++                group_open = true;
++                context.modifiers.parenthesized = true;
++            }
++            ')' if group_open && !expect_member && context.current_members.len() >= 2 => {
++                group_open = false;
++                group_closed = true;
++            }
++            '&' if !expect_member && !group_closed && (!context.modifiers.union || group_open) => {
++                context.modifiers.intersection = true;
++                expect_member = true;
++                if context
++                    .current_members
++                    .iter()
++                    .any(|name| !is_class_type_atom(name))
++                {
++                    context.modifiers.invalid = true;
++                }
++            }
++            '|' if !expect_member
++                && !group_open
++                && !context.modifiers.nullable
++                && (context.current_members.len() == 1 || group_closed) =>
++            {
++                context.modifiers.union = true;
++                expect_member = true;
++                group_closed = false;
++                if context.current_members.iter().any(|name| {
++                    ["mixed", "void", "never"]
++                        .iter()
++                        .any(|t| name.eq_ignore_ascii_case(t))
++                }) {
++                    context.modifiers.invalid = true;
++                }
++                context
++                    .completed_terms
++                    .push(std::mem::take(&mut context.current_members));
++            }
++            c if expect_member && (c.is_alphanumeric() || matches!(c, '_' | '\\')) => {
++                let start = i;
++                while i < prefix_end
++                    && (chars[i].is_alphanumeric() || matches!(chars[i], '_' | '\\'))
++                {
++                    i += 1;
++                }
++                let name: String = chars[start..i].iter().collect();
++                if group_open && !is_class_type_atom(&name) {
++                    context.modifiers.invalid = true;
++                }
++                if !["null", "false", "true"]
++                    .iter()
++                    .any(|t| name.eq_ignore_ascii_case(t))
++                {
++                    context.modifiers.has_non_literal_member = true;
++                }
++                context.current_members.push(name);
++                expect_member = false;
++                continue;
++            }
++            _ => {
++                context.modifiers.invalid = true;
++                break;
++            }
++        }
++        i += 1;
+     }
++    context.modifiers.intersection_slot = group_open || !context.current_members.is_empty();
++    Some(context)
++}
++
++fn is_class_type_atom(name: &str) -> bool {
++    !PHP_NATIVE_TYPES
++        .iter()
++        .any(|native| name.eq_ignore_ascii_case(native))
+ }
+ 
+ /// Check whether the text ending at `pos` (exclusive) is one of the PHP
+diff --git a/src/completion/context/type_hint_completion_tests.rs b/src/completion/context/type_hint_completion_tests.rs
+index 4c09a01..10e8f94 100644
+--- a/src/completion/context/type_hint_completion_tests.rs
++++ b/src/completion/context/type_hint_completion_tests.rs
+@@ -605,3 +605,21 @@ fn native_types_excludes_phpstan_only() {
+     assert!(!PHP_NATIVE_TYPES.contains(&"non-empty-string"));
+     assert!(!PHP_NATIVE_TYPES.contains(&"resource"));
+ }
++
++#[test]
++fn dnf_detects_parenthesized_prefixes_without_claiming_call_expressions() {
++    for source in [
++        "<?php function f(): (First&Second)|Proj",
++        "<?php function f((First&Proj",
++        "<?php class Demo { public (First&Second)|Proj",
++        "<?php class Demo { function __construct(public (First&Proj",
++    ] {
++        let ctx = detect(source, 0, source.encode_utf16().count() as u32).unwrap();
++        assert_eq!(ctx.partial, "Proj");
++        assert!(!ctx.available_for_target(PhpVersion::new(8, 1)), "{source}");
++        assert!(ctx.available_for_target(PhpVersion::new(8, 2)), "{source}");
++    }
++    for source in ["<?php foo((First&Proj", "<?php $x = (First&Second)|Proj"] {
++        assert!(detect(source, 0, source.encode_utf16().count() as u32).is_none());
++    }
++}
+diff --git a/src/completion/handler/class_constant.rs b/src/completion/handler/class_constant.rs
+index 3495f4e..804ba48 100644
+--- a/src/completion/handler/class_constant.rs
++++ b/src/completion/handler/class_constant.rs
+@@ -171,6 +171,11 @@ impl Backend {
+                 .iter()
+                 .filter(|t| t.to_lowercase().starts_with(&partial_lower))
+                 .filter(|t| th_ctx.native_type_available(t, version))
++                .filter(|t| {
++                    th_ctx.type_name_available(t, &|name| {
++                        crate::util::resolve_to_fqn(name, &ctx.use_map, &ctx.namespace)
++                    })
++                })
+                 .enumerate()
+                 .map(|(idx, t)| CompletionItem {
+                     label: t.to_string(),
+@@ -195,6 +200,15 @@ impl Backend {
+                 uri,
+             });
+ 
++        let class_items = class_items.into_iter().filter(|item| {
++            item.kind != Some(CompletionItemKind::CLASS)
++                || item.detail.as_ref().is_none_or(|fqn| {
++                    th_ctx.type_name_available(&format!("\\{fqn}"), &|name| {
++                        crate::util::resolve_to_fqn(name, &ctx.use_map, &ctx.namespace)
++                    })
++                })
++        });
++
+         // When a leading space is needed (return type after `:` with no
+         // space), prefix the insert text of each class-name item so that
+         // the result is `: ClassName` rather than `:ClassName`.
+diff --git a/tests/integration/native_type_php_target.rs b/tests/integration/native_type_php_target.rs
+index b036736..93bd907 100644
+--- a/tests/integration/native_type_php_target.rs
++++ b/tests/integration/native_type_php_target.rs
+@@ -231,3 +231,113 @@ async fn literal_only_unions_require_php82_but_concrete_union_members_keep_php80
+         assert!(keyword(&b, "<?php function demo(): int|false|nu<caret> {}", "null").await);
+     }
+ }
++
++#[tokio::test]
++async fn dnf_group_and_union_tail_follow_php82_in_every_declaration_role() {
++    for minor in [0, 1, 2, 5] {
++        let b = backend(8, minor);
++        for declaration in [
++            "function f((First&Proj<caret>)|null $value) {}",
++            "function f(): (First&Proj<caret>)|null {}",
++            "class Demo { public (First&Proj<caret>)|null $value; }",
++            "class Demo { function __construct(public (First&Proj<caret>)|null $value) {} }",
++            "function f((First&Second)|Proj<caret> $value) {}",
++            "function f(): (First&Second)|Proj<caret> {}",
++        ] {
++            let source = format!(
++                "<?php interface First {{}} interface Second {{}} interface ProjectItem {{}} {declaration}"
++            );
++            assert_eq!(
++                offered(&b, &source, "ProjectItem", CompletionItemKind::CLASS).await,
++                minor >= 2,
++                "8.{minor} {source}"
++            );
++        }
++    }
++}
++
++#[tokio::test]
++async fn dnf_closed_intersections_allow_legal_scalar_union_members() {
++    let b = backend(8, 2);
++    for (prefix, label) in [("str", "string"), ("nu", "null"), ("fa", "false")] {
++        let source = format!(
++            "<?php interface First {{}} interface Second {{}} function f(): (First&Second)|{prefix}<caret> {{}}"
++        );
++        assert!(keyword(&b, &source, label).await, "{source}");
++    }
++    for declaration in [
++        "function f(): (First&Second)|ca<caret> {}",
++        "function f((First&Second)|ca<caret> $value) {}",
++    ] {
++        assert!(keyword(&b, &format!("<?php {declaration}"), "callable").await);
++    }
++    for declaration in [
++        "class Demo { public (First&Second)|ca<caret> $value; }",
++        "class Demo { function __construct(public (First&Second)|ca<caret> $value) {} }",
++    ] {
++        assert!(!keyword(&b, &format!("<?php {declaration}"), "callable").await);
++    }
++}
++
++#[tokio::test]
++async fn dnf_intersection_slots_never_offer_native_scalar_or_relative_types() {
++    let b = backend(8, 5);
++    for prefix in ["(", "(First&", "First|(", "(First&Second)|("] {
++        for (partial, label) in [
++            ("str", "string"),
++            ("obj", "object"),
++            ("nu", "null"),
++            ("mi", "mixed"),
++            ("vo", "void"),
++            ("self", "self"),
++            ("sta", "static"),
++            ("par", "parent"),
++        ] {
++            let source = format!("<?php function f(): {prefix}{partial}<caret> {{}}");
++            assert!(!keyword(&b, &source, label).await, "{source}");
++        }
++    }
++}
++
++#[tokio::test]
++async fn dnf_duplicate_checks_respect_intersection_term_boundaries_and_aliases() {
++    let b = backend(8, 5);
++    for (prefix, expected) in [
++        ("First&", false),
++        ("(First&Second)|", false),
++        ("(First&Second)|(", true),
++        ("(First&Second)|(First&", false),
++        ("First|(Second&", false),
++    ] {
++        let source = format!(
++            "<?php interface First {{}} interface Second {{}} function f(): {prefix}Fir<caret> {{}}"
++        );
++        assert_eq!(
++            offered(&b, &source, "First", CompletionItemKind::CLASS).await,
++            expected,
++            "{source}"
++        );
++    }
++    let source = "<?php namespace App; use App\\First as AliasFirst; interface First {} function f(): AliasFirst&Fir<caret> {}";
++    assert!(!offered(&b, source, "First", CompletionItemKind::CLASS).await);
++}
++
++#[tokio::test]
++async fn dnf_only_syntactic_redundancies_are_filtered() {
++    let b = backend(8, 5);
++    let source = "<?php interface Base {} interface Derived extends Base {} function f(): Base&Der<caret> {}";
++    assert!(offered(&b, source, "Derived", CompletionItemKind::CLASS).await);
++    for (prefix, partial, label) in [
++        ("string|", "str", "string"),
++        ("bool|", "fa", "false"),
++        ("false|", "tr", "true"),
++        ("iterable|", "arr", "array"),
++        ("(First&Second)|", "obj", "object"),
++        ("(First&Second)|", "mi", "mixed"),
++        ("(First&Second)|", "ne", "never"),
++        ("(First&Second)|", "vo", "void"),
++    ] {
++        let source = format!("<?php function f(): {prefix}{partial}<caret> {{}}");
++        assert!(!keyword(&b, &source, label).await, "{source}");
++    }
++}

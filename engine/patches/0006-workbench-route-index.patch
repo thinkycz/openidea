@@ -1,0 +1,437 @@
+diff --git a/src/lib.rs b/src/lib.rs
+index 4bcd124..8eb7816 100644
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -85,6 +85,8 @@
+ //!     parsing (`parse_object_shape`, `extract_object_shape_property_type`,
+ //!     `is_object_shape`)
+ 
++pub mod workbench_routes;
++
+ // Use mimalloc on Linux, where the system allocator is 4-6x slower for
+ // our parallel, allocation-heavy workload. Defined in the library
+ // rather than the binary so every artifact built from this crate uses
+diff --git a/src/main.rs b/src/main.rs
+index 496bfbc..907e7c9 100644
+--- a/src/main.rs
++++ b/src/main.rs
+@@ -564,7 +564,9 @@ async fn async_main() {
+                 eprintln!("Client connected from {}", peer);
+ 
+                 let (read, write) = tokio::io::split(stream);
+-                let (service, socket) = LspService::build(Backend::new).finish();
++                let (service, socket) = LspService::build(Backend::new)
++                    .custom_method("phpWorkbench/routes", Backend::workbench_routes)
++                    .finish();
+                 Server::new(read, write, socket)
+                     .concurrency_level(LSP_CONCURRENCY)
+                     .serve(service)
+@@ -580,7 +582,9 @@ async fn async_main() {
+                 let stdin = tokio::io::stdin();
+                 let stdout = tokio::io::stdout();
+ 
+-                let (service, socket) = LspService::build(Backend::new).finish();
++                let (service, socket) = LspService::build(Backend::new)
++                    .custom_method("phpWorkbench/routes", Backend::workbench_routes)
++                    .finish();
+                 Server::new(stdin, stdout, socket)
+                     .concurrency_level(LSP_CONCURRENCY)
+                     .serve(service)
+diff --git a/src/backend/startup.rs b/src/backend/startup.rs
+index 17ccaca..0b475cb 100644
+--- a/src/backend/startup.rs
++++ b/src/backend/startup.rs
+@@ -278,6 +278,7 @@ impl Backend {
+                     commands: vec!["phpantom.navigateToPrototype".to_string()],
+                     ..ExecuteCommandOptions::default()
+                 }),
++                experimental: Some(serde_json::json!({"phpWorkbenchRoutes": true})),
+                 ..ServerCapabilities::default()
+             },
+             server_info: Some(ServerInfo {
+diff --git a/src/virtual_members/laravel/mod.rs b/src/virtual_members/laravel/mod.rs
+index c429242..71a8ef3 100644
+--- a/src/virtual_members/laravel/mod.rs
++++ b/src/virtual_members/laravel/mod.rs
+@@ -188,8 +188,8 @@ pub(crate) use provider_resources::{
+ };
+ pub(crate) use request_fields::{request_fields_at_position, resolve_request_field_definition};
+ pub(crate) use route_names::{
+-    RouteDiscovery, enumerate_all_routes, find_route_registration_references, route_name_matches,
+-    route_uri_parameters,
++    RouteDiscovery, enumerate_all_routes, find_route_registration_references,
++    resolve_route_definitions, route_name_matches, route_uri_parameters,
+ };
+ pub(crate) use storage::{
+     FILESYSTEM_MANAGER_FQN, LaravelStorageDriverIndex, StorageDriverRegistration,
+diff --git a/src/workbench_routes.rs b/src/workbench_routes.rs
+new file mode 100644
+index 0000000..e82dda3
+--- /dev/null
++++ b/src/workbench_routes.rs
+@@ -0,0 +1,120 @@
++//! Read-only named-route discovery for the PHP Workbench client.
++
++use serde::{Deserialize, Serialize};
++use tower_lsp::{
++    jsonrpc::{Error, Result},
++    lsp_types::Location,
++};
++
++use crate::{
++    Backend,
++    virtual_members::laravel::{
++        enumerate_all_routes, resolve_route_definitions, route_uri_parameters,
++    },
++};
++
++/// List routes, or resolve one selected route name to its registrations.
++#[derive(Debug, Default, Deserialize)]
++pub struct RouteQuery {
++    /// A selected name. Omit to list route names and statically known URIs.
++    pub name: Option<String>,
++    /// Maximum number of rows or locations, between one and five thousand.
++    pub limit: Option<usize>,
++}
++
++/// A named route recovered by the existing Laravel source index.
++#[derive(Debug, Serialize)]
++pub struct RouteItem {
++    /// Fully qualified name including statically known group prefixes.
++    pub name: String,
++    /// Group-prefixed URI, or an empty string when not statically known.
++    pub uri: String,
++    /// URI parameter names, or none when the URI is unknown.
++    pub parameters: Option<Vec<String>>,
++    /// Whether the registration belongs to an installed package.
++    pub from_vendor: bool,
++}
++
++/// A bounded route table or the registrations of a selected name.
++#[derive(Debug, Default, Serialize)]
++pub struct RouteReply {
++    /// Named routes, populated for a list query.
++    pub routes: Vec<RouteItem>,
++    /// Registrations, populated for a selected-name query; duplicates stay visible.
++    pub locations: Vec<Location>,
++    /// More results or dynamically computed route names may exist.
++    pub incomplete: bool,
++}
++
++impl Backend {
++    /// Query the static route index without executing PHP or booting Laravel.
++    pub async fn workbench_routes(&self, query: RouteQuery) -> Result<RouteReply> {
++        let limit = query.limit.unwrap_or(2000);
++        if !(1..=5000).contains(&limit) {
++            return Err(Error::invalid_params(
++                "Route limit must be between 1 and 5000",
++            ));
++        }
++        if let Some(name) = query.name {
++            if name.is_empty() || name.len() > 256 {
++                return Err(Error::invalid_params(
++                    "Route name must contain 1 to 256 bytes",
++                ));
++            }
++            let mut locations = resolve_route_definitions(self, &name);
++            locations.sort_unstable_by(|a, b| {
++                (
++                    a.uri.as_str(),
++                    a.range.start.line,
++                    a.range.start.character,
++                    a.range.end.line,
++                    a.range.end.character,
++                )
++                    .cmp(&(
++                        b.uri.as_str(),
++                        b.range.start.line,
++                        b.range.start.character,
++                        b.range.end.line,
++                        b.range.end.character,
++                    ))
++            });
++            locations.dedup();
++            let incomplete = locations.len() > limit;
++            locations.truncate(limit);
++            return Ok(RouteReply {
++                locations,
++                incomplete,
++                ..RouteReply::default()
++            });
++        }
++        let discovery = enumerate_all_routes(self);
++        let mut routes = discovery.routes;
++        routes.sort_unstable_by(|a, b| {
++            (&a.name, &a.uri, a.from_vendor).cmp(&(&b.name, &b.uri, b.from_vendor))
++        });
++        routes
++            .dedup_by(|a, b| a.name == b.name && a.uri == b.uri && a.from_vendor == b.from_vendor);
++        let incomplete = routes.len() > limit
++            || !discovery.open_prefixes.is_empty()
++            || !discovery.open_suffixes.is_empty();
++        routes.truncate(limit);
++        Ok(RouteReply {
++            routes: routes
++                .into_iter()
++                .map(|route| RouteItem {
++                    parameters: (!route.uri.is_empty()).then(|| {
++                        route_uri_parameters(&route.uri)
++                            .into_iter()
++                            .map(str::to_owned)
++                            .collect()
++                    }),
++                    name: route.name,
++                    uri: route.uri,
++                    from_vendor: route.from_vendor,
++                })
++                .collect(),
++            incomplete,
++            ..RouteReply::default()
++        })
++    }
++}
+diff --git a/tests/integration/main.rs b/tests/integration/main.rs
+index 254642e..91dc358 100644
+--- a/tests/integration/main.rs
++++ b/tests/integration/main.rs
+@@ -255,3 +255,5 @@ mod type_definition;
+ mod type_hierarchy;
+ mod watched_files;
+ mod workspace_symbols;
++
++mod workbench_routes;
+diff --git a/tests/integration/workbench_routes.rs b/tests/integration/workbench_routes.rs
+new file mode 100644
+index 0000000..068f45f
+--- /dev/null
++++ b/tests/integration/workbench_routes.rs
+@@ -0,0 +1,205 @@
++use super::common::{create_test_backend, open_php};
++use phpantom_lsp::workbench_routes::RouteQuery;
++use tower_lsp::{
++    LanguageServer,
++    lsp_types::{
++        DidChangeTextDocumentParams, TextDocumentContentChangeEvent, Url,
++        VersionedTextDocumentIdentifier,
++    },
++};
++
++#[tokio::test]
++async fn workbench_routes_lists_grouped_names_uri_parameters_and_resources() {
++    let backend = create_test_backend();
++    let uri = Url::parse("file:///app/routes/web.php").unwrap();
++    let source = "<?php\nRoute::prefix('admin')->name('admin.')->group(function () { Route::get('/users/{user}/{tab?}', 'show')->name('users.show'); Route::resource('posts', 'PostController')->only(['index', 'show']); });\n";
++    open_php(&backend, &uri, source).await;
++    backend.update_ast(uri.as_str(), source);
++    let reply = backend
++        .workbench_routes(RouteQuery::default())
++        .await
++        .unwrap();
++    let route = reply
++        .routes
++        .iter()
++        .find(|route| route.name == "admin.users.show")
++        .unwrap();
++    assert_eq!(route.uri, "admin/users/{user}/{tab?}");
++    assert_eq!(
++        route.parameters.as_deref(),
++        Some(["user".to_string(), "tab".to_string()].as_slice())
++    );
++    assert!(
++        reply
++            .routes
++            .iter()
++            .any(|route| route.name == "admin.posts.index")
++    );
++    assert!(
++        reply
++            .routes
++            .iter()
++            .any(|route| route.name == "admin.posts.show")
++    );
++    assert!(
++        !reply
++            .routes
++            .iter()
++            .any(|route| route.name == "admin.posts.create")
++    );
++}
++
++#[tokio::test]
++async fn workbench_routes_resolves_selected_name_to_registration() {
++    let backend = create_test_backend();
++    let uri = Url::parse("file:///app/routes/web.php").unwrap();
++    let source = "<?php\n/* café 🐘 */ Route::get('/user/{id}', 'show')->name('users.show');\n";
++    open_php(&backend, &uri, source).await;
++    backend.update_ast(uri.as_str(), source);
++    let reply = backend
++        .workbench_routes(RouteQuery {
++            name: Some("users.show".into()),
++            limit: None,
++        })
++        .await
++        .unwrap();
++    assert_eq!(reply.locations.len(), 1);
++    assert_eq!(reply.locations[0].uri, uri);
++    assert_eq!(reply.locations[0].range.start.line, 1);
++    let character = source.lines().nth(1).unwrap().find("users.show").unwrap();
++    let utf16 = source.lines().nth(1).unwrap()[..character]
++        .encode_utf16()
++        .count();
++    assert_eq!(reply.locations[0].range.start.character, utf16 as u32);
++}
++
++#[tokio::test]
++async fn workbench_routes_limits_rows_and_rejects_invalid_queries() {
++    let backend = create_test_backend();
++    let uri = Url::parse("file:///app/routes/web.php").unwrap();
++    let source = "<?php Route::get('/a', 'a')->name('a'); Route::get('/b', 'b')->name('b');";
++    open_php(&backend, &uri, source).await;
++    backend.update_ast(uri.as_str(), source);
++    assert!(
++        backend
++            .workbench_routes(RouteQuery {
++                name: Some(String::new()),
++                limit: None
++            })
++            .await
++            .is_err()
++    );
++    assert!(
++        backend
++            .workbench_routes(RouteQuery {
++                name: None,
++                limit: Some(5001)
++            })
++            .await
++            .is_err()
++    );
++    let reply = backend
++        .workbench_routes(RouteQuery {
++            name: None,
++            limit: Some(1),
++        })
++        .await
++        .unwrap();
++    assert_eq!(reply.routes.len(), 1);
++    assert!(reply.incomplete);
++    assert!(
++        backend
++            .workbench_routes(RouteQuery {
++                name: None,
++                limit: Some(0)
++            })
++            .await
++            .is_err()
++    );
++    assert!(
++        backend
++            .workbench_routes(RouteQuery {
++                name: Some("x".repeat(257)),
++                limit: None
++            })
++            .await
++            .is_err()
++    );
++}
++
++#[tokio::test]
++async fn workbench_routes_empty_project_and_unknown_name_are_explicit() {
++    let backend = create_test_backend();
++    let reply = backend
++        .workbench_routes(RouteQuery::default())
++        .await
++        .unwrap();
++    assert!(reply.routes.is_empty() && reply.locations.is_empty() && !reply.incomplete);
++    assert!(
++        backend
++            .workbench_routes(RouteQuery {
++                name: Some("missing".into()),
++                limit: None
++            })
++            .await
++            .unwrap()
++            .locations
++            .is_empty()
++    );
++}
++
++#[tokio::test]
++async fn workbench_routes_preserves_duplicates_and_resolves_live_changes() {
++    let backend = create_test_backend();
++    let uri = Url::parse("file:///app/routes/web.php").unwrap();
++    let source = "<?php\nRoute::get('/first', 'first')->name('duplicate');\nRoute::get('/second', 'second')->name('duplicate');\n";
++    open_php(&backend, &uri, source).await;
++    backend.update_ast(uri.as_str(), source);
++    let reply = backend
++        .workbench_routes(RouteQuery {
++            name: Some("duplicate".into()),
++            limit: None,
++        })
++        .await
++        .unwrap();
++    assert_eq!(reply.locations.len(), 2);
++    assert_eq!(reply.locations[0].range.start.line, 1);
++    assert_eq!(reply.locations[1].range.start.line, 2);
++    let changed = "<?php\nRoute::get('/changed', 'first')->name('changed');\n";
++    backend
++        .did_change(DidChangeTextDocumentParams {
++            text_document: VersionedTextDocumentIdentifier {
++                uri: uri.clone(),
++                version: 2,
++            },
++            content_changes: vec![TextDocumentContentChangeEvent {
++                range: None,
++                range_length: None,
++                text: changed.to_owned(),
++            }],
++        })
++        .await;
++    backend.update_ast(uri.as_str(), changed);
++    let reply = backend
++        .workbench_routes(RouteQuery::default())
++        .await
++        .unwrap();
++    assert!(
++        reply
++            .routes
++            .iter()
++            .any(|route| route.name == "changed" && route.uri == "changed")
++    );
++    assert!(!reply.routes.iter().any(|route| route.name == "duplicate"));
++    assert!(
++        backend
++            .workbench_routes(RouteQuery {
++                name: Some("duplicate".into()),
++                limit: None
++            })
++            .await
++            .unwrap()
++            .locations
++            .is_empty()
++    );
++}
+diff --git a/docs/CHANGELOG.md b/docs/CHANGELOG.md
+index f8ca325..dcc6983 100644
+--- a/docs/CHANGELOG.md
++++ b/docs/CHANGELOG.md
+@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
+ 
+ ### Added
+ 
++- **Named-route discovery for PHP Workbench.** The route picker can list statically known names, URLs and parameters and resolve a selection to every matching registration without running Laravel. Contributed by PHP Workbench (local downstream build).
++
+ - **Type-aware value suggestions.** Compatible variables appear first in direct returns, typed arrow bodies and declared property assignments. Other variables remain available, and nested arrays, concatenations and untyped closures keep their normal ordering. Contributed by PHP Workbench (local downstream build).
+ 
+ - **Type-aware argument suggestions.** Compatible variables are shown before other local variables while entering function and method arguments. Contributed by PHP Workbench (local downstream build).
+diff --git a/examples/laravel/app/Demo.php b/examples/laravel/app/Demo.php
+index bdab4d9..b5af642 100644
+--- a/examples/laravel/app/Demo.php
++++ b/examples/laravel/app/Demo.php
+@@ -1574,3 +1574,6 @@ class Demo
+         $pending->async()->get('https://example.com');     // → PromiseInterface
+     }
+ }
++
++// PHP Workbench: Laravel: Go to Route lists statically named routes and opens
++// their registrations without running Artisan. Dynamic names may be incomplete.

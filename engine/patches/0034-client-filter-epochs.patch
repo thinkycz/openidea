@@ -1,0 +1,295 @@
+diff --git a/src/backend/semantic_snapshot.rs b/src/backend/semantic_snapshot.rs
+index 8cf3d98..89a6774 100644
+--- a/src/backend/semantic_snapshot.rs
++++ b/src/backend/semantic_snapshot.rs
+@@ -13,7 +13,25 @@ fn content_modified() -> Error {
+     }
+ }
+ 
++/// A live semantic configuration mutation owns its whole synchronous
++/// publication, including cache and index reconciliation. Overlapping changes
++/// block captures until the last guard finishes, without holding an index lock.
++struct ConfigurationPublication<'a>(&'a Backend);
++impl Drop for ConfigurationPublication<'_> {
++    fn drop(&mut self) {
++        let ready = self.0.diag.documents.lock().finish_configuration_change();
++        if ready {
++            self.0.schedule_diagnostics_after_configuration_reload();
++        }
++    }
++}
++
+ impl Backend {
++    pub(crate) fn begin_configuration_publication(&self) -> impl Drop + '_ {
++        self.diag.documents.lock().begin_configuration_change();
++        ConfigurationPublication(self)
++    }
++
+     pub(crate) fn restore_closed_semantic_source(&self, uri: &str, opening: u64) -> bool {
+         let lock = self.diagnostic_parse_lock(uri);
+         let _guard = lock.lock();
+@@ -804,3 +822,175 @@ mod config_reload_ownership_tests {
+         assert!(f.backend.diag.pending_uris.lock().contains(&f.uri));
+     }
+ }
++
++#[cfg(test)]
++mod client_filter_ownership_tests {
++    use crate::{Backend, config::ClientIndexingOptions};
++    use std::sync::{Arc, atomic::Ordering};
++    use tower_lsp::jsonrpc::ErrorCode;
++    fn options() -> ClientIndexingOptions {
++        ClientIndexingOptions {
++            exclude: vec!["generated".into()],
++            ..Default::default()
++        }
++    }
++    fn fixture() -> (Backend, String, Arc<String>) {
++        let backend = Backend::new_test();
++        let uri = "file:///Caller.php".to_owned();
++        let text = Arc::new("<?php class Caller {}".to_owned());
++        backend.diag.documents.lock().open(&uri, 1, &text);
++        backend
++            .open_files
++            .write()
++            .insert(uri.clone(), Arc::clone(&text));
++        assert!(backend.parse_diagnostic_snapshot(&uri, &text));
++        backend.init_complete.store(true, Ordering::Release);
++        backend.workspace_indexed.store(true, Ordering::Release);
++        backend.diag.pending_uris.lock().clear();
++        (backend, uri, text)
++    }
++    fn modified<T: std::fmt::Debug>(r: tower_lsp::jsonrpc::Result<T>) {
++        assert_eq!(
++            r.expect_err("old filter result must be retired").code,
++            ErrorCode::ServerError(-32801)
++        );
++    }
++    #[test]
++    fn client_filter_change_retires_interactive_result_without_open_files() {
++        let b = Backend::new_test();
++        modified(b.with_current_semantics(|| {
++            assert!(b.set_client_indexing_options(options()));
++            Ok(())
++        }));
++    }
++    #[test]
++    fn client_filter_aba_retires_interactive_result() {
++        let (b, _, _) = fixture();
++        modified(b.with_current_semantics(|| {
++            assert!(b.set_client_indexing_options(options()));
++            assert!(b.set_client_indexing_options(ClientIndexingOptions::default()));
++            Ok(())
++        }));
++    }
++    #[test]
++    fn client_filter_worker_clone_retires_main_result() {
++        let (b, _, _) = fixture();
++        let worker = b.clone_for_blocking();
++        modified(b.with_current_semantics(|| {
++            worker.set_client_indexing_options(options());
++            Ok(())
++        }));
++    }
++    #[test]
++    fn client_filter_native_old_phases_retire_but_parsed_source_is_reusable() {
++        let (b, uri, text) = fixture();
++        let old = b
++            .diag
++            .documents
++            .lock()
++            .capture(&uri, &text)
++            .unwrap()
++            .unwrap();
++        b.set_client_indexing_options(options());
++        let mut docs = b.diag.documents.lock();
++        assert!(docs.parsed(&uri, Some(&old)));
++        assert!(!docs.mark_phase(&uri, Some(&old), false));
++        assert!(!docs.mark_phase(&uri, Some(&old), true));
++        assert_eq!(docs.capture(&uri, &text).unwrap().unwrap().version, 1);
++    }
++    #[test]
++    fn client_filter_change_queues_open_consumers_and_retires_pull_cache() {
++        let (b, uri, _) = fixture();
++        b.supports_pull_diagnostics.store(true, Ordering::Release);
++        b.diag
++            .last_full
++            .lock()
++            .insert(uri.clone(), vec![Default::default()]);
++        b.diag.result_ids.lock().insert(uri.clone(), 44);
++        b.set_client_indexing_options(options());
++        assert!(b.diag.pending_uris.lock().contains(&uri));
++        assert!(!b.diag.last_full.lock().contains_key(&uri));
++        assert_eq!(b.diag.result_ids.lock().get(&uri), Some(&44));
++    }
++    #[test]
++    fn repeated_client_filters_preserve_request_and_native_run() {
++        let (b, uri, text) = fixture();
++        b.set_client_indexing_options(options());
++        b.diag.pending_uris.lock().clear();
++        let old = b
++            .diag
++            .documents
++            .lock()
++            .capture(&uri, &text)
++            .unwrap()
++            .unwrap();
++        assert!(
++            b.with_current_semantics(|| {
++                assert!(!b.set_client_indexing_options(options()));
++                Ok(())
++            })
++            .is_ok()
++        );
++        assert!(b.diag.documents.lock().mark_phase(&uri, Some(&old), true));
++        assert!(b.diag.pending_uris.lock().is_empty());
++    }
++    #[test]
++    fn client_filter_guard_blocks_capture_through_index_reconciliation() {
++        let (b, uri, text) = fixture();
++        let dir = tempfile::tempdir().unwrap();
++        *b.workspace.workspace_root.write() = Some(dir.path().to_path_buf());
++        let old = b
++            .diag
++            .documents
++            .lock()
++            .capture(&uri, &text)
++            .unwrap()
++            .unwrap();
++        let publication = b.client_indexing_publication(options()).unwrap();
++        assert!(
++            b.index_filters()
++                .is_excluded_entry(&dir.path().join("generated"), true)
++        );
++        assert!(b.diag.documents.lock().capture(&uri, &text).is_err());
++        modified(b.with_current_semantics(|| Ok(())));
++        assert!(
++            b.diag.pending_uris.lock().is_empty(),
++            "queue only after reconciliation finishes"
++        );
++        drop(publication);
++        let mut docs = b.diag.documents.lock();
++        let current = docs.capture(&uri, &text).unwrap().unwrap();
++        assert!(docs.parsed(&uri, Some(&current)));
++        assert!(!docs.mark_phase(&uri, Some(&old), true));
++        assert!(docs.mark_phase(&uri, Some(&current), true));
++    }
++    #[test]
++    fn toml_reload_cannot_finish_a_pending_client_filter_publication() {
++        let (b, uri, text) = fixture();
++        let dir = tempfile::tempdir().unwrap();
++        std::fs::write(
++            dir.path().join(".phpantom.toml"),
++            "[diagnostics]\nreport-magic-properties=true\n",
++        )
++        .unwrap();
++        let publication = b.client_indexing_publication(options()).unwrap();
++        b.reload_config(dir.path());
++        assert!(b.diag.documents.lock().capture(&uri, &text).is_err());
++        modified(b.with_current_semantics(|| Ok(())));
++        assert!(b.diag.pending_uris.lock().is_empty());
++        drop(publication);
++        assert!(b.diag.documents.lock().capture(&uri, &text).is_ok());
++        assert!(b.diag.pending_uris.lock().contains(&uri));
++    }
++    #[test]
++    fn identical_push_during_publication_does_not_finish_or_queue_it() {
++        let (b, uri, text) = fixture();
++        let publication = b.client_indexing_publication(options()).unwrap();
++        assert!(b.client_indexing_publication(options()).is_none());
++        assert!(b.diag.documents.lock().capture(&uri, &text).is_err());
++        assert!(b.diag.pending_uris.lock().is_empty());
++        drop(publication);
++        assert!(b.diag.documents.lock().capture(&uri, &text).is_ok());
++        assert!(b.diag.pending_uris.lock().contains(&uri));
++    }
++}
+diff --git a/src/indexing/watch.rs b/src/indexing/watch.rs
+index 88a67ae..a7ba0f2 100644
+--- a/src/indexing/watch.rs
++++ b/src/indexing/watch.rs
+@@ -27,19 +27,6 @@ const GLOBAL_CONFIG_POLL_INTERVAL: Duration = Duration::from_secs(2);
+ /// the same capability it is about to replace.
+ const WATCHED_FILES_REGISTRATION_ID: &str = "workspace/didChangeWatchedFiles";
+ 
+-/// Keep requests and native phases outside a partially published configuration.
+-/// Counting overlapping guards also covers project/global reloads racing on
+-/// separate worker clones. No lock is held across cache/index reconciliation.
+-struct ConfigurationPublication<'a>(&'a Backend);
+-impl Drop for ConfigurationPublication<'_> {
+-    fn drop(&mut self) {
+-        let ready = self.0.diag.documents.lock().finish_configuration_change();
+-        if ready {
+-            self.0.schedule_diagnostics_after_configuration_reload();
+-        }
+-    }
+-}
+-
+ impl Backend {
+     /// Apply a `workspace/didChangeWatchedFiles` batch to the indexes.
+     ///
+@@ -343,8 +330,7 @@ impl Backend {
+                 return;
+             }
+         };
+-        self.diag.documents.lock().begin_configuration_change();
+-        let _publication = ConfigurationPublication(self);
++        let _publication = self.begin_configuration_publication();
+         self.set_config(config);
+ 
+         // Resolved classes and completions may depend on config-driven
+diff --git a/src/lib.rs b/src/lib.rs
+index eb369f3..adfa93a 100644
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -2288,14 +2288,24 @@ impl Backend {
+     /// watcher churn a no-op settings push would otherwise cause (clients
+     /// re-send their whole settings tree for edits to unrelated keys).
+     pub fn set_client_indexing_options(&self, options: config::ClientIndexingOptions) -> bool {
++        self.client_indexing_publication(options).is_some()
++    }
++
++    /// Keep a live client's reconciliation inside the same ownership boundary
++    /// as its filter replacement. A repeated settings push preserves valid work.
++    pub(crate) fn client_indexing_publication(
++        &self,
++        options: config::ClientIndexingOptions,
++    ) -> Option<impl Drop + '_> {
+         let mut current = self.workspace.client_indexing.write();
+         if *current == options {
+-            return false;
++            return None;
+         }
++        let publication = self.begin_configuration_publication();
+         *current = options;
+         drop(current);
+         *self.workspace.index_filters.write() = None;
+-        true
++        Some(publication)
+     }
+ 
+     /// Record whether the client handles `window/showDocument`.
+diff --git a/src/server.rs b/src/server.rs
+index b8aed97..3919c9e 100644
+--- a/src/server.rs
++++ b/src/server.rs
+@@ -190,9 +190,9 @@ impl LanguageServer for Backend {
+         // Captured before the change, so the reconciliation below can
+         // tell which way the filters moved.
+         let previous_filters = self.index_filters();
+-        if !self.set_client_indexing_options(options) {
++        let Some(publication) = self.client_indexing_publication(options) else {
+             return;
+-        }
++        };
+ 
+         // A newly added extension needs its own watcher, or the client
+         // never reports events for those files and the index keeps
+@@ -209,6 +209,7 @@ impl LanguageServer for Backend {
+         // missing a moment ago, so the negative cache has to go or the
+         // editor keeps showing "class not found" for them.
+         self.clear_not_found_caches();
++        drop(publication);
+ 
+         self.request_diagnostic_refresh().await;
+     }

@@ -1,4 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { ask } from "@/workbench/messages";
+vi.mock("@/workbench/messages", () => ({ ask: vi.fn() }));
 import { EditorState } from "@codemirror/state";
 import { remoteChange } from "@/editor/api";
 import { createMemoryBackend, type MemoryBackend } from "../backend";
@@ -22,10 +24,8 @@ function setup(files: Record<string, string>, settings = {}) {
   _resetLanguages();
   const backend: MemoryBackend = createMemoryBackend(files);
   const scheduled: Array<() => void> = [];
-  const manager = new DocumentManager(
-    backend,
-    { settings: () => settings, notify: vi.fn() },
-    (fn) => scheduled.push(fn),
+  const manager = new DocumentManager(backend, { settings: () => settings, notify: vi.fn() }, (fn) =>
+    scheduled.push(fn),
   );
   manager.start();
   const frame = async () => {
@@ -35,7 +35,10 @@ function setup(files: Record<string, string>, settings = {}) {
   return { backend, manager, frame };
 }
 
-afterEach(() => useDocMeta.setState({}, true));
+afterEach(() => {
+  useDocMeta.setState({}, true);
+  vi.mocked(ask).mockReset();
+});
 
 describe("DocumentManager + slots", () => {
   it("shares one document between split slots and syncs edits to the backend", async () => {
@@ -108,11 +111,83 @@ describe("save cleanup", () => {
   it("keeps the caret line and untouched lines", () => {
     const state = EditorState.create({ doc: "a  \nb  \nc  " });
     const m = new ModifiedRanges();
-    m.ranges = [[0, 3], [8, 11]];
+    m.ranges = [
+      [0, 3],
+      [8, 11],
+    ];
     const changes = saveCleanupChanges(state, m, { trim: true, finalNewline: true, protectLines: new Set([3]) });
     expect(changes).toEqual([
       { from: 1, to: 3 },
       { from: 11, to: 11, insert: "\n" },
     ]);
+  });
+});
+
+describe("external save conflicts", () => {
+  async function conflict() {
+    const state = setup({ "/p/a.txt": "original\n" });
+    const model = await state.manager.acquire("/p/a.txt");
+    const slot = new EditorSlot(model, "t1", host);
+    slot.dispatchLocal({ changes: { from: 0, to: 8, insert: "local" } });
+    await state.frame();
+    state.backend.files.set("/p/a.txt", "external\n");
+    return { ...state, model, slot };
+  }
+
+  it("pauses autosave without changing disk or marking the buffer clean", async () => {
+    const { model, backend } = await conflict();
+    await model.save("auto");
+    expect(ask).not.toHaveBeenCalled();
+    expect(backend.files.get("/p/a.txt")).toBe("external\n");
+    expect(model.getMeta().dirty).toBe(true);
+  });
+
+  it("keeps both versions when overwrite is cancelled", async () => {
+    const { model, backend } = await conflict();
+    vi.mocked(ask).mockResolvedValue({ button: "cancel", checked: false });
+    await expect(model.save("explicit")).rejects.toMatchObject({ kind: "cancelled" });
+    expect(backend.files.get("/p/a.txt")).toBe("external\n");
+    expect(model.getMeta().dirty).toBe(true);
+    expect(vi.mocked(ask).mock.calls[0]![0].buttons).toContainEqual({ id: "cancel", label: "Cancel", primary: true });
+  });
+
+  it("writes the editor version only after explicit confirmation", async () => {
+    const { model, backend } = await conflict();
+    vi.mocked(ask).mockResolvedValue({ button: "overwrite", checked: false });
+    await model.save("explicit");
+    expect(ask).toHaveBeenCalledOnce();
+    expect(backend.files.get("/p/a.txt")).toBe("local\n");
+    expect(model.getMeta().dirty).toBe(false);
+  });
+
+  it("asks again if the disk changes while confirmation is open", async () => {
+    const { model, backend } = await conflict();
+    vi.mocked(ask)
+      .mockImplementationOnce(async () => {
+        backend.files.set("/p/a.txt", "new disk\n");
+        return { button: "overwrite", checked: false };
+      })
+      .mockResolvedValueOnce({ button: "cancel", checked: false });
+    await expect(model.save("explicit")).rejects.toMatchObject({ kind: "cancelled" });
+    expect(ask).toHaveBeenCalledTimes(2);
+    expect(backend.files.get("/p/a.txt")).toBe("new disk\n");
+    expect(model.getMeta().dirty).toBe(true);
+  });
+
+  it("retains a conflicted buffer when its last tab closes", async () => {
+    const { model, slot, manager, backend } = await conflict();
+    slot.dispose();
+    await settle();
+    expect(manager.get("/p/a.txt")).toBe(model);
+    expect(model.closed).toBe(false);
+    const reopened = new EditorSlot(await manager.acquire("/p/a.txt"), "reopened", host);
+    expect(reopened.currentState().doc.toString()).toBe("local\n");
+    expect(backend.files.get("/p/a.txt")).toBe("external\n");
+  });
+
+  it("propagates a cancelled Save All to the quit guard", async () => {
+    const { manager } = await conflict();
+    vi.mocked(ask).mockResolvedValue({ button: "cancel", checked: false });
+    await expect(manager.saveAll("explicit")).rejects.toMatchObject({ kind: "cancelled" });
   });
 });

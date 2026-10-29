@@ -1,0 +1,15 @@
+{
+  "version": "0.11.1-workbench.114",
+  "platform": "aarch64-apple-darwin",
+  "sha256": "c520616efb8128814033112e1987574cc429062abc6d063e2d3128b4e69ba436",
+  "source_artifact": "/Users/longdo/Documents/Codex/2026-10-17/in/outputs/php-workbench/dist/PHP Workbench.app/Contents/Resources/phpantom_lsp",
+  "source_recipe": "PHP Workbench scripts/prepare-engine.py and scripts/build-macos.sh",
+  "source_tree": "/Users/longdo/Documents/Codex/2026-10-17/in/outputs/php-workbench",
+  "base_openidea_revision": "50212e73972d6f05bf16050cb0ba10102a6c8054",
+  "upstream_repository": "https://github.com/PHPantom-dev/phpantom_lsp",
+  "upstream_commit": "1756b1f920c1290d4c4fdd4d2c902fad53a75cd3",
+  "source_archive_sha256": "f0a1dc7fa44d309e6d5e8ed65a2075749c1fc177b45820031f58290f1aec5cee",
+  "patches_sha256": "fc0501ba8974285ce6462c560b124f6e62d320d9c0a141934b5314b2f3c5495a",
+  "patch_count": 114,
+  "openstorm_source_recipe": "engine/source.json; scripts/prepare-phpantom.py; scripts/build-phpantom.py"
+}

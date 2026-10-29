@@ -212,6 +212,23 @@ describe("applying completions", () => {
     expect(view.state.doc.toString()).toBe("import bar;\nfoo.bar");
   });
 
+  it("applies a PHPantom class import and completion together", () => {
+    const { view, req } = setup("<?php\n\n$invoice = new Inv|");
+    const c = makeCompletion(
+      item({
+        label: "Invoice",
+        kind: "class",
+        insertText: "Invoice",
+        additionalEdits: [
+          { range: { start: { line: 1, col: 0 }, end: { line: 1, col: 0 } }, new_text: "use EvalApp\\Invoice;\n" },
+        ],
+      }),
+      req,
+    );
+    apply(view, c, view.state.doc.length - 3);
+    expect(view.state.doc.toString()).toBe("<?php\nuse EvalApp\\Invoice;\n\n$invoice = new Invoice");
+  });
+
   it("adds parentheses to a called function and opens its parameters", () => {
     const { view, req } = setup("svc.cr|");
     apply(view, makeCompletion(item({ insertText: "create", labelDetail: "(req: Req)" }), req), 4);
@@ -330,9 +347,9 @@ describe("typeColumnText", () => {
   const edit = (new_text: string) => [{ range: { start: { line: 0, col: 0 }, end: { line: 0, col: 0 } }, new_text }];
 
   it("names the module an auto-import comes from", () => {
-    expect(typeColumnText({ detail: "Auto-import", additionalEdits: edit("\nfrom collections import OrderedDict") })).toBe(
-      "collections",
-    );
+    expect(
+      typeColumnText({ detail: "Auto-import", additionalEdits: edit("\nfrom collections import OrderedDict") }),
+    ).toBe("collections");
     expect(typeColumnText({ detail: "Map<K, V>", additionalEdits: edit("import java.util.HashMap;\n") })).toBe(
       "Map<K, V> (java.util)",
     );
@@ -343,9 +360,9 @@ describe("typeColumnText", () => {
   });
 
   it("keeps a detail that already says where", () => {
-    expect(typeColumnText({ detail: "java.util.ArrayList", additionalEdits: edit("import java.util.ArrayList;\n") })).toBe(
-      "java.util.ArrayList",
-    );
+    expect(
+      typeColumnText({ detail: "java.util.ArrayList", additionalEdits: edit("import java.util.ArrayList;\n") }),
+    ).toBe("java.util.ArrayList");
     expect(typeColumnText({ detail: "fn()  ", additionalEdits: [] })).toBe("fn() ");
   });
 });

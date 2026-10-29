@@ -7,7 +7,16 @@ import { EditorView } from "@codemirror/view";
 import type { LanguageDescription, LanguageSupport } from "@codemirror/language";
 import { create } from "zustand";
 import type { EditorConfigProps } from "@/bindings";
-import type { DocId, DocumentInfo, EditorSettings, FileSettings, LineEnding, OutlineItem, Settings, SyntaxHighlights } from "@/platform/ipc";
+import type {
+  DocId,
+  DocumentInfo,
+  EditorSettings,
+  FileSettings,
+  LineEnding,
+  OutlineItem,
+  Settings,
+  SyntaxHighlights,
+} from "@/platform/ipc";
 import {
   _emitEditorEvent,
   _saveParticipants,
@@ -20,7 +29,14 @@ import {
 import { isVirtualUri } from "@/platform/virtualDocs";
 import { DocSync, type Scheduler, frameScheduler } from "../sync/DocSync";
 import type { DocBackend, LanguageInfo } from "../backend";
-import { findLanguageDescription, languageInfo, loadLanguageInfos, loadSupport, loadedSupport, commentTokens } from "../cm/languages";
+import {
+  findLanguageDescription,
+  languageInfo,
+  loadLanguageInfos,
+  loadSupport,
+  loadedSupport,
+  commentTokens,
+} from "../cm/languages";
 import { foldEffect } from "@codemirror/language";
 import { backendFolds, setBackendFolds } from "../cm/folding";
 import { setSyntaxHighlights } from "../cm/syntaxHighlight";
@@ -44,7 +60,9 @@ import {
 } from "../cm/setup";
 import { setMethodLines, softWrapActive } from "../cm/prefs";
 import type { EditorSlot } from "./slot";
-import { tx } from "@/platform/i18n";
+import { t, tx } from "@/platform/i18n";
+import { IpcError, isCancelled } from "@/platform/ipc";
+import { ask } from "@/workbench/messages";
 
 export type Banner = "binary" | "tooLarge" | "readOnly" | "library" | null;
 
@@ -137,7 +155,13 @@ export function methodLines(items: readonly OutlineItem[]): number[] {
 export function saveCleanupChanges(
   state: EditorState,
   modified: ModifiedRanges,
-  opts: { trim: boolean; finalNewline: boolean; protectLines: Set<number>; allLines?: boolean; trailingBlankLines?: boolean },
+  opts: {
+    trim: boolean;
+    finalNewline: boolean;
+    protectLines: Set<number>;
+    allLines?: boolean;
+    trailingBlankLines?: boolean;
+  },
 ): Array<{ from: number; to: number; insert?: string }> {
   const changes: Array<{ from: number; to: number; insert?: string }> = [];
   const doc = state.doc;
@@ -193,6 +217,11 @@ export class DocModel {
   closed = false;
   private refreshTimer: ReturnType<typeof setTimeout> | undefined;
   private saving: Promise<void> = Promise.resolve();
+  private conflictRevision: string | null = null;
+
+  hasSaveConflict(): boolean {
+    return this.conflictRevision !== null;
+  }
   private meta: DocMeta;
 
   constructor(
@@ -274,7 +303,8 @@ export class DocModel {
 
   addSlot(slot: EditorSlot) {
     this.slots.add(slot);
-    if (this.highlights?.counter === this.changeCounter) slot.reconfigure([setSyntaxHighlights.of(this.highlights.value)]);
+    if (this.highlights?.counter === this.changeCounter)
+      slot.reconfigure([setSyntaxHighlights.of(this.highlights.value)]);
   }
 
   removeSlot(slot: EditorSlot) {
@@ -320,7 +350,8 @@ export class DocModel {
     this.modified.map(cs);
     this.changeCounter++;
     const primary = this.primarySlot();
-    for (const s of this.slots) s.applyExternal(cs, [remoteChange.of(true), Transaction.addToHistory.of(s === primary)]);
+    for (const s of this.slots)
+      s.applyExternal(cs, [remoteChange.of(true), Transaction.addToHistory.of(s === primary)]);
     // Without a tab, the first attached view keeps backend edits (Replace in Files…) undoable.
     let first = !primary;
     for (const a of this.attachments) {
@@ -405,7 +436,13 @@ export class DocModel {
       compartments.heavy.reconfigure(heavyExtension(this.sync.localText.length, editor)),
       compartments.distractionFree.reconfigure(distractionFreeExtension(editor)),
       compartments.prefs.reconfigure(
-        prefsFor({ settings: editor, path: this.path, info: this.info, readOnly: this.meta.readOnly, wrapOverride: this.softWrapOverride }),
+        prefsFor({
+          settings: editor,
+          path: this.path,
+          info: this.info,
+          readOnly: this.meta.readOnly,
+          wrapOverride: this.softWrapOverride,
+        }),
       ),
     ];
     // LSP contributions read completion / hover timings when they are built.
@@ -422,12 +459,25 @@ export class DocModel {
   setReadOnly(readOnly: boolean) {
     if (readOnly === this.meta.readOnly) return;
     const banner = this.meta.banner;
-    this.setMeta({ readOnly, banner: readOnly ? (banner ?? (this.virtual ? null : "readOnly")) : banner === "readOnly" || banner === "library" ? null : banner });
+    this.setMeta({
+      readOnly,
+      banner: readOnly
+        ? (banner ?? (this.virtual ? null : "readOnly"))
+        : banner === "readOnly" || banner === "library"
+          ? null
+          : banner,
+    });
     for (const s of this.slots) {
       s.reconfigure([
         compartments.readOnly.reconfigure(readOnlyExtension(readOnly)),
         compartments.prefs.reconfigure(
-          prefsFor({ settings: this.settings(), path: this.path, info: this.info, readOnly, wrapOverride: this.softWrapOverride }),
+          prefsFor({
+            settings: this.settings(),
+            path: this.path,
+            info: this.info,
+            readOnly,
+            wrapOverride: this.softWrapOverride,
+          }),
         ),
       ]);
       s.syncContributions(true);
@@ -550,7 +600,36 @@ export class DocModel {
       }
       await this.sync.whenIdle();
       if (this.closed) return;
-      await this.manager.backend.save(this.doc);
+      let overwriteRevision: string | null = null;
+      while (true) {
+        const revision = await this.manager.backend.save(this.doc, overwriteRevision);
+        if (!revision) break;
+        const firstNotice = this.conflictRevision !== revision;
+        this.conflictRevision = revision;
+        if (reason === "auto") {
+          if (firstNotice)
+            this.manager.notify({
+              level: "warning",
+              title: t("editor.saveConflict.title"),
+              body: t("editor.saveConflict.paused", { path: this.path }),
+            });
+          return;
+        }
+        const result = await ask({
+          title: t("editor.saveConflict.title"),
+          body: t("editor.saveConflict.body", { path: this.path }),
+          icon: "warning",
+          buttons: [
+            { id: "cancel", label: t("common.cancel"), primary: true },
+            { id: "overwrite", label: t("editor.saveConflict.overwrite") },
+          ],
+        });
+        if (result.button !== "overwrite") throw new IpcError({ kind: "cancelled", message: "Save cancelled" });
+        if (this.closed) return;
+        await this.sync.whenIdle();
+        overwriteRevision = revision;
+      }
+      this.conflictRevision = null;
       this.modified.clear();
       this.setMeta({ dirty: false });
       _emitEditorEvent({ type: "docSaved", doc: this.doc, path: this.path });
@@ -663,7 +742,7 @@ export class DocumentManager {
           console.warn(`autosave of ${model.path} failed`, e);
         }
       }
-      if (model.inUse()) return;
+      if (model.inUse() || model.hasSaveConflict()) return;
       await model.sync.whenIdle();
       if (model.inUse()) return;
       model.dispose();
@@ -693,17 +772,15 @@ export class DocumentManager {
   }
 
   async saveAll(reason: "explicit" | "auto") {
-    const errors: unknown[] = [];
-    await Promise.all(
-      [...this.byPath.values()].map((m) =>
-        m.save(reason).catch((e) => {
-          errors.push(e);
-        }),
-      ),
-    );
-    if (errors.length) {
-      const e = errors[0];
-      this.notify({ level: "error", title: "Could not save", body: e instanceof Error ? e.message : String(e) });
+    // One confirmation at a time; cancellation stops Save All and the close guard.
+    for (const model of this.byPath.values()) {
+      try {
+        await model.save(reason);
+      } catch (e) {
+        if (!isCancelled(e))
+          this.notify({ level: "error", title: "Could not save", body: e instanceof Error ? e.message : String(e) });
+        if (reason === "explicit") throw e;
+      }
     }
   }
 }

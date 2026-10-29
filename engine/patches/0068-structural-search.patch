@@ -1,0 +1,4900 @@
+diff --git a/Cargo.lock b/Cargo.lock
+index 9e0dffe..931f12e 100644
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -1652,6 +1652,7 @@ dependencies = [
+  "mimalloc",
+  "parking_lot",
+  "regex",
++ "rustix",
+  "self-replace",
+  "serde",
+  "serde_json",
+diff --git a/Cargo.toml b/Cargo.toml
+index 517ef18..19943ca 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -54,6 +54,9 @@ similar = { version = "=3.2.0", default-features = false, features = ["std"] }
+ # measured locally now match what users actually run. macOS and Windows
+ # release from their own targets and use the system allocator both in
+ # CI and locally, so they are already representative and are left alone.
++[target.'cfg(unix)'.dependencies]
++rustix = { version = "=1.1.4", features = ["fs"] }
++
+ [target.'cfg(target_os = "linux")'.dependencies]
+ mimalloc = { version = "0.1.47", optional = true }
+ libmimalloc-sys = { version = "0.1", optional = true, features = ["extended"] }
+diff --git a/docs/CHANGELOG.md b/docs/CHANGELOG.md
+index 36cf84d..7307f53 100644
+--- a/docs/CHANGELOG.md
++++ b/docs/CHANGELOG.md
+@@ -15,6 +15,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
+ 
+ ## [Unreleased]
+ 
++- **Document symbols follow unsaved edits immediately.** Outlines and breadcrumbs use the accepted editor revision even before its background parse finishes, including undo. Contributed by PHP Workbench downstream.
++
++- **Search PHP call patterns.** Project structural search matches syntax and captured arguments against current editor text, with explicit incomplete-file reports and cancellation. Contributed by PHP Workbench downstream.
++
+ - **Call hierarchy keeps nested bodies separate.** Calls inside nested methods, functions, closures and arrow functions no longer appear as direct calls of their enclosing declaration. Contributed by PHP Workbench downstream.
+ 
+ - **Built-in function suggestions stay consistent after loading.** Completion respects declaration availability before and after sibling lookups, preserves available alternatives and keeps namespace attribute aliases separate. Contributed by PHP Workbench downstream.
+diff --git a/src/backend/semantic_snapshot.rs b/src/backend/semantic_snapshot.rs
+index 6d41ce5..1d05eee 100644
+--- a/src/backend/semantic_snapshot.rs
++++ b/src/backend/semantic_snapshot.rs
+@@ -2212,3 +2212,101 @@ mod method_generation_pending_tests {
+         assert_eq!(std::fs::read_to_string(child_path).unwrap(), consumer);
+     }
+ }
++
++#[cfg(test)]
++mod document_symbol_pending_tests {
++    use super::*;
++    use tower_lsp::{LanguageServer, lsp_types::*};
++
++    #[tokio::test]
++    async fn document_symbols_prepare_pending_change_and_undo_on_first_request() {
++        let backend = Backend::new_test();
++        let directory = tempfile::tempdir().unwrap();
++        let path = directory.path().join("outline.php");
++        let uri = Url::from_file_path(&path).unwrap();
++        let original = "<?php\njson_decode('disk');\n";
++        let changed = "<?php\n/* ž😀 */ function liveMarker() {}\nclass LiveClass {}\nconst LIVE_VALUE = 1;\n";
++        std::fs::write(&path, original).unwrap();
++        let initial = Arc::new(original.to_owned());
++        backend
++            .diag
++            .documents
++            .lock()
++            .open(uri.as_str(), 1, &initial);
++        backend
++            .open_files
++            .write()
++            .insert(uri.to_string(), Arc::clone(&initial));
++        assert!(backend.parse_diagnostic_snapshot(uri.as_str(), &initial));
++        for (version, source, expected) in [
++            (2, changed, vec!["liveMarker", "LiveClass", "LIVE_VALUE"]),
++            (3, original, vec![]),
++        ] {
++            let text = Arc::new(source.to_owned());
++            // Accepted didChange text, before its asynchronous AST publication.
++            assert!(
++                backend
++                    .diag
++                    .documents
++                    .lock()
++                    .change(uri.as_str(), version, &text)
++            );
++            backend
++                .open_files
++                .write()
++                .insert(uri.to_string(), Arc::clone(&text));
++            let revision = backend
++                .diag
++                .documents
++                .lock()
++                .capture(uri.as_str(), &text)
++                .unwrap();
++            assert!(
++                !backend
++                    .diag
++                    .documents
++                    .lock()
++                    .parsed(uri.as_str(), revision.as_ref())
++            );
++            let response = backend
++                .document_symbol(DocumentSymbolParams {
++                    text_document: TextDocumentIdentifier { uri: uri.clone() },
++                    work_done_progress_params: WorkDoneProgressParams::default(),
++                    partial_result_params: PartialResultParams::default(),
++                })
++                .await
++                .unwrap();
++            let symbols = match response {
++                Some(DocumentSymbolResponse::Nested(symbols)) => symbols,
++                None => vec![],
++                _ => panic!("expected nested symbols"),
++            };
++            let names: Vec<_> = symbols.iter().map(|symbol| symbol.name.as_str()).collect();
++            assert_eq!(
++                names, expected,
++                "first request must use accepted revision {version}"
++            );
++            if version == 2 {
++                let start = changed.find("liveMarker").unwrap();
++                let prefix = &changed[..start];
++                assert_eq!(
++                    symbols[0].selection_range.start,
++                    Position::new(
++                        1,
++                        prefix.rsplit('\n').next().unwrap().encode_utf16().count() as u32
++                    )
++                );
++            }
++        }
++        assert_eq!(std::fs::read_to_string(path).unwrap(), original);
++        let _publication = backend.begin_semantic_publication();
++        let response = backend
++            .document_symbol(DocumentSymbolParams {
++                text_document: TextDocumentIdentifier { uri },
++                work_done_progress_params: WorkDoneProgressParams::default(),
++                partial_result_params: PartialResultParams::default(),
++            })
++            .await;
++        assert_eq!(response.unwrap_err().code, ErrorCode::ServerError(-32801));
++    }
++}
+diff --git a/src/backend/startup.rs b/src/backend/startup.rs
+index 9e5cec4..03b39bf 100644
+--- a/src/backend/startup.rs
++++ b/src/backend/startup.rs
+@@ -279,7 +279,7 @@ impl Backend {
+                     ..ExecuteCommandOptions::default()
+                 }),
+                 experimental: Some(
+-                    serde_json::json!({"phpWorkbenchRoutes": true, "phpWorkbenchViews": true, "phpWorkbenchBuiltins": true, "phpWorkbenchActiveTarget": true, "phpWorkbenchRenameChecked": true}),
++                    serde_json::json!({"phpWorkbenchRoutes": true, "phpWorkbenchViews": true, "phpWorkbenchBuiltins": true, "phpWorkbenchActiveTarget": true, "phpWorkbenchRenameChecked": true, (crate::structural_search::wire::EXPERIMENTAL_CAPABILITY): true}),
+                 ),
+                 ..ServerCapabilities::default()
+             },
+diff --git a/src/lib.rs b/src/lib.rs
+index 3e14acf..af70c74 100644
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -327,9 +327,13 @@ pub mod semantic_export;
+ mod semantic_tokens;
+ mod server;
+ mod source_authority;
+-pub use project_router::{ProjectRouter, ProjectTargetQuery};
++pub use project_router::{
++    ProjectRouter, ProjectTargetQuery, STRUCTURAL_SEARCH_METHOD, StructuralSearchQuery,
++    StructuralSearchReply,
++};
+ mod signature_help;
+ mod signature_overloads;
++mod structural_search;
+ pub mod stub_patches;
+ pub mod stubs;
+ mod symbol_index;
+diff --git a/src/main.rs b/src/main.rs
+index 2c1e1d0..70344dd 100644
+--- a/src/main.rs
++++ b/src/main.rs
+@@ -570,6 +570,10 @@ async fn async_main() {
+                         "phpWorkbench/renameChecked",
+                         ProjectRouter::workbench_rename_checked,
+                     )
++                    .custom_method(
++                        phpantom_lsp::STRUCTURAL_SEARCH_METHOD,
++                        ProjectRouter::workbench_structural_search,
++                    )
+                     .custom_method("phpWorkbench/views", ProjectRouter::workbench_views)
+                     .custom_method("phpWorkbench/builtin", ProjectRouter::workbench_builtin)
+                     .custom_method(
+@@ -598,6 +602,10 @@ async fn async_main() {
+                         "phpWorkbench/renameChecked",
+                         ProjectRouter::workbench_rename_checked,
+                     )
++                    .custom_method(
++                        phpantom_lsp::STRUCTURAL_SEARCH_METHOD,
++                        ProjectRouter::workbench_structural_search,
++                    )
+                     .custom_method("phpWorkbench/views", ProjectRouter::workbench_views)
+                     .custom_method("phpWorkbench/builtin", ProjectRouter::workbench_builtin)
+                     .custom_method(
+diff --git a/src/project_router.rs b/src/project_router.rs
+index 60f99be..7aa7661 100644
+--- a/src/project_router.rs
++++ b/src/project_router.rs
+@@ -12,6 +12,14 @@ use tower_lsp::jsonrpc::{Error, Result};
+ use tower_lsp::lsp_types::*;
+ use tower_lsp::{Client, LanguageServer};
+ 
++pub use crate::structural_search::wire::{
++    METHOD as STRUCTURAL_SEARCH_METHOD, Query as StructuralSearchQuery,
++    Reply as StructuralSearchReply,
++};
++
++#[path = "project_router_structural_search.rs"]
++mod structural_search;
++
+ pub(crate) struct ProjectContext {
+     pub(crate) id: u64,
+     pub(crate) root: Option<PathBuf>,
+@@ -41,6 +49,9 @@ pub struct ProjectRouter {
+     document_routing: RwLock<HashMap<String, DocumentRouting>>,
+     params: RwLock<Option<InitializeParams>>,
+     gate: Arc<tokio::sync::RwLock<()>>,
++    #[cfg(test)]
++    structural_test_barrier:
++        parking_lot::Mutex<Option<Arc<structural_search::test_hook::WorkerBarrier>>>,
+ }
+ 
+ #[derive(Deserialize)]
+@@ -137,6 +148,8 @@ impl ProjectRouter {
+             document_routing: RwLock::new(HashMap::new()),
+             params: RwLock::new(None),
+             gate: Arc::new(tokio::sync::RwLock::new(())),
++            #[cfg(test)]
++            structural_test_barrier: parking_lot::Mutex::new(None),
+         }
+     }
+ 
+diff --git a/src/project_router_structural_expected.rs b/src/project_router_structural_expected.rs
+new file mode 100644
+index 0000000..db6881a
+--- /dev/null
++++ b/src/project_router_structural_expected.rs
+@@ -0,0 +1,226 @@
++//! Exact editor input snapshots and publication receipts for structural search.
++use sha2::{Digest, Sha256};
++use std::collections::{HashMap, HashSet};
++use tower_lsp::jsonrpc::{Error, ErrorCode, Result};
++use tower_lsp::lsp_types::{TextDocumentItem, Url};
++
++use super::ProjectRouter;
++use crate::source_authority::{SourceAuthority, SourceIdentity};
++use crate::structural_search::{
++    control::Control,
++    wire::{ExpectedSource, Query, Reply, SourceKind},
++};
++
++const MAX_SOURCES: usize = 512;
++const MAX_URI_BYTES: usize = 1024 * 1024;
++const MAX_FILE_BYTES: usize = 2 * 1024 * 1024;
++const MAX_TEXT_BYTES: usize = 32 * 1024 * 1024;
++
++pub(super) struct Captured {
++    manifest: Vec<ExpectedSource>,
++    documents: Vec<TextDocumentItem>,
++}
++
++pub(super) struct Hashed {
++    captured: Captured,
++    identities: HashSet<SourceIdentity>,
++}
++
++/// Produced only after checking actual reply stamps. The final router gate
++/// must still validate these captured global documents before echoing receipt.
++pub(super) struct Receipt {
++    captured: Captured,
++}
++
++fn modified() -> Error {
++    Error {
++        code: ErrorCode::ServerError(-32801),
++        message: "Structural search editor sources changed or are not open".into(),
++        data: None,
++    }
++}
++
++fn text_budget() -> Error {
++    Error {
++        code: ErrorCode::ServerError(-32001),
++        message: "Structural search expected-source text budget exceeded".into(),
++        data: None,
++    }
++}
++
++fn local_uri(uri: &Url) -> bool {
++    uri.scheme() == "file"
++        && uri.query().is_none()
++        && uri.fragment().is_none()
++        && uri.to_file_path().is_ok_and(|path| path.is_absolute())
++}
++
++impl Captured {
++    /// Invoke under the initial router read gate. No hash, filesystem read,
++    /// selected-backend filtering or await occurs here.
++    pub(super) fn capture(router: &ProjectRouter, query: &Query) -> Result<Self> {
++        if query.expected_sources.is_empty() {
++            return Ok(Self {
++                manifest: Vec::new(),
++                documents: Vec::new(),
++            });
++        }
++        if query.expected_sources.len() > MAX_SOURCES {
++            return Err(Error::invalid_params(
++                "Expected at most 512 structural source snapshots",
++            ));
++        }
++        let mut uris = HashSet::with_capacity(query.expected_sources.len());
++        let mut uri_bytes = 0usize;
++        for source in &query.expected_sources {
++            uri_bytes = uri_bytes
++                .checked_add(source.uri.as_str().len())
++                .filter(|bytes| *bytes <= MAX_URI_BYTES)
++                .ok_or_else(|| Error::invalid_params("Expected-source URI budget exceeded"))?;
++            if !local_uri(&source.uri) || !uris.insert(source.uri.as_str()) {
++                return Err(Error::invalid_params(
++                    "Expected distinct absolute file URIs without query or fragment",
++                ));
++            }
++            if source.sha256_utf8.len() != 64
++                || !source
++                    .sha256_utf8
++                    .bytes()
++                    .all(|byte| byte.is_ascii_hexdigit())
++            {
++                return Err(Error::invalid_params(
++                    "Expected-source hash must contain 64 hexadecimal digits",
++                ));
++            }
++        }
++        if !uris.contains(query.uri.as_str()) {
++            return Err(Error::invalid_params(
++                "Expected sources must include the exact selected document URI",
++            ));
++        }
++        // Validate the whole manifest shape above before reading any source.
++        // Distinct aliases of one physical source are deliberately allowed.
++        let current = router.documents.read();
++        let mut admitted = Vec::with_capacity(query.expected_sources.len());
++        let mut text_bytes = 0usize;
++        for expected in &query.expected_sources {
++            let document = current.get(expected.uri.as_str()).ok_or_else(modified)?;
++            if document.version != expected.version {
++                return Err(modified());
++            }
++            if document.text.len() > MAX_FILE_BYTES {
++                return Err(text_budget());
++            }
++            text_bytes = text_bytes
++                .checked_add(document.text.len())
++                .filter(|bytes| *bytes <= MAX_TEXT_BYTES)
++                .ok_or_else(text_budget)?;
++            admitted.push(document);
++        }
++        // Reject the complete aggregate before allocating any source copies.
++        let documents = admitted.into_iter().cloned().collect();
++        Ok(Self {
++            manifest: query.expected_sources.clone(),
++            documents,
++        })
++    }
++
++    /// Existing bounded blocking worker only, after dropping the routing gate.
++    pub(super) fn hash(self, authority: &SourceAuthority, control: &Control) -> Result<Hashed> {
++        let mut identities = HashSet::with_capacity(self.manifest.len());
++        for (expected, document) in self.manifest.iter().zip(&self.documents) {
++            control.checkpoint().map_err(super::stopped)?;
++            let mut hash = Sha256::new();
++            for chunk in document.text.as_bytes().chunks(64 * 1024) {
++                control.checkpoint().map_err(super::stopped)?;
++                hash.update(chunk);
++            }
++            if !format!("{:x}", hash.finalize()).eq_ignore_ascii_case(&expected.sha256_utf8) {
++                return Err(modified());
++            }
++            identities.insert(authority.fresh_identity(expected.uri.as_str()));
++        }
++        control.checkpoint().map_err(super::stopped)?;
++        Ok(Hashed {
++            captured: self,
++            identities,
++        })
++    }
++}
++
++impl Hashed {
++    /// Validate real emitted stamps, never the scanner's receipt copy.
++    /// This still runs on the existing blocking worker; fresh_identity may
++    /// canonicalize paths. No lexical project membership is inferred here.
++    pub(super) fn check_reply(
++        self,
++        reply: &Reply,
++        authority: &SourceAuthority,
++        control: &Control,
++    ) -> Result<Receipt> {
++        if self.captured.manifest.is_empty() {
++            return Ok(Receipt {
++                captured: self.captured,
++            });
++        }
++        let by_uri: HashMap<_, _> = self
++            .captured
++            .manifest
++            .iter()
++            .zip(&self.captured.documents)
++            .map(|(expected, document)| (expected.uri.as_str(), (expected, document)))
++            .collect();
++        // Retain initial identities and fresh identities, so an expected
++        // spelling retargeted during work cannot authorize Disk substitution.
++        let mut identities = self.identities;
++        for expected in &self.captured.manifest {
++            control.checkpoint().map_err(super::stopped)?;
++            identities.insert(authority.fresh_identity(expected.uri.as_str()));
++        }
++        for file in &reply.files {
++            control.checkpoint().map_err(super::stopped)?;
++            match &file.stamp.source {
++                SourceKind::Open { version, .. } => {
++                    let (expected, document) =
++                        by_uri.get(file.stamp.uri.as_str()).ok_or_else(modified)?;
++                    if *version != expected.version
++                        || !file
++                            .stamp
++                            .sha256_utf8
++                            .eq_ignore_ascii_case(&expected.sha256_utf8)
++                        || file.stamp.utf8_bytes != document.text.len() as u64
++                    {
++                        return Err(modified());
++                    }
++                }
++                SourceKind::Disk => {
++                    if identities.contains(&authority.fresh_identity(file.stamp.uri.as_str())) {
++                        return Err(modified());
++                    }
++                }
++            }
++        }
++        Ok(Receipt {
++            captured: self.captured,
++        })
++    }
++}
++
++impl Receipt {
++    /// Invoke under the final router read gate, after selected ProjectContext
++    /// Arc membership and Prepared.validate_open_state succeed. No await, hash
++    /// or filesystem operation. Compare GLOBAL router sources, not backend A.
++    pub(super) fn publish(self, router: &ProjectRouter, reply: &mut Reply) -> Result<()> {
++        {
++            let current = router.documents.read();
++            for captured in &self.captured.documents {
++                let document = current.get(captured.uri.as_str()).ok_or_else(modified)?;
++                if document.version != captured.version || document.text != captured.text {
++                    return Err(modified());
++                }
++            }
++        }
++        reply.expected_sources = self.captured.manifest;
++        Ok(())
++    }
++}
+diff --git a/src/project_router_structural_expected_disk_tests.rs b/src/project_router_structural_expected_disk_tests.rs
+new file mode 100644
+index 0000000..9feee41
+--- /dev/null
++++ b/src/project_router_structural_expected_disk_tests.rs
+@@ -0,0 +1,80 @@
++//! Guard-only tests, included as a child of expected_tests AFTER installing
++//! the expected helper. They are not part of tests-only unguarded-route RED.
++use super::super::expected::Captured;
++use super::{Fixture, uri};
++use crate::structural_search::{control::Lifetime, wire::SourceKind};
++use std::time::{Duration, Instant};
++#[cfg(unix)]
++use tower_lsp::jsonrpc::ErrorCode;
++
++#[cfg(unix)]
++#[tokio::test]
++async fn structural_expected_disk_alias_substitution_refuses_matches_and_zero_matches() {
++    let f = Fixture::new().await;
++    let disk_alias = f.a.parent().unwrap().join("DiskAlias.php");
++    std::os::unix::fs::symlink(&f.a, &disk_alias).unwrap();
++    let original = f
++        .router
++        .workbench_structural_search(f.query())
++        .await
++        .unwrap();
++    assert_eq!(original.files.len(), 1);
++    assert!(!original.files[0].matches.is_empty());
++    let (_lifetime, control) = Lifetime::new(Instant::now() + Duration::from_secs(25));
++    for zero_matches in [false, true] {
++        let query = f.query();
++        let captured = {
++            let _gate = f.router.request_guard().await;
++            Captured::capture(&f.router, &query).unwrap()
++        };
++        let checked = captured.hash(&f.router.sources, &control).unwrap();
++        let mut substituted = original.clone();
++        substituted.files[0].stamp.uri = uri(&disk_alias);
++        substituted.files[0].stamp.source = SourceKind::Disk;
++        if zero_matches {
++            substituted.files[0].matches.clear();
++        }
++        // Preserve valid original hash/length/ranges and exact receipt: the
++        // guard must use physical source identity, not URI/hash shape alone.
++        let result = checked.check_reply(&substituted, &f.router.sources, &control);
++        let error = match result {
++            Ok(_) => panic!("Disk alias replaced an expected open source"),
++            Err(error) => error,
++        };
++        assert_eq!(
++            error.code,
++            ErrorCode::ServerError(-32801),
++            "zero_matches={zero_matches}"
++        );
++    }
++    f.unchanged_disk().await;
++}
++
++#[tokio::test]
++async fn structural_expected_distinct_disk_source_with_same_hash_remains_admitted() {
++    let f = Fixture::new().await;
++    let unrelated = f.a.parent().unwrap().join("Unrelated.php");
++    std::fs::write(&unrelated, &f.a_text).unwrap();
++    let original = f
++        .router
++        .workbench_structural_search(f.query())
++        .await
++        .unwrap();
++    let query = f.query();
++    let captured = {
++        let _gate = f.router.request_guard().await;
++        Captured::capture(&f.router, &query).unwrap()
++    };
++    let (_lifetime, control) = Lifetime::new(Instant::now() + Duration::from_secs(25));
++    let checked = captured.hash(&f.router.sources, &control).unwrap();
++    let mut distinct = original;
++    distinct.files[0].stamp.uri = uri(&unrelated);
++    distinct.files[0].stamp.source = SourceKind::Disk;
++    assert!(
++        checked
++            .check_reply(&distinct, &f.router.sources, &control)
++            .is_ok(),
++        "equal text/hash does not establish physical source identity"
++    );
++    f.unchanged_disk().await;
++}
+diff --git a/src/project_router_structural_expected_tests.rs b/src/project_router_structural_expected_tests.rs
+new file mode 100644
+index 0000000..ec3e7e7
+--- /dev/null
++++ b/src/project_router_structural_expected_tests.rs
+@@ -0,0 +1,455 @@
++//! Tests-only proposal: actual async router and real didOpen/change/close.
++use super::{ProjectRouter, test_hook::WorkerBarrier};
++use crate::structural_search::wire::{ExpectedSource, Query, Scope};
++use sha2::{Digest, Sha256};
++use std::{
++    path::{Path, PathBuf},
++    sync::Arc,
++    time::Duration,
++};
++use tower_lsp::{LanguageServer, jsonrpc::ErrorCode, lsp_types::*};
++
++const TIMEOUT: Duration = Duration::from_secs(10);
++
++fn sha(text: &str) -> String {
++    format!("{:x}", Sha256::digest(text.as_bytes()))
++}
++fn uri(path: &Path) -> Url {
++    Url::from_file_path(path).unwrap()
++}
++fn expected(path: &Path, version: i32, text: &str) -> ExpectedSource {
++    ExpectedSource {
++        uri: uri(path),
++        version,
++        sha256_utf8: sha(text),
++    }
++}
++
++struct Fixture {
++    _temp: tempfile::TempDir,
++    router: Arc<ProjectRouter>,
++    a: PathBuf,
++    b: PathBuf,
++    nested: PathBuf,
++    a_text: String,
++    b_text: String,
++    nested_text: String,
++}
++
++fn project(root: &Path, marker: &str) -> (PathBuf, String) {
++    std::fs::create_dir_all(root.join("src")).unwrap();
++    std::fs::write(
++        root.join("composer.json"),
++        r#"{"autoload":{"psr-4":{"App\\":"src/"}}}"#,
++    )
++    .unwrap();
++    let path = root.join("index.php");
++    let text = format!("<?php /* ž🐘 */ foo('{marker}');\r\n");
++    std::fs::write(&path, &text).unwrap();
++    (path, text)
++}
++
++impl Fixture {
++    async fn new() -> Self {
++        let temp = tempfile::tempdir().unwrap();
++        let base = temp.path().canonicalize().unwrap();
++        let root_a = base.join("a");
++        let root_b = base.join("b");
++        let (a, a_text) = project(&root_a, "a");
++        let (b, b_text) = project(&root_b, "b");
++        let (nested, nested_text) = project(&root_a.join("nested"), "nested");
++        let router = Arc::new(ProjectRouter::new_test());
++        router
++            .initialize(InitializeParams {
++                root_uri: Some(Url::from_directory_path(&root_a).unwrap()),
++                workspace_folders: Some(vec![
++                    WorkspaceFolder {
++                        uri: Url::from_directory_path(&root_a).unwrap(),
++                        name: "a".into(),
++                    },
++                    WorkspaceFolder {
++                        uri: Url::from_directory_path(&root_b).unwrap(),
++                        name: "b".into(),
++                    },
++                ]),
++                ..InitializeParams::default()
++            })
++            .await
++            .unwrap();
++        router.initialized(InitializedParams {}).await;
++        for (path, text) in [(&a, &a_text), (&b, &b_text), (&nested, &nested_text)] {
++            router
++                .did_open(DidOpenTextDocumentParams {
++                    text_document: TextDocumentItem {
++                        uri: uri(path),
++                        version: 1,
++                        language_id: "php".into(),
++                        text: text.clone(),
++                    },
++                })
++                .await;
++        }
++        Self {
++            _temp: temp,
++            router,
++            a,
++            b,
++            nested,
++            a_text,
++            b_text,
++            nested_text,
++        }
++    }
++
++    fn manifest(&self) -> Vec<ExpectedSource> {
++        vec![
++            expected(&self.a, 1, &self.a_text),
++            expected(&self.b, 1, &self.b_text),
++            expected(&self.nested, 1, &self.nested_text),
++        ]
++    }
++
++    fn query(&self) -> Query {
++        Query {
++            uri: uri(&self.a),
++            generation: 19,
++            pattern: "foo($__ss_value)".into(),
++            scope: Scope::Document,
++            expected_sources: self.manifest(),
++        }
++    }
++
++    async fn change_b(&self) {
++        self.router
++            .did_change(DidChangeTextDocumentParams {
++                text_document: VersionedTextDocumentIdentifier {
++                    uri: uri(&self.b),
++                    version: 2,
++                },
++                content_changes: vec![TextDocumentContentChangeEvent {
++                    range: None,
++                    range_length: None,
++                    text: self.b_text.replace("foo('b')", "foo('c')"),
++                }],
++            })
++            .await;
++    }
++
++    async fn unchanged_disk(&self) {
++        assert_eq!(std::fs::read(&self.a).unwrap(), self.a_text.as_bytes());
++        assert_eq!(std::fs::read(&self.b).unwrap(), self.b_text.as_bytes());
++        assert_eq!(
++            std::fs::read(&self.nested).unwrap(),
++            self.nested_text.as_bytes()
++        );
++        self.router.shutdown().await.unwrap();
++    }
++}
++
++#[tokio::test]
++async fn structural_expected_current_global_and_nested_sources_have_exact_receipt() {
++    let f = Fixture::new().await;
++    let query = f.query();
++    let manifest = query.expected_sources.clone();
++    let reply = f.router.workbench_structural_search(query).await.unwrap();
++    assert_eq!(reply.expected_sources, manifest);
++    assert_eq!(reply.files.len(), 1);
++    assert_eq!(reply.files[0].stamp.uri, uri(&f.a));
++    assert_eq!(reply.files[0].matches.len(), 1);
++    f.unchanged_disk().await;
++}
++
++#[tokio::test]
++async fn structural_expected_old_version_is_not_accepted_as_current() {
++    let f = Fixture::new().await;
++    let mut query = f.query();
++    query.expected_sources[0].version = 0;
++    let error = f
++        .router
++        .workbench_structural_search(query)
++        .await
++        .unwrap_err();
++    assert_eq!(error.code, ErrorCode::ServerError(-32801));
++    f.unchanged_disk().await;
++}
++
++#[tokio::test]
++async fn structural_expected_wrong_same_length_hash_is_refused_without_normalization() {
++    let f = Fixture::new().await;
++    let mut query = f.query();
++    let different = f.a_text.replace("foo('a')", "foo('z')");
++    assert_eq!(different.len(), f.a_text.len());
++    query.expected_sources[0].sha256_utf8 = sha(&different);
++    let error = f
++        .router
++        .workbench_structural_search(query)
++        .await
++        .unwrap_err();
++    assert_eq!(error.code, ErrorCode::ServerError(-32801));
++    f.unchanged_disk().await;
++}
++
++#[tokio::test]
++async fn structural_expected_missing_or_closed_global_source_is_refused() {
++    let f = Fixture::new().await;
++    let mut missing = f.query();
++    missing.expected_sources.push(expected(
++        &f.a.parent().unwrap().join("Missing.php"),
++        1,
++        "<?php foo('missing');",
++    ));
++    assert_eq!(
++        f.router
++            .workbench_structural_search(missing)
++            .await
++            .unwrap_err()
++            .code,
++        ErrorCode::ServerError(-32801)
++    );
++    f.router
++        .did_close(DidCloseTextDocumentParams {
++            text_document: TextDocumentIdentifier { uri: uri(&f.b) },
++        })
++        .await;
++    assert_eq!(
++        f.router
++            .workbench_structural_search(f.query())
++            .await
++            .unwrap_err()
++            .code,
++        ErrorCode::ServerError(-32801)
++    );
++    f.unchanged_disk().await;
++}
++
++#[tokio::test]
++async fn structural_expected_manifest_shape_is_validated_before_capture() {
++    let f = Fixture::new().await;
++    let mut bad = Vec::new();
++    let mut no_selector = f.query();
++    no_selector.expected_sources.remove(0);
++    bad.push(no_selector);
++    let mut duplicate = f.query();
++    duplicate
++        .expected_sources
++        .push(duplicate.expected_sources[0].clone());
++    bad.push(duplicate);
++    let mut hash_shape = f.query();
++    hash_shape.expected_sources[0].sha256_utf8 = "g".repeat(64);
++    bad.push(hash_shape);
++    let mut query_uri = f.query();
++    let mut value = query_uri.expected_sources[1].clone();
++    value.uri.set_query(Some("fake=1"));
++    query_uri.expected_sources.push(value);
++    bad.push(query_uri);
++    let mut fragment = f.query();
++    let mut value = fragment.expected_sources[1].clone();
++    value.uri.set_fragment(Some("fake"));
++    fragment.expected_sources.push(value);
++    bad.push(fragment);
++    let mut nonfile = f.query();
++    let mut value = nonfile.expected_sources[1].clone();
++    value.uri = Url::parse("https://example.invalid/source.php").unwrap();
++    nonfile.expected_sources.push(value);
++    bad.push(nonfile);
++    let mut count = f.query();
++    count.expected_sources = vec![count.expected_sources[0].clone(); 513];
++    bad.push(count);
++    // Two individually legal URL strings exceed the aggregate URI budget.
++    let mut uri_bytes = f.query();
++    for leaf in ["one", "two"] {
++        let mut value = uri_bytes.expected_sources[0].clone();
++        value.uri = Url::parse(&format!("file:///tmp/{}{leaf}.php", "a".repeat(600_000))).unwrap();
++        uri_bytes.expected_sources.push(value);
++    }
++    bad.push(uri_bytes);
++    for (index, query) in bad.into_iter().enumerate() {
++        let error = f
++            .router
++            .workbench_structural_search(query)
++            .await
++            .unwrap_err();
++        assert_eq!(
++            error.code,
++            ErrorCode::InvalidParams,
++            "invalid manifest case {index}"
++        );
++    }
++    f.unchanged_disk().await;
++}
++
++#[tokio::test]
++async fn structural_expected_unmanifested_open_reply_source_is_refused() {
++    let f = Fixture::new().await;
++    let extra = f.a.parent().unwrap().join("Extra.php");
++    std::fs::write(&extra, "<?php foo('extra');").unwrap();
++    f.router
++        .did_open(DidOpenTextDocumentParams {
++            text_document: TextDocumentItem {
++                uri: uri(&extra),
++                version: 1,
++                language_id: "php".into(),
++                text: "<?php foo('extra');".into(),
++            },
++        })
++        .await;
++    let mut query = f.query();
++    query.scope = Scope::Project;
++    let error = f
++        .router
++        .workbench_structural_search(query)
++        .await
++        .unwrap_err();
++    assert_eq!(error.code, ErrorCode::ServerError(-32801));
++    assert_eq!(
++        std::fs::read_to_string(extra).unwrap(),
++        "<?php foo('extra');"
++    );
++    f.unchanged_disk().await;
++}
++
++#[tokio::test]
++async fn structural_expected_zero_match_receipt_is_verified_and_exact() {
++    let f = Fixture::new().await;
++    let mut query = f.query();
++    query.pattern = "notPresent($__ss_value)".into();
++    query.expected_sources[0].sha256_utf8.make_ascii_uppercase();
++    let expected = query.expected_sources.clone();
++    let reply = f.router.workbench_structural_search(query).await.unwrap();
++    assert_eq!(
++        reply.expected_sources, expected,
++        "receipt preserves exact caller representation/order"
++    );
++    assert_eq!(reply.files.len(), 1);
++    assert!(reply.files[0].matches.is_empty());
++    f.unchanged_disk().await;
++}
++
++#[cfg(unix)]
++#[tokio::test]
++async fn structural_expected_alias_manifest_keeps_nonpreferred_and_preferred_snapshots() {
++    let f = Fixture::new().await;
++    let alias = f.a.parent().unwrap().join("Alias.php");
++    std::os::unix::fs::symlink(&f.a, &alias).unwrap();
++    let alias_text = "<?php /* preferred ž🐘 */ foo('alias');\r\n";
++    f.router
++        .did_open(DidOpenTextDocumentParams {
++            text_document: TextDocumentItem {
++                uri: uri(&alias),
++                version: 7,
++                language_id: "php".into(),
++                text: f.a_text.clone(),
++            },
++        })
++        .await;
++    // Passive same-text alias selects the actual original authority. Both
++    // exact router snapshots belong in the caller manifest.
++    let mut passive_query = f.query();
++    passive_query.uri = uri(&alias);
++    passive_query
++        .expected_sources
++        .push(expected(&alias, 7, &f.a_text));
++    let passive_manifest = passive_query.expected_sources.clone();
++    let passive_reply = f
++        .router
++        .workbench_structural_search(passive_query)
++        .await
++        .unwrap();
++    assert_eq!(passive_reply.expected_sources, passive_manifest);
++    assert_eq!(passive_reply.files.len(), 1);
++    assert_eq!(passive_reply.files[0].stamp.uri, uri(&f.a));
++    assert_eq!(passive_reply.files[0].stamp.sha256_utf8, sha(&f.a_text));
++
++    f.router
++        .did_change(DidChangeTextDocumentParams {
++            text_document: VersionedTextDocumentIdentifier {
++                uri: uri(&alias),
++                version: 8,
++            },
++            content_changes: vec![TextDocumentContentChangeEvent {
++                range: None,
++                range_length: None,
++                text: alias_text.into(),
++            }],
++        })
++        .await;
++    // An explicit change transfers preference. Select that actual preferred
++    // URI now that the original and alias snapshots intentionally diverge.
++    let mut query = f.query();
++    query.uri = uri(&alias);
++    query.expected_sources.push(expected(&alias, 8, alias_text));
++    let manifest = query.expected_sources.clone();
++    let reply = f.router.workbench_structural_search(query).await.unwrap();
++    assert_eq!(reply.expected_sources, manifest);
++    assert_eq!(reply.files.len(), 1);
++    assert_eq!(reply.files[0].stamp.uri, uri(&alias));
++    assert_eq!(reply.files[0].stamp.sha256_utf8, sha(alias_text));
++
++    // Existing project_for policy must still refuse a divergent nonpreferred
++    // selector; expected-source support must not override source authority.
++    let mut divergent = f.query();
++    divergent
++        .expected_sources
++        .push(expected(&alias, 8, alias_text));
++    let error = f
++        .router
++        .workbench_structural_search(divergent)
++        .await
++        .unwrap_err();
++    assert_eq!(error.code, ErrorCode::ServerError(-32801));
++    f.unchanged_disk().await;
++}
++
++#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
++async fn structural_expected_other_project_change_after_prepared_retires_manifest() {
++    let f = Fixture::new().await;
++    let query = f.query();
++    let router = Arc::clone(&f.router);
++    let mut barrier = WorkerBarrier::arm(&f.router);
++    let request = tokio::spawn(async move { router.workbench_structural_search(query).await });
++    assert!(barrier.paused().await.prepared_ok);
++    tokio::time::timeout(TIMEOUT, f.change_b())
++        .await
++        .expect("other project didChange must complete before releasing paused worker");
++    barrier.release();
++    barrier.finished().await;
++    let error = tokio::time::timeout(TIMEOUT, request)
++        .await
++        .unwrap()
++        .unwrap()
++        .unwrap_err();
++    assert_eq!(error.code, ErrorCode::ServerError(-32801));
++    f.unchanged_disk().await;
++}
++
++#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
++async fn structural_expected_nested_source_close_after_prepared_retires_manifest() {
++    let f = Fixture::new().await;
++    let query = f.query();
++    let router = Arc::clone(&f.router);
++    let mut barrier = WorkerBarrier::arm(&f.router);
++    let request = tokio::spawn(async move { router.workbench_structural_search(query).await });
++    assert!(barrier.paused().await.prepared_ok);
++    tokio::time::timeout(
++        TIMEOUT,
++        f.router.did_close(DidCloseTextDocumentParams {
++            text_document: TextDocumentIdentifier {
++                uri: uri(&f.nested),
++            },
++        }),
++    )
++    .await
++    .expect("nested project close must complete before releasing paused worker");
++    barrier.release();
++    barrier.finished().await;
++    let error = tokio::time::timeout(TIMEOUT, request)
++        .await
++        .unwrap()
++        .unwrap()
++        .unwrap_err();
++    assert_eq!(error.code, ErrorCode::ServerError(-32801));
++    f.unchanged_disk().await;
++}
++
++#[path = "project_router_structural_expected_disk_tests.rs"]
++mod disk_guard_tests;
+diff --git a/src/project_router_structural_search.rs b/src/project_router_structural_search.rs
+new file mode 100644
+index 0000000..be22af9
+--- /dev/null
++++ b/src/project_router_structural_search.rs
+@@ -0,0 +1,149 @@
++//! Structural scans release the routing gate while doing bounded blocking work.
++use std::sync::Arc;
++use std::time::{Duration, Instant};
++
++use tower_lsp::jsonrpc::{Error, ErrorCode, Result};
++use tower_lsp::lsp_types::Url;
++
++use super::{ProjectRouter, StructuralSearchQuery, StructuralSearchReply};
++use crate::structural_search::{Pattern, SearchError, control, scan, wire};
++
++#[cfg(test)]
++#[path = "project_router_structural_search_async_tests.rs"]
++mod async_tests;
++#[cfg(test)]
++#[path = "project_router_structural_search_test_hook.rs"]
++pub(super) mod test_hook;
++
++#[path = "project_router_structural_expected.rs"]
++mod expected;
++
++#[cfg(test)]
++#[path = "project_router_structural_expected_tests.rs"]
++mod expected_tests;
++
++fn scan_error(error: scan::ScanError) -> Error {
++    match error {
++        scan::ScanError::InvalidInput(message) => Error::invalid_params(message),
++        scan::ScanError::ContentModified => Error {
++            code: ErrorCode::ServerError(-32801),
++            message: "PHP project state changed during structural search".into(),
++            data: None,
++        },
++        scan::ScanError::Cancelled | scan::ScanError::Matcher(SearchError::Cancelled) => Error {
++            code: ErrorCode::ServerError(-32800),
++            message: "Structural search was canceled".into(),
++            data: None,
++        },
++        scan::ScanError::Deadline | scan::ScanError::Matcher(SearchError::Deadline) => Error {
++            code: ErrorCode::ServerError(-32001),
++            message: "Structural search exceeded its time budget".into(),
++            data: None,
++        },
++        scan::ScanError::Budget(reason) | scan::ScanError::Matcher(SearchError::Budget(reason)) => {
++            Error {
++                code: ErrorCode::ServerError(-32001),
++                message: format!("Structural search limit reached: {reason}").into(),
++                data: None,
++            }
++        }
++        scan::ScanError::Matcher(SearchError::ParserFailure | SearchError::InvalidSpan) => {
++            Error::internal_error()
++        }
++        scan::ScanError::Matcher(error) => Error::invalid_params(error.to_string()),
++    }
++}
++
++fn stopped(stop: control::Stop) -> Error {
++    scan_error(match stop {
++        control::Stop::Cancelled => scan::ScanError::Cancelled,
++        control::Stop::Deadline => scan::ScanError::Deadline,
++    })
++}
++
++impl ProjectRouter {
++    /// Search ordinary PHP syntax within one explicitly selected project.
++    pub async fn workbench_structural_search(
++        &self,
++        query: StructuralSearchQuery,
++    ) -> Result<StructuralSearchReply> {
++        let (_lifetime, control) = control::Lifetime::new(Instant::now() + Duration::from_secs(25));
++        let (project, expected) = {
++            let _gate = self.request_guard().await;
++            let expected = expected::Captured::capture(self, &query)?;
++            let project = self.query_project(Some(query.uri.clone())).await?;
++            (project, expected)
++        };
++        control.checkpoint().map_err(stopped)?;
++        let root = project
++            .root
++            .as_ref()
++            .map(Url::from_directory_path)
++            .transpose()
++            .map_err(|_| Error::invalid_params("Invalid structural-search project root"))?;
++        let wire_project = wire::Project {
++            id: project.id,
++            root,
++        };
++        let backend = Arc::clone(&project.backend);
++        let worker_control = control.clone();
++        #[cfg(test)]
++        let worker_barrier = self.structural_test_barrier.lock().take();
++        let (mut prepared, receipt) =
++            crate::server::run_blocking_cancel_safe("structural_search", move || {
++                #[cfg(test)]
++                let _finished = worker_barrier
++                    .as_ref()
++                    .map(|barrier| barrier.finish_guard(&worker_control));
++                worker_control.checkpoint().map_err(stopped)?;
++                let pattern = Pattern::compile(&query.pattern)
++                    .map_err(|error| scan_error(scan::ScanError::Matcher(error)))?;
++                worker_control.checkpoint().map_err(stopped)?;
++                let result: Result<_> = (|| {
++                    let expected =
++                        expected.hash(&backend.symbols.source_authority, &worker_control)?;
++                    let prepared = backend.with_prepared_current_semantics(|| {
++                        worker_control.checkpoint().map_err(stopped)?;
++                        backend
++                            .search_structural_once(
++                                &query,
++                                wire_project.clone(),
++                                &pattern,
++                                &worker_control,
++                            )
++                            .map_err(scan_error)
++                    })?;
++                    let receipt = expected.check_reply(
++                        &prepared.reply,
++                        &backend.symbols.source_authority,
++                        &worker_control,
++                    )?;
++                    Ok((prepared, receipt))
++                })();
++                #[cfg(test)]
++                if let Some(barrier) = &worker_barrier {
++                    barrier.pause(&worker_control, result.is_ok());
++                }
++                result
++            })
++            .await
++            .ok_or_else(Error::internal_error)??;
++        let _gate = self.request_guard().await;
++        control.checkpoint().map_err(stopped)?;
++        if !self
++            .contexts
++            .read()
++            .iter()
++            .any(|current| Arc::ptr_eq(current, &project))
++        {
++            return Err(scan_error(scan::ScanError::ContentModified));
++        }
++        prepared
++            .validate_open_state(&project.backend)
++            .map_err(scan_error)?;
++        control.checkpoint().map_err(stopped)?;
++        receipt.publish(self, &mut prepared.reply)?;
++        control.checkpoint().map_err(stopped)?;
++        Ok(prepared.reply)
++    }
++}
+diff --git a/src/project_router_structural_search_async_tests.rs b/src/project_router_structural_search_async_tests.rs
+new file mode 100644
+index 0000000..d2f5994
+--- /dev/null
++++ b/src/project_router_structural_search_async_tests.rs
+@@ -0,0 +1,270 @@
++//! Real async request cancellation, concurrent edits and project retirement.
++
++use std::path::{Path, PathBuf};
++use std::sync::Arc;
++use std::time::Duration;
++
++use serde_json::json;
++use tower_lsp::LanguageServer;
++use tower_lsp::jsonrpc::ErrorCode;
++use tower_lsp::lsp_types::*;
++
++use super::super::StructuralSearchQuery;
++use super::ProjectRouter;
++use super::test_hook::WorkerBarrier;
++use crate::structural_search::control::Stop;
++
++const SAFETY_TIMEOUT: Duration = Duration::from_secs(10);
++
++struct Fixture {
++    _directory: tempfile::TempDir,
++    root: PathBuf,
++    source: PathBuf,
++    router: Arc<ProjectRouter>,
++}
++
++fn make_project(root: &Path, marker: &str) -> PathBuf {
++    std::fs::create_dir_all(root.join("src")).unwrap();
++    std::fs::write(
++        root.join("composer.json"),
++        r#"{"autoload":{"psr-4":{"App\\":"src/"}}}"#,
++    )
++    .unwrap();
++    let source = root.join("index.php");
++    std::fs::write(&source, format!("<?php foo('{marker}');\r\n")).unwrap();
++    source
++}
++
++impl Fixture {
++    async fn new() -> Self {
++        let directory = tempfile::tempdir().unwrap();
++        let root = directory.path().canonicalize().unwrap().join("a");
++        let source = make_project(&root, "disk");
++        let router = Arc::new(ProjectRouter::new_test());
++        router
++            .initialize(InitializeParams {
++                root_uri: Some(Url::from_directory_path(&root).unwrap()),
++                workspace_folders: Some(vec![WorkspaceFolder {
++                    uri: Url::from_directory_path(&root).unwrap(),
++                    name: "project-a".into(),
++                }]),
++                ..InitializeParams::default()
++            })
++            .await
++            .unwrap();
++        router.initialized(InitializedParams {}).await;
++        let original = std::fs::read_to_string(&source).unwrap();
++        router
++            .did_open(DidOpenTextDocumentParams {
++                text_document: TextDocumentItem {
++                    uri: Url::from_file_path(&source).unwrap(),
++                    language_id: "php".into(),
++                    version: 1,
++                    text: original,
++                },
++            })
++            .await;
++        // Finish actual first-request readiness before arming the narrow
++        // worker barrier. No semantic retry/timing loop is used in this test.
++        let warm = router
++            .workbench_structural_search(query(&source, 1))
++            .await
++            .unwrap();
++        assert_eq!(
++            warm.files
++                .iter()
++                .map(|file| file.matches.len())
++                .sum::<usize>(),
++            1
++        );
++        Self {
++            _directory: directory,
++            root,
++            source,
++            router,
++        }
++    }
++
++    fn spawn_search(
++        &self,
++        generation: u64,
++    ) -> tokio::task::JoinHandle<tower_lsp::jsonrpc::Result<super::super::StructuralSearchReply>>
++    {
++        let router = Arc::clone(&self.router);
++        let query = query(&self.source, generation);
++        tokio::spawn(async move { router.workbench_structural_search(query).await })
++    }
++}
++
++fn query(source: &Path, generation: u64) -> StructuralSearchQuery {
++    serde_json::from_value(json!({
++        "uri": Url::from_file_path(source).unwrap(),
++        "generation": generation,
++        "pattern": "foo($__ss_value)",
++        "scope": "document",
++    }))
++    .unwrap()
++}
++
++#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
++async fn structural_async_abort_drops_actual_request_owner_worker_observes_cancel_and_finishes() {
++    let fixture = Fixture::new().await;
++    let original = std::fs::read(&fixture.source).unwrap();
++    let mut barrier = WorkerBarrier::arm(&fixture.router);
++    let request = fixture.spawn_search(11);
++    let paused = barrier.paused().await;
++    assert!(
++        paused.prepared_ok,
++        "must pause a real successful prepared scan"
++    );
++    assert_eq!(paused.control.checkpoint(), Ok(()));
++
++    request.abort();
++    let joined = tokio::time::timeout(SAFETY_TIMEOUT, request)
++        .await
++        .expect("aborted request future was not dropped");
++    assert!(joined.unwrap_err().is_cancelled());
++    // Awaiting the aborted JoinHandle establishes that its actual handler
++    // frame (and Lifetime) was dropped. This is not a synthetic flag write.
++    assert_eq!(paused.control.checkpoint(), Err(Stop::Cancelled));
++    barrier.release();
++    assert_eq!(barrier.finished().await.stopped, Some(Stop::Cancelled));
++
++    let independent = tokio::time::timeout(
++        SAFETY_TIMEOUT,
++        fixture
++            .router
++            .workbench_structural_search(query(&fixture.source, 12)),
++    )
++    .await
++    .expect("independent actual request stopped answering after cancellation")
++    .unwrap();
++    assert_eq!(independent.generation, 12);
++    assert_eq!(
++        independent
++            .files
++            .iter()
++            .map(|file| file.matches.len())
++            .sum::<usize>(),
++        1
++    );
++    assert_eq!(std::fs::read(&fixture.source).unwrap(), original);
++    fixture.router.shutdown().await.unwrap();
++}
++
++#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
++async fn structural_async_did_change_completes_while_worker_paused_then_old_reply_refuses() {
++    let fixture = Fixture::new().await;
++    let original = std::fs::read(&fixture.source).unwrap();
++    let mut barrier = WorkerBarrier::arm(&fixture.router);
++    let request = fixture.spawn_search(21);
++    assert!(barrier.paused().await.prepared_ok);
++    let live = "<?php /* ž🐘 */ foo('changed'); foo('second');\r\n";
++    // Await the actual router notification to completion BEFORE releasing
++    // the worker: retaining the request read gate must fail this test.
++    tokio::time::timeout(
++        SAFETY_TIMEOUT,
++        fixture.router.did_change(DidChangeTextDocumentParams {
++            text_document: VersionedTextDocumentIdentifier {
++                uri: Url::from_file_path(&fixture.source).unwrap(),
++                version: 2,
++            },
++            content_changes: vec![TextDocumentContentChangeEvent {
++                range: None,
++                range_length: None,
++                text: live.into(),
++            }],
++        }),
++    )
++    .await
++    .expect("didChange was queued behind the paused structural worker");
++    barrier.release();
++    assert_eq!(barrier.finished().await.stopped, None);
++    let result = tokio::time::timeout(SAFETY_TIMEOUT, request)
++        .await
++        .unwrap()
++        .unwrap();
++    assert_eq!(result.unwrap_err().code, ErrorCode::ServerError(-32801));
++
++    let fresh = fixture
++        .router
++        .workbench_structural_search(query(&fixture.source, 22))
++        .await
++        .unwrap();
++    assert_eq!(fresh.files.len(), 1);
++    assert_eq!(fresh.files[0].matches.len(), 2);
++    assert_eq!(
++        serde_json::to_value(&fresh.files[0].stamp).unwrap()["source"]["version"],
++        2
++    );
++    assert_eq!(std::fs::read(&fixture.source).unwrap(), original);
++    fixture.router.shutdown().await.unwrap();
++}
++
++#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
++async fn structural_async_project_rebuild_completes_while_worker_paused_and_retires_old_arc() {
++    let fixture = Fixture::new().await;
++    let old_original = std::fs::read(&fixture.source).unwrap();
++    let old_context = fixture
++        .router
++        .query_project(Some(Url::from_file_path(&fixture.source).unwrap()))
++        .await
++        .unwrap();
++    let other_root = fixture._directory.path().canonicalize().unwrap().join("b");
++    let other_source = make_project(&other_root, "other");
++    let other_original = std::fs::read(&other_source).unwrap();
++    let mut barrier = WorkerBarrier::arm(&fixture.router);
++    let request = fixture.spawn_search(31);
++    assert!(barrier.paused().await.prepared_ok);
++
++    tokio::time::timeout(
++        SAFETY_TIMEOUT,
++        fixture
++            .router
++            .did_change_workspace_folders(DidChangeWorkspaceFoldersParams {
++                event: WorkspaceFoldersChangeEvent {
++                    removed: vec![WorkspaceFolder {
++                        uri: Url::from_directory_path(&fixture.root).unwrap(),
++                        name: "project-a".into(),
++                    }],
++                    added: vec![WorkspaceFolder {
++                        uri: Url::from_directory_path(&other_root).unwrap(),
++                        name: "project-b".into(),
++                    }],
++                },
++            }),
++    )
++    .await
++    .expect("project rebuild was queued behind the paused structural worker");
++    assert!(
++        !fixture
++            .router
++            .contexts
++            .read()
++            .iter()
++            .any(|current| Arc::ptr_eq(current, &old_context)),
++        "this control must actually retire the captured project, not merely edit a setting"
++    );
++    barrier.release();
++    assert_eq!(barrier.finished().await.stopped, None);
++    let result = tokio::time::timeout(SAFETY_TIMEOUT, request)
++        .await
++        .unwrap()
++        .unwrap();
++    assert_eq!(result.unwrap_err().code, ErrorCode::ServerError(-32801));
++
++    let fresh = fixture
++        .router
++        .workbench_structural_search(query(&other_source, 32))
++        .await
++        .unwrap();
++    assert_ne!(fresh.project.id, old_context.id);
++    assert_eq!(fresh.files.len(), 1);
++    assert_eq!(
++        fresh.files[0].stamp.uri.to_file_path().unwrap(),
++        other_source
++    );
++    assert_eq!(std::fs::read(&fixture.source).unwrap(), old_original);
++    assert_eq!(std::fs::read(&other_source).unwrap(), other_original);
++    fixture.router.shutdown().await.unwrap();
++}
+diff --git a/src/project_router_structural_search_test_hook.rs b/src/project_router_structural_search_test_hook.rs
+new file mode 100644
+index 0000000..61c6af3
+--- /dev/null
++++ b/src/project_router_structural_search_test_hook.rs
+@@ -0,0 +1,126 @@
++//! Per-router test barrier for real asynchronous structural requests.
++//! All Condvar waiting happens on the existing real blocking request worker.
++
++use std::sync::Arc;
++use std::time::Duration;
++
++use parking_lot::{Condvar, Mutex};
++use tokio::sync::oneshot;
++
++use super::ProjectRouter;
++use crate::structural_search::control::{Control, Stop};
++
++const SAFETY_TIMEOUT: Duration = Duration::from_secs(10);
++
++pub(crate) struct WorkerBarrier {
++    reached: Mutex<Option<oneshot::Sender<Paused>>>,
++    finished: Mutex<Option<oneshot::Sender<Finished>>>,
++    release: Arc<(Mutex<bool>, Condvar)>,
++}
++
++pub(super) struct Harness {
++    reached: oneshot::Receiver<Paused>,
++    finished: oneshot::Receiver<Finished>,
++    release: Arc<(Mutex<bool>, Condvar)>,
++}
++
++pub(super) struct Paused {
++    pub control: Control,
++    pub prepared_ok: bool,
++}
++
++pub(super) struct Finished {
++    pub stopped: Option<Stop>,
++}
++
++pub(super) struct WorkerFinished {
++    barrier: Arc<WorkerBarrier>,
++    control: Control,
++}
++
++impl WorkerBarrier {
++    /// Arms exactly the next structurally admitted worker on this router.
++    /// No process-global/TLS hook and no second worker or task is introduced.
++    pub(super) fn arm(router: &ProjectRouter) -> Harness {
++        let (reached_tx, reached_rx) = oneshot::channel();
++        let (finished_tx, finished_rx) = oneshot::channel();
++        let release = Arc::new((Mutex::new(false), Condvar::new()));
++        let barrier = Arc::new(Self {
++            reached: Mutex::new(Some(reached_tx)),
++            finished: Mutex::new(Some(finished_tx)),
++            release: Arc::clone(&release),
++        });
++        let mut slot = router.structural_test_barrier.lock();
++        assert!(slot.is_none(), "one worker barrier per router at a time");
++        *slot = Some(barrier);
++        Harness {
++            reached: reached_rx,
++            finished: finished_rx,
++            release,
++        }
++    }
++
++    pub(super) fn finish_guard(self: &Arc<Self>, control: &Control) -> WorkerFinished {
++        WorkerFinished {
++            barrier: Arc::clone(self),
++            control: control.clone(),
++        }
++    }
++
++    /// Hook location: AFTER prepared-current-semantics returns its result,
++    /// BEFORE the existing blocking closure returns. All semantic locks and
++    /// routing read guards must already have left scope at this boundary.
++    pub(super) fn pause(&self, control: &Control, prepared_ok: bool) {
++        if let Some(sender) = self.reached.lock().take() {
++            let _ = sender.send(Paused {
++                control: control.clone(),
++                prepared_ok,
++            });
++        }
++        let (released, condition) = &*self.release;
++        let mut released = released.lock();
++        while !*released {
++            condition.wait(&mut released);
++        }
++    }
++}
++
++impl Harness {
++    pub(super) async fn paused(&mut self) -> Paused {
++        tokio::time::timeout(SAFETY_TIMEOUT, &mut self.reached)
++            .await
++            .expect("real structural worker did not reach its publication barrier")
++            .expect("real structural worker exited before signaling the barrier")
++    }
++
++    pub(super) async fn finished(&mut self) -> Finished {
++        tokio::time::timeout(SAFETY_TIMEOUT, &mut self.finished)
++            .await
++            .expect("real structural blocking closure did not finish after release")
++            .expect("real structural completion observation was dropped")
++    }
++
++    pub(super) fn release(&self) {
++        let (released, condition) = &*self.release;
++        *released.lock() = true;
++        condition.notify_all();
++    }
++}
++
++impl Drop for Harness {
++    fn drop(&mut self) {
++        // Assertion failure/timeout must never strand a spawn_blocking task
++        // and hang the runtime's own shutdown while unwinding this test.
++        self.release();
++    }
++}
++
++impl Drop for WorkerFinished {
++    fn drop(&mut self) {
++        if let Some(sender) = self.barrier.finished.lock().take() {
++            let _ = sender.send(Finished {
++                stopped: self.control.checkpoint().err(),
++            });
++        }
++    }
++}
+diff --git a/src/server.rs b/src/server.rs
+index 2f0f64c..ccb15c4 100644
+--- a/src/server.rs
++++ b/src/server.rs
+@@ -716,8 +716,10 @@ impl LanguageServer for Backend {
+         let backend = self.clone_for_blocking();
+         let u = uri.clone();
+         self.coalesced_whole_file("document_symbol", &uri, move || {
+-            backend.handle_with_uri("document_symbol", &u, |content| {
+-                backend.handle_document_symbol(&u, content)
++            backend.with_prepared_current_semantics(|| {
++                backend.handle_with_uri("document_symbol", &u, |content| {
++                    backend.handle_document_symbol(&u, content)
++                })
+             })
+         })
+         .await
+diff --git a/src/source_authority.rs b/src/source_authority.rs
+index 247d975..d3bbb5d 100644
+--- a/src/source_authority.rs
++++ b/src/source_authority.rs
+@@ -11,6 +11,20 @@ enum SourceKey {
+     Uri(String),
+ }
+ 
++/// Fresh canonical path identity for a bounded source ledger. Hard links remain
++/// distinct, matching the existing source ownership model.
++#[derive(Clone, Debug, Hash, PartialEq, Eq)]
++pub(crate) struct SourceIdentity(SourceKey);
++
++impl SourceIdentity {
++    pub(crate) fn relative_to<'a>(&'a self, root: &Self) -> Option<&'a std::path::Path> {
++        match (&self.0, &root.0) {
++            (SourceKey::File(path), SourceKey::File(root)) => path.strip_prefix(root).ok(),
++            _ => None,
++        }
++    }
++}
++
+ fn physical_key(uri: &str) -> SourceKey {
+     let Some(path) = Url::parse(uri).ok().and_then(|uri| uri.to_file_path().ok()) else {
+         return SourceKey::Uri(uri.to_owned());
+@@ -126,6 +140,12 @@ pub(crate) struct SourceAuthority {
+ }
+ 
+ impl SourceAuthority {
++    /// Resolve filesystem spelling now, independently of cached alias queries.
++    /// This does not change the editor's accepted open/change ownership.
++    pub(crate) fn fresh_identity(&self, uri: &str) -> SourceIdentity {
++        SourceIdentity(physical_key(uri))
++    }
++
+     /// Revalidate a closed spelling after a filesystem event. An open editor's
+     /// accepted source ownership changes only through open/change lifecycle events.
+     pub(crate) fn revalidate_closed(&self, uri: &str) -> bool {
+@@ -517,4 +537,49 @@ mod tests {
+         assert_eq!(authority.preferred(b), None);
+         assert!(authority.is_preferred(b));
+     }
++
++    #[test]
++    fn ledger_identity_observes_retarget_without_changing_open_preference() {
++        let (directory, a, b) = aliases();
++        let authority = SourceAuthority::default();
++        authority.open(&a);
++        authority.open(&b);
++        let old = authority.fresh_identity(&b);
++        assert_eq!(old, authority.fresh_identity(&a));
++        assert_eq!(authority.preferred(&b), Some(a.clone()));
++        let replacement = directory.path().join("replacement.php");
++        std::fs::write(&replacement, "<?php replacement();").unwrap();
++        let path = Url::parse(&b).unwrap().to_file_path().unwrap();
++        std::fs::remove_file(&path).unwrap();
++        std::os::unix::fs::symlink(&replacement, &path).unwrap();
++        assert_ne!(authority.fresh_identity(&b), old);
++        assert_eq!(authority.fresh_identity(&a), old);
++        assert_eq!(authority.preferred(&b), Some(a));
++    }
++
++    #[test]
++    fn ledger_identity_unifies_missing_file_parent_aliases_but_not_hard_links() {
++        let directory = tempfile::tempdir().unwrap();
++        let root = directory.path().canonicalize().unwrap();
++        let linked = root.join("linked");
++        std::os::unix::fs::symlink(&root, &linked).unwrap();
++        let authority = SourceAuthority::default();
++        let uri = |path: &std::path::Path| Url::from_file_path(path).unwrap().to_string();
++        assert_eq!(
++            authority.fresh_identity(&uri(&root.join("new.php"))),
++            authority.fresh_identity(&uri(&linked.join("new.php")))
++        );
++        let original = root.join("original.php");
++        let hard = root.join("hard.php");
++        std::fs::write(&original, "<?php foo();").unwrap();
++        std::fs::hard_link(&original, &hard).unwrap();
++        assert_ne!(
++            authority.fresh_identity(&uri(&original)),
++            authority.fresh_identity(&uri(&hard))
++        );
++        assert_ne!(
++            authority.fresh_identity("untitled:first"),
++            authority.fresh_identity("untitled:second")
++        );
++    }
+ }
+diff --git a/src/structural_scan.rs b/src/structural_scan.rs
+new file mode 100644
+index 0000000..3891434
+--- /dev/null
++++ b/src/structural_scan.rs
+@@ -0,0 +1,695 @@
++//! Bounded single-project syntax search with immutable source ownership.
++
++use std::collections::{HashMap, HashSet};
++use std::fs::File;
++use std::io::Read;
++use std::path::{Component, Path, PathBuf};
++use std::sync::Arc;
++
++use sha2::{Digest, Sha256};
++use tower_lsp::lsp_types::Url;
++
++use crate::Backend;
++use crate::classmap_scanner::{LinkClaims, workspace_walk_builder};
++use crate::diagnostics::revision::Revision;
++use crate::source_authority::SourceIdentity;
++use crate::structural_search::control::{Control, Stop};
++use crate::structural_search::wire;
++use crate::structural_search::{self as matcher, Pattern, SearchError};
++
++#[derive(Debug)]
++pub(crate) enum ScanError {
++    InvalidInput(&'static str),
++    ContentModified,
++    Cancelled,
++    Deadline,
++    Budget(&'static str),
++    Matcher(SearchError),
++}
++
++type Result<T> = std::result::Result<T, ScanError>;
++
++#[derive(Clone, Copy)]
++struct Budget {
++    files: usize,
++    /// Counts directory/non-PHP entries too; a sparse tree is still bounded.
++    walk_entries: usize,
++    open_documents: usize,
++    input_bytes: usize,
++    file_bytes: usize,
++    matches: usize,
++    issues: usize,
++}
++
++impl Default for Budget {
++    fn default() -> Self {
++        Self {
++            files: 512,
++            walk_entries: 50_000,
++            open_documents: 512,
++            input_bytes: 32 * 1024 * 1024,
++            file_bytes: 2 * 1024 * 1024,
++            matches: 1000,
++            issues: 64,
++        }
++    }
++}
++
++struct Epochs {
++    input: Arc<()>,
++    semantic: Arc<()>,
++}
++
++struct Candidate {
++    uri: Url,
++    identity: SourceIdentity,
++}
++
++enum Guard {
++    Open {
++        uri: String,
++        identity: SourceIdentity,
++        text: Arc<String>,
++        revision: Revision,
++    },
++    Disk {
++        uri: String,
++        identity: SourceIdentity,
++        hash: String,
++    },
++}
++
++/// Retain until the router's final admission check. No persistent text cache.
++pub(crate) struct Prepared {
++    pub reply: wire::Reply,
++    epochs: Epochs,
++    guards: Vec<Guard>,
++    file_bytes: usize,
++}
++
++enum Loaded {
++    Open {
++        text: Arc<String>,
++        revision: Revision,
++    },
++    Disk(String),
++}
++
++impl Loaded {
++    fn text(&self) -> &str {
++        match self {
++            Self::Open { text, .. } => text,
++            Self::Disk(text) => text,
++        }
++    }
++}
++
++enum ReadResult {
++    Text(String),
++    Issue(wire::IssueKind),
++}
++
++fn checkpoint(control: &Control) -> Result<()> {
++    control.checkpoint().map_err(|stop| match stop {
++        Stop::Cancelled => ScanError::Cancelled,
++        Stop::Deadline => ScanError::Deadline,
++    })
++}
++
++fn matcher_checkpoint(control: &Control) -> std::result::Result<(), SearchError> {
++    control.checkpoint().map_err(|stop| match stop {
++        Stop::Cancelled => SearchError::Cancelled,
++        Stop::Deadline => SearchError::Deadline,
++    })
++}
++
++fn hash(text: &str) -> String {
++    format!("{:x}", Sha256::digest(text.as_bytes()))
++}
++
++fn issue(uri: Option<Url>, kind: wire::IssueKind) -> wire::FileIssue {
++    let message = match kind {
++        wire::IssueKind::Syntax => "PHP syntax errors prevented this file from being searched.",
++        wire::IssueKind::UnsupportedTemplate => {
++            "Template source is not supported by this PHP-only structural search."
++        }
++        wire::IssueKind::UnsupportedEncoding => {
++            "Closed source is not UTF8; open it in the editor to search its decoded text."
++        }
++        wire::IssueKind::Unreadable => "A source file could not be read.",
++        wire::IssueKind::WalkError => "Part of the project source tree could not be listed.",
++    };
++    wire::FileIssue {
++        uri,
++        kind,
++        message: message.to_owned(),
++    }
++}
++
++fn add_issue(
++    issues: &mut Vec<wire::FileIssue>,
++    value: wire::FileIssue,
++    budget: Budget,
++) -> Result<()> {
++    if issues.len() >= budget.issues {
++        return Err(ScanError::Budget("file issues"));
++    }
++    issues.push(value);
++    Ok(())
++}
++
++/// Bounded real read, including limit+1 detection. No metadata-size-only trust.
++/// Checkpoints surround OS calls; an OS read itself is not forcibly canceled.
++fn read_disk(path: &Path, limit: usize, control: &Control) -> Result<ReadResult> {
++    read_disk_after_preflight(path, limit, control, || {})
++}
++
++fn read_disk_after_preflight(
++    path: &Path,
++    limit: usize,
++    control: &Control,
++    after_preflight: impl FnOnce(),
++) -> Result<ReadResult> {
++    checkpoint(control)?;
++    // Reject special sources before open; Unix O_NONBLOCK below also closes
++    // the regular-file -> FIFO substitution race between stat and open.
++    if !std::fs::metadata(path).is_ok_and(|metadata| metadata.is_file()) {
++        return Ok(ReadResult::Issue(wire::IssueKind::Unreadable));
++    }
++    after_preflight();
++    let Ok(mut file) = open_source(path) else {
++        return Ok(ReadResult::Issue(wire::IssueKind::Unreadable));
++    };
++    if !file.metadata().is_ok_and(|metadata| metadata.is_file()) {
++        return Ok(ReadResult::Issue(wire::IssueKind::Unreadable));
++    }
++    let mut bytes = Vec::new();
++    let mut block = [0u8; 16 * 1024];
++    loop {
++        checkpoint(control)?;
++        let remaining = limit.saturating_sub(bytes.len()).saturating_add(1);
++        let take = remaining.min(block.len());
++        let count = match file.read(&mut block[..take]) {
++            Ok(count) => count,
++            Err(_) => return Ok(ReadResult::Issue(wire::IssueKind::Unreadable)),
++        };
++        if count == 0 {
++            break;
++        }
++        bytes.extend_from_slice(&block[..count]);
++        if bytes.len() > limit {
++            return Err(ScanError::Budget("source file bytes"));
++        }
++    }
++    checkpoint(control)?;
++    Ok(match String::from_utf8(bytes) {
++        Ok(text) => ReadResult::Text(text),
++        Err(_) => ReadResult::Issue(wire::IssueKind::UnsupportedEncoding),
++    })
++}
++
++#[cfg(unix)]
++fn open_source(path: &Path) -> std::io::Result<File> {
++    use rustix::fs::{Mode, OFlags};
++    rustix::fs::open(
++        path,
++        OFlags::RDONLY | OFlags::NONBLOCK | OFlags::CLOEXEC,
++        Mode::empty(),
++    )
++    .map(File::from)
++    .map_err(Into::into)
++}
++
++#[cfg(not(unix))]
++fn open_source(path: &Path) -> std::io::Result<File> {
++    // Regular-file preflight + descriptor metadata still apply. An atomic
++    // nonregular-open refusal is not claimed on these targets in this draft.
++    File::open(path)
++}
++
++fn file_uri(path: &Path) -> Result<Url> {
++    Url::from_file_path(path)
++        .map_err(|_| ScanError::InvalidInput("Source path cannot be represented as a file URI"))
++}
++
++fn file_path(uri: &Url) -> Result<PathBuf> {
++    uri.to_file_path()
++        .map_err(|_| ScanError::InvalidInput("Select a PHP file document"))
++}
++
++impl Backend {
++    /// Called inside with_prepared_current_semantics on the existing blocking
++    /// worker. ProjectRouter supplies the selected project descriptor.
++    pub(crate) fn search_structural_once(
++        &self,
++        query: &wire::Query,
++        project: wire::Project,
++        pattern: &Pattern,
++        control: &Control,
++    ) -> Result<Prepared> {
++        self.search_structural_inner(query, project, pattern, control, Budget::default(), || {})
++    }
++
++    fn search_structural_inner(
++        &self,
++        query: &wire::Query,
++        project: wire::Project,
++        pattern: &Pattern,
++        control: &Control,
++        budget: Budget,
++        before_validate: impl FnOnce(),
++    ) -> Result<Prepared> {
++        checkpoint(control)?;
++        let selector = file_path(&query.uri)?;
++        let filters = self.index_filters();
++        if !filters.is_php_file(&selector) {
++            return Err(ScanError::InvalidInput("Select a PHP source document"));
++        }
++        let epochs = {
++            let documents = self.diag.documents.lock();
++            if documents.configuration_changing() {
++                return Err(ScanError::ContentModified);
++            }
++            Epochs {
++                input: documents.input_epoch(),
++                semantic: documents.semantic_epoch(),
++            }
++        };
++        let mut issues = Vec::new();
++        let candidates = self.structural_candidates(query, budget, control, &mut issues)?;
++        let original_sources: HashSet<_> = candidates
++            .iter()
++            .map(|candidate| candidate.identity.clone())
++            .collect();
++        let mut prepared = Prepared {
++            reply: wire::Reply {
++                expected_sources: query.expected_sources.clone(),
++                generation: query.generation,
++                project,
++                files: Vec::new(),
++                issues,
++                incomplete: false,
++            },
++            epochs,
++            guards: Vec::new(),
++            file_bytes: budget.file_bytes,
++        };
++        let mut total_bytes = 0usize;
++        let mut total_matches = 0usize;
++        for candidate in candidates {
++            checkpoint(control)?;
++            let preferred = self
++                .symbols
++                .source_authority
++                .preferred(candidate.uri.as_str());
++            let uri = preferred.as_deref().unwrap_or(candidate.uri.as_str());
++            let uri = Url::parse(uri).map_err(|_| ScanError::ContentModified)?;
++            let identity = self.symbols.source_authority.fresh_identity(uri.as_str());
++            if identity != candidate.identity {
++                return Err(ScanError::ContentModified);
++            }
++            if self.is_blade_file(uri.as_str()) {
++                add_issue(
++                    &mut prepared.reply.issues,
++                    issue(Some(uri), wire::IssueKind::UnsupportedTemplate),
++                    budget,
++                )?;
++                continue;
++            }
++            let loaded = {
++                // Same lock order as with_current_semantics: revisions then files.
++                let documents = self.diag.documents.lock();
++                let files = self.open_files.read();
++                match files.get(uri.as_str()) {
++                    Some(text) => {
++                        let revision = documents
++                            .capture(uri.as_str(), text)
++                            .map_err(|()| ScanError::ContentModified)?
++                            .ok_or(ScanError::ContentModified)?;
++                        Some(Loaded::Open {
++                            text: Arc::clone(text),
++                            revision,
++                        })
++                    }
++                    None => None,
++                }
++            };
++            let loaded = match loaded {
++                Some(loaded) => loaded,
++                None if preferred.is_some() => return Err(ScanError::ContentModified),
++                None => match read_disk(&file_path(&uri)?, budget.file_bytes, control)? {
++                    ReadResult::Text(text) => Loaded::Disk(text),
++                    ReadResult::Issue(kind) => {
++                        add_issue(&mut prepared.reply.issues, issue(Some(uri), kind), budget)?;
++                        continue;
++                    }
++                },
++            };
++            let text = loaded.text();
++            if text.len() > budget.file_bytes {
++                return Err(ScanError::Budget("source file bytes"));
++            }
++            total_bytes = total_bytes
++                .checked_add(text.len())
++                .ok_or(ScanError::Budget("aggregate input bytes"))?;
++            if total_bytes > budget.input_bytes {
++                return Err(ScanError::Budget("aggregate input bytes"));
++            }
++            let sha256 = hash(text);
++            let source = match &loaded {
++                Loaded::Open { revision, .. } => wire::SourceKind::Open {
++                    version: revision.version,
++                    opening: revision.open,
++                },
++                Loaded::Disk(_) => wire::SourceKind::Disk,
++            };
++            let stamp = wire::SourceStamp {
++                uri: uri.clone(),
++                source,
++                sha256_utf8: sha256.clone(),
++                utf8_bytes: text.len() as u64,
++            };
++            let limits = matcher::Limits {
++                source_bytes: budget.file_bytes,
++                matches: budget.matches.saturating_sub(total_matches),
++                ..matcher::Limits::default()
++            };
++            let matches =
++                pattern.find_in_with_control(text, limits, &|| matcher_checkpoint(control));
++            // Retain ownership also for a syntax-issue source: its text was
++            // observed in this query, even though no ranges can be published.
++            match &loaded {
++                Loaded::Open { text, revision } => prepared.guards.push(Guard::Open {
++                    uri: uri.to_string(),
++                    identity,
++                    text: Arc::clone(text),
++                    revision: revision.clone(),
++                }),
++                Loaded::Disk(_) => prepared.guards.push(Guard::Disk {
++                    uri: uri.to_string(),
++                    identity,
++                    hash: sha256,
++                }),
++            }
++            match matches {
++                Ok(matches) => {
++                    total_matches += matches.len();
++                    prepared.reply.files.push(wire::FileResult {
++                        stamp,
++                        matches: matches
++                            .into_iter()
++                            .map(|found| {
++                                let source = &text[found.call.bytes.clone()];
++                                let mut chars = source.chars();
++                                let mut preview: String = chars
++                                    .by_ref()
++                                    .take(160)
++                                    .map(|ch| {
++                                        if ch == '\r' || ch == '\n' || ch == '\t' {
++                                            ' '
++                                        } else {
++                                            ch
++                                        }
++                                    })
++                                    .collect();
++                                if chars.next().is_some() {
++                                    preview.push('…');
++                                }
++                                let mut result = wire::Match::from(found);
++                                result.preview = preview;
++                                result
++                            })
++                            .collect(),
++                    });
++                }
++                Err(SearchError::SourceSyntax) => add_issue(
++                    &mut prepared.reply.issues,
++                    issue(Some(uri), wire::IssueKind::Syntax),
++                    budget,
++                )?,
++                Err(SearchError::Cancelled) => return Err(ScanError::Cancelled),
++                Err(SearchError::Deadline) => return Err(ScanError::Deadline),
++                Err(SearchError::Budget(reason)) => return Err(ScanError::Budget(reason)),
++                Err(error) => return Err(ScanError::Matcher(error)),
++            }
++        }
++        before_validate();
++        prepared.validate_open_state(self)?;
++        // Detect additions/removals even before a filesystem watcher arrives.
++        // This is a second bounded shared-policy walk, not an atomic filesystem
++        // transaction. Changes after final observation remain possible.
++        let mut repeated_issues = Vec::new();
++        let refreshed = self.structural_candidates(query, budget, control, &mut repeated_issues)?;
++        let refreshed_sources: HashSet<_> = refreshed
++            .into_iter()
++            .map(|candidate| candidate.identity)
++            .collect();
++        if original_sources != refreshed_sources {
++            return Err(ScanError::ContentModified);
++        }
++        if !repeated_issues.is_empty() {
++            // A final discovery failure prevents claiming source-set equality.
++            // Preserve a bounded explicit incomplete reply when discovery is
++            // already incomplete; do not silently flatten the new failure.
++            for repeated in repeated_issues {
++                if !prepared.reply.issues.iter().any(|previous| {
++                    previous.uri == repeated.uri && previous.message == repeated.message
++                }) {
++                    add_issue(&mut prepared.reply.issues, repeated, budget)?;
++                }
++            }
++        }
++        prepared.validate_full(self, control)?;
++        prepared
++            .reply
++            .files
++            .sort_by(|a, b| a.stamp.uri.as_str().cmp(b.stamp.uri.as_str()));
++        prepared.reply.issues.sort_by(|a, b| {
++            a.uri
++                .as_ref()
++                .map(Url::as_str)
++                .cmp(&b.uri.as_ref().map(Url::as_str))
++                .then(a.message.cmp(&b.message))
++        });
++        prepared.reply.incomplete = !prepared.reply.issues.is_empty();
++        Ok(prepared)
++    }
++
++    fn structural_candidates(
++        &self,
++        query: &wire::Query,
++        budget: Budget,
++        control: &Control,
++        issues: &mut Vec<wire::FileIssue>,
++    ) -> Result<Vec<Candidate>> {
++        let authority = &self.symbols.source_authority;
++        let filters = self.index_filters();
++        let mut candidates: HashMap<SourceIdentity, Candidate> = HashMap::new();
++        if matches!(query.scope, wire::Scope::Document) {
++            let identity = authority.fresh_identity(query.uri.as_str());
++            candidates.insert(
++                identity.clone(),
++                Candidate {
++                    uri: query.uri.clone(),
++                    identity,
++                },
++            );
++        } else {
++            let root =
++                self.workspace
++                    .workspace_root
++                    .read()
++                    .clone()
++                    .ok_or(ScanError::InvalidInput(
++                        "Project search requires a selected project root",
++                    ))?;
++            let root_identity = authority.fresh_identity(file_uri(&root)?.as_str());
++            let vendor_dirs = self.workspace.vendor_dir_paths.lock().clone();
++            let vendor_identities: Vec<_> = vendor_dirs
++                .iter()
++                .map(|path| file_uri(path).map(|uri| authority.fresh_identity(uri.as_str())))
++                .collect::<Result<_>>()?;
++            let claims = LinkClaims::new([root.clone()], Some(self.followed_links()));
++            let walker = workspace_walk_builder(
++                &root,
++                Arc::new(vendor_dirs),
++                Arc::clone(&filters),
++                false,
++                claims,
++            )
++            .build();
++            let eligible = |uri: &Url, identity: &SourceIdentity| -> Result<bool> {
++                let path = file_path(uri)?;
++                // Avoid admitting a lexical prefix containing traversal when
++                // the parent cannot be canonicalized by SourceAuthority.
++                if path.components().any(|part| part == Component::ParentDir) {
++                    return Ok(false);
++                }
++                let relative = identity.relative_to(&root_identity);
++                if !path.starts_with(&root) && relative.is_none() {
++                    return Ok(false);
++                }
++                if vendor_identities
++                    .iter()
++                    .any(|vendor| identity.relative_to(vendor).is_some())
++                {
++                    return Ok(false);
++                }
++                // Canonical aliases of a nested/excluded root must be tested
++                // in the selected root's spelling as well as their own.
++                let respelled = relative.map(|relative| root.join(relative));
++                Ok(filters.is_php_file(&path)
++                    && !filters.is_excluded_path(&path, false)
++                    && respelled
++                        .as_ref()
++                        .is_none_or(|path| !filters.is_excluded_path(path, false))
++                    && self.project_scope.allows_diagnostics(uri.as_str()))
++            };
++            let mut entries = 0usize;
++            for entry in walker {
++                checkpoint(control)?;
++                entries += 1;
++                if entries > budget.walk_entries {
++                    return Err(ScanError::Budget("discovery entries"));
++                }
++                let entry = match entry {
++                    Ok(entry) => entry,
++                    Err(_) => {
++                        add_issue(issues, issue(None, wire::IssueKind::WalkError), budget)?;
++                        continue;
++                    }
++                };
++                let path = entry.path();
++                if !path.is_file() || !filters.is_php_file(path) {
++                    continue;
++                }
++                let uri = file_uri(path)?;
++                let identity = authority.fresh_identity(uri.as_str());
++                if eligible(&uri, &identity)? {
++                    insert_candidate(&mut candidates, Candidate { uri, identity }, budget)?;
++                }
++            }
++            // Capture names only under the map lock; no filesystem/filter
++            // operations while holding it. Actual text ownership is captured
++            // when loading each selected preferred source and epoch-checked.
++            let open_uris = {
++                let files = self.open_files.read();
++                if files.len() > budget.open_documents {
++                    return Err(ScanError::Budget("open document candidates"));
++                }
++                files.keys().cloned().collect::<Vec<_>>()
++            };
++            for name in open_uris {
++                checkpoint(control)?;
++                let Ok(uri) = Url::parse(&name) else { continue };
++                if uri.scheme() != "file" {
++                    continue;
++                }
++                let identity = authority.fresh_identity(uri.as_str());
++                if eligible(&uri, &identity)? {
++                    insert_candidate(&mut candidates, Candidate { uri, identity }, budget)?;
++                }
++            }
++        }
++        let mut candidates: Vec<_> = candidates.into_values().collect();
++        candidates.sort_by(|a, b| a.uri.as_str().cmp(b.uri.as_str()));
++        Ok(candidates)
++    }
++}
++
++fn insert_candidate(
++    candidates: &mut HashMap<SourceIdentity, Candidate>,
++    candidate: Candidate,
++    budget: Budget,
++) -> Result<()> {
++    if let Some(previous) = candidates.get_mut(&candidate.identity) {
++        // Final source text still comes from SourceAuthority's preferred open
++        // alias. This only makes the no-open representative deterministic.
++        if candidate.uri.as_str() < previous.uri.as_str() {
++            *previous = candidate;
++        }
++    } else {
++        if candidates.len() >= budget.files {
++            return Err(ScanError::Budget("source files"));
++        }
++        candidates.insert(candidate.identity.clone(), candidate);
++    }
++    Ok(())
++}
++
++impl Prepared {
++    /// Cheap final admission after the router reacquires its read gate.
++    /// ProjectContext Arc/id membership is independently checked by the router.
++    /// No disk reads/canonicalization are performed in this async-side method.
++    pub(crate) fn validate_open_state(&self, backend: &Backend) -> Result<()> {
++        let documents = backend.diag.documents.lock();
++        let files = backend.open_files.read();
++        if documents.configuration_changing()
++            || !documents.input_matches(&self.epochs.input)
++            || !documents.epoch_matches(&self.epochs.semantic)
++        {
++            return Err(ScanError::ContentModified);
++        }
++        for guard in &self.guards {
++            match guard {
++                Guard::Open {
++                    uri,
++                    text,
++                    revision,
++                    ..
++                } => {
++                    if !documents.current(uri, Some(revision))
++                        || !files
++                            .get(uri)
++                            .is_some_and(|current| Arc::ptr_eq(current, text))
++                    {
++                        return Err(ScanError::ContentModified);
++                    }
++                }
++                Guard::Disk { uri, .. } if files.contains_key(uri) => {
++                    return Err(ScanError::ContentModified);
++                }
++                Guard::Disk { .. } => {}
++            }
++        }
++        Ok(())
++    }
++
++    fn validate_full(&self, backend: &Backend, control: &Control) -> Result<()> {
++        self.validate_open_state(backend)?;
++        for guard in &self.guards {
++            checkpoint(control)?;
++            match guard {
++                Guard::Open { uri, identity, .. } => {
++                    if backend.symbols.source_authority.fresh_identity(uri) != *identity
++                        || !backend.symbols.source_authority.is_preferred(uri)
++                    {
++                        return Err(ScanError::ContentModified);
++                    }
++                }
++                Guard::Disk {
++                    uri,
++                    identity,
++                    hash: expected,
++                } => {
++                    if backend.symbols.source_authority.fresh_identity(uri) != *identity
++                        || backend.symbols.source_authority.preferred(uri).is_some()
++                    {
++                        return Err(ScanError::ContentModified);
++                    }
++                    let uri = Url::parse(uri).map_err(|_| ScanError::ContentModified)?;
++                    match read_disk(&file_path(&uri)?, self.file_bytes, control)? {
++                        ReadResult::Text(current) if hash(&current) == *expected => {}
++                        _ => return Err(ScanError::ContentModified),
++                    }
++                }
++            }
++        }
++        checkpoint(control)?;
++        self.validate_open_state(backend)
++    }
++}
++
++#[cfg(test)]
++#[path = "structural_scan_tests.rs"]
++mod tests;
+diff --git a/src/structural_scan_tests.rs b/src/structural_scan_tests.rs
+new file mode 100644
+index 0000000..3e5f399
+--- /dev/null
++++ b/src/structural_scan_tests.rs
+@@ -0,0 +1,512 @@
++use super::*;
++use crate::structural_search::control::Lifetime;
++use std::time::{Duration, Instant};
++
++struct Fixture {
++    _directory: tempfile::TempDir,
++    root: PathBuf,
++    backend: Backend,
++}
++
++impl Fixture {
++    fn new() -> Self {
++        let directory = tempfile::tempdir().unwrap();
++        let root = directory.path().join("project");
++        std::fs::create_dir_all(&root).unwrap();
++        let backend = Backend::new_test();
++        *backend.workspace.workspace_root.write() = Some(root.clone());
++        Self {
++            _directory: directory,
++            root,
++            backend,
++        }
++    }
++
++    fn write(&self, relative: &str, text: &str) -> Url {
++        let path = self.root.join(relative);
++        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
++        std::fs::write(&path, text).unwrap();
++        file_uri(&path).unwrap()
++    }
++
++    fn open(&self, uri: &Url, version: i32, text: &str) {
++        self.backend.symbols.source_authority.open(uri.as_str());
++        let text = Arc::new(text.to_owned());
++        let mut documents = self.backend.diag.documents.lock();
++        let mut files = self.backend.open_files.write();
++        documents.open(uri.as_str(), version, &text);
++        files.insert(uri.to_string(), text);
++    }
++
++    fn change(&self, uri: &Url, version: i32, text: &str) {
++        self.backend.symbols.source_authority.change(uri.as_str());
++        let text = Arc::new(text.to_owned());
++        let mut documents = self.backend.diag.documents.lock();
++        let mut files = self.backend.open_files.write();
++        assert!(documents.change(uri.as_str(), version, &text));
++        files.insert(uri.to_string(), text);
++    }
++
++    fn query(&self) -> wire::Query {
++        wire::Query {
++            expected_sources: vec![],
++            uri: file_uri(&self.root.join("Selected.php")).unwrap(),
++            generation: 17,
++            pattern: "send($__ss_value)".into(),
++            scope: wire::Scope::Project,
++        }
++    }
++
++    fn project(&self) -> wire::Project {
++        wire::Project {
++            id: 7,
++            root: Some(Url::from_directory_path(&self.root).unwrap()),
++        }
++    }
++
++    fn scan(&self) -> Prepared {
++        self.scan_with(Budget::default(), || {}).unwrap()
++    }
++
++    fn scan_with(&self, budget: Budget, before_validate: impl FnOnce()) -> Result<Prepared> {
++        let query = self.query();
++        let pattern = Pattern::compile(&query.pattern).unwrap();
++        let (_lifetime, control) = Lifetime::new(Instant::now() + Duration::from_secs(30));
++        self.backend.search_structural_inner(
++            &query,
++            self.project(),
++            &pattern,
++            &control,
++            budget,
++            before_validate,
++        )
++    }
++}
++
++#[test]
++fn structural_scan_real_walk_includes_call_only_non_psr_files_and_keeps_zero_match_ledger() {
++    let fixture = Fixture::new();
++    let matched = fixture.write("scripts/Calls.php", "<?php /* ž🐘 */ send(1);\r\n");
++    let empty = fixture.write("other/NoDeclaration.php", "<?php $x = 1;\n");
++    let prepared = fixture.scan();
++    assert_eq!(prepared.reply.generation, 17);
++    assert_eq!(prepared.reply.files.len(), 2);
++    assert!(
++        prepared
++            .reply
++            .files
++            .iter()
++            .find(|file| file.stamp.uri == matched)
++            .unwrap()
++            .matches
++            .len()
++            == 1
++    );
++    assert!(
++        prepared
++            .reply
++            .files
++            .iter()
++            .find(|file| file.stamp.uri == empty)
++            .unwrap()
++            .matches
++            .is_empty()
++    );
++    assert!(!prepared.reply.incomplete);
++    assert!(prepared.reply.issues.is_empty());
++    let found = &prepared
++        .reply
++        .files
++        .iter()
++        .find(|file| file.stamp.uri == matched)
++        .unwrap()
++        .matches[0];
++    assert_eq!(
++        found.call.range.start.character,
++        "<?php /* ž🐘 */ ".encode_utf16().count() as u32
++    );
++    assert_eq!(
++        std::fs::read(matched.to_file_path().unwrap()).unwrap(),
++        "<?php /* ž🐘 */ send(1);\r\n".as_bytes()
++    );
++}
++
++#[test]
++fn structural_scan_unsaved_new_file_and_decoded_overlay_win_without_disk_writes() {
++    let fixture = Fixture::new();
++    let existing = fixture.write("Existing.php", "<?php send('disk');");
++    let unsaved = file_uri(&fixture.root.join("New.php")).unwrap();
++    fixture.open(&existing, 2, "<?php send('ž🐘 unsaved');");
++    fixture.open(&unsaved, 1, "<?php send('new');");
++    let prepared = fixture.scan();
++    assert_eq!(prepared.reply.files.len(), 2);
++    let file = prepared
++        .reply
++        .files
++        .iter()
++        .find(|file| file.stamp.uri == existing)
++        .unwrap();
++    assert!(matches!(
++        file.stamp.source,
++        wire::SourceKind::Open { version: 2, .. }
++    ));
++    assert_eq!(file.stamp.sha256_utf8, hash("<?php send('ž🐘 unsaved');"));
++    assert_eq!(
++        std::fs::read_to_string(existing.to_file_path().unwrap()).unwrap(),
++        "<?php send('disk');"
++    );
++    assert!(!unsaved.to_file_path().unwrap().exists());
++}
++
++#[test]
++fn structural_scan_shared_walker_honors_custom_vendor_and_ignore_files() {
++    let fixture = Fixture::new();
++    std::fs::create_dir(fixture.root.join(".git")).unwrap();
++    fixture.write("composer.json", "{}"); // Non-PHP input is not searched.
++    fixture.write(".gitignore", "ignored/\n");
++    fixture.write("src/Good.php", "<?php send('good');");
++    fixture.write("ignored/Hidden.php", "<?php send('ignored');");
++    fixture.write("deps/Package.php", "<?php send('vendor');");
++    fixture
++        .backend
++        .workspace
++        .vendor_dir_paths
++        .lock()
++        .push(fixture.root.join("deps"));
++    let prepared = fixture.scan();
++    assert_eq!(prepared.reply.files.len(), 1);
++    assert!(
++        prepared.reply.files[0]
++            .stamp
++            .uri
++            .path()
++            .ends_with("src/Good.php")
++    );
++}
++
++#[test]
++fn structural_scan_syntax_and_closed_encoding_issues_are_explicit_not_zero_matches() {
++    let fixture = Fixture::new();
++    fixture.write("Good.php", "<?php send(1);");
++    fixture.write("Broken.php", "<?php send(");
++    let binary = fixture.root.join("Encoded.php");
++    std::fs::write(&binary, [0xff, 0xfe, b'<', 0, b'?', 0]).unwrap();
++    let prepared = fixture.scan();
++    assert_eq!(prepared.reply.files.len(), 1);
++    assert_eq!(prepared.reply.issues.len(), 2);
++    assert!(prepared.reply.incomplete);
++    assert!(
++        prepared
++            .reply
++            .issues
++            .iter()
++            .any(|issue| matches!(issue.kind, wire::IssueKind::Syntax))
++    );
++    assert!(
++        prepared
++            .reply
++            .issues
++            .iter()
++            .any(|issue| matches!(issue.kind, wire::IssueKind::UnsupportedEncoding))
++    );
++}
++
++#[test]
++fn structural_scan_changed_closed_source_with_identical_length_is_rejected() {
++    let fixture = Fixture::new();
++    let uri = fixture.write("Closed.php", "<?php send('old');");
++    let result = fixture.scan_with(Budget::default(), || {
++        std::fs::write(uri.to_file_path().unwrap(), "<?php send('new');").unwrap();
++    });
++    assert!(matches!(result, Err(ScanError::ContentModified)));
++}
++
++#[test]
++fn structural_scan_changed_zero_match_source_also_retires_reply() {
++    let fixture = Fixture::new();
++    fixture.write("Match.php", "<?php send(1);");
++    let uri = fixture.write("NoMatch.php", "<?php $x = 1;");
++    let result = fixture.scan_with(Budget::default(), || {
++        std::fs::write(uri.to_file_path().unwrap(), "<?php $x = 2;").unwrap();
++    });
++    assert!(matches!(result, Err(ScanError::ContentModified)));
++}
++
++#[test]
++fn structural_scan_same_text_new_revision_and_close_reopen_retire_captured_source() {
++    for reopen in [false, true] {
++        let fixture = Fixture::new();
++        let uri = fixture.write("Open.php", "<?php send(1);");
++        fixture.open(&uri, 1, "<?php send(1);");
++        let result = fixture.scan_with(Budget::default(), || {
++            if reopen {
++                fixture.backend.diag.documents.lock().close(uri.as_str());
++                fixture.backend.open_files.write().remove(uri.as_str());
++                fixture.backend.symbols.source_authority.close(uri.as_str());
++                fixture.open(&uri, 1, "<?php send(1);");
++            } else {
++                fixture.change(&uri, 2, "<?php send(1);");
++            }
++        });
++        assert!(
++            matches!(result, Err(ScanError::ContentModified)),
++            "reopen={reopen}"
++        );
++    }
++}
++
++#[test]
++fn structural_scan_new_overlay_after_disk_capture_is_rejected() {
++    let fixture = Fixture::new();
++    let uri = fixture.write("Closed.php", "<?php send(1);");
++    let result = fixture.scan_with(Budget::default(), || {
++        fixture.open(&uri, 1, "<?php send(2);")
++    });
++    assert!(matches!(result, Err(ScanError::ContentModified)));
++}
++
++#[test]
++fn structural_scan_new_unwatched_disk_source_is_detected_by_final_discovery() {
++    let fixture = Fixture::new();
++    fixture.write("First.php", "<?php send(1);");
++    let result = fixture.scan_with(Budget::default(), || {
++        fixture.write("Added.php", "<?php send(2);");
++    });
++    assert!(matches!(result, Err(ScanError::ContentModified)));
++}
++
++#[test]
++fn structural_scan_final_router_admission_rechecks_epoch_after_worker_completion() {
++    let fixture = Fixture::new();
++    let uri = fixture.write("Open.php", "<?php send(1);");
++    fixture.open(&uri, 1, "<?php send(1);");
++    let prepared = fixture.scan();
++    assert!(prepared.validate_open_state(&fixture.backend).is_ok());
++    fixture.change(&uri, 2, "<?php send(2);");
++    assert!(matches!(
++        prepared.validate_open_state(&fixture.backend),
++        Err(ScanError::ContentModified)
++    ));
++}
++
++#[test]
++fn structural_scan_resource_refusal_returns_no_partial_prepared_reply() {
++    let fixture = Fixture::new();
++    fixture.write("First.php", "<?php send(1);");
++    fixture.write("Second.php", "<?php send(2);");
++    for budget in [
++        Budget {
++            files: 1,
++            ..Budget::default()
++        },
++        Budget {
++            input_bytes: 1,
++            ..Budget::default()
++        },
++        Budget {
++            file_bytes: 4,
++            ..Budget::default()
++        },
++        Budget {
++            matches: 1,
++            ..Budget::default()
++        },
++        Budget {
++            walk_entries: 0,
++            ..Budget::default()
++        },
++    ] {
++        assert!(matches!(
++            fixture.scan_with(budget, || {}),
++            Err(ScanError::Budget(_))
++        ));
++    }
++}
++
++#[test]
++fn structural_scan_cancellation_before_publication_returns_no_reply() {
++    let fixture = Fixture::new();
++    fixture.write("First.php", "<?php send(1);");
++    let query = fixture.query();
++    let pattern = Pattern::compile(&query.pattern).unwrap();
++    let (lifetime, control) = Lifetime::new(Instant::now() + Duration::from_secs(30));
++    let result = fixture.backend.search_structural_inner(
++        &query,
++        fixture.project(),
++        &pattern,
++        &control,
++        Budget::default(),
++        || drop(lifetime),
++    );
++    assert!(matches!(result, Err(ScanError::Cancelled)));
++}
++
++#[test]
++fn structural_scan_document_scope_uses_selected_source_and_rootless_project_refuses() {
++    let fixture = Fixture::new();
++    let selected = fixture.write("Selected.php", "<?php send(1);");
++    fixture.write("Other.php", "<?php send(2);");
++    let mut query = fixture.query();
++    query.uri = selected;
++    query.scope = wire::Scope::Document;
++    let pattern = Pattern::compile(&query.pattern).unwrap();
++    let (_lifetime, control) = Lifetime::new(Instant::now() + Duration::from_secs(30));
++    *fixture.backend.workspace.workspace_root.write() = None;
++    let project = wire::Project { id: 7, root: None };
++    let prepared = fixture
++        .backend
++        .search_structural_once(&query, project.clone(), &pattern, &control)
++        .unwrap();
++    assert_eq!(prepared.reply.files.len(), 1);
++    query.scope = wire::Scope::Project;
++    assert!(matches!(
++        fixture
++            .backend
++            .search_structural_once(&query, project, &pattern, &control),
++        Err(ScanError::InvalidInput(_))
++    ));
++}
++
++#[cfg(unix)]
++#[test]
++fn structural_scan_preferred_unsaved_alias_deduplicates_physical_source() {
++    let fixture = Fixture::new();
++    let real = fixture.write("Actual.php", "<?php send('disk');");
++    let alias_path = fixture.root.join("Alias.php");
++    std::os::unix::fs::symlink(real.to_file_path().unwrap(), &alias_path).unwrap();
++    let alias = file_uri(&alias_path).unwrap();
++    fixture.open(&real, 1, "<?php send('passive');");
++    fixture.open(&alias, 1, "<?php send('passive alias');");
++    let passive = fixture.scan();
++    assert_eq!(passive.reply.files.len(), 1);
++    assert_eq!(passive.reply.files[0].stamp.uri, real);
++    assert_eq!(
++        passive.reply.files[0].stamp.sha256_utf8,
++        hash("<?php send('passive');")
++    );
++    // Opening an alias preserves the current owner. Actual typing transfers
++    // ownership through the canonical change lifecycle, including its revision.
++    fixture.change(&alias, 2, "<?php send('preferred');");
++    let prepared = fixture.scan();
++    assert_eq!(prepared.reply.files.len(), 1);
++    assert_eq!(prepared.reply.files[0].stamp.uri, alias);
++    assert_eq!(
++        prepared.reply.files[0].stamp.sha256_utf8,
++        hash("<?php send('preferred');")
++    );
++    assert_eq!(
++        std::fs::read_to_string(real.to_file_path().unwrap()).unwrap(),
++        "<?php send('disk');"
++    );
++}
++
++#[cfg(unix)]
++#[test]
++fn structural_scan_alias_only_new_unsaved_path_inside_real_root_is_included() {
++    let fixture = Fixture::new();
++    let alias_root = fixture._directory.path().join("alias");
++    std::os::unix::fs::symlink(&fixture.root, &alias_root).unwrap();
++    let alias = file_uri(&alias_root.join("New.php")).unwrap();
++    fixture.open(&alias, 1, "<?php send('new alias');");
++    let prepared = fixture.scan();
++    assert_eq!(prepared.reply.files.len(), 1);
++    assert_eq!(prepared.reply.files[0].stamp.uri, alias);
++    assert!(!fixture.root.join("New.php").exists());
++}
++
++#[cfg(unix)]
++#[test]
++fn structural_scan_symlink_retarget_before_publication_is_rejected() {
++    let fixture = Fixture::new();
++    let first = fixture.write("First.php", "<?php send(1);");
++    let second = fixture.write("Second.php", "<?php send(2);");
++    let alias = fixture.root.join("Alias.php");
++    std::os::unix::fs::symlink(first.to_file_path().unwrap(), &alias).unwrap();
++    let result = fixture.scan_with(Budget::default(), || {
++        std::fs::remove_file(&alias).unwrap();
++        std::os::unix::fs::symlink(second.to_file_path().unwrap(), &alias).unwrap();
++    });
++    // Identity/source-set dedup can retain the same two physical sources;
++    // actual representative URI identity must still reject a retarget.
++    assert!(matches!(result, Err(ScanError::ContentModified)));
++}
++
++#[cfg(unix)]
++#[test]
++fn structural_scan_fifo_document_is_refused_without_opening_it() {
++    let fixture = Fixture::new();
++    let fifo = fixture.root.join("Pipe.php");
++    create_fifo(&fifo);
++    let (_lifetime, control) = Lifetime::new(Instant::now() + Duration::from_secs(30));
++    assert!(matches!(
++        read_disk(&fifo, 4096, &control),
++        Ok(ReadResult::Issue(wire::IssueKind::Unreadable))
++    ));
++}
++
++#[cfg(unix)]
++#[test]
++fn structural_scan_regular_file_substituted_with_fifo_after_preflight_refuses() {
++    let fixture = Fixture::new();
++    let path = fixture
++        .write("Swapped.php", "<?php send(1);")
++        .to_file_path()
++        .unwrap();
++    let (_lifetime, control) = Lifetime::new(Instant::now() + Duration::from_secs(30));
++    let result = read_disk_after_preflight(&path, 4096, &control, || {
++        std::fs::remove_file(&path).unwrap();
++        create_fifo(&path);
++    });
++    assert!(matches!(
++        result,
++        Ok(ReadResult::Issue(wire::IssueKind::Unreadable))
++    ));
++}
++
++#[cfg(unix)]
++fn create_fifo(path: &Path) {
++    // rustix intentionally omits mkfifoat on Apple platforms. This isolated
++    // fixture uses the system utility; product reads only use rustix open.
++    assert!(
++        std::process::Command::new("/usr/bin/mkfifo")
++            .arg(path)
++            .status()
++            .unwrap()
++            .success()
++    );
++}
++
++#[test]
++fn structural_scan_previews_are_bounded_unicode_safe_and_keep_full_navigation_spans() {
++    let fixture = Fixture::new();
++    let short = fixture.write("Short.php", "<?php send(\r\n'ž🐘'\r\n);");
++    let long_text = format!("<?php send('{}');", "🐘".repeat(240));
++    let long = fixture.write("Long.php", &long_text);
++    let prepared = fixture.scan();
++    let short_match = &prepared
++        .reply
++        .files
++        .iter()
++        .find(|file| file.stamp.uri == short)
++        .unwrap()
++        .matches[0];
++    assert_eq!(short_match.preview, "send(  'ž🐘'  )");
++    let long_match = &prepared
++        .reply
++        .files
++        .iter()
++        .find(|file| file.stamp.uri == long)
++        .unwrap()
++        .matches[0];
++    assert!(long_match.preview.starts_with("send('🐘"));
++    assert!(long_match.preview.ends_with('…'));
++    assert_eq!(long_match.preview.chars().count(), 161);
++    assert_eq!(
++        &long_text[long_match.call.start_byte as usize..long_match.call.end_byte as usize],
++        format!("send('{}')", "🐘".repeat(240))
++    );
++    assert_eq!(
++        std::fs::read_to_string(long.to_file_path().unwrap()).unwrap(),
++        long_text
++    );
++}
+diff --git a/src/structural_search.rs b/src/structural_search.rs
+new file mode 100644
+index 0000000..2e59992
+--- /dev/null
++++ b/src/structural_search.rs
+@@ -0,0 +1,798 @@
++//! Read-only PHP call-pattern matching through the canonical CST.
++
++use std::collections::BTreeMap;
++use std::ops::Range as ByteRange;
++
++use mago_database::file::FileId;
++use mago_span::{HasSpan, Span};
++use mago_syntax::cst::{
++    Argument, Call, ClassLikeMemberSelector, Expression, Program, Statement, Variable,
++};
++use mago_syntax::lexer::Lexer;
++use mago_syntax::settings::LexerSettings;
++use mago_syntax::token::TokenKind;
++use mago_syntax::walker::{MutWalker, walk_expression_mut, walk_statement_mut};
++use mago_syntax_core::input::Input;
++use tower_lsp::lsp_types::Range;
++
++use crate::parser::with_parsed_program;
++use crate::text_position::{PassLineTable, byte_range_to_lsp_range};
++
++const MAX_PATTERN_BYTES: usize = 4096;
++const CAPTURE_PREFIX: &[u8] = b"$__ss_";
++const MAX_CAPTURE_NAMES: usize = 32;
++const MAX_ARGUMENTS: usize = 128;
++
++#[derive(Clone, Copy, Debug)]
++pub(crate) struct Limits {
++    pub source_bytes: usize,
++    pub tokens: usize,
++    pub nesting: usize,
++    pub nodes: usize,
++    pub matches: usize,
++    /// Cumulative token comparisons, including failed candidate comparisons.
++    pub comparisons: usize,
++    pub comparison_bytes: usize,
++}
++
++impl Default for Limits {
++    fn default() -> Self {
++        Self {
++            source_bytes: 2 * 1024 * 1024,
++            tokens: 131_072,
++            nesting: 128,
++            nodes: 200_000,
++            matches: 1000,
++            comparisons: 1_000_000,
++            comparison_bytes: 16 * 1024 * 1024,
++        }
++    }
++}
++
++#[derive(Clone, Debug, Eq, PartialEq)]
++pub(crate) enum SearchError {
++    Cancelled,
++    Deadline,
++    PatternTooLarge,
++    PatternSyntax,
++    ExpectedOneCall,
++    UnsupportedPattern(&'static str),
++    InvalidCapture,
++    CaptureRoleConflict,
++    SourceSyntax,
++    ParserFailure,
++    InvalidSpan,
++    Budget(&'static str),
++}
++
++impl std::fmt::Display for SearchError {
++    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
++        match self {
++            Self::Cancelled => {
++                f.write_str("Structural search was canceled; no matches were published.")
++            }
++            Self::Deadline => {
++                f.write_str("Structural search deadline reached; no matches were published.")
++            }
++            Self::PatternTooLarge => f.write_str("Pattern exceeds 4096 bytes."),
++            Self::PatternSyntax => f.write_str("Pattern must be valid PHP syntax."),
++            Self::ExpectedOneCall => {
++                f.write_str("Enter exactly one function, instance or static call.")
++            }
++            Self::UnsupportedPattern(reason) => f.write_str(reason),
++            Self::InvalidCapture => {
++                f.write_str("Use a capture named $__ss_name with an ASCII identifier suffix.")
++            }
++            Self::CaptureRoleConflict => {
++                f.write_str("One name cannot capture both an expression and an argument sequence.")
++            }
++            Self::SourceSyntax => {
++                f.write_str("Source has parse or lexer errors; no matches were published.")
++            }
++            Self::ParserFailure => {
++                f.write_str("Parser did not complete; no matches were published.")
++            }
++            Self::InvalidSpan => f.write_str("Parser returned an invalid source span."),
++            Self::Budget(reason) => write!(
++                f,
++                "Structural search limit reached: {reason}. No matches were published."
++            ),
++        }
++    }
++}
++
++impl std::error::Error for SearchError {}
++
++impl From<control::Stop> for SearchError {
++    fn from(stop: control::Stop) -> Self {
++        match stop {
++            control::Stop::Cancelled => Self::Cancelled,
++            control::Stop::Deadline => Self::Deadline,
++        }
++    }
++}
++
++#[derive(Clone, Debug, Eq, PartialEq)]
++pub(crate) struct SourceRange {
++    pub bytes: ByteRange<usize>,
++    pub range: Range,
++}
++
++#[derive(Clone, Debug, Eq, PartialEq)]
++pub(crate) enum Capture {
++    /// All occurrences of a repeated expression capture, in source order.
++    Expression(Vec<SourceRange>),
++    /// Individual argument expression spans; excludes separators and ellipsis.
++    /// A zero-argument tail is represented by an empty vector.
++    Arguments(Vec<SourceRange>),
++}
++
++#[derive(Clone, Debug, Eq, PartialEq)]
++pub(crate) struct Match {
++    pub call: SourceRange,
++    /// Keys exclude the `$__ss_` prefix and are deterministically sorted.
++    pub captures: BTreeMap<String, Capture>,
++}
++
++#[derive(Clone, Debug)]
++struct OwnedToken {
++    kind: TokenKind,
++    text: Vec<u8>,
++}
++
++#[derive(Clone, Debug)]
++enum Term {
++    Capture(String),
++    Exact(Vec<OwnedToken>),
++}
++
++#[derive(Clone, Debug)]
++enum Head {
++    Function(Vec<OwnedToken>),
++    Instance {
++        receiver: Term,
++        method: Vec<u8>,
++    },
++    Static {
++        class: Vec<OwnedToken>,
++        method: Vec<u8>,
++    },
++}
++
++#[derive(Clone, Debug)]
++pub(crate) struct Pattern {
++    head: Head,
++    arguments: Vec<Term>,
++    tail: Option<String>,
++}
++
++#[derive(Clone, Debug)]
++struct SourceToken {
++    kind: TokenKind,
++    bytes: ByteRange<usize>,
++}
++
++struct Tokens<'s> {
++    source: &'s str,
++    tokens: Vec<SourceToken>,
++}
++
++fn bytes(span: Span) -> ByteRange<usize> {
++    span.start.offset as usize..span.end.offset as usize
++}
++
++impl<'s> Tokens<'s> {
++    /// Full-document lexer: strings/comments are never searched as calls.
++    /// Delimiter admission happens before invoking the recursive CST parser.
++    fn read(source: &'s str, limits: Limits) -> Result<Self, SearchError> {
++        Self::read_with_control(source, limits, &|| Ok(()))
++    }
++
++    fn read_with_control(
++        source: &'s str,
++        limits: Limits,
++        checkpoint: &(dyn Fn() -> Result<(), SearchError> + Sync),
++    ) -> Result<Self, SearchError> {
++        checkpoint()?;
++        if source.len() > limits.source_bytes || source.len() > u32::MAX as usize {
++            return Err(SearchError::Budget("source bytes"));
++        }
++        let input = Input::new(FileId::new(b"structural-search.php"), source.as_bytes());
++        let mut lexer = Lexer::new(input, LexerSettings::default());
++        let mut tokens = Vec::new();
++        let mut depth = 0usize;
++        loop {
++            checkpoint()?;
++            let Some(token) = lexer.advance() else {
++                break;
++            };
++            let token = token.map_err(|_| SearchError::SourceSyntax)?;
++            if token.kind == TokenKind::PartialLiteralString {
++                return Err(SearchError::SourceSyntax);
++            }
++            if token.kind.is_trivia() {
++                continue;
++            }
++            if tokens.len() >= limits.tokens {
++                return Err(SearchError::Budget("syntax tokens"));
++            }
++            match token.kind {
++                TokenKind::LeftParenthesis | TokenKind::LeftBracket | TokenKind::LeftBrace => {
++                    depth += 1;
++                    if depth > limits.nesting {
++                        return Err(SearchError::Budget("delimiter nesting"));
++                    }
++                }
++                TokenKind::RightParenthesis | TokenKind::RightBracket | TokenKind::RightBrace => {
++                    depth = depth.saturating_sub(1);
++                }
++                _ => {}
++            }
++            let start = token.start.offset as usize;
++            let end = start
++                .checked_add(token.value.len())
++                .ok_or(SearchError::InvalidSpan)?;
++            if source.get(start..end).is_none() {
++                return Err(SearchError::InvalidSpan);
++            }
++            tokens.push(SourceToken {
++                kind: token.kind,
++                bytes: start..end,
++            });
++        }
++        Ok(Self { source, tokens })
++    }
++
++    fn within(&self, range: ByteRange<usize>) -> Result<&[SourceToken], SearchError> {
++        if range.start >= range.end || self.source.get(range.clone()).is_none() {
++            return Err(SearchError::InvalidSpan);
++        }
++        let start = self
++            .tokens
++            .partition_point(|token| token.bytes.end <= range.start);
++        let end = self
++            .tokens
++            .partition_point(|token| token.bytes.start < range.end);
++        let result = &self.tokens[start..end];
++        if result.is_empty()
++            || result
++                .iter()
++                .any(|token| token.bytes.start < range.start || token.bytes.end > range.end)
++        {
++            return Err(SearchError::InvalidSpan);
++        }
++        Ok(result)
++    }
++
++    fn exact(&self, range: ByteRange<usize>) -> Result<Vec<OwnedToken>, SearchError> {
++        self.within(range)?
++            .iter()
++            .map(|token| {
++                Ok(OwnedToken {
++                    kind: token.kind,
++                    text: self.source.as_bytes()[token.bytes.clone()].to_vec(),
++                })
++            })
++            .collect()
++    }
++
++    fn owns_reserved_variable(&self, range: ByteRange<usize>) -> Result<bool, SearchError> {
++        Ok(self.within(range)?.iter().any(|token| {
++            token.kind == TokenKind::Variable
++                && self.source.as_bytes()[token.bytes.clone()].starts_with(CAPTURE_PREFIX)
++        }))
++    }
++
++    fn location(&self, range: ByteRange<usize>) -> Result<SourceRange, SearchError> {
++        if self.source.get(range.clone()).is_none() || range.start > range.end {
++            return Err(SearchError::InvalidSpan);
++        }
++        Ok(SourceRange {
++            range: byte_range_to_lsp_range(self.source, range.start, range.end),
++            bytes: range,
++        })
++    }
++}
++
++fn capture_name(expression: &Expression<'_>) -> Result<Option<String>, SearchError> {
++    let Expression::Variable(Variable::Direct(variable)) = expression else {
++        return Ok(None);
++    };
++    let Some(name) = variable.name.strip_prefix(CAPTURE_PREFIX) else {
++        return Ok(None);
++    };
++    if name.is_empty()
++        || !matches!(name[0], b'a'..=b'z' | b'A'..=b'Z' | b'_')
++        || name
++            .iter()
++            .any(|byte| !byte.is_ascii_alphanumeric() && *byte != b'_')
++    {
++        return Err(SearchError::InvalidCapture);
++    }
++    Ok(Some(
++        String::from_utf8(name.to_vec()).map_err(|_| SearchError::InvalidCapture)?,
++    ))
++}
++
++fn literal_name(expression: &Expression<'_>, class: bool) -> bool {
++    matches!(expression, Expression::Identifier(_))
++        || (class
++            && matches!(
++                expression,
++                Expression::Self_(_) | Expression::Parent(_) | Expression::Static(_)
++            ))
++}
++
++fn member_name<'a>(selector: &'a ClassLikeMemberSelector<'_>) -> Result<&'a [u8], SearchError> {
++    match selector {
++        ClassLikeMemberSelector::Identifier(identifier) => Ok(identifier.value),
++        _ => Err(SearchError::UnsupportedPattern(
++            "Dynamic method names are not supported.",
++        )),
++    }
++}
++
++fn term(expression: &Expression<'_>, tokens: &Tokens<'_>) -> Result<Term, SearchError> {
++    if let Some(name) = capture_name(expression)? {
++        return Ok(Term::Capture(name));
++    }
++    let span = bytes(expression.span());
++    if tokens.owns_reserved_variable(span.clone())? {
++        return Err(SearchError::UnsupportedPattern(
++            "A capture must occupy a whole receiver or argument expression.",
++        ));
++    }
++    Ok(Term::Exact(tokens.exact(span)?))
++}
++
++impl Pattern {
++    pub(crate) fn compile(input: &str) -> Result<Self, SearchError> {
++        if input.len() > MAX_PATTERN_BYTES {
++            return Err(SearchError::PatternTooLarge);
++        }
++        let input = input.trim();
++        let mut source = if input.starts_with("<?php") {
++            input.to_owned()
++        } else {
++            format!("<?php {input}")
++        };
++        let limits = Limits {
++            source_bytes: MAX_PATTERN_BYTES + 16,
++            ..Limits::default()
++        };
++        let first_tokens = Tokens::read(&source, limits).map_err(pattern_error)?;
++        if !first_tokens
++            .tokens
++            .last()
++            .is_some_and(|token| token.kind == TokenKind::Semicolon)
++        {
++            // A newline keeps a trailing // comment from swallowing our terminator.
++            source.push_str("\n;");
++        }
++        let tokens = Tokens::read(&source, limits).map_err(pattern_error)?;
++        with_parsed_program(&source, "structural_search.compile", |program, _| {
++            Some(Self::compile_program(program, &tokens))
++        })
++        .ok_or(SearchError::ParserFailure)?
++    }
++
++    fn compile_program(program: &Program<'_>, tokens: &Tokens<'_>) -> Result<Self, SearchError> {
++        if program.has_errors() {
++            return Err(SearchError::PatternSyntax);
++        }
++        let mut expression = None;
++        for statement in program.statements.iter() {
++            match statement {
++                Statement::OpeningTag(_) => {}
++                Statement::Expression(statement) if expression.is_none() => {
++                    expression = Some(statement.expression)
++                }
++                _ => return Err(SearchError::ExpectedOneCall),
++            }
++        }
++        let Some(Expression::Call(call)) = expression else {
++            return Err(SearchError::ExpectedOneCall);
++        };
++        let head = match call {
++            Call::Function(call) if literal_name(call.function, false) => {
++                Head::Function(tokens.exact(bytes(call.function.span()))?)
++            }
++            Call::Method(call) => Head::Instance {
++                receiver: term(call.object, tokens)?,
++                method: member_name(&call.method)?.to_vec(),
++            },
++            Call::StaticMethod(call) if literal_name(call.class, true) => Head::Static {
++                class: tokens.exact(bytes(call.class.span()))?,
++                method: member_name(&call.method)?.to_vec(),
++            },
++            Call::NullSafeMethod(_) => {
++                return Err(SearchError::UnsupportedPattern(
++                    "Nullsafe call patterns are not supported yet.",
++                ));
++            }
++            _ => {
++                return Err(SearchError::UnsupportedPattern(
++                    "Use a literal function or static class name.",
++                ));
++            }
++        };
++        let list = call.get_argument_list();
++        if list.arguments.len() > MAX_ARGUMENTS {
++            return Err(SearchError::Budget("pattern arguments"));
++        }
++        let mut arguments = Vec::new();
++        let mut tail = None;
++        for (index, argument) in list.arguments.iter().enumerate() {
++            let Argument::Positional(argument) = argument else {
++                return Err(SearchError::UnsupportedPattern(
++                    "Named argument patterns are not supported.",
++                ));
++            };
++            if argument.ellipsis.is_some() {
++                if index + 1 != list.arguments.len() {
++                    return Err(SearchError::UnsupportedPattern(
++                        "A variadic capture must be the final argument.",
++                    ));
++                }
++                tail = Some(capture_name(argument.value)?.ok_or(
++                    SearchError::UnsupportedPattern(
++                        "Only ...$__ss_name may unpack a pattern argument.",
++                    ),
++                )?);
++            } else {
++                arguments.push(term(argument.value, tokens)?);
++            }
++        }
++        let mut roles = BTreeMap::new();
++        if let Head::Instance {
++            receiver: Term::Capture(name),
++            ..
++        } = &head
++        {
++            roles.insert(name.clone(), false);
++        }
++        for term in &arguments {
++            if let Term::Capture(name) = term {
++                roles.insert(name.clone(), false);
++            }
++        }
++        if let Some(name) = &tail
++            && roles.insert(name.clone(), true).is_some()
++        {
++            return Err(SearchError::CaptureRoleConflict);
++        }
++        if roles.len() > MAX_CAPTURE_NAMES {
++            return Err(SearchError::Budget("capture names"));
++        }
++        Ok(Self {
++            head,
++            arguments,
++            tail,
++        })
++    }
++
++    /// All-or-error: budget exhaustion never publishes a partial result vector.
++    /// Source must be a complete PHP document (ordinary <?php/inline handling).
++    #[cfg(test)]
++    pub(crate) fn find_in(&self, source: &str, limits: Limits) -> Result<Vec<Match>, SearchError> {
++        self.find_in_with_control(source, limits, &|| Ok(()))
++    }
++
++    /// Cooperative checks surround parsing and run through lexing, walking and
++    /// comparison. The bounded parser call itself cannot be interrupted.
++    pub(crate) fn find_in_with_control(
++        &self,
++        source: &str,
++        limits: Limits,
++        checkpoint: &(dyn Fn() -> Result<(), SearchError> + Sync),
++    ) -> Result<Vec<Match>, SearchError> {
++        let tokens = Tokens::read_with_control(source, limits, checkpoint)?;
++        checkpoint()?;
++        let result = with_parsed_program(source, "structural_search.find", |program, _| {
++            Some(self.find_program(program, &tokens, limits, checkpoint))
++        })
++        .ok_or(SearchError::ParserFailure)?;
++        checkpoint()?;
++        result
++    }
++
++    fn find_program(
++        &self,
++        program: &Program<'_>,
++        tokens: &Tokens<'_>,
++        limits: Limits,
++        checkpoint: &(dyn Fn() -> Result<(), SearchError> + Sync),
++    ) -> Result<Vec<Match>, SearchError> {
++        checkpoint()?;
++        if program.has_errors() {
++            return Err(SearchError::SourceSyntax);
++        }
++        let _lines = PassLineTable::new(tokens.source);
++        let mut visitor = Search {
++            pattern: self,
++            checkpoint,
++            tokens,
++            limits,
++            depth: 0,
++            visited: 0,
++            comparisons: 0,
++            comparison_bytes: 0,
++            result: Vec::new(),
++            error: None,
++        };
++        visitor.walk_program(program, &mut ());
++        if let Some(error) = visitor.error {
++            return Err(error);
++        }
++        visitor
++            .result
++            .sort_by_key(|item| (item.call.bytes.start, item.call.bytes.end));
++        checkpoint()?;
++        Ok(visitor.result)
++    }
++}
++
++fn pattern_error(error: SearchError) -> SearchError {
++    if error == SearchError::SourceSyntax {
++        SearchError::PatternSyntax
++    } else {
++        error
++    }
++}
++
++struct Binding {
++    first: ByteRange<usize>,
++    occurrences: Vec<ByteRange<usize>>,
++}
++
++struct Search<'p, 't, 's> {
++    pattern: &'p Pattern,
++    checkpoint: &'p (dyn Fn() -> Result<(), SearchError> + Sync),
++    tokens: &'t Tokens<'s>,
++    limits: Limits,
++    depth: usize,
++    visited: usize,
++    comparisons: usize,
++    comparison_bytes: usize,
++    result: Vec<Match>,
++    error: Option<SearchError>,
++}
++
++impl Search<'_, '_, '_> {
++    fn enter(&mut self) -> bool {
++        if self.error.is_some() {
++            return false;
++        }
++        if let Err(error) = (self.checkpoint)() {
++            self.error = Some(error);
++            return false;
++        }
++        self.visited += 1;
++        if self.visited > self.limits.nodes {
++            self.error = Some(SearchError::Budget("CST nodes"));
++            return false;
++        }
++        if self.depth >= self.limits.nesting {
++            self.error = Some(SearchError::Budget("CST nesting"));
++            return false;
++        }
++        self.depth += 1;
++        true
++    }
++
++    fn charge(&mut self, count: usize, bytes: usize) -> Result<(), SearchError> {
++        (self.checkpoint)()?;
++        self.comparisons = self
++            .comparisons
++            .checked_add(count)
++            .ok_or(SearchError::Budget("token comparisons"))?;
++        if self.comparisons > self.limits.comparisons {
++            return Err(SearchError::Budget("token comparisons"));
++        }
++        self.comparison_bytes = self
++            .comparison_bytes
++            .checked_add(bytes)
++            .ok_or(SearchError::Budget("compared bytes"))?;
++        if self.comparison_bytes > self.limits.comparison_bytes {
++            return Err(SearchError::Budget("compared bytes"));
++        }
++        Ok(())
++    }
++
++    fn exact_matches(
++        &mut self,
++        expected: &[OwnedToken],
++        range: ByteRange<usize>,
++    ) -> Result<bool, SearchError> {
++        let actual_count = self.tokens.within(range.clone())?.len();
++        let cost = range.len() + expected.iter().map(|token| token.text.len()).sum::<usize>();
++        self.charge(actual_count.max(expected.len()), cost)?;
++        let actual = self.tokens.within(range)?;
++        if actual.len() != expected.len() {
++            return Ok(false);
++        }
++        for (actual, expected) in actual.iter().zip(expected) {
++            (self.checkpoint)()?;
++            if actual.kind != expected.kind
++                || self.tokens.source.as_bytes()[actual.bytes.clone()] != expected.text
++            {
++                return Ok(false);
++            }
++        }
++        Ok(true)
++    }
++
++    fn same_expression(
++        &mut self,
++        left: ByteRange<usize>,
++        right: ByteRange<usize>,
++    ) -> Result<bool, SearchError> {
++        let left_count = self.tokens.within(left.clone())?.len();
++        let right_count = self.tokens.within(right.clone())?.len();
++        self.charge(left_count.max(right_count), left.len() + right.len())?;
++        let left = self.tokens.within(left)?;
++        let right = self.tokens.within(right)?;
++        // Both spans come from complete CST Expression nodes. Compare their
++        // syntax token sequences, not source offsets or trivia. Parentheses,
++        // quote style, name spelling/case and literal spelling remain exact.
++        if left.len() != right.len() {
++            return Ok(false);
++        }
++        for (a, b) in left.iter().zip(right) {
++            (self.checkpoint)()?;
++            if a.kind != b.kind
++                || self.tokens.source.as_bytes()[a.bytes.clone()]
++                    != self.tokens.source.as_bytes()[b.bytes.clone()]
++            {
++                return Ok(false);
++            }
++        }
++        Ok(true)
++    }
++
++    fn match_term(
++        &mut self,
++        expected: &Term,
++        expression: &Expression<'_>,
++        bindings: &mut BTreeMap<String, Binding>,
++    ) -> Result<bool, SearchError> {
++        let range = bytes(expression.span());
++        match expected {
++            Term::Exact(expected) => self.exact_matches(expected, range),
++            Term::Capture(name) => {
++                // Validate even a first occurrence before storing any span.
++                self.tokens.within(range.clone())?;
++                if let Some(previous) = bindings.get_mut(name) {
++                    if !self.same_expression(previous.first.clone(), range.clone())? {
++                        return Ok(false);
++                    }
++                    previous.occurrences.push(range);
++                } else {
++                    bindings.insert(
++                        name.clone(),
++                        Binding {
++                            first: range.clone(),
++                            occurrences: vec![range],
++                        },
++                    );
++                }
++                Ok(true)
++            }
++        }
++    }
++
++    fn match_call(&mut self, call: &Call<'_>) -> Result<Option<Match>, SearchError> {
++        (self.checkpoint)()?;
++        let list = call.get_argument_list();
++        if list.arguments.len() > MAX_ARGUMENTS {
++            return Err(SearchError::Budget("candidate arguments"));
++        }
++        // A candidate sequence has fixed known positional arity only. Do not
++        // reinterpret named keys or runtime unpacking as positional expressions.
++        if list.arguments.iter().any(|argument| !matches!(argument, Argument::Positional(argument) if argument.ellipsis.is_none())) {
++            return Ok(None);
++        }
++        let minimum = self.pattern.arguments.len();
++        if list.arguments.len() < minimum
++            || (self.pattern.tail.is_none() && list.arguments.len() != minimum)
++        {
++            return Ok(None);
++        }
++        let mut bindings = BTreeMap::new();
++        let pattern = self.pattern;
++        let head_matches = match (&pattern.head, call) {
++            (Head::Function(expected), Call::Function(actual))
++                if literal_name(actual.function, false) =>
++            {
++                self.exact_matches(expected, bytes(actual.function.span()))?
++            }
++            (Head::Instance { receiver, method }, Call::Method(actual)) => {
++                matches!(&actual.method, ClassLikeMemberSelector::Identifier(name) if name.value == method.as_slice())
++                    && self.match_term(receiver, actual.object, &mut bindings)?
++            }
++            (Head::Static { class, method }, Call::StaticMethod(actual))
++                if literal_name(actual.class, true) =>
++            {
++                matches!(&actual.method, ClassLikeMemberSelector::Identifier(name) if name.value == method.as_slice())
++                    && self.exact_matches(class, bytes(actual.class.span()))?
++            }
++            _ => false,
++        };
++        if !head_matches {
++            return Ok(None);
++        }
++        for (expected, actual) in pattern.arguments.iter().zip(list.arguments.iter()) {
++            if !self.match_term(expected, actual.value(), &mut bindings)? {
++                return Ok(None);
++            }
++        }
++        let mut captures = BTreeMap::new();
++        for (name, binding) in bindings {
++            let mut occurrences = binding.occurrences;
++            occurrences.sort_by_key(|range| (range.start, range.end));
++            captures.insert(
++                name,
++                Capture::Expression(
++                    occurrences
++                        .into_iter()
++                        .map(|range| self.tokens.location(range))
++                        .collect::<Result<_, _>>()?,
++                ),
++            );
++        }
++        if let Some(name) = &self.pattern.tail {
++            let arguments = list
++                .arguments
++                .iter()
++                .skip(minimum)
++                .map(|argument| self.tokens.location(bytes(argument.value().span())))
++                .collect::<Result<_, _>>()?;
++            captures.insert(name.clone(), Capture::Arguments(arguments));
++        }
++        Ok(Some(Match {
++            call: self.tokens.location(bytes(call.span()))?,
++            captures,
++        }))
++    }
++}
++
++impl<'ast, 'arena> MutWalker<'ast, 'arena, ()> for Search<'_, '_, '_> {
++    fn walk_statement(&mut self, statement: &'ast Statement<'arena>, context: &mut ()) {
++        if self.enter() {
++            walk_statement_mut(self, statement, context);
++            self.depth -= 1;
++        }
++    }
++
++    fn walk_expression(&mut self, expression: &'ast Expression<'arena>, context: &mut ()) {
++        if self.enter() {
++            walk_expression_mut(self, expression, context);
++            self.depth -= 1;
++        }
++    }
++
++    fn walk_in_call(&mut self, call: &'ast Call<'arena>, _: &mut ()) {
++        if self.error.is_some() {
++            return;
++        }
++        match self.match_call(call) {
++            Ok(Some(found)) if self.result.len() < self.limits.matches => self.result.push(found),
++            Ok(Some(_)) => self.error = Some(SearchError::Budget("matches")),
++            Ok(None) => {}
++            Err(error) => self.error = Some(error),
++        }
++    }
++}
++
++#[path = "structural_scan.rs"]
++pub(crate) mod scan;
++
++#[path = "structural_search_wire.rs"]
++pub(crate) mod wire;
++
++#[path = "structural_search_control.rs"]
++pub(crate) mod control;
++
++#[cfg(test)]
++#[path = "structural_search_tests.rs"]
++mod tests;
+diff --git a/src/structural_search_control.rs b/src/structural_search_control.rs
+new file mode 100644
+index 0000000..d37c418
+--- /dev/null
++++ b/src/structural_search_control.rs
+@@ -0,0 +1,96 @@
++//! Cooperative lifetime shared by the async request and its blocking worker.
++
++use std::sync::{
++    Arc,
++    atomic::{AtomicBool, Ordering},
++};
++use std::time::Instant;
++
++#[derive(Clone)]
++pub(crate) struct Control {
++    cancelled: Arc<AtomicBool>,
++    deadline: Instant,
++}
++
++pub(crate) struct Lifetime {
++    cancelled: Arc<AtomicBool>,
++}
++
++#[derive(Clone, Copy, Debug, Eq, PartialEq)]
++pub(crate) enum Stop {
++    Cancelled,
++    Deadline,
++}
++
++impl Lifetime {
++    pub(crate) fn new(deadline: Instant) -> (Self, Control) {
++        let cancelled = Arc::new(AtomicBool::new(false));
++        (
++            Self {
++                cancelled: Arc::clone(&cancelled),
++            },
++            Control {
++                cancelled,
++                deadline,
++            },
++        )
++    }
++}
++
++impl Drop for Lifetime {
++    fn drop(&mut self) {
++        self.cancelled.store(true, Ordering::Release);
++    }
++}
++
++impl Control {
++    pub(crate) fn checkpoint(&self) -> Result<(), Stop> {
++        self.checkpoint_at(Instant::now())
++    }
++
++    fn checkpoint_at(&self, now: Instant) -> Result<(), Stop> {
++        if self.cancelled.load(Ordering::Acquire) {
++            return Err(Stop::Cancelled);
++        }
++        if now >= self.deadline {
++            return Err(Stop::Deadline);
++        }
++        Ok(())
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use std::time::Duration;
++
++    #[test]
++    fn dropped_async_owner_cancels_all_worker_clones() {
++        let now = Instant::now();
++        let (owner, worker) = Lifetime::new(now + Duration::from_secs(1));
++        let nested = worker.clone();
++        assert_eq!(worker.checkpoint_at(now), Ok(()));
++        drop(owner);
++        assert_eq!(worker.checkpoint_at(now), Err(Stop::Cancelled));
++        assert_eq!(nested.checkpoint_at(now), Err(Stop::Cancelled));
++    }
++
++    #[test]
++    fn exact_deadline_refuses_without_sleep_or_clock_mutation() {
++        let now = Instant::now();
++        let deadline = now + Duration::from_secs(1);
++        let (_owner, worker) = Lifetime::new(deadline);
++        assert_eq!(worker.checkpoint_at(now), Ok(()));
++        assert_eq!(worker.checkpoint_at(deadline), Err(Stop::Deadline));
++    }
++
++    #[test]
++    fn independent_requests_do_not_cancel_each_other() {
++        let now = Instant::now();
++        let (old_owner, old) = Lifetime::new(now + Duration::from_secs(1));
++        let (_new_owner, new) = Lifetime::new(now + Duration::from_secs(1));
++        drop(old_owner);
++        assert_eq!(old.checkpoint_at(now), Err(Stop::Cancelled));
++        assert_eq!(new.checkpoint_at(now), Ok(()));
++    }
++}
+diff --git a/src/structural_search_tests.rs b/src/structural_search_tests.rs
+new file mode 100644
+index 0000000..62209cf
+--- /dev/null
++++ b/src/structural_search_tests.rs
+@@ -0,0 +1,541 @@
++use super::*;
++
++fn find(pattern: &str, source: &str) -> Vec<Match> {
++    Pattern::compile(pattern)
++        .expect("valid pattern")
++        .find_in(source, Limits::default())
++        .expect("valid complete PHP source")
++}
++
++fn expression_texts<'a>(found: &Match, name: &str, source: &'a str) -> Vec<&'a str> {
++    let Capture::Expression(occurrences) = &found.captures[name] else {
++        panic!("expected expression capture");
++    };
++    occurrences
++        .iter()
++        .map(|range| &source[range.bytes.clone()])
++        .collect()
++}
++
++#[test]
++fn structural_function_matches_ignore_trivia_not_string_contents_or_other_call_kinds() {
++    let source = r#"<?php
++// json_decode($comment);
++$text = 'json_decode($literal)';
++json_decode /* one */ ( $payload /* two */ );
++json_encode($payload);
++$object->json_decode($payload);
++Decoder::json_decode($payload);
++"#;
++    let matches = find("json_decode($__ss_value)", source);
++    assert_eq!(matches.len(), 1);
++    assert_eq!(
++        &source[matches[0].call.bytes.clone()],
++        "json_decode /* one */ ( $payload /* two */ )"
++    );
++    assert_eq!(
++        expression_texts(&matches[0], "value", source),
++        vec!["$payload"]
++    );
++}
++
++#[test]
++fn structural_calls_keep_literal_name_case_and_qualification() {
++    let source = r"<?php render($x); Render($x); \render($x); Demo\render($x);";
++    for pattern in [
++        "render($__ss_x)",
++        "Render($__ss_x)",
++        r"\render($__ss_x)",
++        r"Demo\render($__ss_x)",
++    ] {
++        assert_eq!(find(pattern, source).len(), 1, "{pattern}");
++    }
++}
++
++#[test]
++fn structural_instance_receiver_is_a_whole_expression_and_static_is_distinct() {
++    let source = r"<?php $a->save($x); factory()->save($x); Store::save($x); $a?->save($x); $a->$method($x);";
++    let matches = find("$__ss_receiver->save($__ss_value)", source);
++    assert_eq!(matches.len(), 2);
++    assert_eq!(
++        expression_texts(&matches[1], "receiver", source),
++        vec!["factory()"]
++    );
++    assert_eq!(find("Store::save($__ss_value)", source).len(), 1);
++    assert_eq!(find("$a->save($__ss_value)", source).len(), 1);
++}
++
++#[test]
++fn structural_relative_static_class_forms_are_lexical_not_inferred() {
++    let source = "<?php class X { function f() { self::put(1); static::put(1); parent::put(1); } }";
++    for pattern in [
++        "self::put($__ss_value)",
++        "static::put($__ss_value)",
++        "parent::put($__ss_value)",
++    ] {
++        assert_eq!(find(pattern, source).len(), 1);
++    }
++}
++
++#[test]
++fn structural_repeated_capture_compares_whole_expression_syntax_without_offsets_or_trivia() {
++    let source = "<?php same($a + 1, $a/* note */+1); same($a+1, $a-1); same($a+1, $b+1); same(($a+1), $a+1);";
++    let matches = find("same($__ss_value, $__ss_value)", source);
++    assert_eq!(matches.len(), 1);
++    assert_eq!(
++        expression_texts(&matches[0], "value", source),
++        vec!["$a + 1", "$a/* note */+1"]
++    );
++}
++
++#[test]
++fn structural_repeated_capture_preserves_literal_spelling_and_string_whitespace() {
++    let source = "<?php same('a b', 'ab'); same('a b', 'a b'); same(1, 1.0); same('x', \"x\");";
++    let matches = find("same($__ss_value, $__ss_value)", source);
++    assert_eq!(matches.len(), 1);
++    assert_eq!(
++        expression_texts(&matches[0], "value", source),
++        vec!["'a b'", "'a b'"]
++    );
++}
++
++#[test]
++fn structural_repeated_receiver_and_argument_capture_share_one_binding() {
++    let source = "<?php $a->replace($a); $a->replace($b); factory()->replace(factory());";
++    let matches = find("$__ss_value->replace($__ss_value)", source);
++    assert_eq!(matches.len(), 2);
++    assert_eq!(
++        expression_texts(&matches[1], "value", source),
++        vec!["factory()", "factory()"]
++    );
++}
++
++#[test]
++fn structural_trailing_variadic_capture_includes_zero_or_many_positional_expressions() {
++    let source = "<?php emit('topic'); emit('topic', $a, fn() => 2, [1, 2]); emit('other', 3);";
++    let matches = find("emit('topic', ...$__ss_arguments)", source);
++    assert_eq!(matches.len(), 2);
++    let Capture::Arguments(empty) = &matches[0].captures["arguments"] else {
++        panic!()
++    };
++    assert!(empty.is_empty());
++    let Capture::Arguments(arguments) = &matches[1].captures["arguments"] else {
++        panic!()
++    };
++    assert_eq!(
++        arguments
++            .iter()
++            .map(|range| &source[range.bytes.clone()])
++            .collect::<Vec<_>>(),
++        vec!["$a", "fn() => 2", "[1, 2]"]
++    );
++}
++
++#[test]
++fn structural_named_and_runtime_unpacked_candidate_arguments_are_not_positional() {
++    let source = "<?php emit(value: 1); emit(...$values); emit(1, ...$values); emit(1, 2);";
++    let matches = find("emit(...$__ss_arguments)", source);
++    assert_eq!(matches.len(), 1);
++    assert_eq!(&source[matches[0].call.bytes.clone()], "emit(1, 2)");
++}
++
++#[test]
++fn structural_exact_argument_expression_ignores_trivia_and_does_not_capture_inside_it() {
++    let source =
++        "<?php send(['key' => 1], $a); send([ 'key' /*x*/ => 1 ], $b); send(['key' => 2], $c);";
++    assert_eq!(find("send(['key' => 1], $__ss_value)", source).len(), 2);
++    assert!(matches!(
++        Pattern::compile("send($__ss_value + 1)"),
++        Err(SearchError::UnsupportedPattern(_))
++    ));
++}
++
++#[test]
++fn structural_nested_real_calls_are_all_returned_in_source_order() {
++    let source = "<?php wrap(wrap($a)); function f() { wrap($b); $x = fn() => wrap($c); }";
++    let matches = find("wrap($__ss_value)", source);
++    assert_eq!(matches.len(), 4);
++    assert_eq!(
++        matches
++            .iter()
++            .map(|found| &source[found.call.bytes.clone()])
++            .collect::<Vec<_>>(),
++        vec!["wrap(wrap($a))", "wrap($a)", "wrap($b)", "wrap($c)"]
++    );
++}
++
++#[test]
++fn structural_captures_preserve_unicode_crlf_byte_and_utf16_ranges() {
++    let source = "<?php\r\n$note = 'ž🐘'; send($ž, ['🐘']);\r\n";
++    let matches = find("send($__ss_value, $__ss_other)", source);
++    assert_eq!(matches.len(), 1);
++    let found = &matches[0];
++    assert_eq!(found.call.range.start.line, 1);
++    assert_eq!(
++        found.call.range.start.character,
++        "$note = 'ž🐘'; ".encode_utf16().count() as u32
++    );
++    assert_eq!(
++        found.call.range.end.character,
++        "$note = 'ž🐘'; send($ž, ['🐘'])".encode_utf16().count() as u32
++    );
++    assert_eq!(expression_texts(found, "value", source), vec!["$ž"]);
++    assert_eq!(expression_texts(found, "other", source), vec!["['🐘']"]);
++    assert_eq!(&source[found.call.bytes.clone()], "send($ž, ['🐘'])");
++}
++
++#[test]
++fn structural_patterns_admit_optional_tag_terminator_and_trailing_comments() {
++    let source = "<?php render(1);";
++    for pattern in [
++        "render($__ss_x)",
++        "render($__ss_x);",
++        "<?php render($__ss_x);",
++        "render($__ss_x) // trailing",
++        "render($__ss_x); /* trailing */",
++    ] {
++        assert_eq!(find(pattern, source).len(), 1, "{pattern}");
++    }
++}
++
++#[test]
++fn structural_patterns_refuse_unsupported_or_ambiguous_grammar() {
++    for pattern in [
++        "render(value: $__ss_value)",
++        "render(...$values)",
++        "render(...$__ss_values, 1)",
++        "$__ss_target($__ss_value)",
++        "$object->$method($__ss_value)",
++        "$object?->save($__ss_value)",
++        "$__ss_class::save($__ss_value)",
++        "render($__ss_value, ...$__ss_value)",
++        "render($__ss_)",
++        "render($__ss_value + 1)",
++        "render(1); render(2);",
++        "42",
++        "render(",
++        "",
++    ] {
++        assert!(
++            Pattern::compile(pattern).is_err(),
++            "unexpectedly accepted {pattern}"
++        );
++    }
++}
++
++#[test]
++fn structural_malformed_source_refuses_instead_of_publishing_partial_matches() {
++    let pattern = Pattern::compile("render($__ss_value)").unwrap();
++    for source in [
++        "<?php render(1); render(",
++        "<?php render(1); $x = 'unfinished",
++    ] {
++        assert_eq!(
++            pattern.find_in(source, Limits::default()),
++            Err(SearchError::SourceSyntax)
++        );
++    }
++}
++
++#[test]
++fn structural_match_budget_refuses_without_partial_success() {
++    let pattern = Pattern::compile("render($__ss_value)").unwrap();
++    assert_eq!(
++        pattern.find_in(
++            "<?php render(1); render(2);",
++            Limits {
++                matches: 1,
++                ..Limits::default()
++            }
++        ),
++        Err(SearchError::Budget("matches"))
++    );
++    assert!(
++        pattern
++            .find_in(
++                "<?php render(1);",
++                Limits {
++                    matches: 1,
++                    ..Limits::default()
++                }
++            )
++            .is_ok()
++    );
++}
++
++#[test]
++fn structural_source_token_comparison_and_node_budgets_are_explicit_errors() {
++    let pattern = Pattern::compile("same($__ss_x, $__ss_x)").unwrap();
++    let source = "<?php same($a + 1, $a + 1);";
++    for limits in [
++        Limits {
++            source_bytes: source.len() - 1,
++            ..Limits::default()
++        },
++        Limits {
++            tokens: 2,
++            ..Limits::default()
++        },
++        Limits {
++            comparisons: 0,
++            ..Limits::default()
++        },
++        Limits {
++            comparison_bytes: 0,
++            ..Limits::default()
++        },
++        Limits {
++            nodes: 1,
++            ..Limits::default()
++        },
++        Limits {
++            nesting: 1,
++            ..Limits::default()
++        },
++    ] {
++        assert!(matches!(
++            pattern.find_in(source, limits),
++            Err(SearchError::Budget(_))
++        ));
++    }
++    assert!(
++        pattern
++            .find_in(
++                source,
++                Limits {
++                    source_bytes: source.len(),
++                    ..Limits::default()
++                }
++            )
++            .is_ok()
++    );
++}
++
++#[test]
++fn structural_failed_repeated_candidate_does_not_leak_its_bindings() {
++    let source = "<?php same($a, $b); same($c, $c);";
++    let matches = find("same($__ss_value, $__ss_value)", source);
++    assert_eq!(matches.len(), 1);
++    assert_eq!(
++        expression_texts(&matches[0], "value", source),
++        vec!["$c", "$c"]
++    );
++}
++
++#[test]
++fn structural_interpolation_searches_executable_calls_not_literal_lookalikes() {
++    let source = r#"<?php
++$literal = '$object->render($value)';
++$actual = "{$object->render($value)}";
++"#;
++    let matches = find("$__ss_receiver->render($__ss_value)", source);
++    assert_eq!(matches.len(), 1);
++    assert_eq!(
++        &source[matches[0].call.bytes.clone()],
++        "$object->render($value)"
++    );
++    assert_eq!(
++        expression_texts(&matches[0], "receiver", source),
++        vec!["$object"]
++    );
++    assert!(matches!(
++        Pattern::compile(r#"say("hello $__ss_value")"#),
++        Err(SearchError::UnsupportedPattern(_))
++    ));
++    assert!(matches!(
++        Pattern::compile(r#"say("hello {$__ss_value}")"#),
++        Err(SearchError::UnsupportedPattern(_))
++    ));
++}
++
++#[test]
++fn structural_repeated_interpolated_strings_keep_literal_text_and_variable_spelling() {
++    let source = r#"<?php
++same("hi {$a}", "hi {$a}");
++same("hi {$a}", "hi {$b}");
++same("hi {$a}", "hi{$a}");
++"#;
++    assert_eq!(find("same($__ss_value, $__ss_value)", source).len(), 1);
++}
++
++#[test]
++fn structural_php_tag_islands_do_not_search_inline_html() {
++    let source = "<?php render(1); ?> render(2) <?php render(3);";
++    let matches = find("render($__ss_value)", source);
++    assert_eq!(
++        matches
++            .iter()
++            .map(|found| &source[found.call.bytes.clone()])
++            .collect::<Vec<_>>(),
++        vec!["render(1)", "render(3)"]
++    );
++}
++
++#[test]
++fn structural_excluded_outer_argument_forms_still_visit_nested_calls() {
++    let source = "<?php named(value: render(1)); unpack(...render(2));";
++    assert_eq!(find("render($__ss_value)", source).len(), 2);
++    assert!(find("named(...$__ss_values)", source).is_empty());
++    assert!(find("unpack(...$__ss_values)", source).is_empty());
++}
++
++#[test]
++fn structural_budget_after_an_earlier_match_never_returns_partial_results() {
++    let pattern = Pattern::compile("same($__ss_value, $__ss_value)").unwrap();
++    let first = "<?php same($a, $a);";
++    let both = "<?php same($a, $a); same($b, $b);";
++    let comparisons = (0..100)
++        .find(|&count| {
++            pattern
++                .find_in(
++                    first,
++                    Limits {
++                        comparisons: count,
++                        ..Limits::default()
++                    },
++                )
++                .is_ok()
++        })
++        .unwrap();
++    assert_eq!(
++        pattern
++            .find_in(
++                first,
++                Limits {
++                    comparisons,
++                    ..Limits::default()
++                }
++            )
++            .unwrap()
++            .len(),
++        1
++    );
++    assert_eq!(
++        pattern.find_in(
++            both,
++            Limits {
++                comparisons,
++                ..Limits::default()
++            }
++        ),
++        Err(SearchError::Budget("token comparisons"))
++    );
++    let nodes = (0..100)
++        .find(|&count| {
++            pattern
++                .find_in(
++                    first,
++                    Limits {
++                        nodes: count,
++                        ..Limits::default()
++                    },
++                )
++                .is_ok()
++        })
++        .unwrap();
++    assert_eq!(
++        pattern
++            .find_in(
++                first,
++                Limits {
++                    nodes,
++                    ..Limits::default()
++                }
++            )
++            .unwrap()
++            .len(),
++        1
++    );
++    assert_eq!(
++        pattern.find_in(
++            both,
++            Limits {
++                nodes,
++                ..Limits::default()
++            }
++        ),
++        Err(SearchError::Budget("CST nodes"))
++    );
++}
++
++#[test]
++fn structural_cancelled_request_publishes_no_matches() {
++    let pattern = Pattern::compile("foo($__ss_value)").unwrap();
++    let result = pattern.find_in_with_control("<?php foo(1); foo(2);", Limits::default(), &|| {
++        Err(SearchError::Cancelled)
++    });
++    assert_eq!(result, Err(SearchError::Cancelled));
++}
++
++#[test]
++fn structural_expired_request_refuses_before_invalid_source_parsing() {
++    let pattern = Pattern::compile("foo($__ss_value)").unwrap();
++    let result = pattern.find_in_with_control("<?php foo(", Limits::default(), &|| {
++        Err(SearchError::Deadline)
++    });
++    assert_eq!(result, Err(SearchError::Deadline));
++}
++
++#[test]
++fn structural_each_checkpoint_refuses_partial_results_and_preserves_normal_matching() {
++    use std::sync::atomic::{AtomicUsize, Ordering};
++    let pattern = Pattern::compile("foo($__ss_value, $__ss_value)").unwrap();
++    let source = "<?php foo(bar(1) + 2, bar(1) + 2); foo(3, 3);";
++    let count = AtomicUsize::new(0usize);
++    let expected = pattern.find_in(source, Limits::default()).unwrap();
++    let actual = pattern
++        .find_in_with_control(source, Limits::default(), &|| {
++            count.fetch_add(1, Ordering::Relaxed);
++            Ok(())
++        })
++        .unwrap();
++    assert_eq!(actual, expected);
++    assert_eq!(actual.len(), 2);
++    // Exercise lexical, parsed-node, repeated-expression comparison and final
++    // publication boundaries, including after an earlier match was collected.
++    let total = count.load(Ordering::Relaxed);
++    assert!(total > 40);
++    for stop_at in 1..=total {
++        let seen = AtomicUsize::new(0usize);
++        let actual = pattern.find_in_with_control(source, Limits::default(), &|| {
++            seen.fetch_add(1, Ordering::Relaxed);
++            if seen.load(Ordering::Relaxed) == stop_at {
++                Err(SearchError::Cancelled)
++            } else {
++                Ok(())
++            }
++        });
++        assert_eq!(
++            actual,
++            Err(SearchError::Cancelled),
++            "checkpoint {stop_at}/{total}"
++        );
++    }
++}
++
++#[test]
++fn structural_dropped_owner_stops_matching_after_lexing() {
++    use std::sync::atomic::{AtomicUsize, Ordering};
++    use std::time::{Duration, Instant};
++    let source = "<?php foo(1); foo(2);";
++    let pattern = Pattern::compile("foo($__ss_value)").unwrap();
++    let lex_checks = AtomicUsize::new(0usize);
++    super::Tokens::read_with_control(source, Limits::default(), &|| {
++        lex_checks.fetch_add(1, Ordering::Relaxed);
++        Ok(())
++    })
++    .unwrap();
++    let (owner, worker) = super::control::Lifetime::new(Instant::now() + Duration::from_secs(30));
++    let owner = std::sync::Mutex::new(Some(owner));
++    let checks = AtomicUsize::new(0usize);
++    let actual = pattern.find_in_with_control(source, Limits::default(), &|| {
++        checks.fetch_add(1, Ordering::Relaxed);
++        if checks.load(Ordering::Relaxed) == lex_checks.load(Ordering::Relaxed) + 5 {
++            drop(owner.lock().unwrap().take());
++        }
++        worker.checkpoint().map_err(SearchError::from)
++    });
++    assert_eq!(actual, Err(SearchError::Cancelled));
++    assert!(checks.load(Ordering::Relaxed) > lex_checks.load(Ordering::Relaxed));
++    assert_eq!(pattern.find_in(source, Limits::default()).unwrap().len(), 2);
++}
+diff --git a/src/structural_search_wire.rs b/src/structural_search_wire.rs
+new file mode 100644
+index 0000000..a13fc65
+--- /dev/null
++++ b/src/structural_search_wire.rs
+@@ -0,0 +1,288 @@
++//! Read-only structural-search request and stamped result protocol.
++
++use serde::{Deserialize, Serialize};
++use std::collections::BTreeMap;
++use tower_lsp::lsp_types::{Range, Url};
++
++pub const METHOD: &str = "phpWorkbench/structuralSearch";
++pub const EXPERIMENTAL_CAPABILITY: &str = "phpWorkbenchStructuralSearch";
++
++#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize)]
++#[serde(rename_all = "camelCase")]
++pub enum Scope {
++    #[default]
++    Project,
++    Document,
++}
++
++/// Exact editor-owned input; validated against the router's live document set.
++#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
++#[serde(rename_all = "camelCase")]
++pub struct ExpectedSource {
++    pub uri: Url,
++    pub version: i32,
++    pub sha256_utf8: String,
++}
++
++#[derive(Clone, Debug, Deserialize, Serialize)]
++#[serde(rename_all = "camelCase", deny_unknown_fields)]
++pub struct Query {
++    /// Required consuming document: no ambiguous implicit union of projects.
++    pub uri: Url,
++    /// Host-owned generation, echoed only. Not the LSP request identifier.
++    pub generation: u64,
++    pub pattern: String,
++    #[serde(default)]
++    pub scope: Scope,
++    /// Empty is an unchecked read-only protocol query. The editor requires a
++    /// nonempty manifest including its selected source before dispatch.
++    #[serde(default)]
++    pub expected_sources: Vec<ExpectedSource>,
++}
++
++#[derive(Clone, Debug, Deserialize, Serialize)]
++#[serde(rename_all = "camelCase")]
++pub struct Project {
++    /// Process-local ProjectContext.id. Combined with host provider identity.
++    pub id: u64,
++    /// None is permitted only for explicit document scope.
++    pub root: Option<Url>,
++}
++
++#[derive(Clone, Debug, Deserialize, Serialize)]
++#[serde(tag = "kind", rename_all = "camelCase")]
++pub enum SourceKind {
++    Open { version: i32, opening: u64 },
++    Disk,
++}
++
++#[derive(Clone, Debug, Deserialize, Serialize)]
++#[serde(rename_all = "camelCase")]
++pub struct SourceStamp {
++    /// The actual preferred source spelling used to produce all ranges.
++    pub uri: Url,
++    pub source: SourceKind,
++    /// Lowercase 64-digit SHA256 of the exact UTF8 analysis text, not the
++    /// original on-disk encoding for a decoded open UTF16 document.
++    pub sha256_utf8: String,
++    pub utf8_bytes: u64,
++}
++
++#[derive(Clone, Debug, Deserialize, Serialize)]
++#[serde(rename_all = "camelCase")]
++pub struct SourceRange {
++    pub start_byte: u32,
++    pub end_byte: u32,
++    pub range: Range,
++}
++
++#[derive(Clone, Debug, Deserialize, Serialize)]
++#[serde(tag = "kind", content = "ranges", rename_all = "camelCase")]
++pub enum Capture {
++    Expression(Vec<SourceRange>),
++    Arguments(Vec<SourceRange>),
++}
++
++#[derive(Clone, Debug, Deserialize, Serialize)]
++#[serde(rename_all = "camelCase")]
++pub struct Match {
++    /// Bounded display text only; navigation always validates the source stamp.
++    #[serde(default)]
++    pub preview: String,
++    pub call: SourceRange,
++    pub captures: BTreeMap<String, Capture>,
++}
++
++#[derive(Clone, Debug, Deserialize, Serialize)]
++#[serde(rename_all = "camelCase")]
++pub struct FileResult {
++    pub stamp: SourceStamp,
++    /// Empty means successfully scanned with no matches, not unreadable.
++    /// Retain these ledger entries too: the source set is part of ownership.
++    pub matches: Vec<Match>,
++}
++
++#[derive(Clone, Debug, Deserialize, Serialize)]
++#[serde(rename_all = "camelCase")]
++pub enum IssueKind {
++    Syntax,
++    UnsupportedTemplate,
++    UnsupportedEncoding,
++    Unreadable,
++    WalkError,
++}
++
++#[derive(Clone, Debug, Deserialize, Serialize)]
++#[serde(rename_all = "camelCase")]
++pub struct FileIssue {
++    pub uri: Option<Url>,
++    pub kind: IssueKind,
++    /// Bounded product text, not arbitrary parser dumps or source contents.
++    pub message: String,
++}
++
++#[derive(Clone, Debug, Deserialize, Serialize)]
++#[serde(rename_all = "camelCase")]
++pub struct Reply {
++    /// Exact manifest validated before scanning and again at final admission.
++    #[serde(default)]
++    pub expected_sources: Vec<ExpectedSource>,
++    pub generation: u64,
++    pub project: Project,
++    pub files: Vec<FileResult>,
++    pub issues: Vec<FileIssue>,
++    /// True exactly when a source could not be scanned; show explicitly.
++    /// Resource exhaustion/cancellation/staleness returns RPC error instead.
++    pub incomplete: bool,
++}
++
++impl From<super::SourceRange> for SourceRange {
++    fn from(source: super::SourceRange) -> Self {
++        // The matcher admits at most u32::MAX bytes before constructing spans.
++        Self {
++            start_byte: source.bytes.start as u32,
++            end_byte: source.bytes.end as u32,
++            range: source.range,
++        }
++    }
++}
++
++impl From<super::Match> for Match {
++    fn from(found: super::Match) -> Self {
++        Self {
++            preview: String::new(),
++            call: found.call.into(),
++            captures: found
++                .captures
++                .into_iter()
++                .map(|(name, capture)| {
++                    let capture = match capture {
++                        super::Capture::Expression(ranges) => {
++                            Capture::Expression(ranges.into_iter().map(Into::into).collect())
++                        }
++                        super::Capture::Arguments(ranges) => {
++                            Capture::Arguments(ranges.into_iter().map(Into::into).collect())
++                        }
++                    };
++                    (name, capture)
++                })
++                .collect(),
++        }
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use serde_json::json;
++
++    #[test]
++    fn query_requires_selector_and_rejects_unknown_parameters() {
++        assert!(
++            serde_json::from_value::<Query>(json!({"generation":1,"pattern":"foo()"})).is_err()
++        );
++        assert!(
++            serde_json::from_value::<Query>(
++                json!({"uri":"file:///tmp/a.php","generation":1,"pattern":"foo()","unbounded":true})
++            )
++            .is_err()
++        );
++        let query: Query = serde_json::from_value(
++            json!({"uri":"file:///tmp/a.php","generation":1,"pattern":"foo()"}),
++        )
++        .unwrap();
++        assert!(matches!(query.scope, Scope::Project));
++        assert!(serde_json::from_value::<Query>(json!({"uri":"file:///tmp/a.php","generation":1,"pattern":"foo()","scope":"allProjects"})).is_err());
++    }
++
++    #[test]
++    fn match_wire_conversion_keeps_utf16_and_exact_byte_spans() {
++        let source = "<?php /* ž😀 */ foo('ž😀');";
++        let pattern = super::super::Pattern::compile("foo($__ss_arg)").unwrap();
++        let found = pattern
++            .find_in(source, super::super::Limits::default())
++            .unwrap()
++            .pop()
++            .unwrap();
++        let expected_call = found.call.clone();
++        let wire: Match = found.into();
++        assert_eq!(wire.call.start_byte as usize, expected_call.bytes.start);
++        assert_eq!(wire.call.end_byte as usize, expected_call.bytes.end);
++        assert_eq!(wire.call.range, expected_call.range);
++        assert_ne!(wire.call.start_byte, wire.call.range.start.character);
++        let encoded = serde_json::to_value(&wire).unwrap();
++        assert_eq!(encoded["captures"]["arg"]["kind"], "expression");
++        let decoded: Match = serde_json::from_value(encoded).unwrap();
++        assert_eq!(decoded.call.range, expected_call.range);
++    }
++
++    #[test]
++    fn reply_distinguishes_empty_scan_from_unscanned_file() {
++        let reply = Reply {
++            expected_sources: vec![],
++            generation: 19,
++            project: Project {
++                id: 7,
++                root: Some(Url::parse("file:///tmp/project/").unwrap()),
++            },
++            files: vec![FileResult {
++                stamp: SourceStamp {
++                    uri: Url::parse("file:///tmp/project/a.php").unwrap(),
++                    source: SourceKind::Open {
++                        version: 4,
++                        opening: 12,
++                    },
++                    sha256_utf8: "0".repeat(64),
++                    utf8_bytes: 5,
++                },
++                matches: vec![],
++            }],
++            issues: vec![FileIssue {
++                uri: Some(Url::parse("file:///tmp/project/b.php").unwrap()),
++                kind: IssueKind::Syntax,
++                message: "Cannot scan invalid PHP.".into(),
++            }],
++            incomplete: true,
++        };
++        let value = serde_json::to_value(&reply).unwrap();
++        assert_eq!(value["files"][0]["stamp"]["source"]["kind"], "open");
++        assert_eq!(value["files"][0]["stamp"]["source"]["opening"], 12);
++        let decoded: Reply = serde_json::from_value(value).unwrap();
++        assert_eq!(decoded.generation, 19);
++        assert_eq!(decoded.files.len(), 1);
++        assert!(decoded.files[0].matches.is_empty());
++        assert_eq!(decoded.issues.len(), 1);
++        assert!(decoded.incomplete);
++    }
++    #[test]
++    fn checked_query_and_reply_preserve_exact_editor_manifest() {
++        let expected = ExpectedSource {
++            uri: Url::parse("file:///tmp/%C5%BE%F0%9F%98%80.php").unwrap(),
++            version: 2,
++            sha256_utf8: "a".repeat(64),
++        };
++        let query: Query = serde_json::from_value(serde_json::json!({
++            "uri":expected.uri,"generation":7,"pattern":"foo($__ss_value)",
++            "expectedSources":[{"uri":expected.uri,"version":2,"sha256Utf8":expected.sha256_utf8}],
++        }))
++        .unwrap();
++        assert_eq!(query.expected_sources, vec![expected.clone()]);
++        let encoded = serde_json::to_value(&query).unwrap();
++        assert_eq!(encoded["expectedSources"][0]["version"], 2);
++        assert_eq!(encoded["expectedSources"][0]["sha256Utf8"], "a".repeat(64));
++        let reply: Reply = serde_json::from_value(serde_json::json!({
++            "generation":7,"project":{"id":1,"root":null},
++            "expectedSources":encoded["expectedSources"],
++            "files":[],"issues":[],"incomplete":false,
++        }))
++        .unwrap();
++        assert_eq!(reply.expected_sources, query.expected_sources);
++        assert!(
++            serde_json::from_value::<ExpectedSource>(serde_json::json!({
++                "uri":expected.uri,"sha256Utf8":expected.sha256_utf8,
++            }))
++            .is_err(),
++            "a declared expected source must carry its version"
++        );
++    }
++}
+diff --git a/tests/integration/main.rs b/tests/integration/main.rs
+index a2f011c..95a2926 100644
+--- a/tests/integration/main.rs
++++ b/tests/integration/main.rs
+@@ -303,3 +303,5 @@ mod workbench_rename_project_compat;
+ mod workbench_rename_external_authority;
+ 
+ mod release_metadata_authority;
++
++mod structural_search;
+diff --git a/tests/integration/structural_search.rs b/tests/integration/structural_search.rs
+new file mode 100644
+index 0000000..b34373a
+--- /dev/null
++++ b/tests/integration/structural_search.rs
+@@ -0,0 +1,228 @@
++//! Structural requests search the selected project's actual source set.
++use std::fs;
++use std::path::Path;
++
++use phpantom_lsp::{ProjectRouter, StructuralSearchQuery};
++use serde_json::json;
++use tempfile::TempDir;
++use tower_lsp::LanguageServer;
++use tower_lsp::lsp_types::*;
++
++async fn router(roots: &[&Path]) -> ProjectRouter {
++    let router = ProjectRouter::new_test();
++    let reply = router
++        .initialize(InitializeParams {
++            workspace_folders: Some(
++                roots
++                    .iter()
++                    .enumerate()
++                    .map(|(index, root)| WorkspaceFolder {
++                        uri: Url::from_directory_path(root).unwrap(),
++                        name: format!("project-{index}"),
++                    })
++                    .collect(),
++            ),
++            root_uri: roots
++                .first()
++                .map(|root| Url::from_directory_path(root).unwrap()),
++            ..InitializeParams::default()
++        })
++        .await
++        .unwrap();
++    assert_eq!(
++        reply.capabilities.experimental.unwrap()["phpWorkbenchStructuralSearch"],
++        true
++    );
++    router.initialized(InitializedParams {}).await;
++    router
++}
++
++fn query(path: &Path, generation: u64, scope: &str) -> StructuralSearchQuery {
++    serde_json::from_value(json!({
++        "uri": Url::from_file_path(path).unwrap(), "generation":generation,
++        "pattern":"foo($__ss_value)", "scope":scope,
++    }))
++    .unwrap()
++}
++
++fn project(root: &Path) {
++    fs::create_dir_all(root.join("src")).unwrap();
++    fs::write(
++        root.join("composer.json"),
++        r#"{"autoload":{"psr-4":{"App\\":"src/"}}}"#,
++    )
++    .unwrap();
++}
++
++#[tokio::test]
++async fn structural_selected_project_includes_call_only_non_psr_files() {
++    let temp = TempDir::new().unwrap();
++    let base = temp.path().canonicalize().unwrap();
++    let a = base.join("a");
++    let b = base.join("b");
++    for root in [&a, &b] {
++        project(root);
++        fs::create_dir_all(root.join("misc")).unwrap();
++        fs::write(root.join("misc/calls.php"), "<?php foo('misc');").unwrap();
++    }
++    fs::write(a.join("index.php"), "<?php foo('a');").unwrap();
++    fs::write(b.join("index.php"), "<?php foo('b');").unwrap();
++    let router = router(&[&a, &b]).await;
++    let first = router
++        .workbench_structural_search(query(&a.join("index.php"), 11, "project"))
++        .await
++        .unwrap();
++    assert_eq!(first.generation, 11);
++    assert!(!first.incomplete);
++    assert_eq!(
++        first
++            .files
++            .iter()
++            .map(|file| file.matches.len())
++            .sum::<usize>(),
++        2
++    );
++    assert!(
++        first
++            .files
++            .iter()
++            .all(|file| file.stamp.uri.to_file_path().unwrap().starts_with(&a))
++    );
++    assert!(
++        first
++            .files
++            .iter()
++            .any(|file| file.stamp.uri.to_file_path().unwrap() == a.join("misc/calls.php"))
++    );
++    let second = router
++        .workbench_structural_search(query(&b.join("index.php"), 12, "project"))
++        .await
++        .unwrap();
++    assert_ne!(first.project.id, second.project.id);
++    assert!(
++        second
++            .files
++            .iter()
++            .all(|file| file.stamp.uri.to_file_path().unwrap().starts_with(&b))
++    );
++    router.shutdown().await.unwrap();
++}
++
++#[tokio::test]
++async fn structural_real_route_reads_latest_unsaved_source_without_writing_disk() {
++    let temp = TempDir::new().unwrap();
++    let root = temp.path().canonicalize().unwrap();
++    project(&root);
++    let path = root.join("index.php");
++    let disk = "<?php foo('disk');";
++    fs::write(&path, disk).unwrap();
++    let router = router(&[&root]).await;
++    let uri = Url::from_file_path(&path).unwrap();
++    router
++        .did_open(DidOpenTextDocumentParams {
++            text_document: TextDocumentItem {
++                uri: uri.clone(),
++                language_id: "php".into(),
++                version: 1,
++                text: disk.into(),
++            },
++        })
++        .await;
++    let live = "<?php /* ž😀 */ foo('live'); foo('two');";
++    router
++        .did_change(DidChangeTextDocumentParams {
++            text_document: VersionedTextDocumentIdentifier { uri, version: 2 },
++            content_changes: vec![TextDocumentContentChangeEvent {
++                range: None,
++                range_length: None,
++                text: live.into(),
++            }],
++        })
++        .await;
++    let result = router
++        .workbench_structural_search(query(&path, 22, "document"))
++        .await
++        .unwrap();
++    assert_eq!(result.files.len(), 1);
++    let file = &result.files[0];
++    assert_eq!(file.matches.len(), 2);
++    let stamp = serde_json::to_value(&file.stamp).unwrap();
++    assert_eq!(stamp["source"]["kind"], "open");
++    assert_eq!(stamp["source"]["version"], 2);
++    assert_eq!(file.stamp.utf8_bytes, live.len() as u64);
++    let first = &file.matches[0].call;
++    assert_eq!(
++        &live[first.start_byte as usize..first.end_byte as usize],
++        "foo('live')"
++    );
++    assert_ne!(first.start_byte, first.range.start.character);
++    assert_eq!(fs::read_to_string(path).unwrap(), disk);
++    router.shutdown().await.unwrap();
++}
++
++#[tokio::test]
++async fn structural_real_route_reports_syntax_issues_and_retains_zero_match_sources() {
++    let temp = TempDir::new().unwrap();
++    let root = temp.path().canonicalize().unwrap();
++    project(&root);
++    let path = root.join("index.php");
++    fs::write(&path, "<?php foo(1);").unwrap();
++    fs::write(root.join("empty.php"), "<?php bar(1);").unwrap();
++    fs::write(root.join("broken.php"), "<?php foo(").unwrap();
++    let router = router(&[&root]).await;
++    let result = router
++        .workbench_structural_search(query(&path, 31, "project"))
++        .await
++        .unwrap();
++    assert!(result.incomplete);
++    assert_eq!(result.issues.len(), 1);
++    assert_eq!(
++        serde_json::to_value(&result.issues[0]).unwrap()["kind"],
++        "syntax"
++    );
++    assert_eq!(result.files.len(), 2);
++    assert!(result.files.iter().any(|file| file.matches.is_empty()
++        && file.stamp.uri.to_file_path().unwrap() == root.join("empty.php")));
++    router.shutdown().await.unwrap();
++}
++
++#[tokio::test]
++async fn structural_parent_project_excludes_nested_composer_and_custom_vendor_sources() {
++    let temp = TempDir::new().unwrap();
++    let canonical_root = temp.path().canonicalize().unwrap();
++    let root = canonical_root.as_path();
++    project(root);
++    fs::write(
++        root.join("composer.json"),
++        r#"{"config":{"vendor-dir":"deps"},"autoload":{"psr-4":{"App\\":"src/"}}}"#,
++    )
++    .unwrap();
++    fs::write(root.join("index.php"), "<?php foo('parent');").unwrap();
++    let nested = root.join("nested");
++    project(&nested);
++    fs::write(nested.join("index.php"), "<?php foo('nested');").unwrap();
++    fs::create_dir_all(root.join("deps/package")).unwrap();
++    fs::write(root.join("deps/package/vendor.php"), "<?php foo('vendor');").unwrap();
++    let router = router(&[root]).await;
++    let parent = router
++        .workbench_structural_search(query(&root.join("index.php"), 41, "project"))
++        .await
++        .unwrap();
++    assert!(!parent.incomplete);
++    assert_eq!(parent.files.len(), 1);
++    assert_eq!(
++        parent.files[0].stamp.uri.to_file_path().unwrap(),
++        root.join("index.php")
++    );
++    let child = router
++        .workbench_structural_search(query(&nested.join("index.php"), 42, "project"))
++        .await
++        .unwrap();
++    assert_ne!(parent.project.id, child.project.id);
++    assert_eq!(child.files.len(), 1);
++    assert_eq!(
++        child.files[0].stamp.uri.to_file_path().unwrap(),
++        nested.join("index.php")
++    );
++    router.shutdown().await.unwrap();
++}

@@ -1,0 +1,298 @@
+diff --git a/build.rs b/build.rs
+index c7686b3..3dea6df 100644
+--- a/build.rs
++++ b/build.rs
+@@ -263,7 +263,17 @@ fn main() {
+     }
+     out.push_str("];\n\n");
+ 
+-    // 2. Class name → file index mapping.
++    // File ownership comes from the pinned map path, not symbol-name guesses.
++    out.push_str(&format!(
++        "pub(crate) static STUB_FILE_EXTENSIONS: [&str; {}] = [\n",
++        existing_files.len()
++    ));
++    for path in &existing_files {
++        let extension = path.split('/').next().unwrap_or("Core");
++        out.push_str(&format!("    \"{}\",\n", escape(extension)));
++    }
++    out.push_str("];\n\n");
++
+     let class_entries: Vec<(&str, usize)> = class_map
+         .iter()
+         .filter_map(|(name, path)| {
+@@ -589,6 +599,7 @@ fn fetch_stubs(stubs_root: &Path, lock: &StubsLock) -> Result<(), Box<dyn std::e
+ fn write_empty_stubs() {
+     let content = concat!(
+         "pub(crate) static STUB_FILES: [&str; 0] = [];\n",
++        "pub(crate) static STUB_FILE_EXTENSIONS: [&str; 0] = [];\n",
+         "pub(crate) static STUB_CLASS_MAP: [(&str, usize); 0] = [];\n",
+         "pub(crate) static STUB_FUNCTION_MAP: [(&str, usize); 0] = [];\n",
+         "pub(crate) static STUB_CONSTANT_MAP: [(&str, usize); 0] = [];\n",
+diff --git a/docs/CHANGELOG.md b/docs/CHANGELOG.md
+index ecac069..5490860 100644
+--- a/docs/CHANGELOG.md
++++ b/docs/CHANGELOG.md
+@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
+ 
+ ## [Unreleased]
+ 
++### Added
++
++- **Project PHP extension profiles.** Set `[php] extensions` to the extensions available on your deployment target. Completion and built-in lookup keep project polyfills and exclude unavailable extension declarations after restarting the service. Contributed by PHP Workbench (local downstream patch).
++
+ ### Fixed
+ 
+ - **Built-in classes follow older PHP targets.** Classes introduced in a later PHP release no longer appear in completion or return through another stub loaded into memory. Project-defined polyfills remain available.
+diff --git a/src/config.rs b/src/config.rs
+index b579dce..89e76ca 100644
+--- a/src/config.rs
++++ b/src/config.rs
+@@ -148,6 +148,34 @@ pub struct PhpConfig {
+     /// Override the detected PHP version (e.g. `"8.3"`).
+     /// When `None`, PHPantom infers from `composer.json`.
+     pub version: Option<String>,
++    /// Built-in extension allowlist. Absent or `["*"]` keeps every bundled
++    /// extension; `[]` keeps only Core, standard, Reflection and SPL.
++    /// This describes the deployment target and never probes a PHP process.
++    #[serde(deserialize_with = "deserialize_php_extensions")]
++    pub extensions: Option<Vec<String>>,
++}
++
++fn deserialize_php_extensions<'de, D>(deserializer: D) -> Result<Option<Vec<String>>, D::Error>
++where
++    D: serde::Deserializer<'de>,
++{
++    use serde::de::Error;
++    let names = Vec::<String>::deserialize(deserializer)?;
++    if names.len() > 256
++        || names.iter().any(|name| {
++            name.is_empty()
++                || name.len() > 64
++                || !name
++                    .bytes()
++                    .all(|b| b.is_ascii_alphanumeric() || b"_- *".contains(&b))
++        })
++        || (names.iter().any(|name| name == "*") && names.len() != 1)
++    {
++        return Err(D::Error::custom(
++            "PHP extensions must be up to 256 names or [\"*\"]",
++        ));
++    }
++    Ok(Some(names))
+ }
+ 
+ /// `[diagnostics]` section — toggle individual diagnostic providers.
+diff --git a/src/lib.rs b/src/lib.rs
+index 101ac20..12fab63 100644
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -2314,6 +2314,23 @@ impl Backend {
+     /// the given PHP version.
+     pub fn set_php_version(&self, version: types::PhpVersion) {
+         *self.workspace.php_version.lock() = version;
++        // Like the version indices below, extension availability is a startup
++        // snapshot. Saved profile changes use a fresh service, never mutate a
++        // shared lazy cache while requests are reading it.
++        if let Some(names) = self.config().php.extensions {
++            let disabled = stubs::disabled_extension_sources(&names);
++            let available =
++                |source: &str| !disabled.contains(&(source.as_ptr() as usize, source.len()));
++            self.stub_index
++                .write()
++                .retain(|_, source| available(source));
++            self.stub_function_index
++                .write()
++                .retain(|_, source| available(source));
++            self.stub_constant_index
++                .write()
++                .retain(|_, source| available(source));
++        }
+         // Every symbol a stub file declares shares that file's `&'static str`,
+         // so whether the file mentions `@removed` at all is answered once per
+         // file rather than rescanning it for each of its thousands of symbols.
+diff --git a/src/stubs.rs b/src/stubs.rs
+index 6696cf9..d0492e4 100644
+--- a/src/stubs.rs
++++ b/src/stubs.rs
+@@ -72,6 +72,47 @@ pub fn build_stub_function_index() -> HashMap<&'static str, &'static str> {
+         .collect()
+ }
+ 
++/// Normalize pinned stub directory names and Composer's `ext-` spelling.
++fn extension_name(name: &str) -> String {
++    let lower = name.trim().to_ascii_lowercase();
++    let name = lower.strip_prefix("ext-").unwrap_or(&lower);
++    match name {
++        "zend opcache" | "zendopcache" | "zend_opcache" => "opcache".to_string(),
++        "sqlite" => "sqlite3".to_string(),
++        "apache2handler" => "apache".to_string(),
++        _ => name.to_string(),
++    }
++}
++
++/// Stub sources excluded by an explicit extension profile. Pointer plus length
++/// avoids hashing megabytes of source once for every symbol in a shared file.
++/// Identical embedded strings may share storage: keep a source if any owner is
++/// enabled, because that enabled extension supplies the same declarations.
++pub(crate) fn disabled_extension_sources(
++    names: &[String],
++) -> std::collections::HashSet<(usize, usize)> {
++    use std::collections::HashSet;
++    if names.iter().any(|name| name == "*") {
++        return HashSet::new();
++    }
++    let enabled: HashSet<String> = names.iter().map(|name| extension_name(name)).collect();
++    let mut allowed = HashSet::new();
++    let mut disabled = HashSet::new();
++    for (&source, &owner) in STUB_FILES.iter().zip(STUB_FILE_EXTENSIONS.iter()) {
++        let owner = extension_name(owner);
++        let identity = (source.as_ptr() as usize, source.len());
++        if matches!(owner.as_str(), "core" | "standard" | "reflection" | "spl")
++            || enabled.contains(&owner)
++        {
++            allowed.insert(identity);
++        } else {
++            disabled.insert(identity);
++        }
++    }
++    disabled.retain(|identity| !allowed.contains(identity));
++    disabled
++}
++
+ /// Quick byte-level check whether a stub function has been `@removed`
+ /// at or before the given PHP version.
+ ///
+diff --git a/tests/integration/extension_profiles.rs b/tests/integration/extension_profiles.rs
+new file mode 100644
+index 0000000..a14b28f
+--- /dev/null
++++ b/tests/integration/extension_profiles.rs
+@@ -0,0 +1,115 @@
++//! Deployment extension availability uses the same built-in lookup path as LSP.
++use phpantom_lsp::{Backend, config::Config};
++use tower_lsp::lsp_types::Url;
++
++async fn class_available(backend: &Backend, name: &str) -> bool {
++    let text = format!("<?php\nnew {name}");
++    let labels = super::common::complete_labels_at(
++        backend,
++        &Url::parse("file:///extensions.php").unwrap(),
++        &text,
++        1,
++        (4 + name.len()) as u32,
++    )
++    .await;
++    labels
++        .iter()
++        .any(|label| label.trim_start_matches('\\') == name)
++}
++
++fn with_profile(names: Option<&[&str]>) -> Backend {
++    let backend = Backend::new_test_with_full_stubs();
++    let text = names.map_or_else(String::new, |names| {
++        format!(
++            "[php]\nextensions = {}",
++            serde_json::to_string(names).unwrap()
++        )
++    });
++    backend.set_config(toml::from_str::<Config>(&text).unwrap());
++    backend.set_php_version(backend.php_version());
++    backend
++}
++
++#[tokio::test]
++async fn extension_profiles_filter_all_three_builtin_indices() {
++    let backend = with_profile(Some(&[]));
++    assert!(backend.stub_function_index_mut().contains_key("strlen"));
++    assert!(class_available(&backend, "Exception").await);
++    assert!(class_available(&backend, "ReflectionClass").await);
++    assert!(class_available(&backend, "ArrayIterator").await);
++    assert!(!backend.stub_function_index_mut().contains_key("curl_init"));
++    assert!(!class_available(&backend, "CURLFile").await);
++    assert!(!backend.stub_constant_index().contains_key("CURLOPT_URL"));
++    assert!(
++        !backend
++            .stub_function_index_mut()
++            .contains_key("mysqli_connect")
++    );
++    assert!(!class_available(&backend, "PDO").await);
++}
++
++#[tokio::test]
++async fn extension_profiles_normalize_composer_case_and_directory_aliases() {
++    let backend = with_profile(Some(&["ext-CuRL", "PDO", "sqlite3", "opcache"]));
++    assert!(backend.stub_function_index_mut().contains_key("curl_init"));
++    assert!(class_available(&backend, "CURLFile").await);
++    assert!(backend.stub_constant_index().contains_key("CURLOPT_URL"));
++    assert!(class_available(&backend, "PDO").await);
++    assert!(class_available(&backend, "SQLite3").await);
++    assert!(
++        backend
++            .stub_function_index_mut()
++            .contains_key("opcache_get_status")
++    );
++    assert!(
++        !backend
++            .stub_function_index_mut()
++            .contains_key("mysqli_connect")
++    );
++}
++
++#[tokio::test]
++async fn extension_profiles_default_and_explicit_all_preserve_bundled_symbols() {
++    for names in [None, Some(["*"].as_slice())] {
++        let backend = with_profile(names);
++        assert!(backend.stub_function_index_mut().contains_key("curl_init"));
++        assert!(class_available(&backend, "mysqli").await);
++        assert!(backend.stub_constant_index().contains_key("CURLOPT_URL"));
++    }
++}
++
++#[tokio::test]
++async fn extension_profiles_do_not_make_unknown_extensions_enable_everything() {
++    let backend = with_profile(Some(&["future_custom_extension"]));
++    assert!(backend.stub_function_index_mut().contains_key("strlen"));
++    assert!(backend.find_or_load_function(&["curl_init"]).is_none());
++    assert!(!class_available(&backend, "CURLFile").await);
++}
++
++#[test]
++fn extension_profiles_do_not_restore_lazy_symbols_after_a_fresh_service() {
++    let enabled = with_profile(Some(&["curl"]));
++    assert!(enabled.find_or_load_function(&["curl_init"]).is_some());
++    assert!(enabled.find_or_load_function(&["curl_exec"]).is_some());
++    let disabled = with_profile(Some(&[]));
++    assert!(disabled.find_or_load_function(&["curl_init"]).is_none());
++    assert!(disabled.find_or_load_function(&["curl_exec"]).is_none());
++}
++
++#[test]
++fn extension_profiles_reject_invalid_and_unbounded_settings() {
++    for text in [
++        "[php]\nextensions='curl'".to_string(),
++        "[php]\nextensions=[true]".to_string(),
++        "[php]\nextensions=['*','curl']".to_string(),
++        "[php]\nextensions=['curl/../../file']".to_string(),
++        "[php]\nextensions=['']".to_string(),
++        format!("[php]\nextensions=['{}']", "a".repeat(65)),
++        format!(
++            "[php]\nextensions={}",
++            serde_json::to_string(&vec!["curl"; 257]).unwrap()
++        ),
++    ] {
++        assert!(toml::from_str::<Config>(&text).is_err(), "{text}");
++    }
++}
+diff --git a/tests/integration/main.rs b/tests/integration/main.rs
+index 1d4b4d0..eed9205 100644
+--- a/tests/integration/main.rs
++++ b/tests/integration/main.rs
+@@ -172,6 +172,7 @@ mod document_symbols;
+ mod document_symbols_blade;
+ mod duplicate_class_declarations;
+ mod duplicate_function_declarations;
++mod extension_profiles;
+ mod fix_cli;
+ mod folding_blade;
+ mod folding_ranges;

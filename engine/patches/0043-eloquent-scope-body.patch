@@ -1,0 +1,480 @@
+diff --git a/docs/CHANGELOG.md b/docs/CHANGELOG.md
+--- a/docs/CHANGELOG.md
++++ b/docs/CHANGELOG.md
+@@ -14,6 +14,8 @@
+ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+ 
+ ## [Unreleased]
++
++- **Scope method bodies keep the model type through attribute aliases.** Suggestions and diagnostics follow the imported Eloquent attribute, and ordinary methods no longer borrow a neighboring or unrelated Scope attribute. Contributed by PHP Workbench downstream.
+ 
+ - **Navigation works before the final semicolon is typed.** Go to Definition can follow a completed method call at the end of a PHP file while its statement is unfinished. Contributed by PHP Workbench downstream.
+ 
+diff --git a/examples/laravel/app/Demo.php b/examples/laravel/app/Demo.php
+--- a/examples/laravel/app/Demo.php
++++ b/examples/laravel/app/Demo.php
+@@ -95,7 +95,7 @@
+         $bakery->dough_temp;          // $casts 'float'             → float
+         $bakery->egg_count;           // $attributes default        → int
+         $bakery->flour;               // $fillable (no cast/attr)   → mixed
+-        $bakery->freshlyBaked();      // aliased #[QueryScope]       → Builder
++        $bakery->freshlyBaked();      // aliased #[Q]       → Builder
+         $bakery->gluten_free;         // $attributes default        → bool
+         $bakery->headBaker;           // relationship HasOne        → Baker
+         $bakery->head_baker_count;    // relationship count         → int
+diff --git a/examples/laravel/app/Models/Bakery.php b/examples/laravel/app/Models/Bakery.php
+--- a/examples/laravel/app/Models/Bakery.php
++++ b/examples/laravel/app/Models/Bakery.php
+@@ -2,7 +2,7 @@
+ 
+ namespace App\Models;
+ 
+-use Illuminate\Database\Eloquent\Attributes\Scope as QueryScope;
++use Illuminate\Database\Eloquent\Attributes\Scope as Q;
+ use Illuminate\Database\Eloquent\Builder;
+ use Illuminate\Database\Eloquent\Casts\Attribute;
+ use Illuminate\Database\Eloquent\Model;
+@@ -70,9 +70,10 @@
+         $query->where('baked', false);
+     }
+ 
+-    #[QueryScope]
++    #[Q]
+     protected function freshlyBaked(Builder $query): void
+     {
++        // Try completion on $query: Q keeps Builder<Bakery>, including topping().
+         $query->where('fresh', true);
+     }
+ 
+diff --git a/src/type_engine/variable/forward_walk/diagnostic_walk.rs b/src/type_engine/variable/forward_walk/diagnostic_walk.rs
+--- a/src/type_engine/variable/forward_walk/diagnostic_walk.rs
++++ b/src/type_engine/variable/forward_walk/diagnostic_walk.rs
+@@ -1526,11 +1526,8 @@
+     }
+ 
+     // Seed scope with parameter types.
+-    // Detect whether this method has a #[Scope] attribute by scanning
+-    // the source text around the method span for `#[Scope]`.
+     let has_scope_attr = method_name
+-        .map(|_| detect_scope_attribute_from_source(ctx.content, fn_span_start as usize))
+-        .unwrap_or(false);
++        .is_some_and(|name| method_has_scope_attribute(ctx.all_classes, fn_span_start, name));
+     seed_params(
+         &mut scope,
+         parameters,
+diff --git a/src/type_engine/variable/forward_walk/mod.rs b/src/type_engine/variable/forward_walk/mod.rs
+--- a/src/type_engine/variable/forward_walk/mod.rs
++++ b/src/type_engine/variable/forward_walk/mod.rs
+@@ -42,11 +42,12 @@
+ ///   through [`build_diagnostic_scopes_for_offsets`], which walks only
+ ///   the bodies holding the offsets it is given.
+ use std::cell::{Cell, RefCell};
++use std::sync::Arc;
+ 
+ use mago_span::HasSpan;
+ use mago_syntax::cst::*;
+ 
+-use crate::types::ResolvedType;
++use crate::types::{ClassInfo, ResolvedType};
+ 
+ mod array_assignment;
+ mod assignment;
+@@ -321,36 +322,16 @@
+     }
+ }
+ 
+-/// Detect whether a method has a `#[Scope]` attribute by scanning the
+-/// source text around the method span.  The attribute list precedes or
+-/// is part of the method node, so we search a window around the offset.
+-fn detect_scope_attribute_from_source(content: &str, method_offset: usize) -> bool {
+-    // Search backwards from the method offset for `#[Scope]` or
+-    // `#[\...\Scope]` in the preceding ~500 characters.
+-    let mut search_start = method_offset.saturating_sub(500);
+-    while search_start < content.len() && !content.is_char_boundary(search_start) {
+-        search_start += 1;
+-    }
+-    let mut search_end = content.len().min(method_offset + 200);
+-    while search_end > search_start && !content.is_char_boundary(search_end) {
+-        search_end -= 1;
+-    }
+-    let region = &content[search_start..search_end];
+-    // Find occurrences of `#[` and check if any contain `Scope`.
+-    let mut pos = 0;
+-    while let Some(bracket_pos) = region[pos..].find("#[") {
+-        let abs = pos + bracket_pos;
+-        if let Some(end) = region[abs..].find(']') {
+-            let attr_text = &region[abs..abs + end + 1];
+-            if attr_text.contains("Scope") {
+-                return true;
+-            }
+-            pos = abs + end + 1;
+-        } else {
+-            break;
+-        }
+-    }
+-    false
++/// Read attribute identity from the raw declaration, before virtual scope
++/// methods replace the model's protected methods during member merging.
++pub(super) fn method_has_scope_attribute(
++    local_classes: &[Arc<ClassInfo>],
++    method_start: u32,
++    method_name: &str,
++) -> bool {
++    find_enclosing_class_for_offset(local_classes, method_start)
++        .and_then(|class| class.get_method(method_name))
++        .is_some_and(|method| method.has_scope_attribute)
+ }
+ 
+ /// Resolve the target variable from a standalone function body using
+diff --git a/src/type_engine/variable/resolution.rs b/src/type_engine/variable/resolution.rs
+--- a/src/type_engine/variable/resolution.rs
++++ b/src/type_engine/variable/resolution.rs
+@@ -16,7 +16,7 @@
+ use mago_span::HasSpan;
+ use mago_syntax::cst::*;
+ 
+-use crate::atom::{Atom, atom, bytes_to_str, last_segment};
++use crate::atom::{Atom, atom, bytes_to_str};
+ use crate::docblock;
+ use crate::parser::{extract_hint_type, with_parsed_program};
+ use crate::php_type::{PhpType, TypeKind, is_keyword_type};
+@@ -1334,11 +1334,11 @@
+                 let blk_start = block.left_brace.start.offset;
+                 let blk_end = block.right_brace.end.offset;
+                 if ctx.cursor_offset >= blk_start && ctx.cursor_offset <= blk_end {
+-                    let has_scope_attr = method.attribute_lists.iter().any(|al| {
+-                        al.attributes
+-                            .iter()
+-                            .any(|a| last_segment(a.name.value()) == b"Scope")
+-                    });
++                    let has_scope_attr = super::forward_walk::method_has_scope_attribute(
++                        ctx.all_classes,
++                        method.span().start.offset,
++                        bytes_to_str(method.name.value),
++                    );
+ 
+                     // Extract the enclosing method's @return type for
+                     // generator yield inference inside the body.
+@@ -1461,11 +1461,11 @@
+     method: &Method<'_>,
+     ctx: &VarResolutionCtx<'_>,
+ ) -> Vec<ResolvedType> {
+-    let has_scope_attr = method.attribute_lists.iter().any(|al| {
+-        al.attributes
+-            .iter()
+-            .any(|a| last_segment(a.name.value()) == b"Scope")
+-    });
++    let has_scope_attr = super::forward_walk::method_has_scope_attribute(
++        ctx.all_classes,
++        method.span().start.offset,
++        bytes_to_str(method.name.value),
++    );
+ 
+     let method_name_str = bytes_to_str(method.name.value).to_string();
+ 
+diff --git a/tests/integration/completion_laravel.rs b/tests/integration/completion_laravel.rs
+--- a/tests/integration/completion_laravel.rs
++++ b/tests/integration/completion_laravel.rs
+@@ -12415,6 +12415,302 @@
+     );
+ }
+ 
++fn scope_body_identity_fixture(import: &str, methods: &str) -> String {
++    format!(
++        "<?php\nnamespace App\\Models;\nuse Illuminate\\Database\\Eloquent\\Model;\nuse Illuminate\\Database\\Eloquent\\Builder;\n{import}\nclass User extends Model {{\n    public function scopeVerified(Builder $query): void {{}}\n{methods}\n}}\n"
++    )
++}
++
++async fn assert_scope_body_cached_diagnostics(import: &str, methods: &str, is_scope: bool) {
++    let content = scope_body_identity_fixture(import, methods);
++    let path = "src/Models/User.php";
++    let (backend, dir) = make_workspace(&[(path, &content)]);
++    let uri = crate::common::open_php_at(&backend, &dir, path, &content).await;
++    // The slow pass builds and consumes diagnostic scope snapshots; an
++    // ordinary completion alone does not exercise this parameter seed.
++    let mut diagnostics = Vec::new();
++    backend.collect_slow_diagnostics(uri.as_str(), &content, &mut diagnostics);
++    let unknown_members: Vec<_> = diagnostics
++        .iter()
++        .filter(|diagnostic| {
++            matches!(
++                &diagnostic.code,
++                Some(NumberOrString::String(code)) if code == "unknown_member"
++            )
++        })
++        .collect();
++    let probe_line = content
++        .lines()
++        .position(|line| line.contains("$query->verified();"))
++        .unwrap() as u32;
++    let missing_line = content
++        .lines()
++        .position(|line| line.contains("$query->deliberatelyMissing();"))
++        .unwrap() as u32;
++    assert!(
++        unknown_members
++            .iter()
++            .any(|diagnostic| diagnostic.range.start.line == missing_line),
++        "unknown-member diagnostics must remain active on the Builder: {diagnostics:?}"
++    );
++    assert_eq!(
++        unknown_members
++            .iter()
++            .any(|diagnostic| diagnostic.range.start.line == probe_line),
++        !is_scope,
++        "only the actual attributed method should receive Builder<User> in its cached body: {diagnostics:?}"
++    );
++    assert_eq!(
++        unknown_members.len(),
++        if is_scope { 1 } else { 2 },
++        "where() remains valid and unrelated methods must not inherit a neighboring scope: {diagnostics:?}"
++    );
++}
++
++async fn assert_scope_body_completion_identity(import: &str, attribute: &str, is_scope: bool) {
++    let methods = format!(
++        "    {attribute}\n    protected function active(Builder $query): void {{\n        $query->verified();\n    }}"
++    );
++    let content = scope_body_identity_fixture(import, &methods);
++    let path = "src/Models/User.php";
++    let (backend, dir) = make_workspace(&[(path, &content)]);
++    let line = content
++        .lines()
++        .position(|line| line.contains("$query->verified();"))
++        .unwrap() as u32;
++    let items = complete_at(&backend, &dir, path, &content, line, 16).await;
++    let methods = method_names(&items);
++    assert!(
++        methods.contains(&"where"),
++        "Builder methods must remain available: {methods:?}"
++    );
++    assert_eq!(
++        methods.contains(&"verified"),
++        is_scope,
++        "only canonical Scope identity supplies the model's scope inside the body: {methods:?}"
++    );
++}
++
++#[tokio::test]
++async fn test_scope_body_cached_diagnostics_canonical_attribute() {
++    assert_scope_body_cached_diagnostics(
++        "use Illuminate\\Database\\Eloquent\\Attributes\\Scope;",
++        "    #[Scope]\n    protected function active(Builder $query): void {\n        $query->where('active', true);\n        $query->verified();\n        $query->deliberatelyMissing();\n    }",
++        true,
++    ).await;
++}
++
++#[tokio::test]
++async fn test_scope_body_cached_diagnostics_aliased_attribute() {
++    assert_scope_body_cached_diagnostics(
++        "use Illuminate\\Database\\Eloquent\\Attributes\\Scope as Q;",
++        "    #[Q]\n    protected function active(Builder $query): void {\n        $query->where('active', true);\n        $query->verified();\n        $query->deliberatelyMissing();\n    }",
++        true,
++    ).await;
++}
++
++#[tokio::test]
++async fn test_scope_body_cached_diagnostics_foreign_attribute() {
++    assert_scope_body_cached_diagnostics(
++        "use App\\Models\\Scope;\n#[\\Attribute] class Scope {}",
++        "    #[Scope]\n    protected function ordinary(Builder $query): void {\n        $query->where('active', true);\n        $query->verified();\n        $query->deliberatelyMissing();\n    }",
++        false,
++    ).await;
++}
++
++#[tokio::test]
++async fn test_scope_body_cached_diagnostics_preceding_attribute_does_not_leak() {
++    assert_scope_body_cached_diagnostics(
++        "use Illuminate\\Database\\Eloquent\\Attributes\\Scope;",
++        "    #[Scope]\n    protected function active(Builder $query): void {}\n    protected function ordinary(Builder $query): void {\n        $query->where('active', true);\n        $query->verified();\n        $query->deliberatelyMissing();\n    }",
++        false,
++    ).await;
++}
++
++#[tokio::test]
++async fn test_scope_body_cached_diagnostics_following_attribute_does_not_leak() {
++    assert_scope_body_cached_diagnostics(
++        "use Illuminate\\Database\\Eloquent\\Attributes\\Scope;",
++        "    protected function ordinary(Builder $query): void {\n        $query->where('active', true);\n        $query->verified();\n        $query->deliberatelyMissing();\n    }\n    #[Scope]\n    protected function active(Builder $query): void {}",
++        false,
++    ).await;
++}
++
++#[tokio::test]
++async fn test_scope_body_completion_aliased_attribute_identity() {
++    assert_scope_body_completion_identity(
++        "use Illuminate\\Database\\Eloquent\\Attributes\\Scope as Q;",
++        "#[Q]",
++        true,
++    )
++    .await;
++}
++
++#[tokio::test]
++async fn test_scope_body_completion_foreign_attribute_identity() {
++    assert_scope_body_completion_identity(
++        "use App\\Models\\Scope;\n#[\\Attribute] class Scope {}",
++        "#[Scope]",
++        false,
++    )
++    .await;
++}
++
++#[tokio::test]
++async fn test_scope_body_cached_diagnostics_namespace_identity_isolation() {
++    let content = r#"<?php
++namespace App\Models\First {
++    use Illuminate\Database\Eloquent\Model;
++    use Illuminate\Database\Eloquent\Builder;
++    use Illuminate\Database\Eloquent\Attributes\Scope as Q;
++    class User extends Model {
++        public function scopeVerified(Builder $query): void {}
++        #[Q]
++        protected function active(Builder $query): void {
++            $query->where('active', true);
++            $query->verified(); // canonical
++            $query->deliberatelyMissing(); // canonical control
++        }
++    }
++}
++namespace App\Models\Second {
++    use Illuminate\Database\Eloquent\Model;
++    use Illuminate\Database\Eloquent\Builder;
++    #[\Attribute] class Scope {}
++    class User extends Model {
++        public function scopeVerified(Builder $query): void {}
++        #[Scope]
++        protected function active(Builder $query): void {
++            $query->where('active', true);
++            $query->verified(); // foreign
++            $query->deliberatelyMissing(); // foreign control
++        }
++    }
++}
++"#;
++    let path = "src/Models/NamespaceIdentity.php";
++    let (backend, dir) = make_workspace(&[(path, content)]);
++    let uri = crate::common::open_php_at(&backend, &dir, path, content).await;
++    let diagnostics =
++        crate::common::unknown_member_diagnostics_with_scope_cache(&backend, uri.as_str(), content);
++    for (needle, expected) in [
++        ("$query->verified(); // canonical", false),
++        ("$query->verified(); // foreign", true),
++        ("$query->deliberatelyMissing(); // canonical control", true),
++        ("$query->deliberatelyMissing(); // foreign control", true),
++    ] {
++        let line = content
++            .lines()
++            .position(|line| line.contains(needle))
++            .unwrap() as u32;
++        assert_eq!(
++            diagnostics
++                .iter()
++                .any(|diagnostic| diagnostic.range.start.line == line),
++            expected,
++            "the exact declaration's namespace must determine `{needle}`: {diagnostics:?}"
++        );
++    }
++    assert_eq!(
++        diagnostics.len(),
++        3,
++        "where() must remain valid in both namespaces: {diagnostics:?}"
++    );
++}
++
++#[tokio::test]
++async fn test_scope_body_cached_diagnostics_nested_anonymous_class_isolation() {
++    let content = scope_body_identity_fixture(
++        "use Illuminate\\Database\\Eloquent\\Attributes\\Scope as Q;",
++        r#"    #[Q]
++    protected function active(Builder $query): void {
++        $query->verified(); // outer scope
++        $query->deliberatelyMissing(); // outer control
++        $object = new class {
++            public function active(Builder $query): void {
++                $query->where('active', true);
++                $query->verified(); // anonymous ordinary method
++                $query->deliberatelyMissing(); // anonymous control
++            }
++        };
++    }"#,
++    );
++    let path = "src/Models/User.php";
++    let (backend, dir) = make_workspace(&[(path, &content)]);
++    let uri = crate::common::open_php_at(&backend, &dir, path, &content).await;
++    let diagnostics = crate::common::unknown_member_diagnostics_with_scope_cache(
++        &backend,
++        uri.as_str(),
++        &content,
++    );
++    for (needle, expected) in [
++        ("$query->verified(); // outer scope", false),
++        ("$query->verified(); // anonymous ordinary method", true),
++        ("$query->deliberatelyMissing(); // outer control", true),
++        ("$query->deliberatelyMissing(); // anonymous control", true),
++    ] {
++        let line = content
++            .lines()
++            .position(|line| line.contains(needle))
++            .unwrap() as u32;
++        assert_eq!(
++            diagnostics
++                .iter()
++                .any(|diagnostic| diagnostic.range.start.line == line),
++            expected,
++            "the nested anonymous method must retain its own Builder type for `{needle}`: {diagnostics:?}"
++        );
++    }
++    assert_eq!(
++        diagnostics.len(),
++        3,
++        "ordinary Builder methods remain valid: {diagnostics:?}"
++    );
++}
++
++#[tokio::test]
++async fn test_scope_body_abstract_parameter_hover_attribute_identity() {
++    for (import, attribute, enriched) in [
++        (
++            "use Illuminate\\Database\\Eloquent\\Attributes\\Scope as Q;",
++            "#[Q]",
++            true,
++        ),
++        ("#[\\Attribute] class Scope {}", "#[Scope]", false),
++    ] {
++        let content = scope_body_identity_fixture(
++            import,
++            &format!(
++                "    {attribute}\n    abstract protected function active(Builder $query): void;"
++            ),
++        )
++        .replace(
++            "class User extends Model",
++            "abstract class User extends Model",
++        );
++        let path = "src/Models/User.php";
++        let (backend, dir) = make_workspace(&[(path, &content)]);
++        let uri = crate::common::open_php_at(&backend, &dir, path, &content).await;
++        let (line, text) = content
++            .lines()
++            .enumerate()
++            .find(|(_, line)| line.contains("abstract protected function active"))
++            .unwrap();
++        let column = text.find("$query").unwrap() + 2;
++        let hover =
++            crate::common::markup_hover_at(&backend, &uri, line as u32, column as u32).await;
++        assert!(
++            hover.contains("Builder"),
++            "the native Builder parameter must hover: {hover}"
++        );
++        assert_eq!(
++            hover.contains("Builder<") && hover.contains("User>"),
++            enriched,
++            "abstract parameter hover must use the exact Scope identity for {attribute}: {hover}"
++        );
++    }
++}
++
+ /// `#[Scope]` protected method accessed from *outside* the model class
+ /// must still appear as a public scope method in instance completions.
+ /// This is the scenario where `$bakery->fresh()` was missing: the

@@ -1,0 +1,490 @@
+diff --git a/docs/CHANGELOG.md b/docs/CHANGELOG.md
+index 7c5c35e..b626dbf 100644
+--- a/docs/CHANGELOG.md
++++ b/docs/CHANGELOG.md
+@@ -15,6 +15,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
+ 
+ ## [Unreleased]
+ 
++- **Completion after Unicode text.** Suggestions remain available when emoji precede the cursor, and incomplete-code recovery preserves line endings. Contributed by PHP Workbench downstream.
++
+ - **Composer directory references.** PHP completion and navigation follow local vendor and binary-directory setting references, including paths containing spaces. Contributed by @thinkycz
+ 
+ - **Name extracted declarations.** Clients can supply a name for an extracted variable, constant, function or method before reviewing the proposal. Conflicting or invalid names are refused, and omitted names retain automatic naming. Contributed by PHP Workbench downstream.
+diff --git a/src/completion/context/class_completion/class_completion_tests.rs b/src/completion/context/class_completion/class_completion_tests.rs
+index e685072..9e1c09a 100644
+--- a/src/completion/context/class_completion/class_completion_tests.rs
++++ b/src/completion/context/class_completion/class_completion_tests.rs
+@@ -1196,3 +1196,98 @@ fn test_extract_partial_allows_php_prefixed_identifier() {
+         Some("php_ini".to_string())
+     );
+ }
++
++fn extract_partial_at_utf16_marker(marked: &str) -> Option<String> {
++    let (before, _) = marked.split_once("<caret>").expect("one caret marker");
++    let position = Position::new(
++        before.bytes().filter(|byte| *byte == b'\n').count() as u32,
++        before.rsplit('\n').next().unwrap().encode_utf16().count() as u32,
++    );
++    Backend::extract_partial_class_name(&marked.replace("<caret>", ""), position)
++}
++
++#[test]
++fn test_extract_partial_utf16_after_astral_before_semicolon() {
++    for marked in [
++        "<?php\nnamespace Demo;\n$note = 'ž🐘'; renderL<caret>;\n",
++        "<?php\nnamespace Demo;\n$note = '🐘🐘'; renderL<caret>;\n",
++        "<?php\r\nnamespace Demo;\r\n$note = 'ž🐘'; renderL<caret>;\r\n",
++    ] {
++        assert_eq!(
++            extract_partial_at_utf16_marker(marked),
++            Some("renderL".into()),
++            "{marked:?}"
++        );
++    }
++}
++
++#[test]
++fn test_extract_partial_utf16_after_astral_before_parenthesis() {
++    assert_eq!(
++        extract_partial_at_utf16_marker("<?php\n$note = 'ž🐘'; renderL<caret>('x');\n"),
++        Some("renderL".into()),
++    );
++}
++
++#[test]
++fn test_extract_partial_utf16_does_not_consume_right_identifier_suffix() {
++    for marked in [
++        "<?php\n$note = 'ž🐘'; renderL<caret>abel;\n",
++        "<?php\n$note = '🐘🐘'; renderL<caret>abel('x');\n",
++    ] {
++        assert_eq!(
++            extract_partial_at_utf16_marker(marked),
++            Some("renderL".into()),
++            "{marked:?}"
++        );
++    }
++}
++
++#[test]
++fn test_extract_partial_utf16_ascii_bmp_previous_line_and_eof_controls() {
++    for marked in [
++        "<?php\n$note = 'plain'; renderL<caret>;\n",
++        "<?php\n$note = 'ž'; renderL<caret>;\n",
++        "<?php\n$note = 'ž🐘';\nrenderL<caret>;\n",
++        "<?php\n$note = 'ž🐘'; renderL<caret>",
++    ] {
++        assert_eq!(
++            extract_partial_at_utf16_marker(marked),
++            Some("renderL".into()),
++            "{marked:?}"
++        );
++    }
++}
++
++#[test]
++fn test_extract_partial_utf16_unicode_identifier_and_fqn() {
++    for (marked, expected) in [
++        ("<?php\n$note = '🐘'; Žluť<caret>;\n", "Žluť"),
++        (
++            "<?php\n$note = '🐘'; \\Demo\\Žluť<caret>;\n",
++            "\\Demo\\Žluť",
++        ),
++        (
++            "<?php\n$note = '🐘'; Demo\\Žluť<caret>oučký;\n",
++            "Demo\\Žluť",
++        ),
++    ] {
++        assert_eq!(
++            extract_partial_at_utf16_marker(marked),
++            Some(expected.into()),
++            "{marked:?}"
++        );
++    }
++}
++
++#[test]
++fn test_extract_partial_utf16_preserves_variable_member_static_and_tag_exclusions() {
++    for marked in [
++        "<?php\n$note = '🐘'; $renderL<caret>;\n",
++        "<?php\n$note = '🐘'; $child->renderL<caret>;\n",
++        "<?php\n$note = '🐘'; Demo::renderL<caret>;\n",
++        "🐘<?ph<caret>p",
++    ] {
++        assert_eq!(extract_partial_at_utf16_marker(marked), None, "{marked:?}");
++    }
++}
+diff --git a/src/completion/context/class_completion/mod.rs b/src/completion/context/class_completion/mod.rs
+index b53899b..a296bf8 100644
+--- a/src/completion/context/class_completion/mod.rs
++++ b/src/completion/context/class_completion/mod.rs
+@@ -726,53 +726,24 @@ impl Backend {
+     /// `None` if the resulting text starts with `$` (variable context)
+     /// or is empty.
+     pub fn extract_partial_class_name(content: &str, position: Position) -> Option<String> {
+-        let lines: Vec<&str> = content.lines().collect();
+-        if position.line as usize >= lines.len() {
+-            return None;
+-        }
+-
+-        let line = lines[position.line as usize];
+-        let chars: Vec<char> = line.chars().collect();
+-        let col = (position.character as usize).min(chars.len());
+-
+-        // Walk backwards through identifier characters (including `\`)
+-        let mut i = col;
+-        while i > 0
+-            && (chars[i - 1].is_alphanumeric() || chars[i - 1] == '_' || chars[i - 1] == '\\')
++        let line = content.lines().nth(position.line as usize)?;
++        let byte_col = crate::text_position::utf16_col_to_byte_offset(line, position.character);
++        let prefix = &line[..byte_col];
++        let start = prefix
++            .char_indices()
++            .rev()
++            .take_while(|(_, ch)| ch.is_alphanumeric() || matches!(ch, '_' | '\\'))
++            .map(|(offset, _)| offset)
++            .last()?;
++        let before = &prefix[..start];
++        if before.ends_with('$')
++            || before.ends_with("->")
++            || before.ends_with("::")
++            || before.ends_with("<?")
+         {
+-            i -= 1;
+-        }
+-
+-        if i == col {
+-            // Nothing typed — no partial identifier
+             return None;
+         }
+-
+-        // If preceded by `$`, this is a variable, not a class name
+-        if i > 0 && chars[i - 1] == '$' {
+-            return None;
+-        }
+-
+-        // If preceded by `->` or `::`, member completion handles this
+-        if i >= 2 && chars[i - 2] == '-' && chars[i - 1] == '>' {
+-            return None;
+-        }
+-        if i >= 2 && chars[i - 2] == ':' && chars[i - 1] == ':' {
+-            return None;
+-        }
+-
+-        // If preceded by `<?`, this is the PHP open tag (`<?php`), not
+-        // a class/function name — suppress completion entirely.
+-        if i >= 2 && chars[i - 2] == '<' && chars[i - 1] == '?' {
+-            return None;
+-        }
+-
+-        let partial: String = chars[i..col].iter().collect();
+-        if partial.is_empty() {
+-            return None;
+-        }
+-
+-        Some(partial)
++        Some(prefix[start..].to_owned())
+     }
+ 
+     /// Maximum number of class name completions to return.
+diff --git a/src/completion/handler/patching.rs b/src/completion/handler/patching.rs
+index c053a27..3f82a66 100644
+--- a/src/completion/handler/patching.rs
++++ b/src/completion/handler/patching.rs
+@@ -64,38 +64,21 @@ impl Backend {
+     /// identifier and semicolon (`_x;`) at the cursor so the parser can
+     /// recover the surrounding structure.
+     pub(super) fn patch_incomplete_member_access(content: &str, position: Position) -> String {
+-        let line_idx = position.line as usize;
+-        let col = position.character as usize;
+-        let mut result = String::with_capacity(content.len() + 4);
+-
+-        for (i, line) in content.lines().enumerate() {
+-            if i == line_idx {
+-                let byte_col = line
+-                    .char_indices()
+-                    .nth(col)
+-                    .map(|(idx, _)| idx)
+-                    .unwrap_or(line.len());
+-                // Only patch when the cursor is right after `->` or
+-                // `?->` with nothing meaningful following it.
+-                let before = &line[..byte_col];
+-                let after = line[byte_col..].trim();
+-                if (before.ends_with("->") || before.ends_with("?->")) && after.is_empty() {
+-                    result.push_str(before);
+-                    result.push_str("_x;");
+-                    result.push_str(&line[byte_col..]);
+-                } else {
+-                    result.push_str(line);
+-                }
+-            } else {
+-                result.push_str(line);
+-            }
+-            result.push('\n');
++        let Some(line) = content.lines().nth(position.line as usize) else {
++            return content.to_owned();
++        };
++        let byte_col = crate::text_position::utf16_col_to_byte_offset(line, position.character);
++        let before = &line[..byte_col];
++        let after = line[byte_col..].trim();
++        if !(before.ends_with("->") || before.ends_with("?->")) || !after.is_empty() {
++            return content.to_owned();
+         }
+-
+-        if !content.ends_with('\n') && result.ends_with('\n') {
+-            result.pop();
+-        }
+-
++        let offset = crate::text_position::line_start_byte_offset(content, position.line as usize)
++            + byte_col;
++        let mut result = String::with_capacity(content.len() + 3);
++        result.push_str(&content[..offset]);
++        result.push_str("_x;");
++        result.push_str(&content[offset..]);
+         result
+     }
+ 
+@@ -107,32 +90,118 @@ impl Backend {
+     /// yet).  Closing the call expression lets the parser recover the
+     /// surrounding class/function structure.
+     pub(super) fn patch_content_at_cursor(content: &str, position: Position) -> String {
+-        let line_idx = position.line as usize;
+-        let col = position.character as usize;
++        let Some(line) = content.lines().nth(position.line as usize) else {
++            return content.to_owned();
++        };
++        let byte_col = crate::text_position::utf16_col_to_byte_offset(line, position.character);
++        let offset = crate::text_position::line_start_byte_offset(content, position.line as usize)
++            + byte_col;
+         let mut result = String::with_capacity(content.len() + 2);
++        result.push_str(&content[..offset]);
++        result.push_str(");");
++        result.push_str(&content[offset..]);
++        result
++    }
++}
+ 
+-        for (i, line) in content.lines().enumerate() {
+-            if i == line_idx {
+-                let byte_col = line
+-                    .char_indices()
+-                    .nth(col)
+-                    .map(|(idx, _)| idx)
+-                    .unwrap_or(line.len());
+-                result.push_str(&line[..byte_col]);
+-                result.push_str(");");
+-                result.push_str(&line[byte_col..]);
+-            } else {
+-                result.push_str(line);
+-            }
+-            result.push('\n');
++#[cfg(test)]
++mod utf16_tests {
++    use super::*;
++
++    fn at(marked: &str) -> (String, Position) {
++        let before = marked.split_once("<caret>").unwrap().0;
++        let position = Position::new(
++            before.bytes().filter(|byte| *byte == b'\n').count() as u32,
++            before.rsplit('\n').next().unwrap().encode_utf16().count() as u32,
++        );
++        (marked.replace("<caret>", ""), position)
++    }
++
++    #[test]
++    fn completion_recovery_utf16_call_inserts_at_exact_cursor() {
++        for marked in [
++            "<?php\n$note = '🐘'; $child->greet(<caret>'next');\n",
++            "<?php\n$note = '🐘🐘'; $child->greet(<caret>'next');\n",
++            "<?php\n$note = 'ž'; $child->greet(<caret>'next');\n",
++        ] {
++            let (content, position) = at(marked);
++            assert_eq!(
++                Backend::patch_content_at_cursor(&content, position),
++                marked.replace("<caret>", ");"),
++                "{marked:?}"
++            );
+         }
++    }
+ 
+-        // Remove the trailing newline we may have added if the original
+-        // content did not end with one.
+-        if !content.ends_with('\n') && result.ends_with('\n') {
+-            result.pop();
++    #[test]
++    fn completion_recovery_utf16_member_inserts_before_trailing_whitespace() {
++        for marked in [
++            "<?php\n$note = '🐘'; $child-><caret>   \nnext();\n",
++            "<?php\n$note = '🐘🐘'; $child?-><caret>   \nnext();\n",
++            "<?php\n$note = 'ž'; $child-><caret>   \nnext();\n",
++        ] {
++            let (content, position) = at(marked);
++            assert_eq!(
++                Backend::patch_incomplete_member_access(&content, position),
++                marked.replace("<caret>", "_x;"),
++                "{marked:?}"
++            );
+         }
++    }
+ 
+-        result
++    #[test]
++    fn completion_recovery_utf16_call_preserves_crlf_and_all_other_bytes() {
++        for marked in [
++            "<?php\r\n$note = '🐘'; $child->greet(<caret>'next');\r\nlast();\r\n",
++            "<?php\r\n$child->greet(<caret>\r\nlast();",
++        ] {
++            let (content, position) = at(marked);
++            assert_eq!(
++                Backend::patch_content_at_cursor(&content, position),
++                marked.replace("<caret>", ");"),
++                "{marked:?}"
++            );
++        }
++    }
++
++    #[test]
++    fn completion_recovery_utf16_member_preserves_crlf_and_all_other_bytes() {
++        for marked in [
++            "<?php\r\n$note = '🐘'; $child-><caret>   \r\nlast();\r\n",
++            "<?php\r\n$child?-><caret>\r\nlast();",
++        ] {
++            let (content, position) = at(marked);
++            assert_eq!(
++                Backend::patch_incomplete_member_access(&content, position),
++                marked.replace("<caret>", "_x;"),
++                "{marked:?}"
++            );
++        }
++    }
++
++    #[test]
++    fn completion_recovery_utf16_member_refuses_existing_suffix_without_rewriting() {
++        for marked in [
++            "<?php\n$note = '🐘'; $child-><caret>already;\n",
++            "<?php\r\n$note = '🐘'; $child-><caret>already;\r\n",
++        ] {
++            let (content, position) = at(marked);
++            assert_eq!(
++                Backend::patch_incomplete_member_access(&content, position),
++                content
++            );
++        }
++    }
++
++    #[test]
++    fn completion_recovery_utf16_out_of_range_line_is_unchanged() {
++        for content in ["<?php\n$child->\n", "<?php\r\n$child->\r\n"] {
++            let position = Position::new(100, 0);
++            assert_eq!(Backend::patch_content_at_cursor(content, position), content);
++            assert_eq!(
++                Backend::patch_incomplete_member_access(content, position),
++                content
++            );
++        }
+     }
+ }
+diff --git a/src/completion/target.rs b/src/completion/target.rs
+index c40186e..c67fa88 100644
+--- a/src/completion/target.rs
++++ b/src/completion/target.rs
+@@ -27,8 +27,11 @@ pub fn extract_completion_target(content: &str, position: Position) -> Option<Co
+ 
+     // Collapse multi-line method chains so that continuation lines
+     // (starting with `->` or `?->`) are joined with preceding lines.
+-    let (line, col) =
+-        collapse_continuation_lines(&lines, position.line as usize, position.character as usize);
++    let current_line = lines[position.line as usize];
++    let byte_col = crate::text_position::utf16_col_to_byte_offset(current_line, position.character);
++    // The shared chain scanner indexes Unicode scalars, not LSP UTF-16 units.
++    let char_col = current_line[..byte_col].chars().count();
++    let (line, col) = collapse_continuation_lines(&lines, position.line as usize, char_col);
+     let chars: Vec<char> = line.chars().collect();
+ 
+     let (subject, access_kind) = detect_access_operator(&chars, col)?;
+@@ -38,3 +41,85 @@ pub fn extract_completion_target(content: &str, position: Position) -> Option<Co
+         subject,
+     })
+ }
++
++#[cfg(test)]
++mod utf16_tests {
++    use super::*;
++
++    fn target_at(marked: &str) -> Option<CompletionTarget> {
++        let before = marked.split_once("<caret>").unwrap().0;
++        let position = Position::new(
++            before.bytes().filter(|byte| *byte == b'\n').count() as u32,
++            before.rsplit('\n').next().unwrap().encode_utf16().count() as u32,
++        );
++        extract_completion_target(&marked.replace("<caret>", ""), position)
++    }
++
++    #[test]
++    fn completion_target_utf16_member_after_astral_and_suffix() {
++        for marked in [
++            "<?php\n$note = 'ž🐘'; $child->formatL<caret>;\n",
++            "<?php\n$note = '🐘🐘'; $child->formatL<caret>('x');\n",
++            "<?php\n$note = '🐘'; $child->formatL<caret>abel;\n",
++            "<?php\r\n$note = 'ž🐘'; $child->formatL<caret>;\r\n",
++        ] {
++            let target = target_at(marked).unwrap_or_else(|| panic!("no target: {marked:?}"));
++            assert_eq!(target.subject, "$child", "{marked:?}");
++            assert!(matches!(target.access_kind, AccessKind::Arrow));
++        }
++    }
++
++    #[test]
++    fn completion_target_utf16_nullsafe_static_and_unicode_variable() {
++        for (marked, subject, is_static) in [
++            (
++                "<?php\n$note = '🐘'; $child?->formatL<caret>;",
++                "$child",
++                false,
++            ),
++            (
++                "<?php\n$note = '🐘'; Demo\\BaseFormatter::formatL<caret>;",
++                "Demo\\BaseFormatter",
++                true,
++            ),
++            (
++                "<?php\n$note = '🐘'; $žluť->formatL<caret>;",
++                "$žluť",
++                false,
++            ),
++        ] {
++            let target = target_at(marked).unwrap_or_else(|| panic!("no target: {marked:?}"));
++            assert_eq!(target.subject, subject, "{marked:?}");
++            assert_eq!(
++                matches!(target.access_kind, AccessKind::DoubleColon),
++                is_static
++            );
++        }
++    }
++
++    #[test]
++    fn completion_target_utf16_multiline_chain_keeps_subject() {
++        for marked in [
++            "<?php\n$note = '🐘'; $child->next()\n    ->formatL<caret>;\n",
++            "<?php\n$note = '🐘'; $child->next()\n    ?->formatL<caret>;\n",
++        ] {
++            let target = target_at(marked).unwrap_or_else(|| panic!("no target: {marked:?}"));
++            assert_eq!(target.subject, "$child->next()", "{marked:?}");
++            assert!(matches!(target.access_kind, AccessKind::Arrow));
++        }
++    }
++
++    #[test]
++    fn completion_target_utf16_ascii_bmp_previous_line_and_eof_controls() {
++        for marked in [
++            "<?php\n$note = 'plain'; $child->formatL<caret>;",
++            "<?php\n$note = 'ž'; $child->formatL<caret>;",
++            "<?php\n$note = '🐘';\n$child->formatL<caret>;",
++            "<?php\n$note = '🐘'; $child->formatL<caret>",
++        ] {
++            let target = target_at(marked).unwrap_or_else(|| panic!("no target: {marked:?}"));
++            assert_eq!(target.subject, "$child");
++            assert!(matches!(target.access_kind, AccessKind::Arrow));
++        }
++    }
++}

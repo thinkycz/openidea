@@ -1,0 +1,2130 @@
+diff --git a/docs/CHANGELOG.md b/docs/CHANGELOG.md
+--- a/docs/CHANGELOG.md
++++ b/docs/CHANGELOG.md
+@@ -14,6 +14,10 @@
+ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+ 
+ ## [Unreleased]
++
++- **Code actions prepare pending inherited source.** The first request in an unchanged child sees an unsaved parent signature edit or undo before background diagnostics finish.
++
++- **Generate inherited method overrides.** Choose an override from a named class declaration or anywhere in its members, body or comments, then review the proposed method. Concrete parent methods delegate with their original native contract; missing implementations use an explicit throwing placeholder. Contributed by PHP Workbench downstream.
+ 
+ - **Generate documentation from a declaration.** The Generate PHPDoc block action proposes documentation using the declaration’s types, inherited generic information and uncaught exceptions, while preserving existing comments and attributes. Contributed by PHP Workbench downstream.
+ 
+diff --git a/docs/method-generation.md b/docs/method-generation.md
+new file mode 100644
+--- /dev/null
++++ b/docs/method-generation.md
+@@ -0,0 +1,15 @@
++# Reviewed inherited methods
++
++The `Override <method> (<declaring class>)` code actions propose one inherited method from a named class declaration, member, body or comment. The editor must review the insertion before applying it. The action kind is `refactor.rewrite.overrideMethod`; the existing `Implement ...` quick fix retains its title and kind and proposes all required methods together.
++
++Concrete inherited methods delegate to `parent::method(...)`. Parameter references, variadic forwarding, static and reference-returning methods retain the actual declaration syntax. Void methods do not return the call result. Never-returning methods delegate and throw if the parent unexpectedly returns. Abstract, interface and direct-trait methods use an explicit `LogicException` placeholder rather than pretending that an implementation exists.
++
++Generation uses the shared inherited-member collection, class lookup, subtype rules and signature formatters. Syntax from the actual declaring method supplies native types, references and defaults. Lexical `self` and `parent` types and default class names keep their declaring context across namespaces; imports in the editing file are used only when they resolve to the same class. Existing PHPDoc types do not become new native restrictions. Unknown generic type arguments and complete documentation inheritance are not synthesized by this action.
++
++The target class must be closed and parse without errors. The caret may be in a member, method body or comment within that class; the edit always goes immediately before its validated closing brace. HTML and anonymous-class contexts are unavailable, and the smallest containing class is selected so a nested anonymous class cannot accidentally generate into its outer class. Existing methods, private and final inherited methods, magic methods and synthesized members are excluded from overrides. The implementation quick fix can still supply required magic methods. Layout follows the target indentation and line endings. Multiline string defaults are encoded from their parsed bytes so editor line-ending normalization cannot change their value.
++
++Generated signatures must satisfy the known native contracts throughout the parent, interface and trait hierarchy, including parameter variance, references, required/variadic counts, static/visibility and return types. Conflicting parameter names are refused because silently picking one would change named-argument behavior. The action refuses rather than synthesizes a merged signature for incompatible inherited requirements. PHP target checks cover the native syntax being emitted; an override attribute is generated only from PHP 8.3 and only for an actual parent/interface override.
++
++Some source forms cannot yet be transported safely. Trait precedence/alias adaptations are not rewritten into an explicit override signature. Magic-constant and document-string defaults, inaccessible private default constants/constructors, unavailable source syntax and unresolved constant defaults are refused. Class/interface conflict synthesis, generalized trait adaptation, magic-method override generation, full style/version/corpus acceptance and complete dependency epochs remain open. This is bounded method generation, not complete code-generation acceptance.
++
++Code-action requests prepare pending open PHP source revisions before resolving inherited signatures. An unsaved edit or undo in a parent file is therefore available to the first request in an unchanged child, without waiting for background diagnostics. This uses the existing semantic preparation boundary; changes arriving during a request still invalidate its result.
+diff --git a/examples/php/code_actions.php b/examples/php/code_actions.php
+--- a/examples/php/code_actions.php
++++ b/examples/php/code_actions.php
+@@ -453,3 +453,13 @@
+         }
+     }
+ }
++
++
++// ── Reviewed Inherited Methods ─────────────────────────────────────────────
++// Try: place the caret on this class declaration or on the empty line in its
++// body and choose "Override color (Demo\Scaffolding\Pen)". The proposal
++// delegates to parent::color(); review it before applying the insertion.
++class ExplicitOverrideDemo extends Scaffolding\Pen
++{
++
++}
+diff --git a/examples/php/scaffolding/assertions.php b/examples/php/scaffolding/assertions.php
+--- a/examples/php/scaffolding/assertions.php
++++ b/examples/php/scaffolding/assertions.php
+@@ -2125,6 +2125,8 @@
+     assert($branchVault->isSubclassOf(Scaffolding\ScaffoldingVault::class), 'the branch vault descends from the vault');
+     assert(!$branchVault->hasProperty('pin') || $branchVault->getProperty('pin')->getDeclaringClass()->getName() === Scaffolding\ScaffoldingVault::class, 'a private parent property is not inherited into the subclass scope');
+ 
++    assert((new ExplicitOverrideDemo('blue'))->color() === 'blue', 'the override playground inherits the parent native color contract');
++
+     echo "All assertions passed.\n";
+ }
+ 
+diff --git a/src/backend/semantic_snapshot.rs b/src/backend/semantic_snapshot.rs
+--- a/src/backend/semantic_snapshot.rs
++++ b/src/backend/semantic_snapshot.rs
+@@ -2080,3 +2080,132 @@
+         );
+     }
+ }
++
++#[cfg(test)]
++mod method_generation_pending_tests {
++    use super::*;
++    use tower_lsp::LanguageServer;
++    use tower_lsp::lsp_types::*;
++
++    async fn overrides(backend: &Backend, child: &Url) -> Vec<CodeAction> {
++        backend
++            .code_action(CodeActionParams {
++                text_document: TextDocumentIdentifier { uri: child.clone() },
++                range: Range::new(Position::new(1, 6), Position::new(1, 6)),
++                context: CodeActionContext {
++                    diagnostics: vec![],
++                    only: None,
++                    trigger_kind: None,
++                },
++                work_done_progress_params: WorkDoneProgressParams::default(),
++                partial_result_params: PartialResultParams::default(),
++            })
++            .await
++            .expect("current code actions")
++            .unwrap_or_default()
++            .into_iter()
++            .filter_map(|action| match action {
++                CodeActionOrCommand::CodeAction(action)
++                    if action.kind
++                        == Some(CodeActionKind::new("refactor.rewrite.overrideMethod")) =>
++                {
++                    Some(action)
++                }
++                _ => None,
++            })
++            .collect()
++    }
++
++    #[tokio::test]
++    async fn method_generation_prepares_pending_parent_change_and_undo_on_first_query() {
++        let backend = Backend::new_test();
++        let directory = tempfile::tempdir().unwrap();
++        let parent_path = directory.path().join("unsaved-parent.php");
++        let child_path = directory.path().join("unsaved-child.php");
++        let parent = Url::from_file_path(&parent_path).unwrap();
++        let child = Url::from_file_path(&child_path).unwrap();
++        let original =
++            "<?php\nclass PendingParent { public function oldMethod(): int { return 1; } }\n";
++        let changed = "<?php\nclass PendingParent { public function newMethod(string $value): string { return $value; } }\n";
++        let consumer = "<?php\nclass PendingChild extends PendingParent {}\n";
++        std::fs::write(&parent_path, original).unwrap();
++        std::fs::write(&child_path, consumer).unwrap();
++        for (uri, source) in [(&parent, original), (&child, consumer)] {
++            let text = Arc::new(source.to_owned());
++            backend.diag.documents.lock().open(uri.as_str(), 1, &text);
++            backend
++                .open_files
++                .write()
++                .insert(uri.to_string(), Arc::clone(&text));
++            assert!(backend.parse_diagnostic_snapshot(uri.as_str(), &text));
++        }
++        assert_eq!(
++            overrides(&backend, &child).await[0].title,
++            "Override oldMethod (PendingParent)"
++        );
++
++        for (version, source, expected, absent) in [
++            (2, changed, "newMethod", "oldMethod"),
++            (3, original, "oldMethod", "newMethod"),
++        ] {
++            let text = Arc::new(source.to_owned());
++            // Model the real did_change boundary after accepting the overlay,
++            // before the background parse runs. No task timing or sleeps.
++            assert!(
++                backend
++                    .diag
++                    .documents
++                    .lock()
++                    .change(parent.as_str(), version, &text)
++            );
++            backend
++                .open_files
++                .write()
++                .insert(parent.to_string(), Arc::clone(&text));
++            let revision = backend
++                .diag
++                .documents
++                .lock()
++                .capture(parent.as_str(), &text)
++                .unwrap();
++            assert!(
++                !backend
++                    .diag
++                    .documents
++                    .lock()
++                    .parsed(parent.as_str(), revision.as_ref())
++            );
++            let actions = overrides(&backend, &child).await;
++            assert_eq!(
++                actions.len(),
++                1,
++                "first query must prepare revision {version}"
++            );
++            assert_eq!(
++                actions[0].title,
++                format!("Override {expected} (PendingParent)")
++            );
++            let inserted = actions[0]
++                .edit
++                .as_ref()
++                .unwrap()
++                .changes
++                .as_ref()
++                .unwrap()
++                .values()
++                .flatten()
++                .map(|edit| edit.new_text.as_str())
++                .collect::<String>();
++            assert!(
++                inserted.contains(&format!("parent::{expected}(")),
++                "{inserted}"
++            );
++            assert!(!inserted.contains(absent), "{inserted}");
++            if version == 2 {
++                assert!(inserted.contains("string $value): string"), "{inserted}");
++            }
++        }
++        assert_eq!(std::fs::read_to_string(parent_path).unwrap(), original);
++        assert_eq!(std::fs::read_to_string(child_path).unwrap(), consumer);
++    }
++}
+diff --git a/src/code_actions/implement_methods.rs b/src/code_actions/implement_methods.rs
+--- a/src/code_actions/implement_methods.rs
++++ b/src/code_actions/implement_methods.rs
+@@ -12,7 +12,6 @@
+ 
+ use crate::Backend;
+ use crate::atom::Atom;
+-use crate::class_lookup::find_class_at_offset;
+ use crate::php_type::{PhpType, TypeKind};
+ use crate::text_position::offset_to_position;
+ use crate::types::{ClassInfo, ClassLikeKind, MethodInfo, ParameterInfo, Visibility};
+@@ -31,45 +30,64 @@
+         params: &CodeActionParams,
+         out: &mut Vec<CodeActionOrCommand>,
+     ) {
+-        let cursor_offset = crate::text_position::position_to_offset(content, params.range.start);
+-        let ctx = self.file_context_at(uri, cursor_offset);
+-
+-        // Find the class the cursor is inside. `find_class_at_offset`'s
+-        // lower bound also covers the `class Foo implements Bar`
+-        // declaration line (and any attributes above it), before the `{`.
+-        let current_class = match find_class_at_offset(&ctx.classes, cursor_offset) {
+-            Some(c) => c,
+-            None => return,
+-        };
+-
+-        // Only concrete classes can implement missing methods.
+-        // Abstract classes, interfaces, traits, and enums are skipped.
+-        if current_class.kind != ClassLikeKind::Class || current_class.is_abstract {
++        let Some(target) = self.method_insertion_at(uri, content, params) else {
+             return;
+-        }
+-
+-        // Resolve the full inheritance hierarchy to collect all abstract
+-        // and interface methods.
+-        let class_loader = self.class_loader(&ctx);
+-
++        };
++        let ctx = self.file_context_at(uri, target.keyword);
++        let Some(current_class) = super::override_methods::matching_class(&ctx, &target) else {
++            return;
++        };
++        if current_class.is_abstract {
++            return;
++        }
++        let class_loader = super::override_methods::canonical_loader(self, &ctx);
+         let missing = collect_missing_methods(current_class, &class_loader);
+-
+         if missing.is_empty() {
+             return;
+         }
+-
+-        // Determine the use_map so we can shorten FQNs in generated stubs.
+-        let use_map: HashMap<String, String> = ctx.use_map.clone();
+-        let file_namespace = ctx.namespace.clone();
+-
+-        let stub_text =
+-            build_method_stubs(&missing, &use_map, &file_namespace, content, current_class);
+-
+-        // Insert position: just before the closing brace of the class.
+-        // `end_offset` points one byte past the `}`, so `end_offset - 1`
+-        // is the `}` itself.  We insert before that.
+-        let insert_offset = (current_class.end_offset - 1) as usize;
+-        let insert_pos = offset_to_position(content, insert_offset);
++        let mut stubs = String::new();
++        for method in &missing {
++            let Some((_, declaring)) = crate::inheritance::find_declaring_ancestor(
++                current_class,
++                &class_loader,
++                &|owner| owner.get_method_ci(&method.name).is_some(),
++            ) else {
++                return;
++            };
++            let Some(method) = declaring.get_method_ci(&method.name) else {
++                return;
++            };
++            let Some(prepared) = self.prepare_generated_method(
++                uri,
++                content,
++                current_class,
++                &declaring,
++                method,
++                &ctx,
++            ) else {
++                return;
++            };
++            if !self.generated_method_satisfies_contracts(
++                uri,
++                content,
++                current_class,
++                &prepared,
++                &ctx,
++            ) {
++                return;
++            }
++            stubs.push_str(&super::override_methods::render_method(
++                &prepared,
++                &ctx.use_map,
++                &ctx.namespace,
++                &target,
++                false,
++                false,
++            ));
++            stubs.push_str(target.newline);
++        }
++        let stub_text = super::override_methods::insertion_text(&target, &stubs, content);
++        let insert_pos = offset_to_position(content, target.offset);
+ 
+         let title = if missing.len() == 1 {
+             format!("Implement `{}`", missing[0].name)
+@@ -213,36 +231,64 @@
+     implemented: &mut Vec<String>,
+     depth: usize,
+ ) {
++    collect_effective_concrete_parents(
++        parent_name,
++        class_loader,
++        implemented,
++        &mut Vec::new(),
++        depth,
++    );
++}
++
++fn collect_effective_concrete_parents(
++    parent_name: &Option<crate::atom::Atom>,
++    class_loader: &dyn Fn(&str) -> Option<Arc<ClassInfo>>,
++    implemented: &mut Vec<String>,
++    shadowed: &mut Vec<String>,
++    depth: usize,
++) {
+     if depth > crate::types::MAX_INHERITANCE_DEPTH as usize {
+         return;
+     }
+-
+-    let parent_name = match parent_name {
+-        Some(n) => n,
+-        None => return,
++    let Some(parent_name) = parent_name else {
++        return;
+     };
+-
+-    let parent = match class_loader(parent_name) {
+-        Some(c) => c,
+-        None => return,
++    let Some(parent) = class_loader(parent_name) else {
++        return;
+     };
+-
+     for method in &parent.methods {
+-        if !method.is_abstract {
+-            let lower = method.name.to_lowercase();
+-            if !implemented.contains(&lower) {
+-                implemented.push(lower);
++        let lower = method.name.to_lowercase();
++        if shadowed.contains(&lower) {
++            continue;
++        }
++        shadowed.push(lower.clone());
++        if !method.is_abstract
++            && method.visibility != Visibility::Private
++            && !implemented.contains(&lower)
++        {
++            implemented.push(lower);
++        }
++    }
++    let mut trait_methods = Vec::new();
++    collect_concrete_trait_methods_atoms(
++        &parent.used_traits,
++        class_loader,
++        &mut trait_methods,
++        depth + 1,
++    );
++    for name in trait_methods {
++        if !shadowed.contains(&name) {
++            shadowed.push(name.clone());
++            if !implemented.contains(&name) {
++                implemented.push(name);
+             }
+         }
+     }
+-
+-    // Traits used by the parent also provide concrete methods.
+-    collect_concrete_trait_methods_atoms(&parent.used_traits, class_loader, implemented, depth + 1);
+-
+-    collect_concrete_parent_methods_atom(
++    collect_effective_concrete_parents(
+         &parent.parent_class,
+         class_loader,
+         implemented,
++        shadowed,
+         depth + 1,
+     );
+ }
+@@ -448,51 +494,6 @@
+             );
+         }
+     }
+-}
+-
+-/// Build the source text for all missing method stubs.
+-///
+-/// Each stub includes visibility, static modifier, parameter list with
+-/// type hints and defaults, return type, and an empty body.
+-fn build_method_stubs(
+-    methods: &[MethodInfo],
+-    use_map: &HashMap<String, String>,
+-    file_namespace: &Option<String>,
+-    content: &str,
+-    class: &ClassInfo,
+-) -> String {
+-    let indent = detect_class_indent(content, class);
+-
+-    let mut result = String::new();
+-
+-    for method in methods {
+-        result.push('\n');
+-
+-        // Visibility — interface methods become public, abstract methods
+-        // keep their declared visibility (but never private).
+-        let vis = match method.visibility {
+-            Visibility::Private => "public",
+-            Visibility::Protected => "protected",
+-            Visibility::Public => "public",
+-        };
+-
+-        let static_kw = if method.is_static { "static " } else { "" };
+-
+-        let params = format_params(method, use_map, file_namespace);
+-        let return_type = format_return_type(method, use_map, file_namespace);
+-
+-        result.push_str(&indent);
+-        result.push_str(&format!(
+-            "{} {}function {}({}){}\n",
+-            vis, static_kw, method.name, params, return_type,
+-        ));
+-        result.push_str(&indent);
+-        result.push_str("{\n");
+-        result.push_str(&indent);
+-        result.push_str("}\n");
+-    }
+-
+-    result
+ }
+ 
+ /// Format the parameter list for a method stub.
+@@ -675,7 +676,7 @@
+     use_map: &HashMap<String, String>,
+     file_namespace: &Option<String>,
+ ) -> String {
+-    ty.resolve_names(&|name| crate::util::shorten_from_fqn(name, use_map, file_namespace))
++    ty.resolve_names(&|name| super::override_methods::display_name(name, use_map, file_namespace))
+         .to_string()
+ }
+ 
+@@ -1176,6 +1177,44 @@
+         assert!(names.contains(&"unserialize"));
+     }
+ 
++    // These synthetic metadata fixtures exercise the shared low-level renderer.
++    // AST admission and declaration transport have separate integration tests.
++    fn render_test_stubs(
++        methods: &[MethodInfo],
++        use_map: &HashMap<String, String>,
++        namespace: &Option<String>,
++        content: &str,
++        class: &ClassInfo,
++    ) -> String {
++        use super::super::override_methods::{MethodInsertion, PreparedMethod, render_method};
++        let target = MethodInsertion {
++            keyword: class.keyword_offset,
++            open: class.start_offset,
++            close: class.end_offset.saturating_sub(1),
++            end: class.end_offset,
++            offset: class.end_offset.saturating_sub(1) as usize,
++            indent: detect_class_indent(content, class),
++            class_indent: String::new(),
++            newline: "\n",
++        };
++        methods
++            .iter()
++            .map(|method| {
++                render_method(
++                    &PreparedMethod {
++                        method: method.clone(),
++                        returns_reference: false,
++                    },
++                    use_map,
++                    namespace,
++                    &target,
++                    false,
++                    false,
++                )
++            })
++            .collect()
++    }
++
+     // ── build_method_stubs tests ────────────────────────────────────────
+ 
+     #[test]
+@@ -1194,7 +1233,7 @@
+             ..Default::default()
+         };
+ 
+-        let result = build_method_stubs(&methods, &HashMap::new(), &None, content, &class);
++        let result = render_test_stubs(&methods, &HashMap::new(), &None, content, &class);
+         assert!(result.contains("public function render(): string"));
+     }
+ 
+@@ -1215,7 +1254,7 @@
+             ..Default::default()
+         };
+ 
+-        let result = build_method_stubs(&methods, &HashMap::new(), &None, content, &class);
++        let result = render_test_stubs(&methods, &HashMap::new(), &None, content, &class);
+         assert!(result.contains("public static function init(): void"));
+     }
+ 
+@@ -1240,7 +1279,7 @@
+             ..Default::default()
+         };
+ 
+-        let result = build_method_stubs(&methods, &HashMap::new(), &None, content, &class);
++        let result = render_test_stubs(&methods, &HashMap::new(), &None, content, &class);
+         // No return type hint should be present.
+         assert!(
+             !result.contains(": array<"),
+@@ -1280,7 +1319,7 @@
+             ..Default::default()
+         };
+ 
+-        let result = build_method_stubs(&methods, &HashMap::new(), &None, content, &class);
++        let result = render_test_stubs(&methods, &HashMap::new(), &None, content, &class);
+         assert!(result.contains("protected function doWork()"));
+     }
+ 
+@@ -1299,7 +1338,7 @@
+             ..Default::default()
+         };
+ 
+-        let result = build_method_stubs(&methods, &HashMap::new(), &None, content, &class);
++        let result = render_test_stubs(&methods, &HashMap::new(), &None, content, &class);
+         assert!(result.contains("public function doWork()"));
+     }
+ 
+@@ -1346,7 +1385,7 @@
+             ..Default::default()
+         };
+ 
+-        let result = build_method_stubs(&methods, &HashMap::new(), &None, content, &class);
++        let result = render_test_stubs(&methods, &HashMap::new(), &None, content, &class);
+         assert!(
+             result.contains("public function process(string $name, array $options = []): void")
+         );
+diff --git a/src/code_actions/mod.rs b/src/code_actions/mod.rs
+--- a/src/code_actions/mod.rs
++++ b/src/code_actions/mod.rs
+@@ -113,6 +113,7 @@
+ mod insert_translation_key;
+ mod mago;
+ mod naming;
++mod override_methods;
+ pub(crate) mod phpstan;
+ mod promote_constructor_param;
+ mod remove_unused_import;
+@@ -212,6 +213,7 @@
+ 
+         // ── Implement missing methods ───────────────────────────────────
+         self.collect_implement_methods_actions(uri, content, params, &mut actions);
++        self.collect_override_method_actions(uri, content, params, &mut actions);
+ 
+         // ── Replace deprecated call ─────────────────────────────────────
+         self.collect_replace_deprecated_actions(uri, content, params, &mut actions);
+diff --git a/src/code_actions/override_methods.rs b/src/code_actions/override_methods.rs
+new file mode 100644
+--- /dev/null
++++ b/src/code_actions/override_methods.rs
+@@ -0,0 +1,1023 @@
++//! Reviewed method insertion using inherited symbols and declaration syntax.
++
++use std::collections::HashMap;
++use std::sync::Arc;
++
++use mago_span::HasSpan;
++use mago_syntax::cst::class_like::member::{ClassLikeConstantSelector, ClassLikeMember};
++use mago_syntax::cst::class_like::method::Method;
++use mago_syntax::cst::expression::Expression;
++use mago_syntax::cst::type_hint::Hint;
++use mago_syntax::cst::*;
++use tower_lsp::lsp_types::*;
++
++use super::implement_methods::{format_params, format_return_type};
++use crate::Backend;
++use crate::atom::{atom, bytes_to_str};
++use crate::completion::context::override_completion::collect_overridable_methods;
++use crate::inheritance::{ancestors, find_declaring_ancestor, find_declaring_trait};
++use crate::php_type::PhpType;
++use crate::text_position::{offset_to_position, position_to_offset};
++use crate::types::{ClassInfo, ClassLikeKind, FileContext, MethodInfo, PhpVersion, Visibility};
++
++pub(super) struct MethodInsertion {
++    pub keyword: u32,
++    pub open: u32,
++    pub close: u32,
++    pub end: u32,
++    pub offset: usize,
++    pub indent: String,
++    pub class_indent: String,
++    pub newline: &'static str,
++}
++
++pub(super) struct PreparedMethod {
++    pub method: MethodInfo,
++    pub returns_reference: bool,
++}
++
++impl Backend {
++    pub(super) fn method_insertion_at(
++        &self,
++        uri: &str,
++        content: &str,
++        params: &CodeActionParams,
++    ) -> Option<MethodInsertion> {
++        let cursor = position_to_offset(content, params.range.start);
++        let context = self.file_context_at(uri, cursor);
++        let class = crate::class_lookup::find_class_at_offset(&context.classes, cursor)?;
++        if class.kind != ClassLikeKind::Class {
++            return None;
++        }
++        // Resolve the smallest semantic class first. An anonymous class nested
++        // in a method must never select its containing named class instead.
++        method_insertion(content, params, class.keyword_offset)
++    }
++
++    pub(crate) fn collect_override_method_actions(
++        &self,
++        uri: &str,
++        content: &str,
++        params: &CodeActionParams,
++        out: &mut Vec<CodeActionOrCommand>,
++    ) {
++        let Some(target) = self.method_insertion_at(uri, content, params) else {
++            return;
++        };
++        let ctx = self.file_context_at(uri, target.keyword);
++        let Some(class) = matching_class(&ctx, &target) else {
++            return;
++        };
++        let class_loader = canonical_loader(self, &ctx);
++        let Ok(doc_uri) = uri.parse::<Url>() else {
++            return;
++        };
++        for (candidate, _, _) in collect_overridable_methods(class, "", &class_loader) {
++            let Some((_, declaring)) = find_declaring_ancestor(class, &class_loader, &|owner| {
++                owner.get_method_ci(&candidate.name).is_some()
++            }) else {
++                continue;
++            };
++            let Some(method) = declaring.get_method_ci(&candidate.name) else {
++                continue;
++            };
++            let direct_trait = declaring.kind == ClassLikeKind::Trait
++                && find_declaring_trait(&class.used_traits, &class_loader, &|owner| {
++                    owner.fqn() == declaring.fqn()
++                })
++                .is_some();
++            if method.is_virtual
++                || method.visibility == Visibility::Private
++                || method.name.starts_with("__")
++                || (method.is_final && !direct_trait)
++            {
++                continue;
++            }
++            let Some(prepared) =
++                self.prepare_generated_method(uri, content, class, &declaring, method, &ctx)
++            else {
++                continue;
++            };
++            if !self.generated_method_satisfies_contracts(uri, content, class, &prepared, &ctx) {
++                continue;
++            }
++            let delegates = !method.is_abstract
++                && !direct_trait
++                && class.parent_class.is_some()
++                && matches!(declaring.kind, ClassLikeKind::Class | ClassLikeKind::Trait);
++            let method_text = render_method(
++                &prepared,
++                &ctx.use_map,
++                &ctx.namespace,
++                &target,
++                delegates,
++                self.php_version() >= PhpVersion::new(8, 3) && !direct_trait,
++            );
++            let text = insertion_text(&target, &method_text, content);
++            let position = offset_to_position(content, target.offset);
++            out.push(CodeActionOrCommand::CodeAction(CodeAction {
++                title: format!("Override {} ({})", method.name, declaring.fqn()),
++                kind: Some(CodeActionKind::new("refactor.rewrite.overrideMethod")),
++                edit: Some(super::single_edit(
++                    doc_uri.clone(),
++                    Range::new(position, position),
++                    text,
++                )),
++                ..CodeAction::default()
++            }));
++        }
++    }
++
++    pub(super) fn generated_method_satisfies_contracts(
++        &self,
++        uri: &str,
++        content: &str,
++        target: &ClassInfo,
++        generated: &PreparedMethod,
++        context: &FileContext,
++    ) -> bool {
++        let loader = canonical_loader(self, context);
++        let mut pending: Vec<_> = target
++            .parent_class
++            .iter()
++            .chain(&target.interfaces)
++            .chain(&target.used_traits)
++            .copied()
++            .collect();
++        let mut seen = std::collections::HashSet::new();
++        while let Some(name) = pending.pop() {
++            if !seen.insert(name) {
++                continue;
++            }
++            if seen.len() > 1000 {
++                return false;
++            }
++            let Some(owner) = loader(&format!("\\{name}")) else {
++                return false;
++            };
++            if let Some(method) = owner.get_method_ci(&generated.method.name)
++                && !method.is_virtual
++                && method.visibility != Visibility::Private
++            {
++                let Some(contract) =
++                    self.prepare_generated_method(uri, content, target, &owner, method, context)
++                else {
++                    return false;
++                };
++                if !native_contract_satisfied(generated, &contract, &loader) {
++                    return false;
++                }
++            }
++            pending.extend(
++                owner
++                    .parent_class
++                    .iter()
++                    .chain(&owner.interfaces)
++                    .chain(&owner.used_traits)
++                    .copied(),
++            );
++        }
++        true
++    }
++
++    pub(super) fn prepare_generated_method(
++        &self,
++        uri: &str,
++        content: &str,
++        target: &ClassInfo,
++        declaring: &ClassInfo,
++        method: &MethodInfo,
++        target_context: &FileContext,
++    ) -> Option<PreparedMethod> {
++        let owner_uri = self
++            .symbols
++            .fqn_uri_index
++            .read()
++            .get(declaring.fqn().as_str())
++            .cloned();
++        let (source_uri, source) = if let Some(owner_uri) = owner_uri {
++            let source = if owner_uri == uri {
++                content.to_owned()
++            } else {
++                self.get_file_content(&owner_uri)?
++            };
++            (owner_uri, source)
++        } else {
++            self.find_class_file_content(&declaring.fqn(), uri, content)?
++        };
++        if declaring.kind == ClassLikeKind::Trait
++            && (!target.trait_aliases.is_empty()
++                || !target.trait_precedences.is_empty()
++                || ancestors(target, &canonical_loader(self, target_context)).any(|(_, parent)| {
++                    !parent.trait_aliases.is_empty() || !parent.trait_precedences.is_empty()
++                }))
++        {
++            return None;
++        }
++        let source_context = self.file_context_at(&source_uri, method.name_offset);
++        if !source_context.classes.iter().any(|class| {
++            class.fqn() == declaring.fqn() && class.keyword_offset == declaring.keyword_offset
++        }) {
++            return None;
++        }
++        let source_loader = canonical_loader(self, &source_context);
++        let lexical = if declaring.kind == ClassLikeKind::Trait {
++            if find_declaring_trait(&target.used_traits, &source_loader, &|owner| {
++                owner.fqn() == declaring.fqn()
++            })
++            .is_some()
++            {
++                Arc::new(target.clone())
++            } else {
++                ancestors(target, &source_loader).find_map(|(_, owner)| {
++                    find_declaring_trait(&owner.used_traits, &source_loader, &|tr| {
++                        tr.fqn() == declaring.fqn()
++                    })
++                    .map(|_| owner)
++                })?
++            }
++        } else {
++            Arc::new(declaring.clone())
++        };
++        crate::parser::with_parsed_program(&source, "generation_signature", |program, source| {
++            if !program.errors.is_empty() {
++                return None;
++            }
++            let syntax = find_method(
++                program.statements.iter(),
++                declaring.keyword_offset,
++                method.name_offset,
++                &method.name,
++            )?;
++            if syntax.parameter_list.parameters.len() != method.parameters.len() {
++                return None;
++            }
++            let mut prepared = method.clone();
++            for (parameter, syntax) in prepared
++                .parameters
++                .make_mut()
++                .iter_mut()
++                .zip(syntax.parameter_list.parameters.iter())
++            {
++                parameter.native_type_hint = match syntax.hint.as_ref() {
++                    Some(hint) => Some(portable_hint(
++                        hint,
++                        &lexical,
++                        &source_context,
++                        self.php_version(),
++                        false,
++                    )?),
++                    None => None,
++                };
++                parameter.name = atom(bytes_to_str(syntax.variable.name));
++                parameter.is_reference = syntax.ampersand.is_some();
++                parameter.is_variadic = syntax.ellipsis.is_some();
++                if parameter.is_variadic && self.php_version() < PhpVersion::new(5, 6) {
++                    return None;
++                }
++                parameter.default_value = match syntax.default_value.as_ref() {
++                    Some(default) => Some(
++                        portable_default(
++                            self,
++                            default.value,
++                            source,
++                            &source_context,
++                            &lexical,
++                            target,
++                            target_context,
++                        )?
++                        .replace("\r\n", "\n")
++                        .replace(
++                            '\n',
++                            source_newline(content, target.keyword_offset as usize),
++                        ),
++                    ),
++                    None => None,
++                };
++            }
++            prepared.native_return_type = match syntax.return_type_hint.as_ref() {
++                Some(return_type) => Some(portable_hint(
++                    &return_type.hint,
++                    &lexical,
++                    &source_context,
++                    self.php_version(),
++                    true,
++                )?),
++                None => None,
++            };
++            // An inherited PHPDoc return is not an added native contract.
++            prepared.return_type = prepared.native_return_type.clone();
++            Some(PreparedMethod {
++                method: prepared,
++                returns_reference: syntax.ampersand.is_some(),
++            })
++        })
++    }
++}
++
++pub(super) fn matching_class<'a>(
++    ctx: &'a FileContext,
++    target: &MethodInsertion,
++) -> Option<&'a ClassInfo> {
++    ctx.classes
++        .iter()
++        .find(|class| {
++            class.kind == ClassLikeKind::Class
++                && class.keyword_offset == target.keyword
++                && class.start_offset == target.open
++                && class.end_offset == target.end
++        })
++        .map(AsRef::as_ref)
++}
++
++fn method_insertion(
++    content: &str,
++    params: &CodeActionParams,
++    class_keyword: u32,
++) -> Option<MethodInsertion> {
++    if params.range.start != params.range.end {
++        return None;
++    }
++    let cursor = position_to_offset(content, params.range.start);
++    if offset_to_position(content, cursor as usize) != params.range.start {
++        return None;
++    }
++    crate::parser::with_parsed_program(content, "method_insertion", |program, content| {
++        if !program.errors.is_empty()
++            || program
++                .statements
++                .iter()
++                .any(|statement| cursor_in_inline(Node::Statement(statement), cursor))
++        {
++            return None;
++        }
++        insertion_in_statements(program.statements.iter(), cursor, class_keyword, content)
++    })
++}
++
++fn cursor_in_inline(node: Node<'_, '_>, cursor: u32) -> bool {
++    if let Node::Statement(Statement::Inline(inline)) = node {
++        return cursor >= inline.span().start.offset && cursor < inline.span().end.offset;
++    }
++    let mut found = false;
++    node.visit_children(|child| {
++        found |= cursor_in_inline(child, cursor);
++    });
++    found
++}
++
++fn insertion_in_statements<'a>(
++    statements: impl Iterator<Item = &'a Statement<'a>>,
++    cursor: u32,
++    class_keyword: u32,
++    content: &str,
++) -> Option<MethodInsertion> {
++    for statement in statements {
++        match statement {
++            Statement::Namespace(namespace) => {
++                if let Some(target) = insertion_in_statements(
++                    namespace.statements().iter(),
++                    cursor,
++                    class_keyword,
++                    content,
++                ) {
++                    return Some(target);
++                }
++            }
++            Statement::Class(class)
++                if class.class.span.start.offset == class_keyword
++                    && cursor >= class.span().start.offset
++                    && cursor <= class.right_brace.start.offset =>
++            {
++                let close = class.right_brace.start.offset as usize;
++                if content.get(close..class.right_brace.end.offset as usize) != Some("}") {
++                    return None;
++                }
++                let close_line = content[..close].rfind('\n').map_or(0, |offset| offset + 1);
++                let offset = if content[close_line..close]
++                    .bytes()
++                    .all(|byte| matches!(byte, b' ' | b'\t'))
++                {
++                    close_line
++                } else {
++                    close
++                };
++                let keyword = class.class.span.start.offset as usize;
++                let class_line = content[..keyword]
++                    .rfind('\n')
++                    .map_or(0, |offset| offset + 1);
++                let declaration_start = class.span().start.offset as usize;
++                let declaration_line = content[..declaration_start]
++                    .rfind('\n')
++                    .map_or(0, |offset| offset + 1);
++                let class_prefix = &content[declaration_line..declaration_start];
++                let class_indent = if class_prefix
++                    .bytes()
++                    .all(|byte| matches!(byte, b' ' | b'\t'))
++                {
++                    class_prefix
++                } else {
++                    ""
++                };
++                let indent = class
++                    .members
++                    .first()
++                    .and_then(|member| {
++                        let start = member.span().start.offset as usize;
++                        let line = content[..start].rfind('\n').map_or(0, |offset| offset + 1);
++                        let prefix = &content[line..start];
++                        (prefix.len() > class_indent.len()
++                            && prefix.bytes().all(|byte| matches!(byte, b' ' | b'\t')))
++                        .then(|| prefix.to_owned())
++                    })
++                    .unwrap_or_else(|| format!("{class_indent}    "));
++                let newline = if content[class_line..].find('\n').is_some_and(|offset| {
++                    offset > 0 && content.as_bytes()[class_line + offset - 1] == b'\r'
++                }) {
++                    "\r\n"
++                } else {
++                    "\n"
++                };
++                return Some(MethodInsertion {
++                    keyword: keyword as u32,
++                    open: class.left_brace.start.offset,
++                    close: close as u32,
++                    end: class.right_brace.end.offset,
++                    offset,
++                    indent,
++                    class_indent: class_indent.to_owned(),
++                    newline,
++                });
++            }
++            _ => {}
++        }
++    }
++    None
++}
++
++fn find_method<'a>(
++    statements: impl Iterator<Item = &'a Statement<'a>>,
++    class_keyword: u32,
++    offset: u32,
++    name: &str,
++) -> Option<&'a Method<'a>> {
++    for statement in statements {
++        let (keyword, members) = match statement {
++            Statement::Namespace(namespace) => {
++                if let Some(method) =
++                    find_method(namespace.statements().iter(), class_keyword, offset, name)
++                {
++                    return Some(method);
++                }
++                continue;
++            }
++            Statement::Class(class) => (class.class.span.start.offset, &class.members),
++            Statement::Interface(interface) => {
++                (interface.interface.span.start.offset, &interface.members)
++            }
++            Statement::Trait(trait_) => (trait_.r#trait.span.start.offset, &trait_.members),
++            Statement::Enum(enum_) => (enum_.r#enum.span.start.offset, &enum_.members),
++            _ => continue,
++        };
++        if keyword != class_keyword {
++            continue;
++        }
++        for member in members.iter() {
++            if let ClassLikeMember::Method(method) = member
++                && method.name.span.start.offset == offset
++                && bytes_to_str(method.name.value).eq_ignore_ascii_case(name)
++            {
++                return Some(method);
++            }
++        }
++    }
++    None
++}
++
++fn portable_hint(
++    hint: &Hint<'_>,
++    lexical: &ClassInfo,
++    context: &FileContext,
++    version: PhpVersion,
++    is_return: bool,
++) -> Option<PhpType> {
++    portable_hint_member(hint, lexical, context, version, is_return, false)
++}
++
++fn portable_hint_member(
++    hint: &Hint<'_>,
++    lexical: &ClassInfo,
++    context: &FileContext,
++    version: PhpVersion,
++    is_return: bool,
++    in_union: bool,
++) -> Option<PhpType> {
++    if is_return && version < PhpVersion::new(7, 0) {
++        return None;
++    }
++    let minimum = match hint {
++        Hint::Nullable(_) | Hint::Void(_) | Hint::Iterable(_) => PhpVersion::new(7, 1),
++        Hint::Union(_) | Hint::Mixed(_) | Hint::Static(_) => PhpVersion::new(8, 0),
++        Hint::Intersection(_) | Hint::Never(_) => PhpVersion::new(8, 1),
++        Hint::Parenthesized(_) | Hint::True(_) => PhpVersion::new(8, 2),
++        Hint::Object(_) => PhpVersion::new(7, 2),
++        Hint::Integer(_) | Hint::Float(_) | Hint::String(_) | Hint::Bool(_) => {
++            PhpVersion::new(7, 0)
++        }
++        Hint::Callable(_) => PhpVersion::new(5, 4),
++        _ => PhpVersion::new(5, 0),
++    };
++    if version < minimum {
++        return None;
++    }
++    if let Hint::Union(union) = hint
++        && version < PhpVersion::new(8, 2)
++        && (hint_has_intersection(union.left)
++            || hint_has_intersection(union.right)
++            || !in_union && !hint_has_non_literal(union.left) && !hint_has_non_literal(union.right))
++    {
++        return None;
++    }
++    match hint {
++        Hint::Identifier(identifier) => {
++            let raw = bytes_to_str(identifier.value());
++            let name = context
++                .resolved_names
++                .as_ref()
++                .and_then(|names| names.get(identifier.span().start.offset))
++                .map(str::to_owned)
++                .unwrap_or_else(|| {
++                    crate::util::resolve_to_fqn(raw, &context.use_map, &context.namespace)
++                });
++            Some(PhpType::named(atom(&name)))
++        }
++        Hint::Self_(_) => Some(PhpType::named(lexical.fqn())),
++        Hint::Parent(_) => Some(PhpType::named(lexical.parent_class?)),
++        Hint::Nullable(nullable) => Some(PhpType::nullable(portable_hint_member(
++            nullable.hint,
++            lexical,
++            context,
++            version,
++            is_return,
++            false,
++        )?)),
++        Hint::Parenthesized(parenthesized) => portable_hint_member(
++            parenthesized.hint,
++            lexical,
++            context,
++            version,
++            is_return,
++            in_union,
++        ),
++        Hint::Union(union) => Some(PhpType::union(vec![
++            portable_hint_member(union.left, lexical, context, version, is_return, true)?,
++            portable_hint_member(union.right, lexical, context, version, is_return, true)?,
++        ])),
++        Hint::Intersection(intersection) => Some(PhpType::intersection(vec![
++            portable_hint(intersection.left, lexical, context, version, is_return)?,
++            portable_hint(intersection.right, lexical, context, version, is_return)?,
++        ])),
++        Hint::False(_) | Hint::Null(_)
++            if version < PhpVersion::new(8, 2)
++                && !(in_union && version >= PhpVersion::new(8, 0)) =>
++        {
++            None
++        }
++        Hint::Void(_) | Hint::Never(_) | Hint::Static(_) if !is_return => None,
++        _ => Some(crate::parser::extract_hint_type(hint)),
++    }
++}
++
++fn portable_default(
++    backend: &Backend,
++    expression: &Expression<'_>,
++    source: &str,
++    context: &FileContext,
++    lexical: &ClassInfo,
++    target: &ClassInfo,
++    target_context: &FileContext,
++) -> Option<String> {
++    let version = backend.php_version();
++    if !expression.is_constant(
++        &mago_php_version::PHPVersion::new(version.major as u32, version.minor as u32, 0),
++        true,
++    ) {
++        return None;
++    }
++    let mut replacements = Vec::new();
++    if !default_names(
++        Node::Expression(expression),
++        backend,
++        context,
++        lexical,
++        target,
++        target_context,
++        &mut replacements,
++    ) {
++        return None;
++    }
++    let span = expression.span();
++    let mut text = source
++        .get(span.start.offset as usize..span.end.offset as usize)?
++        .to_owned();
++    replacements.sort_by_key(|(start, _, _)| *start);
++    for (start, end, value) in replacements.into_iter().rev() {
++        text.replace_range(
++            (start - span.start.offset) as usize..(end - span.start.offset) as usize,
++            &value,
++        );
++    }
++    Some(text)
++}
++
++fn default_names(
++    node: Node<'_, '_>,
++    backend: &Backend,
++    context: &FileContext,
++    lexical: &ClassInfo,
++    target: &ClassInfo,
++    target_context: &FileContext,
++    replacements: &mut Vec<(u32, u32, String)>,
++) -> bool {
++    if let Node::Expression(expression) = node {
++        match expression {
++            Expression::MagicConstant(_) | Expression::CompositeString(_) => return false,
++            Expression::Literal(literal::Literal::String(value))
++                if value.raw.contains(&b'\n') || value.raw.contains(&b'\r') =>
++            {
++                let Some(value_bytes) = value.value else {
++                    return false;
++                };
++                let encoded = value_bytes
++                    .iter()
++                    .map(|byte| format!("\\x{byte:02X}"))
++                    .collect::<String>();
++                replacements.push((
++                    value.span.start.offset,
++                    value.span.end.offset,
++                    format!("\"{encoded}\""),
++                ));
++                return true;
++            }
++            Expression::Identifier(identifier)
++            | Expression::ConstantAccess(access::ConstantAccess { name: identifier }) => {
++                let raw = bytes_to_str(identifier.value());
++                let resolved = context
++                    .resolved_names
++                    .as_ref()
++                    .and_then(|names| names.get(identifier.span().start.offset))
++                    .map(str::to_owned)
++                    .unwrap_or_else(|| {
++                        crate::util::resolve_to_fqn(raw, &context.use_map, &context.namespace)
++                    });
++                let canonical = if backend
++                    .lookup_global_constant_candidates(&[&resolved])
++                    .is_some()
++                {
++                    resolved
++                } else if !raw.contains('\\')
++                    && backend.lookup_global_constant_candidates(&[raw]).is_some()
++                {
++                    raw.to_owned()
++                } else {
++                    return false;
++                };
++                replacements.push((
++                    identifier.span().start.offset,
++                    identifier.span().end.offset,
++                    format!("\\{}", canonical.trim_start_matches('\\')),
++                ));
++                return true;
++            }
++            Expression::Access(access::Access::ClassConstant(access)) => {
++                let Some(name) = default_class(access.class, context, lexical) else {
++                    return false;
++                };
++                if let ClassLikeConstantSelector::Identifier(constant) = &access.constant
++                    && !bytes_to_str(constant.value).eq_ignore_ascii_case("class")
++                {
++                    let loader = canonical_loader(backend, context);
++                    if let Some(owner) = loader(&format!("\\{name}"))
++                        && owner.constants.iter().any(|candidate| {
++                            candidate
++                                .name
++                                .eq_ignore_ascii_case(bytes_to_str(constant.value))
++                                && candidate.visibility == Visibility::Private
++                        })
++                        && owner.fqn() != target.fqn()
++                    {
++                        return false;
++                    }
++                }
++                let display =
++                    display_name(&name, &target_context.use_map, &target_context.namespace);
++                replacements.push((
++                    access.class.span().start.offset,
++                    access.class.span().end.offset,
++                    display,
++                ));
++                return true;
++            }
++            Expression::Instantiation(instantiation) => {
++                let Some(name) = default_class(instantiation.class, context, lexical) else {
++                    return false;
++                };
++                let loader = canonical_loader(backend, context);
++                if let Some(owner) = loader(&format!("\\{name}"))
++                    && owner
++                        .get_method_ci("__construct")
++                        .is_some_and(|constructor| constructor.visibility == Visibility::Private)
++                    && owner.fqn() != target.fqn()
++                {
++                    return false;
++                }
++                let display =
++                    display_name(&name, &target_context.use_map, &target_context.namespace);
++                replacements.push((
++                    instantiation.class.span().start.offset,
++                    instantiation.class.span().end.offset,
++                    display,
++                ));
++                if let Some(arguments) = &instantiation.argument_list {
++                    let mut valid = true;
++                    Node::ArgumentList(arguments).visit_children(|child| {
++                        valid &= default_names(
++                            child,
++                            backend,
++                            context,
++                            lexical,
++                            target,
++                            target_context,
++                            replacements,
++                        )
++                    });
++                    return valid;
++                }
++                return true;
++            }
++            _ => {}
++        }
++    }
++    let mut valid = true;
++    node.visit_children(|child| {
++        valid &= default_names(
++            child,
++            backend,
++            context,
++            lexical,
++            target,
++            target_context,
++            replacements,
++        )
++    });
++    valid
++}
++
++fn default_class(
++    expression: &Expression<'_>,
++    context: &FileContext,
++    lexical: &ClassInfo,
++) -> Option<String> {
++    match expression {
++        Expression::Self_(_) => Some(lexical.fqn().to_string()),
++        Expression::Parent(_) => Some(lexical.parent_class?.to_string()),
++        Expression::Identifier(identifier) => Some(
++            context
++                .resolved_names
++                .as_ref()
++                .and_then(|names| names.get(identifier.span().start.offset))
++                .map(str::to_owned)
++                .unwrap_or_else(|| {
++                    crate::util::resolve_to_fqn(
++                        bytes_to_str(identifier.value()),
++                        &context.use_map,
++                        &context.namespace,
++                    )
++                }),
++        ),
++        _ => None,
++    }
++}
++
++pub(super) fn display_name(
++    name: &str,
++    use_map: &HashMap<String, String>,
++    namespace: &Option<String>,
++) -> String {
++    let name = name.trim_start_matches('\\');
++    let shortened = crate::util::shorten_from_fqn(name, use_map, namespace);
++    if crate::util::resolve_to_fqn(&shortened, use_map, namespace).eq_ignore_ascii_case(name) {
++        shortened
++    } else {
++        format!("\\{name}")
++    }
++}
++
++pub(super) fn render_method(
++    prepared: &PreparedMethod,
++    use_map: &HashMap<String, String>,
++    namespace: &Option<String>,
++    target: &MethodInsertion,
++    delegate: bool,
++    override_attribute: bool,
++) -> String {
++    let method = &prepared.method;
++    let nl = target.newline;
++    let indent = &target.indent;
++    let body_indent = format!("{indent}    ");
++    let visibility = if method.visibility == Visibility::Protected {
++        "protected"
++    } else {
++        "public"
++    };
++    let static_kw = if method.is_static { "static " } else { "" };
++    let reference = if prepared.returns_reference { "&" } else { "" };
++    let params = format_params(method, use_map, namespace);
++    let return_type = format_return_type(method, use_map, namespace);
++    let mut text = String::new();
++    if override_attribute {
++        text.push_str(&format!("{indent}#[\\Override]{nl}"));
++    }
++    text.push_str(&format!("{indent}{visibility} {static_kw}function {reference}{}({params}){return_type}{nl}{indent}{{{nl}", method.name));
++    if delegate {
++        let arguments = method
++            .parameters
++            .iter()
++            .map(|parameter| {
++                format!(
++                    "{}${}",
++                    if parameter.is_variadic { "..." } else { "" },
++                    parameter.name.trim_start_matches('$')
++                )
++            })
++            .collect::<Vec<_>>()
++            .join(", ");
++        let call = format!("parent::{}({arguments})", method.name);
++        if method
++            .native_return_type
++            .as_ref()
++            .is_some_and(|hint| hint.is_void() || hint.to_string() == "never")
++        {
++            text.push_str(&format!("{body_indent}{call};{nl}"));
++            if method
++                .native_return_type
++                .as_ref()
++                .is_some_and(|hint| hint.to_string() == "never")
++            {
++                text.push_str(&format!("{body_indent}throw new \\LogicException('A never-returning parent method returned.');{nl}"));
++            }
++        } else if prepared.returns_reference {
++            let mut local = "parentResult".to_owned();
++            while method
++                .parameters
++                .iter()
++                .any(|parameter| parameter.name.trim_start_matches('$') == local)
++            {
++                local.push('_');
++            }
++            text.push_str(&format!(
++                "{body_indent}${local} = &{call};{nl}{body_indent}return ${local};{nl}"
++            ));
++        } else {
++            text.push_str(&format!("{body_indent}return {call};{nl}"));
++        }
++    } else {
++        text.push_str(&format!(
++            "{body_indent}throw new \\LogicException('Method is not implemented.');{nl}"
++        ));
++    }
++    text.push_str(&format!("{indent}}}{nl}"));
++    text
++}
++
++pub(super) fn insertion_text(target: &MethodInsertion, methods: &str, content: &str) -> String {
++    let nl = target.newline;
++    let leading = if target.offset > 0 && content.as_bytes()[target.offset - 1] == b'\n' {
++        nl.to_owned()
++    } else {
++        format!("{nl}{nl}")
++    };
++    let suffix = if target.offset == target.close as usize {
++        target.class_indent.as_str()
++    } else {
++        ""
++    };
++    format!("{leading}{methods}{suffix}")
++}
++
++fn native_contract_satisfied(
++    generated: &PreparedMethod,
++    contract: &PreparedMethod,
++    loader: &dyn Fn(&str) -> Option<Arc<ClassInfo>>,
++) -> bool {
++    let child = &generated.method;
++    let parent = &contract.method;
++    if child.is_static != parent.is_static
++        || generated.returns_reference != contract.returns_reference
++        || (parent.visibility == Visibility::Public && child.visibility != Visibility::Public)
++    {
++        return false;
++    }
++    let required = |method: &MethodInfo| {
++        method
++            .parameters
++            .iter()
++            .filter(|parameter| !parameter.is_variadic && parameter.default_value.is_none())
++            .count()
++    };
++    let variadic = |method: &MethodInfo| {
++        method
++            .parameters
++            .last()
++            .is_some_and(|parameter| parameter.is_variadic)
++    };
++    if required(child) > required(parent)
++        || (!variadic(child)
++            && (variadic(parent) || child.parameters.len() < parent.parameters.len()))
++    {
++        return false;
++    }
++    let strict_loader = |name: &str| {
++        let name = name
++            .strip_prefix("__fqn__\\")
++            .unwrap_or(name)
++            .trim_start_matches('\\');
++        loader(&format!("\\{name}")).filter(|class| class.fqn().eq_ignore_ascii_case(name))
++    };
++    for (index, parent_parameter) in parent.parameters.iter().enumerate() {
++        let Some(child_parameter) = child.parameters.get(index).or_else(|| {
++            child
++                .parameters
++                .last()
++                .filter(|parameter| parameter.is_variadic)
++        }) else {
++            return false;
++        };
++        if child_parameter.is_reference != parent_parameter.is_reference
++            || child_parameter.name.trim_start_matches('$')
++                != parent_parameter.name.trim_start_matches('$')
++        {
++            return false;
++        }
++        let parent_type = super::implement_methods::native_param_hint(parent_parameter)
++            .unwrap_or_else(PhpType::mixed);
++        let child_type = super::implement_methods::native_param_hint(child_parameter)
++            .unwrap_or_else(PhpType::mixed);
++        if !crate::class_lookup::is_subtype_of_typed(&parent_type, &child_type, &strict_loader) {
++            return false;
++        }
++    }
++    match (&child.native_return_type, &parent.native_return_type) {
++        (_, None) => true,
++        (None, Some(_)) => false,
++        (Some(child), Some(parent)) => {
++            crate::class_lookup::is_subtype_of_typed(child, parent, &strict_loader)
++        }
++    }
++}
++
++fn hint_has_intersection(hint: &Hint<'_>) -> bool {
++    match hint {
++        Hint::Intersection(_) => true,
++        Hint::Union(union) => {
++            hint_has_intersection(union.left) || hint_has_intersection(union.right)
++        }
++        Hint::Parenthesized(inner) => hint_has_intersection(inner.hint),
++        _ => false,
++    }
++}
++
++fn hint_has_non_literal(hint: &Hint<'_>) -> bool {
++    match hint {
++        Hint::False(_) | Hint::True(_) | Hint::Null(_) => false,
++        Hint::Union(union) => hint_has_non_literal(union.left) || hint_has_non_literal(union.right),
++        Hint::Parenthesized(inner) => hint_has_non_literal(inner.hint),
++        _ => true,
++    }
++}
++
++pub(super) fn canonical_loader<'a>(
++    backend: &'a Backend,
++    context: &'a FileContext,
++) -> impl Fn(&str) -> Option<Arc<ClassInfo>> + 'a {
++    let loader = backend.class_loader(context);
++    move |name| {
++        let name = name
++            .strip_prefix("__fqn__\\")
++            .unwrap_or(name)
++            .trim_start_matches('\\');
++        loader(&format!("\\{name}")).filter(|class| class.fqn().eq_ignore_ascii_case(name))
++    }
++}
++
++fn source_newline(content: &str, anchor: usize) -> &'static str {
++    let start = content[..anchor].rfind('\n').map_or(0, |offset| offset + 1);
++    if content[start..]
++        .find('\n')
++        .is_some_and(|offset| offset > 0 && content.as_bytes()[start + offset - 1] == b'\r')
++    {
++        "\r\n"
++    } else {
++        "\n"
++    }
++}
+diff --git a/src/server.rs b/src/server.rs
+--- a/src/server.rs
++++ b/src/server.rs
+@@ -538,7 +538,7 @@
+         let backend = self.clone_for_blocking();
+         let uri_clone = uri.clone();
+         run_blocking_cancel_safe("code_action", move || {
+-            backend.with_semantic_epoch(|| {
++            backend.with_prepared_current_semantics(|| {
+                 backend.handle_with_uri("code_action", &uri_clone, |content| {
+                     let actions = backend.handle_code_action(&uri_clone, content, &params);
+                     if actions.is_empty() {
+diff --git a/tests/integration/code_action_override_methods.rs b/tests/integration/code_action_override_methods.rs
+new file mode 100644
+--- /dev/null
++++ b/tests/integration/code_action_override_methods.rs
+@@ -0,0 +1,503 @@
++//! Explicit method generation uses actual inherited declarations and safe edits.
++use crate::common::{apply_workspace_edit, create_test_backend, find_action, get_code_actions_at};
++use phpantom_lsp::types::PhpVersion;
++use tower_lsp::lsp_types::*;
++
++fn actions(marked: &str, version: PhpVersion) -> (String, Vec<CodeActionOrCommand>) {
++    let offset = marked.find("<caret>").unwrap();
++    let prefix = &marked[..offset];
++    let line = prefix.bytes().filter(|byte| *byte == b'\n').count() as u32;
++    let column = prefix.rsplit('\n').next().unwrap().encode_utf16().count() as u32;
++    let source = marked.replacen("<caret>", "", 1);
++    let backend = create_test_backend();
++    backend.set_php_version(version);
++    backend.update_ast("file:///methods.php", &source);
++    let actions = get_code_actions_at(&backend, "file:///methods.php", &source, line, column);
++    (source, actions)
++}
++
++fn generated(marked: &str, method: &str) -> String {
++    let (source, actions) = actions(marked, PhpVersion::new(8, 4));
++    let action = find_action(&actions, &format!("Override {method} (")).expect("override action");
++    assert_eq!(
++        action.kind,
++        Some(CodeActionKind::new("refactor.rewrite.overrideMethod"))
++    );
++    assert!(action.command.is_none() && action.data.is_none());
++    let edit = action.edit.as_ref().unwrap();
++    assert_eq!(edit.changes.as_ref().unwrap().len(), 1);
++    let edits = &edit.changes.as_ref().unwrap()[&Url::parse("file:///methods.php").unwrap()];
++    assert_eq!(edits.len(), 1);
++    assert_eq!(edits[0].range.start, edits[0].range.end);
++    apply_workspace_edit(&source, edit)
++}
++
++#[test]
++fn method_generation_delegates_actual_parent_signature() {
++    let result = generated(
++        "<?php\nclass ParentClass { public function render(string $name): string { return $name; } }\nclass <caret>Child extends ParentClass\n{\n}\n",
++        "render",
++    );
++    assert!(
++        result.contains("#[\\Override]\n    public function render(string $name): string"),
++        "{result}"
++    );
++    assert!(result.contains("return parent::render($name);"), "{result}");
++}
++
++#[test]
++fn method_generation_preserves_reference_and_variadic_forwarding() {
++    let result = generated(
++        "<?php\nclass ParentClass { public function &combine(int &$base, string ...$parts): int { return $base; } }\nclass <caret>Child extends ParentClass {}\n",
++        "combine",
++    );
++    assert!(
++        result.contains("function &combine(int &$base, string ...$parts): int"),
++        "{result}"
++    );
++    assert!(
++        result.contains("$parentResult = &parent::combine($base, ...$parts);"),
++        "{result}"
++    );
++    assert!(result.contains("return $parentResult;"), "{result}");
++    assert!(!result.contains("parent::combine(&$base"));
++}
++
++#[test]
++fn method_generation_reference_temporary_does_not_overwrite_a_parameter() {
++    let result = generated(
++        "<?php\nclass ParentClass { public function &copy(&$parentResult) { return $parentResult; } }\nclass <caret>Child extends ParentClass {}\n",
++        "copy",
++    );
++    assert!(
++        result.contains("$parentResult_ = &parent::copy($parentResult);"),
++        "{result}"
++    );
++}
++
++#[test]
++fn method_generation_void_never_and_static_bodies_are_valid() {
++    let source = "<?php\nclass ParentClass { public function stop(): never { throw new \\Exception(); } public function clear(): void {} public static function size(): int { return 1; } }\nclass <caret>Child extends ParentClass {}\n";
++    let stop = generated(source, "stop");
++    assert!(
++        stop.contains("parent::stop();") && !stop.contains("return parent::stop"),
++        "{stop}"
++    );
++    assert!(stop.contains("A never-returning parent method returned."));
++    let clear = generated(source, "clear");
++    assert!(clear.contains("parent::clear();") && !clear.contains("return parent::clear"));
++    let size = generated(source, "size");
++    assert!(
++        size.contains("public static function size(): int")
++            && size.contains("return parent::size();")
++    );
++}
++
++#[test]
++fn method_generation_transports_lexical_aliases_self_parent_and_defaults() {
++    let result = generated(
++        "<?php\nnamespace Library {\nclass Payload {}\nclass Root {}\nclass Base extends Root { public const LABEL = 'base'; public function copy(self $other, parent $root, Payload $payload = new Payload(), string $label = self::LABEL): self { return $other; } }\n}\nnamespace Consumer {\nuse Library\\Base as Ancestor;\nuse Library\\Payload as Value;\nclass <caret>Child extends Ancestor {}\n}\n",
++        "copy",
++    );
++    let inserted = result.rsplit("#[\\Override]").next().unwrap();
++    assert!(inserted.contains("copy(Ancestor $other, \\Library\\Root $root, Value $payload = new Value(), string $label = Ancestor::LABEL): Ancestor"), "{result}");
++}
++
++#[test]
++fn method_generation_does_not_promote_documented_parameter_or_return_types() {
++    let result = generated(
++        "<?php\nclass ParentClass { /** @param string $value @return int */ public function copy($value) { return 1; } }\nclass <caret>Child extends ParentClass {}\n",
++        "copy",
++    );
++    assert!(
++        result.contains("public function copy($value)\n"),
++        "{result}"
++    );
++    assert!(!result.contains("public function copy(string"));
++}
++
++#[test]
++fn method_generation_keeps_crlf_unicode_and_class_indentation() {
++    let result = generated(
++        "<?php\r\nnamespace App {\r\n    class ParentClass { public function počet(string $jméno): string { return $jméno; } }\r\n    final class <caret>Child extends ParentClass\r\n    {\r\n    }\r\n}\r\n",
++        "počet",
++    );
++    assert!(
++        result.contains("        public function počet(string $jméno): string\r\n"),
++        "{result}"
++    );
++    assert!(!result.replace("\r\n", "").contains('\n'));
++}
++
++#[test]
++fn method_generation_excludes_existing_private_final_magic_and_final_shadowing() {
++    let (_, found) = actions(
++        "<?php\nclass Grand { public function hidden(): int { return 1; } }\nclass ParentClass extends Grand { final public function hidden(): int { return 2; } private function secret() {} public function __clone() {} public function Existing() {} public function allowed() {} }\nclass <caret>Child extends ParentClass { public function existing() {} }\n",
++        PhpVersion::new(8, 4),
++    );
++    for name in ["hidden", "secret", "__clone", "Existing", "existing"] {
++        assert!(
++            find_action(&found, &format!("Override {name} (")).is_none(),
++            "unexpected {name}"
++        );
++    }
++    assert!(find_action(&found, "Override allowed (").is_some());
++}
++
++#[test]
++fn method_generation_uses_concrete_grandparent_before_parent_interface_contract() {
++    let result = generated(
++        "<?php\ninterface Contract { public function render(): string; }\nclass Grand { public function render(): string { return 'grand'; } }\nclass ParentClass extends Grand implements Contract {}\nclass <caret>Child extends ParentClass {}\n",
++        "render",
++    );
++    assert!(result.contains("return parent::render();"), "{result}");
++}
++
++#[test]
++fn method_generation_abstract_interface_and_trait_only_paths_throw_explicitly() {
++    for source in [
++        "<?php\nabstract class ParentClass { abstract public function render(): string; }\nclass <caret>Child extends ParentClass {}\n",
++        "<?php\ninterface Contract { public function render(): string; }\nclass <caret>Child implements Contract {}\n",
++        "<?php\ntrait Shared { public function render(): string { return 'trait'; } }\nclass <caret>Child { use Shared; }\n",
++    ] {
++        let result = generated(source, "render");
++        assert!(
++            result.contains("throw new \\LogicException('Method is not implemented.');"),
++            "{result}"
++        );
++        assert!(!result.contains("parent::render"));
++    }
++}
++
++#[test]
++fn method_generation_from_members_and_comments_inserts_at_class_close() {
++    for member in [
++        "public function other() { <caret>$x = 1; }",
++        "public <caret>$value = 1;",
++        "// <caret>comment\n",
++        "public function other() { /* <caret>comment */ }",
++    ] {
++        let marked = format!(
++            "<?php\ninterface Contract {{ public function required(): void; }}\nclass Base {{ public function render() {{}} }}\nclass Child extends Base implements Contract {{\n    {member}\n}}\n"
++        );
++        let (source, found) = actions(&marked, PhpVersion::new(8, 4));
++        let close = source.rfind('}').unwrap();
++        let prefix = &source[..close];
++        let expected = Position::new(
++            prefix.bytes().filter(|byte| *byte == b'\n').count() as u32,
++            0,
++        );
++        for title in ["Override render (", "Implement `required`"] {
++            let action = find_action(&found, title).expect("class-level generation from member");
++            let edit = action.edit.as_ref().unwrap();
++            let edits = edit
++                .changes
++                .as_ref()
++                .unwrap()
++                .values()
++                .flatten()
++                .collect::<Vec<_>>();
++            assert_eq!(edits.len(), 1);
++            assert_eq!(edits[0].range, Range::new(expected, expected));
++            let result = apply_workspace_edit(&source, edit);
++            assert!(
++                result.starts_with(prefix),
++                "existing members must remain exact: {result}"
++            );
++            assert!(result.ends_with("}\n"));
++        }
++    }
++}
++
++#[test]
++fn method_generation_refuses_html_anonymous_and_unclosed_class_contexts() {
++    for source in [
++        "<h1><caret>Child</h1>\n<?php\nclass Base { public function render() {} }\nclass Child extends Base {}\n",
++        "<?php\nclass Base { public function render() {} }\nclass <caret>Child extends Base {\n",
++        "<?php\ninterface Contract { public function required(): void; }\nclass Base { public function render() {} }\nclass Outer extends Base implements Contract { public function make() { return new class extends Base implements Contract { public function other() { <caret>$x = 1; } }; } }\n",
++        "<?php\nclass Base { public function render() {} }\n$value = new class extends Base { // <caret>comment\n};\n",
++        "<?php\nclass Base { public function render() {} }\nclass Child extends Base { public function other() { ?><p><caret>HTML</p><?php } }\n",
++    ] {
++        let (_, found) = actions(source, PhpVersion::new(8, 4));
++        assert!(find_action(&found, "Override ").is_none());
++        assert!(find_action(&found, "Implement ").is_none());
++    }
++}
++
++#[test]
++fn method_generation_gates_union_literal_and_nullable_syntax_by_target() {
++    let nullable = "<?php\nclass Base { public function copy(?string $value): ?string { return $value; } }\nclass <caret>Child extends Base {}\n";
++    let (_, found) = actions(nullable, PhpVersion::new(7, 1));
++    let edit = find_action(&found, "Override copy (")
++        .unwrap()
++        .edit
++        .as_ref()
++        .unwrap();
++    let text = edit
++        .changes
++        .as_ref()
++        .unwrap()
++        .values()
++        .flatten()
++        .map(|edit| edit.new_text.as_str())
++        .collect::<String>();
++    assert!(text.contains("?string $value): ?string"), "{text}");
++    assert!(!text.contains("#[\\Override]"));
++    let union = "<?php\nclass Base { public function copy(int|false|null $value): int|false|null { return $value; } }\nclass <caret>Child extends Base {}\n";
++    assert!(find_action(&actions(union, PhpVersion::new(8, 0)).1, "Override copy (").is_some());
++    assert!(find_action(&actions(union, PhpVersion::new(7, 4)).1, "Override copy (").is_none());
++    for spelling in ["false|null|int", "int|null|false", "null|int|false"] {
++        let marked = format!(
++            "<?php\nclass Base {{ public function copy({spelling} $value): {spelling} {{ return $value; }} }}\nclass <caret>Child extends Base {{}}\n"
++        );
++        assert!(
++            find_action(
++                &actions(&marked, PhpVersion::new(8, 0)).1,
++                "Override copy ("
++            )
++            .is_some(),
++            "legal union {spelling}"
++        );
++    }
++    let literals_only = "<?php\nclass Base { public function copy(false|null $value): false|null { return $value; } }\nclass <caret>Child extends Base {}\n";
++    assert!(
++        find_action(
++            &actions(literals_only, PhpVersion::new(8, 0)).1,
++            "Override copy ("
++        )
++        .is_none()
++    );
++    assert!(
++        find_action(
++            &actions(literals_only, PhpVersion::new(8, 2)).1,
++            "Override copy ("
++        )
++        .is_some()
++    );
++    let never = "<?php\nclass Base { public function stop(): never { throw new \\Exception(); } }\nclass <caret>Child extends Base {}\n";
++    assert!(find_action(&actions(never, PhpVersion::new(8, 0)).1, "Override stop (").is_none());
++    let literal = "<?php\nclass Base { public function yes(): true { return true; } }\nclass <caret>Child extends Base {}\n";
++    assert!(find_action(&actions(literal, PhpVersion::new(8, 1)).1, "Override yes (").is_none());
++}
++
++#[test]
++fn method_generation_implement_recovers_reference_flags_and_reabstracted_methods() {
++    let source = "<?php\nclass Grand { public function &render(&$value): int { return $value; } }\nabstract class ParentClass extends Grand { abstract public function &render(&$value): int; }\nclass <caret>Child extends ParentClass {}\n";
++    let (_, found) = actions(source, PhpVersion::new(8, 4));
++    let action = find_action(&found, "Implement `render`").unwrap();
++    let text = action
++        .edit
++        .as_ref()
++        .unwrap()
++        .changes
++        .as_ref()
++        .unwrap()
++        .values()
++        .flatten()
++        .map(|edit| edit.new_text.as_str())
++        .collect::<String>();
++    assert!(text.contains("function &render(&$value): int"), "{text}");
++    assert!(text.contains("throw new \\LogicException"));
++}
++
++#[test]
++fn method_generation_refuses_conflicting_interface_signatures_or_parameter_names() {
++    for second in ["string $value", "int $other"] {
++        let source = format!(
++            "<?php\ninterface A {{ public function render(int $value): object; }}\ninterface B {{ public function render({second}): object; }}\nclass <caret>Child implements A, B {{}}\n"
++        );
++        let (_, found) = actions(&source, PhpVersion::new(8, 4));
++        assert!(find_action(&found, "Implement ").is_none());
++        assert!(find_action(&found, "Override ").is_none());
++    }
++}
++
++#[test]
++fn method_generation_refuses_unsafe_magic_and_private_constant_defaults() {
++    for default in ["self::SECRET", "__DIR__"] {
++        let source = format!(
++            "<?php\nclass Base {{ private const SECRET = 'secret'; public function render(string $value = {default}): string {{ return $value; }} }}\nclass <caret>Child extends Base {{}}\n"
++        );
++        assert!(
++            find_action(
++                &actions(&source, PhpVersion::new(8, 4)).1,
++                "Override render ("
++            )
++            .is_none()
++        );
++    }
++}
++
++#[test]
++fn method_generation_refuses_ambiguous_trait_adaptations() {
++    let source = "<?php\ntrait A { public function render(int $value): int { return $value; } }\ntrait B { public function render(string $value): string { return $value; } }\nclass <caret>Child { use A, B { B::render insteadof A; } }\n";
++    assert!(
++        find_action(
++            &actions(source, PhpVersion::new(8, 4)).1,
++            "Override render ("
++        )
++        .is_none()
++    );
++}
++
++#[test]
++fn method_generation_implement_insertion_uses_exact_class_closing_brace() {
++    let source = "<?php\ninterface Contract { public function render(): int; }\nclass <caret>Child implements Contract { public string $literal = '}'; }\nclass Next {}\n";
++    let (source, found) = actions(source, PhpVersion::new(8, 4));
++    let result = apply_workspace_edit(
++        &source,
++        find_action(&found, "Implement `render`")
++            .unwrap()
++            .edit
++            .as_ref()
++            .unwrap(),
++    );
++    assert!(result.contains("$literal = '}';"));
++    assert!(
++        result.find("throw new \\LogicException").unwrap() < result.find("class Next").unwrap()
++    );
++    assert!(result.ends_with("class Next {}\n"));
++}
++
++#[test]
++fn method_generation_qualifies_imported_constant_defaults_and_nested_class_names() {
++    let result = generated(
++        "<?php\nnamespace Library {\nconst LIMIT = 2;\nclass Payload {}\nuse const Library\\LIMIT as COUNT;\nclass Base { public function render(int $count = COUNT, array $types = [Payload::class]): int { return $count; } }\n}\nnamespace Consumer {\nclass <caret>Child extends \\Library\\Base {}\n}\n",
++        "render",
++    );
++    assert!(result.contains("$count = \\Library\\LIMIT"), "{result}");
++    assert!(result.contains("[\\Library\\Payload::class]"), "{result}");
++}
++
++#[test]
++fn method_generation_gates_dnf_and_literal_only_unions() {
++    let dnf = "<?php\ninterface A {}\ninterface B {}\nclass Base { public function render((A&B)|null $value): (A&B)|null { return $value; } }\nclass <caret>Child extends Base {}\n";
++    assert!(find_action(&actions(dnf, PhpVersion::new(8, 1)).1, "Override render (").is_none());
++    assert!(find_action(&actions(dnf, PhpVersion::new(8, 2)).1, "Override render (").is_some());
++    let literal = "<?php\nclass Base { public function render(false|null $value): false|null { return $value; } }\nclass <caret>Child extends Base {}\n";
++    assert!(
++        find_action(
++            &actions(literal, PhpVersion::new(8, 0)).1,
++            "Override render ("
++        )
++        .is_none()
++    );
++    assert!(
++        find_action(
++            &actions(literal, PhpVersion::new(8, 2)).1,
++            "Override render ("
++        )
++        .is_some()
++    );
++}
++
++#[tokio::test]
++async fn method_generation_observes_unsaved_inherited_signatures_on_first_query() {
++    use crate::common::{code_actions_via_server, create_psr4_workspace, open_php, workspace_uri};
++    use tower_lsp::LanguageServer;
++    let (backend, _directory) = create_psr4_workspace(
++        r#"{"autoload":{"psr-4":{"App\\":"src/"}}}"#,
++        &[
++            (
++                "src/Base.php",
++                "<?php\nnamespace App;\nclass Base { public function oldMethod(): int { return 1; } }\n",
++            ),
++            (
++                "src/Child.php",
++                "<?php\nnamespace App;\nclass Child extends Base {}\n",
++            ),
++        ],
++    );
++    let parent = workspace_uri(&backend, "src/Base.php");
++    let child = workspace_uri(&backend, "src/Child.php");
++    open_php(
++        &backend,
++        &parent,
++        "<?php\nnamespace App;\nclass Base { public function oldMethod(): int { return 1; } }\n",
++    )
++    .await;
++    open_php(
++        &backend,
++        &child,
++        "<?php\nnamespace App;\nclass Child extends Base {}\n",
++    )
++    .await;
++    let point = Range::new(Position::new(2, 6), Position::new(2, 6));
++    let before = code_actions_via_server(&backend, &child, point)
++        .await
++        .unwrap_or_default();
++    assert!(find_action(&before, "Override oldMethod (").is_some());
++    backend.did_change(DidChangeTextDocumentParams {
++        text_document: VersionedTextDocumentIdentifier { uri: parent, version: 2 },
++        content_changes: vec![TextDocumentContentChangeEvent { range: None, range_length: None,
++            text: "<?php\nnamespace App;\nclass Base { public function newMethod(string $value): string { return $value; } }\n".into() }],
++    }).await;
++    let after = code_actions_via_server(&backend, &child, point)
++        .await
++        .unwrap_or_default();
++    assert!(find_action(&after, "Override oldMethod (").is_none());
++    let action =
++        find_action(&after, "Override newMethod (").expect("first query after unsaved change");
++    let text = action
++        .edit
++        .as_ref()
++        .unwrap()
++        .changes
++        .as_ref()
++        .unwrap()
++        .values()
++        .flatten()
++        .map(|edit| edit.new_text.as_str())
++        .collect::<String>();
++    assert!(text.contains("newMethod(string $value): string"), "{text}");
++}
++
++#[test]
++fn method_generation_keeps_multiline_defaults_without_doubled_crlf() {
++    let result = generated(
++        "<?php\r\nclass Base { public function render(array $values = [\r\n    'nested' => [1, 2],\r\n]): array { return $values; } }\r\nclass <caret>Child extends Base {}\r\n",
++        "render",
++    );
++    assert!(!result.contains("\r\r\n"), "{result}");
++    assert!(!result.replace("\r\n", "").contains('\n'));
++    assert!(result.contains("'nested' => [1, 2]"));
++}
++
++#[test]
++fn method_generation_encodes_multiline_string_bytes_before_line_ending_conversion() {
++    let result = generated(
++        "<?php\r\nclass Base { public function render(string $value = 'a\nb'): string { return $value; } }\r\nclass <caret>Child extends Base {}\r\n",
++        "render",
++    );
++    let inserted = result.rsplit("#[\\Override]").next().unwrap();
++    assert!(
++        inserted.contains("$value = \"\\x61\\x0A\\x62\""),
++        "{result}"
++    );
++    assert!(!inserted.replace("\r\n", "").contains('\n'));
++}
++
++#[test]
++fn method_generation_refuses_private_initializer_constructor() {
++    let source = "<?php\nclass Base { private function __construct() {} public function render($value = new self()) {} }\nclass <caret>Child extends Base {}\n";
++    assert!(
++        find_action(
++            &actions(source, PhpVersion::new(8, 4)).1,
++            "Override render ("
++        )
++        .is_none()
++    );
++}
++
++#[test]
++fn method_generation_does_not_follow_imports_for_canonical_parent_names() {
++    let result = generated(
++        "<?php\nnamespace { class Base { public function render(): string { return 'global'; } } }\nnamespace Vendor { class Base { public function wrong(): int { return 1; } } }\nnamespace App {\nuse Vendor\\Base;\nclass <caret>Child extends \\Base {}\n}\n",
++        "render",
++    );
++    assert!(result.contains("return parent::render();"), "{result}");
++    let source = "<?php\nnamespace { abstract class Base { abstract public function render(): string; } }\nnamespace Vendor { abstract class Base { abstract public function wrong(): int; } }\nnamespace App {\nuse Vendor\\Base;\nclass <caret>Child extends \\Base {}\n}\n";
++    let (_, found) = actions(source, PhpVersion::new(8, 4));
++    assert!(find_action(&found, "Implement `render`").is_some());
++    assert!(find_action(&found, "Implement `wrong`").is_none());
++}
+diff --git a/tests/integration/main.rs b/tests/integration/main.rs
+--- a/tests/integration/main.rs
++++ b/tests/integration/main.rs
+@@ -41,6 +41,7 @@
+ mod code_action_import_class;
+ mod code_action_inline_variable;
+ mod code_action_insert_translation_key;
++mod code_action_override_methods;
+ mod code_action_promote_constructor_param;
+ mod code_action_remove_override;
+ mod code_action_remove_unreachable;

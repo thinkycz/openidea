@@ -1,0 +1,972 @@
+diff --git a/src/completion/variable/expected.rs b/src/completion/variable/expected.rs
+index 1c810ff..48425fd 100644
+--- a/src/completion/variable/expected.rs
++++ b/src/completion/variable/expected.rs
+@@ -1,5 +1,6 @@
+ //! Value-position context over the shared callable/property type metadata.
+ 
++use super::projection::Projection;
+ use crate::atom::bytes_to_str;
+ use crate::php_type::{PhpType, TypeKind};
+ use crate::text_position::position_to_offset;
+@@ -9,13 +10,19 @@ use crate::{AccessKind, Backend};
+ use mago_span::HasSpan;
+ use mago_syntax::cst::*;
+ use mago_syntax::walker::Walker;
+-use std::borrow::Cow;
++use std::{borrow::Cow, collections::BTreeMap};
+ use tower_lsp::lsp_types::Position;
+ 
+ /// A value constraint discovered without walking the receiver's variable scope.
++#[derive(Clone)]
+ pub(crate) enum ExpectedValue {
++    Projected {
++        base: Box<ExpectedValue>,
++        projection: Projection,
++    },
+     Declared(PhpType),
+     Property {
++        source_offset: u32,
+         receiver: String,
+         name: String,
+         access: AccessKind,
+@@ -27,17 +34,51 @@ impl ExpectedValue {
+         self,
+         backend: &Backend,
+         content: &str,
+-        position: Position,
++        file: &FileContext,
++    ) -> Option<PhpType> {
++        self.resolve_inner(backend, content, file)
++            .filter(usable_hint)
++    }
++
++    pub(super) fn scope_offsets(&self, cursor: u32) -> Vec<u32> {
++        let mut offsets = vec![cursor];
++        let mut value = self;
++        while let Self::Projected { base, .. } = value {
++            value = base;
++        }
++        if let Self::Property { source_offset, .. } = value
++            && *source_offset != cursor
++        {
++            offsets.push(*source_offset);
++        }
++        offsets
++    }
++
++    fn projected(self, projection: Projection) -> Self {
++        Self::Projected {
++            base: Box::new(self),
++            projection,
++        }
++    }
++
++    fn resolve_inner(
++        self,
++        backend: &Backend,
++        content: &str,
+         file: &FileContext,
+     ) -> Option<PhpType> {
+         match self {
++            Self::Projected { base, projection } => {
++                projection.apply(&base.resolve_inner(backend, content, file)?)
++            }
+             Self::Declared(ty) => Some(ty),
+             Self::Property {
++                source_offset,
+                 receiver,
+                 name,
+                 access,
+             } => {
+-                let cursor = position_to_offset(content, position);
++                let cursor = source_offset;
+                 let class_loader = backend.class_loader_with(
+                     &file.classes,
+                     file.use_map_at(cursor),
+@@ -87,7 +128,7 @@ impl ExpectedValue {
+                     }
+                     expected = Some(hint);
+                 }
+-                expected.filter(usable_hint)
++                expected
+             }
+         }
+     }
+@@ -98,7 +139,7 @@ fn usable_hint(hint: &PhpType) -> bool {
+ }
+ 
+ struct CallableValue {
+-    ty: Option<PhpType>,
++    ty: Option<ExpectedValue>,
+     generator: bool,
+ }
+ 
+@@ -111,6 +152,7 @@ struct ValueContext<'a> {
+     prefix: &'a str,
+     callables: Vec<CallableValue>,
+     expected: Option<ExpectedValue>,
++    closure_expectations: BTreeMap<u32, ExpectedValue>,
+ }
+ 
+ impl ValueContext<'_> {
+@@ -140,28 +182,177 @@ impl ValueContext<'_> {
+         }))
+     }
+ 
+-    fn return_value(&self) -> Option<PhpType> {
++    fn return_value(&self) -> Option<ExpectedValue> {
+         let callable = self.callables.last()?;
+-        let ty = callable.ty.as_ref()?;
+-        if callable.generator {
+-            // A generator's function return hint describes the generator object;
+-            // its `return` statement instead produces the fourth PHPDoc argument.
+-            if let TypeKind::Generic(generic) = ty.kind()
+-                && generic
+-                    .name
+-                    .as_str()
+-                    .trim_start_matches('\\')
+-                    .eq_ignore_ascii_case("Generator")
+-                && generic.args.len() == 4
++        let ty = callable.ty.clone()?;
++        Some(if callable.generator {
++            ty.projected(Projection::GeneratorReturn)
++        } else {
++            ty
++        })
++    }
++
++    fn contains(&self, expr: &Expression<'_>) -> bool {
++        let span = expr.span();
++        span.start.offset <= self.cursor && self.cursor <= span.end.offset
++    }
++
++    fn propagate(&mut self, expr: &Expression<'_>, expected: ExpectedValue, depth: usize) {
++        if depth > 64 || !self.contains(expr) {
++            return;
++        }
++        if self.direct(expr) {
++            self.expected = Some(expected);
++            return;
++        }
++        match expr {
++            Expression::Parenthesized(inner) => {
++                self.propagate(inner.expression, expected, depth + 1)
++            }
++            Expression::Conditional(branch) => {
++                if let Some(value) = branch.then
++                    && self.contains(value)
++                {
++                    self.propagate(value, expected, depth + 1);
++                } else if self.contains(branch.r#else) {
++                    self.propagate(branch.r#else, expected, depth + 1);
++                }
++            }
++            Expression::Binary(binary) if binary.operator.is_null_coalesce() => {
++                if self.contains(binary.lhs) {
++                    self.propagate(
++                        binary.lhs,
++                        expected.projected(Projection::Nullable),
++                        depth + 1,
++                    );
++                } else {
++                    self.propagate(binary.rhs, expected, depth + 1);
++                }
++            }
++            Expression::Array(array) => self.array(array.elements.as_slice(), expected, depth),
++            Expression::LegacyArray(array) => {
++                self.array(array.elements.as_slice(), expected, depth)
++            }
++            Expression::ArrowFunction(_) | Expression::Closure(_) => {
++                self.closure_expectations.insert(
++                    expr.span().start.offset,
++                    expected.projected(Projection::CallableReturn),
++                );
++            }
++            // Calls, conditions, coercions and other scopes do not inherit the
++            // outer value's type. Their own declarations may establish one.
++            _ => {}
++        }
++    }
++
++    fn array(&mut self, elements: &[ArrayElement<'_>], expected: ExpectedValue, depth: usize) {
++        let mut next = Some(0u64);
++        for element in elements {
++            match element {
++                ArrayElement::Value(value) => {
++                    let key = next.map(|index| index.to_string());
++                    self.propagate(
++                        value.value,
++                        expected.clone().projected(Projection::ArrayValue(key)),
++                        depth + 1,
++                    );
++                    next = next.and_then(|index| index.checked_add(1));
++                }
++                ArrayElement::KeyValue(value) => {
++                    let key = literal_key(value.key);
++                    if self.contains(value.key) {
++                        self.propagate(
++                            value.key,
++                            expected.clone().projected(Projection::ArrayKey),
++                            depth + 1,
++                        );
++                    } else {
++                        self.propagate(
++                            value.value,
++                            expected
++                                .clone()
++                                .projected(Projection::ArrayValue(key.clone())),
++                            depth + 1,
++                        );
++                    }
++                    match key {
++                        Some(key) => {
++                            if let Ok(index) = key.parse::<u64>()
++                                && index.to_string() == key
++                            {
++                                next = next.and_then(|next| {
++                                    next.max(index).checked_add(u64::from(index >= next))
++                                });
++                            }
++                        }
++                        None => next = None,
++                    }
++                }
++                ArrayElement::Variadic(value) => {
++                    self.propagate(value.value, expected.clone(), depth + 1);
++                    next = None;
++                }
++                ArrayElement::Missing(_) => next = next.and_then(|index| index.checked_add(1)),
++            }
++        }
++    }
++
++    fn argument(&mut self, start: u32, list: &ArgumentList<'_>) {
++        let Some(call) = self
++            .content
++            .get(start as usize..list.left_parenthesis.start.offset as usize)
++        else {
++            return;
++        };
++        for (index, argument) in list.arguments.iter().enumerate() {
++            if !self.contains(argument.value()) {
++                continue;
++            }
++            if argument.is_unpacked()
++                || list.arguments.iter().take(index).any(Argument::is_unpacked)
++            {
++                return;
++            }
++            let name = match argument {
++                Argument::Named(named) => Some(bytes_to_str(named.name.value)),
++                _ => None,
++            };
++            let position = crate::text_position::offset_to_position(self.content, start as usize);
++            if let Some(hint) = self
++                .backend
++                .argument_parameter_expectation(
++                    call.trim(),
++                    index,
++                    name,
++                    self.content,
++                    position,
++                    self.file,
++                )
++                .and_then(|parameter| parameter.type_hint)
+             {
+-                return Some(generic.args[3].clone());
++                self.propagate(argument.value(), ExpectedValue::Declared(hint), 0);
+             }
+-            return None;
++            return;
+         }
+-        Some(ty.clone())
+     }
+ 
+     fn property(&self, lhs: &Expression<'_>) -> Option<ExpectedValue> {
++        match lhs {
++            Expression::ArrayAccess(access) => {
++                return Some(
++                    self.property(access.array)?
++                        .projected(Projection::ArrayValue(literal_key(access.index))),
++                );
++            }
++            Expression::ArrayAppend(access) => {
++                return Some(
++                    self.property(access.array)?
++                        .projected(Projection::ArrayValue(None)),
++                );
++            }
++            Expression::Parenthesized(inner) => return self.property(inner.expression),
++            _ => {}
++        }
+         let (receiver, name, access) = match lhs {
+             Expression::Access(Access::Property(property)) => {
+                 let ClassLikeMemberSelector::Identifier(name) = &property.property else {
+@@ -186,6 +377,7 @@ impl ValueContext<'_> {
+             .content
+             .get(span.start.offset as usize..span.end.offset as usize)?;
+         Some(ExpectedValue::Property {
++            source_offset: lhs.span().start.offset,
+             receiver: receiver.to_owned(),
+             name: name.to_owned(),
+             access,
+@@ -222,6 +414,17 @@ impl<'ast, 'arena, 'a> Walker<'ast, 'arena, ValueContext<'a>> for ExpectedValueW
+     fn walk_expression(&self, node: &'ast Expression<'arena>, ctx: &mut ValueContext<'a>) {
+         let span = node.span();
+         if span.start.offset <= ctx.cursor && ctx.cursor <= span.end.offset {
++            match node {
++                Expression::Call(call) => {
++                    ctx.argument(node.span().start.offset, call.get_argument_list())
++                }
++                Expression::Instantiation(new) => {
++                    if let Some(arguments) = &new.argument_list {
++                        ctx.argument(node.span().start.offset, arguments);
++                    }
++                }
++                _ => {}
++            }
+             mago_syntax::walker::walk_expression(self, node, ctx);
+         }
+     }
+@@ -243,7 +446,7 @@ impl<'ast, 'arena, 'a> Walker<'ast, 'arena, ValueContext<'a>> for ExpectedValueW
+             .and_then(|callable| callable.return_type)
+             .or_else(|| ctx.hint(node.return_type_hint.as_ref()));
+         ctx.callables.push(CallableValue {
+-            ty,
++            ty: ty.map(ExpectedValue::Declared),
+             generator: generator(&node.body),
+         });
+     }
+@@ -266,7 +469,7 @@ impl<'ast, 'arena, 'a> Walker<'ast, 'arena, ValueContext<'a>> for ExpectedValueW
+             _ => false,
+         };
+         ctx.callables.push(CallableValue {
+-            ty,
++            ty: ty.map(ExpectedValue::Declared),
+             generator: is_generator,
+         });
+     }
+@@ -275,7 +478,10 @@ impl<'ast, 'arena, 'a> Walker<'ast, 'arena, ValueContext<'a>> for ExpectedValueW
+     }
+     fn walk_in_closure(&self, node: &'ast Closure<'arena>, ctx: &mut ValueContext<'a>) {
+         ctx.callables.push(CallableValue {
+-            ty: ctx.hint(node.return_type_hint.as_ref()),
++            ty: ctx
++                .hint(node.return_type_hint.as_ref())
++                .map(ExpectedValue::Declared)
++                .or_else(|| ctx.closure_expectations.remove(&node.span().start.offset)),
+             generator: generator(&node.body),
+         });
+     }
+@@ -287,18 +493,19 @@ impl<'ast, 'arena, 'a> Walker<'ast, 'arena, ValueContext<'a>> for ExpectedValueW
+         node: &'ast ArrowFunction<'arena>,
+         ctx: &mut ValueContext<'a>,
+     ) {
+-        let ty = ctx.hint(node.return_type_hint.as_ref());
++        let ty = ctx
++            .hint(node.return_type_hint.as_ref())
++            .map(ExpectedValue::Declared)
++            .or_else(|| ctx.closure_expectations.remove(&node.span().start.offset));
+         ctx.callables.push(CallableValue {
+             ty,
+             generator: false,
+         });
+-        if ctx.direct(node.expression) {
+-            ctx.expected = ctx
+-                .return_value()
+-                .filter(usable_hint)
+-                .map(ExpectedValue::Declared);
++        if let Some(expected) = ctx.return_value() {
++            ctx.propagate(node.expression, expected, 0);
+         }
+     }
++
+     fn walk_out_arrow_function(&self, _: &'ast ArrowFunction<'arena>, ctx: &mut ValueContext<'a>) {
+         ctx.callables.pop();
+     }
+@@ -312,21 +519,69 @@ impl<'ast, 'arena, 'a> Walker<'ast, 'arena, ValueContext<'a>> for ExpectedValueW
+         ctx.callables.pop();
+     }
+     fn walk_in_return(&self, node: &'ast Return<'arena>, ctx: &mut ValueContext<'a>) {
+-        if node.value.is_some_and(|value| ctx.direct(value)) {
+-            ctx.expected = ctx
+-                .return_value()
+-                .filter(usable_hint)
+-                .map(ExpectedValue::Declared);
++        if let Some(value) = node.value
++            && let Some(expected) = ctx.return_value()
++        {
++            ctx.propagate(value, expected, 0);
+         }
+     }
+     fn walk_in_assignment(&self, node: &'ast Assignment<'arena>, ctx: &mut ValueContext<'a>) {
+-        if node.operator.is_assign() && ctx.direct(node.rhs) {
+-            ctx.expected = ctx.property(node.lhs);
++        if node.operator.is_assign()
++            && let Some(expected) = ctx.property(node.lhs)
++        {
++            ctx.propagate(node.rhs, expected, 0);
++        }
++    }
++}
++
++fn literal_key(value: &Expression<'_>) -> Option<String> {
++    match value {
++        Expression::Literal(Literal::String(string)) => string
++            .value
++            .and_then(|value| std::str::from_utf8(value).ok())
++            .map(str::to_owned),
++        Expression::Literal(Literal::Integer(integer)) => {
++            integer.value.map(|value| value.to_string())
++        }
++        _ => None,
++    }
++}
++
++struct DirectArgument;
++impl<'ast, 'arena> Walker<'ast, 'arena, (u32, usize, bool)> for DirectArgument {
++    fn walk_in_argument_list(
++        &self,
++        list: &'ast ArgumentList<'arena>,
++        state: &mut (u32, usize, bool),
++    ) {
++        for argument in list.arguments.iter() {
++            if let Expression::Variable(Variable::Direct(variable)) = argument.value()
++                && variable.span().start.offset as usize + state.1 == state.0 as usize
++            {
++                state.2 = true;
++            }
+         }
+     }
+ }
+ 
+ impl Backend {
++    pub(crate) fn is_direct_variable_argument(
++        &self,
++        content: &str,
++        position: Position,
++        prefix: &str,
++    ) -> bool {
++        let cursor = position_to_offset(content, position);
++        let source = recovered_source(content, cursor, prefix);
++        crate::parser::with_parsed_program(&source, "direct_variable_argument", |program, _| {
++            let mut state = (cursor, prefix.len(), false);
++            for statement in program.statements.iter() {
++                DirectArgument.walk_statement(statement, &mut state);
++            }
++            state.2
++        })
++    }
++
+     /// The expected type of a directly entered variable in a value position.
+     pub(crate) fn expected_variable_value_context(
+         &self,
+@@ -338,15 +593,7 @@ impl Backend {
+         let cursor = position_to_offset(content, position);
+         // A bare `$` is incomplete PHP. Recovery stays after the cursor and never
+         // changes the original content, candidate inference or replacement range.
+-        let source = if prefix == "$" {
+-            let mut patched = String::with_capacity(content.len() + 19);
+-            patched.push_str(&content[..cursor as usize]);
+-            patched.push_str("_workbench_expected");
+-            patched.push_str(&content[cursor as usize..]);
+-            Cow::Owned(patched)
+-        } else {
+-            Cow::Borrowed(content)
+-        };
++        let source = recovered_source(content, cursor, prefix);
+         crate::parser::with_parsed_program(
+             &source,
+             "expected_variable_value_context",
+@@ -360,6 +607,7 @@ impl Backend {
+                     prefix,
+                     callables: Vec::new(),
+                     expected: None,
++                    closure_expectations: BTreeMap::new(),
+                 };
+                 for statement in program.statements.iter() {
+                     ExpectedValueWalker.walk_statement(statement, &mut ctx);
+@@ -369,3 +617,15 @@ impl Backend {
+         )
+     }
+ }
++
++fn recovered_source<'a>(content: &'a str, cursor: u32, prefix: &str) -> Cow<'a, str> {
++    if prefix == "$" {
++        let mut patched = String::with_capacity(content.len() + 19);
++        patched.push_str(&content[..cursor as usize]);
++        patched.push_str("_workbench_expected");
++        patched.push_str(&content[cursor as usize..]);
++        Cow::Owned(patched)
++    } else {
++        Cow::Borrowed(content)
++    }
++}
+diff --git a/src/completion/variable/mod.rs b/src/completion/variable/mod.rs
+index 0da4cb9..4b3d269 100644
+--- a/src/completion/variable/mod.rs
++++ b/src/completion/variable/mod.rs
+@@ -6,4 +6,5 @@
+ /// `crate::type_engine::variable`, not here.
+ pub(crate) mod completion;
+ mod expected;
++mod projection;
+ mod ranking;
+diff --git a/src/completion/variable/projection.rs b/src/completion/variable/projection.rs
+new file mode 100644
+index 0000000..2d3bcf7
+--- /dev/null
++++ b/src/completion/variable/projection.rs
+@@ -0,0 +1,129 @@
++//! Type constraints projected through value-preserving expression structure.
++use crate::php_type::{PhpType, TypeKind};
++
++#[derive(Clone)]
++pub(crate) enum Projection {
++    ArrayValue(Option<String>),
++    ArrayKey,
++    CallableReturn,
++    GeneratorReturn,
++    Nullable,
++}
++
++impl Projection {
++    pub(super) fn apply(&self, ty: &PhpType) -> Option<PhpType> {
++        if matches!(self, Self::Nullable) {
++            return Some(PhpType::nullable(ty.clone()));
++        }
++        match ty.kind() {
++            TypeKind::Nullable(inner) => return self.apply(inner),
++            TypeKind::Union(members) => {
++                // An array/closure literal excludes unrelated union arms, but an
++                // unconstrained matching arm must prevent a fabricated constraint.
++                let members: Vec<_> = members
++                    .iter()
++                    .filter(|member| match self {
++                        Self::ArrayValue(_) | Self::ArrayKey => {
++                            member.is_array_like()
++                                || matches!(
++                                    member.kind(),
++                                    TypeKind::ListShape(_) | TypeKind::UnsealedShape(_)
++                                )
++                        }
++                        Self::CallableReturn => member.is_callable(),
++                        _ => true,
++                    })
++                    .collect();
++                if members.is_empty() {
++                    return None;
++                }
++                let projected: Option<Vec<_>> = members
++                    .into_iter()
++                    .map(|member| self.apply(member))
++                    .collect();
++                return projected.map(PhpType::union);
++            }
++            _ => {}
++        }
++        match self {
++            Self::ArrayValue(key) => {
++                if let TypeKind::ListShape(inner) = ty.kind() {
++                    return self.apply(inner);
++                }
++                if !ty.is_array_like() && !matches!(ty.kind(), TypeKind::UnsealedShape(_)) {
++                    return None;
++                }
++                if ty.known_shape_entries().is_some() {
++                    return key
++                        .as_deref()
++                        .and_then(|key| ty.shape_value_type(key))
++                        .cloned();
++                }
++                ty.is_array_like()
++                    .then(|| ty.extract_element_type().cloned())
++                    .flatten()
++            }
++            Self::ArrayKey => ty.is_array_like().then(|| ty.iterable_key_type()).flatten(),
++            Self::CallableReturn => match ty.kind() {
++                TypeKind::Callable(callable) => callable.return_type.clone(),
++                _ => None,
++            },
++            Self::GeneratorReturn => match ty.kind() {
++                TypeKind::Generic(generic)
++                    if generic
++                        .name
++                        .as_str()
++                        .trim_start_matches('\\')
++                        .eq_ignore_ascii_case("Generator")
++                        && generic.args.len() == 4 =>
++                {
++                    Some(generic.args[3].clone())
++                }
++                _ => None,
++            },
++            Self::Nullable => unreachable!(),
++        }
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn an_unconstrained_matching_union_arm_prevents_false_precision() {
++        for hint in [
++            "(callable():string)|callable",
++            "(callable():string)|Closure",
++        ] {
++            assert!(
++                Projection::CallableReturn
++                    .apply(&PhpType::parse(hint))
++                    .is_none(),
++                "{hint}"
++            );
++        }
++        assert!(
++            Projection::ArrayValue(None)
++                .apply(&PhpType::parse("array|list<string>"))
++                .is_none()
++        );
++    }
++
++    #[test]
++    fn array_projection_respects_shapes_and_unrelated_union_arms() {
++        assert!(
++            Projection::ArrayValue(Some("label".into()))
++                .apply(&PhpType::parse("object{label:string}"))
++                .is_none()
++        );
++        assert_eq!(
++            Projection::ArrayValue(None).apply(&PhpType::parse("list<string>|int")),
++            Some(PhpType::string())
++        );
++        assert_eq!(
++            Projection::CallableReturn.apply(&PhpType::parse("(callable():string)|int")),
++            Some(PhpType::string())
++        );
++    }
++}
+diff --git a/src/completion/variable/ranking.rs b/src/completion/variable/ranking.rs
+index 49ab3e8..b937581 100644
+--- a/src/completion/variable/ranking.rs
++++ b/src/completion/variable/ranking.rs
+@@ -40,7 +40,7 @@ impl Backend {
+         let _scope_guard = forward_walk::with_diagnostic_scope_cache();
+         // Walk the enclosing body once, rather than re-running inference for
+         // every visible candidate. The cache is dropped with this request.
+-        if expected.is_some() {
++        if let Some(expected) = &expected {
+             forward_walk::build_diagnostic_scopes_for_offsets(
+                 content,
+                 &ctx.classes,
+@@ -48,11 +48,14 @@ impl Backend {
+                 Some(self),
+                 owned_loaders.loaders(),
+                 Some(&self.resolved_class_cache),
+-                &[offset],
++                &expected.scope_offsets(offset),
+             );
+         }
+         // Receiver resolution shares the same forward-walk scope cache.
+-        let expected = expected.and_then(|expected| expected.resolve(self, content, position, ctx));
++        let expected = expected.and_then(|expected| expected.resolve(self, content, ctx));
++        if expected.is_none() && name.is_none() {
++            return;
++        }
+         let parameter_tokens = name.map(name_tokens);
+         for item in items {
+             if item
+diff --git a/src/signature_help.rs b/src/signature_help.rs
+index 254976c..2a61b92 100644
+--- a/src/signature_help.rs
++++ b/src/signature_help.rs
+@@ -648,7 +648,9 @@ impl Backend {
+         let (name, value) = crate::call_args::split_named_text_arg(current);
+         // An outer parameter does not determine the type of a variable
+         // nested in an array, binary expression, interpolation or spread.
+-        if trim_argument_trivia(value) != prefix {
++        if trim_argument_trivia(value) != prefix
++            || !self.is_direct_variable_argument(content, position, prefix)
++        {
+             return None;
+         }
+         if args.iter().take(args.len() - 1).any(|arg| {
+@@ -656,8 +658,28 @@ impl Backend {
+         }) {
+             return None;
+         }
++        self.argument_parameter_expectation(
++            &site.call_expression,
++            site.active_parameter as usize,
++            name,
++            content,
++            position,
++            ctx,
++        )
++    }
++
++    pub(crate) fn argument_parameter_expectation(
++        &self,
++        call_expression: &str,
++        parameter_index: usize,
++        name: Option<&str>,
++        content: &str,
++        position: Position,
++        ctx: &FileContext,
++    ) -> Option<VariableArgumentExpectation> {
++        let cursor = position_to_offset(content, position);
+         let target = self
+-            .resolve_callable_target(&site.call_expression, content, position, ctx)
++            .resolve_callable_target(call_expression, content, position, ctx)
+             .or_else(|| {
+                 // Callable types retain positional parameter types, but not
+                 // PHP parameter names. Use them only for positional ranking;
+@@ -665,8 +687,7 @@ impl Backend {
+                 if name.is_some() {
+                     return None;
+                 }
+-                let parsed =
+-                    crate::type_engine::subject_expr::SubjectExpr::parse(&site.call_expression);
++                let parsed = crate::type_engine::subject_expr::SubjectExpr::parse(call_expression);
+                 let crate::type_engine::subject_expr::SubjectExpr::Variable(variable) = &parsed
+                 else {
+                     return None;
+@@ -694,7 +715,7 @@ impl Backend {
+         } else {
+             target
+                 .parameters
+-                .get(site.active_parameter as usize)
++                .get(parameter_index)
+                 .or_else(|| target.parameters.last().filter(|param| param.is_variadic))?
+         };
+         // An overload with a different parameter name cannot establish a
+@@ -707,7 +728,7 @@ impl Backend {
+                         .find(|param| param.name.trim_start_matches('$') == name)
+                 } else {
+                     parameters
+-                        .get(site.active_parameter as usize)
++                        .get(parameter_index)
+                         .or_else(|| parameters.last().filter(|param| param.is_variadic))
+                 };
+                 alternate.is_some_and(|param| param.name == parameter.name)
+@@ -716,7 +737,7 @@ impl Backend {
+             type_hint: parameter
+                 .type_hint
+                 .clone()
+-                .filter(|hint| !hint.contains_mixed() && !hint.is_never()),
++                .filter(|hint| !hint.is_mixed() && !hint.is_never()),
+             name: name_known.then(|| parameter.name.trim_start_matches('$').to_owned()),
+         })
+     }
+diff --git a/tests/integration/completion_variable_names.rs b/tests/integration/completion_variable_names.rs
+index 51f9c2f..dbd688d 100644
+--- a/tests/integration/completion_variable_names.rs
++++ b/tests/integration/completion_variable_names.rs
+@@ -4446,3 +4446,205 @@ async fn test_explicit_workbench_variable_rank_is_absent_without_a_context() {
+             .is_none()
+     }));
+ }
++
++#[tokio::test]
++async fn test_expected_expression_ranking_parentheses_branches_and_coalescing() {
++    for value in [
++        "(/*complete*/$)",
++        "true ? /*complete*/$ : ''",
++        "true ? '' : /*complete*/$",
++        "null ?? /*complete*/$",
++        "/*complete*/$ ?? ''",
++    ] {
++        let source = format!(
++            "<?php function demo(int $aCount, string $zText): string {{ return {value}; }}"
++        );
++        let items = ranked_variables(&source).await;
++        assert_eq!(items[0].label, "$zText", "{value}");
++        assert!(items.iter().any(|i| i.label == "$aCount"));
++    }
++}
++
++#[tokio::test]
++async fn test_expected_expression_ranking_array_values_keys_and_shapes() {
++    for (hint, value) in [
++        ("list<string>", "[/*complete*/$]"),
++        ("array<string, int>", "[/*complete*/$ => 1]"),
++        (
++            "array{label: string, count: int}",
++            "['count' => 1, 'label' => /*complete*/$]",
++        ),
++        ("array{int, string}", "[1, /*complete*/$]"),
++        ("list<list<string>>", "[[/*complete*/$]]"),
++        ("list<string>", "array(/*complete*/$)"),
++    ] {
++        let source = format!(
++            "<?php /** @return {hint} */ function demo(int $aCount, string $zText): array {{ return {value}; }}"
++        );
++        let items = ranked_variables(&source).await;
++        assert_eq!(items[0].label, "$zText", "{hint}: {value}");
++    }
++}
++
++#[tokio::test]
++async fn test_expected_expression_ranking_projects_array_properties() {
++    for value in [
++        "$this->names = [/*complete*/$]",
++        "$this->names[] = /*complete*/$",
++        "$this->names[0] = /*complete*/$",
++        "$this->names = true ? [/*complete*/$] : []",
++    ] {
++        let source = format!(
++            "<?php class Box {{ /** @var list<string> */ public array $names; public function demo(int $aCount, string $zText): void {{ {value}; }} }}"
++        );
++        let items = ranked_variables(&source).await;
++        assert_eq!(items[0].label, "$zText", "{value}");
++    }
++}
++
++#[tokio::test]
++async fn test_expected_expression_ranking_projects_function_arguments_and_callbacks() {
++    for (hint, value) in [
++        ("string", "(/*complete*/$)"),
++        ("string", "true ? /*complete*/$ : ''"),
++        ("list<string>", "[/*complete*/$]"),
++        ("callable(): string", "fn() => /*complete*/$"),
++        (
++            "callable(): string",
++            "function() use ($aCount, $zText) { return /*complete*/$; }",
++        ),
++        ("callable(): list<string>", "fn() => [/*complete*/$]"),
++        (
++            "callable(): callable(): string",
++            "fn() => fn() => /*complete*/$",
++        ),
++    ] {
++        let source = format!(
++            "<?php /** @param {hint} $value */ function take($value): void {{}} function demo(int $aCount, string $zText): void {{ take({value}); }}"
++        );
++        let items = ranked_variables(&source).await;
++        assert_eq!(items[0].label, "$zText", "{hint}: {value}");
++    }
++}
++
++#[tokio::test]
++async fn test_expected_expression_ranking_callback_call_forms_and_declared_return_override() {
++    for (declaration, call) in [
++        (
++            "class Target { /** @param callable(): string $value */ public function take($value): void {} }",
++            "$target->take(fn() => /*complete*/$)",
++        ),
++        (
++            "class Target { /** @param callable(): string $value */ public static function take($value): void {} }",
++            "Target::take(value: fn() => /*complete*/$)",
++        ),
++        (
++            "class Target { /** @param callable(): string $value */ public function __construct($value) {} }",
++            "new Target(fn() => /*complete*/$)",
++        ),
++        (
++            "class Target {} /** @param callable(): string $value */ function take($value): void {}",
++            "take(value: fn() => /*complete*/$)",
++        ),
++    ] {
++        let source = format!(
++            "<?php {declaration} function demo(Target $target, int $aCount, string $zText): void {{ {call}; }}"
++        );
++        let items = ranked_variables(&source).await;
++        assert_eq!(items[0].label, "$zText", "{call}");
++    }
++    let items = ranked_variables("<?php /** @param callable(): int $value */ function take($value): void {} function demo(int $aCount, string $zText): void { take(fn(): string => /*complete*/$); }").await;
++    assert_eq!(items[0].label, "$zText");
++}
++
++#[tokio::test]
++async fn test_expected_expression_ranking_does_not_cross_unconstrained_boundaries() {
++    for (hint, value) in [
++        ("array", "[/*complete*/$]"),
++        ("string", "true && /*complete*/$"),
++        ("string", "/*complete*/$ ? '' : ''"),
++        ("string", "unknown(/*complete*/$)"),
++        ("string", "fn() => /*complete*/$"),
++        ("callable(): string", "fn() => (fn() => /*complete*/$)"),
++    ] {
++        let source = format!(
++            "<?php /** @param {hint} $value */ function take($value): void {{}} function demo(int $aCount, string $zText): void {{ take({value}); }}"
++        );
++        let items = ranked_variables(&source).await;
++        assert_eq!(items[0].label, "$aCount", "{hint}: {value}");
++        assert!(
++            items.iter().all(|item| item
++                .data
++                .as_ref()
++                .and_then(|data| data.get("phpWorkbenchRanking"))
++                .is_none()),
++            "{hint}: {value}"
++        );
++    }
++}
++
++#[tokio::test]
++async fn test_expected_expression_ranking_union_and_partially_unknown_shape() {
++    for (hint, value, first) in [
++        (
++            "array{label: string, other: mixed}",
++            "['label' => /*complete*/$]",
++            "$zText",
++        ),
++        ("list<string>|list<bool>", "[/*complete*/$]", "$zText"),
++        (
++            "array{0: int, 3: string}",
++            "[2 => 1, /*complete*/$]",
++            "$zText",
++        ),
++        (
++            "array{label: string}",
++            "['unknown' => /*complete*/$]",
++            "$aCount",
++        ),
++        ("array{int, string}", "[...[], /*complete*/$]", "$aCount"),
++    ] {
++        let source = format!(
++            "<?php /** @return {hint} */ function demo(int $aCount, string $zText): array {{ return {value}; }}"
++        );
++        let items = ranked_variables(&source).await;
++        assert_eq!(items[0].label, first, "{hint}: {value}");
++    }
++}
++
++#[tokio::test]
++async fn test_expected_expression_ranking_property_callback_and_generator_return() {
++    let items = ranked_variables("<?php class Box { /** @var callable(): string */ public $factory; public function demo(int $aCount, string $zText): void { $this->factory = fn() => /*complete*/$; } }").await;
++    assert_eq!(items[0].label, "$zText");
++    let items = ranked_variables("<?php /** @param callable(): Generator<int,int,void,string> $value */ function take($value): void {} function demo(int $aCount, string $zText): void { take(function() use ($aCount, $zText) { yield 1; return /*complete*/$; }); }").await;
++    assert_eq!(items[0].label, "$zText");
++}
++
++#[tokio::test]
++async fn test_expected_expression_ranking_named_branch_does_not_inherit_parameter_name() {
++    let items = ranked_variables("<?php function take(string $email): void {} function demo(string $aText, string $email): void { take(email: true ? /*complete*/$ : ''); }").await;
++    for item in items
++        .iter()
++        .filter(|item| ["$aText", "$email"].contains(&item.label.as_str()))
++    {
++        assert_eq!(
++            item.data.as_ref().unwrap()["phpWorkbenchRanking"],
++            serde_json::json!({"version":1,"type":0,"name":3})
++        );
++    }
++    assert_eq!(items[0].label, "$aText");
++}
++
++#[tokio::test]
++async fn test_expected_expression_ranking_property_owner_is_resolved_at_assignment() {
++    for body in [
++        "function() use ($aCount, $zText) { return /*complete*/$; }",
++        "function() use ($box, $aCount, $zText) { $box = new OtherBox(); return /*complete*/$; }",
++    ] {
++        let source = format!(
++            "<?php class Box {{ /** @var callable(): string */ public $factory; }} class OtherBox {{ /** @var callable(): int */ public $factory; }} function demo(Box $box, int $aCount, string $zText): void {{ $box->factory = {body}; }}"
++        );
++        let items = ranked_variables(&source).await;
++        assert_eq!(items[0].label, "$zText", "{body}");
++    }
++}

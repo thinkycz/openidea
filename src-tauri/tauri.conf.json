@@ -1,12 +1,12 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "OpenIDEA",
-  "version": "0.1.21",
-  "identifier": "ai.l0ng.openidea",
+  "productName": "OpenStorm",
+  "version": "0.1.22",
+  "identifier": "cz.thinky.openstorm",
   "build": {
     "beforeDevCommand": "pnpm dev",
     "devUrl": "http://localhost:1420",
-    "beforeBuildCommand": "pnpm build",
+    "beforeBuildCommand": "node scripts/verify-phpantom.mjs && pnpm build",
     "frontendDist": "../dist"
   },
   "app": {
@@ -14,7 +14,7 @@
       {
         "label": "main",
         "create": false,
-        "title": "OpenIDEA",
+        "title": "OpenStorm",
         "width": 1440,
         "height": 900,
         "minWidth": 800,
@@ -36,7 +36,7 @@
   "bundle": {
     "active": true,
     "targets": "all",
-    "createUpdaterArtifacts": true,
+    "createUpdaterArtifacts": false,
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
@@ -45,20 +45,23 @@
       "icons/icon.ico"
     ],
     "category": "DeveloperTool",
-    "copyright": "Copyright © 2026 OpenIDEA contributors",
+    "copyright": "Copyright \u00a9 2026 OpenIDEA contributors",
     "license": "Apache-2.0",
-    "shortDescription": "An open-source IDE inspired by IntelliJ IDEA",
-    "longDescription": "OpenIDEA is an open-source IDE inspired by IntelliJ IDEA. Not affiliated with JetBrains.",
+    "shortDescription": "A PHP and Laravel IDE",
+    "longDescription": "OpenStorm is a PHP and Laravel IDE built on OpenIDEA. Not affiliated with JetBrains.",
     "macOS": {
       "entitlements": "./Entitlements.plist",
       "minimumSystemVersion": "11.0"
+    },
+    "resources": {
+      "resources/phpantom/": "phpantom/"
     }
   },
   "mainBinaryName": "openidea",
   "plugins": {
     "updater": {
-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDFCOUU0MUFFOUY4NzZCNkQKUldSdGE0ZWZya0dlRzNnRFJUR2loUVdNZ1BmamxkNzFoaWNPUTBsRmI0cjhxZFRqQURybkMwakEK",
-      "endpoints": ["https://github.com/l0ng-ai/openidea/releases/latest/download/latest.json"]
+      "pubkey": "",
+      "endpoints": []
     }
   }
 }

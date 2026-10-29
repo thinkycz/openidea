@@ -1,0 +1,582 @@
+diff --git a/src/backend/documents.rs b/src/backend/documents.rs
+index f1a9d9f..45c4039 100644
+--- a/src/backend/documents.rs
++++ b/src/backend/documents.rs
+@@ -363,3 +363,287 @@ impl Backend {
+         }
+     }
+ }
++
++#[cfg(test)]
++mod unsaved_fanout_tests {
++    use crate::Backend;
++    use std::sync::atomic::Ordering;
++    use tower_lsp::lsp_types::*;
++
++    const DEPENDENCY: &str = "<?php namespace App; final class Dependency { public function message(): string { return 'ready'; } }";
++    const CALLER: &str = "<?php namespace App; final class Caller { public function read(Dependency $dep): string { return $dep->message(); } }";
++
++    struct Fixture {
++        backend: Backend,
++        _dir: tempfile::TempDir,
++        helper: Url,
++        caller: Url,
++        other: Url,
++        original: String,
++    }
++
++    async fn fixture(helper: &str, caller: &str) -> Fixture {
++        let dir = tempfile::tempdir().unwrap();
++        let root = dir.path().canonicalize().unwrap();
++        let backend = Backend::new_test_with_workspace(root.clone(), Vec::new());
++        let mut uris = Vec::new();
++        for (name, source) in [
++            ("Dependency.php", helper),
++            ("Caller.php", caller),
++            (
++                "Other.php",
++                "<?php namespace App; final class Other { public function value(): int { return 7; } }",
++            ),
++        ] {
++            let path = root.join(name);
++            std::fs::write(&path, source).unwrap();
++            let uri = Url::from_file_path(&path).unwrap();
++            backend
++                .on_did_open(DidOpenTextDocumentParams {
++                    text_document: TextDocumentItem {
++                        uri: uri.clone(),
++                        language_id: "php".to_owned(),
++                        version: 1,
++                        text: source.to_owned(),
++                    },
++                })
++                .await;
++            uris.push(uri);
++        }
++        backend.workspace_indexed.store(true, Ordering::Release);
++        backend.init_complete.store(true, Ordering::Release);
++        backend.diag.pending_uris.lock().clear();
++        Fixture {
++            backend,
++            _dir: dir,
++            helper: uris[0].clone(),
++            caller: uris[1].clone(),
++            other: uris[2].clone(),
++            original: helper.to_owned(),
++        }
++    }
++
++    async fn change(f: &Fixture, text: &str) {
++        f.backend
++            .on_did_change(DidChangeTextDocumentParams {
++                text_document: VersionedTextDocumentIdentifier {
++                    uri: f.helper.clone(),
++                    version: 2,
++                },
++                content_changes: vec![TextDocumentContentChangeEvent {
++                    range: None,
++                    range_length: None,
++                    text: text.to_owned(),
++                }],
++            })
++            .await;
++        assert_eq!(
++            std::fs::read_to_string(f.helper.to_file_path().unwrap()).unwrap(),
++            f.original
++        );
++    }
++
++    #[tokio::test]
++    async fn unsaved_method_declaration_change_queues_unchanged_caller() {
++        let f = fixture(DEPENDENCY, CALLER).await;
++        change(
++            &f,
++            &DEPENDENCY.replace("function message()", "function removed()"),
++        )
++        .await;
++        let pending = f.backend.diag.pending_uris.lock();
++        assert!(
++            pending.contains(f.caller.as_str()),
++            "the caller must update without a Save or caller edit"
++        );
++        assert!(
++            !pending.contains(f.other.as_str()),
++            "unrelated tabs do not re-diagnose"
++        );
++        drop(pending);
++        let text = f
++            .backend
++            .open_files
++            .read()
++            .get(f.caller.as_str())
++            .cloned()
++            .unwrap();
++        assert_eq!(
++            f.backend
++                .diag
++                .documents
++                .lock()
++                .capture(f.caller.as_str(), &text)
++                .unwrap()
++                .unwrap()
++                .version,
++            1
++        );
++    }
++
++    #[tokio::test]
++    async fn typed_method_body_edit_does_not_queue_callers() {
++        let f = fixture(DEPENDENCY, CALLER).await;
++        change(&f, &DEPENDENCY.replace("'ready'", "'changed'")).await;
++        assert!(
++            !f.backend
++                .diag
++                .pending_uris
++                .lock()
++                .contains(f.caller.as_str())
++        );
++    }
++
++    #[tokio::test]
++    async fn added_class_after_empty_overlay_queues_unresolved_caller() {
++        let f = fixture("<?php namespace App;", CALLER).await;
++        change(&f, DEPENDENCY).await;
++        assert!(
++            f.backend
++                .diag
++                .pending_uris
++                .lock()
++                .contains(f.caller.as_str()),
++            "a first declaration must refresh earlier unresolved uses"
++        );
++    }
++
++    #[tokio::test]
++    async fn unsaved_function_signature_change_queues_caller() {
++        let original = "<?php namespace App; function value(): int { return 7; }";
++        let caller = "<?php namespace App; final class Caller { public function read(): int { return value(); } }";
++        let f = fixture(original, caller).await;
++        change(
++            &f,
++            "<?php namespace App; function value(): string { return 'seven'; }",
++        )
++        .await;
++        assert!(
++            f.backend
++                .diag
++                .pending_uris
++                .lock()
++                .contains(f.caller.as_str())
++        );
++    }
++
++    #[tokio::test]
++    async fn typed_function_body_edit_does_not_queue_callers() {
++        let original = "<?php namespace App; function value(): int { return 7; }";
++        let caller = "<?php namespace App; final class Caller { public function read(): int { return value(); } }";
++        let f = fixture(original, caller).await;
++        change(
++            &f,
++            "<?php namespace App; function value(): int { return 9; }",
++        )
++        .await;
++        assert!(
++            !f.backend
++                .diag
++                .pending_uris
++                .lock()
++                .contains(f.caller.as_str())
++        );
++    }
++
++    #[tokio::test]
++    async fn closing_unsaved_dependency_queues_caller_against_restored_disk() {
++        let f = fixture(DEPENDENCY, CALLER).await;
++        change(
++            &f,
++            &DEPENDENCY.replace("function message()", "function removed()"),
++        )
++        .await;
++        f.backend.diag.pending_uris.lock().clear();
++        f.backend
++            .on_did_close(DidCloseTextDocumentParams {
++                text_document: TextDocumentIdentifier {
++                    uri: f.helper.clone(),
++                },
++            })
++            .await;
++        assert!(
++            f.backend
++                .diag
++                .pending_uris
++                .lock()
++                .contains(f.caller.as_str()),
++            "discarding an overlay must refresh restored declarations"
++        );
++        assert!(!f.backend.open_files.read().contains_key(f.helper.as_str()));
++    }
++
++    #[tokio::test]
++    async fn declaration_free_body_edit_does_not_fan_out() {
++        let f = fixture("<?php $value = 1;", CALLER).await;
++        change(&f, "<?php $value = 2;").await;
++        assert!(
++            !f.backend
++                .diag
++                .pending_uris
++                .lock()
++                .contains(f.caller.as_str())
++        );
++        assert!(
++            !f.backend
++                .diag
++                .pending_uris
++                .lock()
++                .contains(f.other.as_str())
++        );
++    }
++    #[tokio::test]
++    async fn untyped_method_body_edit_queues_consumers() {
++        let original = DEPENDENCY.replace("message(): string", "message()");
++        let f = fixture(&original, CALLER).await;
++        change(&f, &original.replace("'ready'", "123")).await;
++        assert!(
++            f.backend
++                .diag
++                .pending_uris
++                .lock()
++                .contains(f.caller.as_str())
++        );
++    }
++
++    #[tokio::test]
++    async fn untyped_function_body_edit_queues_consumers() {
++        let original = "<?php namespace App; function value() { return 7; }";
++        let caller = "<?php namespace App; final class Caller { public function read(): int { return value(); } }";
++        let f = fixture(original, caller).await;
++        change(&f, &original.replace("return 7", "return 'seven'")).await;
++        assert!(
++            f.backend
++                .diag
++                .pending_uris
++                .lock()
++                .contains(f.caller.as_str())
++        );
++    }
++
++    #[tokio::test]
++    async fn identical_reparse_of_inferred_bodies_does_not_loop() {
++        let original = DEPENDENCY.replace("message(): string", "message()");
++        let f = fixture(&original, CALLER).await;
++        f.backend.update_ast(f.helper.as_str(), &original);
++        assert!(f.backend.diag.pending_uris.lock().is_empty());
++    }
++
++    #[tokio::test]
++    async fn added_function_after_empty_overlay_queues_unresolved_caller() {
++        let caller = "<?php namespace App; final class Caller { public function read(): int { return value(); } }";
++        let f = fixture("<?php namespace App;", caller).await;
++        change(
++            &f,
++            "<?php namespace App; function value(): int { return 7; }",
++        )
++        .await;
++        assert!(
++            f.backend
++                .diag
++                .pending_uris
++                .lock()
++                .contains(f.caller.as_str())
++        );
++    }
++}
+diff --git a/src/diagnostics/cross_file.rs b/src/diagnostics/cross_file.rs
+index b99e6af..e67b861 100644
+--- a/src/diagnostics/cross_file.rs
++++ b/src/diagnostics/cross_file.rs
+@@ -32,7 +32,7 @@ use std::sync::Arc;
+ 
+ use crate::Backend;
+ use crate::reference_index::ReferenceIndexKey;
+-use crate::types::ClassInfo;
++use crate::types::{ClassInfo, FunctionInfo};
+ use crate::util::{short_name, strip_fqn_prefix};
+ 
+ /// The symbols a file declared at a point in time.
+@@ -122,6 +122,39 @@ impl Backend {
+         uris
+     }
+ 
++    /// Narrow an AST publication to open consumers after its indexes are visible.
++    pub(crate) fn open_files_affected_by_declarations(
++        &self,
++        changed_uris: &HashSet<&str>,
++        mut keys: Vec<ReferenceIndexKey>,
++        old_classes: Vec<Arc<ClassInfo>>,
++        new_classes: Vec<Arc<ClassInfo>>,
++    ) -> Vec<String> {
++        if keys.is_empty() {
++            return Vec::new();
++        }
++        self.push_descendant_class_keys(
++            &FileDeclarations {
++                classes: old_classes,
++                ..Default::default()
++            },
++            &FileDeclarations {
++                classes: new_classes,
++                ..Default::default()
++            },
++            &mut keys,
++        );
++        let mut uris = self
++            .open_files
++            .read()
++            .keys()
++            .filter(|uri| !changed_uris.contains(uri.as_str()))
++            .cloned()
++            .collect();
++        self.retain_reference_candidates(&keys, &mut uris);
++        uris
++    }
++
+     /// Add the class keys of every transitive descendant of a changed
+     /// class to `keys`.
+     ///
+@@ -245,6 +278,56 @@ fn affected_reference_keys(
+     keys.into_iter().collect()
+ }
+ 
++/// Publication differs from Save: empty scripts do not fan out, and typed
++/// function bodies are irrelevant to callers. Existing class/member narrowing
++/// also accounts for return types inferred from untyped method bodies.
++pub(crate) fn published_class_keys(
++    old: &[ClassInfo],
++    new: &[Arc<ClassInfo>],
++) -> Vec<ReferenceIndexKey> {
++    affected_reference_keys(
++        &FileDeclarations {
++            classes: old.iter().cloned().map(Arc::new).collect(),
++            ..Default::default()
++        },
++        &FileDeclarations {
++            classes: new.to_vec(),
++            ..Default::default()
++        },
++    )
++}
++
++pub(crate) fn published_function_keys(
++    old: &[(String, FunctionInfo)],
++    new_name: &str,
++    new: Option<&FunctionInfo>,
++) -> Vec<ReferenceIndexKey> {
++    let previous = old
++        .iter()
++        .find(|(name, _)| name.eq_ignore_ascii_case(new_name));
++    let changed = match (previous, new) {
++        (Some((_, old)), Some(new)) => {
++            !old.signature_eq(new) || new.return_type.as_ref().is_none_or(|ty| ty.is_mixed())
++        }
++        _ => true,
++    };
++    let mut keys = HashSet::new();
++    if changed {
++        push_name_keys(&mut keys, new_name, ReferenceIndexKey::function_owned);
++    }
++    keys.into_iter().collect()
++}
++
++pub(crate) fn published_constant_keys(
++    names: impl Iterator<Item = String>,
++) -> Vec<ReferenceIndexKey> {
++    let mut keys = HashSet::new();
++    for name in names {
++        push_name_keys(&mut keys, &name, ReferenceIndexKey::Constant);
++    }
++    keys.into_iter().collect()
++}
++
+ fn find_class<'a>(classes: &'a [Arc<ClassInfo>], fqn: &str) -> Option<&'a ClassInfo> {
+     classes
+         .iter()
+diff --git a/src/parser/ast_update.rs b/src/parser/ast_update.rs
+index 5aee3fb..5695db0 100644
+--- a/src/parser/ast_update.rs
++++ b/src/parser/ast_update.rs
+@@ -1052,6 +1052,7 @@ impl Backend {
+             old_define_names: Vec<String>,
+             new_function_fqns: Vec<String>,
+             new_define_names: Vec<String>,
++            source_changed: bool,
+         }
+ 
+         let old_classes_by_update: Vec<Vec<ClassInfo>> = {
+@@ -1090,6 +1091,7 @@ impl Backend {
+         let mut all_old_fqns = Vec::new();
+         let mut all_new_fqns = Vec::new();
+         let mut all_classes = Vec::new();
++        let mut diagnostic_keys = Vec::new();
+ 
+         for ((update, old_classes), (old_function_fqns, old_define_names)) in updates
+             .into_iter()
+@@ -1117,6 +1119,19 @@ impl Backend {
+             all_new_fqns.extend(new_fqns.iter().cloned());
+             all_classes.extend(classes.iter().cloned());
+ 
++            let source_changed = self
++                .init_complete
++                .load(std::sync::atomic::Ordering::Acquire)
++                && self.symbol_maps.read().get(&update.uri).is_none_or(|old| {
++                    old.source_len != update.symbol_map.source_len
++                        || old.source_fingerprint != update.symbol_map.source_fingerprint
++                });
++            if source_changed {
++                diagnostic_keys.extend(crate::diagnostics::cross_file::published_class_keys(
++                    &old_classes,
++                    &classes,
++                ));
++            }
+             prepared.push(PreparedAstIndexUpdate {
+                 uri: update.uri,
+                 parse_errors: update.parse_errors,
+@@ -1136,6 +1151,7 @@ impl Backend {
+                 old_define_names,
+                 new_function_fqns: Vec::new(),
+                 new_define_names: Vec::new(),
++                source_changed,
+             });
+         }
+ 
+@@ -1316,6 +1332,15 @@ impl Backend {
+                     // builds namespace-qualified candidates, so a short-name
+                     // fallback entry is unnecessary and would cause collisions
+                     // when two namespaces define the same short name.
++                    if update.source_changed {
++                        diagnostic_keys.extend(
++                            crate::diagnostics::cross_file::published_function_keys(
++                                &old_functions,
++                                &fqn,
++                                Some(&func_info),
++                            ),
++                        );
++                    }
+                     update.new_function_fqns.push(fqn.clone());
+                     declare_function(&mut fmap, &mut dupes, fqn, &update.uri, func_info);
+                 }
+@@ -1330,6 +1355,15 @@ impl Backend {
+                     {
+                         any_function_changed = true;
+                         changed_names.push(crate::resolution_deps::dep_key(old_fqn));
++                        if update.source_changed {
++                            diagnostic_keys.extend(
++                                crate::diagnostics::cross_file::published_function_keys(
++                                    &old_functions,
++                                    old_fqn,
++                                    None,
++                                ),
++                            );
++                        }
+                     }
+                 }
+             }
+@@ -1381,6 +1415,18 @@ impl Backend {
+             }
+         }
+ 
++        for update in &prepared {
++            if update.source_changed {
++                diagnostic_keys.extend(crate::diagnostics::cross_file::published_constant_keys(
++                    update
++                        .old_define_names
++                        .iter()
++                        .chain(&update.new_define_names)
++                        .cloned(),
++                ));
++            }
++        }
++
+         // Record what each file contributed so the next parse can evict
+         // whatever it removes.  Drop the entry entirely when the file has
+         // no globals, to avoid accumulating empty records for class files.
+@@ -1655,6 +1701,24 @@ impl Backend {
+                 ),
+         );
+ 
++        // All declaration/reference indexes are now visible. Collect consumers
++        // before moving the batch, then queue them after symbol publication.
++        let dependent_open = if diagnostic_keys.is_empty() {
++            Vec::new()
++        } else {
++            self.open_files_affected_by_declarations(
++                &prepared_uris,
++                diagnostic_keys,
++                prepared
++                    .iter()
++                    .flat_map(|update| update.old_classes.iter().cloned().map(Arc::new))
++                    .collect(),
++                prepared
++                    .iter()
++                    .flat_map(|update| update.classes.iter().cloned())
++                    .collect(),
++            )
++        };
+         // A template's lowering and its symbol map go out under one hold of
+         // the publish lock, so that of two parses of the same template racing
+         // each other, one publishes all three maps before the other starts.
+@@ -1688,8 +1752,11 @@ impl Backend {
+             }
+         }
+ 
+-        for uri in refreshed_open {
+-            self.schedule_diagnostics(uri);
++        let mut scheduled = HashSet::new();
++        for uri in refreshed_open.into_iter().chain(dependent_open) {
++            if scheduled.insert(uri.clone()) {
++                self.schedule_diagnostics(uri);
++            }
+         }
+ 
+         changed
+@@ -3222,6 +3289,12 @@ class User extends Model {
+                 .insert(uri.to_owned(), Arc::new(text.to_owned()));
+             backend.update_ast(uri, text);
+         }
++        // This fixture asserts reference-index narrowing, which production
++        // enables after indexing has completed. Until then generic PHP
++        // declaration changes conservatively refresh all open consumers.
++        backend
++            .workspace_indexed
++            .store(true, std::sync::atomic::Ordering::Release);
+         backend
+             .init_complete
+             .store(true, std::sync::atomic::Ordering::Release);
+diff --git a/src/symbol_map/extraction/mod.rs b/src/symbol_map/extraction/mod.rs
+index 7fb625d..d023d21 100644
+--- a/src/symbol_map/extraction/mod.rs
++++ b/src/symbol_map/extraction/mod.rs
+@@ -361,5 +361,11 @@ fn extract_symbol_map_inner(
+         view_receiver_sites: ctx.view_receiver_sites,
+         gate_subjects: ctx.gate_subjects,
+         source_len: u32::try_from(content.len()).unwrap_or(u32::MAX),
++        source_fingerprint: {
++            use std::hash::{Hash, Hasher};
++            let mut hasher = std::collections::hash_map::DefaultHasher::new();
++            content.hash(&mut hasher);
++            hasher.finish()
++        },
+     }
+ }
+diff --git a/src/symbol_map/mod.rs b/src/symbol_map/mod.rs
+index 44529e3..1947449 100644
+--- a/src/symbol_map/mod.rs
++++ b/src/symbol_map/mod.rs
+@@ -1077,6 +1077,8 @@ pub(crate) struct SymbolMap {
+     /// `symbol_maps` may get a map built from *older* text than the buffer
+     /// it was handed.  See [`Self::matches_source`].
+     pub source_len: u32,
++    /// Source identity for avoiding repeated dependency fan-out on identical parses.
++    pub(crate) source_fingerprint: u64,
+ }
+ 
+ impl SymbolMap {

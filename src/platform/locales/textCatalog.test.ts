@@ -122,7 +122,7 @@ const UNTRANSLATED = new Set<string>([
   "Neon",
   "Node.js",
   "npm",
-  "OpenIDEA",
+  "OpenStorm",
   "PostgreSQL",
   "Pyright",
   "Rust",

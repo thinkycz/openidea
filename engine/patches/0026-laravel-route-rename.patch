@@ -1,0 +1,1199 @@
+diff --git a/docs/CHANGELOG.md b/docs/CHANGELOG.md
+index 50f84d0..af6e7a0 100644
+--- a/docs/CHANGELOG.md
++++ b/docs/CHANGELOG.md
+@@ -21,6 +21,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
+ 
+ ### Fixed
+ 
++- **Laravel route refactoring.** Rename unique literal route names across indexed PHP and Blade usages while preserving group prefixes, imports and template coordinates. Ambiguous, generated, colliding or stale declarations are refused. Contributed by PHP Workbench (local downstream patch).
++
+ - **Laravel route names.** Duplicate statically discovered route names report their declaration locations, including grouped and resource routes. Imported facade aliases retain their identity and unrelated imports are excluded. Contributed by PHP Workbench (local downstream patch).
+ 
+ - **Native type suggestions follow the PHP target and declaration.** Parameter and property types exclude return-only types, while modern and composed types follow their supported language versions. PHPDoc and project-class suggestions retain their own behavior. Contributed by PHP Workbench (local downstream patch).
+diff --git a/src/rename/mod.rs b/src/rename/mod.rs
+index 98a0c60..3b5bd12 100644
+--- a/src/rename/mod.rs
++++ b/src/rename/mod.rs
+@@ -34,6 +34,7 @@ mod blade;
+ mod class;
+ mod namespace;
+ mod prepare;
++mod route;
+ mod validate;
+ 
+ mod tests;
+diff --git a/src/rename/prepare.rs b/src/rename/prepare.rs
+index f083ef4..146b819 100644
+--- a/src/rename/prepare.rs
++++ b/src/rename/prepare.rs
+@@ -93,6 +93,10 @@ impl Backend {
+             return None;
+         }
+ 
++        if let Some(site) = self.route_rename_site(uri, content, position) {
++            return self.prepare_route_rename(&site);
++        }
++
+         let span = self.lookup_symbol_at_position(uri, content, position)?;
+ 
+         // The range below is built from this span's byte offsets, and the
+@@ -154,6 +158,9 @@ impl Backend {
+         content: &str,
+         position: Position,
+     ) -> bool {
++        if self.route_rename_site(uri, content, position).is_some() {
++            return true;
++        }
+         let Some(span) = self.lookup_symbol_at_position(uri, content, position) else {
+             return false;
+         };
+@@ -195,6 +202,10 @@ impl Backend {
+             return Ok(None);
+         }
+ 
++        if let Some(site) = self.route_rename_site(uri, content, position) {
++            return self.rename_route(&site, new_name);
++        }
++
+         let Some(span) = self.lookup_symbol_at_position(uri, content, position) else {
+             return Ok(None);
+         };
+diff --git a/src/rename/route.rs b/src/rename/route.rs
+new file mode 100644
+index 0000000..467eca7
+--- /dev/null
++++ b/src/rename/route.rs
+@@ -0,0 +1,355 @@
++//! Route-name edits use a concrete declaration and exact indexed usages.
++use super::{
++    RenameOutcome,
++    validate::{range_text, span_spells_its_name},
++};
++use crate::virtual_members::laravel::{self, RouteDiscovery};
++use crate::{
++    Backend,
++    symbol_map::{LaravelStringKind, SymbolKind},
++    text_position::ranges_overlap,
++};
++use mago_span::HasSpan;
++use mago_syntax::cst::{Call, Expression, Node};
++use std::{
++    collections::{HashMap, HashSet},
++    sync::Arc,
++};
++use tower_lsp::lsp_types::*;
++
++pub(super) struct RouteRenameSite {
++    name: String,
++    range: Range,
++}
++struct RouteRenamePlan {
++    discovery: Arc<RouteDiscovery>,
++    declaration: Location,
++    prefix: String,
++}
++impl Backend {
++    pub(super) fn route_rename_site(
++        &self,
++        uri: &str,
++        content: &str,
++        position: Position,
++    ) -> Option<RouteRenameSite> {
++        if !self.resolved_class_cache.read().is_laravel() || !self.rename_map_matches(uri, content)
++        {
++            return None;
++        }
++        if let Some(span) = self.lookup_symbol_at_position(uri, content, position)
++            && let SymbolKind::LaravelStringKey {
++                kind: LaravelStringKind::Route,
++                ref key,
++                ..
++            } = span.kind
++            && span_spells_its_name(content, &span)
++        {
++            if self
++                .foreign_route_helper_arguments(uri, content)
++                .contains(&(span.start as usize, span.end as usize))
++            {
++                return None;
++            }
++            return Some(RouteRenameSite {
++                name: key.clone(),
++                range: Range::new(
++                    crate::text_position::offset_to_position(content, span.start as usize),
++                    crate::text_position::offset_to_position(content, span.end as usize),
++                ),
++            });
++        }
++        let discovery = self.cached_routes();
++        if discovery
++            .sources
++            .get(uri)
++            .is_none_or(|s| s.as_ref() != content)
++        {
++            return None;
++        }
++        let indices = discovery.declarations_by_uri.get(uri)?;
++        let found = indices
++            .iter()
++            .map(|&i| &discovery.declarations[i])
++            .find(|d| {
++                let r = d.location.range;
++                position >= r.start && position <= r.end
++            })?;
++        Some(RouteRenameSite {
++            name: found.name.clone(),
++            range: found.literal_range?,
++        })
++    }
++
++    fn route_rename_plan(&self, site: &RouteRenameSite) -> Result<RouteRenamePlan, String> {
++        if site.name.contains('*') {
++            return Err("A route-name pattern is not a single route".into());
++        }
++        let discovery = self.cached_routes();
++        let mut matching = discovery
++            .declarations
++            .iter()
++            .filter(|d| d.name == site.name);
++        let Some(declaration) = matching.next() else {
++            return Err("No concrete route declaration was found".into());
++        };
++        if matching.next().is_some()
++            || laravel::resolve_route_definitions(self, &site.name).len() != 1
++        {
++            return Err("The route name has more than one declaration".into());
++        }
++        if discovery
++            .declarations
++            .iter()
++            .any(|d| d.location == declaration.location && d.name != site.name)
++        {
++            return Err("This declaration generates more than one route identity".into());
++        }
++        let range = declaration
++            .literal_range
++            .ok_or("Generated or computed route names need a different refactoring")?;
++        let uri = declaration.location.uri.as_str();
++        if declaration
++            .location
++            .uri
++            .to_file_path()
++            .ok()
++            .is_none_or(|p| p.components().any(|part| part.as_os_str() == "vendor"))
++        {
++            return Err("Package route declarations cannot be renamed".into());
++        }
++        for (uri, snapshot) in &discovery.sources {
++            if self
++                .get_file_content_arc(uri)
++                .is_none_or(|now| now.as_str() != snapshot.as_ref())
++            {
++                return Err("Route declarations changed; retry rename after indexing".into());
++            }
++        }
++        let source = discovery
++            .sources
++            .get(uri)
++            .ok_or("Route declaration source is unavailable")?;
++        let leaf = range_text(source, range).ok_or("Route declaration range is stale")?;
++        let prefix = site
++            .name
++            .strip_suffix(leaf)
++            .ok_or("Route declaration spelling cannot be edited safely")?
++            .to_owned();
++        let declaration = Location::new(declaration.location.uri.clone(), range);
++        Ok(RouteRenamePlan {
++            discovery,
++            declaration,
++            prefix,
++        })
++    }
++
++    pub(super) fn prepare_route_rename(
++        &self,
++        site: &RouteRenameSite,
++    ) -> Option<PrepareRenameResponse> {
++        self.route_rename_plan(site).ok()?;
++        Some(PrepareRenameResponse::RangeWithPlaceholder {
++            range: site.range,
++            placeholder: site.name.clone(),
++        })
++    }
++
++    pub(super) fn rename_route(&self, site: &RouteRenameSite, new_name: &str) -> RenameOutcome {
++        let plan = self.route_rename_plan(site)?;
++        if new_name.is_empty()
++            || new_name.len() > 256
++            || !new_name
++                .chars()
++                .all(|c| c.is_alphanumeric() || matches!(c, '_' | '.' | '-' | ':'))
++        {
++            return Err("Use a route name of 1–256 bytes containing letters, numbers, dots, dashes, colons or underscores".into());
++        }
++        if new_name == site.name {
++            return Ok(None);
++        }
++        if plan
++            .discovery
++            .names
++            .binary_search_by(|n| n.as_str().cmp(new_name))
++            .is_ok()
++        {
++            return Err("Another route already uses the new name".into());
++        }
++        let leaf = new_name
++            .strip_prefix(&plan.prefix)
++            .filter(|s| !s.is_empty())
++            .ok_or_else(|| format!("Keep the route group prefix '{}'", plan.prefix))?;
++        let key = crate::reference_index::laravel_string_reference_key(
++            LaravelStringKind::Route,
++            &site.name,
++        );
++        let snapshot = self.user_file_symbol_maps_for_reference_keys(&[key]);
++        let locations = laravel::find_laravel_string_key_references(
++            self,
++            &LaravelStringKind::Route,
++            &site.name,
++            plan.declaration.uri.as_str(),
++            &snapshot,
++            false,
++        );
++        let mut changes: HashMap<Url, Vec<TextEdit>> = HashMap::new();
++        changes.insert(
++            plan.declaration.uri.clone(),
++            vec![TextEdit {
++                range: plan.declaration.range,
++                new_text: leaf.to_owned(),
++            }],
++        );
++        let mut contents = HashMap::new();
++        let mut foreign_by_uri = HashMap::new();
++        for location in locations {
++            let uri = location.uri.as_str();
++            let source = contents
++                .entry(uri.to_owned())
++                .or_insert_with(|| self.reference_file_content_arc(uri));
++            let source = source.as_ref().ok_or("Route usage source is unavailable")?;
++            let start = crate::text_position::position_to_byte_offset(source, location.range.start);
++            let end = crate::text_position::position_to_byte_offset(source, location.range.end);
++            if foreign_by_uri
++                .entry(uri.to_owned())
++                .or_insert_with(|| self.foreign_route_helper_arguments(uri, source))
++                .contains(&(start, end))
++            {
++                continue;
++            }
++            if !self.rename_map_matches(uri, source)
++                || range_text(source, location.range) != Some(site.name.as_str())
++            {
++                return Err("A route usage changed; retry rename after indexing".into());
++            }
++            let range = self
++                .try_translate_blade_range(uri, location.range)
++                .ok_or("A template route usage cannot be mapped safely")?;
++            let raw = self
++                .get_file_content_arc(uri)
++                .ok_or("Route usage source is unavailable")?;
++            if range_text(&raw, range) != Some(site.name.as_str()) {
++                return Err("Route usage spelling cannot be edited safely".into());
++            }
++            let edits = changes.entry(location.uri).or_default();
++            let edit = TextEdit {
++                range,
++                new_text: new_name.to_owned(),
++            };
++            if edits.contains(&edit) {
++                continue;
++            }
++            if edits.iter().any(|e| ranges_overlap(&e.range, &range)) {
++                return Err("Route rename edits overlap".into());
++            }
++            edits.push(edit);
++        }
++        for (uri, source) in contents {
++            if self.reference_file_content_arc(&uri).as_deref() != source.as_deref() {
++                return Err("A route usage changed while preparing rename".into());
++            }
++        }
++        for (uri, source) in &plan.discovery.sources {
++            if self
++                .get_file_content_arc(uri)
++                .is_none_or(|now| now.as_str() != source.as_ref())
++            {
++                return Err("Route declarations changed while preparing rename".into());
++            }
++        }
++        Ok(Some(crate::code_actions::multi_file_edit(changes)))
++    }
++}
++
++impl Backend {
++    /// The PHP function resolver, including namespace fallback, separates a
++    /// project helper from Laravel's global helper before its string is edited.
++    fn foreign_route_helper_arguments(&self, uri: &str, content: &str) -> HashSet<(usize, usize)> {
++        use crate::virtual_members::laravel::helpers::extract_string_literal;
++        let ctx = self.file_context(uri);
++        let foreign = |raw: &str, offset: u32, allowed: &[&str]| {
++            if let Some(function) = self.resolve_function_name_at(
++                raw,
++                ctx.resolved_names.as_deref(),
++                offset,
++                ctx.use_map_at(offset),
++                ctx.namespace_at(offset),
++            ) {
++                return function.namespace.as_ref().is_some_and(|ns| !ns.is_empty())
++                    || !allowed
++                        .iter()
++                        .any(|name| function.name.eq_ignore_ascii_case(name));
++            }
++            if let Some(names) = &ctx.resolved_names
++                && names.is_imported(offset)
++            {
++                return names.get(offset).is_none_or(|resolved| {
++                    !allowed
++                        .iter()
++                        .any(|name| resolved.trim_start_matches('\\').eq_ignore_ascii_case(name))
++                });
++            }
++            let bare = raw.trim_start_matches('\\');
++            !allowed.iter().any(|name| bare.eq_ignore_ascii_case(name))
++        };
++        crate::parser::with_parsed_program(content, "route_rename_helpers", |program, content| {
++            let mut out = HashSet::new();
++            visit_route_nodes(Node::Program(program), &mut |node| {
++                let args = match node {
++                    Node::FunctionCall(call) => {
++                        let Expression::Identifier(ident) = call.function else {
++                            return;
++                        };
++                        let raw = crate::atom::bytes_to_str(ident.value());
++                        if !["route", "to_route"]
++                            .iter()
++                            .any(|name| raw.trim_start_matches('\\').eq_ignore_ascii_case(name))
++                            || !foreign(raw, ident.span().start.offset, &["route", "to_route"])
++                        {
++                            return;
++                        }
++                        &call.argument_list
++                    }
++                    Node::MethodCall(call) => {
++                        let Expression::Call(Call::Function(receiver)) = call.object else {
++                            return;
++                        };
++                        let Expression::Identifier(ident) = receiver.function else {
++                            return;
++                        };
++                        let raw = crate::atom::bytes_to_str(ident.value());
++                        if !["redirect", "url", "response"]
++                            .iter()
++                            .any(|name| raw.trim_start_matches('\\').eq_ignore_ascii_case(name))
++                            || !foreign(
++                                raw,
++                                ident.span().start.offset,
++                                &["redirect", "url", "response"],
++                            )
++                        {
++                            return;
++                        }
++                        &call.argument_list
++                    }
++                    _ => return,
++                };
++                for argument in args.arguments.iter() {
++                    if let Some((_, start, end)) = extract_string_literal(argument.value(), content)
++                    {
++                        out.insert((start, end));
++                    }
++                }
++            });
++            out
++        })
++    }
++}
++
++fn visit_route_nodes<'a, 'arena>(node: Node<'a, 'arena>, visit: &mut impl FnMut(Node<'a, 'arena>)) {
++    let mut pending = vec![node];
++    while let Some(node) = pending.pop() {
++        visit(node);
++        node.visit_children(|child| pending.push(child));
++    }
++}
+diff --git a/src/symbol_map/extraction/expressions/calls.rs b/src/symbol_map/extraction/expressions/calls.rs
+index 0def814..ccfe4ba 100644
+--- a/src/symbol_map/extraction/expressions/calls.rs
++++ b/src/symbol_map/extraction/expressions/calls.rs
+@@ -328,6 +328,11 @@ fn extract_call<'a>(
+                         ctx.content,
+                         &mut ctx.spans,
+                     );
++                    let route_helper = route_helper_name(
++                        name_clean,
++                        ident.span().start.offset,
++                        ctx.resolved_names,
++                    );
+                     // Detect Laravel helper calls and emit a
+                     // LaravelStringKey span for the first string arg.
+                     // Uses if-else to short-circuit (most function calls
+@@ -347,8 +352,8 @@ fn extract_call<'a>(
+                         || name_clean.eq_ignore_ascii_case("blade_each_directive")
+                     {
+                         Some(crate::symbol_map::LaravelStringKind::View)
+-                    } else if name_clean.eq_ignore_ascii_case("route")
+-                        || name_clean.eq_ignore_ascii_case("to_route")
++                    } else if route_helper.eq_ignore_ascii_case("route")
++                        || route_helper.eq_ignore_ascii_case("to_route")
+                     {
+                         Some(crate::symbol_map::LaravelStringKind::Route)
+                     } else if name_clean.eq_ignore_ascii_case("__")
+@@ -465,7 +470,7 @@ fn extract_call<'a>(
+                 // and `response()->redirectToRoute(…)` all name a route.
+                 // Keyed on the receiver: `route()` is a plain enough method
+                 // name that only the helper it hangs off says it names one.
+-                if is_route_name_helper_receiver(method_call.object)
++                if is_route_name_helper_receiver(method_call.object, ctx.resolved_names)
+                     && is_route_name_method(&member_name)
+                 {
+                     try_emit_laravel_string_span(
+@@ -804,7 +809,7 @@ fn extract_call<'a>(
+                 }
+                 // `URL::signedRoute('orders.show')`,
+                 // `Redirect::route('home')`, `Response::redirectToRoute(…)`.
+-                if is_route_name_facade_call(clean_subject, &member_name) {
++                if is_route_name_facade_call(semantic_subject, &member_name) {
+                     try_emit_laravel_string_span(
+                         crate::symbol_map::LaravelStringKind::Route,
+                         &static_call.argument_list,
+diff --git a/src/symbol_map/extraction/laravel.rs b/src/symbol_map/extraction/laravel.rs
+index c539450..122b96f 100644
+--- a/src/symbol_map/extraction/laravel.rs
++++ b/src/symbol_map/extraction/laravel.rs
+@@ -114,6 +114,16 @@ pub(super) fn try_emit_laravel_string_span(
+     content: &str,
+     spans: &mut Vec<SymbolSpan>,
+ ) {
++    if kind == crate::symbol_map::LaravelStringKind::Route {
++        // URL generation accepts `name`; redirect helpers accept `route`.
++        // Named arguments may precede it, so their source order is not its role.
++        if let Some(key) = argument_expr_for_parameter(argument_list, "name")
++            .or_else(|| argument_expr_for_parameter(argument_list, "route"))
++        {
++            push_laravel_string_span(kind, false, false, key, content, spans);
++        }
++        return;
++    }
+     if kind == crate::symbol_map::LaravelStringKind::Trans {
+         if let Some(key) = argument_expr_for_parameter(argument_list, "key") {
+             push_laravel_string_span(kind, false, false, key, content, spans);
+@@ -787,13 +797,41 @@ pub(super) fn is_laravel_view_factory_call(object: &Expression<'_>) -> bool {
+     is_bare_helper_call(object, "view")
+ }
+ 
+-/// Whether `object` is one of the bare helper calls whose result names a
+-/// route in the methods it receives: `redirect()` (the redirector),
+-/// `url()` (the URL generator), and `response()` (the response factory).
+-pub(super) fn is_route_name_helper_receiver(object: &Expression<'_>) -> bool {
+-    is_bare_helper_call(object, "redirect")
+-        || is_bare_helper_call(object, "url")
+-        || is_bare_helper_call(object, "response")
++/// Resolve explicit function imports while keeping unqualified names available
++/// for PHP's namespace-to-global function fallback.
++pub(super) fn route_helper_name<'a>(
++    raw: &'a str,
++    offset: u32,
++    resolved: Option<&'a crate::names::OwnedResolvedNames>,
++) -> &'a str {
++    resolved
++        .filter(|names| names.is_imported(offset))
++        .and_then(|names| names.get(offset))
++        .map(strip_fqn_prefix)
++        .unwrap_or_else(|| strip_fqn_prefix(raw))
++}
++
++/// Whether the receiver is Laravel's redirector, URL generator or response
++/// factory helper, including an explicit import alias.
++pub(super) fn is_route_name_helper_receiver(
++    object: &Expression<'_>,
++    resolved: Option<&crate::names::OwnedResolvedNames>,
++) -> bool {
++    let Expression::Call(Call::Function(call)) = object else {
++        return false;
++    };
++    let Expression::Identifier(ident) = call.function else {
++        return false;
++    };
++    let name = route_helper_name(
++        bytes_to_str(ident.value()),
++        ident.span().start.offset,
++        resolved,
++    );
++    call.argument_list.arguments.is_empty()
++        && ["redirect", "url", "response"]
++            .iter()
++            .any(|helper| name.eq_ignore_ascii_case(helper))
+ }
+ 
+ /// Whether `member_name` takes the name of the route it points at as its
+diff --git a/src/virtual_members/laravel/route_names.rs b/src/virtual_members/laravel/route_names.rs
+index 5db4c10..3a347c1 100644
+--- a/src/virtual_members/laravel/route_names.rs
++++ b/src/virtual_members/laravel/route_names.rs
+@@ -929,6 +929,7 @@ pub(crate) struct RouteDiscovery {
+ /// A concrete route identity and its declaration range in the captured source.
+ #[derive(Debug)]
+ pub(crate) struct RouteDeclaration {
++    pub literal_range: Option<Range>,
+     pub name: String,
+     pub location: Location,
+ }
+@@ -1010,6 +1011,8 @@ impl GroupPrefix<'_> {
+ /// and go-to-definition keeps the site of the ones whose name matches what the
+ /// user clicked.
+ trait RouteSink {
++    /// Snapshot every walked source, including files with no names yet.
++    fn source(&mut self, _uri: &Url, _content: &str) {}
+     /// A named route, registered at `site`.
+     fn route(&mut self, route: RouteEntry, site: RouteSite<'_>);
+ 
+@@ -1024,6 +1027,7 @@ trait RouteSink {
+ /// declaration resolves to.
+ #[derive(Clone, Copy)]
+ struct RouteSite<'a> {
++    literal: Option<(usize, usize)>,
+     line_index: &'a LineIndex<'a>,
+     complete: bool,
+     uri: &'a Url,
+@@ -1045,13 +1049,15 @@ struct RouteCollector<'a> {
+ }
+ 
+ impl RouteSink for RouteCollector<'_> {
++    fn source(&mut self, uri: &Url, content: &str) {
++        if !self.provenance.sources.contains_key(uri.as_str()) {
++            self.provenance
++                .sources
++                .insert(uri.to_string(), Arc::from(content));
++        }
++    }
+     fn route(&mut self, route: RouteEntry, site: RouteSite<'_>) {
+         if site.complete {
+-            if !self.provenance.sources.contains_key(site.uri.as_str()) {
+-                self.provenance
+-                    .sources
+-                    .insert(site.uri.to_string(), Arc::from(site.content));
+-            }
+             let (start, end) = site.name_arg.unwrap_or_else(|| {
+                 let len = site
+                     .content
+@@ -1061,6 +1067,12 @@ impl RouteSink for RouteCollector<'_> {
+                 (site.offset, site.offset + len)
+             });
+             self.provenance.declarations.push(RouteDeclaration {
++                literal_range: site.literal.map(|(start, end)| {
++                    Range::new(
++                        site.line_index.position(start),
++                        site.line_index.position(end),
++                    )
++                }),
+                 name: route.name.clone(),
+                 location: Location::new(
+                     site.uri.clone(),
+@@ -1492,6 +1504,7 @@ fn walk_route_file(
+     macros: &MacroScope,
+     sink: &mut dyn RouteSink,
+ ) {
++    sink.source(uri, content);
+     let open = RefCell::new(HashSet::new());
+     if let Some(path) = file_path {
+         open.borrow_mut()
+@@ -1574,6 +1587,7 @@ fn walk_expr(
+             &registration,
+             group,
+             RouteSite {
++                literal: None,
+                 line_index: paths.line_index,
+                 complete: !group.unknowable,
+                 uri: paths.uri,
+@@ -1660,6 +1674,9 @@ fn walk_expr(
+                                 uri: paths.uri,
+                                 content,
+                                 offset: name_offset(first_arg.value(), content),
++                                literal: extract_string_literal(first_arg.value(), content)
++                                    .filter(|(raw, _, _)| *raw == name_val.as_str())
++                                    .map(|(_, start, end)| (start, end)),
+                                 name_arg: {
+                                     let span = first_arg.value().span();
+                                     Some((span.start.offset as usize, span.end.offset as usize))
+@@ -1692,6 +1709,7 @@ fn walk_expr(
+                             from_vendor: false,
+                         },
+                         RouteSite {
++                            literal: None,
+                             line_index: paths.line_index,
+                             complete: !group.unknowable,
+                             uri: paths.uri,
+diff --git a/tests/integration/common/mod.rs b/tests/integration/common/mod.rs
+index 6fe03e2..7a0c0e8 100644
+--- a/tests/integration/common/mod.rs
++++ b/tests/integration/common/mod.rs
+@@ -1012,12 +1012,18 @@ pub fn apply_workspace_edit(content: &str, edit: &WorkspaceEdit) -> String {
+ 
+ /// Convert an LSP `Position` (line, character) to a byte offset in `content`.
+ pub fn lsp_pos_to_offset(content: &str, pos: Position) -> usize {
+-    let mut offset = 0;
+-    for (i, line) in content.lines().enumerate() {
+-        if i == pos.line as usize {
+-            return offset + pos.character as usize;
++    let mut line = 0;
++    let mut column = 0;
++    for (offset, ch) in content.char_indices() {
++        if line == pos.line && (column >= pos.character || ch == '\n' || ch == '\r') {
++            return offset;
++        }
++        if ch == '\n' {
++            line += 1;
++            column = 0;
++        } else if line == pos.line {
++            column += ch.len_utf16() as u32;
+         }
+-        offset += line.len() + 1;
+     }
+     content.len()
+ }
+diff --git a/tests/integration/laravel_route_rename.rs b/tests/integration/laravel_route_rename.rs
+new file mode 100644
+index 0000000..bed8bed
+--- /dev/null
++++ b/tests/integration/laravel_route_rename.rs
+@@ -0,0 +1,503 @@
++use crate::common::{
++    LARAVEL_SRC_COMPOSER, apply_edits, create_initialized_psr4_workspace, edits_for_uri,
++    position_after, prepare_rename, rename_result,
++};
++use tower_lsp::lsp_types::*;
++
++async fn workspace(
++    routes: &str,
++    consumer: &str,
++) -> (phpantom_lsp::Backend, tempfile::TempDir, Url) {
++    create_initialized_psr4_workspace(
++        LARAVEL_SRC_COMPOSER,
++        &[("routes/web.php", routes), ("src/Links.php", consumer)],
++        "src/Links.php",
++    )
++    .await
++}
++
++fn usage(name: &str) -> String {
++    format!(
++        "<?php\nnamespace App;\nclass Links {{ function demo() {{ return route('{name}'); }} }}\n"
++    )
++}
++
++#[tokio::test]
++async fn rename_route_usage_updates_declaration_and_exact_php_usages() {
++    let routes =
++        "<?php\nuse Illuminate\\Support\\Facades\\Route;\nRoute::get('/a', 'a')->name('home');\n";
++    let consumer = "<?php\nnamespace App;\nclass Links { function demo() { $literal = 'home'; config('home'); return route('home'); } }\n";
++    let (backend, dir, uri) = workspace(routes, consumer).await;
++    let pos = position_after(consumer, "route('ho");
++    let prepared = prepare_rename(&backend, &uri, pos.line, pos.character).await;
++    assert!(
++        matches!(prepared, Some(PrepareRenameResponse::RangeWithPlaceholder {ref placeholder, ..}) if placeholder == "home"),
++        "{prepared:?}"
++    );
++    let edit = rename_result(&backend, &uri, pos.line, pos.character, "dashboard")
++        .await
++        .unwrap()
++        .expect("route rename");
++    let route_uri = Url::from_file_path(dir.path().join("routes/web.php")).unwrap();
++    assert_eq!(
++        apply_edits(routes, &edits_for_uri(&edit, &route_uri)),
++        routes.replace("name('home')", "name('dashboard')")
++    );
++    assert_eq!(
++        apply_edits(consumer, &edits_for_uri(&edit, &uri)),
++        consumer.replace("route('home')", "route('dashboard')")
++    );
++    assert_eq!(
++        std::fs::read_to_string(dir.path().join("routes/web.php")).unwrap(),
++        routes
++    );
++}
++
++#[tokio::test]
++async fn rename_grouped_route_from_declaration_preserves_group_prefix() {
++    let routes = "<?php\nuse Illuminate\\Support\\Facades\\Route as Routes;\nRoutes::name('admin.')->group(function () { Routes::get('/a', 'a')->name('home'); });\n";
++    let consumer = usage("admin.home");
++    let (backend, dir, uri) = workspace(routes, &consumer).await;
++    let route_uri = Url::from_file_path(dir.path().join("routes/web.php")).unwrap();
++    crate::common::open_php(&backend, &route_uri, routes).await;
++    let pos = position_after(routes, "name('ho");
++    let prepared = prepare_rename(&backend, &route_uri, pos.line, pos.character).await;
++    assert!(
++        matches!(prepared, Some(PrepareRenameResponse::RangeWithPlaceholder {ref placeholder, ..}) if placeholder == "admin.home"),
++        "{prepared:?}"
++    );
++    let edit = rename_result(
++        &backend,
++        &route_uri,
++        pos.line,
++        pos.character,
++        "admin.dashboard",
++    )
++    .await
++    .unwrap()
++    .expect("grouped route rename");
++    assert_eq!(
++        apply_edits(routes, &edits_for_uri(&edit, &route_uri)),
++        routes.replace("name('home')", "name('dashboard')")
++    );
++    assert_eq!(
++        apply_edits(&consumer, &edits_for_uri(&edit, &uri)),
++        consumer.replace("admin.home", "admin.dashboard")
++    );
++}
++
++#[tokio::test]
++async fn rename_route_rejects_ambiguous_declarations_and_existing_destination() {
++    for routes in [
++        "<?php Route::get('/a', 'a')->name('home'); Route::get('/b', 'b')->name('home');",
++        "<?php Route::get('/a', 'a')->name('home'); Route::get('/b', 'b')->name('dashboard');",
++    ] {
++        let consumer = usage("home");
++        let (backend, _dir, uri) = workspace(routes, &consumer).await;
++        let pos = position_after(&consumer, "route('ho");
++        let result = rename_result(&backend, &uri, pos.line, pos.character, "dashboard").await;
++        assert!(
++            !matches!(result, Ok(Some(_))),
++            "ambiguous/colliding rename: {result:?}"
++        );
++    }
++}
++
++#[tokio::test]
++async fn generated_resource_route_has_no_simple_literal_rename() {
++    let consumer = usage("posts.show");
++    let (backend, _dir, uri) = workspace(
++        "<?php Route::resource('posts', 'PostController');",
++        &consumer,
++    )
++    .await;
++    let pos = position_after(&consumer, "route('posts.sh");
++    assert!(
++        prepare_rename(&backend, &uri, pos.line, pos.character)
++            .await
++            .is_none()
++    );
++    assert!(!matches!(
++        rename_result(&backend, &uri, pos.line, pos.character, "posts.detail").await,
++        Ok(Some(_))
++    ));
++}
++
++#[tokio::test]
++async fn route_rename_rejects_php_string_injection_without_edits() {
++    let consumer = usage("home");
++    let (backend, _dir, uri) =
++        workspace("<?php Route::get('/a', 'a')->name('home');", &consumer).await;
++    let pos = position_after(&consumer, "route('ho");
++    let result = rename_result(
++        &backend,
++        &uri,
++        pos.line,
++        pos.character,
++        "home'); evil(); //",
++    )
++    .await;
++    assert!(!matches!(result, Ok(Some(_))));
++}
++
++#[tokio::test]
++async fn non_laravel_helper_is_not_a_route_rename() {
++    let consumer = usage("home");
++    let (backend, _dir, uri) = create_initialized_psr4_workspace(
++        "{}",
++        &[
++            (
++                "routes/web.php",
++                "<?php Route::get('/a', 'a')->name('home');",
++            ),
++            ("src/Links.php", &consumer),
++        ],
++        "src/Links.php",
++    )
++    .await;
++    let pos = position_after(&consumer, "route('ho");
++    assert!(
++        prepare_rename(&backend, &uri, pos.line, pos.character)
++            .await
++            .is_none()
++    );
++    assert!(!matches!(
++        rename_result(&backend, &uri, pos.line, pos.character, "dashboard").await,
++        Ok(Some(_))
++    ));
++}
++
++#[tokio::test]
++async fn local_route_function_is_not_a_laravel_usage() {
++    let routes = "<?php Route::get('/a', 'a')->name('home');";
++    let consumer = "<?php\nnamespace App;\nfunction route(string $name): string { return $name; }\nclass Links { function demo() { route('home'); return \\route('home'); } }\n";
++    let (backend, _dir, uri) = workspace(routes, consumer).await;
++    let local = position_after(consumer, "demo() { route('ho");
++    assert!(
++        prepare_rename(&backend, &uri, local.line, local.character)
++            .await
++            .is_none()
++    );
++    let global = position_after(consumer, "\\route('ho");
++    let edit = rename_result(&backend, &uri, global.line, global.character, "dashboard")
++        .await
++        .unwrap()
++        .unwrap();
++    assert_eq!(
++        apply_edits(consumer, &edits_for_uri(&edit, &uri)),
++        consumer.replace("\\route('home')", "\\route('dashboard')")
++    );
++}
++
++#[tokio::test]
++async fn facade_alias_usage_updates_but_unrelated_facade_does_not() {
++    let routes = "<?php Route::get('/a', 'a')->name('home');";
++    let consumer = "<?php\nnamespace App;\nuse Illuminate\\Support\\Facades\\URL as Urls;\nuse App\\URL;\nclass Links { function demo() { Urls::route('home'); URL::route('home'); return \\route('home'); } }\n";
++    let (backend, _dir, uri) = workspace(routes, consumer).await;
++    let pos = position_after(consumer, "\\route('ho");
++    let edit = rename_result(&backend, &uri, pos.line, pos.character, "dashboard")
++        .await
++        .unwrap()
++        .unwrap();
++    let expected = consumer
++        .replace("Urls::route('home')", "Urls::route('dashboard')")
++        .replace("\\route('home')", "\\route('dashboard')");
++    assert_eq!(apply_edits(consumer, &edits_for_uri(&edit, &uri)), expected);
++}
++
++#[tokio::test]
++async fn route_rename_translates_blade_unicode_ranges_without_other_literal_edits() {
++    let routes = "<?php Route::get('/a', 'a')->name('home');";
++    let consumer = usage("home");
++    let blade = "<p>🐘 žluťoučký home</p>\n<a href=\"{{ route('home') }}\">Home</a>\n";
++    let (backend, dir, uri) = create_initialized_psr4_workspace(
++        LARAVEL_SRC_COMPOSER,
++        &[
++            ("routes/web.php", routes),
++            ("src/Links.php", &consumer),
++            ("resources/views/home.blade.php", blade),
++        ],
++        "src/Links.php",
++    )
++    .await;
++    let blade_uri = Url::from_file_path(dir.path().join("resources/views/home.blade.php")).unwrap();
++    crate::common::open_php(&backend, &blade_uri, blade).await;
++    let pos = position_after(&consumer, "route('ho");
++    let edit = rename_result(&backend, &uri, pos.line, pos.character, "dashboard")
++        .await
++        .unwrap()
++        .unwrap();
++    assert_eq!(
++        apply_edits(blade, &edits_for_uri(&edit, &blade_uri)),
++        blade.replace("route('home')", "route('dashboard')")
++    );
++}
++
++#[tokio::test]
++async fn grouped_route_rename_rejects_prefix_change() {
++    let consumer = usage("admin.home");
++    let (backend, _dir, uri) = workspace(
++        "<?php Route::name('admin.')->group(function () { Route::get('/a', 'a')->name('home'); });",
++        &consumer,
++    )
++    .await;
++    let pos = position_after(&consumer, "route('admin.ho");
++    let outcome = rename_result(&backend, &uri, pos.line, pos.character, "other.dashboard").await;
++    assert!(outcome.unwrap_err().contains("prefix"));
++}
++
++#[tokio::test]
++async fn computed_route_declaration_and_wildcard_usage_refuse_rename() {
++    for (routes, name) in [
++        (
++            "<?php const NAME = 'home'; Route::get('/a', 'a')->name(NAME);",
++            "home",
++        ),
++        ("<?php Route::get('/a', 'a')->name('home');", "ho*"),
++    ] {
++        let consumer = usage(name);
++        let (backend, _dir, uri) = workspace(routes, &consumer).await;
++        let pos = position_after(&consumer, "route('");
++        assert!(
++            prepare_rename(&backend, &uri, pos.line, pos.character)
++                .await
++                .is_none()
++        );
++        assert!(!matches!(
++            rename_result(&backend, &uri, pos.line, pos.character, "dashboard").await,
++            Ok(Some(_))
++        ));
++    }
++}
++
++#[tokio::test]
++async fn imported_route_helper_aliases_share_global_route_identity() {
++    let routes = "<?php Route::get('/a', 'a')->name('home');";
++    let consumer = "<?php\nnamespace App;\nuse function route as link_to;\nuse function to_route as go_to;\nclass Links { function demo() { link_to('home'); go_to('home'); return \\route('home'); } }\n";
++    let (backend, _dir, uri) = workspace(routes, consumer).await;
++    let pos = position_after(consumer, "\\route('ho");
++    let edit = rename_result(&backend, &uri, pos.line, pos.character, "dashboard")
++        .await
++        .unwrap()
++        .unwrap();
++    assert_eq!(
++        apply_edits(consumer, &edits_for_uri(&edit, &uri)),
++        consumer.replace("'home'", "'dashboard'")
++    );
++}
++
++#[tokio::test]
++async fn helper_receiver_alias_and_local_receiver_keep_separate_identities() {
++    let routes = "<?php Route::get('/a', 'a')->name('home');";
++    let consumer = "<?php\nnamespace App;\nuse function redirect as send_to;\nfunction redirect(): object { return new class { function route(string $name): void {} }; }\nclass Links { function demo() { send_to()->route('home'); redirect()->route('home'); return \\route('home'); } }\n";
++    let (backend, _dir, uri) = workspace(routes, consumer).await;
++    let pos = position_after(consumer, "\\route('ho");
++    let edit = rename_result(&backend, &uri, pos.line, pos.character, "dashboard")
++        .await
++        .unwrap()
++        .unwrap();
++    let expected = consumer
++        .replace("send_to()->route('home')", "send_to()->route('dashboard')")
++        .replace("\\route('home')", "\\route('dashboard')");
++    assert_eq!(apply_edits(consumer, &edits_for_uri(&edit, &uri)), expected);
++}
++
++#[tokio::test]
++async fn unsaved_route_and_usage_edits_use_current_ranges_without_touching_disk() {
++    use tower_lsp::LanguageServer;
++    let routes = "<?php\nRoute::get('/a', 'a')->name('home');\n";
++    let consumer = usage("home");
++    let (backend, dir, uri) = workspace(routes, &consumer).await;
++    let route_uri = Url::from_file_path(dir.path().join("routes/web.php")).unwrap();
++    crate::common::open_php(&backend, &route_uri, routes).await;
++    let changed_routes = "<?php\n// 🐘 moved\n\nRoute::get('/a', 'a')->name('profile');\n";
++    let changed_consumer = consumer.replace("home", "profile");
++    for (target, changed) in [
++        (&route_uri, changed_routes),
++        (&uri, changed_consumer.as_str()),
++    ] {
++        backend
++            .did_change(DidChangeTextDocumentParams {
++                text_document: VersionedTextDocumentIdentifier {
++                    uri: target.clone(),
++                    version: 2,
++                },
++                content_changes: vec![TextDocumentContentChangeEvent {
++                    range: None,
++                    range_length: None,
++                    text: changed.to_owned(),
++                }],
++            })
++            .await;
++        backend.update_ast(target.as_str(), changed);
++    }
++    let pos = position_after(&changed_consumer, "route('pro");
++    let edit = rename_result(&backend, &uri, pos.line, pos.character, "dashboard")
++        .await
++        .unwrap()
++        .unwrap();
++    assert_eq!(
++        apply_edits(changed_routes, &edits_for_uri(&edit, &route_uri)),
++        changed_routes.replace("'profile'", "'dashboard'")
++    );
++    assert_eq!(
++        apply_edits(&changed_consumer, &edits_for_uri(&edit, &uri)),
++        changed_consumer.replace("'profile'", "'dashboard'")
++    );
++    assert_eq!(
++        std::fs::read_to_string(dir.path().join("routes/web.php")).unwrap(),
++        routes
++    );
++    assert_eq!(
++        std::fs::read_to_string(dir.path().join("src/Links.php")).unwrap(),
++        consumer
++    );
++}
++
++#[tokio::test]
++async fn excessively_long_route_name_refuses_without_edits() {
++    let consumer = usage("home");
++    let (backend, _dir, uri) =
++        workspace("<?php Route::get('/a', 'a')->name('home');", &consumer).await;
++    let pos = position_after(&consumer, "route('ho");
++    assert!(
++        rename_result(&backend, &uri, pos.line, pos.character, &"x".repeat(257))
++            .await
++            .is_err()
++    );
++}
++
++#[tokio::test]
++async fn one_literal_loaded_under_multiple_group_names_cannot_rename_only_one_identity() {
++    let routes = "<?php\nRoute::name('admin.')->group(__DIR__ . '/sub/shared.php');\nRoute::name('staff.')->group(__DIR__ . '/sub/shared.php');\n";
++    let consumer = usage("admin.home");
++    let (backend, _dir, uri) = create_initialized_psr4_workspace(
++        LARAVEL_SRC_COMPOSER,
++        &[
++            ("routes/web.php", routes),
++            (
++                "routes/sub/shared.php",
++                "<?php Route::get('/a', 'a')->name('home');",
++            ),
++            ("src/Links.php", &consumer),
++        ],
++        "src/Links.php",
++    )
++    .await;
++    let pos = position_after(&consumer, "route('admin.ho");
++    assert!(
++        prepare_rename(&backend, &uri, pos.line, pos.character)
++            .await
++            .is_none()
++    );
++    assert!(
++        rename_result(&backend, &uri, pos.line, pos.character, "admin.dashboard")
++            .await
++            .is_err()
++    );
++}
++
++#[tokio::test]
++async fn unseen_disk_change_to_declaration_prevents_stale_rename() {
++    let routes = "<?php Route::get('/a', 'a')->name('home');";
++    let consumer = usage("home");
++    let (backend, dir, uri) = workspace(routes, &consumer).await;
++    let pos = position_after(&consumer, "route('ho");
++    assert!(
++        prepare_rename(&backend, &uri, pos.line, pos.character)
++            .await
++            .is_some()
++    );
++    let changed = routes.replace("'home'", "'moved'");
++    std::fs::write(dir.path().join("routes/web.php"), &changed).unwrap();
++    assert!(!matches!(
++        rename_result(&backend, &uri, pos.line, pos.character, "dashboard").await,
++        Ok(Some(_))
++    ));
++    assert_eq!(
++        std::fs::read_to_string(dir.path().join("routes/web.php")).unwrap(),
++        changed
++    );
++}
++
++#[tokio::test]
++async fn unicode_route_names_preserve_exact_utf16_edit_ranges() {
++    let routes = "<?php\n/* 🐘 */ Route::get('/a', 'a')->name('žluťoučký.domů');\n";
++    let consumer = usage("žluťoučký.domů");
++    let (backend, dir, uri) = workspace(routes, &consumer).await;
++    let pos = position_after(&consumer, "route('žlu");
++    let edit = rename_result(&backend, &uri, pos.line, pos.character, "žluťoučký.účet")
++        .await
++        .unwrap()
++        .unwrap();
++    let route_uri = Url::from_file_path(dir.path().join("routes/web.php")).unwrap();
++    assert_eq!(
++        apply_edits(routes, &edits_for_uri(&edit, &route_uri)),
++        routes.replace("žluťoučký.domů", "žluťoučký.účet")
++    );
++    assert_eq!(
++        apply_edits(&consumer, &edits_for_uri(&edit, &uri)),
++        consumer.replace("žluťoučký.domů", "žluťoučký.účet")
++    );
++}
++
++#[tokio::test]
++async fn vendor_route_declaration_is_discovered_but_not_renamed() {
++    let routes = "<?php Route::get('/a', 'a')->name('home');";
++    let consumer = usage("home");
++    let composer = r#"{"require":{"laravel/framework":"^11.0"},"autoload":{"psr-4":{"App\\":"src/","Acme\\":"vendor/package/src/"}}}"#;
++    let provider = "<?php namespace Acme; class PkgServiceProvider { public function boot(): void { $this->loadRoutesFrom(__DIR__ . '/../routes/web.php'); } }";
++    let (backend, dir, uri) = create_initialized_psr4_workspace(
++        composer,
++        &[
++            (
++                "bootstrap/providers.php",
++                "<?php return [Acme\\PkgServiceProvider::class];",
++            ),
++            ("vendor/package/src/PkgServiceProvider.php", provider),
++            ("vendor/package/routes/web.php", routes),
++            ("src/Links.php", &consumer),
++        ],
++        "src/Links.php",
++    )
++    .await;
++    let route_uri = Url::from_file_path(dir.path().join("vendor/package/routes/web.php")).unwrap();
++    crate::common::open_php(&backend, &route_uri, routes).await;
++    let table = backend
++        .workbench_routes(phpantom_lsp::workbench_routes::RouteQuery::default())
++        .await
++        .unwrap();
++    assert!(
++        table
++            .routes
++            .iter()
++            .any(|r| r.name == "home" && r.from_vendor)
++    );
++    let pos = position_after(&consumer, "route('ho");
++    assert!(
++        prepare_rename(&backend, &uri, pos.line, pos.character)
++            .await
++            .is_none()
++    );
++    assert!(
++        rename_result(&backend, &uri, pos.line, pos.character, "dashboard")
++            .await
++            .is_err()
++    );
++}
++
++#[tokio::test]
++async fn named_route_arguments_update_the_route_parameter_and_preserve_other_strings() {
++    let routes = "<?php Route::get('/a', 'a')->name('home');";
++    let consumer = "<?php\nnamespace App;\nclass Links { function demo() {\n    \\route(absolute: 'home', name: 'home', parameters: []);\n    \\to_route(status: 302, route: 'home');\n    url()->signedRoute(absolute: 'home', name: 'home');\n    redirect()->route(status: 302, route: 'home');\n} }\n";
++    let (backend, _dir, uri) = workspace(routes, consumer).await;
++    let pos = position_after(consumer, "\\route(absolute: 'home', name: 'ho");
++    let edit = rename_result(&backend, &uri, pos.line, pos.character, "dashboard")
++        .await
++        .unwrap()
++        .expect("named-argument route rename");
++    let expected = consumer
++        .replace("name: 'home'", "name: 'dashboard'")
++        .replace("route: 'home'", "route: 'dashboard'");
++    assert_eq!(apply_edits(consumer, &edits_for_uri(&edit, &uri)), expected);
++}
+diff --git a/tests/integration/laravel_string_key_call_sites.rs b/tests/integration/laravel_string_key_call_sites.rs
+index d962210..56e8913 100644
+--- a/tests/integration/laravel_string_key_call_sites.rs
++++ b/tests/integration/laravel_string_key_call_sites.rs
+@@ -75,8 +75,10 @@ async fn the_signed_url_and_redirect_helpers_reach_the_route() {
+         "response()->redirectToRoute('orders.show')",
+         "url()->temporarySignedRoute('orders.show', 60)",
+     ] {
++        // PHP class lookup has no global fallback inside a namespace.
++        // Import the framework facades rather than naming App\URL/App\Redirect.
+         let caller = format!(
+-            "<?php\nnamespace App;\nclass Demo {{\n\
++            "<?php\nnamespace App; use Illuminate\\Support\\Facades\\URL; use Illuminate\\Support\\Facades\\Redirect;\nclass Demo {{\n\
+              \x20   public function go() {{\n\
+              \x20       return {call};\n\
+              \x20   }}\n}}\n"
+diff --git a/tests/integration/main.rs b/tests/integration/main.rs
+index 90dfe90..f1b10d6 100644
+--- a/tests/integration/main.rs
++++ b/tests/integration/main.rs
+@@ -212,6 +212,7 @@ mod laravel_route_macros;
+ mod laravel_route_names;
+ mod laravel_route_ownership;
+ mod laravel_route_params;
++mod laravel_route_rename;
+ mod laravel_schema_macro_startup;
+ mod laravel_storage_disk_names;
+ mod laravel_string_key_call_sites;

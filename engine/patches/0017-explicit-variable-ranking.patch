@@ -1,0 +1,134 @@
+diff --git a/src/completion/variable/ranking.rs b/src/completion/variable/ranking.rs
+index bc00e2b..49ab3e8 100644
+--- a/src/completion/variable/ranking.rs
++++ b/src/completion/variable/ranking.rs
+@@ -73,20 +73,41 @@ impl Backend {
+                     && is_subtype_of_typed(&actual, expected, &class_loader);
+                 item.detail = Some(actual.to_string());
+             }
+-            item.sort_text = Some(format!(
+-                "0_{}_{}_{}",
+-                u8::from(!compatible),
+-                name.map_or(3, |name| name_affinity(
++            let type_rank = u8::from(!compatible);
++            let name_rank = name.map_or(3, |name| {
++                name_affinity(
+                     &item.label,
+                     name,
+-                    parameter_tokens.as_deref().unwrap_or_default()
+-                )),
+-                item.label.to_lowercase()
+-            ));
++                    parameter_tokens.as_deref().unwrap_or_default(),
++                )
++            });
++            set_variable_rank(item, type_rank, name_rank);
+         }
+     }
+ }
+ 
++/// Carry explicit tiers alongside opaque LSP sort keys, so cached client-side
++/// filtering can retain semantic priority without parsing the sort-text format.
++fn set_variable_rank(item: &mut CompletionItem, type_rank: u8, name_rank: u8) {
++    item.sort_text = Some(format!(
++        "0_{}_{}_{}",
++        type_rank,
++        name_rank,
++        item.label.to_lowercase()
++    ));
++    let data = item.data.get_or_insert_with(|| serde_json::json!({}));
++    if let Some(fields) = data.as_object_mut() {
++        fields.insert(
++            "phpWorkbenchRanking".into(),
++            serde_json::json!({
++                "version": 1,
++                "type": type_rank,
++                "name": name_rank,
++            }),
++        );
++    }
++}
++
+ /// Deterministic word boundaries, without edit-distance or substring guesses.
+ /// Preserve Unicode in tokens; ASCII camel case/acronyms and underscores split.
+ fn name_tokens(name: &str) -> Vec<String> {
+@@ -159,3 +180,26 @@ mod tests {
+         assert_eq!(name_affinity("$a", "", &[]), 3);
+     }
+ }
++
++#[cfg(test)]
++mod rank_metadata_tests {
++    use super::*;
++    #[test]
++    fn rank_metadata_preserves_existing_opaque_resolve_fields() {
++        let mut item = CompletionItem {
++            label: "$user".into(),
++            data: Some(serde_json::json!({"opaque":"keep","kind":"variable"})),
++            ..Default::default()
++        };
++        set_variable_rank(&mut item, 0, 2);
++        assert_eq!(item.data.as_ref().unwrap()["opaque"], "keep");
++        assert_eq!(item.data.as_ref().unwrap()["kind"], "variable");
++        assert_eq!(
++            item.data.as_ref().unwrap()["phpWorkbenchRanking"],
++            serde_json::json!({"version":1,"type":0,"name":2})
++        );
++        item.data = Some(serde_json::json!(["opaque"]));
++        set_variable_rank(&mut item, 1, 0);
++        assert_eq!(item.data, Some(serde_json::json!(["opaque"])));
++    }
++}
+diff --git a/tests/integration/completion_variable_names.rs b/tests/integration/completion_variable_names.rs
+index 53432aa..51f9c2f 100644
+--- a/tests/integration/completion_variable_names.rs
++++ b/tests/integration/completion_variable_names.rs
+@@ -4401,3 +4401,48 @@ async fn test_parameter_name_affinity_builtin_parameter() {
+     .await;
+     assert_eq!(items[0].label, "$string");
+ }
++
++#[tokio::test]
++async fn test_explicit_workbench_variable_rank_carries_type_and_name_priority() {
++    let items = ranked_variables("<?php\nfunction send(string $email): void {}\nfunction demo(int $email, string $zText): void { send(/*complete*/$); }\n").await;
++    let good = items.iter().find(|item| item.label == "$zText").unwrap();
++    let wrong = items.iter().find(|item| item.label == "$email").unwrap();
++    assert_eq!(
++        good.data
++            .as_ref()
++            .and_then(|data| data.get("phpWorkbenchRanking")),
++        Some(&serde_json::json!({"version":1,"type":0,"name":3}))
++    );
++    assert_eq!(
++        wrong
++            .data
++            .as_ref()
++            .and_then(|data| data.get("phpWorkbenchRanking")),
++        Some(&serde_json::json!({"version":1,"type":1,"name":0}))
++    );
++    assert!(
++        items
++            .iter()
++            .filter(|item| item.label.starts_with("$_"))
++            .all(|item| item
++                .data
++                .as_ref()
++                .and_then(|data| data.get("phpWorkbenchRanking"))
++                .is_none())
++    );
++}
++
++#[tokio::test]
++async fn test_explicit_workbench_variable_rank_is_absent_without_a_context() {
++    let items = ranked_variables(
++        "<?php\nfunction demo(int $email, string $zText): void { unknown(/*complete*/$); }\n",
++    )
++    .await;
++    assert!(!items.is_empty());
++    assert!(items.iter().all(|item| {
++        item.data
++            .as_ref()
++            .and_then(|data| data.get("phpWorkbenchRanking"))
++            .is_none()
++    }));
++}

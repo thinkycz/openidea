@@ -1,0 +1,906 @@
+diff --git a/docs/CHANGELOG.md b/docs/CHANGELOG.md
+index 52c159f..50f84d0 100644
+--- a/docs/CHANGELOG.md
++++ b/docs/CHANGELOG.md
+@@ -21,6 +21,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
+ 
+ ### Fixed
+ 
++- **Laravel route names.** Duplicate statically discovered route names report their declaration locations, including grouped and resource routes. Imported facade aliases retain their identity and unrelated imports are excluded. Contributed by PHP Workbench (local downstream patch).
++
+ - **Native type suggestions follow the PHP target and declaration.** Parameter and property types exclude return-only types, while modern and composed types follow their supported language versions. PHPDoc and project-class suggestions retain their own behavior. Contributed by PHP Workbench (local downstream patch).
+ 
+ - **Built-in classes follow older PHP targets.** Classes introduced in a later PHP release no longer appear in completion or return through another stub loaded into memory. Project-defined polyfills remain available.
+diff --git a/src/diagnostics/laravel_string_keys.rs b/src/diagnostics/laravel_string_keys.rs
+index f02f8f2..c459d4b 100644
+--- a/src/diagnostics/laravel_string_keys.rs
++++ b/src/diagnostics/laravel_string_keys.rs
+@@ -34,7 +34,116 @@ enum CheckedStringKind {
+     GateAbility,
+ }
+ 
++#[derive(Default)]
++struct RouteConflicts<'a> {
++    names: Vec<&'a str>,
++    related: Vec<Location>,
++}
++
+ impl Backend {
++    /// Warn at distinct statically discovered declarations of the same route name.
++    /// Conditional registration can still depend on runtime configuration.
++    pub(super) fn collect_duplicate_laravel_route_diagnostics(
++        &self,
++        uri: &str,
++        content: &str,
++        out: &mut Vec<Diagnostic>,
++    ) {
++        use std::collections::{BTreeMap, HashMap};
++        let discovery = self.cached_routes();
++        let Some(indices) = discovery.declarations_by_uri.get(uri) else {
++            return;
++        };
++        if discovery
++            .sources
++            .get(uri)
++            .is_none_or(|source| source.as_ref() != content)
++        {
++            return;
++        }
++        if self
++            .get_file_content_arc(uri)
++            .is_none_or(|now| now.as_str() != content)
++        {
++            return;
++        }
++        // Check each other file once, so moved text never contributes a stale
++        // related location even if an edit races the cached enumeration.
++        let mut current = HashMap::new();
++        current.insert(uri.to_owned(), true);
++        let mut groups: BTreeMap<(u32, u32, u32, u32), RouteConflicts<'_>> = BTreeMap::new();
++        for &index in indices {
++            let declaration = &discovery.declarations[index];
++            let Some(others) = discovery.duplicate_names.get(&declaration.name) else {
++                continue;
++            };
++            let related: Vec<_> = others
++                .iter()
++                .filter_map(|&other| {
++                    let other = &discovery.declarations[other];
++                    if other.location == declaration.location {
++                        return None;
++                    }
++                    let other_uri = other.location.uri.as_str();
++                    let fresh = *current.entry(other_uri.to_owned()).or_insert_with(|| {
++                        discovery.sources.get(other_uri).is_some_and(|source| {
++                            self.get_file_content_arc(other_uri)
++                                .is_some_and(|now| now.as_str() == source.as_ref())
++                        })
++                    });
++                    fresh.then_some(other.location.clone())
++                })
++                .take(16)
++                .collect();
++            if related.is_empty() {
++                continue;
++            }
++            let r = declaration.location.range;
++            let group = groups
++                .entry((r.start.line, r.start.character, r.end.line, r.end.character))
++                .or_default();
++            group.names.push(&declaration.name);
++            for location in related {
++                if group.related.len() < 16 && !group.related.contains(&location) {
++                    group.related.push(location)
++                }
++            }
++        }
++        for ((sl, sc, el, ec), group) in groups {
++            let names = group.names;
++            let locations = group.related;
++            let shown = names
++                .iter()
++                .take(8)
++                .map(|name| format!("'{name}'"))
++                .collect::<Vec<_>>()
++                .join(", ");
++            let remainder = if names.len() > 8 {
++                format!(" and {} more", names.len() - 8)
++            } else {
++                String::new()
++            };
++            let mut diagnostic = helpers::make_diagnostic(
++                Range::new(Position::new(sl, sc), Position::new(el, ec)),
++                DiagnosticSeverity::WARNING,
++                "duplicate_laravel_route",
++                format!(
++                    "Route name(s) {shown}{remainder} have multiple statically discovered declarations"
++                ),
++            );
++            diagnostic.related_information = Some(
++                locations
++                    .into_iter()
++                    .map(|location| DiagnosticRelatedInformation {
++                        location,
++                        message: "Another declaration of the same route name".into(),
++                    })
++                    .collect(),
++            );
++            out.push(diagnostic);
++        }
++    }
++
+     /// Emit a warning for each `$this->argument('x')` / `$this->option('x')`
+     /// whose name is not a parameter of the enclosing command's `$signature`.
+     pub(super) fn collect_invalid_command_param_diagnostics(
+diff --git a/src/diagnostics/mod.rs b/src/diagnostics/mod.rs
+index e06a64a..2da2712 100644
+--- a/src/diagnostics/mod.rs
++++ b/src/diagnostics/mod.rs
+@@ -564,6 +564,10 @@ impl Backend {
+         }
+         let is_laravel = self.resolved_class_cache.read().is_laravel();
+         if is_laravel {
++            step!(
++                "duplicate_laravel_route",
++                self.collect_duplicate_laravel_route_diagnostics(uri_str, content, out)
++            );
+             step!(
+                 "invalid_laravel_string_key",
+                 self.collect_invalid_laravel_string_key_diagnostics(uri_str, content, out)
+diff --git a/src/virtual_members/laravel/route_names.rs b/src/virtual_members/laravel/route_names.rs
+index ee151c0..5db4c10 100644
+--- a/src/virtual_members/laravel/route_names.rs
++++ b/src/virtual_members/laravel/route_names.rs
+@@ -7,11 +7,11 @@ use mago_allocator::LocalArena;
+ use mago_database::file::FileId;
+ use mago_span::HasSpan;
+ use mago_syntax::cst::*;
+-use tower_lsp::lsp_types::{Location, Url};
++use tower_lsp::lsp_types::{Location, Range, Url};
+ 
+ use crate::Backend;
+ use crate::atom::bytes_to_str;
+-use crate::text_position::offset_to_position;
++use crate::text_position::{LineIndex, offset_to_position};
+ 
+ use super::const_eval::{Scope, bind_assignment, const_string, for_each_iteration};
+ use super::helpers::{
+@@ -413,31 +413,13 @@ struct ScanPaths<'a> {
+     open: &'a RefCell<HashSet<PathBuf>>,
+     macros: &'a MacroScope,
+     program: &'a Program<'a>,
++    resolved: &'a mago_names::ResolvedNames<'a>,
++    line_index: &'a LineIndex<'a>,
+     /// The file the walk is currently reading, which is where the route names
+     /// it finds are declared.
+     uri: &'a Url,
+ }
+ 
+-impl<'a> ScanPaths<'a> {
+-    fn new(
+-        dir: Option<&'a Path>,
+-        root: Option<&'a Path>,
+-        open: &'a RefCell<HashSet<PathBuf>>,
+-        macros: &'a MacroScope,
+-        program: &'a Program<'a>,
+-        uri: &'a Url,
+-    ) -> Self {
+-        Self {
+-            dir,
+-            root,
+-            open,
+-            macros,
+-            program,
+-            uri,
+-        }
+-    }
+-}
+-
+ /// Parse a route file and hand the program to `walk`.
+ ///
+ /// The arena the program is allocated in lives only as long as the call, so
+@@ -446,12 +428,14 @@ impl<'a> ScanPaths<'a> {
+ fn in_parsed_route_file<R>(
+     content: &str,
+     name: &'static [u8],
+-    walk: impl FnOnce(&Program<'_>) -> R,
++    walk: impl FnOnce(&Program<'_>, &mago_names::ResolvedNames<'_>, &LineIndex<'_>) -> R,
+ ) -> R {
+     let arena = LocalArena::new();
+     let file_id = FileId::new(name);
+     let program = mago_syntax::parser::parse_file_content(&arena, file_id, content.as_bytes());
+-    walk(program)
++    let resolved = mago_names::resolver::NameResolver::new(&arena).resolve(program);
++    let line_index = LineIndex::new(content);
++    walk(program, &resolved, &line_index)
+ }
+ 
+ // ─── Router macros ───────────────────────────────────────────────────────────
+@@ -913,6 +897,14 @@ pub(crate) struct RouteEntry {
+ /// The result of scanning the project's route files.
+ #[derive(Debug)]
+ pub(crate) struct RouteDiscovery {
++    /// Concrete declarations before the picker/completion list is deduplicated.
++    pub declarations: Vec<RouteDeclaration>,
++    /// Declaration indices keyed by file, avoiding a project-wide diagnostic scan.
++    pub declarations_by_uri: HashMap<String, Vec<usize>>,
++    /// Only names written at more than one distinct declaration site.
++    pub duplicate_names: HashMap<String, Vec<usize>>,
++    /// Immutable source snapshots, copied once per route file for freshness checks.
++    pub sources: HashMap<String, Arc<str>>,
+     /// Every named route that was statically resolved.
+     pub routes: Vec<RouteEntry>,
+     /// The name of every route in `routes`, sorted, shared so that a
+@@ -934,6 +926,19 @@ pub(crate) struct RouteDiscovery {
+     pub open_suffixes: Vec<String>,
+ }
+ 
++/// A concrete route identity and its declaration range in the captured source.
++#[derive(Debug)]
++pub(crate) struct RouteDeclaration {
++    pub name: String,
++    pub location: Location,
++}
++
++#[derive(Default)]
++struct RouteProvenance {
++    declarations: Vec<RouteDeclaration>,
++    sources: HashMap<String, Arc<str>>,
++}
++
+ /// The name and URI prefixes a route inherits from the groups enclosing it,
+ /// and the receivers the router is reachable through at that point.
+ #[derive(Clone, Copy)]
+@@ -975,13 +980,18 @@ impl GroupPrefix<'_> {
+     ///
+     /// The root has to be the `Route` facade, the router variable in scope,
+     /// or `$this` inside a router macro.
+-    fn chain_reaches_router(&self, mut expr: &Expression<'_>, content: &str) -> bool {
++    fn chain_reaches_router(
++        &self,
++        mut expr: &Expression<'_>,
++        content: &str,
++        resolved: &mago_names::ResolvedNames<'_>,
++    ) -> bool {
+         loop {
+             match expr {
+                 Expression::Call(Call::Method(mc)) => expr = mc.object,
+                 Expression::Parenthesized(p) => expr = p.expression,
+                 Expression::Call(Call::StaticMethod(sc)) => {
+-                    return is_facade(sc.class, content, "Route");
++                    return is_facade(sc.class, content, "Route", resolved);
+                 }
+                 Expression::Variable(Variable::Direct(variable)) => {
+                     let name = bytes_to_str(variable.name).trim_start_matches('$');
+@@ -1014,6 +1024,8 @@ trait RouteSink {
+ /// declaration resolves to.
+ #[derive(Clone, Copy)]
+ struct RouteSite<'a> {
++    line_index: &'a LineIndex<'a>,
++    complete: bool,
+     uri: &'a Url,
+     content: &'a str,
+     offset: usize,
+@@ -1026,13 +1038,39 @@ struct RouteSite<'a> {
+ /// The enumeration sink: keeps every route, plus the prefixes and suffixes of
+ /// route names an unknowable group leaves unjudgeable.
+ struct RouteCollector<'a> {
++    provenance: &'a mut RouteProvenance,
+     out: &'a mut Vec<RouteEntry>,
+     open_prefixes: &'a mut Vec<String>,
+     open_suffixes: &'a mut Vec<String>,
+ }
+ 
+ impl RouteSink for RouteCollector<'_> {
+-    fn route(&mut self, route: RouteEntry, _site: RouteSite<'_>) {
++    fn route(&mut self, route: RouteEntry, site: RouteSite<'_>) {
++        if site.complete {
++            if !self.provenance.sources.contains_key(site.uri.as_str()) {
++                self.provenance
++                    .sources
++                    .insert(site.uri.to_string(), Arc::from(site.content));
++            }
++            let (start, end) = site.name_arg.unwrap_or_else(|| {
++                let len = site
++                    .content
++                    .get(site.offset..)
++                    .and_then(|s| s.chars().next())
++                    .map_or(0, char::len_utf8);
++                (site.offset, site.offset + len)
++            });
++            self.provenance.declarations.push(RouteDeclaration {
++                name: route.name.clone(),
++                location: Location::new(
++                    site.uri.clone(),
++                    Range::new(
++                        site.line_index.position(start),
++                        site.line_index.position(end),
++                    ),
++                ),
++            });
++        }
+         self.out.push(route);
+     }
+ 
+@@ -1281,6 +1319,7 @@ pub(crate) fn route_uri_parameters(uri: &str) -> Vec<&str> {
+ /// Follows `Route::group([], __DIR__ . '/sub.php')` file includes so
+ /// that routes in sub-files inherit the parent group's prefixes.
+ pub(crate) fn enumerate_all_routes(backend: &Backend) -> RouteDiscovery {
++    let mut provenance = RouteProvenance::default();
+     let mut routes = Vec::new();
+     let mut open_prefixes = Vec::new();
+     let mut open_suffixes = Vec::new();
+@@ -1321,6 +1360,7 @@ pub(crate) fn enumerate_all_routes(backend: &Backend) -> RouteDiscovery {
+             workspace_root.as_deref(),
+             &macros,
+             &mut RouteCollector {
++                provenance: &mut provenance,
+                 out: &mut routes,
+                 open_prefixes: &mut open_prefixes,
+                 open_suffixes: &mut open_suffixes,
+@@ -1349,6 +1389,7 @@ pub(crate) fn enumerate_all_routes(backend: &Backend) -> RouteDiscovery {
+                 workspace_root.as_deref(),
+                 &macros,
+                 &mut RouteCollector {
++                    provenance: &mut provenance,
+                     out: &mut routes,
+                     open_prefixes: &mut open_prefixes,
+                     open_suffixes: &mut open_suffixes,
+@@ -1387,7 +1428,47 @@ pub(crate) fn enumerate_all_routes(backend: &Backend) -> RouteDiscovery {
+     // `routes` is sorted by name and deduplicated, so the names come out
+     // sorted too.
+     let names: std::sync::Arc<[String]> = routes.iter().map(|route| route.name.clone()).collect();
++    // Included files and macros can revisit a physical declaration. A repeated
++    // visit is not another declaration. Keep different full group names distinct.
++    let mut declarations = provenance.declarations;
++    declarations.sort_by(|a, b| {
++        a.name
++            .cmp(&b.name)
++            .then_with(|| a.location.uri.as_str().cmp(b.location.uri.as_str()))
++            .then_with(|| {
++                a.location
++                    .range
++                    .start
++                    .line
++                    .cmp(&b.location.range.start.line)
++            })
++            .then_with(|| {
++                a.location
++                    .range
++                    .start
++                    .character
++                    .cmp(&b.location.range.start.character)
++            })
++    });
++    declarations.dedup_by(|a, b| a.name == b.name && a.location == b.location);
++    let mut declarations_by_uri: HashMap<String, Vec<usize>> = HashMap::new();
++    let mut duplicate_names: HashMap<String, Vec<usize>> = HashMap::new();
++    for (index, declaration) in declarations.iter().enumerate() {
++        declarations_by_uri
++            .entry(declaration.location.uri.to_string())
++            .or_default()
++            .push(index);
++        duplicate_names
++            .entry(declaration.name.clone())
++            .or_default()
++            .push(index);
++    }
++    duplicate_names.retain(|_, sites| sites.len() > 1);
+     RouteDiscovery {
++        declarations,
++        declarations_by_uri,
++        duplicate_names,
++        sources: provenance.sources,
+         routes,
+         names,
+         open_prefixes,
+@@ -1416,15 +1497,17 @@ fn walk_route_file(
+         open.borrow_mut()
+             .insert(path.canonicalize().unwrap_or_else(|_| path.to_path_buf()));
+     }
+-    in_parsed_route_file(content, b"input.php", |program| {
+-        let paths = ScanPaths::new(
+-            file_path.and_then(Path::parent),
+-            workspace_root,
+-            &open,
++    in_parsed_route_file(content, b"input.php", |program, resolved, line_index| {
++        let paths = ScanPaths {
++            dir: file_path.and_then(Path::parent),
++            root: workspace_root,
++            open: &open,
+             macros,
+             program,
++            resolved,
++            line_index,
+             uri,
+-        );
++        };
+ 
+         let mut scope = Scope::default();
+         for stmt in program.statements.iter() {
+@@ -1485,12 +1568,14 @@ fn walk_expr(
+     // A chain that registers a resource generates its whole route set here;
+     // none of the per-route handling below applies to it.
+     if let Some(registration) = resource_registration(expr, content)
+-        && group.chain_reaches_router(expr, content)
++        && group.chain_reaches_router(expr, content, paths.resolved)
+     {
+         push_resource_routes(
+             &registration,
+             group,
+             RouteSite {
++                line_index: paths.line_index,
++                complete: !group.unknowable,
+                 uri: paths.uri,
+                 content,
+                 offset: registration.name_offset,
+@@ -1542,7 +1627,7 @@ fn walk_expr(
+                 let leaf = leaf_route_name(mc, content, scope);
+                 if let Some(first_arg) = mc.argument_list.arguments.iter().next()
+                     && let Some(name_val) = &leaf.name
+-                    && group.chain_reaches_router(mc.object, content)
++                    && group.chain_reaches_router(mc.object, content, paths.resolved)
+                 {
+                     let full = format!("{}{name_val}", group.name);
+                     // Only collect leaf names (non-prefix names that don't end with '.').
+@@ -1570,6 +1655,8 @@ fn walk_expr(
+                                 from_vendor: false,
+                             },
+                             RouteSite {
++                                line_index: paths.line_index,
++                                complete: !group.unknowable,
+                                 uri: paths.uri,
+                                 content,
+                                 offset: name_offset(first_arg.value(), content),
+@@ -1591,7 +1678,7 @@ fn walk_expr(
+                 let full = format!("{}{registrar}", group.name);
+                 if !registrar.is_empty()
+                     && !full.ends_with('.')
+-                    && group.chain_reaches_router(mc.object, content)
++                    && group.chain_reaches_router(mc.object, content, paths.resolved)
+                 {
+                     if group.unknowable {
+                         sink.open_suffix(full.clone());
+@@ -1605,6 +1692,8 @@ fn walk_expr(
+                             from_vendor: false,
+                         },
+                         RouteSite {
++                            line_index: paths.line_index,
++                            complete: !group.unknowable,
+                             uri: paths.uri,
+                             content,
+                             offset: expr.span().start.offset as usize,
+@@ -1652,12 +1741,13 @@ fn walk_expr(
+                 // `Auth::routes()` registers nothing itself: the facade
+                 // forwards to the router's `auth` macro, which `laravel/ui`
+                 // ships as a mixin.
+-                let macro_name: &[u8] =
+-                    if method_lower == b"routes" && is_facade(sc.class, content, "Auth") {
+-                        b"auth"
+-                    } else {
+-                        ident.value
+-                    };
++                let macro_name: &[u8] = if method_lower == b"routes"
++                    && is_facade(sc.class, content, "Auth", paths.resolved)
++                {
++                    b"auth"
++                } else {
++                    ident.value
++                };
+                 walk_macro(macro_name, None, content, group, paths, sink);
+             }
+         }
+@@ -1695,16 +1785,26 @@ fn record_open_prefix(group_name: &str, head: &str, sink: &mut dyn RouteSink) {
+ 
+ /// Whether the subject of a static call spells the Laravel facade `facade`
+ /// (`Auth`, `Route`), by its short name or its full one.
+-fn is_facade(class: &Expression<'_>, content: &str, facade: &str) -> bool {
++fn is_facade(
++    class: &Expression<'_>,
++    content: &str,
++    facade: &str,
++    resolved: &mago_names::ResolvedNames<'_>,
++) -> bool {
+     let span = class.span();
+     let Some(text) = content.get(span.start.offset as usize..span.end.offset as usize) else {
+         return false;
+     };
+-    let text = text.trim_start_matches('\\');
+-    let short = text
+-        .strip_prefix("Illuminate\\Support\\Facades\\")
++    let text = resolved
++        .resolve(&span.start)
++        .map(bytes_to_str)
+         .unwrap_or(text);
+-    short.eq_ignore_ascii_case(facade)
++    let text = text.trim_start_matches('\\');
++    text.eq_ignore_ascii_case(facade)
++        || text.rsplit_once('\\').is_some_and(|(namespace, name)| {
++            namespace.eq_ignore_ascii_case("Illuminate\\Support\\Facades")
++                && name.eq_ignore_ascii_case(facade)
++        })
+ }
+ 
+ /// Collect the route names a call to the router macro `method` registers.
+@@ -1745,37 +1845,43 @@ fn walk_macro(
+         router_var: None,
+         this_is_router: true,
+     };
+-    in_parsed_route_file(&open.content, b"macro.php", |program| {
+-        let sub_paths = ScanPaths {
+-            dir: open.path.parent(),
+-            program,
+-            uri: &open.uri,
+-            ..paths
+-        };
++    in_parsed_route_file(
++        &open.content,
++        b"macro.php",
++        |program, resolved, line_index| {
++            let sub_paths = ScanPaths {
++                dir: open.path.parent(),
++                program,
++                resolved,
++                line_index,
++                uri: &open.uri,
++                ..paths
++            };
+ 
+-        // A macro closure is registered without a `use (...)` clause, so it
+-        // has no access to the caller's local variables; its body gets its own
+-        // scope.
+-        let mut scope = Scope::default();
+-        match macro_body_at(Node::Program(program), open.offset) {
+-            Some(MacroBody::Closure(closure)) => {
+-                for stmt in closure.body.statements.iter() {
+-                    walk_stmt(stmt, &open.content, inner, sub_paths, &mut scope, sink);
++            // A macro closure is registered without a `use (...)` clause, so it
++            // has no access to the caller's local variables; its body gets its own
++            // scope.
++            let mut scope = Scope::default();
++            match macro_body_at(Node::Program(program), open.offset) {
++                Some(MacroBody::Closure(closure)) => {
++                    for stmt in closure.body.statements.iter() {
++                        walk_stmt(stmt, &open.content, inner, sub_paths, &mut scope, sink);
++                    }
+                 }
++                Some(MacroBody::Arrow(arrow)) => {
++                    walk_expr(
++                        arrow.expression,
++                        &open.content,
++                        inner,
++                        sub_paths,
++                        &mut scope,
++                        sink,
++                    );
++                }
++                None => {}
+             }
+-            Some(MacroBody::Arrow(arrow)) => {
+-                walk_expr(
+-                    arrow.expression,
+-                    &open.content,
+-                    inner,
+-                    sub_paths,
+-                    &mut scope,
+-                    sink,
+-                );
+-            }
+-            None => {}
+-        }
+-    });
++        },
++    );
+     true
+ }
+ 
+@@ -1932,18 +2038,24 @@ fn walk_included_file(
+     };
+     let sub_uri = Url::from_file_path(&included.path).unwrap_or_else(|_| paths.uri.clone());
+ 
+-    in_parsed_route_file(&included.content, b"included.php", |program| {
+-        let sub_paths = ScanPaths {
+-            dir: included.path.parent(),
+-            program,
+-            uri: &sub_uri,
+-            ..paths
+-        };
++    in_parsed_route_file(
++        &included.content,
++        b"included.php",
++        |program, resolved, line_index| {
++            let sub_paths = ScanPaths {
++                dir: included.path.parent(),
++                program,
++                resolved,
++                line_index,
++                uri: &sub_uri,
++                ..paths
++            };
+ 
+-        for stmt in program.statements.iter() {
+-            walk_stmt(stmt, &included.content, group, sub_paths, scope, sink);
+-        }
+-    });
++            for stmt in program.statements.iter() {
++                walk_stmt(stmt, &included.content, group, sub_paths, scope, sink);
++            }
++        },
++    );
+ }
+ 
+ use super::helpers::{chain_uri_prefix, extract_uri_prefix_from_args, join_uri_segments};
+diff --git a/src/virtual_members/laravel/route_names_tests.rs b/src/virtual_members/laravel/route_names_tests.rs
+index ad3dd0f..390692f 100644
+--- a/src/virtual_members/laravel/route_names_tests.rs
++++ b/src/virtual_members/laravel/route_names_tests.rs
+@@ -45,6 +45,7 @@ fn routes_and_open_names(content: &str) -> (Vec<RouteEntry>, Vec<String>, Vec<St
+         None,
+         &MacroScope::default(),
+         &mut RouteCollector {
++            provenance: &mut RouteProvenance::default(),
+             out: &mut out,
+             open_prefixes: &mut open_prefixes,
+             open_suffixes: &mut open_suffixes,
+@@ -90,6 +91,7 @@ fn routes_with_macros(content: &str, macro_source: &str, names: &[&str]) -> Vec<
+         None,
+         &scope,
+         &mut RouteCollector {
++            provenance: &mut RouteProvenance::default(),
+             out: &mut out,
+             open_prefixes: &mut open_prefixes,
+             open_suffixes: &mut open_suffixes,
+@@ -773,6 +775,7 @@ fn routes_of_file(path: &Path, workspace_root: &Path) -> Vec<RouteEntry> {
+         Some(workspace_root),
+         &MacroScope::default(),
+         &mut RouteCollector {
++            provenance: &mut RouteProvenance::default(),
+             out: &mut out,
+             open_prefixes: &mut open_prefixes,
+             open_suffixes: &mut open_suffixes,
+diff --git a/tests/integration/laravel_route_duplicates.rs b/tests/integration/laravel_route_duplicates.rs
+new file mode 100644
+index 0000000..d6bbe6c
+--- /dev/null
++++ b/tests/integration/laravel_route_duplicates.rs
+@@ -0,0 +1,228 @@
++use crate::common::{LARAVEL_SRC_COMPOSER, create_initialized_psr4_workspace, open_php};
++use phpantom_lsp::Backend;
++use tower_lsp::{LanguageServer, lsp_types::*};
++
++fn duplicates(backend: &Backend, uri: &Url, source: &str) -> Vec<Diagnostic> {
++    let mut out = Vec::new();
++    backend.collect_slow_diagnostics(uri.as_str(), source, &mut out);
++    out.retain(|d| d.code == Some(NumberOrString::String("duplicate_laravel_route".into())));
++    out
++}
++
++async fn workspace(source: &str, other: &str) -> (Backend, tempfile::TempDir, Url) {
++    create_initialized_psr4_workspace(
++        LARAVEL_SRC_COMPOSER,
++        &[("routes/web.php", source), ("routes/api.php", other)],
++        "routes/web.php",
++    )
++    .await
++}
++
++#[tokio::test]
++async fn duplicate_route_names_have_exact_ranges_and_related_declarations() {
++    let source = "<?php\n// 🐘 žluťoučký\nRoute::get('/first', 'a')->name('same');\nRoute::get('/second', 'b')->name('same');\n";
++    let (backend, _dir, uri) = workspace(source, "<?php\n").await;
++    let out = duplicates(&backend, &uri, source);
++    assert_eq!(out.len(), 2, "{out:?}");
++    for (index, d) in out.iter().enumerate() {
++        assert_eq!(d.severity, Some(DiagnosticSeverity::WARNING));
++        assert_eq!(d.range.start.line, index as u32 + 2);
++        assert_eq!(d.range.end.character - d.range.start.character, 6);
++        assert!(d.message.contains("same"));
++        let related = d.related_information.as_ref().unwrap();
++        assert_eq!(related.len(), 1);
++        assert_eq!(related[0].location.uri, uri);
++        assert_ne!(related[0].location.range, d.range);
++    }
++}
++
++#[tokio::test]
++async fn duplicate_routes_cross_files_and_group_prefixes() {
++    let source = "<?php\nRoute::name('admin.')->group(function () { Route::get('/a', 'a')->name('home'); });\nRoute::get('/b', 'b')->name('home');\n";
++    let other = "<?php\nRoute::get('/c', 'c')->name('admin.home');\n";
++    let (backend, _dir, uri) = workspace(source, other).await;
++    let out = duplicates(&backend, &uri, source);
++    assert_eq!(out.len(), 1, "{out:?}");
++    assert!(out[0].message.contains("admin.home"));
++    let related = out[0].related_information.as_ref().unwrap();
++    assert_eq!(related.len(), 1);
++    assert!(
++        related[0]
++            .location
++            .uri
++            .as_str()
++            .ends_with("/routes/api.php")
++    );
++}
++
++#[tokio::test]
++async fn duplicate_resource_names_aggregate_per_declaration() {
++    let source = "<?php\nRoute::resource('posts', 'A');\nRoute::resource('posts', 'B');\n";
++    let (backend, _dir, uri) = workspace(source, "<?php\n").await;
++    let out = duplicates(&backend, &uri, source);
++    assert_eq!(out.len(), 2, "{out:?}");
++    for d in &out {
++        assert!(d.message.contains("posts.index"));
++        assert!(d.message.contains("posts.destroy"));
++        assert_eq!(d.related_information.as_ref().unwrap().len(), 1);
++    }
++}
++
++#[tokio::test]
++async fn dynamic_groups_and_unique_names_do_not_report_duplicates() {
++    let source = "<?php\nRoute::name($prefix)->group(function () { Route::get('/a', 'a')->name('same'); });\nRoute::get('/b', 'b')->name('same');\nRoute::get('/c', 'c')->name('different');\n";
++    let (backend, _dir, uri) = workspace(source, "<?php\n").await;
++    assert!(duplicates(&backend, &uri, source).is_empty());
++}
++
++#[tokio::test]
++async fn unsaved_cross_file_edit_adds_moves_and_removes_duplicate_warning() {
++    let source = "<?php\nRoute::get('/a', 'a')->name('same');\n";
++    let initial = "<?php\nRoute::get('/b', 'b')->name('other');\n";
++    let (backend, dir, uri) = workspace(source, initial).await;
++    assert!(duplicates(&backend, &uri, source).is_empty());
++    let other_uri = Url::from_file_path(dir.path().join("routes/api.php")).unwrap();
++    open_php(&backend, &other_uri, initial).await;
++    for (version, changed, expected, line) in [
++        (2, "<?php\nRoute::get('/b', 'b')->name('same');\n", 1, 1),
++        (
++            3,
++            "<?php\n// moved 🐘\n\nRoute::get('/b', 'b')->name('same');\n",
++            1,
++            3,
++        ),
++        (4, "<?php\n", 0, 0),
++    ] {
++        backend
++            .did_change(DidChangeTextDocumentParams {
++                text_document: VersionedTextDocumentIdentifier {
++                    uri: other_uri.clone(),
++                    version,
++                },
++                content_changes: vec![TextDocumentContentChangeEvent {
++                    range: None,
++                    range_length: None,
++                    text: changed.into(),
++                }],
++            })
++            .await;
++        backend.update_ast(other_uri.as_str(), changed);
++        let out = duplicates(&backend, &uri, source);
++        assert_eq!(out.len(), expected, "version {version}: {out:?}");
++        if expected > 0 {
++            assert_eq!(
++                out[0].related_information.as_ref().unwrap()[0]
++                    .location
++                    .range
++                    .start
++                    .line,
++                line
++            );
++        }
++    }
++    assert_eq!(
++        std::fs::read_to_string(dir.path().join("routes/api.php")).unwrap(),
++        initial
++    );
++}
++
++#[tokio::test]
++async fn unrelated_route_class_in_laravel_project_is_not_a_route_declaration() {
++    let source = "<?php\nuse App\\Route;\nRoute::get('/a', 'a')->name('same');\nRoute::get('/b', 'b')->name('same');\n";
++    let (backend, _dir, uri) = workspace(source, "<?php\n").await;
++    assert!(duplicates(&backend, &uri, source).is_empty());
++}
++
++#[tokio::test]
++async fn imported_route_facade_alias_keeps_route_identity() {
++    let source = "<?php\nuse Illuminate\\Support\\Facades\\Route as Routes;\nRoutes::get('/a', 'a')->name('same');\nRoutes::get('/b', 'b')->name('same');\n";
++    let (backend, _dir, uri) = workspace(source, "<?php\n").await;
++    assert_eq!(duplicates(&backend, &uri, source).len(), 2);
++}
++
++#[tokio::test]
++async fn non_laravel_route_shaped_calls_do_not_get_framework_diagnostics() {
++    let source =
++        "<?php\nRoute::get('/a', 'a')->name('same');\nRoute::get('/b', 'b')->name('same');\n";
++    let (backend, _dir, uri) =
++        create_initialized_psr4_workspace("{}", &[("routes/web.php", source)], "routes/web.php")
++            .await;
++    assert!(duplicates(&backend, &uri, source).is_empty());
++}
++
++#[tokio::test]
++async fn repeated_include_is_one_static_declaration_site() {
++    let source = "<?php\nRoute::group([], __DIR__ . '/sub/one.php');\nRoute::group([], __DIR__ . '/sub/one.php');\n";
++    let (backend, _dir, uri) = create_initialized_psr4_workspace(
++        LARAVEL_SRC_COMPOSER,
++        &[
++            ("routes/web.php", source),
++            (
++                "routes/sub/one.php",
++                "<?php Route::get('/a', 'a')->name('same');",
++            ),
++        ],
++        "routes/web.php",
++    )
++    .await;
++    assert!(duplicates(&backend, &uri, source).is_empty());
++}
++
++#[tokio::test]
++async fn utf16_duplicate_declaration_ranges_and_stale_input_guard() {
++    let source = "<?php\n/* 🐘 */ Route::get('/a', 'a')->name('same'); Route::get('/b', 'b')->name('same');\n";
++    let (backend, _dir, uri) = workspace(source, "<?php\n").await;
++    let out = duplicates(&backend, &uri, source);
++    assert_eq!(out.len(), 2);
++    let line = source.lines().nth(1).unwrap();
++    assert_eq!(
++        out[0].range.start.character,
++        line[..line.find("'same'").unwrap()].encode_utf16().count() as u32
++    );
++    assert!(
++        duplicates(
++            &backend,
++            &uri,
++            &source.replace("/* 🐘 */", "/* moved 🐘 */")
++        )
++        .is_empty()
++    );
++}
++
++#[tokio::test]
++async fn fully_qualified_facade_is_case_insensitive() {
++    let source = "<?php\n\\illuminate\\support\\facades\\route::get('/a', 'a')->name('same');\n\\Illuminate\\Support\\Facades\\Route::get('/b', 'b')->name('same');\n";
++    let (backend, _dir, uri) = workspace(source, "<?php\n").await;
++    assert_eq!(duplicates(&backend, &uri, source).len(), 2);
++}
++
++#[tokio::test]
++async fn included_declaration_is_not_duplicated_by_repeated_discovery() {
++    let source = "<?php\nRoute::group([], __DIR__ . '/sub/one.php');\nRoute::group([], __DIR__ . '/sub/one.php');\n";
++    let child = "<?php Route::get('/a', 'a')->name('same');";
++    let (backend, dir, _) = create_initialized_psr4_workspace(
++        LARAVEL_SRC_COMPOSER,
++        &[("routes/web.php", source), ("routes/sub/one.php", child)],
++        "routes/web.php",
++    )
++    .await;
++    let uri = Url::from_file_path(dir.path().join("routes/sub/one.php")).unwrap();
++    open_php(&backend, &uri, child).await;
++    assert!(duplicates(&backend, &uri, child).is_empty());
++}
++
++#[tokio::test]
++async fn many_duplicates_bound_related_information() {
++    let mut source = "<?php\n".to_owned();
++    for n in 0..20 {
++        source.push_str(&format!("Route::get('/{n}', 'a')->name('same');\n"));
++    }
++    let (backend, _dir, uri) = workspace(&source, "<?php\n").await;
++    let out = duplicates(&backend, &uri, &source);
++    assert_eq!(out.len(), 20);
++    for d in out {
++        let related = d.related_information.unwrap();
++        assert_eq!(related.len(), 16);
++        assert!(!related.iter().any(|r| r.location.range == d.range));
++    }
++}
+diff --git a/tests/integration/main.rs b/tests/integration/main.rs
+index 2ac6a7b..90dfe90 100644
+--- a/tests/integration/main.rs
++++ b/tests/integration/main.rs
+@@ -206,6 +206,7 @@ mod laravel_request_input;
+ mod laravel_request_keys;
+ mod laravel_route_controller;
+ mod laravel_route_discovery;
++mod laravel_route_duplicates;
+ mod laravel_route_folio;
+ mod laravel_route_macros;
+ mod laravel_route_names;

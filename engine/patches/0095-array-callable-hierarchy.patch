@@ -1,0 +1,2253 @@
+diff --git a/docs/CHANGELOG.md b/docs/CHANGELOG.md
+index 2cf3e18..7c23e81 100644
+--- a/docs/CHANGELOG.md
++++ b/docs/CHANGELOG.md
+@@ -15,6 +15,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
+ 
+ ## [Unreleased]
+ 
++- **Follow literal array callbacks accurately.** Call hierarchy resolves known class names, object receivers and keyed arrays at their exact method selectors, respecting the selected PHP version and method visibility. Late-bound class names keep overridable implementations unresolved. Contributed by PHP Workbench downstream.
++
+ - **Open type hierarchy after declaration navigation.** Class, interface, trait and enum keywords identify their exact declared type, including read-only built-in source. Contributed by PHP Workbench downstream.
+ 
+ - **Keep built-in navigation consistent.** Call hierarchy and declaration tabs retain the selected PHP version’s signatures and source locations after other files are opened. Embedded declarations remain read-only. Contributed by PHP Workbench downstream.
+diff --git a/examples/php/definition.php b/examples/php/definition.php
+index 3f3536e..6636d76 100644
+--- a/examples/php/definition.php
++++ b/examples/php/definition.php
+@@ -486,3 +486,18 @@ function builtinTypeHierarchyNavigation(): \RuntimeException
+ {
+     return new \RuntimeException('Hierarchy navigation example');
+ }
++
++// Try: Show Callees on arrayCallableNavigation, then follow each selector.
++// Runtime class strings keep their full name; keyed/spread arrays use their
++// final two slots, and an immediately created object keeps its own method.
++function arrayCallableNavigation(): void
++{
++    ([1 => B'ping', 0 => 'Demo\LiteralCallableNavigationTarget'])();
++    ([...[LiteralCallableNavigationTarget::class, 'missing'], 1 => ('ping')])();
++    ([new class {
++        public function label(): void
++        {
++            gtdHelper();
++        }
++    }, 'label'])();
++}
+diff --git a/src/call_hierarchy.rs b/src/call_hierarchy.rs
+index 1a52ad3..6fe660b 100644
+--- a/src/call_hierarchy.rs
++++ b/src/call_hierarchy.rs
+@@ -21,12 +21,13 @@ use tower_lsp::lsp_types::{
+ 
+ use crate::Backend;
+ use crate::symbol_map::{
+-    AnonymousCallable, AnonymousClassConstruction, CallExecutionOwner, ClassRefContext,
+-    ImmediateObjectInvocation, ImmediateObjectReceiver, LiteralCallableInvocation, SymbolKind,
+-    SymbolMap, SymbolSpan,
++    AnonymousCallable, AnonymousClassConstruction, ArrayCallableInvocation, CallExecutionOwner,
++    ClassRefContext, ImmediateObjectInvocation, ImmediateObjectReceiver, LiteralCallableInvocation,
++    SymbolKind, SymbolMap, SymbolSpan,
+ };
+ use crate::text_position::{byte_range_to_lsp_range, offset_to_position, position_to_offset};
+-use crate::types::{ClassInfo, FunctionInfo, MethodInfo};
++use crate::type_engine::resolver::CtxLoaders;
++use crate::types::{AccessKind, ClassInfo, FunctionInfo, MethodInfo};
+ 
+ #[derive(Clone, Copy)]
+ struct SyntacticCallSite {
+@@ -320,17 +321,33 @@ impl Backend {
+         // Generic references intentionally do not interpret runtime string names.
+         // Only callable targets can match these records; ordinary fields never scan.
+         let literal_target = target.item.data.as_ref().is_some_and(|data| {
+-            data.get("function").is_some()
+-                || data
+-                    .get("owner")
+-                    .and_then(|owner| owner.as_str())
+-                    .and_then(|owner| self.find_or_load_class(owner))
+-                    .is_some_and(|owner| {
+-                        data.get("method")
+-                            .and_then(|method| method.as_str())
+-                            .and_then(|method| owner.get_method(method))
+-                            .is_some_and(|method| method.is_static)
+-                    })
++            if data.get("function").is_some() {
++                return true;
++            }
++            let (Some(owner), Some(name), Some(offset)) = (
++                data.get("owner").and_then(|owner| owner.as_str()),
++                data.get("method").and_then(|method| method.as_str()),
++                data.get("offset").and_then(|offset| offset.as_u64()),
++            ) else {
++                return false;
++            };
++            // Test the already validated source declaration, not a receiver's
++            // alias or inherited surface. Drop the index lock before loading.
++            let class = self
++                .symbols
++                .uri_classes_index
++                .read()
++                .get(target.item.uri.as_str())
++                .and_then(|classes| classes.iter().find(|class| class.fqn().as_str() == owner))
++                .cloned();
++            class.is_some_and(|class| {
++                class.methods.iter().any(|method| {
++                    u64::from(method.name_offset) == offset
++                        && method.name.eq_ignore_ascii_case(name)
++                        && !method.is_abstract
++                        && self.runtime_class_callable_method(&class, method)
++                })
++            })
+         });
+         if literal_target {
+             for (uri, _) in self
+@@ -366,10 +383,58 @@ impl Backend {
+             }
+         }
+ 
++        if target
++            .item
++            .data
++            .as_ref()
++            .is_some_and(|data| data.get("method").is_some())
++        {
++            for (uri, _) in self
++                .user_file_symbol_maps()
++                .into_iter()
++                .filter(|(_, map)| !map.array_callable_invocations.is_empty())
++            {
++                let Some((content, map, Some(hash))) = self.cached_file(&mut cache, &uri) else {
++                    continue;
++                };
++                for site in &map.array_callable_invocations {
++                    if !self
++                        .array_callables(&mut cache, &uri, &content, &map, site)
++                        .iter()
++                        .any(|callee| php_item_key(&callee.item) == php_item_key(&target.item))
++                    {
++                        continue;
++                    }
++                    let Some(caller) =
++                        self.array_callable_caller(&mut cache, &uri, &content, &map, &hash, site)
++                    else {
++                        continue;
++                    };
++                    let range = byte_range_to_lsp_range(
++                        &content,
++                        site.selector_start as usize,
++                        site.selector_end as usize,
++                    );
++                    grouped
++                        .entry(php_item_key(&caller.item))
++                        .and_modify(|(_, ranges)| push_unique_range(ranges, range))
++                        .or_insert_with(|| (caller.item, vec![range]));
++                }
++            }
++        }
++
+         let mut calls: Vec<_> = grouped
+             .into_values()
+             .map(|(mut from, mut from_ranges)| {
+                 self.translate_ranges_to_blade(from.uri.as_str(), &mut from_ranges);
++                from_ranges.sort_unstable_by_key(|range| {
++                    (
++                        range.start.line,
++                        range.start.character,
++                        range.end.line,
++                        range.end.character,
++                    )
++                });
+                 self.translate_item_to_blade(&mut from);
+                 CallHierarchyIncomingCall { from, from_ranges }
+             })
+@@ -580,6 +645,30 @@ impl Backend {
+             }
+         }
+ 
++        if let Some(hash) = source_hash.as_ref() {
++            for site in &symbol_map.array_callable_invocations {
++                let Some(caller) =
++                    self.array_callable_caller(&mut cache, uri, &content, &symbol_map, hash, site)
++                else {
++                    continue;
++                };
++                if php_item_key(&caller.item) != php_item_key(&callable.item) {
++                    continue;
++                }
++                let range = byte_range_to_lsp_range(
++                    &content,
++                    site.selector_start as usize,
++                    site.selector_end as usize,
++                );
++                for callee in self.array_callables(&mut cache, uri, &content, &symbol_map, site) {
++                    grouped
++                        .entry(php_item_key(&callee.item))
++                        .and_modify(|(_, ranges)| push_unique_range(ranges, range))
++                        .or_insert_with(|| (callee.item, vec![range]));
++                }
++            }
++        }
++
+         let mut calls: Vec<_> = grouped
+             .into_values()
+             .map(|(mut to, mut from_ranges)| {
+@@ -587,6 +676,14 @@ impl Backend {
+                 // inspected, not in the callee's file.
+                 self.translate_ranges_to_blade(uri, &mut from_ranges);
+                 self.translate_item_to_blade(&mut to);
++                from_ranges.sort_unstable_by_key(|range| {
++                    (
++                        range.start.line,
++                        range.start.character,
++                        range.end.line,
++                        range.end.character,
++                    )
++                });
+                 CallHierarchyOutgoingCall { to, from_ranges }
+             })
+             .collect();
+@@ -769,7 +866,8 @@ impl Backend {
+             || !symbol_map.anonymous_class_constructions.is_empty()
+             || !symbol_map.immediate_object_invocations.is_empty()
+             || !symbol_map.literal_callable_invocations.is_empty()
+-            || !symbol_map.literal_method_selectors.is_empty())
++            || !symbol_map.literal_method_selectors.is_empty()
++            || !symbol_map.array_callable_invocations.is_empty())
+             && source_hash.is_none()
+         {
+             return None;
+@@ -1139,6 +1237,266 @@ impl Backend {
+         )
+     }
+ 
++    fn array_callable_caller(
++        &self,
++        cache: &mut FileCache,
++        uri: &str,
++        content: &str,
++        map: &SymbolMap,
++        hash: &[u8; 32],
++        site: &ArrayCallableInvocation,
++    ) -> Option<PhpCallable> {
++        if let Some(receiver) = &site.allocation {
++            let start = match receiver {
++                ImmediateObjectReceiver::Instantiation { operand_start, .. } => *operand_start,
++                ImmediateObjectReceiver::AnonymousClass { keyword_start, .. } => *keyword_start,
++            };
++            if matches!(
++                map.call_execution_owner(start),
++                Some(CallExecutionOwner::Deferred)
++            ) {
++                return None;
++            }
++        }
++        self.syntactic_call_site_caller(
++            cache,
++            uri,
++            content,
++            map,
++            hash,
++            SyntacticCallSite {
++                start: site.invocation_start,
++                end: site.invocation_end,
++                scope: site.invoking_scope_start,
++            },
++        )
++    }
++
++    fn array_callables(
++        &self,
++        cache: &mut FileCache,
++        uri: &str,
++        content: &str,
++        map: &SymbolMap,
++        site: &ArrayCallableInvocation,
++    ) -> Vec<PhpCallable> {
++        if site.php80.is_some_and(|php80| {
++            php80 != (self.php_version() >= crate::types::PhpVersion::new(8, 0))
++        }) {
++            return Vec::new();
++        }
++        let Some(source) = map.source(content) else {
++            return Vec::new();
++        };
++        let subject = site.subject_text.as_str(source);
++        let member_name = &site.member_name;
++        let is_static = site.is_static;
++        let ctx = self.file_context_at(uri, site.invocation_start);
++        let lexical =
++            crate::class_lookup::find_class_at_offset(&ctx.classes, site.invocation_start);
++        let class_loader = self.class_loader(&ctx);
++        let function_loader = self.function_loader(&ctx);
++        let macro_this = self.laravel_macro_this_resolver(&class_loader);
++        let mut rctx = self.resolution_ctx_at(
++            lexical,
++            &ctx.classes,
++            content,
++            site.invocation_start,
++            CtxLoaders::new(&class_loader, &function_loader, &macro_this),
++        );
++        rctx.is_in_static_method = map.is_in_static_method(site.invocation_start);
++        let mut candidates = Vec::new();
++        if let Some(receiver) = &site.allocation {
++            let Some((class, late_static)) =
++                self.immediate_object_receiver_class(uri, map, receiver, site.invocation_start)
++            else {
++                return Vec::new();
++            };
++            candidates.push((class, false, late_static));
++        } else {
++            let resolved = crate::type_engine::resolver::resolve_target_classes(
++                subject,
++                if is_static {
++                    AccessKind::DoubleColon
++                } else {
++                    AccessKind::Arrow
++                },
++                &rctx,
++            );
++            for value in resolved {
++                for ty in value.type_string.unwrap_nullable().union_members() {
++                    match ty.kind() {
++                        crate::php_type::TypeKind::ClassString(_) => {
++                            if let Some(name) = ty.as_class_name_literal() {
++                                if let Some(class) = self.find_or_load_class(name) {
++                                    candidates.push((class, true, false));
++                                }
++                            } else if let Some(class) = &value.class_info {
++                                candidates.push((
++                                    Arc::clone(class),
++                                    true,
++                                    ty.as_class_name_literal().is_none(),
++                                ));
++                            } else {
++                                for class in
++                                    crate::type_engine::resolver::resolve_class_string_inner_classes(
++                                        ty,
++                                        lexical.map_or("", |class| class.name.as_str()),
++                                        &ctx.classes,
++                                        &class_loader,
++                                    )
++                                {
++                                    candidates.push((
++                                        class,
++                                        true,
++                                        ty.as_class_name_literal().is_none(),
++                                    ));
++                                }
++                            }
++                        }
++                        crate::php_type::TypeKind::Literal(literal) => {
++                            if let crate::php_type::LiteralValue::String(raw) = &**literal
++                                && let Some(name) = crate::util::unescape_php_string_literal(raw)
++                                && let Some(class) =
++                                    self.find_or_load_class(name.trim_start_matches('\\'))
++                                && class
++                                    .fqn()
++                                    .eq_ignore_ascii_case(name.trim_start_matches('\\'))
++                            {
++                                candidates.push((class, true, false));
++                            }
++                        }
++                        _ if !ty.is_scalar() => {
++                            if let Some(class) = &value.class_info {
++                                candidates.push((
++                                    Arc::clone(class),
++                                    is_static,
++                                    is_static && subject.eq_ignore_ascii_case("static"),
++                                ));
++                            }
++                        }
++                        _ => {}
++                    }
++                }
++            }
++        }
++        let loader = |name: &str| self.find_or_load_class(name);
++        let mut callees = Vec::new();
++        for (candidate, require_static, late_static) in candidates {
++            // Shared expression resolution may carry merged/virtual surfaces.
++            // Concrete ownership must start from the actual parsed declaration.
++            let class = ctx
++                .classes
++                .iter()
++                .find(|class| class.fqn().eq_ignore_ascii_case(&candidate.fqn()))
++                .cloned()
++                .or_else(|| self.find_or_load_class(&candidate.fqn()));
++            let Some(class) = class else {
++                continue;
++            };
++            if !matches!(
++                class.kind,
++                crate::types::ClassLikeKind::Class
++                    | crate::types::ClassLikeKind::Enum
++                    | crate::types::ClassLikeKind::Trait
++            ) {
++                continue;
++            }
++            let crate::inheritance::ancestry::MethodOrigin::Known { owner, method } =
++                crate::inheritance::ancestry::resolve_concrete_method_origin(
++                    &class,
++                    member_name,
++                    &loader,
++                )
++            else {
++                continue;
++            };
++            if method.is_abstract
++                || (require_static && !self.runtime_class_callable_method(&owner, &method))
++            {
++                continue;
++            }
++            let effective = Arc::new(crate::inheritance::resolve_class_with_inheritance(
++                &class, &loader,
++            ));
++            let public = effective
++                .get_method(member_name)
++                .is_some_and(|method| method.visibility == crate::types::Visibility::Public);
++            if !public
++                && (class.kind == crate::types::ClassLikeKind::Trait
++                    || lexical
++                        .is_some_and(|scope| scope.kind == crate::types::ClassLikeKind::Trait))
++            {
++                continue;
++            }
++            if matches!(
++                crate::diagnostics::member_visibility::array_callable_access_verdict(
++                    &effective,
++                    member_name,
++                    require_static,
++                    lexical,
++                    matches!(subject, "$this" | "self" | "static"),
++                    &loader,
++                ),
++                crate::diagnostics::member_visibility::MemberAccessVerdict::Inaccessible(_)
++            ) {
++                continue;
++            }
++            if let Some(callee) =
++                self.concrete_method_callable(cache, uri, &class, member_name, late_static)
++                && !callees.iter().any(|existing: &PhpCallable| {
++                    php_item_key(&existing.item) == php_item_key(&callee.item)
++                })
++            {
++                callees.push(callee);
++            }
++        }
++        callees
++    }
++
++    /// PHP 7 permits deprecated static calls only for user methods compiled
++    /// with ALLOW_STATIC. Internal and special magic methods lack that flag.
++    fn runtime_class_callable_method(&self, owner: &Arc<ClassInfo>, method: &MethodInfo) -> bool {
++        if method.is_static {
++            return true;
++        }
++        if self.php_version() >= crate::types::PhpVersion::new(8, 0) {
++            return false;
++        }
++        let special = |name: &str| {
++            [
++                "__construct",
++                "__destruct",
++                "__clone",
++                "__call",
++                "__callStatic",
++                "__get",
++                "__set",
++                "__unset",
++                "__isset",
++                "__toString",
++                "__invoke",
++                "__debugInfo",
++            ]
++            .iter()
++            .any(|special| name.eq_ignore_ascii_case(special))
++        };
++        if special(&method.name) {
++            return false;
++        }
++        // The old global-class constructor spelling was also excluded by the
++        // compiler, including a same-named method beside an explicit constructor.
++        if owner.kind != crate::types::ClassLikeKind::Trait
++            && owner.file_namespace.as_deref().is_none_or(str::is_empty)
++            && method.name.eq_ignore_ascii_case(&owner.name)
++        {
++            return false;
++        }
++        self.find_class_file_uri_for_fqn(&owner.fqn())
++            .and_then(|uri| Url::parse(&uri).ok())
++            .is_some_and(|uri| uri.scheme() == "file")
++    }
++
+     /// Runtime string names are absolute, including bare names inside namespaces.
+     fn literal_callable(
+         &self,
+@@ -1178,7 +1536,7 @@ impl Backend {
+             return None;
+         }
+         let loader = |name: &str| self.find_or_load_class(name);
+-        let crate::inheritance::ancestry::MethodOrigin::Known { method, .. } =
++        let crate::inheritance::ancestry::MethodOrigin::Known { owner, method } =
+             crate::inheritance::ancestry::resolve_concrete_method_origin(
+                 &class,
+                 method_name,
+@@ -1187,7 +1545,7 @@ impl Backend {
+         else {
+             return None;
+         };
+-        if !method.is_static || method.is_abstract {
++        if method.is_abstract || !self.runtime_class_callable_method(&owner, &method) {
+             return None;
+         }
+         let effective = Arc::new(crate::inheritance::resolve_class_with_inheritance(
+@@ -1240,7 +1598,19 @@ impl Backend {
+         map: &SymbolMap,
+         site: &ImmediateObjectInvocation,
+     ) -> Option<PhpCallable> {
+-        let (class, late_static) = match site.receiver {
++        let (class, late_static) =
++            self.immediate_object_receiver_class(uri, map, &site.receiver, site.invocation_start)?;
++        self.concrete_method_callable(cache, uri, &class, "__invoke", late_static)
++    }
++
++    fn immediate_object_receiver_class(
++        &self,
++        uri: &str,
++        map: &SymbolMap,
++        receiver: &ImmediateObjectReceiver,
++        invocation_start: u32,
++    ) -> Option<(Arc<ClassInfo>, bool)> {
++        let (class, late_static) = match *receiver {
+             ImmediateObjectReceiver::Instantiation {
+                 operand_start,
+                 operand_end,
+@@ -1298,11 +1668,11 @@ impl Backend {
+         // Exact named/self/parent/anonymous allocation cannot instantiate an
+         // abstract class. Late static may allocate a concrete runtime subclass.
+         if (!late_static || class.is_final)
+-            && !self.literal_allocation_permitted(uri, site.invocation_start, &class)
++            && !self.literal_allocation_permitted(uri, invocation_start, &class)
+         {
+             return None;
+         }
+-        self.concrete_method_callable(cache, uri, &class, "__invoke", late_static)
++        Some((class, late_static))
+     }
+ 
+     fn literal_allocation_permitted(&self, uri: &str, offset: u32, class: &Arc<ClassInfo>) -> bool {
+@@ -1415,7 +1785,8 @@ impl Backend {
+                 || !symbol_map.anonymous_class_constructions.is_empty()
+                 || !symbol_map.immediate_object_invocations.is_empty()
+                 || !symbol_map.literal_callable_invocations.is_empty()
+-                || !symbol_map.literal_method_selectors.is_empty())
++                || !symbol_map.literal_method_selectors.is_empty()
++                || !symbol_map.array_callable_invocations.is_empty())
+                 && source_hash.is_none()
+             {
+                 return None;
+diff --git a/src/diagnostics/member_visibility.rs b/src/diagnostics/member_visibility.rs
+index 7fe0a15..d906746 100644
+--- a/src/diagnostics/member_visibility.rs
++++ b/src/diagnostics/member_visibility.rs
+@@ -69,7 +69,6 @@
+ use std::sync::Arc;
+ 
+ use super::member_lookup::{MemberKind, declared_member, display_class_name};
+-use crate::atom::Atom;
+ use crate::class_lookup::is_subtype_of;
+ use crate::inheritance::{ancestors, resolve_class_with_inheritance};
+ use crate::types::{ClassInfo, ClassLikeKind, Visibility};
+@@ -226,6 +225,28 @@ pub(crate) fn literal_static_access_verdict(
+     )
+ }
+ 
++/// Invoked array callables reach an existing concrete method; magic handlers
++/// must not make an inaccessible named implementation appear to execute.
++pub(crate) fn array_callable_access_verdict(
++    merged: &Arc<ClassInfo>,
++    method: &str,
++    is_static: bool,
++    current_class: Option<&ClassInfo>,
++    subject_binds_scope: bool,
++    class_loader: &dyn Fn(&str) -> Option<Arc<ClassInfo>>,
++) -> MemberAccessVerdict {
++    member_access_verdict_inner(
++        std::slice::from_ref(merged),
++        method,
++        is_static,
++        true,
++        current_class,
++        subject_binds_scope,
++        class_loader,
++        false,
++    )
++}
++
+ // Keep policy centralized rather than duplicate trait/private-ancestor rules.
+ #[allow(clippy::too_many_arguments)]
+ fn member_access_verdict_inner(
+@@ -447,26 +468,22 @@ fn declaring_class(
+         // is the scope it belongs to.
+         Restriction::Private => {
+             if declared_member(&raw, member_name, is_static, is_method_call).is_some()
+-                || declares_through_own_traits(
+-                    &raw,
+-                    member_name,
+-                    is_static,
+-                    is_method_call,
+-                    class_loader,
+-                )
++                || composed_trait_member(&raw, member_name, is_static, is_method_call, class_loader)
++                    .is_some()
+             {
+                 return Some(raw);
+             }
+             ancestors(&raw, class_loader)
+                 .map(|(_, ancestor)| ancestor)
+                 .find(|ancestor| {
+-                    declares_through_own_traits(
++                    composed_trait_member(
+                         ancestor,
+                         member_name,
+                         is_static,
+                         is_method_call,
+                         class_loader,
+                     )
++                    .is_some()
+                 })
+         }
+         // A protected member is visible to everything below the class
+@@ -495,29 +512,30 @@ fn declaring_class(
+     }
+ }
+ 
+-/// Whether one level of the hierarchy supplies the member through a
+-/// trait it uses.
+-fn declares_through_own_traits(
++/// A member introduced by this level's complete trait composition. Keep
++/// parents/interfaces out of the surface so inherited aliases cannot acquire
++/// a new declaring scope on the child. Canonical composition applies nested
++/// aliases, visibility adaptations and precedence before provenance is judged.
++fn composed_trait_member(
+     class: &ClassInfo,
+     member_name: &str,
+     is_static: bool,
+     is_method_call: bool,
+     class_loader: &dyn Fn(&str) -> Option<Arc<ClassInfo>>,
+-) -> bool {
+-    class.used_traits.iter().any(|trait_name| {
+-        trait_declares(
+-            trait_name,
+-            member_name,
+-            is_static,
+-            is_method_call,
+-            class_loader,
+-        )
+-        .is_some()
+-    })
++) -> Option<(Visibility, MemberKind)> {
++    if class.used_traits.is_empty()
++        || declared_member(class, member_name, is_static, is_method_call).is_some()
++    {
++        return None;
++    }
++    let mut own = class.clone();
++    own.parent_class = None;
++    own.interfaces.clear();
++    let composed = resolve_class_with_inheritance(&own, class_loader);
++    declared_member(&composed, member_name, is_static, is_method_call)
+ }
+ 
+-/// Whether one level of the hierarchy declares the member — itself or
+-/// through a trait — with something other than `private`.
++/// Whether one level introduces a member with nonprivate effective visibility.
+ fn declares_non_privately(
+     class: &ClassInfo,
+     member_name: &str,
+@@ -525,52 +543,11 @@ fn declares_non_privately(
+     is_method_call: bool,
+     class_loader: &dyn Fn(&str) -> Option<Arc<ClassInfo>>,
+ ) -> bool {
+-    if let Some((visibility, _)) = declared_member(class, member_name, is_static, is_method_call) {
+-        return visibility != Visibility::Private;
+-    }
+-    class.used_traits.iter().any(|trait_name| {
+-        trait_declares(
+-            trait_name,
+-            member_name,
+-            is_static,
+-            is_method_call,
+-            class_loader,
+-        )
+-        .is_some_and(|visibility| visibility != Visibility::Private)
+-    })
+-}
+-
+-/// The visibility a trait supplies the member with, following the `use`
+-/// clauses of the trait itself.
+-///
+-/// A trait composes other traits the same way a class does, and PHP
+-/// counts a member reached that way as introduced by whichever class
+-/// uses the outermost trait.  Stopping at the first level would leave a
+-/// protected member of a nested trait untraceable, and the introducer
+-/// would then be read off a *nearer* redeclaration — which reports an
+-/// access PHP allows.
+-///
+-/// Adaptations are not followed: a `use` clause that renames or
+-/// re-scopes what it imports leaves no trace in the trait it imports
+-/// from, so such a member is simply not found here — which costs a
+-/// report rather than inventing one.
+-fn trait_declares(
+-    trait_name: &Atom,
+-    member_name: &str,
+-    is_static: bool,
+-    is_method_call: bool,
+-    class_loader: &dyn Fn(&str) -> Option<Arc<ClassInfo>>,
+-) -> Option<Visibility> {
+-    let declares = |class: &ClassInfo| {
+-        declared_member(class, member_name, is_static, is_method_call).is_some()
+-    };
+-    let (_, declaring) = crate::inheritance::ancestry::find_declaring_trait(
+-        std::slice::from_ref(trait_name),
+-        class_loader,
+-        &declares,
+-    )?;
+-    declared_member(&declaring, member_name, is_static, is_method_call)
+-        .map(|(visibility, _)| visibility)
++    declared_member(class, member_name, is_static, is_method_call)
++        .or_else(|| {
++            composed_trait_member(class, member_name, is_static, is_method_call, class_loader)
++        })
++        .is_some_and(|(visibility, _)| visibility != Visibility::Private)
+ }
+ 
+ /// Find a private member on an ancestor, which the inheritance merge
+diff --git a/src/resolution.rs b/src/resolution.rs
+index 41465cf..fb8aef3 100644
+--- a/src/resolution.rs
++++ b/src/resolution.rs
+@@ -1633,8 +1633,12 @@ impl Backend {
+             // backslash for the direct FQN lookups below.
+             let has_leading_backslash = name.starts_with('\\');
+             let stripped = name.strip_prefix('\\').unwrap_or(name);
+-            if !has_leading_backslash
+-                && !stripped.contains('\\')
++            if has_leading_backslash {
++                // Known runtime class aliases belong to the absolute lookup;
++                // lexical imports and qualified-to-short fallbacks do not.
++                return self.find_or_load_class(stripped);
++            }
++            if !stripped.contains('\\')
+                 && let Some(fqn) = use_map.get(stripped)
+                 && let Some(cls) = self.find_or_load_class(fqn)
+             {
+diff --git a/src/symbol_map/extraction/expressions/calls.rs b/src/symbol_map/extraction/expressions/calls.rs
+index c433127..9e296b5 100644
+--- a/src/symbol_map/extraction/expressions/calls.rs
++++ b/src/symbol_map/extraction/expressions/calls.rs
+@@ -25,44 +25,14 @@ fn known_method_selector<'a>(
+     let ClassLikeMemberSelector::Expression(selector) = selector else {
+         return None;
+     };
+-    let mut expression = selector.expression;
+-    while let Expression::Parenthesized(parenthesized) = expression {
+-        expression = parenthesized.expression;
+-    }
+-    let Expression::Literal(literal::Literal::String(literal)) = expression else {
+-        return None;
++    let site = method_literal(selector.expression, ctx.content)?;
++    let selector = KnownMethodSelector {
++        name: site.name,
++        start: site.start,
++        end: site.end,
+     };
+-    let name = literal.value.and_then(literal_bytes_to_str)?;
+-    if name.is_empty() {
+-        return None;
+-    }
+-    let raw = ctx
+-        .content
+-        .get(literal.span.start.offset as usize..literal.span.end.offset as usize)?;
+-    let bytes = raw.as_bytes();
+-    let (prefix_len, quote) = match bytes {
+-        [quote @ (b'\'' | b'"'), ..] => (1, *quote),
+-        [b'b' | b'B', quote @ (b'\'' | b'"'), ..] => (2, *quote),
+-        _ => return None,
+-    };
+-    if bytes.last() != Some(&quote) {
+-        return None;
+-    }
+-    let start = literal.span.start.offset.checked_add(prefix_len)?;
+-    let end = literal.span.end.offset.checked_sub(1)?;
+-    if start >= end {
+-        return None;
+-    }
+-    let name = crate::atom::atom(name);
+-    ctx.literal_method_selectors.push(LiteralMethodSelector {
+-        start,
+-        end,
+-        literal_start: literal.span.start.offset,
+-        literal_end: literal.span.end.offset,
+-        raw_literal: raw.into(),
+-        name,
+-    });
+-    Some(KnownMethodSelector { name, start, end })
++    ctx.literal_method_selectors.push(site);
++    Some(selector)
+ }
+ 
+ /// Accept only names PHP declarations can spell, with one optional root slash.
+@@ -595,33 +565,22 @@ fn extract_call<'a>(
+                     extract_from_expression(func_call.function, ctx, scope_start);
+                 }
+             }
+-            // A literal array value is normally only a callable reference.
+-            // An actual Call with that exact literal as callee invokes it.
+-            // Match the emitted method token, not all mentions nested in an
+-            // arbitrary array expression; this preserves known direct calls.
++            // Invocation identity belongs to this array's final runtime slots,
++            // not a generic member span that may also occur in a nested spread.
+             let elements = match literal {
+                 Expression::Array(array) => Some(&array.elements),
+                 Expression::LegacyArray(array) => Some(&array.elements),
+                 _ => None,
+             };
+-            if let Some(elements) = elements
+-                && let Some(ArrayElement::Value(value)) = elements.iter().nth(1)
+-                && let Expression::Literal(literal::Literal::String(method)) = value.value
+-            {
+-                let range = (method.span.start.offset + 1, method.span.end.offset - 1);
+-                if ctx.spans[callee_span_base..].iter().any(|span| {
+-                    (span.start, span.end) == range
+-                        && matches!(
+-                            span.kind,
+-                            SymbolKind::MemberAccess {
+-                                is_array_callable: true,
+-                                ..
+-                            }
+-                        )
+-                }) {
+-                    ctx.non_invoked_callable_spans
+-                        .retain(|candidate| *candidate != range);
+-                }
++            if let Some(elements) = elements {
++                extract_array_callable_invocations(
++                    elements,
++                    ctx,
++                    callee_span_base,
++                    scope_start,
++                    func_call.argument_list.left_parenthesis.start.offset,
++                    func_call.argument_list.right_parenthesis.end.offset,
++                );
+             }
+             let func_text = expr_to_subject_text(func_call.function);
+             if !func_text.is_empty() {
+diff --git a/src/symbol_map/extraction/expressions/mod.rs b/src/symbol_map/extraction/expressions/mod.rs
+index f9b931b..0c03b97 100644
+--- a/src/symbol_map/extraction/expressions/mod.rs
++++ b/src/symbol_map/extraction/expressions/mod.rs
+@@ -286,17 +286,13 @@ pub(super) fn extract_from_expression<'a>(
+ 
+         // ── Array ──
+         Expression::Array(array) => {
+-            if let Some(range) =
+-                try_emit_array_callable_span(&array.elements, ctx.content, &mut ctx.spans)
+-            {
++            if let Some(range) = try_emit_array_callable_span(&array.elements, ctx) {
+                 ctx.non_invoked_callable_spans.push(range);
+             }
+             extract_from_array_elements(&array.elements, ctx, scope_start);
+         }
+         Expression::LegacyArray(array) => {
+-            if let Some(range) =
+-                try_emit_array_callable_span(&array.elements, ctx.content, &mut ctx.spans)
+-            {
++            if let Some(range) = try_emit_array_callable_span(&array.elements, ctx) {
+                 ctx.non_invoked_callable_spans.push(range);
+             }
+             extract_from_array_elements(&array.elements, ctx, scope_start);
+diff --git a/src/symbol_map/extraction/laravel.rs b/src/symbol_map/extraction/laravel.rs
+index 3be956e..08663e1 100644
+--- a/src/symbol_map/extraction/laravel.rs
++++ b/src/symbol_map/extraction/laravel.rs
+@@ -1,5 +1,4 @@
+ use mago_span::HasSpan;
+-use mago_syntax::cst::sequence::TokenSeparatedSequence;
+ 
+ use super::*;
+ use crate::virtual_members::laravel::helpers::string_literal_at_range;
+@@ -1601,110 +1600,6 @@ pub(super) fn try_emit_laravel_macro_string_span(
+     });
+ }
+ 
+-/// Detect an array-callable literal — `[Class::class, 'method']` or
+-/// `[$object, 'method']` — and emit a [`SymbolKind::MemberAccess`] span over
+-/// the method-name string so that go-to-definition, references, and rename
+-/// treat it like a real `Class::method` / `$object->method` reference.
+-///
+-/// This is the shape Laravel routes use for controller actions
+-/// (`Route::get('/', [IndexPageController::class, 'indexPage'])`), but the
+-/// pattern is generic PHP (event listeners, `array_map`, etc.).
+-///
+-/// Only fires for a two-element array whose first element is a `::class`
+-/// constant or a variable and whose second element is a plain string literal.
+-pub(super) fn try_emit_array_callable_span(
+-    elements: &TokenSeparatedSequence<'_, ArrayElement<'_>>,
+-    content: &str,
+-    spans: &mut Vec<SymbolSpan>,
+-) -> Option<(u32, u32)> {
+-    // Exactly two positional (value) elements: `[<callee>, '<method>']`.
+-    let mut values = elements.iter().filter_map(|el| match el {
+-        ArrayElement::Value(v) => Some(v.value),
+-        _ => None,
+-    });
+-    let (Some(first), Some(second), None) = (values.next(), values.next(), values.next()) else {
+-        return None;
+-    };
+-    // The whole array must have been exactly those two elements (no
+-    // key/value or variadic entries mixed in).
+-    if elements.iter().count() != 2 {
+-        return None;
+-    }
+-
+-    // Second element must be a plain string literal — the method name.
+-    let Expression::Literal(literal::Literal::String(s)) = second else {
+-        return None;
+-    };
+-
+-    // First element determines the subject and access kind.
+-    let (subject_text, subject_span, is_static) = match first {
+-        // `Class::class` — static-style access on the class name.
+-        Expression::Access(Access::ClassConstant(cca)) => {
+-            let is_class_const = matches!(
+-                &cca.constant,
+-                ClassLikeConstantSelector::Identifier(ident)
+-                    if bytes_to_str(ident.value).eq_ignore_ascii_case("class")
+-            );
+-            if !is_class_const {
+-                return None;
+-            }
+-            (expr_to_subject_text(cca.class), cca.class.span(), true)
+-        }
+-        // `$this` / `$object` — instance-style access.
+-        Expression::Variable(Variable::Direct(dv)) => {
+-            (bytes_to_str(dv.name).to_string(), dv.span, false)
+-        }
+-        _ => return None,
+-    };
+-    if subject_text.is_empty() {
+-        return None;
+-    }
+-
+-    let inner_start = s.span.start.offset + 1;
+-    let inner_end = s.span.end.offset - 1;
+-    if inner_start >= inner_end || inner_end as usize > content.len() {
+-        return None;
+-    }
+-    // A value that is not UTF-8 (`"\x8b"`) falls back to the source text,
+-    // which the identifier-shape check below then rejects.
+-    let member_name = s
+-        .value
+-        .and_then(literal_bytes_to_str)
+-        .unwrap_or(&content[inner_start as usize..inner_end as usize]);
+-    // Guard against non-identifier strings (e.g. `[$a, 'some text']`).
+-    if member_name.is_empty()
+-        || !member_name
+-            .chars()
+-            .all(|c| c.is_ascii_alphanumeric() || c == '_')
+-        || member_name
+-            .chars()
+-            .next()
+-            .is_some_and(|c| c.is_ascii_digit())
+-    {
+-        return None;
+-    }
+-
+-    spans.push(SymbolSpan {
+-        start: inner_start,
+-        end: inner_end,
+-        kind: SymbolKind::MemberAccess {
+-            subject_text: SubjectText::new(
+-                subject_text,
+-                subject_span.start.offset,
+-                subject_span.end.offset,
+-                content,
+-            ),
+-            member_name: crate::atom::atom(member_name),
+-            is_static,
+-            is_method_call: true,
+-            docblock_ref: DocblockMemberRef::No,
+-            is_array_callable: true,
+-            is_nullsafe: false,
+-        },
+-    });
+-    Some((inner_start, inner_end))
+-}
+-
+ /// If `argument_list` belongs to a `compact()` call, emit one
+ /// [`SymbolKind::CompactVariable`] span per string-literal variable name,
+ /// including names inside (possibly nested) array-literal arguments.
+diff --git a/src/symbol_map/extraction/mod.rs b/src/symbol_map/extraction/mod.rs
+index 649a457..457dd0f 100644
+--- a/src/symbol_map/extraction/mod.rs
++++ b/src/symbol_map/extraction/mod.rs
+@@ -13,11 +13,11 @@ use super::docblock::{
+ };
+ use super::{
+     AnonymousCallable, AnonymousCallableKind, AnonymousClassConstruction, AnonymousInvocation,
+-    CallExecutionOwner, CallExecutionRegion, CallSite, ClassRefContext, DocblockMemberRef,
+-    ImmediateObjectInvocation, ImmediateObjectReceiver, LiteralCallableInvocation,
+-    LiteralMethodSelector, SelfStaticParentKind, SubjectText, SymbolKind, SymbolMap, SymbolSpan,
+-    TemplateParamDef, UntypedClosureSite, VarDefKind, VarDefSite, ViewReceiverClass,
+-    ViewReceiverSite,
++    ArrayCallableInvocation, CallExecutionOwner, CallExecutionRegion, CallSite, ClassRefContext,
++    DocblockMemberRef, ImmediateObjectInvocation, ImmediateObjectReceiver,
++    LiteralCallableInvocation, LiteralMethodSelector, SelfStaticParentKind, SubjectText,
++    SymbolKind, SymbolMap, SymbolSpan, TemplateParamDef, UntypedClosureSite, VarDefKind,
++    VarDefSite, ViewReceiverClass, ViewReceiverSite,
+ };
+ use crate::atom::{bytes_to_str, literal_bytes_to_str};
+ use crate::names::OwnedResolvedNames;
+@@ -46,6 +46,7 @@ struct ExtractionCtx<'a> {
+     anonymous_class_constructions: Vec<AnonymousClassConstruction>,
+     immediate_object_invocations: Vec<ImmediateObjectInvocation>,
+     literal_callable_invocations: Vec<LiteralCallableInvocation>,
++    array_callable_invocations: Vec<ArrayCallableInvocation>,
+     literal_method_selectors: Vec<LiteralMethodSelector>,
+     non_invoked_callable_spans: Vec<(u32, u32)>,
+     keyword_constructor_spans: Vec<(u32, u32)>,
+@@ -152,6 +153,8 @@ impl<'a> ExtractionCtx<'a> {
+     }
+ }
+ 
++mod array_callable;
++mod array_callable_values;
+ mod attribute_closures;
+ mod class_like;
+ mod expressions;
+@@ -161,6 +164,8 @@ mod phpunit;
+ mod statements;
+ mod subject_text;
+ 
++use array_callable::*;
++use array_callable_values::array_callable_values;
+ use class_like::*;
+ use expressions::*;
+ use keywords::*;
+@@ -233,6 +238,7 @@ fn extract_symbol_map_inner(
+         anonymous_class_constructions: Vec::new(),
+         immediate_object_invocations: Vec::new(),
+         literal_callable_invocations: Vec::new(),
++        array_callable_invocations: Vec::new(),
+         literal_method_selectors: Vec::new(),
+         non_invoked_callable_spans: Vec::new(),
+         keyword_constructor_spans: Vec::new(),
+@@ -392,6 +398,7 @@ fn extract_symbol_map_inner(
+         anonymous_class_constructions: ctx.anonymous_class_constructions,
+         immediate_object_invocations: ctx.immediate_object_invocations,
+         literal_callable_invocations: ctx.literal_callable_invocations,
++        array_callable_invocations: ctx.array_callable_invocations,
+         literal_method_selectors: ctx.literal_method_selectors,
+         non_invoked_callable_spans: ctx.non_invoked_callable_spans,
+         keyword_constructor_spans: ctx.keyword_constructor_spans,
+diff --git a/src/symbol_map/mod.rs b/src/symbol_map/mod.rs
+index a694f95..a96c415 100644
+--- a/src/symbol_map/mod.rs
++++ b/src/symbol_map/mod.rs
+@@ -1084,6 +1084,25 @@ pub(crate) struct ImmediateObjectInvocation {
+     pub invocation_end: u32,
+ }
+ 
++/// An exact literal-array invocation, separate from stored callable references.
++#[derive(Debug, Clone)]
++pub(crate) struct ArrayCallableInvocation {
++    /// The emitted decoded member's exact raw selector interior.
++    pub selector_start: u32,
++    pub selector_end: u32,
++    /// Receiver and member from this array's normalized final key0/key1 values.
++    pub subject_text: SubjectText,
++    pub member_name: crate::atom::Atom,
++    pub is_static: bool,
++    /// None when identical across targets, otherwise the before/from8.0 variant.
++    pub php80: Option<bool>,
++    /// A directly constructed receiver, never inferred from a synthetic name.
++    pub allocation: Option<ImmediateObjectReceiver>,
++    pub invoking_scope_start: u32,
++    pub invocation_start: u32,
++    pub invocation_end: u32,
++}
++
+ /// A fixed scalar callable string from an actual Call::Function AST node.
+ /// Names are runtime FQNs, independent of lexical namespace/import aliases.
+ #[derive(Debug, Clone, Copy)]
+@@ -1195,6 +1214,8 @@ pub(crate) struct SymbolMap {
+     pub immediate_object_invocations: Vec<ImmediateObjectInvocation>,
+     /// Fixed string invocations; intentionally not generic symbol references.
+     pub literal_callable_invocations: Vec<LiteralCallableInvocation>,
++    /// Literal array calls with exact selector and invocation ownership.
++    pub array_callable_invocations: Vec<ArrayCallableInvocation>,
+     /// Sorted AST string method-selector roles for verified semantic rename.
+     pub literal_method_selectors: Vec<LiteralMethodSelector>,
+     /// Sorted reference-only callee tokens, including metadata, imports and callable values.
+diff --git a/src/type_engine/resolver/mod.rs b/src/type_engine/resolver/mod.rs
+index 75dfca9..a6b8ce4 100644
+--- a/src/type_engine/resolver/mod.rs
++++ b/src/type_engine/resolver/mod.rs
+@@ -532,6 +532,14 @@ fn resolve_target_classes_expr_inner(
+         // ── A bare class name, and `new ClassName` without trailing
+         //    call parens, are the same reference written two ways ──
+         SubjectExpr::ClassName(name) | SubjectExpr::NewExpr { class_name: name } => {
++            // Keep an absolute name marked through loading. Resolving it to a
++            // bare global FQN and loading again would reapply a lexical import.
++            if name.starts_with('\\') {
++                return class_loader(name)
++                    .map(ResolvedType::from_arc)
++                    .into_iter()
++                    .collect();
++            }
+             // Both are source-level references: PHP resolves an
+             // unqualified name against the current namespace before the
+             // global scope, so a same-namespace class must win over a
+@@ -1555,7 +1563,7 @@ fn scope_type_discriminator(vars: &[String], ctx: &ResolutionCtx<'_>) -> Option<
+ /// resolves against `T`'s static members.  Used by both bare-variable
+ /// and property-chain subjects so `$var::` and `$obj->prop::` share the
+ /// same unwrapping behaviour.
+-fn resolve_class_string_inner_classes(
++pub(crate) fn resolve_class_string_inner_classes(
+     ty: &PhpType,
+     owning_class_name: &str,
+     all_classes: &[Arc<ClassInfo>],
+diff --git a/src/type_engine/variable/forward_walk/assignment.rs b/src/type_engine/variable/forward_walk/assignment.rs
+index ebfd963..f2355c9 100644
+--- a/src/type_engine/variable/forward_walk/assignment.rs
++++ b/src/type_engine/variable/forward_walk/assignment.rs
+@@ -1200,50 +1200,6 @@ pub(crate) fn resolve_rhs_with_scope<'b>(
+         // handles some special patterns.
+     }
+ 
+-    // ── Foo::class → class-string<Foo> ──────────────────────────
+-    // `Foo::class` is parsed as `Access::ClassConstant` with the
+-    // identifier `class`.  resolve_rhs_expression doesn't return a
+-    // useful type for this (it looks for a constant named "class"
+-    // on the class and finds nothing).  Handle it here so that
+-    // subsequent `new $var` can resolve the class-string.
+-    if let Expression::Access(Access::ClassConstant(cca)) = rhs
+-        && let ClassLikeConstantSelector::Identifier(ident) = &cca.constant
+-        && ident.value == b"class"
+-    {
+-        let class_name = crate::class_lookup::class_expression_name(
+-            cca.class,
+-            ctx.current_class,
+-            ctx.all_classes,
+-            ctx.class_loader,
+-        )
+-        .filter(|name| !name.is_empty());
+-        if let Some(name) = class_name {
+-            let resolved_name = name.strip_prefix('\\').unwrap_or(&name);
+-            // Resolve the class so we can store a proper ResolvedType
+-            // with class_info.  This allows `new $var` to work.
+-            let classes = crate::type_engine::type_resolution::type_hint_to_classes_typed(
+-                &PhpType::named(atom(resolved_name)),
+-                &ctx.current_class.name,
+-                ctx.all_classes,
+-                ctx.class_loader,
+-            );
+-            // The identifier is spelled as the source writes it, which for a
+-            // name reached through a namespace import (`Support\Pen` behind
+-            // `use App\Support;`) is neither the FQCN nor resolvable once the
+-            // class-string is read somewhere else.  Prefer the resolved class.
+-            let class_string_type = PhpType::class_string(Some(match classes.first() {
+-                Some(cls) => PhpType::named(cls.fqn()),
+-                None => PhpType::named(atom(resolved_name)),
+-            }));
+-            if !classes.is_empty() {
+-                return ResolvedType::from_classes_with_hint(classes, class_string_type);
+-            }
+-            // Even if we can't resolve the class, return a type-string-only result
+-            // so the variable is non-empty in scope.
+-            return vec![ResolvedType::from_type_string(class_string_type)];
+-        }
+-    }
+-
+     // ── Fast paths for expressions whose type is known structurally ──
+     // These avoid the full resolve_rhs_expression round-trip for
+     // common patterns where the result type depends only on the
+diff --git a/src/type_engine/variable/rhs_resolution/property_access.rs b/src/type_engine/variable/rhs_resolution/property_access.rs
+index 56a5bc9..5e04257 100644
+--- a/src/type_engine/variable/rhs_resolution/property_access.rs
++++ b/src/type_engine/variable/rhs_resolution/property_access.rs
+@@ -114,29 +114,18 @@ pub(super) fn resolve_rhs_property_access(
+         ) {
+             Some(class_name) => {
+                 let resolved_name = class_name.strip_prefix('\\').unwrap_or(&class_name);
+-                let resolved_typed = PhpType::named(atom(resolved_name));
+-                let target_classes =
+-                    crate::type_engine::type_resolution::type_hint_to_classes_typed(
+-                        &resolved_typed,
+-                        current_class_name,
+-                        all_classes,
+-                        class_loader,
+-                    );
+-
+                 // The magic `::class` constant yields the fully-qualified name
+                 // of the class as a `class-string<T>`. Resolving it to a plain
+                 // `string` would discard the class identity, so downstream
+                 // consumers (array element inference, `??` fallbacks, and
+                 // `class-string<object>` parameters) keep the concrete class.
+                 if is_class_fetch {
+-                    // The identifier is spelled as the source writes it, which
+-                    // for a name reached through a namespace import
+-                    // (`Support\Pen` behind `use App\Support;`) is neither the
+-                    // FQCN nor resolvable on its own once the class-string
+-                    // leaves this file's context.  Prefer the resolved class.
+-                    let name = match target_classes.first() {
+-                        Some(cls) => cls.fqn(),
+-                        None => atom(resolved_name),
++                    // Source names have already passed through namespace/import
++                    // resolution. Loading a canonical global short name again
++                    // through this file's imports could bind it to another class.
++                    let name = match cca.class {
++                        Expression::Self_(_) | Expression::Static(_) => ctx.current_class.fqn(),
++                        _ => atom(resolved_name),
+                     };
+                     // A written name, `self` and `parent` each name one class,
+                     // so the constant is exactly that class's name. `static`
+@@ -156,7 +145,14 @@ pub(super) fn resolve_rhs_property_access(
+                     };
+                     return vec![ResolvedType::from_type_string(ty)];
+                 }
+-                target_classes
++                let resolved_typed = PhpType::named(atom(resolved_name));
++
++                crate::type_engine::type_resolution::type_hint_to_classes_typed(
++                    &resolved_typed,
++                    current_class_name,
++                    all_classes,
++                    class_loader,
++                )
+             }
+             // `$value::class` / `$value::CONST` (PHP 8.0+): the class is
+             // whatever the expression holds.
+diff --git a/src/types/resolved_type.rs b/src/types/resolved_type.rs
+index 9137ba2..4e299a0 100644
+--- a/src/types/resolved_type.rs
++++ b/src/types/resolved_type.rs
+@@ -241,6 +241,13 @@ impl ResolvedType {
+                 rt.type_string = PhpType::template_param(name, rt.type_string.clone());
+             }
+             results
++        } else if matches!(type_hint.unwrap_nullable().kind(), TypeKind::ClassString(_)) {
++            // Several classes can be named by one class-string value. Keep
++            // that runtime value kind instead of relabelling each as an object.
++            classes
++                .into_iter()
++                .map(|class| Self::from_both_arc(type_hint.clone(), class))
++                .collect()
+         } else if matches!(&type_hint.kind(), TypeKind::Intersection(_)) {
+             // Intersection types: all classes contribute members to a
+             // single value.  Emit one ResolvedType per class (so
+diff --git a/tests/integration/call_hierarchy.rs b/tests/integration/call_hierarchy.rs
+index ddef1fa..bdf3059 100644
+--- a/tests/integration/call_hierarchy.rs
++++ b/tests/integration/call_hierarchy.rs
+@@ -5787,3 +5787,518 @@ async fn builtin_callable_qualified_context_keeps_immutable_target_coordinates_a
+     }
+     router.shutdown().await.unwrap();
+ }
++
++async fn array_exact_root(
++    backend: &Backend,
++    uri: &Url,
++    source: &str,
++    name: &str,
++) -> CallHierarchyItem {
++    let range = noncall_exact_range(source, &format!("function {name}("), name);
++    let mut items = prepare_at(backend, uri, range.start.line, range.start.character).await;
++    assert_eq!(items.len(), 1, "{name}");
++    items.remove(0)
++}
++
++async fn array_exact_reverse(
++    backend: &Backend,
++    caller: &CallHierarchyItem,
++    edge: &CallHierarchyOutgoingCall,
++) {
++    let reverse = incoming(backend, &edge.to).await;
++    assert_eq!(reverse.len(), 1, "{}: {reverse:?}", edge.to.name);
++    assert_eq!(reverse[0].from.uri, caller.uri);
++    assert_eq!(reverse[0].from.selection_range, caller.selection_range);
++    assert_eq!(reverse[0].from_ranges, edge.from_ranges);
++}
++
++#[tokio::test]
++async fn array_callable_exact_fixed_receivers_and_literal_selectors_are_reciprocal() {
++    let backend = create_test_backend();
++    let uri = Url::parse("file:///array-literal-selectors.php").unwrap();
++    let cases = [
++        ("([ArrayExactTarget::class, 'ping'])();", "ping"),
++        ("(['ArrayExactTarget', 'ping'])();", "ping"),
++        ("([b'ArrayExactTarget', B'ping'])();", "ping"),
++        (r#"([ArrayExactTarget::class, "\x70ing"])();"#, r"\x70ing"),
++        ("([ArrayExactTarget::class, ('ping')])();", "ping"),
++        ("([((ArrayExactTarget::class)), 'ping'])();", "ping"),
++        ("(array('ArrayExactTarget', B'ping'))();", "ping"),
++        ("([$object, 'ping'])();", "ping"),
++    ];
++    let mut source = "<?php\r\nclass ArrayExactTarget { public static function ping() {} public function café() {} }\r\nfunction arraySelectorsHost(ArrayExactTarget $object): void {\r\n".to_owned();
++    for (case, _) in cases {
++        source.push_str(&format!(" /* café 🐘 */ {case}\r\n"));
++    }
++    source.push_str(" /* café 🐘 */ ([$object, 'café'])();\r\n}\r\n");
++    open_php(&backend, &uri, &source).await;
++    let root = array_exact_root(&backend, &uri, &source, "arraySelectorsHost").await;
++    let edges = outgoing(&backend, &root).await;
++    assert_eq!(
++        edges.len(),
++        2,
++        "all known string/object selectors: {edges:?}"
++    );
++    let ping = edges.iter().find(|edge| edge.to.name == "ping").unwrap();
++    let expected: Vec<_> = cases
++        .iter()
++        .map(|(case, token)| noncall_exact_range(&source, case, token))
++        .collect();
++    assert_eq!(
++        ping.from_ranges, expected,
++        "binary prefixes stay outside raw selector highlights"
++    );
++    let unicode = edges.iter().find(|edge| edge.to.name == "café").unwrap();
++    assert_eq!(
++        unicode.from_ranges,
++        [noncall_exact_range(
++            &source,
++            "([$object, 'café'])();",
++            "café"
++        )]
++    );
++    for edge in &edges {
++        array_exact_reverse(&backend, &root, edge).await;
++    }
++}
++
++#[tokio::test]
++async fn array_callable_exact_runtime_class_strings_ignore_lexical_imports() {
++    let backend = create_test_backend();
++    let uri = Url::parse("file:///array-runtime-fqn.php").unwrap();
++    let source = "<?php\nnamespace { class Alias { public static function ping() {} } }\nnamespace Foreign { class Actual { public static function ping() {} } }\nnamespace Local { use Foreign\\Actual as Alias; function arrayNamespaceHost(): void {\n (['Alias','ping'])();\n ([Alias::class,'ping'])();\n (['Foreign\\Actual','ping'])();\n (['Missing\\Alias','ping'])();\n} }\n";
++    open_php(&backend, &uri, source).await;
++    let root = array_exact_root(&backend, &uri, source, "arrayNamespaceHost").await;
++    let edges = outgoing(&backend, &root).await;
++    assert_eq!(
++        edges.len(),
++        2,
++        "literal strings are runtime FQNs, class literals use imports: {edges:?}"
++    );
++    for (owner, contexts) in [
++        ("Alias", vec!["(['Alias','ping'])();"]),
++        (
++            "Foreign\\Actual",
++            vec![
++                "([Alias::class,'ping'])();",
++                "(['Foreign\\Actual','ping'])();",
++            ],
++        ),
++    ] {
++        let edge = edges
++            .iter()
++            .find(|edge| edge.to.data.as_ref().unwrap()["owner"] == owner)
++            .unwrap();
++        assert_eq!(
++            edge.from_ranges,
++            contexts
++                .iter()
++                .map(|context| noncall_exact_range(source, context, "ping"))
++                .collect::<Vec<_>>()
++        );
++        array_exact_reverse(&backend, &root, edge).await;
++    }
++}
++
++#[tokio::test]
++async fn array_callable_exact_keys_spreads_and_overwrites_keep_the_final_receiver() {
++    let backend = create_test_backend();
++    let uri = Url::parse("file:///array-keyed-callbacks.php").unwrap();
++    let a_cases = [
++        "([0=>ArrayKeyA::class,1=>'run'])();",
++        "([1=>'run',0=>ArrayKeyA::class])();",
++        "([0=>ArrayKeyA::class,1=>'missing',1=>'run'])();",
++        "([...[ArrayKeyA::class,'run']])();",
++        "([false=>ArrayKeyA::class,true=>'run'])();",
++        "([0.9=>ArrayKeyA::class,1.9=>'run'])();",
++        "([0=>'discarded',0=>ArrayKeyA::class,'1'=>'run'])();",
++        "(array(0=>ArrayKeyA::class,1=>('run')))();",
++    ];
++    let replacement = "([...[$object,'run'],0=>ArrayKeyB::class])();";
++    let mut source = "<?php\r\nclass ArrayKeyA { public static function run() {} }\r\nclass ArrayKeyB { public static function run() {} }\r\nfunction arrayKeysHost(ArrayKeyA $object,array $unknown,int $key): void {\r\n".to_owned();
++    for case in a_cases {
++        source.push_str(&format!(" /* café 🐘 */ {case}\r\n"));
++    }
++    source.push_str(&format!(" {replacement}\r\n"));
++    source.push_str(" ([2=>ArrayKeyA::class,1=>'run'])();\r\n ([...$unknown,0=>ArrayKeyA::class,1=>'run'])();\r\n ([$key=>ArrayKeyA::class,1=>'run'])();\r\n $stored=[ArrayKeyA::class,'run'];\r\n $partial=([ArrayKeyA::class,'run'])(...);\r\n}\r\n");
++    open_php(&backend, &uri, &source).await;
++    let root = array_exact_root(&backend, &uri, &source, "arrayKeysHost").await;
++    let edges = outgoing(&backend, &root).await;
++    assert_eq!(
++        edges.len(),
++        2,
++        "unknown writes and reference-only arrays cannot create calls: {edges:?}"
++    );
++    for (owner, expected) in [
++        (
++            "ArrayKeyA",
++            a_cases
++                .iter()
++                .map(|case| noncall_exact_range(&source, case, "run"))
++                .collect::<Vec<_>>(),
++        ),
++        (
++            "ArrayKeyB",
++            vec![noncall_exact_range(&source, replacement, "run")],
++        ),
++    ] {
++        let edge = edges
++            .iter()
++            .find(|edge| edge.to.data.as_ref().unwrap()["owner"] == owner)
++            .unwrap();
++        assert_eq!(edge.from_ranges, expected);
++        array_exact_reverse(&backend, &root, edge).await;
++    }
++    noncall_assert_navigation_retained(&backend, &uri, &source, replacement, "run", 2).await;
++}
++
++#[tokio::test]
++async fn array_callable_exact_new_and_anonymous_receivers_keep_callable_ownership() {
++    let backend = create_test_backend();
++    let uri = Url::parse("file:///array-object-receivers.php").unwrap();
++    let source = "<?php\r\nfunction arrayAnonymousLeaf() {}\r\nclass ArrayObjectTarget { public function run() {} }\r\nfunction arrayObjectsHost(ArrayObjectTarget $object): void {\r\n ([$object,'run'])();\r\n ([new ArrayObjectTarget(),'run'])();\r\n ([new class extends ArrayObjectTarget {},'run'])();\r\n ([new class { public function run() { arrayAnonymousLeaf(); } },'run'])();\r\n}\r\n";
++    open_php(&backend, &uri, source).await;
++    let root = array_exact_root(&backend, &uri, source, "arrayObjectsHost").await;
++    let edges = outgoing(&backend, &root).await;
++    assert_eq!(
++        edges.len(),
++        2,
++        "a nested method body is not executed by the outer caller: {edges:?}"
++    );
++    let named = edges
++        .iter()
++        .find(|edge| edge.to.data.as_ref().unwrap()["owner"] == "ArrayObjectTarget")
++        .unwrap();
++    assert_eq!(
++        named.from_ranges,
++        [
++            noncall_exact_range(source, "([$object,'run'])();", "run"),
++            noncall_exact_range(source, "([new ArrayObjectTarget(),'run'])();", "run"),
++            noncall_exact_range(
++                source,
++                "([new class extends ArrayObjectTarget {},'run'])();",
++                "run"
++            ),
++        ]
++    );
++    let anonymous = edges
++        .iter()
++        .find(|edge| {
++            edge.to
++                .data
++                .as_ref()
++                .unwrap()
++                .get("anonymous_class")
++                .is_some()
++        })
++        .unwrap();
++    assert_eq!(
++        anonymous.from_ranges,
++        [noncall_exact_range(
++            source,
++            "([new class { public function run() { arrayAnonymousLeaf(); } },'run'])();",
++            "'run'"
++        )]
++        .map(|range| Range::new(
++            Position::new(range.start.line, range.start.character + 1),
++            Position::new(range.end.line, range.end.character - 1)
++        ))
++    );
++    let nested = outgoing(&backend, &anonymous.to).await;
++    assert_eq!(nested.len(), 1);
++    assert_eq!(nested[0].to.name, "arrayAnonymousLeaf");
++    for edge in &edges {
++        array_exact_reverse(&backend, &root, edge).await;
++    }
++    let reverse = incoming(&backend, &nested[0].to).await;
++    assert_eq!(reverse.len(), 1);
++    assert_eq!(
++        reverse[0].from.selection_range,
++        anonymous.to.selection_range
++    );
++}
++
++#[tokio::test]
++async fn array_callable_exact_staticness_and_private_trait_aliases_do_not_invent_targets() {
++    let backend = create_test_backend();
++    backend.set_php_version(phpantom_lsp::types::PhpVersion::new(8, 3));
++    let uri = Url::parse("file:///array-callable-access.php").unwrap();
++    let source = "<?php\ntrait ArrayAliasBody { public function run() {} }\nclass ArrayAliasOwner { use ArrayAliasBody { run as private secret; } public function own() { ([$this,'secret'])(); } public function __call($name,$args) {} }\nclass ArrayForeignScope { public function foreign(ArrayAliasOwner $object) { ([$object,'secret'])(); } }\nclass ArrayAccessTarget { public static function ping() {} public function run() {} private static function hidden() {} public static function __callStatic($name,$args) {} public function own() { ([self::class,'run'])(); ([$this,'run'])(); ([self::class,'hidden'])(); } }\nfunction arrayAccessHost(ArrayAccessTarget $object): void { ([ArrayAccessTarget::class,'run'])(); ([ArrayAccessTarget::class,'hidden'])(); ([$object,'hidden'])(); ([ArrayAccessTarget::class,'ping'])(); }\n";
++    open_php(&backend, &uri, source).await;
++    let foreign = array_exact_root(&backend, &uri, source, "foreign").await;
++    assert!(
++        outgoing(&backend, &foreign).await.is_empty(),
++        "magic fallback must not become a call to an inaccessible alias"
++    );
++    let own_range = noncall_exact_range(source, "function own() { ([$this,'secret'])(); }", "own");
++    let own = prepare_at(
++        &backend,
++        &uri,
++        own_range.start.line,
++        own_range.start.character,
++    )
++    .await
++    .remove(0);
++    let alias_edges = outgoing(&backend, &own).await;
++    assert_eq!(
++        alias_edges.len(),
++        1,
++        "the consumer's own private alias remains callable"
++    );
++    assert_eq!(alias_edges[0].to.name, "run");
++    assert_eq!(
++        alias_edges[0].to.data.as_ref().unwrap()["owner"],
++        "ArrayAliasBody"
++    );
++    array_exact_reverse(&backend, &own, &alias_edges[0]).await;
++    let host = array_exact_root(&backend, &uri, source, "arrayAccessHost").await;
++    let edges = outgoing(&backend, &host).await;
++    assert_eq!(
++        edges.len(),
++        1,
++        "class callbacks require a public static method in this scope: {edges:?}"
++    );
++    assert_eq!(edges[0].to.name, "ping");
++    let range = noncall_exact_range(source, "function own() { ([self::class,'run'])();", "own");
++    let owner = prepare_at(&backend, &uri, range.start.line, range.start.character)
++        .await
++        .remove(0);
++    let inside = outgoing(&backend, &owner).await;
++    assert_eq!(inside.len(), 2);
++    let run = inside.iter().find(|edge| edge.to.name == "run").unwrap();
++    assert_eq!(
++        run.from_ranges,
++        [noncall_exact_range(source, "([$this,'run'])();", "run")]
++    );
++    assert!(inside.iter().any(|edge| edge.to.name == "hidden"));
++}
++
++#[tokio::test]
++async fn array_callable_exact_class_string_types_keep_static_only_union_branches() {
++    let backend = create_test_backend();
++    let uri = Url::parse("file:///array-class-string-types.php").unwrap();
++    let source = "<?php\nfinal class ArrayTypeA { public static function ping() {} public function run() {} }\nfinal class ArrayTypeB { public static function ping() {} public function run() {} }\n/** @param class-string<ArrayTypeA|ArrayTypeB> $class */\nfunction arrayClassStringHost($class): void { ([$class,'ping'])(); ([$class,'run'])(); }\nfunction arrayAssignedStringHost(): void { $class=ArrayTypeA::class; ([$class,'ping'])(); ([$class,'run'])(); }\n";
++    open_php(&backend, &uri, source).await;
++    let union = array_exact_root(&backend, &uri, source, "arrayClassStringHost").await;
++    let edges = outgoing(&backend, &union).await;
++    assert_eq!(
++        edges.len(),
++        2,
++        "class-string union wrappers must not become object values: {edges:?}"
++    );
++    assert!(edges.iter().all(|edge| edge.to.name == "ping"));
++    let mut owners = edges
++        .iter()
++        .map(|edge| edge.to.data.as_ref().unwrap()["owner"].as_str().unwrap())
++        .collect::<Vec<_>>();
++    owners.sort();
++    assert_eq!(owners, ["ArrayTypeA", "ArrayTypeB"]);
++    let assigned = array_exact_root(&backend, &uri, source, "arrayAssignedStringHost").await;
++    let edges = outgoing(&backend, &assigned).await;
++    assert_eq!(edges.len(), 1);
++    assert_eq!(edges[0].to.name, "ping");
++}
++
++#[tokio::test]
++async fn array_callable_exact_negative_literal_keys_follow_the_target_without_reparsing() {
++    let backend = create_test_backend();
++    let uri = Url::parse("file:///array-version-keys.php").unwrap();
++    let source = "<?php\nclass ArrayVersionGraph { public static function pre() {} public static function post() {} public static function both() {} }\nfunction arrayVersionHost(): void {\n ([...[-2=>ArrayVersionGraph::class,'wrong',0=>'pre']])();\n ([...[-2=>ArrayVersionGraph::class,'wrong',-1=>'post']])();\n ([...[-2=>ArrayVersionGraph::class,'both']])();\n}\n";
++    open_php(&backend, &uri, source).await;
++    for (major, minor, expected) in [
++        (7, 4, "pre"),
++        (8, 0, "post"),
++        (8, 2, "post"),
++        (8, 3, "post"),
++        (7, 4, "pre"),
++    ] {
++        backend.set_php_version(phpantom_lsp::types::PhpVersion::new(major, minor));
++        let root = array_exact_root(&backend, &uri, source, "arrayVersionHost").await;
++        let edges = outgoing(&backend, &root).await;
++        assert_eq!(edges.len(), 2, "PHP{major}.{minor}: {edges:?}");
++        assert!(edges.iter().any(|edge| edge.to.name == expected));
++        assert!(edges.iter().any(|edge| edge.to.name == "both"));
++        for edge in &edges {
++            array_exact_reverse(&backend, &root, edge).await;
++        }
++    }
++}
++
++#[tokio::test]
++async fn array_callable_exact_legacy_static_callbacks_follow_method_flags() {
++    let backend = create_test_backend();
++    let uri = Url::parse("file:///array-legacy-static.php").unwrap();
++    let source = "<?php\nclass ArrayLegacyUser { public function run() {} public function __custom() {} }\nfunction arrayLegacyHost() { ([ArrayLegacyUser::class,'run'])(); ('ArrayLegacyUser::run')(); ([ArrayLegacyUser::class,'__custom'])(); ('ArrayLegacyUser::__custom')(); }\n";
++    open_php(&backend, &uri, source).await;
++    for (major, minor) in [(7, 4), (8, 0), (8, 3), (7, 4)] {
++        backend.set_php_version(phpantom_lsp::types::PhpVersion::new(major, minor));
++        let root = array_exact_root(&backend, &uri, source, "arrayLegacyHost").await;
++        let edges = outgoing(&backend, &root).await;
++        if major >= 8 {
++            assert!(edges.is_empty(), "PHP{major}.{minor}: {edges:?}");
++            continue;
++        }
++        assert_eq!(
++            edges.len(),
++            2,
++            "ordinary user methods retain legacy callback eligibility: {edges:?}"
++        );
++        for name in ["run", "__custom"] {
++            let edge = edges.iter().find(|edge| edge.to.name == name).unwrap();
++            let array = format!("([ArrayLegacyUser::class,'{name}'])();");
++            let scalar = format!("('ArrayLegacyUser::{name}')();");
++            let mut actual = edge.from_ranges.clone();
++            actual.sort_by_key(|range| (range.start.line, range.start.character));
++            assert_eq!(
++                actual,
++                [
++                    noncall_exact_range(source, &array, name),
++                    noncall_exact_range(source, &scalar, "()")
++                ]
++            );
++            array_exact_reverse(&backend, &root, edge).await;
++        }
++    }
++}
++
++#[tokio::test]
++async fn array_callable_exact_open_class_strings_do_not_invent_a_concrete_override() {
++    let backend = create_test_backend();
++    let uri = Url::parse("file:///array-late-static.php").unwrap();
++    let source = "<?php\nclass ArrayOpenBase { public static function run() {} public static function probe() { $late=static::class; ([$late,'run'])(); ([static::class,'run'])(); $exact=self::class; ([$exact,'run'])(); } }\nclass ArrayOpenChild extends ArrayOpenBase { public static function run() {} }\n/** @param class-string<ArrayOpenBase> $class */\nfunction arrayOpenHost($class) { ([$class,'run'])(); }\nfinal class ArrayClosedClass { public static function run() {} public static function closedProbe() { $late=static::class; ([$late,'run'])(); ([static::class,'run'])(); } }\nclass ArrayFinalMethod { final public static function run() {} public static function finalProbe() { $late=static::class; ([$late,'run'])(); ([static::class,'run'])(); } }\n";
++    open_php(&backend, &uri, source).await;
++    let root = array_exact_root(&backend, &uri, source, "probe").await;
++    let edges = outgoing(&backend, &root).await;
++    assert_eq!(
++        edges.len(),
++        1,
++        "only self::class names one exact nonfinal class: {edges:?}"
++    );
++    assert_eq!(
++        edges[0].from_ranges,
++        [noncall_exact_range(source, "([$exact,'run'])();", "run")]
++    );
++    array_exact_reverse(&backend, &root, &edges[0]).await;
++    let open = array_exact_root(&backend, &uri, source, "arrayOpenHost").await;
++    assert!(outgoing(&backend, &open).await.is_empty());
++    for name in ["closedProbe", "finalProbe"] {
++        let root = array_exact_root(&backend, &uri, source, name).await;
++        let edges = outgoing(&backend, &root).await;
++        assert_eq!(
++            edges.len(),
++            1,
++            "final classes/methods have one stable implementation: {edges:?}"
++        );
++        assert_eq!(edges[0].from_ranges.len(), 2);
++        array_exact_reverse(&backend, &root, &edges[0]).await;
++    }
++}
++
++#[tokio::test]
++async fn array_callable_exact_shared_class_name_provenance_survives_assignments() {
++    let backend = create_test_backend();
++    let uri = Url::parse("file:///array-class-name-provenance.php").unwrap();
++    let source = "<?php\nnamespace ArrayClassNameProvenance;\n\nclass ParentTarget {\n    public static function run(): string { return 'parent'; }\n}\n\nclass OpenTarget extends ParentTarget {\n    public static function run(): string { return 'base'; }\n    final public static function sealed(): string { return 'sealed'; }\n\n    public static function directLate(): string {\n        return ([static::class, 'run'])();\n    }\n    public static function assignedLate(): string {\n        $class = static::class;\n        return ([$class, 'run'])();\n    }\n    public static function copiedLate(): string {\n        $class = static::class;\n        $copy = $class;\n        return ([$copy, 'run'])();\n    }\n    public static function assignedSelf(): string {\n        $class = self::class;\n        return ([$class, 'run'])();\n    }\n    public static function assignedNamed(): string {\n        $class = OpenTarget::class;\n        return ([$class, 'run'])();\n    }\n    public static function assignedParent(): string {\n        $class = parent::class;\n        return ([$class, 'run'])();\n    }\n    public static function directFinalMethod(): string {\n        return ([static::class, 'sealed'])();\n    }\n    public static function assignedFinalMethod(): string {\n        $class = static::class;\n        return ([$class, 'sealed'])();\n    }\n}\n\nclass OverridingTarget extends OpenTarget {\n    public static function run(): string { return 'child'; }\n}\n\nfinal class ClosedTarget {\n    public static function run(): string { return 'closed'; }\n    public static function closedAssignedLate(): string {\n        $class = static::class;\n        return ([$class, 'run'])();\n    }\n}\n\n/** @param class-string<OpenTarget> $class */\nfunction boundedOpen(string $class): string {\n    return ([$class, 'run'])();\n}\n\n/** @param class-string<OpenTarget> $class */\nfunction boundedFinalMethod(string $class): string {\n    return ([$class, 'sealed'])();\n}\n\n/** @param class-string<ClosedTarget> $class */\nfunction boundedClosed(string $class): string {\n    return ([$class, 'run'])();\n}\n";
++    open_php(&backend, &uri, source).await;
++    for (name, expected) in [
++        ("directLate", None),
++        ("assignedLate", None),
++        ("copiedLate", None),
++        (
++            "assignedSelf",
++            Some(("ArrayClassNameProvenance\\OpenTarget", "run")),
++        ),
++        (
++            "assignedNamed",
++            Some(("ArrayClassNameProvenance\\OpenTarget", "run")),
++        ),
++        (
++            "assignedParent",
++            Some(("ArrayClassNameProvenance\\ParentTarget", "run")),
++        ),
++        (
++            "directFinalMethod",
++            Some(("ArrayClassNameProvenance\\OpenTarget", "sealed")),
++        ),
++        (
++            "assignedFinalMethod",
++            Some(("ArrayClassNameProvenance\\OpenTarget", "sealed")),
++        ),
++        (
++            "closedAssignedLate",
++            Some(("ArrayClassNameProvenance\\ClosedTarget", "run")),
++        ),
++        ("boundedOpen", None),
++        (
++            "boundedFinalMethod",
++            Some(("ArrayClassNameProvenance\\OpenTarget", "sealed")),
++        ),
++        (
++            "boundedClosed",
++            Some(("ArrayClassNameProvenance\\ClosedTarget", "run")),
++        ),
++    ] {
++        let root = array_exact_root(&backend, &uri, source, name).await;
++        let edges = outgoing(&backend, &root).await;
++        if let Some((owner, method)) = expected {
++            assert_eq!(edges.len(), 1, "{name}: {edges:?}");
++            assert_eq!(edges[0].to.data.as_ref().unwrap()["owner"], owner);
++            assert_eq!(edges[0].to.name, method);
++            let reverse = incoming(&backend, &edges[0].to).await;
++            assert!(
++                reverse
++                    .iter()
++                    .any(|edge| edge.from.selection_range == root.selection_range
++                        && edge.from_ranges == edges[0].from_ranges),
++                "{name} incoming: {reverse:?}"
++            );
++            assert!(
++                reverse.iter().all(|edge| ![
++                    "directLate",
++                    "assignedLate",
++                    "copiedLate",
++                    "boundedOpen"
++                ]
++                .contains(&edge.from.name.as_str())),
++                "open class bounds cannot grant exact body ownership: {reverse:?}"
++            );
++        } else {
++            assert!(edges.is_empty(), "{name}: {edges:?}");
++        }
++    }
++}
++
++#[tokio::test]
++async fn array_callable_exact_assigned_absolute_names_do_not_rebind_imports() {
++    let backend = create_test_backend();
++    let uri = Url::parse("file:///array-assigned-runtime-fqn.php").unwrap();
++    let source = "<?php\nnamespace { class Alias { public static function ping() {} } }\nnamespace Foreign { class Actual { public static function ping() {} } }\nnamespace Local { use Foreign\\Actual as Alias; function arrayAssignedNamespaceHost() { $absolute=\\Alias::class; ([$absolute,'ping'])(); $runtime='Alias'; ([$runtime,'ping'])(); $imported=Alias::class; ([$imported,'ping'])(); $unknown=\\Missing\\Alias::class; ([$unknown,'ping'])(); } }\n";
++    open_php(&backend, &uri, source).await;
++    let root = array_exact_root(&backend, &uri, source, "arrayAssignedNamespaceHost").await;
++    let edges = outgoing(&backend, &root).await;
++    assert_eq!(
++        edges.len(),
++        2,
++        "absolute constants and runtime strings cannot use lexical aliases: {edges:?}"
++    );
++    for (owner, contexts) in [
++        (
++            "Alias",
++            vec!["([$absolute,'ping'])();", "([$runtime,'ping'])();"],
++        ),
++        ("Foreign\\Actual", vec!["([$imported,'ping'])();"]),
++    ] {
++        let edge = edges
++            .iter()
++            .find(|edge| edge.to.data.as_ref().unwrap()["owner"] == owner)
++            .unwrap();
++        assert_eq!(
++            edge.from_ranges,
++            contexts
++                .iter()
++                .map(|context| noncall_exact_range(source, context, "ping"))
++                .collect::<Vec<_>>()
++        );
++        array_exact_reverse(&backend, &root, edge).await;
++    }
++}
+diff --git a/src/symbol_map/extraction/array_callable.rs b/src/symbol_map/extraction/array_callable.rs
+new file mode 100644
+index 0000000..04c98a8
+--- /dev/null
++++ b/src/symbol_map/extraction/array_callable.rs
+@@ -0,0 +1,283 @@
++//! Exact quoted selectors and literal-array callable source roles.
++use mago_span::HasSpan;
++use mago_syntax::cst::sequence::TokenSeparatedSequence;
++
++use super::array_callable_values::unparenthesized_expression;
++use super::*;
++
++/// Mago owns decoding; immutable source owns the full quote/prefix receipt.
++pub(super) fn method_literal(
++    expression: &Expression<'_>,
++    content: &str,
++) -> Option<LiteralMethodSelector> {
++    let Expression::Literal(literal::Literal::String(literal)) =
++        unparenthesized_expression(expression)
++    else {
++        return None;
++    };
++    let name = literal.value.and_then(literal_bytes_to_str)?;
++    if name.is_empty() {
++        return None;
++    }
++    let raw = content.get(literal.span.start.offset as usize..literal.span.end.offset as usize)?;
++    let bytes = raw.as_bytes();
++    let (prefix_len, quote) = match bytes {
++        [quote @ (b'\'' | b'"'), ..] => (1, *quote),
++        [b'b' | b'B', quote @ (b'\'' | b'"'), ..] => (2, *quote),
++        _ => return None,
++    };
++    if bytes.last() != Some(&quote) {
++        return None;
++    }
++    let start = literal.span.start.offset.checked_add(prefix_len)?;
++    let end = literal.span.end.offset.checked_sub(1)?;
++    if start >= end {
++        return None;
++    }
++    Some(LiteralMethodSelector {
++        start,
++        end,
++        literal_start: literal.span.start.offset,
++        literal_end: literal.span.end.offset,
++        raw_literal: raw.into(),
++        name: crate::atom::atom(name),
++    })
++}
++
++fn php_identifier(name: &str) -> bool {
++    let mut bytes = name.bytes();
++    let Some(first) = bytes.next() else {
++        return false;
++    };
++    (first == b'_' || first.is_ascii_alphabetic() || first >= 0x80)
++        && bytes.all(|byte| byte == b'_' || byte.is_ascii_alphanumeric() || byte >= 0x80)
++}
++
++/// Allocation metadata is source-local and does not grant a global synthetic name.
++fn array_callable_allocation(expression: &Expression<'_>) -> Option<ImmediateObjectReceiver> {
++    match unparenthesized_expression(expression) {
++        Expression::Instantiation(inst) => match inst.class {
++            Expression::Identifier(_)
++            | Expression::Self_(_)
++            | Expression::Static(_)
++            | Expression::Parent(_) => {
++                let span = inst.class.span();
++                Some(ImmediateObjectReceiver::Instantiation {
++                    operand_start: span.start.offset,
++                    operand_end: span.end.offset,
++                })
++            }
++            _ => None,
++        },
++        Expression::AnonymousClass(anonymous) => Some(ImmediateObjectReceiver::AnonymousClass {
++            body_start: anonymous.left_brace.start.offset,
++            body_end: anonymous.right_brace.end.offset,
++            keyword_start: anonymous.class.span.start.offset,
++        }),
++        _ => None,
++    }
++}
++
++struct ArrayCallableDescription {
++    selector: LiteralMethodSelector,
++    subject_text: SubjectText,
++    is_static: bool,
++    allocation: Option<ImmediateObjectReceiver>,
++}
++
++fn same_values(left: [&Expression<'_>; 2], right: [&Expression<'_>; 2]) -> bool {
++    std::ptr::eq(left[0], right[0]) && std::ptr::eq(left[1], right[1])
++}
++
++pub(super) fn try_emit_array_callable_span<'a>(
++    elements: &TokenSeparatedSequence<'a, ArrayElement<'a>>,
++    ctx: &mut ExtractionCtx<'a>,
++) -> Option<(u32, u32)> {
++    let before = array_callable_values(elements, false)?;
++    let since = array_callable_values(elements, true)?;
++    if !same_values(before, since) {
++        return None;
++    }
++    let description = describe_array_callable(before, ctx.content, false)?;
++    Some(emit_array_callable_reference(&description, ctx, None))
++}
++
++/// Each PHP target selects its own normalized slots. Generic references never
++/// authorize a runtime edge or collapse two version-dependent receivers.
++pub(super) fn extract_array_callable_invocations<'a>(
++    elements: &TokenSeparatedSequence<'a, ArrayElement<'a>>,
++    ctx: &mut ExtractionCtx<'a>,
++    span_base: usize,
++    scope_start: u32,
++    invocation_start: u32,
++    invocation_end: u32,
++) {
++    let before = array_callable_values(elements, false);
++    let since = array_callable_values(elements, true);
++    let variants = match (before, since) {
++        (Some(before), Some(since)) if same_values(before, since) => {
++            [(Some(before), None), (None, None)]
++        }
++        (before, since) => [(before, Some(false)), (since, Some(true))],
++    };
++    for (values, php80) in variants {
++        let Some(description) =
++            values.and_then(|values| describe_array_callable(values, ctx.content, true))
++        else {
++            continue;
++        };
++        let selector = &description.selector;
++        if php80.is_none() {
++            // Only an unambiguous immediate invocation proves that a pair of
++            // class/method strings is a callable rather than ordinary data.
++            let range = emit_array_callable_reference(&description, ctx, Some(span_base));
++            ctx.non_invoked_callable_spans.push(range);
++        } else {
++            // Extraction has no applied target. A version-dependent final
++            // receiver cannot grant a unique standalone reference at this token.
++            let mut index = span_base;
++            while index < ctx.spans.len() {
++                let span = &ctx.spans[index];
++                if span.start == selector.start
++                    && span.end == selector.end
++                    && matches!(
++                        span.kind,
++                        SymbolKind::MemberAccess {
++                            is_array_callable: true,
++                            ..
++                        }
++                    )
++                {
++                    ctx.spans.remove(index);
++                } else {
++                    index += 1;
++                }
++            }
++        }
++        ctx.literal_method_selectors.push(selector.clone());
++        ctx.array_callable_invocations
++            .push(ArrayCallableInvocation {
++                selector_start: selector.start,
++                selector_end: selector.end,
++                subject_text: description.subject_text,
++                member_name: selector.name,
++                is_static: description.is_static,
++                php80,
++                allocation: description.allocation,
++                invoking_scope_start: scope_start,
++                invocation_start,
++                invocation_end,
++            });
++    }
++}
++
++fn emit_array_callable_reference(
++    description: &ArrayCallableDescription,
++    ctx: &mut ExtractionCtx<'_>,
++    invoked_span_base: Option<usize>,
++) -> (u32, u32) {
++    let site = &description.selector;
++    if let Some(base) = invoked_span_base {
++        let mut index = base;
++        while index < ctx.spans.len() {
++            let span = &ctx.spans[index];
++            if span.start == site.start
++                && span.end == site.end
++                && matches!(
++                    span.kind,
++                    SymbolKind::MemberAccess {
++                        is_array_callable: true,
++                        ..
++                    }
++                )
++            {
++                ctx.spans.remove(index);
++            } else {
++                index += 1;
++            }
++        }
++    }
++    ctx.spans.push(SymbolSpan {
++        start: site.start,
++        end: site.end,
++        kind: SymbolKind::MemberAccess {
++            subject_text: description.subject_text.clone(),
++            member_name: site.name,
++            is_static: description.is_static,
++            is_method_call: true,
++            docblock_ref: DocblockMemberRef::No,
++            is_array_callable: true,
++            is_nullsafe: false,
++        },
++    });
++    ctx.literal_method_selectors.push(site.clone());
++    (site.start, site.end)
++}
++
++fn describe_array_callable(
++    [receiver, method]: [&Expression<'_>; 2],
++    content: &str,
++    invoked: bool,
++) -> Option<ArrayCallableDescription> {
++    let receiver = unparenthesized_expression(receiver);
++    let selector = method_literal(method, content)?;
++    if !php_identifier(selector.name.as_str()) {
++        return None;
++    }
++    let receiver_span = receiver.span();
++    let (subject, subject_span, is_static) = match receiver {
++        Expression::Access(Access::ClassConstant(access))
++            if matches!(
++                &access.constant,
++                ClassLikeConstantSelector::Identifier(name) if bytes_to_str(name.value).eq_ignore_ascii_case("class")
++            ) =>
++        {
++            (
++                expr_to_subject_text(access.class),
++                access.class.span(),
++                true,
++            )
++        }
++        Expression::Literal(literal::Literal::String(class)) if invoked => {
++            let name = class.value.and_then(literal_bytes_to_str)?;
++            let name = name.strip_prefix('\\').unwrap_or(name);
++            if !name.split('\\').all(php_identifier) {
++                return None;
++            }
++            (format!("\\{name}"), receiver_span, true)
++        }
++        Expression::AnonymousClass(_) => {
++            // Generic subject resolution must not manufacture a globally
++            // trusted anonymous name. The invocation's exact body receipt
++            // selects this object in the per-URI class cache.
++            (
++                content
++                    .get(receiver_span.start.offset as usize..receiver_span.end.offset as usize)?
++                    .to_owned(),
++                receiver_span,
++                false,
++            )
++        }
++        Expression::Variable(_)
++        | Expression::Access(_)
++        | Expression::Call(_)
++        | Expression::Instantiation(_)
++        | Expression::Clone(_)
++        | Expression::ArrayAccess(_) => (expr_to_subject_text(receiver), receiver_span, false),
++        _ => return None,
++    };
++    if subject.is_empty() {
++        return None;
++    }
++    Some(ArrayCallableDescription {
++        subject_text: SubjectText::new(
++            subject,
++            subject_span.start.offset,
++            subject_span.end.offset,
++            content,
++        ),
++        selector,
++        is_static,
++        allocation: array_callable_allocation(receiver),
++    })
++}
+diff --git a/src/symbol_map/extraction/array_callable_values.rs b/src/symbol_map/extraction/array_callable_values.rs
+new file mode 100644
+index 0000000..fffa2b0
+--- /dev/null
++++ b/src/symbol_map/extraction/array_callable_values.rs
+@@ -0,0 +1,186 @@
++use mago_syntax::cst::sequence::TokenSeparatedSequence;
++use mago_syntax::cst::*;
++
++use crate::atom::{bytes_to_str, literal_bytes_to_str};
++
++pub(super) fn unparenthesized_expression<'a>(
++    mut expression: &'a Expression<'a>,
++) -> &'a Expression<'a> {
++    while let Expression::Parenthesized(parenthesized) = expression {
++        expression = parenthesized.expression;
++    }
++    expression
++}
++
++/// The callable's slots are its final runtime keys, not source positions.
++/// Unknown writes cannot be ignored because they may overwrite either slot.
++pub(super) fn array_callable_values<'a>(
++    elements: &TokenSeparatedSequence<'a, ArrayElement<'a>>,
++    php80: bool,
++) -> Option<[&'a Expression<'a>; 2]> {
++    let mut remaining = 4096;
++    let entries = written_entries(elements, &mut remaining, 0, php80)?;
++    if entries.len() != 2 {
++        return None;
++    }
++    let receiver = entries
++        .iter()
++        .find_map(|(key, value)| (*key == WrittenKey::Integer(0)).then_some(*value))?;
++    let selector = entries
++        .iter()
++        .find_map(|(key, value)| (*key == WrittenKey::Integer(1)).then_some(*value))?;
++    Some([receiver, selector])
++}
++
++#[derive(PartialEq, Eq)]
++enum WrittenKey {
++    Integer(i64),
++    String(String),
++}
++
++struct WrittenEntries<'a> {
++    entries: Vec<(WrittenKey, &'a Expression<'a>)>,
++    next: Option<i64>,
++    highest_integer: Option<i64>,
++    php80: bool,
++}
++
++impl<'a> WrittenEntries<'a> {
++    fn new(php80: bool) -> Self {
++        Self {
++            entries: Vec::new(),
++            next: Some(0),
++            highest_integer: None,
++            php80,
++        }
++    }
++
++    fn set(&mut self, key: WrittenKey, value: &'a Expression<'a>) {
++        if let WrittenKey::Integer(index) = key {
++            let first_integer = self.highest_integer.is_none();
++            self.highest_integer = Some(self.highest_integer.map_or(index, |old| old.max(index)));
++            if self.php80 && first_integer {
++                // Since PHP 8.0, the first integer key may seed a negative
++                // append cursor. String keys do not seed that cursor.
++                self.next = index.checked_add(1);
++            } else if self.php80 || index >= 0 {
++                self.next = self
++                    .next
++                    .and_then(|next| index.checked_add(1).map(|after| next.max(after)));
++            }
++        }
++        if let Some((_, existing)) = self
++            .entries
++            .iter_mut()
++            .find(|(existing, _)| *existing == key)
++        {
++            *existing = value;
++        } else {
++            self.entries.push((key, value));
++        }
++    }
++
++    fn append(&mut self, value: &'a Expression<'a>) -> Option<()> {
++        let index = self.next?;
++        self.set(WrittenKey::Integer(index), value);
++        Some(())
++    }
++}
++
++fn written_entries<'a>(
++    elements: &TokenSeparatedSequence<'a, ArrayElement<'a>>,
++    remaining: &mut usize,
++    depth: usize,
++    php80: bool,
++) -> Option<Vec<(WrittenKey, &'a Expression<'a>)>> {
++    if depth > 32 {
++        return None;
++    }
++    let mut result = WrittenEntries::new(php80);
++    for element in elements.iter() {
++        *remaining = remaining.checked_sub(1)?;
++        match element {
++            ArrayElement::KeyValue(pair) => result.set(written_key(pair.key)?, pair.value),
++            ArrayElement::Value(element) => result.append(element.value)?,
++            ArrayElement::Variadic(element) => {
++                let source = match unparenthesized_expression(element.value) {
++                    Expression::Array(array) => {
++                        written_entries(&array.elements, remaining, depth + 1, php80)?
++                    }
++                    Expression::LegacyArray(array) => {
++                        written_entries(&array.elements, remaining, depth + 1, php80)?
++                    }
++                    _ => return None,
++                };
++                for (key, value) in source {
++                    match key {
++                        WrittenKey::Integer(_) => result.append(value)?,
++                        WrittenKey::String(_) => result.set(key, value),
++                    }
++                }
++            }
++            ArrayElement::Missing(_) => return None,
++        }
++        // Literal writes and spreads cannot remove a key. Three surviving
++        // keys can never become the callable's two slots later in this array
++        // or after spreading it into another literal.
++        if result.entries.len() > 2 {
++            return None;
++        }
++    }
++    Some(result.entries)
++}
++
++fn written_key(expression: &Expression<'_>) -> Option<WrittenKey> {
++    match unparenthesized_expression(expression) {
++        Expression::Literal(Literal::String(literal)) => {
++            let decoded = literal_bytes_to_str(literal.value?)?;
++            Some(match crate::php_type::canonical_int_key(decoded) {
++                Some(index) => WrittenKey::Integer(index),
++                None => WrittenKey::String(decoded.to_string()),
++            })
++        }
++        Expression::Literal(Literal::Null(_)) => Some(WrittenKey::String(String::new())),
++        other => written_numeric_key(other).map(WrittenKey::Integer),
++    }
++}
++
++fn written_numeric_key<'a>(mut expression: &'a Expression<'a>) -> Option<i64> {
++    let mut negative = false;
++    loop {
++        expression = unparenthesized_expression(expression);
++        match expression {
++            Expression::UnaryPrefix(unary) => {
++                match unary.operator {
++                    unary::UnaryPrefixOperator::Plus(_) => {}
++                    unary::UnaryPrefixOperator::Negation(_) => negative = !negative,
++                    _ => return None,
++                }
++                expression = unary.operand;
++            }
++            Expression::Literal(Literal::Integer(integer)) => {
++                integer.value?;
++                let raw = bytes_to_str(integer.raw);
++                return if negative {
++                    crate::php_type::parse_php_int_literal(&format!("-{raw}"))
++                } else {
++                    crate::php_type::parse_php_int_literal(raw)
++                };
++            }
++            Expression::Literal(Literal::Float(float)) => {
++                let value = if negative {
++                    -float.value.0
++                } else {
++                    float.value.0
++                };
++                return (value.is_finite()
++                    && value >= i64::MIN as f64
++                    && value < -(i64::MIN as f64))
++                    .then(|| value.trunc() as i64);
++            }
++            Expression::Literal(Literal::True(_)) => return Some(if negative { -1 } else { 1 }),
++            Expression::Literal(Literal::False(_) | Literal::Null(_)) => return Some(0),
++            _ => return None,
++        }
++    }
++}

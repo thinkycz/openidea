@@ -119,6 +119,7 @@ impl Host {
                 let effective = settings.effective();
                 ide_sdk::apply::server_launch_overrides(cfg, &effective);
                 ide_sdk::apply::configure_server(cfg, &root, server_root, &effective);
+                ide_tools::phpantom::configure(cfg);
                 ide_sdk::java::cap_java_home(cfg, &ide_sdk::java::installed_jdks());
                 if cfg.name == "jdtls" {
                     let bundles: Vec<PathBuf> =
@@ -178,6 +179,7 @@ impl Host {
 
         let repos = Arc::new(RwLock::new(Repos::enclosing(&root)?));
         let watcher = {
+            let lsp = lsp.clone();
             let repos = repos.clone();
             let settings = settings.clone();
             let index = index.clone();
@@ -195,6 +197,7 @@ impl Host {
                 Box::new(move |batch| {
                     let changed: Vec<PathBuf> = batch.created.iter().chain(&batch.modified).cloned().collect();
                     index.update(&changed, &batch.removed);
+                    lsp.php_files_changed(&batch.created, &batch.modified, &batch.removed);
                     // Atomic saves by external tools surface as `created`.
                     documents.on_disk_changed(&changed);
                     record_external_changes(&history, &changed, &batch.removed);
@@ -261,7 +264,7 @@ impl Host {
         let content_watchers = extra_roots
             .iter()
             .filter_map(|r| {
-                let w = content_root_watcher(r, &excludes, &sink, &index, &documents, &history)?;
+                let w = content_root_watcher(r, &excludes, &sink, &index, &documents, &history, &lsp)?;
                 Some((r.clone(), w))
             })
             .collect();
@@ -529,7 +532,7 @@ impl Project {
                 continue;
             }
             if let Some(w) =
-                content_root_watcher(&r, &excludes, &self.sink, &self.index, &self.documents, &self.history)
+                content_root_watcher(&r, &excludes, &self.sink, &self.index, &self.documents, &self.history, &self.lsp)
             {
                 watchers.push((r, w));
             }
@@ -548,6 +551,9 @@ impl Project {
 /// Applies a multi-file edit through the document layer so open editors update live.
 pub fn apply_workspace_edit(documents: &Documents, edit: &ide_core::WorkspaceEdit) -> IdeResult<()> {
     use ide_core::FileEdit;
+    if edit.guard.is_some() {
+        return Err(IdeError::invalid("Reviewed edits must use the guarded project application path"));
+    }
     for file in &edit.files {
         match file {
             FileEdit::Edit { path, edits } => {
@@ -604,7 +610,7 @@ pub fn history_retention(settings: &ide_core::settings::Settings) -> ide_workspa
 }
 
 /// Project Structure content roots outside `root` (existing absolute directories).
-fn content_roots(settings: &ide_core::settings::Settings, root: &Path) -> Vec<PathBuf> {
+pub(crate) fn content_roots(settings: &ide_core::settings::Settings, root: &Path) -> Vec<PathBuf> {
     let mut out: Vec<PathBuf> = Vec::new();
     for r in &settings.project_structure.content_roots {
         let p = PathBuf::from(r.trim());
@@ -624,8 +630,9 @@ fn content_root_watcher(
     index: &Arc<ProjectIndex>,
     documents: &Arc<Documents>,
     history: &Arc<LocalHistory>,
+    lsp: &Arc<LspManager>,
 ) -> Option<Watcher> {
-    let (index, documents, history) = (index.clone(), documents.clone(), history.clone());
+    let (index, documents, history, lsp) = (index.clone(), documents.clone(), history.clone(), lsp.clone());
     Watcher::start(
         dir,
         excludes.to_vec(),
@@ -633,6 +640,7 @@ fn content_root_watcher(
         Box::new(move |batch| {
             let changed: Vec<PathBuf> = batch.created.iter().chain(&batch.modified).cloned().collect();
             index.update(&changed, &batch.removed);
+            lsp.php_files_changed(&batch.created, &batch.modified, &batch.removed);
             documents.on_disk_changed(&changed);
             record_external_changes(&history, &changed, &batch.removed);
         }),

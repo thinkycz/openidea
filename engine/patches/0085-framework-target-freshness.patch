@@ -1,0 +1,2390 @@
+diff --git a/docs/CHANGELOG.md b/docs/CHANGELOG.md
+index 2a396d4..a20a5c9 100644
+--- a/docs/CHANGELOG.md
++++ b/docs/CHANGELOG.md
+@@ -15,6 +15,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
+ 
+ ## [Unreleased]
+ 
++- **Retire diagnostics before replacing project services.** Previously accepted diagnostic sends finish queuing before project retirement, preventing old service publications from crossing the replacement boundary. Contributed by PHP Workbench downstream.
++
++- **Recognize transitive Laravel installations.** Framework discovery reads Composer installed metadata and resolves framework configuration from its declared install path, including custom vendor locations. Contributed by PHP Workbench downstream.
++
++- **Check attribute closure availability.** Static noncapturing attribute-argument closures require PHP 8.5; unsupported closure forms receive their own diagnostics while legal attribute classes remain available. Contributed by PHP Workbench downstream.
++
++- **Refresh saved PHP target profiles.** Project PHP version and extension changes rebuild built-ins and diagnostics while preserving unsaved files. Unrelated projects retain their last valid configuration when saved settings are malformed. Contributed by PHP Workbench downstream.
++
+ - **Use selected PHP for external formatting.** Editor formatting with PHP-script Pint, php-cs-fixer and phpcbf, including Pint Blade, uses the selected local interpreter. Invalid selections refuse PHP execution; standalone CLI formatting keeps its inherited interpreter. Contributed by PHP Workbench downstream.
+ 
+ - **Refresh dependencies when installed metadata changes.** Composer dependency completion and navigation refresh after the project's installed metadata is created, changed or removed, including configured vendor directories. Unsaved project files are retained. Contributed by PHP Workbench downstream.
+diff --git a/src/backend/startup.rs b/src/backend/startup.rs
+index 3df707a..f3c9a0d 100644
+--- a/src/backend/startup.rs
++++ b/src/backend/startup.rs
+@@ -324,18 +324,10 @@ impl Backend {
+ 
+             // Detect the target PHP version.  The config file override
+             // takes precedence; otherwise fall back to composer.json.
+-            let php_version = self
+-                .config()
+-                .php
+-                .version
+-                .as_deref()
+-                .and_then(crate::types::PhpVersion::from_composer_constraint)
+-                .unwrap_or_else(|| {
+-                    composer_package
+-                        .as_ref()
+-                        .and_then(composer::detect_php_version_from_package)
+-                        .unwrap_or_default()
+-                });
++            let php_version = crate::workbench_active_target::resolve_php_version(
++                &self.config(),
++                composer_package.as_ref(),
++            );
+             self.set_php_version(php_version);
+ 
+             // ── Create a progress token for indexing feedback ────────
+diff --git a/src/composer.rs b/src/composer.rs
+index 26da147..9246e8d 100644
+--- a/src/composer.rs
++++ b/src/composer.rs
+@@ -1625,6 +1625,25 @@ pub(crate) fn is_laravel_project(package: &ComposerPackage) -> bool {
+         })
+ }
+ 
++/// Classify the consuming project from declared requirements or saved installed
++/// dependencies. A wrapper can pull Illuminate in transitively without naming it
++/// in the root manifest. Installed version strings are not compatibility claims.
++/// Keep this separate from application classification and analyzer policy.
++pub(crate) fn is_laravel_project_with_installed(root: &Path, package: &ComposerPackage) -> bool {
++    is_laravel_project(package)
++        || read_installed_packages(root, &get_vendor_dir(package)).is_some_and(|installed| {
++            installed.packages.iter().any(|entry| {
++                entry
++                    .get("name")
++                    .and_then(serde_json::Value::as_str)
++                    .is_some_and(|name| {
++                        name.eq_ignore_ascii_case("laravel/framework")
++                            || name.to_ascii_lowercase().starts_with("illuminate/")
++                    })
++            })
++        })
++}
++
+ /// Detect whether the project is a Laravel *application* rather than a
+ /// library that uses an Illuminate component.
+ ///
+diff --git a/src/diagnostics/mod.rs b/src/diagnostics/mod.rs
+index 2e155a1..d3e8813 100644
+--- a/src/diagnostics/mod.rs
++++ b/src/diagnostics/mod.rs
+@@ -723,6 +723,17 @@ impl Backend {
+     /// value to skip the refresh.  Always `false` in push mode: the set
+     /// is delivered inline, so there is nothing to re-pull.
+     pub(crate) async fn assemble_and_push(&self, uri_str: &str) -> bool {
++        if self.shutdown_flag.load(Ordering::Acquire) {
++            return false;
++        }
++        // Wait before snapshot assembly, so gate contention cannot retain an
++        // already assembled versioned payload. Pull-only cache writes do not
++        // enqueue diagnostic notifications and need no transport send fence.
++        let _push_send = if !self.supports_pull_diagnostics.load(Ordering::Acquire) {
++            Some(self.diag.push_send_gate.lock().await)
++        } else {
++            None
++        };
+         if self.shutdown_flag.load(Ordering::Acquire) {
+             return false;
+         }
+@@ -1375,14 +1386,21 @@ impl Backend {
+         };
+ 
+         // A closing consumer must not clear the selected owner's diagnostics.
+-        if !self.shutdown_flag.load(Ordering::Acquire)
+-            && self.project_scope.allows_diagnostics(uri_str)
+-            && self.symbols.source_authority.is_preferred(uri_str)
+-        {
+-            client.publish_diagnostics(uri, Vec::new(), None).await;
+-
+-            // Signalling the pump returns immediately, so a burst of
+-            // didClose notifications cannot deadlock the service loop.
++        let published = {
++            let _push_send = self.diag.push_send_gate.lock().await;
++            if !self.shutdown_flag.load(Ordering::Acquire)
++                && !self.open_files.read().contains_key(uri_str)
++                && self.project_scope.allows_diagnostics(uri_str)
++                && self.symbols.source_authority.is_preferred(uri_str)
++            {
++                client.publish_diagnostics(uri, Vec::new(), None).await;
++                true
++            } else {
++                false
++            }
++        };
++        if published {
++            // Do not hold the diagnostic send gate while requesting refresh.
+             self.request_diagnostic_refresh().await;
+         }
+ 
+@@ -2050,3 +2068,6 @@ mod run_ownership_tests {
+         assert!(documents.phase_current(uri, revision.as_ref(), true));
+     }
+ }
++
++#[cfg(all(test, not(target_arch = "wasm32")))]
++mod retire_fence_tests;
+diff --git a/src/diagnostics/retire_fence_tests.rs b/src/diagnostics/retire_fence_tests.rs
+new file mode 100644
+index 0000000..3e88659
+--- /dev/null
++++ b/src/diagnostics/retire_fence_tests.rs
+@@ -0,0 +1,193 @@
++//! Exercise actual ClientSocket backpressure without a test-only production API.
++use std::future::{Future, poll_fn};
++use std::pin::Pin;
++use std::sync::Arc;
++use std::task::Poll;
++use std::time::Duration;
++
++use tokio::io::{AsyncReadExt, AsyncWriteExt, DuplexStream};
++use tower_lsp::lsp_types::{Diagnostic, Unregistration};
++use tower_lsp::{LanguageServer, LspService, Server};
++
++use crate::Backend;
++
++async fn write_frame(stream: &mut DuplexStream, value: serde_json::Value) {
++    let bytes = serde_json::to_vec(&value).unwrap();
++    let header = format!("Content-Length: {}\r\n\r\n", bytes.len());
++    stream.write_all(header.as_bytes()).await.unwrap();
++    stream.write_all(&bytes).await.unwrap();
++}
++async fn read_frame(stream: &mut DuplexStream) -> serde_json::Value {
++    let mut header = Vec::new();
++    while !header.ends_with(b"\r\n\r\n") {
++        header.push(
++            stream
++                .read_u8()
++                .await
++                .expect("actual LSP output remains open"),
++        );
++        assert!(header.len() < 4096, "bounded LSP frame header");
++    }
++    let header = std::str::from_utf8(&header).unwrap();
++    let len: usize = header
++        .lines()
++        .find_map(|line| line.strip_prefix("Content-Length: "))
++        .unwrap()
++        .parse()
++        .unwrap();
++    let mut body = vec![0; len];
++    stream.read_exact(&mut body).await.unwrap();
++    serde_json::from_slice(&body).unwrap()
++}
++async fn poll_once<F: Future + ?Sized>(mut future: Pin<&mut F>) -> Poll<F::Output> {
++    poll_fn(|cx| Poll::Ready(future.as_mut().poll(cx))).await
++}
++
++fn publish(
++    backend: Arc<Backend>,
++    kind: u8,
++    uri: String,
++) -> Pin<Box<dyn Future<Output = ()> + Send>> {
++    Box::pin(async move {
++        match kind {
++            0 => {
++                backend.assemble_and_push(&uri).await;
++            }
++            1 => {
++                backend.clear_diagnostics_for_file(&uri).await;
++            }
++            2 => {
++                backend.flush_workspace_diag_updates(vec![uri]).await;
++            }
++            _ => unreachable!(),
++        }
++    })
++}
++
++async fn actual_blocked_send_is_drained_before_shutdown_and_retirement_request(kind: u8) {
++    let (service, socket) = LspService::build(Backend::new).finish();
++    // This is a real shallow worker clone, with the same Client, flags and
++    // diagnostic state as the service, not a replacement fake transport.
++    let backend = Arc::new(service.inner().clone_for_diagnostic_worker());
++    let retire_backend = Arc::new(backend.clone_for_diagnostic_worker());
++    let (mut client, server) = tokio::io::duplex(1 << 16);
++    let (input, output) = tokio::io::split(server);
++    let mut driver = Box::pin(Server::new(input, output, socket).serve(service));
++    write_frame(&mut client,serde_json::json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"capabilities":{}}})).await;
++    let initialized=tokio::time::timeout(Duration::from_secs(10),async {
++        tokio::select! {
++            _=&mut driver=>panic!("actual server terminated during initialize"),
++            response=async { loop { let frame=read_frame(&mut client).await; if frame["id"]==1 && frame.get("method").is_none() {return frame;} } }=>response,
++        }
++    }).await.expect("actual transport initialize");
++    assert_eq!(initialized["id"], 1);
++    assert!(initialized.get("error").is_none());
++    // Do not send initialized: no background workers are needed to exercise
++    // these existing send methods, and none can add unrelated publications.
++    // Stop polling the driver so its actual bounded ClientSocket cannot drain.
++    let mut blocked = None;
++    for number in 0..64 {
++        let uri = format!("file:///owned/retire-send-{kind}-{number}.php");
++        let diagnostic = Diagnostic {
++            message: format!("owned send {number}"),
++            ..Diagnostic::default()
++        };
++        backend
++            .diag
++            .last_fast
++            .lock()
++            .insert(uri.clone(), vec![diagnostic.clone()]);
++        backend
++            .diag
++            .workspace_diags
++            .lock()
++            .set_native(&uri, vec![diagnostic]);
++        let mut future = publish(backend.clone(), kind, uri.clone());
++        match poll_once(future.as_mut()).await {
++            Poll::Ready(()) => {}
++            Poll::Pending => {
++                blocked = Some((uri, future));
++                break;
++            }
++        }
++    }
++    let (blocked_uri, blocked_send) = blocked
++        .expect("fixture must reach ACTUAL ClientSocket backpressure before asserting retirement");
++    let mut retiring = Box::pin(async move {
++        retire_backend.shutdown().await.unwrap();
++    });
++    assert!(
++        poll_once(retiring.as_mut()).await.is_pending(),
++        "shutdown must wait for an actual accepted diagnostic send blocked on transport (kind{kind})"
++    );
++    // Resume the real driver; no artificial gate is released by the test.
++    let driver = tokio::spawn(driver);
++    tokio::time::timeout(Duration::from_secs(10), async {
++        tokio::join!(blocked_send, retiring);
++    })
++    .await
++    .expect("transport draining releases accepted send and shutdown");
++    let publisher_client = backend.client.as_ref().unwrap().clone();
++    let mut retirement = Box::pin(async move {
++        publisher_client
++            .unregister_capability(vec![Unregistration {
++                id: "owned-retirement".into(),
++                method: "workspace/didChangeWatchedFiles".into(),
++            }])
++            .await
++            .unwrap();
++    });
++    assert!(
++        poll_once(retirement.as_mut()).await.is_pending(),
++        "real unregister awaits its client acknowledgement"
++    );
++    let mut saw_blocked_send = false;
++    let marker = tokio::time::timeout(Duration::from_secs(10), async {
++        loop {
++            let frame = read_frame(&mut client).await;
++            if frame["method"] == "textDocument/publishDiagnostics"
++                && frame["params"]["uri"] == blocked_uri
++            {
++                saw_blocked_send = true;
++            }
++            if frame["method"] == "client/unregisterCapability" {
++                return frame;
++            }
++        }
++    })
++    .await
++    .expect("actual diagnostic frames and retirement request");
++    assert!(
++        saw_blocked_send,
++        "accepted blocked send must appear BEFORE the retirement marker"
++    );
++    write_frame(
++        &mut client,
++        serde_json::json!({"jsonrpc":"2.0","id":marker["id"],"result":null}),
++    )
++    .await;
++    tokio::time::timeout(Duration::from_secs(10), retirement)
++        .await
++        .expect("retirement response drains");
++    assert!(
++        !backend
++            .assemble_and_push("file:///owned/post-retirement.php")
++            .await,
++        "worker clone sees shutdown and refuses later admission"
++    );
++    driver.abort();
++    let _ = driver.await;
++}
++
++#[tokio::test]
++async fn diagnostic_retire_fence_waits_for_actual_assembled_push_enqueue() {
++    actual_blocked_send_is_drained_before_shutdown_and_retirement_request(0).await;
++}
++#[tokio::test]
++async fn diagnostic_retire_fence_waits_for_actual_did_close_clear_enqueue() {
++    actual_blocked_send_is_drained_before_shutdown_and_retirement_request(1).await;
++}
++#[tokio::test]
++async fn diagnostic_retire_fence_waits_for_actual_workspace_push_enqueue() {
++    actual_blocked_send_is_drained_before_shutdown_and_retirement_request(2).await;
++}
+diff --git a/src/diagnostics/state.rs b/src/diagnostics/state.rs
+index 0dd991e..764c55f 100644
+--- a/src/diagnostics/state.rs
++++ b/src/diagnostics/state.rs
+@@ -22,6 +22,9 @@ pub(crate) struct DiagnosticState {
+     pub(crate) transport_clock: Option<Arc<super::transport_clock::TransportClock>>,
+     pub(crate) documents: Arc<Mutex<super::revision::Revisions>>,
+     pub(crate) publication_sequence: Arc<AtomicU64>,
++    /// Shared by every worker clone. A retiring Backend waits for accepted
++    /// diagnostic sends to enqueue before router capability unregistration.
++    pub(crate) push_send_gate: Arc<tokio::sync::Mutex<()>>,
+     /// Monotonically increasing version counter for diagnostic debouncing.
+     pub(crate) version: Arc<AtomicU64>,
+     /// Notification handle used to wake the diagnostic worker task.
+@@ -90,6 +93,7 @@ impl DiagnosticState {
+             transport_clock: None,
+             documents: Arc::new(Mutex::new(super::revision::Revisions::default())),
+             publication_sequence: Arc::new(AtomicU64::new(0)),
++            push_send_gate: Arc::new(tokio::sync::Mutex::new(())),
+             version: Arc::new(AtomicU64::new(0)),
+             notify: Arc::new(Notify::new()),
+             pending_uris: Arc::new(Mutex::new(HashSet::new())),
+diff --git a/src/diagnostics/syntax_errors.rs b/src/diagnostics/syntax_errors.rs
+index 6d4834c..c182373 100644
+--- a/src/diagnostics/syntax_errors.rs
++++ b/src/diagnostics/syntax_errors.rs
+@@ -17,6 +17,67 @@ use super::helpers::make_diagnostic;
+ use crate::Backend;
+ 
+ impl Backend {
++    /// Reuse feature spans captured in the current symbol-map publication. No reparse.
++    fn collect_attribute_closure_target_diagnostics(
++        &self,
++        uri: &str,
++        content: &str,
++        out: &mut Vec<Diagnostic>,
++    ) {
++        let Some(map) = self.symbol_maps.read().get(uri).cloned() else {
++            return;
++        };
++        if map.attribute_closure_spans.is_empty() || !map.matches_source(content) {
++            return;
++        }
++        // Length alone cannot reject a same-size replacement of an attribute
++        // argument. Feature diagnostics require the exact indexed source.
++        use std::hash::{Hash, Hasher};
++        let mut hasher = std::collections::hash_map::DefaultHasher::new();
++        content.hash(&mut hasher);
++        if hasher.finish() != map.source_fingerprint {
++            return;
++        }
++        let target = self.php_version();
++        for &(start, end, kind) in &map.attribute_closure_spans {
++            use crate::symbol_map::AttributeClosureKind;
++            let (code, message) = match kind {
++                AttributeClosureKind::StaticNonCapturing => {
++                    if target >= crate::types::PhpVersion::new(8, 5) {
++                        continue;
++                    }
++                    (
++                        "php_version_attribute_closure",
++                        "Closure expressions in attribute arguments require PHP 8.5 or later.",
++                    )
++                }
++                AttributeClosureKind::NonStatic => (
++                    "invalid_attribute_closure",
++                    "Closure expressions in attribute arguments must be static.",
++                ),
++                AttributeClosureKind::Capturing => (
++                    "invalid_attribute_closure",
++                    "Closure expressions in attribute arguments must not use a capture clause.",
++                ),
++                AttributeClosureKind::Arrow => (
++                    "invalid_attribute_closure",
++                    "Arrow functions are not supported in attribute arguments.",
++                ),
++            };
++            let Some(range) =
++                self.offset_range_to_lsp_range(uri, content, start as usize, end as usize)
++            else {
++                continue;
++            };
++            out.push(make_diagnostic(
++                range,
++                DiagnosticSeverity::ERROR,
++                code,
++                message.to_owned(),
++            ));
++        }
++    }
++
+     /// Collect syntax-error diagnostics for a single file.
+     ///
+     /// Reads cached parse errors from `self.parse_errors` (populated
+@@ -29,6 +90,7 @@ impl Backend {
+         content: &str,
+         out: &mut Vec<Diagnostic>,
+     ) {
++        self.collect_attribute_closure_target_diagnostics(uri, content, out);
+         let errors = {
+             let map = self.parse_errors.read();
+             match map.get(uri) {
+diff --git a/src/diagnostics/workspace.rs b/src/diagnostics/workspace.rs
+index f488736..d639e2d 100644
+--- a/src/diagnostics/workspace.rs
++++ b/src/diagnostics/workspace.rs
+@@ -1124,6 +1124,7 @@ impl Backend {
+         }
+ 
+         for uri_str in updated {
++            let _push_send = self.diag.push_send_gate.lock().await;
+             if self
+                 .shutdown_flag
+                 .load(std::sync::atomic::Ordering::Acquire)
+diff --git a/src/indexing/init.rs b/src/indexing/init.rs
+index df5b5e5..a563b1d 100644
+--- a/src/indexing/init.rs
++++ b/src/indexing/init.rs
+@@ -111,10 +111,10 @@ impl Backend {
+ 
+         // Classify the project so Laravel-specific resolution (Eloquent
+         // members, config/view/route keys, contract bindings, patches) is
+-        // skipped when no Laravel/Illuminate dependency is present.
++        // skipped when no declared or installed Laravel/Illuminate dependency is present.
+         let is_laravel = composer_json
+             .as_ref()
+-            .map(composer::is_laravel_project)
++            .map(|package| composer::is_laravel_project_with_installed(root, package))
+             .unwrap_or(false);
+         self.resolved_class_cache.write().set_laravel(is_laravel);
+ 
+@@ -482,7 +482,7 @@ impl Backend {
+             if (!any_laravel || !any_runtime_permissions || !any_application)
+                 && let Some(pkg) = composer::read_composer_package(sub_root)
+             {
+-                any_laravel |= composer::is_laravel_project(&pkg);
++                any_laravel |= composer::is_laravel_project_with_installed(sub_root, &pkg);
+                 any_runtime_permissions |= composer::has_runtime_permission_package(&pkg);
+                 any_application |=
+                     composer::is_application_project(&pkg) || sub_root.join("artisan").is_file();
+diff --git a/src/project_router.rs b/src/project_router.rs
+index e5b64ab..e92f2b4 100644
+--- a/src/project_router.rs
++++ b/src/project_router.rs
+@@ -102,6 +102,47 @@ impl ProjectContext {
+         })
+     }
+ 
++    /// Rebuild only a changed effective applied profile, not every TOML edit.
++    /// Fresh backends restore version/extension-filtered stubs and retire old
++    /// diagnostic workers before replaying the transport's unsaved documents.
++    fn saved_target_changed(&self, path: &Path) -> bool {
++        if path
++            .file_name()
++            .is_none_or(|name| name != crate::config::CONFIG_FILE_NAME)
++        {
++            return false;
++        }
++        let Some(root) = self.root.as_ref() else {
++            return false;
++        };
++        let Some(parent) = path.parent() else {
++            return false;
++        };
++        if normalized(parent) != normalized(root) {
++            return false;
++        }
++        let Some(applied) = self.backend.workspace.active_php_target.read().clone() else {
++            return false;
++        };
++        // Parse failure preserves the existing last-good target. Missing project
++        // config uses load_config_from's global/Composer/default policy.
++        let Ok(config) = crate::config::load_config_from(
++            root,
++            self.backend.workspace.global_config_path.as_deref(),
++        ) else {
++            return false;
++        };
++        let composer_package = composer::read_composer_package(root);
++        let version =
++            crate::workbench_active_target::resolve_php_version(&config, composer_package.as_ref());
++        let requested = crate::workbench_active_target::ActiveTarget::applied(
++            version,
++            config.php.extensions.as_deref(),
++            &self.backend.version,
++        );
++        requested != applied
++    }
++
+     fn consumes(&self, uri: &Url) -> bool {
+         let Ok(path) = uri.to_file_path() else {
+             return false;
+@@ -194,10 +235,14 @@ impl ProjectRouter {
+         params: InitializeParams,
+     ) -> Result<InitializeResult> {
+         let _gate = self.gate.write().await;
+-        self.configure_projects(params).await
++        self.configure_projects(params, None).await
+     }
+ 
+-    async fn configure_projects(&self, params: InitializeParams) -> Result<InitializeResult> {
++    async fn configure_projects(
++        &self,
++        params: InitializeParams,
++        previous_configs: Option<&HashMap<PathBuf, crate::config::Config>>,
++    ) -> Result<InitializeResult> {
+         *self.params.write() = Some(params.clone());
+         let mut folders: Vec<PathBuf> = params
+             .workspace_folders
+@@ -229,6 +274,22 @@ impl ProjectRouter {
+                 .cloned()
+                 .collect();
+             let mut backend = Self::backend(self.client.clone(), self.full_stubs);
++            // A topology/target rebuild must not turn another rooted project's
++            // malformed saved TOML into a fresh default profile. Only parse errors
++            // use prior valid effective settings; deletion is a successful default/
++            // global merge and must never inherit the removed project override.
++            if let Some(previous) =
++                previous_configs.and_then(|configs| configs.get(&normalized(root)))
++                && let Err(error) = crate::config::load_config_from(
++                    root,
++                    backend.workspace.global_config_path.as_deref(),
++                )
++            {
++                backend.set_config(previous.clone());
++                backend.log(MessageType::WARNING, format!(
++                    "Failed to reload .phpantom.toml; retaining this project's last valid configuration: {error}",
++                )).await;
++            }
+             backend.symbols.source_authority = Arc::clone(&self.sources);
+             backend.diag.transport_clock = Some(Arc::clone(&self.diagnostic_clock));
+             backend.diag.publication_sequence = Arc::clone(&self.diagnostic_clock.sequence);
+@@ -799,9 +860,10 @@ impl ProjectRouter {
+             (name.is_some_and(|name| name == "composer.json" || name == "composer.lock")
+                 && contexts.iter().any(|c| c.consumes(&event.uri)))
+                 || event.uri.to_file_path().is_ok_and(|path| {
+-                    contexts
+-                        .iter()
+-                        .any(|context| context.owns_installed_metadata(&path))
++                    contexts.iter().any(|context| {
++                        context.owns_installed_metadata(&path)
++                            || context.saved_target_changed(&path)
++                    })
+                 })
+         });
+         if topology_changed {
+@@ -929,6 +991,18 @@ impl ProjectRouter {
+     }
+     async fn rebuild(&self, params: InitializeParams) -> Result<()> {
+         let old = self.contexts.read().clone();
++        // Snapshot only an initialized same-root context, before retiring its
++        // workers. Newly discovered projects have no last-good configuration.
++        let previous_configs: HashMap<PathBuf, crate::config::Config> = old
++            .iter()
++            .filter(|context| context.ready.get().is_some())
++            .filter_map(|context| {
++                context
++                    .root
++                    .as_ref()
++                    .map(|root| (normalized(root), context.backend.config()))
++            })
++            .collect();
+         let prior: Vec<_> = self
+             .owners
+             .read()
+@@ -942,7 +1016,8 @@ impl ProjectRouter {
+         self.retire(&old).await;
+         self.owners.write().clear();
+         self.navigation_versions.write().clear();
+-        self.configure_projects(params).await?;
++        self.configure_projects(params, Some(&previous_configs))
++            .await?;
+         let contexts = self.contexts.read().clone();
+         self.revoke_builtin_documents();
+         for (uri, root) in prior {
+diff --git a/src/server.rs b/src/server.rs
+index ccb15c4..406e67c 100644
+--- a/src/server.rs
++++ b/src/server.rs
+@@ -159,6 +159,10 @@ impl LanguageServer for Backend {
+         self.phpmd_tool.notify.notify_one();
+         self.mago_lint_tool.notify.notify_one();
+         self.mago_analyze_tool.notify.notify_one();
++        // The flag rejects later admissions. Wait for any already accepted
++        // diagnostic send to finish enqueueing before a router retirement
++        // request can become visible on the same client transport.
++        let _push_send = self.diag.push_send_gate.lock().await;
+         Ok(())
+     }
+ 
+diff --git a/src/symbol_map/extraction/attribute_closures.rs b/src/symbol_map/extraction/attribute_closures.rs
+new file mode 100644
+index 0000000..f7a833a
+--- /dev/null
++++ b/src/symbol_map/extraction/attribute_closures.rs
+@@ -0,0 +1,84 @@
++//! Target-independent attribute argument features collected from an already parsed AST.
++use crate::symbol_map::AttributeClosureKind;
++use mago_syntax::cst::*;
++use mago_syntax::walker::Walker;
++
++pub(super) fn collect(program: &Program<'_>) -> Vec<(u32, u32, AttributeClosureKind)> {
++    let mut spans = Vec::new();
++    Attributes.walk_program(program, &mut spans);
++    spans.sort_unstable();
++    spans.dedup();
++    spans
++}
++
++struct Attributes;
++impl<'ast, 'arena> Walker<'ast, 'arena, Vec<(u32, u32, AttributeClosureKind)>> for Attributes {
++    fn walk_in_attribute(
++        &self,
++        attribute: &'ast Attribute<'arena>,
++        spans: &mut Vec<(u32, u32, AttributeClosureKind)>,
++    ) {
++        if let Some(arguments) = &attribute.argument_list {
++            for argument in &arguments.arguments {
++                if let Some(value) = argument.value() {
++                    ArgumentClosures.walk_expression(value, spans);
++                }
++            }
++        }
++    }
++}
++
++/// Descend through the argument expression (including arrays/new arguments),
++/// stopping at function/class body boundaries. A closure nested in an argument
++/// closure's body is ordinary function-body syntax, not another attribute argument.
++struct ArgumentClosures;
++impl<'ast, 'arena> Walker<'ast, 'arena, Vec<(u32, u32, AttributeClosureKind)>>
++    for ArgumentClosures
++{
++    fn walk_closure(
++        &self,
++        closure: &'ast Closure<'arena>,
++        spans: &mut Vec<(u32, u32, AttributeClosureKind)>,
++    ) {
++        let start = closure
++            .r#static
++            .as_ref()
++            .map_or(closure.function.span.start.offset, |keyword| {
++                keyword.span.start.offset
++            });
++        let kind = if closure.r#static.is_none() {
++            AttributeClosureKind::NonStatic
++        } else if closure.use_clause.is_some() {
++            AttributeClosureKind::Capturing
++        } else {
++            AttributeClosureKind::StaticNonCapturing
++        };
++        spans.push((start, closure.function.span.end.offset, kind));
++    }
++    fn walk_arrow_function(
++        &self,
++        closure: &'ast ArrowFunction<'arena>,
++        spans: &mut Vec<(u32, u32, AttributeClosureKind)>,
++    ) {
++        let start = closure
++            .r#static
++            .as_ref()
++            .map_or(closure.r#fn.span.start.offset, |keyword| {
++                keyword.span.start.offset
++            });
++        spans.push((
++            start,
++            closure.r#fn.span.end.offset,
++            AttributeClosureKind::Arrow,
++        ));
++    }
++    fn walk_anonymous_class(
++        &self,
++        class: &'ast AnonymousClass<'arena>,
++        spans: &mut Vec<(u32, u32, AttributeClosureKind)>,
++    ) {
++        if let Some(arguments) = &class.argument_list {
++            self.walk_partial_argument_list(arguments, spans);
++        }
++    }
++}
+diff --git a/src/symbol_map/extraction/mod.rs b/src/symbol_map/extraction/mod.rs
+index 1f566cc..b686508 100644
+--- a/src/symbol_map/extraction/mod.rs
++++ b/src/symbol_map/extraction/mod.rs
+@@ -140,6 +140,7 @@ impl<'a> ExtractionCtx<'a> {
+     }
+ }
+ 
++mod attribute_closures;
+ mod class_like;
+ mod expressions;
+ mod keywords;
+@@ -341,6 +342,11 @@ fn extract_symbol_map_inner(
+     }
+ 
+     SymbolMap {
++        attribute_closure_spans: if content.contains("#[") {
++            attribute_closures::collect(program)
++        } else {
++            Vec::new()
++        },
+         embedded_source: None,
+         spans: ctx.spans,
+         conditional_laravel_spans: ctx.conditional_laravel_spans,
+diff --git a/src/symbol_map/mod.rs b/src/symbol_map/mod.rs
+index bde1aa9..3e3f321 100644
+--- a/src/symbol_map/mod.rs
++++ b/src/symbol_map/mod.rs
+@@ -973,6 +973,15 @@ pub(crate) enum VarDefKind {
+     Unset,
+ }
+ 
++/// Syntax rules specific to closure expressions in attribute arguments.
++#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
++pub enum AttributeClosureKind {
++    StaticNonCapturing,
++    NonStatic,
++    Capturing,
++    Arrow,
++}
++
+ /// Per-file symbol location index.
+ ///
+ /// The `spans` vec is sorted by `start` offset.  Gaps between spans
+@@ -985,6 +994,9 @@ pub(crate) struct SymbolMap {
+     /// Exact embedded bytes used by the trusted stub publisher. Ordinary client
+     /// updates never inherit this provenance, even at a stub-shaped URI.
+     pub embedded_source: Option<&'static str>,
++    /// Target-independent closure-expression heads occurring in attribute arguments.
++    /// Byte ranges are published with this map and filtered by the current PHP target.
++    pub attribute_closure_spans: Vec<(u32, u32, AttributeClosureKind)>,
+     pub spans: Vec<SymbolSpan>,
+     /// Laravel string spans gated by cross-file function/class membership.
+     /// Empty for ordinary PHP files and never consulted by request handlers.
+diff --git a/src/virtual_members/laravel/config_keys.rs b/src/virtual_members/laravel/config_keys.rs
+index b5a3294..7f841cd 100644
+--- a/src/virtual_members/laravel/config_keys.rs
++++ b/src/virtual_members/laravel/config_keys.rs
+@@ -70,9 +70,50 @@ pub(crate) enum ConfigSourceKind {
+     Framework,
+ }
+ 
+-/// The directory holding the framework's default config files.
+-fn framework_config_dir(root: &std::path::Path) -> std::path::PathBuf {
+-    root.join("vendor/laravel/framework/config")
++/// The directory holding the installed framework's default configuration.
++/// Installed metadata is authoritative when present. With no metadata, keep
++/// the conventional configured-vendor layout; never search guessed ancestors.
++fn framework_config_dir(root: &std::path::Path) -> Option<std::path::PathBuf> {
++    let vendor = crate::composer::read_composer_package(root)
++        .as_ref()
++        .map(crate::composer::get_vendor_dir)
++        .unwrap_or_else(|| "vendor".to_string());
++    let vendor_root = root.join(&vendor);
++    let package_root = match crate::composer::read_installed_packages(root, &vendor) {
++        Some(installed) => {
++            let mut frameworks = installed.packages.iter().filter(|entry| {
++                entry
++                    .get("name")
++                    .and_then(serde_json::Value::as_str)
++                    .is_some_and(|name| name.eq_ignore_ascii_case("laravel/framework"))
++            });
++            let framework = frameworks.next()?;
++            // Ambiguous records cannot identify one authoritative installed source.
++            if frameworks.next().is_some() {
++                return None;
++            }
++            match framework.get("install-path") {
++                Some(value) => {
++                    let path = value.as_str().filter(|path| !path.is_empty())?;
++                    installed.composer_dir.join(path)
++                }
++                // Composer 1 omits install-path and uses vendor/<package name>.
++                None => vendor_root.join("laravel/framework"),
++            }
++        }
++        None => {
++            // An unreadable or otherwise unusable existing metadata input must
++            // not silently select a potentially stale conventional directory.
++            let missing = matches!(std::fs::symlink_metadata(vendor_root.join("composer/installed.json")),
++                Err(error) if error.kind() == std::io::ErrorKind::NotFound);
++            if !missing {
++                return None;
++            }
++            vendor_root.join("laravel/framework")
++        }
++    };
++    let config = package_root.join("config");
++    config.is_dir().then_some(config)
+ }
+ 
+ // ─── Keys declared at runtime ─────────────────────────────────────────────────
+@@ -240,7 +281,10 @@ impl Backend {
+         let Some(root) = workspace_root else {
+             return;
+         };
+-        let Ok(entries) = std::fs::read_dir(framework_config_dir(&root)) else {
++        let Some(framework_config) = framework_config_dir(&root) else {
++            return;
++        };
++        let Ok(entries) = std::fs::read_dir(framework_config) else {
+             return;
+         };
+         for entry in entries.flatten() {
+@@ -375,8 +419,10 @@ fn resolve_config_key_declaration_inner(
+             candidates.push((res.namespace.clone(), res.path.clone()));
+         }
+     }
+-    if let Some(first) = parts.first() {
+-        let path = framework_config_dir(&root).join(format!("{first}.php"));
++    if let Some(first) = parts.first()
++        && let Some(framework_config) = framework_config_dir(&root)
++    {
++        let path = framework_config.join(format!("{first}.php"));
+         if path.is_file() {
+             candidates.push((first.to_string(), path));
+         }
+diff --git a/src/workbench_active_target.rs b/src/workbench_active_target.rs
+index a70354d..2f7ab96 100644
+--- a/src/workbench_active_target.rs
++++ b/src/workbench_active_target.rs
+@@ -22,6 +22,24 @@ pub struct ActiveTarget {
+     pub stubs_version: String,
+ }
+ 
++/// Shared startup and saved-profile resolution policy. Keep override, Composer
++/// fallback and default handling identical when deciding whether to rebuild.
++pub(crate) fn resolve_php_version(
++    config: &crate::config::Config,
++    composer_package: Option<&crate::composer::ComposerPackage>,
++) -> PhpVersion {
++    config
++        .php
++        .version
++        .as_deref()
++        .and_then(PhpVersion::from_composer_constraint)
++        .unwrap_or_else(|| {
++            composer_package
++                .and_then(crate::composer::detect_php_version_from_package)
++                .unwrap_or_default()
++        })
++}
++
+ impl ActiveTarget {
+     pub(crate) fn applied(version: PhpVersion, names: Option<&[String]>, engine: &str) -> Self {
+         let (extensions, unknown_extensions) = stubs::describe_extension_selection(names);
+diff --git a/tests/integration/composer_project_contexts.rs b/tests/integration/composer_project_contexts.rs
+index 90a4bc2..f677ef7 100644
+--- a/tests/integration/composer_project_contexts.rs
++++ b/tests/integration/composer_project_contexts.rs
+@@ -1084,3 +1084,1445 @@ async fn composer_installed_refresh_symlink_vendor_physical_deletion_retires_sou
+     assert_eq!(fs::read_to_string(&path).unwrap(), source);
+     router.shutdown().await.unwrap();
+ }
++
++// Saved installed metadata can expose Illuminate transitively through a wrapper.
++const TRANSITIVE_CONFIG_CALLER: &str = "<?php\nconfig('app.');\nconfig('app.label');\n";
++const TRANSITIVE_CONFIG: &str = "<?php return ['label' => 'owned café 🐘'];\n";
++
++fn transitive_framework_fixture(vendor: &str, direct: bool) -> Projects {
++    let fixture = Projects::new();
++    fixture.write(
++        "apps/a/composer.json",
++        &serde_json::json!({
++            "name":"owned/transitive", "type":"project",
++            "require": if direct { serde_json::json!({"illuminate/support":"^12.0"}) }
++                       else { serde_json::json!({"fixture/wrapper":"*"}) },
++            "config":{"vendor-dir":vendor}, "autoload":{"psr-4":{"App\\":"src/"}}
++        })
++        .to_string(),
++    );
++    fixture.write(
++        "apps/a/.phpantom.toml",
++        "[indexing]\nstrategy = \"composer\"\n",
++    );
++    fixture.write("apps/a/config/app.php", TRANSITIVE_CONFIG);
++    fixture.write("apps/a/config-caller.php", TRANSITIVE_CONFIG_CALLER);
++    fixture.write(
++        &format!("apps/a/{vendor}/fixture/installed/src/Marker.php"),
++        "<?php namespace InstalledMarker; class Marker {}\n",
++    );
++    fixture
++}
++
++fn transitive_framework_metadata(
++    fixture: &Projects,
++    vendor: &str,
++    name: &str,
++    version: &str,
++    legacy: bool,
++) {
++    let packages = serde_json::json!([{"name":name,"version":version,
++        "install-path":"../fixture/installed", "autoload":{"psr-4":{"InstalledMarker\\":"src/"}}}]);
++    let value = if legacy {
++        packages
++    } else {
++        serde_json::json!({"packages":packages})
++    };
++    fixture.write(
++        &format!("apps/a/{vendor}/composer/installed.json"),
++        &value.to_string(),
++    );
++}
++
++async fn transitive_config_items(router: &ProjectRouter, path: &Path) -> Vec<CompletionItem> {
++    let result = router
++        .completion(CompletionParams {
++            text_document_position: TextDocumentPositionParams {
++                text_document: TextDocumentIdentifier {
++                    uri: Url::from_file_path(path).unwrap(),
++                },
++                position: position_after(TRANSITIVE_CONFIG_CALLER, "config('app."),
++            },
++            context: None,
++            work_done_progress_params: Default::default(),
++            partial_result_params: Default::default(),
++        })
++        .await
++        .unwrap();
++    match result {
++        Some(CompletionResponse::Array(items)) => items,
++        Some(CompletionResponse::List(list)) => list.items,
++        None => Vec::new(),
++    }
++}
++
++async fn assert_transitive_config(router: &ProjectRouter, fixture: &Projects) {
++    let path = fixture.path("a", "config-caller.php");
++    let result = transitive_config_items(router, &path).await;
++    let selected = result
++        .iter()
++        .find(|item| item.label == "app.label")
++        .unwrap_or_else(|| panic!("missing exact installed-Illuminate config key: {result:?}"));
++    assert!(
++        matches!(&selected.text_edit,Some(CompletionTextEdit::Edit(edit)) if edit.new_text=="app.label")
++    );
++    let result = router
++        .goto_definition(GotoDefinitionParams {
++            text_document_position_params: TextDocumentPositionParams {
++                text_document: TextDocumentIdentifier {
++                    uri: Url::from_file_path(path).unwrap(),
++                },
++                position: position_after(TRANSITIVE_CONFIG_CALLER, "config('app.la"),
++            },
++            work_done_progress_params: Default::default(),
++            partial_result_params: Default::default(),
++        })
++        .await
++        .unwrap();
++    let locations = definition_locations(result);
++    assert_eq!(
++        locations.len(),
++        1,
++        "exact config declaration: {locations:?}"
++    );
++    assert_eq!(
++        locations[0].uri,
++        Url::from_file_path(fixture.path("a", "config/app.php")).unwrap()
++    );
++    // The declaration is the literal content, rather than a fallback file location.
++    assert_eq!(locations[0].range.start, Position::new(0, 15));
++    assert_eq!(locations[0].range.end, Position::new(0, 20));
++}
++
++#[tokio::test]
++async fn composer_transitive_framework_installed_names_enable_actual_config_completion_and_definition()
++ {
++    // Versions are metadata values, not assertions of framework-version compatibility.
++    for (name, version, legacy) in [
++        ("illuminate/support", "v12.0.0", false),
++        ("laravel/framework", "v13.0.0", true),
++    ] {
++        let fixture = transitive_framework_fixture("dependencies with spaces", false);
++        transitive_framework_metadata(&fixture, "dependencies with spaces", name, version, legacy);
++        let before = fs::read(fixture.path("a", "composer.json")).unwrap();
++        let router = fixture.router().await;
++        open(&router, &fixture.path("a", "config-caller.php")).await;
++        assert_transitive_config(&router, &fixture).await;
++        assert_eq!(
++            fs::read(fixture.path("a", "composer.json")).unwrap(),
++            before
++        );
++        router.shutdown().await.unwrap();
++    }
++}
++
++#[tokio::test]
++async fn composer_transitive_framework_unrelated_or_near_match_installed_names_remain_plain_php() {
++    for name in [
++        "fixture/laravel-helper",
++        "laravel/framework-extra",
++        "illuminated/support",
++    ] {
++        let fixture = transitive_framework_fixture("vendor", false);
++        transitive_framework_metadata(&fixture, "vendor", name, "1.0.0", false);
++        let router = fixture.router().await;
++        let path = fixture.path("a", "config-caller.php");
++        open(&router, &path).await;
++        assert!(
++            !transitive_config_items(&router, &path)
++                .await
++                .iter()
++                .any(|item| item.label == "app.label"),
++            "unrelated installed package must not enable Laravel config semantics: {name}"
++        );
++        router.shutdown().await.unwrap();
++    }
++}
++
++#[tokio::test]
++async fn composer_transitive_framework_direct_requirement_still_works_without_installed_metadata() {
++    let fixture = transitive_framework_fixture("vendor", true);
++    let router = fixture.router().await;
++    open(&router, &fixture.path("a", "config-caller.php")).await;
++    assert_transitive_config(&router, &fixture).await;
++    router.shutdown().await.unwrap();
++}
++
++#[tokio::test]
++async fn composer_transitive_framework_metadata_only_rebuild_enables_then_withdraws_config_semantics()
++ {
++    let fixture = transitive_framework_fixture("dependencies with spaces", false);
++    transitive_framework_metadata(
++        &fixture,
++        "dependencies with spaces",
++        "fixture/plain",
++        "1.0.0",
++        false,
++    );
++    let router = fixture.router().await;
++    let path = fixture.path("a", "config-caller.php");
++    open(&router, &path).await;
++    let caller = fs::read(&path).unwrap();
++    let manifest = fs::read(fixture.path("a", "composer.json")).unwrap();
++    assert!(
++        !transitive_config_items(&router, &path)
++            .await
++            .iter()
++            .any(|item| item.label == "app.label")
++    );
++    let metadata = fixture.path("a", "dependencies with spaces/composer/installed.json");
++    for name in ["illuminate/support", "fixture/plain"] {
++        transitive_framework_metadata(&fixture, "dependencies with spaces", name, "12.0.0", false);
++        router
++            .did_change_watched_files(DidChangeWatchedFilesParams {
++                changes: vec![FileEvent {
++                    uri: Url::from_file_path(&metadata).unwrap(),
++                    typ: FileChangeType::CHANGED,
++                }],
++            })
++            .await;
++        if name == "illuminate/support" {
++            assert_transitive_config(&router, &fixture).await;
++        } else {
++            assert!(
++                !transitive_config_items(&router, &path)
++                    .await
++                    .iter()
++                    .any(|item| item.label == "app.label")
++            );
++        }
++    }
++    assert_eq!(fs::read(&path).unwrap(), caller);
++    assert_eq!(
++        fs::read(fixture.path("a", "composer.json")).unwrap(),
++        manifest
++    );
++    router.shutdown().await.unwrap();
++}
++
++// Installed source identity, not framework version labels, selects default config.
++const FRAMEWORK_ROOT_CALLER: &str = "<?php\nconfig('cache.stores.');\nconfig('cache.stores.frameworkOnly.driver');\nconfig('cache.stores.shared.driver');\n";
++const FRAMEWORK_ROOT_APP: &str =
++    "<?php return ['stores' => ['shared' => ['driver' => 'application'], 'appOnly' => []]];\n";
++const FRAMEWORK_ROOT_SELECTED: &str = "<?php return ['stores' => ['frameworkOnly' => ['driver' => 'framework'], 'shared' => ['driver' => 'base']]];\n";
++
++fn framework_root_fixture(vendor: &str) -> Projects {
++    let fixture = Projects::new();
++    fixture.write(
++        "apps/a/composer.json",
++        &serde_json::json!({
++            "name":"owned/framework-root","type":"project","require":{"laravel/framework":"*"},
++            "config":{"vendor-dir":vendor},"autoload":{"psr-4":{"App\\":"src/"}}
++        })
++        .to_string(),
++    );
++    fixture.write(
++        "apps/a/.phpantom.toml",
++        "[indexing]\nstrategy = \"composer\"\n",
++    );
++    fixture.write("apps/a/config/cache.php", FRAMEWORK_ROOT_APP);
++    fixture.write("apps/a/framework-root-caller.php", FRAMEWORK_ROOT_CALLER);
++    fixture
++}
++
++fn framework_root_metadata(
++    fixture: &Projects,
++    vendor: &str,
++    install_path: Option<serde_json::Value>,
++    legacy: bool,
++) {
++    let mut record = serde_json::json!({"name":"laravel/framework","version":"v12.0.0"});
++    if let Some(path) = install_path {
++        record["install-path"] = path;
++    }
++    let packages = serde_json::json!([record]);
++    let metadata = if legacy {
++        packages
++    } else {
++        serde_json::json!({"packages":packages})
++    };
++    fixture.write(
++        &format!("apps/a/{vendor}/composer/installed.json"),
++        &metadata.to_string(),
++    );
++}
++
++async fn framework_root_keys(router: &ProjectRouter, fixture: &Projects) -> Vec<String> {
++    let result = router
++        .completion(CompletionParams {
++            text_document_position: TextDocumentPositionParams {
++                text_document: TextDocumentIdentifier {
++                    uri: Url::from_file_path(fixture.path("a", "framework-root-caller.php"))
++                        .unwrap(),
++                },
++                position: position_after(FRAMEWORK_ROOT_CALLER, "config('cache.stores."),
++            },
++            context: None,
++            work_done_progress_params: Default::default(),
++            partial_result_params: Default::default(),
++        })
++        .await
++        .unwrap();
++    match result {
++        Some(CompletionResponse::Array(items)) => items,
++        Some(CompletionResponse::List(list)) => list.items,
++        None => Vec::new(),
++    }
++    .into_iter()
++    .map(|item| item.label)
++    .collect()
++}
++
++fn framework_root_offset(source: &str, offset: usize) -> Position {
++    let before = &source[..offset];
++    Position::new(
++        before.bytes().filter(|byte| *byte == b'\n').count() as u32,
++        before.rsplit('\n').next().unwrap().encode_utf16().count() as u32,
++    )
++}
++
++async fn framework_root_definition(
++    router: &ProjectRouter,
++    fixture: &Projects,
++    usage: &str,
++    target: &Path,
++    content: &str,
++    key: &str,
++) {
++    let response = router
++        .goto_definition(GotoDefinitionParams {
++            text_document_position_params: TextDocumentPositionParams {
++                text_document: TextDocumentIdentifier {
++                    uri: Url::from_file_path(fixture.path("a", "framework-root-caller.php"))
++                        .unwrap(),
++                },
++                position: position_after(FRAMEWORK_ROOT_CALLER, usage),
++            },
++            work_done_progress_params: Default::default(),
++            partial_result_params: Default::default(),
++        })
++        .await
++        .unwrap();
++    let locations = definition_locations(response);
++    assert_eq!(locations.len(), 1, "one exact config source: {locations:?}");
++    assert_eq!(
++        locations[0].uri,
++        Url::from_file_path(target.canonicalize().unwrap()).unwrap()
++    );
++    let offset = content.find(&format!("'{key}'")).unwrap() + 1;
++    assert_eq!(
++        locations[0].range,
++        Range::new(
++            framework_root_offset(content, offset),
++            framework_root_offset(content, offset + key.len())
++        )
++    );
++}
++
++async fn framework_root_positive(router: &ProjectRouter, fixture: &Projects, selected: &Path) {
++    let labels = framework_root_keys(router, fixture).await;
++    assert!(
++        labels.iter().any(|key| key == "cache.stores.frameworkOnly"),
++        "framework defaults missing: {labels:?}"
++    );
++    assert!(
++        labels.iter().any(|key| key == "cache.stores.appOnly"),
++        "project config missing: {labels:?}"
++    );
++    assert!(
++        !labels.iter().any(|key| key.contains("staleDecoy")),
++        "unselected conventional source leaked: {labels:?}"
++    );
++    framework_root_definition(
++        router,
++        fixture,
++        "config('cache.stores.frameworkOnly.dr",
++        selected,
++        FRAMEWORK_ROOT_SELECTED,
++        "driver",
++    )
++    .await;
++    // Same exact key exists in both sources; project declaration must win.
++    framework_root_definition(
++        router,
++        fixture,
++        "config('cache.stores.shared.dr",
++        &fixture.path("a", "config/cache.php"),
++        FRAMEWORK_ROOT_APP,
++        "driver",
++    )
++    .await;
++}
++
++#[tokio::test]
++async fn composer_framework_config_root_custom_vendor_and_explicit_installer_path_select_defaults()
++{
++    for vendor in ["vendor", "dependencies with spaces"] {
++        let fixture = framework_root_fixture(vendor);
++        fixture.write(
++            &format!("apps/a/{vendor}/custom frameworks/selected/config/cache.php"),
++            FRAMEWORK_ROOT_SELECTED,
++        );
++        fixture.write(
++            &format!("apps/a/{vendor}/laravel/framework/config/cache.php"),
++            "<?php return ['stores'=>['staleDecoy'=>[]]];\n",
++        );
++        framework_root_metadata(
++            &fixture,
++            vendor,
++            Some(serde_json::json!("../custom frameworks/selected")),
++            false,
++        );
++        let selected = fixture.path(
++            "a",
++            &format!("{vendor}/custom frameworks/selected/config/cache.php"),
++        );
++        let before = fs::read(&selected).unwrap();
++        let router = fixture.router().await;
++        open(&router, &fixture.path("a", "framework-root-caller.php")).await;
++        framework_root_positive(&router, &fixture, &selected).await;
++        assert_eq!(fs::read(&selected).unwrap(), before);
++        router.shutdown().await.unwrap();
++    }
++}
++
++#[tokio::test]
++async fn composer_framework_config_root_composer1_and_metadata_absent_keep_configured_conventional_root()
++ {
++    for with_legacy_metadata in [true, false] {
++        let vendor = "dependencies with spaces";
++        let fixture = framework_root_fixture(vendor);
++        fixture.write(
++            &format!("apps/a/{vendor}/laravel/framework/config/cache.php"),
++            FRAMEWORK_ROOT_SELECTED,
++        );
++        if with_legacy_metadata {
++            framework_root_metadata(&fixture, vendor, None, true);
++        }
++        let selected = fixture.path("a", &format!("{vendor}/laravel/framework/config/cache.php"));
++        let router = fixture.router().await;
++        open(&router, &fixture.path("a", "framework-root-caller.php")).await;
++        framework_root_positive(&router, &fixture, &selected).await;
++        router.shutdown().await.unwrap();
++    }
++}
++
++#[tokio::test]
++async fn composer_framework_config_root_present_unusable_metadata_never_guesses_stale_conventional_defaults()
++ {
++    let records = [
++        "not valid JSON",
++        "{\"packages\":[]}",
++        "{\"packages\":[{\"name\":\"fixture/other\"}]}",
++        "{\"packages\":[{\"name\":\"laravel/framework\",\"install-path\":42}]}",
++        "{\"packages\":[{\"name\":\"laravel/framework\",\"install-path\":\"\"}]}",
++        "{\"packages\":[{\"name\":\"laravel/framework\",\"install-path\":\"../missing\"}]}",
++        "{\"packages\":[{\"name\":\"laravel/framework\"},{\"name\":\"laravel/framework\"}]}",
++    ];
++    for metadata in records {
++        let fixture = framework_root_fixture("vendor");
++        fixture.write(
++            "apps/a/vendor/laravel/framework/config/cache.php",
++            "<?php return ['stores'=>['staleDecoy'=>[]]];\n",
++        );
++        fixture.write("apps/a/vendor/composer/installed.json", metadata);
++        let router = fixture.router().await;
++        open(&router, &fixture.path("a", "framework-root-caller.php")).await;
++        let labels = framework_root_keys(&router, &fixture).await;
++        assert!(
++            labels.iter().any(|key| key == "cache.stores.appOnly"),
++            "own config survives invalid metadata: {labels:?}"
++        );
++        assert!(
++            !labels.iter().any(|key| key.contains("staleDecoy")),
++            "unusable metadata must not choose conventional decoy: {metadata}: {labels:?}"
++        );
++        router.shutdown().await.unwrap();
++    }
++}
++
++#[tokio::test]
++async fn composer_framework_config_root_metadata_only_switch_retires_old_framework_default_keys() {
++    let fixture = framework_root_fixture("dependencies with spaces");
++    fixture.write(
++        "apps/a/dependencies with spaces/roots/one/config/cache.php",
++        FRAMEWORK_ROOT_SELECTED,
++    );
++    fixture.write(
++        "apps/a/dependencies with spaces/roots/two/config/cache.php",
++        "<?php return ['stores'=>['replacementOnly'=>['driver'=>'new']]];\n",
++    );
++    framework_root_metadata(
++        &fixture,
++        "dependencies with spaces",
++        Some(serde_json::json!("../roots/one")),
++        false,
++    );
++    let router = fixture.router().await;
++    let caller = fixture.path("a", "framework-root-caller.php");
++    let before = fs::read(&caller).unwrap();
++    open(&router, &caller).await;
++    let selected = fixture.path("a", "dependencies with spaces/roots/one/config/cache.php");
++    framework_root_positive(&router, &fixture, &selected).await;
++    framework_root_metadata(
++        &fixture,
++        "dependencies with spaces",
++        Some(serde_json::json!("../roots/two")),
++        false,
++    );
++    router
++        .did_change_watched_files(DidChangeWatchedFilesParams {
++            changes: vec![FileEvent {
++                uri: Url::from_file_path(
++                    fixture.path("a", "dependencies with spaces/composer/installed.json"),
++                )
++                .unwrap(),
++                typ: FileChangeType::CHANGED,
++            }],
++        })
++        .await;
++    let labels = framework_root_keys(&router, &fixture).await;
++    assert!(
++        labels
++            .iter()
++            .any(|key| key == "cache.stores.replacementOnly"),
++        "fresh default key missing: {labels:?}"
++    );
++    assert!(
++        !labels.iter().any(|key| key.contains("frameworkOnly")),
++        "retired default key leaked: {labels:?}"
++    );
++    assert!(labels.iter().any(|key| key == "cache.stores.appOnly"));
++    assert_eq!(fs::read(&caller).unwrap(), before);
++    router.shutdown().await.unwrap();
++}
++
++// Public feature gates use source-versioned COMPLETE push publications, not provisional pull caches.
++const ATTRIBUTE_WIRE_SOURCE: &str = "<?php\n// café 🐘\nuse Illuminate\\Container\\Attributes\\BindWhen as OwnedGate;\n/* café 🐘 */ #[OwnedGate(Concrete::class, static function () { return true; })]\nclass Guarded {}\nclass Concrete {}\n$legal = new \\Illuminate\\Container\\Attributes\\BindWhen(Concrete::class, static function () { return true; });\n";
++const ATTRIBUTE_WIRE_DECLARATION: &str = "<?php\nnamespace Illuminate\\Container\\Attributes;\n#[\\Attribute(\\Attribute::TARGET_CLASS | \\Attribute::IS_REPEATABLE)]\nclass BindWhen { public function __construct(public string $concrete, public \\Closure $condition) {} }\n";
++
++fn attribute_wire_config(version: &str) -> String {
++    format!(
++        "[php]\nversion='{version}'\n[indexing]\nstrategy='composer'\n[phpstan]\ncommand=''\n[phpcs]\ncommand=''\n[phpmd]\ncommand=''\n[mago]\ncommand=''\n"
++    )
++}
++fn attribute_wire_fixture(a: &str, b: &str) -> Projects {
++    let fixture = Projects::new();
++    for (project, version) in [("a", a), ("b", b)] {
++        fixture.write(
++            &format!("apps/{project}/.phpantom.toml"),
++            &attribute_wire_config(version),
++        );
++        fixture.write(
++            &format!("apps/{project}/src/BindWhen.php"),
++            ATTRIBUTE_WIRE_DECLARATION,
++        );
++        fixture.write(
++            &format!("apps/{project}/attribute.php"),
++            ATTRIBUTE_WIRE_SOURCE,
++        );
++    }
++    fixture
++}
++
++struct AttributeWire {
++    client: crate::common::lsp_transport::TransportClient,
++    pending: std::collections::VecDeque<serde_json::Value>,
++    next_id: i64,
++}
++impl AttributeWire {
++    async fn new(fixture: &Projects) -> Self {
++        let mut wire = Self {
++            client: crate::common::lsp_transport::serve(ProjectRouter::new),
++            pending: Default::default(),
++            next_id: 1,
++        };
++        wire.request("initialize",Some(serde_json::json!({
++            "rootUri":Url::from_directory_path(&fixture.root).unwrap(),
++            "workspaceFolders":[{"uri":Url::from_directory_path(&fixture.root).unwrap(),"name":"attribute-targets"}],
++            "capabilities":{}
++        }))).await;
++        wire.notify("initialized", serde_json::json!({})).await;
++        wire
++    }
++    async fn notify(&mut self, method: &str, params: serde_json::Value) {
++        self.client
++            .send(
++                "attribute wire notification",
++                serde_json::json!({"jsonrpc":"2.0","method":method,"params":params}),
++            )
++            .await;
++    }
++    async fn next_message(&mut self) -> serde_json::Value {
++        loop {
++            let message = self
++                .client
++                .read_until("next actual attribute wire frame", |_| true)
++                .await;
++            if let Some(id) = message
++                .get("id")
++                .filter(|_| message.get("method").is_some())
++            {
++                let result = if message["method"] == "workspace/configuration" {
++                    serde_json::Value::Array(vec![
++                        serde_json::Value::Null;
++                        message["params"]["items"]
++                            .as_array()
++                            .map_or(0, Vec::len)
++                    ])
++                } else {
++                    serde_json::Value::Null
++                };
++                self.client
++                    .send(
++                        "answer attribute server request",
++                        serde_json::json!({"jsonrpc":"2.0","id":id,"result":result}),
++                    )
++                    .await;
++            } else {
++                return message;
++            }
++        }
++    }
++    async fn request(
++        &mut self,
++        method: &str,
++        params: Option<serde_json::Value>,
++    ) -> serde_json::Value {
++        let id = self.next_id;
++        self.next_id += 1;
++        let mut request = serde_json::json!({"jsonrpc":"2.0","id":id,"method":method});
++        if let Some(params) = params {
++            request["params"] = params;
++        }
++        self.client.send("attribute wire request", request).await;
++        let response = tokio::time::timeout(std::time::Duration::from_secs(20), async {
++            loop {
++                let message = self.next_message().await;
++                if message.get("method").is_none() && message["id"] == id {
++                    return message;
++                }
++                self.pending.push_back(message);
++            }
++        })
++        .await
++        .expect("attribute RPC must finish without pulling diagnostics");
++        assert!(
++            response.get("error").is_none(),
++            "attribute RPC {method} failed: {response}"
++        );
++        response["result"].clone()
++    }
++    async fn first_complete(&mut self, uri: &Url, version: i32) -> serde_json::Value {
++        let matches = |message: &serde_json::Value| {
++            message["method"] == "textDocument/publishDiagnostics"
++                && message["params"]["uri"] == uri.as_str()
++                && message["params"]["version"] == version
++                && message["params"]["phpantomDiagnosticComplete"] == true
++        };
++        tokio::time::timeout(std::time::Duration::from_secs(20), async {
++            if let Some(index) = self.pending.iter().position(matches) {
++                return self.pending.remove(index).unwrap();
++            }
++            loop {
++                let message = self.next_message().await;
++                if matches(&message) {
++                    return message;
++                }
++                self.pending.push_back(message);
++            }
++        })
++        .await
++        .expect("first complete source-versioned attribute diagnostic publication")
++    }
++    /// Retire() has stopped old contexts and waits for this response before
++    /// constructing/replaying new ones. Exclude old frames queued before it.
++    async fn target_retirement_boundary(&mut self) -> serde_json::Value {
++        tokio::time::timeout(std::time::Duration::from_secs(20), async {
++            loop {
++                let message = self
++                    .client
++                    .read_until("actual target context retirement request", |_| true)
++                    .await;
++                if let Some(id) = message
++                    .get("id")
++                    .filter(|_| message.get("method").is_some())
++                {
++                    let retirement = message["method"] == "client/unregisterCapability";
++                    if retirement {
++                        assert!(
++                            message["params"]["unregisterations"]
++                                .as_array()
++                                .is_some_and(|items| items.iter().any(
++                                    |item| item["method"] == "workspace/didChangeWatchedFiles"
++                                )),
++                            "retirement must unregister an initialized project watcher: {message}"
++                        );
++                        // Clear ONLY at the observed causal boundary, never based
++                        // on a diagnostic's desired semantic value.
++                        self.pending.clear();
++                    }
++                    let result = if message["method"] == "workspace/configuration" {
++                        serde_json::Value::Array(vec![
++                            serde_json::Value::Null;
++                            message["params"]["items"]
++                                .as_array()
++                                .map_or(0, Vec::len)
++                        ])
++                    } else {
++                        serde_json::Value::Null
++                    };
++                    self.client
++                        .send(
++                            "answer target retirement or server request",
++                            serde_json::json!({"jsonrpc":"2.0","id":id,"result":result}),
++                        )
++                        .await;
++                    if retirement {
++                        return message;
++                    }
++                } else {
++                    self.pending.push_back(message);
++                }
++            }
++        })
++        .await
++        .expect("target-changing event must causally retire initialized contexts")
++    }
++    async fn open(&mut self, path: &Path) -> serde_json::Value {
++        let uri = Url::from_file_path(path).unwrap();
++        self.notify("textDocument/didOpen",serde_json::json!({"textDocument":{"uri":uri,"languageId":"php","version":1,"text":fs::read_to_string(path).unwrap()}})).await;
++        self.first_complete(&uri, 1).await
++    }
++    async fn change(&mut self, path: &Path, version: i32, text: &str) -> serde_json::Value {
++        let uri = Url::from_file_path(path).unwrap();
++        self.notify("textDocument/didChange",serde_json::json!({"textDocument":{"uri":uri,"version":version},"contentChanges":[{"text":text}]})).await;
++        self.first_complete(&uri, version).await
++    }
++    async fn close(mut self) {
++        self.request("shutdown", None).await;
++        self.client
++            .send(
++                "attribute wire exit",
++                serde_json::json!({"jsonrpc":"2.0","method":"exit"}),
++            )
++            .await;
++    }
++}
++fn attribute_wire_code(frame: &serde_json::Value, code: &str) -> Vec<serde_json::Value> {
++    frame["params"]["diagnostics"]
++        .as_array()
++        .expect("complete push diagnostic list")
++        .iter()
++        .filter(|item| item["code"] == code)
++        .cloned()
++        .collect()
++}
++async fn attribute_wire_legal_declaration(
++    wire: &mut AttributeWire,
++    fixture: &Projects,
++    project: &str,
++) {
++    let path = fixture.path(project, "attribute.php");
++    let params = TextDocumentPositionParams {
++        text_document: TextDocumentIdentifier {
++            uri: Url::from_file_path(&path).unwrap(),
++        },
++        position: position_after(
++            ATTRIBUTE_WIRE_SOURCE,
++            "new \\Illuminate\\Container\\Attributes\\BindW",
++        ),
++    };
++    let result = wire
++        .request(
++            "textDocument/definition",
++            Some(
++                serde_json::to_value(GotoDefinitionParams {
++                    text_document_position_params: params.clone(),
++                    work_done_progress_params: Default::default(),
++                    partial_result_params: Default::default(),
++                })
++                .unwrap(),
++            ),
++        )
++        .await;
++    let locations = definition_locations(
++        serde_json::from_value::<Option<GotoDefinitionResponse>>(result).unwrap(),
++    );
++    assert_eq!(
++        locations.len(),
++        1,
++        "legal BindWhen declaration must stay navigable: {locations:?}"
++    );
++    assert_eq!(
++        locations[0].uri,
++        Url::from_file_path(fixture.path(project, "src/BindWhen.php")).unwrap()
++    );
++    let result = wire
++        .request(
++            "textDocument/completion",
++            Some(
++                serde_json::to_value(CompletionParams {
++                    text_document_position: params,
++                    context: None,
++                    work_done_progress_params: Default::default(),
++                    partial_result_params: Default::default(),
++                })
++                .unwrap(),
++            ),
++        )
++        .await;
++    let items = match serde_json::from_value::<Option<CompletionResponse>>(result).unwrap() {
++        Some(CompletionResponse::Array(items)) => items,
++        Some(CompletionResponse::List(list)) => list.items,
++        None => Vec::new(),
++    };
++    assert!(
++        items.iter().any(|item| item.label.contains("BindWhen")),
++        "legal declaration must remain completable: {items:?}"
++    );
++}
++
++#[tokio::test]
++async fn attribute_closure_target_public_diagnostics_preserve_legal_bindwhen_declaration_and_sibling_target()
++ {
++    for old in ["8.3", "8.4"] {
++        let fixture = attribute_wire_fixture(old, "8.5");
++        let mut wire = AttributeWire::new(&fixture).await;
++        for project in ["a", "b"] {
++            wire.open(&fixture.path(project, "src/BindWhen.php")).await;
++        }
++        let a = wire.open(&fixture.path("a", "attribute.php")).await;
++        let b = wire.open(&fixture.path("b", "attribute.php")).await;
++        let diagnostics = attribute_wire_code(&a, "php_version_attribute_closure");
++        assert_eq!(
++            diagnostics.len(),
++            1,
++            "first complete old-target report: {a}"
++        );
++        assert_eq!(diagnostics[0]["severity"], 1);
++        assert!(
++            diagnostics[0]["message"]
++                .as_str()
++                .unwrap()
++                .contains("PHP 8.5")
++        );
++        assert_eq!(
++            diagnostics[0]["range"],
++            serde_json::to_value(Range::new(
++                position_of(ATTRIBUTE_WIRE_SOURCE, "static function"),
++                position_after(ATTRIBUTE_WIRE_SOURCE, "static function")
++            ))
++            .unwrap()
++        );
++        assert!(
++            attribute_wire_code(&b, "php_version_attribute_closure").is_empty(),
++            "first complete8.5 report: {b}"
++        );
++        assert!(
++            attribute_wire_code(&b, "invalid_attribute_closure").is_empty(),
++            "eligible actual static closure: {b}"
++        );
++        for project in ["a", "b"] {
++            attribute_wire_legal_declaration(&mut wire, &fixture, project).await;
++        }
++        wire.close().await;
++    }
++}
++
++#[tokio::test]
++async fn attribute_closure_target_public_custom_alias_array_and_function_body_boundaries() {
++    let fixture = attribute_wire_fixture("8.3", "8.5");
++    let source = "<?php\nnamespace Own;\nuse Own\\DifferentAttribute as Gate;\n#[\\Attribute] class DifferentAttribute { public function __construct(public mixed $callback) {} }\n#[Gate(static function () { $ordinary = function () {}; return true; })] class One {}\n#[Gate(callback: [static function () { return true; }])] class Two {}\n#[Gate(true)] class Three {}\n$outside = static function () {};\n$arrow = static fn () => true;\n";
++    fixture.write("apps/a/custom.php", source);
++    let mut wire = AttributeWire::new(&fixture).await;
++    let frame = wire.open(&fixture.path("a", "custom.php")).await;
++    let diagnostics = attribute_wire_code(&frame, "php_version_attribute_closure");
++    assert_eq!(
++        diagnostics.len(),
++        2,
++        "first complete report only gates argument closures: {frame}"
++    );
++    assert_eq!(
++        diagnostics[0]["range"],
++        serde_json::to_value(Range::new(
++            position_of(source, "static function"),
++            position_after(source, "static function")
++        ))
++        .unwrap()
++    );
++    let mut nested_start = position_of(source, "[static function");
++    nested_start.character += 1;
++    assert_eq!(
++        diagnostics[1]["range"],
++        serde_json::to_value(Range::new(
++            nested_start,
++            position_after(source, "[static function")
++        ))
++        .unwrap()
++    );
++    assert!(
++        attribute_wire_code(&frame, "invalid_attribute_closure").is_empty(),
++        "ordinary body and outside forms are not argument forms: {frame}"
++    );
++    wire.close().await;
++}
++
++#[tokio::test]
++async fn attribute_closure_target_public_source_edit_and_target_reload_do_not_reuse_stale_diagnostics()
++ {
++    let fixture = attribute_wire_fixture("8.3", "8.5");
++    let mut wire = AttributeWire::new(&fixture).await;
++    for project in ["a", "b"] {
++        wire.open(&fixture.path(project, "src/BindWhen.php")).await;
++    }
++    let path = fixture.path("a", "attribute.php");
++    let uri = Url::from_file_path(&path).unwrap();
++    let saved = fs::read(&path).unwrap();
++    let a = wire.open(&path).await;
++    assert_eq!(
++        attribute_wire_code(&a, "php_version_attribute_closure").len(),
++        1,
++        "first complete initial report: {a}"
++    );
++    let bpath = fixture.path("b", "attribute.php");
++    let buri = Url::from_file_path(&bpath).unwrap();
++    let b = wire.open(&bpath).await;
++    assert!(
++        attribute_wire_code(&b, "php_version_attribute_closure").is_empty(),
++        "sibling initial8.5: {b}"
++    );
++    let expression = "static function () { return true; }";
++    let replacement = format!("true{}", " ".repeat(expression.len() - 4));
++    let edited = ATTRIBUTE_WIRE_SOURCE.replacen(expression, &replacement, 1);
++    assert_eq!(edited.len(), ATTRIBUTE_WIRE_SOURCE.len());
++    let v2 = wire.change(&path, 2, &edited).await;
++    assert!(
++        attribute_wire_code(&v2, "php_version_attribute_closure").is_empty(),
++        "first complete actual version2 report: {v2}"
++    );
++    let v3 = wire.change(&path, 3, ATTRIBUTE_WIRE_SOURCE).await;
++    assert_eq!(
++        attribute_wire_code(&v3, "php_version_attribute_closure").len(),
++        1,
++        "first complete actual version3 report: {v3}"
++    );
++    for (target, expected) in [("8.5", 0), ("8.3", 1)] {
++        fixture.write("apps/a/.phpantom.toml", &attribute_wire_config(target));
++        wire.notify("workspace/didChangeWatchedFiles",serde_json::json!({"changes":[{"uri":Url::from_file_path(fixture.path("a",".phpantom.toml")).unwrap(),"type":2}]})).await;
++        wire.target_retirement_boundary().await;
++        let current = wire.first_complete(&uri, 3).await;
++        assert_eq!(
++            attribute_wire_code(&current, "php_version_attribute_closure").len(),
++            expected,
++            "FIRST complete same-version report after target{target}: {current}"
++        );
++        let sibling = wire.first_complete(&buri, 1).await;
++        assert!(
++            attribute_wire_code(&sibling, "php_version_attribute_closure").is_empty(),
++            "replayed sibling remains8.5: {sibling}"
++        );
++        assert!(attribute_wire_code(&sibling, "invalid_attribute_closure").is_empty());
++        assert_eq!(fs::read(&path).unwrap(), saved, "version3 remains unsaved");
++    }
++    wire.close().await;
++}
++
++#[tokio::test]
++async fn attribute_closure_target_public_invalid_forms_remain_invalid_at_85_and_older_targets() {
++    let fixture = attribute_wire_fixture("8.3", "8.5");
++    let source = "<?php\n#[\\Attribute] class OwnGate { public function __construct(public mixed $condition) {} }\n#[OwnGate(function () { return true; })] class NonStatic {}\n#[OwnGate(static function () use ($capture) { return true; })] class Captured {}\n#[OwnGate(static fn () => true)] class Arrow {}\n#[OwnGate(fn () => true)] class NonStaticArrow {}\n$ordinary=function () use ($capture) {};\n$ordinaryArrow=static fn () => true;\n";
++    for project in ["a", "b"] {
++        fixture.write(&format!("apps/{project}/invalid.php"), source);
++    }
++    let mut wire = AttributeWire::new(&fixture).await;
++    for project in ["a", "b"] {
++        let frame = wire.open(&fixture.path(project, "invalid.php")).await;
++        let invalid = attribute_wire_code(&frame, "invalid_attribute_closure");
++        assert_eq!(
++            invalid.len(),
++            4,
++            "FIRST complete report rejects nonstatic/use/arrow at both targets: {frame}"
++        );
++        assert!(
++            attribute_wire_code(&frame, "php_version_attribute_closure").is_empty(),
++            "ineligible forms need their actual rule: {frame}"
++        );
++    }
++    wire.close().await;
++}
++
++async fn target_reload_router(fixture: &Projects) -> ProjectRouter {
++    let router = ProjectRouter::new_test_with_full_stubs();
++    router
++        .initialize(InitializeParams {
++            root_uri: Some(Url::from_directory_path(&fixture.root).unwrap()),
++            workspace_folders: Some(vec![WorkspaceFolder {
++                uri: Url::from_directory_path(&fixture.root).unwrap(),
++                name: "owned-targets".into(),
++            }]),
++            ..Default::default()
++        })
++        .await
++        .unwrap();
++    router.initialized(InitializedParams {}).await;
++    router
++}
++
++async fn target_reload_event(router: &ProjectRouter, fixture: &Projects, typ: FileChangeType) {
++    router
++        .did_change_watched_files(DidChangeWatchedFilesParams {
++            changes: vec![FileEvent {
++                uri: Url::from_file_path(fixture.path("a", ".phpantom.toml")).unwrap(),
++                typ,
++            }],
++        })
++        .await;
++}
++
++async fn target_reload_active(router: &ProjectRouter, fixture: &Projects, project: &str) -> String {
++    router
++        .workbench_active_target(ProjectTargetQuery {
++            uri: Some(Url::from_file_path(fixture.path(project, "index.php")).unwrap()),
++        })
++        .await
++        .unwrap()
++        .php_version
++}
++
++async fn target_reload_function_names(
++    router: &ProjectRouter,
++    path: &Path,
++    source: &str,
++    prefix: &str,
++) -> Vec<String> {
++    let result = router
++        .completion(CompletionParams {
++            text_document_position: TextDocumentPositionParams {
++                text_document: TextDocumentIdentifier {
++                    uri: Url::from_file_path(path).unwrap(),
++                },
++                position: position_after(source, prefix),
++            },
++            context: None,
++            work_done_progress_params: Default::default(),
++            partial_result_params: Default::default(),
++        })
++        .await
++        .unwrap();
++    match result {
++        Some(CompletionResponse::Array(items)) => items,
++        Some(CompletionResponse::List(list)) => list.items,
++        None => Vec::new(),
++    }
++    .into_iter()
++    .map(|item| item.label.split('(').next().unwrap().to_string())
++    .collect()
++}
++
++#[tokio::test]
++async fn composer_target_reload_saved_version_rebuilds_fresh_stubs_and_preserves_unsaved_sibling() {
++    let fixture = Projects::new();
++    fixture.write("apps/a/.phpantom.toml", "[php]\nversion='8.3'\n");
++    fixture.write("apps/b/.phpantom.toml", "[php]\nversion='8.2'\n");
++    fixture.write("apps/a/target-caller.php", "<?php\n// café 🐘\narray_fi\n");
++    let router = target_reload_router(&fixture).await;
++    let caller = fixture.path("a", "target-caller.php");
++    let source = open(&router, &caller).await;
++    let acaller = fixture.path("a", "index.php");
++    let asource = open(&router, &acaller).await;
++    let old_route = items(&router, &acaller, &asource)
++        .await
++        .into_iter()
++        .find(|item| has(std::slice::from_ref(item), "fromA"))
++        .unwrap();
++    assert_eq!(target_reload_active(&router, &fixture, "a").await, "8.3");
++    assert!(
++        !target_reload_function_names(&router, &caller, &source, "array_fi")
++            .await
++            .contains(&"array_find".to_string())
++    );
++    let bdecl = fixture.path("b", "src/Service.php");
++    let bbefore = open(&router, &bdecl).await;
++    replace(
++        &router,
++        &bdecl,
++        2,
++        &bbefore.replace("fromB", "fromBUnsaved"),
++    )
++    .await;
++    let bcaller = fixture.path("b", "index.php");
++    let bsource = open(&router, &bcaller).await;
++    assert_members(&router, &bcaller, &bsource, "fromBUnsaved", &["fromB"]).await;
++    for version in ["8.4", "8.3", "8.4"] {
++        fixture.write(
++            "apps/a/.phpantom.toml",
++            &format!("[php]\nversion='{version}'\n"),
++        );
++        target_reload_event(&router, &fixture, FileChangeType::CHANGED).await;
++        assert_eq!(target_reload_active(&router, &fixture, "a").await, version);
++        assert!(
++            router.completion_resolve(old_route.clone()).await.is_err(),
++            "changed target retires old graph route"
++        );
++        let names = target_reload_function_names(&router, &caller, &source, "array_fi").await;
++        assert_eq!(
++            names.contains(&"array_find".to_string()),
++            version == "8.4",
++            "applied stub target {version}: {names:?}"
++        );
++        assert_eq!(target_reload_active(&router, &fixture, "b").await, "8.2");
++        assert_members(&router, &bcaller, &bsource, "fromBUnsaved", &["fromB"]).await;
++    }
++    assert_eq!(fs::read_to_string(&caller).unwrap(), source);
++    assert_eq!(fs::read_to_string(&bdecl).unwrap(), bbefore);
++    router.shutdown().await.unwrap();
++}
++
++#[tokio::test]
++async fn composer_target_reload_extension_profile_rebuilds_without_mutating_shared_stub_index() {
++    let fixture = Projects::new();
++    fixture.write(
++        "apps/a/.phpantom.toml",
++        "[php]\nversion='8.3'\nextensions=['date']\n",
++    );
++    fixture.write("apps/a/extension-caller.php", "<?php\nmb_strt\n");
++    let router = target_reload_router(&fixture).await;
++    let caller = fixture.path("a", "extension-caller.php");
++    let source = open(&router, &caller).await;
++    for (extensions, expected) in [
++        ("['date']", false),
++        ("['date','mbstring']", true),
++        ("['date']", false),
++        ("['date','mbstring']", true),
++    ] {
++        fixture.write(
++            "apps/a/.phpantom.toml",
++            &format!("[php]\nversion='8.3'\nextensions={extensions}\n"),
++        );
++        target_reload_event(&router, &fixture, FileChangeType::CHANGED).await;
++        let names = target_reload_function_names(&router, &caller, &source, "mb_strt").await;
++        assert_eq!(
++            names.contains(&"mb_strtoupper".to_string()),
++            expected,
++            "extension target {extensions}: {names:?}"
++        );
++        let target = router
++            .workbench_active_target(ProjectTargetQuery {
++                uri: Some(Url::from_file_path(&caller).unwrap()),
++            })
++            .await
++            .unwrap();
++        assert_eq!(
++            target
++                .extensions
++                .as_ref()
++                .unwrap()
++                .contains(&"mbstring".to_string()),
++            expected
++        );
++    }
++    assert_eq!(fs::read_to_string(&caller).unwrap(), source);
++    router.shutdown().await.unwrap();
++}
++
++#[tokio::test]
++async fn composer_target_reload_repeated_or_formatting_only_profile_does_not_retire_graph() {
++    let fixture = Projects::new();
++    fixture.write(
++        "apps/a/.phpantom.toml",
++        "[php]\nversion='8.3'\nextensions=['date','mbstring']\n",
++    );
++    let router = target_reload_router(&fixture).await;
++    let caller = fixture.path("a", "index.php");
++    let source = open(&router, &caller).await;
++    let old = items(&router, &caller, &source)
++        .await
++        .into_iter()
++        .find(|item| has(std::slice::from_ref(item), "fromA"))
++        .unwrap();
++    for config in [
++        "[php]\nversion='8.3'\nextensions=['date','mbstring']\n",
++        "# reordered aliases, same effective target\n[php]\nversion='8.3.1'\nextensions=['mbstring','date','date']\n[formatting]\npint=''\n",
++    ] {
++        fixture.write("apps/a/.phpantom.toml", config);
++        target_reload_event(&router, &fixture, FileChangeType::CHANGED).await;
++        assert!(
++            router.completion_resolve(old.clone()).await.is_ok(),
++            "same effective profile must not retire route token"
++        );
++        assert_eq!(target_reload_active(&router, &fixture, "a").await, "8.3");
++    }
++    router.shutdown().await.unwrap();
++}
++
++#[tokio::test]
++async fn composer_target_reload_invalid_config_keeps_last_good_and_delete_uses_existing_default_policy()
++ {
++    let fixture = Projects::new();
++    fixture.write("apps/a/composer.json",&serde_json::json!({"name":"owned/default-target","require":{"php":"^8.2"},"autoload":{"psr-4":{"App\\":"src/"}}}).to_string());
++    fixture.write("apps/a/.phpantom.toml", "[php]\nversion='8.4'\n");
++    let router = target_reload_router(&fixture).await;
++    open(&router, &fixture.path("a", "index.php")).await;
++    assert_eq!(target_reload_active(&router, &fixture, "a").await, "8.4");
++    fixture.write("apps/a/.phpantom.toml", "[php\nversion='8.1'\n");
++    target_reload_event(&router, &fixture, FileChangeType::CHANGED).await;
++    assert_eq!(target_reload_active(&router, &fixture, "a").await, "8.4");
++    fs::remove_file(fixture.path("a", ".phpantom.toml")).unwrap();
++    target_reload_event(&router, &fixture, FileChangeType::DELETED).await;
++    assert_eq!(target_reload_active(&router, &fixture, "a").await, "8.2");
++    router.shutdown().await.unwrap();
++}
++
++// Context retirement is the causal transport boundary for a saved-target rebuild.
++// Publications already queued before this request still belong to the previous profile.
++async fn target_reload_retirement_barrier(
++    client: &mut crate::common::lsp_transport::TransportClient,
++) {
++    tokio::time::timeout(std::time::Duration::from_secs(20), async {
++        loop {
++            let message = client
++                .read_until("target context retirement boundary", |_| true)
++                .await;
++            if let Some(id) = message
++                .get("id")
++                .filter(|_| message.get("method").is_some())
++            {
++                let retired = message["method"] == "client/unregisterCapability";
++                let result = if message["method"] == "workspace/configuration" {
++                    serde_json::Value::Array(vec![
++                        serde_json::Value::Null;
++                        message["params"]["items"]
++                            .as_array()
++                            .map_or(0, Vec::len)
++                    ])
++                } else {
++                    serde_json::Value::Null
++                };
++                client
++                    .send(
++                        "answer retiring context request",
++                        serde_json::json!({"jsonrpc":"2.0","id":id,"result":result}),
++                    )
++                    .await;
++                if retired {
++                    return;
++                }
++            }
++        }
++    })
++    .await
++    .expect("changed effective target must retire the previous project context")
++}
++
++async fn target_reload_push_frame(
++    client: &mut crate::common::lsp_transport::TransportClient,
++    uri: &Url,
++    missing: bool,
++) -> serde_json::Value {
++    tokio::time::timeout(std::time::Duration::from_secs(20), async {
++        loop {
++            let message = client
++                .read_until("first complete versioned target diagnostics", |message| {
++                    if message.get("id").is_some() && message.get("method").is_some() {
++                        return true;
++                    }
++                    message["method"] == "textDocument/publishDiagnostics"
++                        && message["params"]["uri"] == uri.as_str()
++                        && message["params"]["version"] == 2
++                        && message["params"]["phpantomDiagnosticComplete"] == true
++                })
++                .await;
++            if let Some(id) = message
++                .get("id")
++                .filter(|_| message.get("method").is_some())
++            {
++                let result = if message["method"] == "workspace/configuration" {
++                    serde_json::Value::Array(vec![
++                        serde_json::Value::Null;
++                        message["params"]["items"]
++                            .as_array()
++                            .map_or(0, Vec::len)
++                    ])
++                } else {
++                    serde_json::Value::Null
++                };
++                client
++                    .send(
++                        "answer server request",
++                        serde_json::json!({"jsonrpc":"2.0","id":id,"result":result}),
++                    )
++                    .await;
++                continue;
++            }
++            let diagnostics = message["params"]["diagnostics"]
++                .as_array()
++                .expect("complete native diagnostic list");
++            assert!(
++                diagnostics.iter().any(|d| d["message"]
++                    .as_str()
++                    .is_some_and(|m| m.contains("PushReloadUnsavedMarker"))),
++                "first complete result must keep unsaved-only source: {message}"
++            );
++            let actual_missing = diagnostics.iter().any(|d| {
++                d["code"] == "unknown_function"
++                    && d["message"]
++                        .as_str()
++                        .is_some_and(|m| m.contains("array_find"))
++            });
++            assert_eq!(
++                actual_missing, missing,
++                "first complete result must use current target, without semantic retries: {message}"
++            );
++            return message;
++        }
++    })
++    .await
++    .expect("saved target edit must push current unsaved source diagnostics without reopening")
++}
++
++#[tokio::test]
++async fn composer_target_reload_push_client_receives_unsaved_versioned_diagnostics_without_reopen_or_pull()
++ {
++    use crate::common::lsp_transport::serve;
++    let fixture = Projects::new();
++    fixture.write("apps/a/.phpantom.toml","[php]\nversion='8.3'\n[phpstan]\ncommand=''\n[phpcs]\ncommand=''\n[phpmd]\ncommand=''\n[mago]\ncommand=''\n");
++    let path = fixture.path("a", "push-target.php");
++    fixture.write(
++        "apps/a/push-target.php",
++        "<?php\narray_find([1], static fn ($value) => true);\n",
++    );
++    let saved = fs::read_to_string(&path).unwrap();
++    let unsaved = "<?php\n// café 🐘\narray_find([1], static fn ($value) => true);\nnew PushReloadUnsavedMarker();\n";
++    let uri = Url::from_file_path(&path).unwrap();
++    let mut client = serve(ProjectRouter::new);
++    client.send("initialize push client",serde_json::json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{
++        "rootUri":Url::from_directory_path(&fixture.root).unwrap(),
++        "workspaceFolders":[{"uri":Url::from_directory_path(&fixture.root).unwrap(),"name":"owned-targets"}],
++        "capabilities":{}
++    }})).await;
++    client.wait_for_id(1).await;
++    client
++        .send(
++            "initialized",
++            serde_json::json!({"jsonrpc":"2.0","method":"initialized","params":{}}),
++        )
++        .await;
++    client
++        .send(
++            "open saved document",
++            serde_json::json!({"jsonrpc":"2.0","method":"textDocument/didOpen","params":{
++                "textDocument":{"uri":uri,"languageId":"php","version":1,"text":saved}
++            }}),
++        )
++        .await;
++    client
++        .send(
++            "edit only in memory",
++            serde_json::json!({"jsonrpc":"2.0","method":"textDocument/didChange","params":{
++                "textDocument":{"uri":uri,"version":2},"contentChanges":[{"text":unsaved}]
++            }}),
++        )
++        .await;
++    target_reload_push_frame(&mut client, &uri, true).await;
++    for (version, missing) in [("8.4", false), ("8.3", true), ("8.4", false)] {
++        fixture.write("apps/a/.phpantom.toml",&format!("[php]\nversion='{version}'\n[phpstan]\ncommand=''\n[phpcs]\ncommand=''\n[phpmd]\ncommand=''\n[mago]\ncommand=''\n"));
++        client.send("saved target notification",serde_json::json!({"jsonrpc":"2.0","method":"workspace/didChangeWatchedFiles","params":{
++            "changes":[{"uri":Url::from_file_path(fixture.path("a",".phpantom.toml")).unwrap(),"type":2}]
++        }})).await;
++        target_reload_retirement_barrier(&mut client).await;
++        let frame = target_reload_push_frame(&mut client, &uri, missing).await;
++        assert_eq!(
++            frame["params"]["version"], 2,
++            "metadata changes keep actual document version"
++        );
++        assert_eq!(
++            fs::read_to_string(&path).unwrap(),
++            saved,
++            "unsaved source must remain unsaved"
++        );
++    }
++    client
++        .send(
++            "shutdown",
++            serde_json::json!({"jsonrpc":"2.0","id":99,"method":"shutdown"}),
++        )
++        .await;
++    client.wait_for_id(99).await;
++    client
++        .send("exit", serde_json::json!({"jsonrpc":"2.0","method":"exit"}))
++        .await;
++}
++
++#[tokio::test]
++async fn composer_target_reload_preserves_sibling_last_good_config_when_saved_toml_is_malformed() {
++    let fixture = Projects::new();
++    fixture.write("apps/a/.phpantom.toml", "[php]\nversion='8.3'\n");
++    fixture.write("apps/b/.phpantom.toml", "[php]\nversion='8.2'\n");
++    let router = target_reload_router(&fixture).await;
++    let acaller = fixture.path("a", "index.php");
++    open(&router, &acaller).await;
++    let declaration = fixture.path("b", "src/Service.php");
++    let before = open(&router, &declaration).await;
++    replace(
++        &router,
++        &declaration,
++        2,
++        &before.replace("fromB", "fromBUnsaved"),
++    )
++    .await;
++    let bcaller = fixture.path("b", "index.php");
++    let bsource = open(&router, &bcaller).await;
++    assert_eq!(target_reload_active(&router, &fixture, "b").await, "8.2");
++    assert_members(&router, &bcaller, &bsource, "fromBUnsaved", &["fromB"]).await;
++    fixture.write("apps/b/.phpantom.toml", "[php]\nversion=[broken\n");
++    fixture.write("apps/a/.phpantom.toml", "[php]\nversion='8.4'\n");
++    target_reload_event(&router, &fixture, FileChangeType::CHANGED).await;
++    assert_eq!(target_reload_active(&router, &fixture, "a").await, "8.4");
++    assert_eq!(
++        target_reload_active(&router, &fixture, "b").await,
++        "8.2",
++        "an unrelated target edit must not replace a sibling's last-good applied configuration with defaults"
++    );
++    assert_members(&router, &bcaller, &bsource, "fromBUnsaved", &["fromB"]).await;
++    router.shutdown().await.unwrap();
++}
++
++#[tokio::test]
++async fn composer_target_reload_does_not_restore_deleted_sibling_project_override_from_last_good() {
++    let fixture = Projects::new();
++    fixture.write("apps/a/.phpantom.toml", "[php]\nversion='8.3'\n");
++    fixture.write(
++        "apps/b/composer.json",
++        &serde_json::json!({
++            "name":"owned/deletion-default","require":{"php":"^8.2"},
++            "autoload":{"psr-4":{"App\\":"src/"}}
++        })
++        .to_string(),
++    );
++    fixture.write("apps/b/.phpantom.toml", "[php]\nversion='8.4'\n");
++    let router = target_reload_router(&fixture).await;
++    let bcaller = fixture.path("b", "index.php");
++    let bsource = open(&router, &bcaller).await;
++    assert_eq!(target_reload_active(&router, &fixture, "b").await, "8.4");
++    fs::remove_file(fixture.path("b", ".phpantom.toml")).unwrap();
++    // The unrelated A topology event must not import the removed B override.
++    fixture.write(
++        "apps/a/vendor/composer/installed.json",
++        "{\"packages\":[]}\n",
++    );
++    router
++        .did_change_watched_files(DidChangeWatchedFilesParams {
++            changes: vec![FileEvent {
++                uri: Url::from_file_path(fixture.path("a", "vendor/composer/installed.json"))
++                    .unwrap(),
++                typ: FileChangeType::CREATED,
++            }],
++        })
++        .await;
++    assert_eq!(target_reload_active(&router, &fixture, "b").await, "8.2");
++    assert_members(&router, &bcaller, &bsource, "fromB", &["fromA"]).await;
++    assert!(!fixture.path("b", ".phpantom.toml").exists());
++    assert_eq!(fs::read_to_string(&bcaller).unwrap(), bsource);
++    router.shutdown().await.unwrap();
++}
+diff --git a/tests/integration/diagnostics_syntax_errors.rs b/tests/integration/diagnostics_syntax_errors.rs
+index 5cc692b..722fd6e 100644
+--- a/tests/integration/diagnostics_syntax_errors.rs
++++ b/tests/integration/diagnostics_syntax_errors.rs
+@@ -117,3 +117,55 @@ class Foo {
+         );
+     }
+ }
++
++#[cfg(test)]
++mod attribute_closure_cached_target_tests {
++    use phpantom_lsp::{Backend, types::PhpVersion};
++    use tower_lsp::lsp_types::{Diagnostic, NumberOrString};
++
++    fn collect(backend: &Backend, source: &str) -> Vec<Diagnostic> {
++        let mut result = Vec::new();
++        backend.collect_syntax_error_diagnostics(
++            "file:///owned/attribute.php",
++            source,
++            &mut result,
++        );
++        result
++            .into_iter()
++            .filter(|item| {
++                item.code
++                    == Some(NumberOrString::String(
++                        "php_version_attribute_closure".into(),
++                    ))
++            })
++            .collect()
++    }
++    #[test]
++    fn attribute_closure_cached_spans_follow_current_target_without_reparse() {
++        let backend = Backend::new_test();
++        let source = "<?php #[Own(static function () { return true; })] class Later {}";
++        backend.update_ast("file:///owned/attribute.php", source);
++        for (minor, expected) in [(3, 1), (5, 0), (4, 1)] {
++            backend.set_php_version(PhpVersion::new(8, minor));
++            assert_eq!(collect(&backend, source).len(), expected);
++        }
++    }
++    #[test]
++    fn attribute_closure_cached_spans_reject_same_length_different_source() {
++        let backend = Backend::new_test();
++        backend.set_php_version(PhpVersion::new(8, 3));
++        let source = "<?php #[Own(static function () { return true; })] class Later {}";
++        backend.update_ast("file:///owned/attribute.php", source);
++        assert_eq!(collect(&backend, source).len(), 1);
++        let expression = "static function () { return true; }";
++        let replacement = format!("true{}", " ".repeat(expression.len() - 4));
++        let edited = source.replace(expression, &replacement);
++        assert_eq!(edited.len(), source.len());
++        assert!(
++            collect(&backend, &edited).is_empty(),
++            "stale same-length spans cannot diagnose different source"
++        );
++        backend.update_ast("file:///owned/attribute.php", &edited);
++        assert!(collect(&backend, &edited).is_empty());
++    }
++}

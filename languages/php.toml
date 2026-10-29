@@ -9,7 +9,15 @@ ui-mode = "PHP"
 tree-sitter = "php"
 
 [[language-servers]]
+name = "phpantom"
+command = "phpantom_lsp"
+args = ["--stdio", "--no-project-tools"]
+root-markers = ["composer.json", ".phpantom.toml", "index.php"]
+install-hint = "PHPantom is bundled with OpenStorm on macOS Apple Silicon. Choose another PHP server in Settings on other platforms."
+
+[[language-servers]]
 name = "intelephense"
+fallback = true
 command = "intelephense"
 args = ["--stdio"]
 root-markers = ["composer.json", ".phpactor.json", "index.php"]

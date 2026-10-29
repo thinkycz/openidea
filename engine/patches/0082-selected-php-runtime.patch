@@ -1,0 +1,969 @@
+diff --git a/docs/CHANGELOG.md b/docs/CHANGELOG.md
+index 05e7783..84c9a28 100644
+--- a/docs/CHANGELOG.md
++++ b/docs/CHANGELOG.md
+@@ -15,6 +15,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
+ 
+ ## [Unreleased]
+ 
++- **Use the selected PHP for analyzer scripts.** PHPStan, PHPCS and PHPMD script diagnostics use the editor-selected local interpreter for file and project analysis. Invalid selections report an error; native tools and custom launchers keep their own execution policy. Contributed by PHP Workbench downstream.
++
+ - **Generate members inside anonymous classes.** Constructor, accessor and inherited-method actions select the correct expression-owned class and preserve its surrounding code, inherited contracts and body layout. Interface extraction refuses anonymous owners even when resolving a retained action. Contributed by PHP Workbench downstream.
+ 
+ - **Document escaping exceptions from resolved calls.** Explicit PHPDoc generation follows callable declarations and call arguments, preserves uncaught alternatives and keeps deferred bodies separate. Contributed by PHP Workbench downstream.
+diff --git a/src/backend/startup.rs b/src/backend/startup.rs
+index 47d3750..3df707a 100644
+--- a/src/backend/startup.rs
++++ b/src/backend/startup.rs
+@@ -16,6 +16,9 @@ use crate::server::{run_blocking_cancel_safe, type_hierarchy_registration};
+ 
+ impl Backend {
+     pub(crate) async fn on_initialize(&self, params: InitializeParams) -> Result<InitializeResult> {
++        self.workspace.php_runtime.get_or_init(|| {
++            crate::php_runtime::PhpRuntime::from_options(params.initialization_options.as_ref())
++        });
+         let workspace_root = params
+             .root_uri
+             .as_ref()
+diff --git a/src/diagnostics/external/phpcs.rs b/src/diagnostics/external/phpcs.rs
+index 572eae7..e616f86 100644
+--- a/src/diagnostics/external/phpcs.rs
++++ b/src/diagnostics/external/phpcs.rs
+@@ -9,7 +9,11 @@ use crate::phpcs;
+ use super::ExternalToolRun;
+ 
+ /// Resolve the PHPCS binary for the workspace.
+-fn prepare_phpcs(config: &Config, workspace_root: &Path) -> Option<ExternalToolRun> {
++fn prepare_phpcs(
++    config: &Config,
++    workspace_root: &Path,
++    runtime: crate::php_runtime::PhpRuntime,
++) -> Option<ExternalToolRun> {
+     if config.phpcs.is_disabled() {
+         return None;
+     }
+@@ -27,13 +31,14 @@ fn prepare_phpcs(config: &Config, workspace_root: &Path) -> Option<ExternalToolR
+     let phpcs_config = config.phpcs.clone();
+     Some(Box::new(
+         move |content, file_path, workspace_root, cancelled| {
+-            phpcs::run_phpcs(
++            phpcs::run_phpcs_with_runtime(
+                 &resolved,
+                 content,
+                 file_path,
+                 workspace_root,
+                 &phpcs_config,
+                 cancelled,
++                &runtime,
+             )
+         },
+     ))
+@@ -44,7 +49,10 @@ impl Backend {
+ 
+     /// Run PHPCS on pending files. See [`Backend::external_tool_worker`].
+     pub(crate) async fn phpcs_worker(&self) {
+-        self.external_tool_worker(&self.phpcs_tool, "phpcs", prepare_phpcs)
+-            .await;
++        let runtime = self.php_runtime().clone();
++        self.external_tool_worker(&self.phpcs_tool, "phpcs", move |config, root| {
++            prepare_phpcs(config, root, runtime.clone())
++        })
++        .await;
+     }
+ }
+diff --git a/src/diagnostics/external/phpmd.rs b/src/diagnostics/external/phpmd.rs
+index 7317370..c466e25 100644
+--- a/src/diagnostics/external/phpmd.rs
++++ b/src/diagnostics/external/phpmd.rs
+@@ -9,7 +9,11 @@ use crate::phpmd;
+ use super::ExternalToolRun;
+ 
+ /// Resolve the PHPMD binary for the workspace.
+-fn prepare_phpmd(config: &Config, workspace_root: &Path) -> Option<ExternalToolRun> {
++fn prepare_phpmd(
++    config: &Config,
++    workspace_root: &Path,
++    runtime: crate::php_runtime::PhpRuntime,
++) -> Option<ExternalToolRun> {
+     if config.phpmd.is_disabled() {
+         return None;
+     }
+@@ -22,7 +26,14 @@ fn prepare_phpmd(config: &Config, workspace_root: &Path) -> Option<ExternalToolR
+     let phpmd_config = config.phpmd.clone();
+     Some(Box::new(
+         move |content, _file_path, workspace_root, cancelled| {
+-            phpmd::run_phpmd(&resolved, content, workspace_root, &phpmd_config, cancelled)
++            phpmd::run_phpmd_with_runtime(
++                &resolved,
++                content,
++                workspace_root,
++                &phpmd_config,
++                cancelled,
++                &runtime,
++            )
+         },
+     ))
+ }
+@@ -32,7 +43,10 @@ impl Backend {
+ 
+     /// Run PHPMD on pending files. See [`Backend::external_tool_worker`].
+     pub(crate) async fn phpmd_worker(&self) {
+-        self.external_tool_worker(&self.phpmd_tool, "phpmd", prepare_phpmd)
+-            .await;
++        let runtime = self.php_runtime().clone();
++        self.external_tool_worker(&self.phpmd_tool, "phpmd", move |config, root| {
++            prepare_phpmd(config, root, runtime.clone())
++        })
++        .await;
+     }
+ }
+diff --git a/src/diagnostics/external/phpstan.rs b/src/diagnostics/external/phpstan.rs
+index ab468bc..f115e4c 100644
+--- a/src/diagnostics/external/phpstan.rs
++++ b/src/diagnostics/external/phpstan.rs
+@@ -9,7 +9,11 @@ use crate::phpstan;
+ use super::ExternalToolRun;
+ 
+ /// Resolve the PHPStan binary for the workspace.
+-fn prepare_phpstan(config: &Config, workspace_root: &Path) -> Option<ExternalToolRun> {
++fn prepare_phpstan(
++    config: &Config,
++    workspace_root: &Path,
++    runtime: crate::php_runtime::PhpRuntime,
++) -> Option<ExternalToolRun> {
+     if config.phpstan.is_disabled() {
+         return None;
+     }
+@@ -27,13 +31,14 @@ fn prepare_phpstan(config: &Config, workspace_root: &Path) -> Option<ExternalToo
+     let phpstan_config = config.phpstan.clone();
+     Some(Box::new(
+         move |content, file_path, workspace_root, cancelled| {
+-            phpstan::run_phpstan(
++            phpstan::run_phpstan_with_runtime(
+                 &resolved,
+                 content,
+                 file_path,
+                 workspace_root,
+                 &phpstan_config,
+                 cancelled,
++                &runtime,
+             )
+         },
+     ))
+@@ -44,7 +49,10 @@ impl Backend {
+ 
+     /// Run PHPStan on pending files. See [`Backend::external_tool_worker`].
+     pub(crate) async fn phpstan_worker(&self) {
+-        self.external_tool_worker(&self.phpstan_tool, "phpstan", prepare_phpstan)
+-            .await;
++        let runtime = self.php_runtime().clone();
++        self.external_tool_worker(&self.phpstan_tool, "phpstan", move |config, root| {
++            prepare_phpstan(config, root, runtime.clone())
++        })
++        .await;
+     }
+ }
+diff --git a/src/diagnostics/workspace.rs b/src/diagnostics/workspace.rs
+index 18e28cb..f488736 100644
+--- a/src/diagnostics/workspace.rs
++++ b/src/diagnostics/workspace.rs
+@@ -1214,15 +1214,17 @@ impl Backend {
+         {
+             progress.set_percentage(80, "Running PHPStan (project-wide)");
+             let phpstan_config = config.phpstan.clone();
++            let runtime = self.php_runtime().clone();
+             let shutdown = Arc::clone(&self.shutdown_flag);
+             let root_clone = root.clone();
+             let generations = self.phpstan_tool.generation_snapshot();
+             let result = crate::server::run_blocking_cancel_safe("workspace phpstan", move || {
+-                crate::phpstan::run_phpstan_workspace(
++                crate::phpstan::run_phpstan_workspace_with_runtime(
+                     &resolved,
+                     &root_clone,
+                     &phpstan_config,
+                     &shutdown,
++                    &runtime,
+                 )
+             })
+             .await;
+@@ -1248,11 +1250,18 @@ impl Backend {
+         {
+             progress.set_percentage(85, "Running PHPCS (project-wide)");
+             let phpcs_config = config.phpcs.clone();
++            let runtime = self.php_runtime().clone();
+             let shutdown = Arc::clone(&self.shutdown_flag);
+             let root_clone = root.clone();
+             let generations = self.phpcs_tool.generation_snapshot();
+             let result = crate::server::run_blocking_cancel_safe("workspace phpcs", move || {
+-                crate::phpcs::run_phpcs_workspace(&resolved, &root_clone, &phpcs_config, &shutdown)
++                crate::phpcs::run_phpcs_workspace_with_runtime(
++                    &resolved,
++                    &root_clone,
++                    &phpcs_config,
++                    &shutdown,
++                    &runtime,
++                )
+             })
+             .await;
+             if let Some(Ok(map)) = result {
+@@ -1273,11 +1282,18 @@ impl Backend {
+         {
+             progress.set_percentage(87, "Running PHPMD (project-wide)");
+             let phpmd_config = config.phpmd.clone();
++            let runtime = self.php_runtime().clone();
+             let shutdown = Arc::clone(&self.shutdown_flag);
+             let root_clone = root.clone();
+             let generations = self.phpmd_tool.generation_snapshot();
+             let result = crate::server::run_blocking_cancel_safe("workspace phpmd", move || {
+-                crate::phpmd::run_phpmd_workspace(&resolved, &root_clone, &phpmd_config, &shutdown)
++                crate::phpmd::run_phpmd_workspace_with_runtime(
++                    &resolved,
++                    &root_clone,
++                    &phpmd_config,
++                    &shutdown,
++                    &runtime,
++                )
+             })
+             .await;
+             if let Some(Ok(map)) = result {
+diff --git a/src/lib.rs b/src/lib.rs
+index 63e7c07..9dc666d 100644
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -287,6 +287,7 @@ pub(crate) mod names;
+ mod parallel;
+ mod parser;
+ pub(crate) mod phar;
++pub(crate) mod php_runtime;
+ pub mod php_type;
+ mod phpcs;
+ mod phpmd;
+diff --git a/src/php_runtime.rs b/src/php_runtime.rs
+new file mode 100644
+index 0000000..5c59d36
+--- /dev/null
++++ b/src/php_runtime.rs
+@@ -0,0 +1,455 @@
++//! Immutable client-selected PHP for PHP-script analyzer launchers.
++use serde_json::Value;
++use std::{
++    fs::File,
++    io::Read,
++    path::{Path, PathBuf},
++    process::Command,
++};
++
++#[derive(Clone, Debug, Default)]
++pub(crate) enum PhpRuntime {
++    #[default]
++    Inherited,
++    Selected(std::sync::Arc<PathBuf>),
++    Invalid(std::sync::Arc<str>),
++}
++
++impl PhpRuntime {
++    /// Capture one literal client selection without executing the interpreter.
++    pub(crate) fn from_options(options: Option<&Value>) -> Self {
++        let Some(value) = options.and_then(|options| options.get("phpRuntime")) else {
++            return Self::Inherited;
++        };
++        let Some(value) = value.get("interpreter").and_then(Value::as_str) else {
++            return Self::Invalid(
++                "Selected PHP runtime requires one literal interpreter path or command.".into(),
++            );
++        };
++        match resolve_executable(value) {
++            Ok(path) => Self::Selected(std::sync::Arc::new(path)),
++            Err(error) => Self::Invalid(error.into()),
++        }
++    }
++
++    /// Apply the captured runtime to a recognized PHP launcher, preserving
++    /// direct execution for custom wrappers and native tools.
++    pub(crate) fn command(&self, tool: &Path, root: &Path) -> Result<Command, String> {
++        if matches!(self, Self::Inherited) {
++            return Ok(Command::new(tool));
++        }
++        let absolute = if tool.is_absolute() {
++            tool.to_owned()
++        } else if tool.components().count() > 1 {
++            root.join(tool)
++        } else {
++            resolve_executable(tool.to_str().ok_or("Analyzer path is not UTF-8")?)?
++        };
++        let absolute = absolute
++            .canonicalize()
++            .map_err(|_| "Cannot resolve analyzer launcher".to_owned())?;
++        if !is_php_launcher(&absolute)? {
++            // Unknown shell wrappers and native tools retain their own runtime.
++            return Ok(Command::new(tool));
++        }
++        match self {
++            Self::Selected(interpreter) => {
++                regular_executable(interpreter)?;
++                let mut command = Command::new(interpreter.as_ref());
++                command.arg(absolute);
++                Ok(command)
++            }
++            Self::Invalid(error) => Err(error.to_string()),
++            Self::Inherited => unreachable!(),
++        }
++    }
++}
++
++impl crate::Backend {
++    /// Share the initialized workspace choice with diagnostic workers.
++    pub(crate) fn php_runtime(&self) -> &PhpRuntime {
++        self.workspace.php_runtime.get_or_init(PhpRuntime::default)
++    }
++}
++
++fn regular_executable(path: &Path) -> Result<(), String> {
++    let metadata = std::fs::metadata(path)
++        .map_err(|_| "Selected PHP interpreter is unavailable".to_owned())?;
++    if !metadata.is_file() {
++        return Err("Selected PHP interpreter must be a regular executable file".into());
++    }
++    #[cfg(unix)]
++    {
++        use std::os::unix::fs::PermissionsExt;
++        if metadata.permissions().mode() & 0o111 == 0 {
++            return Err("Selected PHP interpreter is not executable".into());
++        }
++    }
++    Ok(())
++}
++
++fn resolve_executable(value: &str) -> Result<PathBuf, String> {
++    if value.is_empty() || value.len() > 4096 || value.contains('\0') {
++        return Err(
++            "Selected PHP interpreter must be one nonempty literal executable path or PATH command"
++                .into(),
++        );
++    }
++    let path = Path::new(value);
++    let candidate = if path.is_absolute() {
++        path.to_owned()
++    } else {
++        if path.components().count() != 1 || value.chars().any(char::is_whitespace) {
++            return Err("Selected PHP interpreter must be absolute or a bare PATH command without arguments".into());
++        }
++        std::env::var_os("PATH")
++            .and_then(|paths| {
++                std::env::split_paths(&paths)
++                    .filter(|directory| directory.is_absolute())
++                    .map(|directory| directory.join(value))
++                    .find(|candidate| regular_executable(candidate).is_ok())
++            })
++            .ok_or_else(|| "Selected PHP interpreter was not found on PATH".to_owned())?
++    };
++    let canonical = candidate
++        .canonicalize()
++        .map_err(|_| "Cannot resolve selected PHP interpreter".to_owned())?;
++    regular_executable(&canonical)?;
++    Ok(canonical)
++}
++
++fn is_php_launcher(path: &Path) -> Result<bool, String> {
++    if !std::fs::metadata(path)
++        .map_err(|_| "Cannot inspect analyzer launcher".to_owned())?
++        .is_file()
++    {
++        return Err("Analyzer launcher must be a regular file".into());
++    }
++    #[cfg(unix)]
++    let file = {
++        use rustix::fs::{Mode, OFlags};
++        rustix::fs::open(
++            path,
++            OFlags::RDONLY | OFlags::NONBLOCK | OFlags::NOFOLLOW | OFlags::CLOEXEC,
++            Mode::empty(),
++        )
++        .map(File::from)
++        .map_err(|_| "Cannot open analyzer launcher".to_owned())?
++    };
++    #[cfg(not(unix))]
++    let file = File::open(path).map_err(|_| "Cannot open analyzer launcher".to_owned())?;
++    if !file
++        .metadata()
++        .map_err(|_| "Cannot inspect analyzer descriptor".to_owned())?
++        .is_file()
++    {
++        return Err("Analyzer launcher must be a regular file".into());
++    }
++    let mut bytes = Vec::new();
++    file.take(4096)
++        .read_to_end(&mut bytes)
++        .map_err(|_| "Cannot read analyzer header".to_owned())?;
++    let mut header = bytes.as_slice();
++    if header.starts_with(b"\xef\xbb\xbf") {
++        header = &header[3..];
++    }
++    if header.starts_with(b"#!") {
++        let Some(newline) = header.iter().position(|byte| *byte == b'\n') else {
++            return Ok(false);
++        };
++        header = &header[newline + 1..];
++    }
++    let header = header.trim_ascii_start();
++    Ok(header.starts_with(b"<?php") && header.get(5).is_none_or(u8::is_ascii_whitespace))
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use serde_json::json;
++    fn script(directory: &Path, name: &str, content: &[u8]) -> PathBuf {
++        let path = directory.join(name);
++        std::fs::write(&path, content).unwrap();
++        #[cfg(unix)]
++        {
++            use std::os::unix::fs::PermissionsExt;
++            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
++        }
++        path.canonicalize().unwrap()
++    }
++    #[test]
++    fn selected_php_runtime_options_absence_and_invalid_never_fallback() {
++        assert!(matches!(
++            PhpRuntime::from_options(None),
++            PhpRuntime::Inherited
++        ));
++        assert!(matches!(
++            PhpRuntime::from_options(Some(&json!({"other":1}))),
++            PhpRuntime::Inherited
++        ));
++        for value in [
++            json!(null),
++            json!({}),
++            json!({"interpreter":""}),
++            json!({"interpreter":"x\0y"}),
++            json!({"interpreter":"../php"}),
++            json!({"interpreter":"php -d x"}),
++            json!({"interpreter":"a".repeat(4097)}),
++            json!({"interpreter":"/not/a/real/php"}),
++        ] {
++            assert!(matches!(
++                PhpRuntime::from_options(Some(&json!({"phpRuntime":value}))),
++                PhpRuntime::Invalid(_)
++            ));
++        }
++    }
++    #[test]
++    fn selected_php_runtime_script_command_preserves_literal_args_and_native_wrappers() {
++        let d = tempfile::tempdir().unwrap();
++        let php = script(d.path(), "PHP café", b"#!/bin/sh\nexit 0\n")
++            .canonicalize()
++            .unwrap();
++        let tool = script(
++            d.path(),
++            "analyzer space",
++            b"#!/usr/bin/env php\n<?php\necho 'x';",
++        );
++        let runtime = PhpRuntime::Selected(std::sync::Arc::new(php.clone()));
++        let mut command = runtime.command(&tool, d.path()).unwrap();
++        command.args(["analyse", "literal café"]);
++        assert_eq!(command.get_program(), php.as_os_str());
++        assert_eq!(
++            command.get_args().collect::<Vec<_>>(),
++            vec![
++                tool.as_os_str(),
++                std::ffi::OsStr::new("analyse"),
++                std::ffi::OsStr::new("literal café")
++            ]
++        );
++        let invalid = PhpRuntime::Invalid("unavailable".into());
++        assert!(invalid.command(&tool, d.path()).is_err());
++        for (name, bytes) in [
++            ("wrapper", b"#!/bin/sh\necho wrapper\n".as_slice()),
++            ("native", b"\x7fELFbinary".as_slice()),
++        ] {
++            let native = script(d.path(), name, bytes);
++            assert_eq!(
++                invalid.command(&native, d.path()).unwrap().get_program(),
++                native.as_os_str()
++            );
++        }
++        assert_eq!(
++            PhpRuntime::Inherited
++                .command(&tool, d.path())
++                .unwrap()
++                .get_program(),
++            tool.as_os_str()
++        );
++    }
++    #[test]
++    fn selected_php_runtime_bounded_headers_and_regular_file_controls() {
++        let d = tempfile::tempdir().unwrap();
++        for (name, bytes, php) in [
++            ("plain", b"<?php\n".as_slice(), true),
++            ("bom", b"\xef\xbb\xbf<?php\n".as_slice(), true),
++            ("notphp", b"<?phpx".as_slice(), false),
++            ("shell", b"#!/bin/sh\necho '<?php';".as_slice(), false),
++        ] {
++            assert_eq!(
++                is_php_launcher(&script(d.path(), name, bytes)).unwrap(),
++                php
++            );
++        }
++        assert!(is_php_launcher(d.path()).is_err());
++        let long = script(d.path(), "long", &[b'#'; 8192]);
++        assert!(!is_php_launcher(&long).unwrap());
++    }
++    #[test]
++    fn selected_php_runtime_leading_whitespace_is_still_php_and_invalid_selection_refuses() {
++        let d = tempfile::tempdir().unwrap();
++        let tool = script(
++            d.path(),
++            "whitespace analyzer",
++            b"#!/usr/bin/env php\n\r\n \t<?php\necho '{}';",
++        );
++        let invalid = PhpRuntime::Invalid("selected PHP unavailable".into());
++        assert!(is_php_launcher(&tool).unwrap());
++        assert!(invalid.command(&tool, d.path()).is_err());
++    }
++
++    #[tokio::test]
++    async fn selected_php_runtime_initialize_shared_by_worker_clones() {
++        use tower_lsp::lsp_types::InitializeParams;
++        let backend = crate::Backend::new_test();
++        let params = InitializeParams {
++            initialization_options: Some(json!({"phpRuntime":{"interpreter":"/not/a/real/php"}})),
++            ..Default::default()
++        };
++        backend.on_initialize(params).await.unwrap();
++        assert!(matches!(
++            backend.clone_for_diagnostic_worker().php_runtime(),
++            PhpRuntime::Invalid(_)
++        ));
++        assert!(std::sync::Arc::ptr_eq(
++            &backend.workspace.php_runtime,
++            &backend.clone_for_blocking().workspace.php_runtime
++        ));
++    }
++
++    #[cfg(unix)]
++    #[test]
++    #[ignore = "Root supplies PHP_WORKBENCH_TEST_PHP for an owned real-PHP process receipt"]
++    fn selected_php_runtime_real_php_owned_receipt() {
++        let php = std::env::var("PHP_WORKBENCH_TEST_PHP")
++            .expect("root must provide actual PHP executable");
++        let runtime = PhpRuntime::from_options(Some(&json!({"phpRuntime":{"interpreter":php}})));
++        let PhpRuntime::Selected(selected) = &runtime else {
++            panic!("invalid root PHP fixture");
++        };
++        let d = tempfile::tempdir().unwrap();
++        let tool = script(d.path(), "analyzer café.php", b"#!/usr/bin/env php\n<?php echo json_encode(['php'=>PHP_BINARY,'cwd'=>getcwd(),'args'=>array_slice($argv,1)]);\n");
++        let mut command = runtime.command(&tool, d.path()).unwrap();
++        command
++            .current_dir(d.path())
++            .args(["analyse", "space café", ""]);
++        let output = crate::process::run_command_with_timeout(
++            &mut command,
++            std::time::Duration::from_secs(3),
++            &std::sync::atomic::AtomicBool::new(false),
++            "owned PHP fixture",
++            None,
++        )
++        .unwrap();
++        assert_eq!(output.code, 0);
++        let receipt: Value = serde_json::from_str(&output.stdout).unwrap();
++        assert_eq!(
++            Path::new(receipt["php"].as_str().unwrap())
++                .canonicalize()
++                .unwrap(),
++            **selected
++        );
++        assert_eq!(
++            Path::new(receipt["cwd"].as_str().unwrap())
++                .canonicalize()
++                .unwrap(),
++            d.path().canonicalize().unwrap()
++        );
++        assert_eq!(receipt["args"], json!(["analyse", "space café", ""]));
++    }
++    #[cfg(unix)]
++    #[test]
++    #[ignore = "Root supplies PHP_WORKBENCH_TEST_PHP for all six real analyzer adapter receipts"]
++    fn selected_php_runtime_all_file_and_workspace_adapters_use_real_runtime() {
++        let php = std::env::var("PHP_WORKBENCH_TEST_PHP")
++            .expect("root must provide actual PHP executable");
++        let runtime = PhpRuntime::from_options(Some(&json!({"phpRuntime":{"interpreter":php}})));
++        let PhpRuntime::Selected(selected) = &runtime else {
++            panic!("invalid root PHP fixture");
++        };
++        let d = tempfile::tempdir().unwrap();
++        let receipt = d.path().join("runtime.json");
++        let quoted = format!(
++            "'{}'",
++            receipt
++                .to_str()
++                .unwrap()
++                .replace('\\', "\\\\")
++                .replace('\'', "\\'")
++        );
++        let text = format!(
++            "#!/usr/bin/env php\n<?php file_put_contents({quoted}, json_encode(['php'=>PHP_BINARY,'cwd'=>getcwd(),'args'=>array_slice($argv,1)])); echo in_array('--format=json', $argv, true) ? '{{\"files\":[]}}' : '{{\"files\":{{}},\"errors\":[],\"totals\":{{\"errors\":0,\"file_errors\":0}}}}';\n"
++        );
++        let tool = script(d.path(), "actual analyzer café", text.as_bytes());
++        let file = d.path().join("Driver.php");
++        std::fs::write(&file, "<?php\r\n// exact café 🐘\r\n").unwrap();
++        let source = std::fs::read_to_string(&file).unwrap();
++        let cancel = std::sync::atomic::AtomicBool::new(false);
++        for case in 0..6 {
++            match case {
++                0 => {
++                    crate::phpstan::run_phpstan_with_runtime(
++                        &crate::phpstan::ResolvedPhpStan { path: tool.clone() },
++                        &source,
++                        &file,
++                        d.path(),
++                        &Default::default(),
++                        &cancel,
++                        &runtime,
++                    )
++                    .unwrap();
++                }
++                1 => {
++                    crate::phpstan::run_phpstan_workspace_with_runtime(
++                        &crate::phpstan::ResolvedPhpStan { path: tool.clone() },
++                        d.path(),
++                        &Default::default(),
++                        &cancel,
++                        &runtime,
++                    )
++                    .unwrap();
++                }
++                2 => {
++                    crate::phpcs::run_phpcs_with_runtime(
++                        &crate::phpcs::ResolvedPhpcs { path: tool.clone() },
++                        &source,
++                        &file,
++                        d.path(),
++                        &Default::default(),
++                        &cancel,
++                        &runtime,
++                    )
++                    .unwrap();
++                }
++                3 => {
++                    crate::phpcs::run_phpcs_workspace_with_runtime(
++                        &crate::phpcs::ResolvedPhpcs { path: tool.clone() },
++                        d.path(),
++                        &Default::default(),
++                        &cancel,
++                        &runtime,
++                    )
++                    .unwrap();
++                }
++                4 => {
++                    crate::phpmd::run_phpmd_with_runtime(
++                        &crate::phpmd::ResolvedPhpmd { path: tool.clone() },
++                        &source,
++                        d.path(),
++                        &Default::default(),
++                        &cancel,
++                        &runtime,
++                    )
++                    .unwrap();
++                }
++                _ => {
++                    crate::phpmd::run_phpmd_workspace_with_runtime(
++                        &crate::phpmd::ResolvedPhpmd { path: tool.clone() },
++                        d.path(),
++                        &Default::default(),
++                        &cancel,
++                        &runtime,
++                    )
++                    .unwrap();
++                }
++            }
++            let value: Value = serde_json::from_slice(&std::fs::read(&receipt).unwrap()).unwrap();
++            assert_eq!(
++                Path::new(value["php"].as_str().unwrap())
++                    .canonicalize()
++                    .unwrap(),
++                **selected,
++                "adapter {case}"
++            );
++            assert_eq!(
++                Path::new(value["cwd"].as_str().unwrap())
++                    .canonicalize()
++                    .unwrap(),
++                d.path().canonicalize().unwrap(),
++                "adapter {case}"
++            );
++            assert!(!value["args"].as_array().unwrap().is_empty());
++            assert_eq!(std::fs::read_to_string(&file).unwrap(), source);
++            std::fs::remove_file(&receipt).unwrap();
++        }
++    }
++}
+diff --git a/src/phpcs.rs b/src/phpcs.rs
+index 580ffcf..1d44a81 100644
+--- a/src/phpcs.rs
++++ b/src/phpcs.rs
+@@ -42,7 +42,6 @@
+ //! code action can offer `phpcbf` auto-fix.
+ 
+ use std::path::{Path, PathBuf};
+-use std::process::Command;
+ use std::time::Duration;
+ 
+ use tower_lsp::lsp_types::{Diagnostic, DiagnosticSeverity, NumberOrString};
+@@ -120,18 +119,19 @@ pub(crate) fn project_uses_phpcs(
+ ///
+ /// `workspace_root` is needed to run PHPCS from the project root
+ /// directory so that it picks up `phpcs.xml` / `phpcs.xml.dist`.
+-pub(crate) fn run_phpcs(
++pub(crate) fn run_phpcs_with_runtime(
+     resolved: &ResolvedPhpcs,
+     content: &str,
+     file_path: &Path,
+     workspace_root: &Path,
+     config: &PhpcsConfig,
+     cancelled: &std::sync::atomic::AtomicBool,
++    runtime: &crate::php_runtime::PhpRuntime,
+ ) -> Result<Vec<Diagnostic>, String> {
+     let timeout_ms = config.timeout.unwrap_or(DEFAULT_TIMEOUT_MS);
+     let timeout = Duration::from_millis(timeout_ms);
+ 
+-    let mut cmd = Command::new(&resolved.path);
++    let mut cmd = runtime.command(&resolved.path, workspace_root)?;
+     cmd.arg("--report=json")
+         .arg("--no-colors")
+         .arg("-q")
+@@ -206,11 +206,12 @@ pub(crate) fn has_project_config(workspace_root: &Path) -> bool {
+ /// No path argument is passed, so PHPCS scans the `<file>` entries
+ /// from its own ruleset (the caller checks [`has_project_config`]
+ /// first).  Runs with an extended timeout.
+-pub(crate) fn run_phpcs_workspace(
++pub(crate) fn run_phpcs_workspace_with_runtime(
+     resolved: &ResolvedPhpcs,
+     workspace_root: &Path,
+     config: &PhpcsConfig,
+     cancelled: &std::sync::atomic::AtomicBool,
++    runtime: &crate::php_runtime::PhpRuntime,
+ ) -> Result<std::collections::HashMap<PathBuf, Vec<Diagnostic>>, String> {
+     let timeout_ms = config
+         .timeout
+@@ -218,7 +219,7 @@ pub(crate) fn run_phpcs_workspace(
+         .saturating_mul(crate::process::WORKSPACE_TIMEOUT_FACTOR);
+     let timeout = Duration::from_millis(timeout_ms);
+ 
+-    let mut cmd = Command::new(&resolved.path);
++    let mut cmd = runtime.command(&resolved.path, workspace_root)?;
+     cmd.arg("--report=json")
+         .arg("--no-colors")
+         .arg("-q")
+diff --git a/src/phpmd.rs b/src/phpmd.rs
+index 94e0a16..974598a 100644
+--- a/src/phpmd.rs
++++ b/src/phpmd.rs
+@@ -125,8 +125,13 @@ pub(crate) fn resolve_phpmd(
+ // ── PHPMD execution ─────────────────────────────────────────────────
+ 
+ /// The arguments every PHPMD run shares.
+-fn base_command(resolved: &ResolvedPhpmd, workspace_root: &Path, config: &PhpmdConfig) -> Command {
+-    let mut cmd = Command::new(&resolved.path);
++fn base_command(
++    resolved: &ResolvedPhpmd,
++    workspace_root: &Path,
++    config: &PhpmdConfig,
++    runtime: &crate::php_runtime::PhpRuntime,
++) -> Result<Command, String> {
++    let mut cmd = runtime.command(&resolved.path, workspace_root)?;
+     cmd.arg("analyze")
+         .arg("--format=json")
+         .arg("--no-progress")
+@@ -137,7 +142,7 @@ fn base_command(resolved: &ResolvedPhpmd, workspace_root: &Path, config: &PhpmdC
+         cmd.arg(format!("--ruleset={}", ruleset));
+     }
+ 
+-    cmd
++    Ok(cmd)
+ }
+ 
+ /// Run PHPMD on the given buffer content and return LSP diagnostics.
+@@ -145,16 +150,17 @@ fn base_command(resolved: &ResolvedPhpmd, workspace_root: &Path, config: &PhpmdC
+ /// The buffer is fed to PHPMD on stdin (the `-` path argument).  PHPMD
+ /// runs from the workspace root so that it auto-detects the project's
+ /// config file.
+-pub(crate) fn run_phpmd(
++pub(crate) fn run_phpmd_with_runtime(
+     resolved: &ResolvedPhpmd,
+     content: &str,
+     workspace_root: &Path,
+     config: &PhpmdConfig,
+     cancelled: &std::sync::atomic::AtomicBool,
++    runtime: &crate::php_runtime::PhpRuntime,
+ ) -> Result<Vec<Diagnostic>, String> {
+     let timeout = Duration::from_millis(config.timeout_ms());
+ 
+-    let mut cmd = base_command(resolved, workspace_root, config);
++    let mut cmd = base_command(resolved, workspace_root, config, runtime)?;
+     // The result cache is keyed by file path, and stdin has none of its
+     // own: leave the project's cache to the project's own runs.
+     cmd.arg("--no-cache").arg("-");
+@@ -195,11 +201,12 @@ pub(crate) fn run_phpmd(
+ /// config file (the caller checks [`has_project_config`] first).  The
+ /// project's result cache is left to the config, as a run from the
+ /// command line would.  Runs with an extended timeout.
+-pub(crate) fn run_phpmd_workspace(
++pub(crate) fn run_phpmd_workspace_with_runtime(
+     resolved: &ResolvedPhpmd,
+     workspace_root: &Path,
+     config: &PhpmdConfig,
+     cancelled: &std::sync::atomic::AtomicBool,
++    runtime: &crate::php_runtime::PhpRuntime,
+ ) -> Result<std::collections::HashMap<PathBuf, Vec<Diagnostic>>, String> {
+     let timeout = Duration::from_millis(
+         config
+@@ -207,7 +214,7 @@ pub(crate) fn run_phpmd_workspace(
+             .saturating_mul(crate::process::WORKSPACE_TIMEOUT_FACTOR),
+     );
+ 
+-    let mut cmd = base_command(resolved, workspace_root, config);
++    let mut cmd = base_command(resolved, workspace_root, config, runtime)?;
+ 
+     let output = crate::process::run_command_with_timeout(
+         &mut cmd,
+diff --git a/src/phpstan.rs b/src/phpstan.rs
+index 717f57a..04f9a6b 100644
+--- a/src/phpstan.rs
++++ b/src/phpstan.rs
+@@ -42,7 +42,6 @@
+ 
+ use std::io::Write;
+ use std::path::{Path, PathBuf};
+-use std::process::Command;
+ use std::time::Duration;
+ 
+ use tempfile::NamedTempFile;
+@@ -167,13 +166,14 @@ pub(crate) fn resolve_phpstan(
+ ///
+ /// `workspace_root` is needed to run PHPStan from the project root
+ /// directory so that it picks up `phpstan.neon` / `phpstan.neon.dist`.
+-pub(crate) fn run_phpstan(
++pub(crate) fn run_phpstan_with_runtime(
+     resolved: &ResolvedPhpStan,
+     content: &str,
+     file_path: &Path,
+     workspace_root: &Path,
+     config: &PhpStanConfig,
+     cancelled: &std::sync::atomic::AtomicBool,
++    runtime: &crate::php_runtime::PhpRuntime,
+ ) -> Result<Vec<Diagnostic>, String> {
+     let timeout_ms = config.timeout.unwrap_or(DEFAULT_TIMEOUT_MS);
+     let timeout = Duration::from_millis(timeout_ms);
+@@ -185,7 +185,7 @@ pub(crate) fn run_phpstan(
+     // only analyses this single file, not the entire project.  Without
+     // it, PHPStan would analyse all paths from phpstan.neon, which can
+     // take minutes on large codebases.
+-    let mut cmd = Command::new(&resolved.path);
++    let mut cmd = runtime.command(&resolved.path, workspace_root)?;
+     cmd.arg("analyse")
+         .arg("--error-format=json")
+         .arg("--no-progress")
+@@ -277,11 +277,12 @@ pub(crate) fn has_project_config(workspace_root: &Path) -> bool {
+ /// configured in its own configuration file (the caller checks
+ /// [`has_project_config`] first).  Runs with an extended timeout
+ /// ([`crate::process::WORKSPACE_TIMEOUT_FACTOR`] × the per-file timeout).
+-pub(crate) fn run_phpstan_workspace(
++pub(crate) fn run_phpstan_workspace_with_runtime(
+     resolved: &ResolvedPhpStan,
+     workspace_root: &Path,
+     config: &PhpStanConfig,
+     cancelled: &std::sync::atomic::AtomicBool,
++    runtime: &crate::php_runtime::PhpRuntime,
+ ) -> Result<std::collections::HashMap<PathBuf, Vec<Diagnostic>>, String> {
+     let timeout_ms = config
+         .timeout
+@@ -290,7 +291,7 @@ pub(crate) fn run_phpstan_workspace(
+     let timeout = Duration::from_millis(timeout_ms);
+     let memory_limit = config.memory_limit.as_deref().unwrap_or("1G");
+ 
+-    let mut cmd = Command::new(&resolved.path);
++    let mut cmd = runtime.command(&resolved.path, workspace_root)?;
+     cmd.arg("analyse")
+         .arg("--error-format=json")
+         .arg("--no-progress")
+diff --git a/src/project_router.rs b/src/project_router.rs
+index f13c329..f0590b3 100644
+--- a/src/project_router.rs
++++ b/src/project_router.rs
+@@ -1393,3 +1393,45 @@ mod tests {
+         assert_eq!(rooted.workspace_folders, params.workspace_folders);
+     }
+ }
++
++#[cfg(test)]
++mod selected_php_runtime_tests {
++    use super::*;
++    #[tokio::test]
++    async fn selected_php_runtime_router_initializes_each_project_and_unscoped_context() {
++        let d = tempfile::tempdir().unwrap();
++        let mut folders = Vec::new();
++        for name in ["first", "second"] {
++            let root = d.path().join(name);
++            std::fs::create_dir(&root).unwrap();
++            std::fs::write(
++                root.join("composer.json"),
++                format!("{{\"name\":\"fixture/{name}\"}}"),
++            )
++            .unwrap();
++            folders.push(WorkspaceFolder {
++                uri: Url::from_directory_path(root).unwrap(),
++                name: name.into(),
++            });
++        }
++        let router = ProjectRouter::new_test();
++        router
++            .initialize_projects(InitializeParams {
++                workspace_folders: Some(folders),
++                initialization_options: Some(
++                    serde_json::json!({"phpRuntime":{"interpreter":"/not/a/real/php"}}),
++                ),
++                ..Default::default()
++            })
++            .await
++            .unwrap();
++        let contexts = router.contexts.read();
++        assert!(contexts.len() >= 3);
++        for context in contexts.iter() {
++            assert!(matches!(
++                context.backend.workspace.php_runtime.get(),
++                Some(crate::php_runtime::PhpRuntime::Invalid(_))
++            ));
++        }
++    }
++}
+diff --git a/src/workspace_env.rs b/src/workspace_env.rs
+index 0540d6d..71ba83d 100644
+--- a/src/workspace_env.rs
++++ b/src/workspace_env.rs
+@@ -22,6 +22,8 @@ use crate::types::PhpVersion;
+ /// Workspace root, PSR-4 mappings, vendor locations, PHP version, and the
+ /// loaded `.phpantom.toml` configuration.
+ pub(crate) struct WorkspaceEnv {
++    /// Set once at initialize; shared unchanged with workers and child-session clones.
++    pub(crate) php_runtime: Arc<std::sync::OnceLock<crate::php_runtime::PhpRuntime>>,
+     /// The root directory of the workspace (set during `initialize`).
+     pub(crate) workspace_root: Arc<RwLock<Option<PathBuf>>>,
+     /// PSR-4 autoload mappings parsed from `composer.json`.
+@@ -98,6 +100,7 @@ impl WorkspaceEnv {
+ 
+     fn with_global_config(global_config_path: Option<PathBuf>) -> Self {
+         Self {
++            php_runtime: Arc::new(std::sync::OnceLock::new()),
+             workspace_root: Arc::new(RwLock::new(None)),
+             psr4_mappings: Arc::new(RwLock::new(Vec::new())),
+             vendor_uri_prefixes: Mutex::new(Vec::new()),
+@@ -118,6 +121,7 @@ impl WorkspaceEnv {
+ impl Clone for WorkspaceEnv {
+     fn clone(&self) -> Self {
+         Self {
++            php_runtime: Arc::clone(&self.php_runtime),
+             workspace_root: Arc::clone(&self.workspace_root),
+             psr4_mappings: Arc::clone(&self.psr4_mappings),
+             vendor_uri_prefixes: Mutex::new(self.vendor_uri_prefixes.lock().clone()),

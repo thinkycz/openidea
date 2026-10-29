@@ -1,0 +1,3132 @@
+diff --git a/docs/CHANGELOG.md b/docs/CHANGELOG.md
+index 3811070..3f9d28e 100644
+--- a/docs/CHANGELOG.md
++++ b/docs/CHANGELOG.md
+@@ -15,6 +15,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
+ 
+ ## [Unreleased]
+ 
++- **Keep hierarchy nodes and relationships accurate.** Anonymous-class construction follows its concrete constructor, trait composition is reciprocal, and declaration navigation handles comments. Expanding a changed declaration requires a fresh selection; Composer dependency discovery honors its configured folder. Contributed by PHP Workbench downstream.
++
+ - **Keep call hierarchies faithful to execution.** Optional parameter constructors belong to their declared callable. Imports, stored callbacks and deferred metadata remain navigable references without becoming callers; known keyword constructors retain their source locations while ambiguous runtime targets stay unresolved. Contributed by PHP Workbench downstream.
+ 
+ - **Keep Blade caller types consistent.** Component-bound variables honor source PHPDoc, and cross-file view data inference stays independent of another file’s diagnostic scope. Contributed by PHP Workbench downstream.
+diff --git a/examples/php/definition.php b/examples/php/definition.php
+index 1623af8..08b736e 100644
+--- a/examples/php/definition.php
++++ b/examples/php/definition.php
+@@ -409,3 +409,17 @@ function hierarchyDefaultNavigation(
+ // but only the immediately invoked array contributes a call hierarchy edge.
+ $storedHierarchyCallback = [$definitionAtEof, 'label'];
+ ([$definitionAtEof, 'label'])();
++
++
++// Try: Show Callees on anonymousConstructionNavigation. The class keyword
++// links to its constructor; gtdHelper belongs to that constructor's own row.
++// Show Type Hierarchy at the same class keyword to inspect the anonymous type.
++function anonymousConstructionNavigation(): object
++{
++    return new class {
++        public function __construct()
++        {
++            gtdHelper();
++        }
++    };
++}
+diff --git a/src/call_hierarchy.rs b/src/call_hierarchy.rs
+index 21f4b1c..c5259c3 100644
+--- a/src/call_hierarchy.rs
++++ b/src/call_hierarchy.rs
+@@ -21,7 +21,8 @@ use tower_lsp::lsp_types::{
+ 
+ use crate::Backend;
+ use crate::symbol_map::{
+-    AnonymousCallable, CallExecutionOwner, ClassRefContext, SymbolKind, SymbolMap, SymbolSpan,
++    AnonymousCallable, AnonymousClassConstruction, CallExecutionOwner, ClassRefContext, SymbolKind,
++    SymbolMap, SymbolSpan,
+ };
+ use crate::text_position::{byte_range_to_lsp_range, offset_to_position, position_to_offset};
+ use crate::types::{ClassInfo, FunctionInfo, MethodInfo};
+@@ -205,6 +206,59 @@ impl Backend {
+                 .or_insert_with(|| (caller.item, vec![reference.range]));
+         }
+ 
++        let constructor_target = target.item.data.as_ref().is_some_and(|data| {
++            data.get("method")
++                .and_then(|value| value.as_str())
++                .is_some_and(|method| {
++                    method.eq_ignore_ascii_case("__construct")
++                        || data
++                            .get("owner")
++                            .and_then(|value| value.as_str())
++                            .and_then(|owner| self.find_or_load_class(owner))
++                            .is_some_and(|owner| owner.kind == crate::types::ClassLikeKind::Trait)
++                })
++        });
++        if constructor_target {
++            // Use the same initial-index readiness and user/vendor/stub policy
++            // as references, then select metadata-bearing maps. Anonymous names
++            // remain URI-local and never enter global class indexes.
++            for (uri, _) in self
++                .user_file_symbol_maps()
++                .into_iter()
++                .filter(|(_, map)| !map.anonymous_class_constructions.is_empty())
++            {
++                let Some((content, map, Some(hash))) = self.cached_file(&mut cache, &uri) else {
++                    continue;
++                };
++                for site in &map.anonymous_class_constructions {
++                    let Some(callee) = self.anonymous_class_constructor(&mut cache, &uri, site)
++                    else {
++                        continue;
++                    };
++                    if callee.item.uri != target.item.uri
++                        || callee.item.selection_range != target.item.selection_range
++                        || callee.item.name != target.item.name
++                    {
++                        continue;
++                    }
++                    let Some(caller) = self.anonymous_class_creation_caller(
++                        &mut cache, &uri, &content, &map, &hash, site,
++                    ) else {
++                        continue;
++                    };
++                    let range = byte_range_to_lsp_range(
++                        &content,
++                        site.keyword_start as usize,
++                        site.keyword_end as usize,
++                    );
++                    grouped
++                        .entry(php_item_key(&caller.item))
++                        .and_modify(|(_, ranges)| push_unique_range(ranges, range))
++                        .or_insert_with(|| (caller.item, vec![range]));
++                }
++            }
++        }
++
+         let mut calls: Vec<_> = grouped
+             .into_values()
+             .map(|(mut from, mut from_ranges)| {
+@@ -321,6 +375,39 @@ impl Backend {
+             }
+         }
+ 
++        if let Some(source_hash) = source_hash.as_ref() {
++            for site in &symbol_map.anonymous_class_constructions {
++                let Some(caller) = self.anonymous_class_creation_caller(
++                    &mut cache,
++                    uri,
++                    &content,
++                    &symbol_map,
++                    source_hash,
++                    site,
++                ) else {
++                    continue;
++                };
++                if caller.item.uri != callable.item.uri
++                    || caller.item.selection_range != callable.item.selection_range
++                    || caller.item.name != callable.item.name
++                {
++                    continue;
++                }
++                let Some(callee) = self.anonymous_class_constructor(&mut cache, uri, site) else {
++                    continue;
++                };
++                let range = byte_range_to_lsp_range(
++                    &content,
++                    site.keyword_start as usize,
++                    site.keyword_end as usize,
++                );
++                grouped
++                    .entry(php_item_key(&callee.item))
++                    .and_modify(|(_, ranges)| push_unique_range(ranges, range))
++                    .or_insert_with(|| (callee.item, vec![range]));
++            }
++        }
++
+         let mut calls: Vec<_> = grouped
+             .into_values()
+             .map(|(mut to, mut from_ranges)| {
+@@ -368,10 +455,28 @@ impl Backend {
+         {
+             return None;
+         }
++        self.concrete_constructor_callable(
++            cache,
++            uri,
++            &class,
++            matches!(
++                span.kind,
++                SymbolKind::SelfStaticParent(crate::symbol_map::SelfStaticParentKind::Static)
++            ),
++        )
++    }
++
++    fn concrete_constructor_callable(
++        &self,
++        cache: &mut FileCache,
++        uri: &str,
++        class: &Arc<ClassInfo>,
++        late_static: bool,
++    ) -> Option<PhpCallable> {
+         let loader = |name: &str| self.find_or_load_class(name);
+         let crate::inheritance::ancestry::MethodOrigin::Known { owner, method } =
+             crate::inheritance::ancestry::resolve_concrete_method_origin(
+-                &class,
++                class,
+                 "__construct",
+                 &loader,
+             )
+@@ -381,16 +486,17 @@ impl Backend {
+         if method.name_offset == 0 {
+             return None;
+         }
+-        if matches!(
+-            span.kind,
+-            SymbolKind::SelfStaticParent(crate::symbol_map::SelfStaticParentKind::Static)
+-        ) && !class.is_final
+-            && !method.is_final
+-        {
++        if late_static && !class.is_final && !method.is_final {
+             // A runtime subclass can override the lexical constructor.
+             return None;
+         }
+-        let (owner_uri, _) = self.find_class_file_content(&owner.fqn(), "", "")?;
++        let owner_uri = if owner.fqn() == class.fqn()
++            && class.name.starts_with(crate::types::ANONYMOUS_CLASS_PREFIX)
++        {
++            uri.to_owned()
++        } else {
++            self.find_class_file_uri_for_fqn(&owner.fqn())?
++        };
+         let (content, symbol_map, source_hash) = self.cached_file(cache, &owner_uri)?;
+         self.php_callable_at(
+             &owner_uri,
+@@ -439,6 +545,18 @@ impl Backend {
+         {
+             return None;
+         }
++        if data.get("anonymous_class").is_some()
++            || callable
++                .item
++                .data
++                .as_ref()?
++                .get("anonymous_class")
++                .is_some()
++        {
++            let mut current = callable.item.clone();
++            self.translate_item_to_blade(&mut current);
++            return (current == *item).then_some(callable);
++        }
+         Some(callable)
+     }
+ 
+@@ -464,7 +582,8 @@ impl Backend {
+         source_hash: Option<&[u8; 32]>,
+     ) -> Option<PhpCallable> {
+         if (!symbol_map.call_execution_regions.is_empty()
+-            || !symbol_map.keyword_constructor_spans.is_empty())
++            || !symbol_map.keyword_constructor_spans.is_empty()
++            || !symbol_map.anonymous_class_constructions.is_empty())
+             && source_hash.is_none()
+         {
+             return None;
+@@ -514,7 +633,14 @@ impl Backend {
+             }
+         }
+         for class in &classes {
+-            consider(method_callable_at(uri, content, symbol_map, class, offset));
++            consider(method_callable_at(
++                uri,
++                content,
++                symbol_map,
++                class,
++                offset,
++                source_hash,
++            ));
+         }
+ 
+         let function_names = self
+@@ -693,6 +819,54 @@ impl Backend {
+         (caller.scope_start == Some(scope)).then_some(caller)
+     }
+ 
++    fn anonymous_class_constructor(
++        &self,
++        cache: &mut FileCache,
++        uri: &str,
++        site: &AnonymousClassConstruction,
++    ) -> Option<PhpCallable> {
++        let class = self
++            .symbols
++            .uri_classes_index
++            .read()
++            .get(uri)?
++            .iter()
++            .find(|class| {
++                class.name.starts_with(crate::types::ANONYMOUS_CLASS_PREFIX)
++                    && class.start_offset == site.body_start
++                    && class.end_offset == site.body_end
++            })
++            .cloned()?;
++        self.concrete_constructor_callable(cache, uri, &class, false)
++    }
++
++    fn anonymous_class_creation_caller(
++        &self,
++        cache: &mut FileCache,
++        uri: &str,
++        content: &str,
++        map: &SymbolMap,
++        hash: &[u8; 32],
++        site: &AnonymousClassConstruction,
++    ) -> Option<PhpCallable> {
++        if map
++            .non_invoked_callable_spans
++            .binary_search(&(site.keyword_start, site.keyword_end))
++            .is_ok()
++        {
++            return None;
++        }
++        match map.call_execution_owner(site.keyword_start) {
++            Some(CallExecutionOwner::Deferred) => None,
++            Some(CallExecutionOwner::Callable(declaration)) => {
++                self.php_callable_at(uri, content, map, declaration, Some(hash))
++            }
++            None => {
++                self.caller_for_scope(cache, uri, content, map, hash, site.invoking_scope_start)
++            }
++        }
++    }
++
+     fn incoming_literal_anonymous(
+         &self,
+         cache: &mut FileCache,
+@@ -753,7 +927,8 @@ impl Backend {
+         if let Some(symbol_map) = self.symbol_map_for(uri) {
+             let source_hash = hierarchy_source_hash(&symbol_map, &content);
+             if (!symbol_map.call_execution_regions.is_empty()
+-                || !symbol_map.keyword_constructor_spans.is_empty())
++                || !symbol_map.keyword_constructor_spans.is_empty()
++                || !symbol_map.anonymous_class_constructions.is_empty())
+                 && source_hash.is_none()
+             {
+                 return None;
+@@ -861,6 +1036,7 @@ fn method_callable_at(
+     symbol_map: &SymbolMap,
+     class: &ClassInfo,
+     offset: u32,
++    source_hash: Option<&[u8; 32]>,
+ ) -> Option<PhpCallable> {
+     for method in class.methods.iter() {
+         // A member merged in from a parent or a trait carries the declaring
+@@ -883,7 +1059,7 @@ fn method_callable_at(
+         let contains = (method.name_offset..=name_end).contains(&offset)
+             || body.is_some_and(|(start, end)| start <= offset && offset <= end);
+         if contains {
+-            return build_method_callable(uri, content, class, method, body);
++            return build_method_callable(uri, content, class, method, body, source_hash);
+         }
+     }
+     None
+@@ -1060,20 +1236,32 @@ fn build_method_callable(
+     class: &ClassInfo,
+     method: &MethodInfo,
+     body: Option<(u32, u32)>,
++    source_hash: Option<&[u8; 32]>,
+ ) -> Option<PhpCallable> {
+     let class_fqn = class.fqn().to_string();
++    let mut data = serde_json::json!({
++        "kind": "php", "owner": class_fqn, "method": method.name.as_str(),
++        "offset": method.name_offset,
++    });
++    if class.name.starts_with(crate::types::ANONYMOUS_CLASS_PREFIX) {
++        data["anonymous_class"] = serde_json::json!({
++            "uri": uri, "body_start": class.start_offset, "body_end": class.end_offset,
++            "source_sha256": source_hash?,
++        });
++    }
+     build_callable(
+         uri,
+         content,
+         (&method.name, method.name_offset),
+         LspSymbolKind::METHOD,
+-        Some(class_fqn.clone()),
+-        serde_json::json!({
+-            "kind": "php",
+-            "owner": class_fqn,
+-            "method": method.name.as_str(),
+-            "offset": method.name_offset,
+-        }),
++        Some(
++            if class.name.starts_with(crate::types::ANONYMOUS_CLASS_PREFIX) {
++                "Anonymous class".to_owned()
++            } else {
++                class_fqn.clone()
++            },
++        ),
++        data,
+         body,
+     )
+ }
+diff --git a/src/definition/implementation.rs b/src/definition/implementation.rs
+index 3004c0d..abae895 100644
+--- a/src/definition/implementation.rs
++++ b/src/definition/implementation.rs
+@@ -507,6 +507,18 @@ impl Backend {
+         Some(all_locations)
+     }
+ 
++    pub(crate) fn implementation_target_is_vendor(&self, fqn: &str, prefixes: &[String]) -> bool {
++        self.symbols
++            .fqn_uri_index
++            .read()
++            .get(fqn)
++            .is_some_and(|uri| {
++                prefixes
++                    .iter()
++                    .any(|prefix| uri.starts_with(prefix.as_str()))
++            })
++    }
++
+     /// Find all classes that implement or extend the target.
+     ///
+     /// Scans:
+@@ -534,7 +546,7 @@ impl Backend {
+     ///
+     /// When `project_only` is `true`, vendor classes are skipped before
+     /// they are loaded: the index scans (Phases 1-3) drop any candidate
+-    /// whose source lives under a `/vendor/` directory, and the embedded
++    /// whose source lives under a configured dependency directory, and the embedded
+     /// stub scan (Phase 4) is skipped entirely.  Only the project's own
+     /// classes (already parsed, so their lookups hit the cache) are
+     /// examined.  This keeps callers that need only project implementors
+@@ -543,7 +555,7 @@ impl Backend {
+     ///
+     /// Independently of `project_only`, once the workspace index is ready
+     /// the function returns only the Phase 1 reverse-index results, and
+-    /// those are restricted to project classes (excluding `/vendor/` and
++    /// those are restricted to project classes (excluding configured dependencies and
+     /// embedded stubs).  The reverse index is populated by every parse, so
+     /// a vendor or stub class that happened to be loaded earlier in the
+     /// session would otherwise appear non-deterministically.  The full
+@@ -551,7 +563,7 @@ impl Backend {
+     /// both deterministic and consistent with the indexed set.
+     ///
+     /// That restriction is lifted when the *target itself* lives under
+-    /// `/vendor/`: an interface shipped by a Composer package is normally
++    /// a configured dependency directory: an interface shipped by a Composer package is normally
+     /// implemented inside that same package, so keeping only project
+     /// classes would answer a request about `HttpKernelInterface` with the
+     /// implementations Symfony ships filtered out — usually an empty
+@@ -580,19 +592,25 @@ impl Backend {
+         }
+         let workspace_index_ready = self.workspace_indexed.load(Ordering::Acquire);
+ 
++        // Use the same configured URI membership as workspace indexing,
++        // references and rename. Prefixes include raw/canonical aliases and a
++        // trailing separator, so `deps-other` and project folders named
++        // `vendor` are not misclassified. Snapshot once; no per-candidate I/O.
++        let vendor_prefixes = self.workspace_vendor_uri_prefixes();
++        let is_vendor_uri = |uri: &str| {
++            vendor_prefixes
++                .iter()
++                .any(|prefix| uri.starts_with(prefix.as_str()))
++        };
++
+         // A target that ships in a Composer package is answered from the
+         // class index rather than from the project-only workspace index,
+         // so that the package's own implementations are reachable.
+-        let scan_vendor_target = !project_only
+-            && self
+-                .symbols
+-                .fqn_uri_index
+-                .read()
+-                .get(target_fqn)
+-                .is_some_and(|uri| uri.contains("/vendor/"));
++        let scan_vendor_target =
++            !project_only && self.implementation_target_is_vendor(target_fqn, &vendor_prefixes);
+ 
+         // Whether an FQN's indexed source is project code (outside
+-        // `/vendor/` and not an embedded stub).  A class with no indexed
++        // configured vendor directories and not an embedded stub).  A class with no indexed
+         // URI is treated as project-local (mirrors the downstream filter in
+         // `project_auth_implementors`).
+         //
+@@ -613,7 +631,7 @@ impl Backend {
+             }
+             match self.symbols.fqn_uri_index.read().get(fqn) {
+                 Some(uri) => {
+-                    !uri.contains("/vendor/")
++                    !is_vendor_uri(uri)
+                         && !uri.starts_with("phpantom-stub://")
+                         && !uri.starts_with("phpantom-stub-fn://")
+                 }
+@@ -697,7 +715,7 @@ impl Backend {
+             if let Some(p) = progress {
+                 p.add_done(1);
+             }
+-            if project_only && uri.contains("/vendor/") {
++            if project_only && is_vendor_uri(uri) {
+                 continue;
+             }
+             self.check_candidate_fqn(
+@@ -722,7 +740,7 @@ impl Backend {
+             .fqn_uri_index
+             .read()
+             .values()
+-            .filter(|uri| !(project_only && uri.contains("/vendor/")))
++            .filter(|uri| !(project_only && is_vendor_uri(uri)))
+             .filter_map(|uri| Url::parse(uri).ok().and_then(|u| u.to_file_path().ok()))
+             .collect();
+ 
+@@ -1004,6 +1022,18 @@ impl Backend {
+             return true;
+         }
+ 
++        // Type hierarchy deliberately exposes trait composition as a graph:
++        // the reverse index already returns direct trait users. Match that
++        // contract for cold candidates too, without changing nominal
++        // go-to-implementation traversal or flattening nested trait uses.
++        if direct_only
++            && cls.used_traits.iter().any(|used_trait| {
++                *used_trait == target_fqn || (!has_fqn && short_name(used_trait) == target_short)
++            })
++        {
++            return true;
++        }
++
+         // In direct_only mode we only care about the immediate
+         // extends/implements/use clauses checked above.
+         if direct_only {
+diff --git a/src/definition/member/file_lookup.rs b/src/definition/member/file_lookup.rs
+index 2b990be..02a637a 100644
+--- a/src/definition/member/file_lookup.rs
++++ b/src/definition/member/file_lookup.rs
+@@ -86,6 +86,26 @@ impl Backend {
+             .map(|uri| self.class_navigation_uri(class_name, uri))
+     }
+ 
++    /// Locate an already resolved canonical class FQN, including the global
++    /// namespace. Unlike a short-name lookup, `Twin` must not match `N\Twin`.
++    /// Preserve the existing immutable built-in source/viewer remapping.
++    pub(crate) fn find_class_file_uri_for_fqn(&self, fqn: &str) -> Option<String> {
++        let indexed = self.symbols.fqn_uri_index.read().get(fqn).cloned();
++        let uri = indexed.or_else(|| {
++            self.symbols
++                .uri_classes_index
++                .read()
++                .iter()
++                .find_map(|(uri, classes)| {
++                    classes
++                        .iter()
++                        .any(|class| class.fqn().eq_ignore_ascii_case(fqn))
++                        .then(|| uri.clone())
++                })
++        })?;
++        Some(self.class_navigation_uri(fqn, uri))
++    }
++
+     fn find_raw_class_file_uri(&self, class_name: &str, current_uri: &str) -> Option<String> {
+         let last_segment = short_name(class_name);
+         let expected_ns: Option<&str> = if class_name.contains('\\') {
+diff --git a/src/indexing/preload.rs b/src/indexing/preload.rs
+index 0eee499..b20ad3f 100644
+--- a/src/indexing/preload.rs
++++ b/src/indexing/preload.rs
+@@ -251,7 +251,7 @@ impl Backend {
+         // Build the vendor URI prefixes so we can skip vendor files in
+         // Phase 1 (fqn_uri_index may contain vendor URIs from prior
+         // resolution, but we only need symbol maps for user files).
+-        let vendor_prefixes = self.workspace.vendor_uri_prefixes.lock().clone();
++        let vendor_prefixes = self.workspace_vendor_uri_prefixes();
+ 
+         // ── Phase 1: fqn_uri_index files (user only) ─────────────────────
+         let index_uris: Vec<String> = self
+diff --git a/src/indexing/scan.rs b/src/indexing/scan.rs
+index 5876552..f213839 100644
+--- a/src/indexing/scan.rs
++++ b/src/indexing/scan.rs
+@@ -35,6 +35,23 @@ fn vendor_uri_prefixes_for_path(vendor_path: &std::path::Path) -> Vec<String> {
+ }
+ 
+ impl Backend {
++    /// Cache dependency boundaries for a request that precedes normal startup.
++    /// Initialized backends use their published prefixes without reading disk.
++    pub(crate) fn workspace_vendor_uri_prefixes(&self) -> Vec<String> {
++        let prefixes = self.workspace.vendor_uri_prefixes.lock().clone();
++        if !prefixes.is_empty() {
++            return prefixes;
++        }
++        let root = self.workspace.workspace_root.read().clone();
++        if let Some(root) = root {
++            let vendor = crate::composer::read_composer_package(&root)
++                .map(|package| crate::composer::get_vendor_dir(&package))
++                .unwrap_or_else(|| "vendor".to_owned());
++            self.add_vendor_dir(&root.join(vendor));
++        }
++        self.workspace.vendor_uri_prefixes.lock().clone()
++    }
++
+     /// Register a vendor directory path and its URI prefix for
+     /// vendor-file detection.
+     pub(crate) fn add_vendor_dir(&self, vendor_path: &std::path::Path) {
+diff --git a/src/parser/ast_update.rs b/src/parser/ast_update.rs
+index c8fe4bf..9d155c3 100644
+--- a/src/parser/ast_update.rs
++++ b/src/parser/ast_update.rs
+@@ -575,7 +575,11 @@ impl Backend {
+         blade: Option<BladeLowering>,
+         embedded_source: Option<&'static str>,
+     ) -> bool {
+-        let mut update = self.build_ast_index_update(uri, content, embedded_source);
++        let wrapper_scope = blade
++            .as_ref()
++            .and_then(|lowering| lowering.source_map.hierarchy_projection)
++            .map(|projection| projection.wrapper_scope_start);
++        let mut update = self.build_ast_index_update(uri, content, embedded_source, wrapper_scope);
+         update.blade = blade;
+         self.apply_ast_index_updates_batch(vec![update])
+     }
+@@ -606,6 +610,40 @@ impl Backend {
+         }
+     }
+ 
++    /// Recover template file-scope named declarations from the exact body
++    /// emitted by this parse's Blade lowering. A same-named user function or
++    /// method, including one nested inside the wrapper, has no such authority.
++    fn extract_classes_from_blade_wrapper<'a>(
++        statement: &'a Statement<'a>,
++        wrapper_scope: u32,
++        classes: &mut Vec<ClassInfo>,
++        doc_ctx: Option<&DocblockCtx<'a>>,
++    ) {
++        use mago_syntax::cst::class_like::member::ClassLikeMember;
++        use mago_syntax::cst::class_like::method::MethodBody;
++        let body = match statement {
++            Statement::Function(function)
++                if function.body.left_brace.start.offset == wrapper_scope =>
++            {
++                Some(&function.body)
++            }
++            Statement::Class(class) => class.members.iter().find_map(|member| match member {
++                ClassLikeMember::Method(method) => match &method.body {
++                    MethodBody::Concrete(body) if body.left_brace.start.offset == wrapper_scope => {
++                        Some(body)
++                    }
++                    _ => None,
++                },
++                _ => None,
++            }),
++            _ => None,
++        };
++        let Some(body) = body else {
++            return;
++        };
++        Self::extract_classes_from_statements(body.statements.iter(), classes, doc_ctx);
++    }
++
+     /// Preprocess a Blade template into the virtual PHP everything else
+     /// reads it as, and the source map the position translation rides on.
+     ///
+@@ -699,7 +737,11 @@ impl Backend {
+             .map_or(content, |lowering| lowering.virtual_php.as_str());
+ 
+         match crate::util::catch_panic_unwind_safe("parse", uri, None, || {
+-            self.build_ast_index_update(uri, content, None)
++            let wrapper_scope = blade
++                .as_ref()
++                .and_then(|lowering| lowering.source_map.hierarchy_projection)
++                .map(|projection| projection.wrapper_scope_start);
++            self.build_ast_index_update(uri, content, None, wrapper_scope)
+         }) {
+             Some(mut update) => {
+                 update.blade = blade;
+@@ -840,6 +882,7 @@ impl Backend {
+         uri: &str,
+         content: &str,
+         embedded_source: Option<&'static str>,
++        blade_wrapper_scope: Option<u32>,
+     ) -> AstIndexUpdate {
+         with_reusable_arena(|arena| {
+             let file_id = mago_database::file::FileId::new(b"input.php");
+@@ -1038,6 +1081,31 @@ impl Backend {
+                 }
+             }
+ 
++            // The producer's exact wrapper body represents template file
++            // scope. Ordinary PHP function bodies are deliberately not walked
++            // for named declarations. Never infer this authority from a name
++            // such as __blade_template, or a previously published source map.
++            if let Some(wrapper_scope) = blade_wrapper_scope {
++                let mut known = classes_with_ns
++                    .iter()
++                    .map(|(class, _, _)| (class.name, class.start_offset, class.end_offset))
++                    .collect::<HashSet<_>>();
++                for statement in program.statements.iter() {
++                    let mut template_classes = Vec::new();
++                    Self::extract_classes_from_blade_wrapper(
++                        statement,
++                        wrapper_scope,
++                        &mut template_classes,
++                        Some(&doc_ctx),
++                    );
++                    for class in template_classes {
++                        if known.insert((class.name, class.start_offset, class.end_offset)) {
++                            classes_with_ns.push((class, None, None));
++                        }
++                    }
++                }
++            }
++
+             // The file-wide table holds every block's imports.  A file with
+             // one block keeps them only there (see `NamespaceSpan::use_map`).
+             let multi_block = namespace_spans.len() > 1;
+@@ -3715,3 +3783,55 @@ class User extends Model {
+         assert_eq!(std::fs::read_to_string(path).unwrap(), original);
+     }
+ }
++
++#[cfg(test)]
++mod blade_wrapper_class_declaration_tests {
++    use super::*;
++
++    #[test]
++    fn genuine_bound_method_wrapper_collects_named_declarations_without_duplicate_anonymous() {
++        let backend = Backend::new_test_with_stubs(HashMap::new());
++        let source = "@php\nclass BoundBase {}\nclass BoundChild extends BoundBase {}\n$instance = new class extends BoundBase {};\nfunction __blade_template() { class HiddenNested {} }\n@endphp\n";
++        let (php, source_map) = crate::blade::preprocessor::preprocess_with_vars(
++            source,
++            &[],
++            crate::blade::TemplateKind::Component,
++            Some("App\\View\\Components\\Card"),
++            None,
++            &Default::default(),
++        );
++        // Real lowering producer identity, not a synthetic registry insertion
++        // or name-only surrogate for a template's wrapper.
++        assert!(source_map.hierarchy_projection.is_some());
++        let lowering = BladeLowering {
++            virtual_php: Arc::new(php.clone()),
++            source_map,
++            scope: BladeScope::default(),
++        };
++        let uri = "file:///views/components/bound-declarations.blade.php";
++        backend.update_ast_inner(uri, &php, Some(lowering), None);
++        let classes = backend.get_classes_for_uri(uri).unwrap();
++        assert_eq!(
++            classes
++                .iter()
++                .filter(|class| class.name == "BoundBase")
++                .count(),
++            1
++        );
++        assert_eq!(
++            classes
++                .iter()
++                .filter(|class| class.name == "BoundChild")
++                .count(),
++            1
++        );
++        assert_eq!(
++            classes
++                .iter()
++                .filter(|class| class.name.starts_with("__anonymous@"))
++                .count(),
++            1
++        );
++        assert!(!classes.iter().any(|class| class.name == "HiddenNested"));
++    }
++}
+diff --git a/src/project_router.rs b/src/project_router.rs
+index 90ea0b0..30a32a0 100644
+--- a/src/project_router.rs
++++ b/src/project_router.rs
+@@ -1199,6 +1199,22 @@ impl ProjectRouter {
+         self.ready(&context).await;
+         Ok(context)
+     }
++    pub(crate) fn normalize_hierarchy_uri(
++        &self,
++        project: &ProjectContext,
++        uri: &mut Url,
++    ) -> Result<()> {
++        if let Some(owner) = self.contextual_builtin(uri)? {
++            if owner.id != project.id {
++                return Err(Error::invalid_params(
++                    "Builtin hierarchy project context does not match its item",
++                ));
++            }
++            uri.set_query(None);
++        }
++        Ok(())
++    }
++
+     pub(crate) fn qualify_locations<T: Serialize + DeserializeOwned>(
+         &self,
+         project: &ProjectContext,
+diff --git a/src/project_server.rs b/src/project_server.rs
+index 9c09968..593f03c 100644
+--- a/src/project_server.rs
++++ b/src/project_server.rs
+@@ -303,12 +303,16 @@ impl LanguageServer for ProjectRouter {
+ 
+     async fn prepare_call_hierarchy(
+         &self,
+-        params: CallHierarchyPrepareParams,
++        mut params: CallHierarchyPrepareParams,
+     ) -> Result<Option<Vec<CallHierarchyItem>>> {
+         let _request = self.request_guard().await;
+         let project = self
+             .project_for(&params.text_document_position_params.text_document.uri)
+             .await?;
++        self.normalize_hierarchy_uri(
++            &project,
++            &mut params.text_document_position_params.text_document.uri,
++        )?;
+         let mut result = project.backend.prepare_call_hierarchy(params).await?;
+         if let Some(items) = &mut result {
+             for item in items {
+@@ -325,6 +329,7 @@ impl LanguageServer for ProjectRouter {
+     ) -> Result<Option<Vec<CallHierarchyIncomingCall>>> {
+         let _request = self.request_guard().await;
+         let project = self.project_from_data(&mut params.item.data).await?;
++        self.normalize_hierarchy_uri(&project, &mut params.item.uri)?;
+         let mut result = project.backend.incoming_calls(params).await?;
+         if let Some(calls) = &mut result {
+             for call in calls {
+@@ -341,6 +346,7 @@ impl LanguageServer for ProjectRouter {
+     ) -> Result<Option<Vec<CallHierarchyOutgoingCall>>> {
+         let _request = self.request_guard().await;
+         let project = self.project_from_data(&mut params.item.data).await?;
++        self.normalize_hierarchy_uri(&project, &mut params.item.uri)?;
+         let mut result = project.backend.outgoing_calls(params).await?;
+         if let Some(calls) = &mut result {
+             for call in calls {
+@@ -353,12 +359,16 @@ impl LanguageServer for ProjectRouter {
+ 
+     async fn prepare_type_hierarchy(
+         &self,
+-        params: TypeHierarchyPrepareParams,
++        mut params: TypeHierarchyPrepareParams,
+     ) -> Result<Option<Vec<TypeHierarchyItem>>> {
+         let _request = self.request_guard().await;
+         let project = self
+             .project_for(&params.text_document_position_params.text_document.uri)
+             .await?;
++        self.normalize_hierarchy_uri(
++            &project,
++            &mut params.text_document_position_params.text_document.uri,
++        )?;
+         let mut result = project.backend.prepare_type_hierarchy(params).await?;
+         if let Some(items) = &mut result {
+             for item in items {
+@@ -375,6 +385,7 @@ impl LanguageServer for ProjectRouter {
+     ) -> Result<Option<Vec<TypeHierarchyItem>>> {
+         let _request = self.request_guard().await;
+         let project = self.project_from_data(&mut params.item.data).await?;
++        self.normalize_hierarchy_uri(&project, &mut params.item.uri)?;
+         let mut result = project.backend.supertypes(params).await?;
+         if let Some(items) = &mut result {
+             for item in items {
+@@ -391,6 +402,7 @@ impl LanguageServer for ProjectRouter {
+     ) -> Result<Option<Vec<TypeHierarchyItem>>> {
+         let _request = self.request_guard().await;
+         let project = self.project_from_data(&mut params.item.data).await?;
++        self.normalize_hierarchy_uri(&project, &mut params.item.uri)?;
+         let mut result = project.backend.subtypes(params).await?;
+         if let Some(items) = &mut result {
+             for item in items {
+diff --git a/src/references/mod.rs b/src/references/mod.rs
+index a368a3a..4e735d1 100644
+--- a/src/references/mod.rs
++++ b/src/references/mod.rs
+@@ -114,7 +114,7 @@ impl Backend {
+         &self,
+         candidate_uris: Option<&HashSet<Arc<str>>>,
+     ) -> Vec<(String, Arc<SymbolMap>)> {
+-        let vendor_prefixes = self.workspace.vendor_uri_prefixes.lock().clone();
++        let vendor_prefixes = self.workspace_vendor_uri_prefixes();
+ 
+         let maps = self.symbol_maps.read();
+         maps.iter()
+diff --git a/src/server.rs b/src/server.rs
+index 9f13a28..0b72b16 100644
+--- a/src/server.rs
++++ b/src/server.rs
+@@ -956,21 +956,7 @@ impl LanguageServer for Backend {
+                     "prepare_type_hierarchy",
+                     uri,
+                     position,
+-                    |content, pos| {
+-                        backend
+-                            .prepare_type_hierarchy_impl(uri, content, pos)
+-                            .map(|items| {
+-                                items
+-                                    .into_iter()
+-                                    .map(|mut item| {
+-                                        item.range = backend.translate_blade_range(uri, item.range);
+-                                        item.selection_range = backend
+-                                            .translate_blade_range(uri, item.selection_range);
+-                                        item
+-                                    })
+-                                    .collect()
+-                            })
+-                    },
++                    |content, pos| backend.prepare_type_hierarchy_impl(uri, content, pos),
+                 )
+             },
+         )
+diff --git a/src/symbol_map/extraction/expressions/anonymous_class.rs b/src/symbol_map/extraction/expressions/anonymous_class.rs
+index e628bea..adbe697 100644
+--- a/src/symbol_map/extraction/expressions/anonymous_class.rs
++++ b/src/symbol_map/extraction/expressions/anonymous_class.rs
+@@ -10,6 +10,14 @@ pub(super) fn extract_anonymous_class_expr<'a>(
+     ctx: &mut ExtractionCtx<'a>,
+     scope_start: u32,
+ ) {
++    ctx.anonymous_class_constructions
++        .push(AnonymousClassConstruction {
++            keyword_start: anon.class.span.start.offset,
++            keyword_end: anon.class.span.end.offset,
++            body_start: anon.left_brace.start.offset,
++            body_end: anon.right_brace.end.offset,
++            invoking_scope_start: scope_start,
++        });
+     if let Some(ref args) = anon.argument_list {
+         extract_from_partial_arguments(&args.arguments, ctx, scope_start);
+     }
+diff --git a/src/symbol_map/extraction/mod.rs b/src/symbol_map/extraction/mod.rs
+index ab67263..fb5522d 100644
+--- a/src/symbol_map/extraction/mod.rs
++++ b/src/symbol_map/extraction/mod.rs
+@@ -12,10 +12,10 @@ use super::docblock::{
+     extract_docblock_symbols_covering, get_docblock_text_with_offset, is_navigable_type,
+ };
+ use super::{
+-    AnonymousCallable, AnonymousCallableKind, AnonymousInvocation, CallExecutionOwner,
+-    CallExecutionRegion, CallSite, ClassRefContext, DocblockMemberRef, SelfStaticParentKind,
+-    SubjectText, SymbolKind, SymbolMap, SymbolSpan, TemplateParamDef, UntypedClosureSite,
+-    VarDefKind, VarDefSite, ViewReceiverClass, ViewReceiverSite,
++    AnonymousCallable, AnonymousCallableKind, AnonymousClassConstruction, AnonymousInvocation,
++    CallExecutionOwner, CallExecutionRegion, CallSite, ClassRefContext, DocblockMemberRef,
++    SelfStaticParentKind, SubjectText, SymbolKind, SymbolMap, SymbolSpan, TemplateParamDef,
++    UntypedClosureSite, VarDefKind, VarDefSite, ViewReceiverClass, ViewReceiverSite,
+ };
+ use crate::atom::{bytes_to_str, literal_bytes_to_str};
+ use crate::names::OwnedResolvedNames;
+@@ -41,6 +41,7 @@ struct ExtractionCtx<'a> {
+     call_execution_regions: Vec<CallExecutionRegion>,
+     anonymous_callables: Vec<AnonymousCallable>,
+     anonymous_invocations: Vec<AnonymousInvocation>,
++    anonymous_class_constructions: Vec<AnonymousClassConstruction>,
+     non_invoked_callable_spans: Vec<(u32, u32)>,
+     keyword_constructor_spans: Vec<(u32, u32)>,
+     /// Scope start offsets of arrow functions (inheriting scopes).
+@@ -224,6 +225,7 @@ fn extract_symbol_map_inner(
+         call_execution_regions: Vec::new(),
+         anonymous_callables: Vec::new(),
+         anonymous_invocations: Vec::new(),
++        anonymous_class_constructions: Vec::new(),
+         non_invoked_callable_spans: Vec::new(),
+         keyword_constructor_spans: Vec::new(),
+         arrow_fn_scopes: Vec::new(),
+@@ -376,6 +378,7 @@ fn extract_symbol_map_inner(
+             .then(|| AnonymousCallable::source_hash(content)),
+         anonymous_callables: ctx.anonymous_callables,
+         anonymous_invocations: ctx.anonymous_invocations,
++        anonymous_class_constructions: ctx.anonymous_class_constructions,
+         non_invoked_callable_spans: ctx.non_invoked_callable_spans,
+         keyword_constructor_spans: ctx.keyword_constructor_spans,
+         arrow_fn_scopes: ctx.arrow_fn_scopes,
+diff --git a/src/symbol_map/mod.rs b/src/symbol_map/mod.rs
+index f6cf2a6..65ed01f 100644
+--- a/src/symbol_map/mod.rs
++++ b/src/symbol_map/mod.rs
+@@ -1043,6 +1043,19 @@ pub(crate) struct AnonymousInvocation {
+     pub invocation_end: u32,
+ }
+ 
++/// A direct `new class` site, independent of its nested methods' bodies.
++#[derive(Debug, Clone, Copy)]
++pub(crate) struct AnonymousClassConstruction {
++    /// Exact `class` keyword selection and construction call-site range.
++    pub keyword_start: u32,
++    pub keyword_end: u32,
++    /// Anonymous ClassInfo identity in this source URI, with exact body bounds.
++    pub body_start: u32,
++    pub body_end: u32,
++    /// Caller ownership before recursing into class methods.
++    pub invoking_scope_start: u32,
++}
++
+ /// Execution ownership of an initializer, independently of variable lexical scope.
+ #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+ pub(crate) enum CallExecutionOwner {
+@@ -1123,6 +1136,8 @@ pub(crate) struct SymbolMap {
+     pub anonymous_callables: Vec<AnonymousCallable>,
+     /// Direct literal invocations, retaining caller ownership separately from callee syntax.
+     pub anonymous_invocations: Vec<AnonymousInvocation>,
++    /// Direct anonymous-class creations from the same AST/source publication.
++    pub anonymous_class_constructions: Vec<AnonymousClassConstruction>,
+     /// Sorted reference-only callee tokens, including metadata, imports and callable values.
+     pub non_invoked_callable_spans: Vec<(u32, u32)>,
+     /// Sorted exact self/static/parent operands from actual new AST nodes.
+diff --git a/src/type_hierarchy.rs b/src/type_hierarchy.rs
+index 144fa02..e03152b 100644
+--- a/src/type_hierarchy.rs
++++ b/src/type_hierarchy.rs
+@@ -7,15 +7,29 @@
+ //! `find_implementors` scan) and the already-resolved inheritance
+ //! chain for supertypes.
+ 
++use std::collections::{HashMap, HashSet};
++use std::sync::Arc;
++
+ use tower_lsp::lsp_types::*;
+ 
+ use crate::Backend;
+ use crate::class_lookup::find_class_at_offset;
+-use crate::symbol_map::{SelfStaticParentKind, SymbolKind as MapSymbolKind};
++use crate::symbol_map::{
++    AnonymousCallable, SelfStaticParentKind, SymbolKind as MapSymbolKind, SymbolMap,
++};
+ use crate::text_position::{offset_to_position, position_to_offset};
+-use crate::types::{ClassInfo, ClassLikeKind};
++use crate::types::{ANONYMOUS_CLASS_PREFIX, ClassInfo, ClassLikeKind};
+ use crate::util::short_name;
+ 
++#[derive(Clone)]
++struct TypeHierarchyFile {
++    content: Arc<String>,
++    map: Arc<SymbolMap>,
++    hash: [u8; 32],
++}
++
++type TypeHierarchyFiles = HashMap<String, Option<TypeHierarchyFile>>;
++
+ impl Backend {
+     /// Prepare the type hierarchy for the symbol under the cursor.
+     ///
+@@ -28,7 +42,29 @@ impl Backend {
+         content: &str,
+         position: Position,
+     ) -> Option<Vec<TypeHierarchyItem>> {
++        let mut files = TypeHierarchyFiles::new();
++        let source = self.type_hierarchy_file(&mut files, uri)?;
++        if source.content.as_str() != content {
++            return None;
++        }
+         let offset = position_to_offset(content, position);
++        // Anonymous classes have no name declaration span. Select only their
++        // exact cached CST keyword, never a synthetic-name byte range.
++        if let Some(site) = source
++            .map
++            .anonymous_class_constructions
++            .iter()
++            .find(|site| site.keyword_start <= offset && offset < site.keyword_end)
++        {
++            let classes = self.symbols.uri_classes_index.read().get(uri).cloned()?;
++            let class = classes.iter().find(|class| {
++                class.name.starts_with(ANONYMOUS_CLASS_PREFIX)
++                    && class.start_offset == site.body_start
++                    && class.end_offset == site.body_end
++            })?;
++            let item = self.build_anonymous_type_item(&mut files, class, uri)?;
++            return Some(vec![item]);
++        }
+         let span = self.lookup_symbol_map(uri, offset)?;
+ 
+         let fqn = match &span.kind {
+@@ -53,6 +89,15 @@ impl Backend {
+                     .cloned()
+                     .unwrap_or_default();
+                 let current_class = find_class_at_offset(&classes, offset)?;
++                if *ssp_kind != SelfStaticParentKind::Parent
++                    && current_class.name.starts_with(ANONYMOUS_CLASS_PREFIX)
++                {
++                    return Some(vec![self.build_anonymous_type_item(
++                        &mut files,
++                        current_class,
++                        uri,
++                    )?]);
++                }
+ 
+                 if *ssp_kind == SelfStaticParentKind::Parent {
+                     let parent_name = current_class.parent_class.as_ref()?;
+@@ -71,7 +116,7 @@ impl Backend {
+ 
+         let class_info = self.find_or_load_class(&fqn)?;
+ 
+-        let item = self.build_hierarchy_item_for_class(&class_info, &fqn);
++        let item = self.build_hierarchy_item_for_class(&mut files, &class_info, &fqn)?;
+         Some(vec![item])
+     }
+ 
+@@ -81,8 +126,9 @@ impl Backend {
+         &self,
+         item: &TypeHierarchyItem,
+     ) -> Option<Vec<TypeHierarchyItem>> {
++        let mut files = TypeHierarchyFiles::new();
+         let fqn = extract_fqn_from_data(item)?;
+-        let class_info = self.find_or_load_class(&fqn)?;
++        let class_info = self.type_hierarchy_class(&mut files, item, &fqn)?;
+ 
+         let item_uri = item.uri.as_str();
+ 
+@@ -96,12 +142,10 @@ impl Backend {
+             supertype_names.push(iface);
+         }
+ 
+-        // For traits, also include used traits as supertypes since
+-        // traits can `use` other traits.
+-        if class_info.kind == ClassLikeKind::Trait {
+-            for tr in &class_info.used_traits {
+-                supertype_names.push(tr);
+-            }
++        // This hierarchy already exposes trait users as children. Preserve
++        // that composition graph reciprocally for classes, traits and enums.
++        for tr in &class_info.used_traits {
++            supertype_names.push(tr);
+         }
+ 
+         // Resolve each supertype to a ClassInfo and build a hierarchy item.
+@@ -113,6 +157,7 @@ impl Backend {
+         let use_map = ctx.use_map_at(class_info.start_offset);
+         let namespace = ctx.namespace_at(class_info.start_offset);
+ 
++        let mut seen_types = HashSet::new();
+         for name in supertype_names {
+             let (resolved_fqn, super_info) = if let Some(info) = self.find_or_load_class(name) {
+                 (name.to_string(), info)
+@@ -124,8 +169,14 @@ impl Backend {
+                 }
+             };
+ 
+-            let super_item = self.build_hierarchy_item_for_class(&super_info, &resolved_fqn);
+-            result.push(super_item);
++            if !seen_types.insert(super_info.fqn()) {
++                continue;
++            }
++            if let Some(super_item) =
++                self.build_hierarchy_item_for_class(&mut files, &super_info, &resolved_fqn)
++            {
++                result.push(super_item);
++            }
+         }
+ 
+         Some(result)
+@@ -134,7 +185,9 @@ impl Backend {
+     /// Return the subtypes (classes that extend/implement) of a type
+     /// hierarchy item.
+     pub(crate) fn subtypes_impl(&self, item: &TypeHierarchyItem) -> Option<Vec<TypeHierarchyItem>> {
++        let mut files = TypeHierarchyFiles::new();
+         let fqn = extract_fqn_from_data(item)?;
++        self.type_hierarchy_class(&mut files, item, &fqn)?;
+         let short = short_name(&fqn);
+ 
+         let item_uri = item.uri.as_str();
+@@ -150,53 +203,220 @@ impl Backend {
+         // other children live in files discovered on disk but not yet
+         // parsed.  `find_implementors` uses `gti_index` as its first phase
+         // and then scans for the rest, so it returns the complete set.
++        self.ensure_workspace_indexed_for_request();
+         let implementors = self.find_implementors(short, &fqn, &class_loader, true, true, false);
+ 
+         let mut result = Vec::new();
+         for imp in &implementors {
+-            let imp_fqn = crate::util::build_fqn(&imp.name, imp.file_namespace.as_deref());
+-            let imp_item = self.build_hierarchy_item_for_class(imp, &imp_fqn);
+-            result.push(imp_item);
++            // Anonymous declarations are URI-local and absent from the global
++            // declaration index; include them below using their exact owner.
++            if imp.name.starts_with(ANONYMOUS_CLASS_PREFIX) {
++                continue;
++            }
++            let imp_fqn = imp.fqn().to_string();
++            if let Some(imp_item) = self.build_hierarchy_item_for_class(&mut files, imp, &imp_fqn) {
++                result.push(imp_item);
++            }
+         }
+ 
++        // Snapshot only indexed anonymous declarations. The preceding shared
++        // discovery has already loaded project candidate files; do not perform
++        // an additional filesystem scan or lookup synthetic names globally.
++        let vendor_prefixes = self.workspace_vendor_uri_prefixes();
++        let include_vendor = self.implementation_target_is_vendor(&fqn, &vendor_prefixes);
++        let anonymous = self
++            .symbols
++            .uri_classes_index
++            .read()
++            .iter()
++            .filter(|(uri, _)| {
++                include_vendor
++                    || (!uri.starts_with("phpantom-stub://")
++                        && !uri.starts_with("phpantom-stub-fn://")
++                        && !vendor_prefixes
++                            .iter()
++                            .any(|prefix| uri.starts_with(prefix.as_str())))
++            })
++            .flat_map(|(uri, classes)| {
++                classes
++                    .iter()
++                    .filter(|class| class.name.starts_with(ANONYMOUS_CLASS_PREFIX))
++                    .map(|class| (uri.clone(), class.clone()))
++                    .collect::<Vec<_>>()
++            })
++            .collect::<Vec<_>>();
++        for (uri, class) in anonymous {
++            let ctx = self.file_context(&uri);
++            let direct = class
++                .parent_class
++                .iter()
++                .chain(class.interfaces.iter())
++                .chain(class.used_traits.iter())
++                .any(|name| {
++                    let resolved = if self.find_or_load_class(name).is_some() {
++                        name.to_string()
++                    } else {
++                        ctx.resolve_name_at(name, class.start_offset)
++                    };
++                    resolved.eq_ignore_ascii_case(&fqn)
++                });
++            if direct && let Some(item) = self.build_anonymous_type_item(&mut files, &class, &uri) {
++                result.push(item);
++            }
++        }
+         Some(result)
+     }
+ 
++    fn type_hierarchy_file(
++        &self,
++        files: &mut TypeHierarchyFiles,
++        uri: &str,
++    ) -> Option<TypeHierarchyFile> {
++        files
++            .entry(uri.to_owned())
++            .or_insert_with(|| {
++                let content = self.reference_file_content_arc(uri)?;
++                let map = match self.symbol_map_for(uri) {
++                    Some(map) => map,
++                    None if !self.is_blade_file(uri) => {
++                        self.update_ast(uri, &content);
++                        self.symbol_map_for(uri)?
++                    }
++                    None => return None,
++                };
++                if !map.matches_source_fingerprint(&content) {
++                    return None;
++                }
++                let hash = AnonymousCallable::source_hash(&content);
++                Some(TypeHierarchyFile { content, map, hash })
++            })
++            .clone()
++    }
++
++    fn type_hierarchy_class(
++        &self,
++        files: &mut TypeHierarchyFiles,
++        item: &TypeHierarchyItem,
++        fqn: &str,
++    ) -> Option<Arc<ClassInfo>> {
++        let class = if let Some(body) = item.data.as_ref()?.get("anonymousBodyStart") {
++            let body = u32::try_from(body.as_u64()?).ok()?;
++            self.symbols
++                .uri_classes_index
++                .read()
++                .get(item.uri.as_str())?
++                .iter()
++                .find(|class| {
++                    class.name.starts_with(ANONYMOUS_CLASS_PREFIX)
++                        && class.start_offset == body
++                        && class.fqn().as_str() == fqn
++                })
++                .cloned()?
++        } else {
++            self.find_or_load_class(fqn)?
++        };
++        let current = self.build_hierarchy_item_for_class(files, &class, fqn)?;
++        // Opaque data alone cannot authorize another URI, declaration or source.
++        (current == *item).then_some(class)
++    }
++
++    fn build_anonymous_type_item(
++        &self,
++        files: &mut TypeHierarchyFiles,
++        class: &ClassInfo,
++        uri: &str,
++    ) -> Option<TypeHierarchyItem> {
++        let source = self.type_hierarchy_file(files, uri)?;
++        let content = source.content.as_str();
++        let site = source
++            .map
++            .anonymous_class_constructions
++            .iter()
++            .find(|site| {
++                site.body_start == class.start_offset && site.body_end == class.end_offset
++            })?;
++        let keyword = content.get(site.keyword_start as usize..site.keyword_end as usize)?;
++        if keyword != "class" || content.as_bytes().get(site.body_start as usize) != Some(&b'{') {
++            return None;
++        }
++        let fqn = class.fqn().to_string();
++        let mut item = build_type_hierarchy_item(class, &fqn, uri, content)?;
++        item.name = "Anonymous class".to_string();
++        let line = offset_to_position(content, site.keyword_start as usize).line + 1;
++        item.detail = Some(
++            match class.file_namespace.as_deref().filter(|ns| !ns.is_empty()) {
++                Some(namespace) => format!("{namespace} · line {line}"),
++                None => format!("line {line}"),
++            },
++        );
++        item.selection_range = Range::new(
++            offset_to_position(content, site.keyword_start as usize),
++            offset_to_position(content, site.keyword_end as usize),
++        );
++        item.range = Range::new(
++            item.selection_range.start,
++            offset_to_position(content, site.body_end as usize),
++        );
++        item.data = Some(
++            serde_json::json!({"fqn": fqn, "anonymousBodyStart": site.body_start, "sourceHash": source.hash, "sourceLength": content.len()}),
++        );
++        Some(self.visible_type_hierarchy_item(item))
++    }
++
++    fn visible_type_hierarchy_item(&self, mut item: TypeHierarchyItem) -> TypeHierarchyItem {
++        let uri = item.uri.as_str();
++        item.range = self.translate_blade_range(uri, item.range);
++        item.selection_range = self.translate_blade_range(uri, item.selection_range);
++        item
++    }
++
+     /// Build a `TypeHierarchyItem` for a class, looking up its file
+     /// content from `open_files` / `uri_classes_index` / disk so that byte
+     /// offsets can be converted to LSP positions correctly.
+     fn build_hierarchy_item_for_class(
+         &self,
++        files: &mut TypeHierarchyFiles,
+         class_info: &ClassInfo,
+         fqn: &str,
+-    ) -> TypeHierarchyItem {
+-        // Locate the file that contains this class.  We try
+-        // find_class_file_content first with a dummy current URI so
+-        // it searches all files in the uri_classes_index.  If that fails, fall
+-        // back to get_file_content for files that might be open or on
+-        // disk.
+-        let (class_uri, class_content) = self
+-            .find_class_file_content(fqn, "", "")
+-            .or_else(|| self.find_class_file_content(&class_info.name, "", ""))
+-            .unwrap_or_else(|| {
+-                // Last resort: try to find the URI from the fqn_uri_index
+-                // and read from disk / open_files.
+-                let uri = self
+-                    .symbols
+-                    .fqn_uri_index
++    ) -> Option<TypeHierarchyItem> {
++        if class_info.name.starts_with(ANONYMOUS_CLASS_PREFIX) {
++            // The parser's synthetic short name is only file-local. Locate its
++            // owner by actual Arc identity (or an explicitly URI-qualified cache
++            // identity), never by a workspace short-name/FQN search.
++            let owner =
++                self.symbols
++                    .uri_classes_index
+                     .read()
+-                    .get(fqn)
+-                    .cloned()
+-                    .unwrap_or_default();
+-                let content = if !uri.is_empty() {
+-                    self.get_file_content(&uri).unwrap_or_default()
+-                } else {
+-                    String::new()
+-                };
+-                (uri, content)
+-            });
+-
+-        build_type_hierarchy_item(class_info, fqn, &class_uri, &class_content)
++                    .iter()
++                    .find_map(|(uri, classes)| {
++                        classes
++                            .iter()
++                            .any(|candidate| {
++                                std::ptr::eq(candidate.as_ref(), class_info)
++                                    || (candidate.start_offset == class_info.start_offset
++                                        && candidate.end_offset == class_info.end_offset
++                                        && candidate.fqn() == class_info.fqn()
++                                        && candidate.fqn().as_str().ends_with(&format!("@{uri}")))
++                            })
++                            .then(|| uri.clone())
++                    })?;
++            return self.build_anonymous_type_item(files, class_info, &owner);
++        }
++        let uri = self.find_class_file_uri_for_fqn(&class_info.fqn())?;
++        Url::parse(&uri).ok()?;
++        let source = self.type_hierarchy_file(files, &uri)?;
++        let content = source.content.as_str();
++        let name_start = find_name_start(content.as_bytes(), class_info.keyword_offset as usize);
++        if content.get(name_start..name_start.checked_add(class_info.name.len())?)?
++            != class_info.name.as_str()
++        {
++            return None;
++        }
++        let mut item = build_type_hierarchy_item(class_info, fqn, &uri, content)?;
++        item.data = Some(
++            serde_json::json!({"fqn": fqn, "sourceHash": source.hash, "sourceLength": content.len()}),
++        );
++        Some(self.visible_type_hierarchy_item(item))
+     }
+ }
+ 
+@@ -210,8 +430,8 @@ fn build_type_hierarchy_item(
+     fqn: &str,
+     uri: &str,
+     content: &str,
+-) -> TypeHierarchyItem {
+-    let parsed_uri = Url::parse(uri).unwrap_or_else(|_| Url::parse("file:///unknown").unwrap());
++) -> Option<TypeHierarchyItem> {
++    let parsed_uri = Url::parse(uri).ok()?;
+ 
+     let kind = class_like_kind_to_symbol_kind(class_info.kind);
+ 
+@@ -274,7 +494,7 @@ fn build_type_hierarchy_item(
+ 
+     let detail = namespace_detail(fqn);
+ 
+-    TypeHierarchyItem {
++    Some(TypeHierarchyItem {
+         name: class_info.name.to_string(),
+         kind,
+         tags,
+@@ -283,7 +503,7 @@ fn build_type_hierarchy_item(
+         range,
+         selection_range,
+         data: Some(serde_json::json!({"fqn": fqn})),
+-    }
++    })
+ }
+ 
+ /// Starting from `keyword_offset` (which points to the keyword like
+@@ -300,8 +520,15 @@ fn find_name_start(content: &[u8], keyword_offset: usize) -> usize {
+ 
+     // Skip all whitespace (including newlines) between keyword and name,
+     // so the legal `class\nFoo {` layout locates the name correctly.
+-    while pos < len && content[pos].is_ascii_whitespace() {
+-        pos += 1;
++    loop {
++        while pos < len && content[pos].is_ascii_whitespace() {
++            pos += 1;
++        }
++        if let Some(end) = crate::text_scan::skip_php_comment(content, pos) {
++            pos = end;
++        } else {
++            break;
++        }
+     }
+ 
+     pos
+diff --git a/tests/integration/call_hierarchy.rs b/tests/integration/call_hierarchy.rs
+index 1c9d006..44b8a47 100644
+--- a/tests/integration/call_hierarchy.rs
++++ b/tests/integration/call_hierarchy.rs
+@@ -2990,3 +2990,515 @@ async fn hierarchy_trait_keyword_construction_stays_unknown_without_consumer_ide
+     assert_eq!(back[0].from.selection_range, explicit.selection_range);
+     assert_eq!(back[0].from_ranges, vec![range]);
+ }
++
++#[tokio::test]
++async fn hierarchy_anonymous_class_creation_has_own_constructor_and_body_owners() {
++    let backend = create_test_backend();
++    let uri = Url::parse("file:///anonymous-constructor-owners.php").unwrap();
++    let source = concat!(
++        "<?php\r\n",
++        "function constructionArgument(): mixed { return null; }\r\n",
++        "function constructionBody(): void {}\r\n",
++        "function nestedConstructionBody(): void {}\r\n",
++        "function createAnonymous(): void { /* café 🐘 */ $value = new class(constructionArgument()) { public function __construct($value) { constructionBody(); } }; }\r\n",
++        "function nestedCreation(): void { $later = function () { /* café 🐘 */ $value = new class { public function __construct() { nestedConstructionBody(); } }; }; }\r\n",
++    );
++    open_php(&backend, &uri, source).await;
++    let factory = anonymous_hierarchy_prepare(&backend, &uri, source, "createAnonymous").await;
++    let ctor = anonymous_hierarchy_prepare(&backend, &uri, source, "__construct($value)").await;
++    let site = keyword_constructor_range(source, "new class(constructionArgument())", "class");
++    let edges = outgoing(&backend, &factory).await;
++    assert_eq!(
++        edges.len(),
++        2,
++        "creation invokes constructor and evaluates argument, not constructor body calls"
++    );
++    let edge = edges
++        .iter()
++        .find(|call| call.to.selection_range == ctor.selection_range)
++        .expect("constructor edge");
++    assert_eq!(edge.to.uri, uri);
++    assert_eq!(edge.from_ranges, vec![site]);
++    let arguments: Vec<_> = edges
++        .iter()
++        .filter(|call| call.to.name == "constructionArgument")
++        .collect();
++    assert_eq!(arguments.len(), 1);
++    assert_eq!(
++        arguments[0].from_ranges,
++        vec![keyword_constructor_range(
++            source,
++            "class(constructionArgument())",
++            "constructionArgument"
++        )]
++    );
++    let back = incoming(&backend, &ctor).await;
++    assert_eq!(back.len(), 1);
++    assert_eq!(back[0].from.selection_range, factory.selection_range);
++    assert_eq!(back[0].from_ranges, vec![site]);
++    let ctor_edges = outgoing(&backend, &ctor).await;
++    assert_eq!(ctor_edges.len(), 1);
++    assert_eq!(ctor_edges[0].to.name, "constructionBody");
++    assert_eq!(
++        ctor_edges[0].from_ranges,
++        vec![keyword_constructor_range(
++            source,
++            "constructionBody();",
++            "constructionBody"
++        )]
++    );
++    let outer = anonymous_hierarchy_prepare(&backend, &uri, source, "nestedCreation").await;
++    assert!(
++        outgoing(&backend, &outer).await.is_empty(),
++        "declaring a closure does not create its nested class"
++    );
++    let closure = anonymous_hierarchy_prepare(&backend, &uri, source, "function ()").await;
++    let nested_ctor = anonymous_hierarchy_prepare(&backend, &uri, source, "__construct()").await;
++    let nested_edges = outgoing(&backend, &closure).await;
++    assert_eq!(nested_edges.len(), 1);
++    assert_eq!(
++        nested_edges[0].to.selection_range,
++        nested_ctor.selection_range
++    );
++    let nested_range = keyword_constructor_range(source, "new class {", "class");
++    assert_eq!(nested_edges[0].from_ranges, vec![nested_range]);
++    let nested_back = incoming(&backend, &nested_ctor).await;
++    assert_eq!(nested_back.len(), 1);
++    assert_eq!(nested_back[0].from.selection_range, closure.selection_range);
++    assert_eq!(nested_back[0].from_ranges, vec![nested_range]);
++    assert!(
++        incoming(&backend, &closure).await.is_empty(),
++        "known body creation does not invent invocation of the uninvoked closure"
++    );
++}
++
++#[tokio::test]
++async fn hierarchy_anonymous_class_creation_reuses_cross_file_inherited_and_trait_origins() {
++    let backend = create_test_backend();
++    let base_uri = Url::parse("file:///AnonymousConstructionBase.php").unwrap();
++    let caller_uri = Url::parse("file:///AnonymousConstructionCaller.php").unwrap();
++    let base = "<?php\r\nclass AnonymousConstructionParent { public function __construct() {} }\r\ntrait AnonymousConstructionInit { public function initialize() {} }\r\n";
++    let caller = concat!(
++        "<?php\r\n",
++        "function inheritedCreation(): void { /* café 🐘 */ $x = new class extends AnonymousConstructionParent {}; }\r\n",
++        "function traitCreation(): void { /* café 🐘 */ $x = new class { use AnonymousConstructionInit { initialize as __construct; } }; }\r\n",
++        "function noConstructorCreation(): void { $x = new class {}; }\r\n",
++    );
++    open_php(&backend, &base_uri, base).await;
++    open_php(&backend, &caller_uri, caller).await;
++    for (factory_name, target_name, site) in [
++        (
++            "inheritedCreation",
++            "__construct",
++            "new class extends AnonymousConstructionParent",
++        ),
++        (
++            "traitCreation",
++            "initialize",
++            "new class { use AnonymousConstructionInit",
++        ),
++    ] {
++        let factory =
++            anonymous_hierarchy_prepare(&backend, &caller_uri, caller, factory_name).await;
++        let target = anonymous_hierarchy_prepare(&backend, &base_uri, base, target_name).await;
++        let range = keyword_constructor_range(caller, site, "class");
++        let edges = outgoing(&backend, &factory).await;
++        assert_eq!(edges.len(), 1);
++        assert_eq!(edges[0].to.uri, base_uri);
++        assert_eq!(edges[0].to.selection_range, target.selection_range);
++        assert_eq!(edges[0].from_ranges, vec![range]);
++        let back = incoming(&backend, &target).await;
++        assert_eq!(back.len(), 1, "no duplicate or trait-metadata invoker");
++        assert_eq!(back[0].from.uri, caller_uri);
++        assert_eq!(back[0].from.selection_range, factory.selection_range);
++        assert_eq!(back[0].from_ranges, vec![range]);
++    }
++    let empty =
++        anonymous_hierarchy_prepare(&backend, &caller_uri, caller, "noConstructorCreation").await;
++    assert!(
++        outgoing(&backend, &empty).await.is_empty(),
++        "no constructor implementation means no fabricated callable"
++    );
++}
++
++#[tokio::test]
++async fn hierarchy_anonymous_constructor_identity_is_local_to_source_uri() {
++    let backend = create_test_backend();
++    let first = Url::parse("file:///AnonymousConstructionA.php").unwrap();
++    let second = Url::parse("file:///AnonymousConstructionB.php").unwrap();
++    let source = "<?php\r\n/* café 🐘 */ $x = new class { public function __construct() {} };\r\n";
++    open_php(&backend, &first, source).await;
++    open_php(&backend, &second, source).await;
++    for uri in [&first, &second] {
++        let ctor = anonymous_hierarchy_prepare(&backend, uri, source, "__construct").await;
++        let back = incoming(&backend, &ctor).await;
++        assert_eq!(
++            back.len(),
++            1,
++            "same brace and method offsets in another URI are a different construction"
++        );
++        assert_eq!(back[0].from.uri, *uri);
++        assert_eq!(back[0].from.kind, SymbolKind::FILE);
++        let range = keyword_constructor_range(source, "new class", "class");
++        assert_eq!(back[0].from_ranges, vec![range]);
++        let edges = outgoing(&backend, &back[0].from).await;
++        assert_eq!(edges.len(), 1);
++        assert_eq!(edges[0].to.uri, *uri);
++        assert_eq!(edges[0].to.selection_range, ctor.selection_range);
++        assert_eq!(edges[0].from_ranges, vec![range]);
++    }
++}
++
++#[tokio::test]
++async fn hierarchy_anonymous_constructor_delegation_belongs_to_its_constructor_body() {
++    let backend = create_test_backend();
++    let uri = Url::parse("file:///anonymous-constructor-delegation.php").unwrap();
++    let source = concat!(
++        "<?php\r\nclass DelegationParent { public function __construct() {} }\r\n",
++        "function delegatingCreation(): void { /* café 🐘 */ $x = new class extends DelegationParent { public function __construct() { /* body café 🐘 */ parent::__construct(); } }; }\r\n",
++    );
++    open_php(&backend, &uri, source).await;
++    let factory = anonymous_hierarchy_prepare(&backend, &uri, source, "delegatingCreation").await;
++    let own = keyword_constructor_prepare(
++        &backend,
++        &uri,
++        source,
++        "public function __construct() { /* body",
++        "__construct",
++    )
++    .await;
++    let parent = keyword_constructor_prepare(
++        &backend,
++        &uri,
++        source,
++        "class DelegationParent { public function __construct",
++        "__construct",
++    )
++    .await;
++    let creation_range =
++        keyword_constructor_range(source, "new class extends DelegationParent", "class");
++    let delegation_range =
++        keyword_constructor_range(source, "parent::__construct()", "__construct");
++    let creation = outgoing(&backend, &factory).await;
++    assert_eq!(creation.len(), 1);
++    assert_eq!(creation[0].to.selection_range, own.selection_range);
++    assert_eq!(creation[0].from_ranges, vec![creation_range]);
++    let delegation = outgoing(&backend, &own).await;
++    assert_eq!(delegation.len(), 1);
++    assert_eq!(delegation[0].to.selection_range, parent.selection_range);
++    assert_eq!(delegation[0].from_ranges, vec![delegation_range]);
++    let parent_back = incoming(&backend, &parent).await;
++    assert_eq!(
++        parent_back.len(),
++        1,
++        "factory must not steal explicit constructor delegation"
++    );
++    assert_eq!(parent_back[0].from.selection_range, own.selection_range);
++    assert_eq!(parent_back[0].from_ranges, vec![delegation_range]);
++}
++
++#[tokio::test]
++async fn hierarchy_first_incoming_discovers_unopened_anonymous_only_files() {
++    let directory = tempfile::tempdir().unwrap();
++    let root = directory.path().canonicalize().unwrap();
++    std::fs::create_dir_all(root.join("src")).unwrap();
++    std::fs::write(
++        root.join("composer.json"),
++        "{\"autoload\":{\"psr-4\":{\"Cold\\\\\":\"src/\"}}}",
++    )
++    .unwrap();
++    let parent_source =
++        "<?php\r\nnamespace Cold;\r\nclass ParentCtor { public function __construct() {} }\r\n";
++    let anonymous_only = "<?php\r\n/* café 🐘 */ $x = new class extends \\Cold\\ParentCtor {};\r\n";
++    let parent_path = root.join("src/ParentCtor.php");
++    std::fs::write(&parent_path, parent_source).unwrap();
++    let first_path = root.join("src/AnonymousOnlyOne.php");
++    let second_path = root.join("src/AnonymousOnlyTwo.php");
++    std::fs::write(&first_path, anonymous_only).unwrap();
++    std::fs::write(&second_path, anonymous_only).unwrap();
++    let (mappings, _) = phpantom_lsp::composer::parse_composer_json(&root);
++    let backend = Backend::new_test_with_workspace(root, mappings);
++    let parent_uri = Url::from_file_path(&parent_path).unwrap();
++    // Deliberately never open or query either construction source before incoming.
++    open_php(&backend, &parent_uri, parent_source).await;
++    let target =
++        anonymous_hierarchy_prepare(&backend, &parent_uri, parent_source, "__construct").await;
++    let first_reply = incoming(&backend, &target).await;
++    assert_eq!(
++        first_reply.len(),
++        2,
++        "first incoming must discover anonymous-only PHP files missing from the named-class index"
++    );
++    let range = keyword_constructor_range(anonymous_only, "new class extends", "class");
++    for path in [first_path, second_path] {
++        let uri = Url::from_file_path(path).unwrap();
++        let calls: Vec<_> = first_reply
++            .iter()
++            .filter(|call| call.from.uri == uri)
++            .collect();
++        assert_eq!(
++            calls.len(),
++            1,
++            "same brace offsets in different unopened files stay distinct"
++        );
++        assert_eq!(calls[0].from.kind, SymbolKind::FILE);
++        assert_eq!(calls[0].from_ranges, vec![range]);
++    }
++}
++
++#[tokio::test]
++async fn hierarchy_anonymous_constructor_incoming_preserves_custom_vendor_exclusion() {
++    use phpantom_lsp::ProjectRouter;
++    let directory = tempfile::tempdir().unwrap();
++    let root = directory.path().canonicalize().unwrap();
++    for relative in ["src", "deps/custom-package"] {
++        std::fs::create_dir_all(root.join(relative)).unwrap();
++    }
++    std::fs::write(
++        root.join("composer.json"),
++        "{\"config\":{\"vendor-dir\":\"deps\"},\"autoload\":{\"psr-4\":{\"Cold\\\\\":\"src/\"}}}",
++    )
++    .unwrap();
++    std::fs::write(
++        root.join(".phpantom.toml"),
++        "[external_tools]\nenabled=false\n",
++    )
++    .unwrap();
++    let parent = "<?php\r\nnamespace Cold;\r\nclass VendorPolicyParent { public function __construct() {} }\r\n";
++    let creation =
++        "<?php\r\n/* café 🐘 */ $x = new class extends \\Cold\\VendorPolicyParent {};\r\n";
++    let parent_path = root.join("src/VendorPolicyParent.php");
++    let user_path = root.join("src/AnonymousOnly.php");
++    let vendor_path = root.join("deps/custom-package/AnonymousOnly.php");
++    for (path, source) in [
++        (&parent_path, parent),
++        (&user_path, creation),
++        (&vendor_path, creation),
++    ] {
++        std::fs::write(path, source).unwrap();
++    }
++    let router = ProjectRouter::new_test();
++    router
++        .initialize(InitializeParams {
++            root_uri: Some(Url::from_directory_path(&root).unwrap()),
++            workspace_folders: Some(vec![WorkspaceFolder {
++                uri: Url::from_directory_path(&root).unwrap(),
++                name: "custom-vendor-policy".into(),
++            }]),
++            ..InitializeParams::default()
++        })
++        .await
++        .unwrap();
++    router.initialized(InitializedParams {}).await;
++    let parent_uri = Url::from_file_path(&parent_path).unwrap();
++    let vendor_uri = Url::from_file_path(&vendor_path).unwrap();
++    // Force the dependency into the same project's parsed map cache. Vendor
++    // exclusion must survive that state; an unopened vendor file proves less.
++    for (uri, source) in [(&parent_uri, parent), (&vendor_uri, creation)] {
++        router
++            .did_open(DidOpenTextDocumentParams {
++                text_document: TextDocumentItem {
++                    uri: uri.clone(),
++                    language_id: "php".into(),
++                    version: 1,
++                    text: source.into(),
++                },
++            })
++            .await;
++    }
++    let parent_position = anonymous_hierarchy_position(parent, "__construct");
++    let target_items = router
++        .prepare_call_hierarchy(CallHierarchyPrepareParams {
++            text_document_position_params: TextDocumentPositionParams {
++                text_document: TextDocumentIdentifier {
++                    uri: parent_uri.clone(),
++                },
++                position: parent_position,
++            },
++            work_done_progress_params: WorkDoneProgressParams::default(),
++        })
++        .await
++        .unwrap()
++        .unwrap_or_default();
++    let vendor_items = router
++        .prepare_call_hierarchy(CallHierarchyPrepareParams {
++            text_document_position_params: TextDocumentPositionParams {
++                text_document: TextDocumentIdentifier { uri: vendor_uri },
++                position: Position::new(0, 0),
++            },
++            work_done_progress_params: WorkDoneProgressParams::default(),
++        })
++        .await
++        .unwrap()
++        .unwrap_or_default();
++    assert_eq!(target_items.len(), 1);
++    assert_eq!(vendor_items.len(), 1);
++    assert_eq!(vendor_items[0].kind, SymbolKind::FILE);
++    let parent_project = target_items[0]
++        .data
++        .as_ref()
++        .and_then(|data| data.get("_phpWorkbenchProject"))
++        .and_then(|value| value.as_u64())
++        .expect("actual parent project stamp");
++    let vendor_project = vendor_items[0]
++        .data
++        .as_ref()
++        .and_then(|data| data.get("_phpWorkbenchProject"))
++        .and_then(|value| value.as_u64())
++        .expect("actual vendor project stamp");
++    assert_eq!(
++        parent_project, vendor_project,
++        "vendor cache witness must belong to the actual parent project, not a separate connection"
++    );
++    let first_reply = router
++        .incoming_calls(CallHierarchyIncomingCallsParams {
++            item: target_items[0].clone(),
++            work_done_progress_params: WorkDoneProgressParams::default(),
++            partial_result_params: PartialResultParams::default(),
++        })
++        .await
++        .unwrap()
++        .unwrap_or_default();
++    router.shutdown().await.unwrap();
++    assert_eq!(
++        first_reply.len(),
++        1,
++        "reference-policy user callers only, even with cached custom-vendor metadata"
++    );
++    assert_eq!(
++        first_reply[0].from.uri,
++        Url::from_file_path(user_path).unwrap()
++    );
++    assert_eq!(first_reply[0].from.kind, SymbolKind::FILE);
++    assert_eq!(
++        first_reply[0].from_ranges,
++        vec![keyword_constructor_range(
++            creation,
++            "new class extends",
++            "class"
++        )]
++    );
++}
++
++#[tokio::test]
++async fn hierarchy_anonymous_method_receipts_refuse_other_uri_and_same_length_source_edits() {
++    let backend = create_test_backend();
++    let uri = Url::parse("file:///anonymous-method-authority-a.php").unwrap();
++    let foreign = Url::parse("file:///anonymous-method-authority-b.php").unwrap();
++    let source = "<?php\nfunction oldLeaf() {} function newLeaf() {}\nfunction factory() { return new class { public function __construct() { oldLeaf(); } }; }\n";
++    open_php(&backend, &uri, source).await;
++    open_php(&backend, &foreign, source).await;
++    let ctor = anonymous_hierarchy_prepare(&backend, &uri, source, "__construct").await;
++    assert_eq!(outgoing(&backend, &ctor).await[0].to.name, "oldLeaf");
++    assert_eq!(incoming(&backend, &ctor).await.len(), 1);
++    let mut forged = ctor.clone();
++    forged.uri = foreign;
++    assert!(
++        outgoing(&backend, &forged).await.is_empty(),
++        "URI-qualified anonymous owner cannot be replayed at equal offsets in another file"
++    );
++    assert!(incoming(&backend, &forged).await.is_empty());
++    let mut stripped = ctor.clone();
++    stripped
++        .data
++        .as_mut()
++        .unwrap()
++        .as_object_mut()
++        .unwrap()
++        .remove("anonymous_class");
++    assert!(
++        outgoing(&backend, &stripped).await.is_empty(),
++        "stripping receipt cannot bypass the anonymous method guard"
++    );
++    let changed = source.replace("{ oldLeaf();", "{ newLeaf();");
++    assert_eq!(source.len(), changed.len());
++    open_php(&backend, &uri, &changed).await;
++    assert!(outgoing(&backend, &ctor).await.is_empty());
++    assert!(incoming(&backend, &ctor).await.is_empty());
++    let fresh = anonymous_hierarchy_prepare(&backend, &uri, &changed, "__construct").await;
++    assert_eq!(outgoing(&backend, &fresh).await[0].to.name, "newLeaf");
++    assert_eq!(incoming(&backend, &fresh).await.len(), 1);
++}
++
++#[tokio::test]
++async fn hierarchy_anonymous_inherited_constructor_uses_closed_global_owner_not_cached_homonym() {
++    let backend = create_test_backend();
++    let directory = tempfile::tempdir().unwrap();
++    let root = directory.path().canonicalize().unwrap();
++    let namespace_line = "namespace Shadow;\r\n";
++    let padding = format!("/*{}*/\r\n", " ".repeat(namespace_line.len() - 6));
++    let global =
++        format!("<?php\r\n{padding}class TwinCtor {{ public function __construct() {{}} }}\r\n");
++    let shadow = format!(
++        "<?php\r\n{namespace_line}class TwinCtor {{ public function __construct() {{}} }}\r\n"
++    );
++    let factory = "<?php\r\nfunction createInheritedAnonymous(): void { /* café 🐘 */ $value = new class extends \\TwinCtor {}; }\r\n";
++    assert_eq!(global.find("class TwinCtor"), shadow.find("class TwinCtor"));
++    assert_eq!(global.find("__construct"), shadow.find("__construct"));
++    assert_eq!(global.len(), shadow.len());
++    let global_path = root.join("GlobalCtor.php");
++    let shadow_path = root.join("ShadowCtor.php");
++    let factory_path = root.join("Factory.php");
++    for (path, text) in [
++        (&global_path, global.as_str()),
++        (&shadow_path, shadow.as_str()),
++        (&factory_path, factory),
++    ] {
++        std::fs::write(path, text).unwrap();
++    }
++    let global_uri = Url::from_file_path(&global_path).unwrap();
++    let shadow_uri = Url::from_file_path(&shadow_path).unwrap();
++    let factory_uri = Url::from_file_path(&factory_path).unwrap();
++    open_php(&backend, &global_uri, &global).await;
++    open_php(&backend, &shadow_uri, &shadow).await;
++    // The disk-backed canonical global class remains indexed, but standalone
++    // didClose releases its per-URI maps. Only Shadow's short name is cached.
++    backend
++        .did_close(DidCloseTextDocumentParams {
++            text_document: TextDocumentIdentifier {
++                uri: global_uri.clone(),
++            },
++        })
++        .await;
++    open_php(&backend, &factory_uri, factory).await;
++    let caller =
++        anonymous_hierarchy_prepare(&backend, &factory_uri, factory, "createInheritedAnonymous")
++            .await;
++    // First outgoing must select its true inherited owner without priming or
++    // re-preparing the global constructor to restore its per-URI source maps.
++    let first_outgoing = outgoing(&backend, &caller).await;
++    assert_eq!(first_outgoing.len(), 1);
++    let target = &first_outgoing[0].to;
++    assert_eq!(
++        target.uri, global_uri,
++        "resolved global constructor metadata cannot borrow Shadow's aligned source"
++    );
++    assert_eq!(target.name, "__construct");
++    assert_eq!(
++        target.selection_range,
++        keyword_constructor_range(&global, "public function __construct", "__construct")
++    );
++    let site = keyword_constructor_range(factory, "new class extends", "class");
++    assert_eq!(first_outgoing[0].from_ranges, vec![site]);
++    let first_incoming = incoming(&backend, target).await;
++    assert_eq!(first_incoming.len(), 1);
++    assert_eq!(first_incoming[0].from.uri, factory_uri);
++    assert_eq!(
++        first_incoming[0].from.selection_range,
++        caller.selection_range
++    );
++    assert_eq!(first_incoming[0].from_ranges, vec![site]);
++    let unrelated =
++        anonymous_hierarchy_prepare(&backend, &shadow_uri, &shadow, "__construct").await;
++    assert!(
++        incoming(&backend, &unrelated).await.is_empty(),
++        "the namespaced homonym does not gain the global anonymous construction caller"
++    );
++    for (path, text) in [
++        (global_path, global.as_str()),
++        (shadow_path, shadow.as_str()),
++        (factory_path, factory),
++    ] {
++        assert_eq!(std::fs::read(path).unwrap(), text.as_bytes());
++    }
++}
+diff --git a/tests/integration/implementation.rs b/tests/integration/implementation.rs
+index 96e3ec1..a1479a0 100644
+--- a/tests/integration/implementation.rs
++++ b/tests/integration/implementation.rs
+@@ -1939,3 +1939,61 @@ async fn implementation_forgets_a_class_edited_out_of_the_interface() {
+             .is_empty()
+     );
+ }
++
++// Append to tests/integration/implementation.rs. No initialized() call:
++// this protects the genuine pre-startup public request compatibility path.
++#[tokio::test]
++async fn implementation_preinitialized_custom_vendor_excludes_dependency_but_keeps_project_vendor_folder()
++ {
++    let interface = "<?php\nnamespace App;\ninterface PrestartContract {}\n";
++    let own = "<?php\nnamespace App;\nclass PrestartOwn implements PrestartContract {}\n";
++    let ordinary_vendor =
++        "<?php\nnamespace App;\nclass PrestartOrdinaryVendor implements PrestartContract {}\n";
++    let dependency = "<?php\nnamespace Dependency;\nclass PrestartDependency implements \\App\\PrestartContract {}\n";
++    let (backend, dir) = create_psr4_workspace(
++        r#"{"config":{"vendor-dir":"deps"},"autoload":{"psr-4":{"App\\":["src/","vendor/"]}}}"#,
++        &[
++            ("src/PrestartContract.php", interface),
++            ("src/PrestartOwn.php", own),
++            ("vendor/PrestartOrdinaryVendor.php", ordinary_vendor),
++            ("deps/acme/cache/PrestartDependency.php", dependency),
++        ],
++    );
++    let uri = |relative: &str| Url::from_file_path(dir.path().join(relative)).unwrap();
++    // Mimic genuine earlier hover/open loading: all classes enter the same
++    // reverse index before the first implementation/index-readiness request.
++    for (relative, text) in [
++        ("src/PrestartOwn.php", own),
++        ("vendor/PrestartOrdinaryVendor.php", ordinary_vendor),
++        ("deps/acme/cache/PrestartDependency.php", dependency),
++        ("src/PrestartContract.php", interface),
++    ] {
++        open_php(&backend, &uri(relative), text).await;
++    }
++    let locations = implementation_at(&backend, &uri("src/PrestartContract.php"), 2, 11).await;
++    let mut actual = locations
++        .iter()
++        .map(|location| location.uri.to_string())
++        .collect::<Vec<_>>();
++    actual.sort();
++    let mut expected = vec![
++        uri("src/PrestartOwn.php").to_string(),
++        uri("vendor/PrestartOrdinaryVendor.php").to_string(),
++    ];
++    expected.sort();
++    assert_eq!(
++        actual, expected,
++        "configured deps is excluded; an ordinary project vendor folder remains eligible before initialized"
++    );
++    for (relative, expected) in [
++        ("src/PrestartContract.php", interface),
++        ("src/PrestartOwn.php", own),
++        ("vendor/PrestartOrdinaryVendor.php", ordinary_vendor),
++        ("deps/acme/cache/PrestartDependency.php", dependency),
++    ] {
++        assert_eq!(
++            fs::read(dir.path().join(relative)).unwrap(),
++            expected.as_bytes()
++        );
++    }
++}
+diff --git a/tests/integration/structural_search.rs b/tests/integration/structural_search.rs
+index b34373a..df6ab30 100644
+--- a/tests/integration/structural_search.rs
++++ b/tests/integration/structural_search.rs
+@@ -226,3 +226,190 @@ async fn structural_parent_project_excludes_nested_composer_and_custom_vendor_so
+     );
+     router.shutdown().await.unwrap();
+ }
++
++// Append to tests/integration/structural_search.rs. Contract coverage expected
++// GREEN on .101; no new production API or changed matching policy is proposed.
++async fn structural_contract_find(
++    router: &ProjectRouter,
++    path: &Path,
++    generation: u64,
++    pattern: &str,
++) -> Vec<String> {
++    let text = fs::read_to_string(path).unwrap();
++    let mut request = serde_json::to_value(query(path, generation, "document")).unwrap();
++    request["pattern"] = json!(pattern);
++    let reply = router
++        .workbench_structural_search(serde_json::from_value(request).unwrap())
++        .await
++        .unwrap();
++    assert!(!reply.incomplete, "complete PHP document: {pattern}");
++    assert!(reply.issues.is_empty());
++    assert_eq!(reply.files.len(), 1);
++    reply.files[0]
++        .matches
++        .iter()
++        .map(|found| text[found.call.start_byte as usize..found.call.end_byte as usize].to_owned())
++        .collect()
++}
++
++#[tokio::test]
++async fn structural_public_call_cst_excludes_import_partial_array_and_phpunit_references() {
++    let temp = TempDir::new().unwrap();
++    let root = temp.path().canonicalize().unwrap();
++    project(&root);
++    let path = root.join("index.php");
++    let text = concat!(
++        "<?php\r\nuse function Library\\needle;\r\n",
++        "class CallReferenceOwner { public static function needle($value) {} }\r\n",
++        "#[\\PHPUnit\\Framework\\Attributes\\CoversFunction('Library\\needle')] class CallReferenceTest {}\r\n",
++        "$firstClass = Library\\needle(...);\r\n",
++        "$methodReference = [CallReferenceOwner::class, 'needle'];\r\n",
++        "$methodFirstClass = CallReferenceOwner::needle(...);\r\n",
++        "$text = 'Library\\needle(99)'; // Library\\needle(98)\r\n",
++        "Library\\needle(1); /* café 🐘 */ CallReferenceOwner::needle(2);\r\n",
++        "$closure = fn() => Library\\needle(3);\r\n",
++    );
++    fs::write(&path, text).unwrap();
++    let router = router(&[&root]).await;
++    assert_eq!(
++        structural_contract_find(&router, &path, 901, "Library\\needle(...$__ss_arguments)").await,
++        ["Library\\needle(1)", "Library\\needle(3)"]
++    );
++    assert_eq!(
++        structural_contract_find(
++            &router,
++            &path,
++            902,
++            "CallReferenceOwner::needle(...$__ss_arguments)"
++        )
++        .await,
++        ["CallReferenceOwner::needle(2)"]
++    );
++    assert_eq!(fs::read(&path).unwrap(), text.as_bytes());
++    router.shutdown().await.unwrap();
++}
++
++#[tokio::test]
++async fn structural_public_target_names_are_lexical_and_receiver_captures_are_not_type_filters() {
++    let temp = TempDir::new().unwrap();
++    let root = temp.path().canonicalize().unwrap();
++    project(&root);
++    let path = root.join("index.php");
++    let text = concat!(
++        "<?php\nnamespace Consumer;\n",
++        "use function Library\\target as aliasTarget; use Library\\Store as AliasStore;\n",
++        "aliasTarget(1); \\Library\\target(2); namespace\\target(3); target(4); Target(5);\n",
++        "AliasStore::save(6); \\Library\\Store::save(7);\n",
++        "class LeftStore { public function save($value) {} }\n",
++        "class RightStore { public function save($value) {} }\n",
++        "function knownReceivers(LeftStore $left, RightStore $right): void { $left->save(8); $right->save(9); }\n",
++    );
++    fs::write(&path, text).unwrap();
++    let router = router(&[&root]).await;
++    for (index, (pattern, expected)) in [
++        ("aliasTarget($__ss_value)", "aliasTarget(1)"),
++        ("\\Library\\target($__ss_value)", "\\Library\\target(2)"),
++        ("namespace\\target($__ss_value)", "namespace\\target(3)"),
++        ("target($__ss_value)", "target(4)"),
++        ("Target($__ss_value)", "Target(5)"),
++        ("AliasStore::save($__ss_value)", "AliasStore::save(6)"),
++        (
++            "\\Library\\Store::save($__ss_value)",
++            "\\Library\\Store::save(7)",
++        ),
++    ]
++    .into_iter()
++    .enumerate()
++    {
++        assert_eq!(
++            structural_contract_find(&router, &path, 910 + index as u64, pattern).await,
++            [expected]
++        );
++    }
++    assert_eq!(
++        structural_contract_find(&router, &path, 920, "$__ss_receiver->save($__ss_value)").await,
++        ["$left->save(8)", "$right->save(9)"]
++    );
++    router.shutdown().await.unwrap();
++}
++
++#[tokio::test]
++async fn structural_public_mixed_template_search_reports_incomplete_and_replacement_stays_exact_read_only()
++ {
++    use sha2::{Digest, Sha256};
++    let temp = TempDir::new().unwrap();
++    let root = temp.path().canonicalize().unwrap();
++    project(&root);
++    let path = root.join("index.php");
++    let blade = root.join("view.blade.php");
++    let text =
++        "<div>needle('html')</div>\r\n<?php /* café 🐘 */ needle('php'); $ref = needle(...); ?>";
++    let template = "<p>{{ needle('blade') }}</p>\n@php needle('block'); @endphp\n";
++    fs::write(&path, text).unwrap();
++    fs::write(&blade, template).unwrap();
++    let router = router(&[&root]).await;
++    let selected_uri = Url::from_file_path(&path).unwrap();
++    router
++        .did_open(DidOpenTextDocumentParams {
++            text_document: TextDocumentItem {
++                uri: selected_uri.clone(),
++                language_id: "php".into(),
++                version: 1,
++                text: text.into(),
++            },
++        })
++        .await;
++    let mut request = serde_json::to_value(query(&path, 930, "project")).unwrap();
++    request["pattern"] = json!("needle(...$__ss_arguments)");
++    request["expectedSources"] = json!([{"uri":selected_uri,"version":1,
++        "sha256Utf8":format!("{:x}", Sha256::digest(text.as_bytes()))}]);
++    let reply = router
++        .workbench_structural_search(serde_json::from_value(request.clone()).unwrap())
++        .await
++        .unwrap();
++    assert!(
++        reply.incomplete,
++        "Blade omission is explicit, never a complete zero-match claim"
++    );
++    assert_eq!(reply.issues.len(), 1);
++    let issues = serde_json::to_value(&reply.issues).unwrap();
++    assert_eq!(issues[0]["kind"], "unsupportedTemplate");
++    assert_eq!(
++        issues[0]["uri"],
++        json!(Url::from_file_path(&blade).unwrap())
++    );
++    assert_eq!(reply.files.len(), 1);
++    let file = &reply.files[0];
++    assert_eq!(file.stamp.uri, selected_uri);
++    assert_eq!(file.matches.len(), 1);
++    let found = &file.matches[0].call;
++    assert_eq!(
++        &text[found.start_byte as usize..found.end_byte as usize],
++        "needle('php')"
++    );
++    let replacement: phpantom_lsp::StructuralReplaceQuery = serde_json::from_value(json!({
++        "search":request,"replacement":"replacement(...$__ss_arguments)",
++        "selections":[{"stamp":file.stamp,"calls":[found]}],
++    }))
++    .unwrap();
++    let proposal = router
++        .workbench_structural_replace(replacement)
++        .await
++        .unwrap();
++    let value = serde_json::to_value(proposal).unwrap();
++    assert_eq!(value["kind"], "parenthesizedExpression");
++    assert_eq!(value["search"]["incomplete"], true);
++    assert_eq!(value["edits"].as_array().unwrap().len(), 1);
++    assert_eq!(value["edits"][0]["uri"], json!(selected_uri));
++    let edits = value["edits"][0]["edits"].as_array().unwrap();
++    assert_eq!(edits.len(), 1);
++    assert_eq!(edits[0]["call"], serde_json::to_value(found).unwrap());
++    assert_eq!(edits[0]["newText"], "(replacement('php'))");
++    assert_eq!(
++        fs::read(&path).unwrap(),
++        text.as_bytes(),
++        "proposal never applies or saves"
++    );
++    assert_eq!(fs::read(&blade).unwrap(), template.as_bytes());
++    router.shutdown().await.unwrap();
++}
+diff --git a/tests/integration/type_hierarchy.rs b/tests/integration/type_hierarchy.rs
+index 9157ed9..e53a3f3 100644
+--- a/tests/integration/type_hierarchy.rs
++++ b/tests/integration/type_hierarchy.rs
+@@ -1211,3 +1211,920 @@ async fn related_type_ranges_enclose_parent_interface_and_child_names() {
+         assert!(item.selection_range.end <= item.range.end);
+     }
+ }
++
++#[tokio::test]
++async fn hierarchy_authority_retained_type_item_cannot_retarget_a_changed_declaration() {
++    let backend = create_test_backend();
++    let uri = Url::parse("file:///type-authority-source.php").unwrap();
++    let before = concat!(
++        "<?php\r\nclass FirstParent {}\r\nclass OtherParent {}\r\n",
++        "class GuardedType extends FirstParent {}\r\n",
++        "class GuardedChild extends GuardedType {}\r\n",
++    );
++    open_php(&backend, &uri, before).await;
++    let item = prepare_at(&backend, &uri, 3, 7).await.remove(0);
++    assert_eq!(
++        item_names(&supertypes_of(&backend, &item).await),
++        ["FirstParent"]
++    );
++    assert_eq!(
++        item_names(&subtypes_of(&backend, &item).await),
++        ["GuardedChild"]
++    );
++    let after = before.replace(
++        "GuardedType extends FirstParent",
++        "GuardedType extends OtherParent",
++    );
++    assert_eq!(
++        before.len(),
++        after.len(),
++        "same-length identity replacement"
++    );
++    open_php(&backend, &uri, &after).await;
++    assert!(
++        supertypes_of(&backend, &item).await.is_empty(),
++        "retained declaration receipt must not acquire another parent"
++    );
++    assert!(
++        subtypes_of(&backend, &item).await.is_empty(),
++        "both directions reject the stale source receipt"
++    );
++    let fresh = prepare_at(&backend, &uri, 3, 7).await.remove(0);
++    assert_eq!(
++        item_names(&supertypes_of(&backend, &fresh).await),
++        ["OtherParent"]
++    );
++    assert_eq!(
++        item_names(&subtypes_of(&backend, &fresh).await),
++        ["GuardedChild"]
++    );
++}
++
++#[tokio::test]
++async fn hierarchy_authority_type_item_cannot_change_uri_or_strip_its_source_receipt() {
++    let backend = create_test_backend();
++    let uri = Url::parse("file:///type-authority-owner.php").unwrap();
++    let foreign = Url::parse("file:///type-authority-foreign.php").unwrap();
++    let source = "<?php\nclass ReceiptParent {}\nclass ReceiptOwner extends ReceiptParent {}\nclass ReceiptChild extends ReceiptOwner {}\n";
++    open_php(&backend, &uri, source).await;
++    open_php(&backend, &foreign, "<?php\nclass UnrelatedReceipt {}\n").await;
++    let item = prepare_at(&backend, &uri, 2, 7).await.remove(0);
++    assert_eq!(supertypes_of(&backend, &item).await.len(), 1);
++    assert_eq!(subtypes_of(&backend, &item).await.len(), 1);
++    let mut changed_uri = item.clone();
++    changed_uri.uri = foreign;
++    assert!(
++        supertypes_of(&backend, &changed_uri).await.is_empty(),
++        "opaque type data cannot be replayed at another URI"
++    );
++    assert!(subtypes_of(&backend, &changed_uri).await.is_empty());
++    let mut stripped = item.clone();
++    stripped.data = Some(serde_json::json!({"fqn": item_fqn(&item)}));
++    assert!(
++        supertypes_of(&backend, &stripped).await.is_empty(),
++        "stripping source authority cannot bypass ownership"
++    );
++    assert!(subtypes_of(&backend, &stripped).await.is_empty());
++    assert_eq!(supertypes_of(&backend, &item).await.len(), 1);
++}
++
++#[tokio::test]
++async fn hierarchy_authority_type_item_selection_cannot_point_at_another_token() {
++    let backend = create_test_backend();
++    let uri = Url::parse("file:///type-authority-selection.php").unwrap();
++    open_php(
++        &backend,
++        &uri,
++        "<?php\nclass SelectionParent {}\nclass SelectionOwner extends SelectionParent {}\n",
++    )
++    .await;
++    let item = prepare_at(&backend, &uri, 2, 7).await.remove(0);
++    assert_eq!(supertypes_of(&backend, &item).await.len(), 1);
++    let mut forged = item.clone();
++    forged.selection_range = Range::new(Position::new(0, 0), Position::new(0, 0));
++    assert!(
++        supertypes_of(&backend, &forged).await.is_empty(),
++        "declaration data cannot authorize a different selection range"
++    );
++    assert_eq!(supertypes_of(&backend, &item).await.len(), 1);
++}
++
++fn type_hierarchy_position(text: &str, needle: &str) -> Position {
++    let offset = text.find(needle).expect("fixture token");
++    let before = &text[..offset];
++    Position::new(
++        before.bytes().filter(|b| *b == b'\n').count() as u32,
++        before.rsplit('\n').next().unwrap().encode_utf16().count() as u32,
++    )
++}
++
++async fn prepare_type_token(
++    backend: &Backend,
++    uri: &Url,
++    text: &str,
++    needle: &str,
++) -> TypeHierarchyItem {
++    let position = type_hierarchy_position(text, needle);
++    let mut items = prepare_at(backend, uri, position.line, position.character).await;
++    assert_eq!(items.len(), 1, "prepare token {needle}");
++    items.remove(0)
++}
++
++#[tokio::test]
++async fn type_composition_edges_are_reciprocal_direct_and_alias_resolved() {
++    let backend = create_test_backend();
++    let uri = Url::parse("file:///type-composition.php").unwrap();
++    let text = concat!(
++        "<?php\nnamespace Library { trait RootTrait {} trait NestedTrait { use RootTrait; } }\n",
++        "namespace App { use Library\\NestedTrait as Feature; class Consumer { use Feature; } enum Choice { use Feature; } }\n"
++    );
++    open_php(&backend, &uri, text).await;
++    let nested = prepare_type_token(&backend, &uri, text, "NestedTrait {").await;
++    let consumer = prepare_type_token(&backend, &uri, text, "Consumer {").await;
++    let choice = prepare_type_token(&backend, &uri, text, "Choice {").await;
++    let root = prepare_type_token(&backend, &uri, text, "RootTrait {").await;
++    assert_eq!(
++        item_names(&supertypes_of(&backend, &consumer).await),
++        vec!["NestedTrait"]
++    );
++    assert_eq!(
++        item_names(&supertypes_of(&backend, &choice).await),
++        vec!["NestedTrait"]
++    );
++    assert_eq!(
++        item_names(&supertypes_of(&backend, &nested).await),
++        vec!["RootTrait"]
++    );
++    assert_eq!(
++        item_names(&subtypes_of(&backend, &root).await),
++        vec!["NestedTrait"]
++    );
++    assert_eq!(
++        item_names(&subtypes_of(&backend, &nested).await),
++        vec!["Choice", "Consumer"]
++    );
++}
++
++#[tokio::test]
++async fn type_selection_skips_comments_for_all_classlike_keywords() {
++    let backend = create_test_backend();
++    let uri = Url::parse("file:///type-comments.php").unwrap();
++    let text = "<?php\n// 🦀 UTF16 witness\nclass /*C*/ CommentClass {}\ninterface //I\nCommentInterface {}\ntrait #T\nCommentTrait {}\nenum /*E*/ CommentEnum {}\nclass Child extends CommentClass {}\n";
++    open_php(&backend, &uri, text).await;
++    for name in [
++        "CommentClass",
++        "CommentInterface",
++        "CommentTrait",
++        "CommentEnum",
++    ] {
++        let item = prepare_type_token(&backend, &uri, text, name).await;
++        let start = type_hierarchy_position(text, name);
++        assert_eq!(
++            item.selection_range,
++            Range::new(
++                start,
++                Position::new(start.line, start.character + name.len() as u32)
++            )
++        );
++    }
++    let child = prepare_type_token(&backend, &uri, text, "Child extends").await;
++    let supers = supertypes_of(&backend, &child).await;
++    assert_eq!(supers.len(), 1);
++    assert_eq!(
++        supers[0].selection_range.start,
++        type_hierarchy_position(text, "CommentClass")
++    );
++}
++
++#[tokio::test]
++async fn anonymous_type_preparation_uses_real_keyword_and_uri_local_owner() {
++    let backend = create_test_backend();
++    let a = Url::parse("file:///type-anon-a.php").unwrap();
++    let b = Url::parse("file:///type-anon-b.php").unwrap();
++    let text = "<?php\nclass Base {} interface Contract {} trait Feature {}\nreturn new class extends Base implements Contract { use Feature; };\n";
++    open_php(&backend, &a, text).await;
++    open_php(&backend, &b, text).await;
++    for uri in [&a, &b] {
++        let anon = prepare_type_token(&backend, uri, text, "class extends").await;
++        assert_eq!(&anon.uri, uri);
++        let start = type_hierarchy_position(text, "class extends");
++        assert_eq!(
++            anon.selection_range,
++            Range::new(start, Position::new(start.line, start.character + 5))
++        );
++        assert_eq!(
++            item_names(&supertypes_of(&backend, &anon).await),
++            vec!["Base", "Contract", "Feature"]
++        );
++    }
++}
++
++#[tokio::test]
++async fn cold_anonymous_type_children_include_identical_braces_in_distinct_files() {
++    let base = "<?php\nnamespace App;\nclass Base {}\n";
++    // Anonymous names and all offsets deliberately collide across these files.
++    let anonymous = "<?php\nnamespace App;\nreturn new class extends Base {};\n";
++    let (backend, dir) = create_psr4_workspace(
++        r#"{"autoload":{"psr-4":{"App\\":"src/"}}}"#,
++        &[
++            ("src/Base.php", base),
++            ("src/One.php", anonymous),
++            ("src/Two.php", anonymous),
++        ],
++    );
++    let base_uri = Url::from_file_path(dir.path().join("src/Base.php")).unwrap();
++    open_php(&backend, &base_uri, base).await;
++    let base_item = prepare_type_token(&backend, &base_uri, base, "Base {").await;
++    let children = subtypes_of(&backend, &base_item).await;
++    let mut actual = children
++        .iter()
++        .map(|item| item.uri.to_string())
++        .collect::<Vec<_>>();
++    actual.sort();
++    let mut expected = ["src/One.php", "src/Two.php"]
++        .iter()
++        .map(|path| {
++            Url::from_file_path(dir.path().join(path))
++                .unwrap()
++                .to_string()
++        })
++        .collect::<Vec<_>>();
++    expected.sort();
++    assert_eq!(
++        actual, expected,
++        "both unopened anonymous implementations must be discovered"
++    );
++    for child in children {
++        assert_eq!(
++            child.selection_range.start,
++            type_hierarchy_position(anonymous, "class extends")
++        );
++        assert_eq!(
++            item_names(&supertypes_of(&backend, &child).await),
++            vec!["Base"]
++        );
++    }
++}
++
++// Public request regression: configured package target must discover cold
++// package descendants even after the project index is complete.
++#[tokio::test]
++async fn custom_vendor_type_target_includes_cold_package_and_project_children() {
++    let contract = "<?php\nnamespace Acme;\ninterface Contract {}\n";
++    let package_child = "<?php\nnamespace Acme;\nclass PackageChild implements Contract {}\n";
++    let app_child = "<?php\nnamespace App;\nclass ProjectChild implements \\Acme\\Contract {}\n";
++    let (backend, dir) = create_psr4_workspace(
++        r#"{"config":{"vendor-dir":"dependencies with spaces"},"require":{"acme/pkg":"*"},"autoload":{"psr-4":{"App\\":"src/"}}}"#,
++        &[
++            (".phpantom.toml", "[indexing]\nstrategy = \"full\"\n"),
++            (
++                "dependencies with spaces/composer/installed.json",
++                r#"{"packages":[{"name":"acme/pkg","version":"1.0.0","install-path":"../acme/pkg","autoload":{"psr-4":{"Acme\\":"src/"}}}]}"#,
++            ),
++            (
++                "dependencies with spaces/acme/pkg/src/Contract.php",
++                contract,
++            ),
++            (
++                "dependencies with spaces/acme/pkg/src/PackageChild.php",
++                package_child,
++            ),
++            ("src/ProjectChild.php", app_child),
++        ],
++    );
++    backend.initialized(InitializedParams {}).await;
++    // No semantic request or didOpen has touched PackageChild.
++    let uri = Url::from_file_path(
++        dir.path()
++            .join("dependencies with spaces/acme/pkg/src/Contract.php"),
++    )
++    .unwrap();
++    open_php(&backend, &uri, contract).await;
++    let items = prepare_at(&backend, &uri, 2, 12).await;
++    assert_eq!(items.len(), 1);
++    let children = subtypes_of(&backend, &items[0]).await;
++    assert_eq!(item_names(&children), vec!["PackageChild", "ProjectChild"]);
++    for child in children {
++        assert_eq!(
++            item_names(&supertypes_of(&backend, &child).await),
++            vec!["Contract"]
++        );
++    }
++}
++
++// Preserve the shared ready-index policy: a project target reports project
++// children regardless of whether a package implementation became hot.
++#[tokio::test]
++async fn custom_vendor_hot_children_do_not_leak_into_project_type_graph() {
++    let contract = "<?php\nnamespace App;\ninterface Contract {}\n";
++    let project_child = "<?php\nnamespace App;\nclass ProjectChild implements Contract {}\n";
++    let nested_vendor_name = "<?php\nnamespace App\\vendor;\nclass NestedVendorNameChild implements \\App\\Contract {}\n";
++    let package_child =
++        "<?php\nnamespace Acme;\nclass PackageChild implements \\App\\Contract {}\n";
++    let (backend, dir) = create_psr4_workspace(
++        r#"{"config":{"vendor-dir":"dependencies with spaces"},"require":{"acme/pkg":"*"},"autoload":{"psr-4":{"App\\":"src/"}}}"#,
++        &[
++            (".phpantom.toml", "[indexing]\nstrategy = \"full\"\n"),
++            (
++                "dependencies with spaces/composer/installed.json",
++                r#"{"packages":[{"name":"acme/pkg","version":"1.0.0","install-path":"../acme/pkg","autoload":{"psr-4":{"Acme\\":"src/"}}}]}"#,
++            ),
++            (
++                "dependencies with spaces/acme/pkg/src/PackageChild.php",
++                package_child,
++            ),
++            ("src/Contract.php", contract),
++            ("src/ProjectChild.php", project_child),
++            ("src/vendor/NestedVendorNameChild.php", nested_vendor_name),
++        ],
++    );
++    backend.initialized(InitializedParams {}).await;
++    let uri = Url::from_file_path(dir.path().join("src/Contract.php")).unwrap();
++    open_php(&backend, &uri, contract).await;
++    let items = prepare_at(&backend, &uri, 2, 12).await;
++    assert_eq!(items.len(), 1);
++    let expected = vec!["NestedVendorNameChild", "ProjectChild"];
++    assert_eq!(
++        item_names(&subtypes_of(&backend, &items[0]).await),
++        expected
++    );
++    let package_uri = Url::from_file_path(
++        dir.path()
++            .join("dependencies with spaces/acme/pkg/src/PackageChild.php"),
++    )
++    .unwrap();
++    open_php(&backend, &package_uri, package_child).await;
++    assert_eq!(
++        item_names(&subtypes_of(&backend, &items[0]).await),
++        expected
++    );
++}
++
++#[tokio::test]
++async fn hierarchy_authority_builtin_parent_items_keep_real_sources_and_expand() {
++    let backend = crate::common::create_test_backend_with_exception_stubs();
++    let uri = Url::parse("file:///builtin-type-authority.php").unwrap();
++    let text = "<?php\nclass LocalFailure extends RuntimeException {}\n";
++    open_php(&backend, &uri, text).await;
++    let local = prepare_type_token(&backend, &uri, text, "LocalFailure extends").await;
++    let supers = supertypes_of(&backend, &local).await;
++    assert_eq!(item_names(&supers), ["RuntimeException"]);
++    assert!(supers[0].uri.as_str().starts_with("phpantom-stub://"));
++    assert_ne!(
++        supers[0].selection_range.start,
++        supers[0].selection_range.end
++    );
++    let ancestors = supertypes_of(&backend, &supers[0]).await;
++    assert_eq!(item_names(&ancestors), ["Exception"]);
++    assert!(
++        subtypes_of(&backend, &supers[0])
++            .await
++            .iter()
++            .any(|child| child.uri == uri && child.name == "LocalFailure")
++    );
++}
++
++#[tokio::test]
++async fn hierarchy_authority_anonymous_items_reject_same_offset_parent_edits_and_forged_owner() {
++    let backend = create_test_backend();
++    let uri = Url::parse("file:///anonymous-type-authority.php").unwrap();
++    let other = Url::parse("file:///anonymous-type-authority-other.php").unwrap();
++    let before = "<?php\nclass FirstParent {} class OtherParent {}\nreturn new class extends FirstParent {};\n";
++    open_php(&backend, &uri, before).await;
++    open_php(&backend, &other, before).await;
++    let item = prepare_type_token(&backend, &uri, before, "class extends").await;
++    assert_eq!(
++        item_names(&supertypes_of(&backend, &item).await),
++        ["FirstParent"]
++    );
++    let mut forged = item.clone();
++    forged.uri = other;
++    assert!(supertypes_of(&backend, &forged).await.is_empty());
++    let after = before.replace("extends FirstParent", "extends OtherParent");
++    assert_eq!(before.len(), after.len());
++    open_php(&backend, &uri, &after).await;
++    assert!(supertypes_of(&backend, &item).await.is_empty());
++    let fresh = prepare_type_token(&backend, &uri, &after, "class extends").await;
++    assert_eq!(
++        item_names(&supertypes_of(&backend, &fresh).await),
++        ["OtherParent"]
++    );
++}
++
++#[tokio::test]
++async fn cold_custom_vendor_trait_composition_preserves_aliases_and_direct_edges() {
++    let root = "<?php\nnamespace Acme\\Concerns;\ntrait RootTrait {}\n";
++    let (backend, dir) = create_psr4_workspace(
++        r#"{"config":{"vendor-dir":"dependencies with spaces"},"require":{"acme/pkg":"*"},"autoload":{"psr-4":{"App\\":"src/"}}}"#,
++        &[
++            (".phpantom.toml", "[indexing]\nstrategy = \"full\"\n"),
++            (
++                "dependencies with spaces/composer/installed.json",
++                r#"{"packages":[{"name":"acme/pkg","version":"1.0.0","install-path":"../acme/pkg","autoload":{"psr-4":{"Acme\\":"src/"}}}]}"#,
++            ),
++            (
++                "dependencies with spaces/acme/pkg/src/Concerns/RootTrait.php",
++                root,
++            ),
++            (
++                "dependencies with spaces/acme/pkg/src/Concerns/NestedTrait.php",
++                "<?php\nnamespace Acme\\Concerns;\ntrait NestedTrait { use RootTrait; }\n",
++            ),
++            (
++                "dependencies with spaces/acme/pkg/src/DirectConsumer.php",
++                "<?php\nnamespace Acme;\nuse Acme\\Concerns\\RootTrait as Feature;\nclass DirectConsumer { use Feature; }\n",
++            ),
++            (
++                "dependencies with spaces/acme/pkg/src/Choice.php",
++                "<?php\nnamespace Acme;\nuse Acme\\Concerns\\RootTrait as Feature;\nenum Choice { use Feature; }\n",
++            ),
++            (
++                "dependencies with spaces/acme/pkg/src/IndirectConsumer.php",
++                "<?php\nnamespace Acme;\nclass IndirectConsumer { use \\Acme\\Concerns\\NestedTrait; }\n",
++            ),
++            (
++                "dependencies with spaces/acme/pkg/src/Other/RootTrait.php",
++                "<?php\nnamespace Acme\\Other;\ntrait RootTrait {}\n",
++            ),
++            (
++                "dependencies with spaces/acme/pkg/src/WrongConsumer.php",
++                "<?php\nnamespace Acme;\nuse Acme\\Other\\RootTrait as Feature;\nclass WrongConsumer { use Feature; }\n",
++            ),
++            (
++                "src/ProjectConsumer.php",
++                "<?php\nnamespace App;\nclass ProjectConsumer { use \\Acme\\Concerns\\RootTrait; }\n",
++            ),
++        ],
++    );
++    backend.initialized(InitializedParams {}).await;
++    let uri = Url::from_file_path(
++        dir.path()
++            .join("dependencies with spaces/acme/pkg/src/Concerns/RootTrait.php"),
++    )
++    .unwrap();
++    open_php(&backend, &uri, root).await;
++    let prepared = prepare_at(&backend, &uri, 2, 8).await;
++    assert_eq!(prepared.len(), 1);
++    // First response, without opening any package consumer. WrongConsumer and
++    // transitive IndirectConsumer must not be flattened into this direct list.
++    let direct = subtypes_of(&backend, &prepared[0]).await;
++    assert_eq!(
++        item_names(&direct),
++        vec!["Choice", "DirectConsumer", "NestedTrait", "ProjectConsumer"]
++    );
++    let nested = direct
++        .iter()
++        .find(|item| item.name == "NestedTrait")
++        .unwrap();
++    assert_eq!(
++        item_names(&subtypes_of(&backend, nested).await),
++        vec!["IndirectConsumer"]
++    );
++    for consumer in &direct {
++        let names = item_names(&supertypes_of(&backend, consumer).await);
++        assert!(names.contains(&"RootTrait".to_string()));
++        // UnitEnum is an implicit nominal edge when its stub is available;
++        // the composition assertion must not erase it or depend on stub setup.
++        assert!(
++            names.iter().all(
++                |name| name == "RootTrait" || (consumer.name == "Choice" && name == "UnitEnum")
++            )
++        );
++    }
++}
++
++#[tokio::test]
++async fn warm_custom_vendor_anonymous_does_not_leak_into_project_type_children() {
++    let contract = "<?php\nnamespace App;\ninterface Contract {}\n";
++    let user_anon = "<?php\nnamespace App;\nreturn new class implements Contract {};\n";
++    let package_anon = "<?php\nnamespace App;\nreturn new class implements Contract {};\n";
++    let (backend, dir) = create_psr4_workspace(
++        r#"{"config":{"vendor-dir":"dependencies with spaces"},"require":{"acme/pkg":"*"},"autoload":{"psr-4":{"App\\":"src/"}}}"#,
++        &[
++            (".phpantom.toml", "[indexing]\nstrategy = \"full\"\n"),
++            (
++                "dependencies with spaces/composer/installed.json",
++                r#"{"packages":[{"name":"acme/pkg","version":"1.0.0","install-path":"../acme/pkg","autoload":{"psr-4":{"Acme\\":"src/"}}}]}"#,
++            ),
++            ("src/Contract.php", contract),
++            ("src/anonymous.php", user_anon),
++            (
++                "dependencies with spaces/acme/pkg/src/anonymous.php",
++                package_anon,
++            ),
++        ],
++    );
++    backend.initialized(InitializedParams {}).await;
++    let uri = Url::from_file_path(dir.path().join("src/Contract.php")).unwrap();
++    let user_uri = Url::from_file_path(dir.path().join("src/anonymous.php")).unwrap();
++    let package_uri = Url::from_file_path(
++        dir.path()
++            .join("dependencies with spaces/acme/pkg/src/anonymous.php"),
++    )
++    .unwrap();
++    open_php(&backend, &uri, contract).await;
++    let prepared = prepare_at(&backend, &uri, 2, 12).await;
++    assert_eq!(prepared.len(), 1);
++    let before = subtypes_of(&backend, &prepared[0]).await;
++    assert_eq!(
++        before
++            .iter()
++            .map(|item| item.uri.clone())
++            .collect::<Vec<_>>(),
++        vec![user_uri.clone()]
++    );
++    // Make the anonymous dependency entry hot explicitly; this may not alter
++    // the established project-target discovery scope.
++    open_php(&backend, &package_uri, package_anon).await;
++    let after = subtypes_of(&backend, &prepared[0]).await;
++    assert_eq!(
++        after
++            .iter()
++            .map(|item| item.uri.clone())
++            .collect::<Vec<_>>(),
++        vec![user_uri]
++    );
++}
++
++// Append to tests/integration/type_hierarchy.rs. Public handler tests only.
++#[tokio::test]
++async fn blade_type_items_roundtrip_visible_coordinates_and_reciprocal_edges() {
++    let backend = create_test_backend();
++    let uri = Url::parse("file:///visible-type-authority.blade.php").unwrap();
++    let source = concat!(
++        "<h1>café 🐘</h1>\r\n",
++        "@php\r\n",
++        "class BladeAuthorityBase {}\r\n",
++        "/* café 🐘 */ class BladeAuthorityChild extends BladeAuthorityBase {}\r\n",
++        "@endphp\r\n",
++    );
++    crate::common::open_document(&backend, &uri, "blade", source).await;
++    let child_position = Position::new(3, "/* café 🐘 */ class ".encode_utf16().count() as u32);
++    let child_selection = Range::new(
++        child_position,
++        Position::new(
++            3,
++            child_position.character + "BladeAuthorityChild".len() as u32,
++        ),
++    );
++    let children = prepare_at(
++        &backend,
++        &uri,
++        child_position.line,
++        child_position.character,
++    )
++    .await;
++    assert_eq!(
++        children.len(),
++        1,
++        "real projected class prepare; virtual={:?}; classes={:?}",
++        backend.blade_virtual_php(uri.as_str()),
++        backend.get_classes_for_uri(uri.as_str())
++    );
++    assert_eq!(children[0].uri, uri);
++    assert_eq!(children[0].selection_range, child_selection);
++    let parents = supertypes_of(&backend, &children[0]).await;
++    assert_eq!(
++        parents.len(),
++        1,
++        "returned visible item must expand without virtual/raw mismatch"
++    );
++    assert_eq!(parents[0].name, "BladeAuthorityBase");
++    assert_eq!(parents[0].uri, uri);
++    assert_eq!(
++        parents[0].selection_range,
++        Range::new(Position::new(2, 6), Position::new(2, 24))
++    );
++    let back = subtypes_of(&backend, &parents[0]).await;
++    assert_eq!(back.len(), 1);
++    assert_eq!(
++        back[0], children[0],
++        "reciprocal item is published once in visible coordinates"
++    );
++}
++
++#[tokio::test]
++async fn router_builtin_type_hierarchy_qualified_items_expand_and_reject_foreign_or_invalid_qualifiers()
++ {
++    use phpantom_lsp::ProjectRouter;
++    let temporary = tempfile::tempdir().unwrap();
++    let root = temporary.path().canonicalize().unwrap();
++    let roots = [root.join("a"), root.join("b")];
++    for path in &roots {
++        std::fs::create_dir(path).unwrap();
++        std::fs::write(path.join("composer.json"), "{}").unwrap();
++    }
++    let router = ProjectRouter::new_test_with_full_stubs();
++    router
++        .initialize(InitializeParams {
++            workspace_folders: Some(
++                roots
++                    .iter()
++                    .enumerate()
++                    .map(|(index, path)| WorkspaceFolder {
++                        uri: Url::from_directory_path(path).unwrap(),
++                        name: format!("context-{index}"),
++                    })
++                    .collect(),
++            ),
++            root_uri: Some(Url::from_directory_path(&roots[0]).unwrap()),
++            ..Default::default()
++        })
++        .await
++        .unwrap();
++    router.initialized(InitializedParams {}).await;
++    let source = "<?php\nRuntimeException::class;\n";
++    let mut items = Vec::new();
++    for path in &roots {
++        let uri = Url::from_file_path(path.join("query.php")).unwrap();
++        router
++            .did_open(DidOpenTextDocumentParams {
++                text_document: TextDocumentItem {
++                    uri: uri.clone(),
++                    language_id: "php".into(),
++                    version: 1,
++                    text: source.into(),
++                },
++            })
++            .await;
++        let prepared = router
++            .prepare_type_hierarchy(TypeHierarchyPrepareParams {
++                text_document_position_params: TextDocumentPositionParams {
++                    text_document: TextDocumentIdentifier { uri },
++                    position: Position::new(1, 1),
++                },
++                work_done_progress_params: Default::default(),
++            })
++            .await
++            .unwrap()
++            .unwrap();
++        assert_eq!(prepared.len(), 1);
++        let item = prepared[0].clone();
++        let owner = item.data.as_ref().unwrap()["_phpWorkbenchProject"]
++            .as_u64()
++            .unwrap();
++        assert_eq!(item.uri.scheme(), "phpantom-stub");
++        assert_eq!(
++            item.uri.query(),
++            Some(format!("project_context={owner}").as_str())
++        );
++        let supers = router
++            .supertypes(TypeHierarchySupertypesParams {
++                item: item.clone(),
++                work_done_progress_params: Default::default(),
++                partial_result_params: Default::default(),
++            })
++            .await
++            .unwrap()
++            .unwrap_or_default();
++        assert!(
++            supers.iter().any(|parent| parent.name == "Exception"),
++            "nonempty builtin expansion is the positive control"
++        );
++        assert!(
++            supers
++                .iter()
++                .all(|parent| parent.uri.query() == item.uri.query())
++        );
++        // A prepared builtin document URI must also route and normalize correctly.
++        let again = router
++            .prepare_type_hierarchy(TypeHierarchyPrepareParams {
++                text_document_position_params: TextDocumentPositionParams {
++                    text_document: TextDocumentIdentifier {
++                        uri: item.uri.clone(),
++                    },
++                    position: item.selection_range.start,
++                },
++                work_done_progress_params: Default::default(),
++            })
++            .await
++            .unwrap()
++            .unwrap_or_default();
++        assert_eq!(again.as_slice(), std::slice::from_ref(&item));
++        items.push(item);
++    }
++    assert_ne!(
++        items[0].uri.query(),
++        items[1].uri.query(),
++        "different actual project contexts"
++    );
++    for forged in [
++        {
++            let mut item = items[0].clone();
++            item.uri = items[1].uri.clone();
++            item
++        },
++        {
++            let mut item = items[0].clone();
++            item.uri.set_query(Some("project_context=invalid"));
++            item
++        },
++    ] {
++        let result = router
++            .supertypes(TypeHierarchySupertypesParams {
++                item: forged,
++                work_done_progress_params: Default::default(),
++                partial_result_params: Default::default(),
++            })
++            .await;
++        assert!(
++            result.is_err(),
++            "foreign/malformed context must be rejected before stripping"
++        );
++    }
++    let recovered = router
++        .supertypes(TypeHierarchySupertypesParams {
++            item: items[0].clone(),
++            work_done_progress_params: Default::default(),
++            partial_result_params: Default::default(),
++        })
++        .await
++        .unwrap()
++        .unwrap_or_default();
++    assert!(recovered.iter().any(|parent| parent.name == "Exception"));
++    router.shutdown().await.unwrap();
++}
++
++#[tokio::test]
++async fn blade_actual_wrapper_registers_named_classlikes_and_one_anonymous_class() {
++    let backend = create_test_backend();
++    let uri = Url::parse("file:///views/type-declarations.blade.php").unwrap();
++    let text = "<p>🦀 visible prefix</p>\n@php\ninterface TemplateContract {}\ntrait TemplateFeature {}\nclass TemplateBase {}\nclass TemplateChild extends TemplateBase implements TemplateContract { use TemplateFeature; }\nenum TemplateChoice { use TemplateFeature; }\n$instance = new class extends TemplateBase {};\nfunction __blade_template() { class HiddenNestedDeclaration {} }\n@endphp\n";
++    open_php(&backend, &uri, text).await;
++    let classes = backend
++        .get_classes_for_uri(uri.as_str())
++        .expect("template class partition");
++    for expected in [
++        "TemplateContract",
++        "TemplateFeature",
++        "TemplateBase",
++        "TemplateChild",
++        "TemplateChoice",
++    ] {
++        assert_eq!(
++            classes
++                .iter()
++                .filter(|class| class.name == expected)
++                .count(),
++            1,
++            "{expected} registered once"
++        );
++    }
++    assert_eq!(
++        classes
++            .iter()
++            .filter(|class| class.name.starts_with("__anonymous@"))
++            .count(),
++        1
++    );
++    assert!(
++        !classes
++            .iter()
++            .any(|class| class.name == "HiddenNestedDeclaration")
++    );
++    let child = classes
++        .iter()
++        .find(|class| class.name == "TemplateChild")
++        .unwrap();
++    assert_eq!(child.parent_class.as_deref(), Some("TemplateBase"));
++    assert!(
++        child
++            .interfaces
++            .iter()
++            .any(|name| name == "TemplateContract")
++    );
++    assert!(
++        child
++            .used_traits
++            .iter()
++            .any(|name| name == "TemplateFeature")
++    );
++    let items = prepare_at(&backend, &uri, 5, 8).await;
++    assert_eq!(
++        items.len(),
++        1,
++        "first public type preparation must find actual template class"
++    );
++    assert_eq!(items[0].name, "TemplateChild");
++    assert_eq!(
++        items[0].selection_range,
++        Range::new(Position::new(5, 6), Position::new(5, 19))
++    );
++    assert_eq!(
++        item_names(&supertypes_of(&backend, &items[0]).await),
++        vec!["TemplateBase", "TemplateContract", "TemplateFeature"]
++    );
++}
++
++#[tokio::test]
++async fn ordinary_php_wrapper_spelling_does_not_authorize_nested_named_classes() {
++    let backend = create_test_backend();
++    let uri = Url::parse("file:///ordinary-wrapper-spelling.php").unwrap();
++    let text =
++        "<?php\nfunction __blade_template() { class HiddenDeclaration {} $x = new class {}; }\n";
++    open_php(&backend, &uri, text).await;
++    let classes = backend
++        .get_classes_for_uri(uri.as_str())
++        .expect("ordinary class partition");
++    assert!(
++        !classes
++            .iter()
++            .any(|class| class.name == "HiddenDeclaration")
++    );
++    assert!(prepare_at(&backend, &uri, 1, 43).await.is_empty());
++}
++
++#[tokio::test]
++async fn type_hierarchy_global_owner_survives_close_with_only_namespaced_homonym_cached() {
++    let backend = create_test_backend();
++    let directory = tempfile::tempdir().unwrap();
++    let root = directory.path().canonicalize().unwrap();
++    let namespace_line = "namespace Shadow;\r\n";
++    // Equal byte/UTF16 declaration coordinates make className-only validation
++    // insufficient. The global namespace is semantically meaningful here.
++    let global_padding = format!("/*{}*/\r\n", " ".repeat(namespace_line.len() - 6));
++    let global = format!("<?php\r\n{global_padding}class Twin extends \\ParentA {{}}\r\n");
++    let shadow = format!("<?php\r\n{namespace_line}class Twin extends \\ParentB {{}}\r\n");
++    let parents = "<?php\r\nclass ParentA {}\r\nclass ParentB {}\r\n";
++    let consumer = "<?php\r\n/* café 🐘 */ $value = new \\Twin();\r\n";
++    assert_eq!(global.find("class Twin"), shadow.find("class Twin"));
++    assert_eq!(global.len(), shadow.len());
++    let global_path = root.join("Global.php");
++    let shadow_path = root.join("Shadow.php");
++    let parents_path = root.join("Parents.php");
++    let consumer_path = root.join("Consumer.php");
++    for (path, text) in [
++        (&global_path, global.as_str()),
++        (&shadow_path, shadow.as_str()),
++        (&parents_path, parents),
++        (&consumer_path, consumer),
++    ] {
++        std::fs::write(path, text).unwrap();
++    }
++    let global_uri = Url::from_file_path(&global_path).unwrap();
++    let shadow_uri = Url::from_file_path(&shadow_path).unwrap();
++    let parents_uri = Url::from_file_path(&parents_path).unwrap();
++    let consumer_uri = Url::from_file_path(&consumer_path).unwrap();
++    open_php(&backend, &parents_uri, parents).await;
++    open_php(&backend, &global_uri, &global).await;
++    open_php(&backend, &shadow_uri, &shadow).await;
++    // Standalone close restores disk declaration ownership, then deliberately
++    // releases its per-URI maps. fqn_class_index/fqn_uri_index retain Twin.
++    // No type request primes or reloads the global URI before this point.
++    backend
++        .did_close(DidCloseTextDocumentParams {
++            text_document: TextDocumentIdentifier {
++                uri: global_uri.clone(),
++            },
++        })
++        .await;
++    open_php(&backend, &consumer_uri, consumer).await;
++    let selected = prepare_type_token(&backend, &consumer_uri, consumer, "Twin").await;
++    assert_eq!(item_fqn(&selected), "Twin");
++    assert_eq!(
++        selected.uri, global_uri,
++        "canonical global ClassInfo must not borrow the only cached short-name homonym's source"
++    );
++    let expected_start = type_hierarchy_position(&global, "Twin");
++    assert_eq!(
++        selected.selection_range,
++        Range::new(
++            expected_start,
++            Position::new(expected_start.line, expected_start.character + 4)
++        )
++    );
++    let supers = supertypes_of(&backend, &selected).await;
++    assert_eq!(supers.len(), 1);
++    assert_eq!(item_fqn(&supers[0]), "ParentA");
++    assert_eq!(supers[0].uri, parents_uri);
++    let other = prepare_type_token(&backend, &shadow_uri, &shadow, "Twin").await;
++    assert_eq!(item_fqn(&other), "Shadow\\Twin");
++    assert_eq!(other.uri, shadow_uri);
++    let supers = supertypes_of(&backend, &other).await;
++    assert_eq!(supers.len(), 1);
++    assert_eq!(item_fqn(&supers[0]), "ParentB");
++    // A real receipt for the shadow source cannot authorize a global Twin
++    // token, despite identical class name/ranges and matching source bytes there.
++    let mut forged = selected.clone();
++    forged.uri = other.uri.clone();
++    forged.data = other.data.clone();
++    forged.data.as_mut().unwrap()["fqn"] = serde_json::json!("Twin");
++    assert!(supertypes_of(&backend, &forged).await.is_empty());
++    assert!(subtypes_of(&backend, &forged).await.is_empty());
++    for (path, text) in [(global_path, global), (shadow_path, shadow)] {
++        assert_eq!(std::fs::read(path).unwrap(), text.as_bytes());
++    }
++}
++
++#[tokio::test]
++async fn type_hierarchy_full_stub_enum_publishes_each_direct_supertype_once() {
++    let backend = crate::common::create_test_backend_with_full_stubs();
++    let uri = Url::parse("file:///enum-direct-supertype-set.php").unwrap();
++    let source = "<?php\nnamespace Gate;\ninterface Contract {} trait Feature {}\nenum Choice implements Contract { use Feature; case Ready; }\n";
++    open_php(&backend, &uri, source).await;
++    let item = prepare_type_token(&backend, &uri, source, "Choice implements").await;
++    assert_eq!(
++        item_names(&supertypes_of(&backend, &item).await),
++        ["Contract", "Feature", "UnitEnum"]
++    );
++}

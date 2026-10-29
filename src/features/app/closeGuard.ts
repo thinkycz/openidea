@@ -7,7 +7,7 @@
  * documents have unsaved changes. Quit confirms once, then the backend closes
  * every window, each of which runs only its unsaved-changes check.
  */
-import { commands, isTauri, onIdeEvent, type Settings } from "@/platform/ipc";
+import { commands, isTauri, isCancelled, onIdeEvent, type Settings } from "@/platform/ipc";
 import { t } from "@/platform/i18n";
 import { closeProject, provideLeaveProjectGuard, useProject } from "@/platform/project";
 import { maybeEditorService, notifications } from "@/workbench/contributions";
@@ -66,7 +66,7 @@ export async function decideClose(input: CloseInput, deps: CloseDeps): Promise<b
       try {
         await deps.saveAll();
       } catch (e) {
-        deps.onSaveFailed(e);
+        if (!isCancelled(e)) deps.onSaveFailed(e);
         return false;
       }
     }

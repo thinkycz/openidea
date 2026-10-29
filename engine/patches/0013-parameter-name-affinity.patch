@@ -1,0 +1,463 @@
+diff --git a/src/completion/variable/ranking.rs b/src/completion/variable/ranking.rs
+index 321fe9e..bc00e2b 100644
+--- a/src/completion/variable/ranking.rs
++++ b/src/completion/variable/ranking.rs
+@@ -21,13 +21,18 @@ impl Backend {
+         ctx: &FileContext,
+         prefix: &str,
+     ) {
+-        let expected = self
+-            .expected_variable_argument_type(uri, content, position, ctx, prefix)
++        let argument = self.expected_variable_argument(uri, content, position, ctx, prefix);
++        let name = argument
++            .as_ref()
++            .and_then(|argument| argument.name.as_deref());
++        let expected = argument
++            .as_ref()
++            .and_then(|argument| argument.type_hint.clone())
+             .map(super::expected::ExpectedValue::Declared)
+             .or_else(|| self.expected_variable_value_context(content, position, ctx, prefix));
+-        let Some(expected) = expected else {
++        if expected.is_none() && name.is_none() {
+             return;
+-        };
++        }
+         let offset = position_to_offset(content, position);
+         let class_loader = self.class_loader(ctx);
+         let class_loaders = self.class_loaders(ctx);
+@@ -35,20 +40,20 @@ impl Backend {
+         let _scope_guard = forward_walk::with_diagnostic_scope_cache();
+         // Walk the enclosing body once, rather than re-running inference for
+         // every visible candidate. The cache is dropped with this request.
+-        forward_walk::build_diagnostic_scopes_for_offsets(
+-            content,
+-            &ctx.classes,
+-            &class_loaders.as_dyn(),
+-            Some(self),
+-            owned_loaders.loaders(),
+-            Some(&self.resolved_class_cache),
+-            &[offset],
+-        );
+-        // Receiver resolution reuses that same scope cache, so a property
+-        // assignment does not add a second forward walk of the function body.
+-        let Some(expected) = expected.resolve(self, content, position, ctx) else {
+-            return;
+-        };
++        if expected.is_some() {
++            forward_walk::build_diagnostic_scopes_for_offsets(
++                content,
++                &ctx.classes,
++                &class_loaders.as_dyn(),
++                Some(self),
++                owned_loaders.loaders(),
++                Some(&self.resolved_class_cache),
++                &[offset],
++            );
++        }
++        // Receiver resolution shares the same forward-walk scope cache.
++        let expected = expected.and_then(|expected| expected.resolve(self, content, position, ctx));
++        let parameter_tokens = name.map(name_tokens);
+         for item in items {
+             if item
+                 .sort_text
+@@ -58,20 +63,99 @@ impl Backend {
+                 continue;
+             }
+             let mut compatible = false;
+-            if let Some(types) = forward_walk::lookup_diagnostic_scope(&item.label, offset)
++            if let Some(expected) = &expected
++                && let Some(types) = forward_walk::lookup_diagnostic_scope(&item.label, offset)
+                 && !types.is_empty()
+             {
+                 let actual = ResolvedType::types_joined(&types);
+                 compatible = !actual.contains_mixed()
+                     && !actual.is_never()
+-                    && is_subtype_of_typed(&actual, &expected, &class_loader);
++                    && is_subtype_of_typed(&actual, expected, &class_loader);
+                 item.detail = Some(actual.to_string());
+             }
+             item.sort_text = Some(format!(
+-                "0_{}_{}",
++                "0_{}_{}_{}",
+                 u8::from(!compatible),
++                name.map_or(3, |name| name_affinity(
++                    &item.label,
++                    name,
++                    parameter_tokens.as_deref().unwrap_or_default()
++                )),
+                 item.label.to_lowercase()
+             ));
+         }
+     }
+ }
++
++/// Deterministic word boundaries, without edit-distance or substring guesses.
++/// Preserve Unicode in tokens; ASCII camel case/acronyms and underscores split.
++fn name_tokens(name: &str) -> Vec<String> {
++    let chars: Vec<char> = name.trim_start_matches('$').chars().collect();
++    let mut tokens = Vec::new();
++    let mut word = String::new();
++    for (index, &character) in chars.iter().enumerate() {
++        if character == '_' {
++            if !word.is_empty() {
++                tokens.push(std::mem::take(&mut word));
++            }
++            continue;
++        }
++        let boundary = character.is_ascii_uppercase()
++            && index > 0
++            && (chars[index - 1].is_ascii_lowercase()
++                || chars[index - 1].is_ascii_digit()
++                || (chars[index - 1].is_ascii_uppercase()
++                    && chars.get(index + 1).is_some_and(char::is_ascii_lowercase)));
++        if boundary && !word.is_empty() {
++            tokens.push(std::mem::take(&mut word));
++        }
++        word.push(character.to_ascii_lowercase());
++    }
++    if !word.is_empty() {
++        tokens.push(word);
++    }
++    tokens
++}
++
++fn name_affinity(variable: &str, parameter: &str, parameter_tokens: &[String]) -> u8 {
++    if variable.trim_start_matches('$') == parameter {
++        return 0;
++    }
++    if parameter_tokens.is_empty() {
++        return 3;
++    }
++    let variable_tokens = name_tokens(variable);
++    if variable_tokens == parameter_tokens {
++        1
++    } else if variable_tokens.ends_with(parameter_tokens) {
++        2
++    } else {
++        3
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::{name_affinity, name_tokens};
++
++    #[test]
++    fn parameter_name_affinity_uses_word_boundaries_and_ordered_tiers() {
++        assert_eq!(name_tokens("$HTTPClient_ID"), vec!["http", "client", "id"]);
++        let tokens = name_tokens("user_email");
++        for (variable, score) in [
++            ("$user_email", 0),
++            ("$userEmail", 1),
++            ("$billing_user_email", 2),
++            ("$email_user", 3),
++            ("$userVoicemail", 3),
++        ] {
++            assert_eq!(
++                name_affinity(variable, "user_email", &tokens),
++                score,
++                "{variable}"
++            );
++        }
++        assert_eq!(name_affinity("$valid", "id", &name_tokens("id")), 3);
++        assert_eq!(name_affinity("$a", "", &[]), 3);
++    }
++}
+diff --git a/src/signature_help.rs b/src/signature_help.rs
+index 81b87c7..254976c 100644
+--- a/src/signature_help.rs
++++ b/src/signature_help.rs
+@@ -26,8 +26,13 @@ use crate::symbol_map::SymbolMap;
+ use crate::text_position::position_to_offset;
+ use crate::types::*;
+ 
+-/// Information about a signature help call site, extracted from the source
+-/// text around the cursor.
++/// A direct argument's declared constraint and trustworthy parameter name.
++pub(crate) struct VariableArgumentExpectation {
++    pub type_hint: Option<PhpType>,
++    pub name: Option<String>,
++}
++
++/// Information about a signature help call site, extracted from the source.
+ struct CallSiteContext {
+     /// Byte offset immediately after the opening parenthesis.
+     args_start: usize,
+@@ -615,16 +620,16 @@ impl Backend {
+         None
+     }
+ 
+-    /// Resolve the declared type of a directly entered variable argument.
++    /// Resolve the declared type and name of a directly entered variable argument.
+     /// Reuses signature-help call detection and the shared callable resolver.
+-    pub(crate) fn expected_variable_argument_type(
++    pub(crate) fn expected_variable_argument(
+         &self,
+         uri: &str,
+         content: &str,
+         position: Position,
+         ctx: &FileContext,
+         prefix: &str,
+-    ) -> Option<PhpType> {
++    ) -> Option<VariableArgumentExpectation> {
+         let cursor = position_to_offset(content, position);
+         let map = self.symbol_maps.read().get(uri).cloned();
+         if let Some(map) = &map
+@@ -692,10 +697,28 @@ impl Backend {
+                 .get(site.active_parameter as usize)
+                 .or_else(|| target.parameters.last().filter(|param| param.is_variadic))?
+         };
+-        parameter
+-            .type_hint
+-            .clone()
+-            .filter(|hint| !hint.contains_mixed() && !hint.is_never())
++        // An overload with a different parameter name cannot establish a
++        // reliable name preference. Positional type inference stays unchanged.
++        let name_known = !target.synthetic_parameter_names
++            && target.overloads.iter().all(|parameters| {
++                let alternate = if let Some(name) = name {
++                    parameters
++                        .iter()
++                        .find(|param| param.name.trim_start_matches('$') == name)
++                } else {
++                    parameters
++                        .get(site.active_parameter as usize)
++                        .or_else(|| parameters.last().filter(|param| param.is_variadic))
++                };
++                alternate.is_some_and(|param| param.name == parameter.name)
++            });
++        Some(VariableArgumentExpectation {
++            type_hint: parameter
++                .type_hint
++                .clone()
++                .filter(|hint| !hint.contains_mixed() && !hint.is_never()),
++            name: name_known.then(|| parameter.name.trim_start_matches('$').to_owned()),
++        })
+     }
+ 
+     fn resolve_signature(
+diff --git a/src/type_engine/call_resolution/callable_target.rs b/src/type_engine/call_resolution/callable_target.rs
+index aefdfe8..3b79e65 100644
+--- a/src/type_engine/call_resolution/callable_target.rs
++++ b/src/type_engine/call_resolution/callable_target.rs
+@@ -849,6 +849,7 @@ pub(crate) fn callable_type_as_target(return_type: &PhpType) -> Option<ResolvedC
+                 })
+                 .collect();
+             Some(ResolvedCallableTarget {
++                synthetic_parameter_names: true,
+                 parameters: parameters.into(),
+                 return_type: return_type.clone(),
+                 accepts_any_args: false,
+diff --git a/src/types/mod.rs b/src/types/mod.rs
+index 5f7a388..fc04e0f 100644
+--- a/src/types/mod.rs
++++ b/src/types/mod.rs
+@@ -1133,6 +1133,9 @@ pub struct CompletionTarget {
+ /// fields it needs from the result.
+ #[derive(Debug, Clone, Default)]
+ pub(crate) struct ResolvedCallableTarget {
++    /// Parameter labels synthesized from a type-only callable are not PHP names.
++    /// Keep them available for positional type inference, but not name affinity.
++    pub synthetic_parameter_names: bool,
+     /// The parameters of the callable.
+     ///
+     /// A [`SharedVec`] so that projecting a method's parameters into a
+diff --git a/tests/integration/completion_variable_names.rs b/tests/integration/completion_variable_names.rs
+index c25a343..53432aa 100644
+--- a/tests/integration/completion_variable_names.rs
++++ b/tests/integration/completion_variable_names.rs
+@@ -4210,3 +4210,194 @@ async fn test_expected_value_ranking_nested_untyped_arrow() {
+     assert_eq!(items.first().map(|i| i.label.as_str()), Some("$aCount"));
+     assert!(items.iter().any(|i| i.label == "$zText"));
+ }
++
++#[tokio::test]
++async fn test_parameter_name_affinity_exact_match_among_compatible_variables() {
++    let items = ranked_variables("<?php\nfunction send(string $email): void {}\nfunction demo(string $aText, string $email): void { send(/*complete*/$); }\n").await;
++    assert_eq!(items[0].label, "$email");
++    assert!(items.iter().any(|item| item.label == "$aText"));
++}
++
++#[tokio::test]
++async fn test_parameter_name_affinity_untyped_and_mixed_declarations() {
++    for hint in ["", "mixed "] {
++        let source = format!(
++            "<?php\nfunction send({hint}$email): void {{}}\nfunction demo(string $aText, string $email): void {{ send(/*complete*/$); }}\n"
++        );
++        let items = ranked_variables(&source).await;
++        assert_eq!(items[0].label, "$email", "{hint}");
++    }
++}
++
++#[tokio::test]
++async fn test_parameter_name_affinity_normalized_names_and_token_suffixes() {
++    for (parameter, candidates, first) in [
++        (
++            "user_email",
++            "string $aText, string $userEmail",
++            "$userEmail",
++        ),
++        (
++            "email",
++            "string $aText, string $billingEmail",
++            "$billingEmail",
++        ),
++        (
++            "userId",
++            "string $aText, string $request_user_id",
++            "$request_user_id",
++        ),
++        (
++            "HTTPClient",
++            "string $aText, string $http_client",
++            "$http_client",
++        ),
++        ("email", "string $aText, string $voicemail", "$aText"),
++        ("id", "string $aText, string $valid", "$aText"),
++    ] {
++        let source = format!(
++            "<?php\nfunction send(string ${parameter}): void {{}}\nfunction demo({candidates}): void {{ send(/*complete*/$); }}\n"
++        );
++        let items = ranked_variables(&source).await;
++        assert_eq!(items[0].label, first, "{parameter}: {candidates}");
++    }
++}
++
++#[tokio::test]
++async fn test_parameter_name_affinity_type_compatibility_wins() {
++    let items = ranked_variables("<?php\nfunction send(string $email): void {}\nfunction demo(int $email, string $zText): void { send(/*complete*/$); }\n").await;
++    assert_eq!(items[0].label, "$zText");
++    assert!(items.iter().any(|item| item.label == "$email"));
++}
++
++#[tokio::test]
++async fn test_parameter_name_affinity_call_forms_named_variadic_and_first_class() {
++    for (declaration, parameters, call) in [
++        (
++            "function send(int $count, string $email): void {}",
++            "string $aText, string $email",
++            "send(email: /*complete*/$)",
++        ),
++        (
++            "function send(string ...$email): void {}",
++            "string $aText, string $email",
++            "send('first', /*complete*/$)",
++        ),
++        (
++            "class Target { public function send(string $email): void {} }",
++            "Target $target, string $aText, string $email",
++            "$target->send(/*complete*/$)",
++        ),
++        (
++            "class Target { public static function send(string $email): void {} }",
++            "string $aText, string $email",
++            "Target::send(/*complete*/$)",
++        ),
++        (
++            "class Target { public function __construct(string $email) {} }",
++            "string $aText, string $email",
++            "new Target(/*complete*/$)",
++        ),
++        (
++            "function send(string $email): void {}",
++            "string $aText, string $email",
++            "$fn = send(...); $fn(/*complete*/$)",
++        ),
++    ] {
++        let source =
++            format!("<?php\n{declaration}\nfunction demo({parameters}): void {{ {call}; }}\n");
++        let items = ranked_variables(&source).await;
++        assert_eq!(items[0].label, "$email", "{call}");
++    }
++}
++
++#[tokio::test]
++async fn test_parameter_name_affinity_does_not_leak_into_nested_or_unknown_contexts() {
++    for call in [
++        "send([/*complete*/$])",
++        "send('x' . /*complete*/$)",
++        "send(fn() => /*complete*/$)",
++        "unknown(/*complete*/$)",
++        "send(...$zArgs, /*complete*/$)",
++    ] {
++        let source = format!(
++            "<?php\nfunction send(string $email): void {{}}\nfunction demo(string $aText, string $email, array $zArgs): void {{ {call}; }}\n"
++        );
++        let items = ranked_variables(&source).await;
++        assert_eq!(items[0].label, "$aText", "{call}");
++    }
++}
++
++#[tokio::test]
++async fn test_parameter_name_affinity_does_not_invent_type_only_callable_names() {
++    let source = "<?php\n/** @param callable(string): void $fn */\nfunction demo(callable $fn, string $aText, string $param1): void { $fn(/*complete*/$); }\n";
++    let items = ranked_variables(source).await;
++    assert_eq!(items[0].label, "$aText");
++}
++
++#[tokio::test]
++async fn test_parameter_name_affinity_case_sensitive_exact_before_normalized() {
++    let source = "<?php\nfunction send(string $email): void {}\nfunction demo(string $Email, string $email): void { send(/*complete*/$); }\n";
++    let items = ranked_variables(source).await;
++    assert_eq!(items[0].label, "$email");
++}
++
++#[tokio::test]
++async fn test_parameter_name_affinity_unicode_and_incomplete_call() {
++    for source in [
++        "<?php\nfunction send(string $příjemce): void {}\nfunction demo(string $aText, string $příjemce): void { /*🐘*/ send(/*complete*/$); }\n",
++        "<?php\nfunction send(string $email): void {}\nfunction demo(string $aText, string $email): void { send(/*complete*/$",
++    ] {
++        let items = ranked_variables(source).await;
++        let expected = if source.contains("příjemce") {
++            "$příjemce"
++        } else {
++            "$email"
++        };
++        assert_eq!(items[0].label, expected);
++        let CompletionTextEdit::Edit(edit) = items[0].text_edit.as_ref().unwrap() else {
++            panic!("edit")
++        };
++        let position = crate::common::position_after(source, "/*complete*/$");
++        assert_eq!(edit.range.end, position);
++        assert_eq!(edit.range.start.character + 1, position.character);
++    }
++}
++
++#[tokio::test]
++async fn test_parameter_name_affinity_before_limit_and_preserves_candidates() {
++    let mut source = String::from(
++        "<?php\nfunction send(string $email): void {}\nfunction demo(string $email): void {\n",
++    );
++    for index in 0..150 {
++        source.push_str(&format!("$a{index:03} = 'text';\n"));
++    }
++    source.push_str("send(/*complete*/$);\n}\n");
++    let items = ranked_variables(&source).await;
++    assert_eq!(items.len(), 100);
++    assert_eq!(items[0].label, "$email");
++    assert!(items.iter().any(|item| item.label == "$a000"));
++}
++
++#[tokio::test]
++async fn test_parameter_name_affinity_type_only_return_callable_has_no_name() {
++    let items = ranked_variables("<?php\n/** @return callable(string): void */\nfunction factory(): callable { return fn(string $email) => null; }\nfunction demo(string $aText, string $param1): void { factory()(/*complete*/$); }\n").await;
++    assert_eq!(items[0].label, "$aText");
++}
++
++#[tokio::test]
++async fn test_parameter_name_affinity_real_param1_name_is_not_synthetic() {
++    let items = ranked_variables("<?php\nfunction send(string $param1): void {}\nfunction demo(string $aText, string $param1): void { send(/*complete*/$); }\n").await;
++    assert_eq!(items[0].label, "$param1");
++}
++
++#[tokio::test]
++async fn test_parameter_name_affinity_builtin_parameter() {
++    let backend = crate::common::create_test_backend_with_full_stubs();
++    let items = ranked_variables_with_backend(
++        &backend,
++        "<?php\nfunction demo(string $aText, string $string): void { strlen(/*complete*/$); }\n",
++    )
++    .await;
++    assert_eq!(items[0].label, "$string");
++}

@@ -1,0 +1,258 @@
+diff --git a/src/code_actions/generate_getter_setter.rs b/src/code_actions/generate_getter_setter.rs
+index 361d837..15ee6cb 100644
+--- a/src/code_actions/generate_getter_setter.rs
++++ b/src/code_actions/generate_getter_setter.rs
+@@ -95,20 +95,72 @@ impl Backend {
+                 |program, content| {
+                     let ctx = find_cursor_context(&program.statements, cursor_offset);
+ 
+-                    let (property, all_members, class_readonly, body_end) = match &ctx {
++                    let trivia = program.trivia.as_slice();
++                    let (props, all_members, class_readonly, body_end) = match &ctx {
+                         CursorContext::InClassLike {
+                             member: MemberContext::Property(prop),
+                             all_members,
+                             class_readonly,
+                             body_end,
+                             ..
+-                        } => (*prop, *all_members, *class_readonly, *body_end),
++                        } => (
++                            collect_accessor_properties(prop, content, trivia),
++                            *all_members,
++                            *class_readonly,
++                            *body_end,
++                        ),
++                        CursorContext::InClassLike {
++                            member: MemberContext::Method(method, false),
++                            all_members,
++                            class_readonly,
++                            body_end,
++                            ..
++                        } if bytes_to_str(method.name.value)
++                            .eq_ignore_ascii_case("__construct") =>
++                        {
++                            // A promoted parameter is an actual property, but its
++                            // CST owner remains the constructor. Admit only the
++                            // selected declaration header, never its default
++                            // expression (which can contain another class).
++                            let param = method.parameter_list.parameters.iter().find(|param| {
++                                param.is_promoted_property()
++                                    && param.modifiers.iter().any(|modifier| {
++                                        matches!(
++                                            modifier,
++                                            Modifier::Public(_)
++                                                | Modifier::Protected(_)
++                                                | Modifier::Private(_)
++                                        )
++                                    })
++                                    && cursor_offset >= param.span().start.offset
++                                    && cursor_offset <= param.variable.span.end.offset
++                            })?;
++                            let raw_name = bytes_to_str(param.variable.name);
++                            let native_hint = param.hint.as_ref().map(extract_hint_type);
++                            // Keep native signatures faithful to the actual
++                            // property. PHPDoc-only shapes/generics remain docs,
++                            // just as for ordinary property declarations.
++                            let documented = get_docblock_text_for_node(trivia, content, param)
++                                .and_then(extract_var_type)
++                                .or_else(|| {
++                                    get_docblock_text_for_node(trivia, content, *method).and_then(
++                                        |doc| {
++                                            crate::docblock::extract_param_raw_type(doc, raw_name)
++                                        },
++                                    )
++                                });
++                            let type_from_docblock = native_hint.is_none() && documented.is_some();
++                            let property = AccessorProperty {
++                                name: raw_name.strip_prefix('$').unwrap_or(raw_name).to_string(),
++                                type_hint: native_hint.or(documented),
++                                type_from_docblock,
++                                is_readonly: has_readonly(param.modifiers.iter()),
++                                is_static: false,
++                            };
++                            (vec![property], *all_members, *class_readonly, *body_end)
++                        }
+                         _ => return None,
+                     };
+-
+-                    let trivia = program.trivia.as_slice();
+-
+-                    let props = collect_accessor_properties(property, content, trivia);
+                     if props.is_empty() {
+                         return None;
+                     }
+diff --git a/tests/integration/code_action_generate_getter_setter.rs b/tests/integration/code_action_generate_getter_setter.rs
+index 2cc8bd5..032c5fc 100644
+--- a/tests/integration/code_action_generate_getter_setter.rs
++++ b/tests/integration/code_action_generate_getter_setter.rs
+@@ -1410,3 +1410,170 @@ fn anonymous_generation_does_not_duplicate_inherited_getter() {
+         "{actions:?}"
+     );
+ }
++
++#[test]
++fn promoted_accessor_mutable_property_is_selected_by_parameter_cursor() {
++    let backend = create_test_backend();
++    let content = "<?php class Subject { public function __construct(private string $name, private bool $active) {} }";
++    for (needle, getter, setter) in [
++        ("$name", "getName(): string", "setName(string $name): self"),
++        (
++            "$active",
++            "isActive(): bool",
++            "setActive(bool $active): self",
++        ),
++    ] {
++        let actions = actions_at(&backend, content, needle);
++        let action = find_action_titled(&actions, "Generate getter and setter")
++            .expect("promoted property offers both accessors");
++        let result = apply_edits(content, &extract_edits(action));
++        assert!(result.contains(getter), "{result}");
++        assert!(result.contains(setter), "{result}");
++        assert!(result.contains("__construct(private string $name, private bool $active) {}"));
++        if needle == "$name" {
++            assert!(!result.contains("setActive("));
++        } else {
++            assert!(!result.contains("getName("));
++        }
++    }
++}
++
++#[test]
++fn promoted_accessor_readonly_parameter_and_class_keep_getter_only() {
++    let backend = create_test_backend();
++    for content in [
++        "<?php class Subject { public function __construct(private readonly string $name) {} }",
++        "<?php readonly class Subject { public function __construct(private string $name) {} }",
++    ] {
++        let actions = actions_at(&backend, content, "$name");
++        let action = find_action_titled(&actions, "Generate getter")
++            .expect("readonly promoted property retains getter");
++        let result = apply_edits(content, &extract_edits(action));
++        assert!(result.contains("getName(): string"), "{result}");
++        assert!(find_action_titled(&actions, "Generate setter").is_none());
++        assert!(find_action_titled(&actions, "Generate getter and setter").is_none());
++    }
++}
++
++#[test]
++fn promoted_accessor_ordinary_parameter_and_constructor_body_are_not_properties() {
++    let backend = create_test_backend();
++    for (content, needle) in [
++        (
++            "<?php class Subject { public function __construct(string $name) {} }",
++            "$name",
++        ),
++        (
++            "<?php class Subject { public function other(private string $name) {} }",
++            "$name",
++        ),
++        (
++            "<?php class Subject { public function __construct(private string $name) { echo $name; } }",
++            "echo $name",
++        ),
++    ] {
++        let actions = actions_at(&backend, content, needle);
++        assert!(
++            generate_titles(&actions).is_empty(),
++            "must not manufacture a promoted property: {:?}",
++            generate_titles(&actions)
++        );
++    }
++}
++
++#[test]
++fn promoted_accessor_existing_case_insensitive_method_keeps_independent_setter() {
++    let backend = create_test_backend();
++    let content = "<?php class Subject { public function __construct(private string $name) {} public function GETNAME(): string { return $this->name; } }";
++    let actions = actions_at(&backend, content, "$name");
++    assert!(find_action_titled(&actions, "Generate getter").is_none());
++    assert!(find_action_titled(&actions, "Generate getter and setter").is_none());
++    let setter =
++        find_action_titled(&actions, "Generate setter").expect("independent setter remains valid");
++    let result = apply_edits(content, &extract_edits(setter));
++    assert!(result.contains("setName(string $name): self"));
++    assert_eq!(result.matches("GETNAME(").count(), 1);
++}
++
++#[test]
++fn promoted_accessor_anonymous_unicode_crlf_owner_retains_following_code() {
++    let backend = create_test_backend();
++    let content = "<?php\r\n// café 🐘\r\n$o = new class('value') {\r\n  public function __construct(private string $name) {}\r\n}; echo 'outside';\r\n";
++    let actions = actions_at(&backend, content, "$name");
++    let action = find_action_titled(&actions, "Generate getter and setter")
++        .expect("anonymous promoted property supports accessors");
++    let result = apply_edits(content, &extract_edits(action));
++    assert!(
++        result.contains("  public function getName(): string\r\n"),
++        "{result}"
++    );
++    assert!(
++        result.contains("  public function setName(string $name): self\r\n"),
++        "{result}"
++    );
++    assert!(result.ends_with("}; echo 'outside';\r\n"), "{result}");
++    assert!(!result.replace("\r\n", "").contains('\n'));
++}
++
++#[test]
++fn promoted_accessor_documented_shape_stays_doc_only_and_native_type_wins() {
++    let backend = create_test_backend();
++    for (content, native) in [
++        (
++            "<?php class Subject { /** @param array{label: string} $items */ public function __construct(private $items) {} }",
++            false,
++        ),
++        (
++            "<?php class Subject { /** @param list<string> $items */ public function __construct(private array $items) {} }",
++            true,
++        ),
++        (
++            "<?php class Subject { public function __construct(/** @var array{label: string} */ private $items) {} }",
++            false,
++        ),
++    ] {
++        let needle = if native {
++            "private array $items"
++        } else {
++            "private $items"
++        };
++        let actions = actions_at(&backend, content, needle);
++        let action = find_action_titled(&actions, "Generate getter and setter")
++            .expect("documented promoted property supports accessors");
++        let edits = extract_edits(action);
++        let inserted = edits
++            .iter()
++            .map(|e| e.new_text.as_str())
++            .collect::<String>();
++        if native {
++            assert!(inserted.contains("getItems(): array"), "{inserted}");
++            assert!(
++                inserted.contains("setItems(array $items): self"),
++                "{inserted}"
++            );
++        } else {
++            assert!(inserted.contains("@return array{"), "{inserted}");
++            assert!(inserted.contains("@param array{"), "{inserted}");
++            assert!(inserted.contains("label"), "{inserted}");
++            assert!(!inserted.contains("getItems():"), "{inserted}");
++            assert!(inserted.contains("setItems($items): self"), "{inserted}");
++        }
++    }
++}
++
++#[test]
++fn promoted_accessor_default_expression_does_not_select_outer_property() {
++    let backend = create_test_backend();
++    for (content, needle) in [
++        (
++            "<?php class Subject { public function __construct(private int $count = 1234) {} }",
++            "1234",
++        ),
++        (
++            "<?php class Subject { public function __construct(private object $value = new \\stdClass()) {} }",
++            "stdClass",
++        ),
++    ] {
++        assert!(generate_titles(&actions_at(&backend, content, needle)).is_empty());
++    }
++}

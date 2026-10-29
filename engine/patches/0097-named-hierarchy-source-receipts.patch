@@ -1,0 +1,420 @@
+diff --git a/docs/CHANGELOG.md b/docs/CHANGELOG.md
+index 8c525e5..6b164e3 100644
+--- a/docs/CHANGELOG.md
++++ b/docs/CHANGELOG.md
+@@ -15,6 +15,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
+ 
+ ## [Unreleased]
+ 
++- **Refresh changed call hierarchy declarations.** Expanding a retained function or method after its source changes now requires a fresh hierarchy selection. Unchanged declarations remain usable when another file is edited. Contributed by PHP Workbench downstream.
++
+ - **Search and replace named PHP arguments.** Structural patterns capture named values while retaining exact labels and written order. Reviewed replacements preserve captured expressions and keep positional argument tails distinct. Contributed by PHP Workbench downstream.
+ 
+ - **Follow literal array callbacks accurately.** Call hierarchy resolves known class names, object receivers and keyed arrays at their exact method selectors, respecting the selected PHP version and method visibility. Late-bound class names keep overridable implementations unresolved. Contributed by PHP Workbench downstream.
+diff --git a/examples/php/definition.php b/examples/php/definition.php
+index ede566c..083dd04 100644
+--- a/examples/php/definition.php
++++ b/examples/php/definition.php
+@@ -511,3 +511,11 @@ function namedArgumentStructuralSearch(): void
+     json_decode(json: '{"ready":true}', associative: true);
+     json_decode(json: '{"ready":false}', associative: false);
+ }
++
++// Try: show Callees on hierarchyReceiptNavigation, then change gtdHelper()
++// to strlen("updated") in its body. Refresh the hierarchy before expanding
++// the old node; it must not silently acquire the replacement body.
++function hierarchyReceiptNavigation(): void
++{
++    gtdHelper();
++}
+diff --git a/src/call_hierarchy.rs b/src/call_hierarchy.rs
+index 6fe660b..c6d75d1 100644
+--- a/src/call_hierarchy.rs
++++ b/src/call_hierarchy.rs
+@@ -837,7 +837,9 @@ impl Backend {
+             self.translate_item_to_blade(&mut current);
+             return (current == *item).then_some(callable);
+         }
+-        Some(callable)
++        // Ordinary named declarations require the same current source and
++        // opaque identity receipt as their anonymous/file counterparts.
++        (callable.item.data.as_ref()? == data).then_some(callable)
+     }
+ 
+     fn php_callable_at_location(
+@@ -951,6 +953,7 @@ impl Backend {
+                     fqn,
+                     function,
+                     offset,
++                    source_hash,
+                 ));
+             }
+         }
+@@ -993,7 +996,7 @@ impl Backend {
+             );
+             consider(build_callable(
+                 uri,
+-                content,
++                (content, source_hash?),
+                 (name, span.start),
+                 LspSymbolKind::FUNCTION,
+                 namespace,
+@@ -1512,7 +1515,7 @@ impl Backend {
+                 let (fqn, (uri, function)) = functions.get_key_value(target)?;
+                 (fqn.to_owned(), uri.clone(), function.clone())
+             };
+-            let (content, map, _) = self.cached_file(cache, &owner_uri)?;
++            let (content, map, source_hash) = self.cached_file(cache, &owner_uri)?;
+             let target_uri = self.function_navigation_uri(&fqn, owner_uri);
+             return function_callable_at(
+                 &target_uri,
+@@ -1521,6 +1524,7 @@ impl Backend {
+                 &fqn,
+                 &function,
+                 function.name_offset,
++                source_hash.as_ref(),
+             );
+         };
+         let class = self.find_or_load_class(class_name)?;
+@@ -1930,6 +1934,7 @@ fn function_callable_at(
+     fqn: &str,
+     function: &FunctionInfo,
+     offset: u32,
++    source_hash: Option<&[u8; 32]>,
+ ) -> Option<PhpCallable> {
+     if function.name_offset == 0 {
+         return None;
+@@ -1943,7 +1948,7 @@ fn function_callable_at(
+     {
+         return None;
+     }
+-    build_function_callable(uri, content, fqn, function, body)
++    build_function_callable(uri, content, fqn, function, body, source_hash?)
+ }
+ 
+ /// The body of the declaration whose name token sits at `name_offset`.
+@@ -1972,14 +1977,21 @@ fn declaration_body(symbol_map: &SymbolMap, name_offset: u32, upper: u32) -> Opt
+ /// declaration.
+ fn build_callable(
+     uri: &str,
+-    content: &str,
++    (content, source_hash): (&str, &[u8; 32]),
+     (name, name_offset): (&str, u32),
+     kind: LspSymbolKind,
+     detail: Option<String>,
+-    data: serde_json::Value,
++    mut data: serde_json::Value,
+     body: Option<(u32, u32)>,
+ ) -> Option<PhpCallable> {
+     let uri = Url::parse(uri).ok()?;
++    let receipt = data.as_object_mut()?;
++    receipt.insert("uri".into(), serde_json::json!(uri.as_str()));
++    receipt.insert(
++        "source_length".into(),
++        serde_json::json!(u32::try_from(content.len()).ok()?),
++    );
++    receipt.insert("source_sha256".into(), serde_json::json!(source_hash));
+     let name_start = name_offset as usize;
+     let selection_range = byte_range_to_lsp_range(content, name_start, name_start + name.len());
+     let range = Range::new(
+@@ -2109,7 +2121,7 @@ fn build_method_callable(
+     }
+     build_callable(
+         uri,
+-        content,
++        (content, source_hash?),
+         (&method.name, method.name_offset),
+         LspSymbolKind::METHOD,
+         Some(
+@@ -2130,10 +2142,11 @@ fn build_function_callable(
+     fqn: &str,
+     function: &FunctionInfo,
+     body: Option<(u32, u32)>,
++    source_hash: &[u8; 32],
+ ) -> Option<PhpCallable> {
+     build_callable(
+         uri,
+-        content,
++        (content, source_hash),
+         (&function.name, function.name_offset),
+         LspSymbolKind::FUNCTION,
+         function.namespace.clone(),
+diff --git a/tests/integration/call_hierarchy.rs b/tests/integration/call_hierarchy.rs
+index bdf3059..0b9f3cf 100644
+--- a/tests/integration/call_hierarchy.rs
++++ b/tests/integration/call_hierarchy.rs
+@@ -26,6 +26,215 @@ async fn prepare_at(
+         .unwrap_or_default()
+ }
+ 
++const NAMED_RECEIPT_SOURCE: &str = concat!(
++    "<?php\r\n",
++    "/* café 🐘 */ function namedReceiptLeafA(): void {}\r\n",
++    "function namedReceiptLeafB(): void {}\r\n",
++    "function namedReceiptAlpha(): void { namedReceiptLeafA(); }\r\n",
++    "class NamedReceiptOwnerA { public static function run(): void { namedReceiptLeafA(); } }\r\n",
++    "function namedReceiptHost(): void { namedReceiptAlpha(); NamedReceiptOwnerA::run(); }\r\n",
++);
++
++async fn named_receipt_refused(backend: &Backend, item: &CallHierarchyItem) -> (bool, bool) {
++    let outgoing = backend
++        .outgoing_calls(CallHierarchyOutgoingCallsParams {
++            item: item.clone(),
++            work_done_progress_params: Default::default(),
++            partial_result_params: Default::default(),
++        })
++        .await
++        .unwrap();
++    let incoming = backend
++        .incoming_calls(CallHierarchyIncomingCallsParams {
++            item: item.clone(),
++            work_done_progress_params: Default::default(),
++            partial_result_params: Default::default(),
++        })
++        .await
++        .unwrap();
++    (outgoing.is_none(), incoming.is_none())
++}
++
++async fn named_receipt_positive(backend: &Backend, item: &CallHierarchyItem, leaf: &str) {
++    let edges = outgoing(backend, item).await;
++    assert_eq!(
++        edges.len(),
++        1,
++        "a real body must establish a nonempty positive control"
++    );
++    assert_eq!(edges[0].to.name, leaf);
++    let callers = incoming(backend, item).await;
++    assert_eq!(
++        callers.len(),
++        1,
++        "the actual host invokes this named declaration"
++    );
++    assert_eq!(callers[0].from.name, "namedReceiptHost");
++    assert_eq!(callers[0].from_ranges.len(), 1);
++}
++
++#[tokio::test]
++async fn named_call_receipt_function_refuses_accepted_same_offset_rename() {
++    let backend = create_test_backend();
++    let uri = Url::parse("file:///named-receipt-function.php").unwrap();
++    open_php(&backend, &uri, NAMED_RECEIPT_SOURCE).await;
++    let original =
++        anonymous_hierarchy_prepare(&backend, &uri, NAMED_RECEIPT_SOURCE, "namedReceiptAlpha")
++            .await;
++    named_receipt_positive(&backend, &original, "namedReceiptLeafA").await;
++    let changed = NAMED_RECEIPT_SOURCE.replace("namedReceiptAlpha", "namedReceiptBravo");
++    assert_eq!(changed.len(), NAMED_RECEIPT_SOURCE.len());
++    anonymous_hierarchy_change(&backend, &uri, &changed).await;
++    let current = anonymous_hierarchy_prepare(&backend, &uri, &changed, "namedReceiptBravo").await;
++    assert_eq!(current.selection_range, original.selection_range);
++    assert_eq!(
++        current.data.as_ref().unwrap()["offset"],
++        original.data.as_ref().unwrap()["offset"]
++    );
++    assert_ne!(
++        current.data.as_ref().unwrap()["function"],
++        original.data.as_ref().unwrap()["function"]
++    );
++    named_receipt_positive(&backend, &current, "namedReceiptLeafA").await;
++    assert_eq!(
++        named_receipt_refused(&backend, &original).await,
++        (true, true),
++        "an old function identity cannot authorize the replacement at its retained offset"
++    );
++}
++
++#[tokio::test]
++async fn named_call_receipt_method_refuses_accepted_same_offset_owner_change() {
++    let backend = create_test_backend();
++    let uri = Url::parse("file:///named-receipt-method.php").unwrap();
++    open_php(&backend, &uri, NAMED_RECEIPT_SOURCE).await;
++    let original = anonymous_hierarchy_prepare(&backend, &uri, NAMED_RECEIPT_SOURCE, "run()").await;
++    named_receipt_positive(&backend, &original, "namedReceiptLeafA").await;
++    let changed = NAMED_RECEIPT_SOURCE.replace("NamedReceiptOwnerA", "NamedReceiptOwnerB");
++    assert_eq!(changed.len(), NAMED_RECEIPT_SOURCE.len());
++    anonymous_hierarchy_change(&backend, &uri, &changed).await;
++    let current = anonymous_hierarchy_prepare(&backend, &uri, &changed, "run()").await;
++    assert_eq!(current.selection_range, original.selection_range);
++    assert_eq!(
++        current.data.as_ref().unwrap()["offset"],
++        original.data.as_ref().unwrap()["offset"]
++    );
++    assert_ne!(
++        current.data.as_ref().unwrap()["owner"],
++        original.data.as_ref().unwrap()["owner"]
++    );
++    named_receipt_positive(&backend, &current, "namedReceiptLeafA").await;
++    assert_eq!(
++        named_receipt_refused(&backend, &original).await,
++        (true, true),
++        "same method spelling and coordinates cannot transfer an old owner receipt"
++    );
++}
++
++#[tokio::test]
++async fn named_call_receipt_refuses_same_name_body_retarget_after_accepted_change() {
++    let backend = create_test_backend();
++    let uri = Url::parse("file:///named-receipt-body.php").unwrap();
++    open_php(&backend, &uri, NAMED_RECEIPT_SOURCE).await;
++    let original =
++        anonymous_hierarchy_prepare(&backend, &uri, NAMED_RECEIPT_SOURCE, "namedReceiptAlpha")
++            .await;
++    named_receipt_positive(&backend, &original, "namedReceiptLeafA").await;
++    let changed = NAMED_RECEIPT_SOURCE.replace(
++        "function namedReceiptAlpha(): void { namedReceiptLeafA(); }",
++        "function namedReceiptAlpha(): void { namedReceiptLeafB(); }",
++    );
++    assert_eq!(changed.len(), NAMED_RECEIPT_SOURCE.len());
++    assert_ne!(changed, NAMED_RECEIPT_SOURCE);
++    anonymous_hierarchy_change(&backend, &uri, &changed).await;
++    let current = anonymous_hierarchy_prepare(&backend, &uri, &changed, "namedReceiptAlpha").await;
++    assert_eq!(current.selection_range, original.selection_range);
++    assert_eq!(
++        current.data.as_ref().unwrap()["function"],
++        original.data.as_ref().unwrap()["function"]
++    );
++    named_receipt_positive(&backend, &current, "namedReceiptLeafB").await;
++    assert_eq!(
++        named_receipt_refused(&backend, &original).await,
++        (true, true),
++        "an old tree must not silently expand a new source body at identical coordinates"
++    );
++}
++
++#[tokio::test]
++async fn named_call_receipt_opaque_identity_and_real_uri_redirects_are_refused() {
++    let backend = create_test_backend();
++    let left = Url::parse("file:///named-receipt-left.php").unwrap();
++    let right = Url::parse("file:///named-receipt-right.php").unwrap();
++    open_php(&backend, &left, NAMED_RECEIPT_SOURCE).await;
++    let alpha =
++        anonymous_hierarchy_prepare(&backend, &left, NAMED_RECEIPT_SOURCE, "namedReceiptAlpha")
++            .await;
++    let method = anonymous_hierarchy_prepare(&backend, &left, NAMED_RECEIPT_SOURCE, "run()").await;
++    named_receipt_positive(&backend, &alpha, "namedReceiptLeafA").await;
++    named_receipt_positive(&backend, &method, "namedReceiptLeafA").await;
++    let peer = NAMED_RECEIPT_SOURCE
++        .replace("namedReceiptAlpha", "namedReceiptBravo")
++        .replace("namedReceiptLeafA", "namedReceiptLeafC")
++        .replace("namedReceiptLeafB", "namedReceiptLeafD")
++        .replace("NamedReceiptOwnerA", "NamedReceiptOwnerB")
++        .replace("namedReceiptHost", "namedReceiptPeer");
++    assert_eq!(peer.len(), NAMED_RECEIPT_SOURCE.len());
++    open_php(&backend, &right, &peer).await;
++    let bravo = anonymous_hierarchy_prepare(&backend, &right, &peer, "namedReceiptBravo").await;
++    let peer_edges = outgoing(&backend, &bravo).await;
++    assert_eq!(peer_edges.len(), 1);
++    assert_eq!(peer_edges[0].to.name, "namedReceiptLeafC");
++    assert_eq!(bravo.selection_range, alpha.selection_range);
++    let mut redirected = alpha.clone();
++    redirected.uri = right;
++    let mut forged_function = alpha.clone();
++    forged_function.data.as_mut().unwrap()["function"] = serde_json::json!("namedReceiptBravo");
++    let mut forged_owner = method.clone();
++    forged_owner.data.as_mut().unwrap()["owner"] = serde_json::json!("NamedReceiptOwnerB");
++    let mut refusals = Vec::new();
++    for (label, forged) in [
++        ("real-other-uri", redirected),
++        ("opaque-function", forged_function),
++        ("opaque-owner", forged_owner),
++    ] {
++        refusals.push((label, named_receipt_refused(&backend, &forged).await));
++    }
++    assert!(
++        refusals.iter().all(|(_, result)| *result == (true, true)),
++        "real current peer declarations do not authorize stale or forged identity: {refusals:?}"
++    );
++    named_receipt_positive(&backend, &alpha, "namedReceiptLeafA").await;
++    named_receipt_positive(&backend, &method, "namedReceiptLeafA").await;
++}
++
++#[tokio::test]
++async fn named_call_receipt_unchanged_source_survives_unrelated_peer_edits() {
++    let backend = create_test_backend();
++    let uri = Url::parse("file:///named-receipt-unchanged.php").unwrap();
++    let peer = Url::parse("file:///named-receipt-unrelated.php").unwrap();
++    open_php(&backend, &uri, NAMED_RECEIPT_SOURCE).await;
++    let alpha =
++        anonymous_hierarchy_prepare(&backend, &uri, NAMED_RECEIPT_SOURCE, "namedReceiptAlpha")
++            .await;
++    let method = anonymous_hierarchy_prepare(&backend, &uri, NAMED_RECEIPT_SOURCE, "run()").await;
++    named_receipt_positive(&backend, &alpha, "namedReceiptLeafA").await;
++    named_receipt_positive(&backend, &method, "namedReceiptLeafA").await;
++    let peer_before = "<?php\r\nfunction unrelatedReceiptPeer(): int { return 1; }\r\n";
++    let peer_after = "<?php\r\nfunction unrelatedReceiptPeer(): int { return 2; }\r\n";
++    open_php(&backend, &peer, peer_before).await;
++    anonymous_hierarchy_change(&backend, &peer, peer_after).await;
++    let current =
++        anonymous_hierarchy_prepare(&backend, &uri, NAMED_RECEIPT_SOURCE, "namedReceiptAlpha")
++            .await;
++    assert_eq!(
++        current.data, alpha.data,
++        "another document does not change this declaration's source receipt"
++    );
++    named_receipt_positive(&backend, &alpha, "namedReceiptLeafA").await;
++    named_receipt_positive(&backend, &method, "namedReceiptLeafA").await;
++}
++
+ async fn incoming(backend: &Backend, item: &CallHierarchyItem) -> Vec<CallHierarchyIncomingCall> {
+     backend
+         .incoming_calls(CallHierarchyIncomingCallsParams {
+@@ -4306,9 +4515,10 @@ async fn immediate_boundary_same_length_dirty_receiver_change_replaces_reciproca
+         )],
+     )
+     .await;
+-    for (version, current, live, retired, site) in [
+-        (2, changed.as_str(), &other, &first, "(new Other())(51)"),
+-        (3, source, &first, &other, "(new First())(51)"),
++    assert!(incoming(&backend, &other).await.is_empty());
++    for (version, current, live_owner, retired_owner, site) in [
++        (2, changed.as_str(), "Other", "First", "(new Other())(51)"),
++        (3, source, "First", "Other", "(new First())(51)"),
+     ] {
+         backend
+             .did_change(DidChangeTextDocumentParams {
+@@ -4323,16 +4533,42 @@ async fn immediate_boundary_same_length_dirty_receiver_change_replaces_reciproca
+                 }],
+             })
+             .await;
++        // All named items carry their declaring file's current source receipt.
++        let live = immediate_object_target(
++            &backend,
++            &uri,
++            current,
++            &format!("class {live_owner} {{ public function __invoke"),
++            "__invoke",
++        )
++        .await;
++        let retired = immediate_object_target(
++            &backend,
++            &uri,
++            current,
++            &format!("class {retired_owner} {{ public function __invoke"),
++            "__invoke",
++        )
++        .await;
+         let host = anonymous_hierarchy_prepare(&backend, &uri, current, "dirtyObjectHost").await;
+         immediate_boundary_assert_edge(
+             &backend,
+             &host,
+-            live,
++            &live,
+             vec![immediate_object_source_range(current, site, "(51)")],
+         )
+         .await;
++        let callers = backend
++            .incoming_calls(CallHierarchyIncomingCallsParams {
++                item: retired,
++                work_done_progress_params: Default::default(),
++                partial_result_params: Default::default(),
++            })
++            .await
++            .unwrap()
++            .expect("fresh retired receiver remains a valid named declaration");
+         assert!(
+-            incoming(&backend, retired).await.is_empty(),
++            callers.is_empty(),
+             "first reply loses old receiver at version {version}"
+         );
+     }

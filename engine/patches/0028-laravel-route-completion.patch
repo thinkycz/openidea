@@ -1,0 +1,919 @@
+diff --git a/docs/CHANGELOG.md b/docs/CHANGELOG.md
+index b1178bb..1b33d31 100644
+--- a/docs/CHANGELOG.md
++++ b/docs/CHANGELOG.md
+@@ -1,3 +1,7 @@
++## Workbench .28 route completion identity
++
++Route-name and URI-parameter completion resolve global/helper/facade aliases, namespace-local homonyms and framework receiver types. Named route values use their PHP parameter roles; unsaved helper presence changes apply without caller edits.
++
+ # Changelog
+ 
+ All notable changes to PHPantom will be documented in this file.
+diff --git a/src/completion/handler/mod.rs b/src/completion/handler/mod.rs
+index c4a53c7..1a905e7 100644
+--- a/src/completion/handler/mod.rs
++++ b/src/completion/handler/mod.rs
+@@ -402,7 +402,7 @@ impl Backend {
+                     )
+                     && let Some(code) = code_ctx.as_ref()
+                     && let Some(response) =
+-                        self.try_route_param_completion(&content, position, code)
++                        self.try_route_param_completion_in_file(&content, position, code, &ctx)
+                 {
+                     return Ok(Some(response));
+                 }
+diff --git a/src/completion/laravel_route_calls.rs b/src/completion/laravel_route_calls.rs
+new file mode 100644
+index 0000000..1ecd2ed
+--- /dev/null
++++ b/src/completion/laravel_route_calls.rs
+@@ -0,0 +1,254 @@
++//! PHP identity and argument roles for live route URL completion.
++use super::laravel_string_keys::receiver_chain_start;
++use super::source::helpers::{split_trailing_ident, trailing_class_name};
++use crate::{Backend, types::FileContext};
++
++pub(crate) type RouteCallRole<'a> = dyn Fn(&str) -> Option<&'static str> + 'a;
++
++impl Backend {
++    fn global_route_helper(
++        &self,
++        content: &str,
++        callable: &str,
++        ctx: &FileContext,
++    ) -> Option<&'static str> {
++        let written = trailing_class_name(callable);
++        let offset = (callable.len() - written.len()) as u32;
++        let names = ctx.resolved_names.as_deref();
++        let resolved = names.and_then(|names| names.get(offset));
++        let helpers = ["route", "to_route", "redirect", "url", "response"];
++        if let Some(name) = resolved.and_then(|name| {
++            helpers
++                .iter()
++                .copied()
++                .find(|h| name.trim_start_matches('\\').eq_ignore_ascii_case(h))
++        }) {
++            return Some(name);
++        }
++        // An unfinished string may leave the callee out of mago-names while
++        // retaining its imports. Check the typed PHP import, since the legacy
++        // use map merges class/function/constant symbol tables.
++        let recovered = (resolved.is_none() && !written.contains('\\'))
++            .then(|| incomplete_function_context(content, offset, written))
++            .flatten();
++        if let Some(recovered) = &recovered {
++            if let Some(target) = &recovered.imported {
++                return helpers
++                    .into_iter()
++                    .find(|name| target.trim_start_matches('\\').eq_ignore_ascii_case(name));
++            }
++            if recovered.local_declared {
++                return None;
++            }
++        }
++        let name = helpers
++            .into_iter()
++            .find(|name| written.trim_start_matches('\\').eq_ignore_ascii_case(name))?;
++        if written.starts_with('\\') {
++            return Some(name);
++        }
++        if names.is_some_and(|names| names.is_imported(offset)) {
++            return None;
++        }
++        let local = resolved.map(str::to_owned).or_else(|| {
++            let namespace = recovered
++                .as_ref()
++                .map(|r| r.namespace.as_deref())
++                .unwrap_or_else(|| ctx.namespace_at(offset).as_deref());
++            namespace.map(|ns| format!("{ns}\\{name}"))
++        });
++        (!local.is_some_and(|name| self.has_indexed_function(&name))).then_some(name)
++    }
++
++    pub(crate) fn laravel_route_call_role(
++        &self,
++        content: &str,
++        callable: &str,
++        ctx: &FileContext,
++    ) -> Option<&'static str> {
++        let (method, before) = split_trailing_ident(callable);
++        let before = before.trim_end();
++        if !before.ends_with("::") && !before.ends_with("->") {
++            return match self.global_route_helper(content, callable, ctx)? {
++                "route" => Some("name"),
++                "to_route" => Some("route"),
++                _ => None,
++            };
++        }
++        let method = method.to_ascii_lowercase();
++        if !matches!(
++            method.as_str(),
++            "route" | "signedroute" | "temporarysignedroute" | "redirecttoroute"
++        ) {
++            return None;
++        }
++        if let Some(class_prefix) = before.strip_suffix("::") {
++            let written = trailing_class_name(class_prefix);
++            let offset = (class_prefix.trim_end().len() - written.len()) as u32;
++            let resolved = ctx.resolve_name_at(written, offset);
++            for (facade, family) in [
++                ("URL", "url"),
++                ("Redirect", "redirect"),
++                ("Response", "response"),
++            ] {
++                let fqn = format!("Illuminate\\Support\\Facades\\{facade}");
++                if resolved.trim_start_matches('\\').eq_ignore_ascii_case(&fqn)
++                    || (resolved
++                        .trim_start_matches('\\')
++                        .eq_ignore_ascii_case(facade)
++                        && !self.has_indexed_class(facade))
++                {
++                    return route_method_role(family, &method);
++                }
++            }
++            return None;
++        }
++        let receiver = before
++            .strip_suffix("->")?
++            .trim_end()
++            .trim_end_matches('?')
++            .trim_end();
++        if let Some(call) = receiver.strip_suffix(')')
++            && let Some(open) = call.rfind('(')
++            && call[open + 1..].trim().is_empty()
++            && let Some(helper) = self.global_route_helper(content, call[..open].trim_end(), ctx)
++        {
++            return route_method_role(helper, &method);
++        }
++        let start = receiver_chain_start(receiver);
++        let expression = &callable[start..];
++        let target = self.resolve_callable_target_at_offset(
++            expression,
++            content,
++            callable.len() as u32,
++            ctx,
++        )?;
++        let owner = target.owner_class?;
++        let loader = self.class_loader(ctx);
++        for (class, family) in [
++            ("Illuminate\\Routing\\UrlGenerator", "url"),
++            ("Illuminate\\Contracts\\Routing\\UrlGenerator", "url"),
++            ("Illuminate\\Routing\\Redirector", "redirect"),
++            ("Illuminate\\Routing\\ResponseFactory", "response"),
++            (
++                "Illuminate\\Contracts\\Routing\\ResponseFactory",
++                "response",
++            ),
++        ] {
++            if owner.as_str().eq_ignore_ascii_case(class)
++                || crate::class_lookup::is_subclass_of(owner.as_str(), class, &loader)
++            {
++                return route_method_role(family, &method);
++            }
++        }
++        None
++    }
++}
++
++fn route_method_role(family: &str, method: &str) -> Option<&'static str> {
++    match (family, method) {
++        ("url", "route" | "signedroute" | "temporarysignedroute") => Some("name"),
++        ("redirect", "route" | "signedroute" | "temporarysignedroute")
++        | ("response", "redirecttoroute") => Some("route"),
++        _ => None,
++    }
++}
++
++/// Recover typed imports from the active namespace when the incomplete call
++/// has no resolved-name entry. The repaired prefix preserves import offsets.
++#[derive(Default)]
++struct IncompleteFunctionContext {
++    namespace: Option<String>,
++    imported: Option<String>,
++    local_declared: bool,
++}
++
++fn incomplete_function_context(
++    content: &str,
++    offset: u32,
++    alias: &str,
++) -> Option<IncompleteFunctionContext> {
++    use crate::atom::bytes_to_str;
++    use mago_span::HasSpan;
++    use mago_syntax::cst::{Statement, UseItem, UseItems};
++    // Complete only the prefix before the callee. This keeps a later unfinished
++    // namespace body from being discarded and reusing an earlier block's imports.
++    let prefix = &content[..offset as usize];
++    let code = crate::completion::source::code_context::code_context_at(content, offset as usize)?;
++    let mut repaired = prefix.to_owned();
++    repaired.push_str("null");
++    for bracket in code.open_brackets.iter().rev() {
++        match bracket.byte {
++            b'(' => repaired.push(')'),
++            b'[' => repaired.push(']'),
++            b'{' => repaired.push_str(";}"),
++            _ => {}
++        }
++    }
++    repaired.push(';');
++    crate::parser::with_parsed_program(&repaired, "route_completion_import", |program, _| {
++        let namespace = program
++            .statements
++            .iter()
++            .filter_map(|statement| match statement {
++                Statement::Namespace(namespace) if namespace.span().start.offset <= offset => {
++                    Some(namespace)
++                }
++                _ => None,
++            })
++            .next_back();
++        let statements = namespace
++            .map(|namespace| namespace.statements())
++            .unwrap_or(&program.statements);
++        let namespace_name = namespace
++            .and_then(|namespace| namespace.name.as_ref())
++            .map(|name| bytes_to_str(name.value()).to_owned());
++        let local_declared = statements.iter().any(|statement| matches!(statement,
++            Statement::Function(function) if bytes_to_str(function.name.value).eq_ignore_ascii_case(alias)));
++        let target = |item: &UseItem<'_>, prefix: Option<&str>| {
++            let name = bytes_to_str(item.name.value());
++            let imported_alias = item
++                .alias
++                .as_ref()
++                .map(|alias| bytes_to_str(alias.identifier.value))
++                .unwrap_or_else(|| name.rsplit('\\').next().unwrap_or(name));
++            imported_alias.eq_ignore_ascii_case(alias).then(|| {
++                prefix.map_or_else(|| name.to_owned(), |prefix| format!("{prefix}\\{name}"))
++            })
++        };
++        for statement in statements.iter() {
++            let Statement::Use(statement) = statement else {
++                continue;
++            };
++            let found = match &statement.items {
++                UseItems::TypedSequence(sequence) if sequence.r#type.is_function() => {
++                    sequence.items.iter().find_map(|item| target(item, None))
++                }
++                UseItems::TypedList(list) if list.r#type.is_function() => list
++                    .items
++                    .iter()
++                    .find_map(|item| target(item, Some(bytes_to_str(list.namespace.value())))),
++                UseItems::MixedList(list) => list
++                    .items
++                    .iter()
++                    .filter(|item| item.r#type.as_ref().is_some_and(|kind| kind.is_function()))
++                    .find_map(|item| {
++                        target(&item.item, Some(bytes_to_str(list.namespace.value())))
++                    }),
++                _ => None,
++            };
++            if found.is_some() {
++                return Some(IncompleteFunctionContext {
++                    namespace: namespace_name,
++                    imported: found,
++                    local_declared,
++                });
++            }
++        }
++        Some(IncompleteFunctionContext {
++            namespace: namespace_name,
++            imported: None,
++            local_declared,
++        })
++    })
++}
+diff --git a/src/completion/laravel_route_params.rs b/src/completion/laravel_route_params.rs
+index 6e101c6..962c2b3 100644
+--- a/src/completion/laravel_route_params.rs
++++ b/src/completion/laravel_route_params.rs
+@@ -25,10 +25,20 @@ struct RouteParamContext {
+ }
+ 
+ /// Detect the cursor inside a key of a route parameters array.
++#[cfg(test)]
+ fn detect_context(
+     content: &str,
+     cursor_offset: usize,
+     code: &CodeContext<'_>,
++) -> Option<RouteParamContext> {
++    detect_context_inner(content, cursor_offset, code, None)
++}
++
++fn detect_context_inner(
++    content: &str,
++    cursor_offset: usize,
++    code: &CodeContext<'_>,
++    route_role: Option<&crate::completion::laravel_route_calls::RouteCallRole<'_>>,
+ ) -> Option<RouteParamContext> {
+     let (quote_pos, _) = code.open_string?;
+ 
+@@ -40,17 +50,21 @@ fn detect_context(
+ 
+     let call = enclosing_array_key_call(content, code)?;
+     let receiver_is_call = call.before_callee.ends_with("::") || call.before_callee.ends_with("->");
+-    let names_a_route = match call.callee.as_str() {
+-        // `signedRoute()` / `temporarySignedRoute()` only exist on the `URL`
+-        // facade and the URL generator, so the name alone identifies them.
+-        "signedroute" | "temporarysignedroute" => true,
+-        // `route()` is the helper as well as a method on the `URL`, `Redirect`
+-        // and `Response` facades and on the `redirect()`/`url()` helpers, all
+-        // of which take the same `(name, parameters)` pair.
+-        "route" => true,
+-        // `to_route()` is a helper function only.
+-        "to_route" => !receiver_is_call,
+-        _ => false,
++    let names_a_route = if let Some(role) = route_role {
++        role(call.callable).is_some()
++    } else {
++        match call.callee.as_str() {
++            // `signedRoute()` / `temporarySignedRoute()` only exist on the `URL`
++            // facade and the URL generator, so the name alone identifies them.
++            "signedroute" | "temporarysignedroute" => true,
++            // `route()` is the helper as well as a method on the `URL`, `Redirect`
++            // and `Response` facades and on the `redirect()`/`url()` helpers, all
++            // of which take the same `(name, parameters)` pair.
++            "route" => true,
++            // `to_route()` is a helper function only.
++            "to_route" => !receiver_is_call,
++            _ => false,
++        }
+     };
+     if !names_a_route {
+         return None;
+@@ -68,14 +82,36 @@ impl Backend {
+     ///
+     /// Returns `None` when the cursor is not inside the parameters array of a
+     /// route-URL call, or when the route's URI takes no parameters.
++    #[cfg(test)]
+     pub(crate) fn try_route_param_completion(
+         &self,
+         content: &str,
+         position: Position,
+         code: &CodeContext<'_>,
++    ) -> Option<CompletionResponse> {
++        self.try_route_param_completion_inner(content, position, code, None)
++    }
++
++    pub(crate) fn try_route_param_completion_in_file(
++        &self,
++        content: &str,
++        position: Position,
++        code: &CodeContext<'_>,
++        file_ctx: &crate::types::FileContext,
++    ) -> Option<CompletionResponse> {
++        let role = |callable: &str| self.laravel_route_call_role(content, callable, file_ctx);
++        self.try_route_param_completion_inner(content, position, code, Some(&role))
++    }
++
++    fn try_route_param_completion_inner(
++        &self,
++        content: &str,
++        position: Position,
++        code: &CodeContext<'_>,
++        route_role: Option<&crate::completion::laravel_route_calls::RouteCallRole<'_>>,
+     ) -> Option<CompletionResponse> {
+         let cursor_offset = position_to_offset(content, position) as usize;
+-        let ctx = detect_context(content, cursor_offset, code)?;
++        let ctx = detect_context_inner(content, cursor_offset, code, route_role)?;
+ 
+         let discovery = self.cached_routes();
+         let route = discovery
+diff --git a/src/completion/laravel_string_keys/context.rs b/src/completion/laravel_string_keys/context.rs
+index 48bdef9..117a7d0 100644
+--- a/src/completion/laravel_string_keys/context.rs
++++ b/src/completion/laravel_string_keys/context.rs
+@@ -607,7 +607,7 @@ pub(super) fn attribute_class_start(before_paren: &str, name_start: usize) -> Op
+ /// Find the top-level statement boundary before a fluent receiver chain.
+ /// Newlines are ordinary PHP whitespace, while semicolons and braces inside
+ /// balanced calls/closures belong to the receiver expression itself.
+-pub(super) fn receiver_chain_start(prefix: &str) -> usize {
++pub(crate) fn receiver_chain_start(prefix: &str) -> usize {
+     let bytes = prefix.as_bytes();
+     let mut boundary = 0usize;
+     let mut round = 0usize;
+@@ -877,7 +877,7 @@ pub(super) fn detect_laravel_string_key_context(
+     content: &str,
+     position: Position,
+ ) -> Option<LaravelStringKeyContext<'_>> {
+-    detect_laravel_string_key_context_inner(content, position, None, None, None)
++    detect_laravel_string_key_context_inner(content, position, None, None, None, None)
+ }
+ 
+ pub(super) fn detect_laravel_string_key_context_inner<'a>(
+@@ -886,6 +886,7 @@ pub(super) fn detect_laravel_string_key_context_inner<'a>(
+     resolved_names: Option<&'a crate::names::OwnedResolvedNames>,
+     indexed_function_exists: Option<&dyn Fn(&str) -> bool>,
+     indexed_class_exists: Option<&dyn Fn(&str) -> bool>,
++    route_role: Option<&crate::completion::laravel_route_calls::RouteCallRole<'_>>,
+ ) -> Option<LaravelStringKeyContext<'a>> {
+     let cursor_offset = position_to_offset(content, position) as usize;
+     let bytes = content.as_bytes();
+@@ -946,7 +947,12 @@ pub(super) fn detect_laravel_string_key_context_inner<'a>(
+         .flatten();
+     let is_attribute = current_attribute_class_start.is_some();
+ 
+-    let kind = if is_attribute {
++    let live_route_role = route_role.and_then(|role| role(before_paren));
++    let kind = if let Some(role) = live_route_role {
++        (argument.shape == StringArgumentShape::Scalar
++            && argument.named_argument.is_none_or(|name| name == role))
++        .then_some(LaravelStringKind::Route)
++    } else if is_attribute {
+         if argument.shape != StringArgumentShape::Scalar {
+             return None;
+         }
+@@ -1063,7 +1069,7 @@ pub(super) fn detect_laravel_string_key_context_inner<'a>(
+                 (
+                     "url" | "redirect" | "response",
+                     "route" | "signedroute" | "temporarysignedroute" | "redirecttoroute",
+-                ) => Some(LaravelStringKind::Route),
++                ) if route_role.is_none() => Some(LaravelStringKind::Route),
+                 ("route", "is" | "currentroutenamed") => Some(LaravelStringKind::Route),
+                 ("env", "get" | "getorfail") => Some(LaravelStringKind::Env),
+                 // Artisan command names.
+@@ -1158,10 +1164,13 @@ pub(super) fn detect_laravel_string_key_context_inner<'a>(
+             if argument.named_argument.is_some() || argument.shape != StringArgumentShape::Scalar {
+                 return None;
+             }
+-            if matches!(
+-                func_name.to_ascii_lowercase().as_str(),
+-                "route" | "signedroute" | "temporarysignedroute" | "redirecttoroute" | "routeis"
+-            ) {
++            if func_name.eq_ignore_ascii_case("routeis")
++                || (route_role.is_none()
++                    && matches!(
++                        func_name.to_ascii_lowercase().as_str(),
++                        "route" | "signedroute" | "temporarysignedroute" | "redirecttoroute"
++                    ))
++            {
+                 Some(LaravelStringKind::Route)
+                 // `$this->call('cmd')` / `$this->callSilently('cmd')` inside a
+                 // console command run another Artisan command.  Restricted to a
+@@ -1221,7 +1230,7 @@ pub(super) fn detect_laravel_string_key_context_inner<'a>(
+             None
+         } else {
+             match fn_lower.as_str() {
+-                "route" | "to_route" => Some(LaravelStringKind::Route),
++                "route" | "to_route" if route_role.is_none() => Some(LaravelStringKind::Route),
+                 "config" => Some(LaravelStringKind::Config),
+                 "view" | "blade_view_directive" | "blade_each_directive" => {
+                     Some(LaravelStringKind::View)
+diff --git a/src/completion/laravel_string_keys/mod.rs b/src/completion/laravel_string_keys/mod.rs
+index 046d7d0..9c0e172 100644
+--- a/src/completion/laravel_string_keys/mod.rs
++++ b/src/completion/laravel_string_keys/mod.rs
+@@ -22,6 +22,7 @@ mod enumerate;
+ #[cfg(test)]
+ mod tests;
+ 
++pub(crate) use context::receiver_chain_start;
+ use context::*;
+ 
+ /// The icon an editor shows beside a completed string key: whatever the key
+@@ -133,7 +134,7 @@ impl Backend {
+         content: &str,
+         position: Position,
+     ) -> Option<CompletionResponse> {
+-        self.try_laravel_string_key_completion_inner(content, position, None, None, None)
++        self.try_laravel_string_key_completion_inner(content, position, None, None, None, None)
+     }
+ 
+     /// Live-request form of Laravel string-key completion. Resolved names
+@@ -146,12 +147,14 @@ impl Backend {
+     ) -> Option<CompletionResponse> {
+         let indexed_function_exists = |name: &str| self.has_indexed_function(name);
+         let indexed_class_exists = |name: &str| self.has_indexed_class(name);
++        let route_role = |callable: &str| self.laravel_route_call_role(content, callable, file_ctx);
+         self.try_laravel_string_key_completion_inner(
+             content,
+             position,
+             file_ctx.resolved_names.as_deref(),
+             Some(&indexed_function_exists),
+             Some(&indexed_class_exists),
++            Some(&route_role),
+         )
+     }
+ 
+@@ -162,6 +165,7 @@ impl Backend {
+         resolved_names: Option<&crate::names::OwnedResolvedNames>,
+         indexed_function_exists: Option<&dyn Fn(&str) -> bool>,
+         indexed_class_exists: Option<&dyn Fn(&str) -> bool>,
++        route_role: Option<&crate::completion::laravel_route_calls::RouteCallRole<'_>>,
+     ) -> Option<CompletionResponse> {
+         let ctx = detect_laravel_string_key_context_inner(
+             content,
+@@ -169,6 +173,7 @@ impl Backend {
+             resolved_names,
+             indexed_function_exists,
+             indexed_class_exists,
++            route_role,
+         )?;
+ 
+         // The candidate lists are shared with every other consumer, so only
+diff --git a/src/completion/mod.rs b/src/completion/mod.rs
+index f545ea2..280fba0 100644
+--- a/src/completion/mod.rs
++++ b/src/completion/mod.rs
+@@ -80,6 +80,7 @@ pub(crate) mod eloquent_string;
+ pub(crate) mod handler;
+ pub(crate) mod laravel_paths;
+ pub(crate) mod laravel_request_keys;
++mod laravel_route_calls;
+ pub(crate) mod laravel_route_controller;
+ pub(crate) mod laravel_route_params;
+ pub(crate) mod laravel_string_keys;
+diff --git a/src/completion/source/helpers.rs b/src/completion/source/helpers.rs
+index 8db6c59..d114612 100644
+--- a/src/completion/source/helpers.rs
++++ b/src/completion/source/helpers.rs
+@@ -37,6 +37,8 @@ pub(crate) use crate::type_engine::subject_expr::parse_new_expression_class as e
+ /// Recovered from `foo('name', ['key|' => …])`-shaped source text by
+ /// [`enclosing_array_key_call`].
+ pub(crate) struct ArrayKeyCall<'a> {
++    /// Full source prefix ending at the callable, before its opening parenthesis.
++    pub callable: &'a str,
+     /// The call's first argument, which must be a string literal — the name
+     /// the keys belong to (an Artisan command, a route, …).
+     pub name: String,
+@@ -70,6 +72,7 @@ pub(crate) fn enclosing_array_key_call<'a>(
+     }
+ 
+     Some(ArrayKeyCall {
++        callable: content[..paren_open].trim_end(),
+         name,
+         callee: callee.to_ascii_lowercase(),
+         before_callee: before_callee.trim_end(),
+diff --git a/tests/integration/laravel_route_completion_identity.rs b/tests/integration/laravel_route_completion_identity.rs
+new file mode 100644
+index 0000000..8463a14
+--- /dev/null
++++ b/tests/integration/laravel_route_completion_identity.rs
+@@ -0,0 +1,343 @@
++use crate::common::{
++    LARAVEL_SRC_COMPOSER, create_initialized_psr4_workspace, open_php_file, position_after,
++    response_labels,
++};
++use tower_lsp::{LanguageServer, lsp_types::*};
++
++const ROUTES: &str = "<?php Route::get('/users/{user}', 'show')->name('users.show');";
++
++async fn labels(source: &str, needle: &str) -> Vec<String> {
++    let (backend, _dir, _) = create_initialized_psr4_workspace(
++        LARAVEL_SRC_COMPOSER,
++        &[("routes/web.php", ROUTES), ("src/Links.php", source)],
++        "routes/web.php",
++    )
++    .await;
++    let uri = open_php_file(&backend, "src/Links.php").await;
++    complete(&backend, &uri, source, needle).await
++}
++
++async fn complete(
++    backend: &phpantom_lsp::Backend,
++    uri: &Url,
++    source: &str,
++    needle: &str,
++) -> Vec<String> {
++    response_labels(
++        backend
++            .completion(CompletionParams {
++                text_document_position: TextDocumentPositionParams {
++                    text_document: TextDocumentIdentifier { uri: uri.clone() },
++                    position: position_after(source, needle),
++                },
++                work_done_progress_params: Default::default(),
++                partial_result_params: Default::default(),
++                context: None,
++            })
++            .await
++            .unwrap(),
++    )
++}
++
++#[tokio::test]
++async fn local_route_helpers_do_not_offer_route_names() {
++    for name in ["route", "to_route"] {
++        let source = format!(
++            "<?php namespace App; function {name}(string $name): string {{ return $name; }} {name}('');"
++        );
++        let got = labels(&source, &format!("{name}('")).await;
++        assert!(!got.contains(&"users.show".into()), "{name}: {got:?}");
++    }
++}
++
++#[tokio::test]
++async fn local_receiver_helpers_do_not_offer_route_names() {
++    for (helper, method) in [
++        ("redirect", "route"),
++        ("url", "signedRoute"),
++        ("response", "redirectToRoute"),
++    ] {
++        let source = format!(
++            "<?php namespace App; function {helper}(): object {{ return new class {{ function {method}(string $name): void {{}} }}; }} {helper}()->{method}('');"
++        );
++        let got = labels(&source, &format!("{method}('")).await;
++        assert!(!got.contains(&"users.show".into()), "{helper}: {got:?}");
++    }
++}
++
++#[tokio::test]
++async fn unrelated_builder_route_methods_do_not_offer_route_names() {
++    let source = "<?php namespace App; class Builder { function route(string $text): void {} } $builder = new Builder; $builder->route('');";
++    let got = labels(source, "->route('").await;
++    assert!(!got.contains(&"users.show".into()), "{got:?}");
++}
++
++#[tokio::test]
++async fn imported_global_helper_aliases_offer_route_names() {
++    for (import, expression) in [
++        ("route as link_to", "link_to('')"),
++        ("to_route as send_to", "send_to('')"),
++        ("redirect as redirector", "redirector()->route('')"),
++    ] {
++        let source = format!("<?php namespace App; use function {import}; {expression};");
++        let got = labels(&source, &expression[..expression.rfind('\'').unwrap()]).await;
++        assert!(got.contains(&"users.show".into()), "{expression}: {got:?}");
++    }
++}
++
++#[tokio::test]
++async fn named_route_arguments_follow_name_and_route_roles() {
++    for expression in [
++        "\\route(absolute: false, name: '')",
++        "\\to_route(status: 302, route: '')",
++        "\\redirect()->route(parameters: [], route: '')",
++    ] {
++        let source = format!("<?php namespace App; {expression};");
++        let got = labels(&source, &expression[..expression.rfind('\'').unwrap()]).await;
++        assert!(got.contains(&"users.show".into()), "{expression}: {got:?}");
++    }
++    let source = "<?php \\route(name: 'users.show', absolute: '');";
++    assert!(
++        !labels(source, "absolute: '")
++            .await
++            .contains(&"users.show".into())
++    );
++}
++
++#[tokio::test]
++async fn local_route_helpers_do_not_offer_uri_parameter_keys() {
++    for name in ["route", "to_route"] {
++        let source = format!(
++            "<?php namespace App; function {name}(string $name, array $parameters): string {{ return $name; }} {name}('users.show', ['']);"
++        );
++        let got = labels(&source, "['").await;
++        assert!(!got.contains(&"user".into()), "{name}: {got:?}");
++    }
++}
++
++#[tokio::test]
++async fn imported_global_helper_alias_offers_uri_parameter_keys() {
++    let source = "<?php namespace App; use function route as link_to; link_to('users.show', ['']);";
++    let got = labels(source, "['").await;
++    assert!(got.contains(&"user".into()), "{got:?}");
++}
++
++#[tokio::test]
++async fn unsaved_other_file_helper_presence_changes_completion_without_caller_edits() {
++    let source = "<?php namespace App; route(''); route('users.show', ['']);";
++    let empty = "<?php namespace App;";
++    let (backend, dir, _) = create_initialized_psr4_workspace(
++        LARAVEL_SRC_COMPOSER,
++        &[
++            ("routes/web.php", ROUTES),
++            ("src/Links.php", source),
++            ("src/Helpers.php", empty),
++        ],
++        "routes/web.php",
++    )
++    .await;
++    let uri = open_php_file(&backend, "src/Links.php").await;
++    let helper = Url::from_file_path(dir.path().join("src/Helpers.php")).unwrap();
++    for (text, expected) in [
++        (empty, true),
++        (
++            "<?php namespace App; function route(string $name, array $parameters = []): string { return $name; }",
++            false,
++        ),
++        (empty, true),
++    ] {
++        backend.update_ast(helper.as_str(), text);
++        let names = complete(&backend, &uri, source, "route('").await;
++        let parameters = complete(&backend, &uri, source, "['").await;
++        assert_eq!(names.contains(&"users.show".into()), expected, "{names:?}");
++        assert_eq!(
++            parameters.contains(&"user".into()),
++            expected,
++            "{parameters:?}"
++        );
++    }
++    assert_eq!(
++        std::fs::read_to_string(dir.path().join("src/Helpers.php")).unwrap(),
++        empty
++    );
++}
++
++#[tokio::test]
++async fn framework_facade_aliases_offer_names_and_parameter_keys() {
++    for (facade, method) in [
++        ("URL", "route"),
++        ("URL", "signedRoute"),
++        ("Redirect", "route"),
++        ("Response", "redirectToRoute"),
++    ] {
++        let source = format!(
++            "<?php namespace App; use Illuminate\\Support\\Facades\\{facade} as Links; Links::{method}(''); Links::{method}('users.show', ['']);"
++        );
++        assert!(
++            labels(&source, &format!("{method}('"))
++                .await
++                .contains(&"users.show".into()),
++            "{source}"
++        );
++        assert!(
++            labels(&source, "['").await.contains(&"user".into()),
++            "{source}"
++        );
++    }
++}
++
++#[tokio::test]
++async fn typed_framework_receivers_and_subclasses_retain_route_completion() {
++    for owner in ["UrlGenerator", "CustomUrl"] {
++        let source = format!(
++            "<?php namespace Illuminate\\Routing {{ class UrlGenerator {{ function route(string $name, array $parameters = []): string {{ return $name; }} }} class CustomUrl extends UrlGenerator {{}} }} namespace App {{ function demo(\\Illuminate\\Routing\\{owner} $url): void {{ $url->route(''); $url->route('users.show', ['']); }} }}"
++        );
++        let got = labels(&source, "->route('").await;
++        assert!(got.contains(&"users.show".into()), "{owner}: {got:?}");
++        let got = labels(&source, "['").await;
++        assert!(got.contains(&"user".into()), "{owner}: {got:?}");
++    }
++}
++
++#[tokio::test]
++async fn explicit_foreign_helper_imports_and_facades_do_not_complete_routes() {
++    for expression in [
++        "route('')",
++        "route('users.show', [''])",
++        "URL::route('')",
++        "URL::route('users.show', [''])",
++    ] {
++        let source = format!(
++            "<?php namespace App; use function Other\\route; use Other\\URL; {expression};"
++        );
++        let needle = if expression.contains("['") {
++            "['"
++        } else {
++            "route('"
++        };
++        let got = labels(&source, needle).await;
++        assert!(
++            !got.contains(&"users.show".into()) && !got.contains(&"user".into()),
++            "{source}: {got:?}"
++        );
++    }
++}
++
++#[tokio::test]
++async fn explicit_global_helpers_survive_same_file_local_shadowing() {
++    let source = "<?php namespace App; function route(string $name): string { return $name; } \\route(''); \\route('users.show', ['']);";
++    assert!(
++        labels(source, "\\route('")
++            .await
++            .contains(&"users.show".into())
++    );
++    assert!(labels(source, "['").await.contains(&"user".into()));
++}
++
++#[tokio::test]
++async fn local_receiver_helpers_do_not_offer_uri_parameter_keys() {
++    for (helper, method) in [
++        ("redirect", "route"),
++        ("url", "signedRoute"),
++        ("response", "redirectToRoute"),
++    ] {
++        let source = format!(
++            "<?php namespace App; function {helper}(): object {{ return new class {{ function {method}(string $name, array $parameters): void {{}} }}; }} {helper}()->{method}('users.show', ['']);"
++        );
++        let got = labels(&source, "['").await;
++        assert!(!got.contains(&"user".into()), "{helper}: {got:?}");
++    }
++}
++
++#[tokio::test]
++async fn redirect_signed_routes_keep_names_and_parameter_keys_with_route_role() {
++    for method in ["signedRoute", "temporarySignedRoute"] {
++        let intervening = if method == "temporarySignedRoute" {
++            "null, "
++        } else {
++            ""
++        };
++        let source = format!(
++            "<?php namespace App; \\redirect()->{method}(route: ''); \\redirect()->{method}('users.show', {intervening}['']);"
++        );
++        assert!(
++            labels(&source, "route: '")
++                .await
++                .contains(&"users.show".into()),
++            "{source}"
++        );
++        assert!(
++            labels(&source, "['").await.contains(&"user".into()),
++            "{source}"
++        );
++    }
++}
++
++#[tokio::test]
++async fn incomplete_function_aliases_keep_route_name_and_parameter_completion() {
++    for (expression, needle, label) in [
++        ("link_to('users.", "users.", "users.show"),
++        ("link_to('users.show', ['", "['", "user"),
++    ] {
++        let source = format!(
++            "<?php\nnamespace App;\nuse function route as link_to;\nfunction demo() {{ {expression}"
++        );
++        let got = labels(&source, needle).await;
++        assert!(got.contains(&label.to_string()), "{source}: {got:?}");
++    }
++}
++
++#[tokio::test]
++async fn incomplete_call_import_fallback_keeps_php_symbol_tables_separate() {
++    for (imports, expression, expected) in [
++        ("use SomeClass as route;", "route('users.", true),
++        ("use function Other\\route;", "route('users.", false),
++        (
++            "use function route as link_to; use SomeClass as link_to;",
++            "link_to('users.",
++            true,
++        ),
++        ("use SomeClass as link_to;", "link_to('users.", false),
++        ("use const Other\\R as route;", "route('users.", true),
++        ("use Other\\{function route};", "route('users.", false),
++        ("use function \\route as LINK_TO;", "link_to('users.", true),
++    ] {
++        let source = format!("<?php\nnamespace App;\n{imports}\nfunction demo() {{ {expression}");
++        let got = labels(&source, "users.").await;
++        assert_eq!(
++            got.contains(&"users.show".into()),
++            expected,
++            "{source}: {got:?}"
++        );
++    }
++
++    for (source, expected) in [
++        (
++            "<?php NAMESPACE App; USE FUNCTION route AS LINK_TO; function demo() { link_to('users.",
++            true,
++        ),
++        (
++            "<?php namespace First {} namespace Second { use function route as link_to; function demo() { link_to('users.",
++            true,
++        ),
++        (
++            "<?php namespace First {} namespace Second { function route(string $name): string { return $name; } function demo() { route('users.",
++            false,
++        ),
++        (
++            "<?php namespace First { use function route as link_to; } namespace Second { function demo() { link_to('users.",
++            false,
++        ),
++        (
++            "<?php namespace First { use function Other\\route; } namespace Second { function demo() { route('users.",
++            true,
++        ),
++    ] {
++        let got = labels(source, "users.").await;
++        assert_eq!(
++            got.contains(&"users.show".into()),
++            expected,
++            "{source}: {got:?}"
++        );
++    }
++}
+diff --git a/tests/integration/laravel_route_params.rs b/tests/integration/laravel_route_params.rs
+index a20d033..f5944d4 100644
+--- a/tests/integration/laravel_route_params.rs
++++ b/tests/integration/laravel_route_params.rs
+@@ -61,6 +61,7 @@ fn consumer(body: &str) -> String {
+         "\
+ <?php
+ namespace App;
++use Illuminate\\Support\\Facades\\URL;
+ class Runner {{
+     public function go(): void
+     {{
+diff --git a/tests/integration/main.rs b/tests/integration/main.rs
+index 88de4bc..902059a 100644
+--- a/tests/integration/main.rs
++++ b/tests/integration/main.rs
+@@ -204,6 +204,7 @@ mod laravel_provider_refresh;
+ mod laravel_references;
+ mod laravel_request_input;
+ mod laravel_request_keys;
++mod laravel_route_completion_identity;
+ mod laravel_route_controller;
+ mod laravel_route_discovery;
+ mod laravel_route_duplicates;

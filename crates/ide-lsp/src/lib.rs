@@ -13,6 +13,7 @@ mod handler;
 mod inspect;
 pub mod jdtls;
 mod launch;
+mod php;
 mod scope;
 mod server;
 mod tcp;
@@ -562,7 +563,7 @@ impl LspManager {
             .unwrap_or(Value::Null);
         let mut params = json!({
             "processId": std::process::id(),
-            "clientInfo": { "name": "OpenIDEA", "version": env!("CARGO_PKG_VERSION") },
+            "clientInfo": { "name": "OpenStorm", "version": env!("CARGO_PKG_VERSION") },
             "locale": "en",
             "rootPath": server.root.to_string_lossy(),
             "rootUri": root_uri,
@@ -1209,6 +1210,16 @@ impl LspManager {
         cancel: Option<&CancellationToken>,
     ) -> IdeResult<CodeActionQuery> {
         let (snap, targets) = self.doc_targets(doc, "code actions", |c| c.has("codeActionProvider")).await?;
+        if only.iter().any(|k| k == "source.organizeImports")
+            && let Some(t) = targets.iter().find(|t| {
+                t.caps().raw.pointer("/experimental/phpWorkbenchOptimizeImports").and_then(Value::as_bool) == Some(true)
+            })
+        {
+            return Ok(CodeActionQuery {
+                actions: vec![self.php_optimize_imports(&snap, t, cancel).await?],
+                advertised_kinds: Some(vec!["source.organizeImports".into()]),
+            });
+        }
         let advertised_kinds = targets.iter().try_fold(Vec::<String>::new(), |mut acc, t| {
             for k in t.caps().code_action_kinds()? {
                 if !acc.contains(&k) {
@@ -1322,6 +1333,9 @@ impl LspManager {
     pub async fn rename(&self, doc: DocId, pos: Pos, new_name: String) -> IdeResult<WorkspaceEdit> {
         let (snap, targets) = self.doc_targets(doc, "rename", |c| c.has("renameProvider")).await?;
         let t = &targets[0];
+        if t.caps().raw.pointer("/experimental/phpWorkbenchRenameChecked").and_then(Value::as_bool) == Some(true) {
+            return self.php_rename_checked(&snap, t, pos, new_name).await;
+        }
         let query = || async {
             let mut params = snap.pos_params(t, pos);
             params["newName"] = json!(new_name);
@@ -1749,6 +1763,9 @@ impl LspManager {
         for t in &targets {
             let languages = t.server.languages();
             let serves_scheme = t.caps().content_schemes().contains(&scheme);
+            let php_builtin = virtual_doc::is_php_builtin(uri)
+                && languages.iter().any(|l| l.as_str() == "php")
+                && t.caps().raw.pointer("/experimental/phpWorkbenchBuiltins").and_then(Value::as_bool) == Some(true);
             let result: IdeResult<Option<String>> = if serves_scheme {
                 self.call::<_, Option<Value>>(
                     t,
@@ -1759,6 +1776,15 @@ impl LspManager {
                 )
                 .await
                 .map(|v| v.and_then(|v| v.get("text").and_then(Value::as_str).map(str::to_owned)))
+            } else if php_builtin {
+                self.call::<_, Value>(t, "phpWorkbench/builtin", json!({ "uri": uri }), None, LONG_TIMEOUT).await.map(
+                    |v| {
+                        // A mismatched identity must never populate this URI cache.
+                        (v.get("uri").and_then(Value::as_str) == Some(uri))
+                            .then(|| v.get("content").and_then(Value::as_str).map(str::to_owned))
+                            .flatten()
+                    },
+                )
             } else if scheme == "jdt" && languages.iter().any(|l| l.as_str() == "java") {
                 self.call::<_, Option<String>>(t, "java/classFileContents", json!({ "uri": uri }), None, LONG_TIMEOUT)
                     .await
@@ -1781,14 +1807,16 @@ impl LspManager {
             } else {
                 detected
             };
-            let doc = VirtualDocument {
-                uri: uri.to_owned(),
-                text,
-                language_id,
-                title,
-                description: virtual_doc::description(uri),
-                decompiled,
+            let description = if php_builtin {
+                let target = self
+                    .call::<_, Value>(t, "phpWorkbench/activeTarget", json!({ "uri": uri }), None, LONG_TIMEOUT)
+                    .await
+                    .ok();
+                Some(virtual_doc::php_description(target.as_ref()))
+            } else {
+                virtual_doc::description(uri)
             };
+            let doc = VirtualDocument { uri: uri.to_owned(), text, language_id, title, description, decompiled };
             self.virtual_origins.lock().entry(uri.to_owned()).or_insert(t.server.id);
             let mut cache = self.virtual_docs.lock();
             if cache.len() >= VIRTUAL_CACHE_LIMIT {
@@ -1983,6 +2011,14 @@ impl LspManager {
                 });
             }
         }
+    }
+
+    /// Engine instance identities for invalidating reviewed semantic plans.
+    pub fn edit_generations(&self) -> Vec<(ide_core::ServerId, Option<u64>)> {
+        let mut instances: Vec<_> =
+            self.servers.lock().iter().map(|s| (s.id, s.running().map(|r| r.generation))).collect();
+        instances.sort_by_key(|(id, _)| *id);
+        instances
     }
 
     pub fn servers(&self) -> Vec<ServerInfo> {

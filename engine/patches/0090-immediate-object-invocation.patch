@@ -1,0 +1,1529 @@
+diff --git a/docs/CHANGELOG.md b/docs/CHANGELOG.md
+index 3f9d28e..fa54748 100644
+--- a/docs/CHANGELOG.md
++++ b/docs/CHANGELOG.md
+@@ -15,6 +15,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
+ 
+ ## [Unreleased]
+ 
++- **Follow immediately invoked objects in call hierarchy.** Construction and invocation retain separate caller sites and navigate to the concrete method, including inherited and trait implementations. Creating a callable remains distinct from invoking it. Contributed by PHP Workbench downstream.
++
+ - **Keep hierarchy nodes and relationships accurate.** Anonymous-class construction follows its concrete constructor, trait composition is reciprocal, and declaration navigation handles comments. Expanding a changed declaration requires a fresh selection; Composer dependency discovery honors its configured folder. Contributed by PHP Workbench downstream.
+ 
+ - **Keep call hierarchies faithful to execution.** Optional parameter constructors belong to their declared callable. Imports, stored callbacks and deferred metadata remain navigable references without becoming callers; known keyword constructors retain their source locations while ambiguous runtime targets stay unresolved. Contributed by PHP Workbench downstream.
+diff --git a/examples/php/definition.php b/examples/php/definition.php
+index 08b736e..bf3db2b 100644
+--- a/examples/php/definition.php
++++ b/examples/php/definition.php
+@@ -413,7 +413,7 @@ $storedHierarchyCallback = [$definitionAtEof, 'label'];
+ 
+ // Try: Show Callees on anonymousConstructionNavigation. The class keyword
+ // links to its constructor; gtdHelper belongs to that constructor's own row.
+-// Show Type Hierarchy at the same class keyword to inspect the anonymous type.
++// Open hierarchy at the same class keyword, then choose Supertypes or Subtypes.
+ function anonymousConstructionNavigation(): object
+ {
+     return new class {
+@@ -423,3 +423,20 @@ function anonymousConstructionNavigation(): object
+         }
+     };
+ }
++
++// Try: Show Callees on immediateObjectNavigation. Construction and invocation
++// have separate rows; expand either method to follow its own gtdHelper call.
++function immediateObjectNavigation(): void
++{
++    (new class {
++        public function __construct()
++        {
++            gtdHelper();
++        }
++
++        public function __invoke(): void
++        {
++            gtdHelper();
++        }
++    })();
++}
+diff --git a/src/call_hierarchy.rs b/src/call_hierarchy.rs
+index c5259c3..b847fef 100644
+--- a/src/call_hierarchy.rs
++++ b/src/call_hierarchy.rs
+@@ -21,12 +21,19 @@ use tower_lsp::lsp_types::{
+ 
+ use crate::Backend;
+ use crate::symbol_map::{
+-    AnonymousCallable, AnonymousClassConstruction, CallExecutionOwner, ClassRefContext, SymbolKind,
+-    SymbolMap, SymbolSpan,
++    AnonymousCallable, AnonymousClassConstruction, CallExecutionOwner, ClassRefContext,
++    ImmediateObjectInvocation, ImmediateObjectReceiver, SymbolKind, SymbolMap, SymbolSpan,
+ };
+ use crate::text_position::{byte_range_to_lsp_range, offset_to_position, position_to_offset};
+ use crate::types::{ClassInfo, FunctionInfo, MethodInfo};
+ 
++#[derive(Clone, Copy)]
++struct SyntacticCallSite {
++    start: u32,
++    end: u32,
++    scope: u32,
++}
++
+ #[derive(Clone)]
+ struct PhpCallable {
+     item: CallHierarchyItem,
+@@ -259,6 +266,56 @@ impl Backend {
+             }
+         }
+ 
++        let invocation_target = target.item.data.as_ref().is_some_and(|data| {
++            data.get("method")
++                .and_then(|value| value.as_str())
++                .is_some_and(|method| {
++                    method.eq_ignore_ascii_case("__invoke")
++                        || data
++                            .get("owner")
++                            .and_then(|value| value.as_str())
++                            .and_then(|owner| self.find_or_load_class(owner))
++                            .is_some_and(|owner| owner.kind == crate::types::ClassLikeKind::Trait)
++                })
++        });
++        if invocation_target {
++            for (uri, _) in self
++                .user_file_symbol_maps()
++                .into_iter()
++                .filter(|(_, map)| !map.immediate_object_invocations.is_empty())
++            {
++                let Some((content, map, Some(hash))) = self.cached_file(&mut cache, &uri) else {
++                    continue;
++                };
++                for site in &map.immediate_object_invocations {
++                    let Some(callee) = self.immediate_object_callable(&mut cache, &uri, &map, site)
++                    else {
++                        continue;
++                    };
++                    if callee.item.uri != target.item.uri
++                        || callee.item.selection_range != target.item.selection_range
++                        || callee.item.name != target.item.name
++                    {
++                        continue;
++                    }
++                    let Some(caller) =
++                        self.immediate_object_caller(&mut cache, &uri, &content, &map, &hash, site)
++                    else {
++                        continue;
++                    };
++                    let range = byte_range_to_lsp_range(
++                        &content,
++                        site.invocation_start as usize,
++                        site.invocation_end as usize,
++                    );
++                    grouped
++                        .entry(php_item_key(&caller.item))
++                        .and_modify(|(_, ranges)| push_unique_range(ranges, range))
++                        .or_insert_with(|| (caller.item, vec![range]));
++                }
++            }
++        }
++
+         let mut calls: Vec<_> = grouped
+             .into_values()
+             .map(|(mut from, mut from_ranges)| {
+@@ -408,6 +465,41 @@ impl Backend {
+             }
+         }
+ 
++        if let Some(hash) = source_hash.as_ref() {
++            for site in &symbol_map.immediate_object_invocations {
++                let Some(caller) = self.immediate_object_caller(
++                    &mut cache,
++                    uri,
++                    &content,
++                    &symbol_map,
++                    hash,
++                    site,
++                ) else {
++                    continue;
++                };
++                if caller.item.uri != callable.item.uri
++                    || caller.item.selection_range != callable.item.selection_range
++                    || caller.item.name != callable.item.name
++                {
++                    continue;
++                }
++                let Some(callee) =
++                    self.immediate_object_callable(&mut cache, uri, &symbol_map, site)
++                else {
++                    continue;
++                };
++                let range = byte_range_to_lsp_range(
++                    &content,
++                    site.invocation_start as usize,
++                    site.invocation_end as usize,
++                );
++                grouped
++                    .entry(php_item_key(&callee.item))
++                    .and_modify(|(_, ranges)| push_unique_range(ranges, range))
++                    .or_insert_with(|| (callee.item, vec![range]));
++            }
++        }
++
+         let mut calls: Vec<_> = grouped
+             .into_values()
+             .map(|(mut to, mut from_ranges)| {
+@@ -472,22 +564,33 @@ impl Backend {
+         uri: &str,
+         class: &Arc<ClassInfo>,
+         late_static: bool,
++    ) -> Option<PhpCallable> {
++        self.concrete_method_callable(cache, uri, class, "__construct", late_static)
++    }
++
++    fn concrete_method_callable(
++        &self,
++        cache: &mut FileCache,
++        uri: &str,
++        class: &Arc<ClassInfo>,
++        method_name: &str,
++        late_static: bool,
+     ) -> Option<PhpCallable> {
+         let loader = |name: &str| self.find_or_load_class(name);
+         let crate::inheritance::ancestry::MethodOrigin::Known { owner, method } =
+             crate::inheritance::ancestry::resolve_concrete_method_origin(
+                 class,
+-                "__construct",
++                method_name,
+                 &loader,
+             )
+         else {
+             return None;
+         };
+-        if method.name_offset == 0 {
++        if method.name_offset == 0 || (method_name == "__invoke" && method.is_static) {
+             return None;
+         }
+         if late_static && !class.is_final && !method.is_final {
+-            // A runtime subclass can override the lexical constructor.
++            // A runtime subclass can override the lexical method.
+             return None;
+         }
+         let owner_uri = if owner.fqn() == class.fqn()
+@@ -583,7 +686,8 @@ impl Backend {
+     ) -> Option<PhpCallable> {
+         if (!symbol_map.call_execution_regions.is_empty()
+             || !symbol_map.keyword_constructor_spans.is_empty()
+-            || !symbol_map.anonymous_class_constructions.is_empty())
++            || !symbol_map.anonymous_class_constructions.is_empty()
++            || !symbol_map.immediate_object_invocations.is_empty())
+             && source_hash.is_none()
+         {
+             return None;
+@@ -848,22 +952,194 @@ impl Backend {
+         map: &SymbolMap,
+         hash: &[u8; 32],
+         site: &AnonymousClassConstruction,
++    ) -> Option<PhpCallable> {
++        self.syntactic_call_site_caller(
++            cache,
++            uri,
++            content,
++            map,
++            hash,
++            SyntacticCallSite {
++                start: site.keyword_start,
++                end: site.keyword_end,
++                scope: site.invoking_scope_start,
++            },
++        )
++    }
++
++    fn syntactic_call_site_caller(
++        &self,
++        cache: &mut FileCache,
++        uri: &str,
++        content: &str,
++        map: &SymbolMap,
++        hash: &[u8; 32],
++        site: SyntacticCallSite,
+     ) -> Option<PhpCallable> {
+         if map
+             .non_invoked_callable_spans
+-            .binary_search(&(site.keyword_start, site.keyword_end))
++            .binary_search(&(site.start, site.end))
+             .is_ok()
+         {
+             return None;
+         }
+-        match map.call_execution_owner(site.keyword_start) {
++        match map.call_execution_owner(site.start) {
+             Some(CallExecutionOwner::Deferred) => None,
+             Some(CallExecutionOwner::Callable(declaration)) => {
+                 self.php_callable_at(uri, content, map, declaration, Some(hash))
+             }
+-            None => {
+-                self.caller_for_scope(cache, uri, content, map, hash, site.invoking_scope_start)
++            None => self.caller_for_scope(cache, uri, content, map, hash, site.scope),
++        }
++    }
++
++    fn immediate_object_caller(
++        &self,
++        cache: &mut FileCache,
++        uri: &str,
++        content: &str,
++        map: &SymbolMap,
++        hash: &[u8; 32],
++        site: &ImmediateObjectInvocation,
++    ) -> Option<PhpCallable> {
++        let receiver_start = match site.receiver {
++            ImmediateObjectReceiver::Instantiation { operand_start, .. } => operand_start,
++            ImmediateObjectReceiver::AnonymousClass { keyword_start, .. } => keyword_start,
++        };
++        if matches!(
++            map.call_execution_owner(receiver_start),
++            Some(CallExecutionOwner::Deferred)
++        ) {
++            return None;
++        }
++        self.syntactic_call_site_caller(
++            cache,
++            uri,
++            content,
++            map,
++            hash,
++            SyntacticCallSite {
++                start: site.invocation_start,
++                end: site.invocation_end,
++                scope: site.invoking_scope_start,
++            },
++        )
++    }
++
++    fn immediate_object_callable(
++        &self,
++        cache: &mut FileCache,
++        uri: &str,
++        map: &SymbolMap,
++        site: &ImmediateObjectInvocation,
++    ) -> Option<PhpCallable> {
++        let (class, late_static) = match site.receiver {
++            ImmediateObjectReceiver::Instantiation {
++                operand_start,
++                operand_end,
++            } => {
++                let span = map.lookup(operand_start)?;
++                if span.start != operand_start || span.end != operand_end {
++                    return None;
++                }
++                let (fqn, late_static) = match &span.kind {
++                    SymbolKind::ClassReference {
++                        name,
++                        is_fqn,
++                        context: ClassRefContext::New,
++                    } => (
++                        if *is_fqn {
++                            name.trim_start_matches('\\').to_string()
++                        } else {
++                            self.file_context(uri).resolve_name_at(name, span.start)
++                        },
++                        false,
++                    ),
++                    SymbolKind::SelfStaticParent(kind) if map.is_keyword_constructor_span(span) => {
++                        (
++                            self.resolve_keyword_to_fqn(kind, uri, span.start)?,
++                            *kind == crate::symbol_map::SelfStaticParentKind::Static,
++                        )
++                    }
++                    _ => return None,
++                };
++                (self.find_or_load_class(&fqn)?, late_static)
++            }
++            ImmediateObjectReceiver::AnonymousClass {
++                body_start,
++                body_end,
++                ..
++            } => {
++                let class = self
++                    .symbols
++                    .uri_classes_index
++                    .read()
++                    .get(uri)?
++                    .iter()
++                    .find(|class| {
++                        class.name.starts_with(crate::types::ANONYMOUS_CLASS_PREFIX)
++                            && class.start_offset == body_start
++                            && class.end_offset == body_end
++                    })
++                    .cloned()?;
++                (class, false)
++            }
++        };
++        if class.kind != crate::types::ClassLikeKind::Class {
++            return None;
++        }
++        // Exact named/self/parent/anonymous allocation cannot instantiate an
++        // abstract class. Late static may allocate a concrete runtime subclass.
++        if (!late_static || class.is_final)
++            && !self.literal_allocation_permitted(uri, site.invocation_start, &class)
++        {
++            return None;
++        }
++        self.concrete_method_callable(cache, uri, &class, "__invoke", late_static)
++    }
++
++    fn literal_allocation_permitted(&self, uri: &str, offset: u32, class: &Arc<ClassInfo>) -> bool {
++        if class.is_abstract {
++            return false;
++        }
++        let loader = |name: &str| self.find_or_load_class(name);
++        match crate::inheritance::ancestry::resolve_concrete_method_origin(
++            class,
++            "__construct",
++            &loader,
++        ) {
++            crate::inheritance::ancestry::MethodOrigin::Missing => true,
++            crate::inheritance::ancestry::MethodOrigin::Known { method, .. } => {
++                if method.is_static {
++                    return false;
++                }
++                let effective = Arc::new(crate::inheritance::resolve_class_with_inheritance(
++                    class, &loader,
++                ));
++                let classes = self
++                    .symbols
++                    .uri_classes_index
++                    .read()
++                    .get(uri)
++                    .cloned()
++                    .unwrap_or_default();
++                let lexical = crate::class_lookup::find_class_at_offset(&classes, offset);
++                // A trait body carries no definite consumer scope for a
++                // nonpublic constructor, unlike a public constructor.
++                if lexical.is_some_and(|scope| scope.kind == crate::types::ClassLikeKind::Trait)
++                    && effective
++                        .get_method("__construct")
++                        .is_none_or(|ctor| ctor.visibility != crate::types::Visibility::Public)
++                {
++                    return false;
++                }
++                !matches!(
++                    crate::diagnostics::member_visibility::constructor_access_verdict(
++                        &effective, lexical, &loader
++                    ),
++                    crate::diagnostics::member_visibility::MemberAccessVerdict::Inaccessible(_)
++                )
+             }
++            _ => false,
+         }
+     }
+ 
+@@ -928,7 +1204,8 @@ impl Backend {
+             let source_hash = hierarchy_source_hash(&symbol_map, &content);
+             if (!symbol_map.call_execution_regions.is_empty()
+                 || !symbol_map.keyword_constructor_spans.is_empty()
+-                || !symbol_map.anonymous_class_constructions.is_empty())
++                || !symbol_map.anonymous_class_constructions.is_empty()
++                || !symbol_map.immediate_object_invocations.is_empty())
+                 && source_hash.is_none()
+             {
+                 return None;
+diff --git a/src/diagnostics/member_visibility.rs b/src/diagnostics/member_visibility.rs
+index 21cbf51..6be77bb 100644
+--- a/src/diagnostics/member_visibility.rs
++++ b/src/diagnostics/member_visibility.rs
+@@ -174,6 +174,49 @@ pub(crate) fn member_access_verdict(
+     current_class: Option<&ClassInfo>,
+     subject_binds_scope: bool,
+     class_loader: &dyn Fn(&str) -> Option<Arc<ClassInfo>>,
++) -> MemberAccessVerdict {
++    member_access_verdict_inner(
++        merged_classes,
++        member_name,
++        is_static,
++        is_method_call,
++        current_class,
++        subject_binds_scope,
++        class_loader,
++        true,
++    )
++}
++
++/// Constructor visibility uses the same effective-member/lexical-scope rules,
++/// but an inaccessible constructor cannot be made callable by `__call`.
++pub(crate) fn constructor_access_verdict(
++    merged: &Arc<ClassInfo>,
++    current_class: Option<&ClassInfo>,
++    class_loader: &dyn Fn(&str) -> Option<Arc<ClassInfo>>,
++) -> MemberAccessVerdict {
++    member_access_verdict_inner(
++        std::slice::from_ref(merged),
++        "__construct",
++        false,
++        true,
++        current_class,
++        false,
++        class_loader,
++        false,
++    )
++}
++
++// Keep policy centralized rather than duplicate trait/private-ancestor rules.
++#[allow(clippy::too_many_arguments)]
++fn member_access_verdict_inner(
++    merged_classes: &[Arc<ClassInfo>],
++    member_name: &str,
++    is_static: bool,
++    is_method_call: bool,
++    current_class: Option<&ClassInfo>,
++    subject_binds_scope: bool,
++    class_loader: &dyn Fn(&str) -> Option<Arc<ClassInfo>>,
++    allow_magic: bool,
+ ) -> MemberAccessVerdict {
+     // Inside a trait the host class that supplies `$this` is unknown,
+     // so every visibility answer would be a guess.
+@@ -192,6 +235,7 @@ pub(crate) fn member_access_verdict(
+             current_class,
+             subject_binds_scope,
+             class_loader,
++            allow_magic,
+         ) {
+             BranchVerdict::AccessiblePrivateAncestor => {
+                 return MemberAccessVerdict::AccessiblePrivateAncestor;
+@@ -217,6 +261,7 @@ pub(crate) fn member_access_verdict(
+ }
+ 
+ /// Judge the access against one branch of the union.
++#[allow(clippy::too_many_arguments)]
+ fn judge_branch(
+     merged: &Arc<ClassInfo>,
+     member_name: &str,
+@@ -225,6 +270,7 @@ fn judge_branch(
+     current_class: Option<&ClassInfo>,
+     subject_binds_scope: bool,
+     class_loader: &dyn Fn(&str) -> Option<Arc<ClassInfo>>,
++    allow_magic: bool,
+ ) -> BranchVerdict {
+     // A trait naming the member is never a call PHP resolves.  The
+     // spans that carry one are the identifiers in a `use` adaptation
+@@ -243,7 +289,7 @@ fn judge_branch(
+         // A class that answers for members the caller cannot see
+         // directly turns the access into a magic-method call rather
+         // than an error.
+-        if handles_inaccessible_access(merged, is_static, is_method_call) {
++        if allow_magic && handles_inaccessible_access(merged, is_static, is_method_call) {
+             return BranchVerdict::Permitted;
+         }
+         // Not on the assembled class.  The one member PHP has and the
+@@ -273,7 +319,7 @@ fn judge_branch(
+ 
+     // A class that answers for members the caller cannot see directly
+     // turns the access into a magic-method call rather than an error.
+-    if handles_inaccessible_access(merged, is_static, is_method_call) {
++    if allow_magic && handles_inaccessible_access(merged, is_static, is_method_call) {
+         return BranchVerdict::Permitted;
+     }
+ 
+diff --git a/src/symbol_map/extraction/expressions/calls.rs b/src/symbol_map/extraction/expressions/calls.rs
+index 7373aef..62c19e9 100644
+--- a/src/symbol_map/extraction/expressions/calls.rs
++++ b/src/symbol_map/extraction/expressions/calls.rs
+@@ -280,6 +280,36 @@ fn extract_call<'a>(
+             while let Expression::Parenthesized(parenthesized) = literal {
+                 literal = parenthesized.expression;
+             }
++            let object_receiver = match literal {
++                Expression::Instantiation(inst) => match inst.class {
++                    Expression::Identifier(_)
++                    | Expression::Self_(_)
++                    | Expression::Static(_)
++                    | Expression::Parent(_) => {
++                        let span = inst.class.span();
++                        Some(ImmediateObjectReceiver::Instantiation {
++                            operand_start: span.start.offset,
++                            operand_end: span.end.offset,
++                        })
++                    }
++                    _ => None,
++                },
++                Expression::AnonymousClass(anon) => Some(ImmediateObjectReceiver::AnonymousClass {
++                    body_start: anon.left_brace.start.offset,
++                    body_end: anon.right_brace.end.offset,
++                    keyword_start: anon.class.span.start.offset,
++                }),
++                _ => None,
++            };
++            if let Some(receiver) = object_receiver {
++                ctx.immediate_object_invocations
++                    .push(ImmediateObjectInvocation {
++                        receiver,
++                        invoking_scope_start: scope_start,
++                        invocation_start: func_call.argument_list.left_parenthesis.start.offset,
++                        invocation_end: func_call.argument_list.right_parenthesis.end.offset,
++                    });
++            }
+             let callee_keyword_start = match literal {
+                 Expression::Closure(closure) => Some(closure.function.span.start.offset),
+                 Expression::ArrowFunction(arrow) => Some(arrow.r#fn.span.start.offset),
+diff --git a/src/symbol_map/extraction/mod.rs b/src/symbol_map/extraction/mod.rs
+index fb5522d..5f97b5a 100644
+--- a/src/symbol_map/extraction/mod.rs
++++ b/src/symbol_map/extraction/mod.rs
+@@ -14,8 +14,9 @@ use super::docblock::{
+ use super::{
+     AnonymousCallable, AnonymousCallableKind, AnonymousClassConstruction, AnonymousInvocation,
+     CallExecutionOwner, CallExecutionRegion, CallSite, ClassRefContext, DocblockMemberRef,
+-    SelfStaticParentKind, SubjectText, SymbolKind, SymbolMap, SymbolSpan, TemplateParamDef,
+-    UntypedClosureSite, VarDefKind, VarDefSite, ViewReceiverClass, ViewReceiverSite,
++    ImmediateObjectInvocation, ImmediateObjectReceiver, SelfStaticParentKind, SubjectText,
++    SymbolKind, SymbolMap, SymbolSpan, TemplateParamDef, UntypedClosureSite, VarDefKind,
++    VarDefSite, ViewReceiverClass, ViewReceiverSite,
+ };
+ use crate::atom::{bytes_to_str, literal_bytes_to_str};
+ use crate::names::OwnedResolvedNames;
+@@ -42,6 +43,7 @@ struct ExtractionCtx<'a> {
+     anonymous_callables: Vec<AnonymousCallable>,
+     anonymous_invocations: Vec<AnonymousInvocation>,
+     anonymous_class_constructions: Vec<AnonymousClassConstruction>,
++    immediate_object_invocations: Vec<ImmediateObjectInvocation>,
+     non_invoked_callable_spans: Vec<(u32, u32)>,
+     keyword_constructor_spans: Vec<(u32, u32)>,
+     /// Scope start offsets of arrow functions (inheriting scopes).
+@@ -226,6 +228,7 @@ fn extract_symbol_map_inner(
+         anonymous_callables: Vec::new(),
+         anonymous_invocations: Vec::new(),
+         anonymous_class_constructions: Vec::new(),
++        immediate_object_invocations: Vec::new(),
+         non_invoked_callable_spans: Vec::new(),
+         keyword_constructor_spans: Vec::new(),
+         arrow_fn_scopes: Vec::new(),
+@@ -379,6 +382,7 @@ fn extract_symbol_map_inner(
+         anonymous_callables: ctx.anonymous_callables,
+         anonymous_invocations: ctx.anonymous_invocations,
+         anonymous_class_constructions: ctx.anonymous_class_constructions,
++        immediate_object_invocations: ctx.immediate_object_invocations,
+         non_invoked_callable_spans: ctx.non_invoked_callable_spans,
+         keyword_constructor_spans: ctx.keyword_constructor_spans,
+         arrow_fn_scopes: ctx.arrow_fn_scopes,
+diff --git a/src/symbol_map/mod.rs b/src/symbol_map/mod.rs
+index 65ed01f..a380f33 100644
+--- a/src/symbol_map/mod.rs
++++ b/src/symbol_map/mod.rs
+@@ -1056,6 +1056,34 @@ pub(crate) struct AnonymousClassConstruction {
+     pub invoking_scope_start: u32,
+ }
+ 
++/// Exact syntactic receiver of an immediately invoked literal object.
++#[derive(Debug, Clone, Copy)]
++pub(crate) enum ImmediateObjectReceiver {
++    /// A named/self/static/parent operand of an actual Instantiation node.
++    Instantiation {
++        operand_start: u32,
++        operand_end: u32,
++    },
++    /// A source-local anonymous class, never a global synthetic name.
++    AnonymousClass {
++        body_start: u32,
++        body_end: u32,
++        keyword_start: u32,
++    },
++}
++
++/// `(new KnownClass())(...)` or `(new class { ... })(...)`, with no value flow.
++#[derive(Debug, Clone, Copy)]
++pub(crate) struct ImmediateObjectInvocation {
++    /// Exact AST receiver, independent of its constructor's own invocation.
++    pub receiver: ImmediateObjectReceiver,
++    /// Caller scope before traversing the nested receiver/class bodies.
++    pub invoking_scope_start: u32,
++    /// Whole implicit invocation argument-list range, not its construction site.
++    pub invocation_start: u32,
++    pub invocation_end: u32,
++}
++
+ /// Execution ownership of an initializer, independently of variable lexical scope.
+ #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+ pub(crate) enum CallExecutionOwner {
+@@ -1138,6 +1166,8 @@ pub(crate) struct SymbolMap {
+     pub anonymous_invocations: Vec<AnonymousInvocation>,
+     /// Direct anonymous-class creations from the same AST/source publication.
+     pub anonymous_class_constructions: Vec<AnonymousClassConstruction>,
++    /// Direct literal-object calls from the same AST/source publication.
++    pub immediate_object_invocations: Vec<ImmediateObjectInvocation>,
+     /// Sorted reference-only callee tokens, including metadata, imports and callable values.
+     pub non_invoked_callable_spans: Vec<(u32, u32)>,
+     /// Sorted exact self/static/parent operands from actual new AST nodes.
+diff --git a/tests/integration/call_hierarchy.rs b/tests/integration/call_hierarchy.rs
+index 44b8a47..9d674d2 100644
+--- a/tests/integration/call_hierarchy.rs
++++ b/tests/integration/call_hierarchy.rs
+@@ -3502,3 +3502,871 @@ async fn hierarchy_anonymous_inherited_constructor_uses_closed_global_owner_not_
+         assert_eq!(std::fs::read(path).unwrap(), text.as_bytes());
+     }
+ }
++
++const IMMEDIATE_OBJECT_SOURCE: &str = concat!(
++    "<?php\r\n",
++    "final class ImmediateObjectInvoker {\r\n",
++    " public function __construct() {}\r\n",
++    " public function __invoke(int $value): void {}\r\n",
++    "}\r\n",
++    "function immediateObjectHost(): void {\r\n",
++    " /* café 🐘 */ (((new ImmediateObjectInvoker())))(7);\r\n",
++    " (new ImmediateObjectInvoker())->__invoke(8);\r\n",
++    "}\r\n",
++    "function immediateObjectConstructOnly(): void { $stored = new ImmediateObjectInvoker(); }\r\n",
++    "function immediateObjectUnknown(callable $dynamic): void { $dynamic(9); }\r\n",
++);
++
++async fn immediate_object_fixture() -> (Backend, Url) {
++    let backend = create_test_backend();
++    let uri = Url::parse("file:///immediate-object-invocation.php").unwrap();
++    open_php(&backend, &uri, IMMEDIATE_OBJECT_SOURCE).await;
++    (backend, uri)
++}
++
++fn immediate_object_range(context: &str, token: &str) -> Range {
++    let start = IMMEDIATE_OBJECT_SOURCE
++        .find(context)
++        .expect("unique fixture context")
++        + context.rfind(token).expect("exact token in context");
++    let prefix = &IMMEDIATE_OBJECT_SOURCE[..start];
++    let position = Position::new(
++        prefix.bytes().filter(|byte| *byte == b'\n').count() as u32,
++        prefix.rsplit('\n').next().unwrap().encode_utf16().count() as u32,
++    );
++    Range::new(
++        position,
++        Position::new(
++            position.line,
++            position.character + token.encode_utf16().count() as u32,
++        ),
++    )
++}
++
++fn immediate_object_sorted_ranges(mut ranges: Vec<Range>) -> Vec<Range> {
++    ranges.sort_by_key(|range| {
++        (
++            range.start.line,
++            range.start.character,
++            range.end.line,
++            range.end.character,
++        )
++    });
++    ranges
++}
++
++#[tokio::test]
++async fn immediate_object_constructor_and_explicit_invoke_are_independent_positive_controls() {
++    let (backend, uri) = immediate_object_fixture().await;
++    let host = anonymous_hierarchy_prepare(
++        &backend,
++        &uri,
++        IMMEDIATE_OBJECT_SOURCE,
++        "immediateObjectHost",
++    )
++    .await;
++    let edges = outgoing(&backend, &host).await;
++    let constructors = edges
++        .iter()
++        .filter(|edge| edge.to.name == "__construct")
++        .collect::<Vec<_>>();
++    assert_eq!(constructors.len(), 1);
++    assert_eq!(
++        constructors[0].from_ranges,
++        [
++            immediate_object_range(
++                "(((new ImmediateObjectInvoker())))(7)",
++                "ImmediateObjectInvoker"
++            ),
++            immediate_object_range(
++                "(new ImmediateObjectInvoker())->__invoke(8)",
++                "ImmediateObjectInvoker"
++            ),
++        ]
++    );
++    let invokes = edges
++        .iter()
++        .filter(|edge| edge.to.name == "__invoke")
++        .collect::<Vec<_>>();
++    assert_eq!(
++        invokes.len(),
++        1,
++        "explicit __invoke resolves to the declared method"
++    );
++    assert!(
++        invokes[0]
++            .from_ranges
++            .contains(&immediate_object_range("->__invoke(8)", "__invoke"))
++    );
++    assert_ne!(
++        constructors[0].to.selection_range,
++        invokes[0].to.selection_range
++    );
++    assert_eq!(constructors[0].to.uri, uri);
++    assert_eq!(invokes[0].to.uri, uri);
++    let constructor_callers = incoming(&backend, &constructors[0].to).await;
++    assert_eq!(
++        constructor_callers.len(),
++        2,
++        "host and construction-only function, independently of __invoke"
++    );
++    let host_callers = constructor_callers
++        .iter()
++        .filter(|call| call.from.uri == uri && call.from.selection_range == host.selection_range)
++        .collect::<Vec<_>>();
++    assert_eq!(host_callers.len(), 1);
++    assert_eq!(
++        immediate_object_sorted_ranges(host_callers[0].from_ranges.clone()),
++        constructors[0].from_ranges
++    );
++}
++
++#[tokio::test]
++async fn immediate_object_literal_invocation_adds_its_own_exact_outgoing_method_edge() {
++    let (backend, uri) = immediate_object_fixture().await;
++    let host = anonymous_hierarchy_prepare(
++        &backend,
++        &uri,
++        IMMEDIATE_OBJECT_SOURCE,
++        "immediateObjectHost",
++    )
++    .await;
++    let target =
++        anonymous_hierarchy_prepare(&backend, &uri, IMMEDIATE_OBJECT_SOURCE, "__invoke(int").await;
++    let edges = outgoing(&backend, &host).await;
++    assert_eq!(
++        edges.len(),
++        2,
++        "constructor and invocation remain two independent target nodes"
++    );
++    let invocation = edges
++        .iter()
++        .find(|edge| edge.to.name == "__invoke")
++        .unwrap();
++    assert_eq!(invocation.to.selection_range, target.selection_range);
++    assert_eq!(invocation.to.uri, uri);
++    assert_eq!(
++        immediate_object_sorted_ranges(invocation.from_ranges.clone()),
++        [
++            immediate_object_range("(((new ImmediateObjectInvoker())))(7)", "(7)"),
++            immediate_object_range("->__invoke(8)", "__invoke"),
++        ],
++        "the implicit outer invocation owns its argument-list range, not the construction name"
++    );
++}
++
++#[tokio::test]
++async fn immediate_object_literal_invocation_has_reciprocal_exact_incoming_method_sites() {
++    let (backend, uri) = immediate_object_fixture().await;
++    let host = anonymous_hierarchy_prepare(
++        &backend,
++        &uri,
++        IMMEDIATE_OBJECT_SOURCE,
++        "immediateObjectHost",
++    )
++    .await;
++    let target =
++        anonymous_hierarchy_prepare(&backend, &uri, IMMEDIATE_OBJECT_SOURCE, "__invoke(int").await;
++    let calls = incoming(&backend, &target).await;
++    assert_eq!(
++        calls.len(),
++        1,
++        "one actual creator/invoker, no stored or unknown caller"
++    );
++    assert_eq!(calls[0].from.uri, uri);
++    assert_eq!(calls[0].from.selection_range, host.selection_range);
++    assert_eq!(
++        immediate_object_sorted_ranges(calls[0].from_ranges.clone()),
++        [
++            immediate_object_range("(((new ImmediateObjectInvoker())))(7)", "(7)"),
++            immediate_object_range("->__invoke(8)", "__invoke"),
++        ]
++    );
++}
++
++#[tokio::test]
++async fn immediate_object_construction_alone_and_unknown_values_do_not_invent_invoke_targets() {
++    let (backend, uri) = immediate_object_fixture().await;
++    let stored = anonymous_hierarchy_prepare(
++        &backend,
++        &uri,
++        IMMEDIATE_OBJECT_SOURCE,
++        "immediateObjectConstructOnly",
++    )
++    .await;
++    let known = outgoing(&backend, &stored).await;
++    assert_eq!(known.len(), 1);
++    assert_eq!(known[0].to.name, "__construct");
++    assert_eq!(
++        known[0].from_ranges,
++        [immediate_object_range(
++            "$stored = new ImmediateObjectInvoker();",
++            "ImmediateObjectInvoker"
++        )]
++    );
++    let constructor_callers = incoming(&backend, &known[0].to).await;
++    assert_eq!(
++        constructor_callers
++            .iter()
++            .filter(|call| call.from.selection_range == stored.selection_range
++                && call.from.uri == uri
++                && call.from_ranges == known[0].from_ranges)
++            .count(),
++        1,
++        "construction-only constructor edge is reciprocal"
++    );
++    let dynamic = anonymous_hierarchy_prepare(
++        &backend,
++        &uri,
++        IMMEDIATE_OBJECT_SOURCE,
++        "immediateObjectUnknown",
++    )
++    .await;
++    assert!(
++        outgoing(&backend, &dynamic).await.is_empty(),
++        "no callback/value-flow inference is requested"
++    );
++}
++
++fn immediate_object_source_range(source: &str, context: &str, token: &str) -> Range {
++    let offset =
++        source.find(context).expect("extended fixture context") + context.rfind(token).unwrap();
++    let prefix = &source[..offset];
++    let start = Position::new(
++        prefix.bytes().filter(|byte| *byte == b'\n').count() as u32,
++        prefix.rsplit('\n').next().unwrap().encode_utf16().count() as u32,
++    );
++    Range::new(
++        start,
++        Position::new(
++            start.line,
++            start.character + token.encode_utf16().count() as u32,
++        ),
++    )
++}
++
++async fn immediate_object_target(
++    backend: &Backend,
++    uri: &Url,
++    source: &str,
++    context: &str,
++    token: &str,
++) -> CallHierarchyItem {
++    let range = immediate_object_source_range(source, context, token);
++    let items = prepare_at(backend, uri, range.start.line, range.start.character).await;
++    assert_eq!(items.len(), 1, "public preparation control: {context}");
++    assert_eq!(items[0].selection_range, range);
++    items[0].clone()
++}
++
++#[tokio::test]
++async fn immediate_object_nonfinal_inherited_trait_and_anonymous_origins_are_exact_and_reciprocal()
++{
++    let backend = create_test_backend();
++    let uri = Url::parse("file:///immediate-object-origin-cases.php").unwrap();
++    let source = concat!(
++        "<?php\r\n",
++        "class DirectInvokeOpen { public function __construct() {} public function __invoke(int $value): void {} }\r\n",
++        "class DirectInvokeParent { public function __construct() {} public function __invoke(int $value): void {} }\r\n",
++        "class DirectInvokeChild extends DirectInvokeParent {}\r\n",
++        "trait DirectInvokeTrait { public function __invoke(int $value): void {} }\r\n",
++        "class DirectInvokeTraitUser { use DirectInvokeTrait; }\r\n",
++        "function openObjectHost(): void { /* café 🐘 */ (new DirectInvokeOpen())(1); }\r\n",
++        "function inheritedObjectHost(): void { /* café 🐘 */ (new DirectInvokeChild())(2); }\r\n",
++        "function traitObjectHost(): void { /* café 🐘 */ (new DirectInvokeTraitUser())(3); }\r\n",
++        "function anonymousOwnObjectHost(): void { /* café 🐘 */ (new class { public function __construct() {} public function __invoke(int $own): void {} })(4); }\r\n",
++        "function anonymousInheritedObjectHost(): void { /* café 🐘 */ (new class extends DirectInvokeParent {})(5); }\r\n",
++    );
++    open_php(&backend, &uri, source).await;
++    for (host_name, method_context, site, arity, count) in [
++        (
++            "openObjectHost",
++            "class DirectInvokeOpen { public function __construct() {} public function __invoke",
++            "(new DirectInvokeOpen())(1)",
++            "(1)",
++            1,
++        ),
++        (
++            "inheritedObjectHost",
++            "class DirectInvokeParent { public function __construct() {} public function __invoke",
++            "(new DirectInvokeChild())(2)",
++            "(2)",
++            2,
++        ),
++        (
++            "traitObjectHost",
++            "trait DirectInvokeTrait { public function __invoke",
++            "(new DirectInvokeTraitUser())(3)",
++            "(3)",
++            1,
++        ),
++        (
++            "anonymousOwnObjectHost",
++            "public function __invoke(int $own)",
++            "public function __invoke(int $own): void {} })(4)",
++            "(4)",
++            1,
++        ),
++        (
++            "anonymousInheritedObjectHost",
++            "class DirectInvokeParent { public function __construct() {} public function __invoke",
++            "(new class extends DirectInvokeParent {})(5)",
++            "(5)",
++            2,
++        ),
++    ] {
++        let host = anonymous_hierarchy_prepare(&backend, &uri, source, host_name).await;
++        let target =
++            immediate_object_target(&backend, &uri, source, method_context, "__invoke").await;
++        let expected = immediate_object_source_range(source, site, arity);
++        let edges = outgoing(&backend, &host).await;
++        let invoke = edges
++            .iter()
++            .filter(|edge| edge.to.name == "__invoke")
++            .collect::<Vec<_>>();
++        assert_eq!(
++            invoke.len(),
++            1,
++            "exact concrete receiver, regardless of final modifier: {host_name}"
++        );
++        assert_eq!(invoke[0].to.uri, uri);
++        assert_eq!(
++            invoke[0].to.selection_range, target.selection_range,
++            "declaring method/trait origin: {host_name}"
++        );
++        assert_eq!(invoke[0].from_ranges, [expected]);
++        assert_eq!(
++            edges.len(),
++            if host_name == "traitObjectHost" { 1 } else { 2 },
++            "retain real constructor independently; no fabricated constructor for trait-only class"
++        );
++        let back = incoming(&backend, &target).await;
++        assert_eq!(
++            back.len(),
++            count,
++            "only actual immediate invocation hosts: {host_name}"
++        );
++        assert_eq!(
++            back.iter()
++                .filter(|call| call.from.uri == uri
++                    && call.from.selection_range == host.selection_range
++                    && call.from_ranges == [expected])
++                .count(),
++            1,
++            "reciprocal caller and exact outer operator: {host_name}"
++        );
++    }
++}
++
++async fn immediate_boundary_assert_edge(
++    backend: &Backend,
++    host: &CallHierarchyItem,
++    target: &CallHierarchyItem,
++    expected: Vec<Range>,
++) {
++    let edges = outgoing(backend, host).await;
++    let matched = edges
++        .iter()
++        .filter(|edge| {
++            edge.to.uri == target.uri && edge.to.selection_range == target.selection_range
++        })
++        .collect::<Vec<_>>();
++    assert_eq!(matched.len(), 1, "one concrete target from {}", host.name);
++    assert_eq!(
++        immediate_object_sorted_ranges(matched[0].from_ranges.clone()),
++        immediate_object_sorted_ranges(expected.clone())
++    );
++    let callers = incoming(backend, target).await;
++    let matched = callers
++        .iter()
++        .filter(|call| {
++            call.from.uri == host.uri && call.from.selection_range == host.selection_range
++        })
++        .collect::<Vec<_>>();
++    assert_eq!(matched.len(), 1, "one reciprocal caller {}", host.name);
++    assert_eq!(
++        immediate_object_sorted_ranges(matched[0].from_ranges.clone()),
++        immediate_object_sorted_ranges(expected)
++    );
++}
++
++#[tokio::test]
++async fn immediate_boundary_trait_alias_insteadof_targets_original_body() {
++    let backend = create_test_backend();
++    let uri = Url::parse("file:///immediate-alias-boundary.php").unwrap();
++    let source = concat!(
++        "<?php\n",
++        "trait SelectedInvoke { public function invokeBody(): int { return 7; } }\n",
++        "trait ExcludedInvoke { public function invokeBody(): int { return 8; } }\n",
++        "class AliasedInvoke { use SelectedInvoke, ExcludedInvoke { SelectedInvoke::invokeBody insteadof ExcludedInvoke; SelectedInvoke::invokeBody as __invoke; } }\n",
++        "function aliasBoundaryHost(): void { (new AliasedInvoke())(11); }\n"
++    );
++    open_php(&backend, &uri, source).await;
++    let host = anonymous_hierarchy_prepare(&backend, &uri, source, "aliasBoundaryHost").await;
++    let target = immediate_object_target(
++        &backend,
++        &uri,
++        source,
++        "trait SelectedInvoke { public function invokeBody",
++        "invokeBody",
++    )
++    .await;
++    assert_eq!(target.name, "invokeBody");
++    immediate_boundary_assert_edge(
++        &backend,
++        &host,
++        &target,
++        vec![immediate_object_source_range(
++            source,
++            "(new AliasedInvoke())(11)",
++            "(11)",
++        )],
++    )
++    .await;
++    let excluded = immediate_object_target(
++        &backend,
++        &uri,
++        source,
++        "trait ExcludedInvoke { public function invokeBody",
++        "invokeBody",
++    )
++    .await;
++    assert!(
++        incoming(&backend, &excluded).await.is_empty(),
++        "adaptation references are not invocation sites"
++    );
++}
++
++#[tokio::test]
++async fn immediate_boundary_magic_visibility_and_constructor_allocation_are_distinct() {
++    for visibility in ["private", "protected"] {
++        let backend = create_test_backend();
++        let uri = Url::parse(&format!("file:///immediate-{visibility}-invoke.php")).unwrap();
++        let source = format!(
++            "<?php\nclass VisibilityInvoke {{ {visibility} function __invoke(): int {{ return 7; }} }}\nfunction visibilityHost(): void {{ (new VisibilityInvoke())(12); }}\n"
++        );
++        open_php(&backend, &uri, &source).await;
++        let host = anonymous_hierarchy_prepare(&backend, &uri, &source, "visibilityHost").await;
++        let target =
++            immediate_object_target(&backend, &uri, &source, "function __invoke", "__invoke").await;
++        immediate_boundary_assert_edge(
++            &backend,
++            &host,
++            &target,
++            vec![immediate_object_source_range(
++                &source,
++                "(new VisibilityInvoke())(12)",
++                "(12)",
++            )],
++        )
++        .await;
++    }
++    // These definitions are kept in separate fixtures: static magic method and
++    // direct abstract allocation are known-invalid runtime forms, not evidence
++    // that ordinary private/protected magic invocation fails.
++    for (name, declaration) in [
++        (
++            "StaticInvoke",
++            "class StaticInvoke { public static function __invoke(): int { return 7; } }",
++        ),
++        (
++            "AbstractInvoke",
++            "abstract class AbstractInvoke { public function __invoke(): int { return 7; } }",
++        ),
++    ] {
++        let backend = create_test_backend();
++        let uri = Url::parse(&format!("file:///immediate-invalid-{name}.php")).unwrap();
++        let source = format!(
++            "<?php\n{declaration}\nfunction invalidHost(): void {{ (new {name}())(13); }}\n"
++        );
++        open_php(&backend, &uri, &source).await;
++        let host = anonymous_hierarchy_prepare(&backend, &uri, &source, "invalidHost").await;
++        assert!(
++            !outgoing(&backend, &host)
++                .await
++                .iter()
++                .any(|edge| edge.to.name == "__invoke")
++        );
++    }
++    let backend = create_test_backend();
++    let uri = Url::parse("file:///immediate-private-constructor.php").unwrap();
++    let source = concat!(
++        "<?php\n",
++        "class PrivateAllocation { private function __construct() {} public function __call(string $name, array $args): void {} public function __invoke(): int { return 7; } public static function factory(): void { (new self())(14); } }\n",
++        "function inaccessibleAllocationHost(): void { (new PrivateAllocation())(15); }\n"
++    );
++    open_php(&backend, &uri, source).await;
++    let target =
++        immediate_object_target(&backend, &uri, source, "function __invoke", "__invoke").await;
++    let factory = anonymous_hierarchy_prepare(&backend, &uri, source, "factory()").await;
++    immediate_boundary_assert_edge(
++        &backend,
++        &factory,
++        &target,
++        vec![immediate_object_source_range(
++            source,
++            "(new self())(14)",
++            "(14)",
++        )],
++    )
++    .await;
++    let outside =
++        anonymous_hierarchy_prepare(&backend, &uri, source, "inaccessibleAllocationHost").await;
++    assert!(
++        !outgoing(&backend, &outside)
++            .await
++            .iter()
++            .any(|edge| edge.to.selection_range == target.selection_range)
++    );
++    assert!(
++        incoming(&backend, &target)
++            .await
++            .iter()
++            .all(|call| call.from.selection_range != outside.selection_range)
++    );
++}
++
++#[tokio::test]
++async fn immediate_boundary_keyword_receivers_have_independent_static_method_certainty() {
++    let backend = create_test_backend();
++    let uri = Url::parse("file:///immediate-keyword-boundary.php").unwrap();
++    let source = concat!(
++        "<?php\n",
++        "class KeywordInvokeParent { public function __construct() {} public function __invoke(): void {} }\n",
++        "class KeywordInvokeChild extends KeywordInvokeParent { public function lexicalHost(): void { (new self())(21); (new parent())(22); } }\n",
++        "class FinalConstructorOnly { final public function __construct() {} public function __invoke(): void {} public function uncertainHost(): void { (new static())(23); } }\n",
++        "class FinalInvocationOnly { public function __construct() {} final public function __invoke(): void {} public function stableHost(): void { (new static())(24); } }\n",
++        "abstract class AbstractLateInvocation { final public function __invoke(): void {} public static function abstractStableHost(): void { (new static())(25); } }\n"
++    );
++    open_php(&backend, &uri, source).await;
++    let lexical = anonymous_hierarchy_prepare(&backend, &uri, source, "lexicalHost()").await;
++    let parent = immediate_object_target(
++        &backend,
++        &uri,
++        source,
++        "class KeywordInvokeParent { public function __construct() {} public function __invoke",
++        "__invoke",
++    )
++    .await;
++    immediate_boundary_assert_edge(
++        &backend,
++        &lexical,
++        &parent,
++        vec![
++            immediate_object_source_range(source, "(new self())(21)", "(21)"),
++            immediate_object_source_range(source, "(new parent())(22)", "(22)"),
++        ],
++    )
++    .await;
++    let uncertain = anonymous_hierarchy_prepare(&backend, &uri, source, "uncertainHost()").await;
++    let edges = outgoing(&backend, &uncertain).await;
++    assert!(edges.iter().any(|edge| edge.to.name == "__construct"));
++    assert!(
++        !edges.iter().any(|edge| edge.to.name == "__invoke"),
++        "final constructor does not pin overridable invoke"
++    );
++    let stable = anonymous_hierarchy_prepare(&backend, &uri, source, "stableHost()").await;
++    let target = immediate_object_target(&backend, &uri, source, "class FinalInvocationOnly { public function __construct() {} final public function __invoke", "__invoke").await;
++    immediate_boundary_assert_edge(
++        &backend,
++        &stable,
++        &target,
++        vec![immediate_object_source_range(
++            source,
++            "(new static())(24)",
++            "(24)",
++        )],
++    )
++    .await;
++    assert!(
++        !outgoing(&backend, &stable)
++            .await
++            .iter()
++            .any(|edge| edge.to.name == "__construct"),
++        "final invoke does not pin overridable constructor"
++    );
++    let abstract_host =
++        anonymous_hierarchy_prepare(&backend, &uri, source, "abstractStableHost()").await;
++    let abstract_target = immediate_object_target(
++        &backend,
++        &uri,
++        source,
++        "abstract class AbstractLateInvocation { final public function __invoke",
++        "__invoke",
++    )
++    .await;
++    immediate_boundary_assert_edge(
++        &backend,
++        &abstract_host,
++        &abstract_target,
++        vec![immediate_object_source_range(
++            source,
++            "(new static())(25)",
++            "(25)",
++        )],
++    )
++    .await;
++}
++
++#[tokio::test]
++async fn immediate_boundary_namespace_aliases_and_identical_anonymous_files_keep_exact_owners() {
++    let backend = create_test_backend();
++    let uri = Url::parse("file:///immediate-namespaces.php").unwrap();
++    let source = concat!(
++        "<?php\n",
++        "namespace One { class Same { public function __invoke(): void {} } }\n",
++        "namespace Two { class Same { public function __invoke(): void {} } }\n",
++        "namespace Host { use One\\Same as First; use Two\\Same as Second; function firstHost(): void { (new First())(31); } function secondHost(): void { (new Second())(32); } }\n"
++    );
++    open_php(&backend, &uri, source).await;
++    for (host_name, context, site, operator) in [
++        (
++            "firstHost",
++            "namespace One { class Same { public function __invoke",
++            "(new First())(31)",
++            "(31)",
++        ),
++        (
++            "secondHost",
++            "namespace Two { class Same { public function __invoke",
++            "(new Second())(32)",
++            "(32)",
++        ),
++    ] {
++        let host = anonymous_hierarchy_prepare(&backend, &uri, source, host_name).await;
++        let target = immediate_object_target(&backend, &uri, source, context, "__invoke").await;
++        immediate_boundary_assert_edge(
++            &backend,
++            &host,
++            &target,
++            vec![immediate_object_source_range(source, site, operator)],
++        )
++        .await;
++        assert_eq!(incoming(&backend, &target).await.len(), 1);
++    }
++    // Entire source and body braces collide; the only distinction is source URI.
++    let anonymous = "<?php\n(new class { public function __invoke(): void {} })(33);\n";
++    let a = Url::parse("file:///immediate-anonymous-owner-a.php").unwrap();
++    let b = Url::parse("file:///immediate-anonymous-owner-b.php").unwrap();
++    open_php(&backend, &a, anonymous).await;
++    open_php(&backend, &b, anonymous).await;
++    for owner in [&a, &b] {
++        let mut prepared_file = prepare_at(&backend, owner, 0, 0).await;
++        assert_eq!(prepared_file.len(), 1);
++        let host = prepared_file.remove(0);
++        assert_eq!(host.kind, SymbolKind::FILE);
++        let target =
++            immediate_object_target(&backend, owner, anonymous, "function __invoke", "__invoke")
++                .await;
++        assert_eq!(&target.uri, owner);
++        immediate_boundary_assert_edge(
++            &backend,
++            &host,
++            &target,
++            vec![immediate_object_source_range(
++                anonymous,
++                "public function __invoke(): void {} })(33)",
++                "(33)",
++            )],
++        )
++        .await;
++        let back = incoming(&backend, &target).await;
++        assert_eq!(back.len(), 1);
++        assert_eq!(
++            &back[0].from.uri, owner,
++            "no same-brace cross-file borrowing"
++        );
++    }
++}
++
++#[tokio::test]
++async fn immediate_boundary_php_and_blade_file_calls_do_not_steal_nested_closure_sites() {
++    let backend = create_test_backend();
++    let definition_uri = Url::parse("file:///immediate-file-target.php").unwrap();
++    let definition = "<?php\nclass FileBoundaryInvoker { public function __invoke(): void {} }\n";
++    open_php(&backend, &definition_uri, definition).await;
++    let target = immediate_object_target(
++        &backend,
++        &definition_uri,
++        definition,
++        "function __invoke",
++        "__invoke",
++    )
++    .await;
++    for (uri_text, source, blade) in [
++        (
++            "file:///immediate-file-owner.php",
++            "<?php\r\n/* 🐘 */ (new FileBoundaryInvoker())(41);\r\n$nested = static function () { (new FileBoundaryInvoker())(42); };\r\n",
++            false,
++        ),
++        (
++            "file:///immediate-file-owner.blade.php",
++            "<p>café 🐘</p>\r\n@php\r\n/* 🐘 */ (new FileBoundaryInvoker())(41);\r\n$nested = static function () { (new FileBoundaryInvoker())(42); };\r\n@endphp\r\n",
++            true,
++        ),
++    ] {
++        let uri = Url::parse(uri_text).unwrap();
++        if blade {
++            crate::common::open_document(&backend, &uri, "blade", source).await;
++        } else {
++            open_php(&backend, &uri, source).await;
++        }
++        let mut items = prepare_at(&backend, &uri, 0, 0).await;
++        assert_eq!(items.len(), 1);
++        let file = items.remove(0);
++        assert_eq!(file.kind, SymbolKind::FILE);
++        assert_eq!(
++            file.selection_range,
++            Range::new(Position::new(0, 0), Position::new(0, 0))
++        );
++        let closure = anonymous_hierarchy_prepare(&backend, &uri, source, "function ()").await;
++        immediate_boundary_assert_edge(
++            &backend,
++            &file,
++            &target,
++            vec![immediate_object_source_range(
++                source,
++                "(new FileBoundaryInvoker())(41)",
++                "(41)",
++            )],
++        )
++        .await;
++        immediate_boundary_assert_edge(
++            &backend,
++            &closure,
++            &target,
++            vec![immediate_object_source_range(
++                source,
++                "(new FileBoundaryInvoker())(42)",
++                "(42)",
++            )],
++        )
++        .await;
++        assert_eq!(
++            outgoing(&backend, &file).await.len(),
++            1,
++            "assigned nested closure body is not file execution"
++        );
++        let back = incoming(&backend, &target).await;
++        let local = back
++            .iter()
++            .filter(|call| call.from.uri == uri)
++            .collect::<Vec<_>>();
++        assert_eq!(
++            local.len(),
++            2,
++            "logical file + nested closure, no generated wrapper"
++        );
++        assert!(
++            local
++                .iter()
++                .all(|call| !call.from.name.contains("__blade_template"))
++        );
++    }
++}
++
++#[tokio::test]
++async fn immediate_boundary_same_length_dirty_receiver_change_replaces_reciprocal_edges() {
++    let backend = create_test_backend();
++    let uri = Url::parse("file:///immediate-dirty-receiver.php").unwrap();
++    let source = concat!(
++        "<?php\n",
++        "class First { public function __invoke(): void {} }\n",
++        "class Other { public function __invoke(): void {} }\n",
++        "function dirtyObjectHost(): void { (new First())(51); }\n"
++    );
++    let changed = source.replace("(new First())(51)", "(new Other())(51)");
++    assert_eq!(source.len(), changed.len());
++    open_php(&backend, &uri, source).await;
++    let first = immediate_object_target(
++        &backend,
++        &uri,
++        source,
++        "class First { public function __invoke",
++        "__invoke",
++    )
++    .await;
++    let other = immediate_object_target(
++        &backend,
++        &uri,
++        source,
++        "class Other { public function __invoke",
++        "__invoke",
++    )
++    .await;
++    let host = anonymous_hierarchy_prepare(&backend, &uri, source, "dirtyObjectHost").await;
++    immediate_boundary_assert_edge(
++        &backend,
++        &host,
++        &first,
++        vec![immediate_object_source_range(
++            source,
++            "(new First())(51)",
++            "(51)",
++        )],
++    )
++    .await;
++    for (version, current, live, retired, site) in [
++        (2, changed.as_str(), &other, &first, "(new Other())(51)"),
++        (3, source, &first, &other, "(new First())(51)"),
++    ] {
++        backend
++            .did_change(DidChangeTextDocumentParams {
++                text_document: VersionedTextDocumentIdentifier {
++                    uri: uri.clone(),
++                    version,
++                },
++                content_changes: vec![TextDocumentContentChangeEvent {
++                    range: None,
++                    range_length: None,
++                    text: current.to_owned(),
++                }],
++            })
++            .await;
++        let host = anonymous_hierarchy_prepare(&backend, &uri, current, "dirtyObjectHost").await;
++        immediate_boundary_assert_edge(
++            &backend,
++            &host,
++            live,
++            vec![immediate_object_source_range(current, site, "(51)")],
++        )
++        .await;
++        assert!(
++            incoming(&backend, retired).await.is_empty(),
++            "first reply loses old receiver at version {version}"
++        );
++    }
++}
++
++#[tokio::test]
++async fn immediate_boundary_callable_creation_allocates_without_invoking_the_object() {
++    let backend = create_test_backend();
++    let uri = Url::parse("file:///immediate-callable-creation.php").unwrap();
++    let source = concat!(
++        "<?php\n",
++        "class CallableCreationInvoker { public function __construct() {} public function __invoke(): void {} }\n",
++        "function createObjectCallable(): \\Closure { return (new CallableCreationInvoker())(...); }\n",
++        "function createAnonymousCallable(): \\Closure { return (new class { public function __construct() {} public function __invoke(): void {} })(...); }\n"
++    );
++    open_php(&backend, &uri, source).await;
++    for name in ["createObjectCallable", "createAnonymousCallable"] {
++        let host = anonymous_hierarchy_prepare(&backend, &uri, source, name).await;
++        let calls = outgoing(&backend, &host).await;
++        assert_eq!(
++            calls.len(),
++            1,
++            "callable creation still allocates the receiver"
++        );
++        assert_eq!(calls[0].to.name, "__construct");
++    }
++    for context in [
++        "class CallableCreationInvoker { public function __construct() {} public function __invoke",
++        "return (new class { public function __construct() {} public function __invoke",
++    ] {
++        let target = immediate_object_target(&backend, &uri, source, context, "__invoke").await;
++        assert!(
++            incoming(&backend, &target).await.is_empty(),
++            "creating a callable does not invoke its body"
++        );
++    }
++}

@@ -1,0 +1,1070 @@
+diff --git a/docs/CHANGELOG.md b/docs/CHANGELOG.md
+index 5b0aade..c8b3633 100644
+--- a/docs/CHANGELOG.md
++++ b/docs/CHANGELOG.md
+@@ -15,6 +15,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
+ 
+ ## [Unreleased]
+ 
++- **Keep member suggestions while typing.** Completion recovers enclosing function and class scopes before their closing braces are written, preserving visibility and typed chains. Strict membership checks against broad or unavailable object types retain valid member suggestions. Contributed by PHP Workbench downstream.
++
+ - **Rename preserves import bindings.** Class renames update every matching import while retaining explicit aliases and choosing available names for collisions. Moving grouped imports keeps unrelated bindings and surrounding code. Contributed by PHP Workbench downstream.
+ 
+ - **Named trait aliases keep their identity.** Rename follows composed aliases without changing independent methods, and definition navigation follows their original implementation. Contributed by PHP Workbench downstream.
+diff --git a/docs/todo/bugs.md b/docs/todo/bugs.md
+index e328503..5f9e4b9 100644
+--- a/docs/todo/bugs.md
++++ b/docs/todo/bugs.md
+@@ -37,31 +37,7 @@ No outstanding items.
+ 
+ ## Narrowing
+ 
+-### B568. A passing strict `in_array()` against `object` elements drops the needle's classes
+-
+-**Impact: Low · Complexity: Low-Medium**
+-
+-```php
+-/** @param list<object> $handlers */
+-function f(Foo|Bar|string $x, array $handlers): void {
+-    if (in_array($x, $handlers, true)) {
+-        $x->run(); // `$x` reads `string`, though the object it equals can be a `Foo` or a `Bar`
+-    }
+-}
+-```
+-
+-In the branch where the check held, `apply_in_array_narrowing`
+-(`cond_narrowing/in_array.rs`) narrows the needle's class layer through
+-`apply_instanceof_inclusion`, which keeps only the classes the element type
+-resolves to. An element that names no class it can load, such as `object`
+-or a class that is not found, resolves to none, so every class goes and
+-only the needle's scalar alternatives are left. The branch already skips an
+-element that could be anything (`mixed`), but `object` can be any object as
+-well, and a class that cannot be loaded may be an ancestor of the needle's.
+-
+-**Fix:** Narrow the class layer only when every element alternative that
+-can hold an object names a class that loads, and leave the needle's classes
+-alone otherwise.
++No outstanding items.
+ 
+ ## Arithmetic
+ 
+diff --git a/src/completion/array_shape.rs b/src/completion/array_shape.rs
+index ff3b979..2e4b406 100644
+--- a/src/completion/array_shape.rs
++++ b/src/completion/array_shape.rs
+@@ -536,7 +536,11 @@ impl Backend {
+ 
+     /// Recover classes and callable names from the same patched Program.
+     /// None of this transient metadata is published to the workspace indexes.
+-    fn array_key_recovery_context(&self, content: &str, position: Position) -> FileContext {
++    pub(crate) fn array_key_recovery_context(
++        &self,
++        content: &str,
++        position: Position,
++    ) -> FileContext {
+         let offset = position_to_offset(content, position);
+         let _parse = crate::parser::with_parse_cache(content);
+         let (mut classes, blocks) = Self::parse_php_classes_by_block(content, None, false);
+diff --git a/src/completion/handler/member_access.rs b/src/completion/handler/member_access.rs
+index 4e0334a..b72e825 100644
+--- a/src/completion/handler/member_access.rs
++++ b/src/completion/handler/member_access.rs
+@@ -2,8 +2,6 @@
+ //! the related "suggest an overridable parent member" strategy that
+ //! fires when declaring a new method/constant/property in a class body.
+ 
+-use std::sync::Arc;
+-
+ use tower_lsp::lsp_types::{
+     CompletionContext, CompletionItem, CompletionList, CompletionResponse, Position,
+ };
+@@ -34,6 +32,28 @@ impl Backend {
+         ctx: &FileContext,
+         completion_context: Option<&CompletionContext>,
+     ) -> Option<CompletionResponse> {
++        self.member_access_completion_inner(uri, content, position, ctx, completion_context, false)
++    }
++
++    fn member_access_completion_inner(
++        &self,
++        uri: &str,
++        content: &str,
++        position: Position,
++        ctx: &FileContext,
++        completion_context: Option<&CompletionContext>,
++        repaired: bool,
++    ) -> Option<CompletionResponse> {
++        let recovery_cache = repaired.then(crate::virtual_members::new_resolved_class_cache);
++        let resolved_cache = recovery_cache
++            .as_ref()
++            .unwrap_or(&self.resolved_class_cache);
++        let _active_cache = repaired
++            .then(|| crate::virtual_members::with_active_resolved_class_cache(resolved_cache));
++        let _isolated_chain =
++            repaired.then(crate::type_engine::resolver::with_isolated_chain_cache);
++        let _isolated_scope =
++            repaired.then(crate::type_engine::variable::forward_walk::suspend_diagnostic_scope);
+         // ── Primary path: AST-based detection via symbol map ────────
+         // The symbol map's `MemberAccess` correctly handles `(new Foo)->`,
+         // call-result chains, array access chains, and null-safe chains.
+@@ -64,7 +84,7 @@ impl Backend {
+         // cache key can include the actual resolved types. This prevents
+         // stale results if a variable (e.g. `$model`) changes type
+         // within the same file.
+-        let rctx = self.resolution_ctx_at(
++        let mut rctx = self.resolution_ctx_at(
+             current_class,
+             &ctx.classes,
+             content,
+@@ -75,33 +95,33 @@ impl Backend {
+                 &laravel_macro_this_resolver,
+             ),
+         );
+-        let mut resolved = if suppress {
++        rctx.resolved_class_cache = Some(resolved_cache);
++        let resolved = if suppress {
+             vec![]
+         } else {
+             resolve_target_classes(&target.subject, target.access_kind, &rctx)
+         };
+ 
+-        // ── Incomplete-expression retry ─────────────────────────────
+-        if resolved.is_empty() && !suppress && target.subject.starts_with('$') {
+-            let patched = Self::patch_incomplete_member_access(content, position);
+-            if patched != content {
+-                let patched_classes: Vec<Arc<crate::types::ClassInfo>> =
+-                    self.parse_php(&patched).into_iter().map(Arc::new).collect();
+-                let patched_offset = position_to_offset(&patched, position);
+-                let patched_current = find_class_at_offset(&patched_classes, patched_offset);
+-                let patched_rctx = self.resolution_ctx_at(
+-                    patched_current,
+-                    &patched_classes,
++        // Recovered AST/models belong only to this nested query. Its context
++        // remains alive through visibility filtering and item construction.
++        if resolved.is_empty() && !repaired && !suppress {
++            let patched = Self::patch_member_scope_at_eof(content, position).or_else(|| {
++                target
++                    .subject
++                    .starts_with('$')
++                    .then(|| Self::patch_incomplete_member_access(content, position))
++            });
++            if let Some(patched) = patched.filter(|patched| patched != content) {
++                let _parse = crate::parser::with_parse_cache(&patched);
++                let patched_ctx = self.array_key_recovery_context(&patched, position);
++                return self.member_access_completion_inner(
++                    uri,
+                     &patched,
+-                    patched_offset,
+-                    CtxLoaders::new(
+-                        &class_loader,
+-                        &function_loader,
+-                        &laravel_macro_this_resolver,
+-                    ),
++                    position,
++                    &patched_ctx,
++                    completion_context,
++                    true,
+                 );
+-                resolved =
+-                    resolve_target_classes(&target.subject, target.access_kind, &patched_rctx);
+             }
+         }
+ 
+@@ -121,7 +141,9 @@ impl Backend {
+         // resolution when the subject is a call expression like
+         // `collect($x)->`) doesn't crash the LSP server process.
+         let started = std::time::Instant::now();
+-        let cached_items = self.member_completion_cache.lock().get(&cache_key).cloned();
++        let cached_items = (!repaired)
++            .then(|| self.member_completion_cache.lock().get(&cache_key).cloned())
++            .flatten();
+         let cache_hit = cached_items.is_some();
+         let member_items = cached_items.or_else(|| {
+             crate::util::catch_panic_unwind_safe(
+@@ -149,13 +171,13 @@ impl Backend {
+                         effective_access,
+                         current_class,
+                         &class_loader,
+-                        &self.resolved_class_cache,
++                        resolved_cache,
+                         uri,
+                     )
+                 },
+             )
+             .inspect(|items| {
+-                if !items.is_empty() {
++                if !repaired && !items.is_empty() {
+                     let mut cache = self.member_completion_cache.lock();
+                     // Simple size limit: evict everything if the cache gets too big.
+                     // This is crude but effective at preventing memory leaks
+diff --git a/src/completion/handler/patching.rs b/src/completion/handler/patching.rs
+index 3f82a66..3f56004 100644
+--- a/src/completion/handler/patching.rs
++++ b/src/completion/handler/patching.rs
+@@ -56,6 +56,129 @@ impl Backend {
+         Some(patched)
+     }
+ 
++    /// Repair missing enclosing bodies for a member query at EOF. Original
++    /// bytes and declaration offsets before the caret remain unchanged.
++    pub(super) fn patch_member_scope_at_eof(content: &str, position: Position) -> Option<String> {
++        use mago_syntax::{lexer::Lexer, settings::LexerSettings, token::TokenKind};
++        use mago_syntax_core::input::Input;
++
++        if content.len() > u32::MAX as usize {
++            return None;
++        }
++        let offset = crate::text_position::position_to_offset(content, position) as usize;
++        let suffix = content.get(offset..)?;
++        let has_semicolon = suffix.trim() == ";";
++        if !suffix.trim().is_empty() && !has_semicolon {
++            return None;
++        }
++        let bytes = content.as_bytes();
++        let member_start = crate::text_scan::scan_ident_backward(bytes, offset);
++        if member_start < 2
++            || !matches!(
++                bytes.get(member_start - 2..member_start),
++                Some(b"->" | b"::")
++            )
++        {
++            return None;
++        }
++
++        #[derive(Clone, Copy)]
++        enum Frame {
++            Delimiter(TokenKind),
++            Quote(TokenKind),
++            Document,
++        }
++        let input = Input::new(
++            mago_database::file::FileId::new(b"completion-eof.php"),
++            bytes,
++        );
++        let mut lexer = if content.contains("<?") {
++            Lexer::new(input, LexerSettings::default())
++        } else {
++            Lexer::scripting(input, LexerSettings::default())
++        };
++        let mut frames = Vec::new();
++        while let Some(token) = lexer.advance() {
++            let kind = token.ok()?.kind;
++            if kind == TokenKind::PartialLiteralString {
++                return None;
++            }
++            if matches!(frames.last(), Some(Frame::Document)) {
++                match kind {
++                    TokenKind::DocumentStart(_) => {
++                        if frames.len() >= 512 {
++                            return None;
++                        }
++                        frames.push(Frame::Document);
++                    }
++                    TokenKind::DocumentEnd => {
++                        frames.pop();
++                    }
++                    _ => {}
++                }
++                continue;
++            }
++            if let Some(Frame::Quote(delimiter)) = frames.last().copied() {
++                match kind {
++                    TokenKind::LeftBrace | TokenKind::DollarLeftBrace => {
++                        frames.push(Frame::Delimiter(TokenKind::RightBrace));
++                    }
++                    _ if kind == delimiter => {
++                        frames.pop();
++                    }
++                    _ => {}
++                }
++            } else {
++                match kind {
++                    TokenKind::DocumentStart(_) => frames.push(Frame::Document),
++                    TokenKind::DoubleQuote | TokenKind::Backtick => frames.push(Frame::Quote(kind)),
++                    TokenKind::LeftBrace | TokenKind::DollarLeftBrace => {
++                        frames.push(Frame::Delimiter(TokenKind::RightBrace));
++                    }
++                    TokenKind::LeftParenthesis => {
++                        frames.push(Frame::Delimiter(TokenKind::RightParenthesis))
++                    }
++                    TokenKind::LeftBracket | TokenKind::HashLeftBracket => {
++                        frames.push(Frame::Delimiter(TokenKind::RightBracket));
++                    }
++                    TokenKind::RightBrace
++                    | TokenKind::RightParenthesis
++                    | TokenKind::RightBracket
++                        if !matches!(frames.pop(), Some(Frame::Delimiter(close)) if close == kind) =>
++                    {
++                        return None;
++                    }
++                    _ => {}
++                }
++            }
++            if frames.len() > 512 {
++                return None;
++            }
++        }
++        // Do not manufacture quotes, document labels, argument lists or indexes.
++        if frames.is_empty()
++            || frames
++                .iter()
++                .any(|frame| !matches!(frame, Frame::Delimiter(TokenKind::RightBrace)))
++        {
++            return None;
++        }
++        let mut patched = String::with_capacity(content.len() + frames.len() + 7);
++        patched.push_str(&content[..offset]);
++        if member_start == offset {
++            patched.push_str("_x");
++        }
++        patched.push_str(suffix);
++        patched.push('\n');
++        if !has_semicolon {
++            patched.push(';');
++        }
++        for _ in frames {
++            patched.push('}');
++        }
++        Some(patched)
++    }
++
+     /// Patch incomplete member-access expressions for parser recovery.
+     ///
+     /// When the cursor is right after `->` or `?->` and the line has no
+@@ -205,3 +328,84 @@ mod utf16_tests {
+         }
+     }
+ }
++
++#[cfg(test)]
++mod eof_member_recovery_tests {
++    use super::*;
++
++    fn at(marked: &str) -> (String, Position) {
++        let prefix = marked.split_once("<caret>").unwrap().0;
++        (
++            marked.replace("<caret>", ""),
++            Position::new(
++                prefix.bytes().filter(|&b| b == b'\n').count() as u32,
++                prefix.rsplit('\n').next().unwrap().encode_utf16().count() as u32,
++            ),
++        )
++    }
++
++    #[test]
++    fn eof_member_recovery_preserves_partial_crlf_and_semicolon() {
++        for member in ["", "ema"] {
++            for suffix in ["", "\r\n", ";\r\n"] {
++                let marked = format!(
++                    "<?php\r\nfunction f(Item $a) {{ $note='café 🐘'; $a->{member}<caret>{suffix}"
++                );
++                let (content, position) = at(&marked);
++                let patched = Backend::patch_member_scope_at_eof(&content, position).unwrap();
++                let (prefix, _) = marked.split_once("<caret>").unwrap();
++                let dummy = if member.is_empty() { "_x" } else { "" };
++                let terminator = if suffix.trim() == ";" { "" } else { ";" };
++                assert_eq!(patched, format!("{prefix}{dummy}{suffix}\n{terminator}}}"));
++            }
++        }
++    }
++
++    #[test]
++    fn eof_member_recovery_uses_tokens_for_literal_and_interpolation_braces() {
++        let marked = concat!(
++            "<?php\nfunction f(Item $a) {\n",
++            "$single = '} ] )'; $double = \"{ [ (\";\n",
++            "$nested = \"{$a->{\"email\"}} } ] )\";\n",
++            "$doc = <<<TEXT\n} ] )\nTEXT;\n",
++            "$raw = <<<'RAW'\n{ [ (\nRAW;\n",
++            "/* } ] ) */ // { [ (\n",
++            "$a->ema<caret>\n",
++        );
++        let (content, position) = at(marked);
++        assert_eq!(
++            Backend::patch_member_scope_at_eof(&content, position),
++            Some(format!("{content}\n;}}"))
++        );
++    }
++
++    #[test]
++    fn eof_member_recovery_refuses_nonlocal_or_unfinished_lexical_contexts() {
++        for marked in [
++            "<?php function f(Item $a) { $a->ema<caret>; later();",
++            "<?php function f(Item $a) { $a->ema<caret> }",
++            "<?php function f(Item $a) { $s = \"$a-><caret>",
++            "<?php function f(Item $a) { $s = '$a-><caret>",
++            "<?php function f(Item $a) { $s = <<<RAW\n$a-><caret>",
++            "<?php function f(Item $a) { $s = <<<'RAW'\n$a-><caret>",
++            "<?php function f(Item $a) { call($a->ema<caret>",
++            "<?php function f(Item $a) { [$a->ema<caret>",
++            "<?php function f(Item $a) { ] $a->ema<caret>",
++            "<?php $a->ema<caret>",
++        ] {
++            let (content, position) = at(marked);
++            assert!(
++                Backend::patch_member_scope_at_eof(&content, position).is_none(),
++                "{marked}"
++            );
++        }
++    }
++
++    #[test]
++    fn eof_member_recovery_bounds_frames_without_editing_source() {
++        let marked = format!("<?php {} $a->ema<caret>", "{".repeat(513));
++        let (content, position) = at(&marked);
++        assert!(Backend::patch_member_scope_at_eof(&content, position).is_none());
++        assert_eq!(content.matches('{').count(), 513);
++    }
++}
+diff --git a/src/type_engine/variable/forward_walk/cond_narrowing/in_array.rs b/src/type_engine/variable/forward_walk/cond_narrowing/in_array.rs
+index f8b3733..7197dfa 100644
+--- a/src/type_engine/variable/forward_walk/cond_narrowing/in_array.rs
++++ b/src/type_engine/variable/forward_walk/cond_narrowing/in_array.rs
+@@ -125,9 +125,25 @@ pub(crate) fn apply_in_array_narrowing<'b>(
+                     continue;
+                 }
+                 let var_ctx = build_var_ctx(var_name, ctx, &scope_resolver);
+-                ResolvedType::apply_narrowing(&mut results, |classes| {
+-                    narrowing::apply_instanceof_inclusion(&element_type, false, &var_ctx, classes)
+-                });
++                let expanded = crate::type_engine::types::resolution::expand_nested_type_aliases(
++                    &element_type,
++                    &var_ctx.current_class.name,
++                    var_ctx.all_classes,
++                    var_ctx.class_loader,
++                );
++                if element_class_bounds_resolve(
++                    expanded.as_ref().unwrap_or(&element_type),
++                    &var_ctx,
++                ) {
++                    ResolvedType::apply_narrowing(&mut results, |classes| {
++                        narrowing::apply_instanceof_inclusion(
++                            &element_type,
++                            false,
++                            &var_ctx,
++                            classes,
++                        )
++                    });
++                }
+                 // `apply_narrowing` works on the class layer, so a needle
+                 // with no class behind it (`?string`, `int|string`) comes
+                 // back untouched.  Strict equality against the haystack's
+@@ -150,6 +166,61 @@ pub(crate) fn apply_in_array_narrowing<'b>(
+     }
+ }
+ 
++/// Every union alternative must bound its possible objects before a class
++/// inclusion can discard needle classes. An intersection keeps the constraint
++/// of any known component even when another component is unavailable.
++fn element_class_bounds_resolve(element: &PhpType, ctx: &VarResolutionCtx<'_>) -> bool {
++    if element.contains_mixed() || element.is_untyped() {
++        return false;
++    }
++    match element.kind() {
++        TypeKind::Union(members) => members
++            .iter()
++            .all(|member| element_class_bounds_resolve(member, ctx)),
++        TypeKind::Intersection(members) => members
++            .iter()
++            .any(|member| element_class_bounds_resolve(member, ctx)),
++        TypeKind::Nullable(inner) => element_class_bounds_resolve(inner, ctx),
++        TypeKind::Named(name) => {
++            if matches!(
++                name.as_str(),
++                "object" | "callable" | "callable-object" | "iterable"
++            ) {
++                return false;
++            }
++            (element.is_scalar()
++                && !matches!(name.as_str(), "self" | "static" | "parent" | "$this"))
++                || !narrowing::resolve_narrowing_target(element, ctx).is_empty()
++        }
++        TypeKind::Generic(generic) => {
++            if matches!(
++                generic.name.as_str(),
++                "object" | "callable" | "callable-object" | "iterable"
++            ) {
++                return false;
++            }
++            (element.is_scalar()
++                && !matches!(
++                    generic.name.as_str(),
++                    "self" | "static" | "parent" | "$this"
++                ))
++                || !narrowing::resolve_narrowing_target(element, ctx).is_empty()
++        }
++        TypeKind::StaticType(_) | TypeKind::ThisType(_) => {
++            !narrowing::resolve_narrowing_target(element, ctx).is_empty()
++        }
++        // Shapes and callable signatures describe objects without naming
++        // their runtime classes. Other unevaluated types may do so too.
++        TypeKind::ObjectShape(_)
++        | TypeKind::Callable(_)
++        | TypeKind::ValueOf(_)
++        | TypeKind::Conditional(_)
++        | TypeKind::IndexAccess(_, _)
++        | TypeKind::Raw(_) => false,
++        _ => element.is_scalar(),
++    }
++}
++
+ /// The needle's type once a strict `in_array` has proved it equals one of
+ /// the haystack's elements, or `None` when that proves nothing new.
+ ///
+diff --git a/tests/integration/completion_basic.rs b/tests/integration/completion_basic.rs
+index e455c2e..5ffbf27 100644
+--- a/tests/integration/completion_basic.rs
++++ b/tests/integration/completion_basic.rs
+@@ -2831,3 +2831,296 @@ async fn test_completion_trait_override_restates_variadic_param() {
+         "the restated tag should keep the `...`, got: {doc:?}"
+     );
+ }
++
++async fn eof_member_labels(
++    backend: &phpantom_lsp::Backend,
++    uri: &Url,
++    marked: &str,
++    version: i32,
++) -> Vec<String> {
++    let (prefix, _) = marked.split_once("<caret>").unwrap();
++    let position = Position::new(
++        prefix.bytes().filter(|&b| b == b'\n').count() as u32,
++        prefix.rsplit('\n').next().unwrap().encode_utf16().count() as u32,
++    );
++    let text = marked.replace("<caret>", "");
++    if version == 1 {
++        backend
++            .did_open(DidOpenTextDocumentParams {
++                text_document: TextDocumentItem {
++                    uri: uri.clone(),
++                    language_id: "php".into(),
++                    version,
++                    text,
++                },
++            })
++            .await;
++    } else {
++        backend
++            .did_change(DidChangeTextDocumentParams {
++                text_document: VersionedTextDocumentIdentifier {
++                    uri: uri.clone(),
++                    version,
++                },
++                content_changes: vec![TextDocumentContentChangeEvent {
++                    range: None,
++                    range_length: None,
++                    text,
++                }],
++            })
++            .await;
++    }
++    let response = backend
++        .completion(CompletionParams {
++            text_document_position: TextDocumentPositionParams {
++                text_document: TextDocumentIdentifier { uri: uri.clone() },
++                position,
++            },
++            work_done_progress_params: Default::default(),
++            partial_result_params: Default::default(),
++            context: None,
++        })
++        .await
++        .unwrap();
++    let items = match response {
++        Some(CompletionResponse::Array(items)) => items,
++        Some(CompletionResponse::List(list)) => list.items,
++        None => vec![],
++    };
++    items
++        .into_iter()
++        .map(|i| {
++            i.label
++                .split('(')
++                .next()
++                .unwrap()
++                .trim_start_matches('$')
++                .to_owned()
++        })
++        .collect()
++}
++
++#[tokio::test]
++async fn completion_member_eof_recovers_parameter_and_chain_scope() {
++    for chain in [false, true] {
++        for suffix in ["", "\n", ";\n"] {
++            let backend = create_test_backend();
++            let uri = Url::parse("file:///eof-parameter.php").unwrap();
++            let expression = if chain { "$a->profile()->" } else { "$a->" };
++            let marked = format!(
++                "<?php\nnamespace EofCase;\nclass Profile {{ public string $nickname=''; }}\nclass Account {{ public string $email=''; private string $hidden=''; public function profile(): Profile {{return new Profile();}} }}\nfunction run(Account $a): void {{ $note='café 🐘'; {expression}<caret>{suffix}"
++            );
++            let labels = eof_member_labels(&backend, &uri, &marked, 1).await;
++            let expected = if chain { "nickname" } else { "email" };
++            assert!(
++                labels.iter().any(|l| l == expected),
++                "chain={chain} suffix={suffix:?}: {labels:?}"
++            );
++            assert!(!labels.iter().any(|l| l == "hidden"));
++            let opposite = if chain { "email" } else { "nickname" };
++            assert!(!labels.iter().any(|l| l == opposite));
++        }
++    }
++}
++
++#[tokio::test]
++async fn completion_member_eof_recovers_partial_member_and_chain_prefixes() {
++    for chain in [false, true] {
++        for suffix in ["", "\n"] {
++            let backend = create_test_backend();
++            let uri = Url::parse("file:///eof-partial.php").unwrap();
++            let expression = if chain {
++                "$a->profile()->nick"
++            } else {
++                "$a->ema"
++            };
++            let marked = format!(
++                "<?php\nnamespace EofPartial;\nclass Profile {{ public string $nickname=''; }}\nclass Account {{ public string $email=''; private string $hidden=''; public function profile(): Profile {{return new Profile();}} }}\nfunction run(Account $a): void {{ $note='café 🐘'; {expression}<caret>{suffix}"
++            );
++            let labels = eof_member_labels(&backend, &uri, &marked, 1).await;
++            let expected = if chain { "nickname" } else { "email" };
++            assert!(
++                labels.iter().any(|l| l == expected),
++                "chain={chain} suffix={suffix:?}: {labels:?}"
++            );
++            assert!(!labels.iter().any(|l| l == "hidden"));
++        }
++    }
++}
++
++#[tokio::test]
++async fn completion_member_eof_preserves_repaired_private_access_and_update_isolation() {
++    let backend = create_test_backend();
++    let uri = Url::parse("file:///eof-private.php").unwrap();
++    let declarations = "<?php\nnamespace EofPrivate;\nclass ParentBox { protected string $inherited=''; private string $parentSecret=''; }\n";
++    let incomplete = format!(
++        "{declarations}class Box extends ParentBox {{ private string $secret=''; public string $visible=''; function run(): void {{ $this-><caret>"
++    );
++    let labels = eof_member_labels(&backend, &uri, &incomplete, 1).await;
++    for expected in ["secret", "inherited", "visible"] {
++        assert!(
++            labels.iter().any(|l| l == expected),
++            "missing {expected}: {labels:?}"
++        );
++    }
++    assert!(!labels.iter().any(|l| l == "parentSecret"));
++    // Same URI/expression after a real update must not inherit repaired
++    // private access or retain a pointer into the previous patched class.
++    let external = format!(
++        "{declarations}class Box extends ParentBox {{ private string $secret=''; public string $visible=''; }}\nfunction run(Box $other): void {{ $other-><caret>; }}"
++    );
++    let labels = eof_member_labels(&backend, &uri, &external, 2).await;
++    assert!(labels.iter().any(|l| l == "visible"));
++    for forbidden in ["secret", "parentSecret", "inherited"] {
++        assert!(
++            !labels.iter().any(|l| l == forbidden),
++            "leaked {forbidden}: {labels:?}"
++        );
++    }
++    let labels = eof_member_labels(&backend, &uri, &incomplete, 3).await;
++    assert!(labels.iter().any(|l| l == "secret"));
++}
++
++#[tokio::test]
++async fn completion_member_eof_lexer_ignores_balanced_literal_decoys_and_preserves_crlf() {
++    for newline in ["\n", "\r\n"] {
++        let backend = create_test_backend();
++        let uri = Url::parse("file:///eof-literals.php").unwrap();
++        let marked = concat!(
++            "<?php\nnamespace EofLiterals;\nclass Item {public string $email='';}\n",
++            "function run(Item $item): void {\n",
++            "$single = '} ] )'; $double = \"{ [ (\";\n",
++            "$interpolated = \"{$item->email} } ] )\";\n",
++            "$heredoc = <<<TEXT\n} ] )\nTEXT;\n",
++            "$nowdoc = <<<'RAW'\n{ [ (\nRAW;\n",
++            "/* } ] ) */ // { [ (\n",
++            "$note = 'café 🐘'; $item-><caret>\n",
++        )
++        .replace('\n', newline);
++        let labels = eof_member_labels(&backend, &uri, &marked, 1).await;
++        assert!(
++            labels.iter().any(|l| l == "email"),
++            "{newline:?}: {labels:?}"
++        );
++    }
++}
++
++#[tokio::test]
++async fn completion_member_eof_closed_and_top_level_controls() {
++    for body in [
++        "function run(Item $item): void {$item-><caret>\n}",
++        "$item = new Item(); $item-><caret>",
++    ] {
++        let backend = create_test_backend();
++        let uri = Url::parse("file:///eof-controls.php").unwrap();
++        let marked = format!(
++            "<?php\nnamespace EofControl;\nclass Item {{public string $email='';}}\n{body}"
++        );
++        let labels = eof_member_labels(&backend, &uri, &marked, 1).await;
++        assert!(labels.iter().any(|l| l == "email"), "{body:?}: {labels:?}");
++    }
++}
++
++#[tokio::test]
++async fn completion_member_eof_recovers_self_static_and_parent_visibility() {
++    for subject in ["self", "static", "parent"] {
++        for suffix in ["", "\n"] {
++            let backend = create_test_backend();
++            let uri = Url::parse("file:///eof-static-visibility.php").unwrap();
++            let declarations = concat!(
++                "<?php\nnamespace EofStaticVisibility;\n",
++                "class BaseBox {\n",
++                "public static string $shared='';\n",
++                "protected static string $protectedStatic='';\n",
++                "private static string $parentPrivate='';\n",
++                "public static function visibleAction(): void {}\n",
++                "protected static function protectedAction(): void {}\n",
++                "private static function parentPrivateAction(): void {}\n",
++                "}\n",
++            );
++            // Box is intentionally nonfinal: existing final-class static::
++            // suppression remains a separate established policy.
++            let incomplete = format!(
++                "{declarations}class Box extends BaseBox {{\nprivate static string $ownSecret='';\nprivate static function ownHidden(): void {{}}\npublic static function run(): void {{ $note='café 🐘'; {subject}::<caret>{suffix}"
++            );
++            let labels = eof_member_labels(&backend, &uri, &incomplete, 1).await;
++            for expected in [
++                "shared",
++                "protectedStatic",
++                "visibleAction",
++                "protectedAction",
++            ] {
++                assert!(
++                    labels.iter().any(|l| l == expected),
++                    "{subject} {suffix:?} missing {expected}: {labels:?}"
++                );
++            }
++            if subject != "parent" {
++                for expected in ["ownSecret", "ownHidden"] {
++                    assert!(
++                        labels.iter().any(|l| l == expected),
++                        "{subject} missing own private {expected}: {labels:?}"
++                    );
++                }
++            } else {
++                for excluded in ["ownSecret", "ownHidden"] {
++                    assert!(
++                        !labels.iter().any(|l| l == excluded),
++                        "parent:: cannot select child member {excluded}: {labels:?}"
++                    );
++                }
++            }
++            for excluded in ["parentPrivate", "parentPrivateAction"] {
++                assert!(
++                    !labels.iter().any(|l| l == excluded),
++                    "{subject} leaked ancestor private {excluded}: {labels:?}"
++                );
++            }
++            // Same document after update: a repaired lexical scope must not
++            // grant its private/protected access to external class completion.
++            let external = format!(
++                "{declarations}class Box extends BaseBox {{ private static string $ownSecret=''; private static function ownHidden(): void {{}} }}\nBox::<caret>;"
++            );
++            let labels = eof_member_labels(&backend, &uri, &external, 2).await;
++            for expected in ["shared", "visibleAction"] {
++                assert!(
++                    labels.iter().any(|l| l == expected),
++                    "external lost {expected}: {labels:?}"
++                );
++            }
++            for excluded in [
++                "ownSecret",
++                "ownHidden",
++                "protectedStatic",
++                "protectedAction",
++                "parentPrivate",
++                "parentPrivateAction",
++            ] {
++                assert!(
++                    !labels.iter().any(|l| l == excluded),
++                    "external leaked {excluded}: {labels:?}"
++                );
++            }
++        }
++    }
++}
++
++#[tokio::test]
++async fn completion_member_eof_final_static_suppression_control() {
++    let backend = create_test_backend();
++    let uri = Url::parse("file:///eof-final-static.php").unwrap();
++    // Complete source proves the established final-class policy independently
++    // of whether an unfinished class was recovered.
++    let complete = "<?php\nnamespace EofFinal;\nfinal class Box { public static function visibleAction(): void {} public static function run(): void {static::<caret>;} }";
++    let labels = eof_member_labels(&backend, &uri, complete, 1).await;
++    assert!(
++        !labels.iter().any(|l| l == "visibleAction"),
++        "final static:: suppression changed: {labels:?}"
++    );
++    let incomplete = "<?php\nnamespace EofFinal;\nfinal class Box { public static function visibleAction(): void {} public static function run(): void {static::<caret>";
++    let labels = eof_member_labels(&backend, &uri, incomplete, 2).await;
++    assert!(
++        !labels.iter().any(|l| l == "visibleAction"),
++        "recovery bypassed final static:: suppression: {labels:?}"
++    );
++}
+diff --git a/tests/integration/completion_in_array_narrowing.rs b/tests/integration/completion_in_array_narrowing.rs
+index d12c88d..daa14c2 100644
+--- a/tests/integration/completion_in_array_narrowing.rs
++++ b/tests/integration/completion_in_array_narrowing.rs
+@@ -1271,3 +1271,251 @@ async fn test_in_array_strict_this_property_haystack() {
+     // the completion should not crash and should return something.
+     assert!(result.is_some(), "Should return completions");
+ }
++
++async fn strict_in_array_object_bound_methods(element: &str, guard: bool) -> Vec<String> {
++    let backend = create_test_backend();
++    let uri = Url::parse("file:///in-array-object-bound.php").unwrap();
++    let branch = if guard {
++        "if (!in_array($value, $items, true)) { return; }\n        $value->"
++    } else {
++        "if (in_array($value, $items, true)) {\n            $value->\n        }"
++    };
++    let source = format!(
++        "<?php\nclass BoundFirst {{ public string $firstProperty; public function firstMethod(): void {{}} }}\nclass BoundSecond {{ public string $secondProperty; public function secondMethod(): void {{}} }}\nclass BoundService {{\n    /**\n     * @param BoundFirst|BoundSecond|string $value\n     * @param list<{element}> $items\n     */\n    public function inspect($value, array $items): void {{\n        {branch}\n    }}\n}}\n"
++    );
++    crate::common::open_php(&backend, &uri, &source).await;
++    let (line, character) = crate::common::line_char_of(&source, "$value->");
++    crate::common::complete_at_opened(&backend, &uri, line, character + 8)
++        .await
++        .into_iter()
++        .map(|item| item.filter_text.unwrap_or(item.label))
++        .collect()
++}
++
++fn assert_in_array_both_classes(members: &[String]) {
++    for expected in [
++        "firstMethod",
++        "secondMethod",
++        "firstProperty",
++        "secondProperty",
++    ] {
++        assert!(
++            members.iter().any(|member| member == expected),
++            "missing {expected}: {members:?}"
++        );
++    }
++}
++
++#[tokio::test]
++async fn test_in_array_strict_object_elements_preserve_needle_classes() {
++    assert_in_array_both_classes(&strict_in_array_object_bound_methods("object", false).await);
++}
++
++#[tokio::test]
++async fn test_in_array_strict_object_guard_preserves_needle_classes() {
++    assert_in_array_both_classes(&strict_in_array_object_bound_methods("object", true).await);
++}
++
++#[tokio::test]
++async fn test_in_array_strict_unresolved_elements_preserve_needle_classes() {
++    assert_in_array_both_classes(
++        &strict_in_array_object_bound_methods("UnavailableAncestor", false).await,
++    );
++}
++
++#[tokio::test]
++async fn test_in_array_strict_known_or_unresolved_elements_preserve_needle_classes() {
++    assert_in_array_both_classes(
++        &strict_in_array_object_bound_methods("BoundFirst|UnavailableAncestor", false).await,
++    );
++}
++
++#[tokio::test]
++async fn test_in_array_strict_object_or_string_elements_preserve_needle_classes() {
++    assert_in_array_both_classes(
++        &strict_in_array_object_bound_methods("object|string", false).await,
++    );
++}
++
++#[tokio::test]
++async fn test_in_array_strict_mixed_elements_still_preserve_needle_classes() {
++    assert_in_array_both_classes(
++        &strict_in_array_object_bound_methods("BoundFirst|mixed", false).await,
++    );
++}
++
++#[tokio::test]
++async fn test_in_array_strict_known_class_elements_still_narrow_classes() {
++    let members = strict_in_array_object_bound_methods("BoundFirst", false).await;
++    for expected in ["firstMethod", "firstProperty"] {
++        assert!(
++            members.iter().any(|member| member == expected),
++            "missing {expected}: {members:?}"
++        );
++    }
++    for excluded in ["secondMethod", "secondProperty"] {
++        assert!(
++            !members.iter().any(|member| member == excluded),
++            "unrelated class survived known bound: {members:?}"
++        );
++    }
++}
++
++#[tokio::test]
++async fn test_in_array_strict_known_intersection_constraint_still_narrows_classes() {
++    for element in ["BoundFirst&UnavailableAncestor", "BoundFirst&object"] {
++        let members = strict_in_array_object_bound_methods(element, false).await;
++        for expected in ["firstMethod", "firstProperty"] {
++            assert!(
++                members.iter().any(|member| member == expected),
++                "{element}: {members:?}"
++            );
++        }
++        for excluded in ["secondMethod", "secondProperty"] {
++            assert!(
++                !members.iter().any(|member| member == excluded),
++                "known intersection constraint lost for {element}: {members:?}"
++            );
++        }
++    }
++}
++
++#[tokio::test]
++async fn test_in_array_strict_unknown_intersections_preserve_classes() {
++    for element in [
++        "UnavailableAncestor&object",
++        "UnavailableAncestor&OtherUnavailable",
++    ] {
++        assert_in_array_both_classes(&strict_in_array_object_bound_methods(element, false).await);
++    }
++}
++
++async fn strict_in_array_alias_members(alias_body: &str) -> Vec<String> {
++    let backend = create_test_backend();
++    let uri = Url::parse("file:///in-array-alias-bound.php").unwrap();
++    let source = format!(
++        "<?php\nclass BoundFirst {{ public string $firstProperty; public function firstMethod(): void {{}} }}\nclass BoundSecond {{ public string $secondProperty; public function secondMethod(): void {{}} }}\n/** @phpstan-type BoundElements {alias_body} */\nclass BoundAliasService {{\n    /**\n     * @param BoundFirst|BoundSecond|string $value\n     * @param list<BoundElements> $items\n     */\n    public function inspect($value, array $items): void {{\n        if (in_array($value, $items, true)) {{\n            $value->\n        }}\n    }}\n}}\n"
++    );
++    crate::common::open_php(&backend, &uri, &source).await;
++    let (line, character) = crate::common::line_char_of(&source, "$value->");
++    crate::common::complete_at_opened(&backend, &uri, line, character + 8)
++        .await
++        .into_iter()
++        .map(|item| item.filter_text.unwrap_or(item.label))
++        .collect()
++}
++
++#[tokio::test]
++async fn test_in_array_strict_alias_with_unresolved_alternative_preserves_classes() {
++    assert_in_array_both_classes(
++        &strict_in_array_alias_members("BoundFirst|UnavailableAncestor").await,
++    );
++}
++
++#[tokio::test]
++async fn test_in_array_strict_alias_to_known_class_still_narrows() {
++    let members = strict_in_array_alias_members("BoundFirst").await;
++    assert!(
++        members.iter().any(|member| member == "firstMethod"),
++        "{members:?}"
++    );
++    assert!(
++        members.iter().any(|member| member == "firstProperty"),
++        "{members:?}"
++    );
++    assert!(
++        !members
++            .iter()
++            .any(|member| member == "secondMethod" || member == "secondProperty"),
++        "{members:?}"
++    );
++}
++
++#[tokio::test]
++async fn test_in_array_strict_scalar_value_narrowing_still_removes_null() {
++    let backend = create_test_backend();
++    let uri = Url::parse("file:///in-array-scalar-bound.php").unwrap();
++    let source = concat!(
++        "<?php\n",
++        "/**\n * @param ?string $needle\n * @param list<string> $items\n */\n",
++        "function scalarBound($needle, array $items): void {\n",
++        "    if (in_array($needle, $items, true)) {\n",
++        "        $needle;\n",
++        "    }\n}\n",
++    );
++    crate::common::open_php(&backend, &uri, source).await;
++    let (line, character) = crate::common::line_char_of(source, "$needle;");
++    let hover = crate::common::hover_text_at(&backend, &uri, line, character + 1)
++        .await
++        .expect("scalar needle hover");
++    assert!(hover.contains("string"), "{hover}");
++    assert!(
++        !hover.contains("null") && !hover.contains("?string"),
++        "{hover}"
++    );
++}
++
++#[tokio::test]
++async fn test_in_array_strict_unresolved_generic_parent_preserves_known_subclasses() {
++    let backend = create_test_backend();
++    let uri = Url::parse("file:///in-array-generic-parent.php").unwrap();
++    // All three classes name the same external parent. It is unavailable to
++    // this backend, so parent<int> bounds possible objects without loading it.
++    let source = concat!(
++        "<?php\n",
++        "class ParentBoundFirst extends UnavailableGenericParent { public function firstMethod(): void {} public string $firstProperty; }\n",
++        "class ParentBoundSecond extends UnavailableGenericParent { public function secondMethod(): void {} public string $secondProperty; }\n",
++        "class ParentBoundService extends UnavailableGenericParent {\n",
++        "    /**\n     * @param ParentBoundFirst|ParentBoundSecond|string $value\n     * @param list<parent<int>> $items\n     */\n",
++        "    public function inspect($value, array $items): void {\n",
++        "        if (in_array($value, $items, true)) {\n",
++        "            $value->\n",
++        "        }\n    }\n}\n",
++    );
++    crate::common::open_php(&backend, &uri, source).await;
++    let (line, character) = crate::common::line_char_of(source, "$value->");
++    let members: Vec<String> =
++        crate::common::complete_at_opened(&backend, &uri, line, character + 8)
++            .await
++            .into_iter()
++            .map(|item| item.filter_text.unwrap_or(item.label))
++            .collect();
++    assert_in_array_both_classes(&members);
++}
++
++#[tokio::test]
++async fn test_in_array_strict_alias_to_mixed_preserves_needle_classes() {
++    assert_in_array_both_classes(&strict_in_array_alias_members("mixed").await);
++}
++
++#[tokio::test]
++async fn test_in_array_strict_alias_with_mixed_alternative_preserves_needle_classes() {
++    assert_in_array_both_classes(&strict_in_array_alias_members("BoundFirst|mixed").await);
++}
++
++#[tokio::test]
++async fn test_in_array_strict_nested_alias_to_mixed_preserves_needle_classes() {
++    let backend = create_test_backend();
++    let uri = Url::parse("file:///in-array-nested-alias-mixed.php").unwrap();
++    let source = concat!(
++        "<?php\n",
++        "class BoundFirst { public string $firstProperty; public function firstMethod(): void {} }\n",
++        "class BoundSecond { public string $secondProperty; public function secondMethod(): void {} }\n",
++        "/**\n * @phpstan-type UnknownBound mixed\n * @phpstan-type BoundElements BoundFirst|UnknownBound\n */\n",
++        "class BoundAliasService {\n",
++        "    /**\n     * @param BoundFirst|BoundSecond|string $value\n     * @param list<BoundElements> $items\n     */\n",
++        "    public function inspect($value, array $items): void {\n",
++        "        if (in_array($value, $items, true)) {\n",
++        "            $value->\n",
++        "        }\n    }\n}\n",
++    );
++    crate::common::open_php(&backend, &uri, source).await;
++    let (line, character) = crate::common::line_char_of(source, "$value->");
++    let members: Vec<String> =
++        crate::common::complete_at_opened(&backend, &uri, line, character + 8)
++            .await
++            .into_iter()
++            .map(|item| item.filter_text.unwrap_or(item.label))
++            .collect();
++    assert_in_array_both_classes(&members);
++}

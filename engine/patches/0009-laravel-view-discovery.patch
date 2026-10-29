@@ -1,0 +1,291 @@
+--- /dev/null
++++ b/src/workbench_views.rs
+@@ -0,0 +1,75 @@
++//! Read-only access to the shared Blade/template index for PHP Workbench.
++
++use crate::{
++    Backend, symbol_map::LaravelStringKind, virtual_members::laravel::resolve_laravel_string_key,
++};
++use serde::{Deserialize, Serialize};
++use tower_lsp::{
++    jsonrpc::{Error, Result},
++    lsp_types::Location,
++};
++
++/// List known views, or resolve a selected view name to its current template.
++#[derive(Debug, Default, Deserialize)]
++pub struct ViewQuery {
++    /// Selected dotted view name; omit to list names.
++    pub name: Option<String>,
++    /// Maximum result count from one to five thousand; defaults to two thousand.
++    pub limit: Option<usize>,
++}
++
++/// Bounded template discovery shared with PHP literal completion/navigation.
++#[derive(Debug, Default, Serialize)]
++pub struct ViewReply {
++    /// Sorted unique view names for a list query.
++    pub views: Vec<String>,
++    /// Current targets for a selected-name query.
++    pub locations: Vec<Location>,
++    /// The response limit excluded some rows or targets.
++    pub incomplete: bool,
++}
++
++impl Backend {
++    /// Browse templates without booting Laravel or executing project code.
++    pub async fn workbench_views(&self, query: ViewQuery) -> Result<ViewReply> {
++        let limit = query.limit.unwrap_or(2000);
++        if !(1..=5000).contains(&limit) {
++            return Err(Error::invalid_params(
++                "View limit must be between 1 and 5000",
++            ));
++        }
++        if let Some(name) = query.name {
++            // A browse request is a logical name, never an arbitrary filesystem path.
++            if name.is_empty()
++                || name.len() > 256
++                || name.contains(['\\', '/', '\0'])
++                || name
++                    .split("::")
++                    .any(|part| part.split('.').any(str::is_empty))
++            {
++                return Err(Error::invalid_params(
++                    "View name must be a dotted logical name of 1 to 256 bytes",
++                ));
++            }
++            let mut locations =
++                resolve_laravel_string_key(self, &LaravelStringKind::View, &name, "");
++            locations.sort_unstable_by(|a, b| a.uri.as_str().cmp(b.uri.as_str()));
++            locations.dedup();
++            let incomplete = locations.len() > limit;
++            locations.truncate(limit);
++            return Ok(ViewReply {
++                locations,
++                incomplete,
++                ..ViewReply::default()
++            });
++        }
++        let mut views = self.blade_view_names();
++        let incomplete = views.len() > limit;
++        views.truncate(limit);
++        Ok(ViewReply {
++            views,
++            incomplete,
++            ..ViewReply::default()
++        })
++    }
++}
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -86,6 +86,7 @@
+ //!     `is_object_shape`)
+ 
+ pub mod workbench_routes;
++pub mod workbench_views;
+ 
+ // Use mimalloc on Linux, where the system allocator is 4-6x slower for
+ // our parallel, allocation-heavy workload. Defined in the library
+--- a/src/main.rs
++++ b/src/main.rs
+@@ -566,6 +566,7 @@
+                 let (read, write) = tokio::io::split(stream);
+                 let (service, socket) = LspService::build(Backend::new)
+                     .custom_method("phpWorkbench/routes", Backend::workbench_routes)
++                    .custom_method("phpWorkbench/views", Backend::workbench_views)
+                     .finish();
+                 Server::new(read, write, socket)
+                     .concurrency_level(LSP_CONCURRENCY)
+@@ -584,6 +585,7 @@
+ 
+                 let (service, socket) = LspService::build(Backend::new)
+                     .custom_method("phpWorkbench/routes", Backend::workbench_routes)
++                    .custom_method("phpWorkbench/views", Backend::workbench_views)
+                     .finish();
+                 Server::new(stdin, stdout, socket)
+                     .concurrency_level(LSP_CONCURRENCY)
+--- a/src/backend/startup.rs
++++ b/src/backend/startup.rs
+@@ -278,7 +278,9 @@
+                     commands: vec!["phpantom.navigateToPrototype".to_string()],
+                     ..ExecuteCommandOptions::default()
+                 }),
+-                experimental: Some(serde_json::json!({"phpWorkbenchRoutes": true})),
++                experimental: Some(
++                    serde_json::json!({"phpWorkbenchRoutes": true, "phpWorkbenchViews": true}),
++                ),
+                 ..ServerCapabilities::default()
+             },
+             server_info: Some(ServerInfo {
+--- a/tests/integration/main.rs
++++ b/tests/integration/main.rs
+@@ -259,3 +259,5 @@
+ mod workbench_routes;
+ 
+ mod definition_ambiguous_members;
++
++mod workbench_views;
+--- /dev/null
++++ b/tests/integration/workbench_views.rs
+@@ -0,0 +1,127 @@
++use phpantom_lsp::{Backend, workbench_views::ViewQuery};
++
++fn project() -> (tempfile::TempDir, Backend) {
++    let directory = tempfile::tempdir().unwrap();
++    let root = directory.path();
++    std::fs::create_dir_all(root.join("resources/views/users")).unwrap();
++    std::fs::write(root.join("composer.json"), "{}").unwrap();
++    std::fs::write(
++        root.join("resources/views/users/show.blade.php"),
++        "<h1>Hello</h1>",
++    )
++    .unwrap();
++    std::fs::write(root.join("resources/views/welcome.php"), "hello").unwrap();
++    let backend = Backend::new_test_with_workspace(root.to_path_buf(), Default::default());
++    (directory, backend)
++}
++
++#[tokio::test]
++async fn workbench_views_lists_sorted_names_and_resolves_the_shared_definition() {
++    let (directory, backend) = project();
++    let reply = backend.workbench_views(ViewQuery::default()).await.unwrap();
++    assert_eq!(reply.views, vec!["users.show", "welcome"]);
++    assert!(!reply.incomplete);
++    let reply = backend
++        .workbench_views(ViewQuery {
++            name: Some("users.show".into()),
++            limit: None,
++        })
++        .await
++        .unwrap();
++    assert_eq!(reply.locations.len(), 1);
++    assert_eq!(
++        reply.locations[0].uri.to_file_path().unwrap(),
++        directory
++            .path()
++            .join("resources/views/users/show.blade.php")
++    );
++    assert_eq!(reply.locations[0].range.start.line, 0);
++}
++
++#[tokio::test]
++async fn workbench_views_marks_limits_and_rejects_invalid_requests() {
++    let (_directory, backend) = project();
++    let reply = backend
++        .workbench_views(ViewQuery {
++            name: None,
++            limit: Some(1),
++        })
++        .await
++        .unwrap();
++    assert_eq!(reply.views, vec!["users.show"]);
++    assert!(reply.incomplete);
++    for limit in [0, 5001] {
++        assert!(
++            backend
++                .workbench_views(ViewQuery {
++                    name: None,
++                    limit: Some(limit)
++                })
++                .await
++                .is_err()
++        );
++    }
++    for name in [
++        "",
++        "../secret",
++        "users/../../secret",
++        "/absolute",
++        "users\\secret",
++        "users..secret",
++    ] {
++        assert!(
++            backend
++                .workbench_views(ViewQuery {
++                    name: Some(name.into()),
++                    limit: None
++                })
++                .await
++                .is_err(),
++            "{name}"
++        );
++    }
++    assert!(
++        backend
++            .workbench_views(ViewQuery {
++                name: Some("x".repeat(257)),
++                limit: None
++            })
++            .await
++            .is_err()
++    );
++}
++
++#[tokio::test]
++async fn workbench_views_resolves_selection_again_after_template_removal() {
++    let (directory, backend) = project();
++    assert!(
++        !backend
++            .workbench_views(ViewQuery::default())
++            .await
++            .unwrap()
++            .views
++            .is_empty()
++    );
++    std::fs::remove_file(
++        directory
++            .path()
++            .join("resources/views/users/show.blade.php"),
++    )
++    .unwrap();
++    let reply = backend
++        .workbench_views(ViewQuery {
++            name: Some("users.show".into()),
++            limit: None,
++        })
++        .await
++        .unwrap();
++    assert!(reply.locations.is_empty());
++    let reply = backend
++        .workbench_views(ViewQuery {
++            name: Some("missing".into()),
++            limit: None,
++        })
++        .await
++        .unwrap();
++    assert!(reply.locations.is_empty());
++}
+--- a/docs/ARCHITECTURE.md
++++ b/docs/ARCHITECTURE.md
+@@ -1228,3 +1228,8 @@
+ admission spans publication, so an overlapping didOpen either causes the disk
+ result to be discarded or publishes its overlay after the disk result. This
+ shares the existing class/index publisher and does not infer a second type.
++
++The downstream `phpWorkbench/views` endpoint exposes the existing Blade discovery
++index and Laravel string-key definition resolver. It lists bounded, sorted names
++and resolves a selected logical name again without a second template scanner or
++project execution. Host callbacks guard picker generation and open revisions.
+--- a/docs/CHANGELOG.md
++++ b/docs/CHANGELOG.md
+@@ -6,6 +6,10 @@
+ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+ 
+ ## [Unreleased]
++
++### Added
++
++- **Browse Laravel templates from PHP Workbench.** The read-only view endpoint shares template discovery and definition targets with PHP view-name completion and navigation. Names and results are bounded; project PHP is never executed. (Downstream PHP Workbench patch.)
+ 
+ ### Added
+ 
+--- a/examples/laravel/app/Demo.php
++++ b/examples/laravel/app/Demo.php
+@@ -656,6 +656,7 @@
+         // its parameters.
+         $posts = BlogPost::where('published', true)->get();
+         $user = BlogAuthor::first();
++        // PHP Workbench: Laravel: Go to View browses this same template index.
+         view('welcome', compact('posts', 'user'));
+ 
+         // admin/users/index.blade.php declares $users and @extends('welcome'),

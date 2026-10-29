@@ -1,0 +1,1172 @@
+diff --git a/docs/CHANGELOG.md b/docs/CHANGELOG.md
+index dc44ace..11adfc2 100644
+--- a/docs/CHANGELOG.md
++++ b/docs/CHANGELOG.md
+@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
+ 
+ ### Fixed
+ 
++- **Diagnostics follow current edits.** Results from older text or a previous opening of a file no longer replace current warnings. Contributed by PHP Workbench (local downstream patch).
++
+ - **Type hierarchy opens PHP declarations.** Parent and child source ranges now include class, interface, trait and enum names.
+ 
+ - **Blade function diagnostics stay on user-written PHP.** Generated escape and directive helpers no longer invent undefined-function errors at template delimiters; actual unresolved functions retain their original positions and component attribute diagnostics remain visible. Contributed by PHP Workbench (local downstream patch).
+diff --git a/src/backend/documents.rs b/src/backend/documents.rs
+index 51d33e8..da656b4 100644
+--- a/src/backend/documents.rs
++++ b/src/backend/documents.rs
+@@ -11,6 +11,27 @@ use crate::Backend;
+ use crate::server::{run_blocking_cancel_safe, spawn_blocking_detached};
+ 
+ impl Backend {
++    pub(crate) fn diagnostic_parse_lock(&self, uri: &str) -> Arc<parking_lot::Mutex<()>> {
++        Arc::clone(
++            self.did_change_parse_locks
++                .lock()
++                .entry(uri.to_owned())
++                .or_insert_with(|| Arc::new(parking_lot::Mutex::new(()))),
++        )
++    }
++    fn parse_diagnostic_snapshot(&self, uri: &str, text: &Arc<String>) -> bool {
++        let lock = self.diagnostic_parse_lock(uri);
++        let _guard = lock.lock();
++        let Ok(revision) = self.diag.documents.lock().capture(uri, text) else {
++            return false;
++        };
++        self.update_ast(uri, text);
++        self.diag
++            .documents
++            .lock()
++            .mark_parsed(uri, revision.as_ref())
++    }
++
+     pub(crate) async fn on_did_open(&self, params: DidOpenTextDocumentParams) {
+         let doc = params.text_document;
+         let uri = doc.uri.to_string();
+@@ -22,9 +43,13 @@ impl Backend {
+             self.blade_uris.write().insert(uri.clone());
+         }
+ 
+-        self.open_files
+-            .write()
+-            .insert(uri.clone(), Arc::clone(&text));
++        {
++            let mut documents = self.diag.documents.lock();
++            documents.open(&uri, doc.version, &text);
++            self.open_files
++                .write()
++                .insert(uri.clone(), Arc::clone(&text));
++        }
+ 
+         // Resource documents are not PHP source. Build a lightweight symbol
+         // map so navigation, references, rename, and PHP declaration lenses
+@@ -37,7 +62,7 @@ impl Backend {
+         }
+ 
+         // Parse and update AST map, use map, and namespace map
+-        self.update_ast(&uri, &text);
++        self.parse_diagnostic_snapshot(&uri, &text);
+ 
+         // Opening a Blade template is the discrete point where its
+         // call-site variable inference runs (update_ast itself only
+@@ -115,9 +140,15 @@ impl Backend {
+             Arc::new(current)
+         };
+ 
+-        self.open_files
+-            .write()
+-            .insert(uri.clone(), Arc::clone(&text));
++        {
++            let mut documents = self.diag.documents.lock();
++            if !documents.change(&uri, params.text_document.version, &text) {
++                return;
++            }
++            self.open_files
++                .write()
++                .insert(uri.clone(), Arc::clone(&text));
++        }
+ 
+         // A resource document is re-scanned the same way a PHP file is
+         // re-parsed: on a blocking task, and only if the buffer it was
+@@ -163,34 +194,19 @@ impl Backend {
+         // keystroke; `update_ast` already tolerates stale maps when
+         // incomplete code cannot be parsed.
+         if self.sync_ast_updates {
+-            self.update_ast(&uri, &text);
+-            self.schedule_diagnostics(uri.clone());
++            if self.parse_diagnostic_snapshot(&uri, &text) {
++                self.schedule_diagnostics(uri.clone());
++            }
+         } else {
+             let backend = self.clone_for_blocking();
+             tokio::spawn(async move {
+                 let refresh_backend = backend.clone_for_blocking();
+                 let uri_for_diagnostics = uri.clone();
+                 let committed = run_blocking_cancel_safe("did_change parse", move || {
+-                    let parse_lock = {
+-                        let mut locks = backend.did_change_parse_locks.lock();
+-                        Arc::clone(
+-                            locks
+-                                .entry(uri.clone())
+-                                .or_insert_with(|| Arc::new(parking_lot::Mutex::new(()))),
+-                        )
+-                    };
+-                    let _parse_guard = parse_lock.lock();
+-                    let is_latest_text = backend
+-                        .open_files
+-                        .read()
+-                        .get(&uri)
+-                        .is_some_and(|current| Arc::ptr_eq(current, &text));
+-                    if !is_latest_text {
++                    let started = std::time::Instant::now();
++                    if !backend.parse_diagnostic_snapshot(&uri, &text) {
+                         return false;
+                     }
+-
+-                    let started = std::time::Instant::now();
+-                    backend.update_ast(&uri, &text);
+                     let elapsed = started.elapsed();
+                     if elapsed >= std::time::Duration::from_millis(100) {
+                         tracing::debug!(
+@@ -220,8 +236,12 @@ impl Backend {
+     pub(crate) async fn on_did_close(&self, params: DidCloseTextDocumentParams) {
+         let uri = params.text_document.uri.to_string();
+ 
+-        self.open_files.write().remove(&uri);
+-        self.did_change_parse_locks.lock().remove(&uri);
++        {
++            let mut documents = self.diag.documents.lock();
++            documents.close(&uri);
++            self.open_files.write().remove(&uri);
++        }
++        // Keep this lock identity across reopen: detached old work may still hold it.
+         self.clear_declaration_baseline(&uri);
+ 
+         // Drop coalescing state for this file so the maps don't grow unbounded
+@@ -263,6 +283,8 @@ impl Backend {
+                     run_blocking_cancel_safe("did_close parse", move || {
+                         // The file was reopened before this ran; its buffer is
+                         // the truth now and `did_change` owns the parse.
++                        let lock = backend.diagnostic_parse_lock(&uri);
++                        let _guard = lock.lock();
+                         if backend.open_files.read().contains_key(&uri) {
+                             return;
+                         }
+@@ -286,7 +308,10 @@ impl Backend {
+         let uri = params.text_document.uri.to_string();
+         let is_resource = crate::resource_navigation::is_resource_document(&uri);
+ 
+-        if let Some(text) = params.text {
++        if let Some(text) = params
++            .text
++            .filter(|_| !self.open_files.read().contains_key(&uri))
++        {
+             let text = Arc::new(text);
+             self.open_files
+                 .write()
+diff --git a/src/diagnostics/external/mod.rs b/src/diagnostics/external/mod.rs
+index 979248b..f5717ed 100644
+--- a/src/diagnostics/external/mod.rs
++++ b/src/diagnostics/external/mod.rs
+@@ -107,6 +107,9 @@ impl Backend {
+                 }
+             };
+ 
++            let Ok(revision) = self.diag.documents.lock().capture(&uri, &content) else {
++                continue;
++            };
+             // ── Step 3: resolve the tool's binary ───────────────────
+             let file_path = match uri.parse::<Url>().ok().and_then(|u| u.to_file_path().ok()) {
+                 Some(p) => p,
+@@ -151,20 +154,16 @@ impl Backend {
+             };
+ 
+             // ── Step 5: cache results and re-publish ────────────────
+-            // Verify the file is still open *before* writing to the
+-            // cache. If the file was closed while the tool was running,
+-            // `clear_diagnostics_for_file` already purged the cache
+-            // entry — writing it back would leave stale diagnostics that
+-            // resurface on the next `did_open`.
+             {
+-                let files = self.open_files.read();
+-                if !files.contains_key(&uri) {
++                let documents = self.diag.documents.lock();
++                if !self.open_files.read().contains_key(&uri)
++                    || !documents.parsed(&uri, revision.as_ref())
++                {
+                     continue;
+                 }
++                tool.store_snapshot_result(&uri, diags, revision.as_ref());
+             }
+ 
+-            tool.store_file_result(&uri, diags);
+-
+             // Assemble and push so the editor sees fresh results merged
+             // with cached native diagnostics. In pull mode this also
+             // tells the editor to re-pull, but only when the run actually
+diff --git a/src/diagnostics/mod.rs b/src/diagnostics/mod.rs
+index eaf96d7..e06a64a 100644
+--- a/src/diagnostics/mod.rs
++++ b/src/diagnostics/mod.rs
+@@ -256,6 +256,7 @@ mod property_type_errors;
+ mod pull;
+ mod readonly_writes;
+ mod return_type_errors;
++pub(crate) mod revision;
+ mod stale;
+ pub(crate) mod state;
+ mod subject_cache;
+@@ -615,86 +616,55 @@ impl Backend {
+     /// same way: push mode publishes the complete set, replacing the
+     /// Phase 1 snapshot; pull mode caches it, bumps the `resultId`, and
+     /// sends another `workspace/diagnostic/refresh`.
+-    pub(crate) async fn publish_diagnostics_for_file(&self, uri_str: &str, content: &str) {
++    pub(crate) async fn publish_diagnostics_for_file(&self, uri_str: &str, content: &Arc<String>) {
+         if self.should_skip_diagnostics(uri_str) {
+             return;
+         }
+-
+-        // The native collectors are expensive (a full-file forward walk and
+-        // type resolution — hundreds of ms to several seconds on a large
+-        // file). They are pure CPU work and must never run inline on an async
+-        // worker: editors pull both `textDocument/diagnostic` and
+-        // `workspace/diagnostic` on every keystroke, and a handful of
+-        // concurrent inline computes will occupy every async runtime thread,
+-        // stalling delivery of completion and hover responses even though
+-        // those handlers themselves finished. Run them on the blocking pool.
+-
+-        // ── Phase 1: collect and cache fast diagnostics ─────────────
+-        let fast_diagnostics = {
+-            let backend = self.clone_for_blocking();
+-            let uri = uri_str.to_string();
+-            let content = content.to_string();
+-            crate::server::run_blocking_cancel_safe("fast diagnostics", move || {
+-                let mut out = Vec::new();
+-                let effective = backend.analysable_content_or(&uri, &content);
+-                backend.collect_fast_diagnostics(&uri, &effective, &mut out);
+-                out
+-            })
+-            .await
+-            .unwrap_or_default()
+-        };
+-
+-        // The collector above can take a while; re-check that the file is
+-        // still open immediately before writing so a close that landed
+-        // mid-compute can't resurrect the caches `clear_diagnostics_for_file`
+-        // already purged (same rationale as the external tool workers).
+-        if !self.open_files.read().contains_key(uri_str) {
++        let Ok(revision) = self.diag.documents.lock().capture(uri_str, content) else {
+             return;
+-        }
+-
+-        {
+-            let mut cache = self.diag.last_fast.lock();
+-            cache.insert(uri_str.to_string(), fast_diagnostics.clone());
+-        }
+-
+-        // Update the assembled cache immediately so pull-capable editors
+-        // can see fast diagnostics before the slower native passes finish.
+-        self.assemble_and_refresh(uri_str).await;
+-
+-        // ── Phase 2: compute and cache slow diagnostics ─────────────
+-        let slow_diagnostics = {
+-            let backend = self.clone_for_blocking();
+-            let uri = uri_str.to_string();
+-            let content = content.to_string();
+-            crate::server::run_blocking_cancel_safe("slow diagnostics", move || {
+-                // The resolved-class cache guard contains a thread-local raw
+-                // pointer; activate it on this blocking thread for the
+-                // duration of the synchronous collection only.
+-                let _cache_guard = crate::virtual_members::with_active_resolved_class_cache(
+-                    &backend.resolved_class_cache,
+-                );
+-                let mut out = Vec::new();
+-                let effective = backend.analysable_content_or(&uri, &content);
+-                backend.collect_slow_diagnostics(&uri, &effective, &mut out);
+-                out
+-            })
+-            .await
+-            .unwrap_or_default()
+         };
+-
+-        // Re-check again: Phase 2 runs a full-file forward walk and can
+-        // take seconds, plenty of time for a close to land mid-compute.
+-        if !self.open_files.read().contains_key(uri_str) {
+-            return;
+-        }
+-
+-        {
+-            let mut cache = self.diag.last_slow.lock();
+-            cache.insert(uri_str.to_string(), slow_diagnostics);
++        for slow in [false, true] {
++            let backend = self.clone_for_blocking();
++            let uri = uri_str.to_owned();
++            let content = Arc::clone(content);
++            let stamp = revision.clone();
++            let result =
++                crate::server::run_blocking_cancel_safe("diagnostic snapshot", move || {
++                    let parse_lock = backend.diagnostic_parse_lock(&uri);
++                    let _parse_guard = parse_lock.lock();
++                    if !backend.diag.documents.lock().parsed(&uri, stamp.as_ref()) {
++                        return None;
++                    }
++                    let mut out = Vec::new();
++                    let effective = backend.analysable_content_or(&uri, &content);
++                    if slow {
++                        let _cache_guard = crate::virtual_members::with_active_resolved_class_cache(
++                            &backend.resolved_class_cache,
++                        );
++                        backend.collect_slow_diagnostics(&uri, &effective, &mut out);
++                    } else {
++                        backend.collect_fast_diagnostics(&uri, &effective, &mut out);
++                    }
++                    let mut documents = backend.diag.documents.lock();
++                    if !backend.open_files.read().contains_key(&uri)
++                        || !documents.mark_phase(&uri, stamp.as_ref(), slow)
++                    {
++                        return None;
++                    }
++                    let cache = if slow {
++                        &backend.diag.last_slow
++                    } else {
++                        &backend.diag.last_fast
++                    };
++                    cache.lock().insert(uri, out);
++                    Some(())
++                })
++                .await;
++            if result != Some(Some(())) {
++                return;
++            }
++            self.assemble_and_refresh(uri_str).await;
+         }
+-
+-        // Update again with fresh slow results merged in.
+-        self.assemble_and_refresh(uri_str).await;
+     }
+ 
+     /// Assemble diagnostics from all per-source caches for a URI and
+@@ -726,9 +696,20 @@ impl Backend {
+     /// value to skip the refresh.  Always `false` in push mode: the set
+     /// is delivered inline, so there is nothing to re-pull.
+     pub(crate) async fn assemble_and_push(&self, uri_str: &str) -> bool {
++        let (changed, publication) = self.assemble_snapshot(uri_str);
++        if let Some(publication) = publication
++            && let Some(client) = &self.client
++        {
++            client
++                .send_notification::<revision::Publish>(publication)
++                .await;
++        }
++        changed
++    }
++    fn assemble_snapshot(&self, uri_str: &str) -> (bool, Option<revision::Publication>) {
+         let uri = match uri_str.parse::<Url>() {
+             Ok(u) => u,
+-            Err(_) => return false,
++            Err(_) => return (false, None),
+         };
+ 
+         // Serialize this URI's read-merge-write. Each per-source cache
+@@ -747,26 +728,50 @@ impl Backend {
+             )
+         };
+         let assemble_guard = assemble_lock.lock();
++        let documents = self.diag.documents.lock();
++        let content = self.open_files.read().get(uri_str).cloned();
++        let revision = match content
++            .as_ref()
++            .map(|text| documents.capture(uri_str, text))
++        {
++            Some(Ok(revision)) => revision,
++            Some(Err(())) => return (false, None),
++            None => {
++                if !documents.current(uri_str, None) {
++                    return (false, None);
++                }
++                None
++            }
++        };
++        if !documents.parsed(uri_str, revision.as_ref()) {
++            return (false, None);
++        }
++        let fast_current = documents.phase_current(uri_str, revision.as_ref(), false);
++        let slow_current = documents.phase_current(uri_str, revision.as_ref(), true);
++        // Never label an empty old cache as a clean result for a new edit.
++        if revision.is_some() && !fast_current && !slow_current {
++            return (false, None);
++        }
+ 
+         // ── Read all per-source caches ──────────────────────────────
+         let mut full = Vec::new();
+ 
+         {
+             let cache = self.diag.last_fast.lock();
+-            if let Some(fast) = cache.get(uri_str) {
++            if fast_current && let Some(fast) = cache.get(uri_str) {
+                 full.extend(fast.iter().cloned());
+             }
+         }
+         {
+             let cache = self.diag.last_slow.lock();
+-            if let Some(slow) = cache.get(uri_str) {
++            if slow_current && let Some(slow) = cache.get(uri_str) {
+                 full.extend(slow.iter().cloned());
+             }
+         }
+ 
+         let phpstan_before: Vec<Diagnostic> = {
+-            let cache = self.phpstan_tool.last_diags.lock();
+-            cache.get(uri_str).cloned().unwrap_or_default()
++            self.phpstan_tool
++                .snapshot_result(uri_str, revision.as_ref())
+         };
+ 
+         // Eagerly prune stale PHPStan diagnostics against current file
+@@ -793,28 +798,22 @@ impl Backend {
+         }
+ 
+         {
+-            let cache = self.phpcs_tool.last_diags.lock();
+-            if let Some(phpcs_diags) = cache.get(uri_str) {
+-                full.extend(phpcs_diags.iter().cloned());
+-            }
++            full.extend(self.phpcs_tool.snapshot_result(uri_str, revision.as_ref()));
+         }
+         {
+-            let cache = self.phpmd_tool.last_diags.lock();
+-            if let Some(phpmd_diags) = cache.get(uri_str) {
+-                full.extend(phpmd_diags.iter().cloned());
+-            }
++            full.extend(self.phpmd_tool.snapshot_result(uri_str, revision.as_ref()));
+         }
+         {
+-            let cache = self.mago_lint_tool.last_diags.lock();
+-            if let Some(mago_diags) = cache.get(uri_str) {
+-                full.extend(mago_diags.iter().cloned());
+-            }
++            full.extend(
++                self.mago_lint_tool
++                    .snapshot_result(uri_str, revision.as_ref()),
++            );
+         }
+         {
+-            let cache = self.mago_analyze_tool.last_diags.lock();
+-            if let Some(mago_diags) = cache.get(uri_str) {
+-                full.extend(mago_diags.iter().cloned());
+-            }
++            full.extend(
++                self.mago_analyze_tool
++                    .snapshot_result(uri_str, revision.as_ref()),
++            );
+         }
+ 
+         // ── Suppress imprecise overlaps and filter ──────────────────
+@@ -877,7 +876,7 @@ impl Backend {
+             {
+                 let mut cache = self.diag.last_full.lock();
+                 if cache.get(uri_str).is_some_and(|prev| *prev == full) {
+-                    return false;
++                    return (false, None);
+                 }
+                 cache.insert(uri_str.to_string(), full);
+             }
+@@ -885,17 +884,32 @@ impl Backend {
+                 let id = self.diag.result_id_seq.fetch_add(1, Ordering::Relaxed) + 1;
+                 self.diag.result_ids.lock().insert(uri_str.to_string(), id);
+             }
+-            true
++            (true, None)
+         } else {
+             // ── Push mode ───────────────────────────────────────────
+-            let Some(client) = &self.client else {
+-                return false;
++            if self.client.is_none() {
++                return (false, None);
+             };
+             // Nothing left to serialize: push mode caches nothing, it
+             // only publishes the merged set inline.
++            let publication = revision::Publication {
++                params: tower_lsp::lsp_types::PublishDiagnosticsParams {
++                    uri,
++                    diagnostics: full,
++                    version: revision.as_ref().map(|r| r.version),
++                },
++                open: revision.as_ref().map(|r| r.open),
++                complete: revision.as_ref().map(|_| fast_current && slow_current),
++                sequence: revision.as_ref().map(|_| {
++                    self.diag
++                        .publication_sequence
++                        .fetch_add(1, Ordering::Relaxed)
++                        + 1
++                }),
++            };
++            drop(documents);
+             drop(assemble_guard);
+-            client.publish_diagnostics(uri, full, None).await;
+-            false
++            (false, Some(publication))
+         }
+     }
+ 
+@@ -1181,86 +1195,92 @@ impl Backend {
+ 
+     /// Clear diagnostics for a file (e.g. on `did_close`).
+     pub(crate) async fn clear_diagnostics_for_file(&self, uri_str: &str) {
+-        // Migrate the live external tool results into the workspace
+-        // diagnostics store before purging, so a closed file keeps its
+-        // PHPStan/PHPCS/Mago findings instead of losing them until the
+-        // next project-wide run.  Only meaningful once the background
+-        // workspace pass has started.
+-        if self
+-            .diag
+-            .workspace_diag_pass_started
+-            .load(Ordering::Acquire)
+         {
+-            let migrations: [(&'static str, Vec<Diagnostic>); 5] = [
+-                (
+-                    "phpstan",
+-                    self.phpstan_tool
+-                        .last_diags
+-                        .lock()
+-                        .get(uri_str)
+-                        .cloned()
+-                        .unwrap_or_default(),
+-                ),
+-                (
+-                    "phpcs",
+-                    self.phpcs_tool
+-                        .last_diags
+-                        .lock()
+-                        .get(uri_str)
+-                        .cloned()
+-                        .unwrap_or_default(),
+-                ),
+-                (
+-                    "phpmd",
+-                    self.phpmd_tool
+-                        .last_diags
+-                        .lock()
+-                        .get(uri_str)
+-                        .cloned()
+-                        .unwrap_or_default(),
+-                ),
+-                (
+-                    "mago-lint",
+-                    self.mago_lint_tool
+-                        .last_diags
+-                        .lock()
+-                        .get(uri_str)
+-                        .cloned()
+-                        .unwrap_or_default(),
+-                ),
+-                (
+-                    "mago-analyze",
+-                    self.mago_analyze_tool
+-                        .last_diags
+-                        .lock()
+-                        .get(uri_str)
+-                        .cloned()
+-                        .unwrap_or_default(),
+-                ),
+-            ];
+-            let mut ws = self.diag.workspace_diags.lock();
+-            for (source, diags) in migrations {
+-                ws.set_external_for_uri(source, uri_str, diags);
++            let _documents = self.diag.documents.lock();
++            if self.open_files.read().contains_key(uri_str) {
++                return;
+             }
+-        }
+ 
+-        // Remove all per-source caches so we don't leak memory.
+-        self.diag.last_fast.lock().remove(uri_str);
+-        self.diag.last_slow.lock().remove(uri_str);
+-        // Remove cached PHPStan, PHPCS, PHPMD, and Mago diagnostics too.
+-        self.phpstan_tool.forget(uri_str);
+-        self.phpcs_tool.forget(uri_str);
+-        self.phpmd_tool.forget(uri_str);
+-        self.mago_lint_tool.forget(uri_str);
+-        self.mago_analyze_tool.forget(uri_str);
+-        // Remove pull-diagnostic caches.
+-        self.diag.result_ids.lock().remove(uri_str);
+-        self.diag.last_full.lock().remove(uri_str);
+-        // Drop the per-URI assemble lock so the map doesn't grow
+-        // unboundedly across a long editing session; a fresh one is
+-        // created on demand if the URI is reopened.
+-        self.diag.assemble_locks.lock().remove(uri_str);
++            // Migrate the live external tool results into the workspace
++            // diagnostics store before purging, so a closed file keeps its
++            // PHPStan/PHPCS/Mago findings instead of losing them until the
++            // next project-wide run.  Only meaningful once the background
++            // workspace pass has started.
++            if self
++                .diag
++                .workspace_diag_pass_started
++                .load(Ordering::Acquire)
++            {
++                let migrations: [(&'static str, Vec<Diagnostic>); 5] = [
++                    (
++                        "phpstan",
++                        self.phpstan_tool
++                            .last_diags
++                            .lock()
++                            .get(uri_str)
++                            .cloned()
++                            .unwrap_or_default(),
++                    ),
++                    (
++                        "phpcs",
++                        self.phpcs_tool
++                            .last_diags
++                            .lock()
++                            .get(uri_str)
++                            .cloned()
++                            .unwrap_or_default(),
++                    ),
++                    (
++                        "phpmd",
++                        self.phpmd_tool
++                            .last_diags
++                            .lock()
++                            .get(uri_str)
++                            .cloned()
++                            .unwrap_or_default(),
++                    ),
++                    (
++                        "mago-lint",
++                        self.mago_lint_tool
++                            .last_diags
++                            .lock()
++                            .get(uri_str)
++                            .cloned()
++                            .unwrap_or_default(),
++                    ),
++                    (
++                        "mago-analyze",
++                        self.mago_analyze_tool
++                            .last_diags
++                            .lock()
++                            .get(uri_str)
++                            .cloned()
++                            .unwrap_or_default(),
++                    ),
++                ];
++                let mut ws = self.diag.workspace_diags.lock();
++                for (source, diags) in migrations {
++                    ws.set_external_for_uri(source, uri_str, diags);
++                }
++            }
+ 
++            // Remove all per-source caches so we don't leak memory.
++            self.diag.last_fast.lock().remove(uri_str);
++            self.diag.last_slow.lock().remove(uri_str);
++            // Remove cached PHPStan, PHPCS, PHPMD, and Mago diagnostics too.
++            self.phpstan_tool.forget(uri_str);
++            self.phpcs_tool.forget(uri_str);
++            self.phpmd_tool.forget(uri_str);
++            self.mago_lint_tool.forget(uri_str);
++            self.mago_analyze_tool.forget(uri_str);
++            // Remove pull-diagnostic caches.
++            self.diag.result_ids.lock().remove(uri_str);
++            self.diag.last_full.lock().remove(uri_str);
++            // Drop the per-URI assemble lock so the map doesn't grow
++            // unboundedly across a long editing session; a fresh one is
++            // created on demand if the URI is reopened.
++            self.diag.assemble_locks.lock().remove(uri_str);
++        }
+         let client = match &self.client {
+             Some(c) => c,
+             None => return,
+@@ -1682,10 +1702,123 @@ mod tests {
+         let uri = "file:///not_open.php";
+         let content = "<?php\nclass Foo {}\n";
+ 
+-        backend.publish_diagnostics_for_file(uri, content).await;
++        backend
++            .publish_diagnostics_for_file(uri, &Arc::new(content.to_owned()))
++            .await;
+ 
+         assert!(backend.diag.last_fast.lock().get(uri).is_none());
+         assert!(backend.diag.last_slow.lock().get(uri).is_none());
+         assert!(backend.diag.last_full.lock().get(uri).is_none());
+     }
++    #[test]
++    fn assembly_uses_only_phases_and_analyzers_owned_by_current_source() {
++        let backend = Backend::new_test();
++        backend
++            .supports_pull_diagnostics
++            .store(true, Ordering::Release);
++        let uri = "file:///epochs.php";
++        let old = Arc::new("<?php // old".to_owned());
++        backend.open_files.write().insert(uri.into(), old.clone());
++        let old_stamp = {
++            let mut documents = backend.diag.documents.lock();
++            documents.open(uri, 1, &old);
++            let stamp = documents.capture(uri, &old).unwrap().unwrap();
++            documents.mark_parsed(uri, Some(&stamp));
++            documents.mark_phase(uri, Some(&stamp), false);
++            documents.mark_phase(uri, Some(&stamp), true);
++            stamp
++        };
++        let diagnostic = |message: &str| Diagnostic {
++            message: message.into(),
++            ..Diagnostic::default()
++        };
++        backend
++            .diag
++            .last_fast
++            .lock()
++            .insert(uri.into(), vec![diagnostic("old fast")]);
++        backend
++            .diag
++            .last_slow
++            .lock()
++            .insert(uri.into(), vec![diagnostic("old slow")]);
++        backend.phpstan_tool.store_snapshot_result(
++            uri,
++            vec![diagnostic("old tool")],
++            Some(&old_stamp),
++        );
++        assert!(backend.assemble_snapshot(uri).0);
++        assert_eq!(backend.diag.last_full.lock()[uri].len(), 3);
++        let new = Arc::new("<?php // new".to_owned());
++        let new_stamp = {
++            let mut documents = backend.diag.documents.lock();
++            assert!(documents.change(uri, 2, &new));
++            backend.open_files.write().insert(uri.into(), new.clone());
++            documents.capture(uri, &new).unwrap().unwrap()
++        };
++        // A parse from another edit and old cached phases cannot establish a clean result.
++        assert!(!backend.assemble_snapshot(uri).0);
++        {
++            let mut documents = backend.diag.documents.lock();
++            documents.mark_parsed(uri, Some(&new_stamp));
++            assert!(!documents.mark_phase(uri, Some(&old_stamp), true));
++        }
++        assert!(!backend.assemble_snapshot(uri).0);
++        {
++            let mut documents = backend.diag.documents.lock();
++            assert!(documents.mark_phase(uri, Some(&new_stamp), false));
++            backend.diag.last_fast.lock().insert(uri.into(), Vec::new());
++        }
++        assert!(backend.assemble_snapshot(uri).0);
++        assert!(
++            backend.diag.last_full.lock()[uri].is_empty(),
++            "old slow and tool results must not merge into current fast phase"
++        );
++        backend.phpstan_tool.store_snapshot_result(
++            uri,
++            vec![diagnostic("new tool")],
++            Some(&new_stamp),
++        );
++        assert!(backend.assemble_snapshot(uri).0);
++        assert_eq!(backend.diag.last_full.lock()[uri][0].message, "new tool");
++        let scan = backend.phpstan_tool.generation_snapshot();
++        assert!(backend.phpstan_tool.store_scan_result(
++            &scan,
++            uri,
++            vec![diagnostic("unstamped disk scan")]
++        ));
++        assert!(
++            backend
++                .phpstan_tool
++                .snapshot_result(uri, Some(&new_stamp))
++                .is_empty()
++        );
++    }
++
++    #[tokio::test]
++    async fn obsolete_native_worker_and_close_cannot_overwrite_reopened_cache() {
++        let backend = Backend::new_test();
++        let uri = "file:///reopen.php";
++        let old = Arc::new("<?php echo $old;".to_owned());
++        let new = Arc::new("<?php echo 1;".to_owned());
++        {
++            let mut documents = backend.diag.documents.lock();
++            documents.open(uri, 1, &old);
++            documents.close(uri);
++            documents.open(uri, 1, &new);
++            backend.open_files.write().insert(uri.into(), new.clone());
++        }
++        let expected = vec![Diagnostic {
++            message: "new opening".into(),
++            ..Diagnostic::default()
++        }];
++        backend
++            .diag
++            .last_fast
++            .lock()
++            .insert(uri.into(), expected.clone());
++        backend.publish_diagnostics_for_file(uri, &old).await;
++        backend.clear_diagnostics_for_file(uri).await;
++        assert_eq!(backend.diag.last_fast.lock()[uri], expected);
++    }
+ }
+diff --git a/src/diagnostics/revision.rs b/src/diagnostics/revision.rs
+new file mode 100644
+index 0000000..2ddd8bc
+--- /dev/null
++++ b/src/diagnostics/revision.rs
+@@ -0,0 +1,245 @@
++//! Source ownership for live diagnostic phases. Stamps retain no source payload.
++use std::{
++    collections::HashMap,
++    sync::{Arc, Weak},
++};
++
++#[derive(Clone)]
++pub(crate) struct Revision {
++    pub version: i32,
++    pub open: u64,
++    text: Weak<String>,
++}
++impl Revision {
++    pub fn same(&self, other: &Self) -> bool {
++        self.version == other.version && self.open == other.open && self.text.ptr_eq(&other.text)
++    }
++    fn owns(&self, text: &Arc<String>) -> bool {
++        self.text.ptr_eq(&Arc::downgrade(text))
++    }
++}
++#[derive(Default)]
++struct Document {
++    open: u64,
++    current: Option<Revision>,
++    parsed: Option<Revision>,
++    fast: Option<Revision>,
++    slow: Option<Revision>,
++}
++#[derive(Default)]
++pub(crate) struct Revisions(HashMap<String, Document>);
++impl Revisions {
++    pub fn open(&mut self, uri: &str, version: i32, text: &Arc<String>) {
++        let entry = self.0.entry(uri.to_owned()).or_default();
++        let Some(open) = entry.open.checked_add(1) else {
++            entry.current = None;
++            entry.parsed = None;
++            entry.fast = None;
++            entry.slow = None;
++            return;
++        };
++        entry.open = open;
++        entry.current = Some(Revision {
++            version,
++            open: entry.open,
++            text: Arc::downgrade(text),
++        });
++        entry.parsed = None;
++        entry.fast = None;
++        entry.slow = None;
++    }
++    pub fn change(&mut self, uri: &str, version: i32, text: &Arc<String>) -> bool {
++        let Some(entry) = self.0.get_mut(uri) else {
++            return false;
++        };
++        let Some(current) = &entry.current else {
++            return false;
++        };
++        if version <= current.version {
++            return false;
++        }
++        entry.current = Some(Revision {
++            version,
++            open: entry.open,
++            text: Arc::downgrade(text),
++        });
++        entry.parsed = None;
++        true
++    }
++    pub fn close(&mut self, uri: &str) {
++        if let Some(entry) = self.0.get_mut(uri) {
++            entry.current = None;
++            entry.parsed = None;
++            entry.fast = None;
++            entry.slow = None;
++        }
++    }
++    /// None means an untracked test/CLI snapshot; Err means obsolete/closed.
++    pub fn capture(&self, uri: &str, text: &Arc<String>) -> Result<Option<Revision>, ()> {
++        match self.0.get(uri) {
++            None => Ok(None),
++            Some(entry) => entry
++                .current
++                .as_ref()
++                .filter(|r| r.owns(text))
++                .cloned()
++                .map(Some)
++                .ok_or(()),
++        }
++    }
++    pub fn current(&self, uri: &str, revision: Option<&Revision>) -> bool {
++        match (self.0.get(uri), revision) {
++            (None, None) => true,
++            (Some(entry), Some(revision)) => entry
++                .current
++                .as_ref()
++                .is_some_and(|current| current.same(revision) && current.text.strong_count() > 0),
++            _ => false,
++        }
++    }
++    pub fn parsed(&self, uri: &str, revision: Option<&Revision>) -> bool {
++        self.current(uri, revision)
++            && revision.is_none_or(|revision| {
++                self.0
++                    .get(uri)
++                    .and_then(|e| e.parsed.as_ref())
++                    .is_some_and(|p| p.same(revision))
++            })
++    }
++    pub fn mark_parsed(&mut self, uri: &str, revision: Option<&Revision>) -> bool {
++        if !self.current(uri, revision) {
++            return false;
++        }
++        if let Some(revision) = revision {
++            self.0.get_mut(uri).unwrap().parsed = Some(revision.clone());
++        }
++        true
++    }
++    pub fn mark_phase(&mut self, uri: &str, revision: Option<&Revision>, slow: bool) -> bool {
++        if !self.parsed(uri, revision) {
++            return false;
++        }
++        if let Some(revision) = revision {
++            let entry = self.0.get_mut(uri).unwrap();
++            if slow {
++                entry.slow = Some(revision.clone());
++            } else {
++                entry.fast = Some(revision.clone());
++            }
++        }
++        true
++    }
++    pub fn phase_current(&self, uri: &str, revision: Option<&Revision>, slow: bool) -> bool {
++        if !self.parsed(uri, revision) {
++            return false;
++        }
++        revision.is_none_or(|revision| {
++            self.0
++                .get(uri)
++                .and_then(|e| {
++                    if slow {
++                        e.slow.as_ref()
++                    } else {
++                        e.fast.as_ref()
++                    }
++                })
++                .is_some_and(|p| p.same(revision))
++        })
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    #[test]
++    fn an_edit_retires_both_phases_and_waits_for_its_own_parse() {
++        let mut revisions = Revisions::default();
++        let a = Arc::new("old".into());
++        let b = Arc::new("new".into());
++        revisions.open("file:///a.php", 1, &a);
++        let old = revisions.capture("file:///a.php", &a).unwrap().unwrap();
++        assert!(!revisions.mark_phase("file:///a.php", Some(&old), false));
++        assert!(revisions.mark_parsed("file:///a.php", Some(&old)));
++        assert!(revisions.mark_phase("file:///a.php", Some(&old), false));
++        assert!(revisions.mark_phase("file:///a.php", Some(&old), true));
++        assert!(revisions.change("file:///a.php", 2, &b));
++        assert!(!revisions.current("file:///a.php", Some(&old)));
++        assert!(!revisions.mark_phase("file:///a.php", Some(&old), true));
++        let new = revisions.capture("file:///a.php", &b).unwrap().unwrap();
++        assert!(!revisions.phase_current("file:///a.php", Some(&new), false));
++        assert!(revisions.mark_parsed("file:///a.php", Some(&new)));
++        assert!(revisions.mark_phase("file:///a.php", Some(&new), false));
++        assert!(revisions.phase_current("file:///a.php", Some(&new), false));
++        assert!(!revisions.phase_current("file:///a.php", Some(&new), true));
++    }
++    #[test]
++    fn text_aba_and_close_reopen_do_not_reuse_ownership() {
++        let mut revisions = Revisions::default();
++        let a = Arc::new("same".into());
++        revisions.open("u", 1, &a);
++        let first = revisions.capture("u", &a).unwrap().unwrap();
++        let b = Arc::new("different".into());
++        assert!(revisions.change("u", 2, &b));
++        let same = Arc::new("same".into());
++        assert!(revisions.change("u", 3, &same));
++        assert!(!revisions.current("u", Some(&first)));
++        assert!(revisions.capture("u", &a).is_err());
++        revisions.close("u");
++        assert!(revisions.capture("u", &same).is_err());
++        revisions.open("u", 1, &a);
++        let reopened = revisions.capture("u", &a).unwrap().unwrap();
++        assert_eq!(reopened.open, 2);
++        assert!(!reopened.same(&first));
++    }
++    #[test]
++    fn older_and_duplicate_changes_cannot_replace_latest_text() {
++        let mut revisions = Revisions::default();
++        let a = Arc::new("current".into());
++        let b = Arc::new("stale".into());
++        revisions.open("u", 9, &a);
++        assert!(!revisions.change("u", 8, &b));
++        assert!(!revisions.change("u", 9, &b));
++        assert!(revisions.capture("u", &a).is_ok());
++    }
++    #[test]
++    fn cache_stamps_do_not_keep_old_source_payloads_alive() {
++        let mut revisions = Revisions::default();
++        let a = Arc::new("private large source".into());
++        revisions.open("u", 1, &a);
++        let old = revisions.capture("u", &a).unwrap().unwrap();
++        revisions.mark_parsed("u", Some(&old));
++        revisions.mark_phase("u", Some(&old), true);
++        let weak = Arc::downgrade(&a);
++        revisions.change("u", 2, &Arc::new("new".into()));
++        drop(a);
++        assert!(weak.upgrade().is_none());
++        assert!(!revisions.current("u", Some(&old)));
++    }
++}
++
++/// Version and incarnation travel with the computed payload, never with the latest buffer.
++#[derive(serde::Serialize, serde::Deserialize)]
++pub(crate) struct Publication {
++    #[serde(flatten)]
++    pub params: tower_lsp::lsp_types::PublishDiagnosticsParams,
++    #[serde(
++        rename = "phpantomDocumentOpen",
++        skip_serializing_if = "Option::is_none"
++    )]
++    pub open: Option<u64>,
++    #[serde(
++        rename = "phpantomDiagnosticComplete",
++        skip_serializing_if = "Option::is_none"
++    )]
++    pub complete: Option<bool>,
++    #[serde(
++        rename = "phpantomDiagnosticSequence",
++        skip_serializing_if = "Option::is_none"
++    )]
++    pub sequence: Option<u64>,
++}
++pub(crate) enum Publish {}
++impl tower_lsp::lsp_types::notification::Notification for Publish {
++    type Params = Publication;
++    const METHOD: &'static str = "textDocument/publishDiagnostics";
++}
+diff --git a/src/diagnostics/state.rs b/src/diagnostics/state.rs
+index 8511220..f217775 100644
+--- a/src/diagnostics/state.rs
++++ b/src/diagnostics/state.rs
+@@ -18,6 +18,8 @@ use crate::diagnostics::workspace::WorkspaceDiagnostics;
+ /// Diagnostic debouncing state and the pull-model diagnostic caches.
+ #[derive(Clone)]
+ pub(crate) struct DiagnosticState {
++    pub(crate) documents: Arc<Mutex<super::revision::Revisions>>,
++    pub(crate) publication_sequence: Arc<AtomicU64>,
+     /// Monotonically increasing version counter for diagnostic debouncing.
+     pub(crate) version: Arc<AtomicU64>,
+     /// Notification handle used to wake the diagnostic worker task.
+@@ -83,6 +85,8 @@ pub(crate) struct DiagnosticState {
+ impl DiagnosticState {
+     pub(crate) fn new() -> Self {
+         Self {
++            documents: Arc::new(Mutex::new(super::revision::Revisions::default())),
++            publication_sequence: Arc::new(AtomicU64::new(0)),
+             version: Arc::new(AtomicU64::new(0)),
+             notify: Arc::new(Notify::new()),
+             pending_uris: Arc::new(Mutex::new(HashSet::new())),
+diff --git a/src/lib.rs b/src/lib.rs
+index b1aabf2..704ad25 100644
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -546,20 +546,56 @@ pub(crate) struct ExternalToolWorker {
+     /// scan-time results can never clobber a fresher single-file result
+     /// that landed while the project-wide run was still in flight.
+     generations: Arc<Mutex<HashMap<String, u64>>>,
++    snapshots: Arc<Mutex<HashMap<String, crate::diagnostics::revision::Revision>>>,
+ }
+ 
+ impl ExternalToolWorker {
++    pub(crate) fn snapshot_result(
++        &self,
++        uri: &str,
++        revision: Option<&crate::diagnostics::revision::Revision>,
++    ) -> Vec<tower_lsp::lsp_types::Diagnostic> {
++        let cache = self.last_diags.lock();
++        if let Some(revision) = revision
++            && !self
++                .snapshots
++                .lock()
++                .get(uri)
++                .is_some_and(|stamp| stamp.same(revision))
++        {
++            return Vec::new();
++        }
++        cache.get(uri).cloned().unwrap_or_default()
++    }
++    pub(crate) fn store_snapshot_result(
++        &self,
++        uri: &str,
++        diags: Vec<tower_lsp::lsp_types::Diagnostic>,
++        revision: Option<&crate::diagnostics::revision::Revision>,
++    ) {
++        let mut cache = self.last_diags.lock();
++        let mut snapshots = self.snapshots.lock();
++        cache.insert(uri.to_owned(), diags);
++        if let Some(revision) = revision {
++            snapshots.insert(uri.to_owned(), revision.clone());
++        } else {
++            snapshots.remove(uri);
++        }
++        *self.generations.lock().entry(uri.to_owned()).or_insert(0) += 1;
++    }
+     fn new() -> Self {
+         Self {
+             notify: Arc::new(tokio::sync::Notify::new()),
+             pending_uri: Arc::new(Mutex::new(None)),
+             last_diags: Arc::new(Mutex::new(HashMap::new())),
+             generations: Arc::new(Mutex::new(HashMap::new())),
++            snapshots: Arc::new(Mutex::new(HashMap::new())),
+         }
+     }
+ 
+     /// Store a single-file run's result and mark the URI as freshly
+     /// written, superseding any project-wide run still in flight.
++    #[cfg(test)]
+     pub(crate) fn store_file_result(
+         &self,
+         uri: &str,
+@@ -567,6 +603,7 @@ impl ExternalToolWorker {
+     ) {
+         let mut cache = self.last_diags.lock();
+         cache.insert(uri.to_string(), diags);
++        self.snapshots.lock().remove(uri);
+         *self.generations.lock().entry(uri.to_string()).or_insert(0) += 1;
+     }
+ 
+@@ -594,12 +631,15 @@ impl ExternalToolWorker {
+             return false;
+         }
+         cache.insert(uri.to_string(), diags);
++        self.snapshots.lock().remove(uri);
+         true
+     }
+ 
+     /// Drop a URI's cached result and write counter (on `did_close`).
+     pub(crate) fn forget(&self, uri: &str) {
+-        self.last_diags.lock().remove(uri);
++        let mut cache = self.last_diags.lock();
++        cache.remove(uri);
++        self.snapshots.lock().remove(uri);
+         self.generations.lock().remove(uri);
+     }
+ }
+@@ -611,6 +651,7 @@ impl Clone for ExternalToolWorker {
+             pending_uri: Arc::clone(&self.pending_uri),
+             last_diags: Arc::clone(&self.last_diags),
+             generations: Arc::clone(&self.generations),
++            snapshots: Arc::clone(&self.snapshots),
+         }
+     }
+ }

@@ -1,0 +1,242 @@
+diff --git a/docs/CHANGELOG.md b/docs/CHANGELOG.md
+index 113820c..6d1f5c0 100644
+--- a/docs/CHANGELOG.md
++++ b/docs/CHANGELOG.md
+@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
+ 
+ ## [Unreleased]
+ 
++- **Modern PHP keyword suggestions follow the project target.** Autocomplete hides newer `fn`, `match`, `enum` and `readonly` syntax on older PHP versions while retaining ordinary keywords and project functions.
++
++
+ - **Built-in methods follow the project PHP target.** Autocomplete and navigation exclude methods introduced in a newer PHP release, including inherited methods. Project methods retain their own release annotations.
+ 
+ 
+diff --git a/src/completion/context/keyword_completion.rs b/src/completion/context/keyword_completion.rs
+index ee7a075..f3ec936 100644
+--- a/src/completion/context/keyword_completion.rs
++++ b/src/completion/context/keyword_completion.rs
+@@ -6,7 +6,7 @@ use tower_lsp::lsp_types::*;
+ use crate::class_lookup::find_class_at_offset;
+ use crate::completion::class_completion::ClassNameContext;
+ use crate::symbol_map::SymbolMap;
+-use crate::types::{ClassInfo, ClassLikeKind};
++use crate::types::{ClassInfo, ClassLikeKind, PhpVersion};
+ 
+ /// Cursor context used to gate context-sensitive PHP keywords.
+ #[derive(Debug, Clone, Copy)]
+@@ -352,6 +352,7 @@ pub(crate) fn build_keyword_completions(
+     prefix: &str,
+     class_ctx: ClassNameContext,
+     ctx: KeywordContext,
++    php_version: PhpVersion,
+ ) -> Vec<CompletionItem> {
+     if !matches!(class_ctx, ClassNameContext::Any) {
+         return Vec::new();
+@@ -363,6 +364,7 @@ pub(crate) fn build_keyword_completions(
+         .enumerate()
+         .filter(|(_, keyword)| keyword.starts_with(&prefix_lower))
+         .filter(|(_, keyword)| keyword_allowed(keyword, ctx))
++        .filter(|(_, keyword)| keyword_available_for_target(keyword, ctx, php_version))
+         .map(|(idx, keyword)| CompletionItem {
+             label: (*keyword).to_string(),
+             kind: Some(CompletionItemKind::KEYWORD),
+@@ -394,6 +396,19 @@ pub(crate) fn build_backed_enum_type_completions(prefix: &str) -> Vec<Completion
+         .collect()
+ }
+ 
++fn keyword_available_for_target(keyword: &str, ctx: KeywordContext, version: PhpVersion) -> bool {
++    let minimum = match keyword {
++        "fn" => PhpVersion::new(7, 4),
++        "match" => PhpVersion::new(8, 0),
++        "enum" => PhpVersion::new(8, 1),
++        // Outside class-member declarations, readonly introduces a class.
++        "readonly" if ctx.class_body_kind.is_some() => PhpVersion::new(8, 1),
++        "readonly" => PhpVersion::new(8, 2),
++        _ => return true,
++    };
++    version >= minimum
++}
++
+ fn keyword_allowed(keyword: &&str, ctx: KeywordContext) -> bool {
+     if let Some(kind) = ctx.class_body_kind {
+         return keyword_allowed_in_class_body(keyword, kind);
+diff --git a/src/completion/handler/class_constant.rs b/src/completion/handler/class_constant.rs
+index a562520..efd1d6e 100644
+--- a/src/completion/handler/class_constant.rs
++++ b/src/completion/handler/class_constant.rs
+@@ -417,6 +417,7 @@ impl Backend {
+                         "",
+                         class_ctx,
+                         keyword_ctx,
++                        self.php_version(),
+                     );
+                     if items.is_empty() {
+                         return None;
+@@ -584,6 +585,7 @@ impl Backend {
+             &partial,
+             class_ctx,
+             keyword_ctx,
++            self.php_version(),
+         );
+         let (constant_items, const_incomplete) =
+             self.build_constant_completions(&partial, current_uri, position);
+diff --git a/src/completion/handler/member_access.rs b/src/completion/handler/member_access.rs
+index 056ce97..4e0334a 100644
+--- a/src/completion/handler/member_access.rs
++++ b/src/completion/handler/member_access.rs
+@@ -460,6 +460,7 @@ impl Backend {
+                 &partial,
+                 crate::completion::class_completion::ClassNameContext::Any,
+                 keyword_ctx,
++                self.php_version(),
+             )
+         };
+ 
+diff --git a/tests/integration/keyword_php_target.rs b/tests/integration/keyword_php_target.rs
+new file mode 100644
+index 0000000..cd07385
+--- /dev/null
++++ b/tests/integration/keyword_php_target.rs
+@@ -0,0 +1,131 @@
++//! Modern keyword suggestions must follow the selected PHP target.
++use crate::common::complete_at;
++use phpantom_lsp::{Backend, types::PhpVersion};
++use tower_lsp::lsp_types::{CompletionItemKind, Url};
++async fn offered(backend: &Backend, source: &str, label: &str, kind: CompletionItemKind) -> bool {
++    let position = source.find("<caret>").unwrap();
++    let before = &source[..position];
++    let line = before.bytes().filter(|b| *b == b'\n').count() as u32;
++    let col = before.rsplit('\n').next().unwrap().encode_utf16().count() as u32;
++    let items = complete_at(
++        backend,
++        &Url::parse("file:///keyword-target.php").unwrap(),
++        &source.replace("<caret>", ""),
++        line,
++        col,
++    )
++    .await;
++    items.iter().any(|item| {
++        item.kind == Some(kind)
++            && item
++                .filter_text
++                .as_deref()
++                .unwrap_or(item.label.split('(').next().unwrap())
++                == label
++    })
++}
++fn backend(major: u8, minor: u8) -> Backend {
++    let backend = Backend::new_test();
++    backend.set_php_version(PhpVersion::new(major, minor));
++    backend
++}
++#[tokio::test]
++async fn arrow_keyword_starts_at_php74() {
++    for (minor, expected) in [(3, false), (4, true)] {
++        assert_eq!(
++            offered(
++                &backend(7, minor),
++                "<?php\n$callback = fn<caret>",
++                "fn",
++                CompletionItemKind::KEYWORD
++            )
++            .await,
++            expected
++        );
++    }
++}
++#[tokio::test]
++async fn match_and_enum_keywords_follow_separate_release_boundaries() {
++    for (major, minor) in [(7, 4), (8, 0), (8, 1), (8, 5)] {
++        let b = backend(major, minor);
++        let v = PhpVersion::new(major, minor);
++        assert_eq!(
++            offered(
++                &b,
++                "<?php\nfunction demo() { mat<caret> }",
++                "match",
++                CompletionItemKind::KEYWORD
++            )
++            .await,
++            v >= PhpVersion::new(8, 0)
++        );
++        assert_eq!(
++            offered(&b, "<?php\nen<caret>", "enum", CompletionItemKind::KEYWORD).await,
++            v >= PhpVersion::new(8, 1)
++        );
++    }
++}
++#[tokio::test]
++async fn readonly_properties_and_promoted_parameters_start_at_php81() {
++    for (minor, expected) in [(0, false), (1, true), (2, true)] {
++        let b = backend(8, minor);
++        for source in [
++            "<?php\nclass Demo { public rea<caret> }",
++            "<?php\nclass Demo { public function __construct(public rea<caret>) {} }",
++            "<?php\ntrait Demo { public rea<caret> }",
++        ] {
++            assert_eq!(
++                offered(&b, source, "readonly", CompletionItemKind::KEYWORD).await,
++                expected,
++                "8.{minor}: {source}"
++            );
++        }
++    }
++}
++#[tokio::test]
++async fn readonly_classes_require_php82_even_in_function_bodies() {
++    for (minor, expected) in [(0, false), (1, false), (2, true), (5, true)] {
++        let b = backend(8, minor);
++        for source in ["<?php\nrea<caret>", "<?php\nfunction demo() { rea<caret> }"] {
++            assert_eq!(
++                offered(&b, source, "readonly", CompletionItemKind::KEYWORD).await,
++                expected,
++                "8.{minor}: {source}"
++            );
++        }
++    }
++}
++#[tokio::test]
++async fn empty_member_modifier_prefix_keeps_legacy_keywords_and_gates_readonly() {
++    for (minor, expected) in [(0, false), (1, true)] {
++        let b = backend(8, minor);
++        let source = "<?php\nclass Demo { public <caret> }";
++        assert!(offered(&b, source, "function", CompletionItemKind::KEYWORD).await);
++        assert_eq!(
++            offered(&b, source, "readonly", CompletionItemKind::KEYWORD).await,
++            expected
++        );
++    }
++}
++#[tokio::test]
++async fn keyword_gates_do_not_filter_project_symbols_or_ordinary_keywords() {
++    let b = backend(7, 4);
++    assert!(
++        offered(
++            &b,
++            "<?php\nfun<caret>",
++            "function",
++            CompletionItemKind::KEYWORD
++        )
++        .await
++    );
++    assert!(
++        offered(
++            &b,
++            "<?php\nfunction matchProjectTimer() {}\nmat<caret>",
++            "matchProjectTimer",
++            CompletionItemKind::FUNCTION
++        )
++        .await
++    );
++}
+diff --git a/tests/integration/main.rs b/tests/integration/main.rs
+index aa5609a..8063a8d 100644
+--- a/tests/integration/main.rs
++++ b/tests/integration/main.rs
+@@ -267,3 +267,5 @@ mod workbench_views;
+ mod blade_generated_diagnostics;
+ 
+ mod stub_method_versions;
++
++mod keyword_php_target;

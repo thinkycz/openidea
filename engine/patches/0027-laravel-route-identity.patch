@@ -1,0 +1,849 @@
+diff --git a/docs/CHANGELOG.md b/docs/CHANGELOG.md
+index af6e7a0..b1178bb 100644
+--- a/docs/CHANGELOG.md
++++ b/docs/CHANGELOG.md
+@@ -21,6 +21,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
+ 
+ ### Fixed
+ 
++- **Laravel route helper identity.** References, navigation, hover and unknown-route checks distinguish project helpers from Laravel's global helpers, including unsaved namespace-function changes. Contributed by PHP Workbench (local downstream patch).
++
+ - **Laravel route refactoring.** Rename unique literal route names across indexed PHP and Blade usages while preserving group prefixes, imports and template coordinates. Ambiguous, generated, colliding or stale declarations are refused. Contributed by PHP Workbench (local downstream patch).
+ 
+ - **Laravel route names.** Duplicate statically discovered route names report their declaration locations, including grouped and resource routes. Imported facade aliases retain their identity and unrelated imports are excluded. Contributed by PHP Workbench (local downstream patch).
+diff --git a/src/completion/context/function_completion.rs b/src/completion/context/function_completion.rs
+index bee1c75..a2ff384 100644
+--- a/src/completion/context/function_completion.rs
++++ b/src/completion/context/function_completion.rs
+@@ -292,10 +292,19 @@ impl Backend {
+         // after the first use triggers a lazy `update_ast` call.
+         {
+             let idx = self.symbols.autoload_function_index.read();
+-            for (fqn, _path) in idx.iter() {
++            for (fqn, path) in idx.iter() {
+                 if !fqn.to_lowercase().contains(&prefix_lower) {
+                     continue;
+                 }
++                // Parsed declarations (including unsaved removals) supersede
++                // lightweight discovery; surviving functions were offered above.
++                if self
++                    .parsed_uris
++                    .read()
++                    .contains(&crate::util::path_to_uri(path))
++                {
++                    continue;
++                }
+                 if !seen.insert(fqn.to_owned()) {
+                     continue;
+                 }
+diff --git a/src/parser/ast_update.rs b/src/parser/ast_update.rs
+index c32585e..5aee3fb 100644
+--- a/src/parser/ast_update.rs
++++ b/src/parser/ast_update.rs
+@@ -254,9 +254,22 @@ impl Backend {
+                 .iter()
+                 .map(|(uri, map)| (uri.as_str(), map.as_ref())),
+         );
+-        let mut symbol_maps = self.symbol_maps.write();
+-        for (uri, map) in refreshed {
+-            symbol_maps.insert(uri, map);
++        let refreshed_open: Vec<String> = {
++            let open = self.open_files.read();
++            refreshed
++                .iter()
++                .filter(|(uri, _)| open.contains_key(uri))
++                .map(|(uri, _)| uri.clone())
++                .collect()
++        };
++        {
++            let mut symbol_maps = self.symbol_maps.write();
++            for (uri, map) in refreshed {
++                symbol_maps.insert(uri, map);
++            }
++        }
++        for uri in refreshed_open {
++            self.schedule_diagnostics(uri);
+         }
+         true
+     }
+@@ -1605,6 +1618,9 @@ impl Backend {
+                 if let Some(dependency) = LaravelStringDependency::namespaced_auth(fqn) {
+                     affected_laravel_dependencies.insert(dependency);
+                 }
++                if let Some(dependency) = LaravelStringDependency::namespaced_route_helper(fqn) {
++                    affected_laravel_dependencies.insert(dependency);
++                }
+             }
+         }
+         let prepared_uris: HashSet<&str> =
+@@ -1654,6 +1670,14 @@ impl Backend {
+                 }
+             }
+         }
++        let refreshed_open: Vec<String> = {
++            let open = self.open_files.read();
++            refreshed_existing
++                .iter()
++                .filter(|(uri, _)| open.contains_key(uri))
++                .map(|(uri, _)| uri.clone())
++                .collect()
++        };
+         {
+             let mut symbol_maps = self.symbol_maps.write();
+             for (uri, map) in refreshed_existing {
+@@ -1664,6 +1688,10 @@ impl Backend {
+             }
+         }
+ 
++        for uri in refreshed_open {
++            self.schedule_diagnostics(uri);
++        }
++
+         changed
+     }
+ 
+@@ -3177,4 +3205,134 @@ class User extends Model {
+             );
+         }
+     }
++    #[test]
++    fn route_helper_presence_refreshes_only_dependent_open_diagnostics() {
++        let backend = Backend::new_test();
++        let consumer = "file:///app/Consumer.php";
++        let unrelated = "file:///app/Other.php";
++        let helper = "file:///app/Helpers.php";
++        let source = "<?php namespace App; route('home');";
++        for (uri, text) in [
++            (consumer, source),
++            (unrelated, "<?php namespace App; class Other {}"),
++        ] {
++            backend
++                .open_files
++                .write()
++                .insert(uri.to_owned(), Arc::new(text.to_owned()));
++            backend.update_ast(uri, text);
++        }
++        backend
++            .init_complete
++            .store(true, std::sync::atomic::Ordering::Release);
++        backend.diag.pending_uris.lock().clear();
++        backend.update_ast(
++            helper,
++            "<?php namespace App; function route(string $name): string { return $name; }",
++        );
++        {
++            let pending = backend.diag.pending_uris.lock();
++            assert!(
++                pending.contains(consumer),
++                "the unchanged caller must be re-diagnosed"
++            );
++            assert!(
++                !pending.contains(unrelated),
++                "unrelated tabs retain their diagnostics"
++            );
++        }
++        let map = backend.symbol_maps.read().get(consumer).cloned().unwrap();
++        assert!(!map.spans.iter().any(|span| matches!(
++            &span.kind,
++            crate::symbol_map::SymbolKind::LaravelStringKey {
++                kind: crate::symbol_map::LaravelStringKind::Route,
++                ..
++            }
++        )));
++        backend.diag.pending_uris.lock().clear();
++        backend.update_ast(
++            helper,
++            "<?php namespace App; function route(string $name): string { return $name . '!'; }",
++        );
++        assert!(
++            backend.diag.pending_uris.lock().is_empty(),
++            "body-only edits do not change helper identity"
++        );
++        let current = backend.symbol_maps.read().get(consumer).cloned().unwrap();
++        assert!(
++            Arc::ptr_eq(&map, &current),
++            "an unchanged caller map is reused"
++        );
++        backend.update_ast(helper, "<?php namespace App;");
++        assert!(backend.diag.pending_uris.lock().contains(consumer));
++        let map = backend.symbol_maps.read().get(consumer).cloned().unwrap();
++        assert!(map.spans.iter().any(|span| matches!(
++            &span.kind,
++            crate::symbol_map::SymbolKind::LaravelStringKey {
++                kind: crate::symbol_map::LaravelStringKind::Route,
++                ..
++            }
++        )));
++    }
++    #[test]
++    fn parsed_function_removal_supersedes_discovery_membership() {
++        let backend = Backend::new_test();
++        let dir = tempfile::tempdir().unwrap();
++        let path = dir.path().join("Helpers.php");
++        let original =
++            "<?php namespace App; function route(string $name): string { return $name; }";
++        std::fs::write(&path, original).unwrap();
++        let uri = crate::util::path_to_uri(&path);
++        backend
++            .symbols
++            .autoload_function_index
++            .write()
++            .insert("App\\route".to_owned(), path.clone());
++        let completions = || {
++            backend
++                .build_function_completions("App\\route", true, None, &None, &uri)
++                .0
++        };
++        assert_eq!(completions().len(), 1, "unparsed discovery is available");
++        backend.update_ast(&uri, original);
++        assert_eq!(completions().len(), 1, "parsed declaration stays available");
++        backend.update_ast(&uri, "<?php namespace App;");
++        assert!(!backend.has_indexed_function("App\\route"));
++        assert!(
++            completions().is_empty(),
++            "removed discovery cannot leak into completion"
++        );
++        assert_eq!(std::fs::read_to_string(path).unwrap(), original);
++    }
++
++    #[test]
++    fn lazy_function_lookup_cannot_resurrect_deleted_unsaved_declaration() {
++        let backend = Backend::new_test();
++        let dir = tempfile::tempdir().unwrap();
++        let path = dir.path().join("Helpers.php");
++        let original =
++            "<?php namespace App; function route(string $name): string { return $name; }";
++        std::fs::write(&path, original).unwrap();
++        let uri = crate::util::path_to_uri(&path);
++        backend
++            .symbols
++            .autoload_function_index
++            .write()
++            .insert("App\\route".to_owned(), path.clone());
++        backend.update_ast(&uri, original);
++        backend.update_ast(&uri, "<?php namespace App;");
++        assert!(
++            backend
++                .resolve_function_name("App\\route", &HashMap::new(), &None)
++                .is_none()
++        );
++        assert!(
++            !backend
++                .symbols
++                .global_functions
++                .read()
++                .contains_key("App\\route")
++        );
++        assert_eq!(std::fs::read_to_string(path).unwrap(), original);
++    }
+ }
+diff --git a/src/rename/route.rs b/src/rename/route.rs
+index 467eca7..4cd7171 100644
+--- a/src/rename/route.rs
++++ b/src/rename/route.rs
+@@ -9,12 +9,7 @@ use crate::{
+     symbol_map::{LaravelStringKind, SymbolKind},
+     text_position::ranges_overlap,
+ };
+-use mago_span::HasSpan;
+-use mago_syntax::cst::{Call, Expression, Node};
+-use std::{
+-    collections::{HashMap, HashSet},
+-    sync::Arc,
+-};
++use std::{collections::HashMap, sync::Arc};
+ use tower_lsp::lsp_types::*;
+ 
+ pub(super) struct RouteRenameSite {
+@@ -45,12 +40,6 @@ impl Backend {
+             } = span.kind
+             && span_spells_its_name(content, &span)
+         {
+-            if self
+-                .foreign_route_helper_arguments(uri, content)
+-                .contains(&(span.start as usize, span.end as usize))
+-            {
+-                return None;
+-            }
+             return Some(RouteRenameSite {
+                 name: key.clone(),
+                 range: Range::new(
+@@ -202,22 +191,12 @@ impl Backend {
+             }],
+         );
+         let mut contents = HashMap::new();
+-        let mut foreign_by_uri = HashMap::new();
+         for location in locations {
+             let uri = location.uri.as_str();
+             let source = contents
+                 .entry(uri.to_owned())
+                 .or_insert_with(|| self.reference_file_content_arc(uri));
+             let source = source.as_ref().ok_or("Route usage source is unavailable")?;
+-            let start = crate::text_position::position_to_byte_offset(source, location.range.start);
+-            let end = crate::text_position::position_to_byte_offset(source, location.range.end);
+-            if foreign_by_uri
+-                .entry(uri.to_owned())
+-                .or_insert_with(|| self.foreign_route_helper_arguments(uri, source))
+-                .contains(&(start, end))
+-            {
+-                continue;
+-            }
+             if !self.rename_map_matches(uri, source)
+                 || range_text(source, location.range) != Some(site.name.as_str())
+             {
+@@ -261,95 +240,3 @@ impl Backend {
+         Ok(Some(crate::code_actions::multi_file_edit(changes)))
+     }
+ }
+-
+-impl Backend {
+-    /// The PHP function resolver, including namespace fallback, separates a
+-    /// project helper from Laravel's global helper before its string is edited.
+-    fn foreign_route_helper_arguments(&self, uri: &str, content: &str) -> HashSet<(usize, usize)> {
+-        use crate::virtual_members::laravel::helpers::extract_string_literal;
+-        let ctx = self.file_context(uri);
+-        let foreign = |raw: &str, offset: u32, allowed: &[&str]| {
+-            if let Some(function) = self.resolve_function_name_at(
+-                raw,
+-                ctx.resolved_names.as_deref(),
+-                offset,
+-                ctx.use_map_at(offset),
+-                ctx.namespace_at(offset),
+-            ) {
+-                return function.namespace.as_ref().is_some_and(|ns| !ns.is_empty())
+-                    || !allowed
+-                        .iter()
+-                        .any(|name| function.name.eq_ignore_ascii_case(name));
+-            }
+-            if let Some(names) = &ctx.resolved_names
+-                && names.is_imported(offset)
+-            {
+-                return names.get(offset).is_none_or(|resolved| {
+-                    !allowed
+-                        .iter()
+-                        .any(|name| resolved.trim_start_matches('\\').eq_ignore_ascii_case(name))
+-                });
+-            }
+-            let bare = raw.trim_start_matches('\\');
+-            !allowed.iter().any(|name| bare.eq_ignore_ascii_case(name))
+-        };
+-        crate::parser::with_parsed_program(content, "route_rename_helpers", |program, content| {
+-            let mut out = HashSet::new();
+-            visit_route_nodes(Node::Program(program), &mut |node| {
+-                let args = match node {
+-                    Node::FunctionCall(call) => {
+-                        let Expression::Identifier(ident) = call.function else {
+-                            return;
+-                        };
+-                        let raw = crate::atom::bytes_to_str(ident.value());
+-                        if !["route", "to_route"]
+-                            .iter()
+-                            .any(|name| raw.trim_start_matches('\\').eq_ignore_ascii_case(name))
+-                            || !foreign(raw, ident.span().start.offset, &["route", "to_route"])
+-                        {
+-                            return;
+-                        }
+-                        &call.argument_list
+-                    }
+-                    Node::MethodCall(call) => {
+-                        let Expression::Call(Call::Function(receiver)) = call.object else {
+-                            return;
+-                        };
+-                        let Expression::Identifier(ident) = receiver.function else {
+-                            return;
+-                        };
+-                        let raw = crate::atom::bytes_to_str(ident.value());
+-                        if !["redirect", "url", "response"]
+-                            .iter()
+-                            .any(|name| raw.trim_start_matches('\\').eq_ignore_ascii_case(name))
+-                            || !foreign(
+-                                raw,
+-                                ident.span().start.offset,
+-                                &["redirect", "url", "response"],
+-                            )
+-                        {
+-                            return;
+-                        }
+-                        &call.argument_list
+-                    }
+-                    _ => return,
+-                };
+-                for argument in args.arguments.iter() {
+-                    if let Some((_, start, end)) = extract_string_literal(argument.value(), content)
+-                    {
+-                        out.insert((start, end));
+-                    }
+-                }
+-            });
+-            out
+-        })
+-    }
+-}
+-
+-fn visit_route_nodes<'a, 'arena>(node: Node<'a, 'arena>, visit: &mut impl FnMut(Node<'a, 'arena>)) {
+-    let mut pending = vec![node];
+-    while let Some(node) = pending.pop() {
+-        visit(node);
+-        node.visit_children(|child| pending.push(child));
+-    }
+-}
+diff --git a/src/resolution.rs b/src/resolution.rs
+index fe77259..fe2c663 100644
+--- a/src/resolution.rs
++++ b/src/resolution.rs
+@@ -1145,6 +1145,12 @@ impl Backend {
+             let idx = self.symbols.autoload_function_index.read();
+             for &name in candidates {
+                 if let Some(path) = idx.get(name) {
++                    // Full parsing supersedes discovery, including declarations
++                    // removed from an unsaved buffer. Never resurrect disk text.
++                    let uri = crate::util::path_to_uri(path);
++                    if self.parsed_uris.read().contains(&uri) {
++                        continue;
++                    }
+                     let path = path.clone();
+                     drop(idx); // release read lock before parsing
+ 
+@@ -1436,7 +1442,12 @@ impl Backend {
+                 .autoload_function_index
+                 .read()
+                 .get(fqn)
+-                .is_some()
++                .is_some_and(|path| {
++                    !self
++                        .parsed_uris
++                        .read()
++                        .contains(&crate::util::path_to_uri(path))
++                })
+     }
+ 
+     /// Whether discovery or full parsing has seen this exact class FQN.
+diff --git a/src/symbol_map/extraction/expressions/calls.rs b/src/symbol_map/extraction/expressions/calls.rs
+index ccfe4ba..ad8a246 100644
+--- a/src/symbol_map/extraction/expressions/calls.rs
++++ b/src/symbol_map/extraction/expressions/calls.rs
+@@ -371,12 +371,19 @@ fn extract_call<'a>(
+                         None
+                     };
+                     if let Some(kind) = laravel_kind {
++                        let span_start = ctx.spans.len();
+                         try_emit_laravel_string_span(
+                             kind,
+                             &func_call.argument_list,
+                             ctx.content,
+                             &mut ctx.spans,
+                         );
++                        if kind == crate::symbol_map::LaravelStringKind::Route
++                            && let Some(dependency) = ctx.resolved_name_at(ident.span().start.offset)
++                                .and_then(crate::symbol_map::LaravelStringDependency::namespaced_route_helper)
++                        {
++                            ctx.defer_laravel_spans_since(span_start, dependency);
++                        }
+                     }
+                     if let Some(trigger) = crate::symbol_map::laravel_resources::auth_helper_trigger(
+                         ctx.content,
+@@ -473,12 +480,18 @@ fn extract_call<'a>(
+                 if is_route_name_helper_receiver(method_call.object, ctx.resolved_names)
+                     && is_route_name_method(&member_name)
+                 {
++                    let span_start = ctx.spans.len();
+                     try_emit_laravel_string_span(
+                         crate::symbol_map::LaravelStringKind::Route,
+                         &method_call.argument_list,
+                         ctx.content,
+                         &mut ctx.spans,
+                     );
++                    if let Some(dependency) =
++                        route_helper_receiver_dependency(method_call.object, ctx.resolved_names)
++                    {
++                        ctx.defer_laravel_spans_since(span_start, dependency);
++                    }
+                 }
+                 // `$request->routeIs('admin.*', 'account.*')` asks whether the
+                 // current route is any of the names it lists.
+diff --git a/src/symbol_map/extraction/laravel.rs b/src/symbol_map/extraction/laravel.rs
+index 122b96f..c82d066 100644
+--- a/src/symbol_map/extraction/laravel.rs
++++ b/src/symbol_map/extraction/laravel.rs
+@@ -834,6 +834,22 @@ pub(super) fn is_route_name_helper_receiver(
+             .any(|helper| name.eq_ignore_ascii_case(helper))
+ }
+ 
++/// The namespace-local function the receiver may resolve to instead of Laravel.
++pub(super) fn route_helper_receiver_dependency(
++    object: &Expression<'_>,
++    resolved: Option<&crate::names::OwnedResolvedNames>,
++) -> Option<crate::symbol_map::LaravelStringDependency> {
++    let Expression::Call(Call::Function(call)) = object else {
++        return None;
++    };
++    let Expression::Identifier(ident) = call.function else {
++        return None;
++    };
++    resolved?
++        .get(ident.span().start.offset)
++        .and_then(crate::symbol_map::LaravelStringDependency::namespaced_route_helper)
++}
++
+ /// Whether `member_name` takes the name of the route it points at as its
+ /// first argument.
+ ///
+diff --git a/src/symbol_map/mod.rs b/src/symbol_map/mod.rs
+index 59f6a90..44529e3 100644
+--- a/src/symbol_map/mod.rs
++++ b/src/symbol_map/mod.rs
+@@ -600,6 +600,17 @@ impl LaravelStringDependency {
+             .then(|| Self::Function(crate::atom::ascii_lowercase_atom(name)))
+     }
+ 
++    /// A namespace-local route/URL helper that prevents global fallback.
++    pub(crate) fn namespaced_route_helper(name: &str) -> Option<Self> {
++        let name = name.trim_start_matches('\\');
++        let (namespace, short) = name.rsplit_once('\\')?;
++        (!namespace.is_empty()
++            && ["route", "to_route", "redirect", "url", "response"]
++                .iter()
++                .any(|helper| short.eq_ignore_ascii_case(helper)))
++        .then(|| Self::Function(crate::atom::ascii_lowercase_atom(name)))
++    }
++
+     /// A global class name Laravel may otherwise provide as a runtime facade
+     /// alias. Fully-qualified facade classes are unambiguous and return none.
+     pub(crate) fn root_facade(name: &str) -> Option<Self> {
+diff --git a/tests/integration/laravel_route_identity.rs b/tests/integration/laravel_route_identity.rs
+new file mode 100644
+index 0000000..781875e
+--- /dev/null
++++ b/tests/integration/laravel_route_identity.rs
+@@ -0,0 +1,319 @@
++use crate::common::{
++    LARAVEL_SRC_COMPOSER, create_initialized_psr4_workspace, find_references, goto_definition_at,
++    hover_text_at, messages_with_code, open_php, position_after,
++};
++use tower_lsp::{LanguageServer, lsp_types::*};
++
++const ROUTES: &str = "<?php Route::get('/a', 'a')->name('home');";
++const CALLER: &str = "<?php\nnamespace App;\nfunction route(string $name): string { return $name; }\nclass Links { function demo() {\n    route('home');\n    \\route('home');\n    route('local.missing');\n    \\route('global.missing');\n} }\n";
++
++async fn workspace(source: &str) -> (phpantom_lsp::Backend, tempfile::TempDir, Url) {
++    create_initialized_psr4_workspace(
++        LARAVEL_SRC_COMPOSER,
++        &[("routes/web.php", ROUTES), ("src/Links.php", source)],
++        "src/Links.php",
++    )
++    .await
++}
++
++#[tokio::test]
++async fn local_route_argument_has_no_framework_navigation_or_hover() {
++    let (backend, _dir, uri) = workspace(CALLER).await;
++    let local = position_after(CALLER, "    route('ho");
++    assert!(
++        goto_definition_at(&backend, &uri, local.line, local.character)
++            .await
++            .is_none()
++    );
++    assert!(
++        hover_text_at(&backend, &uri, local.line, local.character)
++            .await
++            .is_none()
++    );
++    let global = position_after(CALLER, "\\route('ho");
++    assert!(
++        goto_definition_at(&backend, &uri, global.line, global.character)
++            .await
++            .is_some()
++    );
++    assert!(
++        hover_text_at(&backend, &uri, global.line, global.character)
++            .await
++            .is_some()
++    );
++}
++
++#[tokio::test]
++async fn route_reference_queries_exclude_local_helpers_at_both_ends() {
++    let (backend, _dir, uri) = workspace(CALLER).await;
++    let local = position_after(CALLER, "    route('ho");
++    assert!(
++        find_references(&backend, &uri, local, true)
++            .await
++            .is_empty()
++    );
++    let global = position_after(CALLER, "\\route('ho");
++    let references = find_references(&backend, &uri, global, true).await;
++    assert_eq!(references.len(), 2, "{references:?}");
++    assert!(
++        !references
++            .iter()
++            .any(|l| l.uri == uri && l.range.start.line == local.line)
++    );
++}
++
++#[tokio::test]
++async fn unknown_route_warning_judges_only_the_framework_helper() {
++    let (backend, _dir, uri) = workspace(CALLER).await;
++    let mut diagnostics = Vec::new();
++    backend.collect_slow_diagnostics(uri.as_str(), CALLER, &mut diagnostics);
++    let warnings = messages_with_code(&diagnostics, "invalid_laravel_route");
++    assert_eq!(warnings.len(), 1, "{warnings:?}");
++    assert!(warnings[0].contains("global.missing"));
++}
++
++#[tokio::test]
++async fn declaration_references_do_not_include_unrelated_local_route_calls() {
++    let (backend, dir, _) = workspace(CALLER).await;
++    let uri = Url::from_file_path(dir.path().join("routes/web.php")).unwrap();
++    open_php(&backend, &uri, ROUTES).await;
++    let pos = position_after(ROUTES, "name('ho");
++    let references = find_references(&backend, &uri, pos, true).await;
++    assert_eq!(references.len(), 2, "{references:?}");
++    assert!(
++        !references
++            .iter()
++            .any(|l| l.uri.as_str().ends_with("/src/Links.php") && l.range.start.line == 4)
++    );
++}
++
++#[tokio::test]
++async fn local_receiver_helper_does_not_become_a_framework_route() {
++    let source = "<?php\nnamespace App;\nfunction redirect(): object { return new class { function route(string $name): void {} }; }\nclass Links { function demo() {\n    redirect()->route('home');\n    \\redirect()->route('home');\n    redirect()->route('local.missing');\n} }\n";
++    let (backend, _dir, uri) = workspace(source).await;
++    let local = position_after(source, "    redirect()->route('ho");
++    assert!(
++        goto_definition_at(&backend, &uri, local.line, local.character)
++            .await
++            .is_none()
++    );
++    assert!(
++        hover_text_at(&backend, &uri, local.line, local.character)
++            .await
++            .is_none()
++    );
++    let global = position_after(source, "\\redirect()->route('ho");
++    assert!(
++        goto_definition_at(&backend, &uri, global.line, global.character)
++            .await
++            .is_some()
++    );
++    let refs = find_references(&backend, &uri, global, true).await;
++    assert_eq!(refs.len(), 2);
++    let mut diagnostics = Vec::new();
++    backend.collect_slow_diagnostics(uri.as_str(), source, &mut diagnostics);
++    assert!(messages_with_code(&diagnostics, "invalid_laravel_route").is_empty());
++}
++
++#[tokio::test]
++async fn unsaved_cross_file_shadowing_changes_navigation_without_editing_caller() {
++    let caller = "<?php\nnamespace App;\nclass Links { function demo() { route('unregistered'); return route('home'); } }\n";
++    let empty = "<?php namespace App;\n";
++    let (backend, dir, uri) = create_initialized_psr4_workspace(
++        LARAVEL_SRC_COMPOSER,
++        &[
++            ("routes/web.php", ROUTES),
++            ("src/Links.php", caller),
++            ("src/Helpers.php", empty),
++        ],
++        "src/Links.php",
++    )
++    .await;
++    let helpers = Url::from_file_path(dir.path().join("src/Helpers.php")).unwrap();
++    open_php(&backend, &helpers, empty).await;
++    let position = position_after(caller, "route('ho");
++    assert!(
++        goto_definition_at(&backend, &uri, position.line, position.character)
++            .await
++            .is_some()
++    );
++    for (version, source, framework) in [
++        (
++            2,
++            "<?php namespace App; function route(string $name): string { return $name; }\n",
++            false,
++        ),
++        (3, empty, true),
++    ] {
++        backend
++            .did_change(DidChangeTextDocumentParams {
++                text_document: VersionedTextDocumentIdentifier {
++                    uri: helpers.clone(),
++                    version,
++                },
++                content_changes: vec![TextDocumentContentChangeEvent {
++                    range: None,
++                    range_length: None,
++                    text: source.into(),
++                }],
++            })
++            .await;
++        backend.update_ast(helpers.as_str(), source);
++        assert_eq!(
++            goto_definition_at(&backend, &uri, position.line, position.character)
++                .await
++                .is_some(),
++            framework,
++            "version {version}"
++        );
++        assert_eq!(
++            hover_text_at(&backend, &uri, position.line, position.character)
++                .await
++                .is_some(),
++            framework,
++            "version {version}"
++        );
++        assert_eq!(
++            find_references(&backend, &uri, position, true).await.len(),
++            if framework { 2 } else { 0 },
++            "version {version}"
++        );
++        let mut diagnostics = Vec::new();
++        backend.collect_slow_diagnostics(uri.as_str(), caller, &mut diagnostics);
++        assert_eq!(
++            messages_with_code(&diagnostics, "invalid_laravel_route").len(),
++            usize::from(framework),
++            "version {version}"
++        );
++    }
++    assert_eq!(
++        std::fs::read_to_string(dir.path().join("src/Helpers.php")).unwrap(),
++        empty
++    );
++    assert_eq!(
++        std::fs::read_to_string(dir.path().join("src/Links.php")).unwrap(),
++        caller
++    );
++}
++
++#[tokio::test]
++async fn local_to_route_is_not_a_framework_redirect() {
++    let source = "<?php\nnamespace App;\nfunction to_route(string $route): string { return $route; }\nclass Links { function demo() {\n    to_route('home');\n    \\to_route('home');\n    to_route(route: 'local.missing');\n} }\n";
++    let (backend, _dir, uri) = workspace(source).await;
++    let local = position_after(source, "    to_route('ho");
++    assert!(
++        goto_definition_at(&backend, &uri, local.line, local.character)
++            .await
++            .is_none()
++    );
++    assert!(
++        hover_text_at(&backend, &uri, local.line, local.character)
++            .await
++            .is_none()
++    );
++    let global = position_after(source, "\\to_route('ho");
++    assert_eq!(find_references(&backend, &uri, global, true).await.len(), 2);
++    let mut diagnostics = Vec::new();
++    backend.collect_slow_diagnostics(uri.as_str(), source, &mut diagnostics);
++    assert!(messages_with_code(&diagnostics, "invalid_laravel_route").is_empty());
++}
++
++#[tokio::test]
++async fn url_and_response_receiver_helpers_use_canonical_function_identity() {
++    for (helper, method) in [("url", "signedRoute"), ("response", "redirectToRoute")] {
++        let source = format!(
++            "<?php\nnamespace App;\nfunction {helper}(): object {{ return new class {{ function {method}(string $name): void {{}} }}; }}\nclass Links {{ function demo() {{\n    {helper}()->{method}('home');\n    \\{helper}()->{method}('home');\n    {helper}()->{method}('local.missing');\n}} }}\n"
++        );
++        let (backend, _dir, uri) = workspace(&source).await;
++        let local = position_after(&source, &format!("    {helper}()->{method}('ho"));
++        assert!(
++            goto_definition_at(&backend, &uri, local.line, local.character)
++                .await
++                .is_none(),
++            "{helper}"
++        );
++        assert!(
++            hover_text_at(&backend, &uri, local.line, local.character)
++                .await
++                .is_none(),
++            "{helper}"
++        );
++        let global = position_after(&source, &format!("\\{helper}()->{method}('ho"));
++        assert!(
++            goto_definition_at(&backend, &uri, global.line, global.character)
++                .await
++                .is_some(),
++            "{helper}"
++        );
++        assert_eq!(
++            find_references(&backend, &uri, global, true).await.len(),
++            2,
++            "{helper}"
++        );
++        let mut diagnostics = Vec::new();
++        backend.collect_slow_diagnostics(uri.as_str(), &source, &mut diagnostics);
++        assert!(
++            messages_with_code(&diagnostics, "invalid_laravel_route").is_empty(),
++            "{helper}"
++        );
++    }
++}
++
++#[tokio::test]
++async fn global_imported_helpers_and_facades_retain_their_route_identity() {
++    let source = "<?php\nnamespace App;\nuse function route as link_to;\nuse Illuminate\\Support\\Facades\\URL as Urls;\nfunction route(string $name): string { return $name; }\nclass Links { function demo() {\n    route('home');\n    link_to('home');\n    Urls::route('home');\n    \\route('home');\n    route('local.missing'); link_to('global.missing');\n} }\n";
++    let (backend, _dir, uri) = workspace(source).await;
++    let imported = position_after(source, "link_to('ho");
++    assert!(
++        goto_definition_at(&backend, &uri, imported.line, imported.character)
++            .await
++            .is_some()
++    );
++    assert!(
++        hover_text_at(&backend, &uri, imported.line, imported.character)
++            .await
++            .is_some()
++    );
++    assert_eq!(
++        find_references(&backend, &uri, imported, true).await.len(),
++        4
++    );
++    let callee = position_after(source, "    ro");
++    let locations = crate::common::definition_locations(
++        goto_definition_at(&backend, &uri, callee.line, callee.character).await,
++    );
++    assert!(
++        locations
++            .iter()
++            .any(|l| l.uri == uri && l.range.start.line == 4)
++    );
++    let mut diagnostics = Vec::new();
++    backend.collect_slow_diagnostics(uri.as_str(), source, &mut diagnostics);
++    let warnings = messages_with_code(&diagnostics, "invalid_laravel_route");
++    assert_eq!(warnings.len(), 1, "{warnings:?}");
++    assert!(warnings[0].contains("global.missing"));
++}
++
++#[tokio::test]
++async fn each_namespace_block_uses_its_own_function_fallback() {
++    let source = "<?php\nnamespace Foo {\nfunction route(string $name): string { return $name; }\nclass LocalLinks { function demo() { return route('home'); } }\n}\nnamespace Bar {\nclass GlobalLinks { function demo() { return route('home'); } }\n}\n";
++    let (backend, _dir, uri) = workspace(source).await;
++    let local = position_after(source, "LocalLinks { function demo() { return route('ho");
++    let global = position_after(source, "GlobalLinks { function demo() { return route('ho");
++    assert!(
++        goto_definition_at(&backend, &uri, local.line, local.character)
++            .await
++            .is_none()
++    );
++    assert!(
++        goto_definition_at(&backend, &uri, global.line, global.character)
++            .await
++            .is_some()
++    );
++    assert!(
++        find_references(&backend, &uri, local, true)
++            .await
++            .is_empty()
++    );
++    assert_eq!(find_references(&backend, &uri, global, true).await.len(), 2);
++}
+diff --git a/tests/integration/main.rs b/tests/integration/main.rs
+index f1b10d6..88de4bc 100644
+--- a/tests/integration/main.rs
++++ b/tests/integration/main.rs
+@@ -208,6 +208,7 @@ mod laravel_route_controller;
+ mod laravel_route_discovery;
+ mod laravel_route_duplicates;
+ mod laravel_route_folio;
++mod laravel_route_identity;
+ mod laravel_route_macros;
+ mod laravel_route_names;
+ mod laravel_route_ownership;

@@ -1,0 +1,421 @@
+diff --git a/src/backend/semantic_snapshot.rs b/src/backend/semantic_snapshot.rs
+index 78b6883..8cf3d98 100644
+--- a/src/backend/semantic_snapshot.rs
++++ b/src/backend/semantic_snapshot.rs
+@@ -8,7 +8,7 @@ use crate::Backend;
+ fn content_modified() -> Error {
+     Error {
+         code: ErrorCode::ServerError(-32801),
+-        message: "PHP sources changed during the request".into(),
++        message: "PHP project state changed during the request".into(),
+         data: None,
+     }
+ }
+@@ -74,6 +74,9 @@ impl Backend {
+     pub(crate) fn with_current_semantics<T>(&self, body: impl FnOnce() -> Result<T>) -> Result<T> {
+         let (mut sources, closed, epoch) = {
+             let documents = self.diag.documents.lock();
++            if documents.configuration_changing() {
++                return Err(content_modified());
++            }
+             let files = self.open_files.read();
+             let sources: Vec<(String, Arc<String>)> = files
+                 .iter()
+@@ -110,6 +113,7 @@ impl Backend {
+             let documents = self.diag.documents.lock();
+             let files = self.open_files.read();
+             documents.epoch_matches(&epoch)
++                && !documents.configuration_changing()
+                 && !documents.has_pending_closed()
+                 && files.len() == sources.len()
+                 && sources
+@@ -549,3 +553,254 @@ mod discarded_overlay_tests {
+         assert!(backend.diag.pending_uris.lock().contains(caller.as_str()));
+     }
+ }
++
++#[cfg(test)]
++mod config_reload_ownership_tests {
++    use crate::Backend;
++    use std::path::Path;
++    use std::sync::{Arc, atomic::Ordering};
++    use tower_lsp::{jsonrpc::ErrorCode, lsp_types::Url};
++
++    fn write_config(root: &Path, enabled: bool) {
++        std::fs::write(root.join(".phpantom.toml"), format!("[diagnostics]\nreport-magic-properties = {enabled}\n[phpstan]\ncommand = \"\"\n[phpcs]\ncommand = \"\"\n[phpmd]\ncommand = \"\"\n[mago]\ncommand = \"\"\n")).unwrap();
++    }
++    fn open(backend: &Backend, root: &Path, name: &str) -> (String, Arc<String>) {
++        let path = root.join(format!("{name}.php"));
++        let text = Arc::new(format!(
++            "<?php namespace App; class {name} {{ function read(): int {{ return 1; }} }}"
++        ));
++        std::fs::write(&path, text.as_str()).unwrap();
++        let uri = Url::from_file_path(path).unwrap().to_string();
++        backend.diag.documents.lock().open(&uri, 1, &text);
++        backend
++            .open_files
++            .write()
++            .insert(uri.clone(), Arc::clone(&text));
++        assert!(backend.parse_diagnostic_snapshot(&uri, &text));
++        (uri, text)
++    }
++    struct Fixture {
++        backend: Backend,
++        dir: tempfile::TempDir,
++        uri: String,
++        text: Arc<String>,
++    }
++    fn fixture() -> Fixture {
++        let dir = tempfile::tempdir().unwrap();
++        let root = dir.path().canonicalize().unwrap();
++        let backend = Backend::new_test_with_workspace(root.clone(), vec![]);
++        write_config(&root, false);
++        backend.reload_config(&root);
++        let (uri, text) = open(&backend, &root, "Caller");
++        backend.workspace_indexed.store(true, Ordering::Release);
++        backend.init_complete.store(true, Ordering::Release);
++        backend.diag.pending_uris.lock().clear();
++        Fixture {
++            backend,
++            dir,
++            uri,
++            text,
++        }
++    }
++    fn modified<T: std::fmt::Debug>(result: tower_lsp::jsonrpc::Result<T>) {
++        assert_eq!(
++            result
++                .expect_err("pre-reload results must be rejected")
++                .code,
++            ErrorCode::ServerError(-32801)
++        );
++    }
++    #[test]
++    fn successful_live_reload_rejects_in_flight_interactive_result() {
++        let f = fixture();
++        modified(f.backend.with_current_semantics(|| {
++            let old = f
++                .backend
++                .config()
++                .diagnostics
++                .report_magic_properties_enabled();
++            write_config(f.dir.path(), true);
++            f.backend.reload_config(f.dir.path());
++            Ok(old)
++        }));
++        assert!(
++            f.backend
++                .config()
++                .diagnostics
++                .report_magic_properties_enabled()
++        );
++    }
++    #[test]
++    fn changing_config_back_still_retires_in_flight_result() {
++        let f = fixture();
++        modified(f.backend.with_current_semantics(|| {
++            write_config(f.dir.path(), true);
++            f.backend.reload_config(f.dir.path());
++            write_config(f.dir.path(), false);
++            f.backend.reload_config(f.dir.path());
++            Ok("mixed configuration result")
++        }));
++    }
++    #[test]
++    fn reload_on_worker_clone_retires_main_request() {
++        let f = fixture();
++        let worker = f.backend.clone_for_blocking();
++        modified(f.backend.with_current_semantics(|| {
++            write_config(f.dir.path(), true);
++            worker.reload_config(f.dir.path());
++            Ok("result from prior configuration")
++        }));
++    }
++    #[test]
++    fn native_prior_phase_is_rejected_while_parsed_source_stays_reusable() {
++        let f = fixture();
++        let old = f
++            .backend
++            .diag
++            .documents
++            .lock()
++            .capture(&f.uri, &f.text)
++            .unwrap()
++            .unwrap();
++        write_config(f.dir.path(), true);
++        f.backend.reload_config(f.dir.path());
++        let mut documents = f.backend.diag.documents.lock();
++        assert!(
++            documents.parsed(&f.uri, Some(&old)),
++            "config reload retains the unchanged AST identity"
++        );
++        assert!(
++            !documents.mark_phase(&f.uri, Some(&old), false),
++            "prior native fast work cannot publish as current"
++        );
++        assert!(!documents.mark_phase(&f.uri, Some(&old), true));
++    }
++    #[test]
++    fn live_reload_queues_all_unchanged_open_consumers() {
++        let f = fixture();
++        let (other, _) = open(&f.backend, f.dir.path(), "Other");
++        f.backend.diag.pending_uris.lock().clear();
++        write_config(f.dir.path(), true);
++        f.backend.reload_config(f.dir.path());
++        let pending = f.backend.diag.pending_uris.lock();
++        assert!(
++            pending.contains(&f.uri),
++            "changed diagnostic options apply without caller edits"
++        );
++        assert!(pending.contains(&other));
++        drop(pending);
++        assert_eq!(
++            f.backend
++                .diag
++                .documents
++                .lock()
++                .capture(&f.uri, &f.text)
++                .unwrap()
++                .unwrap()
++                .version,
++            1
++        );
++    }
++    #[test]
++    fn invalid_reload_preserves_current_request_configuration_and_run() {
++        let f = fixture();
++        let old = f
++            .backend
++            .diag
++            .documents
++            .lock()
++            .capture(&f.uri, &f.text)
++            .unwrap()
++            .unwrap();
++        let result = f.backend.with_current_semantics(|| {
++            std::fs::write(
++                f.dir.path().join(".phpantom.toml"),
++                "[diagnostics]\nreport-magic-properties = ???",
++            )
++            .unwrap();
++            f.backend.reload_config(f.dir.path());
++            Ok("unchanged valid state")
++        });
++        assert_eq!(result.unwrap(), "unchanged valid state");
++        assert!(
++            !f.backend
++                .config()
++                .diagnostics
++                .report_magic_properties_enabled()
++        );
++        assert!(
++            f.backend
++                .diag
++                .documents
++                .lock()
++                .mark_phase(&f.uri, Some(&old), true)
++        );
++        assert!(f.backend.diag.pending_uris.lock().is_empty());
++    }
++    #[test]
++    fn reload_retires_requests_even_with_no_open_documents() {
++        let dir = tempfile::tempdir().unwrap();
++        let root = dir.path().canonicalize().unwrap();
++        let backend = Backend::new_test_with_workspace(root.clone(), vec![]);
++        write_config(&root, false);
++        backend.reload_config(&root);
++        modified(backend.with_current_semantics(|| {
++            write_config(&root, true);
++            backend.reload_config(&root);
++            Ok("old workspace result")
++        }));
++    }
++    #[test]
++    fn overlapping_publications_block_requests_and_capture_until_last_finish() {
++        let f = fixture();
++        let old = f
++            .backend
++            .diag
++            .documents
++            .lock()
++            .capture(&f.uri, &f.text)
++            .unwrap()
++            .unwrap();
++        {
++            let mut documents = f.backend.diag.documents.lock();
++            documents.begin_configuration_change();
++            documents.begin_configuration_change();
++            assert!(documents.capture(&f.uri, &f.text).is_err());
++            assert!(!documents.mark_phase(&f.uri, Some(&old), true));
++        }
++        modified(f.backend.with_current_semantics(|| Ok(())));
++        {
++            let mut documents = f.backend.diag.documents.lock();
++            assert!(!documents.finish_configuration_change());
++            assert!(documents.capture(&f.uri, &f.text).is_err());
++        }
++        modified(f.backend.with_current_semantics(|| Ok(())));
++        {
++            let mut documents = f.backend.diag.documents.lock();
++            assert!(documents.finish_configuration_change());
++            let current = documents.capture(&f.uri, &f.text).unwrap().unwrap();
++            assert!(documents.parsed(&f.uri, Some(&current)));
++            assert!(documents.mark_phase(&f.uri, Some(&current), true));
++            assert!(!documents.mark_phase(&f.uri, Some(&old), true));
++        }
++        assert!(f.backend.with_current_semantics(|| Ok(())).is_ok());
++    }
++    #[test]
++    fn pull_reload_retires_cached_full_result_without_reusing_result_ids() {
++        let f = fixture();
++        f.backend
++            .supports_pull_diagnostics
++            .store(true, Ordering::Release);
++        f.backend
++            .diag
++            .last_full
++            .lock()
++            .insert(f.uri.clone(), vec![Default::default()]);
++        f.backend.diag.result_ids.lock().insert(f.uri.clone(), 55);
++        write_config(f.dir.path(), true);
++        f.backend.reload_config(f.dir.path());
++        assert!(!f.backend.diag.last_full.lock().contains_key(&f.uri));
++        assert_eq!(f.backend.diag.result_ids.lock().get(&f.uri), Some(&55));
++        assert!(f.backend.diag.pending_uris.lock().contains(&f.uri));
++    }
++}
+diff --git a/src/diagnostics/mod.rs b/src/diagnostics/mod.rs
+index 16f2aa2..5e22269 100644
+--- a/src/diagnostics/mod.rs
++++ b/src/diagnostics/mod.rs
+@@ -1091,6 +1091,27 @@ impl Backend {
+         self.diag.notify.notify_one();
+     }
+ 
++    /// A successful configuration transaction retired all prior runs before
++    /// changing settings. Queue unchanged open documents after publication.
++    pub(crate) fn schedule_diagnostics_after_configuration_reload(&self) {
++        if !self.init_complete.load(Ordering::Acquire) {
++            return;
++        }
++        let uris: Vec<String> = self.open_files.read().keys().cloned().collect();
++        if uris.is_empty() {
++            return;
++        }
++        if self.supports_pull_diagnostics.load(Ordering::Acquire) {
++            let mut cache = self.diag.last_full.lock();
++            for uri in &uris {
++                cache.remove(uri);
++            }
++        }
++        self.diag.pending_uris.lock().extend(uris);
++        self.diag.version.fetch_add(1, Ordering::Release);
++        self.diag.notify.notify_one();
++    }
++
+     /// Ensure fresh native diagnostics get computed for a file (pull-mode
+     /// path).
+     ///
+diff --git a/src/diagnostics/revision.rs b/src/diagnostics/revision.rs
+index 7484afc..8497fe4 100644
+--- a/src/diagnostics/revision.rs
++++ b/src/diagnostics/revision.rs
+@@ -28,9 +28,30 @@ struct Document {
+     fast: Option<Revision>,
+     slow: Option<Revision>,
+ }
++// The final field counts overlapping live configuration publications.
+ #[derive(Default)]
+-pub(crate) struct Revisions(HashMap<String, Document>, Arc<()>, HashSet<String>);
++pub(crate) struct Revisions(HashMap<String, Document>, Arc<()>, HashSet<String>, usize);
+ impl Revisions {
++    pub fn begin_configuration_change(&mut self) {
++        self.3 += 1;
++        self.1 = Arc::new(());
++        for entry in self.0.values_mut() {
++            if let Some(current) = &mut entry.current {
++                current.diagnostic_run = Arc::new(());
++                entry.fast = None;
++                entry.slow = None;
++            }
++        }
++    }
++    pub fn finish_configuration_change(&mut self) -> bool {
++        assert!(self.3 > 0);
++        self.3 -= 1;
++        self.1 = Arc::new(());
++        self.3 == 0
++    }
++    pub fn configuration_changing(&self) -> bool {
++        self.3 != 0
++    }
+     pub fn open(&mut self, uri: &str, version: i32, text: &Arc<String>) {
+         self.1 = Arc::new(());
+         self.2.remove(uri);
+@@ -95,6 +116,9 @@ impl Revisions {
+     }
+ 
+     fn diagnostic_run_current(&self, uri: &str, revision: Option<&Revision>) -> bool {
++        if self.configuration_changing() {
++            return false;
++        }
+         match (self.0.get(uri), revision) {
+             (None, None) => true,
+             (Some(entry), Some(revision)) => entry.current.as_ref().is_some_and(|current| {
+@@ -139,6 +163,9 @@ impl Revisions {
+ 
+     /// None means an untracked test/CLI snapshot; Err means obsolete/closed.
+     pub fn capture(&self, uri: &str, text: &Arc<String>) -> Result<Option<Revision>, ()> {
++        if self.configuration_changing() {
++            return Err(());
++        }
+         match self.0.get(uri) {
+             None => Ok(None),
+             Some(entry) => entry
+diff --git a/src/indexing/watch.rs b/src/indexing/watch.rs
+index 874bb0e..88a67ae 100644
+--- a/src/indexing/watch.rs
++++ b/src/indexing/watch.rs
+@@ -27,6 +27,19 @@ const GLOBAL_CONFIG_POLL_INTERVAL: Duration = Duration::from_secs(2);
+ /// the same capability it is about to replace.
+ const WATCHED_FILES_REGISTRATION_ID: &str = "workspace/didChangeWatchedFiles";
+ 
++/// Keep requests and native phases outside a partially published configuration.
++/// Counting overlapping guards also covers project/global reloads racing on
++/// separate worker clones. No lock is held across cache/index reconciliation.
++struct ConfigurationPublication<'a>(&'a Backend);
++impl Drop for ConfigurationPublication<'_> {
++    fn drop(&mut self) {
++        let ready = self.0.diag.documents.lock().finish_configuration_change();
++        if ready {
++            self.0.schedule_diagnostics_after_configuration_reload();
++        }
++    }
++}
++
+ impl Backend {
+     /// Apply a `workspace/didChangeWatchedFiles` batch to the indexes.
+     ///
+@@ -320,13 +333,19 @@ impl Backend {
+         // below can tell which way the file filters moved.
+         let previous_filters = self.index_filters();
+ 
+-        match crate::config::load_config_from(root, self.workspace.global_config_path.as_deref()) {
+-            Ok(cfg) => self.set_config(cfg),
++        let config = match crate::config::load_config_from(
++            root,
++            self.workspace.global_config_path.as_deref(),
++        ) {
++            Ok(cfg) => cfg,
+             Err(e) => {
+                 tracing::warn!("Failed to reload .phpantom.toml: {}", e);
+                 return;
+             }
+-        }
++        };
++        self.diag.documents.lock().begin_configuration_change();
++        let _publication = ConfigurationPublication(self);
++        self.set_config(config);
+ 
+         // Resolved classes and completions may depend on config-driven
+         // behaviour (e.g. `report-magic-properties`), so both must be

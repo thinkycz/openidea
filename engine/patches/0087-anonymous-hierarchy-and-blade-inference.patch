@@ -1,0 +1,2721 @@
+diff --git a/docs/CHANGELOG.md b/docs/CHANGELOG.md
+index 549dee1..6b08dbe 100644
+--- a/docs/CHANGELOG.md
++++ b/docs/CHANGELOG.md
+@@ -15,6 +15,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
+ 
+ ## [Unreleased]
+ 
++- **Keep Blade caller types consistent.** Component-bound variables honor source PHPDoc, and cross-file view data inference stays independent of another file’s diagnostic scope. Contributed by PHP Workbench downstream.
++
++- **Show direct anonymous invocations and file callers.** Call hierarchy follows literal immediately invoked closures and arrows, and preserves known calls made at file scope. Creating a first-class callable remains a reference rather than an invocation; other callback and file-entry callers stay unknown. Contributed by PHP Workbench downstream.
++
++- **Keep anonymous callers in PHP call hierarchies.** Literal known calls inside closures and arrow functions retain their own caller nodes, with exact source navigation and stale-item refusal. Anonymous value-flow invocation callers remain unknown. Contributed by PHP Workbench downstream.
++
+ - **Refresh global PHP profiles automatically.** Changing the global PHP version or extension selection updates completion and diagnostics while preserving unsaved files. Closing the service also cancels pending client requests safely. Contributed by PHP Workbench downstream.
+ 
+ - **Retire diagnostics before replacing project services.** Previously accepted diagnostic sends finish queuing before project retirement, preventing old service publications from crossing the replacement boundary. Contributed by PHP Workbench downstream.
+diff --git a/examples/php/definition.php b/examples/php/definition.php
+index 39702d2..f5d5ace 100644
+--- a/examples/php/definition.php
++++ b/examples/php/definition.php
+@@ -381,3 +381,19 @@ strlen("embedded declaration");
+ // Navigation still reaches GtdTarget::label while the statement is unfinished.
+ $definitionAtEof = new GtdTarget();
+ $definitionAtEof->label();
++
++// Try: show Callers on gtdHelper. The closure and arrow below keep distinct
++// caller rows. Show Callees at function/fn to follow their known leaf calls.
++// These leaf calls never borrow anonymousHierarchyDemo as their caller.
++// Its Callees are the literal anonymous invocations; expand each to gtdHelper.
++function anonymousHierarchyDemo(): void
++{
++    (static function (): void { gtdHelper(); })();
++    (static fn () => gtdHelper())();
++}
++
++// Try: Callers on gtdHelper also retains this exact file-scope call. Prepare
++// hierarchy at file start to inspect top-level outgoing calls, and expand
++// this literal arrow invocation separately from its known body call.
++gtdHelper();
++(static fn () => gtdHelper())();
+diff --git a/src/blade/call_site_inference.rs b/src/blade/call_site_inference.rs
+index 9acd1eb..ca4bd22 100644
+--- a/src/blade/call_site_inference.rs
++++ b/src/blade/call_site_inference.rs
+@@ -1069,6 +1069,9 @@ impl Backend {
+         content: &str,
+         offsets: &[u32],
+     ) -> Vec<ResolvedViewCall> {
++        // Caller offsets belong to this source, not an enclosing diagnostic pass.
++        let _diagnostic_scope =
++            crate::type_engine::variable::forward_walk::suspend_diagnostic_scope();
+         let _resolver_guard = crate::type_engine::call_resolution::activate_type_engine_caches();
+         let _cache_guard =
+             crate::virtual_members::with_active_resolved_class_cache(&self.resolved_class_cache);
+@@ -1270,6 +1273,9 @@ impl Backend {
+         virtual_php: &str,
+         occurrences: Vec<crate::blade::component_tags::ComponentTagCall>,
+     ) -> Vec<InferredVars> {
++        // Caller offsets belong to this source, not an enclosing diagnostic pass.
++        let _diagnostic_scope =
++            crate::type_engine::variable::forward_walk::suspend_diagnostic_scope();
+         let _resolver_guard = crate::type_engine::call_resolution::activate_type_engine_caches();
+         let _cache_guard =
+             crate::virtual_members::with_active_resolved_class_cache(&self.resolved_class_cache);
+@@ -1316,10 +1322,21 @@ impl Backend {
+                                 &class_loader,
+                             )
+                         };
+-                        let ty = crate::type_engine::variable::foreach_resolution::resolve_expression_type(
+-                        expr, &var_ctx,
+-                    )
+-                    .unwrap_or_else(PhpType::mixed);
++                        // Bare variables need the same annotation fallback as view data.
++                        let ty = match expr {
++                            Expression::Variable(Variable::Direct(variable)) => crate::type_engine::variable::resolution::resolve_variable_php_type(
++                                bytes_to_str(variable.name),
++                                content,
++                                offset,
++                                Some(current_class),
++                                &file_ctx.classes,
++                                &class_loader,
++                                Some(self),
++                                Loaders::with_function(Some(&function_loader_cl)),
++                            ),
++                            _ => crate::type_engine::variable::foreach_resolution::resolve_expression_type(expr, &var_ctx),
++                        }
++                        .unwrap_or_else(PhpType::mixed);
+                         vars.push((name, qualify_class_names(ty, &class_loader)));
+                     }
+                     if !vars.is_empty() {
+diff --git a/src/blade/call_site_inference_tests.rs b/src/blade/call_site_inference_tests.rs
+index 3239857..4eb1641 100644
+--- a/src/blade/call_site_inference_tests.rs
++++ b/src/blade/call_site_inference_tests.rs
+@@ -147,3 +147,220 @@ fn view_name_resolution_keeps_symlinked_templates() {
+ 
+     assert_eq!(backend.view_names_for_blade_uri(uri.as_str()), vec!["shop"]);
+ }
++
++// Deterministic foreign diagnostic-scope ownership controls. No scheduler retries.
++fn foreign_scope_item_backend() -> Backend {
++    let backend = Backend::new_test();
++    backend.update_ast(
++        "file:///owned-foreign-scope/Item.php",
++        "<?php namespace App; class Item { public string $name; }",
++    );
++    backend
++}
++
++fn foreign_scope_install_sentinel()
++-> crate::type_engine::variable::forward_walk::DiagnosticScopeGuard {
++    use crate::type_engine::variable::forward_walk as walk;
++    assert!(
++        !walk::is_diagnostic_scope_active(),
++        "independent test starts without a diagnostic owner"
++    );
++    let guard = walk::with_diagnostic_scope_cache();
++    let mut scope = walk::ScopeState::new();
++    scope.set(
++        "$sentinel",
++        vec![crate::types::ResolvedType::from_type_string(
++            PhpType::literal_string_raw("foreign-owner"),
++        )],
++    );
++    walk::record_scope_snapshot(0, &scope);
++    guard
++}
++
++fn foreign_scope_assert_preserved(offset: u32) {
++    use crate::type_engine::variable::forward_walk as walk;
++    assert!(walk::is_diagnostic_scope_active());
++    let sentinel = walk::lookup_diagnostic_scope("$sentinel", offset)
++        .expect("outer cache must remain installed");
++    assert_eq!(
++        crate::types::ResolvedType::types_joined(&sentinel),
++        PhpType::literal_string_raw("foreign-owner")
++    );
++    assert!(
++        walk::lookup_diagnostic_scope("$model", offset)
++            .unwrap()
++            .is_empty(),
++        "caller inference must not replace the foreign owner's snapshots"
++    );
++}
++
++#[test]
++fn component_bare_annotated_variable_uses_its_own_source_contract() {
++    let backend = foreign_scope_item_backend();
++    let uri = "file:///owned-foreign-scope/component-caller.php";
++    let blade = "@php\n/** @var \\App\\Item $model */\n@endphp\n<x-webshop::brand.boxes :hairAnalysis=\"$model\" />\n";
++    let (virtual_php, _) = crate::blade::preprocessor::preprocess(blade);
++    backend.update_ast(uri, &virtual_php);
++    let tags = vec!["webshop::brand.boxes".to_owned()];
++    let infer = || {
++        let occurrences =
++            crate::blade::component_tags::scan_component_tag_calls(blade, &tags, &|_| None);
++        assert_eq!(
++            occurrences.len(),
++            1,
++            "genuine preprocessor/scanner correlation fixture"
++        );
++        backend.extract_component_call_site_vars(uri, &virtual_php, occurrences)
++    };
++    let baseline = infer();
++    assert_eq!(baseline.len(), 1);
++    let initial = baseline[0]
++        .iter()
++        .find(|(name, _)| name == "hairAnalysis")
++        .unwrap()
++        .1
++        .to_string();
++    assert_eq!(
++        initial.trim_start_matches('\\'),
++        "App\\Item",
++        "bare @var expression must be admitted without an ambient diagnostic cache"
++    );
++}
++
++#[test]
++fn component_assigned_variable_does_not_consume_a_foreign_diagnostic_scope() {
++    use crate::type_engine::variable::forward_walk as walk;
++    let backend = foreign_scope_item_backend();
++    let uri = "file:///owned-foreign-scope/component-caller.php";
++    let blade = "@php\n$model = new \\App\\Item();\n@endphp\n<x-webshop::brand.boxes :hairAnalysis=\"$model\" />\n";
++    let (virtual_php, _) = crate::blade::preprocessor::preprocess(blade);
++    backend.update_ast(uri, &virtual_php);
++    let tags = vec!["webshop::brand.boxes".to_owned()];
++    let infer = || {
++        let occurrences =
++            crate::blade::component_tags::scan_component_tag_calls(blade, &tags, &|_| None);
++        assert_eq!(
++            occurrences.len(),
++            1,
++            "genuine preprocessor/scanner correlation fixture"
++        );
++        backend.extract_component_call_site_vars(uri, &virtual_php, occurrences)
++    };
++    let baseline = infer();
++    assert_eq!(baseline.len(), 1);
++    let initial = baseline[0]
++        .iter()
++        .find(|(name, _)| name == "hairAnalysis")
++        .unwrap()
++        .1
++        .to_string();
++    assert_eq!(
++        initial.trim_start_matches('\\'),
++        "App\\Item",
++        "positive source oracle before foreign context"
++    );
++    let guard = foreign_scope_install_sentinel();
++    let offset = virtual_php.rfind("$model").unwrap() as u32;
++    foreign_scope_assert_preserved(offset);
++    let actual = infer(); // Exactly one inference with the foreign cache live.
++    foreign_scope_assert_preserved(offset);
++    let actual = actual[0]
++        .iter()
++        .find(|(name, _)| name == "hairAnalysis")
++        .unwrap()
++        .1
++        .to_string();
++    drop(guard);
++    assert!(!walk::is_diagnostic_scope_active());
++    assert_eq!(
++        actual.trim_start_matches('\\'),
++        "App\\Item",
++        "foreign offset-only cache must not erase the caller assignment"
++    );
++}
++
++#[test]
++fn view_expression_inference_does_not_consume_a_foreign_diagnostic_scope() {
++    use crate::type_engine::variable::forward_walk as walk;
++    let backend = foreign_scope_item_backend();
++    let uri = "file:///owned-foreign-scope/view-caller.php";
++    let source = "<?php\n/** @var \\App\\Item $model */\nview('shop', ['item' => $model]);\n";
++    backend.update_ast(uri, source);
++    let offset = source.find("'shop'").unwrap() as u32 + 1;
++    let baseline = backend.extract_call_site_vars(uri, source, &[offset]);
++    assert_eq!(baseline.len(), 1, "view key offset matches genuine source");
++    let initial = baseline[0]
++        .vars
++        .iter()
++        .find(|var| var.name == "item")
++        .unwrap()
++        .ty
++        .to_string();
++    assert_eq!(
++        initial.trim_start_matches('\\'),
++        "App\\Item",
++        "positive source oracle before foreign context"
++    );
++    let guard = foreign_scope_install_sentinel();
++    let expression_offset = source.rfind("$model").unwrap() as u32;
++    foreign_scope_assert_preserved(expression_offset);
++    let actual = backend.extract_call_site_vars(uri, source, &[offset]); // Once.
++    foreign_scope_assert_preserved(expression_offset);
++    let actual = actual[0]
++        .vars
++        .iter()
++        .find(|var| var.name == "item")
++        .unwrap()
++        .ty
++        .to_string();
++    drop(guard);
++    assert!(!walk::is_diagnostic_scope_active());
++    assert_eq!(
++        actual.trim_start_matches('\\'),
++        "App\\Item",
++        "foreign diagnostic cache must not answer a view caller expression"
++    );
++}
++
++#[test]
++fn view_assigned_variable_does_not_consume_a_foreign_diagnostic_scope() {
++    use crate::type_engine::variable::forward_walk as walk;
++    let backend = foreign_scope_item_backend();
++    let uri = "file:///owned-foreign-scope/view-caller.php";
++    let source = "<?php\n$model = new \\App\\Item();\nview('shop', ['item' => $model]);\n";
++    backend.update_ast(uri, source);
++    let offset = source.find("'shop'").unwrap() as u32 + 1;
++    let baseline = backend.extract_call_site_vars(uri, source, &[offset]);
++    assert_eq!(baseline.len(), 1, "view key offset matches genuine source");
++    let initial = baseline[0]
++        .vars
++        .iter()
++        .find(|var| var.name == "item")
++        .unwrap()
++        .ty
++        .to_string();
++    assert_eq!(
++        initial.trim_start_matches('\\'),
++        "App\\Item",
++        "positive source oracle before foreign context"
++    );
++    let guard = foreign_scope_install_sentinel();
++    let expression_offset = source.rfind("$model").unwrap() as u32;
++    foreign_scope_assert_preserved(expression_offset);
++    let actual = backend.extract_call_site_vars(uri, source, &[offset]); // Once.
++    foreign_scope_assert_preserved(expression_offset);
++    let actual = actual[0]
++        .vars
++        .iter()
++        .find(|var| var.name == "item")
++        .unwrap()
++        .ty
++        .to_string();
++    drop(guard);
++    assert!(!walk::is_diagnostic_scope_active());
++    assert_eq!(
++        actual.trim_start_matches('\\'),
++        "App\\Item",
++        "foreign diagnostic cache must not answer a view caller expression"
++    );
++}
+diff --git a/src/blade/preprocessor/mod.rs b/src/blade/preprocessor/mod.rs
+index 19515be..ed77054 100644
+--- a/src/blade/preprocessor/mod.rs
++++ b/src/blade/preprocessor/mod.rs
+@@ -143,7 +143,7 @@ pub fn preprocess_with_vars(
+     let mut virtual_php = String::with_capacity(content.len() + 512);
+     let mut source_map = BladeSourceMap::default();
+ 
+-    let uses_insert_at = prologue::emit(
++    let (uses_insert_at, mut wrapper_scope_start) = prologue::emit(
+         content,
+         injected_vars,
+         kind,
+@@ -607,8 +607,19 @@ pub fn preprocess_with_vars(
+         }
+         source_map.prologue_lines += block.matches('\n').count() as u32;
+         virtual_php.insert_str(uses_insert_at, &block);
++        wrapper_scope_start = wrapper_scope_start
++            .and_then(|start| start.checked_add(u32::try_from(block.len()).ok()?));
+     }
+ 
++    if let Some(wrapper_scope_start) = wrapper_scope_start {
++        use sha2::{Digest, Sha256};
++        source_map.hierarchy_projection = Some(super::source_map::BladeHierarchyProjection {
++            wrapper_scope_start,
++            virtual_sha256: Sha256::digest(virtual_php.as_bytes()).into(),
++            template_sha256: Sha256::digest(content.as_bytes()).into(),
++            visible_end: crate::text_position::offset_to_position(content, content.len()),
++        });
++    }
+     (virtual_php, source_map)
+ }
+ 
+diff --git a/src/blade/preprocessor/prologue.rs b/src/blade/preprocessor/prologue.rs
+index 53abfc5..230693a 100644
+--- a/src/blade/preprocessor/prologue.rs
++++ b/src/blade/preprocessor/prologue.rs
+@@ -58,8 +58,8 @@ fn is_php_variable_name(name: &str) -> bool {
+ }
+ 
+ /// Emit the top-level prologue the template body is wrapped in, and
+-/// return the offset in it where the hoisted `@use` imports are spliced
+-/// in once the whole template has been scanned.
++/// return the hoisted-import insertion offset and the exact generated wrapper
++/// body brace. The latter is adjusted after imports are spliced in.
+ ///
+ /// See [`super::preprocess_with_vars`] for the priority chain the
+ /// declarations follow.
+@@ -70,7 +70,7 @@ pub(super) fn emit(
+     this_class: Option<&str>,
+     virtual_php: &mut String,
+     source_map: &mut BladeSourceMap,
+-) -> usize {
++) -> (usize, Option<u32>) {
+     let signature = crate::blade::signature::extract(content);
+     // (name without `$`, the PHP that declares it), in priority order.
+     let mut declared: Vec<(String, String)> = Vec::new();
+@@ -162,7 +162,9 @@ pub(super) fn emit(
+     }
+     virtual_php.push_str("function ");
+     virtual_php.push_str(crate::blade::WRAPPER_FUNCTION);
+-    virtual_php.push_str("() { global $errors, $__env");
++    virtual_php.push_str("() ");
++    let wrapper_scope_start = u32::try_from(virtual_php.len()).ok();
++    virtual_php.push_str("{ global $errors, $__env");
+     for (name, _) in &declared {
+         virtual_php.push_str(", $");
+         virtual_php.push_str(name);
+@@ -174,5 +176,5 @@ pub(super) fn emit(
+     // an unexpected line break would shift the whole file.
+     source_map.prologue_lines = virtual_php.matches('\n').count() as u32;
+ 
+-    uses_insert_at
++    (uses_insert_at, wrapper_scope_start)
+ }
+diff --git a/src/blade/preprocessor/tests.rs b/src/blade/preprocessor/tests.rs
+index 806f4a8..f1c2c61 100644
+--- a/src/blade/preprocessor/tests.rs
++++ b/src/blade/preprocessor/tests.rs
+@@ -2301,3 +2301,162 @@ fn test_preprocess_bound_attribute_on_plain_html_tag_is_not_php() {
+         "a bound attribute on a plain tag is not PHP: {php}"
+     );
+ }
++
++fn hierarchy_projection_symbol_map(php: &str) -> crate::symbol_map::SymbolMap {
++    let arena = mago_allocator::LocalArena::new();
++    let file = mago_database::file::FileId::new(b"projection.php");
++    let program = mago_syntax::parser::parse_file_content(&arena, file, php.as_bytes());
++    crate::symbol_map::extract_symbol_map(program, php)
++}
++
++#[test]
++fn hierarchy_projection_hoisted_unicode_imports_shift_the_actual_wrapper_by_utf8_bytes() {
++    let body = "<p>café 🐘</p>\n@php projectionHoistLeaf(); @endphp\n";
++    let (plain_php, plain_map) = preprocess(body);
++    let source = format!(
++        "@use('App\\Models\\Žluťoučký as Článek')\n@use('App\\Models\\{{\n    First,\n    Second,\n}}')\n{body}"
++    );
++    let expected_imports = concat!(
++        "use App\\Models\\Žluťoučký as Článek;\n",
++        "use App\\Models\\{\n    First,\n    Second,\n};\n",
++    );
++    let (php, map) = preprocess(&source);
++    let plain = plain_map
++        .hierarchy_projection
++        .expect("plain generated provenance");
++    let projection = map
++        .hierarchy_projection
++        .expect("hoisted generated provenance");
++    assert!(
++        php.contains(expected_imports),
++        "exact real hoisted imports: {php}"
++    );
++    assert_ne!(
++        expected_imports.len(),
++        expected_imports.chars().count(),
++        "fixture must distinguish bytes from scalar columns"
++    );
++    assert_eq!(
++        projection.wrapper_scope_start,
++        plain.wrapper_scope_start + expected_imports.len() as u32
++    );
++    assert_eq!(
++        map.prologue_lines,
++        plain_map.prologue_lines
++            + expected_imports
++                .bytes()
++                .filter(|byte| *byte == b'\n')
++                .count() as u32
++    );
++    assert_eq!(
++        php.as_bytes()[projection.wrapper_scope_start as usize],
++        b'{'
++    );
++    assert!(
++        php[..projection.wrapper_scope_start as usize].ends_with("function __blade_template() ")
++    );
++    let symbols = hierarchy_projection_symbol_map(&php);
++    let leaf = php.find("projectionHoistLeaf();").unwrap() as u32;
++    assert_eq!(
++        symbols.find_enclosing_scope(leaf),
++        projection.wrapper_scope_start,
++        "real AST lexical owner must match adjusted provenance"
++    );
++    assert!(
++        symbols
++            .scopes
++            .iter()
++            .any(|(start, end)| *start == projection.wrapper_scope_start && leaf < *end)
++    );
++    let origin = tower_lsp::lsp_types::Position::new(0, 0);
++    let erased_directive_end = tower_lsp::lsp_types::Position::new(
++        0,
++        source.lines().next().unwrap().encode_utf16().count() as u32,
++    );
++    // Hoisted @use text has no PHP at this visible line. The forward map
++    // collapses the erased directive; inverse chooses its final anchor.
++    assert_eq!(
++        map.blade_to_php(origin),
++        map.blade_to_php(erased_directive_end)
++    );
++    assert_eq!(
++        map.try_php_to_blade(map.blade_to_php(origin)),
++        Some(erased_directive_end)
++    );
++    assert_eq!(
++        projection.visible_end,
++        crate::text_position::offset_to_position(&source, source.len())
++    );
++    assert_eq!(
++        projection.virtual_sha256,
++        crate::symbol_map::AnonymousCallable::source_hash(&php)
++    );
++    assert_eq!(
++        projection.template_sha256,
++        crate::symbol_map::AnonymousCallable::source_hash(&source)
++    );
++    assert_ne!(plain_php, php);
++}
++
++#[test]
++fn hierarchy_projection_component_method_records_only_its_actual_generated_body_scope() {
++    let source = concat!(
++        "<p>café 🐘</p>\r\n",
++        "@php\r\n",
++        "function __blade_template(): void { projectionUserLeaf(); }\r\n",
++        "projectionComponentLeaf();\r\n",
++        "@endphp\r\n",
++    );
++    let (php, map) = preprocess_with_vars(
++        source,
++        &[("title".to_owned(), "string".to_owned())],
++        TemplateKind::Component,
++        Some("App\\View\\Components\\Card"),
++        None,
++        &Default::default(),
++    );
++    let projection = map
++        .hierarchy_projection
++        .expect("component-method generated provenance");
++    assert!(php.contains("abstract class __blade_scope_App_View_Components_Card extends \\App\\View\\Components\\Card"));
++    assert_eq!(
++        php.as_bytes()[projection.wrapper_scope_start as usize],
++        b'{'
++    );
++    assert!(
++        php[..projection.wrapper_scope_start as usize]
++            .ends_with("public function __blade_template() ")
++    );
++    let symbols = hierarchy_projection_symbol_map(&php);
++    let template_call = php.find("projectionComponentLeaf();").unwrap() as u32;
++    let user_call = php.find("projectionUserLeaf();").unwrap() as u32;
++    assert_eq!(
++        symbols.find_enclosing_scope(template_call),
++        projection.wrapper_scope_start
++    );
++    assert_ne!(
++        symbols.find_enclosing_scope(user_call),
++        projection.wrapper_scope_start,
++        "a user function with the same name must retain its own lexical scope"
++    );
++    assert!(
++        symbols
++            .scopes
++            .iter()
++            .any(|(start, end)| *start == projection.wrapper_scope_start && template_call < *end)
++    );
++    assert_eq!(
++        projection.visible_end,
++        tower_lsp::lsp_types::Position::new(5, 0)
++    );
++    assert_eq!(
++        projection.virtual_sha256,
++        crate::symbol_map::AnonymousCallable::source_hash(&php)
++    );
++    assert_eq!(
++        projection.template_sha256,
++        crate::symbol_map::AnonymousCallable::source_hash(source)
++    );
++    let origin = tower_lsp::lsp_types::Position::new(0, 0);
++    assert_eq!(map.try_php_to_blade(map.blade_to_php(origin)), Some(origin));
++}
+diff --git a/src/blade/source_map.rs b/src/blade/source_map.rs
+index a203b4d..a2febb1 100644
+--- a/src/blade/source_map.rs
++++ b/src/blade/source_map.rs
+@@ -1,5 +1,19 @@
+ use tower_lsp::lsp_types::Position;
+ 
++/// Producer-owned identity of the generated template execution wrapper.
++/// Names are not authority: these coordinates and digests are emitted by lowering.
++#[derive(Debug, Clone, Copy)]
++pub(crate) struct BladeHierarchyProjection {
++    /// Exact generated function/method body brace after hoisted imports are inserted.
++    pub wrapper_scope_start: u32,
++    /// Final generated PHP source, including prologue and epilogue.
++    pub virtual_sha256: [u8; 32],
++    /// Original visible source, including HTML that may lower to identical PHP.
++    pub template_sha256: [u8; 32],
++    /// Visible EOF, without generated wrapper closing braces.
++    pub visible_end: Position,
++}
++
+ /// Source map from virtual PHP back to original Blade positions.
+ #[derive(Debug, Clone)]
+ pub struct BladeSourceMap {
+@@ -15,6 +29,8 @@ pub struct BladeSourceMap {
+     /// first template line.  At least [`super::PROLOGUE_LINES`]; larger
+     /// when call-site-inferred `@var` declarations are injected.
+     pub prologue_lines: u32,
++    /// Trusted final wrapper provenance for logical file-execution hierarchy.
++    pub(crate) hierarchy_projection: Option<BladeHierarchyProjection>,
+ }
+ 
+ impl Default for BladeSourceMap {
+@@ -22,6 +38,7 @@ impl Default for BladeSourceMap {
+         Self {
+             adjustments: Vec::new(),
+             prologue_lines: super::PROLOGUE_LINES,
++            hierarchy_projection: None,
+         }
+     }
+ }
+diff --git a/src/blade/typed_receiver.rs b/src/blade/typed_receiver.rs
+index 38026f2..625a80c 100644
+--- a/src/blade/typed_receiver.rs
++++ b/src/blade/typed_receiver.rs
+@@ -109,6 +109,9 @@ impl Backend {
+         content: &str,
+         sites: &[ViewReceiverSite],
+     ) -> Vec<SymbolSpan> {
++        // Confirmation can inspect a caller while another source owns the
++        // offset-only diagnostic snapshots. Resolve this file from its source.
++        let _foreign_scope = crate::type_engine::variable::forward_walk::suspend_diagnostic_scope();
+         let _resolver_guard = crate::type_engine::call_resolution::activate_type_engine_caches();
+         let _cache_guard =
+             crate::virtual_members::with_active_resolved_class_cache(&self.resolved_class_cache);
+@@ -254,3 +257,137 @@ impl<'ast, 'arena, 'w, 'sites>
+         }
+     }
+ }
++
++#[cfg(test)]
++mod foreign_diagnostic_scope_tests {
++    use super::*;
++    use crate::php_type::PhpType;
++    use crate::type_engine::variable::forward_walk as walk;
++    use crate::types::ResolvedType;
++
++    fn locations(spans: &[SymbolSpan]) -> Vec<(u32, u32, String)> {
++        spans
++            .iter()
++            .map(|span| {
++                let crate::symbol_map::SymbolKind::LaravelStringKey { key, .. } = &span.kind else {
++                    panic!("confirmed render must be a real Laravel key span");
++                };
++                (span.start, span.end, key.to_string())
++            })
++            .collect()
++    }
++
++    fn fixture() -> (Backend, &'static str, &'static str, Arc<SymbolMap>) {
++        let backend = Backend::new_test();
++        backend.resolved_class_cache.write().set_laravel(true);
++        let contract_uri = "file:///owned-typed-receiver/Factory.php";
++        let contract = "<?php namespace Illuminate\\Contracts\\View; interface Factory { public function make(string $name): mixed; }";
++        backend
++            .open_files
++            .write()
++            .insert(contract_uri.to_owned(), Arc::new(contract.to_owned()));
++        backend.update_ast(contract_uri, contract);
++        let uri = "file:///owned-typed-receiver/caller.php";
++        let source = "<?php\nfunction renderOwned(\\Illuminate\\Contracts\\View\\Factory $views): void {\n    $views->make('owned-shop', []);\n}\n";
++        backend
++            .open_files
++            .write()
++            .insert(uri.to_owned(), Arc::new(source.to_owned()));
++        backend.update_ast(uri, source);
++        let map = backend.symbol_map_for(uri).unwrap();
++        assert_eq!(
++            map.view_receiver_sites.len(),
++            1,
++            "actual candidate extraction fixture"
++        );
++        (backend, uri, source, map)
++    }
++
++    fn confirm_under_foreign_scope(foreign_receiver: Option<PhpType>) {
++        assert!(!walk::is_diagnostic_scope_active());
++        let (backend, uri, source, map) = fixture();
++        let baseline = backend.typed_receiver_view_spans_for(uri, &map);
++        assert_eq!(
++            baseline.len(),
++            1,
++            "cold source-owned receiver must confirm before foreign cache"
++        );
++        assert_eq!(
++            baseline[0].start,
++            source.find("'owned-shop'").unwrap() as u32 + 1
++        );
++        assert_eq!(
++            baseline[0].end,
++            baseline[0].start + "owned-shop".len() as u32
++        );
++        assert_eq!(locations(&baseline)[0].2, "owned-shop");
++        backend.evict_typed_receiver_view_spans(uri);
++        assert!(
++            !backend
++                .typed_receiver_view_spans_cache
++                .read()
++                .contains_key(uri),
++            "second confirmation must be cold, not baseline reuse"
++        );
++
++        let guard = walk::with_diagnostic_scope_cache();
++        let mut scope = walk::ScopeState::new();
++        scope.set(
++            "$sentinel",
++            vec![ResolvedType::from_type_string(PhpType::literal_string_raw(
++                "foreign-owner",
++            ))],
++        );
++        if let Some(ty) = foreign_receiver {
++            scope.set("$views", vec![ResolvedType::from_type_string(ty)]);
++        }
++        walk::record_scope_snapshot(0, &scope);
++        let receiver_offset = source.rfind("$views").unwrap() as u32;
++        walk::begin_targeted_coverage();
++        walk::record_covered_region(receiver_offset, source.len() as u32);
++        let original_receiver = walk::lookup_diagnostic_scope("$views", receiver_offset).unwrap();
++        let original_receiver = ResolvedType::types_joined(&original_receiver);
++
++        let actual = backend.typed_receiver_view_spans_for(uri, &map); // One cold query.
++        let sentinel = walk::lookup_diagnostic_scope("$sentinel", receiver_offset)
++            .expect("outer owner restored");
++        assert_eq!(
++            ResolvedType::types_joined(&sentinel),
++            PhpType::literal_string_raw("foreign-owner")
++        );
++        let restored_receiver = walk::lookup_diagnostic_scope("$views", receiver_offset).unwrap();
++        assert_eq!(
++            ResolvedType::types_joined(&restored_receiver),
++            original_receiver
++        );
++        assert!(
++            walk::lookup_diagnostic_scope("$sentinel", 0).is_none(),
++            "targeted coverage must remain unchanged"
++        );
++        assert!(walk::scope_snapshots_cover(receiver_offset));
++        assert!(!walk::is_building_scopes());
++        drop(guard);
++        assert!(!walk::is_diagnostic_scope_active());
++        assert_eq!(
++            locations(&actual),
++            locations(&baseline),
++            "foreign diagnostic receiver scope must not poison cached render confirmation"
++        );
++        let cached = backend.typed_receiver_view_spans_for(uri, &map);
++        assert_eq!(
++            locations(&cached),
++            locations(&baseline),
++            "first cold result must cache the source-owned spans"
++        );
++    }
++
++    #[test]
++    fn typed_receiver_cold_confirmation_ignores_foreign_missing_receiver() {
++        confirm_under_foreign_scope(None);
++    }
++
++    #[test]
++    fn typed_receiver_cold_confirmation_ignores_foreign_wrong_receiver_type() {
++        confirm_under_foreign_scope(Some(PhpType::named(crate::atom::atom("UnrelatedReceiver"))));
++    }
++}
+diff --git a/src/call_hierarchy.rs b/src/call_hierarchy.rs
+index 5928148..7b30575 100644
+--- a/src/call_hierarchy.rs
++++ b/src/call_hierarchy.rs
+@@ -20,7 +20,7 @@ use tower_lsp::lsp_types::{
+ };
+ 
+ use crate::Backend;
+-use crate::symbol_map::{ClassRefContext, SymbolKind, SymbolMap, SymbolSpan};
++use crate::symbol_map::{AnonymousCallable, ClassRefContext, SymbolKind, SymbolMap, SymbolSpan};
+ use crate::text_position::{byte_range_to_lsp_range, offset_to_position, position_to_offset};
+ use crate::types::{ClassInfo, FunctionInfo, MethodInfo};
+ 
+@@ -28,6 +28,7 @@ use crate::types::{ClassInfo, FunctionInfo, MethodInfo};
+ struct PhpCallable {
+     item: CallHierarchyItem,
+     body: Option<(u32, u32)>,
++    scope_start: Option<u32>,
+ }
+ 
+ impl PhpCallable {
+@@ -41,7 +42,7 @@ impl PhpCallable {
+ }
+ 
+ /// A file's source text paired with its symbol map.
+-type ParsedFile = (Arc<String>, Arc<SymbolMap>);
++type ParsedFile = (Arc<String>, Arc<SymbolMap>, Option<[u8; 32]>);
+ 
+ /// The text and symbol map of every file a single request touched.
+ ///
+@@ -52,6 +53,7 @@ type ParsedFile = (Arc<String>, Arc<SymbolMap>);
+ #[derive(Default)]
+ struct FileCache {
+     files: HashMap<String, Option<ParsedFile>>,
++    blade_files: HashMap<String, Option<crate::blade::source_map::BladeHierarchyProjection>>,
+ }
+ 
+ impl Backend {
+@@ -64,10 +66,29 @@ impl Backend {
+         let mut cache = FileCache::default();
+         let offset = position_to_offset(content, position);
+ 
+-        let mut item = match self
+-            .symbol_map_for(uri)
+-            .and_then(|symbol_map| self.php_callable_at(uri, content, &symbol_map, offset))
+-        {
++        let mut item = match self.symbol_map_for(uri).and_then(|symbol_map| {
++            let source_hash = hierarchy_source_hash(&symbol_map, content);
++            let at_file_origin = if self.is_blade_file(uri) {
++                self.blade_source_maps
++                    .read()
++                    .get(uri)
++                    .is_some_and(|map| map.blade_to_php(Position::new(0, 0)) == position)
++            } else {
++                offset == 0
++            };
++            if at_file_origin {
++                return self.logical_file_callable(&mut cache, uri, content, source_hash.as_ref()?);
++            }
++            let callable =
++                self.php_callable_at(uri, content, &symbol_map, offset, source_hash.as_ref())?;
++            if callable
++                .scope_start
++                .is_some_and(|scope| self.logical_file_scope_candidate(uri, scope))
++            {
++                return self.logical_file_callable(&mut cache, uri, content, source_hash.as_ref()?);
++            }
++            Some(callable)
++        }) {
+             Some(callable) => callable.item,
+             None => {
+                 self.resolve_definition(uri, content, position)
+@@ -87,7 +108,14 @@ impl Backend {
+     ) -> Option<Vec<CallHierarchyIncomingCall>> {
+         let mut cache = FileCache::default();
+         let target = self.php_callable_from_item(&mut cache, item)?;
+-        let (content, _) = self.cached_file(&mut cache, target.item.uri.as_str())?;
++        if target.item.data.as_ref()?.get("file_scope").is_some() {
++            // Includes and runtime entry points are not inferred from file execution.
++            return Some(Vec::new());
++        }
++        if target.item.data.as_ref()?.get("anonymous").is_some() {
++            return self.incoming_literal_anonymous(&mut cache, &target);
++        }
++        let (content, _, _) = self.cached_file(&mut cache, target.item.uri.as_str())?;
+         let mut references = self
+             .find_references(
+                 target.item.uri.as_str(),
+@@ -120,17 +148,29 @@ impl Backend {
+         let mut grouped: HashMap<String, (CallHierarchyItem, Vec<Range>)> = HashMap::new();
+         for reference in references {
+             let uri = reference.uri.as_str();
+-            let Some((ref_content, symbol_map)) = self.cached_file(&mut cache, uri) else {
++            let Some((ref_content, symbol_map, source_hash)) = self.cached_file(&mut cache, uri)
++            else {
+                 continue;
+             };
+             let offset = position_to_offset(&ref_content, reference.range.start);
+             // Find References answers for the whole member, so a same-named
+             // property read and a `@see` tag naming the method come back
+             // alongside the calls.  Only the calls belong in a hierarchy.
+-            if !symbol_map.lookup(offset).is_some_and(is_call_site) {
++            if !symbol_map
++                .lookup(offset)
++                .is_some_and(|span| is_hierarchy_call_site(&symbol_map, span))
++            {
+                 continue;
+             }
+-            let Some(caller) = self.php_callable_at(uri, &ref_content, &symbol_map, offset) else {
++            let scope = symbol_map.find_enclosing_scope(offset);
++            let caller = if self.logical_file_scope_candidate(uri, scope) {
++                source_hash.as_ref().and_then(|hash| {
++                    self.logical_file_callable(&mut cache, uri, &ref_content, hash)
++                })
++            } else {
++                self.php_callable_at(uri, &ref_content, &symbol_map, offset, source_hash.as_ref())
++            };
++            let Some(caller) = caller else {
+                 continue;
+             };
+             let key = php_item_key(&caller.item);
+@@ -162,7 +202,7 @@ impl Backend {
+             return Some(Vec::new());
+         };
+         let uri = callable.item.uri.as_str();
+-        let (content, symbol_map) = self.cached_file(&mut cache, uri)?;
++        let (content, symbol_map, source_hash) = self.cached_file(&mut cache, uri)?;
+ 
+         let call_sites: Vec<SymbolSpan> = symbol_map
+             .spans
+@@ -170,8 +210,8 @@ impl Backend {
+             .filter(|span| {
+                 span.start >= body_start
+                     && span.start <= body_end
+-                    && is_call_site(span)
+-                    && symbol_map.find_enclosing_scope(span.start) == body_start
++                    && is_hierarchy_call_site(&symbol_map, span)
++                    && Some(symbol_map.find_enclosing_scope(span.start)) == callable.scope_start
+             })
+             .cloned()
+             .collect();
+@@ -204,6 +244,37 @@ impl Backend {
+             }
+         }
+ 
++        if let Some(source_hash) = source_hash.as_ref() {
++            for invocation in &symbol_map.anonymous_invocations {
++                if Some(invocation.invoking_scope_start) != callable.scope_start
++                    || invocation.invocation_start < body_start
++                    || invocation.invocation_end > body_end
++                {
++                    continue;
++                }
++                let Some(record) = symbol_map
++                    .anonymous_callables
++                    .iter()
++                    .find(|record| record.keyword_start == invocation.callee_keyword_start)
++                else {
++                    continue;
++                };
++                let Some(callee) = build_anonymous_callable(uri, &content, record, source_hash)
++                else {
++                    continue;
++                };
++                let from_range = byte_range_to_lsp_range(
++                    &content,
++                    invocation.invocation_start as usize,
++                    invocation.invocation_end as usize,
++                );
++                grouped
++                    .entry(php_item_key(&callee.item))
++                    .and_modify(|(_, ranges)| push_unique_range(ranges, from_range))
++                    .or_insert_with(|| (callee.item, vec![from_range]));
++            }
++        }
++
+         let mut calls: Vec<_> = grouped
+             .into_values()
+             .map(|(mut to, mut from_ranges)| {
+@@ -253,8 +324,14 @@ impl Backend {
+             return None;
+         }
+         let (owner_uri, _) = self.find_class_file_content(&owner.fqn(), "", "")?;
+-        let (content, symbol_map) = self.cached_file(cache, &owner_uri)?;
+-        self.php_callable_at(&owner_uri, &content, &symbol_map, method.name_offset)
++        let (content, symbol_map, source_hash) = self.cached_file(cache, &owner_uri)?;
++        self.php_callable_at(
++            &owner_uri,
++            &content,
++            &symbol_map,
++            method.name_offset,
++            source_hash.as_ref(),
++        )
+     }
+ 
+     fn php_callable_from_item(
+@@ -266,10 +343,36 @@ impl Backend {
+         if data.get("kind")?.as_str()? != "php" {
+             return None;
+         }
+-        let offset = data.get("offset")?.as_u64()? as u32;
++        let offset = u32::try_from(data.get("offset")?.as_u64()?).ok()?;
+         let uri = item.uri.as_str();
+-        let (content, symbol_map) = self.cached_file(cache, uri)?;
+-        self.php_callable_at(uri, &content, &symbol_map, offset)
++        let (content, symbol_map, source_hash) = self.cached_file(cache, uri)?;
++        if data.get("file_scope").is_some() {
++            let callable =
++                self.logical_file_callable(cache, uri, &content, source_hash.as_ref()?)?;
++            return (callable.item.data.as_ref()? == data).then_some(callable);
++        }
++        if data.get("anonymous").is_some() {
++            let source_hash = source_hash.as_ref()?;
++            if symbol_map.anonymous_source_sha256.as_ref() != Some(source_hash) {
++                return None;
++            }
++            let record = symbol_map
++                .anonymous_callables
++                .iter()
++                .find(|record| record.keyword_start == offset)?;
++            let callable = build_anonymous_callable(uri, &content, record, source_hash)?;
++            // Includes URI, full source digest, syntax kind, and all CST ranges.
++            return (callable.item.data.as_ref()? == data).then_some(callable);
++        }
++        let callable =
++            self.php_callable_at(uri, &content, &symbol_map, offset, source_hash.as_ref())?;
++        // Removing the anonymous discriminator must not bypass its source guard.
++        if callable.item.data.as_ref()?.get("anonymous").is_some()
++            || callable.item.data.as_ref()?.get("file_scope").is_some()
++        {
++            return None;
++        }
++        Some(callable)
+     }
+ 
+     fn php_callable_at_location(
+@@ -278,9 +381,9 @@ impl Backend {
+         location: &Location,
+     ) -> Option<PhpCallable> {
+         let uri = location.uri.as_str();
+-        let (content, symbol_map) = self.cached_file(cache, uri)?;
++        let (content, symbol_map, source_hash) = self.cached_file(cache, uri)?;
+         let offset = position_to_offset(&content, location.range.start);
+-        self.php_callable_at(uri, &content, &symbol_map, offset)
++        self.php_callable_at(uri, &content, &symbol_map, offset, source_hash.as_ref())
+     }
+ 
+     /// The innermost function or method whose name token or body contains
+@@ -291,7 +394,13 @@ impl Backend {
+         content: &str,
+         symbol_map: &SymbolMap,
+         offset: u32,
++        source_hash: Option<&[u8; 32]>,
+     ) -> Option<PhpCallable> {
++        if !symbol_map.anonymous_callables.is_empty()
++            && symbol_map.anonymous_source_sha256.as_ref() != source_hash
++        {
++            return None;
++        }
+         let classes = self
+             .symbols
+             .uri_classes_index
+@@ -314,6 +423,15 @@ impl Backend {
+             }
+         };
+ 
++        if let Some(source_hash) = source_hash {
++            for record in &symbol_map.anonymous_callables {
++                if (record.keyword_start..record.keyword_end).contains(&offset)
++                    || (record.body_start..record.body_end).contains(&offset)
++                {
++                    consider(build_anonymous_callable(uri, content, record, source_hash));
++                }
++            }
++        }
+         for class in &classes {
+             consider(method_callable_at(uri, content, symbol_map, class, offset));
+         }
+@@ -384,15 +502,162 @@ impl Backend {
+             ));
+         }
+ 
+-        // A closure or arrow function has no named hierarchy item. Its calls
+-        // must not acquire the enclosing method/function as a fabricated caller.
++        // Keep the innermost lexical owner, including anonymous bodies. An outer
++        // declaration must never acquire calls from a nested callable's body.
+         best.filter(|candidate| {
+             candidate.body.is_none_or(|(start, end)| {
+-                offset < start || offset > end || symbol_map.find_enclosing_scope(offset) == start
++                offset < start
++                    || offset >= end
++                    || Some(symbol_map.find_enclosing_scope(offset)) == candidate.scope_start
+             })
+         })
+     }
+ 
++    /// Select a candidate by producer-owned offset, never by a user function's name.
++    fn logical_file_scope_candidate(&self, uri: &str, scope: u32) -> bool {
++        if !self.is_blade_file(uri) {
++            return scope == 0;
++        }
++        self.blade_source_maps
++            .read()
++            .get(uri)
++            .and_then(|map| map.hierarchy_projection)
++            .is_some_and(|projection| projection.wrapper_scope_start == scope)
++    }
++
++    fn trusted_blade_file_projection(
++        &self,
++        cache: &mut FileCache,
++        uri: &str,
++        source_hash: &[u8; 32],
++    ) -> Option<crate::blade::source_map::BladeHierarchyProjection> {
++        if let Some(projection) = cache.blade_files.get(uri) {
++            return projection.filter(|projection| &projection.virtual_sha256 == source_hash);
++        }
++        let projection = (|| {
++            let projection = self
++                .blade_source_maps
++                .read()
++                .get(uri)?
++                .hierarchy_projection?;
++            if &projection.virtual_sha256 != source_hash {
++                return None;
++            }
++            let raw = self.get_file_content_arc(uri)?;
++            if AnonymousCallable::source_hash(&raw) != projection.template_sha256 {
++                return None;
++            }
++            let map = self.symbol_map_for(uri)?;
++            if !map
++                .scopes
++                .iter()
++                .any(|(start, _)| *start == projection.wrapper_scope_start)
++            {
++                return None;
++            }
++            Some(projection)
++        })();
++        cache.blade_files.insert(uri.to_owned(), projection);
++        projection
++    }
++
++    fn logical_file_callable(
++        &self,
++        cache: &mut FileCache,
++        uri: &str,
++        content: &str,
++        source_hash: &[u8; 32],
++    ) -> Option<PhpCallable> {
++        let mut callable = build_file_callable(uri, content, source_hash)?;
++        if self.is_blade_file(uri) {
++            let projection = self.trusted_blade_file_projection(cache, uri, source_hash)?;
++            callable.scope_start = Some(projection.wrapper_scope_start);
++            let data = callable.item.data.as_mut()?.as_object_mut()?;
++            data.insert(
++                "blade_projection".to_owned(),
++                serde_json::json!({
++                    "wrapper_scope_start": projection.wrapper_scope_start,
++                    "template_sha256": projection.template_sha256,
++                    "visible_end": projection.visible_end,
++                }),
++            );
++        }
++        Some(callable)
++    }
++
++    fn caller_for_scope(
++        &self,
++        cache: &mut FileCache,
++        uri: &str,
++        content: &str,
++        symbol_map: &SymbolMap,
++        source_hash: &[u8; 32],
++        scope: u32,
++    ) -> Option<PhpCallable> {
++        if self.logical_file_scope_candidate(uri, scope) {
++            return self.logical_file_callable(cache, uri, content, source_hash);
++        }
++        if self.is_blade_file(uri) && scope == 0 {
++            // Generated prologue setup is not a visible template execution site.
++            return None;
++        }
++        if let Some(record) = symbol_map
++            .anonymous_callables
++            .iter()
++            .find(|record| record.scope_start == scope)
++        {
++            return build_anonymous_callable(uri, content, record, source_hash);
++        }
++        let caller = self.php_callable_at(uri, content, symbol_map, scope, Some(source_hash))?;
++        (caller.scope_start == Some(scope)).then_some(caller)
++    }
++
++    fn incoming_literal_anonymous(
++        &self,
++        cache: &mut FileCache,
++        target: &PhpCallable,
++    ) -> Option<Vec<CallHierarchyIncomingCall>> {
++        let uri = target.item.uri.as_str();
++        let (content, symbol_map, source_hash) = self.cached_file(cache, uri)?;
++        let source_hash = source_hash.as_ref()?;
++        let offset = target.item.data.as_ref()?.get("offset")?.as_u64()?;
++        let mut grouped: HashMap<String, (CallHierarchyItem, Vec<Range>)> = HashMap::new();
++        for invocation in &symbol_map.anonymous_invocations {
++            if u64::from(invocation.callee_keyword_start) != offset {
++                continue;
++            }
++            let Some(caller) = self.caller_for_scope(
++                cache,
++                uri,
++                &content,
++                &symbol_map,
++                source_hash,
++                invocation.invoking_scope_start,
++            ) else {
++                continue;
++            };
++            let range = byte_range_to_lsp_range(
++                &content,
++                invocation.invocation_start as usize,
++                invocation.invocation_end as usize,
++            );
++            grouped
++                .entry(php_item_key(&caller.item))
++                .and_modify(|(_, ranges)| push_unique_range(ranges, range))
++                .or_insert_with(|| (caller.item, vec![range]));
++        }
++        let mut calls: Vec<_> = grouped
++            .into_values()
++            .map(|(mut from, mut from_ranges)| {
++                self.translate_ranges_to_blade(uri, &mut from_ranges);
++                self.translate_item_to_blade(&mut from);
++                CallHierarchyIncomingCall { from, from_ranges }
++            })
++            .collect();
++        calls.sort_by_cached_key(|call| php_item_key(&call.from));
++        Some(calls)
++    }
++
+     fn cached_file(&self, cache: &mut FileCache, uri: &str) -> Option<ParsedFile> {
+         if let Some(cached) = cache.files.get(uri) {
+             return cached.clone();
+@@ -405,7 +670,8 @@ impl Backend {
+     fn call_hierarchy_file(&self, uri: &str) -> Option<ParsedFile> {
+         let content = self.reference_file_content_arc(uri)?;
+         if let Some(symbol_map) = self.symbol_map_for(uri) {
+-            return Some((content, symbol_map));
++            let source_hash = hierarchy_source_hash(&symbol_map, &content);
++            return Some((content, symbol_map, source_hash));
+         }
+         // A call site can sit in a file the background indexer has not reached
+         // yet.  Parse it now, the way the first request on a freshly opened
+@@ -416,7 +682,9 @@ impl Backend {
+             return None;
+         }
+         self.update_ast(uri, &content);
+-        Some((content, self.symbol_map_for(uri)?))
++        let symbol_map = self.symbol_map_for(uri)?;
++        let source_hash = hierarchy_source_hash(&symbol_map, &content);
++        Some((content, symbol_map, source_hash))
+     }
+ 
+     fn translate_item_to_blade(&self, item: &mut CallHierarchyItem) {
+@@ -424,6 +692,20 @@ impl Backend {
+         if !self.is_blade_file(&uri) {
+             return;
+         }
++        if let Some(projection) = item
++            .data
++            .as_ref()
++            .filter(|data| data.get("file_scope").is_some())
++            .and_then(|data| data.get("blade_projection"))
++            && let Some(end) = projection
++                .get("visible_end")
++                .and_then(|end| serde_json::from_value::<Position>(end.clone()).ok())
++        {
++            let origin = Position::new(0, 0);
++            item.range = Range::new(origin, end);
++            item.selection_range = Range::new(origin, origin);
++            return;
++        }
+         item.range = self.translate_blade_range(&uri, item.range);
+         item.selection_range = self.translate_blade_range(&uri, item.selection_range);
+     }
+@@ -443,6 +725,14 @@ impl Backend {
+ /// Reading a same-named property (`$this->leaf`), naming the method in a
+ /// `@see` tag, and calling it (`$this->leaf()`) all reference the same member,
+ /// so both directions filter down to the occurrences that actually invoke it.
++fn is_hierarchy_call_site(symbol_map: &SymbolMap, span: &SymbolSpan) -> bool {
++    is_call_site(span)
++        && symbol_map
++            .non_invoked_callable_spans
++            .binary_search(&(span.start, span.end))
++            .is_err()
++}
++
+ fn is_call_site(span: &SymbolSpan) -> bool {
+     match &span.kind {
+         SymbolKind::FunctionCall {
+@@ -571,6 +861,96 @@ fn build_callable(
+             data: Some(data),
+         },
+         body,
++        scope_start: body.map(|(start, _)| start),
++    })
++}
++
++/// Compare published source authority before using cached call ownership.
++/// The existing fingerprint is checked without adding a SHA pass to all parses;
++/// a request computes SHA only once per touched file for guarded hierarchy items.
++fn hierarchy_source_hash(symbol_map: &SymbolMap, content: &str) -> Option<[u8; 32]> {
++    use std::hash::{Hash, Hasher};
++    if !symbol_map.matches_source(content) {
++        return None;
++    }
++    let mut hasher = std::collections::hash_map::DefaultHasher::new();
++    content.hash(&mut hasher);
++    (hasher.finish() == symbol_map.source_fingerprint)
++        .then(|| AnonymousCallable::source_hash(content))
++}
++
++fn build_file_callable(uri: &str, content: &str, source_hash: &[u8; 32]) -> Option<PhpCallable> {
++    let end = u32::try_from(content.len()).ok()?;
++    let uri = Url::parse(uri).ok()?;
++    let name = uri
++        .path_segments()?
++        .next_back()
++        .filter(|name| !name.is_empty())
++        .unwrap_or("File scope");
++    Some(PhpCallable {
++        item: CallHierarchyItem {
++            name: format!("File: {name}"),
++            kind: LspSymbolKind::FILE,
++            tags: None,
++            detail: Some(
++                "File scope; includes and runtime entry points are not inferred".to_owned(),
++            ),
++            uri: uri.clone(),
++            range: byte_range_to_lsp_range(content, 0, end as usize),
++            selection_range: Range::new(Position::new(0, 0), Position::new(0, 0)),
++            data: Some(serde_json::json!({
++                "kind": "php", "file_scope": true, "uri": uri.as_str(), "offset": 0,
++                "source_length": end, "source_sha256": source_hash, "incoming": "unknown",
++            })),
++        },
++        body: Some((0, end)),
++        scope_start: Some(0),
++    })
++}
++
++fn build_anonymous_callable(
++    uri: &str,
++    content: &str,
++    record: &AnonymousCallable,
++    source_hash: &[u8; 32],
++) -> Option<PhpCallable> {
++    let expression = record.expression_start as usize..record.expression_end as usize;
++    let keyword = record.keyword_start as usize..record.keyword_end as usize;
++    // CST offsets are only meaningful for the exact source published with them.
++    let expected = match record.kind {
++        crate::symbol_map::AnonymousCallableKind::Closure => "function",
++        crate::symbol_map::AnonymousCallableKind::Arrow => "fn",
++    };
++    if !content.get(keyword.clone())?.eq_ignore_ascii_case(expected)
++        || content.get(expression.clone()).is_none()
++        || keyword.start < expression.start
++        || keyword.end > expression.end
++    {
++        return None;
++    }
++    Some(PhpCallable {
++        item: CallHierarchyItem {
++            name: record.kind.label().to_owned(),
++            kind: LspSymbolKind::FUNCTION,
++            tags: None,
++            detail: Some(
++                "Anonymous callable; other value-flow invocation callers are not inferred"
++                    .to_owned(),
++            ),
++            uri: Url::parse(uri).ok()?,
++            range: byte_range_to_lsp_range(content, expression.start, expression.end),
++            selection_range: byte_range_to_lsp_range(content, keyword.start, keyword.end),
++            data: Some(serde_json::json!({
++                "kind": "php", "anonymous": record.kind.tag(), "uri": uri,
++                "offset": record.keyword_start, "keyword_end": record.keyword_end,
++                "expression_start": record.expression_start, "expression_end": record.expression_end,
++                "scope_start": record.scope_start, "body_start": record.body_start,
++                "body_end": record.body_end, "source_sha256": source_hash,
++                "incoming": "unknown",
++            })),
++        },
++        body: Some((record.body_start, record.body_end)),
++        scope_start: Some(record.scope_start),
+     })
+ }
+ 
+@@ -870,9 +1250,20 @@ function outer(): void {{
+                 "{body}"
+             );
+             let leaf = prepare_at(&backend, &content, "function nestedLeaf");
++            let incoming = backend.incoming_calls_impl(&leaf).unwrap();
++            assert_eq!(incoming.len(), 1, "{body}");
+             assert!(
+-                backend.incoming_calls_impl(&leaf).unwrap().is_empty(),
+-                "{body}"
++                incoming[0]
++                    .from
++                    .data
++                    .as_ref()
++                    .unwrap()
++                    .get("anonymous")
++                    .is_some()
++            );
++            assert_eq!(
++                outgoing_names(&backend, &incoming[0].from),
++                vec!["nestedLeaf"]
+             );
+         }
+     }
+@@ -995,12 +1386,12 @@ class Child extends Base {
+         assert_eq!(incoming.len(), 1);
+         assert_eq!(incoming[0].from.detail.as_deref(), Some("Child"));
+ 
+-        // A first-class callable (`$this->shared(...)`) names the method the
+-        // same way the call above it does.
++        // Creating a first-class callable names the member for references,
++        // but does not add another invocation to the call hierarchy.
+         let shared = prepare_at(&backend, content, "function shared");
+         let incoming = backend.incoming_calls_impl(&shared).unwrap();
+         assert_eq!(incoming.len(), 1);
+         assert_eq!(incoming[0].from.name, "go");
+-        assert_eq!(incoming[0].from_ranges.len(), 2);
++        assert_eq!(incoming[0].from_ranges.len(), 1);
+     }
+ }
+diff --git a/src/symbol_map/extraction/class_like.rs b/src/symbol_map/extraction/class_like.rs
+index c7a0013..114988b 100644
+--- a/src/symbol_map/extraction/class_like.rs
++++ b/src/symbol_map/extraction/class_like.rs
+@@ -484,6 +484,11 @@ pub(super) fn extract_from_trait_alias_adaptation<'a>(
+                 abs.trait_name.span().end.offset,
+                 &trait_raw,
+             ));
++            // Trait adaptations name a method; they do not invoke it.
++            ctx.non_invoked_callable_spans.push((
++                abs.method_name.span.start.offset,
++                abs.method_name.span.end.offset,
++            ));
+             let method_name = crate::atom::atom_bytes(abs.method_name.value);
+             let trait_span = abs.trait_name.span();
+             ctx.spans.push(SymbolSpan {
+@@ -506,6 +511,8 @@ pub(super) fn extract_from_trait_alias_adaptation<'a>(
+             });
+         }
+         TraitUseMethodReference::Identifier(ident) => {
++            ctx.non_invoked_callable_spans
++                .push((ident.span.start.offset, ident.span.end.offset));
+             let subject = first_trait_name.unwrap_or("self").to_string();
+             let method_name = crate::atom::atom_bytes(ident.value);
+             ctx.spans.push(SymbolSpan {
+@@ -527,6 +534,8 @@ pub(super) fn extract_from_trait_alias_adaptation<'a>(
+     // Using `self` as the subject so that `resolve_trait_alias` on
+     // the owning class maps the alias back to the original method.
+     if let Some(ref alias_ident) = alias_adapt.alias {
++        ctx.non_invoked_callable_spans
++            .push((alias_ident.span.start.offset, alias_ident.span.end.offset));
+         let alias_name = crate::atom::atom_bytes(alias_ident.value);
+         ctx.spans.push(SymbolSpan {
+             start: alias_ident.span.start.offset,
+@@ -561,6 +570,10 @@ pub(super) fn extract_from_trait_precedence_adaptation<'a>(
+         &trait_raw,
+     ));
+ 
++    ctx.non_invoked_callable_spans.push((
++        prec.method_reference.method_name.span.start.offset,
++        prec.method_reference.method_name.span.end.offset,
++    ));
+     let method_name = crate::atom::atom_bytes(prec.method_reference.method_name.value);
+     let trait_span = prec.method_reference.trait_name.span();
+     ctx.spans.push(SymbolSpan {
+diff --git a/src/symbol_map/extraction/expressions/calls.rs b/src/symbol_map/extraction/expressions/calls.rs
+index 4de9b4e..17a88bd 100644
+--- a/src/symbol_map/extraction/expressions/calls.rs
++++ b/src/symbol_map/extraction/expressions/calls.rs
+@@ -270,6 +270,23 @@ fn extract_call<'a>(
+ ) {
+     match call {
+         Call::Function(func_call) => {
++            let mut literal = func_call.function;
++            while let Expression::Parenthesized(parenthesized) = literal {
++                literal = parenthesized.expression;
++            }
++            let callee_keyword_start = match literal {
++                Expression::Closure(closure) => Some(closure.function.span.start.offset),
++                Expression::ArrowFunction(arrow) => Some(arrow.r#fn.span.start.offset),
++                _ => None,
++            };
++            if let Some(callee_keyword_start) = callee_keyword_start {
++                ctx.anonymous_invocations.push(AnonymousInvocation {
++                    callee_keyword_start,
++                    invoking_scope_start: scope_start,
++                    invocation_start: func_call.argument_list.left_parenthesis.start.offset,
++                    invocation_end: func_call.argument_list.right_parenthesis.end.offset,
++                });
++            }
+             match func_call.function {
+                 Expression::Identifier(ident) => {
+                     let raw = bytes_to_str(ident.value());
+@@ -1178,6 +1195,8 @@ pub(super) fn extract_partial_application_expr<'a>(
+             Expression::Identifier(ident) => {
+                 let raw = bytes_to_str(ident.value());
+                 let name_clean = strip_fqn_prefix(raw);
++                ctx.non_invoked_callable_spans
++                    .push((ident.span().start.offset, ident.span().end.offset));
+                 ctx.spans.push(SymbolSpan {
+                     start: ident.span().start.offset,
+                     end: ident.span().end.offset,
+@@ -1204,6 +1223,8 @@ pub(super) fn extract_partial_application_expr<'a>(
+             extract_dynamic_member_selector(&method_pa.method, ctx, scope_start);
+             if let ClassLikeMemberSelector::Identifier(ident) = &method_pa.method {
+                 let member_name = crate::atom::atom_bytes(ident.value);
++                ctx.non_invoked_callable_spans
++                    .push((ident.span.start.offset, ident.span.end.offset));
+                 ctx.spans.push(SymbolSpan {
+                     start: ident.span.start.offset,
+                     end: ident.span.end.offset,
+@@ -1231,6 +1252,8 @@ pub(super) fn extract_partial_application_expr<'a>(
+             extract_dynamic_member_selector(&static_pa.method, ctx, scope_start);
+             if let ClassLikeMemberSelector::Identifier(ident) = &static_pa.method {
+                 let member_name = crate::atom::atom_bytes(ident.value);
++                ctx.non_invoked_callable_spans
++                    .push((ident.span.start.offset, ident.span.end.offset));
+                 ctx.spans.push(SymbolSpan {
+                     start: ident.span.start.offset,
+                     end: ident.span.end.offset,
+diff --git a/src/symbol_map/extraction/expressions/closures.rs b/src/symbol_map/extraction/expressions/closures.rs
+index 5d5aab0..6d2eabb 100644
+--- a/src/symbol_map/extraction/expressions/closures.rs
++++ b/src/symbol_map/extraction/expressions/closures.rs
+@@ -8,6 +8,17 @@ pub(super) fn extract_closure_expr<'a>(closure: &'a Closure<'a>, ctx: &mut Extra
+     let closure_scope_start = closure.body.left_brace.start.offset;
+     let closure_scope_end = closure.body.right_brace.end.offset;
+     ctx.scopes.push((closure_scope_start, closure_scope_end));
++    let expression = closure.span();
++    ctx.anonymous_callables.push(AnonymousCallable {
++        kind: AnonymousCallableKind::Closure,
++        expression_start: expression.start.offset,
++        expression_end: expression.end.offset,
++        keyword_start: closure.function.span.start.offset,
++        keyword_end: closure.function.span.end.offset,
++        scope_start: closure_scope_start,
++        body_start: closure_scope_start,
++        body_end: closure_scope_end,
++    });
+     ctx.body_scopes
+         .push((closure_scope_start, closure_scope_end));
+ 
+@@ -89,6 +100,16 @@ pub(super) fn extract_arrow_function_expr<'a>(
+     let arrow_scope_start = arrow.span().start.offset;
+     let arrow_scope_end = arrow.span().end.offset;
+     ctx.scopes.push((arrow_scope_start, arrow_scope_end));
++    ctx.anonymous_callables.push(AnonymousCallable {
++        kind: AnonymousCallableKind::Arrow,
++        expression_start: arrow_scope_start,
++        expression_end: arrow_scope_end,
++        keyword_start: arrow.r#fn.span.start.offset,
++        keyword_end: arrow.r#fn.span.end.offset,
++        scope_start: arrow_scope_start,
++        body_start: arrow.expression.span().start.offset,
++        body_end: arrow_scope_end,
++    });
+     ctx.arrow_fn_scopes.push(arrow_scope_start);
+     // Body scope starts at `=>` for signature help suppression.
+     ctx.body_scopes
+diff --git a/src/symbol_map/extraction/mod.rs b/src/symbol_map/extraction/mod.rs
+index b686508..22eb72b 100644
+--- a/src/symbol_map/extraction/mod.rs
++++ b/src/symbol_map/extraction/mod.rs
+@@ -12,9 +12,10 @@ use super::docblock::{
+     extract_docblock_symbols_covering, get_docblock_text_with_offset, is_navigable_type,
+ };
+ use super::{
+-    CallSite, ClassRefContext, DocblockMemberRef, SelfStaticParentKind, SubjectText, SymbolKind,
+-    SymbolMap, SymbolSpan, TemplateParamDef, UntypedClosureSite, VarDefKind, VarDefSite,
+-    ViewReceiverClass, ViewReceiverSite,
++    AnonymousCallable, AnonymousCallableKind, AnonymousInvocation, CallSite, ClassRefContext,
++    DocblockMemberRef, SelfStaticParentKind, SubjectText, SymbolKind, SymbolMap, SymbolSpan,
++    TemplateParamDef, UntypedClosureSite, VarDefKind, VarDefSite, ViewReceiverClass,
++    ViewReceiverSite,
+ };
+ use crate::atom::{bytes_to_str, literal_bytes_to_str};
+ use crate::names::OwnedResolvedNames;
+@@ -37,6 +38,9 @@ struct ExtractionCtx<'a> {
+     var_defs: Vec<VarDefSite>,
+     /// Scope ranges `(start, end)` for functions, methods, closures, etc.
+     scopes: Vec<(u32, u32)>,
++    anonymous_callables: Vec<AnonymousCallable>,
++    anonymous_invocations: Vec<AnonymousInvocation>,
++    non_invoked_callable_spans: Vec<(u32, u32)>,
+     /// Scope start offsets of arrow functions (inheriting scopes).
+     arrow_fn_scopes: Vec<u32>,
+     /// Body boundaries `(body_start, body_end)` for closures and arrow fns.
+@@ -215,6 +219,9 @@ fn extract_symbol_map_inner(
+         spans: Vec::new(),
+         var_defs: Vec::new(),
+         scopes: Vec::new(),
++        anonymous_callables: Vec::new(),
++        anonymous_invocations: Vec::new(),
++        non_invoked_callable_spans: Vec::new(),
+         arrow_fn_scopes: Vec::new(),
+         body_scopes: Vec::new(),
+         narrowing_blocks: Vec::new(),
+@@ -324,6 +331,8 @@ fn extract_symbol_map_inner(
+ 
+     // Sort call_sites by args_start for reverse-scan lookup.
+     ctx.call_sites.sort_by_key(|cs| cs.args_start);
++    ctx.non_invoked_callable_spans.sort_unstable();
++    ctx.non_invoked_callable_spans.dedup();
+     ctx.breakable_scopes.sort_by_key(|s| s.0);
+     ctx.loop_scopes.sort_by_key(|s| s.0);
+     ctx.switch_scopes.sort_by_key(|s| s.0);
+@@ -353,6 +362,11 @@ fn extract_symbol_map_inner(
+         member_access_indices,
+         var_defs: ctx.var_defs,
+         scopes: ctx.scopes,
++        anonymous_source_sha256: (!ctx.anonymous_callables.is_empty())
++            .then(|| AnonymousCallable::source_hash(content)),
++        anonymous_callables: ctx.anonymous_callables,
++        anonymous_invocations: ctx.anonymous_invocations,
++        non_invoked_callable_spans: ctx.non_invoked_callable_spans,
+         arrow_fn_scopes: ctx.arrow_fn_scopes,
+         body_scopes: ctx.body_scopes,
+         narrowing_blocks: ctx.narrowing_blocks,
+diff --git a/src/symbol_map/mod.rs b/src/symbol_map/mod.rs
+index 3e3f321..56384fc 100644
+--- a/src/symbol_map/mod.rs
++++ b/src/symbol_map/mod.rs
+@@ -982,6 +982,67 @@ pub enum AttributeClosureKind {
+     Arrow,
+ }
+ 
++/// A syntactically declared anonymous callable, without inferred invocation sites.
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++pub(crate) enum AnonymousCallableKind {
++    Closure,
++    Arrow,
++}
++
++impl AnonymousCallableKind {
++    pub(crate) fn tag(self) -> &'static str {
++        match self {
++            Self::Closure => "closure",
++            Self::Arrow => "arrow",
++        }
++    }
++
++    pub(crate) fn label(self) -> &'static str {
++        match self {
++            Self::Closure => "Closure",
++            Self::Arrow => "Arrow function",
++        }
++    }
++}
++
++/// Exact virtual-PHP CST coordinates and lexical ownership of an anonymous body.
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++pub(crate) struct AnonymousCallable {
++    /// Closure or arrow syntax, never a variable's inferred callable value.
++    pub kind: AnonymousCallableKind,
++    /// Complete expression, including static/attributes when present in its CST span.
++    pub expression_start: u32,
++    pub expression_end: u32,
++    /// Actual function/fn token, independent of the visible item label length.
++    pub keyword_start: u32,
++    pub keyword_end: u32,
++    /// Existing SymbolMap scope key; arrows do not use their expression-body start.
++    pub scope_start: u32,
++    /// Executable body region, excluding the parameter/default/header region.
++    pub body_start: u32,
++    pub body_end: u32,
++}
++
++impl AnonymousCallable {
++    /// Digest source once at publication and once per touched request file.
++    pub(crate) fn source_hash(content: &str) -> [u8; 32] {
++        use sha2::{Digest, Sha256};
++        Sha256::digest(content.as_bytes()).into()
++    }
++}
++
++/// A literal closure/arrow invoked directly, without following a variable's value.
++#[derive(Debug, Clone, Copy)]
++pub(crate) struct AnonymousInvocation {
++    /// Keyword offset identifies the exact cached anonymous declaration.
++    pub callee_keyword_start: u32,
++    /// Lexical caller scope supplied by extraction before visiting the callee.
++    pub invoking_scope_start: u32,
++    /// Invocation argument-list extent, separate from the literal callee body.
++    pub invocation_start: u32,
++    pub invocation_end: u32,
++}
++
+ /// Per-file symbol location index.
+ ///
+ /// The `spans` vec is sorted by `start` offset.  Gaps between spans
+@@ -1012,6 +1073,14 @@ pub(crate) struct SymbolMap {
+     /// methods, closures, and arrow functions.  Used by
+     /// `find_enclosing_scope` to determine which scope the cursor is in.
+     pub scopes: Vec<(u32, u32)>,
++    /// Anonymous bodies collected in the existing CST extraction pass.
++    pub anonymous_callables: Vec<AnonymousCallable>,
++    /// Direct literal invocations, retaining caller ownership separately from callee syntax.
++    pub anonymous_invocations: Vec<AnonymousInvocation>,
++    /// Sorted callee-token spans that create first-class callable values rather than invoke them.
++    pub non_invoked_callable_spans: Vec<(u32, u32)>,
++    /// Exact source authority for anonymous offsets; absent in closure-free maps.
++    pub anonymous_source_sha256: Option<[u8; 32]>,
+     /// Scope start offsets of arrow functions.  Arrow functions inherit
+     /// the enclosing scope's variables (unlike closures which isolate
+     /// their scope).  Used by variable name completion to walk up
+diff --git a/tests/integration/call_hierarchy.rs b/tests/integration/call_hierarchy.rs
+index 5d12fce..55a47bf 100644
+--- a/tests/integration/call_hierarchy.rs
++++ b/tests/integration/call_hierarchy.rs
+@@ -960,3 +960,1043 @@ async fn trait_constructor_project_trait_vendor_consumer_incoming_cold_after_wor
+ async fn trait_constructor_project_trait_vendor_consumer_incoming_hot_after_workspace_index() {
+     trait_ctor_assert_vendor_symmetry(true).await;
+ }
++
++fn anonymous_hierarchy_position(source: &str, needle: &str) -> Position {
++    let offset = source.find(needle).expect("fixture token");
++    let prefix = &source[..offset];
++    Position::new(
++        prefix.bytes().filter(|byte| *byte == b'\n').count() as u32,
++        prefix.rsplit('\n').next().unwrap().encode_utf16().count() as u32,
++    )
++}
++
++async fn anonymous_hierarchy_prepare(
++    backend: &Backend,
++    uri: &Url,
++    source: &str,
++    needle: &str,
++) -> CallHierarchyItem {
++    let position = anonymous_hierarchy_position(source, needle);
++    let mut items = prepare_at(backend, uri, position.line, position.character).await;
++    assert_eq!(items.len(), 1, "prepare {needle}");
++    items.remove(0)
++}
++
++async fn anonymous_hierarchy_change(backend: &Backend, uri: &Url, source: &str) {
++    backend
++        .did_change(DidChangeTextDocumentParams {
++            text_document: VersionedTextDocumentIdentifier {
++                uri: uri.clone(),
++                version: 2,
++            },
++            content_changes: vec![TextDocumentContentChangeEvent {
++                range: None,
++                range_length: None,
++                text: source.to_owned(),
++            }],
++        })
++        .await;
++}
++
++#[tokio::test]
++async fn anonymous_known_edges_have_exact_keywords_and_reciprocal_outgoing_calls() {
++    let backend = create_test_backend();
++    let uri = Url::parse("file:///anonymous-keywords.php").unwrap();
++    let source = concat!(
++        "<?php\r\n",
++        "function anonymousLeaf(): int { return 1; }\r\n",
++        "function anonymousHost(): void {\r\n",
++        "    /* café 🐘 */ $closure = static FUNCTION (int $value): int { anonymousLeaf(); return anonymousLeaf(); };\r\n",
++        "    /* café 🐘 */ $arrow = static FN(int $value): int => anonymousLeaf();\r\n",
++        "}\r\n",
++    );
++    open_php(&backend, &uri, source).await;
++    let host = anonymous_hierarchy_prepare(&backend, &uri, source, "anonymousHost").await;
++    assert!(
++        outgoing(&backend, &host).await.is_empty(),
++        "declaration is not invocation"
++    );
++    let leaf = anonymous_hierarchy_prepare(&backend, &uri, source, "anonymousLeaf").await;
++    let callers = incoming(&backend, &leaf).await;
++    assert_eq!(callers.len(), 2);
++    for (keyword, label, count) in [("FUNCTION", "Closure", 2), ("FN", "Arrow function", 1)] {
++        let item = anonymous_hierarchy_prepare(&backend, &uri, source, keyword).await;
++        let start = anonymous_hierarchy_position(source, keyword);
++        assert_eq!(item.name, label);
++        assert_eq!(item.kind, SymbolKind::FUNCTION);
++        assert_eq!(
++            item.selection_range,
++            Range::new(
++                start,
++                Position::new(start.line, start.character + keyword.len() as u32)
++            )
++        );
++        assert_eq!(
++            item.range.start,
++            anonymous_hierarchy_position(
++                source,
++                if keyword == "FUNCTION" {
++                    "static FUNCTION"
++                } else {
++                    "static FN"
++                }
++            )
++        );
++        assert!(item.range.end > item.selection_range.end);
++        let caller = callers
++            .iter()
++            .find(|call| call.from.selection_range == item.selection_range)
++            .unwrap();
++        assert_eq!(caller.from.data, item.data);
++        assert_eq!(caller.from_ranges.len(), count);
++        let edges = outgoing(&backend, &item).await;
++        assert_eq!(edges.len(), 1);
++        assert_eq!(edges[0].to.name, "anonymousLeaf");
++        assert_eq!(edges[0].from_ranges, caller.from_ranges);
++        assert!(
++            incoming(&backend, &item).await.is_empty(),
++            "no invented value-flow caller"
++        );
++        assert_eq!(item.data.as_ref().unwrap()["incoming"], "unknown");
++    }
++}
++
++#[tokio::test]
++async fn anonymous_nested_bodies_keep_only_their_own_lexical_edges() {
++    let backend = create_test_backend();
++    let uri = Url::parse("file:///anonymous-nesting.php").unwrap();
++    let source = concat!(
++        "<?php\n",
++        "function outerAnonymousLeaf(): void {}\n",
++        "function innerAnonymousLeaf(): void {}\n",
++        "function namedAnonymousLeaf(): void {}\n",
++        "function memberAnonymousLeaf(): void {}\n",
++        "function namedAnonymousHost(): void {\n",
++        "    $captured = 1;\n",
++        "    /** @template T @param T $value @return T */\n",
++        "    $outer = static function ($value) use ($captured) {\n",
++        "        outerAnonymousLeaf();\n",
++        "        $first = static fn() => fn() => innerAnonymousLeaf();\n",
++        "        function nestedAnonymousNamed(): void { namedAnonymousLeaf(); }\n",
++        "        $object = new class { public function innerAnonymousMethod(): void { memberAnonymousLeaf(); } };\n",
++        "        return $value;\n",
++        "    };\n",
++        "}\n",
++    );
++    open_php(&backend, &uri, source).await;
++    let outer = anonymous_hierarchy_prepare(&backend, &uri, source, "function ($value)").await;
++    let first_arrow = anonymous_hierarchy_prepare(&backend, &uri, source, "fn() => fn()").await;
++    let inner_arrow =
++        anonymous_hierarchy_prepare(&backend, &uri, source, "fn() => innerAnonymousLeaf").await;
++    assert_eq!(
++        outgoing(&backend, &outer)
++            .await
++            .iter()
++            .map(|edge| edge.to.name.as_str())
++            .collect::<Vec<_>>(),
++        ["outerAnonymousLeaf"]
++    );
++    assert!(outgoing(&backend, &first_arrow).await.is_empty());
++    assert_eq!(
++        outgoing(&backend, &inner_arrow)
++            .await
++            .iter()
++            .map(|edge| edge.to.name.as_str())
++            .collect::<Vec<_>>(),
++        ["innerAnonymousLeaf"]
++    );
++    for (leaf, owner) in [
++        ("namedAnonymousLeaf", "nestedAnonymousNamed"),
++        ("memberAnonymousLeaf", "innerAnonymousMethod"),
++    ] {
++        let item = anonymous_hierarchy_prepare(&backend, &uri, source, leaf).await;
++        let calls = incoming(&backend, &item).await;
++        assert_eq!(calls.len(), 1);
++        assert_eq!(calls[0].from.name, owner);
++    }
++    let leaf = anonymous_hierarchy_prepare(&backend, &uri, source, "innerAnonymousLeaf").await;
++    let calls = incoming(&backend, &leaf).await;
++    assert_eq!(calls.len(), 1);
++    assert_eq!(calls[0].from.selection_range, inner_arrow.selection_range);
++}
++
++#[tokio::test]
++async fn anonymous_same_line_callers_remain_distinct_and_preserve_repeated_sites() {
++    let backend = create_test_backend();
++    let uri = Url::parse("file:///anonymous-same-line.php").unwrap();
++    let source = "<?php\nfunction sameAnonymousLeaf(): void {}\nfunction sameAnonymousHost(): void { $a = function () { sameAnonymousLeaf(); sameAnonymousLeaf(); }; $b = function () { sameAnonymousLeaf(); }; }\n";
++    open_php(&backend, &uri, source).await;
++    let leaf = anonymous_hierarchy_prepare(&backend, &uri, source, "sameAnonymousLeaf").await;
++    let calls = incoming(&backend, &leaf).await;
++    assert_eq!(calls.len(), 2);
++    assert_eq!(
++        calls[0].from.selection_range.start.line,
++        calls[1].from.selection_range.start.line
++    );
++    assert_ne!(
++        calls[0].from.selection_range.start.character,
++        calls[1].from.selection_range.start.character
++    );
++    assert_ne!(calls[0].from.data, calls[1].from.data);
++    let mut counts = calls
++        .iter()
++        .map(|call| call.from_ranges.len())
++        .collect::<Vec<_>>();
++    counts.sort_unstable();
++    assert_eq!(counts, [1, 2]);
++    for call in calls {
++        let edges = outgoing(&backend, &call.from).await;
++        assert_eq!(edges.len(), 1);
++        assert_eq!(edges[0].from_ranges, call.from_ranges);
++    }
++}
++
++#[tokio::test]
++async fn anonymous_stale_item_refuses_same_length_changes_and_stripped_discriminators() {
++    let backend = create_test_backend();
++    let uri = Url::parse("file:///anonymous-stale.php").unwrap();
++    let source = "<?php\nfunction staleLeafA(): void {}\nfunction staleLeafB(): void {}\nfunction staleHost(): void { $cb = function () { staleLeafA(); }; }\n";
++    open_php(&backend, &uri, source).await;
++    let item = anonymous_hierarchy_prepare(&backend, &uri, source, "function ()").await;
++    assert_eq!(outgoing(&backend, &item).await[0].to.name, "staleLeafA");
++    let mut stripped = item.clone();
++    stripped
++        .data
++        .as_mut()
++        .unwrap()
++        .as_object_mut()
++        .unwrap()
++        .remove("anonymous");
++    assert!(
++        backend
++            .outgoing_calls(CallHierarchyOutgoingCallsParams {
++                item: stripped.clone(),
++                work_done_progress_params: Default::default(),
++                partial_result_params: Default::default()
++            })
++            .await
++            .unwrap()
++            .is_none()
++    );
++    let changed = source.replace("{ staleLeafA(); }", "{ staleLeafB(); }");
++    assert_eq!(changed.len(), source.len());
++    anonymous_hierarchy_change(&backend, &uri, &changed).await;
++    for stale in [item, stripped] {
++        assert!(
++            backend
++                .outgoing_calls(CallHierarchyOutgoingCallsParams {
++                    item: stale.clone(),
++                    work_done_progress_params: Default::default(),
++                    partial_result_params: Default::default()
++                })
++                .await
++                .unwrap()
++                .is_none()
++        );
++        assert!(
++            backend
++                .incoming_calls(CallHierarchyIncomingCallsParams {
++                    item: stale,
++                    work_done_progress_params: Default::default(),
++                    partial_result_params: Default::default()
++                })
++                .await
++                .unwrap()
++                .is_none()
++        );
++    }
++    let fresh = anonymous_hierarchy_prepare(&backend, &uri, &changed, "function ()").await;
++    assert_eq!(outgoing(&backend, &fresh).await[0].to.name, "staleLeafB");
++}
++
++#[tokio::test]
++async fn anonymous_blade_items_use_virtual_identity_and_translate_source_ranges_once() {
++    let backend = create_test_backend();
++    let php_uri = Url::parse("file:///blade-anonymous-leaf.php").unwrap();
++    let php_source =
++        "<?php\nfunction bladeAnonymousLeafA(): void {}\nfunction bladeAnonymousLeafB(): void {}\n";
++    open_php(&backend, &php_uri, php_source).await;
++    let uri = Url::parse("file:///anonymous.blade.php").unwrap();
++    let source = "<p>café 🐘</p>\r\n@php\r\n/* 🐘 */ $cb = static fn() => bladeAnonymousLeafA();\r\n@endphp\r\n";
++    crate::common::open_document(&backend, &uri, "blade", source).await;
++    let item = anonymous_hierarchy_prepare(&backend, &uri, source, "fn()").await;
++    let start = anonymous_hierarchy_position(source, "fn()");
++    assert_eq!(
++        item.selection_range,
++        Range::new(start, Position::new(start.line, start.character + 2))
++    );
++    let edges = outgoing(&backend, &item).await;
++    assert_eq!(edges.len(), 1);
++    assert_eq!(edges[0].to.uri, php_uri);
++    assert_eq!(edges[0].to.name, "bladeAnonymousLeafA");
++    let leaf =
++        anonymous_hierarchy_prepare(&backend, &php_uri, php_source, "bladeAnonymousLeafA").await;
++    let back = incoming(&backend, &leaf).await;
++    assert_eq!(back.len(), 1);
++    assert_eq!(back[0].from.uri, uri);
++    assert_eq!(back[0].from.selection_range, item.selection_range);
++    assert_eq!(back[0].from_ranges, edges[0].from_ranges);
++    let call = anonymous_hierarchy_position(source, "bladeAnonymousLeafA();");
++    assert_eq!(
++        edges[0].from_ranges,
++        [Range::new(
++            call,
++            Position::new(
++                call.line,
++                call.character + "bladeAnonymousLeafA".len() as u32
++            )
++        )]
++    );
++    let changed = source.replace("bladeAnonymousLeafA();", "bladeAnonymousLeafB();");
++    anonymous_hierarchy_change(&backend, &uri, &changed).await;
++    assert!(
++        backend
++            .outgoing_calls(CallHierarchyOutgoingCallsParams {
++                item,
++                work_done_progress_params: Default::default(),
++                partial_result_params: Default::default()
++            })
++            .await
++            .unwrap()
++            .is_none()
++    );
++    let fresh = anonymous_hierarchy_prepare(&backend, &uri, &changed, "fn()").await;
++    assert_eq!(
++        outgoing(&backend, &fresh).await[0].to.name,
++        "bladeAnonymousLeafB"
++    );
++}
++
++fn known_literal_invocation_range(source: &str, suffix: &str, skip: u32, width: u32) -> Range {
++    let start = anonymous_hierarchy_position(source, suffix);
++    let start = Position::new(start.line, start.character + skip);
++    Range::new(start, Position::new(start.line, start.character + width))
++}
++
++#[tokio::test]
++async fn literal_iife_and_file_scope_edges_are_reciprocal_without_flattening_bodies() {
++    let backend = create_test_backend();
++    let uri = Url::parse("file:///literal-iife.php").unwrap();
++    let source = concat!(
++        "<?php\r\n",
++        "function iifeLeaf(): int { return 1; }\r\n",
++        "function iifeHost(): void {\r\n",
++        "    /* café 🐘 */ (((static function () { iifeLeaf(); })))();\r\n",
++        "    /* café 🐘 */ ((static fn() => iifeLeaf()))();\r\n",
++        "    $uninvoked = function () { iifeLeaf(); };\r\n",
++        "    $reference = iifeLeaf(...);\r\n",
++        "    $unknown();\r\n",
++        "}\r\n",
++        "iifeLeaf();\r\n",
++        "(fn() => iifeLeaf())();\r\n",
++    );
++    open_php(&backend, &uri, source).await;
++    let host = anonymous_hierarchy_prepare(&backend, &uri, source, "iifeHost").await;
++    let outgoing_host = outgoing(&backend, &host).await;
++    assert_eq!(outgoing_host.len(), 2);
++    for (edge, expected) in outgoing_host.iter().zip([
++        known_literal_invocation_range(source, "})))();", 4, 2),
++        known_literal_invocation_range(source, "iifeLeaf()))();", 12, 2),
++    ]) {
++        assert!(edge.to.data.as_ref().unwrap().get("anonymous").is_some());
++        assert_eq!(edge.from_ranges, [expected]);
++        let callers = incoming(&backend, &edge.to).await;
++        assert_eq!(callers.len(), 1);
++        assert_eq!(callers[0].from.name, "iifeHost");
++        assert_eq!(callers[0].from_ranges, edge.from_ranges);
++        assert_eq!(edge.to.data.as_ref().unwrap()["incoming"], "unknown");
++        let leaves = outgoing(&backend, &edge.to).await;
++        assert_eq!(leaves.len(), 1);
++        assert_eq!(leaves[0].to.name, "iifeLeaf");
++    }
++    let leaf = anonymous_hierarchy_prepare(&backend, &uri, source, "iifeLeaf").await;
++    let callers = incoming(&backend, &leaf).await;
++    assert_eq!(callers.len(), 5, "four anonymous bodies and one file scope");
++    assert_eq!(
++        callers
++            .iter()
++            .filter(|call| call.from.kind == SymbolKind::FUNCTION)
++            .count(),
++        4
++    );
++    let file_caller = callers
++        .iter()
++        .find(|call| call.from.kind == SymbolKind::FILE)
++        .unwrap();
++    let direct = anonymous_hierarchy_position(source, "iifeLeaf();\r\n(fn()");
++    assert_eq!(
++        file_caller.from_ranges,
++        [Range::new(
++            direct,
++            Position::new(direct.line, direct.character + 8)
++        )]
++    );
++    let prepared_file = prepare_at(&backend, &uri, 0, 0).await.remove(0);
++    assert_eq!(prepared_file.kind, SymbolKind::FILE);
++    assert_eq!(prepared_file.data, file_caller.from.data);
++    assert_eq!(
++        prepared_file.selection_range,
++        Range::new(Position::new(0, 0), Position::new(0, 0))
++    );
++    assert_eq!(prepared_file.range.end, Position::new(11, 0));
++    assert_eq!(prepared_file.data.as_ref().unwrap()["incoming"], "unknown");
++    assert!(incoming(&backend, &prepared_file).await.is_empty());
++    let file_edges = outgoing(&backend, &prepared_file).await;
++    assert_eq!(file_edges.len(), 2);
++    assert_eq!(
++        file_edges
++            .iter()
++            .filter(|edge| edge.to.name == "iifeLeaf")
++            .count(),
++        1
++    );
++    let anonymous_edge = file_edges
++        .iter()
++        .find(|edge| edge.to.data.as_ref().unwrap().get("anonymous").is_some())
++        .unwrap();
++    assert_eq!(
++        anonymous_edge.from_ranges,
++        [known_literal_invocation_range(
++            source,
++            "iifeLeaf())();",
++            11,
++            2
++        )]
++    );
++    let invocation_callers = incoming(&backend, &anonymous_edge.to).await;
++    assert_eq!(invocation_callers.len(), 1);
++    assert_eq!(invocation_callers[0].from.kind, SymbolKind::FILE);
++    assert_eq!(
++        invocation_callers[0].from_ranges,
++        anonymous_edge.from_ranges
++    );
++    let uninvoked =
++        anonymous_hierarchy_prepare(&backend, &uri, source, "function () { iifeLeaf(); };").await;
++    assert!(incoming(&backend, &uninvoked).await.is_empty());
++}
++
++#[tokio::test]
++async fn literal_iife_uses_recorded_invoking_scope_in_nested_arrows_and_closures() {
++    let backend = create_test_backend();
++    let uri = Url::parse("file:///nested-iife.php").unwrap();
++    let source = concat!(
++        "<?php\n",
++        "function nestedIifeLeaf(): int { return 1; }\n",
++        "(static fn() => (static function (int $value): int { return nestedIifeLeaf(); })(1))();\n",
++    );
++    open_php(&backend, &uri, source).await;
++    let outer = anonymous_hierarchy_prepare(&backend, &uri, source, "fn()").await;
++    let inner = anonymous_hierarchy_prepare(&backend, &uri, source, "function (int").await;
++    let outer_edges = outgoing(&backend, &outer).await;
++    assert_eq!(outer_edges.len(), 1);
++    assert_eq!(outer_edges[0].to.data, inner.data);
++    assert_eq!(
++        outer_edges[0].from_ranges,
++        [known_literal_invocation_range(source, "})(1)", 2, 3)]
++    );
++    let inner_callers = incoming(&backend, &inner).await;
++    assert_eq!(inner_callers.len(), 1);
++    assert_eq!(inner_callers[0].from.data, outer.data);
++    assert_eq!(inner_callers[0].from_ranges, outer_edges[0].from_ranges);
++    let inner_edges = outgoing(&backend, &inner).await;
++    assert_eq!(inner_edges.len(), 1);
++    assert_eq!(inner_edges[0].to.name, "nestedIifeLeaf");
++    let outer_callers = incoming(&backend, &outer).await;
++    assert_eq!(outer_callers.len(), 1);
++    assert_eq!(outer_callers[0].from.kind, SymbolKind::FILE);
++}
++
++#[tokio::test]
++async fn callable_creation_and_dynamic_values_are_not_literal_invocations() {
++    let backend = create_test_backend();
++    let uri = Url::parse("file:///literal-negative.php").unwrap();
++    let source = concat!(
++        "<?php\n",
++        "function callbackLeaf(): void {}\n",
++        "class CallbackReceiver { public function member(): void {} public static function shared(): void {} }\n",
++        "function callbackReceiver(): CallbackReceiver { return new CallbackReceiver(); }\n",
++        "function callbackAccept(callable $callback): void {}\n",
++        "function callbackHost(CallbackReceiver $object, callable $dynamic): void {\n",
++        "    $unused = function () { callbackLeaf(); };\n",
++        "    $function = callbackLeaf(...);\n",
++        "    $method = $object->member(...);\n",
++        "    $static = CallbackReceiver::shared(...);\n",
++        "    $withReceiver = callbackReceiver()->member(...);\n",
++        "    $literal = (function () { callbackLeaf(); })(...);\n",
++        "    callbackAccept(static fn() => callbackLeaf());\n",
++        "    $dynamic();\n",
++        "}\n",
++    );
++    open_php(&backend, &uri, source).await;
++    let host = anonymous_hierarchy_prepare(&backend, &uri, source, "callbackHost").await;
++    let names = outgoing(&backend, &host)
++        .await
++        .into_iter()
++        .map(|edge| edge.to.name)
++        .collect::<Vec<_>>();
++    assert_eq!(sorted(names), ["callbackAccept", "callbackReceiver"]);
++    for name in ["member", "shared"] {
++        let item = anonymous_hierarchy_prepare(&backend, &uri, source, &format!("{name}()")).await;
++        assert!(incoming(&backend, &item).await.is_empty());
++    }
++    let passed = anonymous_hierarchy_prepare(&backend, &uri, source, "fn()").await;
++    assert!(incoming(&backend, &passed).await.is_empty());
++    let leaf = anonymous_hierarchy_prepare(&backend, &uri, source, "callbackLeaf").await;
++    let leaf_callers = incoming(&backend, &leaf).await;
++    assert_eq!(
++        leaf_callers.len(),
++        3,
++        "known bodies retained without inventing their invokers"
++    );
++    assert!(
++        leaf_callers
++            .iter()
++            .all(|call| call.from.data.as_ref().unwrap().get("anonymous").is_some())
++    );
++}
++
++#[tokio::test]
++async fn file_and_literal_iife_items_refuse_dirty_source_and_wrong_uri_rebinding() {
++    let backend = create_test_backend();
++    let uri = Url::parse("file:///dirty-iife.php").unwrap();
++    let other_uri = Url::parse("file:///other-dirty-iife.php").unwrap();
++    let source = "<?php\nfunction dirtyIifeA(): void {}\nfunction dirtyIifeB(): void {}\n(static fn() => dirtyIifeA())();\n";
++    open_php(&backend, &uri, source).await;
++    let old_file = prepare_at(&backend, &uri, 0, 0).await.remove(0);
++    let old_arrow = anonymous_hierarchy_prepare(&backend, &uri, source, "fn()").await;
++    assert_eq!(
++        incoming(&backend, &old_arrow).await[0].from.kind,
++        SymbolKind::FILE
++    );
++    let mut stripped_file = old_file.clone();
++    stripped_file
++        .data
++        .as_mut()
++        .unwrap()
++        .as_object_mut()
++        .unwrap()
++        .remove("file_scope");
++    assert!(
++        backend
++            .outgoing_calls(CallHierarchyOutgoingCallsParams {
++                item: stripped_file,
++                work_done_progress_params: Default::default(),
++                partial_result_params: Default::default()
++            })
++            .await
++            .unwrap()
++            .is_none()
++    );
++    // Same bytes at another URI must not authorize this file-scope token.
++    open_php(&backend, &other_uri, source).await;
++    let mut wrong_uri = old_file.clone();
++    wrong_uri.uri = other_uri;
++    assert!(
++        backend
++            .outgoing_calls(CallHierarchyOutgoingCallsParams {
++                item: wrong_uri,
++                work_done_progress_params: Default::default(),
++                partial_result_params: Default::default()
++            })
++            .await
++            .unwrap()
++            .is_none()
++    );
++    let changed = source.replace("=> dirtyIifeA()", "=> dirtyIifeB()");
++    assert_eq!(changed.len(), source.len());
++    anonymous_hierarchy_change(&backend, &uri, &changed).await;
++    for item in [old_file, old_arrow] {
++        assert!(
++            backend
++                .outgoing_calls(CallHierarchyOutgoingCallsParams {
++                    item: item.clone(),
++                    work_done_progress_params: Default::default(),
++                    partial_result_params: Default::default()
++                })
++                .await
++                .unwrap()
++                .is_none()
++        );
++        assert!(
++            backend
++                .incoming_calls(CallHierarchyIncomingCallsParams {
++                    item,
++                    work_done_progress_params: Default::default(),
++                    partial_result_params: Default::default()
++                })
++                .await
++                .unwrap()
++                .is_none()
++        );
++    }
++    let file = prepare_at(&backend, &uri, 0, 0).await.remove(0);
++    let edges = outgoing(&backend, &file).await;
++    assert_eq!(edges.len(), 1);
++    let calls = outgoing(&backend, &edges[0].to).await;
++    assert_eq!(calls.len(), 1);
++    assert_eq!(calls[0].to.name, "dirtyIifeB");
++}
++
++#[tokio::test]
++async fn standalone_file_scope_guard_covers_sources_without_any_anonymous_record() {
++    let backend = create_test_backend();
++    let uri = Url::parse("file:///standalone-file-scope.php").unwrap();
++    let source =
++        "<?php\nfunction standaloneA(): void {}\nfunction standaloneB(): void {}\nstandaloneA();\n";
++    open_php(&backend, &uri, source).await;
++    let old_file = prepare_at(&backend, &uri, 0, 0).await.remove(0);
++    assert_eq!(old_file.kind, SymbolKind::FILE);
++    let old_edges = outgoing(&backend, &old_file).await;
++    assert_eq!(old_edges.len(), 1);
++    assert_eq!(old_edges[0].to.name, "standaloneA");
++    let back = incoming(&backend, &old_edges[0].to).await;
++    assert_eq!(back.len(), 1);
++    assert_eq!(back[0].from.data, old_file.data);
++    let changed = source.replace("\nstandaloneA();", "\nstandaloneB();");
++    assert_eq!(source.len(), changed.len());
++    anonymous_hierarchy_change(&backend, &uri, &changed).await;
++    assert!(
++        backend
++            .outgoing_calls(CallHierarchyOutgoingCallsParams {
++                item: old_file.clone(),
++                work_done_progress_params: Default::default(),
++                partial_result_params: Default::default()
++            })
++            .await
++            .unwrap()
++            .is_none()
++    );
++    assert!(
++        backend
++            .incoming_calls(CallHierarchyIncomingCallsParams {
++                item: old_file,
++                work_done_progress_params: Default::default(),
++                partial_result_params: Default::default()
++            })
++            .await
++            .unwrap()
++            .is_none()
++    );
++    let fresh = prepare_at(&backend, &uri, 0, 0).await.remove(0);
++    let edges = outgoing(&backend, &fresh).await;
++    assert_eq!(edges.len(), 1);
++    assert_eq!(edges[0].to.name, "standaloneB");
++}
++
++#[tokio::test]
++async fn blade_literal_iife_in_an_anonymous_body_translates_invocation_ranges_once() {
++    let backend = create_test_backend();
++    let php_uri = Url::parse("file:///blade-iife-leaf.php").unwrap();
++    open_php(
++        &backend,
++        &php_uri,
++        "<?php\nfunction bladeIifeLeaf(): int { return 1; }\n",
++    )
++    .await;
++    let uri = Url::parse("file:///literal-iife.blade.php").unwrap();
++    let source = "<p>café 🐘</p>\r\n@php\r\n$outer = static function () { /* 🐘 */ (static fn() => bladeIifeLeaf())(); };\r\n@endphp\r\n";
++    crate::common::open_document(&backend, &uri, "blade", source).await;
++    let outer = anonymous_hierarchy_prepare(&backend, &uri, source, "function ()").await;
++    let arrow = anonymous_hierarchy_prepare(&backend, &uri, source, "fn()").await;
++    let edges = outgoing(&backend, &outer).await;
++    assert_eq!(edges.len(), 1);
++    assert_eq!(edges[0].to.data, arrow.data);
++    assert_eq!(edges[0].to.selection_range, arrow.selection_range);
++    let expected = known_literal_invocation_range(source, "bladeIifeLeaf())();", 16, 2);
++    assert_eq!(edges[0].from_ranges, [expected]);
++    let back = incoming(&backend, &arrow).await;
++    assert_eq!(back.len(), 1);
++    assert_eq!(back[0].from.data, outer.data);
++    assert_eq!(back[0].from.selection_range, outer.selection_range);
++    assert_eq!(back[0].from_ranges, [expected]);
++    let leaf_edges = outgoing(&backend, &arrow).await;
++    assert_eq!(leaf_edges.len(), 1);
++    assert_eq!(leaf_edges[0].to.uri, php_uri);
++    assert_eq!(leaf_edges[0].to.name, "bladeIifeLeaf");
++}
++
++// Source-only append to tests/integration/call_hierarchy.rs after the existing
++// six IIFE tests; uses their public-handler helpers. No execution by reviewer.
++// This explicitly covers the logical FileScope of the generated Blade wrapper,
++// visible origin/EOF projection, actual IIFE operator ranges and dirty identity.
++#[tokio::test]
++async fn blade_top_level_file_scope_has_visible_origin_exact_invocation_ranges_and_stale_guard() {
++    let backend = create_test_backend();
++    let php_uri = Url::parse("file:///blade-file-scope-leaves.php").unwrap();
++    let php = "<?php\nfunction bladeScopeLeafA(): int { return 1; }\nfunction bladeScopeLeafB(): int { return 2; }\n";
++    open_php(&backend, &php_uri, php).await;
++    let uri = Url::parse("file:///top-level-scope.blade.php").unwrap();
++    let source = concat!(
++        "<h1>café 🐘</h1>\r\n",
++        "@php\r\n",
++        "bladeScopeLeafA();\r\n",
++        "/* café 🐘 */ (static fn() => bladeScopeLeafA())();\r\n",
++        "@endphp\r\n",
++    );
++    crate::common::open_document(&backend, &uri, "blade", source).await;
++    let old_arrow = anonymous_hierarchy_prepare(&backend, &uri, source, "fn()").await;
++    let leaf_a = anonymous_hierarchy_prepare(&backend, &php_uri, php, "bladeScopeLeafA").await;
++    let callers = incoming(&backend, &leaf_a).await;
++    assert_eq!(
++        callers.len(),
++        2,
++        "one template FileScope caller and one anonymous body, not a generated wrapper function"
++    );
++    let file_call = callers
++        .iter()
++        .find(|call| call.from.kind == SymbolKind::FILE)
++        .expect("a real top-level Blade named call has an explicit FileScope owner");
++    let old_file = file_call.from.clone();
++    assert_eq!(old_file.uri, uri);
++    assert_eq!(old_file.data.as_ref().unwrap()["file_scope"], true);
++    assert_eq!(
++        old_file.data.as_ref().unwrap()["offset"],
++        0,
++        "identity stays virtual file0"
++    );
++    assert_eq!(old_file.data.as_ref().unwrap()["incoming"], "unknown");
++    assert_eq!(
++        old_file.selection_range,
++        Range::new(Position::new(0, 0), Position::new(0, 0))
++    );
++    assert_eq!(
++        old_file.range,
++        Range::new(Position::new(0, 0), Position::new(5, 0)),
++        "FileScope visible extent excludes generated prologue and closing wrapper epilogue"
++    );
++    let direct_start = anonymous_hierarchy_position(source, "bladeScopeLeafA();");
++    let direct_range = Range::new(
++        direct_start,
++        Position::new(direct_start.line, direct_start.character + 15),
++    );
++    assert_eq!(file_call.from_ranges, [direct_range]);
++    assert!(callers.iter().any(|call| call.from.data == old_arrow.data));
++
++    // The item's visible selection must be a real public reprepare location,
++    // even though Blade0:0 maps to a nonzero virtual prologue-line offset.
++    let prepared = prepare_at(&backend, &uri, 0, 0).await;
++    assert_eq!(prepared.len(), 1);
++    assert_eq!(prepared[0].kind, SymbolKind::FILE);
++    assert_eq!(prepared[0].data, old_file.data);
++    assert_eq!(prepared[0].range, old_file.range);
++    assert_eq!(prepared[0].selection_range, old_file.selection_range);
++    assert!(
++        incoming(&backend, &old_file).await.is_empty(),
++        "runtime includes/entrypoints remain unknown"
++    );
++
++    let operator = known_literal_invocation_range(source, "bladeScopeLeafA())();", 18, 2);
++    let file_edges = outgoing(&backend, &old_file).await;
++    assert_eq!(
++        file_edges.len(),
++        2,
++        "top-level leaf plus literal IIFE; nested body leaf is not flattened"
++    );
++    let direct_edge = file_edges
++        .iter()
++        .find(|edge| edge.to.name == "bladeScopeLeafA")
++        .unwrap();
++    assert_eq!(direct_edge.to.uri, php_uri);
++    assert_eq!(direct_edge.from_ranges, [direct_range]);
++    let invocation_edge = file_edges
++        .iter()
++        .find(|edge| edge.to.data == old_arrow.data)
++        .unwrap();
++    assert_eq!(
++        invocation_edge.to.selection_range,
++        old_arrow.selection_range
++    );
++    assert_eq!(
++        invocation_edge.from_ranges,
++        [operator],
++        "UTF16/CRLF visible parentheses translated exactly once"
++    );
++    let back = incoming(&backend, &old_arrow).await;
++    assert_eq!(back.len(), 1);
++    assert_eq!(back[0].from.kind, SymbolKind::FILE);
++    assert_eq!(back[0].from.data, old_file.data);
++    assert_eq!(back[0].from.range, old_file.range);
++    assert_eq!(back[0].from.selection_range, old_file.selection_range);
++    assert_eq!(back[0].from_ranges, [operator]);
++    let body_edges = outgoing(&backend, &old_arrow).await;
++    assert_eq!(body_edges.len(), 1);
++    assert_eq!(body_edges[0].to.name, "bladeScopeLeafA");
++
++    // Same-length dirty replacement changes only the anonymous body's target.
++    // Both old items have positive expansions above, so stale refusal is useful.
++    let changed = source.replace("=> bladeScopeLeafA()", "=> bladeScopeLeafB()");
++    assert_eq!(changed.len(), source.len());
++    anonymous_hierarchy_change(&backend, &uri, &changed).await;
++    for item in [old_file, old_arrow] {
++        assert!(
++            backend
++                .outgoing_calls(CallHierarchyOutgoingCallsParams {
++                    item: item.clone(),
++                    work_done_progress_params: Default::default(),
++                    partial_result_params: Default::default(),
++                })
++                .await
++                .unwrap()
++                .is_none()
++        );
++        assert!(
++            backend
++                .incoming_calls(CallHierarchyIncomingCallsParams {
++                    item,
++                    work_done_progress_params: Default::default(),
++                    partial_result_params: Default::default(),
++                })
++                .await
++                .unwrap()
++                .is_none()
++        );
++    }
++    let fresh_file = prepare_at(&backend, &uri, 0, 0).await.remove(0);
++    let fresh_arrow = anonymous_hierarchy_prepare(&backend, &uri, &changed, "fn()").await;
++    assert_eq!(fresh_file.kind, SymbolKind::FILE);
++    assert_eq!(
++        fresh_file.range,
++        Range::new(Position::new(0, 0), Position::new(5, 0))
++    );
++    let fresh_edges = outgoing(&backend, &fresh_file).await;
++    assert_eq!(fresh_edges.len(), 2);
++    let fresh_direct = fresh_edges
++        .iter()
++        .find(|edge| edge.to.name == "bladeScopeLeafA")
++        .unwrap();
++    assert_eq!(fresh_direct.from_ranges, [direct_range]);
++    let fresh_invocation = fresh_edges
++        .iter()
++        .find(|edge| edge.to.data == fresh_arrow.data)
++        .unwrap();
++    assert_eq!(fresh_invocation.from_ranges, [operator]);
++    let fresh_body = outgoing(&backend, &fresh_arrow).await;
++    assert_eq!(fresh_body.len(), 1);
++    assert_eq!(fresh_body[0].to.name, "bladeScopeLeafB");
++    assert_eq!(fresh_body[0].to.uri, php_uri);
++    let fresh_back = incoming(&backend, &fresh_arrow).await;
++    assert_eq!(fresh_back.len(), 1);
++    assert_eq!(fresh_back[0].from.data, fresh_file.data);
++    assert_eq!(fresh_back[0].from_ranges, [operator]);
++    let still_a = incoming(&backend, &leaf_a).await;
++    assert_eq!(still_a.len(), 1);
++    assert_eq!(still_a[0].from.data, fresh_file.data);
++    assert_eq!(still_a[0].from_ranges, [direct_range]);
++}
++
++#[tokio::test]
++async fn blade_file_scope_html_only_dirty_change_retires_raw_identity_when_virtual_php_is_identical()
++ {
++    let backend = create_test_backend();
++    let php_uri = Url::parse("file:///html-only-leaf.php").unwrap();
++    let php = "<?php\nfunction htmlOnlyLeaf(): int { return 1; }\n";
++    open_php(&backend, &php_uri, php).await;
++    let uri = Url::parse("file:///html-only-file-scope.blade.php").unwrap();
++    let source = concat!(
++        "<h1>alpha</h1>\r\n",
++        "@php\r\n",
++        "htmlOnlyLeaf();\r\n",
++        "/* café 🐘 */ (static fn() => htmlOnlyLeaf())();\r\n",
++        "@endphp\r\n",
++    );
++    crate::common::open_document(&backend, &uri, "blade", source).await;
++    let old_file = prepare_at(&backend, &uri, 0, 0).await.remove(0);
++    assert_eq!(old_file.kind, SymbolKind::FILE);
++    let old_edges = outgoing(&backend, &old_file).await;
++    assert_eq!(
++        old_edges.len(),
++        2,
++        "positive known direct call and literal IIFE control"
++    );
++    let old_direct = old_edges
++        .iter()
++        .find(|edge| edge.to.name == "htmlOnlyLeaf")
++        .unwrap();
++    let old_arrow = old_edges
++        .iter()
++        .find(|edge| edge.to.data.as_ref().unwrap().get("anonymous").is_some())
++        .unwrap();
++    assert_eq!(old_direct.to.uri, php_uri);
++    assert_eq!(
++        outgoing(&backend, &old_arrow.to).await[0].to.name,
++        "htmlOnlyLeaf"
++    );
++    let before_virtual = backend
++        .blade_virtual_php(uri.as_str())
++        .expect("actual initial generated PHP");
++    let changed = source.replace("<h1>alpha</h1>", "<h1>omega</h1>");
++    assert_ne!(source, changed);
++    assert_eq!(source.len(), changed.len(), "only same-width HTML changes");
++    assert_eq!(
++        source.encode_utf16().count(),
++        changed.encode_utf16().count()
++    );
++    anonymous_hierarchy_change(&backend, &uri, &changed).await;
++    // No successful semantic retry is used to admit the obsolete item.
++    assert!(
++        backend
++            .outgoing_calls(CallHierarchyOutgoingCallsParams {
++                item: old_file.clone(),
++                work_done_progress_params: Default::default(),
++                partial_result_params: Default::default(),
++            })
++            .await
++            .unwrap()
++            .is_none(),
++        "virtual digest alone must not authorize the old raw-source file identity"
++    );
++    assert!(
++        backend
++            .incoming_calls(CallHierarchyIncomingCallsParams {
++                item: old_file.clone(),
++                work_done_progress_params: Default::default(),
++                partial_result_params: Default::default(),
++            })
++            .await
++            .unwrap()
++            .is_none()
++    );
++    let fresh = prepare_at(&backend, &uri, 0, 0).await.remove(0);
++    let after_virtual = backend
++        .blade_virtual_php(uri.as_str())
++        .expect("actual fresh generated PHP");
++    assert_eq!(
++        before_virtual, after_virtual,
++        "this fixture must isolate raw HTML authority, not a changed virtual source"
++    );
++    assert_eq!(fresh.kind, SymbolKind::FILE);
++    assert_eq!(fresh.selection_range, old_file.selection_range);
++    assert_eq!(fresh.range, old_file.range);
++    assert_eq!(
++        fresh.range,
++        Range::new(Position::new(0, 0), Position::new(5, 0))
++    );
++    let before_data = old_file.data.as_ref().unwrap();
++    let fresh_data = fresh.data.as_ref().unwrap();
++    assert_eq!(before_data["source_sha256"], fresh_data["source_sha256"]);
++    assert_ne!(
++        before_data["blade_projection"]["template_sha256"],
++        fresh_data["blade_projection"]["template_sha256"]
++    );
++    let fresh_edges = outgoing(&backend, &fresh).await;
++    assert_eq!(fresh_edges.len(), 2);
++    let direct = fresh_edges
++        .iter()
++        .find(|edge| edge.to.name == "htmlOnlyLeaf")
++        .unwrap();
++    let arrow = fresh_edges
++        .iter()
++        .find(|edge| edge.to.data.as_ref().unwrap().get("anonymous").is_some())
++        .unwrap();
++    assert_eq!(direct.from_ranges, old_direct.from_ranges);
++    assert_eq!(arrow.from_ranges, old_arrow.from_ranges);
++    assert_eq!(
++        arrow.to.data, old_arrow.to.data,
++        "unchanged virtual callable retains its identity"
++    );
++    let known_callers = incoming(&backend, &arrow.to).await;
++    assert_eq!(known_callers.len(), 1);
++    assert_eq!(known_callers[0].from.data, fresh.data);
++    assert_eq!(known_callers[0].from.selection_range, fresh.selection_range);
++    assert_eq!(known_callers[0].from_ranges, arrow.from_ranges);
++}
++
++#[tokio::test]
++async fn blade_leading_unicode_use_keeps_file_scope_visible_origin_reprepare_and_known_edges() {
++    let backend = create_test_backend();
++    let php_uri = Url::parse("file:///leading-use-leaf.php").unwrap();
++    let php = "<?php\nfunction leadingUseLeaf(): int { return 1; }\n";
++    open_php(&backend, &php_uri, php).await;
++    let uri = Url::parse("file:///leading-use-file-scope.blade.php").unwrap();
++    let source = concat!(
++        "@use('App\\Models\\Žluťoučký as Článek')\r\n",
++        "<p>café 🐘</p>\r\n",
++        "@php\r\n",
++        "leadingUseLeaf();\r\n",
++        "/* 🐘 */ (static fn() => leadingUseLeaf())();\r\n",
++        "@endphp\r\n",
++    );
++    crate::common::open_document(&backend, &uri, "blade", source).await;
++    // The general map collapses removed @use text. FILE prepare must use the
++    // forward origin projection, not require an inverse text-map round trip.
++    let initial = prepare_at(&backend, &uri, 0, 0).await;
++    assert_eq!(
++        initial.len(),
++        1,
++        "first visible-origin query must produce one file item"
++    );
++    let file = &initial[0];
++    assert_eq!(file.kind, SymbolKind::FILE);
++    assert_eq!(file.uri, uri);
++    assert_eq!(
++        file.selection_range,
++        Range::new(Position::new(0, 0), Position::new(0, 0))
++    );
++    assert_eq!(
++        file.range,
++        Range::new(Position::new(0, 0), Position::new(6, 0))
++    );
++    let at_returned_selection = prepare_at(
++        &backend,
++        &uri,
++        file.selection_range.start.line,
++        file.selection_range.start.character,
++    )
++    .await;
++    assert_eq!(at_returned_selection.len(), 1);
++    assert_eq!(at_returned_selection[0].data, file.data);
++    assert_eq!(
++        at_returned_selection[0].selection_range,
++        file.selection_range
++    );
++    assert_eq!(at_returned_selection[0].range, file.range);
++    let arrow = anonymous_hierarchy_prepare(&backend, &uri, source, "fn()").await;
++    let edges = outgoing(&backend, file).await;
++    assert_eq!(
++        edges.len(),
++        2,
++        "only the direct leaf and literal invocation, not the anonymous body's leaf"
++    );
++    let direct = edges
++        .iter()
++        .find(|edge| edge.to.name == "leadingUseLeaf")
++        .unwrap();
++    let direct_start = anonymous_hierarchy_position(source, "leadingUseLeaf();");
++    assert_eq!(direct.to.uri, php_uri);
++    assert_eq!(
++        direct.from_ranges,
++        [Range::new(
++            direct_start,
++            Position::new(direct_start.line, direct_start.character + 14)
++        )]
++    );
++    let invocation = edges
++        .iter()
++        .find(|edge| edge.to.data == arrow.data)
++        .unwrap();
++    let operator = known_literal_invocation_range(source, "leadingUseLeaf())();", 17, 2);
++    assert_eq!(invocation.from_ranges, [operator]);
++    let invocation_callers = incoming(&backend, &arrow).await;
++    assert_eq!(invocation_callers.len(), 1);
++    assert_eq!(invocation_callers[0].from.kind, SymbolKind::FILE);
++    assert_eq!(invocation_callers[0].from.data, file.data);
++    assert_eq!(
++        invocation_callers[0].from.selection_range,
++        file.selection_range
++    );
++    assert_eq!(invocation_callers[0].from.range, file.range);
++    assert_eq!(invocation_callers[0].from_ranges, [operator]);
++    let body = outgoing(&backend, &arrow).await;
++    assert_eq!(body.len(), 1);
++    assert_eq!(body[0].to.name, "leadingUseLeaf");
++    let leaf = anonymous_hierarchy_prepare(&backend, &php_uri, php, "leadingUseLeaf").await;
++    let leaf_callers = incoming(&backend, &leaf).await;
++    assert_eq!(leaf_callers.len(), 2);
++    let file_caller = leaf_callers
++        .iter()
++        .find(|call| call.from.kind == SymbolKind::FILE)
++        .unwrap();
++    assert_eq!(file_caller.from.data, file.data);
++    assert_eq!(file_caller.from_ranges, direct.from_ranges);
++    assert!(leaf_callers.iter().any(|call| call.from.data == arrow.data));
++}

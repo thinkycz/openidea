@@ -729,7 +729,7 @@ impl DebugManager {
                 "initialize",
                 json!({
                     "clientID": "openidea",
-                    "clientName": "OpenIDEA",
+                    "clientName": "OpenStorm",
                     "adapterID": s.adapter,
                     "locale": "en",
                     "linesStartAt1": true,

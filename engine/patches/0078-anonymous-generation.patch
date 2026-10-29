@@ -1,0 +1,851 @@
+diff --git a/docs/CHANGELOG.md b/docs/CHANGELOG.md
+index bb1b44f..70bca4e 100644
+--- a/docs/CHANGELOG.md
++++ b/docs/CHANGELOG.md
+@@ -15,6 +15,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
+ 
+ ## [Unreleased]
+ 
++- **Generate members inside anonymous classes.** Constructor, accessor and inherited-method actions select the correct expression-owned class and preserve its surrounding code, inherited contracts and body layout. Interface extraction refuses anonymous owners even when resolving a retained action. Contributed by PHP Workbench downstream.
++
+ - **Document escaping exceptions from resolved calls.** Explicit PHPDoc generation follows callable declarations and call arguments, preserves uncaught alternatives and keeps deferred bodies separate. Contributed by PHP Workbench downstream.
+ 
+ - **Preserve constructor parameter contracts.** Generated constructors retain native property types and defaults, while PHPDoc types and refinements remain parameter documentation. Contributed by PHP Workbench downstream.
+diff --git a/examples/php/code_actions.php b/examples/php/code_actions.php
+index 7394cae..899235c 100644
+--- a/examples/php/code_actions.php
++++ b/examples/php/code_actions.php
+@@ -154,6 +154,19 @@ class PhpDocGenerationDemo extends Scaffolding\ScaffoldingException
+ }
+ 
+ 
++// Generate constructor/accessors on the anonymous class property. The edit
++// stays inside the returned class and leaves the surrounding method unchanged.
++class AnonymousGenerationDemo
++{
++    public function make(): object
++    {
++        return new class('Ada') {
++            private string $name;
++        };
++    }
++}
++
++
+ // Class-level @extends with template tab stops.  The parent Scaffolding\TypedCollection
+ // has @template TKey and @template TValue, so typing `/**` above this class
+ // generates `@extends Scaffolding\TypedCollection<TKey, TValue>` with tab stops.
+diff --git a/examples/php/scaffolding/assertions.php b/examples/php/scaffolding/assertions.php
+index e430de0..f3869a0 100644
+--- a/examples/php/scaffolding/assertions.php
++++ b/examples/php/scaffolding/assertions.php
+@@ -33,6 +33,7 @@ final class RequireExtendsConsumer extends Scaffolding\RequireExtendsTestCase
+ 
+ function runDemoAssertions(): void
+ {
++    assert(is_object((new AnonymousGenerationDemo())->make()));
+     $overloadSignature = new BuiltinOverloadSignatureDemo();
+     assert($overloadSignature->translatePairs() === 'zbc', 'the replacement-pairs overload returns the translated string');
+     assert($overloadSignature->translateCharacters() === 'zbc', 'the character-translation overload returns the translated string');
+diff --git a/src/code_actions/cursor_context.rs b/src/code_actions/cursor_context.rs
+index 98f35e8..7985fe7 100644
+--- a/src/code_actions/cursor_context.rs
++++ b/src/code_actions/cursor_context.rs
+@@ -6,13 +6,14 @@
+ //! individual code actions don't each need their own copy of the
+ //! namespace → class-like → member traversal.
+ 
+-use mago_span::HasSpan;
++use mago_span::{HasSpan, Span};
+ use mago_syntax::cst::class_like::constant::ClassLikeConstant;
+ use mago_syntax::cst::class_like::member::ClassLikeMember;
+ use mago_syntax::cst::class_like::method::Method;
+ use mago_syntax::cst::class_like::property::Property;
+ use mago_syntax::cst::function_like::function::Function;
+ use mago_syntax::cst::*;
++use mago_syntax::walker::Walker;
+ 
+ // ── Public types ────────────────────────────────────────────────────────────
+ 
+@@ -21,6 +22,8 @@ use mago_syntax::cst::*;
+ pub(crate) enum ClassLikeContextKind {
+     /// A `class` declaration (concrete or abstract).
+     Class,
++    /// An expression-owned class without a source-level declaration name.
++    AnonymousClass,
+     Interface,
+     Trait,
+     Enum,
+@@ -74,28 +77,90 @@ pub(crate) fn find_cursor_context<'a>(
+     statements: &'a Sequence<'a, Statement<'a>>,
+     cursor: u32,
+ ) -> CursorContext<'a> {
+-    for stmt in statements.iter() {
+-        let ctx = find_in_statement(stmt, cursor);
+-        if !matches!(ctx, CursorContext::None) {
+-            return ctx;
+-        }
++    let mut search = CursorSearch {
++        cursor,
++        selected: CursorContext::None,
++        selected_span: None,
++    };
++    for statement in statements.iter() {
++        CursorContexts.walk_statement(statement, &mut search);
+     }
+-    CursorContext::None
++    search.selected
+ }
+ 
+ // ── AST walk (private) ─────────────────────────────────────────────────────
+ 
++struct CursorSearch<'a> {
++    cursor: u32,
++    selected: CursorContext<'a>,
++    selected_span: Option<Span>,
++}
++
++impl<'a> CursorSearch<'a> {
++    fn consider(&mut self, context: CursorContext<'a>, span: Span) {
++        if matches!(context, CursorContext::None) {
++            return;
++        }
++        let length = span.end.offset.saturating_sub(span.start.offset);
++        if self.selected_span.is_none_or(|previous| {
++            length < previous.end.offset.saturating_sub(previous.start.offset)
++        }) {
++            self.selected = context;
++            self.selected_span = Some(span);
++        }
++    }
++}
++
++struct CursorContexts;
++
++impl<'a> Walker<'a, 'a, CursorSearch<'a>> for CursorContexts {
++    fn walk_statement(&self, statement: &'a Statement<'a>, search: &mut CursorSearch<'a>) {
++        let span = statement.span();
++        if search.cursor >= span.start.offset && search.cursor <= span.end.offset {
++            mago_syntax::walker::walk_statement(self, statement, search);
++        }
++    }
++
++    fn walk_expression(&self, expression: &'a Expression<'a>, search: &mut CursorSearch<'a>) {
++        let span = expression.span();
++        if search.cursor >= span.start.offset && search.cursor <= span.end.offset {
++            mago_syntax::walker::walk_expression(self, expression, search);
++        }
++    }
++
++    fn walk_in_statement(&self, statement: &'a Statement<'a>, search: &mut CursorSearch<'a>) {
++        search.consider(
++            find_in_statement(statement, search.cursor),
++            statement.span(),
++        );
++    }
++
++    fn walk_in_expression(&self, expression: &'a Expression<'a>, search: &mut CursorSearch<'a>) {
++        let Expression::AnonymousClass(class) = expression else {
++            return;
++        };
++        // Constructor arguments execute outside this class's member scope.
++        // A nested anonymous body there is still visited by the canonical walker.
++        if search.cursor < class.left_brace.start.offset
++            || search.cursor > class.right_brace.end.offset
++        {
++            return;
++        }
++        search.consider(
++            CursorContext::InClassLike {
++                kind: ClassLikeContextKind::AnonymousClass,
++                class_readonly: class.modifiers.contains_readonly(),
++                member: find_member_at_cursor(class.members.iter(), search.cursor),
++                all_members: &class.members,
++                body_end: class.right_brace.start.offset,
++            },
++            expression.span(),
++        );
++    }
++}
++
+ fn find_in_statement<'a>(stmt: &'a Statement<'a>, cursor: u32) -> CursorContext<'a> {
+     match stmt {
+-        Statement::Namespace(ns) => {
+-            for s in ns.statements().iter() {
+-                let ctx = find_in_statement(s, cursor);
+-                if !matches!(ctx, CursorContext::None) {
+-                    return ctx;
+-                }
+-            }
+-            CursorContext::None
+-        }
+         Statement::Function(func) => {
+             let span = func.span();
+             if cursor >= span.start.offset && cursor <= span.end.offset {
+diff --git a/src/code_actions/extract_interface.rs b/src/code_actions/extract_interface.rs
+index 2fc9ab6..9e81a14 100644
+--- a/src/code_actions/extract_interface.rs
++++ b/src/code_actions/extract_interface.rs
+@@ -106,6 +106,24 @@ impl Backend {
+         let uri = &data.uri;
+         let cursor_offset = crate::text_position::position_to_offset(content, data.range.start);
+ 
++        // Deferred actions must re-admit their current declaration owner.
++        let named_class = crate::parser::with_parsed_program(
++            content,
++            "resolve_extract_interface",
++            |program, _| {
++                matches!(
++                    find_cursor_context(&program.statements, cursor_offset),
++                    CursorContext::InClassLike {
++                        kind: ClassLikeContextKind::Class,
++                        ..
++                    }
++                )
++            },
++        );
++        if !named_class {
++            return None;
++        }
++
+         let file_ctx = self.file_context_at(uri, cursor_offset);
+ 
+         let current_class = find_class_at_offset(&file_ctx.classes, cursor_offset)?;
+diff --git a/src/code_actions/helpers.rs b/src/code_actions/helpers.rs
+index 2017a97..eb38794 100644
+--- a/src/code_actions/helpers.rs
++++ b/src/code_actions/helpers.rs
+@@ -612,7 +612,12 @@ impl GenerationInheritance {
+         newline: &'static str,
+         fallback_unit: &str,
+     ) -> GenerationLayout {
+-        let class_indent = indent_of_line_at(content, self.target.keyword_offset as usize);
++        let declaration = if self.target.keyword_offset == 0 {
++            self.target.start_offset
++        } else {
++            self.target.keyword_offset
++        };
++        let class_indent = indent_of_line_at(content, declaration as usize);
+         let offset = member as usize;
+         let start = content[..offset]
+             .rfind('\n')
+diff --git a/src/code_actions/implement_methods.rs b/src/code_actions/implement_methods.rs
+index f19b9ca..7aa5cd4 100644
+--- a/src/code_actions/implement_methods.rs
++++ b/src/code_actions/implement_methods.rs
+@@ -33,7 +33,7 @@ impl Backend {
+         let Some(target) = self.method_insertion_at(uri, content, params) else {
+             return;
+         };
+-        let ctx = self.file_context_at(uri, target.keyword);
++        let ctx = self.file_context_at(uri, target.open);
+         let Some(current_class) = super::override_methods::matching_class(&ctx, &target) else {
+             return;
+         };
+diff --git a/src/code_actions/override_methods.rs b/src/code_actions/override_methods.rs
+index bdbeb0d..4219c04 100644
+--- a/src/code_actions/override_methods.rs
++++ b/src/code_actions/override_methods.rs
+@@ -51,7 +51,7 @@ impl Backend {
+         }
+         // Resolve the smallest semantic class first. An anonymous class nested
+         // in a method must never select its containing named class instead.
+-        method_insertion(content, params, class.keyword_offset)
++        method_insertion(content, params, class)
+     }
+ 
+     pub(crate) fn collect_override_method_actions(
+@@ -64,7 +64,7 @@ impl Backend {
+         let Some(target) = self.method_insertion_at(uri, content, params) else {
+             return;
+         };
+-        let ctx = self.file_context_at(uri, target.keyword);
++        let ctx = self.file_context_at(uri, target.open);
+         let Some(class) = matching_class(&ctx, &target) else {
+             return;
+         };
+@@ -335,7 +335,14 @@ impl Backend {
+                         .replace("\r\n", "\n")
+                         .replace(
+                             '\n',
+-                            source_newline(content, target.keyword_offset as usize),
++                            source_newline(
++                                content,
++                                if target.keyword_offset == 0 {
++                                    target.start_offset
++                                } else {
++                                    target.keyword_offset
++                                } as usize,
++                            ),
+                         ),
+                     ),
+                     None => None,
+@@ -379,7 +386,7 @@ pub(super) fn matching_class<'a>(
+ fn method_insertion(
+     content: &str,
+     params: &CodeActionParams,
+-    class_keyword: u32,
++    class: &ClassInfo,
+ ) -> Option<MethodInsertion> {
+     if params.range.start != params.range.end {
+         return None;
+@@ -397,7 +404,15 @@ fn method_insertion(
+         {
+             return None;
+         }
+-        insertion_in_statements(program.statements.iter(), cursor, class_keyword, content)
++        program.statements.iter().find_map(|statement| {
++            insertion_in_node(
++                Node::Statement(statement),
++                cursor,
++                class,
++                content,
++                program.trivia.as_slice(),
++            )
++        })
+     })
+ }
+ 
+@@ -412,93 +427,130 @@ fn cursor_in_inline(node: Node<'_, '_>, cursor: u32) -> bool {
+     found
+ }
+ 
+-fn insertion_in_statements<'a>(
+-    statements: impl Iterator<Item = &'a Statement<'a>>,
++fn insertion_in_node(
++    node: Node<'_, '_>,
+     cursor: u32,
+-    class_keyword: u32,
++    target: &ClassInfo,
+     content: &str,
++    trivia: &[Trivia<'_>],
+ ) -> Option<MethodInsertion> {
+-    for statement in statements {
+-        match statement {
+-            Statement::Namespace(namespace) => {
+-                if let Some(target) = insertion_in_statements(
+-                    namespace.statements().iter(),
+-                    cursor,
+-                    class_keyword,
+-                    content,
+-                ) {
+-                    return Some(target);
+-                }
+-            }
+-            Statement::Class(class)
+-                if class.class.span.start.offset == class_keyword
+-                    && cursor >= class.span().start.offset
+-                    && cursor <= class.right_brace.start.offset =>
+-            {
+-                let close = class.right_brace.start.offset as usize;
+-                if content.get(close..class.right_brace.end.offset as usize) != Some("}") {
+-                    return None;
+-                }
+-                let close_line = content[..close].rfind('\n').map_or(0, |offset| offset + 1);
+-                let offset = if content[close_line..close]
+-                    .bytes()
+-                    .all(|byte| matches!(byte, b' ' | b'\t'))
+-                {
+-                    close_line
+-                } else {
+-                    close
+-                };
+-                let keyword = class.class.span.start.offset as usize;
+-                let class_line = content[..keyword]
+-                    .rfind('\n')
+-                    .map_or(0, |offset| offset + 1);
+-                let declaration_start = class.span().start.offset as usize;
+-                let declaration_line = content[..declaration_start]
+-                    .rfind('\n')
+-                    .map_or(0, |offset| offset + 1);
+-                let class_prefix = &content[declaration_line..declaration_start];
+-                let class_indent = if class_prefix
+-                    .bytes()
+-                    .all(|byte| matches!(byte, b' ' | b'\t'))
+-                {
+-                    class_prefix
+-                } else {
+-                    ""
+-                };
+-                let indent = class
+-                    .members
+-                    .first()
+-                    .and_then(|member| {
+-                        let start = member.span().start.offset as usize;
+-                        let line = content[..start].rfind('\n').map_or(0, |offset| offset + 1);
+-                        let prefix = &content[line..start];
+-                        (prefix.len() > class_indent.len()
+-                            && prefix.bytes().all(|byte| matches!(byte, b' ' | b'\t')))
+-                        .then(|| prefix.to_owned())
+-                    })
+-                    .unwrap_or_else(|| format!("{class_indent}    "));
+-                let newline = if content[class_line..].find('\n').is_some_and(|offset| {
+-                    offset > 0 && content.as_bytes()[class_line + offset - 1] == b'\r'
+-                }) {
+-                    "\r\n"
+-                } else {
+-                    "\n"
+-                };
+-                return Some(MethodInsertion {
+-                    keyword: keyword as u32,
+-                    open: class.left_brace.start.offset,
+-                    close: close as u32,
+-                    end: class.right_brace.end.offset,
+-                    offset,
+-                    indent,
+-                    class_indent: class_indent.to_owned(),
+-                    newline,
+-                });
+-            }
+-            _ => {}
++    let span = match node {
++        Node::Statement(statement) => Some(statement.span()),
++        Node::Expression(expression) => Some(expression.span()),
++        _ => None,
++    };
++    if span.is_some_and(|span| cursor < span.start.offset || cursor > span.end.offset) {
++        return None;
++    }
++    let syntax = match node {
++        Node::Statement(Statement::Class(class))
++            if class.class.span.start.offset == target.keyword_offset
++                && class.left_brace.start.offset == target.start_offset
++                && class.right_brace.end.offset == target.end_offset =>
++        {
++            Some((
++                class.span(),
++                class.left_brace,
++                class.right_brace,
++                &class.members,
++            ))
++        }
++        Node::Expression(Expression::AnonymousClass(class))
++            if target.keyword_offset == 0
++                && class.left_brace.start.offset == target.start_offset
++                && class.right_brace.end.offset == target.end_offset
++                && cursor >= class.left_brace.start.offset =>
++        {
++            Some((
++                class.span(),
++                class.left_brace,
++                class.right_brace,
++                &class.members,
++            ))
++        }
++        _ => None,
++    };
++    if let Some((declaration, open, close, members)) = syntax {
++        if cursor > close.start.offset {
++            return None;
+         }
++        let anchor = members
++            .first()
++            .map_or(close.start.offset, |member| member.span().start.offset);
++        let newline = super::helpers::generation_newline(content, trivia, anchor);
++        return insertion_from_syntax(
++            content,
++            target.keyword_offset,
++            declaration,
++            (open, close),
++            members,
++            newline,
++        );
+     }
+-    None
++    let mut found = None;
++    node.visit_children(|child| {
++        if found.is_none() {
++            found = insertion_in_node(child, cursor, target, content, trivia);
++        }
++    });
++    found
++}
++
++fn insertion_from_syntax(
++    content: &str,
++    keyword: u32,
++    declaration: mago_span::Span,
++    braces: (mago_span::Span, mago_span::Span),
++    members: &Sequence<'_, ClassLikeMember<'_>>,
++    newline: &'static str,
++) -> Option<MethodInsertion> {
++    let (open, right) = braces;
++    let close = right.start.offset as usize;
++    if content.get(close..right.end.offset as usize) != Some("}") {
++        return None;
++    }
++    let close_line = content[..close].rfind('\n').map_or(0, |offset| offset + 1);
++    let offset = if content[close_line..close]
++        .bytes()
++        .all(|byte| matches!(byte, b' ' | b'\t'))
++    {
++        close_line
++    } else {
++        close
++    };
++    let declaration_start = declaration.start.offset as usize;
++    let declaration_line = content[..declaration_start]
++        .rfind('\n')
++        .map_or(0, |offset| offset + 1);
++    let prefix = &content[declaration_line..declaration_start];
++    let class_indent = if keyword == 0 {
++        super::helpers::indent_of_line_at(content, declaration_start)
++    } else if prefix.bytes().all(|byte| matches!(byte, b' ' | b'\t')) {
++        prefix.to_owned()
++    } else {
++        String::new()
++    };
++    let indent = members
++        .first()
++        .and_then(|member| {
++            let start = member.span().start.offset as usize;
++            let line = content[..start].rfind('\n').map_or(0, |offset| offset + 1);
++            let prefix = &content[line..start];
++            (prefix.len() > class_indent.len()
++                && prefix.bytes().all(|byte| matches!(byte, b' ' | b'\t')))
++            .then(|| prefix.to_owned())
++        })
++        .unwrap_or_else(|| format!("{class_indent}    "));
++    Some(MethodInsertion {
++        keyword,
++        open: open.start.offset,
++        close: close as u32,
++        end: right.end.offset,
++        offset,
++        indent,
++        class_indent,
++        newline,
++    })
+ }
+ 
+ fn find_method<'a>(
+diff --git a/src/parser/mod.rs b/src/parser/mod.rs
+index 84c307a..98e66e8 100644
+--- a/src/parser/mod.rs
++++ b/src/parser/mod.rs
+@@ -1652,7 +1652,15 @@ impl Backend {
+                             result.push((cls, None, None));
+                         }
+                     }
+-                    _ => {}
++                    _ => {
++                        let mut anonymous = Vec::new();
++                        Self::find_anonymous_classes_in_statement(
++                            statement,
++                            &mut anonymous,
++                            Some(&doc_ctx),
++                        );
++                        result.extend(anonymous.into_iter().map(|class| (class, None, None)));
++                    }
+                 }
+             }
+ 
+diff --git a/tests/integration/code_action_extract_interface.rs b/tests/integration/code_action_extract_interface.rs
+index ff2f386..a4df31a 100644
+--- a/tests/integration/code_action_extract_interface.rs
++++ b/tests/integration/code_action_extract_interface.rs
+@@ -154,3 +154,85 @@ class User
+         _ => panic!("expected Operations variant"),
+     }
+ }
++
++#[test]
++fn anonymous_generation_does_not_extract_a_synthetic_interface_name() {
++    let backend = create_test_backend();
++    let source = "<?php\n$value = new class { public function run(): void {} };\n";
++    let uri = "file:///tmp/Anonymous.php";
++    backend.update_ast(uri, source);
++    let actions = get_code_actions_at(&backend, uri, source, 1, 22);
++    assert!(
++        find_action_titled(&actions, "Extract interface").is_none(),
++        "{actions:?}"
++    );
++}
++
++#[test]
++fn direct_resolve_extract_interface_refuses_anonymous_owner() {
++    let content = "<?php\n$value = new class\n{\n    public function api(): void {}\n};\n";
++    let uri = "file:///tmp/AnonymousResolve.php";
++    let backend = create_test_backend();
++    backend.update_ast(uri, content);
++    backend
++        .open_files()
++        .write()
++        .insert(uri.to_owned(), Arc::new(content.to_owned()));
++    let range = Range::new(Position::new(3, 12), Position::new(3, 12));
++    let direct = CodeAction {
++        title: "Extract interface".into(),
++        kind: Some(CodeActionKind::REFACTOR_EXTRACT),
++        data: Some(serde_json::json!({
++            "action_kind": "refactor.extractInterface",
++            "uri": uri,
++            "range": range,
++            "extra": null
++        })),
++        ..Default::default()
++    };
++    // The actual public resolve path must independently admit current syntax.
++    let (resolved, _) = backend.resolve_code_action(direct);
++    assert!(
++        resolved.edit.is_none(),
++        "anonymous resolve proposed synthetic interface edits: {:?}",
++        resolved.edit
++    );
++    assert!(resolved.command.is_none());
++    let fresh = get_code_actions_at(&backend, uri, content, 3, 12);
++    assert!(find_action_titled(&fresh, "Extract interface").is_none());
++}
++
++#[test]
++fn named_extract_interface_action_cannot_resolve_as_anonymous_owner() {
++    let named = "<?php\nclass Source\n{\n    public function api(): void {}\n}\n";
++    let anonymous = "<?php\n$value = new class\n{\n    public function api(): void {}\n};\n";
++    let uri = "file:///tmp/RetainedExtract.php";
++    let backend = create_test_backend();
++    backend.update_ast(uri, named);
++    backend
++        .open_files()
++        .write()
++        .insert(uri.to_owned(), Arc::new(named.to_owned()));
++    let offered = get_code_actions_at(&backend, uri, named, 3, 12);
++    let action = find_action_titled(&offered, "Extract interface")
++        .expect("named class positive control must advertise extraction")
++        .clone();
++    let (ordinary, _) = backend.resolve_code_action(action.clone());
++    assert!(
++        ordinary.edit.is_some(),
++        "unchanged named owner still resolves"
++    );
++    // Keep original deferred data, but publish actual new syntax/content.
++    backend.update_ast(uri, anonymous);
++    backend
++        .open_files()
++        .write()
++        .insert(uri.to_owned(), Arc::new(anonymous.to_owned()));
++    let (retained, _) = backend.resolve_code_action(action);
++    assert!(
++        retained.edit.is_none(),
++        "retained named data must not create an anonymous synthetic interface: {:?}",
++        retained.edit
++    );
++    assert!(retained.command.is_none());
++}
+diff --git a/tests/integration/code_action_generate_constructor.rs b/tests/integration/code_action_generate_constructor.rs
+index 32ff9a3..6c52645 100644
+--- a/tests/integration/code_action_generate_constructor.rs
++++ b/tests/integration/code_action_generate_constructor.rs
+@@ -1926,3 +1926,73 @@ class DocTypeCase {
+         "documentation must not introduce PHP members: {result}"
+     );
+ }
++
++#[test]
++fn anonymous_generation_constructor_preserves_expression_and_following_class() {
++    let backend = create_test_backend();
++    let source = "<?php\n$value = new class('Ada') { private string $name; }; class Following { public int $other; }\n";
++    let position = position_of(source, "private string");
++    let actions = get_code_actions_in_range(
++        &backend,
++        "file:///test.php",
++        source,
++        Range::new(position, position),
++    );
++    for title in ["Generate constructor", "Generate promoted constructor"] {
++        let action = find_action_titled(&actions, title).expect("anonymous constructor action");
++        assert!(action.disabled.is_none(), "{action:?}");
++        let result = apply_workspace_edit(source, action.edit.as_ref().unwrap());
++        assert!(
++            result.starts_with("<?php\n$value = new class('Ada') {"),
++            "{result}"
++        );
++        assert!(
++            result.ends_with("}; class Following { public int $other; }\n"),
++            "{result}"
++        );
++        assert!(result.contains("function __construct("), "{result}");
++    }
++}
++
++#[test]
++fn anonymous_generation_nested_constructor_uses_inner_properties_and_layout() {
++    let backend = create_test_backend();
++    let source = "<?php\nclass Outer {\n    private int $outer;\n    public function make() {\n        return new class('Ada') {\n            private string $name;\n        };\n    }\n}\n";
++    let position = position_of(source, "private string");
++    let actions = get_code_actions_in_range(
++        &backend,
++        "file:///test.php",
++        source,
++        Range::new(position, position),
++    );
++    let action =
++        find_action_titled(&actions, "Generate constructor").expect("nested anonymous action");
++    let result = apply_workspace_edit(source, action.edit.as_ref().unwrap());
++    assert!(result.contains("            public function __construct(string $name)\n            {\n                $this->name = $name;"), "{result}");
++    assert!(!result.contains("$this->outer ="), "{result}");
++    assert!(result.ends_with("        };\n    }\n}\n"), "{result}");
++}
++
++#[test]
++fn anonymous_generation_preserves_parent_and_trait_initialization() {
++    for source in [
++        "<?php\nclass Base { public function __construct(string $token) {} }\n$value = new class('token') extends Base { private string $name; };\n",
++        "<?php\ntrait Initializes { public function __construct(string $token) {} }\n$value = new class('token') { use Initializes; private string $name; };\n",
++    ] {
++        let backend = create_test_backend();
++        let position = position_of(source, "private string");
++        let actions = get_code_actions_in_range(
++            &backend,
++            "file:///test.php",
++            source,
++            Range::new(position, position),
++        );
++        for title in ["Generate constructor", "Generate promoted constructor"] {
++            let action = find_action_titled(&actions, title).expect("explicit refusal");
++            assert!(
++                action.disabled.is_some() && action.edit.is_none(),
++                "{action:?}"
++            );
++        }
++    }
++}
+diff --git a/tests/integration/code_action_generate_getter_setter.rs b/tests/integration/code_action_generate_getter_setter.rs
+index 24a73cc..2cc8bd5 100644
+--- a/tests/integration/code_action_generate_getter_setter.rs
++++ b/tests/integration/code_action_generate_getter_setter.rs
+@@ -1360,3 +1360,53 @@ fn accessor_name_collision_inherited_getter_exclusion_leaves_unique_getter() {
+         accessor_collision_disabled(&actions, title, &["$foo_bar", "$fooBar"], "setFooBar");
+     }
+ }
++
++#[test]
++fn anonymous_generation_accessor_stays_inside_expression() {
++    let backend = create_test_backend();
++    let source = "<?php\n$value = new class { private string $name = 'Ada'; }; echo 'after';\n";
++    let actions = actions_at(&backend, source, "private string");
++    let action =
++        find_action_titled(&actions, "Generate getter and setter").expect("anonymous accessors");
++    assert!(action.disabled.is_none(), "{action:?}");
++    let result = apply_edits(source, &extract_edits(action));
++    assert!(result.contains("function getName(): string"), "{result}");
++    assert!(
++        result.contains("function setName(string $name): self"),
++        "{result}"
++    );
++    assert!(result.ends_with("}; echo 'after';\n"), "{result}");
++}
++
++#[test]
++fn anonymous_generation_readonly_class_has_no_setter() {
++    let backend = create_test_backend();
++    let source = "<?php\n$value = new readonly class { private string $name; };\n";
++    let actions = actions_at(&backend, source, "private string");
++    assert!(
++        find_action_titled(&actions, "Generate getter")
++            .is_some_and(|action| action.disabled.is_none()),
++        "{actions:?}"
++    );
++    assert!(
++        find_action_titled(&actions, "Generate setter").is_none(),
++        "{actions:?}"
++    );
++}
++
++#[test]
++fn anonymous_generation_does_not_duplicate_inherited_getter() {
++    let backend = create_test_backend();
++    let source = "<?php\nclass Base { final public function getName(): string { return 'base'; } }\n$value = new class extends Base { private string $name = 'Ada'; };\n";
++    let actions = actions_at(&backend, source, "private string");
++    let getter = find_action_titled(&actions, "Generate getter").expect("inherited getter refusal");
++    assert!(
++        getter.disabled.is_some() && getter.edit.is_none(),
++        "{getter:?}"
++    );
++    assert!(
++        find_action_titled(&actions, "Generate setter")
++            .is_some_and(|action| action.disabled.is_none()),
++        "{actions:?}"
++    );
++}
+diff --git a/tests/integration/code_action_override_methods.rs b/tests/integration/code_action_override_methods.rs
+index 7ce42c6..b24e840 100644
+--- a/tests/integration/code_action_override_methods.rs
++++ b/tests/integration/code_action_override_methods.rs
+@@ -210,12 +210,10 @@ fn method_generation_from_members_and_comments_inserts_at_class_close() {
+ }
+ 
+ #[test]
+-fn method_generation_refuses_html_anonymous_and_unclosed_class_contexts() {
++fn method_generation_refuses_html_and_unclosed_class_contexts() {
+     for source in [
+         "<h1><caret>Child</h1>\n<?php\nclass Base { public function render() {} }\nclass Child extends Base {}\n",
+         "<?php\nclass Base { public function render() {} }\nclass <caret>Child extends Base {\n",
+-        "<?php\ninterface Contract { public function required(): void; }\nclass Base { public function render() {} }\nclass Outer extends Base implements Contract { public function make() { return new class extends Base implements Contract { public function other() { <caret>$x = 1; } }; } }\n",
+-        "<?php\nclass Base { public function render() {} }\n$value = new class extends Base { // <caret>comment\n};\n",
+         "<?php\nclass Base { public function render() {} }\nclass Child extends Base { public function other() { ?><p><caret>HTML</p><?php } }\n",
+     ] {
+         let (_, found) = actions(source, PhpVersion::new(8, 4));
+@@ -501,3 +499,64 @@ fn method_generation_does_not_follow_imports_for_canonical_parent_names() {
+     assert!(find_action(&found, "Implement `render`").is_some());
+     assert!(find_action(&found, "Implement `wrong`").is_none());
+ }
++
++#[test]
++fn anonymous_generation_override_is_inserted_in_the_innermost_class() {
++    let result = generated(
++        "<?php\nclass Base { public function render(string $name): string { return $name; } }\nclass Outer { public function make() { return new class extends Base { <caret> }; } public function after(): void {} }\n",
++        "render",
++    );
++    assert!(result.contains("return parent::render($name);"), "{result}");
++    assert!(
++        result.ends_with("}; } public function after(): void {} }\n"),
++        "{result}"
++    );
++}
++
++#[test]
++fn anonymous_generation_uses_body_line_endings_not_constructor_literal() {
++    let marked = "<?php\nclass Base { public function render(): void {} }\n$value = new class('a\nb') extends Base {\r\n    <caret>\r\n};\r\n";
++    let (_, found) = actions(marked, PhpVersion::new(8, 3));
++    let action = find_action(&found, "Override render (").expect("anonymous override");
++    let edit = action.edit.as_ref().unwrap();
++    let text = &edit.changes.as_ref().unwrap().values().next().unwrap()[0].new_text;
++    assert!(text.contains("\r\n"), "{text:?}");
++    assert!(!text.replace("\r\n", "").contains('\n'), "{text:?}");
++}
++
++#[test]
++fn anonymous_generation_preserves_inherited_literal_default_value() {
++    let marked = "<?php\r\nclass Base { public function label(string $value='a\nb'): string { return $value; } }\r\n$value = new class extends Base {\r\n    <caret>\r\n};\r\n";
++    let (_, found) = actions(marked, PhpVersion::new(8, 3));
++    let action = find_action(&found, "Override label (").expect("anonymous override");
++    let edit = action.edit.as_ref().unwrap();
++    let text = &edit.changes.as_ref().unwrap().values().next().unwrap()[0].new_text;
++    assert!(
++        text.contains("string $value = \"\\x61\\x0A\\x62\""),
++        "{text:?}"
++    );
++}
++
++#[test]
++fn anonymous_generation_inner_method_and_body_comment_keep_inner_target() {
++    for marked in [
++        "<?php\ninterface Contract { public function required(): void; }\nclass Base { public function render() {} }\nclass Outer extends Base implements Contract { public function make() { return new class extends Base implements Contract { public function other() { <caret>$x = 1; } }; } }\n",
++        "<?php\nclass Base { public function render() {} }\n$value = new class extends Base { // <caret>comment\n};\n",
++    ] {
++        let (_, found) = actions(marked, PhpVersion::new(8, 3));
++        assert!(
++            find_action(&found, "Override render (").is_some(),
++            "{found:?}"
++        );
++    }
++}
++
++#[test]
++fn anonymous_generation_selects_the_second_sibling_and_namespace_contract() {
++    let marked = "<?php\nnamespace First { class Base { public function render(int $value): int { return $value; } } $a = new class extends Base {}; }\nnamespace Second { class Base { public function render(string $name): string { return $name; } } $b = new class extends Base { <caret> }; }\n";
++    let result = generated(marked, "render");
++    assert!(result.contains("return parent::render($name);"), "{result}");
++    let unchanged_first = marked.split("namespace Second").next().unwrap();
++    assert!(result.starts_with(unchanged_first), "{result}");
++    assert!(result.ends_with("}; }\n"), "{result}");
++}

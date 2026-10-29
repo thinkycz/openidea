@@ -1,0 +1,155 @@
+diff --git a/src/signature_help.rs b/src/signature_help.rs
+--- a/src/signature_help.rs
++++ b/src/signature_help.rs
+@@ -707,14 +707,33 @@
+     ) -> Option<SignatureHelp> {
+         let resolved = self.resolve_callable(&site.call_expression, content, position, ctx)?;
+ 
++        // Named arguments can appear out of declaration order. The current
++        // argument's name, not its comma ordinal, identifies the parameter.
++        let cursor = position_to_offset(content, position) as usize;
++        let args = crate::type_engine::types::conditional::split_text_args(
++            content.get(site.args_start..cursor)?,
++        );
++        let current = trim_argument_trivia(args.last().copied().unwrap_or_default());
++        let (name, _) = crate::call_args::split_named_text_arg(current);
++        let active = if let Some(name) = name {
++            resolved
++                .parameters
++                .iter()
++                .position(|parameter| parameter.name.trim_start_matches('$') == name)
++                .or_else(|| {
++                    resolved
++                        .parameters
++                        .iter()
++                        .position(|parameter| parameter.is_variadic)
++                })? as u32
++        } else {
++            clamp_active_param(site.active_parameter, &resolved.parameters)
++        };
+         let sig = build_signature(&resolved.parameters, resolved.return_type.as_ref());
+         Some(SignatureHelp {
+             signatures: vec![sig],
+             active_signature: Some(0),
+-            active_parameter: Some(clamp_active_param(
+-                site.active_parameter,
+-                &resolved.parameters,
+-            )),
++            active_parameter: Some(active),
+         })
+     }
+ 
+diff --git a/src/call_args.rs b/src/call_args.rs
+--- a/src/call_args.rs
++++ b/src/call_args.rs
+@@ -123,14 +123,23 @@
+     let trimmed = arg.trim();
+     let bytes = trimmed.as_bytes();
+     let mut i = 0;
+-    if i < bytes.len() && (bytes[i].is_ascii_alphabetic() || bytes[i] == b'_') {
++    if i < bytes.len() && (bytes[i].is_ascii_alphabetic() || bytes[i] == b'_' || bytes[i] >= 0x80) {
+         i += 1;
+-        while i < bytes.len() && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_') {
++        while i < bytes.len()
++            && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_' || bytes[i] >= 0x80)
++        {
+             i += 1;
+         }
+         let name_end = i;
+-        while i < bytes.len() && bytes[i] == b' ' {
+-            i += 1;
++        loop {
++            while i < bytes.len() && bytes[i].is_ascii_whitespace() {
++                i += 1;
++            }
++            if let Some(end) = crate::text_scan::skip_php_comment(bytes, i) {
++                i = end;
++            } else {
++                break;
++            }
+         }
+         if i < bytes.len() && bytes[i] == b':' && (i + 1 >= bytes.len() || bytes[i + 1] != b':') {
+             let name = &trimmed[..name_end];
+@@ -222,6 +231,26 @@
+ 
+ #[cfg(test)]
+ mod tests {
++
++    #[test]
++    fn named_text_labels_accept_php_unicode_and_intervening_trivia() {
++        for input in [
++            "druhý: value",
++            "druhý\t: value",
++            "druhý /* label */ : value",
++            "druhý // label\n: value",
++        ] {
++            assert_eq!(super::split_named_text_arg(input), (Some("druhý"), "value"));
++        }
++        assert_eq!(
++            super::split_named_text_arg("Type::VALUE"),
++            (None, "Type::VALUE")
++        );
++        assert_eq!(
++            super::split_named_text_arg("flag ? yes : no"),
++            (None, "flag ? yes : no")
++        );
++    }
+     use super::*;
+     use crate::atom::atom;
+ 
+diff --git a/tests/integration/signature_help.rs b/tests/integration/signature_help.rs
+--- a/tests/integration/signature_help.rs
++++ b/tests/integration/signature_help.rs
+@@ -1931,3 +1931,40 @@
+         "Expected signature help for each() before the arrow fn starts",
+     );
+ }
++
++#[tokio::test]
++async fn named_argument_signature_tracks_declaration_not_comma_order() {
++    for (index, call, expected) in [
++        (0, "format(suffix: ", Some(1)),
++        (1, "format(suffix: 'Z', prefix: ", Some(0)),
++        (2, "format(/* ž 🐘 */ suffix: ", Some(1)),
++        (3, "format(prefix: 'A', suffix: ", Some(1)),
++        (4, "format(unknown: ", None),
++        (5, "format('A', ", Some(1)),
++        (6, "unicode(druhý: ", Some(1)),
++        (7, "format(suffix /* label */ : ", Some(1)),
++        (8, "format(suffix\t: ", Some(1)),
++    ] {
++        let backend = create_test_backend();
++        let uri = Url::parse(&format!("file:///named_signature_{index}.php")).unwrap();
++        let text = format!(
++            "<?php\nfunction format(string $prefix, string $suffix): string {{ return $prefix.$suffix; }} function unicode(string $první, string $druhý): void {{}}\n{call}"
++        );
++        let character = call.encode_utf16().count() as u32;
++        let result = sig_help_at(&backend, &uri, &text, 2, character).await;
++        assert_eq!(result.as_ref().map(active_param), expected, "{call}");
++    }
++}
++
++#[tokio::test]
++async fn named_variadic_arguments_select_the_variadic_parameter() {
++    let backend = create_test_backend();
++    let uri = Url::parse("file:///named_variadic_signature.php").unwrap();
++    let call = "format(extraName: ";
++    let text =
++        format!("<?php\nfunction format(string $prefix = '', int ...$extra): void {{}}\n{call}");
++    let result = sig_help_at(&backend, &uri, &text, 2, call.len() as u32)
++        .await
++        .unwrap();
++    assert_eq!(active_param(&result), 1);
++}
+diff --git a/docs/CHANGELOG.md b/docs/CHANGELOG.md
+--- a/docs/CHANGELOG.md
++++ b/docs/CHANGELOG.md
+@@ -16,6 +16,8 @@
+ ### Changed
+ 
+ ### Fixed
++
++- **Named-argument signature help.** Reordered named arguments highlight their declared parameter, including named variadic values. Contributed by PHP Workbench (local downstream build).
+ 
+ - **Functions in global namespace blocks stay available.** Calls and parameter types resolve correctly when a file also contains named namespace blocks. Contributed by PHP Workbench (local downstream build).
+ 

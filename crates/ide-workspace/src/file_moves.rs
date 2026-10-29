@@ -270,6 +270,7 @@ mod tests {
         let moves = FileMoves::new();
         let mv = vec![FileMove { from: root.join("a").into(), to: root.join("b").into() }];
         let edit = WorkspaceEdit {
+            guard: None,
             files: vec![FileEdit::Edit {
                 path: root.join("main.ts").into(),
                 edits: vec![TextEdit { range: Range::new(Pos::new(0, 21), Pos::new(0, 22)), new_text: "b".into() }],
@@ -300,6 +301,7 @@ mod tests {
         let docs = documents();
         let moves = FileMoves::new();
         let edit = WorkspaceEdit {
+            guard: None,
             files: vec![
                 FileEdit::Edit {
                     path: root.join("Foo.java").into(),

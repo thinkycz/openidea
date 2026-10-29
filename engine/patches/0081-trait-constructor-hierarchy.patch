@@ -1,0 +1,1450 @@
+diff --git a/docs/CHANGELOG.md b/docs/CHANGELOG.md
+index 70bca4e..05e7783 100644
+--- a/docs/CHANGELOG.md
++++ b/docs/CHANGELOG.md
+@@ -101,6 +101,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
+ 
+ ### Fixed
+ 
++- **Call hierarchy follows trait constructors.** Constructor calls point to the composed trait implementation, including inherited constructors and named aliases, and incoming calls retain those construction sites. Ambiguous trait aliases do not invent a target. Contributed by @thinkycz.
++
+ - **Private member identity.** References and rename distinguish a parent's private declaration from a child's independent namesake while retaining legal lexical access and public override families. Nested trait conflict selection preserves the selected implementation. Contributed by PHP Workbench downstream.
+ 
+ - **Rename refuses occupied names.** Member and class renames preserve distinct declarations, PHP case rules and private inheritance boundaries. Case-only changes and unrelated owners remain available. Parent trait members also follow their effective visibility and class declaration precedence, while inaccessible accesses still report their owning class. Contributed by PHP Workbench downstream.
+diff --git a/examples/php/definition.php b/examples/php/definition.php
+index 40fec36..39702d2 100644
+--- a/examples/php/definition.php
++++ b/examples/php/definition.php
+@@ -72,6 +72,23 @@ class GtdTarget extends GtdParent
+ function gtdHelper(): GtdTarget { return new GtdTarget(); }
+ 
+ 
++// Try: show Callees on constructWithTrait. The constructor target is the
++// trait's initialize method; its Callers include both construction sites.
++trait NavigationConstruction
++{
++    public function initialize() {}
++}
++class NavigationConstructed
++{
++    use NavigationConstruction { initialize as __construct; }
++}
++function constructWithTrait(): void
++{
++    new NavigationConstructed();
++    new NavigationConstructed();
++}
++
++
+ // ── Property Hook Bodies (PHP 8.4) ──────────────────────────────────────────
+ // A `get`/`set` hook body reads like any other body: Ctrl+Click reaches
+ // what is written inside one, `$this` is the class that declares the hook,
+diff --git a/src/call_hierarchy.rs b/src/call_hierarchy.rs
+index 7c4e78f..5928148 100644
+--- a/src/call_hierarchy.rs
++++ b/src/call_hierarchy.rs
+@@ -11,7 +11,7 @@
+ //! Blade coordinates as its last step, while the byte offset carried in the
+ //! item's `data` stays virtual so a follow-up request lands where it should.
+ 
+-use std::collections::{HashMap, HashSet};
++use std::collections::HashMap;
+ use std::sync::Arc;
+ 
+ use tower_lsp::lsp_types::{
+@@ -88,7 +88,7 @@ impl Backend {
+         let mut cache = FileCache::default();
+         let target = self.php_callable_from_item(&mut cache, item)?;
+         let (content, _) = self.cached_file(&mut cache, target.item.uri.as_str())?;
+-        let references = self
++        let mut references = self
+             .find_references(
+                 target.item.uri.as_str(),
+                 &content,
+@@ -96,6 +96,26 @@ impl Backend {
+                 false,
+             )
+             .unwrap_or_default();
++        // A method such as initialize() can also be invoked through a trait
++        // constructor alias. Preserve both ordinary calls and known new sites.
++        if let Some(data) = target.item.data.as_ref()
++            && let (Some(owner), Some(method)) = (
++                data.get("owner").and_then(|owner| owner.as_str()),
++                data.get("method").and_then(|method| method.as_str()),
++            )
++            && !method.eq_ignore_ascii_case("__construct")
++            && self
++                .find_or_load_class(owner)
++                .is_some_and(|class| class.kind == crate::types::ClassLikeKind::Trait)
++        {
++            for location in
++                self.find_constructor_implementation_references(&[owner.to_owned()], method, false)
++            {
++                if !references.contains(&location) {
++                    references.push(location);
++                }
++            }
++        }
+ 
+         let mut grouped: HashMap<String, (CallHierarchyItem, Vec<Range>)> = HashMap::new();
+         for reference in references {
+@@ -213,35 +233,28 @@ impl Backend {
+         let SymbolKind::ClassReference { name, is_fqn, .. } = &span.kind else {
+             return None;
+         };
+-        let mut next = Some(if *is_fqn {
++        let fqn = if *is_fqn {
+             name.trim_start_matches('\\').to_string()
+         } else {
+             self.file_context(uri).resolve_name_at(name, span.start)
+-        });
+-
+-        let mut visited: HashSet<String> = HashSet::new();
+-        while let Some(fqn) = next.take() {
+-            if !visited.insert(fqn.clone()) {
+-                return None;
+-            }
+-            let class = self.find_or_load_class(&fqn)?;
+-            // A constructor the class inherited carries the declaring file's
+-            // offsets, so feeding it back through the callable lookup finds
+-            // nothing here and the walk moves on to the parent.
+-            if let Some(constructor) = class.get_method("__construct")
+-                && constructor.name_offset != 0
+-                && !constructor.is_virtual
+-                && let Some((class_uri, _)) = self.find_class_file_content(&fqn, "", "")
+-                && let Some((content, symbol_map)) = self.cached_file(cache, &class_uri)
+-                && let Some(callable) =
+-                    self.php_callable_at(&class_uri, &content, &symbol_map, constructor.name_offset)
+-                && callable.item.name.eq_ignore_ascii_case("__construct")
+-            {
+-                return Some(callable);
+-            }
+-            next = class.parent_class.as_ref().map(|parent| parent.to_string());
++        };
++        let class = self.find_or_load_class(&fqn)?;
++        let loader = |name: &str| self.find_or_load_class(name);
++        let crate::inheritance::ancestry::MethodOrigin::Known { owner, method } =
++            crate::inheritance::ancestry::resolve_concrete_method_origin(
++                &class,
++                "__construct",
++                &loader,
++            )
++        else {
++            return None;
++        };
++        if method.name_offset == 0 {
++            return None;
+         }
+-        None
++        let (owner_uri, _) = self.find_class_file_content(&owner.fqn(), "", "")?;
++        let (content, symbol_map) = self.cached_file(cache, &owner_uri)?;
++        self.php_callable_at(&owner_uri, &content, &symbol_map, method.name_offset)
+     }
+ 
+     fn php_callable_from_item(
+diff --git a/src/inheritance/ancestry.rs b/src/inheritance/ancestry.rs
+index 0a1f078..4b1007e 100644
+--- a/src/inheritance/ancestry.rs
++++ b/src/inheritance/ancestry.rs
+@@ -255,3 +255,214 @@ fn collect_supertypes(
+         collect_supertypes(&loaded, class_loader, visited, out, depth + 1);
+     }
+ }
++
++/// Concrete implementation identity after PHP class/trait precedence.
++/// Unlike first-match navigation, callers can refuse invalid ambiguous composition.
++#[derive(Clone)]
++pub(crate) enum MethodOrigin {
++    Known {
++        owner: Arc<ClassInfo>,
++        method: Arc<crate::types::MethodInfo>,
++    },
++    /// A real declared requirement exists, but has no executable body.
++    Abstract,
++    Missing,
++    Unknown,
++    Ambiguous,
++}
++
++/// Resolve source ownership only; canonical parsed names/adaptations are inputs.
++/// No signature substitution, text scanning, or virtual-method inference occurs.
++pub(crate) fn resolve_concrete_method_origin(
++    class: &Arc<ClassInfo>,
++    name: &str,
++    loader: ClassLoader<'_>,
++) -> MethodOrigin {
++    struct Walk {
++        path: HashSet<(String, String)>,
++        completed: std::collections::HashMap<(String, String), MethodOrigin>,
++        remaining: usize,
++    }
++    fn combine(candidates: impl IntoIterator<Item = MethodOrigin>) -> MethodOrigin {
++        let mut found: Option<(Arc<ClassInfo>, Arc<crate::types::MethodInfo>)> = None;
++        let mut unknown = false;
++        let mut abstract_member = false;
++        for candidate in candidates {
++            match candidate {
++                MethodOrigin::Known { owner, method } => {
++                    if let Some((previous_owner, previous_method)) = &found {
++                        if !previous_owner.fqn().eq_ignore_ascii_case(&owner.fqn())
++                            || previous_method.name_offset != method.name_offset
++                            || !previous_method.name.eq_ignore_ascii_case(&method.name)
++                        {
++                            return MethodOrigin::Ambiguous;
++                        }
++                    } else {
++                        found = Some((owner, method));
++                    }
++                }
++                MethodOrigin::Ambiguous => return MethodOrigin::Ambiguous,
++                MethodOrigin::Unknown => unknown = true,
++                MethodOrigin::Abstract => abstract_member = true,
++                MethodOrigin::Missing => {}
++            }
++        }
++        if unknown {
++            return MethodOrigin::Unknown;
++        }
++        found.map_or(
++            if abstract_member {
++                MethodOrigin::Abstract
++            } else {
++                MethodOrigin::Missing
++            },
++            |(owner, method)| MethodOrigin::Known { owner, method },
++        )
++    }
++    fn walk(
++        class: &Arc<ClassInfo>,
++        name: &str,
++        loader: ClassLoader<'_>,
++        depth: u32,
++        state: &mut Walk,
++    ) -> MethodOrigin {
++        if depth > MAX_INHERITANCE_DEPTH.saturating_add(MAX_TRAIT_DEPTH) {
++            return MethodOrigin::Unknown;
++        }
++        let key = (class.fqn().to_ascii_lowercase(), name.to_ascii_lowercase());
++        if let Some(result) = state.completed.get(&key) {
++            return result.clone();
++        }
++        if state.remaining == 0 || !state.path.insert(key.clone()) {
++            return MethodOrigin::Unknown;
++        }
++        state.remaining -= 1;
++        let result = surface(class, name, loader, depth, state);
++        state.path.remove(&key);
++        // Unknown can depend on the active cycle path or exhausted budget.
++        // Memoize only completed semantic answers, keeping repeated diamonds cheap.
++        if !matches!(result, MethodOrigin::Unknown) {
++            state.completed.insert(key, result.clone());
++        }
++        result
++    }
++
++    fn surface(
++        class: &Arc<ClassInfo>,
++        name: &str,
++        loader: ClassLoader<'_>,
++        depth: u32,
++        state: &mut Walk,
++    ) -> MethodOrigin {
++        let mut own = class
++            .methods
++            .iter()
++            .filter(|method| !method.is_virtual && method.name.eq_ignore_ascii_case(name));
++        if let Some(method) = own.next() {
++            if own.next().is_some() {
++                return MethodOrigin::Ambiguous;
++            }
++            return if method.is_abstract {
++                MethodOrigin::Abstract
++            } else {
++                MethodOrigin::Known {
++                    owner: Arc::clone(class),
++                    method: Arc::clone(method),
++                }
++            };
++        }
++        let mut candidates = Vec::new();
++        for used_name in &class.used_traits {
++            let excluded = class.trait_precedences.iter().any(|precedence| {
++                precedence.method_name.eq_ignore_ascii_case(name)
++                    && precedence
++                        .insteadof
++                        .iter()
++                        .any(|excluded| excluded.eq_ignore_ascii_case(used_name))
++            });
++            if !excluded {
++                candidates.push(match loader(used_name) {
++                    Some(used) => walk(&used, name, loader, depth + 1, state),
++                    None => MethodOrigin::Unknown,
++                });
++            }
++        }
++        // Named aliases contribute their original implementation. Qualified
++        // aliases may retain an insteadof-excluded source under a fresh name.
++        for alias in &class.trait_aliases {
++            if !alias
++                .alias
++                .as_ref()
++                .is_some_and(|alias| alias.eq_ignore_ascii_case(name))
++            {
++                continue;
++            }
++            let mut sources = Vec::new();
++            for used_name in &class.used_traits {
++                if alias
++                    .trait_name
++                    .as_ref()
++                    .is_some_and(|source| !source.eq_ignore_ascii_case(used_name))
++                {
++                    continue;
++                }
++                // PHP binds an unqualified alias against all original direct
++                // trait tables, independently of insteadof exclusions.
++                sources.push(match loader(used_name) {
++                    Some(used) => walk(&used, &alias.method_name, loader, depth + 1, state),
++                    None => MethodOrigin::Unknown,
++                });
++            }
++            let result = if alias.trait_name.is_none()
++                && sources
++                    .iter()
++                    .filter(|source| {
++                        matches!(source, MethodOrigin::Known { .. } | MethodOrigin::Abstract)
++                    })
++                    .count()
++                    > 1
++            {
++                // Even a diamond exposing one implementation through two direct
++                // traits is ambiguous as an unqualified alias source in PHP.
++                MethodOrigin::Ambiguous
++            } else {
++                match combine(sources) {
++                    MethodOrigin::Missing => MethodOrigin::Unknown,
++                    result => result,
++                }
++            };
++            candidates.push(result);
++        }
++        let requirements = combine(candidates);
++        match requirements {
++            MethodOrigin::Missing | MethodOrigin::Abstract => {}
++            result => return result,
++        }
++        // A trait's abstract surface is an obligation, not an absent alias
++        // source and not an executable override. A concrete inherited method
++        // can satisfy it (including an abstract constructor alias).
++        match &class.parent_class {
++            Some(parent) => {
++                match crate::class_lookup::load_ancestor(&class.fqn(), parent, loader) {
++                    Some(parent) => match walk(&parent, name, loader, depth + 1, state) {
++                        MethodOrigin::Missing => requirements,
++                        result => result,
++                    },
++                    None => MethodOrigin::Unknown,
++                }
++            }
++            None => requirements,
++        }
++    }
++    walk(
++        class,
++        name,
++        loader,
++        0,
++        &mut Walk {
++            path: HashSet::new(),
++            completed: std::collections::HashMap::new(),
++            remaining: 1000,
++        },
++    )
++}
+diff --git a/src/reference_index.rs b/src/reference_index.rs
+index aede452..7007389 100644
+--- a/src/reference_index.rs
++++ b/src/reference_index.rs
+@@ -18,7 +18,9 @@ use crate::Backend;
+ use crate::atom::{Atom, AtomMap, AtomSet, atom};
+ use crate::backend::file_access::namespace_in_spans;
+ use crate::class_lookup::find_class_at_offset;
+-use crate::symbol_map::{LaravelStringKind, SelfStaticParentKind, SymbolKind, SymbolMap};
++use crate::symbol_map::{
++    ClassRefContext, LaravelStringKind, SelfStaticParentKind, SymbolKind, SymbolMap,
++};
+ use crate::types::NamespaceSpan;
+ use crate::util::{build_fqn, short_name, strip_fqn_prefix};
+ 
+@@ -760,7 +762,11 @@ impl Backend {
+         namespaces: &OnceCell<Vec<NamespaceSpan>>,
+     ) -> Vec<(ReferenceIndexKey, bool)> {
+         match &span.kind {
+-            SymbolKind::ClassReference { name, is_fqn, .. } => {
++            SymbolKind::ClassReference {
++                name,
++                is_fqn,
++                context,
++            } => {
+                 // A resource document only ever records fully-qualified
+                 // names, so the short-name candidate key `class_keys` adds
+                 // for a source spelling that could differ from the resolved
+@@ -781,7 +787,17 @@ impl Backend {
+                     let (use_map, namespace) = self.use_map_and_namespace_at(uri, span.start);
+                     normalize_symbol_name(Self::resolve_to_fqn(name, &use_map, &namespace))
+                 };
+-                class_keys(&resolved, name)
++                let mut keys = class_keys(&resolved, name);
++                if matches!(context, ClassRefContext::New | ClassRefContext::Attribute) {
++                    keys.push((
++                        ReferenceIndexKey::Member {
++                            name: "__construct".to_string(),
++                            is_static: false,
++                        },
++                        false,
++                    ));
++                }
++                keys
+             }
+             SymbolKind::ClassDeclaration { name } => {
+                 let namespace = self.namespace_at_offset(uri, span.start);
+@@ -789,18 +805,29 @@ impl Backend {
+                 class_keys(&fqn, name)
+             }
+             SymbolKind::SelfStaticParent(kind) if *kind != SelfStaticParentKind::This => {
++                // Candidate only: the scanner checks whether this is a new
++                // operand or explicit constructor delegation. Keeping the
++                // coarse superset also covers not-yet-resolved class scopes.
++                let mut keys = vec![(
++                    ReferenceIndexKey::Member {
++                        name: "__construct".to_string(),
++                        is_static: false,
++                    },
++                    false,
++                )];
+                 let (classes, namespace) = self.classes_and_namespace_at(uri, span.start);
+-                let Some(current_class) = find_class_at_offset(&classes, span.start) else {
+-                    return Vec::new();
+-                };
+-                let fqn = match kind {
+-                    SelfStaticParentKind::Parent => {
+-                        current_class.parent_class.map(normalize_symbol_name)
++                if let Some(current_class) = find_class_at_offset(&classes, span.start) {
++                    let fqn = match kind {
++                        SelfStaticParentKind::Parent => {
++                            current_class.parent_class.map(normalize_symbol_name)
++                        }
++                        _ => Some(build_fqn(&current_class.name, namespace.as_deref())),
++                    };
++                    if let Some(name) = fqn {
++                        keys.extend(class_keys(&name, short_name(&name)));
+                     }
+-                    _ => Some(build_fqn(&current_class.name, namespace.as_deref())),
+-                };
+-                fqn.map(|name| class_keys(&name, short_name(&name)))
+-                    .unwrap_or_default()
++                }
++                keys
+             }
+             SymbolKind::FunctionCall { name, .. } => {
+                 let resolved = if let Some(fqn) = self.resolved_name_at(uri, span.start) {
+@@ -1567,3 +1594,112 @@ mod tests {
+         })
+     }
+ }
++
++#[cfg(test)]
++mod constructor_candidate_tests {
++    use super::*;
++
++    fn constructor_key() -> ReferenceIndexKey {
++        ReferenceIndexKey::Member {
++            name: "__construct".to_string(),
++            is_static: false,
++        }
++    }
++
++    #[test]
++    fn new_and_attribute_are_constructor_candidates_without_counting_member_references() {
++        let backend = Backend::new_test();
++        let uri = "file:///project/main.php";
++        backend.update_ast(
++            uri,
++            "<?php
++#[Vendor\\Attribute] class Consumer {}
++new \\Vendor\\Built();
++",
++        );
++        backend.workspace_indexed.store(true, Ordering::Release);
++        let key = constructor_key();
++        let candidates = backend
++            .reference_candidate_uris_for_keys(std::slice::from_ref(&key))
++            .unwrap();
++        assert!(
++            candidates.contains(uri),
++            "constructor scan must visit actual instantiation files even when the class belongs to vendor"
++        );
++        let counts: u32 = backend
++            .reference_index
++            .read()
++            .get(&key)
++            .map(|entries| entries.values().copied().sum())
++            .unwrap_or(0);
++        assert_eq!(counts, 0, "candidate-only hints are not member references");
++        let map = backend.symbol_maps.read().get(uri).cloned().unwrap();
++        let entries = backend.reference_entries_for_symbol_map(uri, &map);
++        assert_eq!(
++            entries
++                .iter()
++                .filter(|(candidate, counted)| *candidate == key && !*counted)
++                .count(),
++            2,
++            "both attribute and new contribute their own coarse candidate"
++        );
++    }
++
++    #[test]
++    fn keyword_constructor_candidates_are_removed_when_file_is_reparsed_without_them() {
++        let backend = Backend::new_test();
++        let uri = "file:///project/src/Consumer.php";
++        backend.update_ast(
++            uri,
++            "<?php
++class Consumer extends ParentType { function make() { new self(); new static(); new parent(); } }
++",
++        );
++        backend.workspace_indexed.store(true, Ordering::Release);
++        let key = constructor_key();
++        assert!(
++            backend
++                .reference_candidate_uris_for_keys(std::slice::from_ref(&key))
++                .unwrap()
++                .contains(uri)
++        );
++        let counts: u32 = backend
++            .reference_index
++            .read()
++            .get(&key)
++            .map(|entries| entries.values().copied().sum())
++            .unwrap_or(0);
++        assert_eq!(counts, 0);
++        backend.update_ast(
++            uri,
++            "<?php
++class Consumer {}
++",
++        );
++        assert!(
++            !backend
++                .reference_candidate_uris_for_keys(&[key])
++                .unwrap()
++                .contains(uri)
++        );
++    }
++
++    #[test]
++    fn ordinary_type_reference_does_not_become_constructor_candidate() {
++        let backend = Backend::new_test();
++        let uri = "file:///project/main.php";
++        backend.update_ast(
++            uri,
++            "<?php
++function take(\\Vendor\\Built $value): void {}
++",
++        );
++        backend.workspace_indexed.store(true, Ordering::Release);
++        assert!(
++            !backend
++                .reference_candidate_uris_for_keys(&[constructor_key()])
++                .unwrap()
++                .contains(uri)
++        );
++    }
++}
+diff --git a/src/references/classes.rs b/src/references/classes.rs
+index a6abc26..039146a 100644
+--- a/src/references/classes.rs
++++ b/src/references/classes.rs
+@@ -9,6 +9,9 @@
+ use super::*;
+ 
+ use std::cell::OnceCell;
++use std::collections::HashMap;
++
++use parking_lot::RwLock;
+ 
+ use tower_lsp::lsp_types::Location;
+ 
+@@ -125,21 +128,58 @@ impl Backend {
+         &self,
+         owner_fqns: &[String],
+         include_declaration: bool,
++    ) -> Vec<Location> {
++        self.find_constructor_implementation_references(
++            owner_fqns,
++            "__construct",
++            include_declaration,
++        )
++    }
++
++    /// Constructor aliases retain the implementation's original name/owner.
++    pub(crate) fn find_constructor_implementation_references(
++        &self,
++        owner_fqns: &[String],
++        implementation_name: &str,
++        include_declaration: bool,
+     ) -> Vec<Location> {
+         if owner_fqns.is_empty() {
+             return Vec::new();
+         }
+ 
+-        // Expand the owners to the set of classes whose instantiation
+-        // invokes this same constructor (inheriting descendants), pruning
+-        // at descendants that override it.
+-        let scoped = self.collect_constructor_hierarchy(owner_fqns);
+-        if scoped.is_empty() {
++        // Match the concrete source declaration for each actual call-site
++        // receiver. Canonical GTI intentionally excludes vendor consumers of
++        // project targets once indexed; it cannot enumerate this call scope.
++        let targets = self.constructor_implementation_origins(owner_fqns, implementation_name);
++        if targets.is_empty() {
+             return Vec::new();
+         }
++        let origin_matches = RwLock::new(HashMap::<String, bool>::new());
++        let matches_constructor = |fqn: &str| {
++            let key = fold_class_fqn(fqn);
++            if let Some(matches) = origin_matches.read().get(&key).copied() {
++                return matches;
++            }
++            use crate::inheritance::ancestry::{MethodOrigin, resolve_concrete_method_origin};
++            let loader = |name: &str| self.find_or_load_class(name);
++            let matches = loader(fqn).is_some_and(|class| {
++                let MethodOrigin::Known { owner, method } =
++                    resolve_concrete_method_origin(&class, "__construct", &loader)
++                else {
++                    return false;
++                };
++                targets.iter().any(|(target_owner, offset, name)| {
++                    *target_owner == fold_class_fqn(&owner.fqn())
++                        && *offset == method.name_offset
++                        && method.name.eq_ignore_ascii_case(name)
++                })
++            });
++            origin_matches.write().insert(key, matches);
++            matches
++        };
+ 
+         let mut candidate_keys = Vec::new();
+-        for fqn in &scoped {
++        for fqn in owner_fqns {
+             candidate_keys.extend(class_candidate_keys(fqn, crate::util::short_name(fqn)));
+         }
+         candidate_keys.extend([
+@@ -189,7 +229,7 @@ impl Backend {
+                             context: ClassRefContext::New | ClassRefContext::Attribute,
+                         } => {
+                             let resolved = fqn_resolver.fqn(name, *is_fqn, span.start);
+-                            scoped.contains(&fold_class_fqn(&resolved))
++                            matches_constructor(&resolved)
+                         }
+                         // `new self()` / `new static()` / `new parent()` carry
+                         // `SelfStaticParent` spans rather than `ClassReference`,
+@@ -207,7 +247,7 @@ impl Backend {
+                                     match self
+                                         .resolve_keyword_to_fqn(ssp_kind, file_uri, span.start)
+                                     {
+-                                        Some(fqn) => scoped.contains(&fold_class_fqn(&fqn)),
++                                        Some(fqn) => matches_constructor(&fqn),
+                                         None => false,
+                                     }
+                                 }
+@@ -225,9 +265,7 @@ impl Backend {
+                             constructor_receivers()
+                                 .and_then(|file| {
+                                     file.resolved_access(span_index).map(|(_, targets)| {
+-                                        targets
+-                                            .iter()
+-                                            .any(|fqn| scoped.contains(&fold_class_fqn(fqn)))
++                                        targets.iter().any(|fqn| matches_constructor(fqn))
+                                     })
+                                 })
+                                 .unwrap_or(false)
+@@ -243,7 +281,7 @@ impl Backend {
+                 // Optionally include the constructor declaration site(s).
+                 if include_declaration && let Some(classes) = self.get_classes_for_uri(file_uri) {
+                     for class in &classes {
+-                        if !scoped.contains(&fold_class_fqn(&class.fqn())) {
++                        if !matches_constructor(&class.fqn()) {
+                             continue;
+                         }
+ 
+@@ -264,56 +302,32 @@ impl Backend {
+         )
+     }
+ 
+-    /// Expand the constructor owner class(es) into the full set of classes
+-    /// whose instantiation (`new X(...)`) invokes the same constructor.
+-    ///
+-    /// Starting from `owner_fqns` (the class(es) that declare the
+-    /// constructor under the cursor), walk down the inheritance tree and
+-    /// include every descendant that does *not* declare its own
+-    /// constructor (those inherit the owner's), pruning the walk at any
+-    /// descendant that overrides it.
+-    ///
+-    /// The returned FQNs are case-folded: they are only ever membership-
+-    /// tested against a call site's resolved class, and PHP lets that site
+-    /// spell the name in any casing.  The walk itself stays on the declared
+-    /// spelling, because the GTI index is keyed by the name each child
+-    /// writes in its `extends`/`implements` clause.
+-    fn collect_constructor_hierarchy(&self, owner_fqns: &[String]) -> HashSet<String> {
+-        let class_loader = |name: &str| -> Option<Arc<ClassInfo>> { self.find_or_load_class(name) };
+-        let declares_ctor = |fqn: &str| -> bool {
+-            class_loader(fqn)
+-                .map(|c| c.methods.iter().any(|m| is_constructor_name(&m.name)))
+-                .unwrap_or(false)
+-        };
+-
+-        let owners: Vec<String> = owner_fqns.iter().map(|f| normalize_fqn(f)).collect();
+-        let mut result: HashSet<String> = owners.iter().map(|f| fold_class_fqn(f)).collect();
+-
+-        // Walk down from each owner, including inheriting descendants and
+-        // pruning at overrides.
+-        let gti = self.symbols.gti_index.read();
+-        let mut queue: std::collections::VecDeque<String> = owners.iter().cloned().collect();
+-        let mut seen: HashSet<String> = owners.iter().map(|f| fold_class_fqn(f)).collect();
+-        while let Some(fqn) = queue.pop_front() {
+-            if let Some(descendants) = gti.get(&fqn) {
+-                for desc in descendants {
+-                    let normalized = normalize_fqn(desc).to_string();
+-                    if !seen.insert(fold_class_fqn(&normalized)) {
+-                        continue;
+-                    }
+-                    // A descendant that declares its own constructor uses a
+-                    // different constructor — exclude it and stop walking
+-                    // past it.
+-                    if declares_ctor(&normalized) {
+-                        continue;
+-                    }
+-                    result.insert(fold_class_fqn(&normalized));
+-                    queue.push_back(normalized);
+-                }
+-            }
+-        }
+-
+-        result
++    /// The requested implementation's concrete source identities. Resolving
++    /// each actual receiver against these preserves aliases, inheritance,
++    /// overrides and ambiguous-origin refusal without enumerating vendor trees.
++    fn constructor_implementation_origins(
++        &self,
++        owner_fqns: &[String],
++        implementation_name: &str,
++    ) -> Vec<(String, u32, String)> {
++        use crate::inheritance::ancestry::{MethodOrigin, resolve_concrete_method_origin};
++        let loader = |name: &str| self.find_or_load_class(name);
++        owner_fqns
++            .iter()
++            .filter_map(|fqn| {
++                let class = loader(fqn)?;
++                let MethodOrigin::Known { owner, method } =
++                    resolve_concrete_method_origin(&class, implementation_name, &loader)
++                else {
++                    return None;
++                };
++                Some((
++                    fold_class_fqn(&owner.fqn()),
++                    method.name_offset,
++                    method.name.to_ascii_lowercase(),
++                ))
++            })
++            .collect()
+     }
+ 
+     /// The class a `self`/`static`/`parent` keyword at `offset` names, by
+diff --git a/tests/integration/call_hierarchy.rs b/tests/integration/call_hierarchy.rs
+index f952fff..5d12fce 100644
+--- a/tests/integration/call_hierarchy.rs
++++ b/tests/integration/call_hierarchy.rs
+@@ -281,3 +281,682 @@ async fn a_recursive_function_is_its_own_caller() {
+     assert_eq!(out.len(), 1);
+     assert_eq!(out[0].to.name, "countdown");
+ }
++
++// Constructor edges must use the actual composed declaration, not only class-owned methods.
++fn trait_ctor_position(source: &str, needle: &str) -> Position {
++    let offset = source.find(needle).expect("fixture token");
++    let prefix = &source[..offset];
++    Position::new(
++        prefix.bytes().filter(|&b| b == b'\n').count() as u32,
++        prefix.rsplit('\n').next().unwrap().encode_utf16().count() as u32,
++    )
++}
++
++async fn trait_ctor_outgoing(
++    backend: &Backend,
++    uri: &Url,
++    source: &str,
++) -> Vec<CallHierarchyOutgoingCall> {
++    open_php(backend, uri, source).await;
++    let position = trait_ctor_position(source, "make():");
++    let roots = prepare_at(backend, uri, position.line, position.character).await;
++    assert_eq!(roots.len(), 1, "actual public prepare must find caller");
++    outgoing(backend, &roots[0]).await
++}
++
++#[tokio::test]
++async fn trait_constructor_known_edge_cross_file_keeps_exact_declaration_and_repeated_sites() {
++    let (backend, dir) = create_psr4_workspace(
++        r#"{"autoload":{"psr-4":{"App\\":"src/"}}}"#,
++        &[
++            (
++                "src/Construction.php",
++                "<?php\nnamespace App;\ntrait Construction\n{\n    public function __construct() {}\n}\n",
++            ),
++            (
++                "src/Built.php",
++                "<?php\nnamespace App;\nclass Built { use Construction; }\n",
++            ),
++        ],
++    );
++    let uri = Url::from_file_path(dir.path().join("main.php")).unwrap();
++    let source =
++        "<?php\n// café 🐘\nfunction make(): void { new \\App\\Built(); new \\App\\Built(); }\n";
++    let calls = trait_ctor_outgoing(&backend, &uri, source).await;
++    assert_eq!(
++        calls.len(),
++        1,
++        "the known trait constructor must not disappear"
++    );
++    assert_eq!(calls[0].to.name, "__construct");
++    assert_eq!(
++        calls[0].to.uri,
++        Url::from_file_path(dir.path().join("src/Construction.php")).unwrap()
++    );
++    assert_eq!(calls[0].to.selection_range.start, Position::new(4, 20));
++    let first = trait_ctor_position(source, "\\App\\Built()");
++    let second_offset = source.rfind("\\App\\Built()").unwrap();
++    let second_prefix = &source[..second_offset];
++    let second = Position::new(
++        2,
++        second_prefix
++            .rsplit('\n')
++            .next()
++            .unwrap()
++            .encode_utf16()
++            .count() as u32,
++    );
++    assert_eq!(calls[0].from_ranges.len(), 2);
++    assert_eq!(calls[0].from_ranges[0].start, first);
++    assert_eq!(calls[0].from_ranges[1].start, second);
++    assert!(
++        outgoing(&backend, &calls[0].to).await.is_empty(),
++        "returned declaration is expandable"
++    );
++}
++
++#[tokio::test]
++async fn trait_constructor_known_edge_nested_alias_targets_original_implementation() {
++    let backend = create_test_backend();
++    let uri = Url::parse("file:///trait_ctor_alias.php").unwrap();
++    let source = "<?php\r\ntrait Inner { public function initialize() {} }\r\ntrait Outer { use Inner; }\r\nclass Built { use Outer { initialize as __construct; } }\r\nfunction make(): void { new Built(); }\r\n";
++    let calls = trait_ctor_outgoing(&backend, &uri, source).await;
++    assert_eq!(
++        calls.len(),
++        1,
++        "nested trait alias supplies the known constructor"
++    );
++    assert_eq!(calls[0].to.uri, uri);
++    assert_eq!(
++        calls[0].to.selection_range.start,
++        trait_ctor_position(source, "initialize()")
++    );
++    assert!(outgoing(&backend, &calls[0].to).await.is_empty());
++}
++
++#[tokio::test]
++async fn trait_constructor_known_edge_overrides_inherited_parent_constructor() {
++    let backend = create_test_backend();
++    let uri = Url::parse("file:///trait_ctor_precedence.php").unwrap();
++    let source = "<?php\nclass ParentType { public function __construct() {} }\ntrait Construction { public function __construct() {} }\nclass Built extends ParentType { use Construction; }\nfunction make(): void { new Built(); }\n";
++    let calls = trait_ctor_outgoing(&backend, &uri, source).await;
++    assert_eq!(calls.len(), 1);
++    assert_eq!(calls[0].to.detail.as_deref(), Some("Construction"));
++    assert_eq!(
++        calls[0].to.selection_range.start,
++        trait_ctor_position(source, "__construct() {} }\nclass Built")
++    );
++}
++
++#[tokio::test]
++async fn trait_constructor_known_edge_own_and_parent_controls_retain_existing_behavior() {
++    let backend = create_test_backend();
++    let uri = Url::parse("file:///trait_ctor_controls.php").unwrap();
++    let source = "<?php\ntrait Construction { public function __construct() {} }\nclass ParentType { public function __construct() {} }\nclass Own { use Construction; public function __construct() {} }\nclass Child extends ParentType {}\nclass EmptyType {}\nfunction make(): void { new Own(); new Child(); new EmptyType(); new MissingType(); }\n";
++    let calls = trait_ctor_outgoing(&backend, &uri, source).await;
++    let mut owners: Vec<_> = calls
++        .iter()
++        .map(|call| call.to.detail.clone().unwrap())
++        .collect();
++    owners.sort();
++    assert_eq!(owners, ["Own", "ParentType"]);
++    assert!(calls.iter().all(|call| call.from_ranges.len() == 1));
++}
++
++#[tokio::test]
++async fn trait_constructor_known_edge_ambiguous_conflict_does_not_invent_one_trait() {
++    let backend = create_test_backend();
++    let uri = Url::parse("file:///trait_ctor_conflict.php").unwrap();
++    let source = "<?php\ntrait First { public function __construct() {} }\ntrait Second { public function __construct() {} }\nclass Broken { use First, Second; }\nfunction make(): void { new Broken(); }\n";
++    let calls = trait_ctor_outgoing(&backend, &uri, source).await;
++    assert!(
++        calls.is_empty(),
++        "invalid ambiguous composition must not invent a winner"
++    );
++}
++
++#[tokio::test]
++async fn trait_constructor_known_edge_inherited_trait_constructor_keeps_trait_owner() {
++    let backend = create_test_backend();
++    let uri = Url::parse("file:///trait_ctor_inherited.php").unwrap();
++    let source = "<?php\ntrait Construction { public function __construct() {} }\nclass ParentType { use Construction; }\nclass Child extends ParentType {}\nfunction make(): void { new Child(); }\n";
++    let calls = trait_ctor_outgoing(&backend, &uri, source).await;
++    assert_eq!(calls.len(), 1);
++    assert_eq!(calls[0].to.detail.as_deref(), Some("Construction"));
++    assert_eq!(
++        calls[0].to.selection_range.start,
++        trait_ctor_position(source, "__construct()")
++    );
++}
++
++#[tokio::test]
++async fn trait_constructor_known_edge_incoming_matches_repeated_and_inherited_but_prunes_override()
++{
++    let backend = create_test_backend();
++    let uri = Url::parse("file:///trait_ctor_incoming.php").unwrap();
++    let source = "<?php\ntrait Construction { public function __construct() {} }\nclass Built { use Construction; }\nclass Child extends Built {}\nclass Own extends Built { public function __construct() {} }\nfunction make(): void { new Built(); new Built(); new Child(); new Own(); }\n";
++    open_php(&backend, &uri, source).await;
++    let position = trait_ctor_position(source, "__construct()");
++    let roots = prepare_at(&backend, &uri, position.line, position.character).await;
++    assert_eq!(roots.len(), 1);
++    let callers = incoming(&backend, &roots[0]).await;
++    assert_eq!(
++        callers.len(),
++        1,
++        "trait constructor owns the known new calls"
++    );
++    assert_eq!(callers[0].from.name, "make");
++    assert_eq!(callers[0].from.uri, uri);
++    let make_line = source.lines().nth(5).unwrap();
++    let mut expected = Vec::new();
++    for needle in ["Built();", "Built(); new Child", "Child();"] {
++        let column = if needle == "Built(); new Child" {
++            make_line.rfind("Built();").unwrap()
++        } else {
++            make_line.find(needle).unwrap()
++        };
++        expected.push(Position::new(
++            5,
++            make_line[..column].encode_utf16().count() as u32,
++        ));
++    }
++    assert_eq!(
++        callers[0]
++            .from_ranges
++            .iter()
++            .map(|range| range.start)
++            .collect::<Vec<_>>(),
++        expected
++    );
++    let callees = trait_ctor_outgoing(&backend, &uri, source).await;
++    let trait_call = callees
++        .iter()
++        .find(|call| call.to.detail.as_deref() == Some("Construction"))
++        .expect("outgoing trait edge");
++    assert_eq!(
++        trait_call.from_ranges, callers[0].from_ranges,
++        "directions agree on source sites"
++    );
++}
++
++#[tokio::test]
++async fn trait_constructor_known_edge_alias_implementation_has_constructor_incoming_sites() {
++    let backend = create_test_backend();
++    let uri = Url::parse("file:///trait_ctor_alias_incoming.php").unwrap();
++    let source = "<?php\ntrait Construction { public function initialize() {} }\nclass Built { use Construction { initialize as __construct; } }\nclass Child extends Built {}\nclass Own extends Built { public function __construct() {} }\nfunction make(): void { new Built(); new Child(); new Own(); }\n";
++    open_php(&backend, &uri, source).await;
++    let position = trait_ctor_position(source, "initialize()");
++    let roots = prepare_at(&backend, &uri, position.line, position.character).await;
++    assert_eq!(roots.len(), 1);
++    let callers = incoming(&backend, &roots[0]).await;
++    assert_eq!(
++        callers.len(),
++        1,
++        "implementation retains calls through constructor alias"
++    );
++    assert_eq!(callers[0].from.name, "make");
++    let line = source.lines().nth(5).unwrap();
++    let expected = ["Built();", "Child();"].map(|needle| {
++        Position::new(
++            5,
++            line[..line.find(needle).unwrap()].encode_utf16().count() as u32,
++        )
++    });
++    assert_eq!(
++        callers[0]
++            .from_ranges
++            .iter()
++            .map(|range| range.start)
++            .collect::<Vec<_>>(),
++        expected
++    );
++    let callees = trait_ctor_outgoing(&backend, &uri, source).await;
++    let implementation = callees
++        .iter()
++        .find(|call| call.to.selection_range.start == position)
++        .expect("alias implementation outgoing edge");
++    assert_eq!(implementation.from_ranges, callers[0].from_ranges);
++}
++
++#[tokio::test]
++async fn trait_constructor_known_edge_multiple_traits_insteadof_and_qualified_alias_are_not_blanket_refused()
++ {
++    let backend = create_test_backend();
++    let uri = Url::parse("file:///trait_ctor_multiple.php").unwrap();
++    let source = "<?php\ntrait First { public function __construct() {} public function initialize() {} }\ntrait Second { public function __construct() {} public function initialize() {} }\nclass Selected { use First, Second { First::__construct insteadof Second; First::initialize insteadof Second; } }\nclass Aliased { use First, Second { First::__construct insteadof Second; First::initialize insteadof Second; Second::initialize as __construct; } public function __construct() {} }\nclass Qualified { use First, Second { First::__construct insteadof Second; First::initialize insteadof Second; Second::initialize as start; } }\nfunction make(): void { new Selected(); new Aliased(); new Qualified(); }\n";
++    let calls = trait_ctor_outgoing(&backend, &uri, source).await;
++    assert_eq!(
++        calls.len(),
++        2,
++        "valid multiple trait surfaces must retain known edges"
++    );
++    let first = calls
++        .iter()
++        .find(|call| call.to.detail.as_deref() == Some("First"))
++        .expect("selected constructor");
++    assert_eq!(first.from_ranges.len(), 2);
++    assert_eq!(
++        first.to.selection_range.start,
++        trait_ctor_position(source, "__construct()")
++    );
++    assert!(
++        calls
++            .iter()
++            .any(|call| call.to.detail.as_deref() == Some("Aliased")),
++        "class own declaration beats imported alias"
++    );
++}
++
++#[tokio::test]
++async fn trait_constructor_known_edge_qualified_alias_retains_excluded_source() {
++    let backend = create_test_backend();
++    let uri = Url::parse("file:///trait_ctor_qualified_alias.php").unwrap();
++    let source = "<?php\ntrait First { public function initialize() {} }\ntrait Second { public function initialize() {} }\nclass Built { use First, Second { First::initialize insteadof Second; Second::initialize as __construct; } }\nfunction make(): void { new Built(); }\n";
++    let calls = trait_ctor_outgoing(&backend, &uri, source).await;
++    assert_eq!(calls.len(), 1);
++    assert_eq!(calls[0].to.detail.as_deref(), Some("Second"));
++    assert_eq!(calls[0].to.selection_range.start.line, 2);
++    assert!(outgoing(&backend, &calls[0].to).await.is_empty());
++}
++
++#[tokio::test]
++async fn trait_constructor_known_edge_mixed_case_insteadof_keeps_selected_origin() {
++    let backend = create_test_backend();
++    let uri = Url::parse("file:///trait_ctor_mixed_precedence.php").unwrap();
++    let source = "<?php\ntrait First { public function __construct() {} }\ntrait Second { public function __construct() {} }\nclass Built { use First, Second { First::__construct insteadof SECOND; } }\nfunction make(): void { new Built(); }\n";
++    let calls = trait_ctor_outgoing(&backend, &uri, source).await;
++    assert_eq!(calls.len(), 1, "PHP trait identifiers are case-insensitive");
++    assert_eq!(calls[0].to.detail.as_deref(), Some("First"));
++    assert_eq!(
++        calls[0].to.selection_range.start,
++        trait_ctor_position(source, "__construct()")
++    );
++    let callers = incoming(&backend, &calls[0].to).await;
++    assert_eq!(callers.len(), 1);
++    assert_eq!(callers[0].from_ranges, calls[0].from_ranges);
++}
++
++#[tokio::test]
++async fn trait_constructor_known_edge_mixed_case_qualified_alias_keeps_source() {
++    let backend = create_test_backend();
++    let uri = Url::parse("file:///trait_ctor_mixed_alias.php").unwrap();
++    let source = "<?php\ntrait Construction { public function initialize() {} }\nclass Built { use Construction { construction::initialize as __construct; } }\nfunction make(): void { new Built(); }\n";
++    let calls = trait_ctor_outgoing(&backend, &uri, source).await;
++    assert_eq!(calls.len(), 1);
++    assert_eq!(calls[0].to.detail.as_deref(), Some("Construction"));
++    assert_eq!(
++        calls[0].to.selection_range.start,
++        trait_ctor_position(source, "initialize()")
++    );
++    let callers = incoming(&backend, &calls[0].to).await;
++    assert_eq!(callers.len(), 1);
++    assert_eq!(callers[0].from_ranges, calls[0].from_ranges);
++}
++
++#[tokio::test]
++async fn trait_constructor_known_edge_unqualified_alias_after_insteadof_remains_ambiguous() {
++    let backend = create_test_backend();
++    let uri = Url::parse("file:///trait_ctor_unqualified_ambiguous.php").unwrap();
++    let source = "<?php\ntrait First { public function initialize() {} }\ntrait Second { public function initialize() {} }\nclass Broken { use First, Second { First::initialize insteadof Second; initialize as __construct; } }\nfunction make(): void { new Broken(); }\n";
++    let calls = trait_ctor_outgoing(&backend, &uri, source).await;
++    assert!(
++        calls.is_empty(),
++        "insteadof does not disambiguate an unqualified alias's source"
++    );
++}
++
++#[tokio::test]
++async fn trait_constructor_known_edge_deep_implementation_diamonds_remain_known() {
++    let backend = create_test_backend();
++    let uri = Url::parse("file:///trait_ctor_diamond.php").unwrap();
++    let mut source = String::from("<?php\ntrait Origin { public function __construct() {} }\n");
++    let mut previous = String::from("Origin");
++    for level in 0..12 {
++        source.push_str(&format!("trait Left{level} {{ use {previous}; }}\ntrait Right{level} {{ use {previous}; }}\ntrait Level{level} {{ use Left{level}, Right{level}; }}\n"));
++        previous = format!("Level{level}");
++    }
++    source.push_str(&format!(
++        "class Built {{ use {previous}; }}\nfunction make(): void {{ new Built(); }}\n"
++    ));
++    let calls = trait_ctor_outgoing(&backend, &uri, &source).await;
++    assert_eq!(
++        calls.len(),
++        1,
++        "repeated identical implementation must not exhaust a per-path budget"
++    );
++    assert_eq!(calls[0].to.detail.as_deref(), Some("Origin"));
++    assert_eq!(
++        calls[0].to.selection_range.start,
++        trait_ctor_position(&source, "__construct()")
++    );
++}
++
++#[tokio::test]
++async fn trait_constructor_known_edge_unqualified_alias_diamond_counts_direct_sources() {
++    let backend = create_test_backend();
++    let uri = Url::parse("file:///trait_ctor_alias_diamond.php").unwrap();
++    let source = "<?php\ntrait Origin { public function initialize() {} }\ntrait Left { use Origin; }\ntrait Right { use Origin; }\nclass Broken { use Left, Right { initialize as __construct; } }\nfunction make(): void { new Broken(); }\n";
++    let calls = trait_ctor_outgoing(&backend, &uri, source).await;
++    assert!(
++        calls.is_empty(),
++        "same implementation is still two ambiguous direct alias sources in PHP"
++    );
++}
++
++#[tokio::test]
++async fn trait_constructor_known_edge_unqualified_alias_abstract_surface_is_still_ambiguous() {
++    let backend = create_test_backend();
++    let uri = Url::parse("file:///trait_ctor_abstract_alias_ambiguous.php").unwrap();
++    let source = "<?php\ntrait Requirement { abstract public function initialize(); }\ntrait Implementation { public function initialize() {} }\nclass Broken { use Requirement, Implementation { initialize as __construct; } }\nfunction make(): void { new Broken(); }\n";
++    let calls = trait_ctor_outgoing(&backend, &uri, source).await;
++    assert!(
++        calls.is_empty(),
++        "an abstract declaration is a second direct alias source, not an absent member"
++    );
++}
++
++#[tokio::test]
++async fn trait_constructor_known_edge_qualified_alias_with_abstract_requirement_keeps_concrete_origin()
++ {
++    let backend = create_test_backend();
++    let uri = Url::parse("file:///trait_ctor_abstract_alias_qualified.php").unwrap();
++    let source = "<?php\ntrait Requirement { abstract public function initialize(); }\ntrait Implementation { public function initialize() {} }\nclass Built { use Requirement, Implementation { Implementation::initialize as __construct; } }\nfunction make(): void { new Built(); }\n";
++    let calls = trait_ctor_outgoing(&backend, &uri, source).await;
++    assert_eq!(
++        calls.len(),
++        1,
++        "an explicitly qualified concrete alias remains valid"
++    );
++    assert_eq!(calls[0].to.uri, uri);
++    assert_eq!(calls[0].to.detail.as_deref(), Some("Implementation"));
++    let implementation_line = source.lines().nth(2).unwrap();
++    let implementation_column = implementation_line.find("initialize()").unwrap();
++    assert_eq!(
++        calls[0].to.selection_range.start,
++        Position::new(
++            2,
++            implementation_line[..implementation_column]
++                .encode_utf16()
++                .count() as u32
++        )
++    );
++    let callers = incoming(&backend, &calls[0].to).await;
++    assert_eq!(callers.len(), 1);
++    assert_eq!(callers[0].from.name, "make");
++    assert_eq!(callers[0].from.uri, uri);
++    assert_eq!(callers[0].from_ranges, calls[0].from_ranges);
++    assert!(outgoing(&backend, &calls[0].to).await.is_empty());
++}
++
++#[tokio::test]
++async fn trait_constructor_known_edge_abstract_qualified_alias_can_retain_parent_constructor() {
++    let backend = create_test_backend();
++    let uri = Url::parse("file:///trait_ctor_abstract_alias_parent.php").unwrap();
++    let source = "<?php\ntrait Requirement { abstract public function initialize(); }\nclass ParentType { public function __construct() {} }\nclass Built extends ParentType { use Requirement { Requirement::initialize as __construct; } public function initialize() {} }\nfunction make(): void { new Built(); }\n";
++    let calls = trait_ctor_outgoing(&backend, &uri, source).await;
++    assert_eq!(
++        calls.len(),
++        1,
++        "a valid abstract alias requirement must not hide the concrete inherited constructor"
++    );
++    assert_eq!(calls[0].to.uri, uri);
++    assert_eq!(calls[0].to.name, "__construct");
++    assert_eq!(calls[0].to.detail.as_deref(), Some("ParentType"));
++    assert_eq!(
++        calls[0].to.selection_range.start,
++        trait_ctor_position(source, "__construct()")
++    );
++    let callers = incoming(&backend, &calls[0].to).await;
++    assert_eq!(callers.len(), 1);
++    assert_eq!(callers[0].from.name, "make");
++    assert_eq!(callers[0].from.uri, uri);
++    assert_eq!(callers[0].from_ranges, calls[0].from_ranges);
++    assert!(outgoing(&backend, &calls[0].to).await.is_empty());
++}
++
++struct TraitCtorVendorFixture {
++    backend: Backend,
++    _dir: tempfile::TempDir,
++    trait_uri: Url,
++    caller_uri: Url,
++    vendor_uri: Url,
++    trait_source: &'static str,
++    caller_source: &'static str,
++}
++
++#[allow(deprecated)]
++async fn trait_ctor_vendor_fixture() -> TraitCtorVendorFixture {
++    const TRAIT: &str =
++        "<?php\nnamespace App;\ntrait Construction { public function __construct() {} }\n";
++    const CALLER: &str = "<?php\n// café 🐘\nfunction make(): void { new \\Vendor\\Built(); new \\Vendor\\Built(); new \\Vendor\\Child(); new \\Vendor\\Own(); }\n";
++    const MARKER: &str = "<?php\nnamespace App;\ninterface IndexMarker {}\n";
++    let (backend, dir) = create_psr4_workspace(
++        r#"{"autoload":{"psr-4":{"App\\":"src/"}}}"#,
++        &[
++            ("src/Construction.php", TRAIT),
++            ("src/IndexMarker.php", MARKER),
++            (
++                "src/IndexControl.php",
++                "<?php\nnamespace App;\nclass IndexControl implements IndexMarker {}\n",
++            ),
++            (
++                "vendor/acme/package/Built.php",
++                "<?php\nnamespace Vendor;\nclass Built { use \\App\\Construction; }\n",
++            ),
++            (
++                "vendor/acme/package/Child.php",
++                "<?php\nnamespace Vendor;\nclass Child extends Built {}\n",
++            ),
++            (
++                "vendor/acme/package/Own.php",
++                "<?php\nnamespace Vendor;\nclass Own extends Built { public function __construct() {} }\n",
++            ),
++            (
++                "vendor/acme/package/Unused.php",
++                "<?php\nnamespace Vendor;\nclass Unused { use \\App\\Construction; }\n",
++            ),
++            ("main.php", CALLER),
++            (
++                "vendor/composer/installed.json",
++                r#"{"packages":[{"name":"acme/package","version":"1.0.0","install-path":"../acme/package","autoload":{"psr-4":{"Vendor\\":""}}}]}"#,
++            ),
++            (
++                "vendor/composer/autoload_classmap.php",
++                r#"<?php
++$baseDir = dirname(dirname(__DIR__));
++return array(
++    'App\\Construction' => $baseDir . '/src/Construction.php',
++    'App\\IndexMarker' => $baseDir . '/src/IndexMarker.php',
++    'App\\IndexControl' => $baseDir . '/src/IndexControl.php',
++    'Vendor\\Built' => $baseDir . '/vendor/acme/package/Built.php',
++    'Vendor\\Child' => $baseDir . '/vendor/acme/package/Child.php',
++    'Vendor\\Own' => $baseDir . '/vendor/acme/package/Own.php',
++    'Vendor\\Unused' => $baseDir . '/vendor/acme/package/Unused.php',
++);
++"#,
++            ),
++        ],
++    );
++    backend
++        .initialize(InitializeParams {
++            root_uri: Some(Url::from_directory_path(dir.path()).unwrap()),
++            ..Default::default()
++        })
++        .await
++        .unwrap();
++    backend.initialized(InitializedParams {}).await;
++    let marker_uri = Url::from_file_path(dir.path().join("src/IndexMarker.php")).unwrap();
++    open_php(&backend, &marker_uri, MARKER).await;
++    // Public GTI lookup is a real workspace-index barrier, not a test mark flag.
++    let indexed = backend
++        .goto_implementation(tower_lsp::lsp_types::request::GotoImplementationParams {
++            text_document_position_params: TextDocumentPositionParams {
++                text_document: TextDocumentIdentifier { uri: marker_uri },
++                position: Position::new(2, 12),
++            },
++            work_done_progress_params: WorkDoneProgressParams::default(),
++            partial_result_params: PartialResultParams::default(),
++        })
++        .await
++        .unwrap();
++    let indexed_uris: Vec<Url> = match indexed {
++        Some(tower_lsp::lsp_types::request::GotoImplementationResponse::Scalar(location)) => {
++            vec![location.uri]
++        }
++        Some(tower_lsp::lsp_types::request::GotoImplementationResponse::Array(locations)) => {
++            locations.into_iter().map(|location| location.uri).collect()
++        }
++        Some(tower_lsp::lsp_types::request::GotoImplementationResponse::Link(locations)) => {
++            locations
++                .into_iter()
++                .map(|location| location.target_uri)
++                .collect()
++        }
++        None => Vec::new(),
++    };
++    assert_eq!(
++        indexed_uris,
++        vec![Url::from_file_path(dir.path().join("src/IndexControl.php")).unwrap()]
++    );
++    let vendor_uri = Url::parse(
++        backend
++            .fqn_uri_index()
++            .read()
++            .get("Vendor\\Built")
++            .expect("actual Composer installed metadata discovers vendor source"),
++    )
++    .unwrap();
++    assert_eq!(
++        vendor_uri.to_file_path().unwrap().canonicalize().unwrap(),
++        dir.path()
++            .join("vendor/acme/package/Built.php")
++            .canonicalize()
++            .unwrap()
++    );
++    assert!(
++        backend.get_classes_for_uri(vendor_uri.as_str()).is_none(),
++        "fixture must leave vendor consumer cold after project indexing"
++    );
++    let caller_uri = Url::from_file_path(dir.path().join("main.php")).unwrap();
++    assert!(
++        backend.parsed_uris().read().contains(caller_uri.as_str()),
++        "public barrier must really index the closed project caller"
++    );
++    let trait_uri = Url::from_file_path(dir.path().join("src/Construction.php")).unwrap();
++    open_php(&backend, &trait_uri, TRAIT).await;
++    TraitCtorVendorFixture {
++        backend,
++        _dir: dir,
++        trait_uri,
++        caller_uri,
++        vendor_uri,
++        trait_source: TRAIT,
++        caller_source: CALLER,
++    }
++}
++
++async fn trait_ctor_assert_vendor_symmetry(warm_first: bool) {
++    let fixture = trait_ctor_vendor_fixture().await;
++    let backend = &fixture.backend;
++    let constructor = trait_ctor_position(fixture.trait_source, "__construct()");
++    let roots = prepare_at(
++        backend,
++        &fixture.trait_uri,
++        constructor.line,
++        constructor.character,
++    )
++    .await;
++    assert_eq!(roots.len(), 1);
++    let make = trait_ctor_position(fixture.caller_source, "make():");
++    let caller = prepare_at(backend, &fixture.caller_uri, make.line, make.character).await;
++    assert_eq!(caller.len(), 1);
++    let line = fixture.caller_source.lines().nth(2).unwrap();
++    let expected: Vec<Range> = line
++        .match_indices("\\Vendor\\Built")
++        .map(|(column, name)| {
++            let start = line[..column].encode_utf16().count() as u32;
++            Range::new(
++                Position::new(2, start),
++                Position::new(2, start + name.encode_utf16().count() as u32),
++            )
++        })
++        .chain(line.match_indices("\\Vendor\\Child").map(|(column, name)| {
++            let start = line[..column].encode_utf16().count() as u32;
++            Range::new(
++                Position::new(2, start),
++                Position::new(2, start + name.encode_utf16().count() as u32),
++            )
++        }))
++        .collect();
++    if warm_first {
++        let calls = outgoing(backend, &caller[0]).await;
++        let composed = calls
++            .iter()
++            .find(|edge| edge.to.uri == fixture.trait_uri)
++            .expect("outgoing must resolve the actual vendor consumer constructor");
++        assert_eq!(composed.to.selection_range.start, constructor);
++        assert_eq!(composed.from_ranges, expected);
++        assert!(
++            backend
++                .get_classes_for_uri(fixture.vendor_uri.as_str())
++                .is_some()
++        );
++    } else {
++        assert!(
++            backend
++                .get_classes_for_uri(fixture.vendor_uri.as_str())
++                .is_none(),
++            "incoming-first really remains cold"
++        );
++    }
++    let callers = incoming(backend, &roots[0]).await;
++    assert_eq!(
++        callers.len(),
++        1,
++        "project trait's classmap-known vendor consumer new-sites must not disappear after workspace indexing"
++    );
++    assert_eq!(callers[0].from.name, "make");
++    assert_eq!(callers[0].from.uri, fixture.caller_uri);
++    assert_eq!(
++        callers[0].from_ranges, expected,
++        "include repeated Built and inherited Child; exclude Own override"
++    );
++    let calls = outgoing(backend, &caller[0]).await;
++    let composed = calls
++        .iter()
++        .find(|edge| edge.to.uri == fixture.trait_uri)
++        .expect("same concrete trait implementation");
++    assert_eq!(composed.to.selection_range.start, constructor);
++    assert_eq!(
++        composed.from_ranges, callers[0].from_ranges,
++        "incoming/outgoing symmetry independent of vendor load history"
++    );
++    assert_eq!(
++        calls.len(),
++        2,
++        "override keeps its independent real constructor edge"
++    );
++    let unused_uri = Url::parse(
++        backend
++            .fqn_uri_index()
++            .read()
++            .get("Vendor\\Unused")
++            .unwrap(),
++    )
++    .unwrap();
++    assert!(
++        backend.get_classes_for_uri(unused_uri.as_str()).is_none(),
++        "constructor references load actual receivers, not unrelated vendor consumers"
++    );
++    backend.shutdown().await.unwrap();
++}
++
++#[tokio::test]
++async fn trait_constructor_project_trait_vendor_consumer_incoming_cold_after_workspace_index() {
++    trait_ctor_assert_vendor_symmetry(false).await;
++}
++
++#[tokio::test]
++async fn trait_constructor_project_trait_vendor_consumer_incoming_hot_after_workspace_index() {
++    trait_ctor_assert_vendor_symmetry(true).await;
++}

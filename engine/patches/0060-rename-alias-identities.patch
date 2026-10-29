@@ -1,0 +1,2673 @@
+diff --git a/Cargo.lock b/Cargo.lock
+index 63ce176..a70e0b9 100644
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -1646,6 +1646,7 @@ dependencies = [
+  "mago-phpdoc-syntax",
+  "mago-span",
+  "mago-syntax",
++ "mago-syntax-core",
+  "memchr",
+  "memmap2",
+  "mimalloc",
+diff --git a/Cargo.toml b/Cargo.toml
+index 6c157fc..721789f 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -21,6 +21,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+ # tokio is declared per-target below: "full" on native, a slim feature set on
+ # wasm (which has no sockets, so "net" would pull in mio and fail to build).
+ mago-syntax = "=1.47.5"
++mago-syntax-core = "=1.47.5"
+ mago-allocator = "=1.47.5"
+ mago-database = "=1.47.5"
+ mago-names = "=1.47.5"
+diff --git a/docs/CHANGELOG.md b/docs/CHANGELOG.md
+index d998161..5b0aade 100644
+--- a/docs/CHANGELOG.md
++++ b/docs/CHANGELOG.md
+@@ -15,6 +15,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
+ 
+ ## [Unreleased]
+ 
++- **Rename preserves import bindings.** Class renames update every matching import while retaining explicit aliases and choosing available names for collisions. Moving grouped imports keeps unrelated bindings and surrounding code. Contributed by PHP Workbench downstream.
++
++- **Named trait aliases keep their identity.** Rename follows composed aliases without changing independent methods, and definition navigation follows their original implementation. Contributed by PHP Workbench downstream.
++
+ - **Rename against current files.** Checked editor requests reject stale source versions and contents before preparing changes. Cross-file rename also refreshes newly discovered callers after pending edits. Files outside a project keep their own symbol context instead of selecting a same-name declaration inside it. Contributed by PHP Workbench downstream.
+ 
+ - **Keep Eloquent pivot suggestions current.** Concurrent relationship indexing no longer leaves target-model completion cached without its pivot accessor. New relationship edits supersede older rebuilds. Contributed by PHP Workbench downstream.
+diff --git a/src/definition/member/declaring.rs b/src/definition/member/declaring.rs
+index 4d416a3..ac45585 100644
+--- a/src/definition/member/declaring.rs
++++ b/src/definition/member/declaring.rs
+@@ -16,6 +16,79 @@ use crate::util::build_fqn;
+ use super::MemberAccessHint;
+ 
+ impl Backend {
++    /// Follow the canonical alias declaration to its implementation, keeping
++    /// navigation ownership separate from the alias token used by rename.
++    pub(in crate::definition) fn aliased_method_implementation(
++        class: &ClassInfo,
++        member_name: &str,
++        class_loader: &dyn Fn(&str) -> Option<Arc<ClassInfo>>,
++    ) -> Option<(String, ClassInfo, String)> {
++        let mut current = class.clone();
++        let mut name = member_name.to_string();
++        let mut visited = std::collections::HashSet::new();
++        let mut followed_alias = false;
++        for _ in 0..=MAX_TRAIT_DEPTH {
++            if !visited.insert((
++                current.fqn().to_ascii_lowercase(),
++                name.to_ascii_lowercase(),
++            )) {
++                return None;
++            }
++            let effective =
++                crate::inheritance::resolve_class_with_inheritance(&current, class_loader);
++            let offset = effective.get_method(&name)?.name_offset;
++            let declares = |candidate: &ClassInfo| {
++                candidate.methods.iter().any(|method| {
++                    method.name.eq_ignore_ascii_case(&name) && method.name_offset == offset
++                }) || candidate.trait_aliases.iter().any(|alias| {
++                    alias.alias_offset == Some(offset)
++                        && alias
++                            .alias
++                            .as_ref()
++                            .is_some_and(|alias_name| alias_name.eq_ignore_ascii_case(&name))
++                })
++            };
++            let (owner, fqn) = if declares(&current) {
++                let fqn = current.fqn().to_string();
++                (current.clone(), fqn)
++            } else {
++                let (fqn, owner) = crate::inheritance::find_declaring_member_ancestor(
++                    &current,
++                    Some(&name),
++                    class_loader,
++                    &declares,
++                )?;
++                (Arc::unwrap_or_clone(owner), fqn.to_string())
++            };
++            if owner.methods.iter().any(|method| {
++                method.name.eq_ignore_ascii_case(&name) && method.name_offset == offset
++            }) {
++                return followed_alias.then_some((name, owner, fqn));
++            }
++            let alias = owner.trait_aliases.iter().find(|alias| {
++                alias.alias_offset == Some(offset)
++                    && alias
++                        .alias
++                        .as_ref()
++                        .is_some_and(|alias_name| alias_name.eq_ignore_ascii_case(&name))
++            })?;
++            name = alias.method_name.to_string();
++            followed_alias = true;
++            if let Some(source_trait) = alias.trait_name {
++                current = Arc::unwrap_or_clone(class_loader(&source_trait)?);
++            } else {
++                // An unqualified adaptation selects a used trait's surface, not
++                // an overriding class method or another adaptation in this use.
++                current = owner;
++                current.methods = Default::default();
++                current.trait_aliases.clear();
++                current.parent_class = None;
++                current.interfaces.clear();
++            }
++        }
++        None
++    }
++
+     /// Resolve a trait `as` alias on a class.
+     ///
+     /// If `member_name` matches a trait alias declared on the class, returns
+@@ -25,6 +98,15 @@ impl Backend {
+         class: &ClassInfo,
+         member_name: &str,
+     ) -> (String, Option<String>) {
++        // Class methods override an identically named adaptation. Callers
++        // supply a raw class so merged aliases cannot look like own methods.
++        if class
++            .methods
++            .iter()
++            .any(|method| method.name.eq_ignore_ascii_case(member_name))
++        {
++            return (member_name.to_string(), None);
++        }
+         for alias in &class.trait_aliases {
+             if alias.alias.as_deref() == Some(member_name) {
+                 return (
+diff --git a/src/definition/member/mod.rs b/src/definition/member/mod.rs
+index a5d7440..cb6345a 100644
+--- a/src/definition/member/mod.rs
++++ b/src/definition/member/mod.rs
+@@ -185,13 +185,32 @@ impl Backend {
+             let raw_class = Self::reload_raw_class(target_class, &ctx.classes, &class_loader);
+             let lookup_class = raw_class.as_ref().unwrap_or(target_class);
+ 
++            if access_hint != MemberAccessHint::PropertyAccess
++                && let Some((source_name, source_class, source_fqn)) =
++                    Self::aliased_method_implementation(lookup_class, member_name, &class_loader)
++                && let Some(location) = self.member_position_location(
++                    &source_fqn,
++                    uri,
++                    content,
++                    &source_class,
++                    &source_name,
++                    MemberKind::Method,
++                )
++            {
++                locations.push(location);
++                continue;
++            }
++
+             // Check if the member name is a trait `as` alias on this class.
+             // If so, resolve to the original method name and (optionally) the
+             // source trait so we jump to the actual method definition rather
+             // than failing to find an alias that only exists after inheritance
+             // resolution.
+-            let (effective_name, alias_trait) =
+-                Self::resolve_trait_alias(target_class, member_name);
++            let (effective_name, alias_trait) = if access_hint == MemberAccessHint::PropertyAccess {
++                (member_name.to_string(), None)
++            } else {
++                Self::resolve_trait_alias(lookup_class, member_name)
++            };
+ 
+             // When we matched an alias, jump directly to the trait method.
+             // This is important when the class also declares a method with
+@@ -421,7 +440,11 @@ impl Backend {
+         let raw_fallback = Self::reload_raw_class(target_class, &ctx.classes, &class_loader);
+         let fallback_class = raw_fallback.as_ref().unwrap_or(target_class);
+ 
+-        let (effective_name, alias_trait) = Self::resolve_trait_alias(target_class, member_name);
++        let (effective_name, alias_trait) = if access_hint == MemberAccessHint::PropertyAccess {
++            (member_name.to_string(), None)
++        } else {
++            Self::resolve_trait_alias(fallback_class, member_name)
++        };
+ 
+         // Direct trait lookup for aliased members in the fallback path.
+         if let Some(ref trait_name) = alias_trait
+diff --git a/src/diagnostics/use_statements.rs b/src/diagnostics/use_statements.rs
+index ba13154..0f72654 100644
+--- a/src/diagnostics/use_statements.rs
++++ b/src/diagnostics/use_statements.rs
+@@ -19,6 +19,8 @@ pub(crate) struct UseStatementScan {
+     /// Byte offset of the end of the statement's last line, excluding a
+     /// CRLF file's `\r`.
+     pub(crate) end: usize,
++    /// End of the actual import through its semicolon, excluding trailing code.
++    pub(crate) statement_end: usize,
+     /// Whether the statement sits at import depth: brace depth 0, or depth
+     /// 1 inside a `namespace Foo { … }` block.  A trait `use` in a class
+     /// body is deeper, and so is the `@php use …;` a Blade template writes,
+@@ -32,95 +34,148 @@ pub(crate) struct UseStatementScan {
+ /// through its closing `};`), or a plain import split across lines without
+ /// braces.  Either way it is followed until its terminating `;`.
+ pub(crate) fn scan_use_statements(content: &str) -> Vec<UseStatementScan> {
++    use mago_syntax::{lexer::Lexer, settings::LexerSettings, token::TokenKind};
++    use mago_syntax_core::input::Input;
++
++    if content.len() > u32::MAX as usize {
++        return Vec::new();
++    }
++    let input = Input::new(
++        mago_database::file::FileId::new(b"imports.php"),
++        content.as_bytes(),
++    );
++    let mut lexer = if content.contains("<?") {
++        Lexer::new(input, LexerSettings::default())
++    } else {
++        Lexer::scripting(input, LexerSettings::default())
++    };
+     let mut statements = Vec::new();
+-    let mut offset: usize = 0;
+-    // Track brace depth so we can distinguish namespace-level `use`
+-    // imports (depth 0, or depth 1 inside `namespace Foo { … }`) from
+-    // trait `use` statements inside class/trait/enum bodies (depth >= 1
+-    // or >= 2 under a braced namespace).
+-    let mut brace_depth: usize = 0;
+-    let mut namespace_brace_depth: Option<usize> = None;
++    let mut depth = 0usize;
++    let mut namespace_depth = None;
++    let mut namespace_pending = false;
++    let mut boundary = true;
++    let mut previous = None;
+     let mut pending: Option<(usize, usize, bool)> = None;
+-    let mut pending_is_group = false;
+-
+-    for line in content.split('\n') {
+-        let line_brace_depth = brace_depth;
+-
+-        // Brace-depth tracking is crude but sufficient — we only need an
+-        // approximate depth to tell top-level from class-body.  We skip
+-        // braces inside strings and comments only to the extent that
+-        // single-line `//` and `#` comments are trimmed, which covers
+-        // the vast majority of real-world PHP.
+-        let code = line.split("//").next().unwrap_or(line);
+-        let code = code.split('#').next().unwrap_or(code);
+-
+-        let trimmed = line.trim_start();
+-
+-        // Detect `namespace Foo {` so we know that depth 1 is still
+-        // "top-level" for use-import purposes.
+-        if trimmed.starts_with("namespace ") && code.contains('{') {
+-            // The opening brace on this line will bump brace_depth;
+-            // record that the namespace block starts at the *current*
+-            // depth (before the brace is counted).
+-            namespace_brace_depth = Some(brace_depth);
++    let mut quote = None;
++    let mut interpolation_depth = 0usize;
++    let mut documents = 0usize;
++    let mut line_start = 0usize;
++    let mut observed = 0usize;
++
++    while let Some(result) = lexer.advance() {
++        // A broken token stream cannot authorize a new import range.
++        let Ok(token) = result else {
++            break;
++        };
++        let start = token.start.offset as usize;
++        if let Some(newline) = content[observed..start].rfind('\n') {
++            line_start = observed + newline + 1;
+         }
+-
+-        for ch in code.chars() {
+-            match ch {
+-                '{' => brace_depth += 1,
+-                '}' => {
+-                    brace_depth = brace_depth.saturating_sub(1);
+-                    // If we've closed the namespace block, clear the marker.
+-                    if namespace_brace_depth == Some(brace_depth) {
+-                        namespace_brace_depth = None;
+-                    }
++        observed = start;
++        let kind = token.kind;
++        if documents != 0 {
++            match kind {
++                TokenKind::DocumentStart(_) => documents += 1,
++                TokenKind::DocumentEnd => documents -= 1,
++                _ => {}
++            }
++            continue;
++        }
++        if let Some(delimiter) = quote {
++            match kind {
++                TokenKind::LeftBrace | TokenKind::DollarLeftBrace => interpolation_depth += 1,
++                TokenKind::RightBrace => {
++                    interpolation_depth = interpolation_depth.saturating_sub(1)
+                 }
++                _ if kind == delimiter && interpolation_depth == 0 => quote = None,
+                 _ => {}
+             }
++            continue;
+         }
+-
+-        let top_level_depth = namespace_brace_depth.map_or(0, |d| d + 1);
+-        // A CRLF file's line still carries its `\r`; the statement ends
+-        // before it.
+-        let line_end = offset + line.trim_end_matches('\r').len();
+-
+-        if let Some((line_start, keyword_start, top_level)) = pending {
+-            if trimmed.contains(';') {
+-                statements.push(UseStatementScan {
+-                    line_start,
+-                    keyword_start,
+-                    end: line_end,
+-                    top_level,
+-                });
+-                pending = None;
+-            } else if pending_is_group && trimmed.contains('}') {
+-                // A group import closes on `};`.  A `}` on its own means
+-                // the `use … {` we latched onto was a trait import with a
+-                // conflict-resolution block, so stop following it rather
+-                // than running on to some later statement's semicolon.
+-                pending = None;
+-            } else if trimmed.contains('{') {
+-                pending_is_group = true;
++        if kind.is_trivia() {
++            continue;
++        }
++        match kind {
++            TokenKind::DocumentStart(_) => {
++                documents = 1;
++                boundary = false;
++            }
++            TokenKind::DoubleQuote | TokenKind::Backtick => {
++                quote = Some(kind);
++                interpolation_depth = 0;
++                boundary = false;
++            }
++            TokenKind::OpenTag | TokenKind::ShortOpenTag => boundary = true,
++            TokenKind::InlineText | TokenKind::InlineShebang => {}
++            TokenKind::Namespace if boundary => {
++                namespace_pending = true;
++                boundary = false;
++            }
++            TokenKind::Use if boundary => {
++                // A prefix comment or PHP opening tag must remain outside a
++                // deletion; ordinary indentation retains its line-start policy.
++                let prefix = &content[line_start..start];
++                let first = if prefix.bytes().all(|byte| byte.is_ascii_whitespace()) {
++                    line_start
++                } else {
++                    start
++                };
++                pending = Some((first, start, depth == namespace_depth.map_or(0, |d| d + 1)));
++                boundary = false;
++            }
++            TokenKind::LeftParenthesis => {
++                // `function (...) use (...)` is capture syntax, never an import.
++                if previous == Some(TokenKind::Use) {
++                    pending = None;
++                }
++                boundary = false;
+             }
+-        } else if trimmed.starts_with("use ") || trimmed.starts_with("use\t") {
+-            let keyword_start = offset + (line.len() - trimmed.len());
+-            let top_level = line_brace_depth == top_level_depth;
+-            if trimmed.contains(';') {
+-                statements.push(UseStatementScan {
+-                    line_start: offset,
+-                    keyword_start,
+-                    end: line_end,
+-                    top_level,
+-                });
+-            } else {
+-                pending = Some((offset, keyword_start, top_level));
+-                pending_is_group = trimmed.contains('{');
++            TokenKind::LeftBrace => {
++                if pending.is_some() && previous != Some(TokenKind::NamespaceSeparator) {
++                    // Trait adaptations have statements inside their braces;
++                    // only namespace import groups end with a semicolon.
++                    pending = None;
++                }
++                if namespace_pending {
++                    namespace_depth = Some(depth);
++                    namespace_pending = false;
++                }
++                depth += 1;
++                boundary = true;
++            }
++            TokenKind::RightBrace => {
++                depth = depth.saturating_sub(1);
++                if namespace_depth == Some(depth) {
++                    namespace_depth = None;
++                }
++                boundary = true;
++            }
++            TokenKind::Semicolon => {
++                if let Some((first, keyword_start, top_level)) = pending.take() {
++                    let statement_end = start + token.value.len();
++                    let line_end = content[statement_end..]
++                        .find('\n')
++                        .map_or(content.len(), |offset| statement_end + offset);
++                    let end = if content.as_bytes().get(line_end - 1) == Some(&b'\r') {
++                        line_end - 1
++                    } else {
++                        line_end
++                    };
++                    statements.push(UseStatementScan {
++                        line_start: first,
++                        keyword_start,
++                        end,
++                        statement_end,
++                        top_level,
++                    });
++                }
++                namespace_pending = false;
++                boundary = true;
+             }
++            _ => boundary = false,
+         }
+-
+-        offset += line.len() + 1; // +1 for the '\n' that `split` consumed
++        previous = Some(kind);
+     }
+-
+     statements
+ }
+ 
+@@ -158,14 +213,21 @@ pub(crate) fn compute_use_line_ranges(content: &str) -> Vec<ByteRange> {
+ pub(crate) fn compute_use_statement_spans(content: &str) -> Vec<ByteRange> {
+     scan_use_statements(content)
+         .into_iter()
+-        .map(|stmt| (stmt.keyword_start, stmt.end))
++        .map(|stmt| (stmt.keyword_start, stmt.statement_end))
+         .collect()
+ }
+ 
+ /// Strip the leading `use` keyword and any `function` / `const` modifier
+ /// from a `use` statement, returning the remainder.
+ pub(crate) fn use_statement_body(stmt: &str) -> Option<&str> {
+-    let body = stmt.strip_prefix("use ")?.trim_start();
++    if !stmt.get(..3)?.eq_ignore_ascii_case("use") {
++        return None;
++    }
++    let rest = stmt.get(3..)?;
++    if !rest.as_bytes().first()?.is_ascii_whitespace() {
++        return None;
++    }
++    let body = rest.trim_start_matches(|ch: char| ch.is_ascii_whitespace());
+     Some(
+         body.strip_prefix("function ")
+             .or_else(|| body.strip_prefix("const "))
+@@ -234,6 +296,8 @@ pub(crate) fn member_content_span(item: &str) -> (usize, usize) {
+ pub(crate) struct UseMemberMatch<'a> {
+     pub(crate) start: usize,
+     pub(crate) end: usize,
++    /// Whether this member explicitly spells an `as` alias.
++    pub(crate) has_explicit_alias: bool,
+     /// How many items the statement has (a trailing comma does not add
+     /// one). Always `1` for a plain single-class import.
+     pub(crate) member_count: usize,
+@@ -308,21 +372,39 @@ pub(crate) fn find_use_member<'a>(
+             .or_else(|| entry.strip_prefix("const "))
+             .unwrap_or(entry)
+             .trim_start();
+-        let (name, member_alias) = match entry.split_once(" as ") {
+-            Some((n, a)) => (n.trim(), Some(a.trim())),
+-            None => (entry, None),
++        let mut words = entry.split_ascii_whitespace();
++        let Some(name) = words.next() else {
++            continue;
++        };
++        let member_alias = match words.next() {
++            None => None,
++            Some(keyword) if keyword.eq_ignore_ascii_case("as") => {
++                let Some(alias) = words.next() else {
++                    continue;
++                };
++                if words.next().is_some() {
++                    continue;
++                }
++                Some(alias)
++            }
++            Some(_) => continue,
+         };
+         let short_name = name.rsplit('\\').next().unwrap_or(name);
+ 
+         if joined_name_matches(prefix, name, fqn) && member_alias.unwrap_or(short_name) == alias {
+-            found = Some((item_start + content_start, item_start + content_end));
++            found = Some((
++                item_start + content_start,
++                item_start + content_end,
++                member_alias.is_some(),
++            ));
+         }
+     }
+ 
+-    let (start, end) = found?;
++    let (start, end, has_explicit_alias) = found?;
+     Some(UseMemberMatch {
+         start,
+         end,
++        has_explicit_alias,
+         member_count,
+         prefix,
+     })
+@@ -333,6 +415,8 @@ pub(crate) fn find_use_member<'a>(
+ /// names the class (which is the whole list for an ordinary single-class
+ /// import).
+ pub(crate) struct UseStatementLocation<'a> {
++    /// Syntactic alias identity, including an alias equal to the short name.
++    pub(crate) has_explicit_alias: bool,
+     /// The whole statement's byte range.
+     pub(crate) statement: ByteRange,
+     /// The item's byte range within `content` (already offset from the
+@@ -370,6 +454,7 @@ pub(crate) fn find_use_statement<'a>(
+             continue;
+         };
+         return Some(UseStatementLocation {
++            has_explicit_alias: member.has_explicit_alias,
+             statement: (stmt_start, stmt_end),
+             member: (stmt_start + member.start, stmt_start + member.end),
+             member_count: member.member_count,
+@@ -453,4 +538,135 @@ mod tests {
+         assert_eq!(location.member_count, 2);
+         assert_eq!(location.prefix, "App\\Models");
+     }
++    #[test]
++    fn use_statement_alias_metadata_tracks_syntax_not_short_name_equality() {
++        for clause in [
++            " as User",
++            " AS User",
++            " As User",
++            "\tas\tUser",
++            "\n    as\n    User",
++        ] {
++            let content = format!("<?php\n// café 🐘\nuse Demo\\User{clause};\n");
++            let spans = compute_use_statement_spans(&content);
++            let location = find_use_statement(&content, &spans, "Demo\\User", "User")
++                .expect("ordinary PHP alias clause must be recognized");
++            assert!(location.has_explicit_alias);
++            assert_eq!(
++                &content[location.member.0..location.member.1],
++                format!("Demo\\User{clause}")
++            );
++        }
++        let content = "<?php\nuse Demo\\User;\n";
++        let spans = compute_use_statement_spans(content);
++        assert!(
++            !find_use_statement(content, &spans, "Demo\\User", "User")
++                .unwrap()
++                .has_explicit_alias
++        );
++        assert!(
++            find_use_statement("use Demo\\User as", &[(0, 16)], "Demo\\User", "User").is_none()
++        );
++    }
++
++    #[test]
++    fn use_statement_alias_metadata_matches_each_wrapped_group_member() {
++        let content =
++            "<?php\r\nuse Demo\\{\r\n    User,\r\n    User\tAS\tAccount,\r\n    Other,\r\n};\r\n";
++        let spans = compute_use_statement_spans(content);
++        let implicit = find_use_statement(content, &spans, "Demo\\User", "User").unwrap();
++        let explicit = find_use_statement(content, &spans, "Demo\\User", "Account").unwrap();
++        assert!(!implicit.has_explicit_alias);
++        assert!(explicit.has_explicit_alias);
++        assert_eq!(explicit.member_count, 3);
++        assert_eq!(explicit.prefix, "Demo");
++        assert_eq!(
++            &content[explicit.member.0..explicit.member.1],
++            "User\tAS\tAccount"
++        );
++    }
++
++    #[test]
++    fn use_statement_comment_prefix_keeps_line_end_contract() {
++        let content =
++            "<?php\r\n/* café 🐘 */ use Demo\\User as Account; new Account(); // trailing\r\n";
++        let statements = super::scan_use_statements(content);
++        assert_eq!(statements.len(), 1);
++        assert_eq!(
++            &content[statements[0].keyword_start..statements[0].end],
++            "use Demo\\User as Account; new Account(); // trailing"
++        );
++        let spans = compute_use_statement_spans(content);
++        assert_eq!(spans.len(), 1);
++        assert_eq!(
++            &content[spans[0].0..spans[0].1],
++            "use Demo\\User as Account;"
++        );
++    }
++
++    #[test]
++    fn use_statement_literal_comment_heredoc_nowdoc_decoys_are_not_imports() {
++        let content = concat!(
++            "<?php\n/*\nuse Fake\\Block;\n*/\n",
++            "$quoted = '\nuse Fake\\Quoted;\n';\n",
++            "$double = \"\nuse Fake\\Double;\n\";\n",
++            "$heredoc = <<<TEXT\nuse Fake\\Heredoc;\nTEXT;\n",
++            "$nowdoc = <<<'RAW'\nuse Fake\\Nowdoc;\nRAW;\n",
++            "// use Fake\\Line;\n# use Fake\\Hash;\n",
++            "/* real café 🐘 */ use Real\\Item;\n",
++        );
++        let spans = compute_use_statement_spans(content);
++        assert_eq!(
++            spans
++                .iter()
++                .map(|&(start, end)| &content[start..end])
++                .collect::<Vec<_>>(),
++            vec!["use Real\\Item;"]
++        );
++    }
++
++    #[test]
++    fn use_statement_namespace_trait_and_closure_contexts_remain_distinct() {
++        let content = concat!(
++            "<?php\nnamespace A {\nuse Demo\\User;\n",
++            "class C {\nuse TraitOne;\nfunction f() { $g = function () use ($captured) {}; }\n}\n}\n",
++            "namespace B {\nuse Demo\\Other;\n}\n",
++        );
++        let statements = super::scan_use_statements(content);
++        assert_eq!(
++            statements.len(),
++            3,
++            "closure capture is not a namespace or trait import"
++        );
++        assert!(statements[0].top_level);
++        assert!(!statements[1].top_level);
++        assert!(statements[2].top_level);
++    }
++
++    #[test]
++    fn use_statement_relative_namespace_call_does_not_open_a_namespace_block() {
++        let content = concat!(
++            "<?php\nnamespace\\factory(new class {\n",
++            "use MissingTrait;\n",
++            "});\nuse Demo\\User;\n",
++        );
++        let statements = super::scan_use_statements(content);
++        assert_eq!(statements.len(), 2);
++        assert!(
++            !statements[0].top_level,
++            "anonymous-class trait use stays deeper"
++        );
++        assert!(
++            statements[1].top_level,
++            "following real import remains global"
++        );
++        let ranges = compute_use_line_ranges(content);
++        assert_eq!(
++            ranges
++                .iter()
++                .map(|&(start, end)| &content[start..end])
++                .collect::<Vec<_>>(),
++            vec!["use Demo\\User;"]
++        );
++    }
+ }
+diff --git a/src/inheritance/inheritance_tests.rs b/src/inheritance/inheritance_tests.rs
+index 6258116..ff0b130 100644
+--- a/src/inheritance/inheritance_tests.rs
++++ b/src/inheritance/inheritance_tests.rs
+@@ -7,7 +7,8 @@ use crate::types::{ClassLikeKind, MethodInfo};
+ fn nested_trait_outer_precedence_preserves_other_members_and_named_alias() {
+     let models = inherited_private_trait_models(concat!(
+         "<?php\n",
+-        "trait NestedB { private function source(): string { return 'B'; } }\n",
++        "class RetainedAliasResult {}\n",
++        "trait NestedB { private function source(): RetainedAliasResult { return new RetainedAliasResult(); } }\n",
+         "trait Wrapper {\n",
+         "    use NestedB { source as public retained; }\n",
+         "    public function other(): string { return 'other'; }\n",
+@@ -36,7 +37,17 @@ fn nested_trait_outer_precedence_preserves_other_members_and_named_alias() {
+         .get_method("retained")
+         .expect("a distinct named alias survives");
+     assert_eq!(alias.visibility, Visibility::Public);
+-    assert_eq!(alias.name_offset, b.name_offset);
++    let declaration = models
++        .get("Wrapper")
++        .unwrap()
++        .trait_aliases
++        .iter()
++        .find(|adaptation| adaptation.alias.as_deref() == Some("retained"))
++        .unwrap();
++    assert_eq!(alias.name_offset, declaration.alias_offset.unwrap());
++    assert_ne!(alias.name_offset, b.name_offset);
++    assert_eq!(alias.return_type, b.return_type);
++    assert_ne!(alias.return_type, a.return_type);
+     assert!(consumer.has_method("other"));
+     assert!(consumer.has_property("extra"));
+     assert!(consumer.get_constant("EXTRA").is_some());
+diff --git a/src/inheritance/mod.rs b/src/inheritance/mod.rs
+index 17d9dec..108de6b 100644
+--- a/src/inheritance/mod.rs
++++ b/src/inheritance/mod.rs
+@@ -303,7 +303,10 @@ pub(crate) fn resolve_class_with_inheritance(
+         },
+         class_loader,
+         0,
+-        &mut dedup,
++        traits::TraitTraversal {
++            dedup: &mut dedup,
++            alias_sources: &mut std::collections::HashSet::new(),
++        },
+         &class.fqn(),
+     );
+ 
+@@ -440,7 +443,10 @@ pub(crate) fn resolve_class_with_inheritance(
+             },
+             class_loader,
+             0,
+-            &mut dedup,
++            traits::TraitTraversal {
++                dedup: &mut dedup,
++                alias_sources: &mut std::collections::HashSet::new(),
++            },
+             &parent.fqn(),
+         );
+         dedup.discard_private_trait_additions(&mut merged, trait_starts);
+diff --git a/src/inheritance/traits.rs b/src/inheritance/traits.rs
+index 24d9703..f28de5e 100644
+--- a/src/inheritance/traits.rs
++++ b/src/inheritance/traits.rs
+@@ -4,7 +4,7 @@
+ //! declarations, and generic trait substitution. It also includes Laravel-specific
+ //! convention-based factory trait detection.
+ 
+-use std::collections::HashMap;
++use std::collections::{HashMap, HashSet};
+ use std::sync::Arc;
+ 
+ use crate::atom::{Atom, atom};
+@@ -25,6 +25,12 @@ use super::generics::{
+ };
+ use super::{MergeDedup, TraitContext};
+ 
++/// Mutable state shared by a single trait traversal, including isolated alias surfaces.
++pub(crate) struct TraitTraversal<'a> {
++    pub(super) dedup: &'a mut MergeDedup,
++    pub(super) alias_sources: &'a mut HashSet<(Atom, Atom)>,
++}
++
+ /// Merge all traits used by a class into its method/property/constant lists.
+ ///
+ /// Walks the class's `used_traits`, recursively resolves trait composition,
+@@ -45,9 +51,13 @@ pub(crate) fn merge_traits_into(
+     ctx: &TraitContext<'_>,
+     class_loader: &dyn Fn(&str) -> Option<Arc<ClassInfo>>,
+     depth: u32,
+-    dedup: &mut MergeDedup,
++    traversal: TraitTraversal<'_>,
+     self_class_name: &str,
+ ) {
++    let TraitTraversal {
++        dedup,
++        alias_sources,
++    } = traversal;
+     if depth > MAX_TRAIT_DEPTH {
+         return;
+     }
+@@ -145,7 +155,10 @@ pub(crate) fn merge_traits_into(
+                 },
+                 class_loader,
+                 depth + 1,
+-                dedup,
++                TraitTraversal {
++                    dedup: &mut *dedup,
++                    alias_sources: &mut *alias_sources,
++                },
+                 self_class_name,
+             );
+         }
+@@ -183,7 +196,10 @@ pub(crate) fn merge_traits_into(
+                     },
+                     class_loader,
+                     parent_depth + 1,
+-                    dedup,
++                    TraitTraversal {
++                        dedup: &mut *dedup,
++                        alias_sources: &mut *alias_sources,
++                    },
+                     self_class_name,
+                 );
+             }
+@@ -325,6 +341,7 @@ pub(crate) fn merge_traits_into(
+         // Apply `as` alias declarations that create new method names.
+         // For example, `TraitB::method as traitBMethod` creates a copy
+         // of `method` accessible as `traitBMethod`.
++        let mut composed_alias_source = None;
+         for alias in ctx.aliases {
+             // Only process aliases that have a new name.
+             let alias_name = match &alias.alias {
+@@ -348,14 +365,69 @@ pub(crate) fn merge_traits_into(
+                 continue;
+             }
+ 
++            // An unqualified alias refers to the method selected by this use.
++            // Qualified aliases may intentionally retain a rejected source.
++            // Only local precedence applies: an outer exclusion must not erase
++            // an independently named alias declared inside a nested trait.
++            if alias.trait_name.is_none()
++                && ctx.precedences.iter().any(|precedence| {
++                    precedence
++                        .method_name
++                        .eq_ignore_ascii_case(&alias.method_name)
++                        && precedence
++                            .insteadof
++                            .iter()
++                            .any(|excluded| excluded == trait_name)
++                })
++            {
++                continue;
++            }
++
+             // Find the source method in this trait.
+             let source_method = trait_info
+                 .methods
+                 .iter()
+-                .find(|m| m.name.eq_ignore_ascii_case(&alias.method_name));
+-            let source_method = match source_method {
+-                Some(m) => m,
+-                None => continue,
++                .find(|m| m.name.eq_ignore_ascii_case(&alias.method_name))
++                .cloned()
++                .or_else(|| {
++                    if trait_info.used_traits.is_empty() {
++                        return None;
++                    }
++                    // Reuse canonical composition with its existing depth cap.
++                    // A fresh top-level resolve here would reset that cap for
++                    // cyclic trait uses. Outer exclusions do not erase a source
++                    // explicitly retained under an independently named alias.
++                    let source_key = (trait_info.fqn(), alias.method_name);
++                    if !alias_sources.insert(source_key) {
++                        return None;
++                    }
++                    let surface = composed_alias_source.get_or_insert_with(|| {
++                        let mut surface = (*trait_info).clone();
++                        let mut local_dedup = MergeDedup::from_class(&surface);
++                        merge_traits_into(
++                            &mut surface,
++                            &trait_info.used_traits,
++                            &TraitContext {
++                                use_generics: &trait_info.use_generics,
++                                precedences: &trait_info.trait_precedences,
++                                aliases: &trait_info.trait_aliases,
++                                excluded_methods: &[],
++                            },
++                            class_loader,
++                            depth + 1,
++                            TraitTraversal {
++                                dedup: &mut local_dedup,
++                                alias_sources: &mut *alias_sources,
++                            },
++                            self_class_name,
++                        );
++                        surface
++                    });
++                    alias_sources.remove(&source_key);
++                    surface.get_method_arc(&alias.method_name)
++                });
++            let Some(source_method) = source_method else {
++                continue;
+             };
+ 
+             // Skip if an alias with this name already exists.
+@@ -367,8 +439,9 @@ pub(crate) fn merge_traits_into(
+                 continue;
+             }
+ 
+-            let mut aliased = (**source_method).clone();
++            let mut aliased = (*source_method).clone();
+             aliased.name = alias_atom;
++            aliased.name_offset = alias.alias_offset.unwrap_or(0);
+             if let Some(vis) = alias.visibility {
+                 aliased.visibility = vis;
+             }
+diff --git a/src/parser/classes.rs b/src/parser/classes.rs
+index 60761c0..fb7cb55 100644
+--- a/src/parser/classes.rs
++++ b/src/parser/classes.rs
+@@ -1667,6 +1667,10 @@ impl Backend {
+                                         trait_name,
+                                         method_name,
+                                         alias,
++                                        alias_offset: alias_adapt
++                                            .alias
++                                            .as_ref()
++                                            .map(|a| a.span.start.offset),
+                                         visibility,
+                                     });
+                                 }
+diff --git a/src/references/dispatch.rs b/src/references/dispatch.rs
+index 841c857..5ec5924 100644
+--- a/src/references/dispatch.rs
++++ b/src/references/dispatch.rs
+@@ -321,8 +321,18 @@ impl Backend {
+                 );
+ 
+                 if *is_method_call && include_declaration {
++                    let aliases = if mode == ReferenceSearchMode::Rename {
++                        self.named_trait_alias_locations(uri, span_start)
++                    } else {
++                        Vec::new()
++                    };
+                     let call_position = offset_to_position(content, span_start as usize);
+-                    for def in self.resolve_definition(uri, content, call_position) {
++                    let definitions = if aliases.is_empty() {
++                        self.resolve_definition(uri, content, call_position)
++                    } else {
++                        aliases
++                    };
++                    for def in definitions {
+                         let mut start = def.range.start;
+                         let mut end = def.range.end;
+                         if start == end {
+diff --git a/src/references/member_scope.rs b/src/references/member_scope.rs
+index 5c3e2be..07f753a 100644
+--- a/src/references/member_scope.rs
++++ b/src/references/member_scope.rs
+@@ -671,6 +671,18 @@ impl Backend {
+             return true;
+         }
+ 
++        if cls.trait_aliases.iter().any(|alias| {
++            alias.alias_offset.is_some()
++                && alias
++                    .alias
++                    .as_ref()
++                    .is_some_and(|alias_name| alias_name.eq_ignore_ascii_case(name))
++        }) {
++            return crate::inheritance::resolve_class_with_inheritance(&cls, class_loader)
++                .get_method(name)
++                .is_some_and(|method| method.is_static == is_static);
++        }
++
+         let property_name = name.strip_prefix('$').unwrap_or(name);
+         if cls.properties.iter().any(|p| {
+             p.name.as_str().strip_prefix('$').unwrap_or(p.name.as_str()) == property_name
+diff --git a/src/references/private_identity.rs b/src/references/private_identity.rs
+index 4a36abc..04426da 100644
+--- a/src/references/private_identity.rs
++++ b/src/references/private_identity.rs
+@@ -35,6 +35,8 @@ pub(crate) struct MemberBinding {
+     pub(super) expand: bool,
+     name: crate::atom::Atom,
+     receiver: Arc<ClassInfo>,
++    // An adaptation hidden by an own declaration has no bound call sites.
++    dormant_alias: bool,
+ }
+ 
+ impl MemberBinding {
+@@ -57,7 +59,19 @@ fn member_info(
+     match kind {
+         ReferenceMemberKind::Method => class
+             .get_method(name)
+-            .map(|m| (m.visibility, m.name_offset)),
++            .map(|m| (m.visibility, m.name_offset))
++            .or_else(|| {
++                class.trait_aliases.iter().find_map(|alias| {
++                    alias
++                        .alias
++                        .as_ref()
++                        .filter(|alias_name| alias_name.eq_ignore_ascii_case(name))?;
++                    Some((
++                        alias.visibility.unwrap_or(Visibility::Public),
++                        alias.alias_offset?,
++                    ))
++                })
++            }),
+         ReferenceMemberKind::Property => class
+             .properties
+             .iter()
+@@ -91,7 +105,9 @@ impl Backend {
+         let declares = |candidate: &ClassInfo| {
+             member_info(candidate, name, kind).is_some_and(|(_, offset)| offset == effective_offset)
+         };
+-        let declaring = if member_info(class, name, kind).is_some() {
++        let declaring = if member_info(class, name, kind)
++            .is_some_and(|(_, offset)| offset == effective_offset)
++        {
+             Arc::clone(class)
+         } else {
+             find_declaring_member_ancestor(
+@@ -111,6 +127,7 @@ impl Backend {
+             expand: source_visibility == Visibility::Private && visibility != Visibility::Private,
+             name: crate::atom::atom(name),
+             receiver: Arc::clone(class),
++            dormant_alias: false,
+         })
+     }
+ 
+@@ -125,6 +142,9 @@ impl Backend {
+         if target.same_declaration(candidate) {
+             return true;
+         }
++        if target.dormant_alias || candidate.dormant_alias {
++            return false;
++        }
+         if candidate.private {
+             return false;
+         }
+@@ -158,6 +178,35 @@ impl Backend {
+     }
+ 
+     fn reference_bindings_at(&self, file: &BindingFile, span: &SymbolSpan) -> Vec<MemberBinding> {
++        // Alias output tokens are represented as self member accesses in the
++        // symbol map. Attribute the actual declaration before receiver lookup:
++        // an own method can hide this adaptation without owning its token.
++        if let Some(class) = binding_lexical_class(file, span.start)
++            && let Some(alias) = class
++                .trait_aliases
++                .iter()
++                .find(|alias| alias.alias_offset == Some(span.start))
++            && let Some(name) = alias.alias
++        {
++            let effective =
++                self.reference_member_binding(&class, &name, ReferenceMemberKind::Method);
++            let active = effective.as_ref().filter(|binding| {
++                binding.offset == span.start
++                    && binding.declaration.fqn().eq_ignore_ascii_case(&class.fqn())
++            });
++            return vec![MemberBinding {
++                declaration: Arc::clone(&class),
++                offset: span.start,
++                kind: ReferenceMemberKind::Method,
++                private: active.map_or(alias.visibility == Some(Visibility::Private), |binding| {
++                    binding.private
++                }),
++                expand: false,
++                name,
++                receiver: Arc::clone(&class),
++                dormant_alias: active.is_none(),
++            }];
++        }
+         match &span.kind {
+             SymbolKind::MemberDeclaration { name, .. } | SymbolKind::Variable { name } => {
+                 let Some(class) = binding_lexical_class(file, span.start) else {
+@@ -179,6 +228,7 @@ impl Backend {
+                             expand: false,
+                             name: *name,
+                             receiver: Arc::clone(&class),
++                            dormant_alias: false,
+                         }];
+                     }
+                 }
+@@ -240,6 +290,50 @@ impl Backend {
+         }
+     }
+ 
++    /// Named aliases own their rename token even when definition navigation
++    /// deliberately follows the original implementation in another trait.
++    pub(crate) fn named_trait_alias_locations(&self, uri: &str, offset: u32) -> Vec<Location> {
++        let Some(span) = self.lookup_symbol_map(uri, offset) else {
++            return Vec::new();
++        };
++        let bindings = self.private_reference_queries(uri, &span);
++        if !bindings.iter().any(|binding| {
++            binding
++                .declaration
++                .trait_aliases
++                .iter()
++                .any(|alias| alias.alias_offset == Some(binding.offset))
++        }) {
++            return Vec::new();
++        }
++        // A union receiver may also bind an ordinary declaration. Keep its
++        // canonical token alongside aliases, rather than losing that branch.
++        bindings
++            .into_iter()
++            .filter_map(|binding| {
++                let name = binding
++                    .declaration
++                    .trait_aliases
++                    .iter()
++                    .find(|alias| alias.alias_offset == Some(binding.offset))
++                    .and_then(|alias| alias.alias)
++                    .unwrap_or(binding.name);
++                let file = self.find_class_file_uri(binding.declaration.fqn().as_str(), uri)?;
++                let content = self.reference_file_content_arc(&file)?;
++                Some(Location::new(
++                    Url::parse(&file).ok()?,
++                    Range::new(
++                        crate::text_position::offset_to_position(&content, binding.offset as usize),
++                        crate::text_position::offset_to_position(
++                            &content,
++                            binding.offset as usize + name.len(),
++                        ),
++                    ),
++                ))
++            })
++            .collect()
++    }
++
+     /// Attribute results by source identity wherever a private declaration
+     /// breaks the ordinary public override family. Return extra source queries
+     /// for lexical private bindings that the receiver-only search could miss.
+@@ -279,6 +373,7 @@ impl Backend {
+             return;
+         }
+         let only_private = selected.iter().all(|b| b.private);
++        let only_dormant_aliases = selected.iter().all(|binding| binding.dormant_alias);
+         let mut files = std::collections::HashMap::new();
+         locations.retain(|location| {
+             let uri = location.uri.as_str();
+@@ -286,12 +381,12 @@ impl Backend {
+                 .entry(uri.to_owned())
+                 .or_insert_with(|| self.reference_binding_file(uri, &selected[0].name));
+             let Some(file) = file else {
+-                return !only_private;
++                return !only_private && !only_dormant_aliases;
+             };
+             let offset =
+                 crate::text_position::position_to_offset(&file.content, location.range.start);
+             let Some(span) = file.map.lookup(offset) else {
+-                return !only_private;
++                return !only_private && !only_dormant_aliases;
+             };
+             let candidates = self.reference_bindings_at(file, span);
+             if only_private {
+@@ -304,13 +399,19 @@ impl Backend {
+             // Public override families retain their existing hierarchy rules.
+             // A positively identified private binding belongs only to its own
+             // declaration, rather than to a same-named descendant declaration.
+-            candidates.is_empty()
++            (candidates.is_empty() && !only_dormant_aliases)
+                 || candidates.iter().any(|candidate| {
+-                    selected.iter().any(|target| target.kind == candidate.kind)
+-                        && (!candidate.private
+-                            || selected
+-                                .iter()
+-                                .any(|target| self.reference_binding_matches(target, candidate)))
++                    selected.iter().any(|target| {
++                        if target.dormant_alias || candidate.dormant_alias {
++                            return target.same_declaration(candidate);
++                        }
++                        target.kind == candidate.kind
++                            && (target.declaration.kind != crate::types::ClassLikeKind::Trait
++                                || self.reference_binding_matches(target, candidate))
++                    }) && (!candidate.private
++                        || selected
++                            .iter()
++                            .any(|target| self.reference_binding_matches(target, candidate)))
+                 })
+         });
+     }
+diff --git a/src/rename/class/imports.rs b/src/rename/class/imports.rs
+index 93be3b8..5ac2a35 100644
+--- a/src/rename/class/imports.rs
++++ b/src/rename/class/imports.rs
+@@ -19,24 +19,33 @@ pub(super) struct ImportInfo {
+ /// Look up the import entry for a given FQN in a file's use_map.
+ ///
+ /// The use_map is `alias → fqn`, so we need a reverse lookup.
+-pub(super) fn find_import_for_fqn(
++pub(super) fn find_imports_for_fqn(
++    content: &str,
++    block: Option<(usize, usize)>,
+     use_map: &HashMap<String, String>,
+     target_fqn: &str,
+-) -> Option<ImportInfo> {
++) -> Vec<ImportInfo> {
+     let target_normalized = strip_fqn_prefix(target_fqn);
+-    let target_short = crate::util::short_name(target_normalized);
++    let mut spans = crate::diagnostics::use_statements::compute_use_statement_spans(content);
++    if let Some((start, end)) = block {
++        spans.retain(|&(offset, _)| offset >= start && offset <= end);
++    }
++    let mut imports = Vec::new();
+ 
+     for (alias, fqn) in use_map {
+         let fqn_normalized = strip_fqn_prefix(fqn);
+         if fqn_normalized.eq_ignore_ascii_case(target_normalized) {
+-            let has_explicit_alias = !alias.eq_ignore_ascii_case(target_short);
+-            return Some(ImportInfo {
++            let has_explicit_alias =
++                crate::diagnostics::use_statements::find_use_statement(content, &spans, fqn, alias)
++                    .is_some_and(|location| location.has_explicit_alias);
++            imports.push(ImportInfo {
+                 alias: alias.clone(),
+                 has_explicit_alias,
+             });
+         }
+     }
+-    None
++    imports.sort_unstable_by(|a, b| a.alias.cmp(&b.alias));
++    imports
+ }
+ 
+ /// Whether a file declaring `file_namespace` resolves the short name of
+@@ -67,7 +76,9 @@ pub(super) fn has_import_collision(
+     for (alias, fqn) in use_map {
+         let fqn_normalized = strip_fqn_prefix(fqn);
+         // Skip the entry for the class being renamed.
+-        if fqn_normalized.eq_ignore_ascii_case(old_normalized) {
++        if fqn_normalized.eq_ignore_ascii_case(old_normalized)
++            && alias.eq_ignore_ascii_case(crate::util::short_name(old_normalized))
++        {
+             continue;
+         }
+         if alias.to_lowercase() == new_lower {
+@@ -89,18 +100,15 @@ pub(super) fn pick_collision_alias(base_name: &str, use_map: &HashMap<String, St
+             .any(|alias| alias.eq_ignore_ascii_case(candidate))
+     };
+ 
+-    let candidate = format!("{}Alias", base_name);
+-    if is_free(&candidate) {
+-        return candidate;
++    let mut candidate = format!("{}Alias", base_name);
++    let mut suffix = 1usize;
++    // A finite import table cannot occupy more candidates than it has keys.
++    // The first free suffix is reached before the counter can overflow.
++    while !is_free(&candidate) {
++        suffix += 1;
++        candidate = format!("{}Alias{}", base_name, suffix);
+     }
+-    for i in 2..100 {
+-        let candidate = format!("{}Alias{}", base_name, i);
+-        if is_free(&candidate) {
+-            return candidate;
+-        }
+-    }
+-    // Extremely unlikely fallback.
+-    format!("{}Alias99", base_name)
++    candidate
+ }
+ 
+ /// What a class is being renamed/moved to, bundled so
+@@ -115,6 +123,144 @@ pub(super) struct RenameTarget<'a> {
+     pub(super) collision_map: &'a HashMap<String, String>,
+ }
+ 
++/// Coordinate imports sharing a statement before calculating comma removal.
++/// A group leaving its prefix becomes one replacement in original coordinates.
++pub(super) fn build_use_statement_edits(
++    content: &str,
++    block: Option<(usize, usize)>,
++    old_fqn: &str,
++    target: &RenameTarget,
++    infos: &[ImportInfo],
++    use_map: &HashMap<String, String>,
++    file_namespace: Option<&str>,
++) -> Result<Vec<(Range, Vec<TextEdit>)>, String> {
++    let missing =
++        || "An import changed while rename was being prepared. No edits were applied.".to_owned();
++    let mut spans = crate::diagnostics::use_statements::compute_use_statement_spans(content);
++    if let Some((start, end)) = block {
++        spans.retain(|&(offset, _)| offset >= start && offset <= end);
++    }
++    let mut groups: std::collections::BTreeMap<(usize, usize), Vec<&ImportInfo>> =
++        std::collections::BTreeMap::new();
++    for info in infos {
++        let source = use_map
++            .get(&info.alias)
++            .map(String::as_str)
++            .unwrap_or(old_fqn);
++        let location = crate::diagnostics::use_statements::find_use_statement(
++            content,
++            &spans,
++            source,
++            &info.alias,
++        )
++        .ok_or_else(missing)?;
++        groups.entry(location.statement).or_default().push(info);
++    }
++    let mut result = Vec::new();
++    for ((start, end), mut group) in groups {
++        group.sort_unstable_by(|a, b| a.alias.cmp(&b.alias));
++        let first = group.first().ok_or_else(missing)?;
++        let source = use_map
++            .get(&first.alias)
++            .map(String::as_str)
++            .unwrap_or(old_fqn);
++        let location = crate::diagnostics::use_statements::find_use_statement(
++            content,
++            &[(start, end)],
++            source,
++            &first.alias,
++        )
++        .ok_or_else(missing)?;
++        if strip_matching_prefix(target.new_fqn, location.prefix).is_some() {
++            for info in group {
++                result.push(
++                    build_use_statement_edit(
++                        content,
++                        block,
++                        old_fqn,
++                        target,
++                        info,
++                        use_map,
++                        file_namespace,
++                    )
++                    .ok_or_else(missing)?,
++                );
++            }
++            continue;
++        }
++        // The scanner's statement span extends to the line end. Keep any
++        // trailing comment or same-line code outside this coordinated edit.
++        let end = start
++            + content
++                .get(start..end)
++                .ok_or_else(missing)?
++                .find(';')
++                .ok_or_else(missing)?
++            + 1;
++        let mut retained = content.get(start..end).ok_or_else(missing)?.to_owned();
++        for info in &group {
++            let source = use_map
++                .get(&info.alias)
++                .map(String::as_str)
++                .unwrap_or(old_fqn);
++            let current = crate::diagnostics::use_statements::find_use_statement(
++                &retained,
++                &[(0, retained.len())],
++                source,
++                &info.alias,
++            )
++            .ok_or_else(missing)?;
++            if current.member_count == 1 {
++                retained.clear();
++            } else {
++                let (from, to) =
++                    list_item_delete_range(&retained, current.member.0, current.member.1);
++                retained.replace_range(from..to, "");
++            }
++        }
++        let indentation = content[..start].rsplit('\n').next().unwrap_or("");
++        let indentation = if indentation.chars().all(|c| c == ' ' || c == '\t') {
++            indentation
++        } else {
++            ""
++        };
++        let newline = if content.contains("\r\n") {
++            "\r\n"
++        } else {
++            "\n"
++        };
++        let separator = format!("{newline}{indentation}");
++        let mut statements = Vec::new();
++        if !retained.trim().is_empty() {
++            statements.push(retained);
++        }
++        for info in group {
++            statements.push(format!(
++                "use {};",
++                build_member_text(
++                    target.new_fqn,
++                    info,
++                    target.has_collision,
++                    target.new_short_name,
++                    target.collision_map,
++                )
++            ));
++        }
++        let range = Range {
++            start: offset_to_position(content, start),
++            end: offset_to_position(content, end),
++        };
++        result.push((
++            range,
++            vec![TextEdit {
++                range,
++                new_text: statements.join(&separator),
++            }],
++        ));
++    }
++    Ok(result)
++}
++
+ /// Plan the edit(s) needed to bring a file's `use` import for a renamed or
+ /// moved class up to date, together with the byte range those edits
+ /// already cover (so a per-reference edit can skip a location that falls
+diff --git a/src/rename/class/mod.rs b/src/rename/class/mod.rs
+index 5e4451c..97b24d9 100644
+--- a/src/rename/class/mod.rs
++++ b/src/rename/class/mod.rs
+@@ -208,19 +208,19 @@ impl Backend {
+                 );
+                 // A pure rename never changes the namespace, so the group
+                 // prefix (if any) always still fits.
+-                let use_statement_edit = file.use_statement_edit(
++                let use_statement_edits = file.use_statement_edits(
+                     old_fqn_normalized,
+                     &new_fqn,
+                     new_short_name,
+                     &rewrite,
+                     None,
+-                );
++                )?;
+ 
+                 // An inline qualified reference (`\Ns\Foo`, `Sub\Foo`) keeps
+                 // its prefix; only the last segment changes.
+                 let (location_edits, _) = file.rewrite_locations(
+                     &block_locations,
+-                    use_statement_edit.as_ref(),
++                    &use_statement_edits,
+                     &rewrite,
+                     |source| match source.rfind('\\') {
+                         Some(ns_sep) => format!("{}{}", &source[..=ns_sep], new_short_name),
+@@ -229,7 +229,7 @@ impl Backend {
+                 );
+                 file_edits.extend(location_edits);
+ 
+-                if let Some((_, edits)) = use_statement_edit {
++                for (_, edits) in use_statement_edits {
+                     file_edits.extend(edits);
+                 }
+             }
+@@ -352,7 +352,7 @@ impl Backend {
+                 file,
+                 &block_locations,
+                 is_definition_file,
+-            ));
++            )?);
+         }
+ 
+         self.rewrite_template_edits(file_uri_str, mv.new_fqn, mv.old_fqn, &mut file_edits);
+@@ -368,7 +368,7 @@ impl Backend {
+         file: &FileRewrite,
+         block_locations: &[&Location],
+         is_definition_file: bool,
+-    ) -> Vec<TextEdit> {
++    ) -> Result<Vec<TextEdit>, String> {
+         let file_namespace = &file.namespace;
+ 
+         // A block with no import for the class reached it through its
+@@ -376,7 +376,7 @@ impl Backend {
+         // leaves every short-name reference dangling.  Such a block
+         // needs a `use` statement added.
+         let needs_new_import = mv.namespace_changed
+-            && file.import_info.is_none()
++            && file.import_infos.is_empty()
+             && !is_definition_file
+             && namespace_owns(file_namespace.as_deref(), mv.old_fqn)
+             && !namespace_owns(file_namespace.as_deref(), mv.new_fqn);
+@@ -399,30 +399,26 @@ impl Backend {
+             new_import_alias.as_deref(),
+         );
+ 
+-        let use_statement_edit = file.use_statement_edit(
++        let use_statement_edits = file.use_statement_edits(
+             mv.old_fqn,
+             mv.new_fqn,
+             mv.new_short_name,
+             &rewrite,
+             file_namespace.as_deref(),
+-        );
++        )?;
+ 
+         // A qualified reference is rewritten in full, keeping its
+         // leading backslash when it has one.
+-        let (mut edits, has_short_name_ref) = file.rewrite_locations(
+-            block_locations,
+-            use_statement_edit.as_ref(),
+-            &rewrite,
+-            |source| {
++        let (mut edits, has_short_name_ref) =
++            file.rewrite_locations(block_locations, &use_statement_edits, &rewrite, |source| {
+                 if source.starts_with('\\') {
+                     format!("\\{}", mv.new_fqn)
+                 } else {
+                     mv.new_fqn.to_string()
+                 }
+-            },
+-        );
++            });
+ 
+-        if let Some((_, statement_edits)) = use_statement_edit {
++        for (_, statement_edits) in use_statement_edits {
+             edits.extend(statement_edits);
+         }
+ 
+@@ -442,7 +438,7 @@ impl Backend {
+             }
+         }
+ 
+-        edits
++        Ok(edits)
+     }
+ 
+     /// The edits that bring the declaring file's `namespace` statement to
+diff --git a/src/rename/class/rewrite.rs b/src/rename/class/rewrite.rs
+index cc2044c..ce6ff6e 100644
+--- a/src/rename/class/rewrite.rs
++++ b/src/rename/class/rewrite.rs
+@@ -17,8 +17,8 @@ use crate::util::build_fqn;
+ 
+ use super::super::parse_edit_target_uri;
+ use super::imports::{
+-    ImportInfo, RenameTarget, build_use_statement_edit, find_import_for_fqn, has_import_collision,
+-    pick_collision_alias,
++    ImportInfo, RenameTarget, build_use_statement_edits, find_imports_for_fqn,
++    has_import_collision, pick_collision_alias,
+ };
+ 
+ /// One `namespace` block of a file that references the class, with what
+@@ -43,7 +43,7 @@ pub(super) struct FileRewrite {
+     /// Kept separate so declarations are never mistaken for use statements.
+     pub(super) collision_map: HashMap<String, String>,
+     /// The block's import of the class, when it has one.
+-    pub(super) import_info: Option<ImportInfo>,
++    pub(super) import_infos: Vec<ImportInfo>,
+ }
+ 
+ /// How one file's in-code references to the class are rewritten.
+@@ -51,8 +51,8 @@ pub(super) struct ReferenceRewrite {
+     /// The new short name is already imported under another FQN, so the
+     /// rewritten import needs an alias.
+     has_collision: bool,
+-    /// References through the file's own explicit alias stay as they are.
+-    skip_alias_refs: bool,
++    /// The only implicit short spelling whose binding changes.
++    old_short_name: String,
+     /// What a short-name reference becomes.
+     in_code_replacement: String,
+     /// Whether short-name references are rewritten at all: a move that
+@@ -85,7 +85,12 @@ impl Backend {
+                 FileRewrite {
+                     content: Arc::clone(&content),
+                     target_uri: target_uri.clone(),
+-                    import_info: find_import_for_fqn(&block.use_map, old_fqn),
++                    import_infos: find_imports_for_fqn(
++                        &content,
++                        block.range,
++                        &block.use_map,
++                        old_fqn,
++                    ),
+                     namespace: block.namespace,
+                     block: block.range,
+                     use_map: block.use_map,
+@@ -143,25 +148,24 @@ impl FileRewrite {
+         let class_name_changed = old_short_name != new_short_name;
+         let has_collision = class_name_changed
+             && self
+-                .import_info
+-                .as_ref()
+-                .is_some_and(|info| !info.has_explicit_alias)
++                .import_infos
++                .iter()
++                .any(|info| !info.has_explicit_alias)
+             && has_import_collision(&self.collision_map, old_fqn, new_short_name);
+-        let (skip_alias_refs, in_code_replacement) = match &self.import_info {
+-            Some(info) if info.has_explicit_alias => (true, info.alias.clone()),
+-            Some(_) if has_collision => (
+-                false,
+-                pick_collision_alias(new_short_name, &self.collision_map),
+-            ),
+-            _ => match new_import_alias {
+-                Some(alias) => (false, alias.to_string()),
+-                None if class_name_changed => (false, new_short_name.to_string()),
+-                None => (true, old_short_name.to_string()),
+-            },
++        let in_code_replacement = if has_collision {
++            pick_collision_alias(new_short_name, &self.collision_map)
++        } else {
++            new_import_alias
++                .unwrap_or(if class_name_changed {
++                    new_short_name
++                } else {
++                    old_short_name
++                })
++                .to_owned()
+         };
+         ReferenceRewrite {
+             has_collision,
+-            skip_alias_refs,
++            old_short_name: old_short_name.to_owned(),
+             in_code_replacement,
+             rewrite_short_refs: class_name_changed || new_import_alias.is_some(),
+         }
+@@ -170,16 +174,15 @@ impl FileRewrite {
+     /// The edit that brings the file's import of the class up to date,
+     /// with the range it covers so a reference location inside it is not
+     /// rewritten twice.  `None` when the file has no import to update.
+-    pub(super) fn use_statement_edit(
++    pub(super) fn use_statement_edits(
+         &self,
+         old_fqn: &str,
+         new_fqn: &str,
+         new_short_name: &str,
+         rewrite: &ReferenceRewrite,
+         file_namespace: Option<&str>,
+-    ) -> Option<(Range, Vec<TextEdit>)> {
+-        let info = self.import_info.as_ref()?;
+-        build_use_statement_edit(
++    ) -> Result<Vec<(Range, Vec<TextEdit>)>, String> {
++        build_use_statement_edits(
+             &self.content,
+             self.block,
+             old_fqn,
+@@ -189,7 +192,7 @@ impl FileRewrite {
+                 has_collision: rewrite.has_collision,
+                 collision_map: &self.collision_map,
+             },
+-            info,
++            &self.import_infos,
+             &self.use_map,
+             file_namespace,
+         )
+@@ -205,7 +208,7 @@ impl FileRewrite {
+     pub(super) fn rewrite_locations(
+         &self,
+         locations: &[&Location],
+-        use_statement_edit: Option<&(Range, Vec<TextEdit>)>,
++        use_statement_edits: &[(Range, Vec<TextEdit>)],
+         rewrite: &ReferenceRewrite,
+         qualified: impl Fn(&str) -> String,
+     ) -> (Vec<TextEdit>, bool) {
+@@ -216,8 +219,9 @@ impl FileRewrite {
+             let end = position_to_byte_offset(&self.content, loc.range.end);
+             let source_text = self.content.get(start..end).unwrap_or("");
+ 
+-            if let Some((covered, _)) = use_statement_edit
+-                && ranges_overlap(&loc.range, covered)
++            if use_statement_edits
++                .iter()
++                .any(|(covered, _)| ranges_overlap(&loc.range, covered))
+             {
+                 continue;
+             }
+@@ -230,14 +234,11 @@ impl FileRewrite {
+                     range: loc.range,
+                     new_text: qualified(source_text),
+                 });
+-            } else if rewrite.skip_alias_refs
+-                && self
+-                    .import_info
+-                    .as_ref()
+-                    .is_some_and(|info| source_text.eq_ignore_ascii_case(&info.alias))
+-            {
++            } else if self.import_infos.iter().any(|info| {
++                info.has_explicit_alias && source_text.eq_ignore_ascii_case(&info.alias)
++            }) {
+                 continue;
+-            } else {
++            } else if source_text.eq_ignore_ascii_case(&rewrite.old_short_name) {
+                 has_short_name_ref = true;
+                 if rewrite.rewrite_short_refs {
+                     edits.push(TextEdit {
+diff --git a/src/rename/collisions.rs b/src/rename/collisions.rs
+index 020d630..1aae8ef 100644
+--- a/src/rename/collisions.rs
++++ b/src/rename/collisions.rs
+@@ -50,6 +50,16 @@ impl Backend {
+                     .find(|m| m.name_offset != 0 && m.name_offset == offset)
+                 {
+                     Some((MemberKind::Method, method.name.as_str(), method.visibility))
++                } else if let Some(alias) = owner
++                    .trait_aliases
++                    .iter()
++                    .find(|alias| alias.alias_offset == Some(offset))
++                    && let Some(name) = alias.alias.as_ref()
++                {
++                    let effective = resolve_class_with_inheritance(owner, &loader);
++                    effective
++                        .get_method(name)
++                        .map(|method| (MemberKind::Method, name.as_str(), method.visibility))
+                 } else if let Some(property) = owner
+                     .properties
+                     .iter()
+diff --git a/src/rename/prepare.rs b/src/rename/prepare.rs
+index b870d71..45614d2 100644
+--- a/src/rename/prepare.rs
++++ b/src/rename/prepare.rs
+@@ -504,7 +504,16 @@ impl Backend {
+             return false;
+         }
+ 
+-        for loc in self.resolve_definition(uri, content, position) {
++        let aliases = self
++            .lookup_symbol_at_position(uri, content, position)
++            .map(|span| self.named_trait_alias_locations(uri, span.start))
++            .unwrap_or_default();
++        let definitions = if aliases.is_empty() {
++            self.resolve_definition(uri, content, position)
++        } else {
++            aliases
++        };
++        for loc in definitions {
+             let def_uri = loc.uri.to_string();
+             if vendor_prefixes
+                 .iter()
+diff --git a/src/types/mod.rs b/src/types/mod.rs
+index c9a142f..07899f9 100644
+--- a/src/types/mod.rs
++++ b/src/types/mod.rs
+@@ -1581,6 +1581,8 @@ pub struct TraitAlias {
+     /// The alias name, if any (e.g. `Some("traitBMethod")`).
+     /// `None` when only the visibility is changed (e.g. `method as protected`).
+     pub alias: Option<Atom>,
++    /// Byte offset of the independently named alias token in this owner’s source.
++    pub alias_offset: Option<u32>,
+     /// Optional visibility override (e.g. `Some(Visibility::Protected)`).
+     pub visibility: Option<Visibility>,
+ }
+diff --git a/tests/integration/rename_class.rs b/tests/integration/rename_class.rs
+index c846631..bc694ec 100644
+--- a/tests/integration/rename_class.rs
++++ b/tests/integration/rename_class.rs
+@@ -1892,3 +1892,358 @@ async fn class_move_carries_a_class_declared_in_every_branch_of_a_conditional()
+         )
+     );
+ }
++
++async fn rename_import_aliases_actual_caller(caller: &str) -> String {
++    let backend = create_test_backend();
++    let source_uri = Url::parse("file:///same-target/User.php").unwrap();
++    let caller_uri = Url::parse("file:///same-target/caller.php").unwrap();
++    let vendor_uri = Url::parse("file:///same-target/Vendor.php").unwrap();
++    let source = "<?php\nnamespace Demo;\nclass User {}\n";
++    let vendor = "<?php\nnamespace Vendor;\nclass Person {}\nclass Occupied {}\n";
++    open_php(&backend, &source_uri, source).await;
++    open_php(&backend, &vendor_uri, vendor).await;
++    open_php(&backend, &caller_uri, caller).await;
++    let edit = rename(&backend, &source_uri, 2, 7, "Person")
++        .await
++        .expect("actual public rename must propose changes");
++    assert_eq!(
++        apply_edits(source, &edits_for_uri(&edit, &source_uri)),
++        "<?php\nnamespace Demo;\nclass Person {}\n"
++    );
++    assert!(
++        edits_for_uri(&edit, &vendor_uri).is_empty(),
++        "unrelated declarations must not change"
++    );
++    apply_edits(caller, &edits_for_uri(&edit, &caller_uri))
++}
++
++const IMPORT_ALIAS_REFERENCE_CONTROL: &str = concat!(
++    "// User Account Person: keep café 🐘\n",
++    "$implicit = new User();\n",
++    "$alias = new Account();\n",
++    "$other = new Person();\n",
++    "$full = new \\Demo\\User();\n",
++    "$unrelated = new \\Vendor\\Person();\n",
++    "$string = 'User Account Person';\n",
++);
++
++#[tokio::test]
++async fn rename_import_aliases_same_target_separate_imports_keep_each_binding() {
++    let imports = concat!(
++        "<?php\nuse Demo\\User;\nuse Demo\\User as Account;\n",
++        "use Vendor\\Person;\nuse Vendor\\Occupied as pErSoNaLiAs;\n",
++    );
++    let caller = format!("{imports}{IMPORT_ALIAS_REFERENCE_CONTROL}");
++    let expected = caller
++        .replace("use Demo\\User;", "use Demo\\Person as PersonAlias2;")
++        .replace("use Demo\\User as Account;", "use Demo\\Person as Account;")
++        .replace("new User()", "new PersonAlias2()")
++        .replace("new \\Demo\\User()", "new \\Demo\\Person()");
++    // Fresh backends expose both HashMap seeds; every result must be identical.
++    for _ in 0..8 {
++        assert_eq!(rename_import_aliases_actual_caller(&caller).await, expected);
++    }
++}
++
++#[tokio::test]
++async fn rename_import_aliases_same_target_group_keeps_each_member() {
++    let imports = concat!(
++        "<?php\nuse Demo\\{User, User as Account};\n",
++        "use Vendor\\Person;\nuse Vendor\\Occupied as PersonAlias;\n",
++    );
++    let caller = format!("{imports}{IMPORT_ALIAS_REFERENCE_CONTROL}");
++    let expected = caller
++        .replace(
++            "{User, User as Account}",
++            "{Person as PersonAlias2, Person as Account}",
++        )
++        .replace("new User()", "new PersonAlias2()")
++        .replace("new \\Demo\\User()", "new \\Demo\\Person()");
++    assert_eq!(rename_import_aliases_actual_caller(&caller).await, expected);
++}
++
++#[tokio::test]
++async fn rename_import_aliases_same_target_wrapped_list_preserves_crlf_and_unicode() {
++    let imports = concat!(
++        "<?php\nuse Demo\\User,\n    Demo\\User as Account;\n",
++        "use Vendor\\Person;\nuse Vendor\\Occupied as PERSONALIAS;\n",
++    );
++    let caller = format!("{imports}{IMPORT_ALIAS_REFERENCE_CONTROL}").replace('\n', "\r\n");
++    let expected = caller
++        .replace("use Demo\\User,", "use Demo\\Person as PersonAlias2,")
++        .replace("Demo\\User as Account;", "Demo\\Person as Account;")
++        .replace("new User()", "new PersonAlias2()")
++        .replace("new \\Demo\\User()", "new \\Demo\\Person()");
++    assert_eq!(rename_import_aliases_actual_caller(&caller).await, expected);
++}
++
++#[tokio::test]
++async fn rename_import_aliases_explicit_same_short_spelling_is_preserved() {
++    for alias in ["User", "user"] {
++        let caller = format!(
++            "<?php\nuse Demo\\User as {alias};\nuse Vendor\\Person;\nfunction make(): {alias} {{ return new {alias}(); }}\n"
++        );
++        let expected = caller.replace("use Demo\\User as", "use Demo\\Person as");
++        assert_eq!(rename_import_aliases_actual_caller(&caller).await, expected);
++    }
++}
++
++#[tokio::test]
++async fn rename_import_aliases_explicit_new_short_name_still_reserves_its_binding() {
++    let caller = "<?php\nuse Demo\\User;\nuse Demo\\User as Person;\nnew User();\nnew Person();\n";
++    let expected = caller
++        .replace("use Demo\\User;", "use Demo\\Person as PersonAlias;")
++        .replace("use Demo\\User as Person;", "use Demo\\Person as Person;")
++        .replace("new User()", "new PersonAlias()");
++    assert_eq!(rename_import_aliases_actual_caller(caller).await, expected);
++}
++
++#[tokio::test]
++async fn rename_import_aliases_single_explicit_alias_control() {
++    let caller =
++        "<?php\nuse Demo\\User as Account;\nuse Vendor\\Person;\nnew Account();\nnew Person();\n";
++    assert_eq!(
++        rename_import_aliases_actual_caller(caller).await,
++        caller.replace("Demo\\User", "Demo\\Person")
++    );
++}
++
++#[tokio::test]
++async fn rename_import_aliases_single_implicit_collision_control() {
++    let caller = "<?php\nuse Demo\\User;\nuse Vendor\\Person;\nnew User();\nnew Person();\n";
++    let expected = caller
++        .replace("use Demo\\User;", "use Demo\\Person as PersonAlias;")
++        .replace("new User()", "new PersonAlias()");
++    assert_eq!(rename_import_aliases_actual_caller(caller).await, expected);
++}
++
++async fn rename_import_aliases_group_move(caller: &str) -> String {
++    let backend = create_test_backend();
++    let source_uri = Url::parse("file:///group-move/User.php").unwrap();
++    let caller_uri = Url::parse("file:///group-move/caller.php").unwrap();
++    let source = "<?php\nnamespace Demo;\nclass User {}\n";
++    open_php(&backend, &source_uri, source).await;
++    open_php(&backend, &caller_uri, caller).await;
++    let edit = rename(&backend, &source_uri, 2, 7, "Domain\\Person")
++        .await
++        .expect("public class rename must retain both import bindings");
++    let edits = edits_for_uri(&edit, &caller_uri);
++    let mut ordered: Vec<_> = edits.iter().collect();
++    ordered.sort_by_key(|edit| {
++        (
++            edit.range.start.line,
++            edit.range.start.character,
++            edit.range.end.line,
++            edit.range.end.character,
++        )
++    });
++    for adjacent in ordered.windows(2) {
++        let end = (adjacent[0].range.end.line, adjacent[0].range.end.character);
++        let start = (
++            adjacent[1].range.start.line,
++            adjacent[1].range.start.character,
++        );
++        assert!(
++            end <= start,
++            "coordinated group edits must not overlap: {edits:?}"
++        );
++        assert!(
++            adjacent[0].range != adjacent[1].range,
++            "independent insertions at the same range must be coalesced: {edits:?}"
++        );
++    }
++    apply_edits(caller, &edits)
++}
++
++#[tokio::test]
++async fn rename_import_aliases_group_move_all_members_emit_one_exact_replacement() {
++    let caller = concat!(
++        "<?php\nuse Demo\\{User, User as Account};\n",
++        "use Vendor\\Person;\nuse Vendor\\Occupied as pErSoNaLiAs;\n",
++        "new User();\nnew Account();\nnew Person();\n",
++        "new \\Demo\\User();\nnew \\Vendor\\Person();\n",
++    );
++    let expected = concat!(
++        "<?php\nuse Domain\\Person as Account;\nuse Domain\\Person as PersonAlias2;\n",
++        "use Vendor\\Person;\nuse Vendor\\Occupied as pErSoNaLiAs;\n",
++        "new PersonAlias2();\nnew Account();\nnew Person();\n",
++        "new \\Domain\\Person();\nnew \\Vendor\\Person();\n",
++    );
++    assert_eq!(rename_import_aliases_group_move(caller).await, expected);
++}
++
++#[tokio::test]
++async fn rename_import_aliases_group_move_retains_unrelated_member_and_unicode_crlf() {
++    let caller = concat!(
++        "<?php\r\nuse Demo\\{User, User as Account, Other};\r\n",
++        "use Vendor\\Person;\r\nuse Vendor\\Occupied as PERSONALIAS;\r\n",
++        "// keep café 🐘\r\nnew User();\r\nnew Account();\r\nnew Other();\r\nnew Person();\r\n",
++    );
++    let expected = concat!(
++        "<?php\r\nuse Demo\\{Other};\r\n",
++        "use Domain\\Person as Account;\r\nuse Domain\\Person as PersonAlias2;\r\n",
++        "use Vendor\\Person;\r\nuse Vendor\\Occupied as PERSONALIAS;\r\n",
++        "// keep café 🐘\r\nnew PersonAlias2();\r\nnew Account();\r\nnew Other();\r\nnew Person();\r\n",
++    );
++    assert_eq!(rename_import_aliases_group_move(caller).await, expected);
++}
++
++#[tokio::test]
++async fn rename_import_aliases_group_move_multiple_explicit_aliases_preserve_calls() {
++    let caller =
++        "<?php\nuse Demo\\{User as Account, User as Actor};\nnew Account();\nnew Actor();\n";
++    let expected = "<?php\nuse Domain\\Person as Account;\nuse Domain\\Person as Actor;\nnew Account();\nnew Actor();\n";
++    assert_eq!(rename_import_aliases_group_move(caller).await, expected);
++}
++
++#[tokio::test]
++async fn rename_import_aliases_group_move_single_member_control() {
++    let caller = "<?php\nuse Demo\\{User as Account};\nnew Account();\n";
++    let expected = "<?php\nuse Domain\\Person as Account;\nnew Account();\n";
++    assert_eq!(rename_import_aliases_group_move(caller).await, expected);
++}
++
++#[tokio::test]
++async fn rename_import_aliases_uppercase_as_preserves_explicit_same_short_binding() {
++    for keyword in ["AS", "As"] {
++        let caller = format!(
++            "<?php\nuse Demo\\User {keyword} User;\nuse Vendor\\Person;\nnew User();\nnew Person();\n"
++        );
++        let expected =
++            "<?php\nuse Demo\\Person as User;\nuse Vendor\\Person;\nnew User();\nnew Person();\n";
++        assert_eq!(rename_import_aliases_actual_caller(&caller).await, expected);
++    }
++}
++
++#[tokio::test]
++async fn rename_import_aliases_whitespace_as_preserves_explicit_binding() {
++    for clause in ["\tas\tAccount", "\n    as\n    Account"] {
++        let caller = format!(
++            "<?php\nuse Demo\\User{clause};\nuse Vendor\\Person;\nnew Account();\nnew Person();\n"
++        );
++        let expected = "<?php\nuse Demo\\Person as Account;\nuse Vendor\\Person;\nnew Account();\nnew Person();\n";
++        assert_eq!(rename_import_aliases_actual_caller(&caller).await, expected);
++    }
++}
++
++#[tokio::test]
++async fn rename_import_aliases_occupied_through_99_chooses_first_available_100() {
++    let mut caller = "<?php\nuse Demo\\User;\nuse Vendor\\Person;\n".to_owned();
++    caller.push_str("use Vendor\\Occupied as PERSONALIAS;\n");
++    for suffix in 2..=99 {
++        caller.push_str(&format!("use Vendor\\Occupied as PERSONALIAS{suffix};\n"));
++    }
++    caller.push_str("new User();\nnew Person();\nnew PERSONALIAS99();\n// preserve café 🐘\n");
++    let expected = caller
++        .replace("use Demo\\User;", "use Demo\\Person as PersonAlias100;")
++        .replace("new User()", "new PersonAlias100()");
++    assert_eq!(rename_import_aliases_actual_caller(&caller).await, expected);
++}
++
++#[tokio::test]
++async fn rename_import_aliases_comment_prefix_preserves_exact_leading_and_trailing_code() {
++    let caller = "<?php\r\n/* caller café 🐘 */ use Demo\\User as Account; new Account(); // keep ž\r\nnew Account();\r\n";
++    assert_eq!(
++        rename_import_aliases_actual_caller(caller).await,
++        caller.replace("Demo\\User", "Demo\\Person")
++    );
++}
++
++#[tokio::test]
++async fn rename_import_aliases_comment_prefix_group_preserves_both_bindings() {
++    let caller = concat!(
++        "<?php\r\n/* caller café 🐘 */ use Demo\\{User, User as Account}; new Account(); // keep\r\n",
++        "use Vendor\\Person;\r\nuse Vendor\\Occupied as PERSONALIAS;\r\n",
++        "new User();\r\nnew Account();\r\nnew Person();\r\n",
++    );
++    let expected = caller
++        .replace(
++            "{User, User as Account}",
++            "{Person as PersonAlias2, Person as Account}",
++        )
++        .replace("new User()", "new PersonAlias2()");
++    assert_eq!(rename_import_aliases_actual_caller(caller).await, expected);
++}
++
++#[tokio::test]
++async fn rename_import_aliases_comment_prefix_same_line_imports_preserve_all_bindings() {
++    let caller = "<?php\n/* café 🐘 */ use Demo\\User; use Demo\\User as Account;\nuse Vendor\\Person;\nnew User();\nnew Account();\nnew Person();\n";
++    let expected = caller
++        .replace("use Demo\\User;", "use Demo\\Person as PersonAlias;")
++        .replace("use Demo\\User as Account;", "use Demo\\Person as Account;")
++        .replace("new User()", "new PersonAlias()");
++    assert_eq!(rename_import_aliases_actual_caller(caller).await, expected);
++}
++
++#[tokio::test]
++async fn rename_import_aliases_php_open_tag_prefix_is_not_overwritten() {
++    let caller = "<?php use Demo\\User as Account; new Account();\n";
++    assert_eq!(
++        rename_import_aliases_actual_caller(caller).await,
++        caller.replace("Demo\\User", "Demo\\Person")
++    );
++}
++
++#[tokio::test]
++async fn rename_import_aliases_literal_and_comment_decoys_do_not_steal_real_import() {
++    let decoys = concat!(
++        "<?php\n/*\nuse Demo\\User as Account;\n*/\n",
++        "$quoted = '\nuse Demo\\User as Account;\n';\n",
++        "$heredoc = <<<TEXT\nuse Demo\\User as Account;\nTEXT;\n",
++        "$nowdoc = <<<'RAW'\nuse Demo\\User as Account;\nRAW;\n",
++    );
++    let real = "/* actual café 🐘 */ use Demo\\User as Account; // preserve\nnew Account();\n";
++    let caller = format!("{decoys}{real}");
++    let expected = format!("{decoys}{}", real.replace("Demo\\User", "Demo\\Person"));
++    assert_eq!(rename_import_aliases_actual_caller(&caller).await, expected);
++}
++
++#[tokio::test]
++async fn rename_import_aliases_use_keyword_case_preserves_explicit_binding() {
++    for keyword in ["USE", "Use"] {
++        let caller = format!(
++            "<?php\n{keyword} Demo\\User AS User;\nuse Vendor\\Person;\nnew User();\nnew Person();\n"
++        );
++        let expected =
++            "<?php\nuse Demo\\Person as User;\nuse Vendor\\Person;\nnew User();\nnew Person();\n";
++        assert_eq!(rename_import_aliases_actual_caller(&caller).await, expected);
++    }
++}
++
++#[tokio::test]
++async fn rename_import_aliases_use_keyword_php_whitespace_preserves_binding() {
++    for whitespace in ["\t", "\n    "] {
++        let caller = format!(
++            "<?php\nuse{whitespace}Demo\\User as User;\nuse Vendor\\Person;\nnew User();\nnew Person();\n"
++        );
++        let expected =
++            "<?php\nuse Demo\\Person as User;\nuse Vendor\\Person;\nnew User();\nnew Person();\n";
++        assert_eq!(rename_import_aliases_actual_caller(&caller).await, expected);
++    }
++}
++
++#[tokio::test]
++async fn rename_import_aliases_single_group_move_inline_stays_inside_php() {
++    for prefix in ["<?php ", "<?php /* café 🐘 */ "] {
++        let backend = create_test_backend();
++        let source_uri = Url::parse("file:///inline-group/User.php").unwrap();
++        let caller_uri = Url::parse("file:///inline-group/caller.php").unwrap();
++        let source = "<?php\nnamespace Demo;\nclass User {}\n";
++        let caller = format!(
++            "{prefix}use Demo\\{{User as Account, Other}}; new Account(); new Other(); // keep\r\n"
++        );
++        open_php(&backend, &source_uri, source).await;
++        open_php(&backend, &caller_uri, &caller).await;
++        let edit = rename(&backend, &source_uri, 2, 7, "Alpha\\Person")
++            .await
++            .expect("single grouped import should move within the PHP source");
++        let actual = apply_edits(&caller, &edits_for_uri(&edit, &caller_uri));
++        let expected = format!(
++            "{prefix}use Demo\\{{Other}};\r\nuse Alpha\\Person as Account; new Account(); new Other(); // keep\r\n"
++        );
++        assert_eq!(
++            actual, expected,
++            "an alphabetically earlier import must not be inserted before the PHP tag"
++        );
++    }
++}
+diff --git a/tests/integration/rename_member.rs b/tests/integration/rename_member.rs
+index 88cd419..113e030 100644
+--- a/tests/integration/rename_member.rs
++++ b/tests/integration/rename_member.rs
+@@ -2111,3 +2111,605 @@ async fn rename_data_provider_updates_the_metadata_naming_it() {
+         )
+     );
+ }
++
++const COMPOSED_TRAIT_ALIAS_SOURCE: &str = concat!(
++    "<?php\r\n",
++    "trait AliasBase { public function run(): void {} }\r\n",
++    "trait AliasWrapper { use AliasBase { AliasBase::run as innerRun; } }\r\n",
++    "trait AliasOuter { use AliasWrapper; }\r\n",
++    "class AliasConsumer {\r\n",
++    "    use AliasOuter { AliasOuter::innerRun as outerRun; AliasOuter::run as plainRun; }\r\n",
++    "    public function occupied(): void {}\r\n",
++    "}\r\n",
++    "class UnrelatedAliasNames { public function run(): void {} public function innerRun(): void {} public function outerRun(): void {} public function plainRun(): void {} }\r\n",
++    "function aliasDemo(AliasConsumer $value, UnrelatedAliasNames $other): void {\r\n",
++    "    $note = 'café 🐘'; $value->run(); $value->innerRun(); $value->outerRun(); $value->plainRun();\r\n",
++    "    $other->run(); $other->innerRun(); $other->outerRun(); $other->plainRun();\r\n",
++    "}\r\n",
++);
++
++async fn composed_trait_rename_exact(
++    source: &str,
++    needle: &str,
++    name: &str,
++    replacement: &str,
++    expected: &str,
++    count: usize,
++) {
++    let backend = create_test_backend();
++    let uri = Url::parse("file:///composed-trait-alias-rename.php").unwrap();
++    open_php(&backend, &uri, source).await;
++    let (line, character) = line_char_of(source, needle);
++    let within = needle.rfind(name).unwrap() as u32;
++    let edit = rename_result(&backend, &uri, line, character + within + 1, replacement)
++        .await
++        .expect("valid alias/source rename must not be refused")
++        .expect("valid alias/source rename must produce edits");
++    let edits = edits_for_uri(&edit, &uri);
++    assert_eq!(
++        edits.len(),
++        count,
++        "exact bound declaration/adaptation/call tokens only"
++    );
++    assert_eq!(
++        apply_edits(source, &edits),
++        expected,
++        "explicit aliases and unrelated namesakes must remain byte-exact"
++    );
++}
++
++#[tokio::test]
++async fn rename_composed_trait_original_method_keeps_explicit_alias_names() {
++    let expected = COMPOSED_TRAIT_ALIAS_SOURCE
++        .replace(
++            "function run(): void {} }\r\ntrait AliasWrapper",
++            "function work(): void {} }\r\ntrait AliasWrapper",
++        )
++        .replace("AliasBase::run as innerRun", "AliasBase::work as innerRun")
++        .replace(
++            "AliasOuter::run as plainRun",
++            "AliasOuter::work as plainRun",
++        )
++        .replace("$value->run()", "$value->work()");
++    composed_trait_rename_exact(
++        COMPOSED_TRAIT_ALIAS_SOURCE,
++        "trait AliasBase { public function run",
++        "run",
++        "work",
++        &expected,
++        4,
++    )
++    .await;
++}
++
++#[tokio::test]
++async fn rename_composed_trait_inner_alias_updates_outer_source_but_keeps_outer_alias() {
++    let expected = COMPOSED_TRAIT_ALIAS_SOURCE
++        .replace("as innerRun", "as innerWork")
++        .replace("AliasOuter::innerRun", "AliasOuter::innerWork")
++        .replace("$value->innerRun()", "$value->innerWork()");
++    for needle in ["as innerRun", "$value->innerRun"] {
++        composed_trait_rename_exact(
++            COMPOSED_TRAIT_ALIAS_SOURCE,
++            needle,
++            "innerRun",
++            "innerWork",
++            &expected,
++            3,
++        )
++        .await;
++    }
++}
++
++#[tokio::test]
++async fn rename_composed_trait_outer_alias_owns_its_declaration_and_usage() {
++    let expected = COMPOSED_TRAIT_ALIAS_SOURCE
++        .replace("as outerRun", "as outerWork")
++        .replace("$value->outerRun()", "$value->outerWork()");
++    for needle in ["as outerRun", "$value->outerRun"] {
++        composed_trait_rename_exact(
++            COMPOSED_TRAIT_ALIAS_SOURCE,
++            needle,
++            "outerRun",
++            "outerWork",
++            &expected,
++            2,
++        )
++        .await;
++    }
++}
++
++#[tokio::test]
++async fn rename_composed_trait_alias_of_nested_original_has_real_source() {
++    let expected = COMPOSED_TRAIT_ALIAS_SOURCE
++        .replace("as plainRun", "as plainWork")
++        .replace("$value->plainRun()", "$value->plainWork()");
++    for needle in ["as plainRun", "$value->plainRun"] {
++        composed_trait_rename_exact(
++            COMPOSED_TRAIT_ALIAS_SOURCE,
++            needle,
++            "plainRun",
++            "plainWork",
++            &expected,
++            2,
++        )
++        .await;
++    }
++}
++
++#[tokio::test]
++async fn rename_composed_trait_alias_collision_refuses_effective_consumer_member() {
++    for name in ["innerRun", "outerRun", "plainRun"] {
++        for target in ["occupied", "OcCuPiEd"] {
++            let backend = create_test_backend();
++            let uri = Url::parse("file:///composed-trait-alias-collision.php").unwrap();
++            open_php(&backend, &uri, COMPOSED_TRAIT_ALIAS_SOURCE).await;
++            let needle = format!("$value->{name}");
++            let (line, character) = line_char_of(COMPOSED_TRAIT_ALIAS_SOURCE, &needle);
++            let result = rename_result(&backend, &uri, line, character + 9, target).await;
++            assert!(
++                matches!(result, Ok(None) | Err(_)),
++                "occupied destination must refuse all edits: {name}->{target}: {result:?}"
++            );
++        }
++    }
++}
++
++#[tokio::test]
++async fn rename_composed_trait_alias_case_change_preserves_identity() {
++    let expected = COMPOSED_TRAIT_ALIAS_SOURCE
++        .replace("as outerRun", "as OUTERRUN")
++        .replace("$value->outerRun()", "$value->OUTERRUN()");
++    composed_trait_rename_exact(
++        COMPOSED_TRAIT_ALIAS_SOURCE,
++        "$value->outerRun",
++        "outerRun",
++        "OUTERRUN",
++        &expected,
++        2,
++    )
++    .await;
++}
++
++const COMPOSED_REJECTED_ALIAS_SOURCE: &str = concat!(
++    "<?php\r\n",
++    "trait RejectedOrigin { public function run(): void {} }\r\n",
++    "trait RejectedWrapper { use RejectedOrigin; }\r\n",
++    "trait SelectedOrigin { public function run(): void {} }\r\n",
++    "class SelectedConsumer { use SelectedOrigin, RejectedWrapper { SelectedOrigin::run insteadof RejectedWrapper; RejectedWrapper::run as rejectedAlias; } }\r\n",
++    "class OtherRejectedAlias { public function run(): void {} public function rejectedAlias(): void {} }\r\n",
++    "function selectedDemo(SelectedConsumer $value, OtherRejectedAlias $other): void { $note = 'ž🐘'; $value->run(); $value->rejectedAlias(); $other->run(); $other->rejectedAlias(); }\r\n",
++);
++
++#[tokio::test]
++async fn rename_composed_trait_rejected_source_independent_alias_remains_renameable() {
++    let expected = COMPOSED_REJECTED_ALIAS_SOURCE
++        .replace("as rejectedAlias", "as retainedAlias")
++        .replace("$value->rejectedAlias()", "$value->retainedAlias()");
++    composed_trait_rename_exact(
++        COMPOSED_REJECTED_ALIAS_SOURCE,
++        "$value->rejectedAlias",
++        "rejectedAlias",
++        "retainedAlias",
++        &expected,
++        2,
++    )
++    .await;
++}
++
++#[tokio::test]
++async fn rename_composed_trait_rejected_source_does_not_capture_selected_public_call() {
++    let expected = COMPOSED_REJECTED_ALIAS_SOURCE
++        .replace(
++            "trait RejectedOrigin { public function run",
++            "trait RejectedOrigin { public function work",
++        )
++        .replace(
++            "RejectedWrapper::run as rejectedAlias",
++            "RejectedWrapper::work as rejectedAlias",
++        );
++    composed_trait_rename_exact(
++        COMPOSED_REJECTED_ALIAS_SOURCE,
++        "trait RejectedOrigin { public function run",
++        "run",
++        "work",
++        &expected,
++        2,
++    )
++    .await;
++}
++
++#[tokio::test]
++async fn rename_composed_trait_alias_union_keeps_ordinary_declaration() {
++    let source = concat!(
++        "<?php\n",
++        "trait UnionOriginal { public function run(): void {} }\n",
++        "trait UnionWrapper { use UnionOriginal; }\n",
++        "class UnionAlias { use UnionWrapper { UnionWrapper::run as dispatch; } }\n",
++        "class UnionOrdinary { public function dispatch(): void {} }\n",
++        "class UnionUnrelated { public function dispatch(): void {} }\n",
++        "function unionDemo(UnionAlias|UnionOrdinary $value, UnionUnrelated $other): void { $value->dispatch(); $other->dispatch(); }\n",
++    );
++    let expected = source
++        .replace("as dispatch", "as deliver")
++        .replace(
++            "class UnionOrdinary { public function dispatch",
++            "class UnionOrdinary { public function deliver",
++        )
++        .replace("$value->dispatch()", "$value->deliver()");
++    composed_trait_rename_exact(
++        source,
++        "$value->dispatch",
++        "dispatch",
++        "deliver",
++        &expected,
++        3,
++    )
++    .await;
++}
++
++#[tokio::test]
++async fn rename_composed_trait_mid_edit_alias_cycle_keeps_real_anchor() {
++    // Deliberately incomplete PHP while editing: missing alias sources form a cycle.
++    // Real method resolution must terminate and retain its independent declaration.
++    let source = concat!(
++        "<?php\n",
++        "trait CycleLeft { use CycleRight { CycleRight::missing as leftAlias; } public function anchor(): void {} }\n",
++        "trait CycleRight { use CycleLeft { CycleLeft::missing as rightAlias; } }\n",
++        "class CycleOwner { use CycleLeft; }\n",
++        "function cycleDemo(CycleOwner $value): void { $value->anchor(); }\n",
++    );
++    let expected = source
++        .replace("function anchor", "function renamedAnchor")
++        .replace("$value->anchor()", "$value->renamedAnchor()");
++    composed_trait_rename_exact(
++        source,
++        "$value->anchor",
++        "anchor",
++        "renamedAnchor",
++        &expected,
++        2,
++    )
++    .await;
++}
++
++async fn composed_alias_definition_is_original(
++    backend: &phpantom_lsp::Backend,
++    uri: &Url,
++    source: &str,
++    needle: &str,
++    target_uri: &Url,
++    target_source: &str,
++) {
++    let (line, character) = line_char_of(source, needle);
++    let name_start = needle.rfind("->").unwrap() + 2;
++    let response =
++        crate::common::goto_definition_at(backend, uri, line, character + name_start as u32 + 1)
++            .await
++            .expect("alias definition must resolve");
++    let locations: Vec<Location> = match response {
++        GotoDefinitionResponse::Scalar(location) => vec![location],
++        GotoDefinitionResponse::Array(locations) => locations,
++        GotoDefinitionResponse::Link(links) => links
++            .into_iter()
++            .map(|link| Location {
++                uri: link.target_uri,
++                range: link.target_selection_range,
++            })
++            .collect(),
++    };
++    let (target_line, target_character) = line_char_of(target_source, "function run");
++    assert_eq!(
++        locations.len(),
++        1,
++        "one original implementation, not an alias declaration"
++    );
++    assert_eq!(&locations[0].uri, target_uri);
++    assert_eq!(
++        locations[0].range.start,
++        Position::new(target_line, target_character + 9),
++        "offset must identify original run, not receiver alias offset"
++    );
++}
++
++#[tokio::test]
++async fn definition_composed_trait_aliases_keep_original_implementation_token() {
++    let backend = create_test_backend();
++    let uri = Url::parse("file:///composed-alias-definition.php").unwrap();
++    open_php(&backend, &uri, COMPOSED_TRAIT_ALIAS_SOURCE).await;
++    for name in ["innerRun", "outerRun", "plainRun"] {
++        composed_alias_definition_is_original(
++            &backend,
++            &uri,
++            COMPOSED_TRAIT_ALIAS_SOURCE,
++            &format!("$value->{name}"),
++            &uri,
++            COMPOSED_TRAIT_ALIAS_SOURCE,
++        )
++        .await;
++    }
++}
++
++#[tokio::test]
++async fn rename_composed_trait_local_alias_to_vendor_keeps_vendor_implementation() {
++    let vendor =
++        "<?php\nnamespace VendorLib;\ntrait Implementation { public function run(): void {} }\n";
++    let source = concat!(
++        "<?php\nnamespace App;\nuse VendorLib\\Implementation;\n",
++        "trait VendorWrapper { use Implementation; }\n",
++        "class VendorConsumer { use VendorWrapper { VendorWrapper::run as localRun; } }\n",
++        "function vendorDemo(VendorConsumer $value): void { $value->localRun(); $value->run(); }\n",
++    );
++    let (backend, dir) = create_psr4_workspace(
++        r#"{"autoload":{"psr-4":{"App\\":"src/"}}}"#,
++        &[
++            (".phpantom.toml", "[indexing]\nstrategy = \"none\"\n"),
++            ("vendor/acme/pkg/Implementation.php", vendor),
++            ("src/Consumer.php", source),
++        ],
++    );
++    backend.initialized(InitializedParams {}).await;
++    let vendor_uri =
++        Url::from_file_path(dir.path().join("vendor/acme/pkg/Implementation.php")).unwrap();
++    let uri = Url::from_file_path(dir.path().join("src/Consumer.php")).unwrap();
++    open_php(&backend, &vendor_uri, vendor).await;
++    open_php(&backend, &uri, source).await;
++    let (line, character) = line_char_of(source, "$value->localRun");
++    assert!(
++        prepare_rename(&backend, &uri, line, character + 9)
++            .await
++            .is_some(),
++        "local alias owns a local rename declaration"
++    );
++    let edit = rename_result(&backend, &uri, line, character + 9, "localWork")
++        .await
++        .expect("local alias must not be rejected as vendor")
++        .expect("alias edits");
++    let edits = edits_for_uri(&edit, &uri);
++    assert_eq!(edits.len(), 2);
++    assert_eq!(
++        apply_edits(source, &edits),
++        source
++            .replace("as localRun", "as localWork")
++            .replace("$value->localRun()", "$value->localWork()")
++    );
++    assert!(edits_for_uri(&edit, &vendor_uri).is_empty());
++    let (line, character) = line_char_of(source, "$value->run");
++    assert!(
++        prepare_rename(&backend, &uri, line, character + 9)
++            .await
++            .is_none(),
++        "positive vendor-policy control: original implementation is protected"
++    );
++    assert_eq!(
++        std::fs::read_to_string(dir.path().join("src/Consumer.php")).unwrap(),
++        source
++    );
++    assert_eq!(
++        std::fs::read_to_string(dir.path().join("vendor/acme/pkg/Implementation.php")).unwrap(),
++        vendor
++    );
++}
++
++#[tokio::test]
++async fn definition_composed_trait_alias_keeps_vendor_uri_and_original_offset() {
++    let backend = create_test_backend();
++    // Different file lengths make cross-file offset confusion observable.
++    let vendor = "<?php\nnamespace VendorDefinition;\n// padding intentionally differs\ntrait Implementation { public function run(): void {} }\n";
++    let source = concat!(
++        "<?php\nnamespace App;\nuse VendorDefinition\\Implementation;\n",
++        "trait DefWrapper { use Implementation { Implementation::run as innerRun; } }\n",
++        "class DefConsumer { use DefWrapper { DefWrapper::innerRun as outerRun; DefWrapper::run as plainRun; } }\n",
++        "function defDemo(DefConsumer $value): void { $value->innerRun(); $value->outerRun(); $value->plainRun(); }\n",
++    );
++    let vendor_uri = Url::parse("file:///vendor/definition-implementation.php").unwrap();
++    let uri = Url::parse("file:///consumer-definition.php").unwrap();
++    open_php(&backend, &vendor_uri, vendor).await;
++    open_php(&backend, &uri, source).await;
++    for name in ["innerRun", "outerRun", "plainRun"] {
++        composed_alias_definition_is_original(
++            &backend,
++            &uri,
++            source,
++            &format!("$value->{name}"),
++            &vendor_uri,
++            vendor,
++        )
++        .await;
++    }
++}
++
++#[tokio::test]
++async fn definition_composed_trait_unqualified_alias_ignores_own_original_override() {
++    let source = concat!(
++        "<?php\n",
++        "trait UnqualifiedBase { public function run(): void {} }\n",
++        "trait UnqualifiedWrapper { use UnqualifiedBase; }\n",
++        "class UnqualifiedOwner { use UnqualifiedWrapper { run as retainedRun; } public function run(): void {} }\n",
++        "function unqualifiedDemo(UnqualifiedOwner $value): void { $value->retainedRun(); }\n",
++    );
++    let backend = create_test_backend();
++    let uri = Url::parse("file:///unqualified-alias-definition.php").unwrap();
++    open_php(&backend, &uri, source).await;
++    // Helper deliberately expects the first run declaration (the trait), not
++    // the class's independent original-name override.
++    composed_alias_definition_is_original(
++        &backend,
++        &uri,
++        source,
++        "$value->retainedRun",
++        &uri,
++        source,
++    )
++    .await;
++}
++
++const COMPOSED_ALIAS_OWN_OVERRIDE: &str = concat!(
++    "<?php\n",
++    "trait OverrideAliasBase { public function run(): void {} }\n",
++    "trait OverrideAliasWrapper { use OverrideAliasBase; }\n",
++    "class OverrideAliasOwner { use OverrideAliasWrapper { OverrideAliasWrapper::run as dispatch; } public function dispatch(): void {} }\n",
++    "function overrideAliasDemo(OverrideAliasOwner $value): void { $value->dispatch(); $value->run(); }\n",
++);
++
++#[tokio::test]
++async fn definition_composed_trait_own_method_overrides_same_named_alias() {
++    let backend = create_test_backend();
++    let uri = Url::parse("file:///composed-alias-own-override.php").unwrap();
++    open_php(&backend, &uri, COMPOSED_ALIAS_OWN_OVERRIDE).await;
++    let (line, character) = line_char_of(COMPOSED_ALIAS_OWN_OVERRIDE, "$value->dispatch");
++    let response = crate::common::goto_definition_at(&backend, &uri, line, character + 9)
++        .await
++        .expect("own method definition");
++    let positions: Vec<(Url, Position)> = match response {
++        GotoDefinitionResponse::Scalar(location) => vec![(location.uri, location.range.start)],
++        GotoDefinitionResponse::Array(locations) => locations
++            .into_iter()
++            .map(|location| (location.uri, location.range.start))
++            .collect(),
++        GotoDefinitionResponse::Link(links) => links
++            .into_iter()
++            .map(|link| (link.target_uri, link.target_selection_range.start))
++            .collect(),
++    };
++    let (line, character) = line_char_of(COMPOSED_ALIAS_OWN_OVERRIDE, "function dispatch");
++    assert_eq!(
++        positions,
++        vec![(uri, Position::new(line, character + 9))],
++        "own implementation wins over dormant adaptation metadata"
++    );
++}
++
++#[tokio::test]
++async fn rename_composed_trait_own_method_does_not_rename_shadowed_alias() {
++    let expected = COMPOSED_ALIAS_OWN_OVERRIDE
++        .replace("function dispatch", "function deliver")
++        .replace("$value->dispatch()", "$value->deliver()");
++    composed_trait_rename_exact(
++        COMPOSED_ALIAS_OWN_OVERRIDE,
++        "$value->dispatch",
++        "dispatch",
++        "deliver",
++        &expected,
++        2,
++    )
++    .await;
++}
++
++const COMPOSED_ALIAS_PROPERTY: &str = concat!(
++    "<?php\n",
++    "trait PropertyAliasBase { public function run(): void {} }\n",
++    "class PropertyAliasOwner { use PropertyAliasBase { PropertyAliasBase::run as dispatch; } public string $dispatch = ''; }\n",
++    "function propertyAliasDemo(PropertyAliasOwner $value): void { echo $value->dispatch; $value->dispatch(); }\n",
++);
++
++#[tokio::test]
++async fn definition_composed_trait_same_named_property_keeps_member_namespace() {
++    let backend = create_test_backend();
++    let uri = Url::parse("file:///composed-alias-property.php").unwrap();
++    open_php(&backend, &uri, COMPOSED_ALIAS_PROPERTY).await;
++    let (line, character) = line_char_of(COMPOSED_ALIAS_PROPERTY, "$value->dispatch;");
++    let response = crate::common::goto_definition_at(&backend, &uri, line, character + 9)
++        .await
++        .expect("property definition");
++    let positions: Vec<(Url, Position)> = match response {
++        GotoDefinitionResponse::Scalar(location) => vec![(location.uri, location.range.start)],
++        GotoDefinitionResponse::Array(locations) => locations
++            .into_iter()
++            .map(|location| (location.uri, location.range.start))
++            .collect(),
++        GotoDefinitionResponse::Link(links) => links
++            .into_iter()
++            .map(|link| (link.target_uri, link.target_selection_range.start))
++            .collect(),
++    };
++    let (line, character) = line_char_of(COMPOSED_ALIAS_PROPERTY, "$dispatch =");
++    assert_eq!(positions, vec![(uri, Position::new(line, character + 1))]);
++}
++
++#[tokio::test]
++async fn rename_composed_trait_same_named_property_keeps_method_alias() {
++    let expected = COMPOSED_ALIAS_PROPERTY
++        .replace("$dispatch =", "$payload =")
++        .replace("$value->dispatch;", "$value->payload;");
++    composed_trait_rename_exact(
++        COMPOSED_ALIAS_PROPERTY,
++        "$value->dispatch;",
++        "dispatch",
++        "payload",
++        &expected,
++        2,
++    )
++    .await;
++}
++
++const COMPOSED_UNQUALIFIED_PRECEDENCE: &str = concat!(
++    "<?php\n",
++    "class SelectedAliasResult { public function selected(): void {} }\n",
++    "class RejectedAliasResult { public function rejected(): void {} }\n",
++    "trait FirstRejectedAlias { public function run(): RejectedAliasResult { return new RejectedAliasResult(); } }\n",
++    "trait LaterSelectedAlias { public function run(): SelectedAliasResult { return new SelectedAliasResult(); } }\n",
++    "class UnqualifiedPrecedenceOwner { use FirstRejectedAlias, LaterSelectedAlias { LaterSelectedAlias::run insteadof FirstRejectedAlias; run as dispatch; FirstRejectedAlias::run as rejectedDispatch; } }\n",
++    "function precedenceDemo(UnqualifiedPrecedenceOwner $value): void { $value->dispatch()->selected(); $value->rejectedDispatch()->rejected(); }\n",
++);
++
++#[tokio::test]
++async fn rename_composed_trait_unqualified_alias_uses_precedence_selected_return_type() {
++    // Rejected trait is listed first; alias ownership cannot depend on use order.
++    let expected = COMPOSED_UNQUALIFIED_PRECEDENCE
++        .replace("function selected", "function selectedWork")
++        .replace("->selected()", "->selectedWork()");
++    composed_trait_rename_exact(
++        COMPOSED_UNQUALIFIED_PRECEDENCE,
++        "function selected",
++        "selected",
++        "selectedWork",
++        &expected,
++        2,
++    )
++    .await;
++}
++
++#[tokio::test]
++async fn rename_composed_trait_qualified_rejected_alias_retains_own_return_type() {
++    let expected = COMPOSED_UNQUALIFIED_PRECEDENCE
++        .replace("function rejected", "function rejectedWork")
++        .replace("->rejected()", "->rejectedWork()");
++    composed_trait_rename_exact(
++        COMPOSED_UNQUALIFIED_PRECEDENCE,
++        "function rejected",
++        "rejected",
++        "rejectedWork",
++        &expected,
++        2,
++    )
++    .await;
++}
++
++#[tokio::test]
++async fn rename_composed_trait_dormant_alias_declaration_keeps_own_method_and_calls() {
++    let expected = COMPOSED_ALIAS_OWN_OVERRIDE.replace("as dispatch", "as retainedDispatch");
++    composed_trait_rename_exact(
++        COMPOSED_ALIAS_OWN_OVERRIDE,
++        "as dispatch",
++        "dispatch",
++        "retainedDispatch",
++        &expected,
++        1,
++    )
++    .await;
++}
++
++#[tokio::test]
++async fn rename_composed_trait_dormant_alias_case_change_keeps_own_method_identity() {
++    let expected = COMPOSED_ALIAS_OWN_OVERRIDE.replace("as dispatch", "as DISPATCH");
++    composed_trait_rename_exact(
++        COMPOSED_ALIAS_OWN_OVERRIDE,
++        "as dispatch",
++        "dispatch",
++        "DISPATCH",
++        &expected,
++        1,
++    )
++    .await;
++}

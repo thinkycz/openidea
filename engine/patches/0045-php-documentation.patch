@@ -1,0 +1,1565 @@
+diff --git a/docs/CHANGELOG.md b/docs/CHANGELOG.md
+--- a/docs/CHANGELOG.md
++++ b/docs/CHANGELOG.md
+@@ -14,6 +14,8 @@
+ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+ 
+ ## [Unreleased]
++
++- **Generate documentation from a declaration.** The Generate PHPDoc block action proposes documentation using the declaration’s types, inherited generic information and uncaught exceptions, while preserving existing comments and attributes. Contributed by PHP Workbench downstream.
+ 
+ - **Config and translation keys follow imported aliases and named arguments.** Completion and navigation identify the actual helper or facade; local names keep their own meaning and config value types survive aliased calls. Contributed by PHP Workbench downstream.
+ 
+diff --git a/examples/php/code_actions.php b/examples/php/code_actions.php
+--- a/examples/php/code_actions.php
++++ b/examples/php/code_actions.php
+@@ -436,3 +436,20 @@
+         return $greeting . $contact . $count . $length;
+     }
+ }
++
++
++// ── Explicit PHPDoc Generation ─────────────────────────────────────────────
++// Try: place the caret on the class, property or method declaration below
++// and choose "Generate PHPDoc block". Existing documentation is preserved;
++// the proposal can be reviewed before changing the file.
++class ExplicitDocumentationDemo
++{
++    public string $name;
++
++    public function configure($options): void
++    {
++        if (!is_array($options)) {
++            throw new \InvalidArgumentException('Expected options');
++        }
++    }
++}
+diff --git a/src/code_actions/generate_docblock.rs b/src/code_actions/generate_docblock.rs
+new file mode 100644
+--- /dev/null
++++ b/src/code_actions/generate_docblock.rs
+@@ -0,0 +1,460 @@
++//! Explicit PHPDoc generation at an AST declaration header.
++
++use mago_span::{HasSpan, Span};
++use mago_syntax::cst::class_like::member::ClassLikeMember;
++use mago_syntax::cst::class_like::method::MethodBody;
++use mago_syntax::cst::class_like::property::{Property, PropertyItem};
++use mago_syntax::cst::function_like::parameter::FunctionLikeParameterList;
++use mago_syntax::cst::function_like::r#return::FunctionLikeReturnTypeHint;
++use mago_syntax::cst::*;
++use tower_lsp::lsp_types::*;
++
++use crate::Backend;
++use crate::atom::bytes_to_str;
++use crate::completion::phpdoc::generation::{DeclarationDocblock, generate_declaration_docblock};
++use crate::completion::phpdoc::{DocblockContext, SymbolInfo};
++use crate::completion::source::throws_analysis::{self, ThrowsContext};
++use crate::parser::extract_hint_type;
++use crate::symbol_map::docblock::get_docblock_text_with_offset;
++use crate::text_position::{offset_to_position, position_to_offset};
++
++struct Declaration {
++    span: Span,
++    context: DocblockContext,
++    symbol: SymbolInfo,
++    function: Option<FunctionRegion>,
++}
++
++struct FunctionRegion {
++    name: u32,
++    signature: std::ops::Range<usize>,
++    body: std::ops::Range<usize>,
++}
++
++impl Backend {
++    pub(crate) fn collect_generate_docblock_actions(
++        &self,
++        uri: &str,
++        content: &str,
++        params: &CodeActionParams,
++        out: &mut Vec<CodeActionOrCommand>,
++    ) {
++        if params.range.start != params.range.end {
++            return;
++        }
++        let cursor = position_to_offset(content, params.range.start);
++        if offset_to_position(content, cursor as usize) != params.range.start {
++            return;
++        }
++        let declaration =
++            crate::parser::with_parsed_program(content, "generate_docblock", |program, _| {
++                if !program.errors.is_empty() {
++                    return None;
++                }
++                let declaration = find_declaration(program.statements.iter(), cursor)?;
++                if get_docblock_text_with_offset(
++                    program.trivia.as_slice(),
++                    content,
++                    &declaration.span,
++                )
++                .is_some()
++                {
++                    return None;
++                }
++                Some(declaration)
++            });
++        let Some(mut declaration) = declaration else {
++            return;
++        };
++        let start = declaration.span.start.offset as usize;
++        let line_start = content[..start].rfind('\n').map_or(0, |offset| offset + 1);
++        let indent = &content[line_start..start];
++        // Do not split a PHP opening tag, another statement, or a declaration
++        // sharing this line. An insertion must preserve all existing bytes.
++        if !indent.bytes().all(|byte| matches!(byte, b' ' | b'\t')) {
++            return;
++        }
++        let ctx = self.file_context_at(uri, declaration.span.start.offset);
++        let class_loader = self.class_loader(&ctx);
++        let function_loader = self.function_loader(&ctx);
++        let canonical =
++            |name: &str| crate::util::resolve_to_fqn(name, &ctx.use_map, &ctx.namespace);
++        for (hint, _) in &mut declaration.symbol.params {
++            *hint = hint.as_ref().map(|hint| hint.resolve_names(&canonical));
++        }
++        declaration.symbol.return_type = declaration
++            .symbol
++            .return_type
++            .as_ref()
++            .map(|hint| hint.resolve_names(&canonical));
++        declaration.symbol.type_hint = declaration
++            .symbol
++            .type_hint
++            .as_ref()
++            .map(|hint| hint.resolve_names(&canonical));
++        if declaration.context == DocblockContext::Property
++            && declaration.symbol.type_hint.is_none()
++            && let Some(name) = declaration
++                .symbol
++                .variable_name
++                .as_ref()
++                .and_then(|name| name.strip_prefix('$'))
++            && let Some(class) = ctx.classes.iter().find(|class| {
++                declaration.span.start.offset >= class.start_offset
++                    && declaration.span.start.offset <= class.end_offset
++            })
++            && let Some(property) = class
++                .properties
++                .iter()
++                .find(|property| property.name == name && property.native_type_hint.is_none())
++        {
++            declaration.symbol.type_hint = property.type_hint.clone();
++        }
++        let display_name = |name: &str| {
++            let fqn = name.trim_start_matches('\\');
++            let shortened = crate::util::shorten_from_fqn(fqn, &ctx.use_map, &ctx.namespace);
++            if crate::util::resolve_to_fqn(&shortened, &ctx.use_map, &ctx.namespace)
++                .eq_ignore_ascii_case(fqn)
++            {
++                shortened
++            } else {
++                format!("\\{fqn}")
++            }
++        };
++        for name in declaration
++            .symbol
++            .extends_names
++            .iter_mut()
++            .chain(&mut declaration.symbol.implements_names)
++        {
++            *name = display_name(&canonical(name));
++        }
++        let mut throws = Vec::new();
++        let mut inferred_return = None;
++        if let Some(function) = declaration.function {
++            let throws_ctx = ThrowsContext {
++                class_loader: &class_loader,
++                function_loader: Some(&function_loader),
++                use_map: &ctx.use_map,
++                file_namespace: &ctx.namespace,
++            };
++            throws = throws_analysis::find_uncaught_throw_types_in_body(
++                content,
++                &content[function.body],
++                &content[function.signature],
++                Some(&throws_ctx),
++            );
++            inferred_return = self
++                .infer_return_type_at(uri, content, function.name, false)
++                .map(|inferred| inferred.effective.unwrap_or(inferred.native));
++        }
++        let text = generate_declaration_docblock(&DeclarationDocblock {
++            context: declaration.context,
++            symbol: &declaration.symbol,
++            indent,
++            class_loader: &class_loader,
++            display_name: &display_name,
++            inferred_return,
++            throws: &throws,
++        });
++        if text.is_empty() || text.matches("*/").count() != 1 || text.contains('\0') {
++            return;
++        }
++        let newline = if content[line_start..].find('\n').is_some_and(|offset| {
++            offset > 0 && content.as_bytes()[line_start + offset - 1] == b'\r'
++        }) {
++            "\r\n"
++        } else {
++            "\n"
++        };
++        let text = if newline == "\r\n" {
++            text.replace('\n', "\r\n")
++        } else {
++            text
++        };
++        let Ok(uri) = uri.parse() else {
++            return;
++        };
++        let position = offset_to_position(content, line_start);
++        out.push(CodeActionOrCommand::CodeAction(CodeAction {
++            title: "Generate PHPDoc block".into(),
++            kind: Some(CodeActionKind::REFACTOR_REWRITE),
++            edit: Some(super::single_edit(
++                uri,
++                Range::new(position, position),
++                text,
++            )),
++            ..CodeAction::default()
++        }));
++    }
++}
++
++fn symbol_for_function(
++    name: &[u8],
++    parameters: &FunctionLikeParameterList<'_>,
++    return_type: Option<&FunctionLikeReturnTypeHint<'_>>,
++) -> SymbolInfo {
++    SymbolInfo {
++        params: parameters
++            .parameters
++            .iter()
++            .map(|parameter| {
++                let name = bytes_to_str(parameter.variable.name);
++                let name = if parameter.ellipsis.is_some() {
++                    format!("...{name}")
++                } else {
++                    name.to_string()
++                };
++                (parameter.hint.as_ref().map(extract_hint_type), name)
++            })
++            .collect(),
++        return_type: return_type.map(|hint| extract_hint_type(&hint.hint)),
++        method_name: Some(bytes_to_str(name).to_string()),
++        ..SymbolInfo::default()
++    }
++}
++
++fn function_region(name: u32, keyword: u32, body: &Block<'_>) -> FunctionRegion {
++    FunctionRegion {
++        name,
++        signature: keyword as usize..body.left_brace.start.offset as usize,
++        body: body.left_brace.end.offset as usize..body.right_brace.start.offset as usize,
++    }
++}
++
++fn header(
++    span: Span,
++    end: u32,
++    cursor: u32,
++    context: DocblockContext,
++    symbol: SymbolInfo,
++) -> Option<Declaration> {
++    (cursor >= span.start.offset && cursor < end).then_some(Declaration {
++        span,
++        context,
++        symbol,
++        function: None,
++    })
++}
++
++fn find_declaration<'a>(
++    statements: impl Iterator<Item = &'a Statement<'a>>,
++    cursor: u32,
++) -> Option<Declaration> {
++    for statement in statements {
++        let declaration = match statement {
++            Statement::Namespace(namespace) => {
++                find_declaration(namespace.statements().iter(), cursor)
++            }
++            Statement::Function(function) => {
++                let mut declaration = header(
++                    function.span(),
++                    function.body.left_brace.start.offset,
++                    cursor,
++                    DocblockContext::FunctionOrMethod,
++                    symbol_for_function(
++                        function.name.value,
++                        &function.parameter_list,
++                        function.return_type_hint.as_ref(),
++                    ),
++                );
++                if let Some(declaration) = &mut declaration {
++                    declaration.function = Some(function_region(
++                        function.name.span.start.offset,
++                        function.function.span.start.offset,
++                        &function.body,
++                    ));
++                }
++                declaration
++            }
++            Statement::Class(class) => class_declaration(
++                class.span(),
++                class.left_brace.start.offset,
++                &class.members,
++                cursor,
++                SymbolInfo {
++                    extends_names: class
++                        .extends
++                        .as_ref()
++                        .map(|extends| {
++                            extends
++                                .types
++                                .iter()
++                                .map(|name| bytes_to_str(name.value()).to_string())
++                                .collect()
++                        })
++                        .unwrap_or_default(),
++                    implements_names: class
++                        .implements
++                        .as_ref()
++                        .map(|implements| {
++                            implements
++                                .types
++                                .iter()
++                                .map(|name| bytes_to_str(name.value()).to_string())
++                                .collect()
++                        })
++                        .unwrap_or_default(),
++                    ..SymbolInfo::default()
++                },
++            ),
++            Statement::Interface(interface) => class_declaration(
++                interface.span(),
++                interface.left_brace.start.offset,
++                &interface.members,
++                cursor,
++                SymbolInfo {
++                    extends_names: interface
++                        .extends
++                        .as_ref()
++                        .map(|extends| {
++                            extends
++                                .types
++                                .iter()
++                                .map(|name| bytes_to_str(name.value()).to_string())
++                                .collect()
++                        })
++                        .unwrap_or_default(),
++                    ..SymbolInfo::default()
++                },
++            ),
++            Statement::Trait(trait_) => class_declaration(
++                trait_.span(),
++                trait_.left_brace.start.offset,
++                &trait_.members,
++                cursor,
++                SymbolInfo::default(),
++            ),
++            Statement::Enum(enum_) => class_declaration(
++                enum_.span(),
++                enum_.left_brace.start.offset,
++                &enum_.members,
++                cursor,
++                SymbolInfo {
++                    implements_names: enum_
++                        .implements
++                        .as_ref()
++                        .map(|implements| {
++                            implements
++                                .types
++                                .iter()
++                                .map(|name| bytes_to_str(name.value()).to_string())
++                                .collect()
++                        })
++                        .unwrap_or_default(),
++                    ..SymbolInfo::default()
++                },
++            ),
++            _ => None,
++        };
++        if declaration.is_some() {
++            return declaration;
++        }
++    }
++    None
++}
++
++fn class_declaration<'a>(
++    span: Span,
++    body_start: u32,
++    members: &'a Sequence<'a, ClassLikeMember<'a>>,
++    cursor: u32,
++    symbol: SymbolInfo,
++) -> Option<Declaration> {
++    if let Some(declaration) = header(span, body_start, cursor, DocblockContext::ClassLike, symbol)
++    {
++        return Some(declaration);
++    }
++    for member in members.iter() {
++        match member {
++            ClassLikeMember::Method(method) => {
++                let mut declaration = header(
++                    method.span(),
++                    method.body.span().start.offset,
++                    cursor,
++                    DocblockContext::FunctionOrMethod,
++                    symbol_for_function(
++                        method.name.value,
++                        &method.parameter_list,
++                        method.return_type_hint.as_ref(),
++                    ),
++                );
++                if let Some(declaration) = &mut declaration
++                    && let MethodBody::Concrete(body) = &method.body
++                {
++                    declaration.function = Some(function_region(
++                        method.name.span.start.offset,
++                        method.function.span.start.offset,
++                        body,
++                    ));
++                }
++                if declaration.is_some() {
++                    return declaration;
++                }
++            }
++            ClassLikeMember::Property(property) => {
++                let (hint, end) = match property {
++                    Property::Plain(property) => {
++                        if property.items.iter().any(|item| matches!(item, PropertyItem::Concrete(item) if cursor >= item.value.span().start.offset && cursor < item.value.span().end.offset)) { continue; }
++                        (
++                            property.hint.as_ref(),
++                            property.terminator.span().end.offset,
++                        )
++                    }
++                    Property::Hooked(property) => (
++                        property.hint.as_ref(),
++                        property.hook_list.left_brace.start.offset,
++                    ),
++                };
++                if let Some(declaration) = header(
++                    property.span(),
++                    end,
++                    cursor,
++                    DocblockContext::Property,
++                    SymbolInfo {
++                        type_hint: hint.map(extract_hint_type),
++                        variable_name: match property {
++                            Property::Plain(property) if property.items.len() == 1 => property
++                                .items
++                                .first()
++                                .map(|item| bytes_to_str(item.variable().name).to_string()),
++                            Property::Hooked(property) => {
++                                Some(bytes_to_str(property.item.variable().name).to_string())
++                            }
++                            _ => None,
++                        },
++                        ..SymbolInfo::default()
++                    },
++                ) {
++                    return Some(declaration);
++                }
++            }
++            ClassLikeMember::Constant(constant) => {
++                if constant.items.iter().any(|item| {
++                    cursor >= item.value.span().start.offset
++                        && cursor < item.value.span().end.offset
++                }) {
++                    continue;
++                }
++                let span = constant.attribute_lists.first().map_or_else(
++                    || constant.span(),
++                    |attribute| attribute.span().join(constant.span()),
++                );
++                if let Some(declaration) = header(
++                    span,
++                    constant.terminator.span().end.offset,
++                    cursor,
++                    DocblockContext::Constant,
++                    SymbolInfo {
++                        type_hint: constant.hint.as_ref().map(extract_hint_type),
++                        ..SymbolInfo::default()
++                    },
++                ) {
++                    return Some(declaration);
++                }
++            }
++            _ => {}
++        }
++    }
++    None
++}
+diff --git a/src/code_actions/mod.rs b/src/code_actions/mod.rs
+--- a/src/code_actions/mod.rs
++++ b/src/code_actions/mod.rs
+@@ -104,6 +104,7 @@
+ mod fix_class_name;
+ mod fix_namespace;
+ mod generate_constructor;
++mod generate_docblock;
+ mod generate_getter_setter;
+ mod generate_property_hooks;
+ pub(crate) mod implement_methods;
+@@ -230,6 +231,8 @@
+         // ── Promote constructor parameter ───────────────────────────────────
+         self.collect_promote_constructor_param_actions(uri, content, params, &mut actions);
+ 
++        self.collect_generate_docblock_actions(uri, content, params, &mut actions);
++
+         // ── Generate constructor ────────────────────────────────────────────
+         self.collect_generate_constructor_actions(uri, content, params, &mut actions);
+ 
+diff --git a/src/completion/context/catch_completion_tests.rs b/src/completion/context/catch_completion_tests.rs
+--- a/src/completion/context/catch_completion_tests.rs
++++ b/src/completion/context/catch_completion_tests.rs
+@@ -142,7 +142,7 @@
+     let names: Vec<String> = result.iter().map(|t| t.type_name.to_string()).collect();
+     assert_eq!(
+         names,
+-        vec!["ModelNotFoundException", "App\\Exceptions\\AuthException"]
++        vec!["ModelNotFoundException", "\\App\\Exceptions\\AuthException"]
+     );
+ }
+ 
+diff --git a/src/completion/phpdoc/generation/build.rs b/src/completion/phpdoc/generation/build.rs
+--- a/src/completion/phpdoc/generation/build.rs
++++ b/src/completion/phpdoc/generation/build.rs
+@@ -311,7 +311,7 @@
+             backend,
+             function_loader,
+         ),
+-        DocblockContext::ClassLike => build_class_plain(sym, indent, class_loader),
++        DocblockContext::ClassLike => build_class_plain(sym, indent, class_loader, false),
+         DocblockContext::Property => build_property_plain(sym, indent, class_loader),
+         DocblockContext::Constant => build_constant_plain(sym, indent, class_loader),
+         // Inline and Unknown are early-returned by the caller.
+@@ -589,6 +589,22 @@
+             })
+     };
+ 
++    render_function_plain(
++        indent,
++        &param_tags,
++        &uncaught,
++        return_tag.as_deref(),
++        &|name| crate::util::short_name(name).to_string(),
++    )
++}
++
++fn render_function_plain(
++    indent: &str,
++    param_tags: &[(String, String)],
++    uncaught: &[PhpType],
++    return_tag: Option<&str>,
++    display_name: &dyn Fn(&str) -> String,
++) -> String {
+     let has_throws = !uncaught.is_empty();
+ 
+     let has_any_tag = !param_tags.is_empty() || has_throws || return_tag.is_some();
+@@ -602,7 +618,7 @@
+ 
+     if !param_tags.is_empty() {
+         let max_type_len = param_tags.iter().map(|(t, _)| t.len()).max().unwrap_or(0);
+-        for (type_str, name) in &param_tags {
++        for (type_str, name) in param_tags {
+             let padding = " ".repeat(max_type_len - type_str.len());
+             lines.push(format!(
+                 "{} * @param {}{} {}",
+@@ -615,9 +631,9 @@
+         if !param_tags.is_empty() {
+             lines.push(format!("{} *", indent));
+         }
+-        for exc in &uncaught {
++        for exc in uncaught {
+             let exc_str = exc.to_string();
+-            let display = crate::util::short_name(&exc_str).to_string();
++            let display = display_name(&exc_str);
+             lines.push(format!("{} * @throws {}", indent, display));
+         }
+     }
+@@ -641,6 +657,7 @@
+     sym: &SymbolInfo,
+     indent: &str,
+     class_loader: &dyn Fn(&str) -> Option<Arc<ClassInfo>>,
++    unknown_arguments_as_mixed: bool,
+ ) -> String {
+     let mut tag_lines = Vec::new();
+ 
+@@ -648,7 +665,17 @@
+         if let Some(cls) = class_loader(parent)
+             && !cls.template_params.is_empty()
+         {
+-            let parts: Vec<&str> = cls.template_params.iter().map(|s| s.as_str()).collect();
++            let parts: Vec<&str> = cls
++                .template_params
++                .iter()
++                .map(|s| {
++                    if unknown_arguments_as_mixed {
++                        "mixed"
++                    } else {
++                        s.as_str()
++                    }
++                })
++                .collect();
+             tag_lines.push(format!(
+                 "{} * @extends {}<{}>",
+                 indent,
+@@ -662,7 +689,17 @@
+         if let Some(cls) = class_loader(iface)
+             && !cls.template_params.is_empty()
+         {
+-            let parts: Vec<&str> = cls.template_params.iter().map(|s| s.as_str()).collect();
++            let parts: Vec<&str> = cls
++                .template_params
++                .iter()
++                .map(|s| {
++                    if unknown_arguments_as_mixed {
++                        "mixed"
++                    } else {
++                        s.as_str()
++                    }
++                })
++                .collect();
+             tag_lines.push(format!(
+                 "{} * @implements {}<{}>",
+                 indent,
+@@ -949,3 +986,84 @@
+ #[cfg(test)]
+ #[path = "build_tests.rs"]
+ mod tests;
++
++/// Plain declaration generation shares enrichment and rendering with the typing
++/// paths, while its caller supplies exact AST-bound analysis and valid names.
++pub(super) fn build_declaration_docblock(request: &super::DeclarationDocblock<'_>) -> String {
++    let sym = request.symbol;
++    let display_type = |ty: &PhpType| ty.resolve_names(request.display_name);
++    match request.context {
++        DocblockContext::FunctionOrMethod => {
++            let params: Vec<(String, String)> = sym
++                .params
++                .iter()
++                .filter_map(|(hint, name)| {
++                    let ty = declaration_enrichment(hint.as_ref(), request.class_loader)?;
++                    Some((enrichment_type_to_plain(&display_type(&ty)), name.clone()))
++                })
++                .collect();
++            let no_return = sym
++                .method_name
++                .as_ref()
++                .is_some_and(|name| name.eq_ignore_ascii_case("__construct"))
++                || sym.return_type.as_ref().is_some_and(PhpType::is_void);
++            let return_type = if no_return {
++                None
++            } else {
++                request
++                    .inferred_return
++                    .as_ref()
++                    .filter(|ty| {
++                        !ty.is_void()
++                            && !ty.is_mixed()
++                            && sym
++                                .return_type
++                                .as_ref()
++                                .is_none_or(|native| !ty.equivalent(native))
++                    })
++                    .cloned()
++                    .or_else(|| {
++                        declaration_enrichment(sym.return_type.as_ref(), request.class_loader)
++                    })
++            };
++            let return_tag = return_type
++                .as_ref()
++                .map(|ty| enrichment_type_to_plain(&display_type(ty)));
++            render_function_plain(
++                request.indent,
++                &params,
++                request.throws,
++                return_tag.as_deref(),
++                request.display_name,
++            )
++        }
++        DocblockContext::ClassLike => {
++            build_class_plain(sym, request.indent, request.class_loader, true)
++        }
++        DocblockContext::Property | DocblockContext::Constant => {
++            let hint = sym.type_hint.as_ref();
++            let ty = hint.cloned().unwrap_or_else(PhpType::mixed);
++            let enriched = declaration_enrichment(hint, request.class_loader).unwrap_or(ty);
++            let text = enrichment_type_to_plain(&display_type(&enriched));
++            format!("{}/** @var {} */\n", request.indent, text)
++        }
++        DocblockContext::Inline | DocblockContext::Unknown => String::new(),
++    }
++}
++
++fn declaration_enrichment(
++    hint: Option<&PhpType>,
++    class_loader: &dyn Fn(&str) -> Option<Arc<ClassInfo>>,
++) -> Option<PhpType> {
++    let enriched = enrichment_plain_typed_fqn(hint, class_loader)?;
++    if let Some(name) = hint.and_then(PhpType::base_name)
++        && let Some(class) = class_loader(name)
++        && !class.template_params.is_empty()
++    {
++        return Some(PhpType::generic(
++            name,
++            vec![PhpType::mixed(); class.template_params.len()],
++        ));
++    }
++    Some(enriched)
++}
+diff --git a/src/completion/phpdoc/generation/mod.rs b/src/completion/phpdoc/generation/mod.rs
+--- a/src/completion/phpdoc/generation/mod.rs
++++ b/src/completion/phpdoc/generation/mod.rs
+@@ -47,7 +47,7 @@
+ 
+ use tower_lsp::lsp_types::*;
+ 
+-use super::context::DocblockContext;
++use super::context::{DocblockContext, SymbolInfo};
+ use crate::completion::source::throws_analysis::{self, ThrowsContext};
+ use crate::completion::use_edit::{analyze_use_block, build_use_edit};
+ use crate::types::{ClassInfo, FunctionLoader};
+@@ -283,3 +283,20 @@
+ 
+     edits
+ }
++
++/// Inputs for explicit generation anchored to a parsed declaration. Analysis is
++/// provided by the caller so helpers never search past this declaration.
++pub(crate) struct DeclarationDocblock<'a> {
++    pub context: DocblockContext,
++    pub symbol: &'a SymbolInfo,
++    pub indent: &'a str,
++    pub class_loader: &'a dyn Fn(&str) -> Option<Arc<ClassInfo>>,
++    pub display_name: &'a dyn Fn(&str) -> String,
++    pub inferred_return: Option<crate::php_type::PhpType>,
++    pub throws: &'a [crate::php_type::PhpType],
++}
++
++/// Render plain PHPDoc using the same enrichment and tag layout as completion.
++pub(crate) fn generate_declaration_docblock(request: &DeclarationDocblock<'_>) -> String {
++    build::build_declaration_docblock(request)
++}
+diff --git a/src/completion/source/throws_analysis/catch.rs b/src/completion/source/throws_analysis/catch.rs
+--- a/src/completion/source/throws_analysis/catch.rs
++++ b/src/completion/source/throws_analysis/catch.rs
+@@ -6,7 +6,7 @@
+ 
+ use crate::php_type::{PhpType, TypeKind};
+ 
+-use super::scanning::ThrowInfo;
++use super::scanning::{ThrowInfo, ThrowTypeOrigin};
+ 
+ /// Information about a `catch (Type $var)` clause in a function body.
+ #[derive(Debug)]
+@@ -70,7 +70,7 @@
+         }
+ 
+         // Look for `throw` keyword
+-        if pos + 5 <= len && &body[pos..pos + 5] == "throw" {
++        if pos + 5 <= len && bytes.get(pos..pos + 5) == Some(b"throw") {
+             let before_ok =
+                 pos == 0 || !bytes[pos - 1].is_ascii_alphanumeric() && bytes[pos - 1] != b'_';
+             let after_ok = pos + 5 >= len
+@@ -93,6 +93,7 @@
+                             {
+                                 for tn in &c.type_names {
+                                     results.push(ThrowInfo {
++                                        origin: ThrowTypeOrigin::Source,
+                                         type_name: tn.clone(),
+                                         offset: pos,
+                                     });
+@@ -157,7 +158,7 @@
+         }
+ 
+         // Look for `try`
+-        if pos + 3 <= len && &body[pos..pos + 3] == "try" {
++        if pos + 3 <= len && bytes.get(pos..pos + 3) == Some(b"try") {
+             let before_ok = pos == 0 || !bytes[pos - 1].is_ascii_alphanumeric();
+             let after_ok = pos + 3 >= len
+                 || (!bytes[pos + 3].is_ascii_alphanumeric() && bytes[pos + 3] != b'_');
+diff --git a/src/completion/source/throws_analysis/cross_file.rs b/src/completion/source/throws_analysis/cross_file.rs
+--- a/src/completion/source/throws_analysis/cross_file.rs
++++ b/src/completion/source/throws_analysis/cross_file.rs
+@@ -28,8 +28,9 @@
+ 
+ use super::catch::{CatchInfo, find_catch_blocks, find_throw_variable_types};
+ use super::scanning::{
+-    ThrowInfo, extract_function_body, find_inline_throws_annotations, find_method_throws_tags,
+-    find_propagated_throws, find_throw_expression_types, find_throw_statements,
++    ThrowInfo, ThrowTypeOrigin, extract_function_body, find_inline_throws_annotations,
++    find_method_throws_tags, find_propagated_throws, find_throw_expression_types,
++    find_throw_statements,
+ };
+ 
+ /// Optional reference to a class-loader closure, used by nested
+@@ -91,16 +92,27 @@
+         None => return Vec::new(),
+     };
+ 
+-    let throws = find_throw_statements(&body);
+-    let throw_expr_types = find_throw_expression_types(&body, content);
+-    let propagated = find_propagated_throws(&body, content);
+-    let catches = find_catch_blocks(&body);
+-    let throw_vars = find_throw_variable_types(&body, &catches);
++    let signature = extract_function_signature(content, position);
++    find_uncaught_throw_types_in_body(content, &body, &signature, ctx)
++}
++
++/// Analyze the exact AST-selected body and signature without searching for a
++/// neighboring declaration or a comment terminator in the source.
++pub(crate) fn find_uncaught_throw_types_in_body(
++    content: &str,
++    body: &str,
++    signature: &str,
++    ctx: Option<&ThrowsContext<'_>>,
++) -> Vec<PhpType> {
++    let throws = find_throw_statements(body);
++    let throw_expr_types = find_throw_expression_types(body, content);
++    let propagated = find_propagated_throws(body, content);
++    let catches = find_catch_blocks(body);
++    let throw_vars = find_throw_variable_types(body, &catches);
+ 
+     // Cross-file propagated throws from all call patterns.
+     let cross_file_propagated = if let Some(throws_ctx) = ctx {
+-        let signature = extract_function_signature(content, position);
+-        find_cross_file_propagated_throws(&body, &signature, content, throws_ctx)
++        find_cross_file_propagated_throws(body, signature, content, throws_ctx)
+     } else {
+         Vec::new()
+     };
+@@ -118,38 +130,35 @@
+         file_namespace: &Option<String>,
+         class_loader: OptClassLoader<'_>,
+     ) -> bool {
+-        let exc_name = exc_type.base_name().unwrap_or("");
+-        // Resolve exception type to FQN via class loader if available.
+-        let exc_fqn = if let Some(loader) = class_loader {
+-            loader(exc_name)
+-                .map(|cls| cls.fqn().to_string())
+-                .unwrap_or_else(|| exc_name.to_string())
+-        } else {
+-            exc_name.to_string()
+-        };
+-        catches.iter().any(|c| {
+-            offset > c.try_start
+-                && offset < c.try_end
+-                && c.type_names.iter().any(|ct| {
+-                    let ct_name = ct.base_name().unwrap_or("");
+-                    // Resolve the catch type to FQN
+-                    let resolved_ct = crate::util::resolve_to_fqn(ct_name, use_map, file_namespace);
+-                    // Also try through the class loader for root-namespace classes.
+-                    let resolved_ct = if let Some(loader) = class_loader {
+-                        loader(&resolved_ct)
+-                            .or_else(|| loader(ct_name))
+-                            .map(|cls| cls.fqn().to_string())
+-                            .unwrap_or(resolved_ct)
+-                    } else {
+-                        resolved_ct
+-                    };
+-                    // Check for Throwable/Exception (catches everything).
+-                    let resolved_lower = resolved_ct.to_ascii_lowercase();
+-                    if resolved_lower == "throwable" || resolved_lower == "exception" {
++        let exc_fqn = exc_type.to_string();
++        catches.iter().any(|catch| {
++            offset > catch.try_start
++                && offset < catch.try_end
++                && catch.type_names.iter().any(|caught| {
++                    let caught_raw = caught.to_string();
++                    let caught_fqn =
++                        crate::util::resolve_to_fqn(&caught_raw, use_map, file_namespace);
++                    if caught_fqn.eq_ignore_ascii_case(&exc_fqn) {
+                         return true;
+                     }
+-                    // Exact FQN comparison (case-insensitive)
+-                    resolved_ct.eq_ignore_ascii_case(&exc_fqn)
++                    let Some(loader) = class_loader else {
++                        // Without a semantic loader this compatibility helper can
++                        // only recognize PHP's universal throwable interface.
++                        return caught_fqn.eq_ignore_ascii_case("Throwable");
++                    };
++                    let strict_loader = |name: &str| {
++                        let name = name
++                            .strip_prefix("__fqn__\\")
++                            .unwrap_or(name)
++                            .trim_start_matches('\\');
++                        loader(&format!("\\{name}"))
++                            .filter(|class| class.fqn().eq_ignore_ascii_case(name))
++                    };
++                    crate::class_lookup::is_subtype_of_typed(
++                        exc_type,
++                        &PhpType::named(atom(&caught_fqn)),
++                        &strict_loader,
++                    )
+                 })
+         })
+     }
+@@ -157,28 +166,19 @@
+     /// Normalize a ThrowInfo's type_name into a TypeKind::Named,
+     /// resolving short names to FQN when use_map/namespace are available.
+     fn normalize_throw_type(
+-        ty: &PhpType,
++        info: &ThrowInfo,
+         use_map: &HashMap<String, String>,
+         file_namespace: &Option<String>,
+-        class_loader: OptClassLoader<'_>,
+     ) -> Option<PhpType> {
+-        let raw = ty.to_string();
+-        let trimmed = raw.trim_start_matches('\\');
+-        if trimmed.is_empty() {
+-            None
+-        } else {
+-            let resolved = crate::util::resolve_to_fqn(trimmed, use_map, file_namespace);
+-            // Try the class loader for a canonical FQN.
+-            let fqn = if let Some(loader) = class_loader {
+-                loader(&resolved)
+-                    .or_else(|| loader(trimmed))
+-                    .map(|cls| cls.fqn().to_string())
+-                    .unwrap_or(resolved)
+-            } else {
+-                resolved
+-            };
+-            Some(PhpType::named(atom(&fqn)))
+-        }
++        let raw = info.type_name.to_string();
++        if raw.is_empty() {
++            return None;
++        }
++        let canonical = match info.origin {
++            ThrowTypeOrigin::Source => crate::util::resolve_to_fqn(&raw, use_map, file_namespace),
++            ThrowTypeOrigin::Resolved => raw.trim_start_matches('\\').to_string(),
++        };
++        Some(PhpType::named(atom(&canonical)))
+     }
+ 
+     // Determine name-resolution context: use the ThrowsContext fields
+@@ -196,8 +196,7 @@
+ 
+     // 1. Direct `throw new Type(…)` statements
+     for throw in &throws {
+-        if let Some(exc_type) =
+-            normalize_throw_type(&throw.type_name, use_map, file_namespace, class_loader)
++        if let Some(exc_type) = normalize_throw_type(throw, use_map, file_namespace)
+             && !is_caught_by(
+                 &catches,
+                 throw.offset,
+@@ -214,8 +213,7 @@
+ 
+     // 2. `throw $this->method()` -- return type of method is the thrown type
+     for te in &throw_expr_types {
+-        if let Some(exc_type) =
+-            normalize_throw_type(&te.type_name, use_map, file_namespace, class_loader)
++        if let Some(exc_type) = normalize_throw_type(te, use_map, file_namespace)
+             && !is_caught_by(
+                 &catches,
+                 te.offset,
+@@ -232,8 +230,7 @@
+ 
+     // 3. Propagated @throws from called methods (same-file text search)
+     for prop in &propagated {
+-        if let Some(exc_type) =
+-            normalize_throw_type(&prop.type_name, use_map, file_namespace, class_loader)
++        if let Some(exc_type) = normalize_throw_type(prop, use_map, file_namespace)
+             && !is_caught_by(
+                 &catches,
+                 prop.offset,
+@@ -249,10 +246,9 @@
+     }
+ 
+     // 4. Inline `/** @throws ExceptionType */` annotations in the body
+-    let inline = find_inline_throws_annotations(&body);
++    let inline = find_inline_throws_annotations(body);
+     for info in &inline {
+-        if let Some(exc_type) =
+-            normalize_throw_type(&info.type_name, use_map, file_namespace, class_loader)
++        if let Some(exc_type) = normalize_throw_type(info, use_map, file_namespace)
+             && !is_caught_by(
+                 &catches,
+                 info.offset,
+@@ -269,8 +265,7 @@
+ 
+     // 5. `throw $variable` — resolved from catch clause variable type
+     for tv in &throw_vars {
+-        if let Some(exc_type) =
+-            normalize_throw_type(&tv.type_name, use_map, file_namespace, class_loader)
++        if let Some(exc_type) = normalize_throw_type(tv, use_map, file_namespace)
+             && !is_caught_by(
+                 &catches,
+                 tv.offset,
+@@ -287,8 +282,7 @@
+ 
+     // 6. Cross-file propagated @throws from all call patterns
+     for prop in &cross_file_propagated {
+-        if let Some(exc_type) =
+-            normalize_throw_type(&prop.type_name, use_map, file_namespace, class_loader)
++        if let Some(exc_type) = normalize_throw_type(prop, use_map, file_namespace)
+             && !is_caught_by(
+                 &catches,
+                 prop.offset,
+@@ -499,7 +493,7 @@
+         }
+ 
+         // ── Pattern: `new ClassName(…)` ─────────────────────────────
+-        if pos + 3 < len && &body[pos..pos + 3] == "new" {
++        if pos + 3 < len && bytes.get(pos..pos + 3) == Some(b"new") {
+             let before_ok =
+                 pos == 0 || !bytes[pos - 1].is_ascii_alphanumeric() && bytes[pos - 1] != b'_';
+             let after_ok = pos + 3 >= len
+@@ -525,6 +519,7 @@
+                     {
+                         for exc_type in &ctor.throws {
+                             results.push(ThrowInfo {
++                                origin: ThrowTypeOrigin::Resolved,
+                                 type_name: exc_type.clone(),
+                                 offset: call_start,
+                             });
+@@ -665,6 +660,7 @@
+                         {
+                             for exc_type in &func_info.throws {
+                                 results.push(ThrowInfo {
++                                    origin: ThrowTypeOrigin::Resolved,
+                                     type_name: exc_type.clone(),
+                                     offset: ident_start,
+                                 });
+@@ -675,6 +671,7 @@
+                         let same_file_throws = find_method_throws_tags(file_content, clean_name);
+                         for t in same_file_throws {
+                             results.push(ThrowInfo {
++                                origin: ThrowTypeOrigin::Source,
+                                 type_name: t,
+                                 offset: ident_start,
+                             });
+@@ -705,6 +702,7 @@
+     {
+         for exc_type in &method_info.throws {
+             results.push(ThrowInfo {
++                origin: ThrowTypeOrigin::Resolved,
+                 type_name: exc_type.clone(),
+                 offset,
+             });
+diff --git a/src/completion/source/throws_analysis/scanning.rs b/src/completion/source/throws_analysis/scanning.rs
+--- a/src/completion/source/throws_analysis/scanning.rs
++++ b/src/completion/source/throws_analysis/scanning.rs
+@@ -20,11 +20,19 @@
+ 
+ /// Information about a `throw` statement (or throw-expression) found in
+ /// a block of PHP source code.
++#[derive(Clone, Copy, Debug, PartialEq, Eq)]
++pub(crate) enum ThrowTypeOrigin {
++    Source,
++    Resolved,
++}
++
+ #[derive(Debug)]
+ pub(crate) struct ThrowInfo {
+     /// The exception type as written in source (e.g.
+     /// `InvalidArgumentException`, `RuntimeException`).
+     pub type_name: PhpType,
++    /// Whether names still need lexical resolution in the current source file.
++    pub origin: ThrowTypeOrigin,
+     /// Byte offset of this throw statement relative to the start of the
+     /// scanned block.
+     pub offset: usize,
+@@ -62,7 +70,7 @@
+         }
+ 
+         // Look for `throw` keyword
+-        if pos + 5 <= len && &body[pos..pos + 5] == "throw" {
++        if pos + 5 <= len && bytes.get(pos..pos + 5) == Some(b"throw") {
+             let before_ok =
+                 pos == 0 || !bytes[pos - 1].is_ascii_alphanumeric() && bytes[pos - 1] != b'_';
+             let after_ok = pos + 5 >= len
+@@ -80,6 +88,7 @@
+                     let type_name = &after_new[..type_end];
+                     if !type_name.is_empty() {
+                         results.push(ThrowInfo {
++                            origin: ThrowTypeOrigin::Source,
+                             type_name: PhpType::named(atom(type_name)),
+                             offset: pos,
+                         });
+@@ -122,7 +131,7 @@
+         }
+ 
+         // Look for `throw` keyword
+-        if pos + 5 <= len && &body[pos..pos + 5] == "throw" {
++        if pos + 5 <= len && bytes.get(pos..pos + 5) == Some(b"throw") {
+             let before_ok =
+                 pos == 0 || !bytes[pos - 1].is_ascii_alphanumeric() && bytes[pos - 1] != b'_';
+             let after_ok = pos + 5 >= len
+@@ -147,6 +156,7 @@
+                                     find_method_return_type(file_content, method_name)
+                             {
+                                 results.push(ThrowInfo {
++                                    origin: ThrowTypeOrigin::Source,
+                                     type_name: ret_type,
+                                     offset: pos,
+                                 });
+@@ -167,6 +177,7 @@
+                             && let Some(ret_type) = find_method_return_type(file_content, func_name)
+                         {
+                             results.push(ThrowInfo {
++                                origin: ThrowTypeOrigin::Source,
+                                 type_name: ret_type,
+                                 offset: pos,
+                             });
+@@ -216,7 +227,7 @@
+         }
+ 
+         for pat in patterns {
+-            if pos + pat.len() <= len && &body[pos..pos + pat.len()] == *pat {
++            if pos + pat.len() <= len && bytes.get(pos..pos + pat.len()) == Some(pat.as_bytes()) {
+                 let before_ok = if *pat == "$this->" {
+                     true
+                 } else {
+@@ -240,6 +251,7 @@
+                     let throws = find_method_throws_tags(file_content, method_name);
+                     for t in throws {
+                         results.push(ThrowInfo {
++                            origin: ThrowTypeOrigin::Source,
+                             type_name: t,
+                             offset: pos,
+                         });
+@@ -292,12 +304,10 @@
+                     for tag in info.tags_by_kind(TagKind::Throws) {
+                         let rest = tag.description.trim();
+                         if let Some(type_name) = rest.split_whitespace().next() {
+-                            let clean = type_name
+-                                .trim_start_matches('\\')
+-                                .trim_end_matches('*')
+-                                .trim_end_matches('/');
++                            let clean = type_name.trim_end_matches('*').trim_end_matches('/');
+                             if !clean.is_empty() && !clean.starts_with('$') {
+                                 results.push(ThrowInfo {
++                                    origin: ThrowTypeOrigin::Source,
+                                     type_name: PhpType::named(atom(clean)),
+                                     offset: doc_start,
+                                 });
+@@ -356,8 +366,8 @@
+                 if !type_str.is_empty() {
+                     let parsed = PhpType::parse(type_str);
+                     let non_null = parsed.non_null_type().unwrap_or_else(|| parsed.clone());
+-                    if let Some(name) = non_null.base_name() {
+-                        return Some(PhpType::named(atom(name)));
++                    if non_null.base_name().is_some() {
++                        return Some(non_null);
+                     }
+                 }
+             }
+@@ -376,12 +386,12 @@
+                     if let Some(type_str) = rest.split_whitespace().next() {
+                         let parsed = PhpType::parse(type_str);
+                         let non_null = parsed.non_null_type().unwrap_or_else(|| parsed.clone());
+-                        if let Some(name) = non_null.base_name()
++                        if non_null.base_name().is_some()
+                             && !parsed.is_void()
+                             && !parsed.is_mixed()
+                             && !parsed.is_self_like()
+                         {
+-                            return Some(PhpType::named(atom(name)));
++                            return Some(non_null);
+                         }
+                     }
+                 }
+@@ -429,10 +439,7 @@
+                 for tag in info.tags_by_kind(TagKind::Throws) {
+                     let rest = tag.description.trim();
+                     if let Some(type_str) = rest.split_whitespace().next() {
+-                        let clean = type_str
+-                            .trim_end_matches('/')
+-                            .trim_end_matches('*')
+-                            .trim_start_matches('\\');
++                        let clean = type_str.trim_end_matches('/').trim_end_matches('*');
+                         if !clean.is_empty() {
+                             throws.push(PhpType::named(atom(clean)));
+                         }
+diff --git a/src/completion/source/throws_analysis_tests.rs b/src/completion/source/throws_analysis_tests.rs
+--- a/src/completion/source/throws_analysis_tests.rs
++++ b/src/completion/source/throws_analysis_tests.rs
+@@ -66,7 +66,7 @@
+         tags,
+         vec![
+             PhpType::named(atom("InvalidArgumentException")),
+-            PhpType::named(atom("RuntimeException"))
++            PhpType::named(atom("\\RuntimeException"))
+         ]
+     );
+ }
+diff --git a/tests/integration/code_action_generate_docblock.rs b/tests/integration/code_action_generate_docblock.rs
+new file mode 100644
+--- /dev/null
++++ b/tests/integration/code_action_generate_docblock.rs
+@@ -0,0 +1,298 @@
++//! Explicit, reviewed documentation proposals retain declaration identity.
++use crate::common::{
++    apply_workspace_edit, create_test_backend, find_action_titled, get_code_actions_at,
++};
++use tower_lsp::lsp_types::*;
++
++fn at_marker(source: &str) -> (String, Position) {
++    let offset = source.find('|').expect("caret marker");
++    let before = &source[..offset];
++    let line = before.bytes().filter(|byte| *byte == b'\n').count() as u32;
++    let column = before.rsplit('\n').next().unwrap().encode_utf16().count() as u32;
++    (source.replacen('|', "", 1), Position::new(line, column))
++}
++
++fn generated(source: &str) -> String {
++    generated_with_backend(source, &create_test_backend())
++}
++
++fn generated_with_backend(source: &str, backend: &phpantom_lsp::Backend) -> String {
++    let (source, position) = at_marker(source);
++    backend.update_ast("file:///test.php", &source);
++    let actions = get_code_actions_at(
++        backend,
++        "file:///test.php",
++        &source,
++        position.line,
++        position.character,
++    );
++    let action =
++        find_action_titled(&actions, "Generate PHPDoc block").expect("documentation action");
++    assert_eq!(action.kind, Some(CodeActionKind::REFACTOR_REWRITE));
++    assert!(action.command.is_none() && action.data.is_none() && action.disabled.is_none());
++    let edit = action.edit.as_ref().unwrap();
++    assert_eq!(edit.changes.as_ref().unwrap().len(), 1);
++    let edits = &edit.changes.as_ref().unwrap()[&Url::parse("file:///test.php").unwrap()];
++    assert_eq!(edits.len(), 1);
++    assert_eq!(edits[0].range.start, edits[0].range.end);
++    apply_workspace_edit(&source, edit)
++}
++
++fn refuses(source: &str) {
++    let (source, position) = at_marker(source);
++    let backend = create_test_backend();
++    backend.update_ast("file:///test.php", &source);
++    let actions = get_code_actions_at(
++        &backend,
++        "file:///test.php",
++        &source,
++        position.line,
++        position.character,
++    );
++    assert!(
++        find_action_titled(&actions, "Generate PHPDoc block").is_none(),
++        "unexpected documentation action for {source}"
++    );
++}
++
++#[test]
++fn documentation_generates_function_summary_without_redundant_native_tags() {
++    let result = generated("<?php\nfunction |greet(string $name): string { return $name; }\n");
++    assert!(result.contains("/**\n * \n */\nfunction greet"));
++    assert!(
++        !result.contains("@param") && !result.contains("@return"),
++        "{result}"
++    );
++}
++
++#[test]
++fn documentation_uses_ast_parameters_with_compact_attributes_and_references() {
++    let result = generated("<?php\nfunction |map(#[Meta(']')] array&$items, &...$rest): void {}\n");
++    assert!(result.contains("@param array<mixed> $items"), "{result}");
++    assert!(result.contains("...$rest"), "{result}");
++    assert!(!result.contains("Meta<mixed>") && !result.contains("@return"));
++}
++
++#[test]
++fn documentation_generates_qualifying_methods_and_constructor_without_return() {
++    let result =
++        generated("<?php\nclass Example {\n    public function |__construct($name) {}\n}\n");
++    assert!(
++        result.contains("    /**\n     * @param mixed $name\n     */\n    public function"),
++        "{result}"
++    );
++    assert!(!result.contains("@return"));
++}
++
++#[test]
++fn documentation_supports_named_classlikes_and_abstract_method_signatures() {
++    for kind in ["class", "interface", "trait", "enum"] {
++        let result = generated(&format!("<?php\n{kind} |Example {{}}\n"));
++        assert!(result.contains("/**\n * \n */\n"), "{result}");
++    }
++    let result = generated(
++        "<?php\ninterface Example {\n    public function |map($items): array;\n    /** @return string */\n    public function other(): string;\n}\n",
++    );
++    assert!(
++        result.contains("@param mixed $items") && result.contains("@return array<mixed>"),
++        "{result}"
++    );
++    assert!(!result.contains("@throws"));
++}
++
++#[test]
++fn documentation_preserves_property_aliases_and_fully_qualified_types() {
++    let result = generated(
++        "<?php\nnamespace App;\nuse Vendor\\Clock as Timepiece;\nclass Example {\n    public Timepiece |$clock;\n}\n",
++    );
++    assert!(result.contains("/** @var Timepiece */"), "{result}");
++    let result = generated(
++        "<?php\nnamespace App;\nclass Example {\n    public \\Vendor\\Clock $|clock;\n}\n",
++    );
++    assert!(result.contains("\\Vendor\\Clock"), "{result}");
++}
++
++#[test]
++fn documentation_inserts_before_complete_attributes_and_retains_crlf_unicode() {
++    let result = generated(
++        "<?php\r\n#[Meta(\r\n    text: ']function fake(){',\r\n)]\r\nfunction |žluťoučký($jméno): void {}\r\n",
++    );
++    assert!(result.contains("*/\r\n#[Meta("), "{result}");
++    assert!(result.contains("$jméno"));
++    assert!(!result.replace("\r\n", "").contains('\n'));
++}
++
++#[test]
++fn documentation_respects_attached_docblocks_through_attributes_and_comments() {
++    for source in [
++        "<?php\n/** Kept */\nfunction |run($item) {}\n",
++        "<?php\n/** Kept */\n#[Meta(']')]\nfunction |run($item) {}\n",
++        "<?php\nclass Example {\n    /** Kept */\n    #[Meta]\n    public |$name;\n}\n",
++        "<?php\n/** Kept */\n// kept as well\nclass |Example {}\n",
++    ] {
++        refuses(source);
++    }
++}
++
++#[test]
++fn documentation_refuses_bodies_locals_closures_anonymous_classes_html_and_broken_source() {
++    for source in [
++        "<?php\nfunction run() { |$item = 1; }\n",
++        "<?php\nclass Example {\n    function run() { |$item = 1; }\n}\n",
++        "<?php\n$closure = function |($item) {};\n",
++        "<?php\n$instance = new class |{};\n",
++        "<h1>|class Example</h1>\n<?php\nclass Existing {}\n",
++        "<?php\nfunction |broken( {}\n",
++        "<?php function |sameLine() {}\n",
++        "<?php\nclass Example { public |$item; }\n",
++        "<?php\nclass Example {\n    public $item = |new Value();\n}\n",
++    ] {
++        refuses(source);
++    }
++}
++
++#[test]
++fn documentation_uses_exact_function_body_before_neighboring_documented_methods() {
++    let result = generated(
++        "<?php\nclass Example {\n    public function |items(): array { /* do not skip this comment */ return [1, 2]; }\n    /** Other */\n    public function other(): void { throw new \\LogicException(); }\n}\n",
++    );
++    assert!(result.contains("@return"), "{result}");
++    assert!(!result.contains("@throws"), "{result}");
++    assert!(result.contains("/* do not skip this comment */"));
++}
++
++#[test]
++fn documentation_throws_keep_import_aliases_and_absolute_identity() {
++    let result = generated(
++        "<?php\nnamespace App;\nuse RuntimeException as Failure;\nfunction |fail(): void { throw new Failure(); }\n",
++    );
++    assert!(result.contains("@throws Failure"), "{result}");
++    let result = generated(
++        "<?php\nnamespace App;\nclass RuntimeException extends \\Exception {}\nfunction |fail(): void { throw new \\RuntimeException(); }\n",
++    );
++    assert!(result.contains("@throws \\RuntimeException"), "{result}");
++    let result = generated(
++        "<?php\nnamespace App;\nfunction |fail(): void { throw new \\ForeignVendor\\MissingFault(); }\n",
++    );
++    assert!(
++        result.contains("@throws \\ForeignVendor\\MissingFault"),
++        "{result}"
++    );
++}
++
++#[test]
++fn documentation_refuses_type_text_that_would_close_the_comment() {
++    refuses("<?php\nfunction |items(): array { return ['*/' => true]; }\n");
++}
++
++#[test]
++fn documentation_does_not_duplicate_an_applied_unsaved_docblock() {
++    let result = generated("<?php\nfunction |run($item): void {}\n");
++    let offset = result.find("run(").unwrap();
++    let mut marked = result;
++    marked.insert(offset, '|');
++    refuses(&marked);
++}
++
++#[test]
++fn documentation_body_analysis_handles_unicode_identifiers() {
++    let result = generated(
++        "<?php\nfunction |run($café): void { $café = 1; throw new \\RuntimeException(); }\n",
++    );
++    assert!(
++        result.contains("@param mixed $café") && result.contains("@throws RuntimeException"),
++        "{result}"
++    );
++}
++
++#[test]
++fn documentation_constants_retain_typed_hints() {
++    let result = generated("<?php\nclass Example {\n    public const string |NAME = 'name';\n}\n");
++    assert!(result.contains("/** @var string */"), "{result}");
++}
++
++#[test]
++fn documentation_uses_mixed_for_unspecified_generic_arguments() {
++    let result =
++        generated("<?php\n/** @template T */\nclass Box {}\nclass |Child extends Box {}\n");
++    assert!(result.contains("@extends Box<mixed>"), "{result}");
++    let result = generated(
++        "<?php\n/** @template T */\nclass Box {}\nclass Example {\n    public Box |$box;\n}\n",
++    );
++    assert!(result.contains("@var Box<mixed>"), "{result}");
++}
++
++#[test]
++fn documentation_absolute_throw_does_not_follow_a_conflicting_import() {
++    let result = generated(
++        "<?php\nnamespace Vendor { class RuntimeException extends \\Exception {} }\nnamespace App {\nuse Vendor\\RuntimeException;\nfunction |fail(): void { throw new \\RuntimeException(); }\n}\n",
++    );
++    assert!(result.contains("@throws \\RuntimeException"), "{result}");
++    assert!(
++        !result.contains("@throws \\Vendor\\RuntimeException"),
++        "{result}"
++    );
++}
++
++#[test]
++fn documentation_unknown_absolute_throw_does_not_fall_back_to_global_namesake() {
++    let result = generated(
++        "<?php\nnamespace App;\nfunction |fail(): void { throw new \\UnknownVendor\\RuntimeException(); }\n",
++    );
++    assert!(
++        result.contains("@throws \\UnknownVendor\\RuntimeException"),
++        "{result}"
++    );
++}
++
++#[test]
++fn documentation_relative_throw_does_not_fall_back_to_global_namesake() {
++    let result = generated(
++        "<?php\nnamespace App;\nfunction |fail(): void { throw new RelativeVendor\\RuntimeException(); }\n",
++    );
++    assert!(
++        result.contains("@throws \\App\\RelativeVendor\\RuntimeException"),
++        "{result}"
++    );
++}
++
++#[test]
++fn documentation_catches_use_lexical_import_and_absolute_identity() {
++    let result = generated(
++        "<?php\nnamespace App;\nuse Vendor\\RuntimeException;\nfunction |fail(): void { try { throw new \\RuntimeException(); } catch (RuntimeException $failure) {} }\n",
++    );
++    assert!(result.contains("@throws \\RuntimeException"), "{result}");
++    let result = generated(
++        "<?php\nnamespace App;\nfunction |fail(): void { try { throw new \\RuntimeException(); } catch (RelativeVendor\\RuntimeException $failure) {} }\n",
++    );
++    assert!(result.contains("@throws \\RuntimeException"), "{result}");
++}
++
++#[test]
++fn documentation_catch_hierarchy_uses_shared_subtyping() {
++    let backend = crate::common::create_test_backend_with_full_stubs();
++    let result = generated_with_backend(
++        "<?php\nnamespace App;\nfunction |fail(): void { try { throw new \\TypeError(); } catch (\\Exception $failure) {} }\n",
++        &backend,
++    );
++    assert!(result.contains("@throws \\TypeError"), "{result}");
++    let result = generated_with_backend(
++        "<?php\nnamespace App;\nfunction |fail(): void { try { throw new \\TypeError(); } catch (\\Throwable $failure) {} }\n",
++        &backend,
++    );
++    assert!(!result.contains("@throws"), "{result}");
++    let result = generated_with_backend(
++        "<?php\nnamespace App;\nfunction |fail(): void { try { throw new \\RuntimeException(); } catch (\\Exception $failure) {} }\n",
++        &backend,
++    );
++    assert!(!result.contains("@throws"), "{result}");
++}
++
++#[test]
++fn documentation_cross_file_throws_keep_the_declaration_namespace() {
++    let result = generated(
++        "<?php\nnamespace Vendor {\nclass Failure extends \\Exception {}\n/** @throws Failure */\nfunction perform(): void {}\n}\nnamespace App {\nfunction |run(): void { \\Vendor\\perform(); }\n}\n",
++    );
++    assert!(result.contains("@throws \\Vendor\\Failure"), "{result}");
++    assert!(!result.contains("@throws \\App\\Vendor"), "{result}");
++}
+diff --git a/tests/integration/completion_throws.rs b/tests/integration/completion_throws.rs
+--- a/tests/integration/completion_throws.rs
++++ b/tests/integration/completion_throws.rs
+@@ -7,7 +7,9 @@
+ //! and `additional_text_edits` are emitted to auto-import exception classes
+ //! that are not yet in the file's `use` list.
+ 
+-use crate::common::{complete_at, create_psr4_workspace, create_test_backend};
++use crate::common::{
++    complete_at, create_psr4_workspace, create_test_backend, create_test_backend_with_full_stubs,
++};
+ use tower_lsp::lsp_types::*;
+ 
+ /// Helper: extract `@throws` completion items from a list.
+@@ -227,7 +229,8 @@
+ /// `catch (Throwable $e)` catches everything.
+ #[tokio::test]
+ async fn test_throws_catch_throwable_catches_all() {
+-    let backend = create_test_backend();
++    // Catching an ancestor depends on PHP’s actual embedded class hierarchy.
++    let backend = create_test_backend_with_full_stubs();
+     let uri = Url::parse("file:///throws_throwable.php").unwrap();
+     let text = concat!(
+         "<?php\n",
+@@ -257,7 +260,8 @@
+ /// `catch (Exception $e)` catches all Exception subclasses.
+ #[tokio::test]
+ async fn test_throws_catch_exception_catches_all() {
+-    let backend = create_test_backend();
++    // Catching an ancestor depends on PHP’s actual embedded class hierarchy.
++    let backend = create_test_backend_with_full_stubs();
+     let uri = Url::parse("file:///throws_exception.php").unwrap();
+     let text = concat!(
+         "<?php\n",
+@@ -1679,7 +1683,8 @@
+ /// throw should NOT appear.
+ #[tokio::test]
+ async fn test_throws_propagated_caught_by_broader_catch() {
+-    let backend = create_test_backend();
++    // Catching an ancestor depends on PHP’s actual embedded class hierarchy.
++    let backend = create_test_backend_with_full_stubs();
+     let uri = Url::parse("file:///throws_prop_broad.php").unwrap();
+     let text = concat!(
+         "<?php\n",
+@@ -1715,7 +1720,8 @@
+ /// the propagated throw should NOT appear.
+ #[tokio::test]
+ async fn test_throws_propagated_caught_by_throwable() {
+-    let backend = create_test_backend();
++    // Catching an ancestor depends on PHP’s actual embedded class hierarchy.
++    let backend = create_test_backend_with_full_stubs();
+     let uri = Url::parse("file:///throws_prop_throwable.php").unwrap();
+     let text = concat!(
+         "<?php\n",
+diff --git a/tests/integration/main.rs b/tests/integration/main.rs
+--- a/tests/integration/main.rs
++++ b/tests/integration/main.rs
+@@ -34,6 +34,7 @@
+ mod code_action_extract_variable;
+ mod code_action_fix_return_type;
+ mod code_action_generate_constructor;
++mod code_action_generate_docblock;
+ mod code_action_generate_getter_setter;
+ mod code_action_generate_property_hooks;
+ mod code_action_implement_methods;

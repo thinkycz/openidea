@@ -661,7 +661,7 @@ pub fn workspace_edit(conv: &Conv, e: lsp::WorkspaceEdit) -> WorkspaceEdit {
             }
         }
     }
-    WorkspaceEdit { files }
+    WorkspaceEdit { files, ..Default::default() }
 }
 
 // ---------------------------------------------------------------- navigation

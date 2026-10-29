@@ -1,0 +1,904 @@
+diff --git a/docs/CHANGELOG.md b/docs/CHANGELOG.md
+index b626dbf..ade677c 100644
+--- a/docs/CHANGELOG.md
++++ b/docs/CHANGELOG.md
+@@ -53,6 +53,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
+ 
+ ### Fixed
+ 
++- **References respect unknown receivers.** Finding usages or renaming a member on an untyped receiver no longer selects same-named members from unrelated classes. Macro registration searches also exclude unrelated or unknown call chains. Known typed and framework receivers keep their scoped results. Contributed by @longdo
++
+ - **Nested Composer projects keep independent completion and PHP settings.** Opening a containing Composer workspace also discovers its child projects. Installed libraries retain the consuming application's configuration, and saved manifest changes preserve current unsaved buffers. Contributed by PHP Workbench downstream.
+ 
+ - **Composer projects keep their own symbols and PHP settings.** Completion and navigation distinguish apps that use the same class, function or constant names. Unsaved edits to a shared dependency follow its active source without replacing another open buffer's text. Contributed by PHP Workbench downstream.
+diff --git a/src/references/dispatch.rs b/src/references/dispatch.rs
+index defaf47..e988b3e 100644
+--- a/src/references/dispatch.rs
++++ b/src/references/dispatch.rs
+@@ -280,6 +280,12 @@ impl Backend {
+                     return self.find_constructor_references(&seeds, include_declaration);
+                 }
+ 
++                // A spelling alone cannot bind an unresolved receiver to a
++                // project member, including when rename asks for declarations.
++                if hierarchy.is_none() {
++                    return Vec::new();
++                }
++
+                 let mut locations = self.find_member_references(
+                     member_name,
+                     *is_static,
+@@ -289,7 +295,6 @@ impl Backend {
+                 );
+ 
+                 if *is_method_call && include_declaration {
+-                    let before_len = locations.len();
+                     let call_position = offset_to_position(content, span_start as usize);
+                     for def in self.resolve_definition(uri, content, call_position) {
+                         let mut start = def.range.start;
+@@ -311,12 +316,6 @@ impl Backend {
+                         member_name,
+                         declaration_scope.as_ref().or(hierarchy.as_ref()),
+                     );
+-                    if locations.len() == before_len {
+-                        self.append_unique_laravel_macro_registration_location(
+-                            &mut locations,
+-                            member_name,
+-                        );
+-                    }
+                 }
+ 
+                 locations
+diff --git a/src/references/members.rs b/src/references/members.rs
+index 5aa3f0e..4e5bee4 100644
+--- a/src/references/members.rs
++++ b/src/references/members.rs
+@@ -105,23 +105,15 @@ impl Backend {
+                         continue;
+                     }
+ 
+-                    let matches_macro = if subject_text.as_str(source).contains('(') {
+-                        // Chained call receivers like
+-                        // `$query->pluck(...)->macroName()` are expensive to
+-                        // resolve precisely here and are the main real-world
+-                        // macro-registration rename case.
+-                        true
+-                    } else {
+-                        let subject_fqns = self.resolve_subject_to_fqns(
+-                            subject_text.as_str(source),
+-                            *is_static,
+-                            &file_ctx,
+-                            span.start,
+-                            content,
+-                        );
+-                        !subject_fqns.is_empty()
+-                            && subject_fqns.iter().any(|fqn| hierarchy.contains(self, fqn))
+-                    };
++                    let subject_fqns = self.resolve_subject_to_fqns(
++                        subject_text.as_str(source),
++                        *is_static,
++                        &file_ctx,
++                        span.start,
++                        content,
++                    );
++                    let matches_macro =
++                        subject_fqns.iter().any(|fqn| hierarchy.contains(self, fqn));
+                     if !matches_macro {
+                         continue;
+                     }
+@@ -175,26 +167,6 @@ impl Backend {
+         }
+     }
+ 
+-    pub(super) fn append_unique_laravel_macro_registration_location(
+-        &self,
+-        locations: &mut Vec<Location>,
+-        name: &str,
+-    ) {
+-        let index = self.laravel_macros.read();
+-        let Some((uri, offset)) = index.unique_definition_for_name(name) else {
+-            return;
+-        };
+-        let Some(content) = self.get_file_content_arc(uri) else {
+-            return;
+-        };
+-        let Ok(parsed_uri) = Url::parse(uri) else {
+-            return;
+-        };
+-        let start = offset_to_position(&content, offset as usize + 1);
+-        let end = offset_to_position(&content, offset as usize + 1 + name.len());
+-        push_location(locations, &parsed_uri, start, end);
+-    }
+-
+     /// Find the references to a member declaration, scoped to the class
+     /// hierarchy that declares it.
+     ///
+diff --git a/src/references/tests.rs b/src/references/tests.rs
+index 736e2ac..f990922 100644
+--- a/src/references/tests.rs
++++ b/src/references/tests.rs
+@@ -222,7 +222,7 @@ async fn test_macro_references_from_descendant_call_include_ancestor_and_sibling
+ }
+ 
+ #[tokio::test]
+-async fn test_macro_registration_references_include_unresolved_chain_call() {
++async fn test_macro_registration_references_exclude_unresolved_chain_call() {
+     let backend = Backend::new_test();
+     let base_uri = Url::parse("file:///BaseCollection.php").unwrap();
+     let provider_uri = Url::parse("file:///Provider.php").unwrap();
+@@ -282,13 +282,31 @@ async fn test_macro_registration_references_include_unresolved_chain_call() {
+     );
+ 
+     let (line, character) = line_char_of(provider_text, "shine");
+-    let locs = find_references(&backend, &provider_uri, line, character, true).await;
+-    assert!(
+-        locs.iter().any(|loc| {
+-            loc.uri == caller_uri && loc.range.start.line == 3 && loc.range.start.character == 33
+-        }),
+-        "expected unresolved chain macro call to be included: {locs:?}"
+-    );
++    for include_declaration in [false, true] {
++        let locs = find_references(
++            &backend,
++            &provider_uri,
++            line,
++            character,
++            include_declaration,
++        )
++        .await;
++        let expected = if include_declaration {
++            vec![Location::new(
++                provider_uri.clone(),
++                Range::new(
++                    Position::new(line, character),
++                    Position::new(line, character + 5),
++                ),
++            )]
++        } else {
++            vec![]
++        };
++        assert_eq!(
++            locs, expected,
++            "an unknown chain is not a proven macro usage"
++        );
++    }
+ }
+ 
+ #[test]
+@@ -1452,3 +1470,382 @@ function run(Service $service, Other $other): void {
+     assert_eq!(cold.len(), 1, "only the Service receiver is a reference");
+     assert_eq!(references(true), cold);
+ }
++
++async fn unresolved_selected_macro_identity_fixture() -> (Backend, Url, Url, &'static str) {
++    let backend = Backend::new_test();
++    let class_uri = Url::parse("file:///MacroIdentityWidget.php").unwrap();
++    let provider_uri = Url::parse("file:///MacroIdentityProvider.php").unwrap();
++    let caller_uri = Url::parse("file:///MacroIdentityCaller.php").unwrap();
++    let class_text = "<?php\nnamespace App\\Support;\nclass Widget {}\n";
++    let provider_text = concat!(
++        "<?php\nnamespace App;\nuse App\\Support\\Widget;\n",
++        "Widget::macro('shine', function (): string { return 'ok'; });\n",
++    );
++    let caller_text = concat!(
++        "<?php\nnamespace App;\nuse App\\Support\\Widget;\n",
++        "function demo(Widget $known, $unknown): void {\n",
++        "    $known->shine();\n",
++        "    $unknown->shine();\n",
++        "}\n",
++    );
++    open_file(&backend, &class_uri, class_text).await;
++    open_file(&backend, &provider_uri, provider_text).await;
++    open_file(&backend, &caller_uri, caller_text).await;
++    seed_macro_index(&backend, &provider_uri, provider_text);
++    backend.resolved_class_cache.write().set_laravel(true);
++    assert!(backend.resolved_class_cache.read().is_laravel());
++    assert!(
++        backend
++            .laravel_macros
++            .read()
++            .unique_definition_for_name("shine")
++            .is_some(),
++        "fixture must exercise the unique-name registration fallback, not an absent macro"
++    );
++    (backend, provider_uri, caller_uri, caller_text)
++}
++
++#[tokio::test]
++async fn unresolved_selected_receiver_cannot_borrow_unique_laravel_macro_identity() {
++    let (backend, _, caller_uri, caller_text) = unresolved_selected_macro_identity_fixture().await;
++    let (line, column) = line_char_of(caller_text, "$unknown->shine");
++    for include_declaration in [false, true] {
++        let locations = find_references(
++            &backend,
++            &caller_uri,
++            line,
++            column + "$unknown->".len() as u32 + 2,
++            include_declaration,
++        )
++        .await;
++        assert!(
++            locations.is_empty(),
++            "unknown receiver must not claim known calls or the unique registration; include_declaration={include_declaration}: {locations:?}"
++        );
++    }
++}
++
++#[tokio::test]
++async fn known_selected_receiver_keeps_scoped_laravel_macro_and_declaration() {
++    let (backend, provider_uri, caller_uri, caller_text) =
++        unresolved_selected_macro_identity_fixture().await;
++    let (line, column) = line_char_of(caller_text, "$known->shine");
++    for include_declaration in [false, true] {
++        let locations = find_references(
++            &backend,
++            &caller_uri,
++            line,
++            column + "$known->".len() as u32 + 2,
++            include_declaration,
++        )
++        .await;
++        assert_eq!(
++            locations.len(),
++            if include_declaration { 2 } else { 1 },
++            "known receiver retains exact macro call and optional registration: {locations:?}"
++        );
++        assert!(locations.iter().any(|location| location.uri == caller_uri
++            && location.range.start == Position::new(line, column + "$known->".len() as u32)));
++        assert_eq!(
++            locations
++                .iter()
++                .any(|location| location.uri == provider_uri),
++            include_declaration
++        );
++        assert!(!locations.iter().any(|location| location.uri == caller_uri
++            && location.range.start.line == line + 1),
++            "the unresolved neighbor is not evidence of this known receiver's identity: {locations:?}");
++    }
++}
++
++const REGISTRATION_CHAIN_PROVIDER: &str = concat!(
++    "<?php\nnamespace App;\nuse App\\Support\\BaseCollection;\n",
++    "BaseCollection::macro('shine', function (): string { return 'ok'; });\n",
++);
++const REGISTRATION_CHAIN_CALLER: &str = concat!(
++    "<?php\nnamespace App;\nuse App\\Support\\GoodFactory;\nuse App\\Support\\BadFactory;\n",
++    "function demo(GoodFactory $typed, BadFactory $unrelated, $unknown): void {\n",
++    "    $note = 'ž🐘'; $typed->pluck('name', 'id')->shine();\n",
++    "    $note = 'ž🐘'; $unrelated->pluck('name', 'id')->shine();\n",
++    "    $note = 'ž🐘'; $unknown->pluck('name', 'id')->shine();\n",
++    "}\n",
++);
++
++async fn registration_chain_identity_fixture(caller: &str) -> (Backend, Url, Url) {
++    let backend = Backend::new_test();
++    let classes_uri = Url::parse("file:///RegistrationChainTypes.php").unwrap();
++    let provider_uri = Url::parse("file:///RegistrationChainProvider.php").unwrap();
++    let caller_uri = Url::parse("file:///RegistrationChainCaller.php").unwrap();
++    let classes = concat!(
++        "<?php\nnamespace App\\Support;\n",
++        "class BaseCollection {}\n",
++        "class Unrelated { public function shine(): string { return 'unrelated'; } }\n",
++        "class GoodFactory { public function pluck(string $name, string $id): BaseCollection { return new BaseCollection(); } }\n",
++        "class BadFactory { public function pluck(string $name, string $id): Unrelated { return new Unrelated(); } }\n",
++    );
++    open_file(&backend, &classes_uri, classes).await;
++    open_file(&backend, &provider_uri, REGISTRATION_CHAIN_PROVIDER).await;
++    open_file(&backend, &caller_uri, caller).await;
++    seed_macro_index(&backend, &provider_uri, REGISTRATION_CHAIN_PROVIDER);
++    backend.resolved_class_cache.write().set_laravel(true);
++    assert!(
++        backend
++            .laravel_macros
++            .read()
++            .unique_definition_for_name("shine")
++            .is_some()
++    );
++    (backend, provider_uri, caller_uri)
++}
++
++fn registration_chain_exact_token(text: &str, occurrence: &str, token: &str) -> Range {
++    let start = text.find(occurrence).unwrap() + occurrence.rfind(token).unwrap();
++    let position = |offset| {
++        let before = &text[..offset];
++        Position::new(
++            before.bytes().filter(|byte| *byte == b'\n').count() as u32,
++            before.rsplit('\n').next().unwrap().encode_utf16().count() as u32,
++        )
++    };
++    Range::new(position(start), position(start + token.len()))
++}
++
++#[tokio::test]
++async fn macro_registration_chain_requires_resolved_related_receiver_identity() {
++    let (backend, provider_uri, caller_uri) =
++        registration_chain_identity_fixture(REGISTRATION_CHAIN_CALLER).await;
++    let registration = Location::new(
++        provider_uri.clone(),
++        registration_chain_exact_token(REGISTRATION_CHAIN_PROVIDER, "'shine'", "shine"),
++    );
++    let known_call = Location::new(
++        caller_uri.clone(),
++        registration_chain_exact_token(
++            REGISTRATION_CHAIN_CALLER,
++            "$typed->pluck('name', 'id')->shine",
++            "shine",
++        ),
++    );
++    let (line, character) = line_char_of(REGISTRATION_CHAIN_PROVIDER, "shine");
++    for include_declaration in [false, true] {
++        let mut actual = find_references(
++            &backend,
++            &provider_uri,
++            line,
++            character + 2,
++            include_declaration,
++        )
++        .await;
++        let mut expected = vec![known_call.clone()];
++        if include_declaration {
++            expected.push(registration.clone());
++        }
++        let key = |location: &Location| {
++            (
++                location.uri.to_string(),
++                location.range.start.line,
++                location.range.start.character,
++                location.range.end.line,
++                location.range.end.character,
++            )
++        };
++        actual.sort_by_key(key);
++        expected.sort_by_key(key);
++        assert_eq!(
++            actual, expected,
++            "typed BaseCollection chain only; own-shine Unrelated and unknown chains are not this macro: include_declaration={include_declaration}"
++        );
++    }
++    assert_eq!(
++        backend.get_file_content(caller_uri.as_str()).as_deref(),
++        Some(REGISTRATION_CHAIN_CALLER)
++    );
++    assert_eq!(
++        backend.get_file_content(provider_uri.as_str()).as_deref(),
++        Some(REGISTRATION_CHAIN_PROVIDER)
++    );
++}
++
++#[tokio::test]
++async fn macro_registration_unknown_and_unrelated_chains_have_no_certain_usage() {
++    let caller = REGISTRATION_CHAIN_CALLER.replace(
++        "    $note = 'ž🐘'; $typed->pluck('name', 'id')->shine();\n",
++        "",
++    );
++    let (backend, provider_uri, caller_uri) = registration_chain_identity_fixture(&caller).await;
++    let (line, character) = line_char_of(REGISTRATION_CHAIN_PROVIDER, "shine");
++    for include_declaration in [false, true] {
++        let actual = find_references(
++            &backend,
++            &provider_uri,
++            line,
++            character + 2,
++            include_declaration,
++        )
++        .await;
++        let expected = if include_declaration {
++            vec![Location::new(
++                provider_uri.clone(),
++                registration_chain_exact_token(REGISTRATION_CHAIN_PROVIDER, "'shine'", "shine"),
++            )]
++        } else {
++            vec![]
++        };
++        assert_eq!(
++            actual, expected,
++            "parentheses and a unique macro name do not establish receiver identity: include_declaration={include_declaration}"
++        );
++    }
++    assert_eq!(
++        backend.get_file_content(caller_uri.as_str()).as_deref(),
++        Some(caller.as_str())
++    );
++    assert_eq!(
++        backend.get_file_content(provider_uri.as_str()).as_deref(),
++        Some(REGISTRATION_CHAIN_PROVIDER)
++    );
++}
++
++const KNOWN_MISSING_MEMBER_CALLER: &str = concat!(
++    "<?php\nnamespace App;\n",
++    "class EmptyReceiver {}\n",
++    "function demo(EmptyReceiver $other): void {\n",
++    "    $note = 'ž🐘'; $other->shine();\n",
++    "}\n",
++);
++
++fn known_missing_member_open_bytes(
++    backend: &Backend,
++) -> std::collections::BTreeMap<String, String> {
++    backend
++        .open_files()
++        .read()
++        .iter()
++        .map(|(uri, text)| (uri.clone(), text.as_str().to_owned()))
++        .collect()
++}
++
++#[tokio::test]
++async fn known_missing_member_references_never_borrow_unique_foreign_macro_registration() {
++    let (backend, provider_uri, caller_uri) =
++        registration_chain_identity_fixture(KNOWN_MISSING_MEMBER_CALLER).await;
++    let before = known_missing_member_open_bytes(&backend);
++    let range =
++        registration_chain_exact_token(KNOWN_MISSING_MEMBER_CALLER, "$other->shine", "shine");
++    let self_call = Location::new(caller_uri.clone(), range);
++    for include_declaration in [false, true] {
++        let locations = find_references(
++            &backend,
++            &caller_uri,
++            range.start.line,
++            range.start.character + 1,
++            include_declaration,
++        )
++        .await;
++        assert!(
++            !locations
++                .iter()
++                .any(|location| location.uri == provider_uri),
++            "known EmptyReceiver has no relationship to the globally unique BaseCollection macro: declarations={include_declaration}: {locations:?}"
++        );
++        assert!(
++            locations.is_empty() || locations == vec![self_call.clone()],
++            "a conservative omission or the exact scoped self-call is allowed; no other member identity is established: {locations:?}"
++        );
++        assert_eq!(
++            known_missing_member_open_bytes(&backend),
++            before,
++            "reference queries do not mutate any open document"
++        );
++    }
++}
++
++fn known_missing_member_assert_self_only_edit(
++    edit: &WorkspaceEdit,
++    caller_uri: &Url,
++    range: Range,
++) {
++    let mut count = 0;
++    let mut check = |uri: &Url, text_edit: &TextEdit| {
++        assert_eq!(
++            uri, caller_uri,
++            "missing member cannot rename a foreign macro registration"
++        );
++        assert_eq!(
++            text_edit.range, range,
++            "only the exact queried member token may change"
++        );
++        assert_eq!(text_edit.new_text, "glow");
++        count += 1;
++    };
++    if let Some(changes) = &edit.changes {
++        for (uri, edits) in changes {
++            for text_edit in edits {
++                check(uri, text_edit);
++            }
++        }
++    }
++    if let Some(changes) = &edit.document_changes {
++        let mut check_document = |document: &TextDocumentEdit| {
++            for text_edit in &document.edits {
++                match text_edit {
++                    OneOf::Left(text_edit) => check(&document.text_document.uri, text_edit),
++                    OneOf::Right(text_edit) => {
++                        check(&document.text_document.uri, &text_edit.text_edit)
++                    }
++                }
++            }
++        };
++        match changes {
++            DocumentChanges::Edits(edits) => {
++                for document in edits {
++                    check_document(document);
++                }
++            }
++            DocumentChanges::Operations(operations) => {
++                for operation in operations {
++                    match operation {
++                        DocumentChangeOperation::Edit(document) => check_document(document),
++                        DocumentChangeOperation::Op(operation) => panic!(
++                            "a missing method rename cannot propose a resource mutation: {operation:?}"
++                        ),
++                    }
++                }
++            }
++        }
++    }
++    assert!(
++        count <= 1,
++        "do not duplicate the exact self-call replacement"
++    );
++}
++
++#[tokio::test]
++async fn known_missing_member_rename_never_changes_unique_foreign_macro_registration() {
++    let (backend, _, caller_uri) =
++        registration_chain_identity_fixture(KNOWN_MISSING_MEMBER_CALLER).await;
++    let before = known_missing_member_open_bytes(&backend);
++    let range =
++        registration_chain_exact_token(KNOWN_MISSING_MEMBER_CALLER, "$other->shine", "shine");
++    let result = backend
++        .rename(RenameParams {
++            text_document_position: TextDocumentPositionParams {
++                text_document: TextDocumentIdentifier {
++                    uri: caller_uri.clone(),
++                },
++                position: Position::new(range.start.line, range.start.character + 1),
++            },
++            new_name: "glow".into(),
++            work_done_progress_params: WorkDoneProgressParams::default(),
++        })
++        .await;
++    // A refusal is safe; every proposed edit must stay on the queried receiver.
++    if let Ok(Some(edit)) = result {
++        known_missing_member_assert_self_only_edit(&edit, &caller_uri, range);
++    }
++    assert_eq!(
++        known_missing_member_open_bytes(&backend),
++        before,
++        "rename requests propose changes; all open source bytes remain exact"
++    );
++}
+diff --git a/src/rename/tests.rs b/src/rename/tests.rs
+index 62116d1..76b7069 100644
+--- a/src/rename/tests.rs
++++ b/src/rename/tests.rs
+@@ -501,7 +501,7 @@ async fn rename_macro_from_descendant_call_updates_ancestor_and_sibling_calls()
+ }
+ 
+ #[tokio::test]
+-async fn rename_macro_registration_string_updates_unresolved_chain_call() {
++async fn rename_macro_registration_string_does_not_rewrite_untyped_chain() {
+     let backend = Backend::new_test();
+     let base_uri = Url::parse("file:///BaseCollection.php").unwrap();
+     let provider_uri = Url::parse("file:///Provider.php").unwrap();
+@@ -536,15 +536,20 @@ async fn rename_macro_registration_string_updates_unresolved_chain_call() {
+     assert!(edit.is_some(), "expected macro rename edit");
+     let edit = edit.unwrap();
+ 
+-    let caller_result = apply_edits(caller_text, &edits_for_uri(&edit, &caller_uri));
++    let provider_result = apply_edits(provider_text, &edits_for_uri(&edit, &provider_uri));
+     assert!(
+-        caller_result.contains("$query->pluck('name', 'id')->glow();"),
+-        "{caller_result}"
++        provider_result.contains("macro('glow'"),
++        "{provider_result}"
++    );
++    let caller_result = apply_edits(caller_text, &edits_for_uri(&edit, &caller_uri));
++    assert_eq!(
++        caller_result, caller_text,
++        "an unknown chain must not be rewritten by registration rename"
+     );
+ }
+ 
+ #[tokio::test]
+-async fn rename_macro_chain_call_updates_registration_string() {
++async fn rename_macro_chain_untyped_receiver_does_not_guess_registration() {
+     let backend = Backend::new_test();
+     let base_uri = Url::parse("file:///BaseCollection.php").unwrap();
+     let provider_uri = Url::parse("file:///Provider.php").unwrap();
+@@ -574,7 +579,66 @@ async fn rename_macro_chain_call_updates_registration_string() {
+     open_file(&backend, &caller_uri, caller_text).await;
+     seed_macro_index(&backend, &provider_uri, provider_text);
+ 
+-    let edit = rename(&backend, &caller_uri, 3, 33, "glow").await;
++    let (line, character) = line_char_of(caller_text, "shine");
++    let edit = rename(&backend, &caller_uri, line, character + 2, "glow").await;
++    assert!(
++        edit.is_none(),
++        "a unique macro name does not identify an untyped chain receiver: {edit:?}"
++    );
++    assert_eq!(
++        backend
++            .open_files()
++            .read()
++            .get(caller_uri.as_str())
++            .unwrap()
++            .as_str(),
++        caller_text
++    );
++    assert_eq!(
++        backend
++            .open_files()
++            .read()
++            .get(provider_uri.as_str())
++            .unwrap()
++            .as_str(),
++        provider_text
++    );
++}
++
++#[tokio::test]
++async fn rename_macro_chain_typed_return_updates_registration_string() {
++    let backend = Backend::new_test();
++    let base_uri = Url::parse("file:///BaseCollection.php").unwrap();
++    let provider_uri = Url::parse("file:///Provider.php").unwrap();
++    let caller_uri = Url::parse("file:///Caller.php").unwrap();
++
++    let base_text = concat!(
++        "<?php\n",
++        "namespace App\\Support;\n",
++        "class BaseCollection {}\n",
++    );
++    let provider_text = concat!(
++        "<?php\n",
++        "namespace App;\n",
++        "use App\\Support\\BaseCollection;\n",
++        "BaseCollection::macro('shine', function (): string { return 'ok'; });\n",
++    );
++    let caller_text = concat!(
++        "<?php\n",
++        "namespace App;\n",
++        "class Query { public function pluck(string $value, string $key): \\App\\Support\\BaseCollection {} }\n",
++        "function demo(Query $query): void {\n",
++        "    $query->pluck('name', 'id')->shine();\n",
++        "}\n",
++    );
++
++    open_file(&backend, &base_uri, base_text).await;
++    open_file(&backend, &provider_uri, provider_text).await;
++    open_file(&backend, &caller_uri, caller_text).await;
++    seed_macro_index(&backend, &provider_uri, provider_text);
++
++    let (line, character) = line_char_of(caller_text, "shine");
++    let edit = rename(&backend, &caller_uri, line, character + 2, "glow").await;
+     assert!(edit.is_some(), "expected macro chain rename edit");
+     let edit = edit.unwrap();
+ 
+diff --git a/src/virtual_members/laravel/macros.rs b/src/virtual_members/laravel/macros.rs
+index 173871c..bf7b5bb 100644
+--- a/src/virtual_members/laravel/macros.rs
++++ b/src/virtual_members/laravel/macros.rs
+@@ -572,6 +572,7 @@ impl LaravelMacroIndex {
+ 
+     /// The sole registration location for `name`, if exactly one target in the
+     /// index contributes that macro name.
++    #[cfg(test)]
+     pub(crate) fn unique_definition_for_name(&self, name: &str) -> Option<(&str, u32)> {
+         let mut matches = self
+             .locations
+diff --git a/tests/integration/references.rs b/tests/integration/references.rs
+index af274d3..9c1e879 100644
+--- a/tests/integration/references.rs
++++ b/tests/integration/references.rs
+@@ -5042,3 +5042,231 @@ fn references_on_crlf_file_with_multibyte_prefix_use_utf16_columns() {
+         "the usage range must be in UTF-16 units on its own line, got: {results:#?}"
+     );
+ }
++
++const UNRESOLVED_MEMBER_IDENTITY_SOURCE: &str = concat!(
++    "<?php\n",
++    "// ž🐘: strings and unrelated receivers are not symbol identity.\n",
++    "class Alpha { public string $label = \"\"; public function save(): void {} }\n",
++    "class Beta { public string $label = \"\"; public function save(): void {} }\n",
++    "class StaticAlpha { public static function save(): void {} }\n",
++    "class StaticBeta { public static function save(): void {} }\n",
++    "function known(Alpha $alpha, Beta $beta): void {\n",
++    "    $alpha->save(); // first\n",
++    "    $alpha->save(); // second\n",
++    "    $beta->save(); echo $alpha->label; echo $beta->label;\n",
++    "}\n",
++    "function untyped($untyped): void { $untyped->save(); echo $untyped->label; }\n",
++    "function explicitMixed(mixed $mixed): void { $mixed->save(); }\n",
++    "function undefinedReceiver(): void { $missing->save(); }\n",
++    "function statics(): void {\n",
++    "    $class::save();\n",
++    "    StaticAlpha::save();\n",
++    "    StaticBeta::save();\n",
++    "    MissingClass::save();\n",
++    "}\n",
++    "$literal = '$alpha->save(); StaticAlpha::save(); save';\n",
++    "// $alpha->save(); StaticAlpha::save(); save\n",
++);
++
++fn unresolved_member_identity_position(needle: &str) -> Position {
++    let byte =
++        UNRESOLVED_MEMBER_IDENTITY_SOURCE.find(needle).unwrap() + needle.find("save").unwrap();
++    let prefix = &UNRESOLVED_MEMBER_IDENTITY_SOURCE[..byte];
++    Position::new(
++        prefix.bytes().filter(|byte| *byte == b'\n').count() as u32,
++        prefix.rsplit('\n').next().unwrap().encode_utf16().count() as u32,
++    )
++}
++
++async fn unresolved_member_identity_fixture() -> (Backend, Url) {
++    let backend = create_test_backend();
++    let uri = Url::parse("file:///unresolved-member-identity.php").unwrap();
++    open_php(&backend, &uri, UNRESOLVED_MEMBER_IDENTITY_SOURCE).await;
++    (backend, uri)
++}
++
++async fn unresolved_member_query_is_empty(needle: &str) {
++    let (backend, uri) = unresolved_member_identity_fixture().await;
++    let position = unresolved_member_identity_position(needle);
++    for include_declaration in [false, true] {
++        let locations = find_references(&backend, &uri, position, include_declaration).await;
++        assert!(
++            locations.is_empty(),
++            "unresolved query {needle:?} must not select unrelated save symbols; declarations={include_declaration}, got {locations:?}"
++        );
++    }
++}
++
++#[tokio::test]
++async fn unresolved_query_untyped_member_has_no_name_only_references() {
++    unresolved_member_query_is_empty("$untyped->save()").await;
++}
++
++#[tokio::test]
++async fn unresolved_query_explicit_mixed_member_has_no_name_only_references() {
++    unresolved_member_query_is_empty("$mixed->save()").await;
++}
++
++#[tokio::test]
++async fn unresolved_query_undefined_member_has_no_name_only_references() {
++    unresolved_member_query_is_empty("$missing->save()").await;
++}
++
++#[tokio::test]
++async fn unresolved_query_unknown_static_class_keeps_only_its_lexical_identity() {
++    let (backend, uri) = unresolved_member_identity_fixture().await;
++    let position = unresolved_member_identity_position("MissingClass::save()");
++    for include_declaration in [false, true] {
++        let locations = find_references(&backend, &uri, position, include_declaration).await;
++        assert_eq!(
++            locations.len(),
++            1,
++            "only the explicit MissingClass call has this identity: {locations:?}"
++        );
++        assert_eq!(locations[0].uri, uri);
++        assert_eq!(locations[0].range.start, position);
++        assert_eq!(
++            locations[0].range.end,
++            Position::new(position.line, position.character + 4)
++        );
++    }
++}
++
++fn unresolved_member_identity_points(
++    locations: &[Location],
++) -> std::collections::BTreeSet<(u32, u32)> {
++    locations
++        .iter()
++        .map(|location| {
++            assert_eq!(
++                location.uri.as_str(),
++                "file:///unresolved-member-identity.php"
++            );
++            (location.range.start.line, location.range.start.character)
++        })
++        .collect()
++}
++
++#[tokio::test]
++async fn unresolved_query_typed_control_retains_only_exact_receiver_identity() {
++    let (backend, uri) = unresolved_member_identity_fixture().await;
++    let first = unresolved_member_identity_position("$alpha->save(); // first");
++    let second = unresolved_member_identity_position("$alpha->save(); // second");
++    let declaration = unresolved_member_identity_position(
++        "class Alpha { public string $label = \"\"; public function save",
++    );
++    for include_declaration in [false, true] {
++        let actual = find_references(&backend, &uri, first, include_declaration).await;
++        let mut expected = std::collections::BTreeSet::from([
++            (first.line, first.character),
++            (second.line, second.character),
++        ]);
++        if include_declaration {
++            expected.insert((declaration.line, declaration.character));
++        }
++        assert_eq!(
++            unresolved_member_identity_points(&actual),
++            expected,
++            "typed query must exclude Beta, static methods, unresolved accesses, strings and comments"
++        );
++        assert_eq!(actual.len(), expected.len(), "no duplicate locations");
++    }
++}
++
++async fn unresolved_member_rename_emits_no_edits(needle: &str) {
++    let (backend, uri) = unresolved_member_identity_fixture().await;
++    let position = unresolved_member_identity_position(needle);
++    let result =
++        crate::common::rename_result(&backend, &uri, position.line, position.character, "persist")
++            .await;
++    match result {
++        Ok(None) | Err(_) => {}
++        Ok(Some(edit)) => {
++            panic!("unresolved rename {needle:?} must not plan unrelated mutations: {edit:?}")
++        }
++    }
++    assert_eq!(
++        backend
++            .open_files()
++            .read()
++            .get(uri.as_str())
++            .unwrap()
++            .as_str(),
++        UNRESOLVED_MEMBER_IDENTITY_SOURCE,
++        "a rename query must not mutate the open source"
++    );
++}
++
++#[tokio::test]
++async fn unresolved_query_untyped_rename_does_not_plan_unrelated_mutations() {
++    unresolved_member_rename_emits_no_edits("$untyped->save()").await;
++}
++
++#[tokio::test]
++async fn unresolved_query_mixed_rename_does_not_plan_unrelated_mutations() {
++    unresolved_member_rename_emits_no_edits("$mixed->save()").await;
++}
++
++#[tokio::test]
++async fn unresolved_query_undefined_rename_does_not_plan_unrelated_mutations() {
++    unresolved_member_rename_emits_no_edits("$missing->save()").await;
++}
++
++#[tokio::test]
++async fn unresolved_query_typed_rename_control_changes_only_bound_declaration_and_calls() {
++    let (backend, uri) = unresolved_member_identity_fixture().await;
++    let position = unresolved_member_identity_position("$alpha->save(); // first");
++    let edit = crate::common::rename(&backend, &uri, position.line, position.character, "persist")
++        .await
++        .expect("a resolved project method remains renameable");
++    let edits = crate::common::edits_for_uri(&edit, &uri);
++    assert_eq!(edits.len(), 3, "declaration and two typed calls only");
++    let expected = UNRESOLVED_MEMBER_IDENTITY_SOURCE
++        .replace(
++            "class Alpha { public string $label = \"\"; public function save",
++            "class Alpha { public string $label = \"\"; public function persist",
++        )
++        .replace("$alpha->save(); // first", "$alpha->persist(); // first")
++        .replace("$alpha->save(); // second", "$alpha->persist(); // second");
++    assert_eq!(
++        crate::common::apply_edits(UNRESOLVED_MEMBER_IDENTITY_SOURCE, &edits),
++        expected,
++        "unrelated declarations/calls, unresolved calls, strings and comments stay literal"
++    );
++    assert_eq!(
++        backend
++            .open_files()
++            .read()
++            .get(uri.as_str())
++            .unwrap()
++            .as_str(),
++        UNRESOLVED_MEMBER_IDENTITY_SOURCE,
++        "workspace edits are proposals, not implicit server mutations"
++    );
++}
++
++#[tokio::test]
++async fn unresolved_query_property_does_not_match_unrelated_properties() {
++    let (backend, uri) = unresolved_member_identity_fixture().await;
++    let byte = UNRESOLVED_MEMBER_IDENTITY_SOURCE
++        .find("$untyped->label")
++        .unwrap()
++        + "$untyped->".len();
++    let prefix = &UNRESOLVED_MEMBER_IDENTITY_SOURCE[..byte];
++    let position = Position::new(
++        prefix.bytes().filter(|b| *b == b'\n').count() as u32,
++        prefix.rsplit('\n').next().unwrap().encode_utf16().count() as u32,
++    );
++    for include_declaration in [false, true] {
++        assert!(
++            find_references(&backend, &uri, position, include_declaration)
++                .await
++                .is_empty()
++        );
++    }
++}
++
++#[tokio::test]
++async fn unresolved_query_dynamic_static_does_not_match_named_classes() {
++    unresolved_member_query_is_empty("$class::save()").await;
++}

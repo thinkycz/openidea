@@ -1,0 +1,234 @@
+diff --git a/docs/CHANGELOG.md b/docs/CHANGELOG.md
+--- a/docs/CHANGELOG.md
++++ b/docs/CHANGELOG.md
+@@ -46,6 +46,8 @@
+ - **Project PHP extension profiles.** Set `[php] extensions` to the extensions available on your deployment target. Completion and built-in lookup keep project polyfills and exclude unavailable extension declarations after restarting the service. Contributed by PHP Workbench (local downstream patch).
+ 
+ ### Fixed
++
++- **Unicode signature hints highlight the right parameter.** Parameter names, types and default values retain their correct highlight ranges, including supplementary Unicode characters. Contributed by @thinkycz.
+ 
+ - **Eloquent scopes and decimal casts match the model.** Builder suggestions recognize aliased framework scope attributes, include public scopes and exclude private or unrelated attributes. Decimal-cast properties are strings that retain their precision. Contributed by PHP Workbench downstream.
+ 
+diff --git a/examples/php/scaffolding/assertions.php b/examples/php/scaffolding/assertions.php
+--- a/examples/php/scaffolding/assertions.php
++++ b/examples/php/scaffolding/assertions.php
+@@ -33,6 +33,10 @@
+ 
+ function runDemoAssertions(): void
+ {
++    $unicodeSignature = new UnicodeSignatureHelpDemo();
++    assert($unicodeSignature->label('A', 'B') === 'AB', 'Unicode parameter names retain the declared string result');
++    assert($unicodeSignature->label(druhý: 'B', první: 'A') === 'AB', 'named Unicode arguments bind by declaration name');
++    assert($unicodeSignature->label('A') === 'A🐘', 'the supplementary-character default remains part of the string result');
+     $dnfCompletion = new DnfTypeCompletionDemo();
+     $dnfCollection = new \ArrayObject(['one']);
+     assert($dnfCompletion->demo($dnfCollection) === $dnfCollection, 'the intersection arm accepts an object implementing both interfaces');
+diff --git a/examples/php/signature_help.php b/examples/php/signature_help.php
+--- a/examples/php/signature_help.php
++++ b/examples/php/signature_help.php
+@@ -66,3 +66,27 @@
+     #[DemoRoute('/users', method: 'POST')]
+     public function store(): void {}
+ }
++
++
++// ── Unicode Parameter Labels ────────────────────────────────────────────────
++
++class UnicodeSignatureHelpDemo
++{
++    /**
++     * @param string $první First label segment.
++     * @param string $druhý Second label segment.
++     */
++    public function label(string $první, string $druhý = '🐘'): string
++    {
++        return $první . $druhý;
++    }
++
++    public function demo(): void
++    {
++        // Try: trigger parameter hints in either argument. The highlight stays
++        // on the whole parameter, including Unicode names and default values.
++        $this->label('A', 'B');
++        // Named arguments highlight their declaration position, not call order.
++        $this->label(druhý: 'B', první: 'A');
++    }
++}
+diff --git a/src/signature_help.rs b/src/signature_help.rs
+--- a/src/signature_help.rs
++++ b/src/signature_help.rs
+@@ -279,21 +279,20 @@
+     );
+     let label = format!("({}){}", params_str, ret);
+ 
+-    // Build ParameterInformation using label offsets.  The offsets are
+-    // byte offsets into the label string (UTF-16 code unit offsets are
+-    // also accepted, but since PHP identifiers are ASCII the byte
+-    // offsets match).
++    // LSP parameter label ranges use UTF-16 code units, including Unicode
++    // identifiers, type names and default values.
+     let mut param_infos = Vec::with_capacity(params.len());
+     let mut offset = 1; // skip the leading `(`
+ 
+     for (idx, (pl, param)) in param_labels.iter().zip(params.iter()).enumerate() {
++        let label_len = pl.encode_utf16().count();
+         let start = offset as u32;
+-        let end = (offset + pl.len()) as u32;
++        let end = (offset + label_len) as u32;
+         param_infos.push(ParameterInformation {
+             label: ParameterLabel::LabelOffsets([start, end]),
+             documentation: build_param_documentation(param),
+         });
+-        offset += pl.len();
++        offset += label_len;
+         if idx < param_labels.len() - 1 {
+             offset += 2; // ", "
+         }
+diff --git a/tests/integration/signature_help.rs b/tests/integration/signature_help.rs
+--- a/tests/integration/signature_help.rs
++++ b/tests/integration/signature_help.rs
+@@ -51,7 +51,12 @@
+         .map(|pi| match &pi.label {
+             ParameterLabel::Simple(s) => s.clone(),
+             ParameterLabel::LabelOffsets([start, end]) => {
+-                sig.label[*start as usize..*end as usize].to_string()
++                let utf16 = sig.label.encode_utf16().collect::<Vec<_>>();
++                let units = utf16
++                    .get(*start as usize..*end as usize)
++                    .expect("parameter offsets must remain within the UTF-16 signature label");
++                String::from_utf16(units)
++                    .expect("parameter offsets must not split a surrogate pair")
+             }
+         })
+         .collect()
+@@ -529,7 +534,8 @@
+     for pi in params {
+         match &pi.label {
+             ParameterLabel::LabelOffsets([start, end]) => {
+-                let substr = &sig.label[*start as usize..*end as usize];
++                let utf16 = sig.label.encode_utf16().collect::<Vec<_>>();
++                let substr = String::from_utf16(&utf16[*start as usize..*end as usize]).unwrap();
+                 // Each extracted label should be a valid parameter representation.
+                 assert!(
+                     substr.contains('$'),
+@@ -1968,3 +1974,119 @@
+         .unwrap();
+     assert_eq!(active_param(&result), 1);
+ }
++
++#[tokio::test]
++async fn signature_utf16_unicode_parameter_labels_preserve_documentation_and_named_active() {
++    let declaration = concat!(
++        "<?php\n",
++        "/**\n",
++        " * @param string $první First Unicode label segment.\n",
++        " * @param string $druhý Second Unicode label segment.\n",
++        " */\n",
++        "function label(string $první, string $druhý): string { return $první.$druhý; }\n",
++    );
++    for (index, call, expected_active) in [
++        (0, "label('A', ", 1),
++        (1, "label(druhý: ", 1),
++        (2, "label(druhý: 'B', první: ", 0),
++    ] {
++        let backend = create_test_backend();
++        let uri = Url::parse(&format!("file:///signature_utf16_unicode_{index}.php")).unwrap();
++        let text = format!("{declaration}{call}");
++        let help = sig_help_at(&backend, &uri, &text, 6, call.encode_utf16().count() as u32)
++            .await
++            .unwrap();
++        assert_eq!(active_param(&help), expected_active);
++        assert_eq!(sig_label(&help), "(string $první, string $druhý): string");
++        assert_eq!(param_labels(&help), vec!["string $první", "string $druhý"]);
++        assert_eq!(
++            param_docs(&help),
++            vec![
++                Some("First Unicode label segment.".into()),
++                Some("Second Unicode label segment.".into())
++            ]
++        );
++    }
++}
++
++#[tokio::test]
++async fn signature_utf16_non_bmp_parameter_names_decode_exactly() {
++    let backend = create_test_backend();
++    let uri = Url::parse("file:///signature_utf16_non_bmp.php").unwrap();
++    let call = "blend(🐘: 'first', druhý: ";
++    let text = format!(
++        "<?php\nfunction blend(string $🐘, string $druhý): string {{ return $🐘.$druhý; }}\n{call}"
++    );
++    let help = sig_help_at(&backend, &uri, &text, 2, call.encode_utf16().count() as u32)
++        .await
++        .unwrap();
++    assert_eq!(active_param(&help), 1);
++    assert_eq!(param_labels(&help), vec!["string $🐘", "string $druhý"]);
++    assert_eq!(sig_label(&help), "(string $🐘, string $druhý): string");
++}
++
++#[tokio::test]
++async fn signature_utf16_unicode_native_class_type_does_not_shift_ascii_parameters() {
++    let backend = create_test_backend();
++    let uri = Url::parse("file:///signature_utf16_class.php").unwrap();
++    let call = "carry(new Žluťoučký🐘(), ";
++    let text = format!(
++        "<?php\nclass Žluťoučký🐘 {{}}\nfunction carry(Žluťoučký🐘 $first, int $second): Žluťoučký🐘 {{ return $first; }}\n{call}"
++    );
++    let help = sig_help_at(&backend, &uri, &text, 3, call.encode_utf16().count() as u32)
++        .await
++        .unwrap();
++    assert_eq!(active_param(&help), 1);
++    assert_eq!(
++        param_labels(&help),
++        vec!["Žluťoučký🐘 $first", "int $second"]
++    );
++    assert_eq!(
++        sig_label(&help),
++        "(Žluťoučký🐘 $first, int $second): Žluťoučký🐘"
++    );
++}
++
++#[tokio::test]
++async fn signature_utf16_non_bmp_default_and_unicode_variadic_keep_parameter_ranges() {
++    let backend = create_test_backend();
++    let uri = Url::parse("file:///signature_utf16_default_variadic.php").unwrap();
++    let call = "render('first', 'second', ";
++    let text = format!(
++        "<?php\nfunction render(string $label = '🐘 café', string ...$přílohy): string {{ return $label; }}\n{call}"
++    );
++    let help = sig_help_at(&backend, &uri, &text, 2, call.encode_utf16().count() as u32)
++        .await
++        .unwrap();
++    assert_eq!(active_param(&help), 1);
++    assert_eq!(
++        param_labels(&help),
++        vec!["string $label = '🐘 café'", "string ...$přílohy"]
++    );
++    assert_eq!(
++        sig_label(&help),
++        "(string $label = '🐘 café', string ...$přílohy): string"
++    );
++}
++
++#[tokio::test]
++async fn signature_utf16_ascii_control_keeps_existing_parameter_ranges() {
++    let backend = create_test_backend();
++    let uri = Url::parse("file:///signature_utf16_ascii.php").unwrap();
++    let call = "render(label: 'first', items: ";
++    let text = format!(
++        "<?php\nfunction render(string $label = 'plain', string ...$items): string {{ return $label; }}\n{call}"
++    );
++    let help = sig_help_at(&backend, &uri, &text, 2, call.encode_utf16().count() as u32)
++        .await
++        .unwrap();
++    assert_eq!(active_param(&help), 1);
++    assert_eq!(
++        param_labels(&help),
++        vec!["string $label = 'plain'", "string ...$items"]
++    );
++    assert_eq!(
++        sig_label(&help),
++        "(string $label = 'plain', string ...$items): string"
++    );
++}

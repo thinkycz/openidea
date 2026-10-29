@@ -1,0 +1,768 @@
+diff --git a/docs/CHANGELOG.md b/docs/CHANGELOG.md
+index 84c9a28..09c4621 100644
+--- a/docs/CHANGELOG.md
++++ b/docs/CHANGELOG.md
+@@ -15,6 +15,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
+ 
+ ## [Unreleased]
+ 
++- **Readable documentation tables.** PHP hover documentation displays supported HTML tables as readable rows, retaining their captions and explanations. Unsupported markup stays visible. Contributed by PHP Workbench downstream.
++
+ - **Use the selected PHP for analyzer scripts.** PHPStan, PHPCS and PHPMD script diagnostics use the editor-selected local interpreter for file and project analysis. Invalid selections report an error; native tools and custom launchers keep their own execution policy. Contributed by PHP Workbench downstream.
+ 
+ - **Generate members inside anonymous classes.** Constructor, accessor and inherited-method actions select the correct expression-owned class and preserve its surrounding code, inherited contracts and body layout. Interface extraction refuses anonymous owners even when resolving a retained action. Contributed by PHP Workbench downstream.
+diff --git a/src/hover/formatting.rs b/src/hover/formatting.rs
+index eba6af5..721ab91 100644
+--- a/src/hover/formatting.rs
++++ b/src/hover/formatting.rs
+@@ -241,12 +241,12 @@ pub(super) fn build_param_return_section(
+             }
+             if has_desc {
+                 entry.push_str("  \n\u{00a0}\u{00a0}\u{00a0}\u{00a0}");
+-                entry.push_str(p.description.as_deref().unwrap());
++                entry.push_str(&html_to_markdown(p.description.as_deref().unwrap()));
+             }
+         } else if has_desc {
+             // Types match — show description directly after the name.
+             entry.push(' ');
+-            entry.push_str(p.description.as_deref().unwrap());
++            entry.push_str(&html_to_markdown(p.description.as_deref().unwrap()));
+         }
+         entries.push(entry);
+     }
+@@ -270,11 +270,11 @@ pub(super) fn build_param_return_section(
+             }
+             if has_ret_desc {
+                 entry.push_str("  \n\u{00a0}\u{00a0}\u{00a0}\u{00a0}");
+-                entry.push_str(return_description.unwrap());
++                entry.push_str(&html_to_markdown(return_description.unwrap()));
+             }
+         } else if has_ret_desc {
+             entry.push(' ');
+-            entry.push_str(return_description.unwrap());
++            entry.push_str(&html_to_markdown(return_description.unwrap()));
+         }
+         entries.push(entry);
+     }
+@@ -511,38 +511,40 @@ fn skip_type_token(s: &str) -> &str {
+ /// Handles inline formatting (`<b>`/`<strong>`, `<i>`/`<em>`, `<code>`),
+ /// line breaks (`<br>`, `<p>`), lists (`<ul>`/`<ol>`/`<li>`), and
+ /// definition lists (`<dl>`/`<dt>`/`<dd>`); `<span>` is unwrapped. This is
+-/// a simple string-replacement pass, not a full HTML parser, so tag
++/// a simple string-replacement pass after narrow, loss-preserving table conversion; tag
+ /// matching is case-sensitive and attributes are not recognised.
+ pub(crate) fn html_to_markdown(text: &str) -> String {
+-    text.replace("<b>", "**")
+-        .replace("</b>", "**")
+-        .replace("<strong>", "**")
+-        .replace("</strong>", "**")
+-        .replace("<i>", "*")
+-        .replace("</i>", "*")
+-        .replace("<em>", "*")
+-        .replace("</em>", "*")
+-        .replace("<code>", "`")
+-        .replace("</code>", "`")
+-        .replace("<br />", "\n")
+-        .replace("<br/>", "\n")
+-        .replace("<br>", "\n")
+-        .replace("<p>", "\n\n")
+-        .replace("</p>", "")
+-        .replace("<ul>", "\n")
+-        .replace("</ul>", "\n")
+-        .replace("<ol>", "\n")
+-        .replace("</ol>", "\n")
+-        .replace("<li>", "- ")
+-        .replace("</li>", "\n")
+-        .replace("<dl>", "\n")
+-        .replace("</dl>", "\n")
+-        .replace("<dt>", "\n**")
+-        .replace("</dt>", "**")
+-        .replace("<dd>", "\n  ")
+-        .replace("</dd>", "")
+-        .replace("<span>", "")
+-        .replace("</span>", "")
++    super::html_tables::convert(text, |text| {
++        text.replace("<b>", "**")
++            .replace("</b>", "**")
++            .replace("<strong>", "**")
++            .replace("</strong>", "**")
++            .replace("<i>", "*")
++            .replace("</i>", "*")
++            .replace("<em>", "*")
++            .replace("</em>", "*")
++            .replace("<code>", "`")
++            .replace("</code>", "`")
++            .replace("<br />", "\n")
++            .replace("<br/>", "\n")
++            .replace("<br>", "\n")
++            .replace("<p>", "\n\n")
++            .replace("</p>", "")
++            .replace("<ul>", "\n")
++            .replace("</ul>", "\n")
++            .replace("<ol>", "\n")
++            .replace("</ol>", "\n")
++            .replace("<li>", "- ")
++            .replace("</li>", "\n")
++            .replace("<dl>", "\n")
++            .replace("</dl>", "\n")
++            .replace("<dt>", "\n**")
++            .replace("</dt>", "**")
++            .replace("<dd>", "\n  ")
++            .replace("</dd>", "")
++            .replace("<span>", "")
++            .replace("</span>", "")
++    })
+ }
+ 
+ /// Extract the description from a pre-parsed [`DocblockInfo`], applying
+diff --git a/src/hover/html_tables.rs b/src/hover/html_tables.rs
+new file mode 100644
+index 0000000..27afde9
+--- /dev/null
++++ b/src/hover/html_tables.rs
+@@ -0,0 +1,387 @@
++//! Convert supported HTML tables to ordinary Markdown lists; keep unsupported input intact.
++struct Tag<'a> {
++    name: &'a str,
++    close: bool,
++    end: usize,
++}
++fn tag(text: &str, at: usize) -> Option<Tag<'_>> {
++    let b = text.as_bytes();
++    if b.get(at) != Some(&b'<') {
++        return None;
++    }
++    let mut p = at + 1;
++    let close = b.get(p) == Some(&b'/');
++    if close {
++        p += 1;
++    }
++    let start = p;
++    while b.get(p).is_some_and(u8::is_ascii_alphabetic) {
++        p += 1;
++    }
++    if p == start
++        || !b
++            .get(p)
++            .is_some_and(|c| c.is_ascii_whitespace() || *c == b'>' || *c == b'/')
++    {
++        return None;
++    }
++    let name = &text[start..p];
++    let mut quote = None;
++    while let Some(&c) = b.get(p) {
++        if let Some(q) = quote {
++            if c == q {
++                quote = None;
++            }
++        } else if c == b'\'' || c == b'"' {
++            quote = Some(c);
++        } else if c == b'>' {
++            return Some(Tag {
++                name,
++                close,
++                end: p + 1,
++            });
++        } else if c == b'<' {
++            return None;
++        }
++        p += 1;
++    }
++    None
++}
++fn decode(text: &str) -> Option<String> {
++    let mut out = String::new();
++    let mut rest = text;
++    while let Some(at) = rest.find('&') {
++        out.push_str(&rest[..at]);
++        rest = &rest[at..];
++        let Some(end) = rest.as_bytes().iter().take(17).position(|b| *b == b';') else {
++            if rest
++                .as_bytes()
++                .get(1)
++                .is_some_and(|c| c.is_ascii_alphabetic() || *c == b'#')
++            {
++                return None;
++            }
++            out.push('&');
++            rest = &rest[1..];
++            continue;
++        };
++        let e = &rest[1..end];
++        if e.contains('&') || e.chars().any(char::is_whitespace) {
++            out.push('&');
++            rest = &rest[1..];
++            continue;
++        }
++        let value = match e {
++            "amp" => Some('&'),
++            "lt" => Some('<'),
++            "gt" => Some('>'),
++            "quot" => Some('"'),
++            "apos" => Some('\''),
++            "nbsp" => Some(' '),
++            "vert" | "VerticalLine" => Some('|'),
++            _ => e
++                .strip_prefix("#x")
++                .or_else(|| e.strip_prefix("#X"))
++                .and_then(|n| u32::from_str_radix(n, 16).ok())
++                .and_then(char::from_u32)
++                .or_else(|| {
++                    e.strip_prefix('#')
++                        .and_then(|n| n.parse::<u32>().ok())
++                        .and_then(char::from_u32)
++                }),
++        };
++        out.push(value.filter(|c| !c.is_control())?);
++        rest = &rest[end + 1..];
++    }
++    out.push_str(rest);
++    Some(out)
++}
++fn escaped(text: &str) -> String {
++    let mut out = String::new();
++    let mut whitespace = false;
++    for c in text.chars() {
++        if c.is_whitespace() {
++            if !whitespace {
++                out.push(' ');
++            }
++            whitespace = true;
++            continue;
++        }
++        whitespace = false;
++        match c {
++            '<' => out.push_str("&lt;"),
++            '>' => out.push_str("&gt;"),
++            '\\' | '\x60' | '*' | '_' | '[' | ']' => {
++                out.push('\\');
++                out.push(c);
++            }
++            _ => out.push(c),
++        }
++    }
++    out
++}
++fn inline(text: &str) -> Option<String> {
++    let mut out = String::new();
++    let mut cursor = 0;
++    let mut stack = Vec::new();
++    while let Some(rel) = text[cursor..].find('<') {
++        let at = cursor + rel;
++        out.push_str(&escaped(&text[cursor..at]));
++        let t = tag(text, at)?;
++        let name = t.name.to_ascii_lowercase();
++        if name == "code" && !t.close {
++            let mut end = t.end;
++            let (close, after) = loop {
++                let next = end + text[end..].find('<')?;
++                let t = tag(text, next)?;
++                if t.close && t.name.eq_ignore_ascii_case("code") {
++                    break (next, t.end);
++                }
++                end = t.end;
++            };
++            let content = decode(&text[t.end..close])?;
++            let width = content
++                .split(|c| c != '\x60')
++                .map(str::len)
++                .max()
++                .unwrap_or(0)
++                + 1;
++            let fence = "\x60".repeat(width);
++            let pad = content.starts_with('\x60') || content.ends_with('\x60');
++            out.push_str(&fence);
++            if pad {
++                out.push(' ');
++            }
++            out.push_str(&content);
++            if pad {
++                out.push(' ');
++            }
++            out.push_str(&fence);
++            cursor = after;
++            continue;
++        }
++        let marker = match name.as_str() {
++            "b" | "strong" => "**",
++            "i" | "em" => "*",
++            "span" => "",
++            "br" if !t.close => " / ",
++            "p" => " ",
++            _ => return None,
++        };
++        if name != "br" {
++            if t.close {
++                if stack.pop().as_deref() != Some(name.as_str()) {
++                    return None;
++                }
++            } else {
++                stack.push(name);
++            }
++        }
++        out.push_str(marker);
++        cursor = t.end;
++    }
++    out.push_str(&escaped(&text[cursor..]));
++    if !stack.is_empty() {
++        return None;
++    }
++    Some(out.trim().to_string())
++}
++fn table(text: &str, start: usize) -> Option<(usize, String)> {
++    let opening = tag(text, start)?;
++    if opening.close || !opening.name.eq_ignore_ascii_case("table") {
++        return None;
++    }
++    let mut cursor = opening.end;
++    let mut rows = Vec::<Vec<String>>::new();
++    let mut row = None::<Vec<String>>;
++    let mut cell = None::<(String, usize)>;
++    let mut caption = String::new();
++    let mut caption_start = None;
++    let mut wrappers = Vec::new();
++    loop {
++        let at = cursor + text[cursor..].find('<')?;
++        if cell.is_none() && caption_start.is_none() {
++            let loose = text[cursor..at].trim();
++            if !loose.is_empty() {
++                if row.is_some() {
++                    return None;
++                }
++                if !caption.is_empty() {
++                    caption.push(' ');
++                }
++                caption.push_str(&escaped(loose));
++            }
++        }
++        let t = tag(text, at)?;
++        let name = t.name.to_ascii_lowercase();
++        if let Some((kind, content_start)) = cell.as_ref() {
++            if t.close && &name == kind {
++                row.as_mut()?.push(inline(&text[*content_start..at])?);
++                cell = None;
++            } else if matches!(name.as_str(), "table" | "tr" | "td" | "th") {
++                return None;
++            }
++        } else if let Some(content_start) = caption_start {
++            if t.close && name == "caption" {
++                caption = inline(&text[content_start..at])?;
++                caption_start = None;
++            } else if matches!(name.as_str(), "table" | "tr" | "td" | "th") {
++                return None;
++            }
++        } else {
++            match (name.as_str(), t.close) {
++                ("table", true) => {
++                    if row.is_some() || !wrappers.is_empty() || rows.is_empty() {
++                        return None;
++                    }
++                    let mut out = String::from("\n\n");
++                    if !caption.is_empty() {
++                        out.push_str(&caption);
++                        out.push_str("\n\n");
++                    }
++                    for cells in rows {
++                        out.push_str("- ");
++                        out.push_str(&cells.join(" — "));
++                        out.push('\n');
++                    }
++                    out.push('\n');
++                    return Some((t.end, out));
++                }
++                ("tr", false) if row.is_none() => row = Some(Vec::new()),
++                ("tr", true) => {
++                    let cells = row.take()?;
++                    if cells.is_empty() {
++                        return None;
++                    }
++                    rows.push(cells);
++                }
++                ("td" | "th", false) if row.is_some() => cell = Some((name, t.end)),
++                ("caption", false) if row.is_none() && caption.is_empty() => {
++                    caption_start = Some(t.end)
++                }
++                ("thead" | "tbody" | "tfoot", false) if row.is_none() => wrappers.push(name),
++                ("thead" | "tbody" | "tfoot", true) if row.is_none() => {
++                    if wrappers.pop().as_deref() != Some(name.as_str()) {
++                        return None;
++                    }
++                }
++                _ => return None,
++            }
++        }
++        cursor = t.end;
++    }
++}
++// Markdown fences start on their own line, with up to three spaces of indentation.
++// An unclosed fence consumes the rest of the document as code.
++fn fence_end(text: &str, start: usize, width: usize, marker: u8) -> usize {
++    let Some(newline) = text[start..].find('\n') else {
++        return text.len();
++    };
++    let mut line_start = start + newline + 1;
++    while line_start < text.len() {
++        let line_end = text[line_start..]
++            .find('\n')
++            .map_or(text.len(), |n| line_start + n);
++        let line = text[line_start..line_end]
++            .strip_suffix('\r')
++            .unwrap_or(&text[line_start..line_end]);
++        let indent = line.bytes().take_while(|b| *b == b' ').count();
++        if indent <= 3 {
++            let tail = &line[indent..];
++            let count = tail.bytes().take_while(|b| *b == marker).count();
++            if count >= width && tail[count..].bytes().all(|b| b == b' ' || b == b'\t') {
++                return if line_end < text.len() {
++                    line_end + 1
++                } else {
++                    line_end
++                };
++            }
++        }
++        line_start = line_end.saturating_add(1);
++    }
++    text.len()
++}
++fn table_opener(text: &str, at: usize) -> bool {
++    let bytes = &text.as_bytes()[at..];
++    bytes
++        .get(..6)
++        .is_some_and(|prefix| prefix.eq_ignore_ascii_case(b"<table"))
++        && bytes
++            .get(6)
++            .is_some_and(|c| c.is_ascii_whitespace() || *c == b'>' || *c == b'/')
++}
++pub(super) fn convert(text: &str, legacy: impl Fn(&str) -> String) -> String {
++    let mut out = String::new();
++    let mut cursor = 0;
++    let mut pending = 0;
++    let mut line_start = 0;
++    while cursor < text.len() {
++        let byte = text.as_bytes()[cursor];
++        if matches!(byte, b'~' | b'`')
++            && cursor - line_start <= 3
++            && text[line_start..cursor].bytes().all(|b| b == b' ')
++        {
++            let width = text.as_bytes()[cursor..]
++                .iter()
++                .take_while(|b| **b == byte)
++                .count();
++            let line_end = text[cursor + width..]
++                .find('\n')
++                .map_or(text.len(), |n| cursor + width + n);
++            let valid_info = byte != b'`' || !text[cursor + width..line_end].contains('`');
++            if width >= 3 && valid_info {
++                let end = fence_end(text, cursor, width, byte);
++                out.push_str(&legacy(&text[pending..cursor]));
++                out.push_str(&text[cursor..end]);
++                cursor = end;
++                pending = end;
++                line_start = end;
++                continue;
++            }
++        }
++        // Table examples and existing Markdown code must not be reinterpreted as HTML.
++        if byte == b'\x60' {
++            let width = text.as_bytes()[cursor..]
++                .iter()
++                .take_while(|b| **b == b'\x60')
++                .count();
++            let fence = "\x60".repeat(width);
++            if let Some(end) = text[cursor + width..].find(&fence) {
++                let end = cursor + width + end + width;
++                out.push_str(&legacy(&text[pending..cursor]));
++                out.push_str(&text[cursor..end]);
++                if let Some(n) = text[cursor..end].rfind('\n') {
++                    line_start = cursor + n + 1;
++                }
++                cursor = end;
++                pending = end;
++                continue;
++            }
++            // A single unmatched run must not be counted/searched once per byte.
++            cursor += width;
++            continue;
++        }
++        if table_opener(text, cursor) {
++            out.push_str(&legacy(&text[pending..cursor]));
++            if let Some((end, replacement)) = table(text, cursor) {
++                out.push_str(&replacement);
++                if let Some(n) = text[cursor..end].rfind('\n') {
++                    line_start = cursor + n + 1;
++                }
++                cursor = end;
++                pending = end;
++                continue;
++            }
++            // A malformed opener retains its suffix without rescanning quoted/nested tags.
++            out.push_str(&text[cursor..]);
++            return out;
++        }
++        let c = text[cursor..].chars().next().unwrap();
++        cursor += c.len_utf8();
++        if c == '\n' {
++            line_start = cursor;
++        }
++    }
++    out.push_str(&legacy(&text[pending..]));
++    out
++}
+diff --git a/src/hover/mod.rs b/src/hover/mod.rs
+index 863b075..08e1e8f 100644
+--- a/src/hover/mod.rs
++++ b/src/hover/mod.rs
+@@ -17,6 +17,7 @@
+ mod class;
+ pub(crate) mod constants;
+ mod formatting;
++mod html_tables;
+ mod laravel_trans;
+ mod member;
+ mod see_refs;
+diff --git a/src/hover/tests.rs b/src/hover/tests.rs
+index b19b6b4..65c651c 100644
+--- a/src/hover/tests.rs
++++ b/src/hover/tests.rs
+@@ -581,3 +581,180 @@ fn laravel_string_key_hover_gated_on_is_laravel() {
+          config key, got {hover:?}"
+     );
+ }
++
++#[test]
++fn html_table_hover_keeps_rows_code_entities_and_literal_generics() {
++    let html = "Before<table class=\"flags\"><caption>Available flags</caption><tr><th>Flag</th><th>Description</th></tr><tr><td><code>A&#124;B</code></td><td>Žofie &amp; 😀 array&lt;string&gt;</td></tr><tr><td>C</td><td>second row</td></tr></table>After";
++    let text = super::formatting::html_to_markdown(html);
++    for wanted in [
++        "Before",
++        "Available flags",
++        "Flag",
++        "Description",
++        "A|B",
++        "Žofie &amp; 😀",
++        "second row",
++        "After",
++    ] {
++        assert!(text.contains(wanted), "missing {wanted}: {text}");
++    }
++    assert!(!text.contains("<table"), "HTML table leaked: {text}");
++    assert!(!text.contains("<td>"), "HTML cells leaked: {text}");
++    assert!(text.contains("`A|B`"), "code cell lost: {text}");
++    assert!(
++        text.contains("- "),
++        "table must use host-readable list rows: {text}"
++    );
++}
++
++#[test]
++fn html_table_hover_preserves_unknown_or_malformed_markup_and_code_examples() {
++    for text in [
++        "array<string|int>",
++        "<table><tr><td>Never lose this",
++        "<table><tr><td><unknown>retain</unknown></td></tr></table>",
++        "`<table><tr><td>example</td></tr></table>`",
++        "```html\n<table><tr><td>example</td></tr></table>\n```",
++    ] {
++        assert_eq!(super::formatting::html_to_markdown(text), text);
++    }
++}
++
++#[test]
++fn html_table_unsupported_outer_structure_keeps_all_original_text() {
++    for text in [
++        "<table>loose caption<caption>explicit caption</caption><tr><td>value</td></tr></table>",
++        "<table><unknown><table><tr><td>nested text</td></tr></table></unknown></table>",
++    ] {
++        assert_eq!(super::formatting::html_to_markdown(text), text);
++    }
++}
++
++#[test]
++fn html_table_code_cells_keep_literal_html_after_entity_decoding() {
++    let text = super::formatting::html_to_markdown(
++        "prose <b>bold</b><table><tr><td><code>&lt;b&gt;literal&lt;/b&gt; &lt;code&gt;inner&lt;/code&gt;</code></td></tr></table>",
++    );
++    assert!(
++        text.contains("**bold**"),
++        "ordinary inline prose changed: {text}"
++    );
++    assert!(
++        text.contains("`<b>literal</b> <code>inner</code>`"),
++        "code was rewritten as HTML: {text}"
++    );
++    assert!(
++        !text.contains("**literal**"),
++        "literal code changed: {text}"
++    );
++    let ticks =
++        super::formatting::html_to_markdown("<table><tr><td><code>a`b</code></td></tr></table>");
++    assert!(ticks.contains("``a`b``"), "backtick fence unsafe: {ticks}");
++}
++
++#[test]
++fn html_table_escaped_entities_are_not_decoded_twice() {
++    let text = formatting::html_to_markdown("<table><tr><td>&amp;lt; &amp;copy;</td></tr></table>");
++    assert!(
++        text.contains("&amp;lt; &amp;copy;"),
++        "entity escaped text changed meaning: {text}"
++    );
++}
++
++#[test]
++fn html_table_tilde_fenced_examples_remain_literal() {
++    let text = "~~~html\n<table><tr><td>literal</td></tr></table>\n~~~";
++    assert_eq!(formatting::html_to_markdown(text), text);
++}
++
++#[test]
++fn html_table_plain_cells_decode_entities_exactly_once_for_markdown() {
++    let text = super::formatting::html_to_markdown(
++        "<table><tr><td>&amp;lt; &amp;copy; &copy; &amp;amp; &#124; Žofie</td></tr></table>",
++    );
++    assert!(
++        text.contains("&amp;lt; &amp;copy; &copy; &amp;amp; &#124; Žofie"),
++        "plain cell must survive the Markdown entity decoder unchanged: {text}"
++    );
++    assert!(!text.contains("©"));
++}
++
++#[test]
++fn html_table_tilde_fenced_examples_stay_literal_and_following_table_converts() {
++    for fence in [
++        "~~~html\n<table><tr><td>example</td></tr></table>\n~~~\n",
++        "   ~~~~html\r\n<table><tr><td>example</td></tr></table>\r\n   ~~~~~\r\n",
++        "~~~html\n<table><tr><td>unclosed example</td></tr></table>",
++    ] {
++        assert_eq!(super::formatting::html_to_markdown(fence), fence);
++    }
++    let input = "~~~html\n<table><tr><td>example</td></tr></table>\n~~~\n<table><tr><td>actual cell</td></tr></table>";
++    let text = super::formatting::html_to_markdown(input);
++    assert!(text.starts_with("~~~html\n<table><tr><td>example</td></tr></table>\n~~~\n"));
++    assert!(
++        text.contains("- actual cell"),
++        "post-fence prose did not resume: {text}"
++    );
++    let inline =
++        super::formatting::html_to_markdown("inline ~~~ <table><tr><td>actual</td></tr></table>");
++    assert!(
++        inline.contains("- actual"),
++        "inline tildes are not code fences: {inline}"
++    );
++}
++
++#[test]
++fn html_table_long_ampersand_and_unmatched_backtick_runs_retain_content() {
++    let ampersands = "&".repeat(32_768);
++    let input = format!("<table><tr><td>{ampersands}</td></tr></table>");
++    let text = super::formatting::html_to_markdown(&input);
++    assert_eq!(text.matches('&').count(), ampersands.len());
++    let ticks = "`".repeat(32_768);
++    let text = super::formatting::html_to_markdown(&format!(
++        "{ticks}<table><tr><td>tail</td></tr></table>"
++    ));
++    assert!(text.starts_with(&ticks));
++    assert_eq!(
++        text,
++        format!("{ticks}<table><tr><td>tail</td></tr></table>")
++    );
++}
++
++#[test]
++fn html_table_unclosed_backtick_fences_remain_literal() {
++    let text = "```html\n<table><tr><td>literal</td></tr></table>";
++    assert_eq!(formatting::html_to_markdown(text), text);
++}
++
++#[test]
++fn html_table_unclosed_quoted_opener_preserves_its_suffix() {
++    let text = format!("<table caption=\"{}", "<table a=Žofie ".repeat(4096));
++    assert_eq!(formatting::html_to_markdown(&text), text);
++}
++
++#[test]
++fn html_table_stray_ampersand_does_not_consume_a_following_entity() {
++    let text = formatting::html_to_markdown("<table><tr><td>& &amp;</td></tr></table>");
++    assert!(
++        !text.contains("&amp;amp;"),
++        "later entity changed visible meaning: {text}"
++    );
++    let code =
++        formatting::html_to_markdown("<table><tr><td><code>& &amp;</code></td></tr></table>");
++    assert!(
++        code.contains("`& &`"),
++        "code entity changed meaning: {code}"
++    );
++}
++
++#[test]
++fn html_table_unknown_code_entity_keeps_the_original_table() {
++    let text = "<table><tr><td><code>&copy;</code></td></tr></table>";
++    assert_eq!(formatting::html_to_markdown(text), text);
++}
++
++#[test]
++fn html_table_overlong_code_entity_keeps_the_original_table() {
++    let text = "<table><tr><td><code>&CounterClockwiseContourIntegral;</code></td></tr></table>";
++    assert_eq!(formatting::html_to_markdown(text), text);
++}
+diff --git a/tests/integration/hover.rs b/tests/integration/hover.rs
+index 74045e0..a15db6d 100644
+--- a/tests/integration/hover.rs
++++ b/tests/integration/hover.rs
+@@ -16034,3 +16034,56 @@ namespace B {
+         "`Foo` in block B is `B\\Foo`, got: {text}"
+     );
+ }
++
++#[test]
++fn hover_builtin_file_put_contents_preserves_readable_flag_documentation() {
++    let backend = create_test_backend_with_full_stubs();
++    let content = "<?php\nfile_put_contents(\"example.txt\", \"text\", FILE_APPEND);\n";
++    let hover = hover_at(&backend, "file:///hover-flags.php", content, 1, 4)
++        .expect("expected embedded function hover");
++    let text = hover_text(&hover).replace("\\_", "_");
++    for expected in [
++        "Write a string to a file",
++        "Available flags",
++        "FILE_USE_INCLUDE_PATH",
++        "FILE_APPEND",
++        "LOCK_EX",
++        "Acquire an exclusive lock",
++        "int|false",
++    ] {
++        assert!(text.contains(expected), "missing {expected}: {text}");
++    }
++    for tag in ["<table", "</table", "<tr", "</tr", "<td", "</td"] {
++        assert!(!text.contains(tag), "raw HTML table in hover: {text}");
++    }
++}
++
++#[tokio::test]
++async fn hover_param_and_return_html_tables_use_shared_presentation_boundary() {
++    let backend = create_test_backend();
++    let uri = Url::parse("file:///hover_param_return_tables.php").unwrap();
++    let source = "<?php\n/**\n * @param string $value <table><tr><td>Input</td><td><code>A&#124;B</code></td></tr></table>\n * @return string <table><tr><td>Output</td><td>Žofie &amp; 😀</td></tr></table>\n */\nfunction table_docs(string $value): string { return $value; }\ntable_docs('unused');\n";
++    open_php(&backend, &uri, source).await;
++    let text = markup_hover_at(&backend, &uri, 6, 5).await;
++    for wanted in ["Input", "Output", "A&#124;B", "Žofie &amp; 😀"] {
++        assert!(text.contains(wanted), "lost {wanted}: {text}");
++    }
++    assert!(!text.contains("<table"), "raw param/return HTML: {text}");
++}
++
++#[tokio::test]
++async fn hover_param_table_code_keeps_entity_encoded_literal_html() {
++    let backend = create_test_backend();
++    let uri = Url::parse("file:///hover_literal_html_code.php").unwrap();
++    open_php(&backend, &uri, "<?php\n/** @param string $value <table><tr><td><code>&lt;b&gt;literal&lt;/b&gt;</code></td></tr></table> */\nfunction literal_docs(string $value): void {}\nliteral_docs('unused');\n").await;
++    let text = markup_hover_at(&backend, &uri, 3, 5).await;
++    assert!(
++        text.contains("&lt;b&gt;literal&lt;/b&gt;"),
++        "literal code cell corrupted: {text}"
++    );
++    assert!(
++        !text.contains("**literal**"),
++        "decoded HTML transformed code: {text}"
++    );
++    assert!(!text.contains("<table"), "table did not convert: {text}");
++}

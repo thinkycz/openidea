@@ -2229,7 +2229,7 @@
   "Warn when committing in detached HEAD or during rebase": "在分离的 HEAD 中或变基期间提交时发出警告",
   "Warning": "警告",
   "Welcome": "欢迎",
-  "Welcome to OpenIDEA": "欢迎使用 OpenIDEA",
+  "Welcome to OpenStorm": "欢迎使用 OpenStorm",
   "What's New": "新功能",
   "When caret is moved": "移动光标时",
   "When files are created": "创建文件时",
@@ -2589,7 +2589,7 @@
   "Create Git repository": "创建 Git 仓库",
   "Export Settings": "导出设置",
   "Export Settings…": "导出设置…",
-  "OpenIDEA settings": "OpenIDEA 设置",
+  "OpenStorm settings": "OpenStorm 设置",
   "Settings exported": "设置已导出",
   "Cannot export settings": "无法导出设置",
   "Import Settings": "导入设置",
@@ -4488,5 +4488,6 @@
   "Automatic (first available)": "自动（第一个可用的）",
   "Custom combination": "自定义组合",
   "Python language server": "Python 语言服务器",
-  "Only one of these built-in Python analyzers runs at a time.": "这些内置 Python 分析器同一时间只运行一个。"
+  "Only one of these built-in Python analyzers runs at a time.": "这些内置 Python 分析器同一时间只运行一个。",
+  "Save cancelled": "保存已取消"
 }

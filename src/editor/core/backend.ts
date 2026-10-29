@@ -37,7 +37,7 @@ export interface DocBackend {
   openVirtual(uri: string): Promise<DocumentInfo>;
   close(doc: DocId): Promise<void>;
   edit(doc: DocId, baseVersion: number, changes: TextChange[]): Promise<number>;
-  save(doc: DocId): Promise<void>;
+  save(doc: DocId, overwriteRevision?: string | null): Promise<string | null>;
   snapshot(doc: DocId): Promise<DocumentInfo>;
   setLineEnding(doc: DocId, lineEnding: LineEnding): Promise<void>;
   /** "Reload with Encoding" (`reload`) or "Convert to Encoding"; resolves to the new encoding. */
@@ -61,7 +61,7 @@ export const ipcBackend: DocBackend = {
   openVirtual: (uri) => call(commands.docOpenVirtual(uri)),
   close: async (doc) => void (await call(commands.docClose(doc))),
   edit: (doc, baseVersion, changes) => call(commands.docEdit(doc, baseVersion, { changes })),
-  save: async (doc) => void (await call(commands.docSave(doc))),
+  save: (doc, overwriteRevision = null) => call(commands.docSaveChecked(doc, overwriteRevision)),
   snapshot: (doc) => call(commands.docSnapshot(doc)),
   setLineEnding: async (doc, le) => void (await call(commands.docSetLineEnding(doc, le))),
   setEncoding: (doc, encoding, reload) => call(commands.docSetEncoding(doc, encoding, reload)),
@@ -295,12 +295,17 @@ export function createMemoryBackend(files: Record<string, string> = {}): MemoryB
         return d.version;
       });
     },
-    async save(doc) {
+    async save(doc, overwriteRevision = null) {
       const d = get(doc);
+      if (d.text === d.saved) return null;
+      const disk = store.get(d.path);
+      const revision = JSON.stringify([d.path, disk ?? null]);
+      if (disk !== d.saved && overwriteRevision !== revision) return revision;
       const before = d.text !== d.saved;
       d.saved = d.text;
       store.set(d.path, d.text);
       setDirty(d, before);
+      return null;
     },
     async snapshot(doc) {
       return info(get(doc));
@@ -314,7 +319,10 @@ export function createMemoryBackend(files: Record<string, string> = {}): MemoryB
     async outline(doc) {
       // Brace-based outline good enough for the dev shell.
       const d = get(doc);
-      const posAt = ((index) => (_text: string, offset: number) => index(offset))(lineIndex(d.text));
+      const posAt = (
+        (index) => (_text: string, offset: number) =>
+          index(offset)
+      )(lineIndex(d.text));
       const items: OutlineItem[] = [];
       const re = /\b(class|fun|function|fn|interface|object)\s+([A-Za-z_]\w*)/g;
       for (let m = re.exec(d.text); m; m = re.exec(d.text)) {
@@ -342,7 +350,8 @@ export function createMemoryBackend(files: Record<string, string> = {}): MemoryB
         };
         const parent = items.findLast(
           (p) =>
-            (p.range.start.line < start.line || (p.range.start.line === start.line && p.range.start.col <= start.col)) &&
+            (p.range.start.line < start.line ||
+              (p.range.start.line === start.line && p.range.start.col <= start.col)) &&
             (p.range.end.line > start.line || (p.range.end.line === start.line && p.range.end.col >= start.col)),
         );
         if (parent) parent.children.push(item);

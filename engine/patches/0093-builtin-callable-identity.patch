@@ -1,0 +1,1143 @@
+diff --git a/docs/CHANGELOG.md b/docs/CHANGELOG.md
+index 8060f48..89efa10 100644
+--- a/docs/CHANGELOG.md
++++ b/docs/CHANGELOG.md
+@@ -15,6 +15,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
+ 
+ ## [Unreleased]
+ 
++- **Keep built-in navigation consistent.** Call hierarchy and declaration tabs retain the selected PHP version’s signatures and source locations after other files are opened. Embedded declarations remain read-only. Contributed by PHP Workbench downstream.
++
+ - **Follow literal callable strings in call hierarchy.** Direct function and static-method strings retain their runtime target and exact invocation site, including deprecated public trait calls. Ordinary class calls outside a class now preserve the enclosing namespace when a global class has the same short name. Contributed by PHP Workbench downstream.
+ 
+ - **Follow quoted method selectors.** Navigation, references and call hierarchy recognize fixed string method names. Rename includes escaped names while preserving quotes and refuses references whose source changed. Contributed by PHP Workbench downstream.
+diff --git a/examples/php/definition.php b/examples/php/definition.php
+index 0ebd4c6..fc6f6ba 100644
+--- a/examples/php/definition.php
++++ b/examples/php/definition.php
+@@ -468,3 +468,14 @@ function literalStringNavigation(): void
+     ('Demo\LiteralCallableNavigationTarget::ping')();
+     $created = ('Demo\gtdHelper')(...);
+ }
++
++// Try: Show Callees on builtinHierarchyNavigation, then navigate to each
++// embedded declaration. Ordinary and literal calls use the same PHP-target
++// declaration, including when the stub contains older signature variants.
++function builtinHierarchyNavigation(): void
++{
++    \strtolower('A');
++    ('strtolower')('A');
++    \DateTimeImmutable::createFromFormat('!Y', '2026');
++    ('DateTimeImmutable::createFromFormat')('!Y', '2026');
++}
+diff --git a/src/backend/file_access.rs b/src/backend/file_access.rs
+index 02b1768..cfb716a 100644
+--- a/src/backend/file_access.rs
++++ b/src/backend/file_access.rs
+@@ -48,6 +48,11 @@ impl Backend {
+     pub(crate) fn get_file_content(&self, uri: &str) -> Option<String> {
+         let preferred = self.symbols.source_authority.preferred(uri);
+         let uri = preferred.as_deref().unwrap_or(uri);
++        // Match the read-only builtin viewer even when an editor has supplied
++        // unrelated text at the same virtual identity.
++        if Self::is_builtin_declaration_uri(uri) {
++            return self.builtin_declaration_source(uri).map(str::to_owned);
++        }
+         if let Some(content) = self.open_files.read().get(uri) {
+             return Some(String::clone(content));
+         }
+@@ -124,6 +129,13 @@ impl Backend {
+     pub(crate) fn get_file_content_arc(&self, uri: &str) -> Option<Arc<String>> {
+         let preferred = self.symbols.source_authority.preferred(uri);
+         let uri = preferred.as_deref().unwrap_or(uri);
++        // Match the read-only builtin viewer even when an editor has supplied
++        // unrelated text at the same virtual identity.
++        if Self::is_builtin_declaration_uri(uri) {
++            return self
++                .builtin_declaration_source(uri)
++                .map(|source| Arc::new(source.to_owned()));
++        }
+         if let Some(content) = self.open_files.read().get(uri) {
+             return Some(Arc::clone(content));
+         }
+diff --git a/src/call_hierarchy.rs b/src/call_hierarchy.rs
+index 960b0da..1a52ad3 100644
+--- a/src/call_hierarchy.rs
++++ b/src/call_hierarchy.rs
+@@ -841,9 +841,18 @@ impl Backend {
+             let Some((declaring_uri, function)) = functions.get(fqn) else {
+                 continue;
+             };
+-            if declaring_uri == uri {
++            let target_uri = self.function_navigation_uri(fqn, declaring_uri.clone());
++            // Co-declared builtins can retain another canonical source owner's
++            // index entry. The exact-source navigation receipt admits only their
++            // immutable canonical viewer, never a same-named ordinary file.
++            if declaring_uri == uri || target_uri == uri {
+                 consider(function_callable_at(
+-                    uri, content, symbol_map, fqn, function, offset,
++                    &target_uri,
++                    content,
++                    symbol_map,
++                    fqn,
++                    function,
++                    offset,
+                 ));
+             }
+         }
+@@ -1146,8 +1155,9 @@ impl Backend {
+                 (fqn.to_owned(), uri.clone(), function.clone())
+             };
+             let (content, map, _) = self.cached_file(cache, &owner_uri)?;
++            let target_uri = self.function_navigation_uri(&fqn, owner_uri);
+             return function_callable_at(
+-                &owner_uri,
++                &target_uri,
+                 &content,
+                 &map,
+                 &fqn,
+diff --git a/src/definition/member/file_lookup.rs b/src/definition/member/file_lookup.rs
+index 02a637a..ad2cffe 100644
+--- a/src/definition/member/file_lookup.rs
++++ b/src/definition/member/file_lookup.rs
+@@ -203,14 +203,31 @@ impl Backend {
+         uri
+     }
+ 
++    /// Canonical viewer identity for a function co-declared in an embedded file.
++    /// Remapping is permitted only when both catalogs name the exact same bytes.
++    pub(crate) fn function_navigation_uri(&self, fqn: &str, uri: String) -> String {
++        if let Some(source) = self.published_builtin_source(&uri) {
++            let functions = self.stub_function_index.read();
++            if let Some((canonical, function_source)) = functions.get_key_value(fqn)
++                && *function_source == source
++            {
++                return format!("phpantom-stub-fn://{canonical}");
++            }
++        }
++        uri
++    }
++
+     /// Return source only when the selected AST was published from these exact
+-    /// embedded bytes. A client update at the same URI clears this provenance.
++    /// embedded catalog bytes; a virtual URI prefix alone grants no authority.
+     pub(in crate::definition) fn published_builtin_source(
+         &self,
+         uri: &str,
+     ) -> Option<&'static str> {
+-        let constant = uri.strip_prefix("phpantom-stub://const/")?;
+-        let source = self.stub_constant_index.read().get(constant).copied()?;
++        let source = if let Some(constant) = uri.strip_prefix("phpantom-stub://const/") {
++            self.stub_constant_index.read().get(constant).copied()?
++        } else {
++            self.builtin_declaration_source(uri)?
++        };
+         let published = self.symbol_maps.read().get(uri)?.embedded_source?;
+         (published == source).then_some(source)
+     }
+diff --git a/src/parser/ast_update.rs b/src/parser/ast_update.rs
+index 9d155c3..467c77f 100644
+--- a/src/parser/ast_update.rs
++++ b/src/parser/ast_update.rs
+@@ -474,6 +474,18 @@ impl Backend {
+     /// changed (or a class was added/removed), meaning other open files
+     /// that reference those classes may have stale diagnostics.
+     pub fn update_ast(&self, uri: &str, content: &str) -> bool {
++        if Self::is_builtin_declaration_uri(uri) {
++            let Some(source) = self.builtin_declaration_source(uri) else {
++                return false;
++            };
++            // Lazy feature paths and editor paths must publish the same active-
++            // target declaration variants at this immutable builtin identity.
++            // A forged editor document cannot replace the trusted catalog AST.
++            if content != source {
++                return false;
++            }
++            return self.update_builtin_stub_ast(uri, source);
++        }
+         self.update_ast_with_authority(uri, content, None)
+     }
+ 
+@@ -1651,7 +1663,10 @@ impl Backend {
+                     // (`Brotli\compress`) can be a real implementation, so
+                     // there it still takes a `function_exists` guard to
+                     // stand down.
+-                    if (func_info.is_polyfill || !fqn.contains('\\'))
++                    // A trusted embedded AST is the native declaration itself,
++                    // not a user signature stub/polyfill competing with it.
++                    if update.symbol_map.embedded_source.is_none()
++                        && (func_info.is_polyfill || !fqn.contains('\\'))
+                         && self.stub_function_index.read().contains_key(fqn.as_str())
+                     {
+                         continue;
+diff --git a/src/parser/mod.rs b/src/parser/mod.rs
+index 98e66e8..c11925f 100644
+--- a/src/parser/mod.rs
++++ b/src/parser/mod.rs
+@@ -1690,23 +1690,6 @@ impl Backend {
+         &self,
+         content: &str,
+         php_version: Option<PhpVersion>,
+-    ) -> Vec<FunctionInfo> {
+-        self.parse_functions_with_authority(content, php_version, false)
+-    }
+-
+-    pub(crate) fn parse_builtin_functions(
+-        &self,
+-        content: &str,
+-        version: PhpVersion,
+-    ) -> Vec<FunctionInfo> {
+-        self.parse_functions_with_authority(content, Some(version), true)
+-    }
+-
+-    fn parse_functions_with_authority(
+-        &self,
+-        content: &str,
+-        php_version: Option<PhpVersion>,
+-        stub_introductions: bool,
+     ) -> Vec<FunctionInfo> {
+         with_parsed_program(content, "parse_functions", |program, content| {
+             let mut use_map = HashMap::new();
+@@ -1717,7 +1700,7 @@ impl Backend {
+                 trivias: program.trivia.as_slice(),
+                 content,
+                 php_version,
+-                stub_introductions,
++                stub_introductions: false,
+                 explicit_version_filtering: php_version.is_some(),
+                 defer_inferred_name_resolution: false,
+                 use_map,
+diff --git a/src/resolution.rs b/src/resolution.rs
+index 48084b4..41465cf 100644
+--- a/src/resolution.rs
++++ b/src/resolution.rs
+@@ -587,13 +587,14 @@ impl Backend {
+         } else {
+             // Global-namespace lookup — match by short name only.
+             stub_idx.get_key_value(last_segment)
+-        };
+-        if let Some((canonical_name, &stub_content)) = stub_lookup {
++        }
++        .map(|(name, &source)| (name.to_owned(), source));
++        drop(stub_idx);
++        if let Some((canonical_name, stub_content)) = stub_lookup {
+             // Key the stub URI by the stub index's spelling so that
+             // differently-cased lookups share one cache entry.
+             let stub_uri = format!("phpantom-stub://{}", canonical_name);
+-            let ver = Some(self.php_version());
+-            if let Some(classes) = self.parse_and_cache_stub(stub_content, &stub_uri, ver)
++            if let Some(classes) = self.parse_and_cache_stub(stub_content, &stub_uri)
+                 && let Some(cls) = classes
+                     .iter()
+                     .find(|c| c.name.eq_ignore_ascii_case(last_segment))
+@@ -652,12 +653,13 @@ impl Backend {
+         } else {
+             // Global-namespace lookup (e.g. "PDO").
+             stub_idx.get_key_value(last_segment)
+-        };
++        }
++        .map(|(name, &source)| (name.to_owned(), source));
++        drop(stub_idx);
+ 
+-        if let Some((canonical_name, &content)) = stub_lookup {
++        if let Some((canonical_name, content)) = stub_lookup {
+             let stub_uri = format!("phpantom-stub://{}", canonical_name);
+-            let ver = Some(self.php_version());
+-            if let Some(classes) = self.parse_and_cache_stub(content, &stub_uri, ver)
++            if let Some(classes) = self.parse_and_cache_stub(content, &stub_uri)
+                 && let Some(cls) = classes
+                     .iter()
+                     .find(|c| c.name.eq_ignore_ascii_case(last_segment))
+@@ -749,7 +751,6 @@ impl Backend {
+         &self,
+         content: &'static str,
+         uri: &str,
+-        php_version: Option<PhpVersion>,
+     ) -> Option<Vec<Arc<ClassInfo>>> {
+         if !self.parse_inflight.try_claim(uri) {
+             return self.wait_for_cached_result(uri);
+@@ -758,7 +759,10 @@ impl Backend {
+             inflight: &self.parse_inflight,
+             uri: uri.to_owned(),
+         };
+-        self.parse_and_cache_content_versioned(content, uri, php_version)
++        // Builtin types and their source map share one trusted publication.
++        // A later semantic feature must not reparse all availability variants.
++        self.update_builtin_stub_ast(uri, content);
++        self.shared_classes_for_uri(uri)
+     }
+ 
+     /// Block until another thread finishes parsing a file, then return
+@@ -1247,69 +1251,26 @@ impl Backend {
+         // ones like "Brotli\\compress") to the raw PHP source of the file
+         // that defines them.  We parse the entire file, cache all discovered
+         // functions in global_functions, and return the one we need.
+-        let stub_fn_idx = self.stub_function_index.read();
+         for &name in candidates {
+-            if let Some(&stub_content) = stub_fn_idx.get(name) {
+-                let ver = Some(self.php_version());
+-                let mut functions = self.parse_builtin_functions(stub_content, self.php_version());
+-
+-                if functions.is_empty() {
+-                    continue;
+-                }
+-
+-                // Apply stub patches for phpstorm-stubs deficiencies
+-                // (e.g. array_reduce returning `mixed` instead of a
+-                // template-based type).  See `stub_patches`.
+-                for func in &mut functions {
+-                    crate::stub_patches::apply_function_stub_patches(func);
+-                }
+-
+-                let stub_uri = format!("phpantom-stub-fn://{}", name);
+-                let mut result: Option<FunctionInfo> = None;
+-
+-                {
+-                    let mut fmap = self.symbols.global_functions.write();
+-                    for func in &functions {
+-                        let fqn = if let Some(ref ns) = func.namespace {
+-                            format!("{}\\{}", ns, func.name)
+-                        } else {
+-                            func.name.to_string()
+-                        };
+-
+-                        if result.is_none()
+-                            && (fqn.eq_ignore_ascii_case(name)
+-                                || func.name.eq_ignore_ascii_case(name))
+-                        {
+-                            result = Some(func.clone());
+-                        }
+-
+-                        // Cache the FQN so future lookups hit Phase 1.
+-                        // No short-name fallback: `resolve_function_name`
+-                        // already builds namespace-qualified candidates.
+-                        fmap.or_insert_with(fqn, || (stub_uri.clone(), func.clone()));
+-                    }
+-                }
+-
+-                // Also cache any classes defined in the same stub file so
+-                // that class lookups for types referenced by the function
+-                // (e.g. return types) can find them later.
+-                let mut classes = Self::parse_php_versioned(stub_content, ver);
+-                if !classes.is_empty() {
+-                    let empty_use_map = HashMap::new();
+-                    let stub_namespace = self.parse_namespace(stub_content);
+-                    Self::resolve_parent_class_names(&mut classes, &empty_use_map, &stub_namespace);
+-                    let class_uri = format!("phpantom-stub-fn://{}", name);
+-                    let arc_classes: Vec<Arc<ClassInfo>> =
+-                        classes.into_iter().map(Arc::new).collect();
+-                    self.symbols
+-                        .uri_classes_index
+-                        .write()
+-                        .insert(class_uri, arc_classes);
+-                }
+-
+-                if result.is_some() {
+-                    return result;
+-                }
++            let stub = self
++                .stub_function_index
++                .read()
++                .get_key_value(name)
++                .map(|(canonical, &source)| (canonical.to_owned(), source));
++            let Some((canonical, source)) = stub else {
++                continue;
++            };
++            let uri = format!("phpantom-stub-fn://{canonical}");
++            // Publish source maps, functions and co-declared classes from one
++            // target-filtered AST, retaining ordinary declaration winner policy.
++            if !self
++                .symbol_map_for(&uri)
++                .is_some_and(|map| map.embedded_source == Some(source))
++            {
++                self.update_builtin_stub_ast(&uri, source);
++            }
++            if let Some((_, info)) = self.symbols.global_functions.read().get(name) {
++                return Some(info.clone());
+             }
+         }
+ 
+diff --git a/src/workbench_builtins.rs b/src/workbench_builtins.rs
+index bc0f8c5..2611f8d 100644
+--- a/src/workbench_builtins.rs
++++ b/src/workbench_builtins.rs
+@@ -20,6 +20,25 @@ pub struct BuiltinDocument {
+ }
+ 
+ impl Backend {
++    /// Class/function builtin documents are read-only even when unavailable.
++    /// Constant identities retain their separate existing publication contract.
++    pub(crate) fn is_builtin_declaration_uri(uri: &str) -> bool {
++        uri.starts_with("phpantom-stub-fn://")
++            || (uri.starts_with("phpantom-stub://") && !uri.starts_with("phpantom-stub://const/"))
++    }
++
++    /// Source authority comes from the active embedded catalog, not a URI prefix
++    /// or an editor overlay. Qualified viewer URIs are unwrapped by the router.
++    pub(crate) fn builtin_declaration_source(&self, uri: &str) -> Option<&'static str> {
++        if let Some(encoded) = uri.strip_prefix("phpantom-stub-fn://") {
++            let name = decode_name(encoded)?;
++            return self.stub_function_index.read().get(name.as_str()).copied();
++        }
++        let encoded = uri.strip_prefix("phpantom-stub://")?;
++        let name = decode_name(encoded)?;
++        self.stub_index.read().get(name.as_str()).copied()
++    }
++
+     /// Read embedded standard-library source without reading project files.
+     pub async fn workbench_builtin(&self, query: BuiltinQuery) -> Result<BuiltinDocument> {
+         let (is_function, encoded) = if let Some(name) = query.uri.strip_prefix("phpantom-stub://")
+diff --git a/tests/integration/call_hierarchy.rs b/tests/integration/call_hierarchy.rs
+index 8755b04..ddef1fa 100644
+--- a/tests/integration/call_hierarchy.rs
++++ b/tests/integration/call_hierarchy.rs
+@@ -5073,3 +5073,717 @@ async fn literal_callable_direct_public_trait_static_is_known_despite_deprecatio
+         "outside nonpublic trait calls cannot execute"
+     );
+ }
++
++const BUILTIN_IDENTITY_LITERAL: &str = concat!(
++    "<?php\r\nfunction literalIdentityHost(): void {\r\n",
++    " /* café 🐘 */ ('strtolower')('A');\r\n",
++    " /* café 🐘 */ ('DateTimeImmutable::createFromFormat')('!Y', '2026');\r\n",
++    "}\r\nfunction builtinIdentityCreation(): void { $a=('strtolower')(...); $b=('DateTimeImmutable::createFromFormat')(...); }\r\n",
++);
++const BUILTIN_IDENTITY_DIRECT: &str = "<?php\r\nfunction ordinaryIdentityHost(): void { /* café 🐘 */ strtolower('A'); DateTimeImmutable::createFromFormat('!Y', '2026'); }\r\n";
++
++struct BuiltinIdentityOracle {
++    uri: Url,
++    content: String,
++    name: &'static str,
++    start: usize,
++    selection: Range,
++    declaration: Range,
++}
++fn builtin_identity_point(source: &str, offset: usize) -> Position {
++    let prefix = &source[..offset];
++    Position::new(
++        prefix.bytes().filter(|byte| *byte == b'\n').count() as u32,
++        prefix.rsplit('\n').next().unwrap().encode_utf16().count() as u32,
++    )
++}
++fn builtin_identity_range(source: &str, context: &str, token: &str) -> Range {
++    let offset = source.find(context).expect("exact source context")
++        + context.rfind(token).expect("source token");
++    Range::new(
++        builtin_identity_point(source, offset),
++        builtin_identity_point(source, offset + token.len()),
++    )
++}
++fn builtin_identity_oracle(uri: Url, content: String, method: bool) -> BuiltinIdentityOracle {
++    let (name, start) = if method {
++        let class_header = "\nclass DateTimeImmutable implements DateTimeInterface\n";
++        let class = content
++            .find(class_header)
++            .expect("exact top-level DateTimeImmutable source header")
++            + 1;
++        let next_header = "\nclass DateTime implements DateTimeInterface\n";
++        let class_end = class
++            + content[class..]
++                .find(next_header)
++                .expect("independent next top-level DateTime boundary");
++        assert!(
++            content[class..class_end]
++                .starts_with("class DateTimeImmutable implements DateTimeInterface\n{")
++        );
++        assert!(content[class_end..].starts_with(next_header));
++        let marker = "#[PhpStormStubsElementAvailable(from: '8.0')]";
++        let supported = content[class..class_end]
++            .match_indices(marker)
++            .filter_map(|(offset, _)| {
++                let after = class + offset + marker.len();
++                content[after..class_end]
++                    .trim_start()
++                    .starts_with("public static function createFromFormat(")
++                    .then_some(after)
++            })
++            .collect::<Vec<_>>();
++        assert_eq!(
++            supported.len(),
++            1,
++            "PHP8.3 selects the 8.0+ overload, never the earlier 5.5..7.4 duplicate"
++        );
++        let after = supported[0];
++        let offset = after
++            + content[after..].find("function createFromFormat(").unwrap()
++            + "function ".len();
++        ("createFromFormat", offset)
++    } else {
++        let declarations = content
++            .match_indices("function strtolower(")
++            .collect::<Vec<_>>();
++        assert_eq!(
++            declarations.len(),
++            1,
++            "independent immutable function source witness"
++        );
++        ("strtolower", declarations[0].0 + "function ".len())
++    };
++    assert_eq!(&content[start..start + name.len()], name);
++    let body = start
++        + content[start..]
++            .find('{')
++            .expect("concrete bundled stub body");
++    let end = body + content[body..].find('}').unwrap() + 1;
++    assert!(
++        content[body + 1..end - 1].trim().is_empty(),
++        "these exact bundled stub declarations have empty bodies"
++    );
++    let selection = Range::new(
++        builtin_identity_point(&content, start),
++        builtin_identity_point(&content, start + name.len()),
++    );
++    let declaration = Range::new(selection.start, builtin_identity_point(&content, end));
++    BuiltinIdentityOracle {
++        uri,
++        content,
++        name,
++        start,
++        selection,
++        declaration,
++    }
++}
++fn builtin_identity_assert(
++    item: &CallHierarchyItem,
++    oracle: &BuiltinIdentityOracle,
++    qualified: bool,
++) {
++    let mut uri = item.uri.clone();
++    if qualified {
++        assert!(uri.query().unwrap().starts_with("project_context="));
++        uri.set_query(None);
++    }
++    assert_eq!(
++        uri, oracle.uri,
++        "actual declaration URI, not a same-named sibling"
++    );
++    assert_eq!(item.name, oracle.name);
++    assert_eq!(
++        item.selection_range, oracle.selection,
++        "coordinates must select the target-supported declaration in immutable raw bytes"
++    );
++    assert_eq!(
++        item.range, oracle.declaration,
++        "full declaration range belongs to the same raw source"
++    );
++    let data = item.data.as_ref().unwrap();
++    let payload = if qualified { &data["payload"] } else { data };
++    assert_eq!(
++        payload["offset"].as_u64(),
++        Some(oracle.start as u64),
++        "receipt offset must match immutable target source"
++    );
++}
++fn builtin_identity_expected(literal: bool, method: bool) -> Range {
++    if literal {
++        if method {
++            builtin_identity_range(
++                BUILTIN_IDENTITY_LITERAL,
++                "('DateTimeImmutable::createFromFormat')('!Y', '2026')",
++                "('!Y', '2026')",
++            )
++        } else {
++            builtin_identity_range(BUILTIN_IDENTITY_LITERAL, "('strtolower')('A')", "('A')")
++        }
++    } else if method {
++        builtin_identity_range(
++            BUILTIN_IDENTITY_DIRECT,
++            "DateTimeImmutable::createFromFormat('!Y', '2026')",
++            "createFromFormat",
++        )
++    } else {
++        builtin_identity_range(BUILTIN_IDENTITY_DIRECT, "strtolower('A')", "strtolower")
++    }
++}
++
++#[tokio::test]
++async fn builtin_literal_and_ordinary_calls_keep_target_supported_immutable_origins_cold_then_warm()
++{
++    use phpantom_lsp::{types::PhpVersion, workbench_builtins::BuiltinQuery};
++    let backend = crate::common::create_test_backend_with_full_stubs();
++    backend.set_php_version(PhpVersion::new(8, 3));
++    assert_eq!(backend.php_version(), PhpVersion::new(8, 3));
++    // Getter only reads the immutable catalog; no AST prepare/ordinary lookup
++    // warms the source before the required first literal hierarchy query.
++    let function_uri = Url::parse("phpantom-stub-fn://strtolower").unwrap();
++    let class_uri = Url::parse("phpantom-stub://DateTimeImmutable").unwrap();
++    let function_doc = backend
++        .workbench_builtin(BuiltinQuery {
++            uri: function_uri.to_string(),
++        })
++        .await
++        .unwrap();
++    let class_doc = backend
++        .workbench_builtin(BuiltinQuery {
++            uri: class_uri.to_string(),
++        })
++        .await
++        .unwrap();
++    let oracles = [
++        builtin_identity_oracle(function_uri, function_doc.content, false),
++        builtin_identity_oracle(class_uri, class_doc.content, true),
++    ];
++    let literal_uri = Url::parse("file:///builtin-identity-literal.php").unwrap();
++    let direct_uri = Url::parse("file:///builtin-identity-direct.php").unwrap();
++    open_php(&backend, &literal_uri, BUILTIN_IDENTITY_LITERAL).await;
++    let literal = anonymous_hierarchy_prepare(
++        &backend,
++        &literal_uri,
++        BUILTIN_IDENTITY_LITERAL,
++        "literalIdentityHost",
++    )
++    .await;
++    let cold = outgoing(&backend, &literal).await;
++    assert_eq!(
++        cold.len(),
++        2,
++        "first literal query has both supported builtin targets"
++    );
++    for oracle in &oracles {
++        builtin_identity_assert(
++            &cold
++                .iter()
++                .find(|edge| edge.to.name == oracle.name)
++                .unwrap()
++                .to,
++            oracle,
++            false,
++        );
++    }
++    open_php(&backend, &direct_uri, BUILTIN_IDENTITY_DIRECT).await;
++    let direct = anonymous_hierarchy_prepare(
++        &backend,
++        &direct_uri,
++        BUILTIN_IDENTITY_DIRECT,
++        "ordinaryIdentityHost",
++    )
++    .await;
++    let ordinary = outgoing(&backend, &direct).await;
++    let warm = outgoing(&backend, &literal).await;
++    // Assert every stage against raw target source, not merely equality of
++    // two answers that could share the same wrong duplicate declaration.
++    for (label, edges, is_literal) in [
++        ("cold", &cold, true),
++        ("ordinary", &ordinary, false),
++        ("warm", &warm, true),
++    ] {
++        assert_eq!(
++            edges.len(),
++            2,
++            "both builtin targets remain present at {label}: {edges:?}"
++        );
++        for (index, oracle) in oracles.iter().enumerate() {
++            let found = edges
++                .iter()
++                .filter(|edge| edge.to.name == oracle.name)
++                .collect::<Vec<_>>();
++            assert_eq!(found.len(), 1);
++            builtin_identity_assert(&found[0].to, oracle, false);
++            assert_eq!(
++                found[0].from_ranges,
++                [builtin_identity_expected(is_literal, index == 1)]
++            );
++        }
++    }
++    assert_eq!(
++        cold, warm,
++        "query history cannot mutate declaration identity"
++    );
++    // Reciprocal scans are deliberately after the cold→ordinary→warm sequence.
++    for (index, oracle) in oracles.iter().enumerate() {
++        let target = &cold
++            .iter()
++            .find(|edge| edge.to.name == oracle.name)
++            .unwrap()
++            .to;
++        let callers = incoming(&backend, target).await;
++        assert_eq!(callers.len(), 2);
++        for (owner, expected) in [
++            (&literal, builtin_identity_expected(true, index == 1)),
++            (&direct, builtin_identity_expected(false, index == 1)),
++        ] {
++            assert_eq!(
++                callers
++                    .iter()
++                    .filter(|call| call.from.uri == owner.uri
++                        && call.from.selection_range == owner.selection_range
++                        && call.from_ranges == [expected])
++                    .count(),
++                1
++            );
++        }
++        let still = backend
++            .workbench_builtin(BuiltinQuery {
++                uri: oracle.uri.to_string(),
++            })
++            .await
++            .unwrap();
++        assert_eq!(still.content, oracle.content);
++    }
++    let creation = anonymous_hierarchy_prepare(
++        &backend,
++        &literal_uri,
++        BUILTIN_IDENTITY_LITERAL,
++        "builtinIdentityCreation",
++    )
++    .await;
++    assert!(outgoing(&backend, &creation).await.is_empty());
++}
++
++fn builtin_identity_function_oracle(name: &'static str, content: String) -> BuiltinIdentityOracle {
++    let needle = format!("function {name}(");
++    let matches = content.match_indices(&needle).collect::<Vec<_>>();
++    assert_eq!(
++        matches.len(),
++        1,
++        "finite real bundled function declaration witness: {name}"
++    );
++    let start = matches[0].0 + "function ".len();
++    let body = start + content[start..].find('{').unwrap();
++    let end = body + content[body..].find('}').unwrap() + 1;
++    assert!(content[body + 1..end - 1].trim().is_empty());
++    let selection = Range::new(
++        builtin_identity_point(&content, start),
++        builtin_identity_point(&content, start + name.len()),
++    );
++    let declaration = Range::new(selection.start, builtin_identity_point(&content, end));
++    BuiltinIdentityOracle {
++        uri: Url::parse(&format!("phpantom-stub-fn://{name}")).unwrap(),
++        content,
++        name,
++        start,
++        selection,
++        declaration,
++    }
++}
++
++#[tokio::test]
++async fn builtin_function_sibling_first_publication_keeps_later_canonical_prepare_and_incoming() {
++    use phpantom_lsp::{types::PhpVersion, workbench_builtins::BuiltinQuery};
++    let backend = crate::common::create_test_backend_with_full_stubs();
++    backend.set_php_version(PhpVersion::new(8, 3));
++    let earlier_uri = Url::parse("phpantom-stub-fn://addslashes").unwrap();
++    let canonical_uri = Url::parse("phpantom-stub-fn://strtolower").unwrap();
++    let earlier_doc = backend
++        .workbench_builtin(BuiltinQuery {
++            uri: earlier_uri.to_string(),
++        })
++        .await
++        .unwrap();
++    let later_doc = backend
++        .workbench_builtin(BuiltinQuery {
++            uri: canonical_uri.to_string(),
++        })
++        .await
++        .unwrap();
++    assert_eq!(
++        earlier_doc.content, later_doc.content,
++        "actual two-function shared raw catalog source; getter does not parse/warm"
++    );
++    let earlier = builtin_identity_function_oracle("addslashes", earlier_doc.content);
++    let later = builtin_identity_function_oracle("strtolower", later_doc.content);
++    let first_uri = Url::parse("file:///builtin-sibling-first.php").unwrap();
++    let first_source = "<?php\r\nfunction firstBuiltinSibling(): void { addslashes('a'); }\r\n";
++    open_php(&backend, &first_uri, first_source).await;
++    let first =
++        anonymous_hierarchy_prepare(&backend, &first_uri, first_source, "firstBuiltinSibling")
++            .await;
++    let first_edges = outgoing(&backend, &first).await;
++    assert_eq!(first_edges.len(), 1);
++    builtin_identity_assert(&first_edges[0].to, &earlier, false);
++    let later_uri = Url::parse("file:///builtin-sibling-later.php").unwrap();
++    let later_source = "<?php\r\nfunction laterBuiltinSibling(): void { /* café 🐘 */ strtolower('B'); ('strtolower')('C'); }\r\n";
++    open_php(&backend, &later_uri, later_source).await;
++    let host =
++        anonymous_hierarchy_prepare(&backend, &later_uri, later_source, "laterBuiltinSibling")
++            .await;
++    let edges = outgoing(&backend, &host).await;
++    assert_eq!(
++        edges.len(),
++        1,
++        "earlier sibling cannot own/hide the later canonical function"
++    );
++    builtin_identity_assert(&edges[0].to, &later, false);
++    let prepared = prepare_at(
++        &backend,
++        &canonical_uri,
++        later.selection.start.line,
++        later.selection.start.character,
++    )
++    .await;
++    assert_eq!(
++        prepared.len(),
++        1,
++        "top-level canonical source prepare cannot skip a declaration indexed under alphabetic sibling URI"
++    );
++    builtin_identity_assert(&prepared[0], &later, false);
++    let calls = incoming(&backend, &prepared[0]).await;
++    assert_eq!(calls.len(), 1);
++    assert_eq!(calls[0].from.uri, later_uri);
++    assert_eq!(calls[0].from.selection_range, host.selection_range);
++    let mut actual = calls[0].from_ranges.clone();
++    actual.sort_by_key(|range| (range.start.line, range.start.character));
++    assert_eq!(
++        actual,
++        [
++            builtin_identity_range(later_source, "strtolower('B')", "strtolower"),
++            builtin_identity_range(later_source, "('strtolower')('C')", "('C')")
++        ]
++    );
++    assert_eq!(
++        backend
++            .workbench_builtin(BuiltinQuery {
++                uri: canonical_uri.to_string()
++            })
++            .await
++            .unwrap()
++            .content,
++        later.content
++    );
++}
++
++#[tokio::test]
++async fn builtin_forced_virtual_text_cannot_grant_unavailable_version_or_extension_authority_and_project_polyfill_still_works()
++ {
++    use phpantom_lsp::{types::PhpVersion, workbench_builtins::BuiltinQuery};
++    // Fresh backends per applied profile, not a mutation-based restoration claim.
++    for (minor, extensions, array_available, curl_available) in [
++        (3, Vec::<String>::new(), false, false),
++        (4, vec!["curl".to_owned()], true, true),
++    ] {
++        let backend = crate::common::create_test_backend_with_full_stubs();
++        let mut config = phpantom_lsp::config::Config::default();
++        config.php.extensions = Some(extensions);
++        backend.set_config(config);
++        backend.set_php_version(PhpVersion::new(8, minor));
++        let array_uri = Url::parse("phpantom-stub-fn://array_find").unwrap();
++        let curl_uri = Url::parse("phpantom-stub-fn://curl_version").unwrap();
++        let array_doc = backend
++            .workbench_builtin(BuiltinQuery {
++                uri: array_uri.to_string(),
++            })
++            .await;
++        let curl_doc = backend
++            .workbench_builtin(BuiltinQuery {
++                uri: curl_uri.to_string(),
++            })
++            .await;
++        assert_eq!(array_doc.is_ok(), array_available);
++        assert_eq!(curl_doc.is_ok(), curl_available);
++        let user_uri = Url::parse(&format!("file:///builtin-profile-8{minor}.php")).unwrap();
++        let source = "<?php\r\nfunction builtinProfileHost(): void { ('array_find')([], static fn($value) => true); ('curl_version')(); ('WorkbenchUnknownBuiltin')(); }\r\n";
++        open_php(&backend, &user_uri, source).await;
++        let host =
++            anonymous_hierarchy_prepare(&backend, &user_uri, source, "builtinProfileHost").await;
++        let before = outgoing(&backend, &host).await;
++        assert_eq!(
++            before.iter().any(|edge| edge.to.name == "array_find"),
++            array_available
++        );
++        assert_eq!(
++            before.iter().any(|edge| edge.to.name == "curl_version"),
++            curl_available
++        );
++        assert!(
++            !before
++                .iter()
++                .any(|edge| edge.to.name == "WorkbenchUnknownBuiltin")
++        );
++        for (name, uri) in [
++            ("array_find", array_uri.clone()),
++            ("curl_version", curl_uri.clone()),
++            (
++                "WorkbenchUnknownBuiltin",
++                Url::parse("phpantom-stub-fn://WorkbenchUnknownBuiltin").unwrap(),
++            ),
++        ] {
++            let forged = format!(
++                "<?php\r\n/* client-forged source café 🐘 */ function {name}(...$args) {{}}\r\n"
++            );
++            open_php(&backend, &uri, &forged).await;
++        }
++        let after = outgoing(&backend, &host).await;
++        assert_eq!(
++            backend
++                .workbench_builtin(BuiltinQuery {
++                    uri: array_uri.to_string()
++                })
++                .await
++                .is_ok(),
++            array_available
++        );
++        assert_eq!(
++            backend
++                .workbench_builtin(BuiltinQuery {
++                    uri: curl_uri.to_string()
++                })
++                .await
++                .is_ok(),
++            curl_available
++        );
++        assert!(
++            backend
++                .workbench_builtin(BuiltinQuery {
++                    uri: "phpantom-stub-fn://WorkbenchUnknownBuiltin".into()
++                })
++                .await
++                .is_err()
++        );
++        assert_eq!(
++            after.iter().any(|edge| edge.to.name == "array_find"),
++            array_available,
++            "virtual didOpen cannot restore an unavailable PHP function"
++        );
++        assert_eq!(
++            after.iter().any(|edge| edge.to.name == "curl_version"),
++            curl_available,
++            "virtual didOpen cannot grant a disabled extension"
++        );
++        assert!(
++            !after
++                .iter()
++                .any(|edge| edge.to.name == "WorkbenchUnknownBuiltin"),
++            "unknown virtual URI is not a source authority"
++        );
++        for edge in &after {
++            let doc = if edge.to.name == "array_find" {
++                array_doc.as_ref().unwrap()
++            } else {
++                curl_doc.as_ref().unwrap()
++            };
++            let oracle = builtin_identity_function_oracle(
++                if edge.to.name == "array_find" {
++                    "array_find"
++                } else {
++                    "curl_version"
++                },
++                doc.content.clone(),
++            );
++            builtin_identity_assert(&edge.to, &oracle, false);
++        }
++        if !array_available {
++            let project_uri = Url::parse("file:///valid-php83-array-find-polyfill.php").unwrap();
++            let project = "<?php\r\nfunction array_find(array $values, callable $predicate): mixed { return null; }\r\n";
++            open_php(&backend, &project_uri, project).await;
++            let recovered = outgoing(&backend, &host).await;
++            let matches = recovered
++                .iter()
++                .filter(|edge| edge.to.name == "array_find")
++                .collect::<Vec<_>>();
++            assert_eq!(matches.len(), 1);
++            assert_eq!(
++                matches[0].to.uri, project_uri,
++                "legitimate project polyfill uses project authority, not unavailable builtin authority"
++            );
++            assert_eq!(
++                matches[0].to.selection_range,
++                builtin_identity_range(project, "function array_find(", "array_find")
++            );
++        }
++    }
++}
++
++#[tokio::test]
++async fn builtin_class_client_text_does_not_replace_target_supported_immutable_declaration() {
++    use phpantom_lsp::{types::PhpVersion, workbench_builtins::BuiltinQuery};
++    let backend = crate::common::create_test_backend_with_full_stubs();
++    backend.set_php_version(PhpVersion::new(8, 3));
++    let uri = Url::parse("phpantom-stub://DateTimeImmutable").unwrap();
++    let document = backend
++        .workbench_builtin(BuiltinQuery {
++            uri: uri.to_string(),
++        })
++        .await
++        .unwrap();
++    let expected = builtin_identity_oracle(uri.clone(), document.content, true);
++    let source_uri = Url::parse("file:///builtin-class-forced-source.php").unwrap();
++    let source = "<?php\r\nfunction builtinClassSourceHost(): void { /* café 🐘 */ ('DateTimeImmutable::createFromFormat')('!Y','2026'); }\r\n";
++    open_php(&backend, &source_uri, source).await;
++    let host =
++        anonymous_hierarchy_prepare(&backend, &source_uri, source, "builtinClassSourceHost").await;
++    let first = outgoing(&backend, &host).await;
++    assert_eq!(first.len(), 1);
++    builtin_identity_assert(&first[0].to, &expected, false);
++    let forged = "<?php\r\nclass DateTimeImmutable { public static function createFromFormat(...$args) {} }\r\n";
++    open_php(&backend, &uri, forged).await;
++    let getter = backend
++        .workbench_builtin(BuiltinQuery {
++            uri: uri.to_string(),
++        })
++        .await
++        .unwrap();
++    assert_eq!(
++        getter.content, expected.content,
++        "read-only builtin viewer never consumes client replacement bytes"
++    );
++    let after = outgoing(&backend, &host).await;
++    assert_eq!(
++        after.len(),
++        1,
++        "immutable builtin stays available after forbidden replacement input"
++    );
++    builtin_identity_assert(&after[0].to, &expected, false);
++    assert_eq!(
++        first, after,
++        "no forged or older overload coordinates are admitted"
++    );
++}
++
++#[tokio::test]
++async fn builtin_callable_qualified_context_keeps_immutable_target_coordinates_and_reciprocal_owner()
++ {
++    use phpantom_lsp::{ProjectRouter, workbench_builtins::BuiltinQuery};
++    let temp = tempfile::tempdir().unwrap();
++    let root = temp.path().canonicalize().unwrap();
++    std::fs::write(root.join("composer.json"), r#"{"require":{"php":"^8.3"}}"#).unwrap();
++    std::fs::write(
++        root.join(".phpantom.toml"),
++        "[php]\nversion=\"8.3\"\n[external_tools]\nenabled=false\n",
++    )
++    .unwrap();
++    let router = ProjectRouter::new_test_with_full_stubs();
++    router
++        .initialize(InitializeParams {
++            root_uri: Some(Url::from_directory_path(&root).unwrap()),
++            ..Default::default()
++        })
++        .await
++        .unwrap();
++    router.initialized(InitializedParams {}).await;
++    let uri = Url::from_file_path(root.join("literal.php")).unwrap();
++    router
++        .did_open(DidOpenTextDocumentParams {
++            text_document: TextDocumentItem {
++                uri: uri.clone(),
++                language_id: "php".into(),
++                version: 1,
++                text: BUILTIN_IDENTITY_LITERAL.into(),
++            },
++        })
++        .await;
++    let position = builtin_identity_range(
++        BUILTIN_IDENTITY_LITERAL,
++        "function literalIdentityHost",
++        "literalIdentityHost",
++    )
++    .start;
++    let prepared = router
++        .prepare_call_hierarchy(CallHierarchyPrepareParams {
++            text_document_position_params: TextDocumentPositionParams {
++                text_document: TextDocumentIdentifier { uri: uri.clone() },
++                position,
++            },
++            work_done_progress_params: Default::default(),
++        })
++        .await
++        .unwrap()
++        .unwrap();
++    assert_eq!(prepared.len(), 1);
++    let host = &prepared[0];
++    let owner = host.data.as_ref().unwrap()["_phpWorkbenchProject"]
++        .as_u64()
++        .unwrap();
++    let edges = router
++        .outgoing_calls(CallHierarchyOutgoingCallsParams {
++            item: host.clone(),
++            work_done_progress_params: Default::default(),
++            partial_result_params: Default::default(),
++        })
++        .await
++        .unwrap()
++        .unwrap_or_default();
++    assert_eq!(edges.len(), 2);
++    for (name, canonical, method) in [
++        ("strtolower", "phpantom-stub-fn://strtolower", false),
++        (
++            "createFromFormat",
++            "phpantom-stub://DateTimeImmutable",
++            true,
++        ),
++    ] {
++        let edge = edges.iter().find(|edge| edge.to.name == name).unwrap();
++        assert_eq!(
++            edge.to.uri.query(),
++            Some(format!("project_context={owner}").as_str())
++        );
++        assert_eq!(
++            edge.to.data.as_ref().unwrap()["_phpWorkbenchProject"].as_u64(),
++            Some(owner)
++        );
++        let document = router
++            .workbench_builtin(BuiltinQuery {
++                uri: edge.to.uri.to_string(),
++            })
++            .await
++            .unwrap();
++        assert_eq!(document.uri, edge.to.uri.to_string());
++        let oracle =
++            builtin_identity_oracle(Url::parse(canonical).unwrap(), document.content, method);
++        builtin_identity_assert(&edge.to, &oracle, true);
++        let callers = router
++            .incoming_calls(CallHierarchyIncomingCallsParams {
++                item: edge.to.clone(),
++                work_done_progress_params: Default::default(),
++                partial_result_params: Default::default(),
++            })
++            .await
++            .unwrap()
++            .unwrap_or_default();
++        assert_eq!(callers.len(), 1);
++        assert_eq!(callers[0].from.uri, uri);
++        assert_eq!(callers[0].from.selection_range, host.selection_range);
++        assert_eq!(
++            callers[0].from_ranges,
++            [builtin_identity_expected(true, method)]
++        );
++        let mut malformed = edge.to.clone();
++        malformed.uri.set_query(Some("project_context=invalid"));
++        assert!(
++            router
++                .incoming_calls(CallHierarchyIncomingCallsParams {
++                    item: malformed,
++                    work_done_progress_params: Default::default(),
++                    partial_result_params: Default::default()
++                })
++                .await
++                .is_err(),
++            "malformed qualifier is rejected before source lookup"
++        );
++    }
++    router.shutdown().await.unwrap();
++}
+diff --git a/tests/integration/stub_method_versions.rs b/tests/integration/stub_method_versions.rs
+index 4e5f946..3783b0e 100644
+--- a/tests/integration/stub_method_versions.rs
++++ b/tests/integration/stub_method_versions.rs
+@@ -568,7 +568,26 @@ async fn stub_constant_global_loader_first_keeps_target_filtered_completion_reso
+ 
+ #[tokio::test]
+ async fn stub_constant_global_loader_after_filtered_class_load_cannot_overwrite_model() {
+-    let backend = global_loader_constant_backend(1);
++    // Class and constant catalogs may point at distinct files. Keep the sentinel
++    // out of the class source so its later hover genuinely exercises the global
++    // constant publisher, even when class loading publishes a complete AST.
++    const CLASS_SOURCE: &str = r#"<?php
++interface GlobalLoaderConstantCarrier {
++    public const STABLE = 1;
++    /** @since 8.2 */
++    public const FUTURE = 2;
++}
++class GlobalLoaderConstantChild implements GlobalLoaderConstantCarrier {}
++"#;
++    let backend = Backend::new_test_with_all_stubs(
++        HashMap::from([
++            ("GlobalLoaderConstantCarrier", CLASS_SOURCE),
++            ("GlobalLoaderConstantChild", CLASS_SOURCE),
++        ]),
++        HashMap::new(),
++        HashMap::from([("CONSTANT_ADMISSION_SENTINEL", GLOBAL_LOADER_CONSTANT_STUB)]),
++    );
++    backend.set_php_version(PhpVersion::new(8, 1));
+     let before = constant_items(&backend, "GlobalLoaderConstantChild").await;
+     assert!(constant_named(&before, "STABLE").is_some());
+     assert!(constant_named(&before, "FUTURE").is_none());

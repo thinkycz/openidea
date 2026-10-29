@@ -97,6 +97,21 @@ pub struct TextEdit {
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, Type)]
 pub struct WorkspaceEdit {
     pub files: Vec<FileEdit>,
+    /// Host-issued revision witnesses for reviewed semantic edits.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[specta(optional)]
+    pub guard: Option<WorkspaceEditGuard>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceEditGuard {
+    pub project_revision: String,
+    pub documents_revision: String,
+    #[serde(default)]
+    pub disk_revisions: Vec<(crate::IpcPath, String)>,
+    #[serde(default)]
+    pub engine_generations: Vec<(crate::ServerId, Option<u64>)>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]

@@ -1,0 +1,585 @@
+diff --git a/docs/CHANGELOG.md b/docs/CHANGELOG.md
+index edcd312..3dcf8c6 100644
+--- a/docs/CHANGELOG.md
++++ b/docs/CHANGELOG.md
+@@ -15,6 +15,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
+ 
+ ## [Unreleased]
+ 
++- **Preserve constructor parameter contracts.** Generated constructors retain native property types and defaults, while PHPDoc types and refinements remain parameter documentation. Contributed by PHP Workbench downstream.
++
+ - **Explain ambiguous accessor names.** Generation refuses grouped properties that would create duplicate PHP method names and identifies the properties to rename. Independent non-conflicting accessors remain available. Contributed by PHP Workbench downstream.
+ 
+ - **Match generated method layout to its class.** Constructor and accessor actions preserve relative indentation and source line endings without rewriting captured defaults or documentation. Contributed by PHP Workbench downstream.
+diff --git a/src/code_actions/generate_constructor.rs b/src/code_actions/generate_constructor.rs
+index 1369c59..fcc11d7 100644
+--- a/src/code_actions/generate_constructor.rs
++++ b/src/code_actions/generate_constructor.rs
+@@ -24,9 +24,9 @@ use super::cursor_context::{CursorContext, MemberContext, find_cursor_context};
+ use super::helpers::GenerationLayout;
+ use crate::Backend;
+ use crate::atom::bytes_to_str;
+-use crate::docblock::{extract_var_type, get_docblock_text_for_node};
++use crate::docblock::{TagKind, get_docblock_text_for_node, parse_docblock_for_tags};
+ use crate::parser::extract_hint_type;
+-use crate::php_type::{PhpType, TypeKind};
++use crate::php_type::PhpType;
+ use crate::symbol_map::docblock::get_docblock_text_with_offset;
+ use crate::text_position::offset_to_position;
+ 
+@@ -36,9 +36,9 @@ use crate::text_position::offset_to_position;
+ struct QualifyingProperty {
+     /// Property name without the `$` prefix.
+     name: String,
+-    /// Structured type hint for the constructor parameter, if available.
+-    type_hint: Option<PhpType>,
+-    /// Only the original native property hint may become a promoted hint.
++    /// Documented property type, retained as constructor parameter documentation.
++    doc_type_hint: Option<String>,
++    /// Only the original native property hint may become a parameter hint.
+     native_type_hint: Option<PhpType>,
+     /// Default value text (e.g. `'active'`, `[]`), if the property has one.
+     default_value: Option<String>,
+@@ -323,10 +323,14 @@ fn collect_qualifying_properties<'a>(
+ 
+         let native_hint = plain.hint.as_ref().map(|h| extract_hint_type(h));
+ 
+-        // Try to get a docblock @var type if there's no native hint
+-        // or if we want to use it as a fallback.
+-        let docblock_type =
+-            get_docblock_text_for_node(trivia, content, plain).and_then(extract_var_type);
++        // Copy source spelling rather than displaying a decoded type: a shape
++        // key may contain escaped comment delimiters that must stay escaped.
++        let docblock_type = get_docblock_text_for_node(trivia, content, plain)
++            .and_then(parse_docblock_for_tags)
++            .and_then(|info| {
++                info.tags_by_kind_vendor_first(TagKind::Var)
++                    .find_map(|tag| tag.type_text().map(|text| text.into_owned()))
++            });
+ 
+         let docblock = get_docblock_text_with_offset(trivia, content, plain);
+         let prop_span = member.span();
+@@ -359,20 +363,6 @@ fn collect_qualifying_properties<'a>(
+             let var_name = bytes_to_str(item.variable().name);
+             let bare_name = var_name.strip_prefix('$').unwrap_or(var_name);
+ 
+-            let type_hint = if let Some(ref hint) = native_hint {
+-                Some(hint.clone())
+-            } else if let Some(ref doc_type) = docblock_type {
+-                // Only use docblock type if it's a single, non-compound type.
+-                // Skip complex types like `array{key: value}` or `int|string`.
+-                if is_simple_php_type(doc_type) {
+-                    Some(doc_type.clone())
+-                } else {
+-                    None::<PhpType>
+-                }
+-            } else {
+-                None
+-            };
+-
+             let default_value = if let PropertyItem::Concrete(concrete) = item {
+                 let span = concrete.value.span();
+                 let start = span.start.offset as usize;
+@@ -384,7 +374,7 @@ fn collect_qualifying_properties<'a>(
+ 
+             result.push(QualifyingProperty {
+                 name: bare_name.to_string(),
+-                type_hint,
++                doc_type_hint: docblock_type.clone(),
+                 native_type_hint: native_hint.clone(),
+                 default_value,
+                 visibility,
+@@ -398,27 +388,6 @@ fn collect_qualifying_properties<'a>(
+     result
+ }
+ 
+-/// Check whether a [`PhpType`] is a simple (non-compound) type suitable
+-/// for use as a parameter type hint.
+-///
+-/// Accepts `Named` and `Nullable(Named)` types; rejects unions,
+-/// intersections, array shapes, generics, etc.  A late-static type is
+-/// rejected as well: PHP allows `static` as a return type only, and its
+-/// bounded display form (`static(App\Foo)`) is not source syntax at all, so
+-/// writing either into a parameter list would not parse. Return-only `void`
+-/// and `never` are likewise excluded from documentation-derived parameters.
+-fn is_simple_php_type(ty: &PhpType) -> bool {
+-    match ty.kind() {
+-        TypeKind::Named(name) => {
+-            !name.eq_ignore_ascii_case("void") && !name.eq_ignore_ascii_case("never")
+-        }
+-        TypeKind::Nullable(inner) => {
+-            matches!(inner.kind(), TypeKind::Named(_)) && is_simple_php_type(inner)
+-        }
+-        _ => false,
+-    }
+-}
+-
+ /// Insert after the last property, without crossing its next sibling/body boundary.
+ fn find_insertion_offset<'a>(
+     members: &Sequence<'a, ClassLikeMember<'a>>,
+@@ -503,6 +472,24 @@ fn build_constructor_with_layout(
+     let mut result = String::new();
+ 
+     result.push_str(layout.newline);
++    if props.iter().any(|prop| prop.doc_type_hint.is_some()) {
++        result.push_str(indent);
++        result.push_str("/**");
++        result.push_str(layout.newline);
++        for prop in props {
++            if let Some(hint) = &prop.doc_type_hint {
++                result.push_str(indent);
++                result.push_str(" * @param ");
++                result.push_str(hint);
++                result.push_str(" $");
++                result.push_str(&prop.name);
++                result.push_str(layout.newline);
++            }
++        }
++        result.push_str(indent);
++        result.push_str(" */");
++        result.push_str(layout.newline);
++    }
+     result.push_str(indent);
+     result.push_str("public function __construct(");
+ 
+@@ -516,7 +503,7 @@ fn build_constructor_with_layout(
+     for prop in props {
+         let mut param = String::new();
+ 
+-        if let Some(ref hint) = prop.type_hint {
++        if let Some(ref hint) = prop.native_type_hint {
+             param.push_str(&hint.to_string());
+             param.push(' ');
+         }
+@@ -672,73 +659,12 @@ fn build_promoted_constructor(props: &[QualifyingProperty], indent: &str) -> Str
+ #[cfg(test)]
+ mod tests {
+     use super::*;
+-    use crate::atom::atom;
+-
+-    // ── is_simple_type ──────────────────────────────────────────────────
+-
+-    #[test]
+-    fn simple_type_accepts_basic() {
+-        assert!(is_simple_php_type(&PhpType::parse("string")));
+-        assert!(is_simple_php_type(&PhpType::parse("int")));
+-        assert!(is_simple_php_type(&PhpType::parse("array")));
+-        assert!(is_simple_php_type(&PhpType::parse("bool")));
+-    }
+-
+-    #[test]
+-    fn simple_type_accepts_nullable() {
+-        assert!(is_simple_php_type(&PhpType::parse("?string")));
+-        assert!(is_simple_php_type(&PhpType::parse("?Foo")));
+-    }
+-
+-    #[test]
+-    fn simple_type_accepts_fqn() {
+-        assert!(is_simple_php_type(&PhpType::parse("App\\Models\\User")));
+-        assert!(is_simple_php_type(&PhpType::parse("?App\\Models\\User")));
+-    }
+-
+-    /// `static` is not a valid parameter type in PHP, and the bounded display
+-    /// form is not source syntax, so neither may reach a generated signature.
+-    #[test]
+-    fn simple_type_rejects_late_static() {
+-        assert!(!is_simple_php_type(&PhpType::parse("static(App\\Foo)")));
+-        assert!(!is_simple_php_type(&PhpType::parse("$this(App\\Foo)")));
+-        assert!(!is_simple_php_type(&PhpType::static_type(atom("App\\Foo"))));
+-        assert!(!is_simple_php_type(&PhpType::nullable(PhpType::this_type(
+-            atom("App\\Foo")
+-        ))));
+-    }
+-
+-    #[test]
+-    fn simple_type_rejects_union() {
+-        assert!(!is_simple_php_type(&PhpType::parse("int|string")));
+-    }
+-
+-    #[test]
+-    fn simple_type_rejects_intersection() {
+-        assert!(!is_simple_php_type(&PhpType::parse("Foo&Bar")));
+-    }
+-
+-    #[test]
+-    fn simple_type_rejects_array_shape() {
+-        assert!(!is_simple_php_type(&PhpType::parse("array{name: string}")));
+-    }
+-
+-    #[test]
+-    fn simple_type_rejects_generic() {
+-        assert!(!is_simple_php_type(&PhpType::parse("Collection<User>")));
+-    }
+-
+-    #[test]
+-    fn simple_type_rejects_empty() {
+-        assert!(!is_simple_php_type(&PhpType::parse("")));
+-    }
+-
+     // ── build_constructor ───────────────────────────────────────────────
+ 
+     fn prop(name: &str, type_hint: Option<&str>, default: Option<&str>) -> QualifyingProperty {
+         QualifyingProperty {
+             name: name.to_string(),
+-            type_hint: type_hint.map(PhpType::parse),
++            doc_type_hint: None,
+             native_type_hint: type_hint.map(PhpType::parse),
+             default_value: default.map(|s| s.to_string()),
+             visibility: "public",
+@@ -851,7 +777,7 @@ mod tests {
+     ) -> QualifyingProperty {
+         QualifyingProperty {
+             name: name.to_string(),
+-            type_hint: type_hint.map(PhpType::parse),
++            doc_type_hint: None,
+             native_type_hint: type_hint.map(PhpType::parse),
+             default_value: default.map(|s| s.to_string()),
+             visibility,
+@@ -1035,7 +961,7 @@ mod tests {
+             assert_eq!(props[0].name, "name");
+             assert_eq!(
+                 props[0]
+-                    .type_hint
++                    .native_type_hint
+                     .as_ref()
+                     .map(|t| t.to_string())
+                     .as_deref(),
+@@ -1045,7 +971,7 @@ mod tests {
+             assert_eq!(props[1].name, "age");
+             assert_eq!(
+                 props[1]
+-                    .type_hint
++                    .native_type_hint
+                     .as_ref()
+                     .map(|t| t.to_string())
+                     .as_deref(),
+@@ -1090,7 +1016,7 @@ mod tests {
+             assert_eq!(props[1].name, "id");
+             assert_eq!(
+                 props[1]
+-                    .type_hint
++                    .native_type_hint
+                     .as_ref()
+                     .map(|t| t.to_string())
+                     .as_deref(),
+@@ -1134,7 +1060,7 @@ mod tests {
+             assert_eq!(props[0].name, "name");
+             assert_eq!(
+                 props[0]
+-                    .type_hint
++                    .doc_type_hint
+                     .as_ref()
+                     .map(|t| t.to_string())
+                     .as_deref(),
+@@ -1146,7 +1072,7 @@ mod tests {
+     }
+ 
+     #[test]
+-    fn skips_compound_docblock_type() {
++    fn preserves_compound_docblock_type() {
+         let arena = Box::leak(Box::new(LocalArena::new()));
+         let file_id = mago_database::file::FileId::new(b"input.php");
+         let php = "<?php\nclass Foo {\n    /** @var int|string */\n    public $id;\n}";
+@@ -1157,10 +1083,8 @@ mod tests {
+             let props = collect_qualifying_properties(all_members, php, program.trivia.as_slice());
+             assert_eq!(props.len(), 1);
+             assert_eq!(props[0].name, "id");
+-            assert!(
+-                props[0].type_hint.is_none(),
+-                "compound docblock type should be skipped"
+-            );
++            assert!(props[0].native_type_hint.is_none());
++            assert_eq!(props[0].doc_type_hint.as_deref(), Some("int|string"));
+         } else {
+             panic!("should find class");
+         }
+@@ -1179,7 +1103,7 @@ mod tests {
+             assert_eq!(props.len(), 1);
+             assert_eq!(
+                 props[0]
+-                    .type_hint
++                    .native_type_hint
+                     .as_ref()
+                     .map(|t| t.to_string())
+                     .as_deref(),
+@@ -1203,7 +1127,7 @@ mod tests {
+             assert_eq!(props.len(), 1);
+             assert_eq!(
+                 props[0]
+-                    .type_hint
++                    .native_type_hint
+                     .as_ref()
+                     .map(|t| t.to_string())
+                     .as_deref(),
+diff --git a/tests/integration/code_action_generate_constructor.rs b/tests/integration/code_action_generate_constructor.rs
+index bc95923..32ff9a3 100644
+--- a/tests/integration/code_action_generate_constructor.rs
++++ b/tests/integration/code_action_generate_constructor.rs
+@@ -554,7 +554,7 @@ class User {
+ // ── Docblock type fallback ──────────────────────────────────────────────────
+ 
+ #[test]
+-fn uses_docblock_type_when_no_native_hint() {
++fn documents_type_without_adding_native_hint() {
+     let backend = create_test_backend();
+     let uri = "file:///test.php";
+     let content = "\
+@@ -569,13 +569,13 @@ class Foo {
+     let result = apply_workspace_edit(content, action.edit.as_ref().unwrap());
+ 
+     assert!(
+-        result.contains("string $name"),
+-        "should use docblock type as param hint: {result}"
++        result.contains("@param string $name") && result.contains("__construct($name)"),
++        "should retain documented type without adding a native constraint: {result}"
+     );
+ }
+ 
+ #[test]
+-fn skips_compound_docblock_type() {
++fn retains_compound_docblock_type_as_documentation() {
+     let backend = create_test_backend();
+     let uri = "file:///test.php";
+     let content = "\
+@@ -589,11 +589,10 @@ class Foo {
+     let action = find_action_titled(&actions, "Generate constructor").expect("should offer action");
+     let result = apply_workspace_edit(content, action.edit.as_ref().unwrap());
+ 
+-    // Compound docblock types are not usable as native type hints in
+-    // all PHP versions, so the parameter should be untyped.
++    // Documentation does not add a native constraint to an untyped property.
+     assert!(
+-        result.contains("($id)"),
+-        "compound docblock type should produce untyped param: {result}"
++        result.contains("($id)") && result.contains("@param int|string $id"),
++        "compound documentation should survive on the untyped parameter: {result}"
+     );
+ }
+ 
+@@ -1704,3 +1703,226 @@ fn generation_layout_compact_constructor_uses_structural_indentation_after_liter
+         assert_constructor_layout(&source, member, body, "\n");
+     }
+ }
++
++fn constructor_doc_type_result(source: &str, title: &str) -> String {
++    let backend = create_test_backend();
++    let point = position_of(source, "private");
++    let actions = get_code_actions_in_range(
++        &backend,
++        "file:///constructor-doc-types.php",
++        source,
++        Range::new(point, point),
++    );
++    let action = find_action_titled(&actions, title).expect("constructor stays available");
++    assert!(
++        action.disabled.is_none(),
++        "unexpected refusal: {:?}",
++        action.disabled
++    );
++    assert!(action.command.is_none());
++    if title == "Generate constructor" {
++        assert!(
++            extract_edits(action)
++                .iter()
++                .all(|edit| edit.range.start == edit.range.end),
++            "traditional generation must retain declarations and property documentation"
++        );
++    }
++    apply_workspace_edit(source, action.edit.as_ref().expect("reviewable edit"))
++}
++
++fn assert_constructor_doc_types(source: &str, defaults: &[(&str, Option<&str>)]) -> String {
++    let result = constructor_doc_type_result(source, "Generate constructor");
++    let backend = create_test_backend();
++    let original = backend.parse_php(source);
++    let generated = backend.parse_php(&result);
++    let original_owner = original
++        .iter()
++        .find(|class| class.name == "DocTypeCase")
++        .unwrap();
++    let owner = generated
++        .iter()
++        .find(|class| class.name == "DocTypeCase")
++        .expect("target class survives");
++    let constructors: Vec<_> = owner
++        .methods
++        .iter()
++        .filter(|method| method.name.eq_ignore_ascii_case("__construct"))
++        .collect();
++    assert_eq!(
++        constructors.len(),
++        1,
++        "exactly one constructor is generated"
++    );
++    let constructor = constructors[0];
++    assert_eq!(
++        constructor.parameters.len(),
++        original_owner.properties.len()
++    );
++    assert_eq!(defaults.len(), original_owner.properties.len());
++    for property in &original_owner.properties {
++        let parameter_name = format!("${}", property.name);
++        let parameter = constructor
++            .parameters
++            .iter()
++            .find(|parameter| parameter.name == parameter_name.as_str())
++            .expect("each property has its own constructor parameter");
++        assert_eq!(
++            parameter.native_type_hint, property.native_type_hint,
++            "native constraints must come only from the declared property type: {result}"
++        );
++        assert_eq!(
++            parameter.type_hint, property.type_hint,
++            "effective documented property type must survive as parameter documentation: {result}"
++        );
++        let (_, default) = defaults
++            .iter()
++            .find(|(name, _)| *name == property.name.as_str())
++            .expect("fixture specifies parameter default");
++        assert_eq!(
++            parameter.default_value.as_deref(),
++            *default,
++            "captured default remains unchanged for {}",
++            property.name
++        );
++        let retained = owner
++            .properties
++            .iter()
++            .find(|candidate| candidate.name == property.name)
++            .expect("traditional constructor retains the property");
++        assert_eq!(retained.native_type_hint, property.native_type_hint);
++        assert_eq!(retained.type_hint, property.type_hint);
++    }
++    result
++}
++
++#[test]
++fn constructor_doc_types_callable_string_default_stays_untyped_with_callable_annotation() {
++    let source = "<?php\nclass DocTypeCase {\n    /** @var callable */\n    private $callback = 'strlen';\n}\n";
++    let result = assert_constructor_doc_types(source, &[("callback", Some("'strlen'"))]);
++    assert!(
++        result.contains("/** @var callable */"),
++        "original property documentation survives"
++    );
++}
++
++#[test]
++fn constructor_doc_types_callable_array_default_stays_untyped_with_callable_annotation() {
++    let source = "<?php\nclass Handler { public static function run(): int { return 1; } }\nclass DocTypeCase {\n    /** @var callable */\n    private $callback = [Handler::class, 'run'];\n}\n";
++    assert_constructor_doc_types(source, &[("callback", Some("[Handler::class, 'run']"))]);
++}
++
++#[test]
++fn constructor_doc_types_scalar_documentation_does_not_restrict_existing_storage_default() {
++    let source =
++        "<?php\nclass DocTypeCase {\n    /** @var int */\n    private $value = 'pending';\n}\n";
++    assert_constructor_doc_types(source, &[("value", Some("'pending'"))]);
++}
++
++#[test]
++fn constructor_doc_types_shape_and_generic_annotations_survive_on_parameters() {
++    let source = "<?php\nclass DocTypeCase {\n    /** @var array{key: int} */\n    private $shape = ['key' => 1];\n    /** @var list<string> */\n    private $names = ['Ada'];\n}\n";
++    assert_constructor_doc_types(
++        source,
++        &[("shape", Some("['key' => 1]")), ("names", Some("['Ada']"))],
++    );
++}
++
++#[test]
++fn constructor_doc_types_native_array_keeps_documented_element_refinement() {
++    let source = "<?php\nclass DocTypeCase {\n    /** @var list<int> */\n    private array $values = [1, 2];\n}\n";
++    assert_constructor_doc_types(source, &[("values", Some("[1, 2]"))]);
++}
++
++#[test]
++fn constructor_doc_types_native_int_and_imported_alias_remain_native() {
++    let source = "<?php\nnamespace Vendor { class Payload {} }\nnamespace App {\nuse Vendor\\Payload as Data;\nclass DocTypeCase {\n    private int $count = 7;\n    private Data $payload;\n}\n}\n";
++    assert_constructor_doc_types(source, &[("count", Some("7")), ("payload", None)]);
++}
++
++#[test]
++fn constructor_doc_types_promotion_keeps_untyped_documented_properties_and_exact_defaults() {
++    let source = "<?php\nclass Handler { public static function run(): int { return 1; } }\nclass DocTypeCase {\n    /** @var callable */\n    private $callback = 'strlen';\n    /** @var callable */\n    private $handler = [Handler::class, 'run'];\n    /** @var int */\n    private $value = 'pending';\n    /** @var array{key: int} */\n    private $shape = ['key' => 1];\n    /** @var list<string> */\n    private $names = ['Ada'];\n    private int $count = 7;\n}\n";
++    let result = constructor_doc_type_result(source, "Generate promoted constructor");
++    let backend = create_test_backend();
++    let original = backend.parse_php(source);
++    let generated = backend.parse_php(&result);
++    let before = original
++        .iter()
++        .find(|class| class.name == "DocTypeCase")
++        .unwrap();
++    let after = generated
++        .iter()
++        .find(|class| class.name == "DocTypeCase")
++        .unwrap();
++    assert_eq!(after.properties.len(), before.properties.len());
++    let constructors: Vec<_> = after
++        .methods
++        .iter()
++        .filter(|method| method.name.eq_ignore_ascii_case("__construct"))
++        .collect();
++    assert_eq!(constructors.len(), 1);
++    let constructor = constructors[0];
++    let defaults = [
++        ("callback", "'strlen'"),
++        ("handler", "[Handler::class, 'run']"),
++        ("value", "'pending'"),
++        ("shape", "['key' => 1]"),
++        ("names", "['Ada']"),
++        ("count", "7"),
++    ];
++    for property in &before.properties {
++        let retained = after
++            .properties
++            .iter()
++            .find(|candidate| candidate.name == property.name)
++            .unwrap();
++        assert_eq!(retained.native_type_hint, property.native_type_hint);
++        assert_eq!(
++            retained.type_hint, property.type_hint,
++            "promotion retains effective property documentation"
++        );
++        let parameter_name = format!("${}", property.name);
++        let parameter = constructor
++            .parameters
++            .iter()
++            .find(|candidate| candidate.name == parameter_name.as_str())
++            .unwrap();
++        assert_eq!(
++            parameter.native_type_hint, property.native_type_hint,
++            "promotion retains originally native constraints only"
++        );
++        let (_, default) = defaults
++            .iter()
++            .find(|(name, _)| *name == property.name.as_str())
++            .unwrap();
++        assert_eq!(parameter.default_value.as_deref(), Some(*default));
++    }
++}
++
++#[test]
++fn constructor_doc_types_escaped_shape_key_stays_inside_documentation() {
++    let source = r#"<?php
++class DocTypeCase {
++    /** @var array{"*\x2f public function injected($value) {} \x2f*": int} */
++    private $value;
++    public function injected($value) {}
++}
++"#;
++    let result = assert_constructor_doc_types(source, &[("value", None)]);
++    let backend = create_test_backend();
++    let classes = backend.parse_php(&result);
++    let owner = classes
++        .iter()
++        .find(|class| class.name == "DocTypeCase")
++        .unwrap();
++    assert_eq!(
++        owner
++            .methods
++            .iter()
++            .filter(|method| method.name == "injected")
++            .count(),
++        1,
++        "documentation must not introduce PHP members: {result}"
++    );
++}

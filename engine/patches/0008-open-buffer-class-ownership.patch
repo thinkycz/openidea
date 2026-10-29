@@ -1,0 +1,125 @@
+diff --git a/src/resolution.rs b/src/resolution.rs
+index f3d6b8e..df81edf 100644
+--- a/src/resolution.rs
++++ b/src/resolution.rs
+@@ -794,6 +794,11 @@ impl Backend {
+         uri: &str,
+         php_version: Option<PhpVersion>,
+     ) -> Option<Vec<Arc<ClassInfo>>> {
++        // Open documents belong to didOpen/didChange's shared AST publisher.
++        // A lazy lookup must not resurrect the saved class after an unsaved rename.
++        if self.open_files.read().contains_key(uri) {
++            return self.shared_classes_for_uri(uri);
++        }
+         let file_use_map = self.parse_use_statements(content);
+         let file_namespace = self.parse_namespace(content);
+ 
+@@ -868,6 +873,14 @@ impl Backend {
+ 
+         let arc_classes: Vec<Arc<ClassInfo>> = classes.into_iter().map(Arc::new).collect();
+ 
++        // A file may have opened while this disk snapshot was being parsed.
++        // Keep admission locked through publication so didOpen either wins
++        // before this check, or publishes its authoritative overlay afterwards.
++        let open_files_guard = self.open_files.read();
++        if open_files_guard.contains_key(uri) {
++            return self.shared_classes_for_uri(uri);
++        }
++
+         // Used below to decide whether resolved-class cache eviction
+         // is needed (only on re-parse, not first load).
+         let was_already_parsed = self.parsed_uris.read().contains(uri);
+@@ -1943,6 +1956,63 @@ mod tests {
+     static STDCLASS_STUB: &str = "<?php class stdClass {}";
+     static STRING_FUNCTIONS_STUB: &str = "<?php function strlen(string $string): int {}";
+ 
++    #[test]
++    fn lazy_resolution_preserves_an_unsaved_class_rename() {
++        let backend = Backend::new_test();
++        let directory = tempfile::tempdir().unwrap();
++        let path = directory.path().join("InvoiceService.php");
++        let saved = "<?php class InvoiceService { public string $old; }";
++        std::fs::write(&path, saved).unwrap();
++        let uri = crate::util::path_to_uri(&path);
++        backend.parse_and_cache_file(&path).unwrap();
++        let overlay = "<?php class RenamedInvoice { public string $latest; }";
++        backend
++            .open_files
++            .write()
++            .insert(uri.clone(), std::sync::Arc::new(overlay.to_owned()));
++        backend.update_ast(&uri, overlay);
++        let classes = backend.parse_and_cache_file(&path).unwrap();
++        assert_eq!(classes.len(), 1);
++        assert_eq!(classes[0].name, "RenamedInvoice");
++        let names: Vec<_> = backend
++            .handle_workspace_symbol("RenamedInvoice")
++            .unwrap_or_default()
++            .into_iter()
++            .map(|symbol| symbol.name)
++            .collect();
++        assert_eq!(names, vec!["RenamedInvoice"]);
++        assert!(
++            backend
++                .handle_workspace_symbol("InvoiceService")
++                .unwrap_or_default()
++                .is_empty()
++        );
++        assert_eq!(std::fs::read_to_string(path).unwrap(), saved);
++    }
++
++    #[test]
++    fn captured_lazy_content_cannot_restore_a_deleted_open_declaration() {
++        let backend = Backend::new_test();
++        let uri = "file:///project/Removed.php";
++        let saved = "<?php class Removed {}";
++        backend.parse_and_cache_content(saved, uri).unwrap();
++        backend
++            .open_files
++            .write()
++            .insert(uri.to_owned(), std::sync::Arc::new("<?php".to_owned()));
++        backend.update_ast(uri, "<?php");
++        let classes = backend
++            .parse_and_cache_content(saved, uri)
++            .unwrap_or_default();
++        assert!(classes.is_empty());
++        assert!(
++            backend
++                .handle_workspace_symbol("Removed")
++                .unwrap_or_default()
++                .is_empty()
++        );
++    }
++
+     #[test]
+     fn class_lookup_ignores_case_for_parsed_classes() {
+         let backend = Backend::new_test();
+diff --git a/docs/CHANGELOG.md b/docs/CHANGELOG.md
+index 80372df..1c9b744 100644
+--- a/docs/CHANGELOG.md
++++ b/docs/CHANGELOG.md
+@@ -21,6 +21,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
+ 
+ ### Fixed
+ 
++- **Unsaved class search and resolution.** Looking up a saved class no longer replaces newer open-buffer declarations after a rename or deletion. Contributed by PHP Workbench (local downstream build).
++
+ - **Union member navigation keeps every declaration.** Go to Definition offers each matching method or property instead of choosing one union alternative. Shared inherited declarations appear once. Contributed by PHP Workbench (local downstream build).
+ 
+ - **Built-in function suggestions respect their PHP introduction version.** Functions introduced after the project target stay out of completion and lazy stub caches; user polyfills remain available. Contributed by PHP Workbench downstream.
+diff --git a/docs/ARCHITECTURE.md b/docs/ARCHITECTURE.md
+index 974df96..ce7277e 100644
+--- a/docs/ARCHITECTURE.md
++++ b/docs/ARCHITECTURE.md
+@@ -1219,3 +1219,12 @@ PHP class names go through resolution at parse time (`resolve_parent_class_names
+ 5. **No namespace** → keep as-is.
+ 
+ This runs on `parent_class`, `used_traits`, and `mixins` for every `ClassInfo` extracted from a file.
++
++### Open-buffer ownership during lazy class loading
++
++Lazy class parsing returns the current shared class records for an open URI.
++Its saved disk snapshot cannot replace didOpen/didChange state. The lazy path
++checks before parsing and again before publication; a read guard on open-file
++admission spans publication, so an overlapping didOpen either causes the disk
++result to be discarded or publishes its overlay after the disk result. This
++shares the existing class/index publisher and does not infer a second type.

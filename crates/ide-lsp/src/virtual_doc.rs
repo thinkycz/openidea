@@ -31,10 +31,26 @@ fn segments(uri: &str) -> Vec<String> {
     rest.split('/').filter(|s| !s.is_empty()).map(|s| percent_decode_str(s).decode_utf8_lossy().into_owned()).collect()
 }
 
+/// Only embedded class/function source is supported by the engine viewer.
+pub fn is_php_builtin(uri: &str) -> bool {
+    matches!(scheme(uri), "phpantom-stub" | "phpantom-stub-fn") && !uri.starts_with("phpantom-stub://const/")
+}
+
+pub fn php_description(target: Option<&serde_json::Value>) -> String {
+    match target.and_then(|t| t.get("php_version")).and_then(serde_json::Value::as_str) {
+        Some(version) => format!("PHP {version} built-in declarations (PHPantom)"),
+        None => "PHP built-in declarations (PHPantom)".to_owned(),
+    }
+}
+
 /// Editor tab title: the last path segment; a class file whose real source
 /// was found is shown as `.java` (IDEA: `String.java` vs `String.class`).
 pub fn title(uri: &str, decompiled: bool) -> String {
     let name = segments(uri).pop().unwrap_or_else(|| uri.to_owned());
+    if is_php_builtin(uri) {
+        // Router-qualified URIs retain their namespace in the last segment.
+        return format!("{}.php", name.rsplit('\\').next().unwrap_or(&name));
+    }
     match name.strip_suffix(".class") {
         Some(stem) if !decompiled && scheme(uri) == "jdt" => format!("{stem}.java"),
         _ => name,

@@ -1,0 +1,332 @@
+diff --git a/docs/CHANGELOG.md b/docs/CHANGELOG.md
+index f9250dc..dd95666 100644
+--- a/docs/CHANGELOG.md
++++ b/docs/CHANGELOG.md
+@@ -15,6 +15,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
+ 
+ ## [Unreleased]
+ 
++- **Keep generated accessors inside compact classes.** Getter and setter generation preserves following members and comments, including compact traits and readonly classes. Contributed by PHP Workbench downstream.
++
+ - **Readonly-class accessors.** Getter generation remains available for readonly classes, while setter actions are omitted for their readonly properties. Contributed by PHP Workbench downstream.
+ 
+ - **Preview PHP structural replacements.** Prepare selected call transformations against current editor text, with captured expressions and checked source identities. The editor reviews changes before applying them. Contributed by PHP Workbench downstream.
+diff --git a/src/code_actions/cursor_context.rs b/src/code_actions/cursor_context.rs
+index 571947d..98f35e8 100644
+--- a/src/code_actions/cursor_context.rs
++++ b/src/code_actions/cursor_context.rs
+@@ -55,6 +55,8 @@ pub(crate) enum CursorContext<'a> {
+         /// All members of the class-like, for actions that need to
+         /// inspect siblings (e.g. "does a constructor already exist?").
+         all_members: &'a Sequence<'a, ClassLikeMember<'a>>,
++        /// Start of the canonical class-like closing brace.
++        body_end: u32,
+     },
+     /// The cursor is on a top-level (or namespace-level) function.
+     /// The boolean is `true` when the cursor is inside the function body.
+@@ -113,6 +115,7 @@ fn find_in_statement<'a>(stmt: &'a Statement<'a>, cursor: u32) -> CursorContext<
+                     class_readonly: class.modifiers.contains_readonly(),
+                     member,
+                     all_members: &class.members,
++                    body_end: class.right_brace.start.offset,
+                 }
+             } else {
+                 CursorContext::None
+@@ -127,6 +130,7 @@ fn find_in_statement<'a>(stmt: &'a Statement<'a>, cursor: u32) -> CursorContext<
+                     class_readonly: false,
+                     member,
+                     all_members: &iface.members,
++                    body_end: iface.right_brace.start.offset,
+                 }
+             } else {
+                 CursorContext::None
+@@ -141,6 +145,7 @@ fn find_in_statement<'a>(stmt: &'a Statement<'a>, cursor: u32) -> CursorContext<
+                     class_readonly: false,
+                     member,
+                     all_members: &tr.members,
++                    body_end: tr.right_brace.start.offset,
+                 }
+             } else {
+                 CursorContext::None
+@@ -155,6 +160,7 @@ fn find_in_statement<'a>(stmt: &'a Statement<'a>, cursor: u32) -> CursorContext<
+                     class_readonly: false,
+                     member,
+                     all_members: &en.members,
++                    body_end: en.right_brace.start.offset,
+                 }
+             } else {
+                 CursorContext::None
+diff --git a/src/code_actions/generate_getter_setter.rs b/src/code_actions/generate_getter_setter.rs
+index 72cc860..cda6b41 100644
+--- a/src/code_actions/generate_getter_setter.rs
++++ b/src/code_actions/generate_getter_setter.rs
+@@ -33,6 +33,7 @@ use crate::atom::bytes_to_str;
+ use crate::docblock::{extract_var_type, get_docblock_text_for_node};
+ use crate::parser::extract_hint_type;
+ use crate::php_type::PhpType;
++use crate::symbol_map::docblock::get_docblock_text_with_offset;
+ use crate::text_position::offset_to_position;
+ 
+ // ── Data types ──────────────────────────────────────────────────────────────
+@@ -94,13 +95,14 @@ impl Backend {
+             |program, content| {
+                 let ctx = find_cursor_context(&program.statements, cursor_offset);
+ 
+-                let (property, all_members, class_readonly) = match &ctx {
++                let (property, all_members, class_readonly, body_end) = match &ctx {
+                     CursorContext::InClassLike {
+                         member: MemberContext::Property(prop),
+                         all_members,
+                         class_readonly,
++                        body_end,
+                         ..
+-                    } => (*prop, *all_members, *class_readonly),
++                    } => (*prop, *all_members, *class_readonly, *body_end),
+                     _ => return None,
+                 };
+ 
+@@ -154,7 +156,8 @@ impl Backend {
+ 
+                 let indent = detect_indent_from_members(all_members, content);
+ 
+-                let insert_offset = find_accessor_insertion_offset(all_members, content);
++                let insert_offset =
++                    find_accessor_insertion_offset(all_members, content, trivia, body_end);
+                 Some((available, indent, insert_offset))
+             },
+         ) else {
+@@ -508,38 +511,51 @@ fn build_setter(prop: &AccessorProperty, indent: &str) -> String {
+     result
+ }
+ 
+-/// Find the byte offset where accessor methods should be inserted.
+-///
+-/// Inserts after the last existing method in the class, or after the
+-/// last member if there are no methods.
++/// Insert after the last method (or member) without crossing a sibling or
++/// the canonical class-like closing brace. Keep following trivia with its
++/// original member when compact layout prevents reaching a safe line end.
+ fn find_accessor_insertion_offset<'a>(
+     members: &Sequence<'a, ClassLikeMember<'a>>,
+     content: &str,
++    trivia: &[Trivia<'a>],
++    body_end: u32,
+ ) -> usize {
+-    // Prefer inserting after the last method.
+     let mut last_method_end: Option<u32> = None;
+     let mut last_member_end: Option<u32> = None;
+-
+     for member in members.iter() {
+         let span = member.span();
+         last_member_end = Some(span.end.offset);
+-
+         if matches!(member, ClassLikeMember::Method(_)) {
+             last_method_end = Some(span.end.offset);
+         }
+     }
+-
+-    let end = last_method_end.or(last_member_end).unwrap_or(0);
+-    find_line_end(content, end as usize)
+-}
+-
+-/// Find the end of the line at or after the given offset (past the newline).
+-fn find_line_end(content: &str, offset: usize) -> usize {
+-    if let Some(nl) = content[offset..].find('\n') {
+-        offset + nl + 1
+-    } else {
+-        content.len()
++    let end = last_method_end.or(last_member_end).unwrap_or(body_end);
++    let next = members
++        .iter()
++        .filter(|member| member.span().start.offset >= end)
++        .min_by_key(|member| member.span().start.offset);
++    let boundary = next
++        .map(|member| {
++            get_docblock_text_with_offset(trivia, content, member)
++                .map(|(_, offset)| offset)
++                .filter(|offset| *offset >= end)
++                .unwrap_or_else(|| member.span().start.offset)
++        })
++        .unwrap_or(body_end)
++        .min(body_end);
++    // A following member's docblock belongs to that member. Also never split
++    // an intervening multi-line comment merely to reach the first newline.
++    let Some(newline) = content[end as usize..boundary as usize].find('\n') else {
++        return end as usize;
++    };
++    let newline = end as usize + newline;
++    let index = trivia.partition_point(|item| item.span.end.offset <= newline as u32);
++    if trivia.get(index).is_some_and(|item| {
++        item.span.start.offset <= newline as u32 && !matches!(item.kind, TriviaKind::WhiteSpace)
++    }) {
++        return end as usize;
+     }
++    newline + 1
+ }
+ 
+ /// Check if the modifier list includes `readonly`.
+diff --git a/src/code_actions/generate_property_hooks.rs b/src/code_actions/generate_property_hooks.rs
+index 725ee99..65f3adf 100644
+--- a/src/code_actions/generate_property_hooks.rs
++++ b/src/code_actions/generate_property_hooks.rs
+@@ -221,6 +221,7 @@ impl Backend {
+                         class_readonly,
+                         member: MemberContext::Property(prop),
+                         all_members,
++                        ..
+                     } => (*prop, *all_members, *kind, *class_readonly),
+                     _ => return None,
+                 };
+diff --git a/tests/integration/code_action_generate_getter_setter.rs b/tests/integration/code_action_generate_getter_setter.rs
+index e54707f..582fb0b 100644
+--- a/tests/integration/code_action_generate_getter_setter.rs
++++ b/tests/integration/code_action_generate_getter_setter.rs
+@@ -11,8 +11,8 @@
+ //! prefix for `bool`, `static` methods for static properties).
+ 
+ use crate::common::{
+-    create_test_backend, extract_edits, find_action_titled, find_actions,
+-    get_code_actions_in_range, position_of,
++    apply_edits, create_test_backend, extract_edits, find_action_titled, find_actions,
++    get_code_actions_in_range, lsp_pos_to_offset, position_of,
+ };
+ use tower_lsp::lsp_types::*;
+ 
+@@ -361,3 +361,137 @@ fn readonly_class_accessor_explicit_readonly_property_policy_is_preserved() {
+         );
+     }
+ }
++
++// Accessors must stay in their owning body without separating another member
++// from its documentation, attributes, or trailing comments.
++fn assert_accessor_insertion(content: &str, insertion_anchor: &str, readonly: bool) {
++    let backend = create_test_backend();
++    let actions = actions_at(&backend, content, "private int $value");
++    let expected = content
++        .find(insertion_anchor)
++        .expect("unique insertion anchor")
++        + insertion_anchor.len();
++    let titles: &[&str] = if readonly {
++        &["Generate getter"]
++    } else {
++        &[
++            "Generate getter",
++            "Generate setter",
++            "Generate getter and setter",
++        ]
++    };
++    for title in titles {
++        let action = find_action_titled(&actions, title).expect("accessor action");
++        let edits = extract_edits(action);
++        assert_eq!(edits.len(), 1, "{title}: insertion only");
++        assert_eq!(edits[0].range.start, edits[0].range.end);
++        assert_eq!(
++            lsp_pos_to_offset(content, edits[0].range.start),
++            expected,
++            "{title}: must remain in the owning body and before following member trivia"
++        );
++        let result = apply_edits(content, &edits);
++        assert_eq!(&result[..expected], &content[..expected]);
++        assert_eq!(
++            &result[expected + edits[0].new_text.len()..],
++            &content[expected..]
++        );
++    }
++    if readonly {
++        assert!(find_action_titled(&actions, "Generate setter").is_none());
++        assert!(find_action_titled(&actions, "Generate getter and setter").is_none());
++    }
++}
++
++#[test]
++fn compact_class_accessors_stay_before_closing_body_and_outside_statement() {
++    assert_accessor_insertion(
++        "<?php class Compact { private int $value = 1; } $outside = 42;\n",
++        "private int $value = 1;",
++        false,
++    );
++}
++
++#[test]
++fn compact_trait_accessors_stay_before_following_class() {
++    assert_accessor_insertion(
++        "<?php trait Compact { private int $value = 1; } class UsesCompact { use Compact; }",
++        "private int $value = 1;",
++        false,
++    );
++}
++
++#[test]
++fn compact_readonly_getter_stays_after_constructor_inside_body() {
++    assert_accessor_insertion(
++        "<?php readonly class Compact { private int $value; public function __construct() { $this->value = 7; } } $outside = 42;\n",
++        "$this->value = 7; }",
++        true,
++    );
++}
++
++#[test]
++fn compact_accessors_do_not_cross_following_property() {
++    assert_accessor_insertion(
++        "<?php class Compact { private int $value = 1; public function existing() {} public int $tail = 2; }\n",
++        "public function existing() {}",
++        false,
++    );
++}
++
++#[test]
++fn compact_accessors_preserve_following_multiline_docblock() {
++    assert_accessor_insertion(
++        "<?php class Compact { private int $value = 1; public function existing() {} /** tail }\n * @var int\n */ public int $tail = 2; }\n",
++        "public function existing() {}",
++        false,
++    );
++}
++
++#[test]
++fn compact_accessors_preserve_trailing_multiline_comment() {
++    assert_accessor_insertion(
++        "<?php class Compact { private int $value = 1; /* comment }\n continued */ }\n",
++        "private int $value = 1;",
++        false,
++    );
++}
++
++#[test]
++fn compact_namespaced_accessors_preserve_unicode_crlf_and_following_class() {
++    assert_accessor_insertion(
++        "<?php\r\nnamespace Demo { /* λ😀 } */ class Compact { private int $value = 1; } class After {} }\r\n",
++        "private int $value = 1;",
++        false,
++    );
++}
++
++#[test]
++fn multiline_accessors_keep_existing_after_method_line_placement() {
++    assert_accessor_insertion(
++        "<?php\nclass Compact {\n    private int $value = 1;\n    public function existing() {} // trailing comment\n    /** tail */\n    public int $tail = 2;\n}\n",
++        "public function existing() {} // trailing comment\n",
++        false,
++    );
++}
++
++#[test]
++fn unfinished_class_does_not_offer_outside_body_accessors() {
++    let backend = create_test_backend();
++    for content in [
++        "<?php class Broken { private int $value;",
++        "<?php class Broken { private int $value; public function existing() {",
++    ] {
++        let actions = actions_at(&backend, content, "private int $value");
++        assert!(generate_titles(&actions).is_empty());
++    }
++}
++
++#[test]
++fn compact_accessors_keep_following_attributes_and_docblock_together() {
++    assert_accessor_insertion(
++        "<?php class Compact { private int $value = 1; public function existing() {} /** tail */ #[Example] public int $tail = 2; }\n",
++        "public function existing() {}",
++        false,
++    );
++}

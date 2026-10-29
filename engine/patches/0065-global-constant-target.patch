@@ -1,0 +1,862 @@
+diff --git a/docs/CHANGELOG.md b/docs/CHANGELOG.md
+index c17547b..426f5da 100644
+--- a/docs/CHANGELOG.md
++++ b/docs/CHANGELOG.md
+@@ -15,6 +15,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
+ 
+ ## [Unreleased]
+ 
++- **Global constants follow the project PHP target.** Completion and hover exclude newer or removed built-in constants while preserving project polyfills and package release notes. Fully qualified `\define()` calls retain their declared constant names. Contributed by PHP Workbench downstream.
++
+ - **Built-in suggestions follow the project PHP version.** Class constants and sibling declarations introduced in newer PHP releases stay unavailable on older targets. Navigation opens the matching bundled source while preserving project declarations. Contributed by PHP Workbench downstream.
+ 
+ - **Formatting preserves unchanged surrounding code.** Formatting edits retain shared leading and trailing text, including Unicode and CRLF boundaries, so token rewrites in one function do not replace untouched functions after it. Contributed by PHP Workbench downstream.
+diff --git a/src/lib.rs b/src/lib.rs
+index 252ccb6..9940c42 100644
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -2418,8 +2418,20 @@ impl Backend {
+                     .or_insert_with(|| source.contains("@since"))
+                     || !stubs::is_stub_class_introduced_after(source, name, version))
+         });
++        // A shared file can declare thousands of constants. Associate metadata
++        // with actual declarations once per source, preserving admitted alternatives.
++        let mut constant_unavailable: HashMap<(usize, usize), HashSet<String>> = HashMap::new();
+         self.stub_constant_index.write().retain(|name, source| {
+-            !may_be_removed(source) || !stubs::is_stub_constant_removed(source, name, version)
++            let unavailable = constant_unavailable
++                .entry((source.as_ptr() as usize, source.len()))
++                .or_insert_with(|| {
++                    if source.contains("@since") || source.contains("@removed") {
++                        Self::unavailable_builtin_constant_names(source, version)
++                    } else {
++                        HashSet::new()
++                    }
++                });
++            !unavailable.contains(*name)
+         });
+         *self.workspace.active_php_target.write() =
+             Some(workbench_active_target::ActiveTarget::applied(
+diff --git a/src/parser/ast_update.rs b/src/parser/ast_update.rs
+index 2b77461..5e0c5a1 100644
+--- a/src/parser/ast_update.rs
++++ b/src/parser/ast_update.rs
+@@ -1214,16 +1214,18 @@ impl Backend {
+                 &mut define_entries,
+                 content,
+                 None,
++                Some(&doc_ctx),
+             );
+             let defines: Vec<(String, DefineInfo)> = define_entries
+                 .into_iter()
+-                .map(|(name, offset, value)| {
++                .filter(|declaration| declaration.available)
++                .map(|declaration| {
+                     (
+-                        name,
++                        declaration.name,
+                         DefineInfo {
+                             file_uri: uri.to_string(),
+-                            name_offset: offset,
+-                            value,
++                            name_offset: declaration.name_offset,
++                            value: declaration.value,
+                         },
+                     )
+                 })
+diff --git a/src/parser/functions.rs b/src/parser/functions.rs
+index 2c72f47..22c8cde 100644
+--- a/src/parser/functions.rs
++++ b/src/parser/functions.rs
+@@ -16,6 +16,15 @@ use super::{
+     is_removed_for_version, merge_deprecation_info,
+ };
+ 
++/// A parsed constant keeps its target admission until the publication phase.
++/// Names remain exact: namespace-qualified `const`, literal names for `define`.
++pub(super) struct ParsedDefine {
++    pub name: String,
++    pub name_offset: u32,
++    pub value: Option<String>,
++    pub available: bool,
++}
++
+ /// Try to extract the guarded function name from a
+ /// `if (! function_exists('name'))` condition.
+ ///
+@@ -549,19 +558,33 @@ impl Backend {
+     ///
+     /// Uses the parsed AST rather than regex, so it piggybacks on the
+     /// parse pass that `update_ast` already performs.
+-    pub(crate) fn extract_defines_from_statements<'a>(
++    pub(super) fn extract_defines_from_statements<'a>(
+         statements: impl Iterator<Item = &'a Statement<'a>>,
+-        defines: &mut Vec<(String, u32, Option<String>)>,
++        defines: &mut Vec<ParsedDefine>,
+         content: &str,
+         namespace: Option<&str>,
++        doc_ctx: Option<&DocblockCtx<'a>>,
+     ) {
+         for statement in statements {
++            let available = !matches!(statement, Statement::Expression(_) | Statement::Constant(_))
++                || !doc_ctx.is_some_and(|ctx| {
++                    ctx.stub_introductions
++                        && ctx.php_version.is_some_and(|version| {
++                            super::is_future_builtin_declaration(statement, doc_ctx)
++                                || is_removed_for_version(statement, ctx, version)
++                        })
++                });
+             match statement {
+                 Statement::Expression(expr_stmt) => {
+                     if let Some(entry) =
+                         Self::try_extract_define_info(expr_stmt.expression, content)
+                     {
+-                        defines.push(entry);
++                        defines.push(ParsedDefine {
++                            name: entry.0,
++                            name_offset: entry.1,
++                            value: entry.2,
++                            available,
++                        });
+                     }
+                 }
+                 // Handle namespace-level const declarations
+@@ -575,7 +598,12 @@ impl Backend {
+                             Some(ns) => format!("{ns}\\{name}"),
+                             None => name.to_string(),
+                         };
+-                        defines.push((fqn, item.name.span.start.offset, value));
++                        defines.push(ParsedDefine {
++                            name: fqn,
++                            name_offset: item.name.span.start.offset,
++                            value,
++                            available,
++                        });
+                     }
+                 }
+                 Statement::Namespace(ns_stmt) => {
+@@ -589,6 +617,7 @@ impl Backend {
+                         defines,
+                         content,
+                         inner.or(namespace),
++                        doc_ctx,
+                     );
+                 }
+                 Statement::Block(block) => {
+@@ -597,10 +626,17 @@ impl Backend {
+                         defines,
+                         content,
+                         namespace,
++                        doc_ctx,
+                     );
+                 }
+                 Statement::If(if_stmt) => {
+-                    Self::extract_defines_from_if_body(&if_stmt.body, defines, content, namespace);
++                    Self::extract_defines_from_if_body(
++                        &if_stmt.body,
++                        defines,
++                        content,
++                        namespace,
++                        doc_ctx,
++                    );
+                 }
+                 Statement::Class(class) => {
+                     for member in class.members.iter() {
+@@ -612,6 +648,7 @@ impl Backend {
+                                 defines,
+                                 content,
+                                 namespace,
++                                doc_ctx,
+                             );
+                         }
+                     }
+@@ -626,6 +663,7 @@ impl Backend {
+                                 defines,
+                                 content,
+                                 namespace,
++                                doc_ctx,
+                             );
+                         }
+                     }
+@@ -640,6 +678,7 @@ impl Backend {
+                                 defines,
+                                 content,
+                                 namespace,
++                                doc_ctx,
+                             );
+                         }
+                     }
+@@ -650,6 +689,7 @@ impl Backend {
+                         defines,
+                         content,
+                         namespace,
++                        doc_ctx,
+                     );
+                 }
+                 _ => {}
+@@ -661,9 +701,10 @@ impl Backend {
+     /// calls.  Mirrors `extract_functions_from_if_body`.
+     fn extract_defines_from_if_body<'a>(
+         body: &'a IfBody<'a>,
+-        defines: &mut Vec<(String, u32, Option<String>)>,
++        defines: &mut Vec<ParsedDefine>,
+         content: &str,
+         namespace: Option<&str>,
++        doc_ctx: Option<&DocblockCtx<'a>>,
+     ) {
+         match body {
+             IfBody::Statement(body) => {
+@@ -672,6 +713,7 @@ impl Backend {
+                     defines,
+                     content,
+                     namespace,
++                    doc_ctx,
+                 );
+                 for else_if in body.else_if_clauses.iter() {
+                     Self::extract_defines_from_statements(
+@@ -679,6 +721,7 @@ impl Backend {
+                         defines,
+                         content,
+                         namespace,
++                        doc_ctx,
+                     );
+                 }
+                 if let Some(else_clause) = &body.else_clause {
+@@ -687,6 +730,7 @@ impl Backend {
+                         defines,
+                         content,
+                         namespace,
++                        doc_ctx,
+                     );
+                 }
+             }
+@@ -696,6 +740,7 @@ impl Backend {
+                     defines,
+                     content,
+                     namespace,
++                    doc_ctx,
+                 );
+                 for else_if in body.else_if_clauses.iter() {
+                     Self::extract_defines_from_statements(
+@@ -703,6 +748,7 @@ impl Backend {
+                         defines,
+                         content,
+                         namespace,
++                        doc_ctx,
+                     );
+                 }
+                 if let Some(else_clause) = &body.else_clause {
+@@ -711,6 +757,7 @@ impl Backend {
+                         defines,
+                         content,
+                         namespace,
++                        doc_ctx,
+                     );
+                 }
+             }
+@@ -734,7 +781,9 @@ impl Backend {
+                 Expression::Identifier(ident) => ident,
+                 _ => return None,
+             };
+-            if !ident.value().eq_ignore_ascii_case(b"define") {
++            let name = ident.value();
++            let name = name.strip_prefix(b"\\").unwrap_or(name);
++            if !name.eq_ignore_ascii_case(b"define") {
+                 return None;
+             }
+             let args: Vec<_> = func_call.argument_list.arguments.iter().collect();
+diff --git a/src/parser/mod.rs b/src/parser/mod.rs
+index fd8c33b..44bd10d 100644
+--- a/src/parser/mod.rs
++++ b/src/parser/mod.rs
+@@ -1682,11 +1682,58 @@ impl Backend {
+                 &mut defines,
+                 content,
+                 None,
++                None,
+             );
+             defines
++                .into_iter()
++                .map(|declaration| (declaration.name, declaration.name_offset, declaration.value))
++                .collect()
+         })
+     }
+ 
++    /// Classify each embedded source once; an admitted alternative preserves
++    /// the exact constant name even when another declaration is unavailable.
++    pub(crate) fn unavailable_builtin_constant_names(
++        content: &str,
++        version: PhpVersion,
++    ) -> HashSet<String> {
++        with_parsed_program(
++            content,
++            "parse_builtin_constant_versions",
++            |program, content| {
++                let ctx = DocblockCtx {
++                    trivias: program.trivia.as_slice(),
++                    content,
++                    php_version: Some(version),
++                    stub_introductions: true,
++                    defer_inferred_name_resolution: false,
++                    use_map: HashMap::new(),
++                    namespace: None,
++                    scope_attribute_offsets: None,
++                };
++                let mut declarations = Vec::new();
++                Self::extract_defines_from_statements(
++                    program.statements.iter(),
++                    &mut declarations,
++                    content,
++                    None,
++                    Some(&ctx),
++                );
++                let mut available: HashMap<String, bool> = HashMap::new();
++                for declaration in declarations {
++                    available
++                        .entry(declaration.name)
++                        .and_modify(|admitted| *admitted |= declaration.available)
++                        .or_insert(declaration.available);
++                }
++                available
++                    .into_iter()
++                    .filter_map(|(name, admitted)| (!admitted).then_some(name))
++                    .collect()
++            },
++        )
++    }
++
+     /// Parse PHP source text and extract `use` statement mappings.
+     ///
+     /// Returns a `HashMap` mapping short (imported) names to their
+diff --git a/tests/integration/main.rs b/tests/integration/main.rs
+index 1dd2ee9..f3020c8 100644
+--- a/tests/integration/main.rs
++++ b/tests/integration/main.rs
+@@ -284,6 +284,7 @@ mod workbench_views;
+ 
+ mod blade_generated_diagnostics;
+ 
++mod stub_global_constant_versions;
+ mod stub_global_siblings;
+ mod stub_method_versions;
+ 
+diff --git a/tests/integration/stub_global_constant_versions.rs b/tests/integration/stub_global_constant_versions.rs
+new file mode 100644
+index 0000000..717657d
+--- /dev/null
++++ b/tests/integration/stub_global_constant_versions.rs
+@@ -0,0 +1,514 @@
++//! Built-in global constants follow their target without changing package metadata.
++use crate::common::{complete_at, create_psr4_workspace, hover_text_at, open_php};
++use phpantom_lsp::{Backend, types::PhpVersion};
++use std::collections::HashMap;
++use tower_lsp::lsp_types::{CompletionItemKind, Url};
++
++const GLOBAL_TARGET_SOURCE: &str = r#"<?php
++namespace {
++    const GLOBAL_TARGET_STABLE = 73031;
++    /** @since 8.2 */
++    const GLOBAL_TARGET_FUTURE = 73032, GLOBAL_TARGET_FUTURE_SECOND = 73033;
++    const GLOBAL_TARGET_ADJACENT = 73034;
++    /** @since 8.2 */
++    define('GLOBAL_TARGET_FUTURE_DEFINE', 73035);
++    define('GLOBAL_TARGET_ADJACENT_DEFINE', 73036);
++    /** @removed 8.2 */
++    const GLOBAL_TARGET_REMOVED = 73040;
++    /** @removed 8.2 */
++    define('GLOBAL_TARGET_REMOVED_DEFINE', 73041);
++    /** @since PECL 9.0 */
++    const GLOBAL_TARGET_EXTENSION_RELEASE = 73037;
++    class GlobalTargetCarrier { public const STABLE = 73038; }
++    function global_target_trigger(): int { return 73039; }
++}
++namespace GlobalTargetNs {
++    /** @since 8.2 */
++    const FUTURE = 73100;
++    const STABLE = 73101;
++    /** @since 8.2 */
++    define('GlobalTargetExplicit\FUTURE_DEFINE', 73102);
++    define('GLOBAL_TARGET_EXACT_GLOBAL', 73103);
++}
++"#;
++
++fn global_target_backend(minor: u8) -> Backend {
++    let constants: HashMap<_, _> = [
++        "GLOBAL_TARGET_STABLE",
++        "GLOBAL_TARGET_FUTURE",
++        "GLOBAL_TARGET_FUTURE_SECOND",
++        "GLOBAL_TARGET_ADJACENT",
++        "GLOBAL_TARGET_FUTURE_DEFINE",
++        "GLOBAL_TARGET_ADJACENT_DEFINE",
++        "GLOBAL_TARGET_EXTENSION_RELEASE",
++        "GlobalTargetNs\\FUTURE",
++        "GlobalTargetNs\\STABLE",
++        "GLOBAL_TARGET_REMOVED",
++        "GLOBAL_TARGET_REMOVED_DEFINE",
++        "GlobalTargetExplicit\\FUTURE_DEFINE",
++        "GLOBAL_TARGET_EXACT_GLOBAL",
++    ]
++    .into_iter()
++    .map(|name| (name, GLOBAL_TARGET_SOURCE))
++    .collect();
++    let backend = Backend::new_test_with_all_stubs(
++        HashMap::from([("GlobalTargetCarrier", GLOBAL_TARGET_SOURCE)]),
++        HashMap::from([("global_target_trigger", GLOBAL_TARGET_SOURCE)]),
++        HashMap::new(),
++    );
++    // Seed the target snapshot before any query. The constructor has already
++    // filtered its default target; these tests do not promote a filtered cache.
++    backend.stub_constant_index_mut().extend(constants);
++    backend.set_php_version(PhpVersion::new(8, minor));
++    backend
++}
++
++async fn global_completion_names(backend: &Backend, prefix: &str) -> Vec<String> {
++    let source = format!("<?php\necho {prefix}");
++    complete_at(
++        backend,
++        &Url::parse("file:///global-target-completion.php").unwrap(),
++        &source,
++        1,
++        ("echo ".len() + prefix.encode_utf16().count()) as u32,
++    )
++    .await
++    .into_iter()
++    .filter(|item| item.kind == Some(CompletionItemKind::CONSTANT))
++    .map(|item| item.filter_text.unwrap_or(item.label))
++    .collect()
++}
++
++async fn global_target_hover(backend: &Backend, name: &str) -> Option<String> {
++    let uri = Url::parse("file:///global-target-hover.php").unwrap();
++    let source = format!("<?php\necho \\{name};\n");
++    open_php(backend, &uri, &source).await;
++    // Enter the actual identifier after `echo \`; all fixture names ASCII.
++    hover_text_at(backend, &uri, 1, 8).await
++}
++
++async fn assert_global_target_matrix(backend: &Backend, minor: u8) {
++    let names = global_completion_names(backend, "GLOBAL_TARGET_").await;
++    for name in [
++        "GLOBAL_TARGET_STABLE",
++        "GLOBAL_TARGET_ADJACENT",
++        "GLOBAL_TARGET_ADJACENT_DEFINE",
++        "GLOBAL_TARGET_EXTENSION_RELEASE",
++        "GLOBAL_TARGET_EXACT_GLOBAL",
++    ] {
++        assert!(
++            names.iter().any(|got| got == name),
++            "missing stable {name}: {names:?}"
++        );
++        assert!(
++            global_target_hover(backend, name).await.is_some(),
++            "missing stable hover {name}"
++        );
++    }
++    for (name, value) in [
++        ("GLOBAL_TARGET_FUTURE", "73032"),
++        ("GLOBAL_TARGET_FUTURE_SECOND", "73033"),
++        ("GLOBAL_TARGET_FUTURE_DEFINE", "73035"),
++    ] {
++        assert_eq!(
++            names.iter().any(|got| got == name),
++            minor >= 2,
++            "completion {name} 8.{minor}"
++        );
++        let hover = global_target_hover(backend, name).await;
++        assert_eq!(
++            hover.is_some(),
++            minor >= 2,
++            "hover {name} 8.{minor}: {hover:?}"
++        );
++        if let Some(hover) = hover {
++            assert!(hover.contains(value), "wrong constant identity: {hover}");
++        }
++    }
++    for name in ["GLOBAL_TARGET_REMOVED", "GLOBAL_TARGET_REMOVED_DEFINE"] {
++        assert_eq!(
++            names.iter().any(|got| got == name),
++            minor < 2,
++            "removed completion {name} 8.{minor}"
++        );
++        assert_eq!(
++            global_target_hover(backend, name).await.is_some(),
++            minor < 2,
++            "removed hover {name} 8.{minor}"
++        );
++    }
++}
++
++#[tokio::test]
++async fn global_constant_target_cold_completion_and_hover_use_numeric_introductions() {
++    for minor in [1, 2] {
++        let backend = global_target_backend(minor);
++        assert!(
++            !backend
++                .global_defines()
++                .read()
++                .contains_key("GLOBAL_TARGET_STABLE")
++        );
++        // First query is completion: a lazy hover must not be necessary to
++        // filter the cold embedded constant index.
++        assert_global_target_matrix(&backend, minor).await;
++    }
++}
++
++#[tokio::test]
++async fn global_constant_target_stable_global_first_cannot_publish_future_siblings() {
++    for minor in [1, 2] {
++        let backend = global_target_backend(minor);
++        let hover = global_target_hover(&backend, "GLOBAL_TARGET_STABLE")
++            .await
++            .unwrap();
++        assert!(hover.contains("73031"));
++        assert!(
++            backend
++                .global_defines()
++                .read()
++                .contains_key("GLOBAL_TARGET_STABLE"),
++            "actual trusted global publisher must run"
++        );
++        assert_global_target_matrix(&backend, minor).await;
++    }
++}
++
++#[tokio::test]
++async fn global_constant_target_future_first_hover_cannot_bypass_cold_admission() {
++    for minor in [1, 2] {
++        for name in ["GLOBAL_TARGET_FUTURE", "GLOBAL_TARGET_FUTURE_DEFINE"] {
++            let backend = global_target_backend(minor);
++            assert!(
++                !backend
++                    .global_defines()
++                    .read()
++                    .contains_key("GLOBAL_TARGET_STABLE")
++            );
++            assert_eq!(
++                global_target_hover(&backend, name).await.is_some(),
++                minor >= 2,
++                "first lookup of {name} bypassed target8.{minor}"
++            );
++            assert!(
++                global_target_hover(&backend, "GLOBAL_TARGET_STABLE")
++                    .await
++                    .is_some()
++            );
++        }
++    }
++}
++
++#[tokio::test]
++async fn global_constant_target_function_and_class_first_keep_global_admission() {
++    for minor in [1, 2] {
++        for function_first in [false, true] {
++            let backend = global_target_backend(minor);
++            if function_first {
++                assert!(
++                    backend
++                        .find_or_load_function(&["global_target_trigger"])
++                        .is_some()
++                );
++            } else {
++                let source = "<?php\nGlobalTargetCarrier::";
++                let items = complete_at(
++                    &backend,
++                    &Url::parse("file:///global-target-class-query.php").unwrap(),
++                    source,
++                    1,
++                    "GlobalTargetCarrier::".len() as u32,
++                )
++                .await;
++                assert!(items.iter().any(|item| item.label == "STABLE"));
++            }
++            assert_global_target_matrix(&backend, minor).await;
++        }
++    }
++}
++
++#[tokio::test]
++async fn global_constant_target_namespace_and_explicit_define_names_are_exact() {
++    for minor in [1, 2] {
++        let backend = global_target_backend(minor);
++        assert!(
++            global_target_hover(&backend, "GLOBAL_TARGET_STABLE")
++                .await
++                .is_some()
++        );
++        for (name, available, value) in [
++            ("GlobalTargetNs\\STABLE", true, "73101"),
++            ("GlobalTargetNs\\FUTURE", minor >= 2, "73100"),
++            ("GlobalTargetExplicit\\FUTURE_DEFINE", minor >= 2, "73102"),
++            ("GLOBAL_TARGET_EXACT_GLOBAL", true, "73103"),
++        ] {
++            let hover = global_target_hover(&backend, name).await;
++            assert_eq!(
++                hover.is_some(),
++                available,
++                "exact global name {name} 8.{minor}: {hover:?}"
++            );
++            if let Some(hover) = hover {
++                assert!(hover.contains(value));
++            }
++        }
++        for wrong in [
++            "FUTURE",
++            "GlobalTargetNs\\GLOBAL_TARGET_EXACT_GLOBAL",
++            "GlobalTargetNs\\GlobalTargetExplicit\\FUTURE_DEFINE",
++        ] {
++            assert!(
++                global_target_hover(&backend, wrong).await.is_none(),
++                "namespace leaked into explicit define identity: {wrong}"
++            );
++        }
++    }
++}
++
++const PROJECT_GLOBAL_RELEASE_NOTES: &str = r#"<?php
++namespace {
++/** @since 99.0 */
++const PROJECT_GLOBAL_SINCE_NOTE = 73201;
++/** @since 99.0 */
++define('PROJECT_GLOBAL_DEFINE_NOTE', 73202);
++}
++namespace ProjectGlobalNotes {
++    /** @since 99.0 */
++    const NAMESPACE_NOTE = 73203;
++}
++"#;
++
++async fn assert_project_global_notes(backend: &Backend) {
++    for (name, value) in [
++        ("PROJECT_GLOBAL_SINCE_NOTE", "73201"),
++        ("PROJECT_GLOBAL_DEFINE_NOTE", "73202"),
++        ("ProjectGlobalNotes\\NAMESPACE_NOTE", "73203"),
++    ] {
++        let hover = global_target_hover(backend, name)
++            .await
++            .expect("package release note is not PHP builtin authority");
++        assert!(hover.contains(value));
++    }
++    let names = global_completion_names(backend, "PROJECT_GLOBAL_").await;
++    for name in ["PROJECT_GLOBAL_SINCE_NOTE", "PROJECT_GLOBAL_DEFINE_NOTE"] {
++        assert!(names.iter().any(|got| got == name));
++    }
++}
++
++#[tokio::test]
++async fn global_constant_target_ordinary_project_release_notes_are_not_builtin_metadata() {
++    let backend = global_target_backend(1);
++    open_php(
++        &backend,
++        &Url::parse("file:///project-global-release-notes.php").unwrap(),
++        PROJECT_GLOBAL_RELEASE_NOTES,
++    )
++    .await;
++    assert_project_global_notes(&backend).await;
++}
++
++#[tokio::test]
++async fn global_constant_target_composer_autoload_files_keep_package_release_notes() {
++    let (backend, dir) = create_psr4_workspace(
++        r#"{"autoload":{"files":["package/notes.php"]}}"#,
++        &[("package/notes.php", PROJECT_GLOBAL_RELEASE_NOTES)],
++    );
++    backend.set_php_version(PhpVersion::new(8, 1));
++    // Use the production constant autoload fallback's declared file list,
++    // without didOpening package source or pretending it is an embedded stub.
++    backend
++        .autoload_file_paths()
++        .write()
++        .push(dir.path().join("package/notes.php"));
++    assert_project_global_notes(&backend).await;
++    assert_eq!(
++        std::fs::read_to_string(dir.path().join("package/notes.php")).unwrap(),
++        PROJECT_GLOBAL_RELEASE_NOTES
++    );
++}
++
++#[tokio::test]
++async fn global_constant_target_alternative_declarations_keep_an_available_identity() {
++    const SOURCE: &str = r#"<?php
++const ALTERNATIVE_STABLE = 73900;
++if (PHP_VERSION_ID >= 80200) {
++    /** @since 8.2 */
++    define('ALTERNATIVE_SHARED', 73901);
++} else {
++    /** @removed 8.2 */
++    define('ALTERNATIVE_SHARED', 73902);
++}
++"#;
++    for minor in [1, 2] {
++        let backend = Backend::new_test_with_all_stubs(
++            HashMap::new(),
++            HashMap::new(),
++            HashMap::from([
++                ("ALTERNATIVE_STABLE", SOURCE),
++                ("ALTERNATIVE_SHARED", SOURCE),
++            ]),
++        );
++        backend.set_php_version(PhpVersion::new(8, minor));
++        let names = global_completion_names(&backend, "ALTERNATIVE_").await;
++        assert!(names.iter().any(|name| name == "ALTERNATIVE_SHARED"));
++        assert!(
++            global_target_hover(&backend, "ALTERNATIVE_STABLE")
++                .await
++                .unwrap()
++                .contains("73900")
++        );
++        let value = if minor == 1 { "73902" } else { "73901" };
++        assert!(
++            global_target_hover(&backend, "ALTERNATIVE_SHARED")
++                .await
++                .unwrap()
++                .contains(value)
++        );
++    }
++}
++
++#[tokio::test]
++async fn global_constant_target_older_project_polyfill_keeps_exact_builtin_spelling() {
++    // On 8.1 this name is absent from the real runtime builtin surface, so a
++    // project polyfill with this exact spelling is a valid authority control.
++    let backend = global_target_backend(1);
++    let uri = Url::parse("file:///global-target-polyfill.php").unwrap();
++    let source = r#"<?php
++/** @since 99.0
++ * @removed 8.1
++ */
++const GLOBAL_TARGET_FUTURE = 73901;
++/** @removed 8.1 */
++const PROJECT_GLOBAL_REMOVED_PACKAGE_NOTE = 73902;
++"#;
++    open_php(&backend, &uri, source).await;
++    let before = global_target_hover(&backend, "GLOBAL_TARGET_FUTURE")
++        .await
++        .unwrap();
++    assert!(before.contains("73901"));
++    assert!(
++        global_target_hover(&backend, "GLOBAL_TARGET_STABLE")
++            .await
++            .unwrap()
++            .contains("73031")
++    );
++    // Warm publication of the whole trusted source cannot overwrite/remove
++    // the project definition merely because a forbidden sibling has its name.
++    let after = global_target_hover(&backend, "GLOBAL_TARGET_FUTURE")
++        .await
++        .unwrap();
++    assert!(
++        after.contains("73901"),
++        "polyfill lost project identity: {after}"
++    );
++    assert!(!after.contains("73032"));
++    assert!(
++        global_target_hover(&backend, "PROJECT_GLOBAL_REMOVED_PACKAGE_NOTE")
++            .await
++            .unwrap()
++            .contains("73902")
++    );
++    let names = global_completion_names(&backend, "GLOBAL_TARGET_FUTURE").await;
++    assert!(names.iter().any(|name| name == "GLOBAL_TARGET_FUTURE"));
++}
++
++#[tokio::test]
++async fn global_constant_target_client_stub_uri_does_not_authorize_global_release_notes() {
++    let backend = global_target_backend(1);
++    // This is a legitimate-looking identity, delivered only via ordinary
++    // didOpen. The trusted index loader is never invoked with these bytes.
++    let uri = Url::parse("phpantom-stub://const/CLIENT_GLOBAL_TARGET_NOTES").unwrap();
++    let source = r#"<?php
++/** @since 99.0 */
++const CLIENT_GLOBAL_SINCE_NOTE = 73911;
++/** @removed 8.1 */
++define('CLIENT_GLOBAL_REMOVED_NOTE', 73912);
++"#;
++    open_php(&backend, &uri, source).await;
++    for (name, value) in [
++        ("CLIENT_GLOBAL_SINCE_NOTE", "73911"),
++        ("CLIENT_GLOBAL_REMOVED_NOTE", "73912"),
++    ] {
++        let hover = global_target_hover(&backend, name)
++            .await
++            .expect("URI spelling must not grant metadata authority");
++        assert!(hover.contains(value));
++    }
++    let names = global_completion_names(&backend, "CLIENT_GLOBAL_").await;
++    for name in ["CLIENT_GLOBAL_SINCE_NOTE", "CLIENT_GLOBAL_REMOVED_NOTE"] {
++        assert!(names.iter().any(|got| got == name));
++    }
++}
++
++#[tokio::test]
++async fn global_constant_target_composer_removed_tag_is_package_metadata() {
++    const PACKAGE_NOTES: &str = r#"<?php
++/** @since 99.0 */
++const COMPOSER_GLOBAL_SINCE_NOTE = 73921;
++/** @removed 8.1 */
++define('COMPOSER_GLOBAL_REMOVED_NOTE', 73922);
++"#;
++    let (backend, dir) = create_psr4_workspace(
++        r#"{"autoload":{"files":["package/notes.php"]}}"#,
++        &[("package/notes.php", PACKAGE_NOTES)],
++    );
++    backend.set_php_version(PhpVersion::new(8, 1));
++    backend
++        .autoload_file_paths()
++        .write()
++        .push(dir.path().join("package/notes.php"));
++    for (name, value) in [
++        ("COMPOSER_GLOBAL_SINCE_NOTE", "73921"),
++        ("COMPOSER_GLOBAL_REMOVED_NOTE", "73922"),
++    ] {
++        let hover = global_target_hover(&backend, name)
++            .await
++            .expect("package versions do not govern PHP builtin admission");
++        assert!(hover.contains(value));
++    }
++    assert_eq!(
++        std::fs::read_to_string(dir.path().join("package/notes.php")).unwrap(),
++        PACKAGE_NOTES
++    );
++}
++
++#[tokio::test]
++async fn global_constant_target_fully_qualified_define_matches_only_builtin_identity() {
++    const QUALIFIED: &str = r#"<?php
++namespace GlobalQualified {
++    /** @since 8.2 */
++    \define('GLOBAL_QUALIFIED_FUTURE', 73931);
++    \define('GlobalQualifiedExplicit\STABLE', 73932);
++    Different\define('GLOBAL_QUALIFIED_NOT_BUILTIN', 73933);
++}
++"#;
++    for minor in [1, 2] {
++        let backend = Backend::new_test_with_all_stubs(
++            HashMap::new(),
++            HashMap::new(),
++            HashMap::from([
++                ("GLOBAL_QUALIFIED_FUTURE", QUALIFIED),
++                ("GlobalQualifiedExplicit\\STABLE", QUALIFIED),
++            ]),
++        );
++        backend.set_php_version(PhpVersion::new(8, minor));
++        let stable = global_target_hover(&backend, "GlobalQualifiedExplicit\\STABLE")
++            .await
++            .unwrap();
++        assert!(
++            stable.contains("73932"),
++            "qualified builtin define must retain exact literal name/value"
++        );
++        let future = global_target_hover(&backend, "GLOBAL_QUALIFIED_FUTURE").await;
++        assert_eq!(future.is_some(), minor >= 2);
++        if let Some(future) = future {
++            assert!(future.contains("73931"));
++        }
++        assert!(
++            global_target_hover(&backend, "GLOBAL_QUALIFIED_NOT_BUILTIN")
++                .await
++                .is_none(),
++            "qualified nonbuiltin call must not register a global define"
++        );
++    }
++}

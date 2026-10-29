@@ -1,0 +1,2132 @@
+diff --git a/docs/CHANGELOG.md b/docs/CHANGELOG.md
+index ddd70c2..7857b55 100644
+--- a/docs/CHANGELOG.md
++++ b/docs/CHANGELOG.md
+@@ -15,6 +15,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
+ 
+ ## [Unreleased]
+ 
++- **Explain incomplete call hierarchies.** Editors using the Workbench hierarchy extension receive known calls together with unresolved source locations and analysis limits. Empty results distinguish inspected code from unavailable analysis. Contributed by PHP Workbench downstream.
++
+ - **Follow stored callable values.** Call hierarchy follows locally stored callbacks through value copies, reference cells, branch alternatives and known array-selector changes while keeping callable creation separate from later invocation. Captured receivers retain their creation-time target. Contributed by PHP Workbench downstream.
+ 
+ - **Refresh changed call hierarchy declarations.** Expanding a retained function or method after its source changes now requires a fresh hierarchy selection. Unchanged declarations remain usable when another file is edited. Contributed by PHP Workbench downstream.
+diff --git a/docs/todo.md b/docs/todo.md
+index 52058d0..4f4771d 100644
+--- a/docs/todo.md
++++ b/docs/todo.md
+@@ -48,6 +48,8 @@ contributor even though it's short.
+ | D26  | [Reading a typed property that nothing initialises is not reported](todo/diagnostics.md#d26-reading-a-typed-property-that-nothing-initialises-is-not-reported) | Low-Medium | Medium-High |
+ | L1  | [Facade completion](todo/laravel.md#l1-facade-completion-upstream-method-generator-improvement) (upstream `facade-documenter` PRs)                              | High        | High        |
+ | E2  | [Project-level stubs as type resolution source](todo/external-stubs.md#e2-project-level-stubs-as-resolution-source) (depends on E1)                             | Medium      | High        |
++| F24 | [Preserve unresolved hierarchy target alternatives](todo/lsp-features.md#f24-preserve-unresolved-hierarchy-target-alternatives) | Medium | High |
++| F25 | [Account for unavailable workspace hierarchy sources](todo/lsp-features.md#f25-account-for-unavailable-workspace-hierarchy-sources) | Medium | Medium-High |
+ | F20 | [Migrate to the maintained `tower-lsp` fork](todo/lsp-features.md#f20-migrate-to-the-maintained-tower-lsp-fork)                                              | Low-Medium  | Very High   |
+ | F21 | [Static `typeHierarchyProvider` advertisement](todo/lsp-features.md#f21-static-typehierarchyprovider-advertisement-depends-on-f20) (depends on F20; also needs an upstream `lsp-types` fix) | Low-Medium  |
+ | BL1  | [Blade-aware code actions](todo/blade.md#bl1-blade-aware-code-actions)                                                      | Medium     | Medium-High | Low         |
+diff --git a/docs/todo/lsp-features.md b/docs/todo/lsp-features.md
+index 013f6ef..1100aca 100644
+--- a/docs/todo/lsp-features.md
++++ b/docs/todo/lsp-features.md
+@@ -603,3 +603,29 @@ escaping" rather than a bare PHP one.
+ (`find_references_inner`), `src/rename/validate.rs`
+ (`Expected`, `is_name_token`), `src/rename/class.rs`
+ (`build_class_move_edit`).
++
++
++## F24. Preserve unresolved hierarchy target alternatives
++
++**Impact: Medium · Complexity: High**
++
++The Workbench call hierarchy extension accounts for inspected invocation sites.
++A known edge at a call site can still mask an unresolved receiver alternative
++when an ordinary member or literal array target has several possible types.
++Expose completeness through the shared callable resolver, retain all known
++edges, and report the original call site as partial when any alternative cannot
++be resolved. Cover missing and magic methods, branch unions and selectors
++without introducing a second type-resolution path.
++
++## F25. Account for unavailable workspace hierarchy sources
++
++**Impact: Medium · Complexity: Medium-High**
++
++Incoming hierarchy coverage currently inspects published user symbol maps.
++A workspace file skipped before map publication, such as an unreadable or
++non-UTF8 source, is outside that inventory. Retain indexing admission/failure
++receipts so hierarchy can distinguish excluded files from unavailable source,
++then report partial workspace coverage without reading excluded files or
++inventing caller nodes. The invocation coverage budget bounds analysis after
++index construction; whole-file parsing and legacy edge resolution still need
++independent performance/resource acceptance.
+diff --git a/examples/php/definition.php b/examples/php/definition.php
+index 93e9efa..edf103c 100644
+--- a/examples/php/definition.php
++++ b/examples/php/definition.php
+@@ -546,3 +546,15 @@ function storedCallableNavigation(): array
+         'array' => $array('!Y', '2026') instanceof \DateTimeImmutable,
+     ];
+ }
++
++// Try: Show Callees on hierarchyCoverageNavigation in PHP Workbench. The known
++// helper remains visible, and the runtime callback is reported as unresolved.
++// Compare with hierarchyEmptyNavigation, whose inspected body has no calls.
++function hierarchyCoverageNavigation(callable $runtimeCallback): void
++{
++    gtdHelper();
++    $runtimeCallback();
++}
++function hierarchyEmptyNavigation(): void
++{
++}
+diff --git a/src/backend/startup.rs b/src/backend/startup.rs
+index 9be80b6..56659c2 100644
+--- a/src/backend/startup.rs
++++ b/src/backend/startup.rs
+@@ -282,7 +282,7 @@ impl Backend {
+                     ..ExecuteCommandOptions::default()
+                 }),
+                 experimental: Some(
+-                    serde_json::json!({"phpWorkbenchRoutes": true, "phpWorkbenchViews": true, "phpWorkbenchBuiltins": true, "phpWorkbenchActiveTarget": true, "phpWorkbenchRenameChecked": true, (crate::structural_search::wire::EXPERIMENTAL_CAPABILITY): true, (crate::structural_search::wire::REPLACE_EXPERIMENTAL_CAPABILITY): true}),
++                    serde_json::json!({"phpWorkbenchRoutes": true, "phpWorkbenchViews": true, "phpWorkbenchBuiltins": true, "phpWorkbenchActiveTarget": true, "phpWorkbenchRenameChecked": true, "phpWorkbenchCallHierarchyAnalysis": true, (crate::structural_search::wire::EXPERIMENTAL_CAPABILITY): true, (crate::structural_search::wire::REPLACE_EXPERIMENTAL_CAPABILITY): true}),
+                 ),
+                 ..ServerCapabilities::default()
+             },
+diff --git a/src/call_hierarchy.rs b/src/call_hierarchy.rs
+index 17caeb3..e8e312b 100644
+--- a/src/call_hierarchy.rs
++++ b/src/call_hierarchy.rs
+@@ -19,8 +19,11 @@ use tower_lsp::lsp_types::{
+     Range, SymbolKind as LspSymbolKind, Url,
+ };
+ 
++pub(crate) mod status;
+ mod stored;
+ 
++pub(crate) use status::{HierarchyAnalysis, HierarchyIssueKind};
++
+ use crate::Backend;
+ use crate::symbol_map::{
+     AnonymousCallable, AnonymousClassConstruction, ArrayCallableInvocation, CallExecutionOwner,
+@@ -70,6 +73,7 @@ struct FileCache {
+     blade_files: HashMap<String, Option<crate::blade::source_map::BladeHierarchyProjection>>,
+     /// Stored-value flow only; this is not a completeness claim for all calls.
+     stored_value_flow_complete: Option<bool>,
++    analysis: HierarchyAnalysis,
+ }
+ impl FileCache {
+     fn record_stored_completeness(&mut self, complete: bool) {
+@@ -124,20 +128,20 @@ impl Backend {
+         Some(vec![item])
+     }
+ 
+-    pub(crate) fn incoming_calls_impl(
++    fn incoming_calls_items_impl(
+         &self,
+         item: &CallHierarchyItem,
++        cache: &mut FileCache,
+     ) -> Option<Vec<CallHierarchyIncomingCall>> {
+-        let mut cache = FileCache::default();
+-        let target = self.php_callable_from_item(&mut cache, item)?;
++        let target = self.php_callable_from_item(cache, item)?;
+         if target.item.data.as_ref()?.get("file_scope").is_some() {
+             // Includes and runtime entry points are not inferred from file execution.
+             return Some(Vec::new());
+         }
+         if target.item.data.as_ref()?.get("anonymous").is_some() {
+-            return self.incoming_literal_anonymous(&mut cache, &target);
++            return self.incoming_literal_anonymous(cache, &target);
+         }
+-        let (content, _, _) = self.cached_file(&mut cache, target.item.uri.as_str())?;
++        let (content, _, _) = self.cached_file(cache, target.item.uri.as_str())?;
+         let mut references = self
+             .find_references(
+                 target.item.uri.as_str(),
+@@ -170,8 +174,7 @@ impl Backend {
+         let mut grouped: HashMap<String, (CallHierarchyItem, Vec<Range>)> = HashMap::new();
+         for reference in references {
+             let uri = reference.uri.as_str();
+-            let Some((ref_content, symbol_map, source_hash)) = self.cached_file(&mut cache, uri)
+-            else {
++            let Some((ref_content, symbol_map, source_hash)) = self.cached_file(cache, uri) else {
+                 continue;
+             };
+             let offset = position_to_offset(&ref_content, reference.range.start);
+@@ -189,7 +192,7 @@ impl Backend {
+                 continue;
+             }
+             if symbol_map.is_keyword_constructor_span(span) {
+-                let Some(callee) = self.constructor_callable(&mut cache, uri, span) else {
++                let Some(callee) = self.constructor_callable(cache, uri, span) else {
+                     continue;
+                 };
+                 if callee.item.uri != target.item.uri
+@@ -209,9 +212,9 @@ impl Backend {
+                     source_hash.as_ref(),
+                 )
+             } else if self.logical_file_scope_candidate(uri, scope) {
+-                source_hash.as_ref().and_then(|hash| {
+-                    self.logical_file_callable(&mut cache, uri, &ref_content, hash)
+-                })
++                source_hash
++                    .as_ref()
++                    .and_then(|hash| self.logical_file_callable(cache, uri, &ref_content, hash))
+             } else {
+                 self.php_callable_at(uri, &ref_content, &symbol_map, offset, source_hash.as_ref())
+             };
+@@ -246,12 +249,11 @@ impl Backend {
+                 .into_iter()
+                 .filter(|(_, map)| !map.anonymous_class_constructions.is_empty())
+             {
+-                let Some((content, map, Some(hash))) = self.cached_file(&mut cache, &uri) else {
++                let Some((content, map, Some(hash))) = self.cached_file(cache, &uri) else {
+                     continue;
+                 };
+                 for site in &map.anonymous_class_constructions {
+-                    let Some(callee) = self.anonymous_class_constructor(&mut cache, &uri, site)
+-                    else {
++                    let Some(callee) = self.anonymous_class_constructor(cache, &uri, site) else {
+                         continue;
+                     };
+                     if callee.item.uri != target.item.uri
+@@ -260,9 +262,9 @@ impl Backend {
+                     {
+                         continue;
+                     }
+-                    let Some(caller) = self.anonymous_class_creation_caller(
+-                        &mut cache, &uri, &content, &map, &hash, site,
+-                    ) else {
++                    let Some(caller) = self
++                        .anonymous_class_creation_caller(cache, &uri, &content, &map, &hash, site)
++                    else {
+                         continue;
+                     };
+                     let range = byte_range_to_lsp_range(
+@@ -296,11 +298,11 @@ impl Backend {
+                 .into_iter()
+                 .filter(|(_, map)| !map.immediate_object_invocations.is_empty())
+             {
+-                let Some((content, map, Some(hash))) = self.cached_file(&mut cache, &uri) else {
++                let Some((content, map, Some(hash))) = self.cached_file(cache, &uri) else {
+                     continue;
+                 };
+                 for site in &map.immediate_object_invocations {
+-                    let Some(callee) = self.immediate_object_callable(&mut cache, &uri, &map, site)
++                    let Some(callee) = self.immediate_object_callable(cache, &uri, &map, site)
+                     else {
+                         continue;
+                     };
+@@ -311,7 +313,7 @@ impl Backend {
+                         continue;
+                     }
+                     let Some(caller) =
+-                        self.immediate_object_caller(&mut cache, &uri, &content, &map, &hash, site)
++                        self.immediate_object_caller(cache, &uri, &content, &map, &hash, site)
+                     else {
+                         continue;
+                     };
+@@ -365,18 +367,18 @@ impl Backend {
+                 .into_iter()
+                 .filter(|(_, map)| !map.literal_callable_invocations.is_empty())
+             {
+-                let Some((content, map, Some(hash))) = self.cached_file(&mut cache, &uri) else {
++                let Some((content, map, Some(hash))) = self.cached_file(cache, &uri) else {
+                     continue;
+                 };
+                 for site in &map.literal_callable_invocations {
+-                    let Some(callee) = self.literal_callable(&mut cache, &uri, site) else {
++                    let Some(callee) = self.literal_callable(cache, &uri, site) else {
+                         continue;
+                     };
+                     if php_item_key(&callee.item) != php_item_key(&target.item) {
+                         continue;
+                     }
+                     let Some(caller) =
+-                        self.literal_callable_caller(&mut cache, &uri, &content, &map, &hash, site)
++                        self.literal_callable_caller(cache, &uri, &content, &map, &hash, site)
+                     else {
+                         continue;
+                     };
+@@ -404,19 +406,19 @@ impl Backend {
+                 .into_iter()
+                 .filter(|(_, map)| !map.array_callable_invocations.is_empty())
+             {
+-                let Some((content, map, Some(hash))) = self.cached_file(&mut cache, &uri) else {
++                let Some((content, map, Some(hash))) = self.cached_file(cache, &uri) else {
+                     continue;
+                 };
+                 for site in &map.array_callable_invocations {
+                     if !self
+-                        .array_callables(&mut cache, &uri, &content, &map, site)
++                        .array_callables(cache, &uri, &content, &map, site)
+                         .iter()
+                         .any(|callee| php_item_key(&callee.item) == php_item_key(&target.item))
+                     {
+                         continue;
+                     }
+                     let Some(caller) =
+-                        self.array_callable_caller(&mut cache, &uri, &content, &map, &hash, site)
++                        self.array_callable_caller(cache, &uri, &content, &map, &hash, site)
+                     else {
+                         continue;
+                     };
+@@ -433,7 +435,7 @@ impl Backend {
+             }
+         }
+ 
+-        let stored_complete = self.collect_stored_incoming(&mut cache, &target, &mut grouped);
++        let stored_complete = self.collect_stored_incoming(cache, &target, &mut grouped);
+         cache.record_stored_completeness(stored_complete);
+         let mut calls: Vec<_> = grouped
+             .into_values()
+@@ -455,17 +457,17 @@ impl Backend {
+         Some(calls)
+     }
+ 
+-    pub(crate) fn outgoing_calls_impl(
++    fn outgoing_calls_items_impl(
+         &self,
+         item: &CallHierarchyItem,
++        cache: &mut FileCache,
+     ) -> Option<Vec<CallHierarchyOutgoingCall>> {
+-        let mut cache = FileCache::default();
+-        let callable = self.php_callable_from_item(&mut cache, item)?;
++        let callable = self.php_callable_from_item(cache, item)?;
+         let Some((body_start, body_end)) = callable.body else {
+             return Some(Vec::new());
+         };
+         let uri = callable.item.uri.as_str();
+-        let (content, symbol_map, source_hash) = self.cached_file(&mut cache, uri)?;
++        let (content, symbol_map, source_hash) = self.cached_file(cache, uri)?;
+ 
+         let call_sites: Vec<SymbolSpan> = symbol_map
+             .spans
+@@ -509,13 +511,13 @@ impl Backend {
+                 if matches!(span.kind, SymbolKind::ClassReference { .. })
+                     || symbol_map.is_keyword_constructor_span(&span)
+                 {
+-                    self.constructor_callable(&mut cache, uri, &span)
++                    self.constructor_callable(cache, uri, &span)
+                         .into_iter()
+                         .collect()
+                 } else {
+                     self.resolve_definition(uri, &content, position)
+                         .into_iter()
+-                        .filter_map(|location| self.php_callable_at_location(&mut cache, &location))
++                        .filter_map(|location| self.php_callable_at_location(cache, &location))
+                         .collect()
+                 };
+ 
+@@ -562,7 +564,7 @@ impl Backend {
+         if let Some(source_hash) = source_hash.as_ref() {
+             for site in &symbol_map.anonymous_class_constructions {
+                 let Some(caller) = self.anonymous_class_creation_caller(
+-                    &mut cache,
++                    cache,
+                     uri,
+                     &content,
+                     &symbol_map,
+@@ -577,7 +579,7 @@ impl Backend {
+                 {
+                     continue;
+                 }
+-                let Some(callee) = self.anonymous_class_constructor(&mut cache, uri, site) else {
++                let Some(callee) = self.anonymous_class_constructor(cache, uri, site) else {
+                     continue;
+                 };
+                 let range = byte_range_to_lsp_range(
+@@ -594,14 +596,9 @@ impl Backend {
+ 
+         if let Some(hash) = source_hash.as_ref() {
+             for site in &symbol_map.immediate_object_invocations {
+-                let Some(caller) = self.immediate_object_caller(
+-                    &mut cache,
+-                    uri,
+-                    &content,
+-                    &symbol_map,
+-                    hash,
+-                    site,
+-                ) else {
++                let Some(caller) =
++                    self.immediate_object_caller(cache, uri, &content, &symbol_map, hash, site)
++                else {
+                     continue;
+                 };
+                 if caller.item.uri != callable.item.uri
+@@ -610,8 +607,7 @@ impl Backend {
+                 {
+                     continue;
+                 }
+-                let Some(callee) =
+-                    self.immediate_object_callable(&mut cache, uri, &symbol_map, site)
++                let Some(callee) = self.immediate_object_callable(cache, uri, &symbol_map, site)
+                 else {
+                     continue;
+                 };
+@@ -629,20 +625,15 @@ impl Backend {
+ 
+         if let Some(hash) = source_hash.as_ref() {
+             for site in &symbol_map.literal_callable_invocations {
+-                let Some(caller) = self.literal_callable_caller(
+-                    &mut cache,
+-                    uri,
+-                    &content,
+-                    &symbol_map,
+-                    hash,
+-                    site,
+-                ) else {
++                let Some(caller) =
++                    self.literal_callable_caller(cache, uri, &content, &symbol_map, hash, site)
++                else {
+                     continue;
+                 };
+                 if php_item_key(&caller.item) != php_item_key(&callable.item) {
+                     continue;
+                 }
+-                let Some(callee) = self.literal_callable(&mut cache, uri, site) else {
++                let Some(callee) = self.literal_callable(cache, uri, site) else {
+                     continue;
+                 };
+                 let range = byte_range_to_lsp_range(
+@@ -660,7 +651,7 @@ impl Backend {
+         if let Some(hash) = source_hash.as_ref() {
+             for site in &symbol_map.array_callable_invocations {
+                 let Some(caller) =
+-                    self.array_callable_caller(&mut cache, uri, &content, &symbol_map, hash, site)
++                    self.array_callable_caller(cache, uri, &content, &symbol_map, hash, site)
+                 else {
+                     continue;
+                 };
+@@ -672,7 +663,7 @@ impl Backend {
+                     site.selector_start as usize,
+                     site.selector_end as usize,
+                 );
+-                for callee in self.array_callables(&mut cache, uri, &content, &symbol_map, site) {
++                for callee in self.array_callables(cache, uri, &content, &symbol_map, site) {
+                     grouped
+                         .entry(php_item_key(&callee.item))
+                         .and_modify(|(_, ranges)| push_unique_range(ranges, range))
+@@ -681,7 +672,7 @@ impl Backend {
+             }
+         }
+ 
+-        let stored_complete = self.collect_stored_outgoing(&mut cache, &callable, &mut grouped);
++        let stored_complete = self.collect_stored_outgoing(cache, &callable, &mut grouped);
+         cache.record_stored_completeness(stored_complete);
+         let mut calls: Vec<_> = grouped
+             .into_values()
+diff --git a/src/call_hierarchy/status.rs b/src/call_hierarchy/status.rs
+new file mode 100644
+index 0000000..89c36be
+--- /dev/null
++++ b/src/call_hierarchy/status.rs
+@@ -0,0 +1,711 @@
++//! Per-query observations over actual source invocation sites, not fake graph nodes.
++use super::*;
++use crate::symbol_map::{HierarchyInvocation, HierarchyInvocationKind};
++use serde::{Deserialize, Serialize};
++
++const MAX_COVERAGE_INVOCATIONS: usize = 4096;
++
++fn range_key(range: &Range) -> (u32, u32, u32, u32) {
++    (
++        range.start.line,
++        range.start.character,
++        range.end.line,
++        range.end.character,
++    )
++}
++
++/// One source-authoritative index reused for all inspected callers in a file.
++struct CoverageIndex {
++    calls: HashMap<(u32, u32), usize>,
++    array_ranges: HashMap<(u32, u32), Vec<Range>>,
++    explicit_owners: HashMap<u32, Vec<usize>>,
++    lexical_scopes: HashMap<u32, Vec<usize>>,
++}
++impl CoverageIndex {
++    fn new(map: &SymbolMap, content: &str) -> Self {
++        let mut index = Self {
++            calls: HashMap::new(),
++            array_ranges: HashMap::new(),
++            explicit_owners: HashMap::new(),
++            lexical_scopes: HashMap::new(),
++        };
++        for (position, call) in map.call_sites.iter().enumerate() {
++            index
++                .calls
++                .entry((
++                    call.args_start.saturating_sub(1),
++                    call.args_end.saturating_add(1),
++                ))
++                .or_insert(position);
++        }
++        for array in &map.array_callable_invocations {
++            index
++                .array_ranges
++                .entry((array.invocation_start, array.invocation_end))
++                .or_default()
++                .push(byte_range_to_lsp_range(
++                    content,
++                    array.selector_start as usize,
++                    array.selector_end as usize,
++                ));
++        }
++        for (position, site) in map.hierarchy_invocations.iter().enumerate() {
++            match map.call_execution_owner(site.invocation_start) {
++                Some(CallExecutionOwner::Deferred) => {}
++                Some(CallExecutionOwner::Callable(owner)) => index
++                    .explicit_owners
++                    .entry(owner)
++                    .or_default()
++                    .push(position),
++                None => index
++                    .lexical_scopes
++                    .entry(site.invoking_scope_start)
++                    .or_default()
++                    .push(position),
++            }
++        }
++        index
++    }
++    fn caller_sites(&self, target: &PhpCallable, map: &SymbolMap) -> Vec<usize> {
++        let owner = target
++            .item
++            .data
++            .as_ref()
++            .and_then(|data| data.get("offset"))
++            .and_then(serde_json::Value::as_u64)
++            .and_then(|offset| u32::try_from(offset).ok());
++        let mut positions = owner
++            .and_then(|owner| self.explicit_owners.get(&owner))
++            .cloned()
++            .unwrap_or_default();
++        if let Some(scope) = target.scope_start
++            && let Some(sites) = self.lexical_scopes.get(&scope)
++        {
++            positions.extend(sites.iter().copied().filter(|position| {
++                let site = &map.hierarchy_invocations[*position];
++                target.body.is_some_and(|(start, end)| {
++                    site.invocation_start >= start && site.invocation_end <= end
++                })
++            }));
++        }
++        positions.sort_unstable();
++        positions
++    }
++}
++
++/// Known graph edges paired with bounded, query-local source observations.
++#[derive(Clone, Debug, Serialize, Deserialize)]
++#[serde(rename_all = "camelCase")]
++pub struct HierarchyReply<T> {
++    /// Genuine resolved edges, including known possibilities in partial results.
++    pub items: Vec<T>,
++    /// Coverage and unresolved source sites for this query.
++    pub analysis: HierarchyAnalysis,
++}
++
++/// Coverage of the inspected source, rather than a claim of full PHP parity.
++#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
++#[serde(rename_all = "snake_case")]
++pub enum HierarchyAnalysisState {
++    #[default]
++    /// All inspected actual invocation sites were accounted for.
++    Resolved,
++    /// Some possible calls were unresolved, unsupported or beyond a limit.
++    Partial,
++    /// The requested source could not be inspected with current authority.
++    Unavailable,
++}
++
++/// Bounded issues observed while resolving a single hierarchy query.
++#[derive(Clone, Debug, Default, Serialize, Deserialize)]
++#[serde(rename_all = "camelCase")]
++pub struct HierarchyAnalysis {
++    /// Overall query coverage.
++    pub state: HierarchyAnalysisState,
++    /// At most64 distinct source issues.
++    pub issues: Vec<HierarchyIssue>,
++    /// Additional issues or source sites exceeded the bounded query budget.
++    pub issues_truncated: bool,
++}
++
++/// Why an actual source call could not be fully accounted for.
++#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
++#[serde(rename_all = "snake_case")]
++pub enum HierarchyIssueKind {
++    /// Supported source syntax lacks a complete concrete callable target.
++    UnresolvedCall,
++    /// This actual invocation form is not modeled by the graph.
++    UnsupportedCall,
++    /// A finite query budget prevented further inspection.
++    Limit,
++    /// A candidate source could not be inspected with current authority.
++    SourceUnavailable,
++}
++
++/// An issue at an exact caller source range, without a synthetic callable node.
++#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
++#[serde(rename_all = "camelCase")]
++pub struct HierarchyIssue {
++    /// The observed resolution limitation.
++    pub kind: HierarchyIssueKind,
++    /// Source containing the actual invocation.
++    pub uri: Url,
++    /// Callee source range, translated to Blade coordinates when appropriate.
++    pub range: Range,
++}
++
++impl HierarchyAnalysis {
++    fn finish(mut self) -> Self {
++        self.issues.sort_by(|a, b| {
++            (
++                a.uri.as_str(),
++                a.range.start.line,
++                a.range.start.character,
++                a.range.end.line,
++                a.range.end.character,
++                a.kind as u8,
++            )
++                .cmp(&(
++                    b.uri.as_str(),
++                    b.range.start.line,
++                    b.range.start.character,
++                    b.range.end.line,
++                    b.range.end.character,
++                    b.kind as u8,
++                ))
++        });
++        self
++    }
++
++    fn add(&mut self, issue: HierarchyIssue) {
++        if self.state != HierarchyAnalysisState::Unavailable {
++            self.state = HierarchyAnalysisState::Partial;
++        }
++        if self.issues.contains(&issue) {
++            return;
++        }
++        if self.issues.len() == 64 {
++            self.issues_truncated = true;
++        } else {
++            self.issues.push(issue);
++        }
++    }
++
++    fn merge(&mut self, other: Self) {
++        if other.state == HierarchyAnalysisState::Unavailable {
++            // An unavailable potential caller makes incoming coverage partial;
++            // the requested declaration itself can still be inspected.
++            self.state = HierarchyAnalysisState::Partial;
++        }
++        for issue in other.issues {
++            self.add(issue);
++        }
++        self.issues_truncated |= other.issues_truncated;
++        if other.issues_truncated {
++            self.state = HierarchyAnalysisState::Partial;
++        }
++    }
++}
++
++impl Backend {
++    pub(crate) fn incoming_calls_impl(
++        &self,
++        item: &CallHierarchyItem,
++    ) -> Option<Vec<CallHierarchyIncomingCall>> {
++        self.incoming_calls_items_impl(item, &mut FileCache::default())
++    }
++
++    pub(crate) fn outgoing_calls_impl(
++        &self,
++        item: &CallHierarchyItem,
++    ) -> Option<Vec<CallHierarchyOutgoingCall>> {
++        self.outgoing_calls_items_impl(item, &mut FileCache::default())
++    }
++
++    pub(crate) fn outgoing_calls_analysis_impl(
++        &self,
++        item: &CallHierarchyItem,
++    ) -> Option<HierarchyReply<CallHierarchyOutgoingCall>> {
++        let mut cache = FileCache::default();
++        let items = self.outgoing_calls_items_impl(item, &mut cache)?;
++        let target = self.php_callable_from_item(&mut cache, item)?;
++        let mut invocation_budget = MAX_COVERAGE_INVOCATIONS;
++        self.outgoing_analysis(&mut cache, &target, &items, &mut invocation_budget, None);
++        Some(HierarchyReply {
++            items,
++            analysis: cache.analysis.finish(),
++        })
++    }
++
++    pub(crate) fn incoming_calls_analysis_impl(
++        &self,
++        item: &CallHierarchyItem,
++    ) -> Option<HierarchyReply<CallHierarchyIncomingCall>> {
++        let mut cache = FileCache::default();
++        let items = self.incoming_calls_items_impl(item, &mut cache)?;
++        let target = self.php_callable_from_item(&mut cache, item)?;
++        if target
++            .item
++            .data
++            .as_ref()
++            .is_some_and(|data| data.get("file_scope").is_some())
++        {
++            cache.analysis.state = HierarchyAnalysisState::Unavailable;
++            return Some(HierarchyReply {
++                items,
++                analysis: cache.analysis.finish(),
++            });
++        }
++        let mut inspected = std::collections::HashSet::new();
++        let mut budget = 256usize;
++        let mut invocation_budget = MAX_COVERAGE_INVOCATIONS;
++        // Unknown calls may name this target even when references cannot index
++        // them. Inspect each actual caller once, rather than declaring an empty
++        // references result exhaustive. This is bounded project coverage only.
++        let mut files = self.user_file_symbol_maps();
++        files.sort_by(|a, b| a.0.cmp(&b.0));
++        for (uri, _) in files {
++            let Some((content, map, Some(hash))) = self.cached_file(&mut cache, &uri) else {
++                cache.analysis.add(HierarchyIssue {
++                    kind: HierarchyIssueKind::SourceUnavailable,
++                    uri: Url::parse(&uri).ok()?,
++                    range: Range::default(),
++                });
++                continue;
++            };
++            let _lines = crate::text_position::PassLineTable::new(&content);
++            let coverage_index = CoverageIndex::new(&map, &content);
++            for site in &map.hierarchy_invocations {
++                if matches!(
++                    map.call_execution_owner(site.invocation_start),
++                    Some(CallExecutionOwner::Deferred)
++                ) {
++                    continue;
++                }
++                if invocation_budget == 0 {
++                    self.inventory_issue(
++                        &mut cache,
++                        &uri,
++                        &content,
++                        site,
++                        HierarchyIssueKind::Limit,
++                    );
++                    cache.analysis.issues_truncated = true;
++                    return Some(HierarchyReply {
++                        items,
++                        analysis: cache.analysis.finish(),
++                    });
++                }
++                invocation_budget -= 1;
++                if site.invocation_start >= site.invocation_end
++                    || content
++                        .get(site.invocation_start as usize..site.invocation_end as usize)
++                        .is_none()
++                {
++                    self.inventory_issue(
++                        &mut cache,
++                        &uri,
++                        &content,
++                        site,
++                        HierarchyIssueKind::SourceUnavailable,
++                    );
++                    continue;
++                }
++                let Some(caller) =
++                    self.inventory_caller(&mut cache, &uri, &content, &map, &hash, site)
++                else {
++                    self.inventory_issue(
++                        &mut cache,
++                        &uri,
++                        &content,
++                        site,
++                        HierarchyIssueKind::UnsupportedCall,
++                    );
++                    continue;
++                };
++                if !inspected.insert(php_item_key(&caller.item)) {
++                    continue;
++                }
++                if budget == 0 {
++                    self.inventory_issue(
++                        &mut cache,
++                        &uri,
++                        &content,
++                        site,
++                        HierarchyIssueKind::Limit,
++                    );
++                    cache.analysis.issues_truncated = true;
++                    return Some(HierarchyReply {
++                        items,
++                        analysis: cache.analysis.finish(),
++                    });
++                }
++                budget -= 1;
++                let accumulated = std::mem::take(&mut cache.analysis);
++                let mut caller_item = caller.item.clone();
++                self.translate_item_to_blade(&mut caller_item);
++                if let Some(outgoing) = self.outgoing_calls_items_impl(&caller_item, &mut cache) {
++                    self.outgoing_analysis(
++                        &mut cache,
++                        &caller,
++                        &outgoing,
++                        &mut invocation_budget,
++                        Some(&coverage_index),
++                    );
++                } else {
++                    self.inventory_issue(
++                        &mut cache,
++                        &uri,
++                        &content,
++                        site,
++                        HierarchyIssueKind::UnresolvedCall,
++                    );
++                }
++                let mut observed = std::mem::replace(&mut cache.analysis, accumulated);
++                if observed.state == HierarchyAnalysisState::Unavailable {
++                    observed.add(HierarchyIssue {
++                        kind: HierarchyIssueKind::SourceUnavailable,
++                        uri: caller.item.uri.clone(),
++                        range: caller_item.selection_range,
++                    });
++                }
++                cache.analysis.merge(observed);
++            }
++        }
++        Some(HierarchyReply {
++            items,
++            analysis: cache.analysis.finish(),
++        })
++    }
++
++    fn inventory_caller(
++        &self,
++        cache: &mut FileCache,
++        uri: &str,
++        content: &str,
++        map: &SymbolMap,
++        hash: &[u8; 32],
++        site: &HierarchyInvocation,
++    ) -> Option<PhpCallable> {
++        self.syntactic_call_site_caller(
++            cache,
++            uri,
++            content,
++            map,
++            hash,
++            SyntacticCallSite {
++                start: site.invocation_start,
++                end: site.invocation_end,
++                scope: site.invoking_scope_start,
++            },
++        )
++    }
++
++    pub(super) fn inventory_issue(
++        &self,
++        cache: &mut FileCache,
++        uri: &str,
++        content: &str,
++        site: &HierarchyInvocation,
++        kind: HierarchyIssueKind,
++    ) {
++        let Ok(uri_value) = Url::parse(uri) else {
++            cache.analysis.state = HierarchyAnalysisState::Unavailable;
++            return;
++        };
++        if site.callee_start >= site.callee_end
++            || content
++                .get(site.callee_start as usize..site.callee_end as usize)
++                .is_none()
++        {
++            cache.analysis.add(HierarchyIssue {
++                kind: HierarchyIssueKind::SourceUnavailable,
++                uri: uri_value,
++                range: Range::default(),
++            });
++            return;
++        }
++        let mut ranges = [byte_range_to_lsp_range(
++            content,
++            site.callee_start as usize,
++            site.callee_end as usize,
++        )];
++        self.translate_ranges_to_blade(uri, &mut ranges);
++        cache.analysis.add(HierarchyIssue {
++            kind,
++            uri: uri_value,
++            range: ranges[0],
++        });
++    }
++
++    fn has_unmodeled_callable_dispatch(
++        &self,
++        uri: &str,
++        content: &str,
++        site: &HierarchyInvocation,
++        call: Option<&crate::symbol_map::CallSite>,
++    ) -> bool {
++        let Some(call) = call else {
++            return false;
++        };
++        if call.arg_count == 0 {
++            return false;
++        }
++        let context = self.file_context_at(uri, site.invocation_start);
++        let Some(target) = self.resolve_callable_target_at_offset(
++            &call.call_expression,
++            content,
++            call.args_start,
++            &context,
++        ) else {
++            return false;
++        };
++        let Some(text) = content.get(call.args_start as usize..call.args_end as usize) else {
++            return false;
++        };
++        let arguments = crate::type_engine::types::conditional::split_text_args(text);
++        let binds_callable = |parameters: &[crate::types::ParameterInfo]| {
++            let bound = crate::call_args::bind_text_args_to_params(parameters, &arguments);
++            parameters.iter().zip(bound).any(|(parameter, argument)| {
++                argument.is_some()
++                    && parameter.type_hint.as_ref().is_some_and(|hint| {
++                        hint.union_members()
++                            .iter()
++                            .any(|member| member.is_callable())
++                    })
++            })
++        };
++        binds_callable(&target.parameters)
++            || target
++                .overloads
++                .iter()
++                .any(|overload| binds_callable(&overload.parameters))
++    }
++
++    fn known_allocation_without_constructor(
++        &self,
++        uri: &str,
++        map: &SymbolMap,
++        site: &HierarchyInvocation,
++    ) -> bool {
++        let class = match site.kind {
++            HierarchyInvocationKind::AnonymousConstruction => {
++                let Some(construction) = map
++                    .anonymous_class_constructions
++                    .iter()
++                    .find(|value| value.keyword_start == site.callee_start)
++                else {
++                    return false;
++                };
++                self.symbols
++                    .uri_classes_index
++                    .read()
++                    .get(uri)
++                    .and_then(|classes| {
++                        classes
++                            .iter()
++                            .find(|class| {
++                                class.name.starts_with(crate::types::ANONYMOUS_CLASS_PREFIX)
++                                    && class.start_offset == construction.body_start
++                                    && class.end_offset == construction.body_end
++                            })
++                            .cloned()
++                    })
++            }
++            HierarchyInvocationKind::Construction => {
++                let Some(span) = map.lookup(site.callee_start) else {
++                    return false;
++                };
++                let fqn = match &span.kind {
++                    SymbolKind::ClassReference { name, is_fqn, .. } => {
++                        if *is_fqn {
++                            name.trim_start_matches('\\').to_owned()
++                        } else {
++                            self.file_context(uri).resolve_name_at(name, span.start)
++                        }
++                    }
++                    SymbolKind::SelfStaticParent(kind) => {
++                        let Some(fqn) = self.resolve_keyword_to_fqn(kind, uri, span.start) else {
++                            return false;
++                        };
++                        fqn
++                    }
++                    _ => return false,
++                };
++                self.find_or_load_class(&fqn)
++            }
++            _ => return false,
++        };
++        let Some(class) = class else {
++            return false;
++        };
++        if class.kind != crate::types::ClassLikeKind::Class {
++            return false;
++        }
++        let loader = |name: &str| self.find_or_load_class(name);
++        matches!(
++            crate::inheritance::ancestry::resolve_concrete_method_origin(
++                &class,
++                "__construct",
++                &loader
++            ),
++            crate::inheritance::ancestry::MethodOrigin::Missing
++        )
++    }
++
++    fn outgoing_analysis(
++        &self,
++        cache: &mut FileCache,
++        target: &PhpCallable,
++        items: &[CallHierarchyOutgoingCall],
++        invocation_budget: &mut usize,
++        coverage_index: Option<&CoverageIndex>,
++    ) {
++        if target.body.is_none()
++            || matches!(
++                target.item.uri.scheme(),
++                "phpantom-stub" | "phpantom-stub-fn"
++            )
++        {
++            cache.analysis.state = HierarchyAnalysisState::Unavailable;
++            return;
++        }
++        let uri = target.item.uri.as_str();
++        let Some((content, map, Some(hash))) = self.cached_file(cache, uri) else {
++            cache.analysis.state = HierarchyAnalysisState::Unavailable;
++            return;
++        };
++        let _lines = crate::text_position::PassLineTable::new(&content);
++        let local_index;
++        let index = if let Some(index) = coverage_index {
++            index
++        } else {
++            local_index = CoverageIndex::new(&map, &content);
++            &local_index
++        };
++        let covered_ranges: std::collections::HashSet<_> = items
++            .iter()
++            .flat_map(|item| &item.from_ranges)
++            .map(range_key)
++            .collect();
++        for position in index.caller_sites(target, &map) {
++            let site = &map.hierarchy_invocations[position];
++            if *invocation_budget == 0 {
++                self.inventory_issue(cache, uri, &content, site, HierarchyIssueKind::Limit);
++                cache.analysis.issues_truncated = true;
++                return;
++            }
++            *invocation_budget -= 1;
++            let Some(caller) = self.inventory_caller(cache, uri, &content, &map, &hash, site)
++            else {
++                // Only attribute an ownerless site when its source lies in the
++                // selected body; nested callable bodies have explicit owners.
++                if target.body.is_some_and(|(start, end)| {
++                    site.invocation_start >= start && site.invocation_end <= end
++                }) && Some(site.invoking_scope_start) == target.scope_start
++                {
++                    self.inventory_issue(
++                        cache,
++                        uri,
++                        &content,
++                        site,
++                        HierarchyIssueKind::UnsupportedCall,
++                    );
++                }
++                continue;
++            };
++            if php_item_key(&caller.item) != php_item_key(&target.item) {
++                continue;
++            }
++            if site.invocation_start >= site.invocation_end
++                || content
++                    .get(site.invocation_start as usize..site.invocation_end as usize)
++                    .is_none()
++            {
++                self.inventory_issue(
++                    cache,
++                    uri,
++                    &content,
++                    site,
++                    HierarchyIssueKind::SourceUnavailable,
++                );
++                continue;
++            }
++            let call = index
++                .calls
++                .get(&(site.invocation_start, site.invocation_end))
++                .and_then(|position| map.call_sites.get(*position));
++            if self.has_unmodeled_callable_dispatch(uri, &content, site, call) {
++                self.inventory_issue(
++                    cache,
++                    uri,
++                    &content,
++                    site,
++                    HierarchyIssueKind::UnsupportedCall,
++                );
++            }
++            if site.kind == HierarchyInvocationKind::Unsupported {
++                self.inventory_issue(
++                    cache,
++                    uri,
++                    &content,
++                    site,
++                    HierarchyIssueKind::UnsupportedCall,
++                );
++                continue;
++            }
++            let callee_range = byte_range_to_lsp_range(
++                &content,
++                site.callee_start as usize,
++                site.callee_end as usize,
++            );
++            let args_range = byte_range_to_lsp_range(
++                &content,
++                site.invocation_start as usize,
++                site.invocation_end as usize,
++            );
++            let mut accepted = vec![callee_range, args_range];
++            // Literal arrays report only their actual selector interior.
++            if let Some(ranges) = index
++                .array_ranges
++                .get(&(site.invocation_start, site.invocation_end))
++            {
++                accepted.extend(ranges.iter().copied());
++            }
++            let first_literal = map
++                .literal_method_selectors
++                .partition_point(|literal| literal.start < site.callee_start);
++            for literal in map.literal_method_selectors[first_literal..]
++                .iter()
++                .take_while(|literal| literal.start <= site.callee_end)
++            {
++                if literal.end <= site.callee_end {
++                    accepted.push(byte_range_to_lsp_range(
++                        &content,
++                        literal.start as usize,
++                        literal.end as usize,
++                    ));
++                }
++            }
++            self.translate_ranges_to_blade(uri, &mut accepted);
++            let covered = accepted
++                .iter()
++                .any(|range| covered_ranges.contains(&range_key(range)));
++            if covered {
++                continue;
++            }
++            // A concrete allocation without a constructor is a resolved empty
++            // graph contribution, unlike an unresolved invocation.
++            if self.known_allocation_without_constructor(uri, &map, site) {
++                continue;
++            }
++            self.inventory_issue(
++                cache,
++                uri,
++                &content,
++                site,
++                HierarchyIssueKind::UnresolvedCall,
++            );
++        }
++    }
++}
+diff --git a/src/call_hierarchy/stored.rs b/src/call_hierarchy/stored.rs
+index fd434a0..320bb3f 100644
+--- a/src/call_hierarchy/stored.rs
++++ b/src/call_hierarchy/stored.rs
+@@ -357,6 +357,28 @@ impl Backend {
+         }
+     }
+ 
++    fn stored_resolution_issue(
++        &self,
++        cache: &mut FileCache,
++        uri: &str,
++        content: &str,
++        map: &SymbolMap,
++        site: &VariableCallableInvocation,
++    ) {
++        if let Some(invocation) = map.hierarchy_invocations.iter().find(|invocation| {
++            invocation.invocation_start == site.invocation_start
++                && invocation.invocation_end == site.invocation_end
++        }) {
++            self.inventory_issue(
++                cache,
++                uri,
++                content,
++                invocation,
++                HierarchyIssueKind::UnresolvedCall,
++            );
++        }
++    }
++
+     pub(super) fn collect_stored_incoming(
+         &self,
+         cache: &mut FileCache,
+@@ -397,6 +419,9 @@ impl Backend {
+                 };
+                 let resolved = self.variable_callables(cache, &uri, site);
+                 complete &= resolved.complete;
++                if !resolved.complete {
++                    self.stored_resolution_issue(cache, &uri, &content, &map, site);
++                }
+                 if !resolved
+                     .callees
+                     .iter()
+@@ -456,6 +481,9 @@ impl Backend {
+             }
+             let resolved = self.variable_callables(cache, uri, site);
+             complete &= resolved.complete;
++            if !resolved.complete {
++                self.stored_resolution_issue(cache, uri, &content, &map, site);
++            }
+             let range = byte_range_to_lsp_range(
+                 &content,
+                 site.invocation_start as usize,
+diff --git a/src/lib.rs b/src/lib.rs
+index 9dc666d..405d917 100644
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -328,7 +328,11 @@ pub mod semantic_export;
+ mod semantic_tokens;
+ mod server;
+ mod source_authority;
++pub use call_hierarchy::status::{
++    HierarchyAnalysis, HierarchyAnalysisState, HierarchyIssue, HierarchyIssueKind, HierarchyReply,
++};
+ pub use project_router::{
++    CALL_HIERARCHY_INCOMING_ANALYSIS_METHOD, CALL_HIERARCHY_OUTGOING_ANALYSIS_METHOD,
+     ProjectRouter, ProjectTargetQuery, STRUCTURAL_REPLACE_METHOD, STRUCTURAL_SEARCH_METHOD,
+     StructuralReplaceQuery, StructuralReplaceReply, StructuralSearchQuery, StructuralSearchReply,
+ };
+diff --git a/src/main.rs b/src/main.rs
+index dbc56ac..43d25e3 100644
+--- a/src/main.rs
++++ b/src/main.rs
+@@ -565,6 +565,14 @@ async fn async_main() {
+ 
+                 let (read, write) = tokio::io::split(stream);
+                 let (service, socket) = LspService::build(ProjectRouter::new)
++                    .custom_method(
++                        phpantom_lsp::CALL_HIERARCHY_INCOMING_ANALYSIS_METHOD,
++                        ProjectRouter::workbench_call_hierarchy_incoming,
++                    )
++                    .custom_method(
++                        phpantom_lsp::CALL_HIERARCHY_OUTGOING_ANALYSIS_METHOD,
++                        ProjectRouter::workbench_call_hierarchy_outgoing,
++                    )
+                     .custom_method("phpWorkbench/routes", ProjectRouter::workbench_routes)
+                     .custom_method(
+                         "phpWorkbench/renameChecked",
+@@ -601,6 +609,14 @@ async fn async_main() {
+                 let stdout = tokio::io::stdout();
+ 
+                 let (service, socket) = LspService::build(ProjectRouter::new)
++                    .custom_method(
++                        phpantom_lsp::CALL_HIERARCHY_INCOMING_ANALYSIS_METHOD,
++                        ProjectRouter::workbench_call_hierarchy_incoming,
++                    )
++                    .custom_method(
++                        phpantom_lsp::CALL_HIERARCHY_OUTGOING_ANALYSIS_METHOD,
++                        ProjectRouter::workbench_call_hierarchy_outgoing,
++                    )
+                     .custom_method("phpWorkbench/routes", ProjectRouter::workbench_routes)
+                     .custom_method(
+                         "phpWorkbench/renameChecked",
+diff --git a/src/project_router.rs b/src/project_router.rs
+index 30a32a0..42b4cb5 100644
+--- a/src/project_router.rs
++++ b/src/project_router.rs
+@@ -21,6 +21,12 @@ pub use crate::structural_search::wire::{
+ #[cfg(not(target_arch = "wasm32"))]
+ #[path = "project_router_global_config.rs"]
+ mod global_config;
++#[path = "project_router_hierarchy.rs"]
++mod hierarchy;
++pub use hierarchy::{
++    CALL_HIERARCHY_INCOMING_ANALYSIS_METHOD, CALL_HIERARCHY_OUTGOING_ANALYSIS_METHOD,
++};
++
+ #[path = "project_router_structural_search.rs"]
+ mod structural_search;
+ 
+diff --git a/src/project_router_hierarchy.rs b/src/project_router_hierarchy.rs
+new file mode 100644
+index 0000000..cdd91f3
+--- /dev/null
++++ b/src/project_router_hierarchy.rs
+@@ -0,0 +1,95 @@
++//! Query-local hierarchy coverage over the same project/source authority as LSP.
++use super::ProjectRouter;
++use crate::Backend;
++use crate::call_hierarchy::status::HierarchyReply;
++use tower_lsp::jsonrpc::{Error, ErrorCode, Result};
++use tower_lsp::lsp_types::{
++    CallHierarchyIncomingCall, CallHierarchyIncomingCallsParams, CallHierarchyOutgoingCall,
++    CallHierarchyOutgoingCallsParams,
++};
++
++/// Incoming hierarchy with explicit coverage for the requested project.
++pub const CALL_HIERARCHY_INCOMING_ANALYSIS_METHOD: &str = "phpWorkbench/callHierarchyIncoming";
++/// Outgoing hierarchy with explicit coverage for the requested project.
++pub const CALL_HIERARCHY_OUTGOING_ANALYSIS_METHOD: &str = "phpWorkbench/callHierarchyOutgoing";
++
++fn changed_source() -> Error {
++    Error::new(ErrorCode::ServerError(-32801))
++}
++
++impl Backend {
++    /// Resolve callers and their query-local coverage without changing LSP items.
++    pub async fn call_hierarchy_incoming_analysis(
++        &self,
++        params: CallHierarchyIncomingCallsParams,
++    ) -> Result<HierarchyReply<CallHierarchyIncomingCall>> {
++        let backend = self.clone_for_blocking();
++        crate::server::run_blocking_cancel_safe("call_hierarchy_incoming_analysis", move || {
++            backend.ensure_workspace_indexed_for_request();
++            backend.with_prepared_current_semantics(|| {
++                backend
++                    .incoming_calls_analysis_impl(&params.item)
++                    .ok_or_else(changed_source)
++            })
++        })
++        .await
++        .ok_or_else(Error::internal_error)?
++    }
++
++    /// Resolve callees and their query-local coverage without changing LSP items.
++    pub async fn call_hierarchy_outgoing_analysis(
++        &self,
++        params: CallHierarchyOutgoingCallsParams,
++    ) -> Result<HierarchyReply<CallHierarchyOutgoingCall>> {
++        let backend = self.clone_for_blocking();
++        crate::server::run_blocking_cancel_safe("call_hierarchy_outgoing_analysis", move || {
++            backend.with_prepared_current_semantics(|| {
++                backend
++                    .outgoing_calls_analysis_impl(&params.item)
++                    .ok_or_else(changed_source)
++            })
++        })
++        .await
++        .ok_or_else(Error::internal_error)?
++    }
++}
++
++impl ProjectRouter {
++    /// Expand callers in the item's originating project, preserving its receipt.
++    pub async fn workbench_call_hierarchy_incoming(
++        &self,
++        mut params: CallHierarchyIncomingCallsParams,
++    ) -> Result<HierarchyReply<CallHierarchyIncomingCall>> {
++        let _request = self.request_guard().await;
++        let project = self.project_from_data(&mut params.item.data).await?;
++        self.normalize_hierarchy_uri(&project, &mut params.item.uri)?;
++        let mut reply = project
++            .backend
++            .call_hierarchy_incoming_analysis(params)
++            .await?;
++        for edge in &mut reply.items {
++            self.tag_data(&project, &mut edge.from.data);
++        }
++        self.qualify_locations(&project, &mut reply)?;
++        Ok(reply)
++    }
++
++    /// Expand callees in the item's originating project, preserving its receipt.
++    pub async fn workbench_call_hierarchy_outgoing(
++        &self,
++        mut params: CallHierarchyOutgoingCallsParams,
++    ) -> Result<HierarchyReply<CallHierarchyOutgoingCall>> {
++        let _request = self.request_guard().await;
++        let project = self.project_from_data(&mut params.item.data).await?;
++        self.normalize_hierarchy_uri(&project, &mut params.item.uri)?;
++        let mut reply = project
++            .backend
++            .call_hierarchy_outgoing_analysis(params)
++            .await?;
++        for edge in &mut reply.items {
++            self.tag_data(&project, &mut edge.to.data);
++        }
++        self.qualify_locations(&project, &mut reply)?;
++        Ok(reply)
++    }
++}
+diff --git a/src/symbol_map/extraction/expressions/anonymous_class.rs b/src/symbol_map/extraction/expressions/anonymous_class.rs
+index adbe697..d093e2a 100644
+--- a/src/symbol_map/extraction/expressions/anonymous_class.rs
++++ b/src/symbol_map/extraction/expressions/anonymous_class.rs
+@@ -10,6 +10,14 @@ pub(super) fn extract_anonymous_class_expr<'a>(
+     ctx: &mut ExtractionCtx<'a>,
+     scope_start: u32,
+ ) {
++    ctx.hierarchy_invocations.push(HierarchyInvocation {
++        callee_start: anon.class.span.start.offset,
++        callee_end: anon.class.span.end.offset,
++        invocation_start: anon.span().start.offset,
++        invocation_end: anon.span().end.offset,
++        invoking_scope_start: scope_start,
++        kind: HierarchyInvocationKind::AnonymousConstruction,
++    });
+     ctx.anonymous_class_constructions
+         .push(AnonymousClassConstruction {
+             keyword_start: anon.class.span.start.offset,
+diff --git a/src/symbol_map/extraction/expressions/calls.rs b/src/symbol_map/extraction/expressions/calls.rs
+index 95765d0..71f2f94 100644
+--- a/src/symbol_map/extraction/expressions/calls.rs
++++ b/src/symbol_map/extraction/expressions/calls.rs
+@@ -61,6 +61,24 @@ pub(super) fn extract_instantiation_expr<'a>(
+     ctx: &mut ExtractionCtx<'a>,
+     scope_start: u32,
+ ) {
++    ctx.hierarchy_invocations.push(HierarchyInvocation {
++        callee_start: inst.class.span().start.offset,
++        callee_end: inst.class.span().end.offset,
++        invocation_start: inst.span().start.offset,
++        invocation_end: inst.span().end.offset,
++        invoking_scope_start: scope_start,
++        kind: if matches!(
++            inst.class,
++            Expression::Identifier(_)
++                | Expression::Self_(_)
++                | Expression::Static(_)
++                | Expression::Parent(_)
++        ) {
++            HierarchyInvocationKind::Construction
++        } else {
++            HierarchyInvocationKind::Unsupported
++        },
++    });
+     emit_keyword(&inst.new, ctx);
+     match inst.class {
+         Expression::Identifier(ident) => {
+@@ -320,12 +338,76 @@ pub(super) fn extract_call_expr_members<'a>(
+     extract_call(call, ctx, scope_start, false)
+ }
+ 
++fn hierarchy_selector_kind(
++    selector: &ClassLikeMemberSelector<'_>,
++    content: &str,
++) -> HierarchyInvocationKind {
++    match selector {
++        ClassLikeMemberSelector::Identifier(_) => HierarchyInvocationKind::Call,
++        ClassLikeMemberSelector::Expression(expression)
++            if method_literal(expression.expression, content).is_some() =>
++        {
++            HierarchyInvocationKind::Call
++        }
++        _ => HierarchyInvocationKind::Unsupported,
++    }
++}
++
+ fn extract_call<'a>(
+     call: &'a Call<'a>,
+     ctx: &mut ExtractionCtx<'a>,
+     scope_start: u32,
+     visit_receiver: bool,
+ ) {
++    let (callee, arguments, kind) = match call {
++        Call::Function(call) => {
++            let expr = crate::parser::unwrap_parens(call.function);
++            let supported = matches!(
++                expr,
++                Expression::Identifier(_)
++                    | Expression::Variable(Variable::Direct(_))
++                    | Expression::Literal(literal::Literal::String(_))
++                    | Expression::Array(_)
++                    | Expression::LegacyArray(_)
++                    | Expression::Closure(_)
++                    | Expression::ArrowFunction(_)
++                    | Expression::Instantiation(_)
++                    | Expression::AnonymousClass(_)
++            );
++            (
++                expr.span(),
++                &call.argument_list,
++                if supported {
++                    HierarchyInvocationKind::Call
++                } else {
++                    HierarchyInvocationKind::Unsupported
++                },
++            )
++        }
++        Call::Method(call) => (
++            call.method.span(),
++            &call.argument_list,
++            hierarchy_selector_kind(&call.method, ctx.content),
++        ),
++        Call::NullSafeMethod(call) => (
++            call.method.span(),
++            &call.argument_list,
++            hierarchy_selector_kind(&call.method, ctx.content),
++        ),
++        Call::StaticMethod(call) => (
++            call.method.span(),
++            &call.argument_list,
++            hierarchy_selector_kind(&call.method, ctx.content),
++        ),
++    };
++    ctx.hierarchy_invocations.push(HierarchyInvocation {
++        callee_start: callee.start.offset,
++        callee_end: callee.end.offset,
++        invocation_start: arguments.left_parenthesis.start.offset,
++        invocation_end: arguments.right_parenthesis.end.offset,
++        invoking_scope_start: scope_start,
++        kind,
++    });
+     match call {
+         Call::Function(func_call) => {
+             let mut literal = func_call.function;
+diff --git a/src/symbol_map/extraction/mod.rs b/src/symbol_map/extraction/mod.rs
+index feafdcb..89be067 100644
+--- a/src/symbol_map/extraction/mod.rs
++++ b/src/symbol_map/extraction/mod.rs
+@@ -14,11 +14,11 @@ use super::docblock::{
+ use super::{
+     AnonymousCallable, AnonymousCallableKind, AnonymousClassConstruction, AnonymousInvocation,
+     ArrayCallableInvocation, CallExecutionOwner, CallExecutionRegion, CallSite, CallableValueSite,
+-    CallableValueSyntax, ClassRefContext, DocblockMemberRef, ImmediateObjectInvocation,
+-    ImmediateObjectReceiver, LiteralCallableInvocation, LiteralMethodSelector,
+-    SelfStaticParentKind, SubjectText, SymbolKind, SymbolMap, SymbolSpan, TemplateParamDef,
+-    UntypedClosureSite, VarDefKind, VarDefSite, VariableCallableInvocation, ViewReceiverClass,
+-    ViewReceiverSite,
++    CallableValueSyntax, ClassRefContext, DocblockMemberRef, HierarchyInvocation,
++    HierarchyInvocationKind, ImmediateObjectInvocation, ImmediateObjectReceiver,
++    LiteralCallableInvocation, LiteralMethodSelector, SelfStaticParentKind, SubjectText,
++    SymbolKind, SymbolMap, SymbolSpan, TemplateParamDef, UntypedClosureSite, VarDefKind,
++    VarDefSite, VariableCallableInvocation, ViewReceiverClass, ViewReceiverSite,
+ };
+ use crate::atom::{bytes_to_str, literal_bytes_to_str};
+ use crate::names::OwnedResolvedNames;
+@@ -49,6 +49,7 @@ struct ExtractionCtx<'a> {
+     literal_callable_invocations: Vec<LiteralCallableInvocation>,
+     array_callable_invocations: Vec<ArrayCallableInvocation>,
+     variable_callable_invocations: Vec<VariableCallableInvocation>,
++    hierarchy_invocations: Vec<HierarchyInvocation>,
+     callable_value_sites: Vec<CallableValueSite>,
+     literal_method_selectors: Vec<LiteralMethodSelector>,
+     non_invoked_callable_spans: Vec<(u32, u32)>,
+@@ -243,6 +244,7 @@ fn extract_symbol_map_inner(
+         literal_callable_invocations: Vec::new(),
+         array_callable_invocations: Vec::new(),
+         variable_callable_invocations: Vec::new(),
++        hierarchy_invocations: Vec::new(),
+         callable_value_sites: Vec::new(),
+         literal_method_selectors: Vec::new(),
+         non_invoked_callable_spans: Vec::new(),
+@@ -411,6 +413,7 @@ fn extract_symbol_map_inner(
+         literal_callable_invocations: ctx.literal_callable_invocations,
+         array_callable_invocations: ctx.array_callable_invocations,
+         variable_callable_invocations: ctx.variable_callable_invocations,
++        hierarchy_invocations: ctx.hierarchy_invocations,
+         callable_value_sites: ctx.callable_value_sites,
+         literal_method_selectors: ctx.literal_method_selectors,
+         non_invoked_callable_spans: ctx.non_invoked_callable_spans,
+diff --git a/src/symbol_map/mod.rs b/src/symbol_map/mod.rs
+index 6ff17df..460080e 100644
+--- a/src/symbol_map/mod.rs
++++ b/src/symbol_map/mod.rs
+@@ -1103,6 +1103,25 @@ pub(crate) struct ArrayCallableInvocation {
+     pub invocation_end: u32,
+ }
+ 
++/// Every actual call expression, including syntax without a navigable symbol.
++#[derive(Debug, Clone, Copy)]
++pub(crate) struct HierarchyInvocation {
++    pub callee_start: u32,
++    pub callee_end: u32,
++    pub invocation_start: u32,
++    pub invocation_end: u32,
++    pub invoking_scope_start: u32,
++    pub kind: HierarchyInvocationKind,
++}
++
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++pub(crate) enum HierarchyInvocationKind {
++    Call,
++    Unsupported,
++    Construction,
++    AnonymousConstruction,
++}
++
+ /// A direct variable function call; assignment and first-class creation are not execution.
+ #[derive(Debug, Clone, Copy)]
+ pub(crate) struct VariableCallableInvocation {
+@@ -1258,6 +1277,7 @@ pub(crate) struct SymbolMap {
+     pub array_callable_invocations: Vec<ArrayCallableInvocation>,
+     /// Direct variable calls; targets require separate source-proven value flow.
+     pub variable_callable_invocations: Vec<VariableCallableInvocation>,
++    pub hierarchy_invocations: Vec<HierarchyInvocation>,
+     /// Inert callable creation syntax, sorted by exact expression coordinates.
+     pub callable_value_sites: Vec<CallableValueSite>,
+     /// Sorted AST string method-selector roles for verified semantic rename.
+diff --git a/tests/integration/call_hierarchy.rs b/tests/integration/call_hierarchy.rs
+index 5abb73e..4484ea1 100644
+--- a/tests/integration/call_hierarchy.rs
++++ b/tests/integration/call_hierarchy.rs
+@@ -7337,3 +7337,565 @@ async fn stored_callable_loop_carried_closures_keep_first_and_later_iteration_ta
+     assert_eq!(edges.len(), 3);
+     backend.shutdown().await.unwrap();
+ }
++
++async fn hierarchy_analysis_outgoing(
++    backend: &Backend,
++    item: &CallHierarchyItem,
++) -> phpantom_lsp::HierarchyReply<CallHierarchyOutgoingCall> {
++    backend
++        .call_hierarchy_outgoing_analysis(CallHierarchyOutgoingCallsParams {
++            item: item.clone(),
++            work_done_progress_params: Default::default(),
++            partial_result_params: Default::default(),
++        })
++        .await
++        .unwrap()
++}
++
++#[tokio::test]
++async fn hierarchy_analysis_distinguishes_empty_unknown_and_mixed_calls_with_exact_source() {
++    use phpantom_lsp::{HierarchyAnalysisState as State, HierarchyIssueKind as Kind};
++    let backend = create_test_backend();
++    let uri = Url::parse("file:///hierarchy-analysis.php").unwrap();
++    let source = "<?php\r\nfunction statusLeaf(int $n): int { return $n; }\r\nfunction statusEmpty(): void {}\r\nfunction statusUnknown(callable $unknown): void { /* café 🐘 */ $unknown(1); }\r\nfunction statusMixed(callable $unknown): void { statusLeaf(0); $unknown(statusLeaf(1)); }\r\n";
++    open_php(&backend, &uri, source).await;
++    let empty = anonymous_hierarchy_prepare(&backend, &uri, source, "statusEmpty").await;
++    let reply = hierarchy_analysis_outgoing(&backend, &empty).await;
++    assert!(reply.items.is_empty());
++    assert_eq!(reply.analysis.state, State::Resolved);
++    assert!(reply.analysis.issues.is_empty());
++    for (name, context, known) in [
++        ("statusUnknown", "$unknown(1)", false),
++        ("statusMixed", "$unknown(statusLeaf(1))", true),
++    ] {
++        let root = anonymous_hierarchy_prepare(&backend, &uri, source, name).await;
++        let opaque = root.data.clone();
++        let reply = hierarchy_analysis_outgoing(&backend, &root).await;
++        assert_eq!(reply.analysis.state, State::Partial);
++        assert_eq!(reply.analysis.issues.len(), 1);
++        let issue = &reply.analysis.issues[0];
++        assert_eq!(issue.kind, Kind::UnresolvedCall);
++        assert_eq!(issue.uri, uri);
++        assert_eq!(
++            issue.range,
++            noncall_exact_range(source, context, "$unknown")
++        );
++        assert_eq!(!reply.items.is_empty(), known);
++        assert!(!reply.analysis.issues_truncated);
++        if known {
++            assert_eq!(reply.items.len(), 1);
++            assert_eq!(reply.items[0].to.name, "statusLeaf");
++            assert_eq!(reply.items[0].from_ranges.len(), 2);
++        }
++        assert_eq!(root.data, opaque);
++    }
++    backend.shutdown().await.unwrap();
++}
++
++#[tokio::test]
++async fn hierarchy_analysis_nested_resolved_selector_call_cannot_certify_dynamic_method() {
++    use phpantom_lsp::{HierarchyAnalysisState as State, HierarchyIssueKind as Kind};
++    let backend = create_test_backend();
++    let uri = Url::parse("file:///hierarchy-analysis-dynamic.php").unwrap();
++    let source = "<?php\r\nfunction statusSelector(): string { return 'run'; }\r\nfunction statusDynamic(object $object): void { $object->{statusSelector()}(); }\r\n";
++    open_php(&backend, &uri, source).await;
++    let root = anonymous_hierarchy_prepare(&backend, &uri, source, "statusDynamic").await;
++    let reply = hierarchy_analysis_outgoing(&backend, &root).await;
++    assert_eq!(reply.items.len(), 1);
++    assert_eq!(reply.items[0].to.name, "statusSelector");
++    assert_eq!(reply.analysis.state, State::Partial);
++    assert!(
++        reply
++            .analysis
++            .issues
++            .iter()
++            .any(|issue| issue.kind == Kind::UnsupportedCall && issue.uri == uri)
++    );
++    backend.shutdown().await.unwrap();
++}
++
++#[tokio::test]
++async fn hierarchy_analysis_reports_bounded_issues_without_fabricating_edges() {
++    use phpantom_lsp::HierarchyAnalysisState as State;
++    let backend = create_test_backend();
++    let uri = Url::parse("file:///hierarchy-analysis-many.php").unwrap();
++    let mut source = "<?php\r\nfunction statusMany(callable $unknown): void {\r\n".to_owned();
++    for n in 0..70 {
++        source.push_str(&format!(" /* café 🐘 */ $unknown({n});\r\n"));
++    }
++    source.push_str("}\r\n");
++    open_php(&backend, &uri, &source).await;
++    let root = anonymous_hierarchy_prepare(&backend, &uri, &source, "statusMany").await;
++    let reply = hierarchy_analysis_outgoing(&backend, &root).await;
++    assert!(reply.items.is_empty());
++    assert_eq!(reply.analysis.state, State::Partial);
++    assert_eq!(reply.analysis.issues.len(), 64);
++    assert!(reply.analysis.issues_truncated);
++    assert!(
++        reply
++            .analysis
++            .issues
++            .iter()
++            .all(|issue| issue.uri == uri && issue.range.start < issue.range.end)
++    );
++    backend.shutdown().await.unwrap();
++}
++
++#[tokio::test]
++async fn hierarchy_analysis_refuses_stale_results_then_recovers_current_coverage() {
++    use phpantom_lsp::HierarchyAnalysisState as State;
++    let backend = create_test_backend();
++    let uri = Url::parse("file:///hierarchy-analysis-stale.php").unwrap();
++    let source = "<?php\r\nfunction statusFreshLeaf(int $n): int { return $n; }\r\nfunction statusFresh(callable $unknown): void { $unknown(1); }\r\n";
++    open_php(&backend, &uri, source).await;
++    let old = anonymous_hierarchy_prepare(&backend, &uri, source, "statusFresh(").await;
++    assert_eq!(
++        hierarchy_analysis_outgoing(&backend, &old)
++            .await
++            .analysis
++            .state,
++        State::Partial
++    );
++    let changed = source.replace("$unknown(1)", "statusFreshLeaf(1)");
++    anonymous_hierarchy_change(&backend, &uri, &changed).await;
++    let error = backend
++        .call_hierarchy_outgoing_analysis(CallHierarchyOutgoingCallsParams {
++            item: old,
++            work_done_progress_params: Default::default(),
++            partial_result_params: Default::default(),
++        })
++        .await
++        .unwrap_err();
++    assert_eq!(error.code.code(), -32801);
++    let fresh = anonymous_hierarchy_prepare(&backend, &uri, &changed, "statusFresh(").await;
++    let reply = hierarchy_analysis_outgoing(&backend, &fresh).await;
++    assert_eq!(reply.items.len(), 1);
++    assert_eq!(reply.items[0].to.name, "statusFreshLeaf");
++    assert_eq!(reply.analysis.state, State::Resolved);
++    assert!(reply.analysis.issues.is_empty());
++    backend.shutdown().await.unwrap();
++}
++
++#[tokio::test]
++async fn hierarchy_analysis_callback_dispatch_and_builtin_source_are_not_false_complete() {
++    use phpantom_lsp::{HierarchyAnalysisState as State, HierarchyIssueKind as Kind};
++    let backend = crate::common::create_test_backend_with_full_stubs();
++    let uri = Url::parse("file:///hierarchy-analysis-callback.php").unwrap();
++    let source = "<?php\r\nfunction statusCallback(): void { $callback = static fn(int $n): int => $n; array_map($callback, [1]); }\r\n";
++    open_php(&backend, &uri, source).await;
++    let root = anonymous_hierarchy_prepare(&backend, &uri, source, "statusCallback").await;
++    let reply = hierarchy_analysis_outgoing(&backend, &root).await;
++    assert_eq!(reply.items.len(), 1);
++    assert_eq!(reply.items[0].to.name, "array_map");
++    assert_eq!(reply.analysis.state, State::Partial);
++    assert!(
++        reply
++            .analysis
++            .issues
++            .iter()
++            .any(|issue| issue.kind == Kind::UnsupportedCall)
++    );
++    let builtin = hierarchy_analysis_outgoing(&backend, &reply.items[0].to).await;
++    assert_eq!(builtin.analysis.state, State::Unavailable);
++    let closure = anonymous_hierarchy_prepare(&backend, &uri, source, "fn(int $n)").await;
++    let incoming = backend
++        .call_hierarchy_incoming_analysis(CallHierarchyIncomingCallsParams {
++            item: closure,
++            work_done_progress_params: Default::default(),
++            partial_result_params: Default::default(),
++        })
++        .await
++        .unwrap();
++    assert_eq!(incoming.analysis.state, State::Partial);
++    assert!(incoming.items.is_empty());
++    backend.shutdown().await.unwrap();
++}
++
++#[tokio::test]
++async fn hierarchy_analysis_known_empty_constructor_does_not_create_an_unknown_call() {
++    use phpantom_lsp::HierarchyAnalysisState as State;
++    let backend = create_test_backend();
++    let uri = Url::parse("file:///hierarchy-analysis-empty-constructor.php").unwrap();
++    let source = "<?php\r\nclass StatusPlain {}\r\nfunction statusConstruction(): void { new StatusPlain(); }\r\n";
++    open_php(&backend, &uri, source).await;
++    let root = anonymous_hierarchy_prepare(&backend, &uri, source, "statusConstruction").await;
++    let reply = hierarchy_analysis_outgoing(&backend, &root).await;
++    assert!(reply.items.is_empty());
++    assert_eq!(reply.analysis.state, State::Resolved);
++    assert!(reply.analysis.issues.is_empty());
++    backend.shutdown().await.unwrap();
++}
++
++const HIERARCHY_ANALYSIS_ROUTER_SOURCE: &str = "<?php\r\nfunction analysisRouterLeaf(): void {}\r\nfunction analysisRouterHost(callable $unknown): void { /* café 🐘 */ analysisRouterLeaf(); strtolower('X'); $unknown(1); }\r\n";
++
++async fn hierarchy_analysis_router_fixture() -> (
++    tempfile::TempDir,
++    phpantom_lsp::ProjectRouter,
++    Vec<Url>,
++    Vec<CallHierarchyItem>,
++    Vec<CallHierarchyItem>,
++) {
++    use phpantom_lsp::ProjectRouter;
++    let temporary = tempfile::tempdir().unwrap();
++    let root = temporary.path().canonicalize().unwrap();
++    let roots = [root.join("first"), root.join("second")];
++    for path in &roots {
++        std::fs::create_dir(path).unwrap();
++        std::fs::write(path.join("composer.json"), r#"{"require":{"php":"^8.3"}}"#).unwrap();
++        std::fs::write(
++            path.join(".phpantom.toml"),
++            "[php]\nversion=\"8.3\"\n[external_tools]\nenabled=false\n",
++        )
++        .unwrap();
++    }
++    let router = ProjectRouter::new_test_with_full_stubs();
++    let initialized = router
++        .initialize(InitializeParams {
++            root_uri: Some(Url::from_directory_path(&roots[0]).unwrap()),
++            workspace_folders: Some(
++                roots
++                    .iter()
++                    .enumerate()
++                    .map(|(index, path)| WorkspaceFolder {
++                        uri: Url::from_directory_path(path).unwrap(),
++                        name: format!("hierarchy-analysis-{index}"),
++                    })
++                    .collect(),
++            ),
++            ..Default::default()
++        })
++        .await
++        .unwrap();
++    assert_eq!(
++        initialized.capabilities.experimental.as_ref().unwrap()["phpWorkbenchCallHierarchyAnalysis"],
++        true
++    );
++    router.initialized(InitializedParams {}).await;
++    let mut uris = Vec::new();
++    let mut hosts = Vec::new();
++    let mut leaves = Vec::new();
++    for path in roots {
++        let uri = Url::from_file_path(path.join("query.php")).unwrap();
++        router
++            .did_open(DidOpenTextDocumentParams {
++                text_document: TextDocumentItem {
++                    uri: uri.clone(),
++                    language_id: "php".into(),
++                    version: 1,
++                    text: HIERARCHY_ANALYSIS_ROUTER_SOURCE.into(),
++                },
++            })
++            .await;
++        for (name, destination) in [
++            ("analysisRouterHost", &mut hosts),
++            ("analysisRouterLeaf", &mut leaves),
++        ] {
++            let range = noncall_exact_range(
++                HIERARCHY_ANALYSIS_ROUTER_SOURCE,
++                &format!("function {name}("),
++                name,
++            );
++            let items = router
++                .prepare_call_hierarchy(CallHierarchyPrepareParams {
++                    text_document_position_params: TextDocumentPositionParams {
++                        text_document: TextDocumentIdentifier { uri: uri.clone() },
++                        position: range.start,
++                    },
++                    work_done_progress_params: Default::default(),
++                })
++                .await
++                .unwrap()
++                .unwrap();
++            assert_eq!(items.len(), 1);
++            destination.push(items[0].clone());
++        }
++        uris.push(uri);
++    }
++    assert_ne!(
++        hosts[0].data.as_ref().unwrap()["_phpWorkbenchProject"],
++        hosts[1].data.as_ref().unwrap()["_phpWorkbenchProject"]
++    );
++    (temporary, router, uris, hosts, leaves)
++}
++
++#[tokio::test]
++async fn hierarchy_analysis_router_preserves_context_receipts_and_partial_source_issues() {
++    use phpantom_lsp::{HierarchyAnalysisState as State, HierarchyIssueKind as Kind};
++    let (_temporary, router, uris, hosts, leaves) = hierarchy_analysis_router_fixture().await;
++    for index in 0..2 {
++        let host = &hosts[index];
++        let host_receipt = host.data.clone();
++        let reply = router
++            .workbench_call_hierarchy_outgoing(CallHierarchyOutgoingCallsParams {
++                item: host.clone(),
++                work_done_progress_params: Default::default(),
++                partial_result_params: Default::default(),
++            })
++            .await
++            .unwrap();
++        assert_eq!(reply.analysis.state, State::Partial);
++        assert!(!reply.analysis.issues_truncated);
++        assert_eq!(reply.analysis.issues.len(), 1);
++        assert_eq!(reply.analysis.issues[0].kind, Kind::UnresolvedCall);
++        assert_eq!(reply.analysis.issues[0].uri, uris[index]);
++        assert_eq!(
++            reply.analysis.issues[0].range,
++            noncall_exact_range(HIERARCHY_ANALYSIS_ROUTER_SOURCE, "$unknown(1)", "$unknown")
++        );
++        assert_eq!(reply.items.len(), 2, "known edges survive partial coverage");
++        let leaf = reply
++            .items
++            .iter()
++            .find(|edge| edge.to.name == "analysisRouterLeaf")
++            .unwrap();
++        assert_eq!(
++            leaf.to, leaves[index],
++            "prepared opaque receipts survive outgoing transport"
++        );
++        assert_eq!(
++            leaf.to.uri, uris[index],
++            "same names in another Composer context must not redirect edges"
++        );
++        let builtin = reply
++            .items
++            .iter()
++            .find(|edge| edge.to.name == "strtolower")
++            .unwrap();
++        let owner = host_receipt.as_ref().unwrap()["_phpWorkbenchProject"]
++            .as_u64()
++            .unwrap();
++        assert_eq!(builtin.to.uri.scheme(), "phpantom-stub-fn");
++        assert_eq!(
++            builtin.to.uri.query(),
++            Some(format!("project_context={owner}").as_str())
++        );
++        let builtin_data = builtin.to.data.as_ref().unwrap();
++        assert_eq!(builtin_data["_phpWorkbenchProject"].as_u64(), Some(owner));
++        assert_eq!(
++            builtin_data["payload"]["uri"],
++            "phpantom-stub-fn://strtolower"
++        );
++        assert!(builtin_data["payload"]["source_length"].as_u64().unwrap() > 0);
++        assert_eq!(
++            builtin_data["payload"]["source_sha256"]
++                .as_array()
++                .unwrap()
++                .len(),
++            32
++        );
++        let prepared_builtin = router
++            .prepare_call_hierarchy(CallHierarchyPrepareParams {
++                text_document_position_params: TextDocumentPositionParams {
++                    text_document: TextDocumentIdentifier {
++                        uri: builtin.to.uri.clone(),
++                    },
++                    position: builtin.to.selection_range.start,
++                },
++                work_done_progress_params: Default::default(),
++            })
++            .await
++            .unwrap()
++            .unwrap();
++        assert_eq!(
++            prepared_builtin.as_slice(),
++            std::slice::from_ref(&builtin.to)
++        );
++        for callee in [&leaf.to, &builtin.to] {
++            let receipt = callee.data.clone();
++            let incoming = router
++                .workbench_call_hierarchy_incoming(CallHierarchyIncomingCallsParams {
++                    item: callee.clone(),
++                    work_done_progress_params: Default::default(),
++                    partial_result_params: Default::default(),
++                })
++                .await
++                .unwrap();
++            assert_eq!(incoming.analysis.state, State::Partial);
++            assert_eq!(incoming.items.len(), 1);
++            assert_eq!(
++                incoming.items[0].from, *host,
++                "incoming restores the exact prepared caller receipt"
++            );
++            let context = if callee.name == "strtolower" {
++                "strtolower('X')"
++            } else {
++                "analysisRouterLeaf(); strtolower"
++            };
++            assert_eq!(
++                incoming.items[0].from_ranges,
++                [noncall_exact_range(
++                    HIERARCHY_ANALYSIS_ROUTER_SOURCE,
++                    context,
++                    &callee.name
++                )]
++            );
++            assert!(!incoming.analysis.issues_truncated);
++            assert_eq!(incoming.analysis.issues.len(), 1);
++            assert_eq!(incoming.analysis.issues[0].uri, uris[index]);
++            assert_eq!(incoming.analysis.issues[0].kind, Kind::UnresolvedCall);
++            assert_eq!(callee.data, receipt);
++        }
++        let unavailable = router
++            .workbench_call_hierarchy_outgoing(CallHierarchyOutgoingCallsParams {
++                item: builtin.to.clone(),
++                work_done_progress_params: Default::default(),
++                partial_result_params: Default::default(),
++            })
++            .await
++            .unwrap();
++        assert_eq!(unavailable.analysis.state, State::Unavailable);
++        assert_eq!(host.data, host_receipt);
++    }
++    router.shutdown().await.unwrap();
++}
++
++#[tokio::test]
++async fn hierarchy_analysis_router_refuses_foreign_and_invalid_builtin_qualifiers_both_directions()
++{
++    let (_temporary, router, _uris, hosts, _leaves) = hierarchy_analysis_router_fixture().await;
++    let mut builtins = Vec::new();
++    for host in hosts {
++        let reply = router
++            .workbench_call_hierarchy_outgoing(CallHierarchyOutgoingCallsParams {
++                item: host,
++                work_done_progress_params: Default::default(),
++                partial_result_params: Default::default(),
++            })
++            .await
++            .unwrap();
++        builtins.push(
++            reply
++                .items
++                .into_iter()
++                .find(|edge| edge.to.name == "strtolower")
++                .unwrap()
++                .to,
++        );
++    }
++    assert_ne!(builtins[0].uri.query(), builtins[1].uri.query());
++    let pristine = builtins[0].clone();
++    for forged in [
++        {
++            let mut item = pristine.clone();
++            item.uri = builtins[1].uri.clone();
++            item
++        },
++        {
++            let mut item = pristine.clone();
++            item.uri.set_query(Some("project_context=invalid"));
++            item
++        },
++        {
++            let mut item = pristine.clone();
++            item.uri
++                .set_query(Some("project_context=18446744073709551615"));
++            item
++        },
++    ] {
++        assert!(
++            router
++                .workbench_call_hierarchy_incoming(CallHierarchyIncomingCallsParams {
++                    item: forged.clone(),
++                    work_done_progress_params: Default::default(),
++                    partial_result_params: Default::default(),
++                })
++                .await
++                .is_err(),
++            "foreign/malformed context must be refused before builtin normalization"
++        );
++        assert!(
++            router
++                .workbench_call_hierarchy_outgoing(CallHierarchyOutgoingCallsParams {
++                    item: forged,
++                    work_done_progress_params: Default::default(),
++                    partial_result_params: Default::default(),
++                })
++                .await
++                .is_err(),
++            "outgoing analysis must enforce the same authority as incoming"
++        );
++    }
++    let recovered = router
++        .workbench_call_hierarchy_incoming(CallHierarchyIncomingCallsParams {
++            item: pristine.clone(),
++            work_done_progress_params: Default::default(),
++            partial_result_params: Default::default(),
++        })
++        .await
++        .unwrap();
++    assert_eq!(
++        recovered.items.len(),
++        1,
++        "refused forgeries must not retire the legitimate context"
++    );
++    assert_eq!(pristine, builtins[0]);
++    router.shutdown().await.unwrap();
++}
++
++#[tokio::test]
++async fn hierarchy_analysis_invocation_budget_preserves_known_edges_and_reports_limit() {
++    use phpantom_lsp::{HierarchyAnalysisState as State, HierarchyIssueKind as Kind};
++    let backend = create_test_backend();
++    let uri = Url::parse("file:///hierarchy-analysis-invocation-budget.php").unwrap();
++    let mut source = "<?php\r\nclass StatusBudgetEmpty {}\r\nfunction statusBudgetLeaf(): void {}\r\nfunction statusBudgetHost(): void {\r\n    statusBudgetLeaf();\r\n".to_owned();
++    // Exceed the 4096 status-inspection budget without producing thousands
++    // of unknown issues or real constructor targets. The edge builder still
++    // has a genuine positive control which must survive partial coverage.
++    for _ in 0..4104 {
++        source.push_str("    new StatusBudgetEmpty();\r\n");
++    }
++    source.push_str("}\r\n");
++    open_php(&backend, &uri, &source).await;
++    let host = anonymous_hierarchy_prepare(&backend, &uri, &source, "statusBudgetHost").await;
++    let leaf = anonymous_hierarchy_prepare(&backend, &uri, &source, "statusBudgetLeaf").await;
++    let receipt = host.data.clone();
++    let outgoing = hierarchy_analysis_outgoing(&backend, &host).await;
++    assert_eq!(outgoing.items.len(), 1);
++    assert_eq!(outgoing.items[0].to, leaf);
++    assert_eq!(
++        outgoing.items[0].from_ranges,
++        [noncall_exact_range(
++            &source,
++            "statusBudgetLeaf();",
++            "statusBudgetLeaf"
++        )]
++    );
++    assert_eq!(outgoing.analysis.state, State::Partial);
++    assert!(outgoing.analysis.issues_truncated);
++    assert!(
++        outgoing
++            .analysis
++            .issues
++            .iter()
++            .any(|issue| issue.kind == Kind::Limit)
++    );
++    assert!(
++        outgoing
++            .analysis
++            .issues
++            .iter()
++            .all(|issue| issue.uri == uri && issue.range.start < issue.range.end)
++    );
++    assert_eq!(host.data, receipt);
++
++    let incoming = backend
++        .call_hierarchy_incoming_analysis(CallHierarchyIncomingCallsParams {
++            item: leaf,
++            work_done_progress_params: Default::default(),
++            partial_result_params: Default::default(),
++        })
++        .await
++        .unwrap();
++    assert_eq!(incoming.items.len(), 1);
++    assert_eq!(incoming.items[0].from, host);
++    assert_eq!(incoming.analysis.state, State::Partial);
++    assert!(incoming.analysis.issues_truncated);
++    assert!(
++        incoming
++            .analysis
++            .issues
++            .iter()
++            .any(|issue| issue.kind == Kind::Limit)
++    );
++    backend.shutdown().await.unwrap();
++}

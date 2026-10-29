@@ -1,0 +1,655 @@
+diff --git a/docs/CHANGELOG.md b/docs/CHANGELOG.md
+index 81c3b6e..bd7cdaa 100644
+--- a/docs/CHANGELOG.md
++++ b/docs/CHANGELOG.md
+@@ -29,6 +29,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
+ 
+ ### Fixed
+ 
++- **Results follow external project changes.** Autocomplete and native diagnostics discard results computed before watched PHP, Composer or resource updates finish, while open editor text is preserved. Contributed by PHP Workbench (local downstream patch).
++
+ - **Laravel route helper identity.** References, navigation, hover and unknown-route checks distinguish project helpers from Laravel's global helpers, including unsaved namespace-function changes. Contributed by PHP Workbench (local downstream patch).
+ 
+ - **Laravel route refactoring.** Rename unique literal route names across indexed PHP and Blade usages while preserving group prefixes, imports and template coordinates. Ambiguous, generated, colliding or stale declarations are refused. Contributed by PHP Workbench (local downstream patch).
+diff --git a/src/backend/semantic_snapshot.rs b/src/backend/semantic_snapshot.rs
+index 89a6774..d10f279 100644
+--- a/src/backend/semantic_snapshot.rs
++++ b/src/backend/semantic_snapshot.rs
+@@ -13,14 +13,16 @@ fn content_modified() -> Error {
+     }
+ }
+ 
+-/// A live semantic configuration mutation owns its whole synchronous
++/// A live semantic mutation owns its whole synchronous
+ /// publication, including cache and index reconciliation. Overlapping changes
+ /// block captures until the last guard finishes, without holding an index lock.
+-struct ConfigurationPublication<'a>(&'a Backend);
+-impl Drop for ConfigurationPublication<'_> {
++struct SemanticPublication<'a>(&'a Backend);
++impl Drop for SemanticPublication<'_> {
+     fn drop(&mut self) {
+-        let ready = self.0.diag.documents.lock().finish_configuration_change();
+-        if ready {
++        // Do not expose the ready epoch until old pull results are evicted
++        // and unchanged consumers are queued. Captures use this same mutex.
++        let mut documents = self.0.diag.documents.lock();
++        if documents.finish_configuration_change() {
+             self.0.schedule_diagnostics_after_configuration_reload();
+         }
+     }
+@@ -28,8 +30,30 @@ impl Drop for ConfigurationPublication<'_> {
+ 
+ impl Backend {
+     pub(crate) fn begin_configuration_publication(&self) -> impl Drop + '_ {
++        self.begin_semantic_publication()
++    }
++
++    pub(crate) fn begin_semantic_publication(&self) -> impl Drop + '_ {
+         self.diag.documents.lock().begin_configuration_change();
+-        ConfigurationPublication(self)
++        SemanticPublication(self)
++    }
++
++    /// Guard already-prepared, read-only results without reparsing open files.
++    /// Request handlers retain their own source/range validation and index prep.
++    pub(crate) fn with_semantic_epoch<T>(&self, body: impl FnOnce() -> Result<T>) -> Result<T> {
++        let epoch = {
++            let documents = self.diag.documents.lock();
++            if documents.configuration_changing() {
++                return Err(content_modified());
++            }
++            documents.semantic_epoch()
++        };
++        let result = body();
++        let documents = self.diag.documents.lock();
++        if documents.configuration_changing() || !documents.epoch_matches(&epoch) {
++            return Err(content_modified());
++        }
++        result
+     }
+ 
+     pub(crate) fn restore_closed_semantic_source(&self, uri: &str, opening: u64) -> bool {
+@@ -994,3 +1018,442 @@ mod client_filter_ownership_tests {
+         assert!(b.diag.pending_uris.lock().contains(&uri));
+     }
+ }
++
++#[cfg(test)]
++mod watched_disk_ownership_tests {
++    use super::*;
++    use std::sync::atomic::Ordering;
++    use tower_lsp::lsp_types::*;
++
++    struct Fixture {
++        backend: Backend,
++        dir: tempfile::TempDir,
++        uri: String,
++        text: Arc<String>,
++    }
++    fn fixture() -> Fixture {
++        let dir = tempfile::tempdir().unwrap();
++        let root = dir.path().canonicalize().unwrap();
++        let backend = Backend::new_test_with_workspace(root.clone(), vec![]);
++        let uri = Url::from_file_path(root.join("Caller.php"))
++            .unwrap()
++            .to_string();
++        let text = Arc::new("<?php class Caller {}".to_owned());
++        backend.diag.documents.lock().open(&uri, 1, &text);
++        backend
++            .open_files
++            .write()
++            .insert(uri.clone(), Arc::clone(&text));
++        assert!(backend.parse_diagnostic_snapshot(&uri, &text));
++        backend.init_complete.store(true, Ordering::Release);
++        backend.workspace_indexed.store(true, Ordering::Release);
++        backend.diag.pending_uris.lock().clear();
++        Fixture {
++            backend,
++            dir,
++            uri,
++            text,
++        }
++    }
++    fn event(f: &Fixture, name: &str, typ: FileChangeType) -> DidChangeWatchedFilesParams {
++        DidChangeWatchedFilesParams {
++            changes: vec![FileEvent {
++                uri: Url::from_file_path(f.dir.path().canonicalize().unwrap().join(name)).unwrap(),
++                typ,
++            }],
++        }
++    }
++    fn apply(f: &Fixture, params: &DidChangeWatchedFilesParams) -> bool {
++        f.backend
++            .apply_watched_file_changes(params, &f.dir.path().canonicalize().unwrap())
++    }
++    fn modified<T: std::fmt::Debug>(r: Result<T>) {
++        assert_eq!(
++            r.expect_err("disk publication must retire old results")
++                .code,
++            ErrorCode::ServerError(-32801)
++        );
++    }
++    #[test]
++    fn watched_creation_retires_an_inflight_result_from_worker_clone() {
++        let f = fixture();
++        std::fs::write(f.dir.path().join("Added.php"), "<?php class Added {}").unwrap();
++        let worker = f.backend.clone_for_blocking();
++        modified(f.backend.with_current_semantics(|| {
++            assert!(worker.apply_watched_file_changes(
++                &event(&f, "Added.php", FileChangeType::CREATED),
++                &f.dir.path().canonicalize().unwrap()
++            ));
++            Ok("obsolete completion")
++        }));
++    }
++    #[test]
++    fn watched_change_and_delete_retires_inflight_results() {
++        for typ in [FileChangeType::CHANGED, FileChangeType::DELETED] {
++            let f = fixture();
++            let path = f.dir.path().canonicalize().unwrap().join("Dependency.php");
++            let uri = Url::from_file_path(&path).unwrap().to_string();
++            std::fs::write(&path, "<?php class Dependency {}").unwrap();
++            f.backend.update_ast(&uri, "<?php class Dependency {}");
++            f.backend.parsed_uris.write().insert(uri.clone());
++            if typ == FileChangeType::DELETED {
++                std::fs::remove_file(&path).unwrap();
++            }
++            modified(f.backend.with_current_semantics(|| {
++                assert!(apply(&f, &event(&f, "Dependency.php", typ)));
++                Ok(())
++            }));
++        }
++    }
++    #[test]
++    fn watched_composer_reload_retires_inflight_results() {
++        let f = fixture();
++        std::fs::write(
++            f.dir.path().join("composer.json"),
++            r#"{"autoload":{"psr-4":{"App\\":"src/"}}}"#,
++        )
++        .unwrap();
++        modified(f.backend.with_current_semantics(|| {
++            assert!(apply(
++                &f,
++                &event(&f, "composer.json", FileChangeType::CHANGED)
++            ));
++            Ok(())
++        }));
++    }
++    #[test]
++    fn watched_publication_retires_old_native_phases_preserves_source_and_refreshes_pull() {
++        let f = fixture();
++        let old = f
++            .backend
++            .diag
++            .documents
++            .lock()
++            .capture(&f.uri, &f.text)
++            .unwrap()
++            .unwrap();
++        f.backend
++            .supports_pull_diagnostics
++            .store(true, Ordering::Release);
++        f.backend
++            .diag
++            .last_full
++            .lock()
++            .insert(f.uri.clone(), vec![Default::default()]);
++        f.backend.diag.result_ids.lock().insert(f.uri.clone(), 51);
++        std::fs::write(f.dir.path().join("Added.php"), "<?php class Added {}").unwrap();
++        assert!(apply(&f, &event(&f, "Added.php", FileChangeType::CREATED)));
++        let mut docs = f.backend.diag.documents.lock();
++        assert!(docs.parsed(&f.uri, Some(&old)));
++        assert!(
++            !docs.mark_phase(&f.uri, Some(&old), false),
++            "fast old run retired"
++        );
++        assert!(
++            !docs.mark_phase(&f.uri, Some(&old), true),
++            "slow old run retired"
++        );
++        let new = docs.capture(&f.uri, &f.text).unwrap().unwrap();
++        assert_eq!(new.version, 1);
++        assert!(docs.mark_phase(&f.uri, Some(&new), true));
++        drop(docs);
++        assert!(f.backend.diag.pending_uris.lock().contains(&f.uri));
++        assert!(!f.backend.diag.last_full.lock().contains_key(&f.uri));
++        assert_eq!(f.backend.diag.result_ids.lock().get(&f.uri), Some(&51));
++    }
++    #[test]
++    fn watched_resource_change_retires_inflight_results() {
++        let f = fixture();
++        std::fs::write(f.dir.path().join("services.yaml"), "services: {}\n").unwrap();
++        modified(f.backend.with_current_semantics(|| {
++            assert!(apply(
++                &f,
++                &event(&f, "services.yaml", FileChangeType::CREATED)
++            ));
++            Ok(())
++        }));
++    }
++    #[test]
++    fn ignored_and_unloaded_watcher_noise_preserves_current_work() {
++        let f = fixture();
++        let old = f
++            .backend
++            .diag
++            .documents
++            .lock()
++            .capture(&f.uri, &f.text)
++            .unwrap()
++            .unwrap();
++        std::fs::write(f.dir.path().join("Unloaded.php"), "<?php class Unloaded {}").unwrap();
++        assert!(
++            f.backend
++                .with_current_semantics(|| {
++                    assert!(!apply(
++                        &f,
++                        &event(&f, "Unloaded.php", FileChangeType::CHANGED)
++                    ));
++                    assert!(!apply(&f, &event(&f, "notes.txt", FileChangeType::CREATED)));
++                    assert!(!apply(&f, &DidChangeWatchedFilesParams { changes: vec![] }));
++                    Ok(())
++                })
++                .is_ok()
++        );
++        assert!(
++            f.backend
++                .diag
++                .documents
++                .lock()
++                .mark_phase(&f.uri, Some(&old), true)
++        );
++        assert!(f.backend.diag.pending_uris.lock().is_empty());
++    }
++    #[test]
++    fn disk_batch_cannot_finish_an_overlapping_configuration_publication() {
++        let f = fixture();
++        let publication = f.backend.begin_configuration_publication();
++        std::fs::write(f.dir.path().join("Added.php"), "<?php class Added {}").unwrap();
++        assert!(apply(&f, &event(&f, "Added.php", FileChangeType::CREATED)));
++        assert!(
++            f.backend
++                .diag
++                .documents
++                .lock()
++                .capture(&f.uri, &f.text)
++                .is_err()
++        );
++        modified(f.backend.with_current_semantics(|| Ok(())));
++        assert!(f.backend.diag.pending_uris.lock().is_empty());
++        drop(publication);
++        assert!(
++            f.backend
++                .diag
++                .documents
++                .lock()
++                .capture(&f.uri, &f.text)
++                .is_ok()
++        );
++        assert!(f.backend.diag.pending_uris.lock().contains(&f.uri));
++    }
++    #[test]
++    fn pending_disk_publication_blocks_new_capture_without_index_locks() {
++        let f = fixture();
++        let worker = f.backend.clone_for_blocking();
++        let old = f
++            .backend
++            .diag
++            .documents
++            .lock()
++            .capture(&f.uri, &f.text)
++            .unwrap()
++            .unwrap();
++        let publication = worker.begin_semantic_publication();
++        assert!(
++            f.backend
++                .diag
++                .documents
++                .lock()
++                .capture(&f.uri, &f.text)
++                .is_err()
++        );
++        modified(f.backend.with_current_semantics(|| Ok(())));
++        assert!(f.backend.diag.pending_uris.lock().is_empty());
++        drop(publication);
++        let mut docs = f.backend.diag.documents.lock();
++        assert!(!docs.mark_phase(&f.uri, Some(&old), true));
++        let current = docs.capture(&f.uri, &f.text).unwrap().unwrap();
++        assert!(docs.parsed(&f.uri, Some(&current)));
++        assert!(docs.mark_phase(&f.uri, Some(&current), true));
++    }
++    #[test]
++    fn watcher_does_not_replace_a_live_unsaved_dependency_overlay() {
++        let f = fixture();
++        let path = f.dir.path().canonicalize().unwrap().join("Dependency.php");
++        let uri = Url::from_file_path(&path).unwrap().to_string();
++        let text = Arc::new("<?php class UnsavedDependency {}".to_owned());
++        std::fs::write(&path, "<?php class DiskDependency {}").unwrap();
++        f.backend.diag.documents.lock().open(&uri, 2, &text);
++        f.backend
++            .open_files
++            .write()
++            .insert(uri.clone(), Arc::clone(&text));
++        assert!(f.backend.parse_diagnostic_snapshot(&uri, &text));
++        assert!(
++            f.backend
++                .with_current_semantics(|| {
++                    assert!(!apply(
++                        &f,
++                        &event(&f, "Dependency.php", FileChangeType::CHANGED)
++                    ));
++                    Ok(())
++                })
++                .is_ok()
++        );
++        assert!(Arc::ptr_eq(&f.backend.open_files.read()[&uri], &text));
++        assert!(
++            f.backend
++                .symbols
++                .fqn_class_index
++                .read()
++                .contains_key("UnsavedDependency")
++        );
++        assert!(
++            !f.backend
++                .symbols
++                .fqn_class_index
++                .read()
++                .contains_key("DiskDependency")
++        );
++    }
++    #[tokio::test]
++    async fn result_producing_server_handlers_reject_a_pending_disk_publication() {
++        use tower_lsp::LanguageServer;
++        let f = fixture();
++        let publication = f.backend.begin_semantic_publication();
++        let text_document = TextDocumentIdentifier {
++            uri: Url::parse(&f.uri).unwrap(),
++        };
++        let text_document_position = TextDocumentPositionParams {
++            text_document: text_document.clone(),
++            position: Position::new(0, 12),
++        };
++        modified(
++            f.backend
++                .references(ReferenceParams {
++                    text_document_position: text_document_position.clone(),
++                    context: ReferenceContext {
++                        include_declaration: true,
++                    },
++                    work_done_progress_params: WorkDoneProgressParams::default(),
++                    partial_result_params: PartialResultParams::default(),
++                })
++                .await,
++        );
++        modified(
++            f.backend
++                .rename(RenameParams {
++                    text_document_position,
++                    new_name: "RenamedCaller".into(),
++                    work_done_progress_params: WorkDoneProgressParams::default(),
++                })
++                .await,
++        );
++        modified(
++            f.backend
++                .code_action(CodeActionParams {
++                    text_document,
++                    range: Range::new(Position::new(0, 0), Position::new(0, 20)),
++                    context: CodeActionContext {
++                        diagnostics: vec![],
++                        only: None,
++                        trigger_kind: None,
++                    },
++                    work_done_progress_params: WorkDoneProgressParams::default(),
++                    partial_result_params: PartialResultParams::default(),
++                })
++                .await,
++        );
++        modified(f.backend.code_action_resolve(CodeAction::default()).await);
++        modified(
++            f.backend
++                .symbol(WorkspaceSymbolParams {
++                    query: "Caller".into(),
++                    work_done_progress_params: WorkDoneProgressParams::default(),
++                    partial_result_params: PartialResultParams::default(),
++                })
++                .await,
++        );
++        drop(publication);
++    }
++    #[tokio::test]
++    async fn pull_handlers_do_not_return_cached_results_during_publication() {
++        let f = fixture();
++        f.backend
++            .diag
++            .last_full
++            .lock()
++            .insert(f.uri.clone(), vec![Default::default()]);
++        f.backend.diag.result_ids.lock().insert(f.uri.clone(), 51);
++        let publication = f.backend.begin_semantic_publication();
++        modified(
++            f.backend
++                .document_pull_diagnostic(DocumentDiagnosticParams {
++                    text_document: TextDocumentIdentifier {
++                        uri: Url::parse(&f.uri).unwrap(),
++                    },
++                    identifier: None,
++                    previous_result_id: Some("51".into()),
++                    work_done_progress_params: WorkDoneProgressParams::default(),
++                    partial_result_params: PartialResultParams::default(),
++                }),
++        );
++        modified(
++            f.backend
++                .workspace_pull_diagnostic(WorkspaceDiagnosticParams {
++                    identifier: None,
++                    previous_result_ids: vec![PreviousResultId {
++                        uri: Url::parse(&f.uri).unwrap(),
++                        value: "51".into(),
++                    }],
++                    work_done_progress_params: WorkDoneProgressParams::default(),
++                    partial_result_params: PartialResultParams::default(),
++                }),
++        );
++        assert!(f.backend.diag.pending_uris.lock().is_empty());
++        drop(publication);
++    }
++    #[test]
++    fn prepared_result_retires_a_spanning_disk_epoch_without_parsing_sources() {
++        let f = fixture();
++        std::fs::write(f.dir.path().join("Added.php"), "<?php class Added {}").unwrap();
++        modified(f.backend.with_semantic_epoch(|| {
++            assert!(apply(&f, &event(&f, "Added.php", FileChangeType::CREATED)));
++            Ok("old prepared result")
++        }));
++    }
++    #[test]
++    fn ready_epoch_is_not_visible_before_old_pull_cache_is_retired() {
++        use std::{
++            sync::mpsc,
++            time::{Duration, Instant},
++        };
++        let f = fixture();
++        f.backend
++            .supports_pull_diagnostics
++            .store(true, Ordering::Release);
++        f.backend
++            .diag
++            .last_full
++            .lock()
++            .insert(f.uri.clone(), vec![Default::default()]);
++        let cache = f.backend.diag.last_full.lock();
++        let worker = f.backend.clone_for_blocking();
++        let (started, ready) = mpsc::channel();
++        let (finish, proceed) = mpsc::channel();
++        let join = std::thread::spawn(move || {
++            let publication = worker.begin_semantic_publication();
++            started.send(()).unwrap();
++            proceed.recv().unwrap();
++            drop(publication);
++        });
++        ready.recv_timeout(Duration::from_secs(2)).unwrap();
++        finish.send(()).unwrap();
++        let deadline = Instant::now() + Duration::from_millis(200);
++        let mut ready_with_old_cache = false;
++        while Instant::now() < deadline {
++            if let Some(documents) = f.backend.diag.documents.try_lock()
++                && !documents.configuration_changing()
++            {
++                ready_with_old_cache = true;
++                break;
++            }
++            std::thread::yield_now();
++        }
++        drop(cache);
++        join.join().unwrap();
++        assert!(
++            !ready_with_old_cache,
++            "requests could capture a ready epoch while its old pull cache was still present"
++        );
++        assert!(!f.backend.diag.last_full.lock().contains_key(&f.uri));
++    }
++}
+diff --git a/src/diagnostics/pull.rs b/src/diagnostics/pull.rs
+index 5285139..ed30d6d 100644
+--- a/src/diagnostics/pull.rs
++++ b/src/diagnostics/pull.rs
+@@ -20,6 +20,13 @@ impl Backend {
+     pub(crate) fn document_pull_diagnostic(
+         &self,
+         params: DocumentDiagnosticParams,
++    ) -> Result<DocumentDiagnosticReportResult> {
++        self.with_semantic_epoch(|| self.document_pull_diagnostic_current(params))
++    }
++
++    fn document_pull_diagnostic_current(
++        &self,
++        params: DocumentDiagnosticParams,
+     ) -> Result<DocumentDiagnosticReportResult> {
+         let uri_str = params.text_document.uri.to_string();
+ 
+@@ -88,6 +95,13 @@ impl Backend {
+     pub(crate) fn workspace_pull_diagnostic(
+         &self,
+         params: WorkspaceDiagnosticParams,
++    ) -> Result<WorkspaceDiagnosticReportResult> {
++        self.with_semantic_epoch(|| self.workspace_pull_diagnostic_current(params))
++    }
++
++    fn workspace_pull_diagnostic_current(
++        &self,
++        params: WorkspaceDiagnosticParams,
+     ) -> Result<WorkspaceDiagnosticReportResult> {
+         // The first workspace pull releases the deferred background
+         // workspace pass (see `wait_for_first_workspace_pull`).  This
+diff --git a/src/indexing/watch.rs b/src/indexing/watch.rs
+index a7ba0f2..a3906a0 100644
+--- a/src/indexing/watch.rs
++++ b/src/indexing/watch.rs
+@@ -217,6 +217,11 @@ impl Backend {
+             return false;
+         }
+ 
++        // Cover the whole accepted disk transaction, including nested config
++        // reloads and Composer/resource reconciliation. Ignored watcher noise
++        // returns above and keeps current requests and diagnostic runs valid.
++        let _publication = self.begin_semantic_publication();
++
+         if translations_changed {
+             self.laravel_string_key_cache.write().translations = None;
+         }
+diff --git a/src/server.rs b/src/server.rs
+index 3919c9e..000774f 100644
+--- a/src/server.rs
++++ b/src/server.rs
+@@ -498,14 +498,16 @@ impl LanguageServer for Backend {
+             // Ahead of reading the file: a refresh that parses new files can
+             // rewrite a template's virtual PHP (see `Backend::find_references`).
+             backend.ensure_workspace_indexed_for_request();
+-            backend.handle_with_position("references", &uri_clone, position, |content, pos| {
+-                backend
+-                    .find_references(&uri_clone, content, pos, include_declaration)
+-                    .map(|locs| {
+-                        locs.into_iter()
+-                            .filter_map(|l| backend.try_translate_location(l))
+-                            .collect()
+-                    })
++            backend.with_semantic_epoch(|| {
++                backend.handle_with_position("references", &uri_clone, position, |content, pos| {
++                    backend
++                        .find_references(&uri_clone, content, pos, include_declaration)
++                        .map(|locs| {
++                            locs.into_iter()
++                                .filter_map(|l| backend.try_translate_location(l))
++                                .collect()
++                        })
++                })
+             })
+         })
+         .await
+@@ -534,13 +536,15 @@ impl LanguageServer for Backend {
+         let backend = self.clone_for_blocking();
+         let uri_clone = uri.clone();
+         run_blocking_cancel_safe("code_action", move || {
+-            backend.handle_with_uri("code_action", &uri_clone, |content| {
+-                let actions = backend.handle_code_action(&uri_clone, content, &params);
+-                if actions.is_empty() {
+-                    None
+-                } else {
+-                    Some(actions)
+-                }
++            backend.with_semantic_epoch(|| {
++                backend.handle_with_uri("code_action", &uri_clone, |content| {
++                    let actions = backend.handle_code_action(&uri_clone, content, &params);
++                    if actions.is_empty() {
++                        None
++                    } else {
++                        Some(actions)
++                    }
++                })
+             })
+         })
+         .await
+@@ -555,10 +559,10 @@ impl LanguageServer for Backend {
+         let fallback = action.clone();
+         let (resolved, republish_uri) =
+             run_blocking_cancel_safe("code_action_resolve", move || {
+-                backend.resolve_code_action(action)
++                backend.with_semantic_epoch(|| Ok(backend.resolve_code_action(action)))
+             })
+             .await
+-            .unwrap_or((fallback, None));
++            .unwrap_or(Ok((fallback, None)))?;
+ 
+         // The resolver is read-only and currently returns no republish URI.
+         // Preserve the response API; document/tool updates own diagnostic refresh.
+@@ -673,8 +677,10 @@ impl LanguageServer for Backend {
+             if needs_refresh {
+                 backend.ensure_workspace_indexed_for_request();
+             }
+-            backend.handle_with_position("rename", &uri_clone, position, |content, pos| {
+-                Some(backend.handle_rename(&uri_clone, content, pos, &new_name))
++            backend.with_semantic_epoch(|| {
++                backend.handle_with_position("rename", &uri_clone, position, |content, pos| {
++                    Some(backend.handle_rename(&uri_clone, content, pos, &new_name))
++                })
+             })
+         })
+         .await
+@@ -720,11 +726,11 @@ impl LanguageServer for Backend {
+         // The query is matched against every symbol of every parsed file, so
+         // this walks the whole workspace index.
+         let backend = self.clone_for_blocking();
+-        Ok(run_blocking_cancel_safe("symbol", move || {
+-            backend.handle_workspace_symbol(&params.query)
++        run_blocking_cancel_safe("symbol", move || {
++            backend.with_semantic_epoch(|| Ok(backend.handle_workspace_symbol(&params.query)))
+         })
+         .await
+-        .flatten())
++        .unwrap_or(Ok(None))
+     }
+ 
+     async fn folding_range(&self, params: FoldingRangeParams) -> Result<Option<Vec<FoldingRange>>> {

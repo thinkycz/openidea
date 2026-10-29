@@ -1,0 +1,202 @@
+diff --git a/docs/CHANGELOG.md b/docs/CHANGELOG.md
+index 11adfc2..ecac069 100644
+--- a/docs/CHANGELOG.md
++++ b/docs/CHANGELOG.md
+@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
+ 
+ ## [Unreleased]
+ 
++### Fixed
++
++- **Built-in classes follow older PHP targets.** Classes introduced in a later PHP release no longer appear in completion or return through another stub loaded into memory. Project-defined polyfills remain available.
++
++
+ ### Fixed
+ 
+ - **Diagnostics follow current edits.** Results from older text or a previous opening of a file no longer replace current warnings. Contributed by PHP Workbench (local downstream patch).
+diff --git a/src/lib.rs b/src/lib.rs
+index 704ad25..101ac20 100644
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -2332,7 +2332,11 @@ impl Backend {
+                     || !stubs::is_stub_function_introduced_after(source, name, version))
+         });
+         self.stub_index.write().retain(|name, source| {
+-            !may_be_removed(source) || !stubs::is_stub_class_removed(source, name, version)
++            (!may_be_removed(source) || !stubs::is_stub_class_removed(source, name, version))
++                && (!*mentions_since
++                    .entry(source.as_ptr() as usize)
++                    .or_insert_with(|| source.contains("@since"))
++                    || !stubs::is_stub_class_introduced_after(source, name, version))
+         });
+         self.stub_constant_index.write().retain(|name, source| {
+             !may_be_removed(source) || !stubs::is_stub_constant_removed(source, name, version)
+diff --git a/src/resolution.rs b/src/resolution.rs
+index df81edf..f0cd83c 100644
+--- a/src/resolution.rs
++++ b/src/resolution.rs
+@@ -806,6 +806,18 @@ impl Backend {
+         // multi-namespace files (e.g. PDO.php with both `namespace { }`
+         // and `namespace Pdo { }`) resolve parent names correctly.
+         let (mut classes_with_ns, blocks) = Self::parse_php_classes_by_block(content, php_version);
++        if (uri.starts_with("phpantom-stub://") || uri.starts_with("phpantom-stub-fn://"))
++            && content.contains("@since")
++        {
++            let version = php_version.unwrap_or_else(|| self.php_version());
++            classes_with_ns.retain(|(class, _, _)| {
++                !crate::stubs::is_stub_class_introduced_after_offset(
++                    content,
++                    class.keyword_offset,
++                    version,
++                )
++            });
++        }
+ 
+         // Resolve parent names against each class's own namespace block
+         // (namespace and imports), mirroring the logic in `update_ast_inner`,
+@@ -2567,3 +2579,76 @@ mod inflight_guard_tests {
+         });
+     }
+ }
++
++#[cfg(test)]
++mod workbench_class_introduction_tests {
++    use crate::{Backend, types::PhpVersion};
++    use std::collections::HashMap;
++    const SOURCE: &str =
++        "<?php\nclass LegacyVersionClass {}\n/** @since 8.1 */\nclass FutureVersionClass {}\n";
++    #[test]
++    fn future_builtin_classes_are_not_indexed_for_an_older_php_target() {
++        let backend = Backend::new_test_with_stubs(HashMap::from([
++            ("LegacyVersionClass", SOURCE),
++            ("FutureVersionClass", SOURCE),
++        ]));
++        backend.set_php_version(PhpVersion::new(7, 4));
++        assert!(backend.stub_index.read().contains_key("LegacyVersionClass"));
++        assert!(
++            !backend.stub_index.read().contains_key("FutureVersionClass"),
++            "PHP7.4 must not offer an8.1 built-in class"
++        );
++    }
++    #[test]
++    fn loading_an_older_sibling_does_not_resurrect_a_future_builtin_class() {
++        let backend = Backend::new_test_with_stubs(HashMap::from([("LegacyVersionClass", SOURCE)]));
++        backend.set_php_version(PhpVersion::new(7, 4));
++        assert!(backend.find_or_load_class("LegacyVersionClass").is_some());
++        assert!(
++            backend.find_or_load_class("FutureVersionClass").is_none(),
++            "lazy stub parsing must keep the same target gate"
++        );
++    }
++}
++
++#[cfg(test)]
++mod workbench_class_introduction_boundaries {
++    use crate::{Backend, types::PhpVersion};
++    use std::collections::HashMap;
++    #[test]
++    fn introduced_class_is_available_at_its_exact_minor_version() {
++        let source = "<?php\n/** @since 8.1 */\nclass VersionReady {}";
++        let backend = Backend::new_test_with_stubs(HashMap::from([("VersionReady", source)]));
++        backend.set_php_version(PhpVersion::new(8, 1));
++        assert!(backend.find_or_load_class("VersionReady").is_some());
++    }
++    #[test]
++    fn a_project_polyfill_is_not_filtered_as_a_stub() {
++        let source = "<?php\n/** @since 8.1 */\nclass VersionPolyfill {}";
++        let backend = Backend::new_test_with_stubs(HashMap::from([("VersionPolyfill", source)]));
++        backend.set_php_version(PhpVersion::new(7, 4));
++        backend.update_ast("file:///project.php", source);
++        assert!(backend.find_or_load_class("VersionPolyfill").is_some());
++    }
++    #[test]
++    fn duplicate_short_names_use_their_own_namespace_and_source_position() {
++        let source = "<?php\nnamespace Newer {\n/** @since 8.1 */\nclass Twin {}\n}\nnamespace Older {\nclass Twin {}\n}";
++        let backend = Backend::new_test_with_stubs(HashMap::from([
++            ("Newer\\Twin", source),
++            ("Older\\Twin", source),
++        ]));
++        backend.set_php_version(PhpVersion::new(7, 4));
++        assert!(!backend.stub_index.read().contains_key("Newer\\Twin"));
++        assert!(backend.stub_index.read().contains_key("Older\\Twin"));
++        assert!(backend.find_or_load_class("Older\\Twin").is_some());
++        assert!(backend.find_or_load_class("Newer\\Twin").is_none());
++    }
++    #[test]
++    fn pecl_release_notes_and_docblock_class_mentions_do_not_hide_legacy_classes() {
++        let source =
++            "<?php\n/** Example: class Mentioned {} */\n/** @since PECL 8.4 */\nclass Mentioned {}";
++        let backend = Backend::new_test_with_stubs(HashMap::from([("Mentioned", source)]));
++        backend.set_php_version(PhpVersion::new(7, 4));
++        assert!(backend.find_or_load_class("Mentioned").is_some());
++    }
++}
+diff --git a/src/stubs.rs b/src/stubs.rs
+index 76718f9..6696cf9 100644
+--- a/src/stubs.rs
++++ b/src/stubs.rs
+@@ -177,6 +177,64 @@ pub fn is_stub_function_introduced_after(
+     position.is_some_and(|position| introduced_after_at(source, position, php_version))
+ }
+ 
++/// Whether a built-in class-like declaration was introduced after the target.
++pub fn is_stub_class_introduced_after(
++    source: &str,
++    class_name: &str,
++    version: crate::types::PhpVersion,
++) -> bool {
++    if !source.contains("@since") {
++        return false;
++    }
++    let short = class_name.rsplit('\\').next().unwrap_or(class_name);
++    let mut positions = Vec::new();
++    for kind in ["class", "interface", "trait", "enum"] {
++        let needle = format!("{kind} {short}");
++        for (position, _) in source.match_indices(&needle) {
++            let after = position + needle.len();
++            if source
++                .as_bytes()
++                .get(after)
++                .is_some_and(|b| !b.is_ascii_whitespace() && !matches!(b, b'{' | b':'))
++            {
++                continue;
++            }
++            let line = source[..position].rfind('\n').map_or(0, |p| p + 1);
++            if source[line..position]
++                .split_whitespace()
++                .all(|word| matches!(word, "abstract" | "final" | "readonly"))
++            {
++                positions.push(position);
++            }
++        }
++    }
++    let position = if positions.len() == 1 {
++        positions.first().copied()
++    } else {
++        // Duplicate short names or unusual declaration layout need the same
++        // canonical parser used by resolution, not a second namespace parser.
++        let (classes, _) = crate::Backend::parse_php_classes_by_block(source, None);
++        classes.into_iter().find_map(|(class, namespace, _)| {
++            let fqn = namespace.filter(|ns| !ns.is_empty()).map_or_else(
++                || class.name.to_string(),
++                |ns| format!("{ns}\\{}", class.name),
++            );
++            (fqn.eq_ignore_ascii_case(class_name.trim_start_matches('\\'))
++                && class.keyword_offset > 0)
++                .then_some(class.keyword_offset as usize)
++        })
++    };
++    position.is_some_and(|position| introduced_after_at(source, position, version))
++}
++
++pub(crate) fn is_stub_class_introduced_after_offset(
++    source: &str,
++    keyword_offset: u32,
++    version: crate::types::PhpVersion,
++) -> bool {
++    keyword_offset > 0 && introduced_after_at(source, keyword_offset as usize, version)
++}
++
+ /// Check a parsed stub function using its identifier offset, avoiding another
+ /// whole-file name search while its sibling declarations are cached.
+ pub(crate) fn is_stub_function_introduced_after_offset(

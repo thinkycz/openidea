@@ -512,3 +512,234 @@ fn archive_entries_open_read_only_without_observers() {
     assert!(f.rec.log.lock().is_empty(), "language servers / history never see archive entries");
     f.docs.close(info.id);
 }
+
+#[test]
+fn save_refuses_external_changes_even_before_the_watcher_runs() {
+    let f = fixture();
+    let path = f.root.join("conflict.txt");
+    fs::write(&path, "alpha\n").unwrap();
+    let id = f.docs.open(&path).unwrap().id;
+    f.docs.edit(id, 0, change(0, 5, "local")).unwrap();
+    fs::write(&path, "omega\n").unwrap();
+    assert!(f.docs.save(id).is_err(), "saving must not overwrite external changes");
+    assert_eq!(fs::read_to_string(&path).unwrap(), "omega\n");
+    assert!(f.docs.snapshot(id).unwrap().dirty);
+}
+
+#[test]
+fn confirmed_overwrite_is_bound_to_the_reviewed_disk_revision() {
+    let f = fixture();
+    let path = f.root.join("review.txt");
+    fs::write(&path, "original\n").unwrap();
+    let id = f.docs.open(&path).unwrap().id;
+    f.docs.edit(id, 0, change(0, 8, "local")).unwrap();
+    fs::write(&path, "external\n").unwrap();
+    f.docs.on_disk_changed(std::slice::from_ref(&path));
+    let reviewed = f.docs.save_checked(id, None).unwrap().unwrap();
+    assert_eq!(fs::read_to_string(&path).unwrap(), "external\n");
+    fs::write(&path, "new disk\n").unwrap();
+    let newer = f.docs.save_checked(id, Some(&reviewed)).unwrap().unwrap();
+    assert_ne!(reviewed, newer);
+    assert_eq!(fs::read_to_string(&path).unwrap(), "new disk\n");
+    assert!(f.docs.save_checked(id, Some(&newer)).unwrap().is_none());
+    assert_eq!(fs::read_to_string(&path).unwrap(), "local\n");
+    assert!(!f.docs.snapshot(id).unwrap().dirty);
+    f.docs.edit(id, 1, change(0, 5, "later")).unwrap();
+    assert!(f.docs.save_checked(id, None).unwrap().is_none());
+}
+
+#[test]
+fn deleted_file_requires_confirmation_before_recreating_it() {
+    let f = fixture();
+    let path = f.root.join("deleted.txt");
+    fs::write(&path, "original").unwrap();
+    let id = f.docs.open(&path).unwrap().id;
+    f.docs.edit(id, 0, change(0, 8, "local")).unwrap();
+    fs::remove_file(&path).unwrap();
+    assert_eq!(f.docs.save_checked(id, None).unwrap().as_deref(), Some("missing"));
+    assert!(!path.exists());
+    fs::write(&path, "recreated externally").unwrap();
+    assert!(f.docs.save_checked(id, Some("missing")).unwrap().is_some());
+    assert_eq!(fs::read_to_string(&path).unwrap(), "recreated externally");
+}
+
+fn reviewed_plan(docs: &Documents, files: Vec<ide_core::FileEdit>) -> ide_core::WorkspaceEdit {
+    let disk_revisions = files
+        .iter()
+        .filter_map(|f| match f {
+            ide_core::FileEdit::Edit { path, .. } => {
+                Some((path.clone(), blake3::hash(&fs::read(path).unwrap()).to_hex().to_string()))
+            }
+            _ => None,
+        })
+        .collect();
+    ide_core::WorkspaceEdit {
+        files,
+        guard: Some(ide_core::WorkspaceEditGuard {
+            disk_revisions,
+            project_revision: "test-project".into(),
+            engine_generations: vec![],
+            documents_revision: docs.edit_revision().unwrap(),
+        }),
+    }
+}
+fn replace_name(path: &Path, from: u32, to: u32, name: &str) -> ide_core::FileEdit {
+    ide_core::FileEdit::Edit {
+        path: path.into(),
+        edits: vec![TextEdit { range: Range::new(Pos::new(0, from), Pos::new(0, to)), new_text: name.into() }],
+    }
+}
+
+#[test]
+fn reviewed_edits_refuse_a_changed_unsaved_dependency_before_any_write() {
+    let f = fixture();
+    let a = f.root.join("a.php");
+    let b = f.root.join("b.php");
+    fs::write(&a, "Old").unwrap();
+    fs::write(&b, "Old").unwrap();
+    let dependency = f.docs.open(&b).unwrap();
+    let plan = reviewed_plan(&f.docs, vec![replace_name(&a, 0, 3, "New")]);
+    f.docs.replace_all(dependency.id, "Unsaved").unwrap();
+    assert_eq!(f.docs.apply_guarded_edits(&plan, &f.root.join("recovery")).unwrap_err().kind, ErrorKind::OutOfSync);
+    assert_eq!(fs::read_to_string(a).unwrap(), "Old");
+    assert_eq!(f.docs.snapshot(dependency.id).unwrap().text, "Unsaved");
+}
+
+#[test]
+fn reviewed_edits_preflight_every_target_and_keep_external_changes() {
+    let f = fixture();
+    let a = f.root.join("a.php");
+    let b = f.root.join("b.php");
+    fs::write(&a, "Old").unwrap();
+    fs::write(&b, "Old").unwrap();
+    let open = f.docs.open(&b).unwrap();
+    let plan = reviewed_plan(&f.docs, vec![replace_name(&a, 0, 3, "New"), replace_name(&b, 0, 3, "New")]);
+    fs::write(&b, "External").unwrap();
+    assert_eq!(f.docs.apply_guarded_edits(&plan, &f.root.join("recovery")).unwrap_err().kind, ErrorKind::OutOfSync);
+    assert_eq!(fs::read_to_string(&a).unwrap(), "Old");
+    assert_eq!(fs::read_to_string(&b).unwrap(), "External");
+    assert_eq!(f.docs.snapshot(open.id).unwrap().text, "Old");
+}
+
+#[test]
+fn reviewed_edits_reject_collisions_bad_unicode_and_read_only_targets() {
+    let f = fixture();
+    let a = f.root.join("a.php");
+    fs::write(&a, "😀Old").unwrap();
+    for files in [
+        vec![replace_name(&a, 2, 5, "New"), replace_name(&a, 2, 5, "Other")],
+        vec![replace_name(&a, 1, 2, "Split surrogate")],
+        vec![replace_name(&a, 2, 99, "Bad column")],
+        vec![ide_core::FileEdit::Edit {
+            path: a.clone().into(),
+            edits: vec![
+                TextEdit { range: Range::new(Pos::new(0, 2), Pos::new(0, 5)), new_text: "New".into() },
+                TextEdit { range: Range::new(Pos::new(0, 3), Pos::new(0, 4)), new_text: "Overlap".into() },
+            ],
+        }],
+    ] {
+        let plan = reviewed_plan(&f.docs, files);
+        assert_eq!(
+            f.docs.apply_guarded_edits(&plan, &f.root.join("recovery")).unwrap_err().kind,
+            ErrorKind::InvalidInput
+        );
+        assert_eq!(fs::read_to_string(&a).unwrap(), "😀Old");
+    }
+    let mut permissions = fs::metadata(&a).unwrap().permissions();
+    permissions.set_readonly(true);
+    fs::set_permissions(&a, permissions).unwrap();
+    let plan = reviewed_plan(&f.docs, vec![replace_name(&a, 2, 5, "New")]);
+    assert_eq!(
+        f.docs.apply_guarded_edits(&plan, &f.root.join("recovery")).unwrap_err().kind,
+        ErrorKind::PermissionDenied
+    );
+}
+
+#[test]
+fn reviewed_edits_apply_utf16_to_open_and_closed_files_and_emit_undo_patch() {
+    let f = fixture();
+    let a = f.root.join("a.php");
+    let b = f.root.join("b.php");
+    fs::write(&a, "😀Old\r\n").unwrap();
+    fs::write(&b, "Old\r\n").unwrap();
+    let open = f.docs.open(&a).unwrap();
+    f.docs.replace_all(open.id, "😀Old unsaved\n").unwrap();
+    let plan = reviewed_plan(&f.docs, vec![replace_name(&a, 2, 5, "New"), replace_name(&b, 0, 3, "New")]);
+    f.docs.apply_guarded_edits(&plan, &f.root.join("recovery")).unwrap();
+    assert_eq!(fs::read_to_string(a).unwrap(), "😀New unsaved\r\n");
+    assert_eq!(fs::read_to_string(b).unwrap(), "New\r\n");
+    assert_eq!(f.docs.snapshot(open.id).unwrap().text, "😀New unsaved\n");
+    assert!(!f.docs.snapshot(open.id).unwrap().dirty);
+    assert!(f.events.lock().iter().any(|e| matches!(e, IdeEvent::DocPatched { doc, .. } if *doc == open.id)));
+    assert_eq!(fs::read_dir(f.root.join("recovery")).unwrap().count(), 0);
+}
+
+#[test]
+fn reviewed_edits_validate_closed_target_bytes_again_when_staging() {
+    let f = fixture();
+    let path = f.root.join("closed.php");
+    fs::write(&path, "Old").unwrap();
+    let plan = reviewed_plan(&f.docs, vec![replace_name(&path, 0, 3, "New")]);
+    fs::write(&path, "External").unwrap();
+    assert_eq!(f.docs.apply_guarded_edits(&plan, &f.root.join("recovery")).unwrap_err().kind, ErrorKind::OutOfSync);
+    assert_eq!(fs::read_to_string(path).unwrap(), "External");
+}
+
+#[cfg(unix)]
+#[test]
+fn reviewed_edits_roll_back_partial_writes_and_retain_recovery_originals() {
+    use std::os::unix::fs::PermissionsExt;
+    let f = fixture();
+    let a = f.root.join("a.php");
+    let locked = f.root.join("locked");
+    fs::create_dir(&locked).unwrap();
+    let b = locked.join("b.php");
+    fs::write(&a, "Old").unwrap();
+    fs::write(&b, "Old").unwrap();
+    let open = f.docs.open(&a).unwrap();
+    let plan = reviewed_plan(&f.docs, vec![replace_name(&a, 0, 3, "New"), replace_name(&b, 0, 3, "New")]);
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o555)).unwrap();
+    let recovery = f.root.join("recovery");
+    let result = f.docs.apply_guarded_edits(&plan, &recovery);
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
+    let error = result.unwrap_err();
+    assert!(error.message.contains("recovery manifest"));
+    assert_eq!(fs::read_to_string(a).unwrap(), "Old");
+    assert_eq!(fs::read_to_string(b).unwrap(), "Old");
+    assert_eq!(f.docs.snapshot(open.id).unwrap().text, "Old");
+    let receipt = fs::read_dir(recovery).unwrap().next().unwrap().unwrap().path();
+    assert!(receipt.join("manifest.json").is_file());
+    assert_eq!(fs::read_to_string(receipt.join("0.original")).unwrap(), "Old");
+    assert_eq!(fs::read_to_string(receipt.join("1.original")).unwrap(), "Old");
+}
+
+#[cfg(unix)]
+#[test]
+fn reviewed_edits_reject_hard_link_aliases() {
+    let f = fixture();
+    let a = f.root.join("a.php");
+    let b = f.root.join("alias.php");
+    fs::write(&a, "Old").unwrap();
+    fs::hard_link(&a, &b).unwrap();
+    let plan = reviewed_plan(&f.docs, vec![replace_name(&a, 0, 3, "New"), replace_name(&b, 0, 3, "Other")]);
+    assert_eq!(f.docs.apply_guarded_edits(&plan, &f.root.join("recovery")).unwrap_err().kind, ErrorKind::InvalidInput);
+    assert_eq!(fs::read_to_string(a).unwrap(), "Old");
+    assert_eq!(fs::read_to_string(b).unwrap(), "Old");
+}
+
+#[test]
+fn reviewed_edits_invalidate_when_save_encoding_properties_change() {
+    let f = fixture();
+    let path = f.root.join("a.php");
+    fs::write(&path, "Old\n").unwrap();
+    let doc = f.docs.open(&path).unwrap();
+    let plan = reviewed_plan(&f.docs, vec![replace_name(&path, 0, 3, "New")]);
+    f.docs.set_line_ending(doc.id, LineEnding::CrLf).unwrap();
+    assert_eq!(
+        f.docs.snapshot(doc.id).unwrap().version,
+        doc.version,
+        "line-ending changes need their own revision witness"
+    );
+    assert_eq!(f.docs.apply_guarded_edits(&plan, &f.root.join("recovery")).unwrap_err().kind, ErrorKind::OutOfSync);
+    assert_eq!(fs::read_to_string(path).unwrap(), "Old\n");
+}

@@ -1,0 +1,2370 @@
+diff --git a/docs/CHANGELOG.md b/docs/CHANGELOG.md
+--- a/docs/CHANGELOG.md
++++ b/docs/CHANGELOG.md
+@@ -14,6 +14,8 @@
+ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+ 
+ ## [Unreleased]
++
++- **Config and translation keys follow imported aliases and named arguments.** Completion and navigation identify the actual helper or facade; local names keep their own meaning and config value types survive aliased calls. Contributed by PHP Workbench downstream.
+ 
+ - **Scope method bodies keep the model type through attribute aliases.** Suggestions and diagnostics follow the imported Eloquent attribute, and ordinary methods no longer borrow a neighboring or unrelated Scope attribute. Contributed by PHP Workbench downstream.
+ 
+diff --git a/examples/laravel/app/Demo.php b/examples/laravel/app/Demo.php
+--- a/examples/laravel/app/Demo.php
++++ b/examples/laravel/app/Demo.php
+@@ -7,6 +7,9 @@
+  */
+ 
+ namespace App;
++
++use function config as setting;
++use function __ as translate;
+ 
+ use App\Facades\Oven;
+ use App\Facades\PastryOven;
+@@ -50,6 +53,7 @@
+ use Illuminate\Support\Facades\Broadcast;
+ use Illuminate\Support\Facades\Cache;
+ use Illuminate\Support\Facades\Config;
++use Illuminate\Support\Facades\Config as Settings;
+ use Illuminate\Support\Facades\DB;
+ use Illuminate\Support\Facades\Gate;
+ use Illuminate\Support\Facades\Http;
+@@ -577,6 +581,9 @@
+     {
+         // Global helper
+         config('app.name');
++        // Aliases and reordered arguments name the same config declaration.
++        setting(default: null, key: 'app.name');
++        Settings::get(default: null, key: 'app.name');
+ 
+         // Facade methods
+         Config::get('app.name');
+@@ -773,6 +780,7 @@
+         __('Fresh bread for :name', replace: ['name' => 'Ada'], locale: 'fr');
+         // Try: change this to 'messages.new_key' and apply the insertion quick fix.
+         __('messages.welcome');
++        translate(locale: 'en', replace: [], key: 'messages.welcome');
+         trans('auth.failed');
+         trans_choice('messages.notifications', 5);
+         Lang::get('pagination.next');
+diff --git a/examples/laravel/assertions.php b/examples/laravel/assertions.php
+--- a/examples/laravel/assertions.php
++++ b/examples/laravel/assertions.php
+@@ -8,6 +8,9 @@
+  * behaviour are correct, so the LSP can model them accurately.
+  * Requires no external database or full application boot.
+  */
++
++use function config as readConfig;
++use function __ as readTranslation;
+ 
+ require_once __DIR__ . '/vendor/autoload.php';
+ 
+@@ -1718,6 +1721,28 @@
+     ($castSampleCasts['toppings'] ?? null) === \Illuminate\Database\Eloquent\Casts\AsCollection::class . ':,' . \App\Models\Frosting::class
+ );
+ 
++// Literal helper aliases preserve PHP's named key binding. Keep this
++// container isolated from the database examples and restore it afterwards.
++(function (): void {
++    $previous = \Illuminate\Container\Container::getInstance();
++    $container = new \Illuminate\Container\Container();
++    $container->instance('config', new \Illuminate\Config\Repository([
++        'workbench' => ['enabled' => true],
++    ]));
++    $loader = new \Illuminate\Translation\ArrayLoader();
++    $loader->addMessages('en', 'workbench', ['welcome' => 'Hello :name']);
++    $container->instance('translator', new \Illuminate\Translation\Translator($loader, 'en'));
++    \Illuminate\Container\Container::setInstance($container);
++    try {
++        check('Config alias uses the reordered key argument',
++            readConfig(default: 'unused', key: 'workbench.enabled') === true);
++        check('Translation alias uses the reordered key argument',
++            readTranslation(locale: 'en', replace: ['name' => 'Ada'], key: 'workbench.welcome') === 'Hello Ada');
++    } finally {
++        \Illuminate\Container\Container::setInstance($previous);
++    }
++})();
++
+ // ─── Summary ────────────────────────────────────────────────────────────────
+ 
+ echo "\n";
+diff --git a/src/code_actions/extract_function/scope.rs b/src/code_actions/extract_function/scope.rs
+--- a/src/code_actions/extract_function/scope.rs
++++ b/src/code_actions/extract_function/scope.rs
+@@ -30,6 +30,7 @@
+     let constant_loader = backend.constant_loader(&ctx);
+     let config_resolver = |key: &str| backend.resolve_config_type(key);
+     let trans_resolver = |key: &str| backend.resolve_trans_type(key);
++    let laravel_function_name = backend.laravel_function_name_loader(&ctx);
+     let loaders = Loaders {
+         function_loader: Some(
+             &function_loader as &dyn Fn(&str, u32) -> Option<crate::types::FunctionInfo>,
+@@ -37,6 +38,7 @@
+         constant_loader: Some(&constant_loader),
+         config_resolver: Some(&config_resolver),
+         trans_resolver: Some(&trans_resolver),
++        laravel_function_name: Some(&laravel_function_name),
+     };
+ 
+     let current_class = find_class_at_offset(&ctx.classes, cursor_offset);
+diff --git a/src/completion/array_shape.rs b/src/completion/array_shape.rs
+--- a/src/completion/array_shape.rs
++++ b/src/completion/array_shape.rs
+@@ -288,10 +288,10 @@
+         // error (e.g. unclosed `$var['`) that prevented the parser from
+         // recovering the class structure.  Patch the cursor line to close
+         // the array access, re-parse, and retry.
+-        let patched_classes_storage;
+-        let (raw_type, effective_classes) = match raw_type {
++        let patched_context_storage;
++        let (raw_type, effective_context) = match raw_type {
+             Some(t) if find_class_at_offset(&file_ctx.classes, cursor_offset).is_some() => {
+-                (t, file_ctx.classes.as_slice())
++                (t, file_ctx)
+             }
+             Some(t) => {
+                 // The docblock text scan (`find_iterable_raw_type_in_source`)
+@@ -307,14 +307,10 @@
+                 // already resolved.
+                 let patched = patch_array_access_at_cursor(content, position);
+                 if patched == content {
+-                    (t, file_ctx.classes.as_slice())
++                    (t, file_ctx)
+                 } else {
+-                    patched_classes_storage = self
+-                        .parse_php(&patched)
+-                        .into_iter()
+-                        .map(Arc::new)
+-                        .collect::<Vec<_>>();
+-                    (t, patched_classes_storage.as_slice())
++                    patched_context_storage = self.array_key_recovery_context(&patched, position);
++                    (t, &patched_context_storage)
+                 }
+             }
+             None => {
+@@ -322,26 +318,18 @@
+                 if patched == content {
+                     return vec![];
+                 }
+-                patched_classes_storage = self
+-                    .parse_php(&patched)
+-                    .into_iter()
+-                    .map(Arc::new)
+-                    .collect::<Vec<_>>();
++                // Keep the recovered Program alive for both metadata extraction
++                // and the type engine's retry, rather than reusing stale names.
++                let _patched_parse = crate::parser::with_parse_cache(&patched);
+                 let patched_offset = position_to_offset(&patched, position);
+-                let patched_ctx = FileContext {
+-                    classes: patched_classes_storage.clone(),
+-                    use_map: file_ctx.use_map.clone(),
+-                    namespace: file_ctx.namespace.clone(),
+-                    namespace_spans: file_ctx.namespace_spans.clone(),
+-                    resolved_names: file_ctx.resolved_names.clone(),
+-                };
++                patched_context_storage = self.array_key_recovery_context(&patched, position);
+                 match self.resolve_variable_raw_type(
+                     &ctx.var_name,
+                     &patched,
+                     patched_offset as usize,
+-                    &patched_ctx,
++                    &patched_context_storage,
+                 ) {
+-                    Some(t) => (t, patched_classes_storage.as_slice()),
++                    Some(t) => (t, &patched_context_storage),
+                     None => return vec![],
+                 }
+             }
+@@ -349,8 +337,8 @@
+ 
+         // Uses `effective_classes` which may be the patched classes when
+         // the original parse failed due to syntax errors.
+-        let class_loader =
+-            self.class_loader_with(effective_classes, &file_ctx.use_map, &file_ctx.namespace);
++        let effective_classes = effective_context.classes.as_slice();
++        let class_loader = self.class_loader(effective_context);
+ 
+         // If there are prefix keys (chained access), resolve through each
+         // level of the shape to get the inner type. Each hop may itself be
+@@ -546,6 +534,51 @@
+         Some(current)
+     }
+ 
++    /// Recover classes and callable names from the same patched Program.
++    /// None of this transient metadata is published to the workspace indexes.
++    fn array_key_recovery_context(&self, content: &str, position: Position) -> FileContext {
++        let offset = position_to_offset(content, position);
++        let _parse = crate::parser::with_parse_cache(content);
++        let (mut classes, blocks) = Self::parse_php_classes_by_block(content, None, false);
++        let (use_map, namespace, resolved_names) = crate::parser::with_parsed_program(
++            content,
++            "array_key_recovery_context",
++            |program, _| {
++                let mut use_map = std::collections::HashMap::new();
++                Self::extract_use_statements_from_statements(
++                    program.statements.iter(),
++                    &mut use_map,
++                );
++                let namespace = Self::extract_namespace_from_statements(program.statements.iter());
++                let arena = mago_allocator::LocalArena::new();
++                let names = mago_names::resolver::NameResolver::new(&arena).resolve(program);
++                (
++                    use_map,
++                    namespace,
++                    Some(Arc::new(crate::names::OwnedResolvedNames::from_resolved(
++                        &names,
++                    ))),
++                )
++            },
++        );
++        Self::resolve_parent_class_names_by_block(&mut classes, &blocks, &use_map, &namespace);
++        let classes = classes
++            .into_iter()
++            .map(|(mut class, namespace, _)| {
++                class.file_namespace = namespace.as_deref().map(crate::atom::atom);
++                Arc::new(class)
++            })
++            .collect();
++        FileContext {
++            classes,
++            use_map,
++            namespace,
++            namespace_spans: (!blocks.is_empty()).then_some(blocks),
++            resolved_names,
++        }
++        .at(offset)
++    }
++
+     /// Resolve the raw (uncleaned) type annotation for a variable.
+     ///
+     /// Searches for `@var` and `@param` annotations, and also follows
+@@ -586,6 +619,7 @@
+         let function_loader = self.function_loader(file_ctx);
+         let config_resolver = |key: &str| self.resolve_config_type(key);
+         let trans_resolver = |key: &str| self.resolve_trans_type(key);
++        let laravel_function_name = self.laravel_function_name_loader(file_ctx);
+         let resolved = crate::type_engine::variable::resolution::resolve_variable_types(
+             var_name,
+             effective_class,
+@@ -598,6 +632,7 @@
+                 function_loader: Some(&function_loader),
+                 config_resolver: Some(&config_resolver),
+                 trans_resolver: Some(&trans_resolver),
++                laravel_function_name: Some(&laravel_function_name),
+                 ..Loaders::default()
+             },
+         );
+diff --git a/src/completion/array_shape_tests.rs b/src/completion/array_shape_tests.rs
+--- a/src/completion/array_shape_tests.rs
++++ b/src/completion/array_shape_tests.rs
+@@ -155,3 +155,25 @@
+     assert_eq!(ctx.quote_char, Some('\''));
+     assert_eq!(ctx.key_start_col, 9);
+ }
++
++#[test]
++fn recovered_context_uses_position_after_crlf_normalization() {
++    let backend = Backend::new_test();
++    let source = format!(
++        "<?php\r\n{}namespace First {{ use Wrong\\Schema as Schema; }}\r\nnamespace Second {{ use Right\\Schema as Schema;\r\n/** @var array{{ok: string}} $data */\r\n$data['\r\n}}\r\n",
++        "\r\n".repeat(256)
++    );
++    let line = source.lines().position(|line| line == "$data['").unwrap() as u32;
++    let position = Position::new(line, 7);
++    let patched = patch_array_access_at_cursor(&source, position);
++    assert_ne!(
++        position_to_offset(&source, position),
++        position_to_offset(&patched, position)
++    );
++    let ctx = backend.array_key_recovery_context(&patched, position);
++    assert_eq!(ctx.namespace.as_deref(), Some("Second"));
++    assert_eq!(
++        ctx.use_map.get("Schema").map(String::as_str),
++        Some("Right\\Schema")
++    );
++}
+diff --git a/src/completion/laravel_key_calls.rs b/src/completion/laravel_key_calls.rs
+new file mode 100644
+--- /dev/null
++++ b/src/completion/laravel_key_calls.rs
+@@ -0,0 +1,90 @@
++//! Semantic callable identity for config and translation key completion.
++
++use super::laravel_string_keys::receiver_chain_start;
++use super::source::helpers::{split_trailing_ident, trailing_class_name};
++use crate::symbol_map::laravel_key_calls::{self, KeyCall};
++use crate::{Backend, types::FileContext};
++
++pub(crate) type KeyCallRole<'a> = dyn Fn(&str) -> Option<KeyCall> + 'a;
++
++impl Backend {
++    pub(crate) fn laravel_key_call_role(
++        &self,
++        content: &str,
++        callable: &str,
++        ctx: &FileContext,
++    ) -> Option<KeyCall> {
++        let (method, before) = split_trailing_ident(callable);
++        let before = before.trim_end();
++        if !before.ends_with("::") && !before.ends_with("->") {
++            let helper = self.global_laravel_helper(
++                content,
++                callable,
++                ctx,
++                &["config", "__", "trans", "trans_choice"],
++            )?;
++            return laravel_key_calls::function_call(helper);
++        }
++        if laravel_key_calls::config_method_call(method).is_none()
++            && laravel_key_calls::translation_method_call(method).is_none()
++        {
++            return None;
++        }
++        if let Some(class_prefix) = before.strip_suffix("::") {
++            let written = trailing_class_name(class_prefix);
++            let offset = (class_prefix.trim_end().len() - written.len()) as u32;
++            let resolved = ctx.resolve_name_at(written, offset);
++            let receiver = resolved.trim_start_matches('\\');
++            if !receiver.contains('\\') && self.has_indexed_class(receiver) {
++                return None;
++            }
++            return laravel_key_calls::static_call(receiver, method);
++        }
++        let receiver = before
++            .strip_suffix("->")?
++            .trim_end()
++            .trim_end_matches('?')
++            .trim_end();
++        if let Some(call) = receiver.strip_suffix(')')
++            && let Some(open) = call.rfind('(')
++            && call[open + 1..].trim().is_empty()
++            && self
++                .global_laravel_helper(content, call[..open].trim_end(), ctx, &["config"])
++                .is_some()
++        {
++            return laravel_key_calls::config_method_call(method);
++        }
++        // Resolve typed repositories through the existing callable target path.
++        // The method's actual owner can be an interface or an inherited base.
++        let start = receiver_chain_start(receiver);
++        let target = self.resolve_callable_target_at_offset(
++            &callable[start..],
++            content,
++            callable.len() as u32,
++            ctx,
++        )?;
++        let owner = target.owner_class?;
++        let loader = self.class_loader(ctx);
++        for class in [
++            "Illuminate\\Config\\Repository",
++            "Illuminate\\Contracts\\Config\\Repository",
++        ] {
++            if owner.as_str().eq_ignore_ascii_case(class)
++                || crate::class_lookup::is_subclass_of(owner.as_str(), class, &loader)
++            {
++                return laravel_key_calls::config_method_call(method);
++            }
++        }
++        for class in [
++            "Illuminate\\Translation\\Translator",
++            "Illuminate\\Contracts\\Translation\\Translator",
++        ] {
++            if owner.as_str().eq_ignore_ascii_case(class)
++                || crate::class_lookup::is_subclass_of(owner.as_str(), class, &loader)
++            {
++                return laravel_key_calls::translation_method_call(method);
++            }
++        }
++        None
++    }
++}
+diff --git a/src/completion/laravel_route_calls.rs b/src/completion/laravel_route_calls.rs
+--- a/src/completion/laravel_route_calls.rs
++++ b/src/completion/laravel_route_calls.rs
+@@ -6,24 +6,25 @@
+ pub(crate) type RouteCallRole<'a> = dyn Fn(&str) -> Option<&'static str> + 'a;
+ 
+ impl Backend {
+-    fn global_route_helper(
++    pub(super) fn global_laravel_helper(
+         &self,
+         content: &str,
+         callable: &str,
+         ctx: &FileContext,
++        helpers: &[&'static str],
+     ) -> Option<&'static str> {
+         let written = trailing_class_name(callable);
+         let offset = (callable.len() - written.len()) as u32;
+         let names = ctx.resolved_names.as_deref();
+         let resolved = names.and_then(|names| names.get(offset));
+-        let helpers = ["route", "to_route", "redirect", "url", "response"];
+-        if let Some(name) = resolved.and_then(|name| {
+-            helpers
+-                .iter()
+-                .copied()
+-                .find(|h| name.trim_start_matches('\\').eq_ignore_ascii_case(h))
+-        }) {
+-            return Some(name);
++        if resolved.is_some() || written.starts_with('\\') {
++            return self.global_laravel_function_name(
++                written,
++                offset,
++                names,
++                ctx.namespace_at(offset).as_deref(),
++                helpers,
++            );
+         }
+         // An unfinished string may leave the callee out of mago-names while
+         // retaining its imports. Check the typed PHP import, since the legacy
+@@ -34,7 +35,8 @@
+         if let Some(recovered) = &recovered {
+             if let Some(target) = &recovered.imported {
+                 return helpers
+-                    .into_iter()
++                    .iter()
++                    .copied()
+                     .find(|name| target.trim_start_matches('\\').eq_ignore_ascii_case(name));
+             }
+             if recovered.local_declared {
+@@ -42,7 +44,8 @@
+             }
+         }
+         let name = helpers
+-            .into_iter()
++            .iter()
++            .copied()
+             .find(|name| written.trim_start_matches('\\').eq_ignore_ascii_case(name))?;
+         if written.starts_with('\\') {
+             return Some(name);
+@@ -69,7 +72,12 @@
+         let (method, before) = split_trailing_ident(callable);
+         let before = before.trim_end();
+         if !before.ends_with("::") && !before.ends_with("->") {
+-            return match self.global_route_helper(content, callable, ctx)? {
++            return match self.global_laravel_helper(
++                content,
++                callable,
++                ctx,
++                &["route", "to_route", "redirect", "url", "response"],
++            )? {
+                 "route" => Some("name"),
+                 "to_route" => Some("route"),
+                 _ => None,
+@@ -111,7 +119,12 @@
+         if let Some(call) = receiver.strip_suffix(')')
+             && let Some(open) = call.rfind('(')
+             && call[open + 1..].trim().is_empty()
+-            && let Some(helper) = self.global_route_helper(content, call[..open].trim_end(), ctx)
++            && let Some(helper) = self.global_laravel_helper(
++                content,
++                call[..open].trim_end(),
++                ctx,
++                &["route", "to_route", "redirect", "url", "response"],
++            )
+         {
+             return route_method_role(helper, &method);
+         }
+@@ -186,7 +199,7 @@
+         }
+     }
+     repaired.push(';');
+-    crate::parser::with_parsed_program(&repaired, "route_completion_import", |program, _| {
++    crate::parser::with_parsed_program(&repaired, "laravel_completion_import", |program, _| {
+         let namespace = program
+             .statements
+             .iter()
+diff --git a/src/completion/laravel_string_keys/context.rs b/src/completion/laravel_string_keys/context.rs
+--- a/src/completion/laravel_string_keys/context.rs
++++ b/src/completion/laravel_string_keys/context.rs
+@@ -10,6 +10,11 @@
+ 
+ use crate::symbol_map::LaravelStringKind;
+ use crate::text_position::position_to_offset;
++
++pub(super) struct LaravelCallRoles<'a> {
++    pub(super) route: &'a crate::completion::laravel_route_calls::RouteCallRole<'a>,
++    pub(super) key: &'a crate::completion::laravel_key_calls::KeyCallRole<'a>,
++}
+ 
+ pub(super) struct LaravelStringKeyContext<'a> {
+     pub(super) kind: LaravelStringKind,
+@@ -886,7 +891,7 @@
+     resolved_names: Option<&'a crate::names::OwnedResolvedNames>,
+     indexed_function_exists: Option<&dyn Fn(&str) -> bool>,
+     indexed_class_exists: Option<&dyn Fn(&str) -> bool>,
+-    route_role: Option<&crate::completion::laravel_route_calls::RouteCallRole<'_>>,
++    call_roles: Option<&LaravelCallRoles<'_>>,
+ ) -> Option<LaravelStringKeyContext<'a>> {
+     let cursor_offset = position_to_offset(content, position) as usize;
+     let bytes = content.as_bytes();
+@@ -947,8 +952,19 @@
+         .flatten();
+     let is_attribute = current_attribute_class_start.is_some();
+ 
++    let route_role = call_roles.map(|roles| roles.route);
++    let key_role = call_roles.map(|roles| roles.key);
+     let live_route_role = route_role.and_then(|role| role(before_paren));
+-    let kind = if let Some(role) = live_route_role {
++    let live_key_role = (!is_attribute)
++        .then(|| key_role.and_then(|role| role(before_paren)))
++        .flatten();
++    let kind = if let Some(call) = live_key_role {
++        (argument
++            .named_argument
++            .is_none_or(|name| name == call.parameter)
++            && (argument.shape == StringArgumentShape::Scalar || call.accepts_array))
++            .then_some(call.kind)
++    } else if let Some(role) = live_route_role {
+         (argument.shape == StringArgumentShape::Scalar
+             && argument.named_argument.is_none_or(|name| name == role))
+         .then_some(LaravelStringKind::Route)
+@@ -1059,9 +1075,9 @@
+                     "config",
+                     "get" | "getmany" | "set" | "has" | "boolean" | "array" | "collection"
+                     | "prepend" | "push",
+-                ) => Some(LaravelStringKind::Config),
++                ) if key_role.is_none() => Some(LaravelStringKind::Config),
+                 ("view", "make" | "exists") => Some(LaravelStringKind::View),
+-                ("lang", "get" | "has" | "hasforlocale" | "choice") => {
++                ("lang", "get" | "has" | "hasforlocale" | "choice") if key_role.is_none() => {
+                     Some(LaravelStringKind::Trans)
+                 }
+                 // Route names reached through the URL-building facades, and the
+@@ -1231,11 +1247,13 @@
+         } else {
+             match fn_lower.as_str() {
+                 "route" | "to_route" if route_role.is_none() => Some(LaravelStringKind::Route),
+-                "config" => Some(LaravelStringKind::Config),
++                "config" if key_role.is_none() => Some(LaravelStringKind::Config),
+                 "view" | "blade_view_directive" | "blade_each_directive" => {
+                     Some(LaravelStringKind::View)
+                 }
+-                "__" | "trans" | "trans_choice" => Some(LaravelStringKind::Trans),
++                "__" | "trans" | "trans_choice" if key_role.is_none() => {
++                    Some(LaravelStringKind::Trans)
++                }
+                 "env" => Some(LaravelStringKind::Env),
+                 // The Blade preprocessor lowers `@can`/`@cannot`/`@canany` to
+                 // this call, so completion inside the directive works too.
+diff --git a/src/completion/laravel_string_keys/mod.rs b/src/completion/laravel_string_keys/mod.rs
+--- a/src/completion/laravel_string_keys/mod.rs
++++ b/src/completion/laravel_string_keys/mod.rs
+@@ -148,13 +148,18 @@
+         let indexed_function_exists = |name: &str| self.has_indexed_function(name);
+         let indexed_class_exists = |name: &str| self.has_indexed_class(name);
+         let route_role = |callable: &str| self.laravel_route_call_role(content, callable, file_ctx);
++        let key_role = |callable: &str| self.laravel_key_call_role(content, callable, file_ctx);
++        let call_roles = LaravelCallRoles {
++            route: &route_role,
++            key: &key_role,
++        };
+         self.try_laravel_string_key_completion_inner(
+             content,
+             position,
+             file_ctx.resolved_names.as_deref(),
+             Some(&indexed_function_exists),
+             Some(&indexed_class_exists),
+-            Some(&route_role),
++            Some(&call_roles),
+         )
+     }
+ 
+@@ -165,7 +170,7 @@
+         resolved_names: Option<&crate::names::OwnedResolvedNames>,
+         indexed_function_exists: Option<&dyn Fn(&str) -> bool>,
+         indexed_class_exists: Option<&dyn Fn(&str) -> bool>,
+-        route_role: Option<&crate::completion::laravel_route_calls::RouteCallRole<'_>>,
++        call_roles: Option<&LaravelCallRoles<'_>>,
+     ) -> Option<CompletionResponse> {
+         let ctx = detect_laravel_string_key_context_inner(
+             content,
+@@ -173,7 +178,7 @@
+             resolved_names,
+             indexed_function_exists,
+             indexed_class_exists,
+-            route_role,
++            call_roles,
+         )?;
+ 
+         // The candidate lists are shared with every other consumer, so only
+diff --git a/src/completion/mod.rs b/src/completion/mod.rs
+--- a/src/completion/mod.rs
++++ b/src/completion/mod.rs
+@@ -78,6 +78,7 @@
+ pub(crate) mod command_params;
+ pub(crate) mod eloquent_string;
+ pub(crate) mod handler;
++mod laravel_key_calls;
+ pub(crate) mod laravel_paths;
+ pub(crate) mod laravel_request_keys;
+ mod laravel_route_calls;
+diff --git a/src/diagnostics/match_type_errors.rs b/src/diagnostics/match_type_errors.rs
+--- a/src/diagnostics/match_type_errors.rs
++++ b/src/diagnostics/match_type_errors.rs
+@@ -82,6 +82,7 @@
+                     let owned_loaders = self.diagnostic_loaders_over(
+                         function_loaders.at(subject_offset),
+                         constant_loaders.at(subject_offset),
++                        &file_ctx,
+                     );
+                     let loaders = owned_loaders.loaders();
+ 
+diff --git a/src/diagnostics/property_type_errors.rs b/src/diagnostics/property_type_errors.rs
+--- a/src/diagnostics/property_type_errors.rs
++++ b/src/diagnostics/property_type_errors.rs
+@@ -342,6 +342,7 @@
+     let owned_loaders = ctx.backend.diagnostic_loaders_over(
+         ctx.type_ctx.function_loader_at(site),
+         ctx.type_ctx.constant_loader_at(site),
++        ctx.file_ctx,
+     );
+     let loaders = owned_loaders.loaders();
+ 
+diff --git a/src/diagnostics/return_type_errors.rs b/src/diagnostics/return_type_errors.rs
+--- a/src/diagnostics/return_type_errors.rs
++++ b/src/diagnostics/return_type_errors.rs
+@@ -600,7 +600,8 @@
+                 backend,
+             );
+ 
+-            let owned_loaders = backend.diagnostic_loaders_over(function_loader, constant_loader);
++            let owned_loaders =
++                backend.diagnostic_loaders_over(function_loader, constant_loader, file_ctx);
+             let loaders = owned_loaders.loaders();
+ 
+             for (maybe_expr, start, end, stmt_start) in returns {
+@@ -762,7 +763,7 @@
+     let declared_return =
+         crate::virtual_members::laravel::expand_model_type(&declared_return, class_loader);
+ 
+-    let owned_loaders = backend.diagnostic_loaders_over(function_loader, constant_loader);
++    let owned_loaders = backend.diagnostic_loaders_over(function_loader, constant_loader, file_ctx);
+     let loaders = owned_loaders.loaders();
+ 
+     for (maybe_expr, start, end, stmt_start) in returns {
+diff --git a/src/diagnostics/type_errors/mod.rs b/src/diagnostics/type_errors/mod.rs
+--- a/src/diagnostics/type_errors/mod.rs
++++ b/src/diagnostics/type_errors/mod.rs
+@@ -376,6 +376,7 @@
+                     let owned_loaders = self.diagnostic_loaders_over(
+                         function_loaders.at(*args_start),
+                         constant_loaders.at(*args_start),
++                        &file_ctx,
+                     );
+                     let loaders = owned_loaders.loaders();
+ 
+diff --git a/src/hover/variable.rs b/src/hover/variable.rs
+--- a/src/hover/variable.rs
++++ b/src/hover/variable.rs
+@@ -71,11 +71,13 @@
+         let constant_loader = self.constant_loader(ctx);
+         let config_resolver = |key: &str| self.resolve_config_type(key);
+         let trans_resolver = |key: &str| self.resolve_trans_type(key);
++        let laravel_function_name = self.laravel_function_name_loader(ctx);
+         let loaders = crate::type_engine::resolver::Loaders {
+             function_loader: Some(&function_loader as &dyn Fn(&str, u32) -> Option<FunctionInfo>),
+             constant_loader: Some(&constant_loader),
+             config_resolver: Some(&config_resolver),
+             trans_resolver: Some(&trans_resolver),
++            laravel_function_name: Some(&laravel_function_name),
+         };
+ 
+         // Try the type-string path first.  This preserves generic
+diff --git a/src/references/receivers.rs b/src/references/receivers.rs
+--- a/src/references/receivers.rs
++++ b/src/references/receivers.rs
+@@ -315,11 +315,13 @@
+             let constant_loader = self.constant_loader(&file_ctx);
+             let config_resolver = |key: &str| self.resolve_config_type(key);
+             let trans_resolver = |key: &str| self.resolve_trans_type(key);
++            let laravel_function_name = self.laravel_function_name_loader(&file_ctx);
+             let loaders = crate::type_engine::resolver::Loaders {
+                 function_loader: Some(&function_loader),
+                 constant_loader: Some(&constant_loader),
+                 config_resolver: Some(&config_resolver),
+                 trans_resolver: Some(&trans_resolver),
++                laravel_function_name: Some(&laravel_function_name),
+             };
+             match walk {
+                 // Only the bodies holding the accesses being searched for:
+diff --git a/src/resolution.rs b/src/resolution.rs
+--- a/src/resolution.rs
++++ b/src/resolution.rs
+@@ -1450,6 +1450,62 @@
+                 })
+     }
+ 
++    /// Identify a global framework helper using existing per-offset names.
++    /// Namespace-local functions win; an explicit foreign import never falls
++    /// back to a same-spelled global helper when its declaration is absent.
++    pub(crate) fn global_laravel_function_name(
++        &self,
++        name: &str,
++        offset: u32,
++        resolved_names: Option<&crate::names::OwnedResolvedNames>,
++        namespace: Option<&str>,
++        helpers: &[&'static str],
++    ) -> Option<&'static str> {
++        let canonical = |name: &str| {
++            helpers
++                .iter()
++                .copied()
++                .find(|helper| name.trim_start_matches('\\').eq_ignore_ascii_case(helper))
++        };
++        if name.starts_with('\\') {
++            return canonical(name);
++        }
++        let names = resolved_names?;
++        let resolved = names.get(offset)?;
++        if let Some(helper) = canonical(resolved) {
++            return Some(helper);
++        }
++        if names.is_imported(offset) || name.contains('\\') {
++            return None;
++        }
++        let helper = canonical(name)?;
++        // Mago has already qualified an unimported function with its block's
++        // namespace. Consult that exact local FQN before PHP's global fallback.
++        if resolved.contains('\\') {
++            return (!self.has_indexed_function(resolved)).then_some(helper);
++        }
++        if let Some(namespace) = namespace.filter(|namespace| !namespace.is_empty()) {
++            return (!self.has_indexed_function(&format!("{namespace}\\{name}"))).then_some(helper);
++        }
++        Some(helper)
++    }
++
++    /// Borrow the parsed file's callable identity without loading helper stubs.
++    pub(crate) fn laravel_function_name_loader<'a>(
++        &'a self,
++        ctx: &'a FileContext,
++    ) -> impl Fn(&str, u32) -> Option<&'static str> + 'a {
++        move |name, offset| {
++            self.global_laravel_function_name(
++                name,
++                offset,
++                ctx.resolved_names.as_deref(),
++                ctx.namespace_at(offset).as_deref(),
++                &["config", "__", "trans"],
++            )
++        }
++    }
++
+     /// Whether discovery or full parsing has seen this exact class FQN.
+     ///
+     /// Laravel's optional root facade aliases are used only when no real
+@@ -1820,9 +1876,7 @@
+         self.constant_loader_with(ctx.resolved_names.as_deref(), &ctx.use_map, &ctx.namespace)
+     }
+ 
+-    /// Bundle the four cross-file resolvers a diagnostic collector hands
+-    /// the type engine: function and constant lookup for `ctx`, plus the
+-    /// Laravel config and translation resolvers.
++    /// Bundle declaration and Laravel repository/identity resolution for `ctx`.
+     ///
+     /// Bind the result to a local and call
+     /// [`LendsLoaders::loaders`](crate::type_engine::resolver::LendsLoaders::loaders)
+@@ -1832,16 +1886,17 @@
+         &'a self,
+         ctx: &'a FileContext,
+     ) -> impl crate::type_engine::resolver::LendsLoaders + 'a {
+-        self.diagnostic_loaders_over(self.function_loader(ctx), self.constant_loader(ctx))
++        self.diagnostic_loaders_over(self.function_loader(ctx), self.constant_loader(ctx), ctx)
+     }
+ 
+     /// [`diagnostic_loaders`](Self::diagnostic_loaders), for a caller
+     /// that already holds the function and constant loaders and only
+-    /// needs the two Laravel resolvers added.
++    /// needs the Laravel repository and parsed callable-identity resolvers added.
+     pub(crate) fn diagnostic_loaders_over<'a, F, C>(
+         &'a self,
+         function_loader: F,
+         constant_loader: C,
++        ctx: &'a FileContext,
+     ) -> impl crate::type_engine::resolver::LendsLoaders + 'a
+     where
+         F: Fn(&str, u32) -> Option<crate::types::FunctionInfo> + 'a,
+@@ -1852,6 +1907,7 @@
+             constant_loader,
+             move |key: &str| self.resolve_config_type(key),
+             move |key: &str| self.resolve_trans_type(key),
++            self.laravel_function_name_loader(ctx),
+         )
+     }
+ 
+diff --git a/src/symbol_map/extraction/expressions/calls.rs b/src/symbol_map/extraction/expressions/calls.rs
+--- a/src/symbol_map/extraction/expressions/calls.rs
++++ b/src/symbol_map/extraction/expressions/calls.rs
+@@ -328,7 +328,7 @@
+                         ctx.content,
+                         &mut ctx.spans,
+                     );
+-                    let route_helper = route_helper_name(
++                    let route_helper = laravel_helper_name(
+                         name_clean,
+                         ident.span().start.offset,
+                         ctx.resolved_names,
+@@ -341,12 +341,24 @@
+                     // The `config()` helper is the one that both reads and
+                     // writes, so it takes a path of its own rather than the
+                     // read-only mapping below.
+-                    if name_clean.eq_ignore_ascii_case("config") {
++                    let key_helper =
++                        crate::symbol_map::laravel_key_calls::function_call(route_helper);
++                    if key_helper.is_some_and(|call| {
++                        call.kind == crate::symbol_map::LaravelStringKind::Config
++                    }) {
++                        let span_start = ctx.spans.len();
+                         try_emit_laravel_config_helper_spans(
+                             &func_call.argument_list,
+                             ctx.content,
+                             &mut ctx.spans,
+                         );
++                        if let Some(dependency) =
++                            ctx.resolved_name_at(ident.span().start.offset).and_then(
++                                crate::symbol_map::LaravelStringDependency::namespaced_key_helper,
++                            )
++                        {
++                            ctx.defer_laravel_spans_since(span_start, dependency);
++                        }
+                     }
+                     let laravel_kind = if name_clean.eq_ignore_ascii_case("view")
+                         || name_clean.eq_ignore_ascii_case("blade_each_directive")
+@@ -356,10 +368,9 @@
+                         || route_helper.eq_ignore_ascii_case("to_route")
+                     {
+                         Some(crate::symbol_map::LaravelStringKind::Route)
+-                    } else if name_clean.eq_ignore_ascii_case("__")
+-                        || name_clean.eq_ignore_ascii_case("trans")
+-                        || name_clean.eq_ignore_ascii_case("trans_choice")
+-                    {
++                    } else if key_helper.is_some_and(|call| {
++                        call.kind == crate::symbol_map::LaravelStringKind::Trans
++                    }) {
+                         Some(crate::symbol_map::LaravelStringKind::Trans)
+                     } else if name_clean.eq_ignore_ascii_case("app")
+                         || name_clean.eq_ignore_ascii_case("resolve")
+@@ -378,10 +389,16 @@
+                             ctx.content,
+                             &mut ctx.spans,
+                         );
+-                        if kind == crate::symbol_map::LaravelStringKind::Route
+-                            && let Some(dependency) = ctx.resolved_name_at(ident.span().start.offset)
+-                                .and_then(crate::symbol_map::LaravelStringDependency::namespaced_route_helper)
+-                        {
++                        let dependency = ctx.resolved_name_at(ident.span().start.offset).and_then(|name| {
++                            if kind == crate::symbol_map::LaravelStringKind::Route {
++                                crate::symbol_map::LaravelStringDependency::namespaced_route_helper(name)
++                            } else if kind == crate::symbol_map::LaravelStringKind::Trans {
++                                crate::symbol_map::LaravelStringDependency::namespaced_key_helper(name)
++                            } else {
++                                None
++                            }
++                        });
++                        if let Some(dependency) = dependency {
+                             ctx.defer_laravel_spans_since(span_start, dependency);
+                         }
+                     }
+@@ -455,13 +472,23 @@
+                         &mut ctx.spans,
+                     );
+                 }
+-                if is_laravel_config_repository_call(method_call.object, &member_name) {
++                if is_laravel_config_repository_call(
++                    method_call.object,
++                    &member_name,
++                    ctx.resolved_names,
++                ) {
++                    let span_start = ctx.spans.len();
+                     try_emit_laravel_config_key_span(
+                         &member_name,
+                         &method_call.argument_list,
+                         ctx.content,
+                         &mut ctx.spans,
+                     );
++                    if let Some(dependency) =
++                        config_repository_dependency(method_call.object, ctx.resolved_names)
++                    {
++                        ctx.defer_laravel_spans_since(span_start, dependency);
++                    }
+                 }
+                 // `$this->app->singleton('payments', …)` registers a container
+                 // key and `app()->make('payments')` asks for one.  Gated on the
+@@ -667,13 +694,23 @@
+             extract_dynamic_member_selector(&method_call.method, ctx, scope_start);
+             if let ClassLikeMemberSelector::Identifier(ident) = &method_call.method {
+                 let member_name = crate::atom::atom_bytes(ident.value);
+-                if is_laravel_config_repository_call(method_call.object, &member_name) {
++                if is_laravel_config_repository_call(
++                    method_call.object,
++                    &member_name,
++                    ctx.resolved_names,
++                ) {
++                    let span_start = ctx.spans.len();
+                     try_emit_laravel_config_key_span(
+                         &member_name,
+                         &method_call.argument_list,
+                         ctx.content,
+                         &mut ctx.spans,
+                     );
++                    if let Some(dependency) =
++                        config_repository_dependency(method_call.object, ctx.resolved_names)
++                    {
++                        ctx.defer_laravel_spans_since(span_start, dependency);
++                    }
+                 }
+                 // Use `->` so resolve_callable handles it the same
+                 // as regular method calls.
+@@ -754,7 +791,12 @@
+                     .map(strip_fqn_prefix)
+                     .unwrap_or(clean_subject);
+                 let laravel_span_start = ctx.spans.len();
+-                if is_config_facade_name(clean_subject) && is_config_repository_method(&member_name)
++                let key_call = crate::symbol_map::laravel_key_calls::static_call(
++                    semantic_subject,
++                    &member_name,
++                );
++                if key_call
++                    .is_some_and(|call| call.kind == crate::symbol_map::LaravelStringKind::Config)
+                 {
+                     try_emit_laravel_config_key_span(
+                         &member_name,
+@@ -862,12 +904,8 @@
+                         &mut ctx.spans,
+                     );
+                 }
+-                if (clean_subject.eq_ignore_ascii_case("Lang")
+-                    || clean_subject.eq_ignore_ascii_case("Illuminate\\Support\\Facades\\Lang"))
+-                    && matches!(
+-                        member_name.to_ascii_lowercase().as_str(),
+-                        "get" | "has" | "hasforlocale" | "choice"
+-                    )
++                if key_call
++                    .is_some_and(|call| call.kind == crate::symbol_map::LaravelStringKind::Trans)
+                 {
+                     try_emit_laravel_string_span(
+                         crate::symbol_map::LaravelStringKind::Trans,
+diff --git a/src/symbol_map/extraction/laravel.rs b/src/symbol_map/extraction/laravel.rs
+--- a/src/symbol_map/extraction/laravel.rs
++++ b/src/symbol_map/extraction/laravel.rs
+@@ -300,14 +300,16 @@
+     if is_write && try_emit_config_array_spans(argument_list, true, content, spans) {
+         return;
+     }
+-    emit_laravel_string_span(
+-        crate::symbol_map::LaravelStringKind::Config,
+-        is_write,
+-        0,
+-        argument_list,
+-        content,
+-        spans,
+-    );
++    if let Some(key) = argument_expr_for_parameter(argument_list, "key") {
++        push_laravel_string_span(
++            crate::symbol_map::LaravelStringKind::Config,
++            is_write,
++            false,
++            key,
++            content,
++            spans,
++        );
++    }
+ }
+ 
+ /// Emit the config-key spans for the `config()` helper, which both reads and
+@@ -321,14 +323,16 @@
+     if try_emit_config_array_spans(argument_list, true, content, spans) {
+         return;
+     }
+-    emit_laravel_string_span(
+-        crate::symbol_map::LaravelStringKind::Config,
+-        false,
+-        0,
+-        argument_list,
+-        content,
+-        spans,
+-    );
++    if let Some(key) = argument_expr_for_parameter(argument_list, "key") {
++        push_laravel_string_span(
++            crate::symbol_map::LaravelStringKind::Config,
++            false,
++            false,
++            key,
++            content,
++            spans,
++        );
++    }
+ }
+ 
+ /// The config keys `expr` writes when it is one of the calls a file's write
+@@ -351,7 +355,7 @@
+         }
+         Expression::Call(Call::Method(call)) => {
+             if let ClassLikeMemberSelector::Identifier(method) = &call.method
+-                && is_laravel_config_repository_call(call.object, bytes_to_str(method.value))
++                && is_laravel_config_repository_call(call.object, bytes_to_str(method.value), None)
+             {
+                 try_emit_laravel_config_key_span(
+                     bytes_to_str(method.value),
+@@ -363,7 +367,7 @@
+         }
+         Expression::Call(Call::NullSafeMethod(call)) => {
+             if let ClassLikeMemberSelector::Identifier(method) = &call.method
+-                && is_laravel_config_repository_call(call.object, bytes_to_str(method.value))
++                && is_laravel_config_repository_call(call.object, bytes_to_str(method.value), None)
+             {
+                 try_emit_laravel_config_key_span(
+                     bytes_to_str(method.value),
+@@ -440,10 +444,11 @@
+     content: &str,
+     spans: &mut Vec<SymbolSpan>,
+ ) -> bool {
+-    let Some(first_arg) = argument_list.arguments.iter().next() else {
++    let parameter = if is_write { "key" } else { "keys" };
++    let Some(argument) = argument_expr_for_parameter(argument_list, parameter) else {
+         return false;
+     };
+-    let Some(elements) = crate::parser::array_literal_elements(first_arg.value()) else {
++    let Some(elements) = crate::parser::array_literal_elements(argument) else {
+         return false;
+     };
+     for element in elements.iter() {
+@@ -799,7 +804,7 @@
+ 
+ /// Resolve explicit function imports while keeping unqualified names available
+ /// for PHP's namespace-to-global function fallback.
+-pub(super) fn route_helper_name<'a>(
++pub(super) fn laravel_helper_name<'a>(
+     raw: &'a str,
+     offset: u32,
+     resolved: Option<&'a crate::names::OwnedResolvedNames>,
+@@ -823,7 +828,7 @@
+     let Expression::Identifier(ident) = call.function else {
+         return false;
+     };
+-    let name = route_helper_name(
++    let name = laravel_helper_name(
+         bytes_to_str(ident.value()),
+         ident.span().start.offset,
+         resolved,
+@@ -1777,21 +1782,7 @@
+ /// contract that accepts config keys — one as its first argument, or a list
+ /// of them in the case of `getMany()`.
+ pub(super) fn is_config_repository_method(name: &str) -> bool {
+-    matches!(
+-        name.to_ascii_lowercase().as_str(),
+-        "has"
+-            | "get"
+-            | "getmany"
+-            | "string"
+-            | "integer"
+-            | "float"
+-            | "boolean"
+-            | "array"
+-            | "collection"
+-            | "set"
+-            | "prepend"
+-            | "push"
+-    )
++    crate::symbol_map::laravel_key_calls::config_method_call(name).is_some()
+ }
+ 
+ /// Returns `true` for a static call whose first argument is an Artisan
+@@ -1813,20 +1804,39 @@
+ pub(super) fn is_laravel_config_repository_call(
+     object: &Expression<'_>,
+     member_name: &str,
++    resolved: Option<&crate::names::OwnedResolvedNames>,
+ ) -> bool {
+     if !is_config_repository_method(member_name) {
+         return false;
+     }
+-
+-    match object {
+-        Expression::Call(Call::Function(func_call)) => match func_call.function {
+-            Expression::Identifier(ident) => {
+-                strip_fqn_prefix(bytes_to_str(ident.value())).eq_ignore_ascii_case("config")
+-            }
+-            _ => false,
+-        },
+-        _ => false,
+-    }
++    let Expression::Call(Call::Function(call)) = object else {
++        return false;
++    };
++    let Expression::Identifier(ident) = call.function else {
++        return false;
++    };
++    call.argument_list.arguments.is_empty()
++        && laravel_helper_name(
++            bytes_to_str(ident.value()),
++            ident.span().start.offset,
++            resolved,
++        )
++        .eq_ignore_ascii_case("config")
++}
++
++pub(super) fn config_repository_dependency(
++    object: &Expression<'_>,
++    resolved: Option<&crate::names::OwnedResolvedNames>,
++) -> Option<crate::symbol_map::LaravelStringDependency> {
++    let Expression::Call(Call::Function(call)) = object else {
++        return None;
++    };
++    let Expression::Identifier(ident) = call.function else {
++        return None;
++    };
++    resolved?
++        .get(ident.span().start.offset)
++        .and_then(crate::symbol_map::LaravelStringDependency::namespaced_key_helper)
+ }
+ 
+ // ─── Laravel route controller method spans ──────────────────────────────────
+diff --git a/src/symbol_map/laravel_key_calls.rs b/src/symbol_map/laravel_key_calls.rs
+new file mode 100644
+--- /dev/null
++++ b/src/symbol_map/laravel_key_calls.rs
+@@ -0,0 +1,68 @@
++//! Canonical Laravel config and translation call identities and key roles.
++
++use super::LaravelStringKind;
++
++#[derive(Clone, Copy)]
++pub(crate) struct KeyCall {
++    pub kind: LaravelStringKind,
++    pub parameter: &'static str,
++    pub accepts_array: bool,
++}
++
++pub(crate) fn function_call(name: &str) -> Option<KeyCall> {
++    let name = name.trim_start_matches('\\');
++    if name.eq_ignore_ascii_case("config") {
++        config_method_call("get")
++    } else if ["__", "trans", "trans_choice"]
++        .iter()
++        .any(|helper| name.eq_ignore_ascii_case(helper))
++    {
++        translation_method_call("get")
++    } else {
++        None
++    }
++}
++
++pub(crate) fn static_call(receiver: &str, method: &str) -> Option<KeyCall> {
++    let receiver = receiver.trim_start_matches('\\');
++    if receiver.eq_ignore_ascii_case("Illuminate\\Support\\Facades\\Config")
++        || receiver.eq_ignore_ascii_case("Config")
++    {
++        config_method_call(method)
++    } else if receiver.eq_ignore_ascii_case("Illuminate\\Support\\Facades\\Lang")
++        || receiver.eq_ignore_ascii_case("Lang")
++    {
++        translation_method_call(method)
++    } else {
++        None
++    }
++}
++
++pub(crate) fn config_method_call(method: &str) -> Option<KeyCall> {
++    let method = method.to_ascii_lowercase();
++    match method.as_str() {
++        "getmany" => Some(KeyCall {
++            kind: LaravelStringKind::Config,
++            parameter: "keys",
++            accepts_array: true,
++        }),
++        "get" | "string" | "integer" | "float" | "boolean" | "array" | "collection" | "set"
++        | "prepend" | "push" | "has" => Some(KeyCall {
++            kind: LaravelStringKind::Config,
++            parameter: "key",
++            accepts_array: false,
++        }),
++        _ => None,
++    }
++}
++
++pub(crate) fn translation_method_call(method: &str) -> Option<KeyCall> {
++    ["get", "has", "hasForLocale", "choice"]
++        .iter()
++        .any(|candidate| method.eq_ignore_ascii_case(candidate))
++        .then_some(KeyCall {
++            kind: LaravelStringKind::Trans,
++            parameter: "key",
++            accepts_array: false,
++        })
++}
+diff --git a/src/symbol_map/mod.rs b/src/symbol_map/mod.rs
+--- a/src/symbol_map/mod.rs
++++ b/src/symbol_map/mod.rs
+@@ -28,6 +28,7 @@
+ 
+ pub(crate) mod docblock;
+ pub(crate) mod extraction;
++pub(crate) mod laravel_key_calls;
+ pub(crate) mod laravel_resources;
+ 
+ use crate::atom::Atom;
+@@ -611,6 +612,15 @@
+         .then(|| Self::Function(crate::atom::ascii_lowercase_atom(name)))
+     }
+ 
++    /// A namespace-local config/translation helper that prevents PHP's
++    /// fallback to the global helper.
++    pub(crate) fn namespaced_key_helper(name: &str) -> Option<Self> {
++        let name = name.trim_start_matches('\\');
++        let (namespace, short) = name.rsplit_once('\\')?;
++        (!namespace.is_empty() && laravel_key_calls::function_call(short).is_some())
++            .then(|| Self::Function(crate::atom::ascii_lowercase_atom(name)))
++    }
++
+     /// A global class name Laravel may otherwise provide as a runtime facade
+     /// alias. Fully-qualified facade classes are unambiguous and return none.
+     pub(crate) fn root_facade(name: &str) -> Option<Self> {
+diff --git a/src/type_engine/resolver/context.rs b/src/type_engine/resolver/context.rs
+--- a/src/type_engine/resolver/context.rs
++++ b/src/type_engine/resolver/context.rs
+@@ -77,6 +77,9 @@
+ /// the resolution chain.  Reduces clippy `type_complexity` warnings.
+ pub(crate) type FunctionLoaderFn<'a> = Option<&'a dyn Fn(&str, u32) -> Option<FunctionInfo>>;
+ 
++/// Canonical Laravel global helper identity without requiring a declaration.
++pub(crate) type LaravelFunctionNameFn<'a> = Option<&'a dyn Fn(&str, u32) -> Option<&'static str>>;
++
+ /// Type alias for the optional constant-value-loader closure passed
+ /// through the resolution chain.  Given a constant name as written and
+ /// the byte offset it was written at, returns `Some(Some(value))` when
+@@ -139,6 +142,8 @@
+     /// entry.  Used by the `__()`/`trans()`/`Lang::get()` return-type
+     /// interception in function/static-call resolution.
+     pub trans_resolver: TransResolverFn<'a>,
++    /// Resolved imports and namespace-local shadowing for framework helpers.
++    pub laravel_function_name: LaravelFunctionNameFn<'a>,
+ }
+ 
+ impl<'a> Loaders<'a> {
+@@ -149,6 +154,7 @@
+             constant_loader: None,
+             config_resolver: None,
+             trans_resolver: None,
++            laravel_function_name: None,
+         }
+     }
+ }
+@@ -167,37 +173,41 @@
+     fn loaders(&self) -> Loaders<'_>;
+ }
+ 
+-/// The four closures a [`Loaders`] borrows, held by value.
+-pub(crate) struct OwnedLoaders<F, C, G, T> {
++/// The closures a [`Loaders`] borrows, held by value.
++pub(crate) struct OwnedLoaders<F, C, G, T, H> {
+     function_loader: F,
+     constant_loader: C,
+     config_resolver: G,
+     trans_resolver: T,
+-}
+-
+-impl<F, C, G, T> OwnedLoaders<F, C, G, T> {
+-    /// Bundle four already-built loaders.
++    laravel_function_name: H,
++}
++
++impl<F, C, G, T, H> OwnedLoaders<F, C, G, T, H> {
++    /// Bundle declaration, repository and callable-identity loaders.
+     pub(crate) fn new(
+         function_loader: F,
+         constant_loader: C,
+         config_resolver: G,
+         trans_resolver: T,
++        laravel_function_name: H,
+     ) -> Self {
+         Self {
+             function_loader,
+             constant_loader,
+             config_resolver,
+             trans_resolver,
+-        }
+-    }
+-}
+-
+-impl<F, C, G, T> LendsLoaders for OwnedLoaders<F, C, G, T>
++            laravel_function_name,
++        }
++    }
++}
++
++impl<F, C, G, T, H> LendsLoaders for OwnedLoaders<F, C, G, T, H>
+ where
+     F: Fn(&str, u32) -> Option<crate::types::FunctionInfo>,
+     C: Fn(&str, u32) -> Option<Option<String>>,
+     G: Fn(&str) -> Option<crate::php_type::PhpType>,
+     T: Fn(&str) -> Option<crate::php_type::PhpType>,
++    H: Fn(&str, u32) -> Option<&'static str>,
+ {
+     fn loaders(&self) -> Loaders<'_> {
+         Loaders {
+@@ -205,6 +215,7 @@
+             constant_loader: Some(&self.constant_loader),
+             config_resolver: Some(&self.config_resolver),
+             trans_resolver: Some(&self.trans_resolver),
++            laravel_function_name: Some(&self.laravel_function_name),
+         }
+     }
+ }
+diff --git a/src/type_engine/variable/rhs_resolution/calls.rs b/src/type_engine/variable/rhs_resolution/calls.rs
+--- a/src/type_engine/variable/rhs_resolution/calls.rs
++++ b/src/type_engine/variable/rhs_resolution/calls.rs
+@@ -833,59 +833,55 @@
+         }
+     }
+ 
+-    // ── Laravel config() return type inference ───────
+-    if let Some(ref name) = func_name {
+-        let normalized_func = name.trim_start_matches('\\');
+-        if matches!(normalized_func, "config" | "Illuminate\\Support\\config") {
+-            let arg_texts =
+-                crate::type_engine::variable::raw_type_inference::extract_arg_texts_from_ast(
+-                    &func_call.argument_list,
+-                    content,
+-                );
+-            if let Some(first_arg) = arg_texts.first()
+-                && let Some(key) = crate::util::unescape_php_string_literal(first_arg.trim())
+-                && !key.is_empty()
+-                && !key.contains('$')
+-                && let Some(resolver) = ctx.loaders.config_resolver
+-                && let Some(ty) = resolver(&key)
+-            {
+-                return vec![ResolvedType::from_type_string(ty)];
+-            }
+-        }
+-    }
+-
+-    // ── Laravel translation helper return type narrowing ─────
+-    // `trans()`/`__()` declare a return type of `string|array|null` because
+-    // a translation key may name a whole group, and the keyless form hands
+-    // the key straight back. The key decides which branch a call takes:
+-    // a leaf entry is a `string`, a group is the array beneath it, and
+-    // `__()` with no key at all is the `null`.
+-    if let Some(ref name) = func_name
++    // Resolve once, lazily: literal builtins outside a Laravel workspace
++    // still avoid function lookup, and aliases share normal PHP precedence.
++    let resolved_function = std::cell::LazyCell::new(|| {
++        func_name
++            .as_ref()
++            .and_then(|name| function_loader.and_then(|loader| loader(name, func_name_offset)))
++    });
++    let laravel_helper_name = func_name
++        .as_ref()
++        .and_then(|name| {
++            ctx.loaders
++                .laravel_function_name
++                .and_then(|identity| identity(name, func_name_offset))
++        })
++        .filter(|_| is_laravel_context(ctx))
++        .filter(|helper| {
++            // Identity is authoritative even if a missing foreign import made
++            // the ordinary loader find a global declaration as fallback.
++            resolved_function.as_ref().is_none_or(|info| {
++                info.namespace.as_deref().is_none_or(str::is_empty)
++                    && info.name.eq_ignore_ascii_case(helper)
++            })
++        });
++    let laravel_function =
++        laravel_helper_name.and_then(crate::symbol_map::laravel_key_calls::function_call);
++
++    if laravel_function
++        .is_some_and(|call| call.kind == crate::symbol_map::LaravelStringKind::Config)
++        && let Some(key) = literal_laravel_key_argument(&func_call.argument_list, content)
++        && let Some(resolver) = ctx.loaders.config_resolver
++        && let Some(ty) = resolver(&key)
++    {
++        return vec![ResolvedType::from_type_string(ty)];
++    }
++
++    // Only the resolved global helper may narrow a translation result.
++    // Named key arguments use the same binding as their positional form.
++    if laravel_function.is_some_and(|call| call.kind == crate::symbol_map::LaravelStringKind::Trans)
++        && matches!(laravel_helper_name, Some("trans" | "__"))
+         && let Some(resolver) = ctx.loaders.trans_resolver
+     {
+-        let normalized_func = name.trim_start_matches('\\');
+-        if matches!(normalized_func, "trans" | "__") {
+-            let arg_texts =
+-                crate::type_engine::variable::raw_type_inference::extract_arg_texts_from_ast(
+-                    &func_call.argument_list,
+-                    content,
+-                );
+-            match arg_texts.first() {
+-                Some(first_arg) => {
+-                    let ty = crate::util::unescape_php_string_literal(first_arg.trim())
+-                        .filter(|key| !key.is_empty() && !key.contains('$'))
+-                        .and_then(|key| resolver(&key))
+-                        .unwrap_or_else(crate::virtual_members::laravel::unresolved_trans_type);
+-                    return vec![ResolvedType::from_type_string(ty)];
+-                }
+-                // `trans()` with no key hands back the translator itself, a
+-                // shape this narrowing does not model; `__()` returns the
+-                // null it was given.
+-                None if normalized_func == "__" => {
+-                    return vec![ResolvedType::from_type_string(PhpType::null())];
+-                }
+-                None => {}
+-            }
++        if laravel_key_argument(&func_call.argument_list).is_some() {
++            let ty = literal_laravel_key_argument(&func_call.argument_list, content)
++                .and_then(|key| resolver(&key))
++                .unwrap_or_else(crate::virtual_members::laravel::unresolved_trans_type);
++            return vec![ResolvedType::from_type_string(ty)];
++        }
++        if laravel_helper_name == Some("__") {
++            return vec![ResolvedType::from_type_string(PhpType::null())];
+         }
+     }
+ 
+@@ -975,8 +971,7 @@
+     }
+ 
+     if let Some(ref name) = func_name
+-        && let Some(fl) = function_loader
+-        && let Some(func_info) = fl(name, func_name_offset)
++        && let Some(func_info) = resolved_function.as_ref()
+     {
+         // A return type the call site decides (a conditional keyed on an
+         // argument, or a branch the flags argument rules out) is
+@@ -1036,7 +1031,7 @@
+                 // arguments fill in.
+                 let walker_types = walker_arg_types(&func_call.argument_list, ctx);
+                 let ty = substitute_function_templates(
+-                    &func_info,
++                    func_info,
+                     ty,
+                     &crate::type_engine::variable::raw_type_inference::extract_arg_texts_from_ast(
+                         &func_call.argument_list,
+@@ -1079,7 +1074,7 @@
+             let rctx = ctx.as_resolution_ctx();
+             let walker_types = walker_arg_types(&func_call.argument_list, ctx);
+             let subs =
+-                build_function_template_subs(&func_info, &arg_texts, Some(&walker_types), &rctx);
++                build_function_template_subs(func_info, &arg_texts, Some(&walker_types), &rctx);
+             if !subs.is_empty()
+                 && let Some(ref ret) = func_info.return_type
+             {
+@@ -2919,6 +2914,44 @@
+         .next()
+ }
+ 
++fn is_laravel_context(ctx: &VarResolutionCtx<'_>) -> bool {
++    if let Some(cache) = ctx.resolved_class_cache {
++        cache.read().is_laravel()
++    } else {
++        ctx.backend
++            .is_some_and(|backend| backend.resolved_class_cache.read().is_laravel())
++    }
++}
++
++// Config and translator entry points declare their key first. Bind that
++// known parameter through the shared PHP binder, so a preceding named
++// default, replacement or locale never becomes the repository key.
++fn laravel_key_argument<'b>(argument_list: &ArgumentList<'b>) -> Option<&'b Expression<'b>> {
++    let parameters = [crate::types::ParameterInfo {
++        name: atom("$key"),
++        is_required: false,
++        type_hint: None,
++        native_type_hint: None,
++        description: None,
++        default_value: None,
++        is_variadic: false,
++        is_reference: false,
++        closure_this_type: None,
++        param_out_type: None,
++    }];
++    crate::call_args::bind_args_to_params(&parameters, argument_list)
++        .into_iter()
++        .next()
++        .flatten()
++}
++
++fn literal_laravel_key_argument(argument_list: &ArgumentList<'_>, content: &str) -> Option<String> {
++    let span = laravel_key_argument(argument_list)?.span();
++    let text = content.get(span.start.offset as usize..span.end.offset as usize)?;
++    crate::util::unescape_php_string_literal(text.trim())
++        .filter(|key| !key.is_empty() && !key.contains('$'))
++}
++
+ fn try_resolve_config_method_type(
+     owner_fqn: &str,
+     method_name: &str,
+@@ -2940,16 +2973,11 @@
+     {
+         return None;
+     }
++    if !is_laravel_context(ctx) {
++        return None;
++    }
+     let resolver = ctx.loaders.config_resolver?;
+-    let arg_texts = crate::type_engine::variable::raw_type_inference::extract_arg_texts_from_ast(
+-        argument_list,
+-        ctx.content,
+-    );
+-    let first_arg = arg_texts.first()?;
+-    let key = crate::util::unescape_php_string_literal(first_arg.trim())?;
+-    if key.is_empty() || key.contains('$') {
+-        return None;
+-    }
++    let key = literal_laravel_key_argument(argument_list, ctx.content)?;
+     let ty = resolver(&key)?;
+     if method_name == "array" {
+         if ty.is_array_like() {
+@@ -2984,14 +3012,12 @@
+     {
+         return None;
+     }
++    if !is_laravel_context(ctx) {
++        return None;
++    }
+     let resolver = ctx.loaders.trans_resolver?;
+-    let arg_texts = crate::type_engine::variable::raw_type_inference::extract_arg_texts_from_ast(
+-        argument_list,
+-        ctx.content,
+-    );
+-    let first_arg = arg_texts.first()?;
+-    let ty = crate::util::unescape_php_string_literal(first_arg.trim())
+-        .filter(|key| !key.is_empty() && !key.contains('$'))
++    laravel_key_argument(argument_list)?;
++    let ty = literal_laravel_key_argument(argument_list, ctx.content)
+         .and_then(|key| resolver(&key))
+         .unwrap_or_else(crate::virtual_members::laravel::unresolved_trans_type);
+     Some(vec![ResolvedType::from_type_string(ty)])
+diff --git a/tests/integration/completion_array_shapes.rs b/tests/integration/completion_array_shapes.rs
+--- a/tests/integration/completion_array_shapes.rs
++++ b/tests/integration/completion_array_shapes.rs
+@@ -6408,12 +6408,14 @@
+ #[tokio::test]
+ async fn test_array_shape_key_completion_from_config_return_type() {
+     let (backend, _dir) = crate::common::create_psr4_workspace(
+-        r#"{ "autoload": { "psr-4": { "App\\": "src/" } } }"#,
++        r#"{ "require": { "laravel/framework": "^13.0" }, "autoload": { "psr-4": { "App\\": "src/" } } }"#,
+         &[(
+             "config/database.php",
+             "<?php\nreturn [\n    'default' => env('DB_CONNECTION', 'mysql'),\n    'connections' => [\n        'mysql' => [\n            'host' => env('DB_HOST', '127.0.0.1'),\n            'port' => env('DB_PORT', 3306),\n        ],\n    ],\n];\n",
+         )],
+     );
++
++    backend.initialized(InitializedParams {}).await;
+ 
+     let uri = Url::parse("file:///test_config_shape.php").unwrap();
+     let text = concat!(
+diff --git a/tests/integration/laravel_config_array_identity.rs b/tests/integration/laravel_config_array_identity.rs
+new file mode 100644
+--- /dev/null
++++ b/tests/integration/laravel_config_array_identity.rs
+@@ -0,0 +1,82 @@
++//! Recovered array access uses the repaired source's callable identity.
++use crate::common::{
++    complete_labels_at_opened, create_initialized_psr4_workspace, open_php_file, split_cursor,
++};
++
++async fn assert_recovered_keys(prefix: &str, expression: &str, helper: &str, expected: &str) {
++    let marked = format!(
++        "<?php\n{prefix}\nfunction probe(): void {{\n$value = {expression};\n$value['§\n}}\n"
++    );
++    let (content, position) = split_cursor(&marked);
++    let composer = r#"{"require":{"laravel/framework":"^13.0"},"autoload":{"psr-4":{"App\\":"app/"},"files":["app/helpers.php"]}}"#;
++    let (backend, _dir, _) = create_initialized_psr4_workspace(
++        composer,
++        &[
++            ("app/helpers.php", helper),
++            (
++                "config/workbench.php",
++                "<?php return ['theme' => ['label' => 'Bright']];",
++            ),
++            ("app/Consumer.php", &content),
++        ],
++        "app/helpers.php",
++    )
++    .await;
++    let uri = open_php_file(&backend, "app/Consumer.php").await;
++    let labels = complete_labels_at_opened(&backend, &uri, position.line, position.character).await;
++    assert!(
++        labels.iter().any(|label| label == expected),
++        "{expression}: recovered access should offer {expected}: {labels:?}"
++    );
++    let excluded = if expected == "label" {
++        "local"
++    } else {
++        "label"
++    };
++    assert!(
++        !labels.iter().any(|label| label == excluded),
++        "{expression}: unrelated array keys must be absent: {labels:?}"
++    );
++}
++
++#[tokio::test]
++async fn config_array_identity_recovered_global_helper() {
++    assert_recovered_keys(
++        "namespace App;",
++        "config('workbench.theme')",
++        "<?php",
++        "label",
++    )
++    .await;
++}
++
++#[tokio::test]
++async fn config_array_identity_recovered_alias_named_key() {
++    assert_recovered_keys(
++        "namespace App; use function config as setting;",
++        "setting(default: [], key: 'workbench.theme')",
++        "<?php",
++        "label",
++    )
++    .await;
++}
++
++#[tokio::test]
++async fn config_array_identity_recovered_local_helper() {
++    assert_recovered_keys("namespace App;", "config('workbench.theme')", "<?php namespace App; /** @return array{local: string} */ function config($key): array { return ['local' => 'custom']; }", "local").await;
++}
++
++#[tokio::test]
++async fn config_array_identity_recovered_foreign_import() {
++    assert_recovered_keys("namespace App; use function Vendor\\config as setting;", "setting('workbench.theme')", "<?php namespace Vendor; /** @return array{local: string} */ function config($key): array { return ['local' => 'custom']; }", "local").await;
++}
++
++#[tokio::test]
++async fn config_array_identity_recovered_same_file_local_helper() {
++    assert_recovered_keys("namespace App; /** @return array{local: string} */ function config($key): array { return ['local' => 'custom']; }", "config('workbench.theme')", "<?php", "local").await;
++}
++
++#[tokio::test]
++async fn config_array_identity_recovered_namespace_imports_stay_separate() {
++    assert_recovered_keys("namespace Prior; use function config as setting;\nnamespace App;", "setting('workbench.theme')", "<?php namespace App; /** @return array{local: string} */ function setting($key): array { return ['local' => 'custom']; }", "local").await;
++}
+diff --git a/tests/integration/laravel_config_completion_identity.rs b/tests/integration/laravel_config_completion_identity.rs
+new file mode 100644
+--- /dev/null
++++ b/tests/integration/laravel_config_completion_identity.rs
+@@ -0,0 +1,237 @@
++//! Literal config and translation completion follows callable identity and
++//! the key parameter, rather than a written short name or argument position.
++
++use crate::common::{
++    LARAVEL_APP_COMPOSER, complete_labels_at_opened, create_initialized_psr4_workspace,
++    split_cursor,
++};
++
++async fn assert_key_completion(
++    imports: &str,
++    declarations: &str,
++    expression: &str,
++    expected: Option<&str>,
++) {
++    let marked = format!("<?php\nnamespace App;\n{imports}\n{declarations}\n{expression}\n");
++    let (content, position) = split_cursor(&marked);
++    let (backend, _dir, uri) = create_initialized_psr4_workspace(
++        LARAVEL_APP_COMPOSER,
++        &[
++            (
++                "config/workbench.php",
++                "<?php return ['enabled' => true];\n",
++            ),
++            (
++                "lang/en/workbench.php",
++                "<?php return ['welcome' => 'Welcome'];\n",
++            ),
++            ("app/Consumer.php", &content),
++        ],
++        "app/Consumer.php",
++    )
++    .await;
++    let labels = complete_labels_at_opened(&backend, &uri, position.line, position.character).await;
++    if let Some(key) = expected {
++        assert!(
++            labels.iter().any(|label| label == key),
++            "`{expression}` should offer {key}: {labels:?}"
++        );
++    } else {
++        for key in ["workbench.enabled", "workbench.welcome"] {
++            assert!(
++                !labels.iter().any(|label| label == key),
++                "`{expression}` is not a framework key argument and must not offer {key}: {labels:?}"
++            );
++        }
++    }
++}
++
++#[tokio::test]
++async fn config_completion_identity_canonical_controls() {
++    for expression in [
++        "config('workbench.§');",
++        "\\config('workbench.§');",
++        "Config::get('workbench.§');",
++    ] {
++        assert_key_completion(
++            "use Illuminate\\Support\\Facades\\Config;",
++            "",
++            expression,
++            Some("workbench.enabled"),
++        )
++        .await;
++    }
++}
++
++#[tokio::test]
++async fn config_completion_identity_translation_canonical_controls() {
++    for expression in [
++        "__('workbench.§');",
++        "trans('workbench.§');",
++        "\\__('workbench.§');",
++        "Lang::get('workbench.§');",
++    ] {
++        assert_key_completion(
++            "use Illuminate\\Support\\Facades\\Lang;",
++            "",
++            expression,
++            Some("workbench.welcome"),
++        )
++        .await;
++    }
++}
++
++#[tokio::test]
++async fn config_completion_identity_imported_config_function_alias() {
++    assert_key_completion(
++        "use function config as setting;",
++        "",
++        "setting('workbench.§');",
++        Some("workbench.enabled"),
++    )
++    .await;
++}
++
++#[tokio::test]
++async fn config_completion_identity_imported_translation_function_aliases() {
++    for (import, expression) in [
++        ("use function __ as tr;", "tr('workbench.§');"),
++        (
++            "use function trans as translate;",
++            "translate('workbench.§');",
++        ),
++    ] {
++        assert_key_completion(import, "", expression, Some("workbench.welcome")).await;
++    }
++}
++
++#[tokio::test]
++async fn config_completion_identity_imported_config_facade_alias() {
++    assert_key_completion(
++        "use Illuminate\\Support\\Facades\\Config as Settings;",
++        "",
++        "Settings::get('workbench.§');",
++        Some("workbench.enabled"),
++    )
++    .await;
++}
++
++#[tokio::test]
++async fn config_completion_identity_imported_translation_facade_alias() {
++    assert_key_completion(
++        "use Illuminate\\Support\\Facades\\Lang as Messages;",
++        "",
++        "Messages::get('workbench.§');",
++        Some("workbench.welcome"),
++    )
++    .await;
++}
++
++#[tokio::test]
++async fn config_completion_identity_local_functions_are_not_framework_helpers() {
++    let declarations = "function config(string $key, mixed $default = null): mixed { return $default; }\nfunction __(string $key, array $replace = [], ?string $locale = null): string { return $key; }";
++    for expression in ["config('workbench.§');", "__('workbench.§');"] {
++        assert_key_completion("", declarations, expression, None).await;
++    }
++}
++
++#[tokio::test]
++async fn config_completion_identity_foreign_facades_are_not_framework_facades() {
++    let declarations = "class Config { public static function get(string $key): mixed { return null; } }\nclass Lang { public static function get(string $key): string { return $key; } }";
++    for expression in ["Config::get('workbench.§');", "Lang::get('workbench.§');"] {
++        assert_key_completion("", declarations, expression, None).await;
++    }
++}
++
++#[tokio::test]
++async fn config_completion_identity_named_key_arguments() {
++    for (import, expression, key) in [
++        ("", "config(key: 'workbench.§');", "workbench.enabled"),
++        (
++            "use function config as setting;",
++            "setting(key: 'workbench.§');",
++            "workbench.enabled",
++        ),
++        ("", "__(key: 'workbench.§');", "workbench.welcome"),
++        (
++            "use function __ as tr;",
++            "tr(key: 'workbench.§');",
++            "workbench.welcome",
++        ),
++    ] {
++        assert_key_completion(import, "", expression, Some(key)).await;
++    }
++}
++
++#[tokio::test]
++async fn config_completion_identity_reordered_named_key_arguments() {
++    for (import, expression, key) in [
++        (
++            "",
++            "config(default: false, key: 'workbench.§');",
++            "workbench.enabled",
++        ),
++        (
++            "use Illuminate\\Support\\Facades\\Config as Settings;",
++            "Settings::get(default: false, key: 'workbench.§');",
++            "workbench.enabled",
++        ),
++        (
++            "",
++            "__(locale: 'en', replace: [], key: 'workbench.§');",
++            "workbench.welcome",
++        ),
++        (
++            "use Illuminate\\Support\\Facades\\Lang as Messages;",
++            "Messages::get(locale: 'en', replace: [], key: 'workbench.§');",
++            "workbench.welcome",
++        ),
++    ] {
++        assert_key_completion(import, "", expression, Some(key)).await;
++    }
++}
++
++#[tokio::test]
++async fn config_completion_identity_named_nonkey_arguments_do_not_offer_keys() {
++    for expression in [
++        "config(default: 'workbench.§', key: 'workbench.enabled');",
++        "__(locale: 'workbench.§', key: 'workbench.welcome');",
++        "__(replace: ['name' => 'workbench.§'], key: 'workbench.welcome');",
++    ] {
++        assert_key_completion("", "", expression, None).await;
++    }
++}
++
++#[tokio::test]
++async fn config_completion_identity_positional_nonkey_arguments_do_not_offer_keys() {
++    for expression in [
++        "config('workbench.enabled', 'workbench.§');",
++        "__('workbench.welcome', ['name' => 'workbench.§']);",
++        "__('workbench.welcome', [], 'workbench.§');",
++    ] {
++        assert_key_completion("", "", expression, None).await;
++    }
++}
++
++#[tokio::test]
++async fn config_completion_identity_unfinished_aliased_key_strings() {
++    for (import, expression, key) in [
++        (
++            "use function config as setting;",
++            "setting('workbench.§",
++            "workbench.enabled",
++        ),
++        (
++            "use function __ as tr;",
++            "tr('workbench.§",
++            "workbench.welcome",
++        ),
++        (
++            "use Illuminate\\Support\\Facades\\Config as Settings;",
++            "Settings::get(key: 'workbench.§",
++            "workbench.enabled",
++        ),
++    ] {
++        assert_key_completion(import, "", expression, Some(key)).await;
++    }
++}
+diff --git a/tests/integration/laravel_config_literal_types.rs b/tests/integration/laravel_config_literal_types.rs
+new file mode 100644
+--- /dev/null
++++ b/tests/integration/laravel_config_literal_types.rs
+@@ -0,0 +1,296 @@
++use crate::common::{
++    create_initialized_psr4_workspace, markup_hover_at, open_php_file, position_of,
++};
++
++const COMPOSER: &str = r#"{
++    "require": { "laravel/framework": "^13.0" },
++    "autoload": { "psr-4": { "App\\": "app/", "Illuminate\\": "framework/" },
++                  "files": ["app/helpers.php"] }
++}"#;
++const HELPERS: &str = "<?php
++function config($key = null, $default = null): mixed { return null; }
++function __($key = null, $replace = [], $locale = null): string|array|null { return null; }
++function trans($key = null, $replace = [], $locale = null): string|array|null { return null; }
++function trans_choice($key, $number, $replace = [], $locale = null): string { return 'plural'; }
++";
++const CONFIG: &str =
++    "<?php return ['theme' => ['label' => 'Bright'], 'enabled' => true, 'count' => 7];";
++const CONFIG_FACADE: &str = "<?php namespace Illuminate\\Support\\Facades;
++class Config { public static function get($key, $default = null): mixed { return null; } }
++";
++
++async fn assert_local_type(imports: &str, expression: &str, expected: &str) {
++    let source = format!("<?php\nnamespace App;\n{imports}\n$value = {expression};\n$value;\n");
++    let (backend, _dir, _) = create_initialized_psr4_workspace(
++        COMPOSER,
++        &[
++            ("app/helpers.php", HELPERS),
++            ("config/workbench.php", CONFIG),
++            (
++                "lang/en/workbench.php",
++                "<?php return ['welcome' => 'Hello'];",
++            ),
++            ("framework/Support/Facades/Config.php", CONFIG_FACADE),
++            ("app/UseConfig.php", &source),
++        ],
++        "app/helpers.php",
++    )
++    .await;
++    let uri = open_php_file(&backend, "app/UseConfig.php").await;
++    let position = position_of(&source, "$value;");
++    let hover = markup_hover_at(&backend, &uri, position.line, position.character + 2).await;
++    assert!(
++        hover
++            .lines()
++            .any(|line| line == format!("$value = {expected}")),
++        "{expression}: expected exact local type {expected}, got {hover}"
++    );
++}
++
++#[tokio::test]
++async fn config_literal_imported_function_alias_retains_value_type() {
++    assert_local_type(
++        "use function config as setting;",
++        "setting('workbench.enabled')",
++        "bool",
++    )
++    .await;
++}
++
++#[tokio::test]
++async fn config_literal_alias_binds_reordered_named_key() {
++    assert_local_type(
++        "use function config as setting;",
++        "setting(default: 'fallback', key: 'workbench.enabled')",
++        "bool",
++    )
++    .await;
++}
++
++#[tokio::test]
++async fn config_literal_global_binds_reordered_named_key() {
++    assert_local_type(
++        "",
++        "config(default: 'fallback', key: 'workbench.count')",
++        "int",
++    )
++    .await;
++}
++
++#[tokio::test]
++async fn config_literal_facade_alias_binds_reordered_named_key() {
++    assert_local_type(
++        "use Illuminate\\Support\\Facades\\Config as Settings;",
++        "Settings::get(default: 'fallback', key: 'workbench.enabled')",
++        "bool",
++    )
++    .await;
++}
++
++#[tokio::test]
++async fn config_literal_local_homonym_keeps_declared_integer_return() {
++    assert_local_type(
++        "function config($key): int { return 3; }",
++        "config('workbench.theme.label')",
++        "int",
++    )
++    .await;
++}
++
++#[tokio::test]
++async fn config_literal_local_homonym_keeps_declared_string_return() {
++    assert_local_type(
++        "function config($key): string { return 'local'; }",
++        "config('workbench.enabled')",
++        "string",
++    )
++    .await;
++}
++
++#[tokio::test]
++async fn config_literal_global_control_uses_repository_value() {
++    assert_local_type("", "\\config('workbench.theme.label')", "string").await;
++}
++
++#[tokio::test]
++async fn translation_literal_alias_binds_reordered_named_key() {
++    assert_local_type(
++        "use function __ as tr;",
++        "tr(locale: 'en', replace: [], key: 'workbench.welcome')",
++        "string",
++    )
++    .await;
++}
++
++#[tokio::test]
++async fn translation_literal_local_dunder_keeps_declared_return() {
++    assert_local_type(
++        "function __($key): int { return 3; }",
++        "__('workbench.welcome')",
++        "int",
++    )
++    .await;
++}
++
++#[tokio::test]
++async fn translation_literal_local_trans_keeps_declared_return() {
++    assert_local_type(
++        "function trans($key): bool { return true; }",
++        "trans('workbench.welcome')",
++        "bool",
++    )
++    .await;
++}
++
++#[tokio::test]
++async fn translation_literal_plural_helper_keeps_declared_string_return() {
++    assert_local_type("", "trans_choice('workbench', 2)", "string").await;
++}
++
++#[tokio::test]
++async fn config_literal_alias_in_plain_php_keeps_declared_type() {
++    let source = "<?php\nnamespace Plain;\nuse function config as setting;\n$value = setting('workbench.enabled');\n$value;\n";
++    let composer = r#"{"autoload":{"psr-4":{"Plain\\":"app/"},"files":["app/helpers.php"]}}"#;
++    let (backend, _dir, _) = create_initialized_psr4_workspace(
++        composer,
++        &[
++            (
++                "app/helpers.php",
++                "<?php function config($key): string { return 'local'; }",
++            ),
++            ("config/workbench.php", CONFIG),
++            ("app/Plain.php", source),
++        ],
++        "app/helpers.php",
++    )
++    .await;
++    let uri = open_php_file(&backend, "app/Plain.php").await;
++    let position = position_of(source, "$value;");
++    let hover = markup_hover_at(&backend, &uri, position.line, position.character + 2).await;
++    assert!(
++        hover.lines().any(|line| line == "$value = string"),
++        "plain PHP config alias must keep declared return type, got {hover}"
++    );
++}
++
++async fn assert_missing_helper_type(imports: &str, expression: &str, expected: &str) {
++    let source = format!("<?php\nnamespace App;\n{imports}\n$value = {expression};\n$value;\n");
++    let (backend, _dir, _) = create_initialized_psr4_workspace(
++        crate::common::LARAVEL_APP_COMPOSER,
++        &[
++            ("config/workbench.php", CONFIG),
++            (
++                "lang/en/workbench.php",
++                "<?php return ['welcome' => 'Hello'];",
++            ),
++            ("app/UseConfig.php", &source),
++        ],
++        "app/UseConfig.php",
++    )
++    .await;
++    let uri = open_php_file(&backend, "app/UseConfig.php").await;
++    let position = position_of(&source, "$value;");
++    let hover = markup_hover_at(&backend, &uri, position.line, position.character + 2).await;
++    assert!(
++        hover
++            .lines()
++            .any(|line| line == format!("$value = {expected}")),
++        "{expression}: missing framework helper declaration must retain known {expected}, got {hover}"
++    );
++}
++
++#[tokio::test]
++async fn config_literal_global_without_loaded_helper_retains_value_type() {
++    assert_missing_helper_type("", "config('workbench.enabled')", "bool").await;
++}
++
++#[tokio::test]
++async fn config_literal_alias_without_loaded_helper_binds_named_key() {
++    assert_missing_helper_type(
++        "use function config as setting;",
++        "setting(default: false, key: 'workbench.count')",
++        "int",
++    )
++    .await;
++}
++
++#[tokio::test]
++async fn translation_literal_alias_without_loaded_helper_retains_value_type() {
++    assert_missing_helper_type(
++        "use function __ as tr;",
++        "tr(locale: 'en', key: 'workbench.welcome')",
++        "string",
++    )
++    .await;
++}
++
++#[tokio::test]
++async fn config_literal_foreign_import_keeps_declared_type() {
++    assert_local_type("function readConfig($key): string { return 'local'; }\nuse function App\\readConfig as config;", "config('workbench.enabled')", "string").await;
++}
++
++#[tokio::test]
++async fn config_literal_fully_qualified_helper_bypasses_local_shadow() {
++    assert_local_type(
++        "function config($key): int { return 3; }",
++        "\\config('workbench.enabled')",
++        "bool",
++    )
++    .await;
++}
++
++#[tokio::test]
++async fn config_literal_namespace_relative_call_keeps_declared_type() {
++    assert_local_type(
++        "function config($key): int { return 3; }",
++        "namespace\\config('workbench.enabled')",
++        "int",
++    )
++    .await;
++}
++
++#[tokio::test]
++async fn translation_literal_alias_in_plain_php_keeps_declared_type() {
++    let source = "<?php\nnamespace Plain;\nuse function __ as tr;\n$value = tr('workbench.welcome');\n$value;\n";
++    let composer = r#"{"autoload":{"psr-4":{"Plain\\":"app/"},"files":["app/helpers.php"]}}"#;
++    let (backend, _dir, _) = create_initialized_psr4_workspace(
++        composer,
++        &[
++            (
++                "app/helpers.php",
++                "<?php function __($key): int { return 3; }",
++            ),
++            (
++                "lang/en/workbench.php",
++                "<?php return ['welcome' => 'Hello'];",
++            ),
++            ("app/Plain.php", source),
++        ],
++        "app/helpers.php",
++    )
++    .await;
++    let uri = open_php_file(&backend, "app/Plain.php").await;
++    let position = position_of(source, "$value;");
++    let hover = markup_hover_at(&backend, &uri, position.line, position.character + 2).await;
++    assert!(
++        hover.lines().any(|line| line == "$value = int"),
++        "plain PHP translation alias must keep declared return type, got {hover}"
++    );
++}
++
++#[tokio::test]
++async fn config_literal_undefined_helper_in_plain_php_has_no_framework_type() {
++    let source = "<?php\n$value = config('workbench.enabled');\n$value;\n";
++    let (backend, _dir, uri) = create_initialized_psr4_workspace(
++        r#"{"autoload":{"psr-4":{"App\\":"app/"}}}"#,
++        &[("config/workbench.php", CONFIG), ("app/Plain.php", source)],
++        "app/Plain.php",
++    )
++    .await;
++    let position = position_of(source, "$value;");
++    let hover = markup_hover_at(&backend, &uri, position.line, position.character + 2).await;
++    assert!(
++        hover.lines().any(|line| line == "$value"),
++        "undefined plain PHP helper must remain unresolved, got {hover}"
++    );
++}
+diff --git a/tests/integration/laravel_config_reference_identity.rs b/tests/integration/laravel_config_reference_identity.rs
+new file mode 100644
+--- /dev/null
++++ b/tests/integration/laravel_config_reference_identity.rs
+@@ -0,0 +1,134 @@
++//! Config/translation navigation shares callable and named-key ownership.
++use crate::common::{
++    LARAVEL_APP_COMPOSER, create_initialized_psr4_workspace, definition_locations,
++    goto_definition_at, split_cursor,
++};
++use tower_lsp::lsp_types::{Position, Range};
++
++async fn assert_reference(
++    imports: &str,
++    declarations: &str,
++    expression: &str,
++    target: Option<&str>,
++) {
++    let marked = format!("<?php\nnamespace App;\n{imports}\n{declarations}\n{expression}\n");
++    let (content, position) = split_cursor(&marked);
++    let (backend, dir, uri) = create_initialized_psr4_workspace(
++        LARAVEL_APP_COMPOSER,
++        &[
++            (
++                "config/workbench.php",
++                "<?php\nreturn ['enabled' => true];\n",
++            ),
++            (
++                "lang/en/workbench.php",
++                "<?php\nreturn ['welcome' => 'Welcome'];\n",
++            ),
++            ("app/Consumer.php", &content),
++        ],
++        "app/Consumer.php",
++    )
++    .await;
++    let targets = definition_locations(
++        goto_definition_at(&backend, &uri, position.line, position.character).await,
++    );
++    if let Some(path) = target {
++        assert_eq!(targets.len(), 1, "{expression}: {targets:?}");
++        assert_eq!(
++            targets[0].uri.to_file_path().unwrap(),
++            dir.path().join(path)
++        );
++        assert_eq!(
++            targets[0].range,
++            Range::new(Position::new(1, 9), Position::new(1, 16)),
++            "the exact key content owns navigation"
++        );
++    } else {
++        assert!(
++            targets.is_empty(),
++            "unrelated call/default/replacement must not navigate to a framework key: {expression}: {targets:?}"
++        );
++    }
++}
++
++#[tokio::test]
++async fn config_reference_identity_aliases_and_named_keys() {
++    for (imports, expression, target) in [
++        ("", "config('workbench.en§abled');", "config/workbench.php"),
++        (
++            "use function config as setting;",
++            "setting('workbench.en§abled');",
++            "config/workbench.php",
++        ),
++        (
++            "use function config as setting;",
++            "setting()->get(key: 'workbench.en§abled');",
++            "config/workbench.php",
++        ),
++        (
++            "use function config as setting;",
++            "setting(default: false, key: 'workbench.en§abled');",
++            "config/workbench.php",
++        ),
++        (
++            "use Illuminate\\Support\\Facades\\Config as Settings;",
++            "Settings::get(default: false, key: 'workbench.en§abled');",
++            "config/workbench.php",
++        ),
++        (
++            "use function __ as tr;",
++            "tr('workbench.wel§come');",
++            "lang/en/workbench.php",
++        ),
++        (
++            "use function trans as tr;",
++            "tr(locale: 'en', key: 'workbench.wel§come');",
++            "lang/en/workbench.php",
++        ),
++        (
++            "use Illuminate\\Support\\Facades\\Lang as Messages;",
++            "Messages::get(locale: 'en', key: 'workbench.wel§come');",
++            "lang/en/workbench.php",
++        ),
++    ] {
++        assert_reference(imports, "", expression, Some(target)).await;
++    }
++}
++
++#[tokio::test]
++async fn config_reference_identity_rejects_local_names_and_nonkey_arguments() {
++    for (declarations, expression) in [
++        (
++            "function config($key) { return $key; }",
++            "config('workbench.en§abled');",
++        ),
++        (
++            "function config() { return new \\stdClass(); }",
++            "config()->get('workbench.en§abled');",
++        ),
++        ("", "config('app.name')->get('workbench.en§abled');"),
++        (
++            "function __($key) { return $key; }",
++            "__('workbench.wel§come');",
++        ),
++        ("class Config {}", "Config::get('workbench.en§abled');"),
++        ("class Lang {}", "Lang::get('workbench.wel§come');"),
++        ("", "config(default: 'workbench.en§abled', key: 'missing');"),
++        (
++            "",
++            "__(replace: ['name' => 'workbench.wel§come'], key: 'missing');",
++        ),
++    ] {
++        assert_reference("", declarations, expression, None).await;
++    }
++}
++
++#[tokio::test]
++async fn config_reference_identity_classes_have_no_namespace_global_fallback() {
++    for expression in [
++        "Config::get('workbench.en§abled');",
++        "Lang::get('workbench.wel§come');",
++    ] {
++        assert_reference("", "", expression, None).await;
++    }
++}
+diff --git a/tests/integration/laravel_string_key_call_sites.rs b/tests/integration/laravel_string_key_call_sites.rs
+--- a/tests/integration/laravel_string_key_call_sites.rs
++++ b/tests/integration/laravel_string_key_call_sites.rs
+@@ -173,7 +173,7 @@
+ /// `hasForLocale()` asks about the same keys `Lang::get()` reads.
+ #[tokio::test]
+ async fn has_for_locale_reaches_the_translation() {
+-    let caller = "<?php\nnamespace App;\nclass Demo {\n\
++    let caller = "<?php\nnamespace App; use Illuminate\\Support\\Facades\\Lang;\nclass Demo {\n\
+         \x20   public function go(): bool {\n\
+         \x20       return Lang::hasForLocale('messages.welcome', 'da');\n\
+         \x20   }\n}\n";
+@@ -196,7 +196,7 @@
+ /// spellings the repository reads it in.
+ #[tokio::test]
+ async fn get_many_reaches_each_config_key_it_lists() {
+-    let caller = "<?php\nnamespace App;\nclass Demo {\n\
++    let caller = "<?php\nnamespace App; use Illuminate\\Support\\Facades\\Config;\nclass Demo {\n\
+         \x20   public function go(): array {\n\
+         \x20       return Config::getMany(['app.name', 'app.timezone' => 'UTC']);\n\
+         \x20   }\n}\n";
+diff --git a/tests/integration/main.rs b/tests/integration/main.rs
+--- a/tests/integration/main.rs
++++ b/tests/integration/main.rs
+@@ -185,7 +185,9 @@
+ mod laravel_app_facade_container;
+ mod laravel_binding_precedence;
+ mod laravel_commands;
++mod laravel_config_array_identity;
+ mod laravel_config_keys;
++mod laravel_config_literal_types;
+ mod laravel_config_values;
+ mod laravel_container_bindings;
+ mod laravel_contract_concrete;
+@@ -276,3 +278,7 @@
+ mod keyword_php_target;
+ 
+ mod native_type_php_target;
++
++mod laravel_config_completion_identity;
++
++mod laravel_config_reference_identity;

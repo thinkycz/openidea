@@ -1,3 +1,4 @@
+import { IpcError } from "@/platform/ipc";
 import { describe, expect, it, vi } from "vitest";
 import { confirmExitEnabled, decideClose, type CloseDeps, type CloseInput } from "../closeGuard";
 import type { MessageRequest as PromptRequest, MessageResult as PromptResult } from "@/workbench/messages";
@@ -79,4 +80,13 @@ describe("decideClose", () => {
     expect(confirmExitEnabled({ general: {} })).toBe(false);
     expect(confirmExitEnabled(null)).toBe(false);
   });
+});
+
+it("keeps the window open without an error when overwrite confirmation is cancelled", async () => {
+  const { d } = deps([{ button: "save", checked: false }]);
+  d.saveAll = vi.fn(async () => {
+    throw new IpcError({ kind: "cancelled", message: "Save cancelled" });
+  });
+  await expect(decideClose({ ...base, dirty: 1, quitting: true }, d)).resolves.toBe(false);
+  expect(d.onSaveFailed).not.toHaveBeenCalled();
 });

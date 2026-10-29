@@ -1,0 +1,243 @@
+diff --git a/docs/CHANGELOG.md b/docs/CHANGELOG.md
+index 1b33d31..81c3b6e 100644
+--- a/docs/CHANGELOG.md
++++ b/docs/CHANGELOG.md
+@@ -1,3 +1,7 @@
++## Workbench .29 diagnostic run ownership
++
++Queued native diagnostic refreshes retire prior fast/slow work without discarding unchanged parsed source. Save fanout observes the same per-document run boundary; repeated pull requests preserve pending current work.
++
+ ## Workbench .28 route completion identity
+ 
+ Route-name and URI-parameter completion resolve global/helper/facade aliases, namespace-local homonyms and framework receiver types. Named route values use their PHP parameter roles; unsaved helper presence changes apply without caller edits.
+diff --git a/src/diagnostics/mod.rs b/src/diagnostics/mod.rs
+index 2da2712..16f2aa2 100644
+--- a/src/diagnostics/mod.rs
++++ b/src/diagnostics/mod.rs
+@@ -993,6 +993,11 @@ impl Backend {
+         // the fresh set. The resultId is bumped only by `assemble_and_push`,
+         // so the "unchanged" fast-path stays correct.
+ 
++        // A dependency refresh can keep the document version unchanged.
++        // Retire its prior run before queueing so an earlier collector cannot
++        // overwrite new phases or label cached slow results as complete.
++        self.diag.documents.lock().invalidate_diagnostics(&uri);
++
+         // Both modes: queue for the debounced background worker.
+         // In push mode the worker pushes the full assembled set.
+         // In pull mode the worker pushes only fast diagnostics and
+@@ -1067,6 +1072,13 @@ impl Backend {
+             }
+         }
+ 
++        {
++            let mut documents = self.diag.documents.lock();
++            for uri in &uris {
++                documents.invalidate_diagnostics(uri);
++            }
++        }
++
+         // Both modes: queue all files for the debounced background worker.
+         // In push mode the worker pushes the full assembled set.
+         // In pull mode the worker pushes only fast diagnostics and
+@@ -1826,3 +1838,122 @@ mod tests {
+         assert_eq!(backend.diag.last_fast.lock()[uri], expected);
+     }
+ }
++
++#[cfg(test)]
++mod run_ownership_tests {
++    use crate::Backend;
++    use std::sync::{Arc, atomic::Ordering};
++
++    fn parsed_caller() -> (Backend, Arc<String>) {
++        let backend = Backend::new_test();
++        let text = Arc::new("<?php namespace App; class Caller {}".to_owned());
++        let uri = "file:///Caller.php";
++        backend
++            .open_files
++            .write()
++            .insert(uri.to_owned(), Arc::clone(&text));
++        backend.diag.documents.lock().open(uri, 1, &text);
++        backend.update_ast(uri, &text);
++        {
++            let mut documents = backend.diag.documents.lock();
++            let revision = documents.capture(uri, &text).unwrap();
++            assert!(documents.mark_parsed(uri, revision.as_ref()));
++            assert!(documents.mark_phase(uri, revision.as_ref(), false));
++            assert!(documents.mark_phase(uri, revision.as_ref(), true));
++        }
++        backend.init_complete.store(true, Ordering::Release);
++        (backend, text)
++    }
++
++    #[test]
++    fn queued_refresh_rejects_prior_work_for_unchanged_caller() {
++        let (backend, text) = parsed_caller();
++        let uri = "file:///Caller.php";
++        let old = backend.diag.documents.lock().capture(uri, &text).unwrap();
++        backend.schedule_diagnostics(uri.to_owned());
++        let mut documents = backend.diag.documents.lock();
++        assert!(
++            documents.parsed(uri, old.as_ref()),
++            "source parsing is still current"
++        );
++        assert!(
++            !documents.mark_phase(uri, old.as_ref(), true),
++            "a queued dependency refresh must retire earlier diagnostic work"
++        );
++        let fresh = documents.capture(uri, &text).unwrap();
++        assert_eq!(fresh.as_ref().unwrap().version, 1);
++        assert!(
++            fresh.as_ref().unwrap().same(old.as_ref().unwrap()),
++            "source revision remains reusable"
++        );
++        assert!(documents.mark_phase(uri, fresh.as_ref(), true));
++        assert!(
++            !documents.phase_current(uri, old.as_ref(), true),
++            "old run cannot own a fresh phase"
++        );
++    }
++
++    #[test]
++    fn queued_refresh_cannot_pair_new_fast_with_previous_slow_results() {
++        let (backend, text) = parsed_caller();
++        let uri = "file:///Caller.php";
++        backend.schedule_diagnostics(uri.to_owned());
++        let mut documents = backend.diag.documents.lock();
++        let fresh = documents.capture(uri, &text).unwrap();
++        assert!(documents.parsed(uri, fresh.as_ref()));
++        assert!(documents.mark_phase(uri, fresh.as_ref(), false));
++        assert!(documents.phase_current(uri, fresh.as_ref(), false));
++        assert!(
++            !documents.phase_current(uri, fresh.as_ref(), true),
++            "old slow results must not complete a new run"
++        );
++        assert!(documents.mark_phase(uri, fresh.as_ref(), true));
++        assert!(documents.phase_current(uri, fresh.as_ref(), true));
++    }
++
++    #[test]
++    fn scheduling_another_document_preserves_caller_phase_ownership() {
++        let (backend, text) = parsed_caller();
++        let uri = "file:///Caller.php";
++        let revision = backend.diag.documents.lock().capture(uri, &text).unwrap();
++        let other = Arc::new("<?php class Other {}".to_owned());
++        backend
++            .open_files
++            .write()
++            .insert("file:///Unrelated.php".to_owned(), Arc::clone(&other));
++        backend
++            .diag
++            .documents
++            .lock()
++            .open("file:///Unrelated.php", 1, &other);
++        backend.schedule_diagnostics("file:///Unrelated.php".to_owned());
++        let documents = backend.diag.documents.lock();
++        assert!(documents.phase_current(uri, revision.as_ref(), false));
++        assert!(documents.phase_current(uri, revision.as_ref(), true));
++    }
++
++    #[test]
++    fn save_fanout_retires_unchanged_caller_run() {
++        let (backend, text) = parsed_caller();
++        let uri = "file:///Caller.php";
++        let revision = backend.diag.documents.lock().capture(uri, &text).unwrap();
++        backend.schedule_diagnostics_for_open_files("file:///Saved.php");
++        assert!(backend.diag.pending_uris.lock().contains(uri));
++        let mut documents = backend.diag.documents.lock();
++        assert!(documents.parsed(uri, revision.as_ref()));
++        assert!(!documents.mark_phase(uri, revision.as_ref(), true));
++    }
++
++    #[test]
++    fn repeated_pull_requests_do_not_retire_pending_current_work() {
++        let (backend, text) = parsed_caller();
++        let uri = "file:///Caller.php";
++        let revision = backend.diag.documents.lock().capture(uri, &text).unwrap();
++        backend.trigger_diagnostics_for_pull(uri);
++        backend.trigger_diagnostics_for_pull(uri);
++        assert!(backend.diag.pending_uris.lock().contains(uri));
++        let mut documents = backend.diag.documents.lock();
++        assert!(documents.mark_phase(uri, revision.as_ref(), true));
++        assert!(documents.phase_current(uri, revision.as_ref(), true));
++    }
++}
+diff --git a/src/diagnostics/revision.rs b/src/diagnostics/revision.rs
+index 88516d1..7484afc 100644
+--- a/src/diagnostics/revision.rs
++++ b/src/diagnostics/revision.rs
+@@ -9,8 +9,10 @@ pub(crate) struct Revision {
+     pub version: i32,
+     pub open: u64,
+     text: Weak<String>,
++    diagnostic_run: Arc<()>,
+ }
+ impl Revision {
++    /// Source identity deliberately excludes the independently refreshed run.
+     pub fn same(&self, other: &Self) -> bool {
+         self.version == other.version && self.open == other.open && self.text.ptr_eq(&other.text)
+     }
+@@ -45,6 +47,7 @@ impl Revisions {
+             version,
+             open: entry.open,
+             text: Arc::downgrade(text),
++            diagnostic_run: Arc::new(()),
+         });
+         entry.parsed = None;
+         entry.fast = None;
+@@ -64,6 +67,7 @@ impl Revisions {
+             version,
+             open: entry.open,
+             text: Arc::downgrade(text),
++            diagnostic_run: Arc::new(()),
+         });
+         entry.parsed = None;
+         self.1 = Arc::new(());
+@@ -79,6 +83,28 @@ impl Revisions {
+             entry.slow = None;
+         }
+     }
++    /// Retire diagnostic work without retiring the unchanged parsed source.
++    pub fn invalidate_diagnostics(&mut self, uri: &str) {
++        if let Some(entry) = self.0.get_mut(uri)
++            && let Some(current) = &mut entry.current
++        {
++            current.diagnostic_run = Arc::new(());
++            entry.fast = None;
++            entry.slow = None;
++        }
++    }
++
++    fn diagnostic_run_current(&self, uri: &str, revision: Option<&Revision>) -> bool {
++        match (self.0.get(uri), revision) {
++            (None, None) => true,
++            (Some(entry), Some(revision)) => entry.current.as_ref().is_some_and(|current| {
++                current.same(revision)
++                    && Arc::ptr_eq(&current.diagnostic_run, &revision.diagnostic_run)
++            }),
++            _ => false,
++        }
++    }
++
+     pub fn semantic_epoch(&self) -> Arc<()> {
+         Arc::clone(&self.1)
+     }
+@@ -153,7 +179,7 @@ impl Revisions {
+         true
+     }
+     pub fn mark_phase(&mut self, uri: &str, revision: Option<&Revision>, slow: bool) -> bool {
+-        if !self.parsed(uri, revision) {
++        if !self.parsed(uri, revision) || !self.diagnostic_run_current(uri, revision) {
+             return false;
+         }
+         if let Some(revision) = revision {
+@@ -167,7 +193,7 @@ impl Revisions {
+         true
+     }
+     pub fn phase_current(&self, uri: &str, revision: Option<&Revision>, slow: bool) -> bool {
+-        if !self.parsed(uri, revision) {
++        if !self.parsed(uri, revision) || !self.diagnostic_run_current(uri, revision) {
+             return false;
+         }
+         revision.is_none_or(|revision| {

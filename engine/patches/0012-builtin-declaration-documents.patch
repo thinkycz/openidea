@@ -1,0 +1,314 @@
+diff --git a/docs/CHANGELOG.md b/docs/CHANGELOG.md
+index 921684f..dc44ace 100644
+--- a/docs/CHANGELOG.md
++++ b/docs/CHANGELOG.md
+@@ -15,6 +15,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
+ 
+ ### Added
+ 
++- **Browse PHP built-in declarations.** Standard-library functions now return navigable embedded source locations. PHP Workbench can read their immutable source without creating project files. Contributed by PHP Workbench (local downstream patch).
++
+ - **Browse Laravel templates from PHP Workbench.** The read-only view endpoint shares template discovery and definition targets with PHP view-name completion and navigation. Names and results are bounded; project PHP is never executed. (Downstream PHP Workbench patch.)
+ 
+ ### Added
+diff --git a/examples/php/definition.php b/examples/php/definition.php
+index 3e03e50..2a2fa07 100644
+--- a/examples/php/definition.php
++++ b/examples/php/definition.php
+@@ -343,3 +343,6 @@ class DataProviderDemo
+         yield 'small' => [1, 2, 3];
+     }
+ }
++
++// Try: Go to Definition on strlen to inspect its read-only PHP built-in declaration.
++strlen("embedded declaration");
+diff --git a/src/backend/startup.rs b/src/backend/startup.rs
+index f32b543..4882a7a 100644
+--- a/src/backend/startup.rs
++++ b/src/backend/startup.rs
+@@ -279,7 +279,7 @@ impl Backend {
+                     ..ExecuteCommandOptions::default()
+                 }),
+                 experimental: Some(
+-                    serde_json::json!({"phpWorkbenchRoutes": true, "phpWorkbenchViews": true}),
++                    serde_json::json!({"phpWorkbenchRoutes": true, "phpWorkbenchViews": true, "phpWorkbenchBuiltins": true}),
+                 ),
+                 ..ServerCapabilities::default()
+             },
+diff --git a/src/definition/resolve.rs b/src/definition/resolve.rs
+index 8fa391a..0e548e9 100644
+--- a/src/definition/resolve.rs
++++ b/src/definition/resolve.rs
+@@ -529,6 +529,16 @@ impl Backend {
+             }
+         }
+ 
++        // Resolve embedded declarations through the shared lazy class loader,
++        // retaining the original stub URI and source coordinates.
++        for fqn in &candidates {
++            if self.load_stub_class(fqn).is_some()
++                && let Some(location) = self.class_declaration_location(fqn)
++            {
++                return Some(location);
++            }
++        }
++
+         // ── Template parameter fallback ─────────────────────────────────
+         // If no class was found, the name might be a template parameter
+         // (e.g. `TKey`, `TModel`) defined in a `@template` tag on the
+@@ -678,9 +688,8 @@ impl Backend {
+     /// stub lazily and caches it in `global_functions` for future lookups.
+     ///
+     /// When found, reads the source file and locates the `function name(`
+-    /// declaration line.  Stub functions (with `phpantom-stub-fn://` URIs)
+-    /// are not navigable so they are skipped for go-to-definition but
+-    /// still loaded into the cache for return-type resolution.
++    /// declaration line. Embedded functions retain a virtual URI whose
++    /// source is available through the read-only builtin-document request.
+     pub(crate) fn resolve_function_definition(&self, candidates: &[String]) -> Option<Location> {
+         // ── Step 1: Check global_functions (user code + cached stubs) ──
+         let found = {
+@@ -719,13 +728,6 @@ impl Backend {
+             })
+         };
+ 
+-        // Stub functions don't have real file locations — skip
+-        // go-to-definition for them (they're still useful for return-type
+-        // resolution via the function_loader).
+-        if file_uri.starts_with("phpantom-stub-fn://") {
+-            return None;
+-        }
+-
+         // Read the file content (try open files first, then disk).
+         let file_content = self.get_file_content(&file_uri)?;
+ 
+diff --git a/src/lib.rs b/src/lib.rs
+index 53869c5..b1aabf2 100644
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -85,6 +85,7 @@
+ //!     parsing (`parse_object_shape`, `extract_object_shape_property_type`,
+ //!     `is_object_shape`)
+ 
++pub mod workbench_builtins;
+ pub mod workbench_routes;
+ pub mod workbench_views;
+ 
+diff --git a/src/main.rs b/src/main.rs
+index e1bfa2b..f3ff629 100644
+--- a/src/main.rs
++++ b/src/main.rs
+@@ -567,6 +567,7 @@ async fn async_main() {
+                 let (service, socket) = LspService::build(Backend::new)
+                     .custom_method("phpWorkbench/routes", Backend::workbench_routes)
+                     .custom_method("phpWorkbench/views", Backend::workbench_views)
++                    .custom_method("phpWorkbench/builtin", Backend::workbench_builtin)
+                     .finish();
+                 Server::new(read, write, socket)
+                     .concurrency_level(LSP_CONCURRENCY)
+@@ -586,6 +587,7 @@ async fn async_main() {
+                 let (service, socket) = LspService::build(Backend::new)
+                     .custom_method("phpWorkbench/routes", Backend::workbench_routes)
+                     .custom_method("phpWorkbench/views", Backend::workbench_views)
++                    .custom_method("phpWorkbench/builtin", Backend::workbench_builtin)
+                     .finish();
+                 Server::new(stdin, stdout, socket)
+                     .concurrency_level(LSP_CONCURRENCY)
+diff --git a/src/workbench_builtins.rs b/src/workbench_builtins.rs
+new file mode 100644
+index 0000000..bc0f8c5
+--- /dev/null
++++ b/src/workbench_builtins.rs
+@@ -0,0 +1,85 @@
++//! Bounded read-only access to the PHP service's embedded declarations.
++use crate::Backend;
++use serde::{Deserialize, Serialize};
++use tower_lsp::jsonrpc::{Error, Result};
++
++/// An embedded declaration URI, never an arbitrary file path.
++#[derive(Debug, Deserialize)]
++pub struct BuiltinQuery {
++    /// Virtual URI returned by semantic navigation.
++    pub uri: String,
++}
++
++/// Immutable PHP stub text for a virtual editor document.
++#[derive(Debug, Serialize)]
++pub struct BuiltinDocument {
++    /// The requested embedded-document identity.
++    pub uri: String,
++    /// Original PHP source used for declaration coordinates.
++    pub content: String,
++}
++
++impl Backend {
++    /// Read embedded standard-library source without reading project files.
++    pub async fn workbench_builtin(&self, query: BuiltinQuery) -> Result<BuiltinDocument> {
++        let (is_function, encoded) = if let Some(name) = query.uri.strip_prefix("phpantom-stub://")
++        {
++            (false, name)
++        } else if let Some(name) = query.uri.strip_prefix("phpantom-stub-fn://") {
++            (true, name)
++        } else {
++            return Err(Error::invalid_params("Unsupported embedded declaration"));
++        };
++        let name = decode_name(encoded)
++            .ok_or_else(|| Error::invalid_params("Invalid embedded declaration identity"))?;
++        // Never consult open_files: a client cannot replace embedded source
++        // by opening a forged virtual document with the same URI.
++        let content = if is_function {
++            self.stub_function_index.read().get(name.as_str()).copied()
++        } else {
++            self.stub_index.read().get(name.as_str()).copied()
++        }
++        .ok_or_else(|| Error::invalid_params("Embedded declaration is unavailable"))?;
++        if content.len() > 2 * 1024 * 1024 {
++            return Err(Error::invalid_params(
++                "Embedded declaration exceeds the source viewer limit",
++            ));
++        }
++        Ok(BuiltinDocument {
++            uri: query.uri,
++            content: content.to_owned(),
++        })
++    }
++}
++
++fn decode_name(encoded: &str) -> Option<String> {
++    if encoded.len() > 4096 {
++        return None;
++    }
++    let mut bytes = Vec::new();
++    let mut chars = encoded.bytes();
++    while let Some(byte) = chars.next() {
++        if byte == b'%' {
++            let a = (chars.next()? as char).to_digit(16)?;
++            let b = (chars.next()? as char).to_digit(16)?;
++            bytes.push((a * 16 + b) as u8);
++        } else {
++            bytes.push(byte);
++        }
++    }
++    let name = String::from_utf8(bytes).ok()?;
++    if name.len() > 512
++        || !name.split('\\').all(|part| {
++            !part.is_empty()
++                && part.bytes().enumerate().all(|(index, byte)| {
++                    byte == b'_'
++                        || byte.is_ascii_alphabetic()
++                        || byte >= 0x80
++                        || (index > 0 && byte.is_ascii_digit())
++                })
++        })
++    {
++        return None;
++    }
++    Some(name)
++}
+diff --git a/tests/integration/definition_classes.rs b/tests/integration/definition_classes.rs
+index 914b1bc..c533ef0 100644
+--- a/tests/integration/definition_classes.rs
++++ b/tests/integration/definition_classes.rs
+@@ -3,6 +3,102 @@ use phpantom_lsp::Backend;
+ use tower_lsp::LanguageServer;
+ use tower_lsp::lsp_types::*;
+ 
++#[tokio::test]
++async fn workbench_builtin_class_source_uses_original_coordinates() {
++    let backend = crate::common::create_test_backend_with_full_stubs();
++    let uri = Url::parse("file:///builtin.php").unwrap();
++    open_php(&backend, &uri, "<?php\n$clock = new DateTimeImmutable();\n").await;
++    let Some(GotoDefinitionResponse::Scalar(location)) =
++        goto_definition_at(&backend, &uri, 1, 17).await
++    else {
++        panic!("Missing builtin class definition");
++    };
++    let document = backend
++        .workbench_builtin(phpantom_lsp::workbench_builtins::BuiltinQuery {
++            uri: location.uri.to_string(),
++        })
++        .await
++        .unwrap();
++    assert_eq!(document.uri, location.uri.as_str());
++    let line = document
++        .content
++        .lines()
++        .nth(location.range.start.line as usize)
++        .unwrap();
++    assert!(line.contains("class DateTimeImmutable"), "{line}");
++}
++
++#[tokio::test]
++async fn workbench_builtin_function_definitions_have_readable_source() {
++    let backend = crate::common::create_test_backend_with_full_stubs();
++    let uri = Url::parse("file:///builtin.php").unwrap();
++    open_php(
++        &backend,
++        &uri,
++        "<?php\nstrlen('hi');\narray_map('strval', [1]);\n",
++    )
++    .await;
++    for (line, name) in [(1, "strlen"), (2, "array_map")] {
++        let Some(GotoDefinitionResponse::Scalar(location)) =
++            goto_definition_at(&backend, &uri, line, 3).await
++        else {
++            panic!("Missing builtin function definition: {name}");
++        };
++        assert_eq!(location.uri.scheme(), "phpantom-stub-fn");
++        let document = backend
++            .workbench_builtin(phpantom_lsp::workbench_builtins::BuiltinQuery {
++                uri: location.uri.to_string(),
++            })
++            .await
++            .unwrap();
++        let line = document
++            .content
++            .lines()
++            .nth(location.range.start.line as usize)
++            .unwrap();
++        assert!(line.contains(&format!("function {name}(")), "{line}");
++    }
++}
++
++#[tokio::test]
++async fn workbench_builtin_source_is_embedded_and_rejects_other_locations() {
++    use phpantom_lsp::workbench_builtins::BuiltinQuery;
++    let backend = crate::common::create_test_backend_with_full_stubs();
++    let uri = Url::parse("phpantom-stub://DateTimeImmutable").unwrap();
++    open_php(&backend, &uri, "<?php class ForgedProjectContent {}").await;
++    let document = backend
++        .workbench_builtin(BuiltinQuery {
++            uri: uri.to_string(),
++        })
++        .await
++        .unwrap();
++    assert!(!document.content.contains("ForgedProjectContent"));
++    assert!(document.content.contains("class DateTimeImmutable"));
++    let document = backend
++        .workbench_builtin(BuiltinQuery {
++            uri: "phpantom-stub://FFI%5CCData".into(),
++        })
++        .await
++        .unwrap();
++    assert!(document.content.contains("class CData"));
++    for uri in [
++        "file:///etc/passwd",
++        "https://example.com/source",
++        "phpantom-stub://../secret",
++        "phpantom-stub://DateTimeImmutable?secret",
++        "phpantom-stub://unknown",
++        "phpantom-stub-fn://../../secret",
++    ] {
++        assert!(
++            backend
++                .workbench_builtin(BuiltinQuery { uri: uri.into() })
++                .await
++                .is_err(),
++            "{uri}"
++        );
++    }
++}
++
+ // ─── Same-File Goto Definition Tests ────────────────────────────────────────
+ 
+ #[tokio::test]

@@ -1,0 +1,182 @@
+--- a/src/diagnostics/mod.rs
++++ b/src/diagnostics/mod.rs
+@@ -1316,6 +1316,30 @@
+         start_byte: usize,
+         end_byte: usize,
+     ) -> Option<Range> {
++        self.offset_range_to_lsp_range_with_origin(uri, content, start_byte, end_byte, false)
++    }
++
++    /// Map a PHP function token only when both boundaries belong to source PHP.
++    /// Blade component/type diagnostics may intentionally anchor generated calls
++    /// on user markup and keep using the general mapping above.
++    pub(crate) fn offset_php_source_range_to_lsp_range(
++        &self,
++        uri: &str,
++        content: &str,
++        start_byte: usize,
++        end_byte: usize,
++    ) -> Option<Range> {
++        self.offset_range_to_lsp_range_with_origin(uri, content, start_byte, end_byte, true)
++    }
++
++    fn offset_range_to_lsp_range_with_origin(
++        &self,
++        uri: &str,
++        content: &str,
++        start_byte: usize,
++        end_byte: usize,
++        require_original_php: bool,
++    ) -> Option<Range> {
+         let virtual_php_handle = self.blade_virtual_content.read();
+         if let Some(virtual_php) = virtual_php_handle.get(uri)
+             && let Some(map) = self.blade_source_maps.read().get(uri)
+@@ -1324,13 +1348,23 @@
+                 return None;
+             }
+ 
+-            let mut range =
++            let virtual_range =
+                 crate::text_position::byte_range_to_lsp_range(virtual_php, start_byte, end_byte);
+-
+-            // A diagnostic originating in the prologue (injected headers)
+-            // is skipped rather than reported on line 1 of the Blade file.
+-            range.start = map.try_php_to_blade(range.start)?;
+-            range.end = map.try_php_to_blade(range.end)?;
++            let range = Range {
++                start: map.try_php_to_blade(virtual_range.start)?,
++                end: map.try_php_to_blade(virtual_range.end)?,
++            };
++
++            // Navigation may clamp generated PHP to a template delimiter. A
++            // diagnostic must instead describe PHP the user actually wrote:
++            // both boundaries must round-trip, with no trailing wrapper lines.
++            if require_original_php
++                && (range.end.line as usize >= map.adjustments.len()
++                    || map.blade_to_php(range.start) != virtual_range.start
++                    || map.blade_to_php(range.end) != virtual_range.end)
++            {
++                return None;
++            }
+ 
+             return Some(range);
+         }
+--- a/src/diagnostics/unknown_functions.rs
++++ b/src/diagnostics/unknown_functions.rs
+@@ -176,7 +176,7 @@
+             }
+ 
+             // ── Function is unresolved — emit diagnostic ────────────────
+-            let range = match self.offset_range_to_lsp_range(
++            let range = match self.offset_php_source_range_to_lsp_range(
+                 uri,
+                 content,
+                 span.start as usize,
+--- a/tests/integration/main.rs
++++ b/tests/integration/main.rs
+@@ -261,3 +261,5 @@
+ mod definition_ambiguous_members;
+ 
+ mod workbench_views;
++
++mod blade_generated_diagnostics;
+--- /dev/null
++++ b/tests/integration/blade_generated_diagnostics.rs
+@@ -0,0 +1,62 @@
++use crate::common::{create_test_backend, open_document};
++use tower_lsp::lsp_types::{Diagnostic, Url};
++
++async fn functions(body: &str) -> Vec<Diagnostic> {
++    let backend = create_test_backend();
++    let uri = Url::parse("file:///view.blade.php").unwrap();
++    open_document(&backend, &uri, "php", body).await;
++    let php = backend.blade_virtual_php(uri.as_str()).unwrap();
++    let mut diagnostics = Vec::new();
++    backend.collect_unknown_function_diagnostics(uri.as_str(), &php, &mut diagnostics);
++    diagnostics
++}
++
++#[tokio::test]
++async fn generated_escape_helper_is_not_a_template_error() {
++    let diagnostics = functions("<p>🐘 {{ 'ok' }}</p>").await;
++    assert!(diagnostics.is_empty(), "{diagnostics:?}");
++}
++
++#[tokio::test]
++async fn actual_unknown_function_survives_with_original_unicode_range() {
++    let body = "<p>café 🐘 {{ userWrittenMissing() }}</p>";
++    let diagnostics = functions(body).await;
++    assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
++    assert!(diagnostics[0].message.contains("userWrittenMissing"));
++    let column = body[..body.find("userWrittenMissing").unwrap()]
++        .encode_utf16()
++        .count() as u32;
++    assert_eq!(diagnostics[0].range.start.line, 0);
++    assert_eq!(diagnostics[0].range.start.character, column);
++    assert_eq!(diagnostics[0].range.end.character, column + 18);
++}
++
++#[tokio::test]
++async fn user_written_escape_helper_is_still_checked() {
++    let body = "<p>{{ e('ok') }}</p>";
++    let diagnostics = functions(body).await;
++    assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
++    assert!(diagnostics[0].message.contains("'e'"));
++    assert_eq!(
++        diagnostics[0].range.start.character,
++        body.find("e(").unwrap() as u32
++    );
++    assert_eq!(
++        diagnostics[0].range.end.character,
++        diagnostics[0].range.start.character + 1
++    );
++}
++
++#[tokio::test]
++async fn php_block_unknown_function_keeps_its_source_location() {
++    let diagnostics = functions("@php\nuserWrittenMissing();\n@endphp\n").await;
++    assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
++    assert_eq!(diagnostics[0].range.start.line, 1);
++    assert_eq!(diagnostics[0].range.start.character, 0);
++}
++
++#[tokio::test]
++async fn directive_generated_helpers_have_no_user_php_range() {
++    let diagnostics = functions("@include('parts.header')\n@csrf\n").await;
++    assert!(diagnostics.is_empty(), "{diagnostics:?}");
++}
+--- a/docs/ARCHITECTURE.md
++++ b/docs/ARCHITECTURE.md
+@@ -1233,3 +1233,9 @@
+ index and Laravel string-key definition resolver. It lists bounded, sorted names
+ and resolves a selected logical name again without a second template scanner or
+ project execution. Host callbacks guard picker generation and open revisions.
++
++Blade PHP-function diagnostic ranges use the existing source map but require both virtual
++boundaries to round-trip through original source coordinates. Navigation and component/type diagnostics anchored on user markup keep
++their permissive clamping behavior; generated helpers and trailing wrapper lines
++cannot become user-facing PHP diagnostics. User-authored PHP calls, including
++explicit escape-helper calls, retain normal diagnostics.
+--- a/docs/CHANGELOG.md
++++ b/docs/CHANGELOG.md
+@@ -6,6 +6,10 @@
+ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+ 
+ ## [Unreleased]
++
++### Fixed
++
++- **Blade function diagnostics stay on user-written PHP.** Generated escape and directive helpers no longer invent undefined-function errors at template delimiters; actual unresolved functions retain their original positions and component attribute diagnostics remain visible. Contributed by PHP Workbench (local downstream patch).
+ 
+ ### Added
+ 
+--- a/examples/laravel/app/Demo.php
++++ b/examples/laravel/app/Demo.php
+@@ -657,6 +657,7 @@
+         $posts = BlogPost::where('published', true)->get();
+         $user = BlogAuthor::first();
+         // PHP Workbench: Laravel: Go to View browses this same template index.
++        // Undefined-function diagnostics exclude generated helpers; user-written calls remain checked.
+         view('welcome', compact('posts', 'user'));
+ 
+         // admin/users/index.blade.php declares $users and @extends('welcome'),

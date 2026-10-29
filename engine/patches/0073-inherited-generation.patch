@@ -1,0 +1,1131 @@
+diff --git a/docs/CHANGELOG.md b/docs/CHANGELOG.md
+index 1cfbe57..beb9918 100644
+--- a/docs/CHANGELOG.md
++++ b/docs/CHANGELOG.md
+@@ -15,6 +15,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
+ 
+ ## [Unreleased]
+ 
++- **Respect inherited generation contracts.** Generated accessors preserve inherited methods and compatible interface signatures. Constructor actions refuse to bypass inherited initialization or final constructor restrictions. Contributed by PHP Workbench downstream.
++
+ - **Generate constructors without losing surrounding code.** Compact declarations and grouped properties retain neighboring members. Promotion preserves original native property types and documentation and requires PHP 8.0; documentation-only return types are not used as constructor parameter types. Contributed by PHP Workbench downstream.
+ 
+ - **Keep generated accessors inside compact classes.** Getter and setter generation preserves following members and comments, including compact traits and readonly classes. Contributed by PHP Workbench downstream.
+diff --git a/src/code_actions/generate_constructor.rs b/src/code_actions/generate_constructor.rs
+index 79baa08..837c083 100644
+--- a/src/code_actions/generate_constructor.rs
++++ b/src/code_actions/generate_constructor.rs
+@@ -126,12 +126,40 @@ impl Backend {
+             return;
+         };
+ 
++        let inheritance = match self.generation_inheritance(content, params.range.start) {
++            Ok(inheritance) => inheritance,
++            Err(reason) => {
++                for title in ["Generate constructor", "Generate promoted constructor"] {
++                    out.push(super::helpers::disabled_generation(
++                        title,
++                        CodeActionKind::REFACTOR_REWRITE,
++                        reason,
++                    ));
++                }
++                return;
++            }
++        };
++        if let Some(reason) = inheritance.constructor_refusal() {
++            for title in ["Generate constructor", "Generate promoted constructor"] {
++                out.push(super::helpers::disabled_generation(
++                    title,
++                    CodeActionKind::REFACTOR_REWRITE,
++                    reason,
++                ));
++            }
++            return;
++        }
+         let insert_pos = offset_to_position(content, insert_offset);
+ 
+         // ── Traditional constructor ─────────────────────────────────────
+-        {
+-            let constructor_text = build_constructor(&props, &indent);
+-
++        let constructor_text = build_constructor(&props, &indent);
++        if self.generated_signature_admitted(
++            uri,
++            content,
++            &inheritance,
++            "__construct",
++            &constructor_text,
++        ) {
+             let edit = TextEdit {
+                 range: Range {
+                     start: insert_pos,
+@@ -153,6 +181,12 @@ impl Backend {
+                 disabled: None,
+                 data: None,
+             }));
++        } else {
++            out.push(super::helpers::disabled_generation(
++                "Generate constructor",
++                CodeActionKind::REFACTOR_REWRITE,
++                "The generated constructor cannot satisfy the inherited PHP signature contract.",
++            ));
+         }
+ 
+         // ── Promoted constructor ────────────────────────────────────────
+@@ -175,6 +209,21 @@ impl Backend {
+             return;
+         }
+         let constructor_text = build_promoted_constructor(&props, &indent);
++        if !self.generated_signature_admitted(
++            uri,
++            content,
++            &inheritance,
++            "__construct",
++            &constructor_text,
++        ) {
++            out.push(super::helpers::disabled_generation(
++                "Generate promoted constructor",
++                CodeActionKind::REFACTOR_REWRITE,
++                "The generated constructor cannot satisfy the inherited PHP signature contract.",
++            ));
++            return;
++        }
++
+         let mut spans: Vec<(usize, usize)> =
+             props.iter().map(|prop| prop.declaration_span).collect();
+         spans.sort_unstable();
+diff --git a/src/code_actions/generate_getter_setter.rs b/src/code_actions/generate_getter_setter.rs
+index 7336918..9bd6847 100644
+--- a/src/code_actions/generate_getter_setter.rs
++++ b/src/code_actions/generate_getter_setter.rs
+@@ -88,7 +88,7 @@ impl Backend {
+ 
+         // Resolve the cursor context and gather the (owned) accessor data.
+         // The borrowed AST does not escape the closure.
+-        let Some((available, indent, insert_offset)) = crate::parser::with_parsed_program(
++        let Some((mut available, indent, insert_offset)) = crate::parser::with_parsed_program(
+             content,
+             "generate_getter_setter",
+             |program, content| {
+@@ -165,8 +165,75 @@ impl Backend {
+ 
+         let insert_pos = offset_to_position(content, insert_offset);
+ 
+-        let any_can_getter = available.iter().any(|a| a.can_getter);
+-        let any_can_setter = available.iter().any(|a| a.can_setter);
++        let inheritance = match self.generation_inheritance(content, params.range.start) {
++            Ok(inheritance) => inheritance,
++            Err(reason) => {
++                for title in [
++                    "Generate getter",
++                    "Generate setter",
++                    "Generate getter and setter",
++                ] {
++                    out.push(super::helpers::disabled_generation(
++                        title,
++                        CodeActionKind::REFACTOR,
++                        reason,
++                    ));
++                }
++                return;
++            }
++        };
++        let mut getter_refused = false;
++        let mut setter_refused = false;
++        for candidate in &mut available {
++            if candidate.can_getter {
++                let name =
++                    getter_method_name(&candidate.prop.name, candidate.prop.type_hint.as_ref());
++                if inheritance.existing_accessor(&name)
++                    || !self.generated_signature_admitted(
++                        uri,
++                        content,
++                        &inheritance,
++                        &name,
++                        &build_getter(&candidate.prop, &indent),
++                    )
++                {
++                    candidate.can_getter = false;
++                    getter_refused = true;
++                }
++            }
++            if candidate.can_setter {
++                let name = setter_method_name(&candidate.prop.name);
++                if inheritance.existing_accessor(&name)
++                    || !self.generated_signature_admitted(
++                        uri,
++                        content,
++                        &inheritance,
++                        &name,
++                        &build_setter(&candidate.prop, &indent),
++                    )
++                {
++                    candidate.can_setter = false;
++                    setter_refused = true;
++                }
++            }
++        }
++        let any_can_getter = available.iter().any(|candidate| candidate.can_getter);
++        let any_can_setter = available.iter().any(|candidate| candidate.can_setter);
++        if getter_refused && !any_can_getter {
++            out.push(super::helpers::disabled_generation("Generate getter", CodeActionKind::REFACTOR,
++                "The inherited getter is preserved or its signature cannot be satisfied by this generated getter."));
++        }
++        if setter_refused && !any_can_setter {
++            out.push(super::helpers::disabled_generation("Generate setter", CodeActionKind::REFACTOR,
++                "The inherited setter is preserved or its signature cannot be satisfied by this generated setter."));
++        }
++        if (getter_refused || setter_refused) && !(any_can_getter && any_can_setter) {
++            out.push(super::helpers::disabled_generation(
++                "Generate getter and setter",
++                CodeActionKind::REFACTOR,
++                "Both generated accessors must satisfy the inherited PHP contracts.",
++            ));
++        }
+ 
+         // ── Generate getter ─────────────────────────────────────────────
+         if any_can_getter {
+diff --git a/src/code_actions/helpers.rs b/src/code_actions/helpers.rs
+index ecf2016..9eaf62f 100644
+--- a/src/code_actions/helpers.rs
++++ b/src/code_actions/helpers.rs
+@@ -319,3 +319,265 @@ pub(super) fn member_insertion_offset<'a>(
+     }
+     newline + 1
+ }
++
++/// Query-local declaration and composed hierarchy; never published to symbol caches.
++pub(super) struct GenerationInheritance {
++    context: crate::types::FileContext,
++    target: crate::types::ClassInfo,
++    own_traits: crate::types::ClassInfo,
++    parent: Option<crate::types::ClassInfo>,
++    final_private_constructor: bool,
++}
++
++impl GenerationInheritance {
++    pub(super) fn existing_accessor(&self, name: &str) -> bool {
++        self.parent
++            .as_ref()
++            .and_then(|parent| parent.get_method_ci(name))
++            .is_some_and(|method| {
++                !method.is_virtual
++                    && !method.is_abstract
++                    && method.visibility != crate::types::Visibility::Private
++            })
++    }
++
++    pub(super) fn constructor_refusal(&self) -> Option<&'static str> {
++        if self.final_private_constructor {
++            return Some(
++                "A final parent constructor cannot be replaced, including a final private constructor.",
++            );
++        }
++        if self
++            .own_traits
++            .get_method_ci("__construct")
++            .is_some_and(|method| !method.is_virtual && !method.is_abstract)
++        {
++            return Some(
++                "A constructor supplied by a used trait must retain its initialization. Edit it explicitly instead of generating a replacement.",
++            );
++        }
++        if self
++            .parent
++            .as_ref()
++            .and_then(|parent| parent.get_method_ci("__construct"))
++            .is_some_and(|method| {
++                !method.is_virtual
++                    && (method.is_final
++                        || (!method.is_abstract
++                            && method.visibility != crate::types::Visibility::Private))
++            })
++        {
++            return Some(
++                "The inherited constructor must retain parent initialization. Generate an explicit delegating constructor instead of guessing its arguments.",
++            );
++        }
++        None
++    }
++}
++
++fn complete_generation_graph(
++    class: &crate::types::ClassInfo,
++    loader: &dyn Fn(&str) -> Option<std::sync::Arc<crate::types::ClassInfo>>,
++    depth: u32,
++    visiting: &mut std::collections::HashSet<crate::atom::Atom>,
++    done: &mut std::collections::HashSet<crate::atom::Atom>,
++) -> bool {
++    let name = class.fqn();
++    if done.contains(&name) {
++        return true;
++    }
++    if depth > crate::types::MAX_INHERITANCE_DEPTH || done.len() + visiting.len() >= 1000 {
++        return false;
++    }
++    if !visiting.insert(name) {
++        return false;
++    }
++    for dependency in class
++        .parent_class
++        .iter()
++        .chain(&class.interfaces)
++        .chain(&class.used_traits)
++    {
++        let Some(owner) = loader(&format!("\\{dependency}")) else {
++            return false;
++        };
++        if !complete_generation_graph(&owner, loader, depth + 1, visiting, done) {
++            return false;
++        }
++    }
++    visiting.remove(&name);
++    done.insert(name);
++    true
++}
++
++impl crate::Backend {
++    pub(super) fn generation_inheritance(
++        &self,
++        content: &str,
++        position: Position,
++    ) -> Result<GenerationInheritance, &'static str> {
++        // This canonical recovery context is also used by ordinary completion;
++        // it rebuilds namespace/import ownership without publishing edited text.
++        let context = self.array_key_recovery_context(content, position);
++        let cursor = crate::text_position::position_to_offset(content, position);
++        let target = crate::class_lookup::find_class_at_offset(&context.classes, cursor)
++            .ok_or("The current PHP declaration could not be resolved safely.")?
++            .clone();
++        let loader = super::override_methods::canonical_loader(self, &context);
++        if !complete_generation_graph(
++            &target,
++            &loader,
++            0,
++            &mut std::collections::HashSet::new(),
++            &mut std::collections::HashSet::new(),
++        ) {
++            return Err(
++                "The inherited PHP contracts are unresolved, cyclic or exceed the generation limit. No code was generated.",
++            );
++        }
++        let mut own = target.clone();
++        own.parent_class = None;
++        own.interfaces.clear();
++        let own_traits = crate::inheritance::resolve_class_with_inheritance(&own, &loader);
++        let parent = target
++            .parent_class
++            .and_then(|name| loader(&format!("\\{name}")))
++            .map(|parent| crate::inheritance::resolve_class_with_inheritance(&parent, &loader));
++        let mut final_private_constructor = false;
++        let mut parent_name = target.parent_class;
++        for _ in 0..crate::types::MAX_INHERITANCE_DEPTH {
++            let Some(name) = parent_name else {
++                break;
++            };
++            let Some(parent) = loader(&format!("\\{name}")) else {
++                break;
++            };
++            let mut local = (*parent).clone();
++            local.parent_class = None;
++            local.interfaces.clear();
++            let composed = crate::inheritance::resolve_class_with_inheritance(&local, &loader);
++            if composed.get_method_ci("__construct").is_some_and(|method| {
++                !method.is_virtual
++                    && method.is_final
++                    && method.visibility == crate::types::Visibility::Private
++            }) {
++                final_private_constructor = true;
++            }
++            parent_name = parent.parent_class;
++        }
++        drop(loader);
++        Ok(GenerationInheritance {
++            context,
++            target,
++            own_traits,
++            parent,
++            final_private_constructor,
++        })
++    }
++
++    pub(super) fn generated_signature_admitted(
++        &self,
++        uri: &str,
++        content: &str,
++        inheritance: &GenerationInheritance,
++        name: &str,
++        text: &str,
++    ) -> bool {
++        let snippet = format!("<?php class __WorkbenchGeneratedSignature {{\n{text}\n}}\n");
++        let _parse = crate::parser::with_parse_cache(&snippet);
++        let classes = Self::parse_php_versioned(&snippet, Some(self.php_version()));
++        let Some(method) = classes.first().and_then(|class| class.get_method_ci(name)) else {
++            return false;
++        };
++        let mut method = method.clone();
++        let context = &inheritance.context;
++        // Offsets in a generated snippet must not consult original-source names.
++        let lexical = crate::types::FileContext {
++            classes: Vec::new(),
++            use_map: context.use_map.clone(),
++            namespace: context.namespace.clone(),
++            namespace_spans: None,
++            resolved_names: None,
++        };
++        let prepared = crate::parser::with_parsed_program(
++            &snippet,
++            "generated_accessor_contract",
++            |program, _| {
++                if !program.errors.is_empty() {
++                    return None;
++                }
++                let class = program
++                    .statements
++                    .iter()
++                    .find_map(|statement| match statement {
++                        mago_syntax::cst::Statement::Class(class) => Some(class),
++                        _ => None,
++                    })?;
++                let syntax = class.members.iter().find_map(|member| match member {
++                    ClassLikeMember::Method(method) => Some(method),
++                    _ => None,
++                })?;
++                if syntax.parameter_list.parameters.len() != method.parameters.len() {
++                    return None;
++                }
++                for (parameter, syntax) in method
++                    .parameters
++                    .make_mut()
++                    .iter_mut()
++                    .zip(syntax.parameter_list.parameters.iter())
++                {
++                    parameter.native_type_hint = match syntax.hint.as_ref() {
++                        Some(hint) => Some(super::override_methods::portable_hint(
++                            hint,
++                            &inheritance.target,
++                            &lexical,
++                            self.php_version(),
++                            false,
++                        )?),
++                        None => None,
++                    };
++                }
++                method.native_return_type = match syntax.return_type_hint.as_ref() {
++                    Some(hint) => Some(super::override_methods::portable_hint(
++                        &hint.hint,
++                        &inheritance.target,
++                        &lexical,
++                        self.php_version(),
++                        true,
++                    )?),
++                    None => None,
++                };
++                method.return_type = method.native_return_type.clone();
++                Some(super::override_methods::PreparedMethod {
++                    method,
++                    returns_reference: syntax.ampersand.is_some(),
++                })
++            },
++        );
++        let Some(prepared) = prepared else {
++            return false;
++        };
++        self.generated_class_owned_method_satisfies_contracts(
++            uri,
++            content,
++            &inheritance.target,
++            &prepared,
++            context,
++        )
++    }
++}
++
++pub(super) fn disabled_generation(
++    title: &str,
++    kind: CodeActionKind,
++    reason: &str,
++) -> CodeActionOrCommand {
++    CodeActionOrCommand::CodeAction(CodeAction {
++        title: title.to_string(),
++        kind: Some(kind),
++        disabled: Some(CodeActionDisabled {
++            reason: reason.to_string(),
++        }),
++        ..CodeAction::default()
++    })
++}
+diff --git a/src/code_actions/override_methods.rs b/src/code_actions/override_methods.rs
+index 148d8f6..bdbeb0d 100644
+--- a/src/code_actions/override_methods.rs
++++ b/src/code_actions/override_methods.rs
+@@ -135,6 +135,31 @@ impl Backend {
+         target: &ClassInfo,
+         generated: &PreparedMethod,
+         context: &FileContext,
++    ) -> bool {
++        self.generated_method_contracts(uri, content, target, generated, context, false)
++    }
++
++    /// Actual class-owned declarations supersede concrete trait methods, but
++    /// must still implement every abstract trait/interface/ancestor contract.
++    pub(super) fn generated_class_owned_method_satisfies_contracts(
++        &self,
++        uri: &str,
++        content: &str,
++        target: &ClassInfo,
++        generated: &PreparedMethod,
++        context: &FileContext,
++    ) -> bool {
++        self.generated_method_contracts(uri, content, target, generated, context, true)
++    }
++
++    fn generated_method_contracts(
++        &self,
++        uri: &str,
++        content: &str,
++        target: &ClassInfo,
++        generated: &PreparedMethod,
++        context: &FileContext,
++        class_owned: bool,
+     ) -> bool {
+         let loader = canonical_loader(self, context);
+         let mut pending: Vec<_> = target
+@@ -157,7 +182,15 @@ impl Backend {
+             };
+             if let Some(method) = owner.get_method_ci(&generated.method.name)
+                 && !method.is_virtual
+-                && method.visibility != Visibility::Private
++                && (!class_owned || owner.kind != ClassLikeKind::Trait || method.is_abstract)
++                && (method.visibility != Visibility::Private
++                    || (class_owned
++                        && owner.kind == ClassLikeKind::Trait
++                        && method.is_abstract
++                        && find_declaring_trait(&target.used_traits, &loader, &|direct| {
++                            direct.fqn() == owner.fqn()
++                        })
++                        .is_some()))
+             {
+                 let Some(contract) =
+                     self.prepare_generated_method(uri, content, target, &owner, method, context)
+@@ -189,21 +222,30 @@ impl Backend {
+         method: &MethodInfo,
+         target_context: &FileContext,
+     ) -> Option<PreparedMethod> {
+-        let owner_uri = self
+-            .symbols
+-            .fqn_uri_index
+-            .read()
+-            .get(declaring.fqn().as_str())
+-            .cloned();
+-        let (source_uri, source) = if let Some(owner_uri) = owner_uri {
+-            let source = if owner_uri == uri {
+-                content.to_owned()
+-            } else {
+-                self.get_file_content(&owner_uri)?
+-            };
+-            (owner_uri, source)
++        // The supplied context may be query-local current text that has never
++        // been indexed, or a newer same-URI revision than the global owner map.
++        let current_owner = target_context.classes.iter().any(|class| {
++            class.fqn() == declaring.fqn() && class.keyword_offset == declaring.keyword_offset
++        });
++        let (source_uri, source) = if current_owner {
++            (uri.to_owned(), content.to_owned())
+         } else {
+-            self.find_class_file_content(&declaring.fqn(), uri, content)?
++            let owner_uri = self
++                .symbols
++                .fqn_uri_index
++                .read()
++                .get(declaring.fqn().as_str())
++                .cloned();
++            if let Some(owner_uri) = owner_uri {
++                let source = if owner_uri == uri {
++                    content.to_owned()
++                } else {
++                    self.get_file_content(&owner_uri)?
++                };
++                (owner_uri, source)
++            } else {
++                self.find_class_file_content(&declaring.fqn(), uri, content)?
++            }
+         };
+         if declaring.kind == ClassLikeKind::Trait
+             && (!target.trait_aliases.is_empty()
+@@ -214,7 +256,11 @@ impl Backend {
+         {
+             return None;
+         }
+-        let source_context = self.file_context_at(&source_uri, method.name_offset);
++        let source_context = if source_uri == uri {
++            target_context.at(method.name_offset)
++        } else {
++            self.file_context_at(&source_uri, method.name_offset)
++        };
+         if !source_context.classes.iter().any(|class| {
+             class.fqn() == declaring.fqn() && class.keyword_offset == declaring.keyword_offset
+         }) {
+@@ -494,7 +540,7 @@ fn find_method<'a>(
+     None
+ }
+ 
+-fn portable_hint(
++pub(super) fn portable_hint(
+     hint: &Hint<'_>,
+     lexical: &ClassInfo,
+     context: &FileContext,
+@@ -1006,6 +1052,15 @@ pub(super) fn canonical_loader<'a>(
+             .strip_prefix("__fqn__\\")
+             .unwrap_or(name)
+             .trim_start_matches('\\');
++        // A current query-local declaration takes precedence over stale or
++        // absent global indexes, including canonical fully qualified names.
++        if let Some(class) = context
++            .classes
++            .iter()
++            .find(|class| class.fqn().eq_ignore_ascii_case(name))
++        {
++            return Some(Arc::clone(class));
++        }
+         loader(&format!("\\{name}")).filter(|class| class.fqn().eq_ignore_ascii_case(name))
+     }
+ }
+diff --git a/tests/integration/code_action_generate_constructor.rs b/tests/integration/code_action_generate_constructor.rs
+index abb8585..71221ae 100644
+--- a/tests/integration/code_action_generate_constructor.rs
++++ b/tests/integration/code_action_generate_constructor.rs
+@@ -1357,3 +1357,161 @@ fn constructor_legality_doc_only_void_never_are_not_parameter_types() {
+         );
+     }
+ }
++
++fn inherited_constructor_actions(source: &str) -> Vec<CodeActionOrCommand> {
++    let backend = create_test_backend();
++    backend.update_ast("file:///test.php", source);
++    let point = position_of(source, "private int $value");
++    get_code_actions_in_range(
++        &backend,
++        "file:///test.php",
++        source,
++        Range::new(point, point),
++    )
++}
++
++fn inherited_constructor_enabled<'a>(
++    actions: &'a [CodeActionOrCommand],
++    title: &str,
++) -> Option<&'a CodeAction> {
++    for item in actions {
++        if let CodeActionOrCommand::Command(command) = item {
++            assert_ne!(
++                command.title, title,
++                "constructor generation must propose edits"
++            );
++        }
++    }
++    let action = find_action_titled(actions, title)?;
++    if let Some(disabled) = &action.disabled {
++        assert!(!disabled.reason.trim().is_empty());
++        return None;
++    }
++    assert!(action.command.is_none() && action.edit.is_some());
++    Some(action)
++}
++
++fn inherited_constructor_parent_initialization_preserved_or_refused(
++    actions: &[CodeActionOrCommand],
++    required_argument: bool,
++) {
++    for title in ["Generate constructor", "Generate promoted constructor"] {
++        if let Some(action) = inherited_constructor_enabled(actions, title) {
++            let edits = extract_edits(action);
++            let generated = edits
++                .iter()
++                .map(|edit| edit.new_text.as_str())
++                .collect::<Vec<_>>()
++                .join("\n");
++            assert!(
++                generated.contains("parent::__construct("),
++                "enabled generation must not silently bypass parent initialization: {generated}"
++            );
++            if required_argument {
++                assert!(
++                    !generated.contains("parent::__construct()"),
++                    "required parent argument must be forwarded"
++                );
++                assert!(
++                    generated.contains("string $"),
++                    "parent input needs a caller-supplied typed parameter: {generated}"
++                );
++            }
++        }
++    }
++}
++
++#[test]
++fn inherited_generation_final_parent_constructor_including_private_refuses_both_variants() {
++    for visibility in ["public", "private"] {
++        let source = format!(
++            "<?php\nclass ParentCase {{ final {visibility} function __construct() {{}} }}\nclass ChildCase extends ParentCase {{ private int $value; }}\n"
++        );
++        let actions = inherited_constructor_actions(&source);
++        for title in ["Generate constructor", "Generate promoted constructor"] {
++            assert!(
++                inherited_constructor_enabled(&actions, title).is_none(),
++                "final {visibility} constructor may not be overridden"
++            );
++        }
++    }
++}
++
++#[test]
++fn inherited_generation_required_parent_constructor_is_not_silently_bypassed() {
++    let actions = inherited_constructor_actions(
++        "<?php\nclass ParentCase { protected string $token; public function __construct(string $token) { $this->token = $token; } }\nclass ChildCase extends ParentCase { private int $value; }\n",
++    );
++    inherited_constructor_parent_initialization_preserved_or_refused(&actions, true);
++}
++
++#[test]
++fn inherited_generation_noarg_parent_constructor_side_effect_is_not_silently_bypassed() {
++    let actions = inherited_constructor_actions(
++        "<?php\nclass ParentCase { protected bool $ready = false; public function __construct() { $this->ready = true; } }\nclass ChildCase extends ParentCase { private int $value; }\n",
++    );
++    inherited_constructor_parent_initialization_preserved_or_refused(&actions, false);
++}
++
++#[test]
++fn inherited_generation_private_nonfinal_parent_constructor_allows_fresh_child_constructor() {
++    let actions = inherited_constructor_actions(
++        "<?php\nclass ParentCase { private function __construct(string $secret) {} }\nclass ChildCase extends ParentCase { private int $value; }\n",
++    );
++    for title in ["Generate constructor", "Generate promoted constructor"] {
++        let action = inherited_constructor_enabled(&actions, title).expect(
++            "nonfinal private parent constructor is not an inherited initialization contract",
++        );
++        let generated = extract_edits(action)
++            .iter()
++            .map(|edit| edit.new_text.as_str())
++            .collect::<Vec<_>>()
++            .join("\n");
++        assert!(generated.contains("public function __construct("));
++        assert!(
++            !generated.contains("parent::__construct("),
++            "private ancestor constructor cannot be called"
++        );
++    }
++}
++
++#[test]
++fn inherited_generation_indirect_trait_constructor_initialization_is_not_bypassed() {
++    let actions = inherited_constructor_actions(
++        "<?php\ntrait InitializesToken { protected string $token; public function __construct(string $token) { $this->token = $token; } }\nclass GrandCase { use InitializesToken; }\nclass ParentCase extends GrandCase {}\nclass ChildCase extends ParentCase { private int $value; }\n",
++    );
++    inherited_constructor_parent_initialization_preserved_or_refused(&actions, true);
++}
++
++#[test]
++fn inherited_generation_interface_constructor_contract_is_not_broken() {
++    let actions = inherited_constructor_actions(
++        "<?php\ninterface CreatesToken { public function __construct(string $token); }\nclass ChildCase implements CreatesToken { private int $value; }\n",
++    );
++    for title in ["Generate constructor", "Generate promoted constructor"] {
++        if let Some(action) = inherited_constructor_enabled(&actions, title) {
++            let generated = extract_edits(action)
++                .iter()
++                .map(|edit| edit.new_text.as_str())
++                .collect::<Vec<_>>()
++                .join("\n");
++            assert!(
++                generated.contains("string $"),
++                "enabled generation must retain the required interface input, not replace it with int value alone: {generated}"
++            );
++        }
++    }
++}
++
++#[test]
++fn inherited_generation_compatible_abstract_trait_constructor_remains_available() {
++    let actions = inherited_constructor_actions(
++        "<?php\ntrait CreatesValue { abstract public function __construct(int $value); }\nclass ChildCase { use CreatesValue; private int $value; }\n",
++    );
++    for title in ["Generate constructor", "Generate promoted constructor"] {
++        assert!(
++            inherited_constructor_enabled(&actions, title).is_some(),
++            "compatible abstract trait contract has no initialization body to bypass: {title}"
++        );
++    }
++}
+diff --git a/tests/integration/code_action_generate_getter_setter.rs b/tests/integration/code_action_generate_getter_setter.rs
+index 582fb0b..1e4e5f6 100644
+--- a/tests/integration/code_action_generate_getter_setter.rs
++++ b/tests/integration/code_action_generate_getter_setter.rs
+@@ -495,3 +495,367 @@ fn compact_accessors_keep_following_attributes_and_docblock_together() {
+         false,
+     );
+ }
++
++// Inherited safety is exercised through public Backend actions after publishing
++// the real source into the canonical class index.
++fn inherited_accessor_actions(source: &str) -> Vec<CodeActionOrCommand> {
++    let backend = create_test_backend();
++    backend.set_php_version(phpantom_lsp::types::PhpVersion::new(8, 3));
++    backend.update_ast("file:///test.php", source);
++    actions_at(&backend, source, "private int $value")
++}
++
++fn inherited_accessor_enabled<'a>(
++    actions: &'a [CodeActionOrCommand],
++    title: &str,
++) -> Option<&'a CodeAction> {
++    for item in actions {
++        if let CodeActionOrCommand::Command(command) = item {
++            assert_ne!(
++                command.title, title,
++                "generation must not become an executable command"
++            );
++        }
++    }
++    let action = find_action_titled(actions, title)?;
++    if let Some(disabled) = &action.disabled {
++        assert!(!disabled.reason.trim().is_empty(), "refusal needs a reason");
++        return None;
++    }
++    assert!(
++        action.command.is_none() && action.edit.is_some(),
++        "enabled generation must propose reviewed edits"
++    );
++    Some(action)
++}
++
++fn inherited_accessor_refused(actions: &[CodeActionOrCommand], title: &str) {
++    assert!(
++        inherited_accessor_enabled(actions, title).is_none(),
++        "illegal inherited method replacement must not be enabled: {title}"
++    );
++}
++
++fn inherited_accessor_compatible_or_refused(
++    actions: &[CodeActionOrCommand],
++    title: &str,
++    compatible_signature: &str,
++) {
++    if let Some(action) = inherited_accessor_enabled(actions, title) {
++        let generated = extract_edits(action)
++            .iter()
++            .map(|edit| edit.new_text.as_str())
++            .collect::<Vec<_>>()
++            .join("\n");
++        assert!(
++            generated.contains(compatible_signature),
++            "enabled replacement must satisfy the inherited native signature, not blindly use the property type: {generated}"
++        );
++    }
++}
++
++#[test]
++fn inherited_generation_final_getter_blocks_getter_and_combined() {
++    let actions = inherited_accessor_actions(
++        "<?php\nclass ParentCase { final public function GETVALUE(): int { return 1; } }\nclass ChildCase extends ParentCase { private int $value; }\n",
++    );
++    inherited_accessor_refused(&actions, "Generate getter");
++    inherited_accessor_refused(&actions, "Generate getter and setter");
++    assert!(
++        inherited_accessor_enabled(&actions, "Generate setter").is_some(),
++        "unrelated missing setter still works"
++    );
++}
++
++#[test]
++fn inherited_generation_indirect_final_setter_blocks_setter_and_combined() {
++    let actions = inherited_accessor_actions(
++        "<?php\nclass GrandCase { final public function setValue(int $value): self { return $this; } }\nclass ParentCase extends GrandCase {}\nclass ChildCase extends ParentCase { private int $value; }\n",
++    );
++    inherited_accessor_refused(&actions, "Generate setter");
++    inherited_accessor_refused(&actions, "Generate getter and setter");
++    assert!(inherited_accessor_enabled(&actions, "Generate getter").is_some());
++}
++
++#[test]
++fn inherited_generation_nonfinal_getter_return_contract_is_not_broken() {
++    let actions = inherited_accessor_actions(
++        "<?php\nclass ParentCase { public function getValue(): string { return 'parent'; } }\nclass ChildCase extends ParentCase { private int $value; }\n",
++    );
++    for title in ["Generate getter", "Generate getter and setter"] {
++        inherited_accessor_compatible_or_refused(&actions, title, "function getValue(): string");
++    }
++}
++
++#[test]
++fn inherited_generation_nonfinal_setter_parameter_and_return_contracts_are_not_broken() {
++    let actions = inherited_accessor_actions(
++        "<?php\nclass ParentCase { public function setValue(string $value): void {} }\nclass ChildCase extends ParentCase { private int $value; }\n",
++    );
++    for title in ["Generate setter", "Generate getter and setter"] {
++        inherited_accessor_compatible_or_refused(
++            &actions,
++            title,
++            "function setValue(string $value): void",
++        );
++    }
++}
++
++#[test]
++fn inherited_generation_compatible_concrete_getter_does_not_disable_fresh_setter() {
++    let actions = inherited_accessor_actions(
++        "<?php\nclass ParentCase { public function getValue(): int { return 1; } }\nclass ChildCase extends ParentCase { private int $value; }\n",
++    );
++    let setter = inherited_accessor_enabled(&actions, "Generate setter")
++        .expect("inheritance must not disable unrelated missing accessors");
++    assert!(
++        extract_edits(setter)[0]
++            .new_text
++            .contains("function setValue(int $value): self")
++    );
++    // Keeping the inherited implementation or emitting a compatible override
++    // are both legal; this fixture does not force one implementation policy.
++    inherited_accessor_compatible_or_refused(
++        &actions,
++        "Generate getter",
++        "function getValue(): int",
++    );
++}
++
++#[test]
++fn inherited_generation_private_parent_getter_does_not_block_child_getter() {
++    let actions = inherited_accessor_actions(
++        "<?php\nclass ParentCase { private function getValue(): string { return 'private'; } }\nclass ChildCase extends ParentCase { private int $value; }\n",
++    );
++    let getter = inherited_accessor_enabled(&actions, "Generate getter")
++        .expect("private parent method is not an inherited contract");
++    assert!(
++        extract_edits(getter)[0]
++            .new_text
++            .contains("function getValue(): int")
++    );
++}
++
++#[test]
++fn inherited_generation_unrelated_parent_methods_preserve_both_accessors() {
++    let actions = inherited_accessor_actions(
++        "<?php\nclass ParentCase { final public function getOther(): string { return 'other'; } }\nclass ChildCase extends ParentCase { private int $value; }\n",
++    );
++    for title in [
++        "Generate getter",
++        "Generate setter",
++        "Generate getter and setter",
++    ] {
++        assert!(
++            inherited_accessor_enabled(&actions, title).is_some(),
++            "unrelated inheritance must not disable {title}"
++        );
++    }
++}
++
++#[test]
++fn inherited_generation_interface_getter_contract_is_not_broken() {
++    let actions = inherited_accessor_actions(
++        "<?php\ninterface ValueContract { public function getValue(): string; }\nclass ChildCase implements ValueContract { private int $value; }\n",
++    );
++    for title in ["Generate getter", "Generate getter and setter"] {
++        inherited_accessor_compatible_or_refused(&actions, title, "function getValue(): string");
++    }
++}
++
++#[test]
++fn inherited_generation_compatible_abstract_interface_getter_can_be_implemented() {
++    let actions = inherited_accessor_actions(
++        "<?php\ninterface ValueContract { public function getValue(): int; }\nclass ChildCase implements ValueContract { private int $value; }\n",
++    );
++    let getter = inherited_accessor_enabled(&actions, "Generate getter")
++        .expect("compatible abstract contract still needs its implementation");
++    assert!(
++        extract_edits(getter)[0]
++            .new_text
++            .contains("function getValue(): int")
++    );
++}
++
++#[test]
++fn inherited_generation_trait_final_adaptation_remains_final_in_child() {
++    let actions = inherited_accessor_actions(
++        "<?php\ntrait ValueTrait { public function getValue(): int { return 1; } }\nclass ParentCase { use ValueTrait { getValue as final; } }\nclass ChildCase extends ParentCase { private int $value; }\n",
++    );
++    inherited_accessor_refused(&actions, "Generate getter");
++    inherited_accessor_refused(&actions, "Generate getter and setter");
++    assert!(inherited_accessor_enabled(&actions, "Generate setter").is_some());
++}
++
++#[tokio::test]
++async fn inherited_generation_unsaved_cross_file_parent_change_rechecks_contract() {
++    use crate::common::{code_actions_via_server, open_php};
++    use tower_lsp::LanguageServer;
++    let backend = create_test_backend();
++    let parent_uri = Url::parse("file:///ParentCase.php").unwrap();
++    let child_uri = Url::parse("file:///ChildCase.php").unwrap();
++    let parent = "<?php\nnamespace Demo;\nclass ParentCase { public function getOther(): int { return 1; } }\n";
++    let child = "<?php\r\nnamespace Demo;\r\n// ž🐘\r\nclass ChildCase extends ParentCase { private int $value; }\r\n";
++    open_php(&backend, &parent_uri, parent).await;
++    open_php(&backend, &child_uri, child).await;
++    let point = position_of(child, "private int $value");
++    let before = code_actions_via_server(&backend, &child_uri, Range::new(point, point))
++        .await
++        .unwrap_or_default();
++    assert!(inherited_accessor_enabled(&before, "Generate getter").is_some());
++    backend.did_change(DidChangeTextDocumentParams {
++        text_document: VersionedTextDocumentIdentifier { uri: parent_uri, version: 2 },
++        content_changes: vec![TextDocumentContentChangeEvent { range: None, range_length: None,
++            text: "<?php\nnamespace Demo;\nclass ParentCase { final public function getValue(): int { return 2; } }\n".into() }],
++    }).await;
++    let after = code_actions_via_server(&backend, &child_uri, Range::new(point, point))
++        .await
++        .unwrap_or_default();
++    inherited_accessor_refused(&after, "Generate getter");
++    inherited_accessor_refused(&after, "Generate getter and setter");
++    assert!(
++        inherited_accessor_enabled(&after, "Generate setter").is_some(),
++        "positive control prevents empty response from passing"
++    );
++}
++
++#[test]
++fn inherited_generation_class_owned_accessors_can_override_direct_final_trait_methods() {
++    let actions = inherited_accessor_actions(
++        "<?php\ntrait ValueTrait { final public function getValue(): string { return 'trait'; } final public function setValue(string $value): void {} }\nclass ChildCase { use ValueTrait; private int $value; }\n",
++    );
++    for title in [
++        "Generate getter",
++        "Generate setter",
++        "Generate getter and setter",
++    ] {
++        assert!(
++            inherited_accessor_enabled(&actions, title).is_some(),
++            "class own methods take precedence over directly used trait methods: {title}"
++        );
++    }
++}
++#[test]
++fn inherited_generation_final_private_parent_getter_still_allows_child_owned_getter() {
++    let actions = inherited_accessor_actions(
++        "<?php\nclass ParentCase { final private function getValue(): string { return 'private'; } }\nclass ChildCase extends ParentCase { private int $value; }\n",
++    );
++    let getter = inherited_accessor_enabled(&actions, "Generate getter")
++        .expect("final private ordinary methods do not constrain a child method");
++    assert!(
++        extract_edits(getter)[0]
++            .new_text
++            .contains("function getValue(): int")
++    );
++}
++// Append to code_action_generate_getter_setter.rs after frozen inherited tests.
++#[test]
++fn inherited_generation_fresh_unindexed_interface_contract_remains_implementable() {
++    let backend = create_test_backend();
++    let source = "<?php\ninterface FreshContract { public function getValue(): int; }\nclass FreshChild implements FreshContract { private int $value; }\n";
++    // Intentionally no update_ast/didOpen: public action input is authoritative.
++    let actions = actions_at(&backend, source, "private int $value");
++    let getter = inherited_accessor_enabled(&actions, "Generate getter")
++        .expect("query-local compatible interface must not require global AST publication");
++    assert!(
++        extract_edits(getter)[0]
++            .new_text
++            .contains("function getValue(): int")
++    );
++}
++
++#[test]
++fn inherited_generation_fresh_unindexed_abstract_contract_remains_implementable() {
++    let backend = create_test_backend();
++    let source = "<?php\nabstract class FreshParent { abstract public function getValue(): int; }\nclass FreshChild extends FreshParent { private int $value; }\n";
++    let actions = actions_at(&backend, source, "private int $value");
++    let getter = inherited_accessor_enabled(&actions, "Generate getter")
++        .expect("query-local abstract declaration is a real compatible contract");
++    assert!(
++        extract_edits(getter)[0]
++            .new_text
++            .contains("function getValue(): int")
++    );
++}
++
++#[test]
++fn inherited_generation_fresh_contract_replaces_stale_same_uri_at_equal_offsets() {
++    let backend = create_test_backend();
++    let indexed = "<?php\ninterface CurrentContract { public function getValue(): array; }\nclass CurrentChild implements CurrentContract { private int $value; }\n";
++    let current = indexed.replacen(": array", ": mixed", 1);
++    assert_eq!(indexed.len(), current.len());
++    backend.update_ast("file:///test.php", indexed);
++    let actions = actions_at(&backend, &current, "private int $value");
++    let getter = inherited_accessor_enabled(&actions, "Generate getter")
++        .expect("current mixed contract admits int; stale array contract must not disable it");
++    assert!(
++        extract_edits(getter)[0]
++            .new_text
++            .contains("function getValue(): int")
++    );
++}
++
++#[test]
++fn inherited_generation_fresh_incompatible_contract_cannot_use_stale_compatible_same_uri() {
++    let backend = create_test_backend();
++    let indexed = "<?php\ninterface CurrentContract { public function getValue(): mixed; }\nclass CurrentChild implements CurrentContract { private int $value; }\n";
++    let current = indexed.replacen(": mixed", ": array", 1);
++    assert_eq!(indexed.len(), current.len());
++    backend.update_ast("file:///test.php", indexed);
++    let actions = actions_at(&backend, &current, "private int $value");
++    for title in ["Generate getter", "Generate getter and setter"] {
++        inherited_accessor_compatible_or_refused(&actions, title, "function getValue(): array");
++    }
++}
++// Append-only tests; no primary files changed by the reviewer.
++#[test]
++fn inherited_generation_concrete_trait_does_not_hide_another_abstract_trait_contract() {
++    let actions = inherited_accessor_actions(
++        "<?php\ntrait AConcrete { public function getValue(): string { return 'x'; } }\ntrait BAbstract { abstract public function getValue(): string; }\nclass ChildCase { use AConcrete, BAbstract; private int $value; }\n",
++    );
++    for title in ["Generate getter", "Generate getter and setter"] {
++        inherited_accessor_compatible_or_refused(&actions, title, "function getValue(): string");
++    }
++    assert!(
++        inherited_accessor_enabled(&actions, "Generate setter").is_some(),
++        "independent setter remains legal"
++    );
++}
++
++#[test]
++fn inherited_generation_compatible_mixed_concrete_abstract_traits_allow_class_getter() {
++    let actions = inherited_accessor_actions(
++        "<?php\ntrait AConcrete { public function getValue(): int { return 1; } }\ntrait BAbstract { abstract public function getValue(): int; }\nclass ChildCase { use AConcrete, BAbstract; private int $value; }\n",
++    );
++    let getter = inherited_accessor_enabled(&actions, "Generate getter")
++        .expect("compatible abstract trait contract can be implemented by a class-owned getter");
++    assert!(
++        extract_edits(getter)[0]
++            .new_text
++            .contains("function getValue(): int")
++    );
++    assert!(inherited_accessor_enabled(&actions, "Generate setter").is_some());
++}
++
++#[test]
++fn inherited_generation_private_abstract_trait_contract_is_not_a_private_parent_method() {
++    let actions = inherited_accessor_actions(
++        "<?php\ntrait PrivateContract { abstract private function getValue(): string; }\nclass ChildCase { use PrivateContract; private int $value; }\n",
++    );
++    for title in ["Generate getter", "Generate getter and setter"] {
++        inherited_accessor_compatible_or_refused(&actions, title, "function getValue(): string");
++    }
++    assert!(inherited_accessor_enabled(&actions, "Generate setter").is_some());
++}
++
++#[test]
++fn inherited_generation_ancestor_fulfilled_private_trait_contract_does_not_bind_child() {
++    let actions = inherited_accessor_actions(
++        "<?php\ntrait PrivateContract { abstract private function getValue(): string; }\nclass ParentCase { use PrivateContract; private function getValue(): string { return 'parent'; } }\nclass ChildCase extends ParentCase { private int $value; }\n",
++    );
++    assert!(
++        inherited_accessor_enabled(&actions, "Generate getter").is_some(),
++        "a fulfilled ancestor-private contract is isolated from child declarations"
++    );
++    assert!(inherited_accessor_enabled(&actions, "Generate setter").is_some());
++}

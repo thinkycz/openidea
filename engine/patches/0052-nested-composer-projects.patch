@@ -1,0 +1,1771 @@
+diff --git a/docs/ARCHITECTURE.md b/docs/ARCHITECTURE.md
+--- a/docs/ARCHITECTURE.md
++++ b/docs/ARCHITECTURE.md
+@@ -774,7 +774,7 @@
+ 
+ ### Monorepo / Multi-Composer-Root Support
+ 
+-The LSP transport uses `ProjectRouter` (`src/project_router.rs`) to select an independent `Backend` for each Composer project. Workspace folders without a root `composer.json` also use `discover_subproject_roots`; discovery respects ignore rules and does not recursively accept Composer projects inside an already accepted project. A containing workspace context excludes its child project roots and serves loose files. This discovery policy does not imply support for every nested Composer layout. The older merged discovery helpers remain available to direct `Backend` callers; the isolation boundary described here is the routed LSP service.
++The LSP transport uses `ProjectRouter` (`src/project_router.rs`) to select an independent `Backend` for each Composer project. Routed discovery walks beneath opened folders even when a containing directory has its own `composer.json`. Valid nested Composer manifests create child contexts; a containing context excludes their roots and serves its own source and loose files. Discovery respects ignore rules and hidden directories, prunes default/configured vendor paths, and does not follow arbitrary directory symlinks. Installed symlinked path packages retain each consuming graph rather than acquiring standalone configuration. Dependency ownership is classified after sibling manifests are read, so a later application can own an earlier vendor or shared-package tree. Metadata from discarded libraries cannot exclude unrelated applications; mutually consuming development roots retain independent contexts. The older merged discovery helpers remain available to direct `Backend` callers; the isolation boundary described here is the routed LSP service.
+ 
+ **Project-local semantics.** Each context is freshly constructed, with its own symbol indexes, imports, parsed declarations, reference indexes, derived caches, PHP target and configuration. Worker/request clones share only their own context's state. Existing class/function/type resolvers run unchanged within that context; there is no mutable process-wide project switch. A dependency shared by two apps is resolved through each app's graph, rather than through another app's FQN winner. Watch events are filtered by consumers; Composer topology and workspace-folder changes retire and rebuild contexts.
+ 
+@@ -786,7 +786,7 @@
+ 
+ **Diagnostic identity.** `ProjectScope` limits delivery to the selected owner and excludes child roots; physical authority additionally suppresses passive aliases. Semantic computation and source revision fences remain context-local. `TransportClock` shares only the client-opening ledger and monotonic publication sequence across children and rebuilds. Actual client opens advance the ledger; child replay seeds that same opening without inventing a client reopen. Passive clears carry the actual version, opening, completeness and sequence envelope expected by the host. Pull result IDs are context-qualified. Retired contexts stop diagnostic delivery, their workers are signalled, and watcher registrations and progress tokens are context-namespaced.
+ 
+-Discovery of independent projects nested inside an accepted Composer root remains a separate [backlog item](todo/indexing.md#x19-discover-independent-nested-composer-roots-inside-composer-workspaces). Physical identity follows canonical paths and symlinks; distinct hard-link paths are not unified.
++Saved manifest creation/removal and workspace-folder changes rebuild context ownership. A prior owner is retained only if the rebuilt graph still consumes that document, allowing a newly independent child to receive the actual unsaved text and version. Physical identity follows canonical paths and symlinks; distinct hard-link paths are not unified.
+ 
+ ### Function Resolution Priority
+ 
+diff --git a/docs/CHANGELOG.md b/docs/CHANGELOG.md
+--- a/docs/CHANGELOG.md
++++ b/docs/CHANGELOG.md
+@@ -50,6 +50,8 @@
+ - **Project PHP extension profiles.** Set `[php] extensions` to the extensions available on your deployment target. Completion and built-in lookup keep project polyfills and exclude unavailable extension declarations after restarting the service. Contributed by PHP Workbench (local downstream patch).
+ 
+ ### Fixed
++
++- **Nested Composer projects keep independent completion and PHP settings.** Opening a containing Composer workspace also discovers its child projects. Installed libraries retain the consuming application's configuration, and saved manifest changes preserve current unsaved buffers. Contributed by PHP Workbench downstream.
+ 
+ - **Composer projects keep their own symbols and PHP settings.** Completion and navigation distinguish apps that use the same class, function or constant names. Unsaved edits to a shared dependency follow its active source without replacing another open buffer's text. Contributed by PHP Workbench downstream.
+ 
+diff --git a/docs/todo.md b/docs/todo.md
+--- a/docs/todo.md
++++ b/docs/todo.md
+@@ -35,7 +35,6 @@
+ | #   | Item                                                                                                                                                            | Impact      | Complexity  |
+ | --- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------- | ----------- |
+ |     | Clear [refactoring gate](todo/refactor.md)                                                                                                                      | —           | —           |
+-| X19 | [Discover independent nested Composer roots inside Composer workspaces](todo/indexing.md#x19-discover-independent-nested-composer-roots-inside-composer-workspaces) | Medium | Medium |
+ | X17  | [Index the workspace's other folders](todo/indexing.md#x17-index-the-workspaces-other-folders)                              | Medium      | Medium      |
+ | X14  | [Ask Zed to expose `file_scan_exclusions` and `file_types` to extensions](todo/indexing.md#x14-ask-zed-to-expose-file_scan_exclusions-and-file_types-to-extensions) (upstream request) | Low | Low |
+ | E1  | [External stub packages (ide-helper, etc.)](todo/external-stubs.md#e1-project-level-phpstorm-stubs-for-gtd)                                                     | Medium-High | Low         |
+diff --git a/docs/todo/indexing.md b/docs/todo/indexing.md
+--- a/docs/todo/indexing.md
++++ b/docs/todo/indexing.md
+@@ -493,19 +493,3 @@
+ configured. Maintainer's call on the semantics; whichever way it
+ goes, the chosen behaviour needs a test and a sentence in
+ [`configuration.md`](../configuration.md).
+-
+-
+-## X19. Discover independent nested Composer roots inside Composer workspaces
+-
+-**Impact: Medium · Complexity: Medium**
+-
+-Project routing discovers sibling Composer roots in a containing non-Composer
+-workspace, but treats an accepted Composer root as a discovery boundary. Opening
+-a Composer workspace that itself contains another independent Composer project
+-therefore does not create a separate child context. Extend discovery with an
+-explicit ownership policy that distinguishes nested independent projects from
+-installed dependencies and path packages, respects ignore rules, and handles
+-saved manifest creation, removal and folder changes without merging declarations
+-or replaying partial buffers. Verify identical FQNs and distinct PHP targets in
+-parent/child layouts, both query orders, shared dependencies and topology changes.
+-Preserve the existing routed isolation for discovered sibling roots.
+diff --git a/examples/composer-projects/README.md b/examples/composer-projects/README.md
+--- a/examples/composer-projects/README.md
++++ b/examples/composer-projects/README.md
+@@ -1,20 +1,26 @@
+ # Independent Composer projects
+ 
+-Open this directory as one workspace, then open `apps/a/index.php` and
+-`apps/b/index.php`. Both applications declare `App\Service`, with a different
+-method. Completion and navigation follow the application containing the caller.
+-Try either opening order, edit a Service without saving, and Undo the change.
+-The other application's declarations remain independent.
++Open this directory as one workspace. It contains its own Composer project,
++independent apps in `apps/a` and `apps/b`, and another project nested inside
++app A at `apps/a/tools/c`. Each declares `App\Service` with a different method.
++Open each `index.php`: completion and navigation follow its own project, in
++either opening order. Edit a Service without saving and Undo the change;
++the other projects remain independent.
+ 
+-No packages or generated vendor files are required. The two applications use
+-separate Composer PSR-4 roots. Run each entry point separately to check its
+-runtime contract:
++The root and app C target PHP 8.2, app A targets PHP 8.3, and app B targets
++PHP 8.4. Each service applies its own Composer requirement; no ancestor's
++target is inherited. Installed vendor libraries and installed symlinked path
++packages retain the consuming project's configuration.
++
++No packages or generated vendor files are required. Run each entry point in
++its own PHP process to verify its runtime contract:
+ 
+ ```sh
++php -d zend.assertions=1 index.php
+ php -d zend.assertions=1 apps/a/index.php
+ php -d zend.assertions=1 apps/b/index.php
++php -d zend.assertions=1 apps/a/tools/c/index.php
+ ```
+ 
+-Each script deliberately loads only its own Service. They are independent PHP
+-applications; their identically named classes cannot be loaded into one PHP
+-process together.
++Each script deliberately loads only its own Service. These independent PHP
++applications cannot load their identically named classes into one PHP process.
+diff --git a/examples/composer-projects/apps/a/composer.json b/examples/composer-projects/apps/a/composer.json
+--- a/examples/composer-projects/apps/a/composer.json
++++ b/examples/composer-projects/apps/a/composer.json
+@@ -1,7 +1,7 @@
+ {
+   "name": "php-workbench/example-a",
+   "require": {
+-    "php": ">=8.2"
++    "php": "^8.3"
+   },
+   "autoload": {
+     "psr-4": {
+diff --git a/examples/composer-projects/apps/a/tools/c/composer.json b/examples/composer-projects/apps/a/tools/c/composer.json
+new file mode 100644
+--- /dev/null
++++ b/examples/composer-projects/apps/a/tools/c/composer.json
+@@ -0,0 +1,11 @@
++{
++  "name": "demo/app-c",
++  "require": {
++    "php": "^8.2"
++  },
++  "autoload": {
++    "psr-4": {
++      "App\\": "src/"
++    }
++  }
++}
+diff --git a/examples/composer-projects/apps/a/tools/c/index.php b/examples/composer-projects/apps/a/tools/c/index.php
+new file mode 100644
+--- /dev/null
++++ b/examples/composer-projects/apps/a/tools/c/index.php
+@@ -0,0 +1,7 @@
++<?php
++
++require_once __DIR__ . '/src/Service.php';
++
++$service = new \App\Service();
++// Try: completion and navigation use this project's Service.
++assert($service->fromC() === 'app-c');
+diff --git a/examples/composer-projects/apps/a/tools/c/src/Service.php b/examples/composer-projects/apps/a/tools/c/src/Service.php
+new file mode 100644
+--- /dev/null
++++ b/examples/composer-projects/apps/a/tools/c/src/Service.php
+@@ -0,0 +1,11 @@
++<?php
++
++namespace App;
++
++final class Service
++{
++    public function fromC(): string
++    {
++        return 'app-c';
++    }
++}
+diff --git a/examples/composer-projects/apps/b/composer.json b/examples/composer-projects/apps/b/composer.json
+--- a/examples/composer-projects/apps/b/composer.json
++++ b/examples/composer-projects/apps/b/composer.json
+@@ -1,7 +1,7 @@
+ {
+   "name": "php-workbench/example-b",
+   "require": {
+-    "php": ">=8.2"
++    "php": "^8.4"
+   },
+   "autoload": {
+     "psr-4": {
+diff --git a/examples/composer-projects/composer.json b/examples/composer-projects/composer.json
+new file mode 100644
+--- /dev/null
++++ b/examples/composer-projects/composer.json
+@@ -0,0 +1,11 @@
++{
++  "name": "demo/workspace",
++  "require": {
++    "php": "^8.2"
++  },
++  "autoload": {
++    "psr-4": {
++      "App\\": "src/"
++    }
++  }
++}
+diff --git a/examples/composer-projects/index.php b/examples/composer-projects/index.php
+new file mode 100644
+--- /dev/null
++++ b/examples/composer-projects/index.php
+@@ -0,0 +1,7 @@
++<?php
++
++require_once __DIR__ . '/src/Service.php';
++
++$service = new \App\Service();
++// Try: completion and navigation use this project's Service.
++assert($service->fromWorkspace() === 'workspace');
+diff --git a/examples/composer-projects/src/Service.php b/examples/composer-projects/src/Service.php
+new file mode 100644
+--- /dev/null
++++ b/examples/composer-projects/src/Service.php
+@@ -0,0 +1,11 @@
++<?php
++
++namespace App;
++
++final class Service
++{
++    public function fromWorkspace(): string
++    {
++        return 'workspace';
++    }
++}
+diff --git a/src/composer.rs b/src/composer.rs
+--- a/src/composer.rs
++++ b/src/composer.rs
+@@ -287,6 +287,74 @@
+     })
+ }
+ 
++/// Installed symlinked path package sources outside the vendor directory.
++fn installed_path_packages(
++    workspace_root: &Path,
++    vendor_dir: &str,
++) -> Vec<(serde_json::Value, PathBuf)> {
++    let vendor_path = workspace_root.join(vendor_dir);
++
++    let Some(installed) = read_installed_packages(workspace_root, vendor_dir) else {
++        return Vec::new();
++    };
++    let InstalledPackages {
++        packages,
++        composer_dir,
++    } = installed;
++
++    let canonical_vendor = vendor_path
++        .canonicalize()
++        .unwrap_or_else(|_| vendor_path.clone());
++    let mut roots = Vec::new();
++
++    for package in packages {
++        // Condition 1: dist.type must be "path".
++        let is_path_repo = package
++            .get("dist")
++            .and_then(|d| d.get("type"))
++            .and_then(|t| t.as_str())
++            == Some("path");
++        if !is_path_repo {
++            continue;
++        }
++
++        // Condition 2: must be symlinked, not copied.
++        let is_symlinked = package
++            .get("transport-options")
++            .and_then(|t| t.get("symlink"))
++            .and_then(|s| s.as_bool())
++            == Some(true);
++        if !is_symlinked {
++            continue;
++        }
++
++        // Resolve the package root on disk via install-path.
++        let pkg_root =
++            if let Some(install_path) = package.get("install-path").and_then(|p| p.as_str()) {
++                composer_dir.join(install_path)
++            } else if let Some(name) = package.get("name").and_then(|n| n.as_str()) {
++                vendor_path.join(name)
++            } else {
++                continue;
++            };
++
++        // Canonicalize to follow symlinks to the real location.
++        let pkg_root = pkg_root.canonicalize().unwrap_or(pkg_root);
++        if !pkg_root.is_dir() {
++            continue;
++        }
++
++        // A materialised vendor copy belongs to the vendor graph. The caller
++        // decides whether an external symlink source is eligible project code.
++        if pkg_root.starts_with(&canonical_vendor) {
++            continue;
++        }
++
++        roots.push((package, pkg_root));
++    }
++    roots
++}
++
+ /// Extract PSR-4 mappings from path-repository packages in `installed.json`.
+ ///
+ /// Path-repository packages (Composer `"type": "path"` repositories) are
+@@ -319,78 +387,14 @@
+     workspace_root: &Path,
+     vendor_dir: &str,
+ ) -> Vec<Psr4Mapping> {
+-    let vendor_path = workspace_root.join(vendor_dir);
+-
+-    let Some(installed) = read_installed_packages(workspace_root, vendor_dir) else {
+-        return Vec::new();
+-    };
+-    let InstalledPackages {
+-        packages,
+-        composer_dir,
+-    } = installed;
+-
+     let canonical_root = workspace_root
+         .canonicalize()
+-        .unwrap_or_else(|_| workspace_root.to_path_buf());
+-    let canonical_vendor = vendor_path
+-        .canonicalize()
+-        .unwrap_or_else(|_| vendor_path.clone());
++        .unwrap_or_else(|_| workspace_root.into());
+     let mut mappings = Vec::new();
+-
+-    for package in &packages {
+-        // Condition 1: dist.type must be "path".
+-        let is_path_repo = package
+-            .get("dist")
+-            .and_then(|d| d.get("type"))
+-            .and_then(|t| t.as_str())
+-            == Some("path");
+-        if !is_path_repo {
++    for (package, pkg_root) in installed_path_packages(workspace_root, vendor_dir) {
++        if !pkg_root.starts_with(&canonical_root) {
+             continue;
+         }
+-
+-        // Condition 2: must be symlinked, not copied.
+-        let is_symlinked = package
+-            .get("transport-options")
+-            .and_then(|t| t.get("symlink"))
+-            .and_then(|s| s.as_bool())
+-            == Some(true);
+-        if !is_symlinked {
+-            continue;
+-        }
+-
+-        // Resolve the package root on disk via install-path.
+-        let pkg_root =
+-            if let Some(install_path) = package.get("install-path").and_then(|p| p.as_str()) {
+-                composer_dir.join(install_path)
+-            } else if let Some(name) = package.get("name").and_then(|n| n.as_str()) {
+-                vendor_path.join(name)
+-            } else {
+-                continue;
+-            };
+-
+-        // Canonicalize to follow symlinks to the real location.
+-        let pkg_root = pkg_root.canonicalize().unwrap_or(pkg_root);
+-        if !pkg_root.is_dir() {
+-            continue;
+-        }
+-
+-        // Condition 3: the resolved path must be inside the workspace but
+-        // NOT inside the vendor directory.  Path repositories are project
+-        // code only when they are symlinked *out* of vendor (e.g. the
+-        // internachi/modular pattern, where modules live under
+-        // `app-modules/` and are symlinked into vendor).  A package whose
+-        // canonical path resolves back inside `vendor/` — because the
+-        // symlink target is itself in vendor, or the symlink was
+-        // materialised into a real copy — is an ordinary vendored
+-        // dependency.  It is already covered by the vendor classmap for
+-        // resolution and by the service-provider scan for macros, so
+-        // adding its PSR-4 mapping here would only cause the diagnostics
+-        // pass to walk and analyse the whole dependency as if it were the
+-        // user's own source.
+-        if !pkg_root.starts_with(&canonical_root) || pkg_root.starts_with(&canonical_vendor) {
+-            continue;
+-        }
+-
+         let Some(psr4) = package
+             .get("autoload")
+             .and_then(|a| a.get("psr-4"))
+@@ -1309,6 +1313,203 @@
+     roots
+ }
+ 
++/// Physical installed path-package roots, including sources outside the consumer.
++pub(crate) fn installed_path_package_roots(root: &Path, vendor: &str) -> Vec<PathBuf> {
++    installed_path_packages(root, vendor)
++        .into_iter()
++        .map(|(_, path)| path)
++        .collect()
++}
++
++struct DiscoveredProject {
++    root: PathBuf,
++    vendor_dir: String,
++    dependencies: Vec<PathBuf>,
++}
++
++fn project_reaches(edges: &[Vec<usize>], pending: &[bool], from: usize, target: usize) -> bool {
++    let mut visited = vec![false; edges.len()];
++    let mut stack = vec![from];
++    visited[from] = true;
++    while let Some(node) = stack.pop() {
++        if node == target {
++            return true;
++        }
++        for &next in &edges[node] {
++            if pending[next] && !visited[next] {
++                visited[next] = true;
++                stack.push(next);
++            }
++        }
++    }
++    false
++}
++
++fn independent_projects(projects: &[DiscoveredProject]) -> Vec<bool> {
++    let edges: Vec<Vec<usize>> = projects
++        .iter()
++        .enumerate()
++        .map(|(owner, project)| {
++            projects
++                .iter()
++                .enumerate()
++                .filter_map(|(index, candidate)| {
++                    (index != owner
++                        && project
++                            .dependencies
++                            .iter()
++                            .any(|path| candidate.root.starts_with(path)))
++                    .then_some(index)
++                })
++                .collect()
++        })
++        .collect();
++    let mut pending = vec![true; projects.len()];
++    let mut accepted = vec![false; projects.len()];
++    while let Some(first) = pending.iter().position(|pending| *pending) {
++        let independent = (0..projects.len()).find(|&index| {
++            pending[index]
++                && !edges
++                    .iter()
++                    .enumerate()
++                    .any(|(owner, dependencies)| pending[owner] && dependencies.contains(&index))
++        });
++        let group = if let Some(index) = independent {
++            vec![index]
++        } else {
++            // Mutually consuming development roots retain their own contexts.
++            // Move to a source component before excluding its libraries, so a
++            // discarded library's configuration cannot hide another project.
++            let mut current = first;
++            loop {
++                let group: Vec<_> = (0..projects.len())
++                    .filter(|&index| {
++                        pending[index]
++                            && project_reaches(&edges, &pending, current, index)
++                            && project_reaches(&edges, &pending, index, current)
++                    })
++                    .collect();
++                if let Some(owner) = (0..projects.len()).find(|&owner| {
++                    pending[owner]
++                        && !group.contains(&owner)
++                        && edges[owner].iter().any(|index| group.contains(index))
++                }) {
++                    current = owner;
++                } else {
++                    break group;
++                }
++            }
++        };
++        for &index in &group {
++            accepted[index] = true;
++            pending[index] = false;
++        }
++        for index in group {
++            for &dependency in &edges[index] {
++                pending[dependency] = false;
++            }
++        }
++    }
++    accepted
++}
++
++/// Discover independent Composer contexts beneath an opened workspace folder.
++///
++/// Unlike the legacy merged-backend discovery, accepted manifests do not stop
++/// discovery. Installed vendor and path-package sources retain the consuming
++/// project's context instead of acquiring standalone configuration.
++pub(crate) fn discover_project_context_roots(workspace_root: &Path) -> Vec<(PathBuf, String)> {
++    use std::sync::Arc;
++
++    use ignore::WalkBuilder;
++    use parking_lot::RwLock;
++
++    let canonical_workspace = workspace_root
++        .canonicalize()
++        .unwrap_or_else(|_| workspace_root.into());
++    let excluded = Arc::new(RwLock::new(Vec::<PathBuf>::new()));
++    let dependency_paths = |root: &Path, package: &ComposerPackage| {
++        let vendor = get_vendor_dir(package);
++        std::iter::once(root.join(&vendor))
++            .chain(installed_path_package_roots(root, &vendor))
++            .map(|path| {
++                let path = path.canonicalize().unwrap_or(path);
++                path.strip_prefix(&canonical_workspace)
++                    .map(|relative| workspace_root.join(relative))
++                    .unwrap_or(path)
++            })
++            .collect::<Vec<_>>()
++    };
++    if let Some(package) = read_composer_package(workspace_root) {
++        excluded
++            .write()
++            .extend(dependency_paths(workspace_root, &package));
++    }
++    let filtered = Arc::clone(&excluded);
++    let walker = WalkBuilder::new(workspace_root)
++        .git_ignore(true)
++        .git_global(true)
++        .git_exclude(true)
++        .require_git(false)
++        .hidden(true)
++        .parents(true)
++        .ignore(true)
++        .sort_by_file_name(|a, b| {
++            // Register each project's dependencies before walking its source
++            // directories, regardless of their alphabetic names.
++            (a != "composer.json")
++                .cmp(&(b != "composer.json"))
++                .then_with(|| a.cmp(b))
++        })
++        .filter_entry(move |entry| {
++            if entry.file_type().is_some_and(|kind| kind.is_dir()) {
++                entry.file_name() != "vendor"
++                    && !filtered
++                        .read()
++                        .iter()
++                        .any(|path| entry.path().starts_with(path))
++            } else {
++                entry.file_name() == "composer.json"
++            }
++        })
++        .build();
++    let mut projects = Vec::new();
++    for entry in walker.flatten() {
++        if !entry.file_type().is_some_and(|kind| kind.is_file()) {
++            continue;
++        }
++        let Some(root) = entry.path().parent() else {
++            continue;
++        };
++        if root == workspace_root {
++            continue;
++        }
++        if let Some(package) = read_composer_package(root) {
++            let vendor_dir = get_vendor_dir(&package);
++            let dependencies = dependency_paths(root, &package);
++            // Descendant dependencies can be pruned immediately. Cross-project
++            // dependencies are classified after all sibling manifests are read.
++            excluded.write().extend(
++                dependencies
++                    .iter()
++                    .filter(|path| path.starts_with(root))
++                    .cloned(),
++            );
++            projects.push(DiscoveredProject {
++                root: root.to_path_buf(),
++                vendor_dir,
++                dependencies,
++            });
++        }
++    }
++    let accepted = independent_projects(&projects);
++    projects
++        .into_iter()
++        .zip(accepted)
++        .filter_map(|(project, accepted)| accepted.then_some((project.root, project.vendor_dir)))
++        .collect()
++}
++
+ /// Detect the target PHP version from a project's `composer.json`.
+ ///
+ /// Checks two locations in order:
+@@ -2192,3 +2393,68 @@
+         );
+     }
+ }
++
++#[cfg(test)]
++mod context_discovery_tests {
++    use super::{DiscoveredProject, independent_projects};
++
++    fn project(root: &str, dependencies: &[&str]) -> DiscoveredProject {
++        DiscoveredProject {
++            root: root.into(),
++            vendor_dir: "vendor".into(),
++            dependencies: dependencies.iter().map(std::path::PathBuf::from).collect(),
++        }
++    }
++
++    #[test]
++    fn explicitly_opened_vendor_named_directory_still_discovers_child_projects() {
++        let directory = tempfile::tempdir().unwrap();
++        let root = directory.path().canonicalize().unwrap().join("vendor");
++        let child = root.join("apps/child");
++        std::fs::create_dir_all(&child).unwrap();
++        std::fs::write(
++            root.join("composer.json"),
++            r#"{"name":"fixture/root","config":{"vendor-dir":"deps"}}"#,
++        )
++        .unwrap();
++        std::fs::write(child.join("composer.json"), r#"{"name":"fixture/child"}"#).unwrap();
++        assert_eq!(
++            super::discover_project_context_roots(&root),
++            vec![(child, "vendor".into())]
++        );
++    }
++
++    #[test]
++    fn discarded_dependency_metadata_cannot_hide_an_independent_application() {
++        let roots = [
++            project("/workspace/a-deps/library", &["/workspace/other"]),
++            project("/workspace/other", &[]),
++            project("/workspace/z-app", &["/workspace/a-deps"]),
++        ];
++        assert_eq!(independent_projects(&roots), vec![false, true, true]);
++    }
++
++    #[test]
++    fn mutually_consuming_roots_keep_contexts_but_their_libraries_do_not() {
++        let roots = [
++            project("/workspace/alpha", &["/workspace/beta"]),
++            project(
++                "/workspace/beta",
++                &["/workspace/alpha", "/workspace/library"],
++            ),
++            project("/workspace/library", &["/workspace/other"]),
++            project("/workspace/other", &[]),
++        ];
++        assert_eq!(independent_projects(&roots), vec![true, true, false, true]);
++    }
++
++    #[test]
++    fn shared_package_metadata_does_not_override_either_consuming_application() {
++        let roots = [
++            project("/workspace/packages/shared", &[]),
++            project("/workspace/apps/a", &["/workspace/packages/shared"]),
++            project("/workspace/apps/b", &["/workspace/packages/shared"]),
++        ];
++        assert_eq!(independent_projects(&roots), vec![false, true, true]);
++    }
++}
+diff --git a/src/indexing/watch.rs b/src/indexing/watch.rs
+--- a/src/indexing/watch.rs
++++ b/src/indexing/watch.rs
+@@ -414,8 +414,6 @@
+         let extra_extensions = index_filters.extra_extensions().to_vec();
+         let is_laravel = self.resolved_class_cache.read().is_laravel();
+ 
+-        // Create, change, and delete: what every watcher but the two
+-        // Composer ones asks for.
+         let watch_all = WatchKind::Create | WatchKind::Change | WatchKind::Delete;
+ 
+         // Patterns the workspace folders are watched with. Each one is
+@@ -429,8 +427,8 @@
+             ("**/*.php".to_string(), watch_all),
+             ("**/*.{yaml,yml,xml}".to_string(), watch_all),
+             ("**/*.{yaml,yml,xml}.dist".to_string(), watch_all),
+-            ("**/composer.json".to_string(), WatchKind::Change),
+-            ("**/composer.lock".to_string(), WatchKind::Change),
++            ("**/composer.json".to_string(), watch_all),
++            ("**/composer.lock".to_string(), watch_all),
+             ("**/.phpantom.toml".to_string(), watch_all),
+         ]);
+         if is_laravel {
+@@ -591,6 +589,26 @@
+ 
+ #[cfg(test)]
+ mod tests {
++    #[test]
++    fn composer_manifest_watchers_admit_creation_change_and_removal() {
++        let backend = Backend::new_test();
++        let (registration, _) = backend.build_watched_file_registration();
++        let options: DidChangeWatchedFilesRegistrationOptions =
++            serde_json::from_value(registration.register_options.unwrap()).unwrap();
++        for pattern in ["**/composer.json", "**/composer.lock"] {
++            let watcher = options
++                .watchers
++                .iter()
++                .find(|watcher| watcher.glob_pattern == GlobPattern::String(pattern.into()))
++                .unwrap();
++            assert_eq!(
++                watcher.kind,
++                Some(WatchKind::Create | WatchKind::Change | WatchKind::Delete),
++                "new and removed manifests must reach project discovery: {pattern}"
++            );
++        }
++    }
++
+     use super::*;
+ 
+     #[test]
+diff --git a/src/project_router.rs b/src/project_router.rs
+--- a/src/project_router.rs
++++ b/src/project_router.rs
+@@ -179,13 +179,11 @@
+         folders.retain(|p| seen.insert(normalized(p)));
+         let mut roots = folders.clone();
+         for folder in &folders {
+-            if !folder.join("composer.json").is_file() {
+-                roots.extend(
+-                    composer::discover_subproject_roots(folder)
+-                        .into_iter()
+-                        .map(|(path, _)| path),
+-                );
+-            }
++            roots.extend(
++                composer::discover_project_context_roots(folder)
++                    .into_iter()
++                    .map(|(path, _)| path),
++            );
+         }
+         let mut seen = HashSet::new();
+         roots.retain(|p| seen.insert(normalized(p)));
+@@ -217,11 +215,7 @@
+                         .map(|mapping| root.join(mapping.base_path))
+                         .filter(|path| !contains(root, path)),
+                 );
+-                dependencies.extend(
+-                    composer::extract_path_repo_psr4_mappings(root, &vendor)
+-                        .into_iter()
+-                        .map(|mapping| root.join(mapping.base_path)),
+-                );
++                dependencies.extend(composer::installed_path_package_roots(root, &vendor));
+                 dependency_files.extend(
+                     composer::parse_autoload_classmap(root, &vendor)
+                         .into_values()
+@@ -899,7 +893,9 @@
+             {
+                 continue;
+             }
+-            if let Some(context) = contexts.iter().find(|c| c.root == root) {
++            if let Some(context) = contexts.iter().find(|context| {
++                context.root == root && Url::parse(&uri).is_ok_and(|uri| context.consumes(&uri))
++            }) {
+                 self.owners.write().insert(uri, context.id);
+             }
+         }
+diff --git a/tests/integration/composer_project_nested.rs b/tests/integration/composer_project_nested.rs
+new file mode 100644
+--- /dev/null
++++ b/tests/integration/composer_project_nested.rs
+@@ -0,0 +1,1006 @@
++//! Independent nested Composer projects retain their own semantic graphs.
++use std::fs;
++use std::path::{Path, PathBuf};
++
++use phpantom_lsp::{ProjectRouter, ProjectTargetQuery};
++use tempfile::TempDir;
++use tower_lsp::LanguageServer;
++use tower_lsp::lsp_types::*;
++
++use crate::common::{definition_locations, position_after, position_of};
++
++const CALLER: &str = "<?php\n$value = new \\App\\Service();\n$value->\n";
++
++struct Workspace {
++    _directory: TempDir,
++    root: PathBuf,
++}
++
++impl Workspace {
++    fn new(child_manifest: bool) -> Self {
++        let directory = tempfile::tempdir().unwrap();
++        let root = directory.path().canonicalize().unwrap();
++        let fixture = Self {
++            _directory: directory,
++            root,
++        };
++        fixture.manifest("", "8.2");
++        fixture.write(".phpantom.toml", "[indexing]\nstrategy = \"none\"\n");
++        fixture.write("index.php", CALLER);
++        fixture.write("tools/child/index.php", CALLER);
++        fixture.write(
++            "tools/child/.phpantom.toml",
++            "[indexing]\nstrategy = \"none\"\n",
++        );
++        if child_manifest {
++            fixture.manifest("tools/child", "8.4");
++        }
++        for (directory, owner) in [("src", "Root"), ("tools/child/src", "Child")] {
++            for (class, suffix) in [
++                ("Service", ""),
++                ("AfterChange", "Dirty"),
++                ("AfterUndo", "Undo"),
++            ] {
++                fixture.write(&format!("{directory}/{class}.php"), &format!(
++                    "<?php\nnamespace App;\nclass {class} {{ public function from{owner}{suffix}(): void {{}} }}\n"));
++            }
++        }
++        fixture
++    }
++
++    fn write(&self, relative: &str, text: &str) {
++        let path = self.root.join(relative);
++        fs::create_dir_all(path.parent().unwrap()).unwrap();
++        fs::write(path, text).unwrap();
++    }
++
++    fn manifest(&self, directory: &str, php: &str) {
++        let relative = Path::new(directory).join("composer.json");
++        self.write(
++            relative.to_str().unwrap(),
++            &serde_json::json!({
++                "name":if directory.is_empty() {"fixture/root"} else {"fixture/child"},
++                "require":{"php":format!("^{php}")},"autoload":{"psr-4":{"App\\":"src/"}}
++            })
++            .to_string(),
++        );
++    }
++
++    async fn router(&self) -> ProjectRouter {
++        let router = ProjectRouter::new_test();
++        router
++            .initialize(InitializeParams {
++                root_uri: Some(Url::from_directory_path(&self.root).unwrap()),
++                workspace_folders: Some(vec![WorkspaceFolder {
++                    uri: Url::from_directory_path(&self.root).unwrap(),
++                    name: "composer-root".into(),
++                }]),
++                ..InitializeParams::default()
++            })
++            .await
++            .unwrap();
++        router.initialized(InitializedParams {}).await;
++        router
++    }
++}
++
++async fn open(router: &ProjectRouter, path: &Path) -> String {
++    let source = fs::read_to_string(path).unwrap();
++    router
++        .did_open(DidOpenTextDocumentParams {
++            text_document: TextDocumentItem {
++                uri: Url::from_file_path(path).unwrap(),
++                language_id: "php".into(),
++                version: 1,
++                text: source.clone(),
++            },
++        })
++        .await;
++    source
++}
++
++async fn change(
++    router: &ProjectRouter,
++    path: &Path,
++    version: i32,
++    range: Option<Range>,
++    text: &str,
++) {
++    router
++        .did_change(DidChangeTextDocumentParams {
++            text_document: VersionedTextDocumentIdentifier {
++                uri: Url::from_file_path(path).unwrap(),
++                version,
++            },
++            content_changes: vec![TextDocumentContentChangeEvent {
++                range,
++                range_length: None,
++                text: text.into(),
++            }],
++        })
++        .await;
++}
++
++async fn watch(router: &ProjectRouter, path: &Path, typ: FileChangeType) {
++    router
++        .did_change_watched_files(DidChangeWatchedFilesParams {
++            changes: vec![FileEvent {
++                uri: Url::from_file_path(path).unwrap(),
++                typ,
++            }],
++        })
++        .await;
++}
++
++async fn assert_members(
++    router: &ProjectRouter,
++    path: &Path,
++    source: &str,
++    own: &str,
++    absent: &[&str],
++) {
++    let response = router
++        .completion(CompletionParams {
++            text_document_position: TextDocumentPositionParams {
++                text_document: TextDocumentIdentifier {
++                    uri: Url::from_file_path(path).unwrap(),
++                },
++                position: position_after(source, "$value->"),
++            },
++            context: None,
++            work_done_progress_params: WorkDoneProgressParams::default(),
++            partial_result_params: PartialResultParams::default(),
++        })
++        .await
++        .unwrap();
++    let items = match response {
++        Some(CompletionResponse::Array(items)) => items,
++        Some(CompletionResponse::List(list)) => list.items,
++        None => Vec::new(),
++    };
++    let labels: Vec<_> = items
++        .iter()
++        .map(|item| item.label.split('(').next().unwrap())
++        .collect();
++    assert!(
++        labels.contains(&own),
++        "{} missing {own}: {labels:?}",
++        path.display()
++    );
++    for name in absent {
++        assert!(
++            !labels.contains(name),
++            "{} includes foreign/stale {name}: {labels:?}",
++            path.display()
++        );
++    }
++}
++
++async fn assert_definition(
++    router: &ProjectRouter,
++    path: &Path,
++    source: &str,
++    needle: &str,
++    expected: &Path,
++) {
++    let response = router
++        .goto_definition(GotoDefinitionParams {
++            text_document_position_params: TextDocumentPositionParams {
++                text_document: TextDocumentIdentifier {
++                    uri: Url::from_file_path(path).unwrap(),
++                },
++                position: position_of(source, needle),
++            },
++            work_done_progress_params: WorkDoneProgressParams::default(),
++            partial_result_params: PartialResultParams::default(),
++        })
++        .await
++        .unwrap();
++    let locations = definition_locations(response);
++    assert_eq!(
++        locations.len(),
++        1,
++        "one exact {needle} definition required: {locations:?}"
++    );
++    assert_eq!(locations[0].uri, Url::from_file_path(expected).unwrap());
++}
++
++async fn assert_target(router: &ProjectRouter, path: &Path, expected: &str) {
++    let target = router
++        .workbench_active_target(ProjectTargetQuery {
++            uri: Some(Url::from_file_path(path).unwrap()),
++        })
++        .await
++        .unwrap();
++    assert_eq!(
++        target.php_version,
++        expected,
++        "wrong project/config owner for {}",
++        path.display()
++    );
++}
++
++async fn nested_order(child_first: bool) {
++    let fixture = Workspace::new(true);
++    let router = fixture.router().await;
++    let order = if child_first {
++        ["tools/child", ""]
++    } else {
++        ["", "tools/child"]
++    };
++    for directory in order {
++        let path = fixture.root.join(directory).join("index.php");
++        let source = open(&router, &path).await;
++        let own = if directory.is_empty() {
++            "fromRoot"
++        } else {
++            "fromChild"
++        };
++        let other = if directory.is_empty() {
++            "fromChild"
++        } else {
++            "fromRoot"
++        };
++        assert_members(&router, &path, &source, own, &[other]).await;
++        assert_definition(
++            &router,
++            &path,
++            &source,
++            "Service",
++            &fixture.root.join(directory).join("src/Service.php"),
++        )
++        .await;
++        let with_call = source.replace("$value->\n", &format!("$value->{own}();\n$value->\n"));
++        change(&router, &path, 2, None, &with_call).await;
++        assert_definition(
++            &router,
++            &path,
++            &with_call,
++            own,
++            &fixture.root.join(directory).join("src/Service.php"),
++        )
++        .await;
++    }
++    for (directory, own, other) in [
++        ("", "fromRoot", "fromChild"),
++        ("tools/child", "fromChild", "fromRoot"),
++    ] {
++        let source = CALLER.replace("$value->\n", &format!("$value->{own}();\n$value->\n"));
++        assert_members(
++            &router,
++            &fixture.root.join(directory).join("index.php"),
++            &source,
++            own,
++            &[other],
++        )
++        .await;
++    }
++    router.shutdown().await.unwrap();
++}
++
++#[tokio::test]
++async fn composer_nested_root_then_child_keeps_same_fqn_independent() {
++    nested_order(false).await;
++}
++
++#[tokio::test]
++async fn composer_nested_child_then_root_keeps_same_fqn_independent() {
++    nested_order(true).await;
++}
++
++#[tokio::test]
++async fn composer_nested_projects_apply_distinct_composer_php_targets() {
++    let fixture = Workspace::new(true);
++    let router = fixture.router().await;
++    for (directory, target) in [("tools/child", "8.4"), ("", "8.2"), ("tools/child", "8.4")] {
++        let path = fixture.root.join(directory).join("index.php");
++        open(&router, &path).await;
++        assert_target(&router, &path, target).await;
++    }
++    router.shutdown().await.unwrap();
++}
++
++#[tokio::test]
++async fn composer_nested_manifest_create_remove_replays_actual_unsaved_text_and_version() {
++    let fixture = Workspace::new(false);
++    let router = fixture.router().await;
++    let root_caller = fixture.root.join("index.php");
++    let child_caller = fixture.root.join("tools/child/index.php");
++    open(&router, &root_caller).await;
++    let original = open(&router, &child_caller).await;
++    assert_members(
++        &router,
++        &child_caller,
++        &original,
++        "fromRoot",
++        &["fromChild"],
++    )
++    .await;
++    let dirty = "<?php\n/* café 🐘 */ $value = new \\App\\AfterChange();\n$value->\n";
++    change(&router, &child_caller, 5, None, dirty).await;
++    assert_members(
++        &router,
++        &child_caller,
++        dirty,
++        "fromRootDirty",
++        &["fromChildDirty"],
++    )
++    .await;
++    fixture.manifest("tools/child", "8.4");
++    let manifest = fixture.root.join("tools/child/composer.json");
++    watch(&router, &manifest, FileChangeType::CREATED).await;
++    assert_members(
++        &router,
++        &child_caller,
++        dirty,
++        "fromChildDirty",
++        &["fromRootDirty", "fromChild"],
++    )
++    .await;
++    assert_target(&router, &child_caller, "8.4").await;
++    assert_members(
++        &router,
++        &root_caller,
++        CALLER,
++        "fromRoot",
++        &["fromChild", "fromChildDirty"],
++    )
++    .await;
++    // Replayed document version is 5, not a fabricated new opening at 1.
++    change(&router, &child_caller, 4, None, CALLER).await;
++    assert_members(
++        &router,
++        &child_caller,
++        dirty,
++        "fromChildDirty",
++        &["fromChild"],
++    )
++    .await;
++    let undone = dirty.replace("AfterChange", "AfterUndo");
++    change(
++        &router,
++        &child_caller,
++        6,
++        Some(Range::new(
++            position_of(dirty, "AfterChange"),
++            position_after(dirty, "AfterChange"),
++        )),
++        "AfterUndo",
++    )
++    .await;
++    assert_members(
++        &router,
++        &child_caller,
++        &undone,
++        "fromChildUndo",
++        &["fromChildDirty", "fromRootUndo"],
++    )
++    .await;
++    fs::remove_file(&manifest).unwrap();
++    watch(&router, &manifest, FileChangeType::DELETED).await;
++    assert_members(
++        &router,
++        &child_caller,
++        &undone,
++        "fromRootUndo",
++        &["fromChildUndo", "fromRoot"],
++    )
++    .await;
++    assert_target(&router, &child_caller, "8.2").await;
++    change(
++        &router,
++        &child_caller,
++        7,
++        Some(Range::new(
++            position_of(&undone, "AfterUndo"),
++            position_after(&undone, "AfterUndo"),
++        )),
++        "AfterChange",
++    )
++    .await;
++    assert_members(
++        &router,
++        &child_caller,
++        dirty,
++        "fromRootDirty",
++        &["fromChildDirty", "fromRootUndo"],
++    )
++    .await;
++    router
++        .did_close(DidCloseTextDocumentParams {
++            text_document: TextDocumentIdentifier {
++                uri: Url::from_file_path(&child_caller).unwrap(),
++            },
++        })
++        .await;
++    assert_eq!(fs::read_to_string(&child_caller).unwrap(), original);
++    assert_members(
++        &router,
++        &root_caller,
++        CALLER,
++        "fromRoot",
++        &["fromChild", "fromChildUndo"],
++    )
++    .await;
++    router.shutdown().await.unwrap();
++}
++
++async fn installed_dependency_control(kind: &str) {
++    let fixture = Workspace::new(false);
++    let (vendor, package) = match kind {
++        "custom" => (
++            "packages/deps with spaces",
++            "packages/deps with spaces/acme/library",
++        ),
++        "path" => ("vendor", "packages/module"),
++        _ => ("vendor", "vendor/acme/library"),
++    };
++    let mut manifest: serde_json::Value =
++        serde_json::from_slice(&fs::read(fixture.root.join("composer.json")).unwrap()).unwrap();
++    manifest["require"]["acme/library"] = serde_json::json!("@dev");
++    manifest["config"] = serde_json::json!({"vendor-dir":vendor});
++    if kind == "path" {
++        manifest["repositories"] =
++            serde_json::json!([{"type":"path","url":package,"options":{"symlink":true}}]);
++    }
++    fixture.write("composer.json", &manifest.to_string());
++    fixture.write(&format!("{package}/composer.json"), r#"{"name":"acme/library","require":{"php":"^7.4"},"autoload":{"psr-4":{"Library\\":"src/"}}}"#);
++    fixture.write(
++        &format!("{package}/.phpantom.toml"),
++        "[php]\nversion = \"7.4\"\n[indexing]\nstrategy = \"none\"\n",
++    );
++    fixture.write(&format!("{package}/src/Tool.php"), "<?php\nnamespace Library;\nclass Tool { public function fromInstalledLibrary(): void {} }\n");
++    let probe = "<?php\nnamespace Library;\nfunction probe(\\App\\Service $value): void {\n    $value->\n}\n";
++    fixture.write(&format!("{package}/src/probe.php"), probe);
++    let tool_caller = "<?php\n$value = new \\Library\\Tool();\n$value->\n";
++    fixture.write("library.php", tool_caller);
++    let install_path = if kind == "path" {
++        "../../packages/module"
++    } else {
++        "../acme/library"
++    };
++    fixture.write(
++        &format!("{vendor}/composer/installed.json"),
++        &serde_json::json!({"packages":[{
++            "name":"acme/library","version":"dev-main","install-path":install_path,
++            "dist":{"type":if kind == "path" {"path"} else {"zip"}},
++            "transport-options":{"symlink":kind == "path"},"autoload":{"psr-4":{"Library\\":"src/"}}
++        }]})
++        .to_string(),
++    );
++    fixture.write(&format!("{vendor}/composer/autoload_classmap.php"), &format!(
++        "<?php\n$vendorDir = dirname(__DIR__);\n$baseDir = dirname($vendorDir);\nreturn array(\n    'Library\\\\Tool' => $baseDir . '/{package}/src/Tool.php',\n);\n"));
++    // The actual Composer baseDir is the project root even for custom vendors;
++    // use a vendor-relative spelling there, as generated Composer maps do.
++    if kind != "path" {
++        fixture.write(&format!("{vendor}/composer/autoload_classmap.php"),
++            "<?php\n$vendorDir = dirname(__DIR__);\nreturn array(\n    'Library\\\\Tool' => $vendorDir . '/acme/library/src/Tool.php',\n);\n");
++    }
++    let router = fixture.router().await;
++    let caller = fixture.root.join("library.php");
++    open(&router, &caller).await;
++    assert_members(
++        &router,
++        &caller,
++        tool_caller,
++        "fromInstalledLibrary",
++        &["fromChild"],
++    )
++    .await;
++    assert_definition(
++        &router,
++        &caller,
++        tool_caller,
++        "Tool",
++        &fixture.root.join(package).join("src/Tool.php"),
++    )
++    .await;
++    let library_probe = fixture.root.join(package).join("src/probe.php");
++    open(&router, &library_probe).await;
++    assert_target(&router, &library_probe, "8.2").await;
++    assert_members(&router, &library_probe, probe, "fromRoot", &["fromChild"]).await;
++    assert_definition(
++        &router,
++        &library_probe,
++        probe,
++        "Service",
++        &fixture.root.join("src/Service.php"),
++    )
++    .await;
++    router.shutdown().await.unwrap();
++}
++
++#[tokio::test]
++async fn composer_nested_default_vendor_package_keeps_consuming_project_config() {
++    installed_dependency_control("default").await;
++}
++
++#[tokio::test]
++async fn composer_nested_custom_vendor_package_keeps_consuming_project_config() {
++    installed_dependency_control("custom").await;
++}
++
++#[tokio::test]
++async fn composer_nested_installed_path_package_keeps_consuming_project_config() {
++    installed_dependency_control("path").await;
++}
++
++#[tokio::test]
++async fn composer_nested_ignored_and_hidden_candidates_do_not_become_project_contexts() {
++    let fixture = Workspace::new(false);
++    fs::create_dir(fixture.root.join(".git")).unwrap();
++    fixture.write(".gitignore", "/ignored-app/\n");
++    for directory in ["ignored-app", ".hidden-app"] {
++        fixture.manifest(directory, "7.4");
++        fixture.write(
++            &format!("{directory}/.phpantom.toml"),
++            "[php]\nversion = \"7.4\"\n",
++        );
++        fixture.write(&format!("{directory}/src/Service.php"), "<?php\nnamespace App;\nclass Service { public function fromIgnoredProject(): void {} }\n");
++        fixture.write(&format!("{directory}/index.php"), CALLER);
++    }
++    let router = fixture.router().await;
++    for directory in ["ignored-app", ".hidden-app"] {
++        let path = fixture.root.join(directory).join("index.php");
++        open(&router, &path).await;
++        assert_target(&router, &path, "8.2").await;
++        assert_members(
++            &router,
++            &path,
++            CALLER,
++            "fromRoot",
++            &["fromIgnoredProject", "fromChild"],
++        )
++        .await;
++        assert_definition(
++            &router,
++            &path,
++            CALLER,
++            "Service",
++            &fixture.root.join("src/Service.php"),
++        )
++        .await;
++    }
++    router.shutdown().await.unwrap();
++}
++
++#[tokio::test]
++async fn composer_nested_manifest_lifecycle_replays_current_dirty_declaration() {
++    let fixture = Workspace::new(false);
++    let declaration_source = "<?php\nnamespace Feature;\nclass Recovered { public function value(): \\App\\Service { return new \\App\\Service(); } }\n";
++    fixture.write("tools/child/src/Recovered.php", declaration_source);
++    let router = fixture.router().await;
++    let declaration = fixture.root.join("tools/child/src/Recovered.php");
++    open(&router, &declaration).await;
++    let dirty = declaration_source.replace("App\\Service", "App\\AfterChange");
++    change(&router, &declaration, 8, None, &dirty).await;
++    let caller = fixture.root.join("tools/child/index.php");
++    let saved = open(&router, &caller).await;
++    let current_caller = "<?php\n$value = (new \\Feature\\Recovered())->value();\n$value->\n";
++    change(&router, &caller, 2, None, current_caller).await;
++    assert_members(
++        &router,
++        &caller,
++        current_caller,
++        "fromRootDirty",
++        &["fromChildDirty"],
++    )
++    .await;
++    fixture.manifest("tools/child", "8.4");
++    let manifest = fixture.root.join("tools/child/composer.json");
++    watch(&router, &manifest, FileChangeType::CREATED).await;
++    assert_members(
++        &router,
++        &caller,
++        current_caller,
++        "fromChildDirty",
++        &["fromRootDirty", "fromChild"],
++    )
++    .await;
++    assert_target(&router, &declaration, "8.4").await;
++    assert_definition(&router, &caller, current_caller, "Recovered", &declaration).await;
++    change(&router, &declaration, 7, None, declaration_source).await;
++    assert_members(
++        &router,
++        &caller,
++        current_caller,
++        "fromChildDirty",
++        &["fromChild"],
++    )
++    .await;
++    let undone = dirty.replace("App\\AfterChange", "App\\AfterUndo");
++    change(&router, &declaration, 9, None, &undone).await;
++    assert_members(
++        &router,
++        &caller,
++        current_caller,
++        "fromChildUndo",
++        &["fromChildDirty", "fromRootUndo"],
++    )
++    .await;
++    fs::remove_file(&manifest).unwrap();
++    watch(&router, &manifest, FileChangeType::DELETED).await;
++    assert_members(
++        &router,
++        &caller,
++        current_caller,
++        "fromRootUndo",
++        &["fromChildUndo", "fromRoot"],
++    )
++    .await;
++    assert_target(&router, &declaration, "8.2").await;
++    router
++        .did_close(DidCloseTextDocumentParams {
++            text_document: TextDocumentIdentifier {
++                uri: Url::from_file_path(&declaration).unwrap(),
++            },
++        })
++        .await;
++    assert_members(
++        &router,
++        &caller,
++        current_caller,
++        "fromRoot",
++        &["fromRootUndo", "fromChild"],
++    )
++    .await;
++    assert_eq!(
++        fs::read_to_string(&declaration).unwrap(),
++        declaration_source
++    );
++    assert_eq!(fs::read_to_string(&caller).unwrap(), saved);
++    router.shutdown().await.unwrap();
++}
++
++#[tokio::test]
++async fn composer_nested_later_consumer_reclaims_earlier_external_custom_vendor_package() {
++    let fixture = Workspace::new(false);
++    fs::remove_file(fixture.root.join("composer.json")).unwrap();
++    fixture.write("z-app/composer.json", r#"{"name":"fixture/consumer","require":{"php":"^8.2","acme/pkg":"^1.0"},"config":{"vendor-dir":"../a-deps"},"autoload":{"psr-4":{"App\\":"src/"}}}"#);
++    fixture.write("z-app/.phpantom.toml", "[indexing]\nstrategy = \"none\"\n");
++    fixture.write(
++        "z-app/src/Service.php",
++        "<?php\nnamespace App;\nclass Service { public function fromConsumer(): void {} }\n",
++    );
++    fixture.write(
++        "a-deps/acme/pkg/composer.json",
++        r#"{"name":"acme/pkg","require":{"php":"^7.4"},"autoload":{"psr-4":{"Library\\":"src/"}}}"#,
++    );
++    fixture.write(
++        "a-deps/acme/pkg/.phpantom.toml",
++        "[php]\nversion = \"7.4\"\n[indexing]\nstrategy = \"none\"\n",
++    );
++    fixture.write("a-deps/acme/pkg/src/Tool.php", "<?php\nnamespace Library;\nclass Tool { public function fromInstalledPackage(): void {} }\n");
++    fixture.write("a-deps/composer/installed.json", r#"{"packages":[{"name":"acme/pkg","version":"1.0.0","install-path":"../acme/pkg","autoload":{"psr-4":{"Library\\":"src/"}}}]}"#);
++    fixture.write("a-deps/composer/autoload_classmap.php", "<?php\n$vendorDir = dirname(__DIR__);\nreturn array(\n    'Library\\\\Tool' => $vendorDir . '/acme/pkg/src/Tool.php',\n);\n");
++    let caller_source =
++        "<?php\n$value = new \\Library\\Tool();\n$value->fromInstalledPackage();\n$value->\n";
++    fixture.write("z-app/index.php", caller_source);
++    let probe_source = "<?php\nnamespace Library;\nfunction probe(\\App\\Service $value): void {\n    $value->\n}\n";
++    fixture.write("a-deps/acme/pkg/src/probe.php", probe_source);
++    let router = fixture.router().await;
++    let caller = fixture.root.join("z-app/index.php");
++    open(&router, &caller).await;
++    assert_target(&router, &caller, "8.2").await;
++    assert_members(
++        &router,
++        &caller,
++        caller_source,
++        "fromInstalledPackage",
++        &["fromRoot", "fromChild"],
++    )
++    .await;
++    let tool = fixture.root.join("a-deps/acme/pkg/src/Tool.php");
++    assert_definition(&router, &caller, caller_source, "Tool", &tool).await;
++    assert_definition(
++        &router,
++        &caller,
++        caller_source,
++        "fromInstalledPackage",
++        &tool,
++    )
++    .await;
++    let probe = fixture.root.join("a-deps/acme/pkg/src/probe.php");
++    open(&router, &probe).await;
++    // a-deps is visited before z-app: later discovery of the consumer must
++    // retract the package's earlier candidate context, not leave it at 7.4.
++    assert_target(&router, &probe, "8.2").await;
++    assert_members(
++        &router,
++        &probe,
++        probe_source,
++        "fromConsumer",
++        &["fromRoot", "fromChild"],
++    )
++    .await;
++    assert_definition(
++        &router,
++        &probe,
++        probe_source,
++        "Service",
++        &fixture.root.join("z-app/src/Service.php"),
++    )
++    .await;
++    router.shutdown().await.unwrap();
++}
++
++#[cfg(unix)]
++#[tokio::test]
++async fn composer_nested_installed_symlink_package_outside_consumer_keeps_consumer_context() {
++    let fixture = Workspace::new(false);
++    fs::remove_file(fixture.root.join("composer.json")).unwrap();
++    fixture.write("apps/z-app/composer.json", r#"{"name":"fixture/consumer","require":{"php":"^8.2","acme/pkg":"@dev"},"autoload":{"psr-4":{"App\\":"src/"}},"repositories":[{"type":"path","url":"../../packages/shared","options":{"symlink":true}}]}"#);
++    fixture.write(
++        "apps/z-app/.phpantom.toml",
++        "[indexing]\nstrategy = \"none\"\n",
++    );
++    fixture.write(
++        "apps/z-app/src/Service.php",
++        "<?php\nnamespace App;\nclass Service { public function fromConsumer(): void {} }\n",
++    );
++    fixture.write(
++        "packages/shared/composer.json",
++        r#"{"name":"acme/pkg","require":{"php":"^7.4"},"autoload":{"psr-4":{"Library\\":"src/"}}}"#,
++    );
++    fixture.write(
++        "packages/shared/.phpantom.toml",
++        "[php]\nversion = \"7.4\"\n[indexing]\nstrategy = \"none\"\n",
++    );
++    let tool_source = "<?php\nnamespace Library;\nclass Tool { public function service(): \\App\\Service { return new \\App\\Service(); } }\n";
++    fixture.write("packages/shared/src/Tool.php", tool_source);
++    fixture.write("apps/z-app/vendor/composer/installed.json", r#"{"packages":[{"name":"acme/pkg","version":"dev-main","install-path":"../acme/pkg","dist":{"type":"path","url":"../../packages/shared"},"transport-options":{"symlink":true},"autoload":{"psr-4":{"Library\\":"src/"}}}]}"#);
++    fixture.write("apps/z-app/vendor/composer/autoload_classmap.php", "<?php\n$vendorDir = dirname(__DIR__);\nreturn array(\n    'Library\\\\Tool' => $vendorDir . '/acme/pkg/src/Tool.php',\n);\n");
++    let link = fixture.root.join("apps/z-app/vendor/acme/pkg");
++    fs::create_dir_all(link.parent().unwrap()).unwrap();
++    std::os::unix::fs::symlink(fixture.root.join("packages/shared"), &link).unwrap();
++    let tool = fixture.root.join("packages/shared/src/Tool.php");
++    assert_eq!(
++        link.join("src/Tool.php").canonicalize().unwrap(),
++        tool.canonicalize().unwrap()
++    );
++    assert!(
++        !tool.starts_with(fixture.root.join("apps/z-app")),
++        "control must live outside consuming project"
++    );
++    let caller_source = "<?php\n$value = (new \\Library\\Tool())->service();\n$value->\n";
++    fixture.write("apps/z-app/index.php", caller_source);
++    let router = fixture.router().await;
++    let caller = fixture.root.join("apps/z-app/index.php");
++    open(&router, &caller).await;
++    assert_members(
++        &router,
++        &caller,
++        caller_source,
++        "fromConsumer",
++        &["fromRoot", "fromChild"],
++    )
++    .await;
++    assert_definition(
++        &router,
++        &caller,
++        caller_source,
++        "Tool",
++        &link.join("src/Tool.php"),
++    )
++    .await;
++    // Query the real physical source, not only the consumer's vendor spelling.
++    // Installed path eligibility is relative to the containing workspace;
++    // being outside this consumer must not create a standalone package target.
++    open(&router, &tool).await;
++    assert_target(&router, &tool, "8.2").await;
++    assert_definition(
++        &router,
++        &tool,
++        tool_source,
++        "Service",
++        &fixture.root.join("apps/z-app/src/Service.php"),
++    )
++    .await;
++    assert_members(
++        &router,
++        &caller,
++        caller_source,
++        "fromConsumer",
++        &["fromRoot", "fromChild"],
++    )
++    .await;
++    assert_eq!(fs::read_to_string(&tool).unwrap(), tool_source);
++    router.shutdown().await.unwrap();
++}
++
++#[tokio::test]
++async fn composer_nested_three_levels_revisit_each_own_members_targets_and_definitions() {
++    let fixture = Workspace::new(true);
++    fixture.manifest("tools/child", "8.3");
++    fixture.manifest("tools/child/apps/grandchild", "8.4");
++    fixture.write(
++        "tools/child/apps/grandchild/.phpantom.toml",
++        "[indexing]\nstrategy = \"none\"\n",
++    );
++    fixture.write(
++        "tools/child/apps/grandchild/src/Service.php",
++        "<?php\nnamespace App;\nclass Service { public function fromGrandchild(): void {} }\n",
++    );
++    let cases = [
++        ("", "fromRoot", "8.2"),
++        ("tools/child", "fromChild", "8.3"),
++        ("tools/child/apps/grandchild", "fromGrandchild", "8.4"),
++    ];
++    for (directory, member, _) in cases {
++        let source = CALLER.replace("$value->\n", &format!("$value->{member}();\n$value->\n"));
++        fixture.write(
++            Path::new(directory).join("index.php").to_str().unwrap(),
++            &source,
++        );
++    }
++    let router = fixture.router().await;
++    for (directory, _, _) in cases {
++        open(&router, &fixture.root.join(directory).join("index.php")).await;
++    }
++    for index in [0, 1, 2, 0, 1, 2] {
++        let (directory, own, target) = cases[index];
++        let path = fixture.root.join(directory).join("index.php");
++        let source = fs::read_to_string(&path).unwrap();
++        let absent: Vec<_> = cases
++            .iter()
++            .filter_map(|(_, member, _)| (*member != own).then_some(*member))
++            .collect();
++        assert_members(&router, &path, &source, own, &absent).await;
++        assert_target(&router, &path, target).await;
++        let expected = fixture.root.join(directory).join("src/Service.php");
++        assert_definition(&router, &path, &source, "Service", &expected).await;
++        assert_definition(&router, &path, &source, own, &expected).await;
++    }
++    router.shutdown().await.unwrap();
++}
++
++#[tokio::test]
++async fn composer_nested_adding_then_removing_parent_folder_preserves_dirty_child_document() {
++    let fixture = Workspace::new(true);
++    let child_root = fixture.root.join("tools/child");
++    let child_folder = WorkspaceFolder {
++        uri: Url::from_directory_path(&child_root).unwrap(),
++        name: "child".into(),
++    };
++    let parent_folder = WorkspaceFolder {
++        uri: Url::from_directory_path(&fixture.root).unwrap(),
++        name: "parent".into(),
++    };
++    let router = ProjectRouter::new_test();
++    router
++        .initialize(InitializeParams {
++            root_uri: Some(child_folder.uri.clone()),
++            workspace_folders: Some(vec![child_folder.clone()]),
++            ..InitializeParams::default()
++        })
++        .await
++        .unwrap();
++    router.initialized(InitializedParams {}).await;
++    let child = child_root.join("index.php");
++    let original = open(&router, &child).await;
++    let dirty = "<?php\n/* café 🐘 */ $value = new \\App\\AfterChange();\n$value->\n";
++    change(&router, &child, 5, None, dirty).await;
++    assert_members(
++        &router,
++        &child,
++        dirty,
++        "fromChildDirty",
++        &["fromRootDirty", "fromChild"],
++    )
++    .await;
++    assert_target(&router, &child, "8.4").await;
++    router
++        .did_change_workspace_folders(DidChangeWorkspaceFoldersParams {
++            event: WorkspaceFoldersChangeEvent {
++                added: vec![parent_folder.clone()],
++                removed: Vec::new(),
++            },
++        })
++        .await;
++    assert_members(
++        &router,
++        &child,
++        dirty,
++        "fromChildDirty",
++        &["fromRootDirty", "fromChild"],
++    )
++    .await;
++    assert_target(&router, &child, "8.4").await;
++    let parent = fixture.root.join("index.php");
++    let parent_source = open(&router, &parent).await;
++    assert_members(
++        &router,
++        &parent,
++        &parent_source,
++        "fromRoot",
++        &["fromChild", "fromChildDirty"],
++    )
++    .await;
++    assert_target(&router, &parent, "8.2").await;
++    assert_definition(
++        &router,
++        &parent,
++        &parent_source,
++        "Service",
++        &fixture.root.join("src/Service.php"),
++    )
++    .await;
++    change(&router, &child, 4, None, CALLER).await;
++    assert_members(&router, &child, dirty, "fromChildDirty", &["fromChild"]).await;
++    let undone = dirty.replace("AfterChange", "AfterUndo");
++    change(
++        &router,
++        &child,
++        6,
++        Some(Range::new(
++            position_of(dirty, "AfterChange"),
++            position_after(dirty, "AfterChange"),
++        )),
++        "AfterUndo",
++    )
++    .await;
++    assert_members(
++        &router,
++        &child,
++        &undone,
++        "fromChildUndo",
++        &["fromRootUndo", "fromChildDirty"],
++    )
++    .await;
++    router
++        .did_close(DidCloseTextDocumentParams {
++            text_document: TextDocumentIdentifier {
++                uri: Url::from_file_path(&parent).unwrap(),
++            },
++        })
++        .await;
++    router
++        .did_change_workspace_folders(DidChangeWorkspaceFoldersParams {
++            event: WorkspaceFoldersChangeEvent {
++                added: Vec::new(),
++                removed: vec![parent_folder],
++            },
++        })
++        .await;
++    assert_members(
++        &router,
++        &child,
++        &undone,
++        "fromChildUndo",
++        &["fromRootUndo", "fromChildDirty"],
++    )
++    .await;
++    assert_target(&router, &child, "8.4").await;
++    assert_definition(
++        &router,
++        &child,
++        &undone,
++        "AfterUndo",
++        &child_root.join("src/AfterUndo.php"),
++    )
++    .await;
++    change(&router, &child, 5, None, CALLER).await;
++    assert_members(&router, &child, &undone, "fromChildUndo", &["fromChild"]).await;
++    change(
++        &router,
++        &child,
++        7,
++        Some(Range::new(
++            position_of(&undone, "AfterUndo"),
++            position_after(&undone, "AfterUndo"),
++        )),
++        "AfterChange",
++    )
++    .await;
++    assert_members(
++        &router,
++        &child,
++        dirty,
++        "fromChildDirty",
++        &["fromRootDirty", "fromChildUndo"],
++    )
++    .await;
++    assert_eq!(fs::read_to_string(&child).unwrap(), original);
++    assert_eq!(fs::read_to_string(&parent).unwrap(), parent_source);
++    router.shutdown().await.unwrap();
++}
+diff --git a/tests/integration/main.rs b/tests/integration/main.rs
+--- a/tests/integration/main.rs
++++ b/tests/integration/main.rs
+@@ -126,6 +126,7 @@
+ mod composer_project_aliases;
+ mod composer_project_contexts;
+ mod composer_project_diagnostics;
++mod composer_project_nested;
+ mod composer_project_retarget;
+ mod composer_project_watch_aliases;
+ mod crash_sandbox;

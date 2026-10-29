@@ -1,0 +1,525 @@
+diff --git a/src/backend.rs b/src/backend.rs
+index 61afcbc..e8636ec 100644
+--- a/src/backend.rs
++++ b/src/backend.rs
+@@ -8,3 +8,5 @@ pub(crate) mod file_access;
+ pub(crate) mod laravel;
+ pub(crate) mod requests;
+ pub(crate) mod startup;
++
++mod semantic_snapshot;
+diff --git a/src/backend/documents.rs b/src/backend/documents.rs
+index da656b4..f1a9d9f 100644
+--- a/src/backend/documents.rs
++++ b/src/backend/documents.rs
+@@ -19,12 +19,15 @@ impl Backend {
+                 .or_insert_with(|| Arc::new(parking_lot::Mutex::new(()))),
+         )
+     }
+-    fn parse_diagnostic_snapshot(&self, uri: &str, text: &Arc<String>) -> bool {
++    pub(crate) fn parse_diagnostic_snapshot(&self, uri: &str, text: &Arc<String>) -> bool {
+         let lock = self.diagnostic_parse_lock(uri);
+         let _guard = lock.lock();
+         let Ok(revision) = self.diag.documents.lock().capture(uri, text) else {
+             return false;
+         };
++        if revision.is_some() && self.diag.documents.lock().parsed(uri, revision.as_ref()) {
++            return true;
++        }
+         self.update_ast(uri, text);
+         self.diag
+             .documents
+@@ -236,11 +239,12 @@ impl Backend {
+     pub(crate) async fn on_did_close(&self, params: DidCloseTextDocumentParams) {
+         let uri = params.text_document.uri.to_string();
+ 
+-        {
++        let opening = {
+             let mut documents = self.diag.documents.lock();
+             documents.close(&uri);
+             self.open_files.write().remove(&uri);
+-        }
++            documents.closed_opening(&uri)
++        };
+         // Keep this lock identity across reopen: detached old work may still hold it.
+         self.clear_declaration_baseline(&uri);
+ 
+@@ -254,41 +258,18 @@ impl Backend {
+             coalesce.last.lock().retain(|k, _| !k.ends_with(&suffix));
+         }
+ 
+-        if crate::resource_navigation::is_resource_document(&uri) {
+-            if let Some(content) = self.get_file_content(&uri) {
+-                self.update_resource_symbol_index(&uri, &content);
+-            } else {
+-                self.clear_file_maps(&uri);
+-            }
+-        } else if let Some(path) = self.workspace_index_path(&uri) {
+-            // A workspace file stays in the index once closed, as the file
+-            // on disk rather than the buffer: unsaved edits are discarded
+-            // with the buffer, and the references it made keep counting.
+-            // The re-parse (and the Laravel refreshes `update_ast` runs
+-            // for a provider or config file) goes to a blocking task, as
+-            // `did_change` does, so closing a file does not stall the
+-            // service loop.
+-            let reparse = move |backend: &Backend, uri: &str| match std::fs::read_to_string(&path) {
+-                Ok(content) => {
+-                    backend.update_ast(uri, &content);
+-                }
+-                Err(_) => backend.clear_file_maps(uri),
+-            };
+-            if self.sync_ast_updates {
+-                reparse(self, &uri);
++        if let Some(opening) = opening {
++            if self.sync_ast_updates
++                || crate::resource_navigation::is_resource_document(&uri)
++                || self.workspace_index_path(&uri).is_none()
++            {
++                self.restore_closed_semantic_source(&uri, opening);
+             } else {
+                 let backend = self.clone_for_blocking();
+                 let uri = uri.clone();
+                 tokio::spawn(async move {
+                     run_blocking_cancel_safe("did_close parse", move || {
+-                        // The file was reopened before this ran; its buffer is
+-                        // the truth now and `did_change` owns the parse.
+-                        let lock = backend.diagnostic_parse_lock(&uri);
+-                        let _guard = lock.lock();
+-                        if backend.open_files.read().contains_key(&uri) {
+-                            return;
+-                        }
+-                        reparse(&backend, &uri);
++                        backend.restore_closed_semantic_source(&uri, opening)
+                     })
+                     .await;
+                 });
+diff --git a/src/diagnostics/revision.rs b/src/diagnostics/revision.rs
+index 2ddd8bc..88516d1 100644
+--- a/src/diagnostics/revision.rs
++++ b/src/diagnostics/revision.rs
+@@ -1,6 +1,6 @@
+ //! Source ownership for live diagnostic phases. Stamps retain no source payload.
+ use std::{
+-    collections::HashMap,
++    collections::{HashMap, HashSet},
+     sync::{Arc, Weak},
+ };
+ 
+@@ -27,9 +27,11 @@ struct Document {
+     slow: Option<Revision>,
+ }
+ #[derive(Default)]
+-pub(crate) struct Revisions(HashMap<String, Document>);
++pub(crate) struct Revisions(HashMap<String, Document>, Arc<()>, HashSet<String>);
+ impl Revisions {
+     pub fn open(&mut self, uri: &str, version: i32, text: &Arc<String>) {
++        self.1 = Arc::new(());
++        self.2.remove(uri);
+         let entry = self.0.entry(uri.to_owned()).or_default();
+         let Some(open) = entry.open.checked_add(1) else {
+             entry.current = None;
+@@ -64,16 +66,51 @@ impl Revisions {
+             text: Arc::downgrade(text),
+         });
+         entry.parsed = None;
++        self.1 = Arc::new(());
+         true
+     }
+     pub fn close(&mut self, uri: &str) {
+         if let Some(entry) = self.0.get_mut(uri) {
++            self.1 = Arc::new(());
++            self.2.insert(uri.to_owned());
+             entry.current = None;
+             entry.parsed = None;
+             entry.fast = None;
+             entry.slow = None;
+         }
+     }
++    pub fn semantic_epoch(&self) -> Arc<()> {
++        Arc::clone(&self.1)
++    }
++    pub fn epoch_matches(&self, epoch: &Arc<()>) -> bool {
++        Arc::ptr_eq(&self.1, epoch)
++    }
++    pub fn pending_closed(&self) -> Vec<(String, u64)> {
++        self.2
++            .iter()
++            .filter_map(|uri| {
++                self.closed_opening(uri)
++                    .map(|opening| (uri.clone(), opening))
++            })
++            .collect()
++    }
++    pub fn has_pending_closed(&self) -> bool {
++        !self.2.is_empty()
++    }
++    pub fn closed_opening(&self, uri: &str) -> Option<u64> {
++        self.0
++            .get(uri)
++            .filter(|entry| entry.current.is_none() && self.2.contains(uri))
++            .map(|entry| entry.open)
++    }
++    pub fn finish_closed(&mut self, uri: &str, opening: u64) -> bool {
++        if self.closed_opening(uri) != Some(opening) {
++            return false;
++        }
++        self.2.remove(uri);
++        true
++    }
++
+     /// None means an untracked test/CLI snapshot; Err means obsolete/closed.
+     pub fn capture(&self, uri: &str, text: &Arc<String>) -> Result<Option<Revision>, ()> {
+         match self.0.get(uri) {
+diff --git a/src/server.rs b/src/server.rs
+index 668f2f0..b8aed97 100644
+--- a/src/server.rs
++++ b/src/server.rs
+@@ -119,9 +119,17 @@ impl Backend {
+     {
+         let backend = self.clone_for_blocking();
+         let uri_clone = uri.clone();
+-        run_blocking_cancel_safe(name, move || body(&backend, &uri_clone, position))
+-            .await
+-            .unwrap_or(Ok(None))
++        let result = run_blocking_cancel_safe(name, move || {
++            backend.with_current_semantics(|| body(&backend, &uri_clone, position))
++        })
++        .await
++        .unwrap_or(Ok(None));
++        match result {
++            Err(error) if error.code == tower_lsp::jsonrpc::ErrorCode::ServerError(-32801) => {
++                Ok(None)
++            }
++            result => result,
++        }
+     }
+ }
+ 
+@@ -426,10 +434,11 @@ impl LanguageServer for Backend {
+         // the cancellations that supersede stale completions — make progress
+         // instead of queueing behind a synchronous resolution.
+         let backend = self.clone_for_blocking();
+-        let result =
+-            run_blocking_cancel_safe("completion", move || backend.handle_completion(params))
+-                .await
+-                .unwrap_or(Ok(None));
++        let result = run_blocking_cancel_safe("completion", move || {
++            backend.with_current_semantics(|| backend.handle_completion(params))
++        })
++        .await
++        .unwrap_or(Ok(None));
+ 
+         let elapsed = started.elapsed();
+         let item_count = match &result {
+@@ -454,10 +463,10 @@ impl LanguageServer for Backend {
+         let backend = self.clone_for_blocking();
+         let fallback = params.clone();
+         let item = run_blocking_cancel_safe("completion_resolve", move || {
+-            backend.handle_completion_resolve(params)
++            backend.with_current_semantics(|| Ok(backend.handle_completion_resolve(params)))
+         })
+         .await
+-        .unwrap_or(fallback);
++        .unwrap_or(Ok(fallback))?;
+         Ok(item)
+     }
+ 
+@@ -1328,3 +1337,121 @@ mod tests {
+         );
+     }
+ }
++
++#[cfg(test)]
++mod semantic_source_tests {
++    use super::*;
++    use serde_json::json;
++
++    const DEP: &str = "file:///Dependency.php";
++    const MAIN: &str = "file:///main.php";
++    const OLD: &str = "<?php\nclass Dependency { public function oldMember(): void {} }\n";
++    const NEW: &str =
++        "<?php\n// changed source\nclass Dependency {\npublic function newMember(): void {}\n}\n";
++    const CALLER: &str =
++        "<?php\nfunction demo(Dependency $value): void {\n$value->oldMember();\n}\n";
++
++    fn install(backend: &Backend, uri: &str, text: &str) {
++        let text = Arc::new(text.to_owned());
++        backend.diag.documents.lock().open(uri, 1, &text);
++        backend
++            .open_files
++            .write()
++            .insert(uri.to_owned(), Arc::clone(&text));
++        backend.update_ast(uri, &text);
++        let revision = backend.diag.documents.lock().capture(uri, &text).unwrap();
++        assert!(
++            backend
++                .diag
++                .documents
++                .lock()
++                .mark_parsed(uri, revision.as_ref())
++        );
++    }
++    fn pending(backend: &Backend, uri: &str, text: &str) {
++        let text = Arc::new(text.to_owned());
++        assert!(backend.diag.documents.lock().change(uri, 2, &text));
++        backend.open_files.write().insert(uri.to_owned(), text);
++    }
++    async fn complete(backend: &Backend) -> Vec<String> {
++        let params = serde_json::from_value(
++            json!({"textDocument":{"uri":MAIN},"position":{"line":2,"character":8}}),
++        )
++        .unwrap();
++        let items = match LanguageServer::completion(backend, params)
++            .await
++            .unwrap()
++            .unwrap()
++        {
++            CompletionResponse::Array(items) => items,
++            CompletionResponse::List(list) => list.items,
++        };
++        items
++            .into_iter()
++            .map(|item| item.label.split('(').next().unwrap().to_owned())
++            .collect()
++    }
++    #[tokio::test]
++    async fn completion_refreshes_a_dependency_whose_parse_is_pending() {
++        let backend = Backend::new_test();
++        install(&backend, DEP, OLD);
++        install(&backend, MAIN, CALLER);
++        assert!(complete(&backend).await.contains(&"oldMember".to_owned()));
++        pending(&backend, DEP, NEW);
++        let labels = complete(&backend).await;
++        assert!(
++            labels.contains(&"newMember".to_owned()),
++            "request must parse the current dependency before resolving: {labels:?}"
++        );
++        assert!(
++            !labels.contains(&"oldMember".to_owned()),
++            "request must not return the prior parsed dependency"
++        );
++    }
++    #[tokio::test]
++    async fn definition_refreshes_pending_source_and_dependency_together() {
++        let backend = Backend::new_test();
++        install(&backend, DEP, OLD);
++        install(&backend, MAIN, CALLER);
++        pending(&backend, DEP, NEW);
++        pending(&backend, MAIN, &CALLER.replace("oldMember", "newMember"));
++        let params = serde_json::from_value(
++            json!({"textDocument":{"uri":MAIN},"position":{"line":2,"character":11}}),
++        )
++        .unwrap();
++        let response = LanguageServer::goto_definition(&backend, params)
++            .await
++            .unwrap();
++        let locations = match response {
++            Some(GotoDefinitionResponse::Scalar(location)) => vec![location],
++            Some(GotoDefinitionResponse::Array(locations)) => locations,
++            _ => vec![],
++        };
++        assert_eq!(
++            locations.len(),
++            1,
++            "the new method must resolve from the current source"
++        );
++        assert_eq!(locations[0].uri.as_str(), DEP);
++        assert_eq!(locations[0].range.start.line, 3);
++    }
++    #[tokio::test]
++    async fn completion_restores_closed_dependency_before_background_disk_parse() {
++        let root = tempfile::tempdir().unwrap();
++        let path = root.path().join("Dependency.php");
++        std::fs::write(&path, OLD).unwrap();
++        let dependency = Url::from_file_path(&path).unwrap().to_string();
++        let backend = Backend::new_test_with_workspace(root.path().to_path_buf(), vec![]);
++        install(&backend, &dependency, NEW);
++        install(&backend, MAIN, CALLER);
++        assert!(complete(&backend).await.contains(&"newMember".to_owned()));
++        backend.diag.documents.lock().close(&dependency);
++        backend.open_files.write().remove(&dependency);
++        let labels = complete(&backend).await;
++        assert!(
++            labels.contains(&"oldMember".to_owned()),
++            "a closed overlay must restore disk semantics before the first query: {labels:?}"
++        );
++        assert!(!labels.contains(&"newMember".to_owned()));
++    }
++}
+diff --git a/src/backend/semantic_snapshot.rs b/src/backend/semantic_snapshot.rs
+new file mode 100644
+index 0000000..6a3767b
+--- /dev/null
++++ b/src/backend/semantic_snapshot.rs
+@@ -0,0 +1,171 @@
++//! Interactive requests must not resolve against pending open-file parses.
++use std::sync::Arc;
++
++use tower_lsp::jsonrpc::{Error, ErrorCode, Result};
++
++use crate::Backend;
++
++fn content_modified() -> Error {
++    Error {
++        code: ErrorCode::ServerError(-32801),
++        message: "PHP sources changed during the request".into(),
++        data: None,
++    }
++}
++
++impl Backend {
++    pub(crate) fn restore_closed_semantic_source(&self, uri: &str, opening: u64) -> bool {
++        let lock = self.diagnostic_parse_lock(uri);
++        let _guard = lock.lock();
++        let pending = self.diag.documents.lock().closed_opening(uri) == Some(opening);
++        if !pending {
++            return true;
++        }
++        if self.open_files.read().contains_key(uri) {
++            return false;
++        }
++        if crate::resource_navigation::is_resource_document(uri) {
++            if let Some(content) = self.get_file_content(uri) {
++                self.update_resource_symbol_index(uri, &content);
++            } else {
++                self.clear_file_maps(uri);
++            }
++        } else if let Some(path) = self.workspace_index_path(uri) {
++            match std::fs::read_to_string(path) {
++                Ok(content) => {
++                    self.update_ast(uri, &content);
++                }
++                Err(_) => self.clear_file_maps(uri),
++            }
++        } else {
++            self.clear_file_maps(uri);
++        }
++        self.diag.documents.lock().finish_closed(uri, opening)
++    }
++
++    /// Refresh pending sources on the existing request blocking worker, then
++    /// reject the result if an opening or text changes during its computation.
++    /// No source payload is added to a persistent cache by this guard.
++    pub(crate) fn with_current_semantics<T>(&self, body: impl FnOnce() -> Result<T>) -> Result<T> {
++        let (mut sources, closed, epoch) = {
++            let documents = self.diag.documents.lock();
++            let files = self.open_files.read();
++            let sources: Vec<(String, Arc<String>)> = files
++                .iter()
++                .map(|(uri, text)| (uri.clone(), Arc::clone(text)))
++                .collect();
++            (
++                sources,
++                documents.pending_closed(),
++                documents.semantic_epoch(),
++            )
++        };
++        for (uri, opening) in closed {
++            if !self.restore_closed_semantic_source(&uri, opening) {
++                return Err(content_modified());
++            }
++        }
++        sources.sort_unstable_by(|a, b| a.0.cmp(&b.0));
++        for (uri, text) in &sources {
++            if crate::resource_navigation::is_resource_document(uri) {
++                continue;
++            }
++            let revision = self
++                .diag
++                .documents
++                .lock()
++                .capture(uri, text)
++                .map_err(|()| content_modified())?;
++            let parsed = self.diag.documents.lock().parsed(uri, revision.as_ref());
++            if !parsed && !self.parse_diagnostic_snapshot(uri, text) {
++                return Err(content_modified());
++            }
++        }
++        let current = || {
++            let documents = self.diag.documents.lock();
++            let files = self.open_files.read();
++            documents.epoch_matches(&epoch)
++                && !documents.has_pending_closed()
++                && files.len() == sources.len()
++                && sources
++                    .iter()
++                    .all(|(uri, text)| files.get(uri).is_some_and(|now| Arc::ptr_eq(now, text)))
++        };
++        if !current() {
++            return Err(content_modified());
++        }
++        let result = body();
++        if !current() {
++            return Err(content_modified());
++        }
++        result
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    #[test]
++    fn a_change_during_resolution_discards_the_result() {
++        let backend = Backend::new_test();
++        let uri = "file:///Dependency.php";
++        let text = Arc::new("<?php class Dependency {}".to_owned());
++        backend.open_files.write().insert(uri.to_owned(), text);
++        let result = backend.with_current_semantics(|| {
++            backend.open_files.write().insert(
++                uri.to_owned(),
++                Arc::new("<?php class Changed {}".to_owned()),
++            );
++            Ok("obsolete result")
++        });
++        assert_eq!(result.unwrap_err().code, ErrorCode::ServerError(-32801));
++    }
++    #[test]
++    fn same_text_reopen_and_new_overlays_discard_in_flight_results() {
++        let backend = Backend::new_test();
++        let uri = "file:///Dependency.php";
++        backend.open_files.write().insert(
++            uri.to_owned(),
++            Arc::new("<?php class Dependency {}".to_owned()),
++        );
++        let result = backend.with_current_semantics(|| {
++            backend.open_files.write().insert(
++                uri.to_owned(),
++                Arc::new("<?php class Dependency {}".to_owned()),
++            );
++            Ok(())
++        });
++        assert!(
++            result.is_err(),
++            "new opening identity is significant even for identical source"
++        );
++        let result = backend.with_current_semantics(|| {
++            backend.open_files.write().insert(
++                "file:///New.php".to_owned(),
++                Arc::new("<?php class Added {}".to_owned()),
++            );
++            Ok(())
++        });
++        assert!(result.is_err(), "new unsaved classes can change resolution");
++    }
++    #[test]
++    fn an_overlay_opened_and_closed_during_resolution_changes_the_epoch() {
++        let root = tempfile::tempdir().unwrap();
++        let path = root.path().join("Dependency.php");
++        std::fs::write(&path, "<?php class Changed {}").unwrap();
++        let uri = tower_lsp::lsp_types::Url::from_file_path(&path)
++            .unwrap()
++            .to_string();
++        let backend = Backend::new_test_with_workspace(root.path().to_path_buf(), vec![]);
++        let result = backend.with_current_semantics(|| {
++            let text = Arc::new("<?php class Changed {}".to_owned());
++            backend.diag.documents.lock().open(&uri, 1, &text);
++            backend.open_files.write().insert(uri.clone(), text);
++            backend.diag.documents.lock().close(&uri);
++            backend.open_files.write().remove(&uri);
++            assert!(backend.restore_closed_semantic_source(&uri, 1));
++            Ok("old result")
++        });
++        assert_eq!(result.unwrap_err().code, ErrorCode::ServerError(-32801));
++    }
++}

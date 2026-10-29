@@ -111,8 +111,10 @@ fn archive_bytes(path: &Path) -> IdeResult<Option<(Vec<u8>, f64)>> {
 pub(crate) fn load_text(path: &Path) -> IdeResult<LoadedText> {
     if let Some((bytes, mtime_ms)) = archive_bytes(path)? {
         let len = bytes.len() as u64;
+        let disk_revision = blake3::hash(&bytes).to_hex().to_string();
         let (text, enc, has_bom, binary) = decode_owned(bytes);
         return Ok(LoadedText {
+            disk_revision,
             text,
             encoding: encoding_label(enc),
             has_bom,
@@ -135,8 +137,10 @@ pub(crate) fn load_text(path: &Path) -> IdeResult<LoadedText> {
     }
     let bytes = fs::read(path)?;
     let len = bytes.len() as u64;
+    let disk_revision = blake3::hash(&bytes).to_hex().to_string();
     let (text, enc, has_bom, binary) = decode_owned(bytes);
     Ok(LoadedText {
+        disk_revision,
         text,
         encoding: encoding_label(enc),
         has_bom,
@@ -162,6 +166,7 @@ pub(crate) fn load_text_as(path: &Path, encoding: &str) -> IdeResult<LoadedText>
         _ => (&bytes[..], false),
     };
     let (text, _) = enc.decode_without_bom_handling(body);
+    loaded.disk_revision = blake3::hash(&bytes).to_hex().to_string();
     loaded.text = text.into_owned();
     loaded.encoding = encoding_label(enc);
     loaded.has_bom = has_bom;
@@ -226,6 +231,16 @@ pub(crate) fn is_atomic_temp(path: &Path) -> bool {
 /// writes through symlinks. Falls back to an in-place write when the directory
 /// does not allow creating files. Returns the new mtime in ms.
 pub fn write_atomic(path: &Path, bytes: &[u8]) -> IdeResult<f64> {
+    write_atomic_impl(path, bytes, true)
+}
+
+/// Atomic replacement without an in-place fallback. Reviewed multi-file edits
+/// need a failed write to leave the current target completely untouched.
+pub fn write_atomic_strict(path: &Path, bytes: &[u8]) -> IdeResult<f64> {
+    write_atomic_impl(path, bytes, false)
+}
+
+fn write_atomic_impl(path: &Path, bytes: &[u8], allow_in_place: bool) -> IdeResult<f64> {
     let target = match fs::symlink_metadata(path) {
         Ok(m) if m.file_type().is_symlink() => fs::canonicalize(path)?,
         _ => path.to_path_buf(),
@@ -238,7 +253,7 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> IdeResult<f64> {
     let file = fs::OpenOptions::new().write(true).create_new(true).open(&tmp);
     let mut file = match file {
         Ok(f) => f,
-        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied && existing.is_some() => {
+        Err(e) if allow_in_place && e.kind() == std::io::ErrorKind::PermissionDenied && existing.is_some() => {
             tracing::debug!("cannot create temp file next to {}: {e}; writing in place", target.display());
             fs::write(&target, bytes)?;
             return Ok(mtime_ms(&fs::metadata(&target)?));

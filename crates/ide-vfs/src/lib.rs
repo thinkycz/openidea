@@ -21,7 +21,9 @@ pub use archive::{
 };
 pub use bytes::{ByteRange, FileProbe, MAX_RANGE_LEN, base64, image_mime, probe, read_data_url, read_range};
 use encoding::SNIFF_LEN;
-pub use encoding::{LARGE_FILE_THRESHOLD, MAX_OPEN_SIZE, READ_ONLY_THRESHOLD, encode, write_atomic};
+pub use encoding::{
+    LARGE_FILE_THRESHOLD, MAX_OPEN_SIZE, READ_ONLY_THRESHOLD, encode, write_atomic, write_atomic_strict,
+};
 pub use rules::ExcludeMatcher;
 pub use watch::{WatchMode, Watcher};
 
@@ -172,6 +174,10 @@ pub fn read_dir(dir: &Path, excludes: &[String]) -> IdeResult<Vec<FileEntry>> {
 #[derive(Clone, Debug, Serialize, Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct LoadedText {
+    /// Identity of the exact bytes decoded, for guarded saves (not IPC data).
+    #[serde(skip)]
+    #[specta(skip)]
+    pub disk_revision: String,
     pub text: String,
     /// WHATWG encoding label, e.g. `utf-8`, `gbk`, `utf-16le`.
     pub encoding: String,

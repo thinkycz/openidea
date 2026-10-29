@@ -40,3 +40,14 @@ pub async fn snapshot(host: &Host, window: &str, doc: DocId) -> IdeResult<Docume
 
 mod commands;
 pub use commands::*;
+
+/// Guarded editor save; returns the disk revision requiring confirmation.
+pub async fn save_checked(
+    host: &Host,
+    window: &str,
+    doc: DocId,
+    overwrite_revision: Option<String>,
+) -> IdeResult<Option<String>> {
+    let project = host.project(window)?;
+    host.blocking(move || project.documents.save_checked(doc, overwrite_revision.as_deref())).await
+}

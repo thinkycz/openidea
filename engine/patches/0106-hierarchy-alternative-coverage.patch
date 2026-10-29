@@ -1,0 +1,4105 @@
+diff --git a/docs/CHANGELOG.md b/docs/CHANGELOG.md
+index 1bbe9fff6dbdc56e46b99f6b9e703f2c08f77f6c..e364ff92292a55c2aabf939d53cfa95e35dbafb0 100644
+--- a/docs/CHANGELOG.md
++++ b/docs/CHANGELOG.md
+@@ -15,6 +15,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
+ 
+ ## [Unreleased]
+ 
++- **Keep call hierarchy coverage accurate.** Known targets remain visible alongside missing alternatives, and class imports keep their meaning through native hints, PHPDoc and class-string values. Incoming analysis identifies unreadable project sources and recovers after they are repaired or removed. Contributed by PHP Workbench downstream.
++
+ - **Keep incomplete indexing visible.** When a workspace scan finishes with partial results or fails, show a warning with a recovery action after the progress indicator closes. Successful scans and scratch sessions stay quiet. Contributed by PHP Workbench downstream.
+ 
+ - **Keep neighboring code during import cleanup.** Removing an unused import preserves other statements, used imports and comments sharing its line. Contributed by PHP Workbench downstream.
+diff --git a/src/call_hierarchy.rs b/src/call_hierarchy.rs
+index e8e312b1f699d0a823231f19d8b1c56469e6aa42..0bb8071ca6f8973e56ba8483559b0b8a29060ebb 100644
+--- a/src/call_hierarchy.rs
++++ b/src/call_hierarchy.rs
+@@ -25,6 +25,7 @@ mod stored;
+ pub(crate) use status::{HierarchyAnalysis, HierarchyIssueKind};
+ 
+ use crate::Backend;
++use crate::definition::member::ReceiverCoverage;
+ use crate::symbol_map::{
+     AnonymousCallable, AnonymousClassConstruction, ArrayCallableInvocation, CallExecutionOwner,
+     ClassRefContext, ImmediateObjectInvocation, ImmediateObjectReceiver, LiteralCallableInvocation,
+@@ -69,6 +70,8 @@ type ParsedFile = (Arc<String>, Arc<SymbolMap>, Option<[u8; 32]>);
+ /// is fetched at most once per request.
+ #[derive(Default)]
+ struct FileCache {
++    /// Coverage is observed only for analysis requests, never normal navigation.
++    track_member_coverage: bool,
+     files: HashMap<String, Option<ParsedFile>>,
+     blade_files: HashMap<String, Option<crate::blade::source_map::BladeHierarchyProjection>>,
+     /// Stored-value flow only; this is not a completeness claim for all calls.
+@@ -515,10 +518,40 @@ impl Backend {
+                         .into_iter()
+                         .collect()
+                 } else {
+-                    self.resolve_definition(uri, &content, position)
+-                        .into_iter()
+-                        .filter_map(|location| self.php_callable_at_location(cache, &location))
+-                        .collect()
++                    let (locations, mut coverage) = if cache.track_member_coverage {
++                        self.resolve_definition_with_coverage(uri, &content, position)
++                    } else {
++                        (
++                            self.resolve_definition(uri, &content, position),
++                            ReceiverCoverage::Complete,
++                        )
++                    };
++                    let mut callees = Vec::new();
++                    for location in locations {
++                        if let Some(callee) = self.php_callable_at_location(cache, &location) {
++                            callees.push(callee);
++                        } else if cache.track_member_coverage
++                            && coverage == ReceiverCoverage::Complete
++                        {
++                            coverage = ReceiverCoverage::Unresolved;
++                        }
++                    }
++                    if cache.track_member_coverage && coverage != ReceiverCoverage::Complete {
++                        let kind = if coverage == ReceiverCoverage::Limited {
++                            cache.analysis.issues_truncated = true;
++                            HierarchyIssueKind::Limit
++                        } else {
++                            HierarchyIssueKind::UnresolvedCall
++                        };
++                        self.hierarchy_source_issue(
++                            cache,
++                            uri,
++                            &content,
++                            (span.start, span.end),
++                            kind,
++                        );
++                    }
++                    callees
+                 };
+ 
+             for callee in callees {
+diff --git a/src/call_hierarchy/status.rs b/src/call_hierarchy/status.rs
+index 89c36be073025b7e76bd3570ba1e4bfb9cb6d961..b8139106ecbc12badad19044a75db20fc77c39b3 100644
+--- a/src/call_hierarchy/status.rs
++++ b/src/call_hierarchy/status.rs
+@@ -226,7 +226,10 @@ impl Backend {
+         &self,
+         item: &CallHierarchyItem,
+     ) -> Option<HierarchyReply<CallHierarchyOutgoingCall>> {
+-        let mut cache = FileCache::default();
++        let mut cache = FileCache {
++            track_member_coverage: true,
++            ..FileCache::default()
++        };
+         let items = self.outgoing_calls_items_impl(item, &mut cache)?;
+         let target = self.php_callable_from_item(&mut cache, item)?;
+         let mut invocation_budget = MAX_COVERAGE_INVOCATIONS;
+@@ -241,7 +244,10 @@ impl Backend {
+         &self,
+         item: &CallHierarchyItem,
+     ) -> Option<HierarchyReply<CallHierarchyIncomingCall>> {
+-        let mut cache = FileCache::default();
++        let mut cache = FileCache {
++            track_member_coverage: true,
++            ..FileCache::default()
++        };
+         let items = self.incoming_calls_items_impl(item, &mut cache)?;
+         let target = self.php_callable_from_item(&mut cache, item)?;
+         if target
+@@ -256,6 +262,34 @@ impl Backend {
+                 analysis: cache.analysis.finish(),
+             });
+         }
++        // A rejected source has no published map, so map iteration alone
++        // cannot report it. Consume the existing completed index read receipt.
++        let receipt = self.workspace_index_read_receipt();
++        for uri in receipt.unreadable_user_sources {
++            cache.analysis.add(HierarchyIssue {
++                kind: HierarchyIssueKind::SourceUnavailable,
++                uri,
++                range: Range::default(),
++            });
++        }
++        if receipt.overflow {
++            cache.analysis.state = HierarchyAnalysisState::Partial;
++            cache.analysis.issues_truncated = true;
++        }
++        if matches!(
++            receipt.outcome,
++            crate::indexing::preload::WorkspaceIndexOutcome::Running
++                | crate::indexing::preload::WorkspaceIndexOutcome::Failed
++        ) {
++            // The requested callable was inspected, but the workspace pass
++            // could not establish complete caller coverage.
++            cache.analysis.add(HierarchyIssue {
++                kind: HierarchyIssueKind::Limit,
++                uri: item.uri.clone(),
++                range: Range::default(),
++            });
++            cache.analysis.issues_truncated = true;
++        }
+         let mut inspected = std::collections::HashSet::new();
+         let mut budget = 256usize;
+         let mut invocation_budget = MAX_COVERAGE_INVOCATIONS;
+@@ -408,14 +442,31 @@ impl Backend {
+         content: &str,
+         site: &HierarchyInvocation,
+         kind: HierarchyIssueKind,
++    ) {
++        self.hierarchy_source_issue(
++            cache,
++            uri,
++            content,
++            (site.callee_start, site.callee_end),
++            kind,
++        );
++    }
++
++    pub(super) fn hierarchy_source_issue(
++        &self,
++        cache: &mut FileCache,
++        uri: &str,
++        content: &str,
++        source_range: (u32, u32),
++        kind: HierarchyIssueKind,
+     ) {
+         let Ok(uri_value) = Url::parse(uri) else {
+             cache.analysis.state = HierarchyAnalysisState::Unavailable;
+             return;
+         };
+-        if site.callee_start >= site.callee_end
++        if source_range.0 >= source_range.1
+             || content
+-                .get(site.callee_start as usize..site.callee_end as usize)
++                .get(source_range.0 as usize..source_range.1 as usize)
+                 .is_none()
+         {
+             cache.analysis.add(HierarchyIssue {
+@@ -427,8 +478,8 @@ impl Backend {
+         }
+         let mut ranges = [byte_range_to_lsp_range(
+             content,
+-            site.callee_start as usize,
+-            site.callee_end as usize,
++            source_range.0 as usize,
++            source_range.1 as usize,
+         )];
+         self.translate_ranges_to_blade(uri, &mut ranges);
+         cache.analysis.add(HierarchyIssue {
+diff --git a/src/definition/member/coverage.rs b/src/definition/member/coverage.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..933da0b025541cb47e8c1ef89187f9ec3bd22c61
+--- /dev/null
++++ b/src/definition/member/coverage.rs
+@@ -0,0 +1,652 @@
++//! Account for the alternatives retained by the existing receiver inference.
++//! This module does not infer types, load classes, inspect source or cache state.
++use std::sync::Arc;
++
++use crate::php_type::{PhpType, TypeKind};
++use crate::types::{AccessKind, ClassInfo, ResolvedType};
++
++/// Whether every inferred receiver alternative has an authoritative declaration.
++#[derive(Clone, Copy, Debug, PartialEq, Eq)]
++pub(crate) enum ReceiverCoverage {
++    /// All independent receiver alternatives are covered.
++    Complete,
++    /// At least one receiver alternative has no authoritative declaration.
++    Unresolved,
++    /// A finite accounting budget prevented complete inspection.
++    Limited,
++}
++
++const MAX_NODES: usize = 256;
++const MAX_DEPTH: usize = 32;
++const MAX_NAME_BYTES: usize = 65_536;
++
++struct Accounting<'a> {
++    candidates: &'a [Arc<ClassInfo>],
++    successful: &'a [bool],
++    nullsafe: bool,
++    access_kind: AccessKind,
++    qualify: &'a dyn Fn(&str) -> String,
++    nodes_left: usize,
++    name_bytes_left: usize,
++}
++
++/// Evaluate coverage without repeating the receiver's shared inference pass.
++/// Unions represent independent alternatives; intersections constrain one value.
++pub(super) fn receiver_coverage(
++    resolved: &[ResolvedType],
++    candidates: &[Arc<ClassInfo>],
++    successful: &[bool],
++    nullsafe: bool,
++    access_kind: AccessKind,
++    qualify: &dyn Fn(&str) -> String,
++) -> ReceiverCoverage {
++    if resolved.is_empty() || candidates.len() != successful.len() {
++        return ReceiverCoverage::Unresolved;
++    }
++    if resolved.len() > MAX_NODES || candidates.len() > MAX_NODES {
++        return ReceiverCoverage::Limited;
++    }
++    // Bound identity comparisons as well as type-node recursion. With at most
++    //256 candidates and256 nodes there are at most65536 candidate comparisons.
++    let mut candidate_name_bytes = 0usize;
++    for class in candidates {
++        candidate_name_bytes = candidate_name_bytes.saturating_add(class.fqn().len());
++        if candidate_name_bytes > MAX_NAME_BYTES {
++            return ReceiverCoverage::Limited;
++        }
++    }
++    let mut accounting = Accounting {
++        candidates,
++        successful,
++        nullsafe,
++        access_kind,
++        qualify,
++        nodes_left: MAX_NODES,
++        name_bytes_left: MAX_NAME_BYTES,
++    };
++    let mut limited = false;
++    for value in resolved {
++        match accounting.ty(&value.type_string, value.class_info.as_deref(), 0) {
++            ReceiverCoverage::Complete => {}
++            ReceiverCoverage::Unresolved => return ReceiverCoverage::Unresolved,
++            ReceiverCoverage::Limited => limited = true,
++        }
++    }
++    if limited {
++        ReceiverCoverage::Limited
++    } else {
++        ReceiverCoverage::Complete
++    }
++}
++
++impl Accounting<'_> {
++    fn ty(&mut self, ty: &PhpType, actual: Option<&ClassInfo>, depth: usize) -> ReceiverCoverage {
++        if depth >= MAX_DEPTH || self.nodes_left == 0 {
++            return ReceiverCoverage::Limited;
++        }
++        self.nodes_left -= 1;
++        // raw_kind avoids kind()'s recursive template-bound unwrap escaping
++        // this accounting budget. Shape/container wrappers do not grant methods.
++        match ty.raw_kind() {
++            TypeKind::Benevolent(inner) | TypeKind::TemplateParam(_, inner) => {
++                self.ty(inner, actual, depth + 1)
++            }
++            TypeKind::Nullable(inner) => {
++                if !self.nullsafe {
++                    return ReceiverCoverage::Unresolved;
++                }
++                self.ty(inner, actual, depth + 1)
++            }
++            TypeKind::Union(members) => {
++                let mut limited = false;
++                for member in members {
++                    // A class_info attached to a whole union cannot identify
++                    // which residual alternative each member names.
++                    match self.ty(member, None, depth + 1) {
++                        ReceiverCoverage::Complete => {}
++                        ReceiverCoverage::Unresolved => return ReceiverCoverage::Unresolved,
++                        ReceiverCoverage::Limited => limited = true,
++                    }
++                }
++                if limited {
++                    ReceiverCoverage::Limited
++                } else {
++                    ReceiverCoverage::Complete
++                }
++            }
++            TypeKind::Intersection(members) => {
++                let mut limited = false;
++                for member in members {
++                    match self.ty(member, None, depth + 1) {
++                        // One constraint supplying the method covers this
++                        // simultaneous receiver, even if another lacks it.
++                        ReceiverCoverage::Complete => return ReceiverCoverage::Complete,
++                        ReceiverCoverage::Unresolved => {}
++                        ReceiverCoverage::Limited => limited = true,
++                    }
++                }
++                if limited {
++                    ReceiverCoverage::Limited
++                } else {
++                    ReceiverCoverage::Unresolved
++                }
++            }
++            TypeKind::Named(name) => {
++                if name.eq_ignore_ascii_case("null") {
++                    return if self.nullsafe {
++                        ReceiverCoverage::Complete
++                    } else {
++                        ReceiverCoverage::Unresolved
++                    };
++                }
++                if non_receiver_name(name) {
++                    return ReceiverCoverage::Unresolved;
++                }
++                self.named(name, actual)
++            }
++            TypeKind::Generic(generic) => {
++                if non_receiver_name(&generic.name) {
++                    return ReceiverCoverage::Unresolved;
++                }
++                // Generic argument types describe contents/bindings, not
++                // independent receiver values: Box<Missing> is still Box.
++                self.named(&generic.name, actual)
++            }
++            TypeKind::StaticType(bound) | TypeKind::ThisType(bound) => self.named(bound, actual),
++            TypeKind::ClassNameLiteral(inner) => self.ty(inner, None, depth + 1),
++            TypeKind::ClassString(Some(inner)) | TypeKind::InterfaceString(Some(inner))
++                if self.access_kind == AccessKind::DoubleColon =>
++            {
++                self.ty(inner, None, depth + 1)
++            }
++            _ => ReceiverCoverage::Unresolved,
++        }
++    }
++
++    fn named(&mut self, name: &str, actual: Option<&ClassInfo>) -> ReceiverCoverage {
++        if let Some(class) = actual {
++            // Simple class-bearing leaves already have their canonical class.
++            // Requalifying a resolved global name in the caller namespace can
++            // silently redirect identity; use the actual class instead.
++            return self.canonical(&class.fqn());
++        }
++        if name.len() > self.name_bytes_left {
++            return ReceiverCoverage::Limited;
++        }
++        self.name_bytes_left -= name.len();
++        // Source imports take precedence over a coincidentally matching global
++        // name. The caller also preserves already canonical inferred identities.
++        let qualified = (self.qualify)(name);
++        if qualified.len() > self.name_bytes_left {
++            return ReceiverCoverage::Limited;
++        }
++        self.name_bytes_left -= qualified.len();
++        if self.matches_success(&qualified) {
++            ReceiverCoverage::Complete
++        } else {
++            ReceiverCoverage::Unresolved
++        }
++    }
++
++    fn canonical(&mut self, name: &str) -> ReceiverCoverage {
++        if name.len() > self.name_bytes_left {
++            return ReceiverCoverage::Limited;
++        }
++        self.name_bytes_left -= name.len();
++        if self.matches_success(name) {
++            ReceiverCoverage::Complete
++        } else {
++            ReceiverCoverage::Unresolved
++        }
++    }
++
++    fn matches_success(&self, name: &str) -> bool {
++        let canonical = name.trim_start_matches('\\');
++        self.candidates
++            .iter()
++            .zip(self.successful)
++            .any(|(class, successful)| {
++                *successful
++                    && class
++                        .fqn()
++                        .trim_start_matches('\\')
++                        .eq_ignore_ascii_case(canonical)
++            })
++    }
++}
++
++fn non_receiver_name(name: &str) -> bool {
++    let name = name.trim_start_matches('\\');
++    [
++        "mixed",
++        "object",
++        "null",
++        "true",
++        "false",
++        "bool",
++        "boolean",
++        "int",
++        "integer",
++        "float",
++        "double",
++        "real",
++        "string",
++        "numeric-string",
++        "non-empty-string",
++        "literal-string",
++        "class-string",
++        "interface-string",
++        "callable-string",
++        "resource",
++        "closed-resource",
++        "scalar",
++        "numeric",
++        "array-key",
++        "void",
++        "never",
++        "noreturn",
++        "callable",
++        "array",
++        "list",
++        "iterable",
++        "non-empty-array",
++        "non-empty-list",
++    ]
++    .iter()
++    .any(|keyword| name.eq_ignore_ascii_case(keyword))
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use crate::atom::atom;
++
++    fn class(fqn: &str) -> Arc<ClassInfo> {
++        let (namespace, name) = fqn
++            .rsplit_once('\\')
++            .map_or((None, fqn), |(namespace, name)| {
++                (Some(atom(namespace)), name)
++            });
++        Arc::new(ClassInfo {
++            name: atom(name),
++            file_namespace: namespace,
++            ..ClassInfo::default()
++        })
++    }
++
++    fn identity(name: &str) -> String {
++        name.to_owned()
++    }
++
++    #[test]
++    fn actual_simple_class_identity_is_not_requalified_in_the_caller_namespace() {
++        let known = class("GlobalKnown");
++        let value =
++            ResolvedType::from_both_arc(PhpType::named(atom("GlobalKnown")), Arc::clone(&known));
++        let forbidden_qualifier = |_: &str| -> String {
++            panic!("already resolved simple class must use actual identity")
++        };
++        assert_eq!(
++            receiver_coverage(
++                &[value],
++                &[known],
++                &[true],
++                false,
++                AccessKind::Arrow,
++                &forbidden_qualifier
++            ),
++            ReceiverCoverage::Complete
++        );
++    }
++
++    #[test]
++    fn union_requires_each_alternative_and_supports_existing_import_qualification() {
++        let known = class("Vendor\\Known");
++        let other = class("Vendor\\Other");
++        let qualify = |name: &str| match name {
++            "KnownAlias" => "Vendor\\Known".to_owned(),
++            "OtherAlias" => "Vendor\\Other".to_owned(),
++            other => format!("Caller\\{other}"),
++        };
++        let hint = PhpType::union(vec![
++            PhpType::named(atom("KnownAlias")),
++            PhpType::named(atom("Missing")),
++        ]);
++        let value = ResolvedType::from_both_arc(hint, Arc::clone(&known));
++        assert_eq!(
++            receiver_coverage(
++                &[value],
++                &[Arc::clone(&known)],
++                &[true],
++                false,
++                AccessKind::Arrow,
++                &qualify
++            ),
++            ReceiverCoverage::Unresolved
++        );
++        let both = ResolvedType::from_type_string(PhpType::union(vec![
++            PhpType::named(atom("KnownAlias")),
++            PhpType::named(atom("OtherAlias")),
++        ]));
++        assert_eq!(
++            receiver_coverage(
++                &[both],
++                &[known, other],
++                &[true, true],
++                false,
++                AccessKind::Arrow,
++                &qualify
++            ),
++            ReceiverCoverage::Complete
++        );
++    }
++
++    #[test]
++    fn fully_qualified_missing_homonym_cannot_be_certified_by_loaded_short_name() {
++        let known = class("Loaded\\Thing");
++        let value = ResolvedType::from_both_arc(
++            PhpType::union(vec![
++                PhpType::named(atom("\\Loaded\\Thing")),
++                PhpType::named(atom("\\Missing\\Thing")),
++            ]),
++            Arc::clone(&known),
++        );
++        assert_eq!(
++            receiver_coverage(
++                &[value],
++                &[known],
++                &[true],
++                false,
++                AccessKind::Arrow,
++                &identity
++            ),
++            ReceiverCoverage::Unresolved
++        );
++    }
++
++    #[test]
++    fn intersection_constraints_are_one_receiver_and_dnf_still_checks_each_union_arm() {
++        let known = class("Known");
++        let marker = class("Marker");
++        let other = class("Other");
++        let intersection = PhpType::intersection(vec![
++            PhpType::named(atom("Known")),
++            PhpType::named(atom("Marker")),
++        ]);
++        let resolved = [
++            ResolvedType::from_both_arc(intersection.clone(), Arc::clone(&known)),
++            ResolvedType::from_both_arc(intersection.clone(), Arc::clone(&marker)),
++        ];
++        assert_eq!(
++            receiver_coverage(
++                &resolved,
++                &[Arc::clone(&known), marker],
++                &[true, false],
++                false,
++                AccessKind::Arrow,
++                &identity
++            ),
++            ReceiverCoverage::Complete
++        );
++        let dnf = ResolvedType::from_type_string(PhpType::union(vec![
++            intersection,
++            PhpType::named(atom("Other")),
++        ]));
++        assert_eq!(
++            receiver_coverage(
++                std::slice::from_ref(&dnf),
++                &[Arc::clone(&known), Arc::clone(&other)],
++                &[true, true],
++                false,
++                AccessKind::Arrow,
++                &identity
++            ),
++            ReceiverCoverage::Complete
++        );
++        assert_eq!(
++            receiver_coverage(
++                &[dnf],
++                &[known, other],
++                &[true, false],
++                false,
++                AccessKind::Arrow,
++                &identity
++            ),
++            ReceiverCoverage::Unresolved
++        );
++    }
++
++    #[test]
++    fn generic_contents_are_not_receiver_alternatives_and_template_bounds_are_respected() {
++        let known = class("Known");
++        let value = ResolvedType::from_both_arc(
++            PhpType::generic("Known", vec![PhpType::named(atom("Missing"))]),
++            Arc::clone(&known),
++        );
++        assert_eq!(
++            receiver_coverage(
++                &[value],
++                &[Arc::clone(&known)],
++                &[true],
++                false,
++                AccessKind::Arrow,
++                &identity
++            ),
++            ReceiverCoverage::Complete
++        );
++        let bounded = ResolvedType::from_both_arc(
++            PhpType::template_param(atom("T"), PhpType::named(atom("Known"))),
++            Arc::clone(&known),
++        );
++        assert_eq!(
++            receiver_coverage(
++                &[bounded],
++                &[known],
++                &[true],
++                false,
++                AccessKind::Arrow,
++                &identity
++            ),
++            ReceiverCoverage::Complete
++        );
++        let unknown =
++            ResolvedType::from_type_string(PhpType::template_param(atom("U"), PhpType::mixed()));
++        assert_eq!(
++            receiver_coverage(&[unknown], &[], &[], false, AccessKind::Arrow, &identity),
++            ReceiverCoverage::Unresolved
++        );
++    }
++
++    #[test]
++    fn nullable_short_circuit_is_complete_only_for_nullsafe_access() {
++        let known = class("Known");
++        let nullable = ResolvedType::from_both_arc(
++            PhpType::nullable(PhpType::named(atom("Known"))),
++            Arc::clone(&known),
++        );
++        assert_eq!(
++            receiver_coverage(
++                std::slice::from_ref(&nullable),
++                &[Arc::clone(&known)],
++                &[true],
++                true,
++                AccessKind::Arrow,
++                &identity
++            ),
++            ReceiverCoverage::Complete
++        );
++        assert_eq!(
++            receiver_coverage(
++                &[nullable],
++                &[known],
++                &[true],
++                false,
++                AccessKind::Arrow,
++                &identity
++            ),
++            ReceiverCoverage::Unresolved
++        );
++    }
++
++    #[test]
++    fn class_string_wrappers_are_receivers_only_for_double_colon() {
++        let known = class("Known");
++        let value = ResolvedType::from_type_string(PhpType::class_string(Some(PhpType::named(
++            atom("Known"),
++        ))));
++        assert_eq!(
++            receiver_coverage(
++                std::slice::from_ref(&value),
++                &[Arc::clone(&known)],
++                &[true],
++                false,
++                AccessKind::DoubleColon,
++                &identity
++            ),
++            ReceiverCoverage::Complete
++        );
++        assert_eq!(
++            receiver_coverage(
++                &[value],
++                &[known],
++                &[true],
++                false,
++                AccessKind::Arrow,
++                &identity
++            ),
++            ReceiverCoverage::Unresolved
++        );
++    }
++
++    #[test]
++    fn residual_scalars_and_mixed_do_not_disappear_beside_a_known_receiver() {
++        let known = class("Known");
++        for residual in [
++            PhpType::mixed(),
++            PhpType::int(),
++            PhpType::named(atom("object")),
++        ] {
++            let value = ResolvedType::from_both_arc(
++                PhpType::union(vec![PhpType::named(atom("Known")), residual]),
++                Arc::clone(&known),
++            );
++            assert_eq!(
++                receiver_coverage(
++                    &[value],
++                    &[Arc::clone(&known)],
++                    &[true],
++                    false,
++                    AccessKind::Arrow,
++                    &identity
++                ),
++                ReceiverCoverage::Unresolved
++            );
++        }
++    }
++
++    #[test]
++    fn equivalent_canonical_candidates_and_inherited_location_dedup_keep_success() {
++        let known = class("Space\\Known");
++        let value = ResolvedType::from_type_string(PhpType::named(atom("\\space\\KNOWN")));
++        assert_eq!(
++            receiver_coverage(
++                &[value],
++                &[Arc::clone(&known), known],
++                &[false, true],
++                false,
++                AccessKind::Arrow,
++                &identity
++            ),
++            ReceiverCoverage::Complete
++        );
++        // Distinct receiver classes can independently resolve to one emitted
++        // location; successful bits must be captured before location dedup.
++        let left = class("Left");
++        let right = class("Right");
++        let values = [
++            ResolvedType::from_arc(Arc::clone(&left)),
++            ResolvedType::from_arc(Arc::clone(&right)),
++        ];
++        assert_eq!(
++            receiver_coverage(
++                &values,
++                &[left, right],
++                &[true, true],
++                false,
++                AccessKind::Arrow,
++                &identity
++            ),
++            ReceiverCoverage::Complete
++        );
++    }
++
++    #[test]
++    fn static_and_this_bounds_preserve_actual_class_identity() {
++        let known = class("Known");
++        for hint in [
++            PhpType::static_type(atom("Known")),
++            PhpType::this_type(atom("Known")),
++        ] {
++            let value = ResolvedType::from_both_arc(hint, Arc::clone(&known));
++            assert_eq!(
++                receiver_coverage(
++                    &[value],
++                    &[Arc::clone(&known)],
++                    &[true],
++                    false,
++                    AccessKind::Arrow,
++                    &identity
++                ),
++                ReceiverCoverage::Complete
++            );
++        }
++    }
++
++    #[test]
++    fn accounting_limits_are_explicit_and_mismatched_success_metadata_is_not_complete() {
++        let known = class("Known");
++        assert_eq!(
++            receiver_coverage(
++                &[ResolvedType::from_arc(Arc::clone(&known))],
++                &[known],
++                &[],
++                false,
++                AccessKind::Arrow,
++                &identity
++            ),
++            ReceiverCoverage::Unresolved
++        );
++        let too_many = vec![ResolvedType::from_type_string(PhpType::mixed()); MAX_NODES + 1];
++        assert_eq!(
++            receiver_coverage(&too_many, &[], &[], false, AccessKind::Arrow, &identity),
++            ReceiverCoverage::Limited
++        );
++        let mut deep = PhpType::named(atom("Known"));
++        for _ in 0..MAX_DEPTH + 1 {
++            deep = PhpType::class_string(Some(deep));
++        }
++        assert_eq!(
++            receiver_coverage(
++                &[ResolvedType::from_type_string(deep)],
++                &[],
++                &[],
++                false,
++                AccessKind::DoubleColon,
++                &identity
++            ),
++            ReceiverCoverage::Limited
++        );
++        let long_name = PhpType::named(atom(&"x".repeat(MAX_NAME_BYTES + 1)));
++        assert_eq!(
++            receiver_coverage(
++                &[ResolvedType::from_type_string(long_name)],
++                &[],
++                &[],
++                false,
++                AccessKind::Arrow,
++                &identity
++            ),
++            ReceiverCoverage::Limited
++        );
++    }
++}
+diff --git a/src/definition/member/mod.rs b/src/definition/member/mod.rs
+index cd0198ef46b8527f522dd8e00451e653edef9577..6a507d9780711c86c6ac47e401cf15cf00cf5876 100644
+--- a/src/definition/member/mod.rs
++++ b/src/definition/member/mod.rs
+@@ -25,6 +25,7 @@
+ //!     `reload_raw_class`) and member position lookup
+ //!     (`find_member_position`)
+ 
++mod coverage;
+ mod declaring;
+ mod file_lookup;
+ mod shape_keys;
+@@ -45,6 +46,8 @@ use crate::virtual_members::laravel::{
+     custom_builder_fqn, extends_eloquent_model, facade_concrete_class,
+     is_accessor_or_mutator_method, where_property_method_to_column,
+ };
++pub(crate) use coverage::ReceiverCoverage;
++use coverage::receiver_coverage;
+ 
+ /// Pre-extracted context for a member definition lookup.
+ ///
+@@ -61,6 +64,8 @@ pub(super) struct MemberDefinitionCtx<'a> {
+     pub access_kind: AccessKind,
+     /// Hint about whether the site looks like a method call or property access.
+     pub access_hint: MemberAccessHint,
++    /// Whether the source access short-circuits for a null receiver.
++    pub is_nullsafe: bool,
+ }
+ 
+ /// The kind of class member being resolved.
+@@ -134,6 +139,21 @@ impl Backend {
+         position: Position,
+         mctx: &MemberDefinitionCtx<'_>,
+     ) -> Option<Vec<Location>> {
++        self.resolve_member_definitions_inner(uri, content, position, mctx, None)
++    }
++
++    /// Share the original member-resolution pass with request-local coverage.
++    pub(super) fn resolve_member_definitions_inner(
++        &self,
++        uri: &str,
++        content: &str,
++        position: Position,
++        mctx: &MemberDefinitionCtx<'_>,
++        mut coverage: Option<&mut ReceiverCoverage>,
++    ) -> Option<Vec<Location>> {
++        if let Some(state) = coverage.as_deref_mut() {
++            *state = ReceiverCoverage::Unresolved;
++        }
+         let member_name = mctx.member_name;
+         let subject = mctx.subject;
+         let access_kind = mctx.access_kind;
+@@ -162,11 +182,24 @@ impl Backend {
+                 &laravel_macro_this_resolver,
+             ),
+         );
+-        let candidates = ResolvedType::into_arced_classes(
+-            crate::type_engine::resolver::resolve_target_classes(subject, access_kind, &rctx),
+-        );
++        let resolved =
++            crate::type_engine::resolver::resolve_target_classes(subject, access_kind, &rctx);
++        let (candidates, receiver_types) = if coverage.is_some() {
++            let candidates: Vec<Arc<ClassInfo>> = resolved
++                .iter()
++                .filter_map(|value| value.class_info.clone())
++                .collect();
++            (candidates, Some(resolved))
++        } else {
++            (ResolvedType::into_arced_classes(resolved), None)
++        };
+ 
+         if candidates.is_empty() {
++            if let Some(state) = coverage.as_deref_mut()
++                && crate::parser::class_source_imports(content, cursor_offset).is_none()
++            {
++                *state = ReceiverCoverage::Limited;
++            }
+             return None;
+         }
+ 
+@@ -174,7 +207,49 @@ impl Backend {
+         //    candidate's framework/trait fallback order. Union alternatives
+         //    must not silently collapse to whichever class resolves first.
+         let mut locations = Vec::new();
+-        for target_class in &candidates {
++        let mut successful = receiver_types
++            .as_ref()
++            .map(|_| vec![false; candidates.len()]);
++        let publish = |state: Option<&mut ReceiverCoverage>, successful: Option<&[bool]>| {
++            if let (Some(state), Some(types), Some(successful)) =
++                (state, receiver_types.as_deref(), successful)
++            {
++                // Only CLASS imports may qualify a class receiver. The shared
++                // legacy table also contains function and constant imports.
++                let source_imports = crate::parser::class_source_imports(content, cursor_offset);
++                let import_limit = source_imports.is_none();
++                let observed = receiver_coverage(
++                    types,
++                    &candidates,
++                    successful,
++                    mctx.is_nullsafe,
++                    access_kind,
++                    &|name| {
++                        let Some(source_imports) = source_imports.as_ref() else {
++                            return String::new();
++                        };
++                        if let Some(imported) = source_imports.imported_reference(name) {
++                            return imported;
++                        }
++                        if name.starts_with('\\')
++                            || candidates
++                                .iter()
++                                .any(|class| class.fqn().eq_ignore_ascii_case(name))
++                        {
++                            name.to_owned()
++                        } else {
++                            source_imports.resolve_source_reference(name)
++                        }
++                    },
++                );
++                *state = if import_limit {
++                    ReceiverCoverage::Limited
++                } else {
++                    observed
++                };
++            }
++        };
++        for (candidate_index, target_class) in candidates.iter().enumerate() {
+             // Candidates from resolve_target_classes may be fully-resolved
+             // (merged) classes that include virtual/mixin members directly
+             // in their methods list (e.g. when generic args triggered
+@@ -197,6 +272,9 @@ impl Backend {
+                     MemberKind::Method,
+                 )
+             {
++                if let Some(bits) = successful.as_mut() {
++                    bits[candidate_index] = true;
++                }
+                 locations.push(location);
+                 continue;
+             }
+@@ -244,6 +322,9 @@ impl Backend {
+                         MemberKind::Method,
+                     )
+                 {
++                    if let Some(bits) = successful.as_mut() {
++                        bits[candidate_index] = true;
++                    }
+                     locations.push(location);
+                     continue;
+                 }
+@@ -269,6 +350,9 @@ impl Backend {
+                     MemberKind::Constant,
+                 )
+             {
++                if let Some(bits) = successful.as_mut() {
++                    bits[candidate_index] = true;
++                }
+                 locations.push(location);
+                 continue;
+             }
+@@ -304,6 +388,9 @@ impl Backend {
+                     MemberKind::Method,
+                 )
+             {
++                if let Some(bits) = successful.as_mut() {
++                    bits[candidate_index] = true;
++                }
+                 locations.push(location);
+                 continue;
+             }
+@@ -329,6 +416,9 @@ impl Backend {
+                     ),
+                 )
+             {
++                if let Some(bits) = successful.as_mut() {
++                    bits[candidate_index] = true;
++                }
+                 locations.push(location);
+                 continue;
+             }
+@@ -354,6 +444,9 @@ impl Backend {
+                     ),
+                 )
+             {
++                if let Some(bits) = successful.as_mut() {
++                    bits[candidate_index] = true;
++                }
+                 locations.push(location);
+                 continue;
+             }
+@@ -371,6 +464,9 @@ impl Backend {
+                 && let Some(location) =
+                     self.macro_definition_location(declaring_class.fqn().as_str(), &search_name)
+             {
++                if let Some(bits) = successful.as_mut() {
++                    bits[candidate_index] = true;
++                }
+                 locations.push(location);
+                 continue;
+             }
+@@ -383,6 +479,9 @@ impl Backend {
+                 &search_name,
+                 member_kind,
+             ) {
++                if let Some(bits) = successful.as_mut() {
++                    bits[candidate_index] = true;
++                }
+                 locations.push(location);
+                 continue;
+             }
+@@ -395,6 +494,9 @@ impl Backend {
+                 && let Some(location) =
+                     self.object_shape_property_location(uri, content, &search_name, cursor_offset)
+             {
++                if let Some(bits) = successful.as_mut() {
++                    bits[candidate_index] = true;
++                }
+                 locations.push(location);
+                 continue;
+             }
+@@ -416,6 +518,9 @@ impl Backend {
+                     ),
+                 )
+             {
++                if let Some(bits) = successful.as_mut() {
++                    bits[candidate_index] = true;
++                }
+                 locations.push(location);
+                 continue;
+             }
+@@ -430,96 +535,110 @@ impl Backend {
+                 ))
+             });
+             locations.dedup();
++            publish(coverage, successful.as_deref());
+             return Some(locations);
+         }
+ 
+         // No candidate had the member — fall back to the first candidate
+         // and try the original (non-iterating) logic so we at least get
+         // partial results when possible.
+-        let target_class = &candidates[0];
+-        let raw_fallback = Self::reload_raw_class(target_class, &ctx.classes, &class_loader);
+-        let fallback_class = raw_fallback.as_ref().unwrap_or(target_class);
++        let fallback = (|| {
++            let target_class = &candidates[0];
++            let raw_fallback = Self::reload_raw_class(target_class, &ctx.classes, &class_loader);
++            let fallback_class = raw_fallback.as_ref().unwrap_or(target_class);
+ 
+-        let (effective_name, alias_trait) = if access_hint == MemberAccessHint::PropertyAccess {
+-            (member_name.to_string(), None)
+-        } else {
+-            Self::resolve_trait_alias(fallback_class, member_name)
+-        };
++            let (effective_name, alias_trait) = if access_hint == MemberAccessHint::PropertyAccess {
++                (member_name.to_string(), None)
++            } else {
++                Self::resolve_trait_alias(fallback_class, member_name)
++            };
+ 
+-        // Direct trait lookup for aliased members in the fallback path.
+-        if let Some(ref trait_name) = alias_trait
+-            && let Some(ref trait_info) = class_loader(trait_name)
+-            && let Some(location) = self.member_position_location(
+-                trait_name,
+-                uri,
+-                content,
+-                trait_info,
+-                &effective_name,
+-                MemberKind::Method,
+-            )
+-        {
+-            return Some(vec![location]);
+-        }
++            // Direct trait lookup for aliased members in the fallback path.
++            if let Some(ref trait_name) = alias_trait
++                && let Some(ref trait_info) = class_loader(trait_name)
++                && let Some(location) = self.member_position_location(
++                    trait_name,
++                    uri,
++                    content,
++                    trait_info,
++                    &effective_name,
++                    MemberKind::Method,
++                )
++            {
++                return Some(vec![location]);
++            }
+ 
+-        // Try with scope mapping in the fallback path too.
+-        let Some((search_name, declaring_class, declaring_fqn)) = Self::resolve_search_name(
+-            target_class,
+-            fallback_class,
+-            &effective_name,
+-            &class_loader,
+-            Some(&self.resolved_class_cache),
+-        ) else {
+-            // Last resort: Eloquent array entry (virtual properties) and
+-            // where{Property} method mapping.
+-            if extends_eloquent_model(fallback_class, &class_loader) {
+-                let fqn = fallback_class.name.to_string();
+-                let bounds = (
+-                    fallback_class.start_offset as usize,
+-                    fallback_class.end_offset as usize,
+-                );
+-                // where{Property} → column entry
+-                if let Some(column) = where_property_method_to_column(&effective_name)
+-                    && let Some(location) =
+-                        self.eloquent_array_entry_location(&fqn, uri, content, &column, bounds)
+-                {
+-                    return Some(vec![location]);
+-                }
+-                if let Some(location) =
+-                    self.eloquent_array_entry_location(&fqn, uri, content, &effective_name, bounds)
+-                {
+-                    return Some(vec![location]);
++            // Try with scope mapping in the fallback path too.
++            let Some((search_name, declaring_class, declaring_fqn)) = Self::resolve_search_name(
++                target_class,
++                fallback_class,
++                &effective_name,
++                &class_loader,
++                Some(&self.resolved_class_cache),
++            ) else {
++                // Last resort: Eloquent array entry (virtual properties) and
++                // where{Property} method mapping.
++                if extends_eloquent_model(fallback_class, &class_loader) {
++                    let fqn = fallback_class.name.to_string();
++                    let bounds = (
++                        fallback_class.start_offset as usize,
++                        fallback_class.end_offset as usize,
++                    );
++                    // where{Property} → column entry
++                    if let Some(column) = where_property_method_to_column(&effective_name)
++                        && let Some(location) =
++                            self.eloquent_array_entry_location(&fqn, uri, content, &column, bounds)
++                    {
++                        return Some(vec![location]);
++                    }
++                    if let Some(location) = self.eloquent_array_entry_location(
++                        &fqn,
++                        uri,
++                        content,
++                        &effective_name,
++                        bounds,
++                    ) {
++                        return Some(vec![location]);
++                    }
+                 }
+-            }
+-            return None;
+-        };
++                return None;
++            };
+ 
+-        let member_kind = Self::classify_member(&declaring_class, &search_name, access_hint)?;
++            let member_kind = Self::classify_member(&declaring_class, &search_name, access_hint)?;
+ 
+-        // ── Laravel macro registration site (fallback path) ─────
+-        if member_kind == MemberKind::Method
+-            && let Some(location) =
+-                self.macro_definition_location(declaring_class.fqn().as_str(), &search_name)
+-        {
+-            return Some(vec![location]);
+-        }
++            // ── Laravel macro registration site (fallback path) ─────
++            if member_kind == MemberKind::Method
++                && let Some(location) =
++                    self.macro_definition_location(declaring_class.fqn().as_str(), &search_name)
++            {
++                return Some(vec![location]);
++            }
++
++            // ── Object shape property fallback (fallback path) ──────
++            if declaring_fqn == "__object_shape"
++                && let Some(location) =
++                    self.object_shape_property_location(uri, content, &search_name, cursor_offset)
++            {
++                return Some(vec![location]);
++            }
+ 
+-        // ── Object shape property fallback (fallback path) ──────
+-        if declaring_fqn == "__object_shape"
+-            && let Some(location) =
+-                self.object_shape_property_location(uri, content, &search_name, cursor_offset)
++            self.member_position_location(
++                &declaring_fqn,
++                uri,
++                content,
++                &declaring_class,
++                &search_name,
++                member_kind,
++            )
++            .map(|location| vec![location])
++        })();
++        if fallback.is_some()
++            && let Some(bits) = successful.as_mut()
+         {
+-            return Some(vec![location]);
++            bits[0] = true;
+         }
+-
+-        self.member_position_location(
+-            &declaring_fqn,
+-            uri,
+-            content,
+-            &declaring_class,
+-            &search_name,
+-            member_kind,
+-        )
+-        .map(|location| vec![location])
++        publish(coverage, successful.as_deref());
++        fallback
+     }
+ 
+     /// Look up a member's declaration position given its declaring class
+diff --git a/src/definition/resolve.rs b/src/definition/resolve.rs
+index b7e87351c0265aab42df82611ef3f9b6b78f9162..f7ddc8c73747ab22dc950473f984ea33768e640f 100644
+--- a/src/definition/resolve.rs
++++ b/src/definition/resolve.rs
+@@ -19,7 +19,7 @@ use std::sync::Arc;
+ use crate::symbol_map::VarDefKind;
+ use tower_lsp::lsp_types::*;
+ 
+-use super::member::{MemberAccessHint, MemberDefinitionCtx, MemberKind};
++use super::member::{MemberAccessHint, MemberDefinitionCtx, MemberKind, ReceiverCoverage};
+ use super::point_location;
+ use crate::Backend;
+ use crate::class_lookup::find_class_at_offset;
+@@ -97,6 +97,28 @@ impl Backend {
+         uri: &str,
+         content: &str,
+         position: Position,
++    ) -> Vec<Location> {
++        self.resolve_definition_inner(uri, content, position, None)
++    }
++
++    /// Return original navigation targets with opt-in member coverage metadata.
++    pub(crate) fn resolve_definition_with_coverage(
++        &self,
++        uri: &str,
++        content: &str,
++        position: Position,
++    ) -> (Vec<Location>, ReceiverCoverage) {
++        let mut coverage = ReceiverCoverage::Complete;
++        let locations = self.resolve_definition_inner(uri, content, position, Some(&mut coverage));
++        (locations, coverage)
++    }
++
++    fn resolve_definition_inner(
++        &self,
++        uri: &str,
++        content: &str,
++        position: Position,
++        coverage: Option<&mut ReceiverCoverage>,
+     ) -> Vec<Location> {
+         // Consult precomputed symbol map (retries one byte earlier for
+         // end-of-token edge cases).
+@@ -105,7 +127,7 @@ impl Backend {
+             .or_else(|| recover_trailing_method_call(content, position));
+         if let Some(ref s) = symbol
+             && let Some(resolved) =
+-                self.resolve_from_symbol(&s.kind, uri, content, position, s.start)
++                self.resolve_from_symbol(&s.kind, uri, content, position, s.start, coverage)
+         {
+             return resolved;
+         }
+@@ -269,6 +291,7 @@ impl Backend {
+         content: &str,
+         position: Position,
+         cursor_offset: u32,
++        coverage: Option<&mut ReceiverCoverage>,
+     ) -> Option<Vec<Location>> {
+         match kind {
+             SymbolKind::Variable { name } | SymbolKind::CompactVariable { name } => {
+@@ -335,6 +358,7 @@ impl Backend {
+                 member_name,
+                 is_static,
+                 is_method_call,
++                is_nullsafe,
+                 ..
+             } => {
+                 let access_kind = if *is_static {
+@@ -352,9 +376,10 @@ impl Backend {
+                     subject: subject_text.as_str(self.symbol_map_source(uri, content)?),
+                     access_kind,
+                     access_hint,
++                    is_nullsafe: *is_nullsafe,
+                 };
+ 
+-                self.resolve_member_definitions_with(uri, content, position, &mctx)
++                self.resolve_member_definitions_inner(uri, content, position, &mctx, coverage)
+             }
+ 
+             SymbolKind::SelfStaticParent(ssp_kind) => self
+@@ -422,6 +447,7 @@ impl Backend {
+                         member_name: name,
+                         subject: &subject,
+                         access_kind: AccessKind::DoubleColon,
++                        is_nullsafe: false,
+                         access_hint: match kind {
+                             MemberKind::Method => MemberAccessHint::MethodCall,
+                             _ => MemberAccessHint::PropertyAccess,
+@@ -601,7 +627,7 @@ impl Backend {
+         // If no class was found, the name might be a template parameter
+         // (e.g. `TKey`, `TModel`) defined in a `@template` tag on the
+         // enclosing class or method docblock.
+-        if let Some(tpl_def) = self.lookup_template_def(uri, name, cursor_offset) {
++        if !is_fqn && let Some(tpl_def) = self.lookup_template_def(uri, name, cursor_offset) {
+             return template_def_location(uri, content, &tpl_def);
+         }
+ 
+diff --git a/src/definition/type_definition.rs b/src/definition/type_definition.rs
+index 90f1ee1b7e6368d4f7bd3a1cf4562c3363d091b5..b90ebd49aa8d72a78e134309caae8c4b79e40b66 100644
+--- a/src/definition/type_definition.rs
++++ b/src/definition/type_definition.rs
+@@ -135,9 +135,15 @@ impl Backend {
+                     .unwrap_or_default(),
+             },
+ 
+-            SymbolKind::ClassReference { name, .. } => {
+-                // The type *is* the class itself.
+-                vec![PhpType::named(atom(name))]
++            SymbolKind::ClassReference { name, is_fqn, .. } => {
++                // Preserve the source token's absolute-name provenance; the
++                // symbol map stores its root separately from the name text.
++                let name = if *is_fqn && !name.starts_with('\\') {
++                    atom(&format!("\\{name}"))
++                } else {
++                    atom(name)
++                };
++                vec![PhpType::named(name)]
+             }
+ 
+             SymbolKind::FunctionCall { name, .. } => self
+@@ -271,8 +277,14 @@ impl Backend {
+                     continue;
+                 }
+ 
++                // A rooted inferred type is already canonical. Remove only
++                // its spelling marker and retain absolute lookup semantics,
++                // so caller namespace/imports cannot retarget that identity.
++                let (name, is_fqn) = name
++                    .strip_prefix('\\')
++                    .map_or((name.as_str(), false), |canonical| (canonical, true));
+                 if let Some(loc) =
+-                    self.resolve_class_reference(uri, content, &name, false, cursor_offset)
++                    self.resolve_class_reference(uri, content, name, is_fqn, cursor_offset)
+                 {
+                     // Avoid duplicate locations.
+                     if !locations
+diff --git a/src/indexing/preload.rs b/src/indexing/preload.rs
+index de177eb2e79c9a18ac033a6dc2f30ae8fdabcd24..52c8542bbe1641fcad38bd51292e9d7fd7a30928 100644
+--- a/src/indexing/preload.rs
++++ b/src/indexing/preload.rs
+@@ -30,6 +30,16 @@ pub(crate) enum WorkspaceIndexOutcome {
+     Running,
+ }
+ 
++/// Query-local view of the existing index read receipt, without source reads.
++pub(crate) struct WorkspaceIndexReadReceipt {
++    /// Outcome observed under the same lock as the failure inventory.
++    pub(crate) outcome: WorkspaceIndexOutcome,
++    /// Admitted user sources that failed reading before map publication.
++    pub(crate) unreadable_user_sources: Vec<Url>,
++    /// Additional failures could not be retained or decoded as source URIs.
++    pub(crate) overflow: bool,
++}
++
+ impl WorkspaceIndexOutcome {
+     pub(crate) fn message(self) -> String {
+         match self {
+@@ -173,6 +183,57 @@ impl Backend {
+             outcome
+         }
+     }
++    /// Snapshot failed admitted sources from the last actual index pass.
++    /// Failure ownership was already checked by retain_owned_index_read_failures;
++    /// this accessor neither scans nor rereads source to invent a second result.
++    pub(crate) fn workspace_index_read_receipt(&self) -> WorkspaceIndexReadReceipt {
++        let (outcome, failed, mut overflow) = {
++            let state = self.workspace_index_outcome.lock();
++            let mut outcome = state.outcome();
++            if outcome == WorkspaceIndexOutcome::Complete
++                && !self.workspace_indexed.load(Ordering::Acquire)
++            {
++                outcome = WorkspaceIndexOutcome::Unavailable;
++            }
++            (
++                outcome,
++                state.unreadable.iter().cloned().collect::<Vec<_>>(),
++                state.unreadable_overflow,
++            )
++        };
++        // The completed pass already populated these dependency boundaries.
++        // Do not call the fallback accessor which can read composer.json.
++        let vendor_prefixes = self.workspace.vendor_uri_prefixes.lock().clone();
++        let filters = self.index_filters();
++        let mut unreadable_user_sources = Vec::new();
++        for raw_uri in failed {
++            if raw_uri.starts_with("phpantom-stub://")
++                || raw_uri.starts_with("phpantom-stub-fn://")
++                || vendor_prefixes
++                    .iter()
++                    .any(|prefix| raw_uri.starts_with(prefix))
++            {
++                continue;
++            }
++            let Ok(uri) = Url::parse(&raw_uri) else {
++                overflow = true;
++                continue;
++            };
++            if let Ok(path) = uri.to_file_path()
++                && (!filters.is_php_file(&path) || filters.is_excluded_path(&path, false))
++            {
++                continue;
++            }
++            unreadable_user_sources.push(uri);
++        }
++        unreadable_user_sources.sort_unstable_by(|a, b| a.as_str().cmp(b.as_str()));
++        WorkspaceIndexReadReceipt {
++            outcome,
++            unreadable_user_sources,
++            overflow,
++        }
++    }
++
+     fn read_index_uri(&self, uri: &str, supplied: Option<String>) -> IndexRead {
+         if let Some(content) = supplied.or_else(|| self.get_file_content(uri)) {
+             return IndexRead::Content(content);
+diff --git a/src/parser/class_source_imports.rs b/src/parser/class_source_imports.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..df3426c2db880040d58422d43d137262e70a4d98
+--- /dev/null
++++ b/src/parser/class_source_imports.rs
+@@ -0,0 +1,494 @@
++//! Bounded lexical CLASS import headers, owned by the exact parse-cache file.
++
++use std::collections::HashMap;
++use std::sync::Arc;
++
++use mago_span::HasSpan;
++use mago_syntax::cst::*;
++
++use crate::atom::bytes_to_str;
++
++/// CLASS imports belonging to one source namespace block.
++#[derive(Debug, Default)]
++pub(crate) struct ClassSourceImports {
++    pub(crate) namespace: Option<String>,
++    pub(crate) use_map: HashMap<String, String>,
++}
++
++impl ClassSourceImports {
++    /// Expand an actual lexical class alias, preserving qualified suffix bytes.
++    /// Absolute and namespace-relative names never consult source aliases.
++    pub(crate) fn imported_reference(&self, written: &str) -> Option<String> {
++        if written.starts_with('\\') {
++            return None;
++        }
++        let head = written.split('\\').next().unwrap_or(written);
++        if head.eq_ignore_ascii_case("namespace") && written.contains('\\') {
++            return None;
++        }
++        let prefix = self.use_map.get(head).or_else(|| {
++            self.use_map
++                .iter()
++                .find(|(alias, _)| alias.eq_ignore_ascii_case(head))
++                .map(|(_, target)| target)
++        })?;
++        Some(format!("{prefix}{}", &written[head.len()..]))
++    }
++
++    /// Resolve a WRITTEN PHP class name. The result is canonical without `\`.
++    /// Semantic identities must bypass this API or carry a leading root slash.
++    pub(crate) fn resolve_source_reference(&self, written: &str) -> String {
++        if written.starts_with('\\') {
++            return written.trim_start_matches('\\').to_owned();
++        }
++        let name = if written
++            .get(..10)
++            .is_some_and(|prefix| prefix.eq_ignore_ascii_case("namespace\\"))
++        {
++            &written[10..]
++        } else if let Some(imported) = self.imported_reference(written) {
++            return imported;
++        } else {
++            written
++        };
++        match self.namespace.as_deref() {
++            Some(namespace) => format!("{namespace}\\{name}"),
++            None => name.to_owned(),
++        }
++    }
++}
++
++pub(super) struct ClassSourceImportScopes {
++    global: Arc<ClassSourceImports>,
++    blocks: Vec<ClassSourceImportBlock>,
++}
++
++struct ClassSourceImportBlock {
++    start: u32,
++    end: u32,
++    imports: Arc<ClassSourceImports>,
++    includes_end: bool,
++}
++
++impl ClassSourceImportScopes {
++    pub(super) fn at(&self, offset: u32) -> Arc<ClassSourceImports> {
++        self.blocks
++            .iter()
++            .filter(|block| {
++                offset >= block.start
++                    && (offset < block.end || (block.includes_end && offset == block.end))
++            })
++            .min_by_key(|block| block.end.saturating_sub(block.start))
++            .map_or_else(
++                || Arc::clone(&self.global),
++                |block| Arc::clone(&block.imports),
++            )
++    }
++}
++
++struct HeaderBudget {
++    remaining_entries: usize,
++    remaining_name_bytes: usize,
++    lexical_headers: Vec<(u32, u32)>,
++    opaque_statements: Vec<(u32, u32)>,
++}
++
++impl HeaderBudget {
++    fn entry(&mut self) -> Option<()> {
++        self.remaining_entries = self.remaining_entries.checked_sub(1)?;
++        Some(())
++    }
++
++    fn name(&mut self, bytes: usize) -> Option<()> {
++        self.remaining_name_bytes = self.remaining_name_bytes.checked_sub(bytes)?;
++        Some(())
++    }
++}
++
++/// Only namespace/use headers are inspected. Callable and class bodies are opaque.
++pub(super) fn extract(
++    program: &Program<'_>,
++    content_len: u32,
++) -> Option<Arc<ClassSourceImportScopes>> {
++    let mut budget = HeaderBudget {
++        remaining_entries: 4096,
++        remaining_name_bytes: 65_536,
++        lexical_headers: Vec::new(),
++        opaque_statements: Vec::new(),
++    };
++    let mut blocks = Vec::new();
++    let global = collect_scope(
++        program.statements.iter(),
++        None,
++        content_len,
++        0,
++        &mut budget,
++        &mut blocks,
++    )?;
++    for error in program.errors {
++        budget.entry()?;
++        let span = error.span();
++        let start = span.start.offset;
++        let end = span.end.offset;
++        // A malformed header may be absent from the recovered CST. Only errors
++        // strictly inside an existing opaque statement are provably unrelated.
++        if budget
++            .lexical_headers
++            .iter()
++            .any(|&(left, right)| start <= right && end >= left)
++            || !budget
++                .opaque_statements
++                .iter()
++                .any(|&(left, right)| start > left && end <= right)
++        {
++            return None;
++        }
++    }
++    Some(Arc::new(ClassSourceImportScopes { global, blocks }))
++}
++
++fn collect_scope<'a>(
++    statements: impl Iterator<Item = &'a Statement<'a>>,
++    namespace: Option<String>,
++    scope_end: u32,
++    depth: usize,
++    budget: &mut HeaderBudget,
++    blocks: &mut Vec<ClassSourceImportBlock>,
++) -> Option<Arc<ClassSourceImports>> {
++    if depth >= 32 {
++        return None;
++    }
++    let mut headers = Vec::new();
++    for statement in statements {
++        budget.entry()?;
++        headers.push(statement);
++    }
++    let mut imports = ClassSourceImports {
++        namespace,
++        use_map: HashMap::new(),
++    };
++    for (index, statement) in headers.iter().enumerate() {
++        match statement {
++            Statement::Use(statement) => {
++                let span = statement.span();
++                budget
++                    .lexical_headers
++                    .push((span.start.offset, span.end.offset));
++                collect_use(&statement.items, &mut imports.use_map, budget)?;
++            }
++            Statement::Namespace(declaration) => {
++                let namespace = declaration
++                    .name
++                    .as_ref()
++                    .map(|name| bytes_to_str(name.value()));
++                if let Some(namespace) = namespace {
++                    budget.name(namespace.len())?;
++                }
++                let start = declaration.span().start.offset;
++                let header_end = match &declaration.body {
++                    NamespaceBody::BraceDelimited(body) => body.left_brace.end.offset,
++                    NamespaceBody::Implicit(body) => body.terminator.span().end.offset,
++                };
++                budget.lexical_headers.push((start, header_end));
++                let end = match &declaration.body {
++                    NamespaceBody::BraceDelimited(_) => declaration.span().end.offset,
++                    NamespaceBody::Implicit(_) => headers[index + 1..]
++                        .iter()
++                        .find_map(|statement| {
++                            if let Statement::Namespace(next) = statement {
++                                Some(next.span().start.offset)
++                            } else {
++                                None
++                            }
++                        })
++                        .unwrap_or(scope_end),
++                };
++                let child = collect_scope(
++                    declaration.statements().iter(),
++                    namespace.map(str::to_owned),
++                    end,
++                    depth + 1,
++                    budget,
++                    blocks,
++                )?;
++                let includes_end =
++                    matches!(&declaration.body, NamespaceBody::Implicit(_)) && end == scope_end;
++                blocks.push(ClassSourceImportBlock {
++                    start,
++                    end,
++                    imports: child,
++                    includes_end,
++                });
++            }
++            _ => {
++                let span = statement.span();
++                budget
++                    .opaque_statements
++                    .push((span.start.offset, span.end.offset));
++            }
++        }
++    }
++    Some(Arc::new(imports))
++}
++
++fn collect_use(
++    items: &UseItems<'_>,
++    imports: &mut HashMap<String, String>,
++    budget: &mut HeaderBudget,
++) -> Option<()> {
++    match items {
++        UseItems::Sequence(sequence) => {
++            for item in sequence.items.iter() {
++                collect_item(item, None, true, imports, budget)?;
++            }
++        }
++        UseItems::TypedSequence(sequence) => {
++            for item in sequence.items.iter() {
++                collect_item(item, None, false, imports, budget)?;
++            }
++        }
++        UseItems::TypedList(list) => {
++            let prefix = bytes_to_str(list.namespace.value());
++            for item in list.items.iter() {
++                collect_item(item, Some(prefix), false, imports, budget)?;
++            }
++        }
++        UseItems::MixedList(list) => {
++            let prefix = bytes_to_str(list.namespace.value());
++            for item in list.items.iter() {
++                collect_item(
++                    &item.item,
++                    Some(prefix),
++                    item.r#type.is_none(),
++                    imports,
++                    budget,
++                )?;
++            }
++        }
++    }
++    Some(())
++}
++
++fn collect_item(
++    item: &UseItem<'_>,
++    prefix: Option<&str>,
++    is_class: bool,
++    imports: &mut HashMap<String, String>,
++    budget: &mut HeaderBudget,
++) -> Option<()> {
++    budget.entry()?;
++    let raw = bytes_to_str(item.name.value()).trim_start_matches('\\');
++    budget.name(item.name.value().len())?;
++    if let Some(prefix) = prefix {
++        budget.name(prefix.len() + 1)?;
++    }
++    let alias = item
++        .alias
++        .as_ref()
++        .map(|alias| bytes_to_str(alias.identifier.value));
++    if let Some(alias) = alias {
++        budget.name(alias.len())?;
++    }
++    if !is_class {
++        return Some(());
++    }
++    let full = match prefix {
++        Some(prefix) => format!("{}\\{raw}", prefix.trim_start_matches('\\')),
++        None => raw.to_owned(),
++    };
++    let alias = alias.unwrap_or_else(|| crate::util::short_name(&full));
++    if imports
++        .keys()
++        .any(|previous| previous.eq_ignore_ascii_case(alias))
++    {
++        return None;
++    }
++    imports.insert(alias.to_owned(), full);
++    Some(())
++}
++
++#[cfg(test)]
++mod tests {
++    use super::super::{class_source_imports, with_parse_cache};
++    use super::*;
++
++    fn at(source: &str, marker: &str) -> Arc<ClassSourceImports> {
++        class_source_imports(source, source.find(marker).unwrap() as u32).unwrap()
++    }
++
++    #[test]
++    fn class_table_ignores_function_and_constant_alias_collisions() {
++        let source = "<?php namespace Consumer; use Vendor\\Real as Alias; use function Tools\\helper as Alias; use const Tools\\VALUE as Alias; function marker() {}";
++        let imports = at(source, "marker()");
++        assert_eq!(imports.use_map.len(), 1);
++        assert_eq!(imports.resolve_source_reference("aLiAs"), "Vendor\\Real");
++        assert_eq!(
++            imports.imported_reference("ALIAS\\Child").as_deref(),
++            Some("Vendor\\Real\\Child")
++        );
++        assert_eq!(
++            imports.resolve_source_reference("Missing"),
++            "Consumer\\Missing"
++        );
++        assert_eq!(imports.resolve_source_reference("\\Alias"), "Alias");
++        assert_eq!(imports.imported_reference("\\Alias"), None);
++        assert_eq!(
++            imports.resolve_source_reference("NaMeSpAcE\\Alias"),
++            "Consumer\\Alias"
++        );
++        assert_eq!(imports.imported_reference("namespace\\Alias"), None);
++    }
++
++    #[test]
++    fn mixed_and_typed_groups_capture_only_class_items() {
++        let source = "<?php use \\Vendor\\{Real as Alias, function helper as Alias, const VALUE as Alias, Other}; use function Tools\\{one, two}; use const Tools\\{ONE, TWO}; function marker() {}";
++        let imports = at(source, "marker()");
++        assert_eq!(imports.use_map.len(), 2);
++        assert_eq!(imports.resolve_source_reference("Alias"), "Vendor\\Real");
++        assert_eq!(imports.resolve_source_reference("Other"), "Vendor\\Other");
++        assert_eq!(imports.imported_reference("one"), None);
++        assert_eq!(imports.resolve_source_reference("one"), "one");
++    }
++
++    #[test]
++    fn same_name_braced_namespace_blocks_do_not_share_aliases() {
++        let source = "<?php namespace Same { use A\\One as Alias; function first() {} } namespace Same { use B\\Two as Alias; function second() {} } namespace Same { function third() {} } namespace { use GlobalClass as Alias; function fourth() {} }";
++        assert_eq!(
++            at(source, "first()").resolve_source_reference("Alias"),
++            "A\\One"
++        );
++        assert_eq!(
++            at(source, "second()").resolve_source_reference("Alias"),
++            "B\\Two"
++        );
++        assert_eq!(
++            at(source, "third()").resolve_source_reference("Alias"),
++            "Same\\Alias"
++        );
++        assert_eq!(
++            at(source, "fourth()").resolve_source_reference("Alias"),
++            "GlobalClass"
++        );
++    }
++
++    #[test]
++    fn implicit_namespace_and_body_uses_are_scoped_correctly() {
++        let source = "<?php namespace First; use A\\One as Alias; class Holder { use LocalTrait; } function first() { $captured = 1; $fn = function () use ($captured) { return 'use Fake;'; }; } namespace Second; use B\\Two as Alias; function second() {}";
++        let first = at(source, "first()");
++        assert_eq!(first.use_map.len(), 1);
++        assert_eq!(first.resolve_source_reference("Alias"), "A\\One");
++        assert_eq!(
++            first.resolve_source_reference("LocalTrait"),
++            "First\\LocalTrait"
++        );
++        assert_eq!(
++            at(source, "second()").resolve_source_reference("Alias"),
++            "B\\Two"
++        );
++    }
++
++    #[test]
++    fn cached_file_returns_the_same_owned_context_for_equal_source() {
++        let source = "<?php namespace Consumer; use Vendor\\Real as Alias; function marker() {}";
++        let _guard = with_parse_cache(source);
++        let first = at(source, "marker()");
++        let copied = source.to_owned();
++        let second = at(&copied, "marker()");
++        assert!(Arc::ptr_eq(&first, &second));
++        // All scopes are cached together, independent of the first queried offset.
++        let namespace_header =
++            class_source_imports(source, source.find("namespace").unwrap() as u32).unwrap();
++        assert!(Arc::ptr_eq(&first, &namespace_header));
++    }
++
++    #[test]
++    fn same_length_edits_and_cache_teardown_do_not_reuse_old_imports() {
++        let source = "<?php use A\\One as Alias; function marker() {}";
++        let old = {
++            let _guard = with_parse_cache(source);
++            let old = at(source, "marker()");
++            let edited = source.replace("A\\One", "B\\Two");
++            let _nested = with_parse_cache(&edited);
++            assert_eq!(
++                at(&edited, "marker()").resolve_source_reference("Alias"),
++                "B\\Two"
++            );
++            assert_eq!(
++                at(source, "marker()").resolve_source_reference("Alias"),
++                "A\\One"
++            );
++            old
++        };
++        let fresh = at(source, "marker()");
++        assert!(!Arc::ptr_eq(&old, &fresh));
++        assert_eq!(old.resolve_source_reference("Alias"), "A\\One");
++    }
++
++    #[test]
++    fn unavailable_import_headers_are_cached_and_never_an_empty_context() {
++        let source = "<?php use A\\One as Alias; use B\\Two as ALIAS; function marker() {}";
++        let _guard = with_parse_cache(source);
++        let offset = source.find("marker()").unwrap() as u32;
++        assert!(class_source_imports(source, offset).is_none());
++        super::super::PARSE_CACHE.with(|cell| {
++            let file = cell.borrow().as_ref().unwrap().find(source).unwrap();
++            assert!(matches!(file.class_source_imports.get(), Some(None)));
++        });
++        assert!(class_source_imports(source, offset).is_none());
++    }
++
++    #[test]
++    fn all_import_kinds_and_all_blocks_share_global_entry_and_name_budgets() {
++        let mut source = "<?php namespace First; use function Tools\\{".to_owned();
++        for index in 0..4096 {
++            if index != 0 {
++                source.push(',');
++            }
++            source.push_str(&format!("helper{index}"));
++        }
++        source.push_str("}; namespace Second; function marker() {}");
++        assert!(class_source_imports(&source, source.find("marker()").unwrap() as u32).is_none());
++        let source = format!(
++            "<?php use function Tools\\{}; function marker() {{}}",
++            "x".repeat(65_537)
++        );
++        assert!(class_source_imports(&source, source.find("marker()").unwrap() as u32).is_none());
++    }
++
++    #[test]
++    fn incomplete_callable_body_keeps_valid_namespace_imports() {
++        let source =
++            "<?php namespace Consumer; use Vendor\\Real as Alias; function marker() { $value-> }";
++        assert_eq!(
++            at(source, "marker()").resolve_source_reference("Alias"),
++            "Vendor\\Real"
++        );
++    }
++
++    #[test]
++    fn eof_stays_in_final_implicit_namespace_and_next_block_owns_its_start() {
++        let source =
++            "<?php namespace First; use A\\One as Alias; namespace Second; use B\\Two as Alias;";
++        assert_eq!(
++            class_source_imports(source, source.len() as u32)
++                .unwrap()
++                .resolve_source_reference("Alias"),
++            "B\\Two"
++        );
++        assert_eq!(
++            class_source_imports(source, source.find("namespace Second").unwrap() as u32)
++                .unwrap()
++                .resolve_source_reference("Alias"),
++            "B\\Two"
++        );
++    }
++
++    #[test]
++    fn invalid_offsets_and_malformed_source_are_unavailable() {
++        let source = "<?php // Ž\nfunction marker() {}";
++        let inside_utf8 = source.find('Ž').unwrap() as u32 + 1;
++        assert!(class_source_imports(source, inside_utf8).is_none());
++        assert!(class_source_imports(source, source.len() as u32 + 1).is_none());
++        assert!(class_source_imports("<?php use Vendor\\;", 6).is_none());
++    }
++}
+diff --git a/src/parser/mod.rs b/src/parser/mod.rs
+index c11925fea6d6d3151c39f43fa94a7e43f124f620..63ec5047b594f7e7aa3fa0dbf571894db0f31aa7 100644
+--- a/src/parser/mod.rs
++++ b/src/parser/mod.rs
+@@ -21,7 +21,9 @@ use std::sync::Arc;
+ mod anonymous;
+ mod ast_update;
+ mod attributes;
++mod class_source_imports;
+ mod classes;
++pub(crate) use class_source_imports::ClassSourceImports;
+ pub(crate) mod error_format;
+ mod function_availability;
+ mod functions;
+@@ -831,6 +833,9 @@ struct CachedFile {
+     /// The arena that owns the AST nodes, and a pointer to the `Program`
+     /// allocated in it.  Unset until the first parse of this file.
+     parsed: std::cell::OnceCell<(mago_allocator::LocalArena, *const ())>,
++    /// Source-only lexical headers; None is cached as an unavailable answer.
++    class_source_imports:
++        std::cell::OnceCell<Option<Arc<class_source_imports::ClassSourceImportScopes>>>,
+ }
+ 
+ impl CachedFile {
+@@ -838,6 +843,7 @@ impl CachedFile {
+         Rc::new(Self {
+             content,
+             parsed: std::cell::OnceCell::new(),
++            class_source_imports: std::cell::OnceCell::new(),
+         })
+     }
+ 
+@@ -1189,6 +1195,31 @@ pub(crate) fn with_parsed_program<T: Default>(
+     }
+ }
+ 
++/// Source-only CLASS imports for the exact lexical block at `offset`.
++/// Cached once per exact request-local parsed file, including failure. A None
++/// result is unavailable and must not fall back to the merged import table.
++pub(crate) fn class_source_imports(content: &str, offset: u32) -> Option<Arc<ClassSourceImports>> {
++    let cursor = usize::try_from(offset).ok()?;
++    if cursor > content.len() || !content.is_char_boundary(cursor) {
++        return None;
++    }
++    let content_len = u32::try_from(content.len()).ok()?;
++    // Clone the owning Rc and release the RefCell borrow before parsing or
++    // extraction. Exact equality and eviction remain the existing cache's job.
++    let cached =
++        PARSE_CACHE.with(|cell| cell.borrow().as_ref().and_then(|cache| cache.find(content)));
++    with_parsed_program(content, "class_source_imports", |program, _| {
++        let scopes = match cached.as_ref() {
++            Some(file) => file
++                .class_source_imports
++                .get_or_init(|| class_source_imports::extract(program, content_len))
++                .clone(),
++            None => class_source_imports::extract(program, content_len),
++        }?;
++        Some(scopes.at(offset))
++    })
++}
++
+ /// Convert a Mago [`Hint`] AST node directly to a [`PhpType`].
+ ///
+ /// Since `Hint` only represents native PHP type syntax (no
+diff --git a/src/php_type/transform.rs b/src/php_type/transform.rs
+index 0b85f0a7cf98b88fa5dfb6a98fd545d6722b3ffc..5c03767733fdd8fe6c1e9d90e0db797580a3c782 100644
+--- a/src/php_type/transform.rs
++++ b/src/php_type/transform.rs
+@@ -174,6 +174,75 @@ impl PhpType {
+         }
+     }
+ 
++    /// Transform only this node's names; children retain their identity.
++    /// A structured walk can therefore resolve every name once.
++    pub(crate) fn resolve_root_names(&self, resolver: &dyn Fn(&str) -> String) -> PhpType {
++        let resolve = |name: &Atom| -> Atom {
++            if is_keyword_type(name) {
++                *name
++            } else {
++                atom(&resolver(name))
++            }
++        };
++        match self.raw_kind() {
++            TypeKind::Named(name) => {
++                let resolved = resolve(name);
++                if resolved == *name {
++                    self.clone()
++                } else {
++                    PhpType::named(resolved)
++                }
++            }
++            TypeKind::Generic(g) => {
++                let name = resolve(&g.name);
++                if name == g.name {
++                    self.clone()
++                } else {
++                    PhpType::generic_atom(name, g.args.clone())
++                }
++            }
++            TypeKind::Callable(c) => {
++                let kind = resolve(&c.kind);
++                if kind == c.kind {
++                    self.clone()
++                } else {
++                    PhpType::callable_type(CallableType {
++                        kind,
++                        params: c.params.clone(),
++                        return_type: c.return_type.clone(),
++                    })
++                }
++            }
++            TypeKind::StaticType(name) => PhpType::static_type(atom(&resolver(name))),
++            TypeKind::ThisType(name) => PhpType::this_type(atom(&resolver(name))),
++            TypeKind::ArrayShape(entries)
++                if entries
++                    .iter()
++                    .any(|e| e.key.as_deref().and_then(class_constant_key).is_some()) =>
++            {
++                PhpType::array_shape(
++                    entries
++                        .iter()
++                        .map(|entry| ShapeEntry {
++                            key: entry
++                                .key
++                                .as_deref()
++                                .map(|key| match class_constant_key(key) {
++                                    Some((class, constant)) => {
++                                        format!("{}::{constant}", resolve(&atom(class)))
++                                    }
++                                    None => key.to_owned(),
++                                }),
++                            value_type: entry.value_type.clone(),
++                            optional: entry.optional,
++                        })
++                        .collect(),
++                )
++            }
++            _ => self.clone(),
++        }
++    }
++
+     /// Produce a new `PhpType` with all class names resolved through
+     /// the provided callback.
+     ///
+diff --git a/src/type_engine/call_resolution/mod.rs b/src/type_engine/call_resolution/mod.rs
+index a65feb0898820ca089cae8a125643d434f22da8f..ce71559d94e24a966580a95ef6f7418a040670b1 100644
+--- a/src/type_engine/call_resolution/mod.rs
++++ b/src/type_engine/call_resolution/mod.rs
+@@ -88,7 +88,8 @@ pub(crate) use target_cache::{
+ pub(crate) use template_binding::{TemplateCallee, bind_template_args, instantiate_class};
+ pub(crate) use template_subs::{
+     array_literal_shape_type_with, build_call_template_subs, evaluate_constant_operands,
+-    finish_template_subs, generalize_object_template_arg, self_bound_template_params,
++    finish_template_subs, generalize_object_template_arg, resolve_constant_table_operand,
++    self_bound_template_params,
+ };
+ 
+ pub(crate) use callable_target::callable_type_as_target;
+diff --git a/src/type_engine/call_resolution/template_subs.rs b/src/type_engine/call_resolution/template_subs.rs
+index 73efea8b37216ee85077456f049aa227deeebdcb..a81fb9f9552936e47d125e4d1c4b933183d07225 100644
+--- a/src/type_engine/call_resolution/template_subs.rs
++++ b/src/type_engine/call_resolution/template_subs.rs
+@@ -1058,6 +1058,20 @@ pub(crate) fn type_operator_bound_literal(
+         .filter(|ty| matches!(ty.kind(), TypeKind::Literal(_)))
+ }
+ 
++/// Resolve a single named operator operand as an indexed constant table.
++/// No enum/class-name inference is performed here: unresolved names must still
++/// pass through the declaration's class import qualification.
++pub(crate) fn resolve_constant_table_operand(
++    name: &str,
++    ctx: &ResolutionCtx<'_>,
++) -> Option<PhpType> {
++    if name.contains("::") {
++        return None;
++    }
++    let value = resolve_operand_constant_value(name, ctx)?;
++    array_literal_shape_type(&value, ctx)
++}
++
+ /// The array shape a constant read through a type operator describes.
+ ///
+ /// `key-of<ID_TABLE>` and `ID_TABLE[K]` name an operand as concrete as an
+diff --git a/src/type_engine/resolver/mod.rs b/src/type_engine/resolver/mod.rs
+index a6b8ce46495ade32027b1860c685cdd879c54a45..9966904316db8dcccf90e693c93cde0c1860a633 100644
+--- a/src/type_engine/resolver/mod.rs
++++ b/src/type_engine/resolver/mod.rs
+@@ -1683,7 +1683,7 @@ fn resolve_variable_fallback(
+     // ── `$var::` where `$var` holds a class-string ──
+     if access_kind == AccessKind::DoubleColon {
+         let class_string_targets =
+-            crate::type_engine::variable::class_string_resolution::resolve_class_string_targets(
++            crate::type_engine::variable::class_string_resolution::resolve_class_string_target_types(
+                 var_name,
+                 effective_class,
+                 all_classes,
+@@ -1692,11 +1692,17 @@ fn resolve_variable_fallback(
+                 class_loader,
+                 ctx.backend,
+             );
+-        if !class_string_targets.is_empty() {
+-            return class_string_targets
+-                .into_iter()
+-                .map(ResolvedType::from_class)
+-                .collect();
++        // A loaded target carries unresolved peers with it. A set consisting
++        // only of proven literal class names is authoritative even if none
++        // loads; falling back could resurrect an unreachable coalesce arm.
++        let only_proven_names = !class_string_targets.is_empty()
++            && class_string_targets.iter().all(|value| matches!(value.type_string.raw_kind(), TypeKind::Named(name) if name.starts_with('\\')));
++        if only_proven_names
++            || class_string_targets
++                .iter()
++                .any(|value| value.class_info.is_some())
++        {
++            return class_string_targets;
+         }
+     }
+ 
+diff --git a/src/type_engine/types/conditional.rs b/src/type_engine/types/conditional.rs
+index 936085bcb970930812e9418ceb34ef90cbffc22f..7d4cfc5d8cdc0af7965ebf8e27e2df1578bcce6e 100644
+--- a/src/type_engine/types/conditional.rs
++++ b/src/type_engine/types/conditional.rs
+@@ -1701,7 +1701,11 @@ fn try_resolve_with_template_default(
+         }
+     } else if let TypeKind::Named(s) = condition.kind() {
+         match default_value.kind() {
+-            TypeKind::Named(dv) => dv == s,
++            // Both values are already semantic names. A leading root marker
++            // records absolute provenance; it does not change class identity.
++            // Keep the entire remaining FQN: short-name comparison or loading
++            // here would reintroduce the consuming file's import ambiguity.
++            TypeKind::Named(dv) => dv.trim_start_matches('\\') == s.trim_start_matches('\\'),
+             _ => false,
+         }
+     } else {
+@@ -2627,4 +2631,36 @@ mod tests {
+         assert_eq!(resolve("$id").as_deref(), Some("Sync"));
+         assert_eq!(resolve("$id, false").as_deref(), Some("Async"));
+     }
++
++    #[test]
++    fn class_template_condition_preserves_absolute_name_identity() {
++        let condition = PhpType::parse("(T is Exception ? string : int)");
++        let values = HashMap::from([("T".to_owned(), PhpType::parse("\\Exception"))]);
++        assert_eq!(
++            resolve_conditional_from_values(&condition, &values),
++            Some(PhpType::parse("string")),
++        );
++        // The root marker may instead be retained on the condition side.
++        let absolute_condition = PhpType::parse("(T is \\Exception ? string : int)");
++        let unrooted_values = HashMap::from([("T".to_owned(), PhpType::parse("Exception"))]);
++        assert_eq!(
++            resolve_conditional_from_values(&absolute_condition, &unrooted_values),
++            Some(PhpType::parse("string")),
++        );
++    }
++
++    #[test]
++    fn class_template_condition_keeps_distinct_fully_qualified_names() {
++        let condition = PhpType::parse("(T is Library\\Exception ? string : int)");
++        let values = HashMap::from([("T".to_owned(), PhpType::parse("\\Other\\Exception"))]);
++        assert_eq!(
++            resolve_conditional_from_values(&condition, &values),
++            Some(PhpType::parse("int")),
++        );
++        let global_values = HashMap::from([("T".to_owned(), PhpType::parse("\\Exception"))]);
++        assert_eq!(
++            resolve_conditional_from_values(&condition, &global_values),
++            Some(PhpType::parse("int")),
++        );
++    }
+ }
+diff --git a/src/type_engine/types/resolution.rs b/src/type_engine/types/resolution.rs
+index e82de754bacbb815ac228e103a2e7b1eeca7add8..0bdc8c100fb26b8748631b82566224cc362923a0 100644
+--- a/src/type_engine/types/resolution.rs
++++ b/src/type_engine/types/resolution.rs
+@@ -714,38 +714,138 @@ pub(crate) fn expand_nested_type_aliases(
+     all_classes: &[Arc<ClassInfo>],
+     class_loader: &dyn Fn(&str) -> Option<Arc<ClassInfo>>,
+ ) -> Option<PhpType> {
+-    // Aliases are declared on a class in the file, so a file that declares
+-    // none cannot name one.
+     if all_classes.iter().all(|c| c.type_aliases.is_empty()) {
+         return None;
+     }
+-    fn walk(
+-        ty: &PhpType,
+-        depth: u8,
+-        owning_class_name: &str,
+-        all_classes: &[Arc<ClassInfo>],
+-        class_loader: &dyn Fn(&str) -> Option<Arc<ClassInfo>>,
+-    ) -> PhpType {
++    let walker = TypeAliasNameWalk {
++        owning_class_name,
++        all_classes,
++        class_loader,
++        resolve_name: None,
++        constant_operand: None,
++        preserve_name: &|_| false,
++        has_aliases: true,
++    };
++    let expanded = walker.walk(ty, 0, true, false);
++    (expanded != *ty).then_some(expanded)
++}
++
++/// Expand aliases before qualifying written names. Alias bodies are already
++/// resolved in their declaration scope: false means canonical metadata and
++/// must never be interpreted using the caller's imports. Template names remain
++/// unmarked so the existing refinement comparisons keep their meaning.
++pub(crate) fn expand_nested_type_aliases_with_names(
++    ty: &PhpType,
++    owning_class_name: &str,
++    all_classes: &[Arc<ClassInfo>],
++    class_loader: &dyn Fn(&str) -> Option<Arc<ClassInfo>>,
++    resolve_name: &dyn Fn(&str, bool) -> String,
++    preserve_name: &dyn Fn(&str) -> bool,
++    constant_operand: &dyn Fn(&str, bool) -> Option<PhpType>,
++) -> PhpType {
++    TypeAliasNameWalk {
++        owning_class_name,
++        all_classes,
++        class_loader,
++        resolve_name: Some(resolve_name),
++        constant_operand: Some(constant_operand),
++        preserve_name,
++        has_aliases: all_classes
++            .iter()
++            .any(|class| !class.type_aliases.is_empty()),
++    }
++    .walk(ty, 0, true, false)
++}
++
++// Resolve one name, distinguishing written source from canonical metadata.
++type AliasNameResolver<'a> = &'a dyn Fn(&str, bool) -> String;
++type AliasConstantResolver<'a> = &'a dyn Fn(&str, bool) -> Option<PhpType>;
++
++struct TypeAliasNameWalk<'a> {
++    owning_class_name: &'a str,
++    all_classes: &'a [Arc<ClassInfo>],
++    class_loader: &'a dyn Fn(&str) -> Option<Arc<ClassInfo>>,
++    resolve_name: Option<AliasNameResolver<'a>>,
++    constant_operand: Option<AliasConstantResolver<'a>>,
++    preserve_name: &'a dyn Fn(&str) -> bool,
++    has_aliases: bool,
++}
++
++impl TypeAliasNameWalk<'_> {
++    /// A constant table is semantic metadata from its own declaration.
++    /// Root its names without consumer aliases or template-name placeholders.
++    fn semantic_names(&self, ty: &PhpType) -> PhpType {
++        let Some(resolve) = self.resolve_name else {
++            return ty.clone();
++        };
++        if matches!(ty.raw_kind(), TypeKind::TemplateParam(_, _)) {
++            return ty.clone();
++        }
++        let mapped = ty.map_children(&|child| self.semantic_names(child));
++        mapped.resolve_root_names(&|name| resolve(name, false))
++    }
++
++    fn walk(&self, ty: &PhpType, depth: u8, written: bool, operator_operand: bool) -> PhpType {
+         if depth >= 10 {
++            // Keep the ordinary API's existing cycle boundary. Source mode must
++            // not publish an unresolved alias as a different loaded class.
++            return if self.resolve_name.is_some() {
++                PhpType::mixed()
++            } else {
++                ty.clone()
++            };
++        }
++        if self.resolve_name.is_some() && matches!(ty.raw_kind(), TypeKind::TemplateParam(_, _)) {
++            // A bound is semantic metadata, not another written source hint.
+             return ty.clone();
+         }
+-        if matches!(ty.kind(), TypeKind::Named(_)) {
+-            return match resolve_type_alias_typed(ty, owning_class_name, all_classes, class_loader)
++        let kind = if self.resolve_name.is_some() {
++            ty.raw_kind()
++        } else {
++            ty.kind()
++        };
++        if let TypeKind::Named(name) = kind {
++            if written && (self.preserve_name)(name) {
++                return ty.clone();
++            }
++            if self.has_aliases
++                && let Some(expanded) = resolve_type_alias_typed(
++                    ty,
++                    self.owning_class_name,
++                    self.all_classes,
++                    self.class_loader,
++                )
+             {
+-                Some(expanded) => walk(
+-                    &expanded,
+-                    depth + 1,
+-                    owning_class_name,
+-                    all_classes,
+-                    class_loader,
+-                ),
+-                None => ty.clone(),
+-            };
++                return self.walk(&expanded, depth + 1, false, operator_operand);
++            }
++            if operator_operand
++                && let Some(resolve) = self.constant_operand
++                && let Some(table) = resolve(name, written)
++            {
++                // A proven constant is not a class reference. Resolve it only
++                // after aliases have had their existing first claim.
++                return self.semantic_names(&table);
++            }
++            if self.resolve_name.is_none() {
++                return ty.clone();
++            }
++        }
++        let child_is_operand = matches!(
++            ty.raw_kind(),
++            TypeKind::KeyOf(_) | TypeKind::ValueOf(_) | TypeKind::IndexAccess(_, _)
++        );
++        let mapped = ty.map_children(&|child| self.walk(child, depth, written, child_is_operand));
++        match self.resolve_name {
++            Some(resolve) => mapped.resolve_root_names(&|name| {
++                if written && (self.preserve_name)(name) {
++                    name.to_owned()
++                } else {
++                    resolve(name, written)
++                }
++            }),
++            None => mapped,
+         }
+-        ty.map_children(&|child| walk(child, depth, owning_class_name, all_classes, class_loader))
+     }
+-    let expanded = walk(ty, 0, owning_class_name, all_classes, class_loader);
+-    (expanded != *ty).then_some(expanded)
+ }
+ 
+ /// [`expand_nested_type_aliases`] for a type read off a member of `class`,
+@@ -975,3 +1075,107 @@ fn expand_aliases_in_source(
+     }
+     ty.map_children(&|child| expand_aliases_in_source(child, source_class, class_loader, visiting))
+ }
++
++#[cfg(test)]
++mod operator_operand_provenance_tests {
++    use super::*;
++
++    #[test]
++    fn proven_constant_operand_precedes_class_qualification_only_in_an_operator() {
++        let table = PhpType::parse("array{known: int}");
++        let qualified = |name: &str, written: bool| {
++            if written {
++                format!("\\Consumer\\{name}")
++            } else {
++                format!("\\{name}")
++            }
++        };
++        let resolve_table = |name: &str, _: bool| (name == "TABLE").then(|| table.clone());
++        let operand = expand_nested_type_aliases_with_names(
++            &PhpType::parse("key-of<TABLE>"),
++            "",
++            &[],
++            &|_| None,
++            &qualified,
++            &|_| false,
++            &resolve_table,
++        );
++        assert_eq!(operand, PhpType::key_of(table.clone()));
++        let class = expand_nested_type_aliases_with_names(
++            &PhpType::parse("TABLE"),
++            "",
++            &[],
++            &|_| None,
++            &qualified,
++            &|_| false,
++            &resolve_table,
++        );
++        assert_eq!(class, PhpType::parse("\\Consumer\\TABLE"));
++        let unresolved = expand_nested_type_aliases_with_names(
++            &PhpType::parse("value-of<MissingEnum>"),
++            "",
++            &[],
++            &|_| None,
++            &qualified,
++            &|_| false,
++            &resolve_table,
++        );
++        assert_eq!(
++            unresolved,
++            PhpType::parse("value-of<\\Consumer\\MissingEnum>")
++        );
++    }
++
++    #[test]
++    fn type_alias_keeps_precedence_over_same_named_constant() {
++        let mut owner = ClassInfo {
++            name: atom("Owner"),
++            ..Default::default()
++        };
++        let table = PhpType::parse("array{alias_key: int}");
++        owner
++            .type_aliases
++            .insert(atom("TABLE"), TypeAliasDef::Local(table.clone()));
++        let result = expand_nested_type_aliases_with_names(
++            &PhpType::parse("key-of<TABLE>"),
++            "Owner",
++            &[Arc::new(owner)],
++            &|_| None,
++            &|name, _| format!("\\{name}"),
++            &|_| false,
++            &|_, _| panic!("expanded alias must take precedence over constant lookup"),
++        );
++        assert_eq!(result, PhpType::key_of(table));
++    }
++
++    #[test]
++    fn constant_table_names_do_not_use_consumer_templates_or_type_aliases() {
++        let mut consumer = ClassInfo {
++            name: atom("Consumer"),
++            ..Default::default()
++        };
++        consumer
++            .type_aliases
++            .insert(atom("T"), TypeAliasDef::Local(PhpType::parse("int")));
++        let table = PhpType::parse("array{record: class-string<T>}");
++        let result = expand_nested_type_aliases_with_names(
++            &PhpType::parse("value-of<TABLE>"),
++            "Consumer",
++            &[Arc::new(consumer)],
++            &|_| None,
++            &|name, written| {
++                if written {
++                    format!("\\Consumer\\{name}")
++                } else {
++                    format!("\\{name}")
++                }
++            },
++            &|name| name == "T",
++            &|name, _| (name == "TABLE").then(|| table.clone()),
++        );
++        assert_eq!(
++            result,
++            PhpType::value_of(PhpType::parse("array{record: class-string<\\T>}")),
++        );
++    }
++}
+diff --git a/src/type_engine/variable/class_string_resolution.rs b/src/type_engine/variable/class_string_resolution.rs
+index 357eb23263b054fc7852ff2bb13918e6bf5aabd5..e1aac51ccc859b578d9d5ff693972dc58ee6232f 100644
+--- a/src/type_engine/variable/class_string_resolution.rs
++++ b/src/type_engine/variable/class_string_resolution.rs
+@@ -15,47 +15,76 @@ use mago_syntax::cst::*;
+ use crate::atom::bytes_to_str;
+ use crate::class_lookup::resolve_class_keyword;
+ use crate::parser::with_parsed_program;
+-use crate::types::ClassInfo;
+-use crate::util::short_name;
++use crate::php_type::PhpType;
++use crate::types::{ClassInfo, ResolvedType};
+ 
+ use crate::type_engine::conditional_resolution::extract_class_string_from_expr;
+ use crate::type_engine::resolver::VarResolutionCtx;
+ 
+-/// Resolve the class a `::class` literal names, after `self`/`static`/
+-/// `parent` have already been substituted, and append it to `results`.
+-///
+-/// A same-file class is preferred for a bare name, since that is the one
+-/// the file means and it is already loaded.  A *qualified* name spells
+-/// where the class lives, so it goes straight to the loader: matching it
+-/// against a same-file class by short name alone would pick a namespace
+-/// mate that merely shares the last segment (`Consumer\Pen` standing in
+-/// for `App\Support\Pen`).
+-fn push_class_string_target(name: &str, ctx: &VarResolutionCtx<'_>, results: &mut Vec<ClassInfo>) {
+-    let local = (!name.contains('\\'))
+-        .then(|| ctx.all_classes.iter().find(|c| c.name == short_name(name)))
+-        .flatten();
+-    if let Some(cls) = local {
+-        ClassInfo::push_unique(results, ClassInfo::clone(cls));
++/// Resolve a written class literal against its lexical CLASS import table,
++/// then perform an exact lookup. Semantic keyword replacements arrive rooted.
++fn push_class_string_target(
++    name: &str,
++    ctx: &VarResolutionCtx<'_>,
++    results: &mut Vec<ResolvedType>,
++) {
++    let canonical = if name.starts_with('\\') {
++        name.to_owned()
++    } else if let Some(imports) =
++        crate::parser::class_source_imports(ctx.content, ctx.cursor_offset)
++    {
++        format!(
++            "\\{}",
++            imports
++                .resolve_source_reference(name)
++                .trim_start_matches('\\')
++        )
++    } else {
++        // Missing source authority is unknown, never an implicit global lookup.
++        ResolvedType::push_unique(results, ResolvedType::from_type_string(PhpType::mixed()));
+         return;
+-    }
+-    let fqn = crate::util::resolve_source_class_name(
+-        name,
+-        ctx.current_class.file_namespace.as_deref(),
+-        ctx.all_classes,
+-        ctx.class_loader,
+-    );
+-    if let Some(cls) = (ctx.class_loader)(&fqn) {
+-        ClassInfo::push_unique(results, Arc::unwrap_or_clone(cls));
++    };
++    if let Some(cls) = (ctx.class_loader)(&canonical) {
++        ResolvedType::push_unique(results, ResolvedType::from_arc(cls));
++    } else {
++        ResolvedType::push_unique(
++            results,
++            ResolvedType::from_type_string(PhpType::named(crate::atom::atom(&canonical))),
++        );
+     }
+ }
+ 
++/// Preserve the existing known-class projection for consumers that do not
++/// request alternative coverage. The typed entry point performs the same walk.
++pub(in crate::type_engine) fn resolve_class_string_targets(
++    var_name: &str,
++    current_class: &ClassInfo,
++    all_classes: &[Arc<ClassInfo>],
++    content: &str,
++    cursor_offset: u32,
++    class_loader: &dyn Fn(&str) -> Option<Arc<ClassInfo>>,
++    backend: Option<&crate::Backend>,
++) -> Vec<ClassInfo> {
++    resolve_class_string_target_types(
++        var_name,
++        current_class,
++        all_classes,
++        content,
++        cursor_offset,
++        class_loader,
++        backend,
++    )
++    .into_iter()
++    .filter_map(|value| value.class_info.map(Arc::unwrap_or_clone))
++    .collect()
++}
+ /// Resolve a `$variable` that holds a class-string (e.g. `$cls = User::class`)
+ /// to the referenced class(es).
+ ///
+ /// Instead of resolving the variable to its *value type* (`string`),
+ /// this resolves it to the *referenced class* so that static members
+ /// are offered — see the module docs for the supported patterns.
+-pub(in crate::type_engine) fn resolve_class_string_targets(
++pub(in crate::type_engine) fn resolve_class_string_target_types(
+     var_name: &str,
+     current_class: &ClassInfo,
+     all_classes: &[Arc<ClassInfo>],
+@@ -63,7 +92,8 @@ pub(in crate::type_engine) fn resolve_class_string_targets(
+     cursor_offset: u32,
+     class_loader: &dyn Fn(&str) -> Option<Arc<ClassInfo>>,
+     backend: Option<&crate::Backend>,
+-) -> Vec<ClassInfo> {
++) -> Vec<ResolvedType> {
++    let _parse_cache = crate::parser::with_parse_cache(content);
+     with_parsed_program(
+         content,
+         "resolve_class_string_targets",
+@@ -89,7 +119,7 @@ pub(in crate::type_engine) fn resolve_class_string_targets(
+ fn resolve_class_string_in_statements<'b>(
+     statements: impl Iterator<Item = &'b Statement<'b>>,
+     ctx: &VarResolutionCtx<'_>,
+-) -> Vec<ClassInfo> {
++) -> Vec<ResolvedType> {
+     let stmts: Vec<&Statement> = statements.collect();
+ 
+     // Check class bodies first (same pattern as resolve_variable_in_statements).
+@@ -124,10 +154,13 @@ fn resolve_class_string_in_statements<'b>(
+                 }
+             }
+             Statement::Namespace(ns) => {
+-                let results = resolve_class_string_in_statements(ns.statements().iter(), ctx);
+-                if !results.is_empty() {
+-                    return results;
++                let span = ns.span();
++                if ctx.cursor_offset < span.start.offset || ctx.cursor_offset > span.end.offset {
++                    continue;
+                 }
++                // The owning namespace's literal proof remains authoritative
++                // even when no target can be loaded. Do not scan a peer block.
++                return resolve_class_string_in_statements(ns.statements().iter(), ctx);
+             }
+             Statement::Function(func) => {
+                 let body_start = func.body.left_brace.start.offset;
+@@ -152,7 +185,7 @@ fn resolve_class_string_in_statements<'b>(
+ fn resolve_class_string_in_members<'b>(
+     members: impl Iterator<Item = &'b ClassLikeMember<'b>>,
+     ctx: &VarResolutionCtx<'_>,
+-) -> Vec<ClassInfo> {
++) -> Vec<ResolvedType> {
+     for member in members {
+         if let ClassLikeMember::Method(method) = member {
+             let body = match &method.body {
+@@ -175,7 +208,7 @@ fn resolve_class_string_in_members<'b>(
+ fn walk_class_string_assignments<'b>(
+     statements: impl Iterator<Item = &'b Statement<'b>>,
+     ctx: &VarResolutionCtx<'_>,
+-    results: &mut Vec<ClassInfo>,
++    results: &mut Vec<ResolvedType>,
+ ) {
+     // Track variables assigned an array literal of `::class` entries
+     // (e.g. `$repos = [Foo::class, Bar::class]`) so that a later
+@@ -183,7 +216,7 @@ fn walk_class_string_assignments<'b>(
+     // union of element classes.  Assignments precede the foreach in the
+     // statement stream, so recording them as we go makes the mapping
+     // available by the time the foreach is processed.
+-    let mut array_class_vars: std::collections::HashMap<String, Vec<String>> =
++    let mut array_class_vars: std::collections::HashMap<String, Vec<ClassStringAlternative>> =
+         std::collections::HashMap::new();
+     for stmt in statements {
+         if stmt.span().start.offset >= ctx.cursor_offset {
+@@ -230,15 +263,8 @@ fn walk_class_string_assignments<'b>(
+                     }
+                     if !class_names.is_empty() {
+                         results.clear();
+-                        for cn in class_names {
+-                            let resolved_name = if let Some(resolved) =
+-                                resolve_class_keyword(&cn, Some(ctx.current_class))
+-                            {
+-                                resolved
+-                            } else {
+-                                cn
+-                            };
+-                            push_class_string_target(&resolved_name, ctx, results);
++                        for alternative in class_names {
++                            push_class_string_alternative(alternative, ctx, results);
+                         }
+                     }
+                 }
+@@ -327,7 +353,7 @@ fn collect_nested_statements<'b>(stmt: &'b Statement<'b>) -> Vec<&'b Statement<'
+ fn check_class_string_assignment(
+     expr: &Expression<'_>,
+     ctx: &VarResolutionCtx<'_>,
+-    results: &mut Vec<ClassInfo>,
++    results: &mut Vec<ResolvedType>,
+ ) {
+     let Expression::Assignment(assignment) = expr else {
+         return;
+@@ -346,31 +372,58 @@ fn check_class_string_assignment(
+     let class_names = extract_class_string_names(assignment.rhs);
+     // Clear previous results — the last unconditional assignment wins.
+     results.clear();
+-    for name in class_names {
+-        let resolved_name =
+-            if let Some(resolved) = resolve_class_keyword(&name, Some(ctx.current_class)) {
+-                resolved
+-            } else {
+-                name
+-            };
+-        push_class_string_target(&resolved_name, ctx, results);
++    for alternative in class_names {
++        push_class_string_alternative(alternative, ctx, results);
+     }
+ }
+ 
+-/// Extract class names from `::class` expressions, recursing into
+-/// match arms, ternary branches, null-coalescing, and parenthesized
+-/// expressions.
+-fn extract_class_string_names(expr: &Expression<'_>) -> Vec<String> {
++/// A syntactic class-string arm; null stays distinct so `??` can remove it.
++#[derive(Clone)]
++enum ClassStringAlternative {
++    Name(String),
++    Null,
++    Unknown,
++}
++
++fn push_class_string_alternative(
++    alternative: ClassStringAlternative,
++    ctx: &VarResolutionCtx<'_>,
++    results: &mut Vec<ResolvedType>,
++) {
++    match alternative {
++        ClassStringAlternative::Name(name) => {
++            let resolved_name = resolve_class_keyword(&name, Some(ctx.current_class))
++                .map(|canonical| format!("\\{}", canonical.trim_start_matches('\\')))
++                .unwrap_or(name);
++            push_class_string_target(&resolved_name, ctx, results);
++        }
++        ClassStringAlternative::Null => {
++            ResolvedType::push_unique(results, ResolvedType::from_type_string(PhpType::null()));
++        }
++        ClassStringAlternative::Unknown => {
++            ResolvedType::push_unique(results, ResolvedType::from_type_string(PhpType::mixed()));
++        }
++    }
++}
++
++/// Extract value alternatives from the already parsed expression. This does
++/// not infer an opaque expression's type; the ordinary forward walker still
++/// supplies types when no class target was proven here.
++fn extract_class_string_names(expr: &Expression<'_>) -> Vec<ClassStringAlternative> {
+     if let Some(name) = extract_class_string_from_expr(expr) {
+-        return vec![name];
++        return vec![ClassStringAlternative::Name(name)];
+     }
+     match expr {
+         Expression::Parenthesized(p) => extract_class_string_names(p.expression),
++        Expression::Literal(Literal::Null(_)) => vec![ClassStringAlternative::Null],
+         Expression::Match(match_expr) => {
+             let mut names = Vec::new();
+             for arm in match_expr.arms.iter() {
+                 names.extend(extract_class_string_names(arm.expression()));
+             }
++            if names.is_empty() {
++                names.push(ClassStringAlternative::Unknown);
++            }
+             names
+         }
+         Expression::Conditional(cond) => {
+@@ -381,39 +434,39 @@ fn extract_class_string_names(expr: &Expression<'_>) -> Vec<String> {
+             names
+         }
+         Expression::Binary(binary) if binary.operator.is_null_coalesce() => {
+-            let mut names = Vec::new();
+-            names.extend(extract_class_string_names(binary.lhs));
+-            names.extend(extract_class_string_names(binary.rhs));
++            let mut names = extract_class_string_names(binary.lhs);
++            let may_be_null = names.iter().any(|name| {
++                matches!(
++                    name,
++                    ClassStringAlternative::Null | ClassStringAlternative::Unknown
++                )
++            });
++            names.retain(|name| !matches!(name, ClassStringAlternative::Null));
++            if may_be_null {
++                names.extend(extract_class_string_names(binary.rhs));
++            }
+             names
+         }
+-        _ => vec![],
++        _ => vec![ClassStringAlternative::Unknown],
+     }
+ }
+ 
+-/// Extract class names from array elements that are `::class` literals.
+-///
+-/// Handles `[Page::class, CustomPage::class]` and similar array
+-/// expressions used as foreach iterables.
+-fn extract_class_string_names_from_array(expr: &Expression<'_>) -> Vec<String> {
+-    match expr {
+-        Expression::Array(array) => {
+-            let mut names = Vec::new();
+-            for item in array.elements.iter() {
+-                if let ArrayElement::Value(val) = item {
+-                    names.extend(extract_class_string_names(val.value));
+-                }
+-            }
+-            names
+-        }
+-        Expression::LegacyArray(array) => {
+-            let mut names = Vec::new();
+-            for item in array.elements.iter() {
+-                if let ArrayElement::Value(val) = item {
+-                    names.extend(extract_class_string_names(val.value));
+-                }
+-            }
+-            names
++/// Keep each literal array value in source order, including opaque values.
++fn extract_class_string_names_from_array(expr: &Expression<'_>) -> Vec<ClassStringAlternative> {
++    let elements = match expr {
++        Expression::Array(array) => &array.elements,
++        Expression::LegacyArray(array) => &array.elements,
++        _ => return Vec::new(),
++    };
++    let mut names = Vec::new();
++    for item in elements.iter() {
++        if let ArrayElement::Value(val) = item {
++            names.extend(extract_class_string_names(val.value));
++        } else {
++            // This walker does not model keyed/spread entries. A known peer
++            // cannot make the unmodeled entry a complete receiver inventory.
++            names.push(ClassStringAlternative::Unknown);
+         }
+-        _ => vec![],
+     }
++    names
+ }
+diff --git a/src/type_engine/variable/forward_walk/diagnostic_walk.rs b/src/type_engine/variable/forward_walk/diagnostic_walk.rs
+index 66e59e1bfd12c3ea31d7e97d83af2877fb2edfee..332d9ff81d2c08e8c4d30e0b4e0c231bc718e406 100644
+--- a/src/type_engine/variable/forward_walk/diagnostic_walk.rs
++++ b/src/type_engine/variable/forward_walk/diagnostic_walk.rs
+@@ -750,7 +750,9 @@ pub(crate) fn seed_closure_params(
+             &pname,
+         )
+         .filter(|_| is_docblock_adjacent(ctx.content, fn_span_start as usize))
+-        .map(|t| super::param_seeding::resolve_docblock_param_type(&t, ctx));
++        .map(|t| {
++            super::param_seeding::resolve_docblock_param_type(&t, fn_span_start as usize, ctx)
++        });
+ 
+         // A template can take the `null` itself, so it keeps its own name
+         // (`@param T $t = null` stays `T`).
+@@ -1074,6 +1076,7 @@ fn walk_file_for_scopes(
+         targets,
+     };
+ 
++    let _parse_cache = crate::parser::with_parse_cache(content);
+     with_parsed_program(content, "build_diagnostic_scopes", |program, _content| {
+         // Walk all top-level statements, analyzing function/method
+         // bodies AND top-level code (assignments, expressions, if,
+diff --git a/src/type_engine/variable/forward_walk/param_seeding.rs b/src/type_engine/variable/forward_walk/param_seeding.rs
+index cc72c70c9cef0e3df4f1b4d30e959ed73d2bf4e2..5b36f9d803a2c0ca155940b19124eb58cfa86e70 100644
+--- a/src/type_engine/variable/forward_walk/param_seeding.rs
++++ b/src/type_engine/variable/forward_walk/param_seeding.rs
+@@ -219,15 +219,78 @@ fn finish_constant_operands(ty: &PhpType, ctx: &ForwardWalkCtx<'_>) -> Option<Ph
+ /// Reading the constant here means the body sees the keys the table
+ /// actually has, and the declaration is judged a refinement of the native
+ /// `string` hint rather than an operator nothing can compare.
+-pub(crate) fn resolve_docblock_param_type(raw: &PhpType, ctx: &ForwardWalkCtx<'_>) -> PhpType {
+-    let expanded = crate::type_engine::type_resolution::expand_nested_type_aliases(
++pub(crate) fn resolve_docblock_param_type(
++    raw: &PhpType,
++    decl_start: usize,
++    ctx: &ForwardWalkCtx<'_>,
++) -> PhpType {
++    // Preserve every declared placeholder, including unbounded templates.
++    // Do not mark them here: the existing unmarked-vs-refined comparison below
++    // deliberately precedes substitution of template bounds.
++    let declaration_templates = std::cell::OnceCell::new();
++    let preserve_name = |name: &str| {
++        ctx.current_class
++            .template_params
++            .iter()
++            .any(|p| p.as_str() == name)
++            || declaration_templates
++                .get_or_init(|| {
++                    super::super::resolution::declaration_template_names(ctx.content, decl_start)
++                })
++                .iter()
++                .any(|p| p == name)
++    };
++    let imports = std::cell::OnceCell::new();
++    let resolved = crate::type_engine::type_resolution::expand_nested_type_aliases_with_names(
+         raw,
+         &ctx.current_class.name,
+         ctx.all_classes,
+         ctx.class_loader,
++        &|name, written| {
++            if name.starts_with('\\')
++                || name.eq_ignore_ascii_case("self")
++                || name.eq_ignore_ascii_case("static")
++                || name.eq_ignore_ascii_case("parent")
++                || name == "$this"
++            {
++                return name.to_owned();
++            }
++            if !written {
++                // Alias bodies were already qualified by their declaration.
++                return format!("\\{}", name.trim_start_matches('\\'));
++            }
++            imports
++                .get_or_init(|| crate::parser::class_source_imports(ctx.content, decl_start as u32))
++                .as_ref()
++                .map_or_else(
++                    || "mixed".to_owned(),
++                    |imports| {
++                        format!(
++                            "\\{}",
++                            imports
++                                .resolve_source_reference(name)
++                                .trim_start_matches('\\')
++                        )
++                    },
++                )
++        },
++        &preserve_name,
++        &|name, written| {
++            let canonical;
++            let name = if written || name.starts_with('\\') {
++                name
++            } else {
++                canonical = format!("\\{name}");
++                &canonical
++            };
++            crate::type_engine::call_resolution::resolve_constant_table_operand(
++                name,
++                &ctx.as_resolution_ctx(),
++            )
++        },
+     );
+-    let raw = expanded.as_ref().unwrap_or(raw);
+-    let resolved = crate::util::resolve_php_type_names(raw, ctx.class_loader);
++    // Qualification does not replace the shared generic-default finishing.
++    let resolved = crate::util::fill_generic_type_defaults(&resolved, ctx.class_loader);
+     let resolved = bind_enclosing_self(&resolved, ctx).unwrap_or(resolved);
+     finish_constant_operands(&resolved, ctx).unwrap_or(resolved)
+ }
+@@ -243,7 +306,10 @@ fn bind_enclosing_self(ty: &PhpType, ctx: &ForwardWalkCtx<'_>) -> Option<PhpType
+     (!class.name.is_empty()
+         && class.kind != crate::types::ClassLikeKind::Trait
+         && ty.contains_bare_self())
+-    .then(|| ty.replace_bare_self(&class.fqn()))
++    .then(|| {
++        let canonical = format!("\\{}", class.fqn().trim_start_matches('\\'));
++        ty.replace_bare_self(&canonical)
++    })
+ }
+ 
+ /// The declaration a parameter belongs to, as far as resolving its type
+@@ -291,13 +357,46 @@ pub(crate) fn resolve_param_type(
+     // says (`bool $a = null` is `?bool`).
+     let default_is_null = crate::parser::param_default_is_null(param);
+     let accept_default = |ty: PhpType| if default_is_null { ty.or_null() } else { ty };
+-    let native_type = raw_native.clone().map(accept_default);
++    // A native hint is lexical source, unlike inherited/canonical hints.
++    // Resolve it before loading so an absent explicit import cannot fall
++    // through to an unrelated loaded global class with the same short name.
++    let qualified_native = raw_native.as_ref().map(|ty| {
++        // Scalars and keywords do not need import metadata at all.
++        let imports = std::cell::OnceCell::new();
++        ty.resolve_names(&|name| {
++            if name.starts_with('\\')
++                || name.eq_ignore_ascii_case("self")
++                || name.eq_ignore_ascii_case("static")
++                || name.eq_ignore_ascii_case("parent")
++                || name == "$this"
++            {
++                return name.to_owned();
++            }
++            imports
++                .get_or_init(|| {
++                    crate::parser::class_source_imports(ctx.content, param.span().start.offset)
++                })
++                .as_ref()
++                .map_or_else(
++                    || "mixed".to_owned(),
++                    |imports| {
++                        format!(
++                            "\\{}",
++                            imports
++                                .resolve_source_reference(name)
++                                .trim_start_matches('\\')
++                        )
++                    },
++                )
++        })
++    });
++    let native_type = qualified_native.clone().map(accept_default);
+     let native_type = native_type.as_ref();
+     // Eloquent scope Builder enrichment: when the enclosing class
+     // extends Eloquent Model and this is a scope method (convention
+     // or #[Scope] attribute), enrich bare `Builder` to
+     // `Builder<EnclosingModel>`.
+-    let enriched_type = raw_native
++    let enriched_type = qualified_native
+         .as_ref()
+         .and_then(|nt| {
+             if let Some(mname) = method_name {
+@@ -323,7 +422,7 @@ pub(crate) fn resolve_param_type(
+         method_span_start as usize,
+         pname,
+     )
+-    .map(|t| resolve_docblock_param_type(&t, ctx));
++    .map(|t| resolve_docblock_param_type(&t, method_span_start as usize, ctx));
+     let raw_docblock_type = unmarked_docblock_type.clone().map(|t| {
+         super::super::resolution::substitute_template_param_bounds(
+             t,
+@@ -480,8 +579,19 @@ pub(crate) fn resolve_param_type(
+                 )
+             })
+         }
++    } else if raw_native.is_some() {
++        // The source-native hint was already qualified. A missing class must
++        // stay unresolved; loading the raw merged declaration could undo that
++        // authority through a same-named global class. Genuine inherited
++        // refinements were selected above before this fallback.
++        build_type_string_only_result(
++            raw_docblock_type.as_ref(),
++            type_for_resolution,
++            ctx.content,
++            method_span_start as usize,
++        )
+     } else {
+-        // Try the merged class.
++        // An untyped method can still obtain its type from an interface.
+         try_resolve_from_merged_class(pname, method_name, ctx).unwrap_or_else(|| {
+             build_type_string_only_result(
+                 raw_docblock_type.as_ref(),
+@@ -602,9 +712,9 @@ fn prototype_param_refinement(
+ /// back out so the walker seeds the body with the refined type instead of
+ /// the restated hint.
+ ///
+-/// Only consulted for parameters whose native hint names a class and that
+-/// carry no `@param` of their own, so the merged-class lookup stays off
+-/// the common path.
++/// Consulted only without an overriding `@param` on a class with ancestors.
++/// Broad native hints such as `object` can carry a substituted interface
++/// refinement too; the matching native declaration below proves its origin.
+ fn inherited_param_refinement(
+     pname: &str,
+     method_name: Option<&str>,
+@@ -613,8 +723,6 @@ fn inherited_param_refinement(
+ ) -> Option<PhpType> {
+     let method_name = method_name?;
+     let native = native_type?;
+-    // Only a class-named hint can be refined by an inherited docblock.
+-    native.base_name()?;
+     let class = ctx.current_class;
+     if class.name.is_empty()
+         || (class.parent_class.is_none() && class.interfaces.is_empty() && class.mixins.is_empty())
+diff --git a/src/type_engine/variable/resolution.rs b/src/type_engine/variable/resolution.rs
+index 5eba21b7d5ceb522e7080e0f2625345419a7440f..4b4a6631cc7137d983d6ab1cf482a91a7c3fda2a 100644
+--- a/src/type_engine/variable/resolution.rs
++++ b/src/type_engine/variable/resolution.rs
+@@ -264,7 +264,10 @@ pub(super) fn enrich_builder_type_in_scope(
+         TypeKind::Named(n) => n.as_str(),
+         _ => return None,
+     };
+-    let is_eloquent_builder = type_name == ELOQUENT_BUILDER_FQN || type_name == "Builder";
++    let is_eloquent_builder = type_name
++        .trim_start_matches('\\')
++        .eq_ignore_ascii_case(ELOQUENT_BUILDER_FQN)
++        || type_name == "Builder";
+     if !is_eloquent_builder {
+         return None;
+     }
+@@ -344,6 +347,7 @@ pub(crate) fn resolve_variable_types(
+         None => return vec![],
+     };
+ 
++    let _parse_cache = crate::parser::with_parse_cache(content);
+     let resolved = with_parsed_program(content, "resolve_variable_types", |program, _content| {
+         resolve_variable_types_in_program(
+             program,
+@@ -401,6 +405,7 @@ pub(crate) fn resolve_variable_types_with_callable_source(
+     source_ctx.var_name = &variable;
+     source_ctx.callable_source = Some(source);
+     source_ctx.top_level_scope = None;
++    let _parse_cache = crate::parser::with_parse_cache(ctx.content);
+     with_parsed_program(
+         ctx.content,
+         "resolve_callable_variable_values",
+@@ -1602,6 +1607,17 @@ pub(super) fn substitute_template_param_bounds(
+     ty.substitute(&subs)
+ }
+ 
++/// All template placeholders introduced by a declaration, including names
++/// without a bound. Source class qualification must leave these names alone.
++pub(super) fn declaration_template_names(content: &str, decl_start: usize) -> Vec<String> {
++    content
++        .get(..decl_start)
++        .and_then(extract_preceding_docblock)
++        .filter(|docblock| docblock.contains("template"))
++        .map(docblock::extract_template_params)
++        .unwrap_or_default()
++}
++
+ /// The markers [`bounded_template_markers`] builds for the declaration
+ /// starting at `decl_start`, or `None` when it declares no bounded template.
+ pub(crate) fn declaration_template_markers(
+diff --git a/src/util.rs b/src/util.rs
+index 5dd952182d3099e0bb7ee17dde2d21fd77d056e7..6056452ec7de649be5ace5e335262c8bc77429f7 100644
+--- a/src/util.rs
++++ b/src/util.rs
+@@ -247,7 +247,7 @@ pub(crate) fn resolve_php_type_names(
+ /// key slot for every consumer that reads the arguments positionally.
+ ///
+ /// [`build_generic_subs`]: crate::inheritance::build_generic_subs
+-fn fill_generic_type_defaults(
++pub(crate) fn fill_generic_type_defaults(
+     ty: &crate::php_type::PhpType,
+     class_loader: &dyn Fn(&str) -> Option<Arc<crate::types::ClassInfo>>,
+ ) -> crate::php_type::PhpType {
+diff --git a/tests/integration/call_hierarchy.rs b/tests/integration/call_hierarchy.rs
+index 4484ea1986365a48ed90dff4c10081a8ea36ace2..465c272abff9154d64c3847cf2b50435d575900e 100644
+--- a/tests/integration/call_hierarchy.rs
++++ b/tests/integration/call_hierarchy.rs
+@@ -7899,3 +7899,794 @@ async fn hierarchy_analysis_invocation_budget_preserves_known_edges_and_reports_
+     );
+     backend.shutdown().await.unwrap();
+ }
++
++// Source-only proposal: append to tests/integration/call_hierarchy.rs.
++// Reuses that module's actual Backend/public-handler helpers. Not executed.
++const F24_ALTERNATIVE_SOURCE: &str = concat!(
++    "<?php\r\n",
++    "final class StatusKnown { public function ping(): void {} }\r\n",
++    "final class StatusOther { public function ping(): void {} }\r\n",
++    "function probeKnown(StatusKnown $value): void { /* café 🐘 */ $value->ping(); }\r\n",
++    "function probeAlternatives(StatusKnown|StatusMissing $value): void { /* café 🐘 */ $value->ping(); }\r\n",
++    "function probeBothKnown(StatusKnown|StatusOther $value): void { /* café 🐘 */ $value->ping(); }\r\n",
++);
++async fn f24_alternative_reply(
++    name: &str,
++) -> (
++    Backend,
++    Url,
++    phpantom_lsp::HierarchyReply<CallHierarchyOutgoingCall>,
++) {
++    let backend = create_test_backend();
++    let uri = Url::parse("file:///f24-alternatives.php").unwrap();
++    open_php(&backend, &uri, F24_ALTERNATIVE_SOURCE).await;
++    let root = anonymous_hierarchy_prepare(&backend, &uri, F24_ALTERNATIVE_SOURCE, name).await;
++    let reply = hierarchy_analysis_outgoing(&backend, &root).await;
++    (backend, uri, reply)
++}
++#[tokio::test]
++async fn f24_alternative_single_known_positive() {
++    let (backend, uri, reply) = f24_alternative_reply("probeKnown(").await;
++    assert_eq!(reply.items.len(), 1);
++    assert_eq!(reply.items[0].to.uri, uri);
++    assert_eq!(
++        reply.items[0].to.data.as_ref().unwrap()["owner"],
++        "StatusKnown"
++    );
++    assert_eq!(reply.items[0].to.name, "ping");
++    assert_eq!(
++        reply.analysis.state,
++        phpantom_lsp::HierarchyAnalysisState::Resolved
++    );
++    assert!(reply.analysis.issues.is_empty());
++    backend.shutdown().await.unwrap();
++}
++#[tokio::test]
++async fn f24_alternative_missing_branch_cannot_be_certified_by_known_edge() {
++    use phpantom_lsp::{HierarchyAnalysisState as State, HierarchyIssueKind as Kind};
++    let (backend, uri, reply) = f24_alternative_reply("probeAlternatives(").await;
++    // Do not fix status by dropping the proven edge.
++    assert_eq!(reply.items.len(), 1);
++    assert_eq!(reply.items[0].to.uri, uri);
++    assert_eq!(
++        reply.items[0].to.data.as_ref().unwrap()["owner"],
++        "StatusKnown"
++    );
++    assert_eq!(reply.items[0].to.name, "ping");
++    let range = noncall_exact_range(
++        F24_ALTERNATIVE_SOURCE,
++        "function probeAlternatives(StatusKnown|StatusMissing $value): void { /* café 🐘 */ $value->ping(); }",
++        "ping",
++    );
++    assert_eq!(reply.items[0].from_ranges, [range]);
++    assert_eq!(reply.analysis.state, State::Partial);
++    assert!(
++        reply
++            .analysis
++            .issues
++            .iter()
++            .any(|issue| issue.kind == Kind::UnresolvedCall
++                && issue.uri == uri
++                && issue.range == range)
++    );
++    assert!(!reply.analysis.issues_truncated);
++    backend.shutdown().await.unwrap();
++}
++#[tokio::test]
++async fn f24_alternative_all_known_keeps_both_targets_and_resolved_status() {
++    let (backend, uri, reply) = f24_alternative_reply("probeBothKnown(").await;
++    let mut owners = reply
++        .items
++        .iter()
++        .map(|edge| {
++            assert_eq!(edge.to.uri, uri);
++            assert_eq!(edge.to.name, "ping");
++            edge.to.data.as_ref().unwrap()["owner"]
++                .as_str()
++                .unwrap()
++                .to_owned()
++        })
++        .collect::<Vec<_>>();
++    owners.sort();
++    assert_eq!(owners, ["StatusKnown", "StatusOther"]);
++    assert_eq!(
++        reply.analysis.state,
++        phpantom_lsp::HierarchyAnalysisState::Resolved
++    );
++    assert!(reply.analysis.issues.is_empty());
++    backend.shutdown().await.unwrap();
++}
++
++const F24_COVERAGE_CONTROLS: &str = concat!(
++    "<?php\r\n",
++    "interface F24Marker {}\r\n",
++    "class F24Base { public function ping(): void {} }\r\n",
++    "final class F24A extends F24Base implements F24Marker {}\r\n",
++    "final class F24B extends F24Base {}\r\n",
++    "/** @template T */ final class F24Box { public function ping(): void {} }\r\n",
++    "function intersectionControl(F24A&F24Marker $value): void { $value->ping(); }\r\n",
++    "/** @param F24Box<F24Missing> $value */ function genericControl(F24Box $value): void { $value->ping(); }\r\n",
++    "function nullsafeControl(?F24A $value): void { $value?->ping(); }\r\n",
++    "function nullablePartial(?F24A $value): void { $value->ping(); }\r\n",
++    "function inheritedControl(F24A|F24B $value): void { $value->ping(); }\r\n",
++    "function narrowedControl(F24A|F24Missing $value): void { if ($value instanceof F24A) { $value->ping(); } }\r\n",
++);
++
++async fn f24_coverage_control(name: &str, expected: phpantom_lsp::HierarchyAnalysisState) {
++    let backend = create_test_backend();
++    let uri = Url::parse("file:///f24-coverage-controls.php").unwrap();
++    open_php(&backend, &uri, F24_COVERAGE_CONTROLS).await;
++    let item = anonymous_hierarchy_prepare(&backend, &uri, F24_COVERAGE_CONTROLS, name).await;
++    let reply = hierarchy_analysis_outgoing(&backend, &item).await;
++    assert_eq!(
++        reply.items.len(),
++        1,
++        "all known declarations survive and inherited targets deduplicate"
++    );
++    assert_eq!(reply.items[0].to.name, "ping");
++    assert_eq!(reply.items[0].to.uri, uri);
++    assert_eq!(reply.items[0].from_ranges.len(), 1);
++    assert_eq!(reply.analysis.state, expected);
++    if expected == phpantom_lsp::HierarchyAnalysisState::Resolved {
++        assert!(reply.analysis.issues.is_empty());
++    } else {
++        assert!(reply.analysis.issues.iter().any(|issue| issue.kind
++            == phpantom_lsp::HierarchyIssueKind::UnresolvedCall
++            && issue.range == reply.items[0].from_ranges[0]
++            && issue.uri == uri));
++    }
++    assert!(!reply.analysis.issues_truncated);
++    backend.shutdown().await.unwrap();
++}
++
++#[tokio::test]
++async fn f24_alternative_intersection_uses_contributing_method() {
++    f24_coverage_control(
++        "intersectionControl(",
++        phpantom_lsp::HierarchyAnalysisState::Resolved,
++    )
++    .await;
++}
++#[tokio::test]
++async fn f24_alternative_generic_arguments_are_not_receivers() {
++    f24_coverage_control(
++        "genericControl(",
++        phpantom_lsp::HierarchyAnalysisState::Resolved,
++    )
++    .await;
++}
++#[tokio::test]
++async fn f24_alternative_nullsafe_short_circuit_is_complete() {
++    f24_coverage_control(
++        "nullsafeControl(",
++        phpantom_lsp::HierarchyAnalysisState::Resolved,
++    )
++    .await;
++}
++#[tokio::test]
++async fn f24_alternative_nullable_plain_call_is_partial() {
++    f24_coverage_control(
++        "nullablePartial(",
++        phpantom_lsp::HierarchyAnalysisState::Partial,
++    )
++    .await;
++}
++#[tokio::test]
++async fn f24_alternative_shared_inherited_declaration_is_complete() {
++    f24_coverage_control(
++        "inheritedControl(",
++        phpantom_lsp::HierarchyAnalysisState::Resolved,
++    )
++    .await;
++}
++#[tokio::test]
++async fn f24_alternative_flow_narrowing_is_authoritative() {
++    f24_coverage_control(
++        "narrowedControl(",
++        phpantom_lsp::HierarchyAnalysisState::Resolved,
++    )
++    .await;
++}
++
++const F24_QUALIFIED_CONTROLS: &str = concat!(
++    "<?php\r\n",
++    "namespace F24Targets { final class Alpha { public function ping(): void {} } }\r\n",
++    "namespace F24Consumer {\r\n",
++    "use F24Targets\\Alpha as Receiver;\r\n",
++    "function aliasControl(Receiver $value): void { /* café 🐘 */ $value->ping(); }\r\n",
++    "function qualifiedMissing(Receiver|\\F24Other\\Alpha $value): void { /* café 🐘 */ $value->ping(); }\r\n",
++    "}\r\n",
++);
++async fn f24_qualified_control(name: &str, expected: phpantom_lsp::HierarchyAnalysisState) {
++    let backend = create_test_backend();
++    let uri = Url::parse("file:///f24-qualified-controls.php").unwrap();
++    open_php(&backend, &uri, F24_QUALIFIED_CONTROLS).await;
++    let item = anonymous_hierarchy_prepare(&backend, &uri, F24_QUALIFIED_CONTROLS, name).await;
++    let reply = hierarchy_analysis_outgoing(&backend, &item).await;
++    assert_eq!(reply.items.len(), 1);
++    assert_eq!(reply.items[0].to.name, "ping");
++    assert_eq!(reply.items[0].to.uri, uri);
++    assert_eq!(
++        reply.items[0].to.data.as_ref().unwrap()["owner"],
++        "F24Targets\\Alpha"
++    );
++    assert_eq!(reply.analysis.state, expected);
++    if expected == phpantom_lsp::HierarchyAnalysisState::Resolved {
++        assert!(reply.analysis.issues.is_empty());
++    } else {
++        assert!(reply.analysis.issues.iter().any(|issue| issue.kind
++            == phpantom_lsp::HierarchyIssueKind::UnresolvedCall
++            && issue.uri == uri
++            && issue.range == reply.items[0].from_ranges[0]));
++    }
++    backend.shutdown().await.unwrap();
++}
++#[tokio::test]
++async fn f24_alternative_import_alias_preserves_known_target() {
++    f24_qualified_control(
++        "aliasControl(",
++        phpantom_lsp::HierarchyAnalysisState::Resolved,
++    )
++    .await;
++}
++#[tokio::test]
++async fn f24_alternative_missing_qualified_homonym_is_not_known() {
++    f24_qualified_control(
++        "qualifiedMissing(",
++        phpantom_lsp::HierarchyAnalysisState::Partial,
++    )
++    .await;
++}
++
++const F24_EXTRA_SOURCE: &str = r#"<?php
++namespace {
++    final class F24Collision { public function ping(): void {} }
++    final class F24StaticKnown { public static function ping(): void {} }
++    final class F24StaticOther { public static function ping(): void {} }
++    function classStringMissing(bool $choose): void {
++        $type = $choose ? F24StaticKnown::class : F24StaticMissing::class;
++        /* café 🐘 */ $type::ping();
++    }
++    function classStringOpaque(bool $choose, $dynamic): void {
++        $type = $choose ? F24StaticKnown::class : $dynamic;
++        $type::ping();
++    }
++    function nullCoalesceKnown(): void { $type = null ?? F24StaticKnown::class; $type::ping(); }
++    function nonNullCoalesceKnown(): void { $type = F24StaticKnown::class ?? F24StaticOther::class; $type::ping(); }
++    function missingCoalesceNoKnown(): void { $type = F24StaticMissing::class ?? F24StaticKnown::class; $type::ping(); }
++    function classStringBoth(bool $choose): void {
++        $type = $choose ? F24StaticKnown::class : F24StaticOther::class;
++        /* café 🐘 */ $type::ping();
++    }
++}
++namespace F24AliasCtx {
++    use \F24Collision as Loaded;
++    use \F24Absent\F24Collision as F24Collision;
++    function importedHomonym(Loaded|F24Collision $value): void { /* café 🐘 */ $value->ping(); }
++    function canonicalGlobal(\F24Collision $value): void { $value->ping(); }
++    function onlyMissingHomonym(F24Collision $value): void { $value->ping(); }
++    /** @param Loaded|F24Collision $value */
++    function docImportedHomonym($value): void { $value->ping(); }
++    final class Host { public function methodMissingHomonym(F24Collision $value): void { $value->ping(); } }
++    final class PromotedHost { public function __construct(/** @var F24Collision */ public F24Collision $value) { $value->ping(); } }
++    function missingStaticHomonym(bool $choose): void { $type = $choose ? \F24StaticKnown::class : F24Collision::class; $type::ping(); }
++    function namespacedMissingCoalesce(): void { $type = \F24Absent\F24StaticMissing::class ?? \F24StaticKnown::class; $type::ping(); }
++}
++namespace {
++    interface F24Marker {}
++    use function F24Absent\F24Collision;
++    /** @param \F24Collision&F24Marker $value */
++    function functionImportDoesNotRenameClass($value): void { $value->ping(); }
++    /** @return class-string<F24StaticKnown> */
++    function typedClassString() { return F24StaticKnown::class; }
++    function opaqueTypedClassString(): void { $type = typedClassString(); $type::ping(); }
++}
++namespace Illuminate\Database\Eloquent {
++    class Model {}
++    class Builder { public function ping(): void {} }
++}
++namespace F24ScopeCtx {
++    use F24Absent\Builder as Builder;
++    final class ScopeHost extends \Illuminate\Database\Eloquent\Model {
++        public function scopeMissingBuilder(Builder $value): void { $value->ping(); }
++    }
++}
++namespace F24AliasOrigin {
++    interface Marker {}
++    final class Target implements Marker { public function ping(): void {} }
++    /** @phpstan-type Row Target&Marker */
++    final class Types {}
++}
++namespace F24AliasUser {
++    use F24Absent\F24AliasOrigin as F24AliasOrigin;
++    /** @phpstan-import-type Row from \F24AliasOrigin\Types */
++    final class AliasHost {
++        /** @param Row $value */
++        public function importedAliasOrigin($value): void { $value->ping(); }
++    }
++}
++namespace F24SelfCtx {
++    use F24Absent\F24SelfCtx as F24SelfCtx;
++    interface Marker {}
++    final class Receiver implements Marker {
++        public function ping(): void {}
++        /** @param self&Marker $value */
++        public function selfIntersection($value): void { $value->ping(); }
++    }
++}
++"#;
++async fn f24_extra_control(
++    name: &str,
++    expected_count: usize,
++    expected: phpantom_lsp::HierarchyAnalysisState,
++) {
++    let source = F24_EXTRA_SOURCE.replace('\n', "\r\n");
++    let backend = create_test_backend();
++    let uri = Url::parse("file:///f24-extra-controls.php").unwrap();
++    open_php(&backend, &uri, &source).await;
++    let item = anonymous_hierarchy_prepare(&backend, &uri, &source, name).await;
++    let reply = hierarchy_analysis_outgoing(&backend, &item).await;
++    assert_eq!(reply.items.len(), expected_count);
++    assert!(
++        reply.items.iter().all(|edge| edge.to.uri == uri
++            && edge.to.name == "ping"
++            && edge.from_ranges.len() == 1)
++    );
++    assert_eq!(reply.analysis.state, expected);
++    if expected == phpantom_lsp::HierarchyAnalysisState::Resolved {
++        assert!(reply.analysis.issues.is_empty());
++    } else {
++        assert!(reply.analysis.issues.iter().any(|issue| issue.kind
++            == phpantom_lsp::HierarchyIssueKind::UnresolvedCall
++            && issue.uri == uri
++            && (expected_count == 0 || issue.range == reply.items[0].from_ranges[0])));
++    }
++    backend.shutdown().await.unwrap();
++}
++#[tokio::test]
++async fn f24_alternative_imported_missing_homonym_is_not_global_class() {
++    f24_extra_control(
++        "importedHomonym(",
++        1,
++        phpantom_lsp::HierarchyAnalysisState::Partial,
++    )
++    .await;
++}
++#[tokio::test]
++async fn f24_alternative_actual_global_class_ignores_conflicting_caller_alias() {
++    f24_extra_control(
++        "canonicalGlobal(",
++        1,
++        phpantom_lsp::HierarchyAnalysisState::Resolved,
++    )
++    .await;
++}
++#[tokio::test]
++async fn f24_alternative_self_intersection_uses_its_actual_contributor() {
++    f24_extra_control(
++        "selfIntersection(",
++        1,
++        phpantom_lsp::HierarchyAnalysisState::Resolved,
++    )
++    .await;
++}
++#[tokio::test]
++async fn f24_alternative_class_string_missing_branch_is_not_certified() {
++    f24_extra_control(
++        "classStringMissing(",
++        1,
++        phpantom_lsp::HierarchyAnalysisState::Partial,
++    )
++    .await;
++}
++#[tokio::test]
++async fn f24_alternative_class_string_both_known_targets_are_complete() {
++    f24_extra_control(
++        "classStringBoth(",
++        2,
++        phpantom_lsp::HierarchyAnalysisState::Resolved,
++    )
++    .await;
++}
++
++#[tokio::test]
++async fn f24_alternative_class_string_opaque_branch_is_partial() {
++    f24_extra_control(
++        "classStringOpaque(",
++        1,
++        phpantom_lsp::HierarchyAnalysisState::Partial,
++    )
++    .await;
++}
++#[tokio::test]
++async fn f24_alternative_class_string_null_coalesces_to_known() {
++    f24_extra_control(
++        "nullCoalesceKnown(",
++        1,
++        phpantom_lsp::HierarchyAnalysisState::Resolved,
++    )
++    .await;
++}
++#[tokio::test]
++async fn f24_alternative_class_string_nonnull_does_not_invent_rhs_target() {
++    f24_extra_control(
++        "nonNullCoalesceKnown(",
++        1,
++        phpantom_lsp::HierarchyAnalysisState::Resolved,
++    )
++    .await;
++}
++#[tokio::test]
++async fn f24_alternative_class_string_unloaded_nonnull_does_not_invent_rhs() {
++    f24_extra_control(
++        "missingCoalesceNoKnown(",
++        0,
++        phpantom_lsp::HierarchyAnalysisState::Partial,
++    )
++    .await;
++}
++#[tokio::test]
++async fn f24_alternative_class_string_namespaced_unloaded_does_not_invent_rhs() {
++    f24_extra_control(
++        "namespacedMissingCoalesce(",
++        0,
++        phpantom_lsp::HierarchyAnalysisState::Partial,
++    )
++    .await;
++}
++
++#[tokio::test]
++async fn f24_alternative_only_missing_import_cannot_resolve_global_homonym() {
++    f24_extra_control(
++        "onlyMissingHomonym(",
++        0,
++        phpantom_lsp::HierarchyAnalysisState::Partial,
++    )
++    .await;
++}
++#[tokio::test]
++async fn f24_alternative_class_literal_missing_import_cannot_resolve_global_homonym() {
++    f24_extra_control(
++        "missingStaticHomonym(",
++        1,
++        phpantom_lsp::HierarchyAnalysisState::Partial,
++    )
++    .await;
++}
++#[tokio::test]
++async fn f24_alternative_function_import_does_not_rename_class() {
++    f24_extra_control(
++        "functionImportDoesNotRenameClass(",
++        1,
++        phpantom_lsp::HierarchyAnalysisState::Resolved,
++    )
++    .await;
++}
++#[tokio::test]
++async fn f24_alternative_opaque_assignment_retains_typed_return_resolution() {
++    let source = F24_EXTRA_SOURCE.replace('\n', "\r\n");
++    let backend = create_test_backend();
++    let uri = Url::parse("file:///f24-opaque-typed-controls.php").unwrap();
++    open_php(&backend, &uri, &source).await;
++    let item =
++        anonymous_hierarchy_prepare(&backend, &uri, &source, "opaqueTypedClassString(").await;
++    let reply = hierarchy_analysis_outgoing(&backend, &item).await;
++    assert_eq!(reply.items.len(), 2);
++    assert!(
++        reply
++            .items
++            .iter()
++            .any(|edge| edge.to.name == "typedClassString")
++    );
++    assert!(reply.items.iter().any(|edge| edge.to.name == "ping"
++        && edge.to.data.as_ref().unwrap()["owner"] == "F24StaticKnown"));
++    assert_eq!(
++        reply.analysis.state,
++        phpantom_lsp::HierarchyAnalysisState::Resolved
++    );
++    assert!(reply.analysis.issues.is_empty());
++    backend.shutdown().await.unwrap();
++}
++
++#[tokio::test]
++async fn f24_alternative_method_missing_import_cannot_reenter_raw_merged_hint() {
++    f24_extra_control(
++        "methodMissingHomonym(",
++        0,
++        phpantom_lsp::HierarchyAnalysisState::Partial,
++    )
++    .await;
++}
++
++#[tokio::test]
++async fn f24_alternative_promoted_inline_docblock_cannot_reenter_raw_hint() {
++    f24_extra_control(
++        "__construct(",
++        0,
++        phpantom_lsp::HierarchyAnalysisState::Partial,
++    )
++    .await;
++}
++#[tokio::test]
++async fn f24_alternative_scope_enrichment_cannot_override_missing_class_import() {
++    f24_extra_control(
++        "scopeMissingBuilder(",
++        0,
++        phpantom_lsp::HierarchyAnalysisState::Partial,
++    )
++    .await;
++}
++
++#[tokio::test]
++async fn f24_alternative_docblock_missing_import_cannot_resolve_global_homonym() {
++    f24_extra_control(
++        "docImportedHomonym(",
++        1,
++        phpantom_lsp::HierarchyAnalysisState::Partial,
++    )
++    .await;
++}
++
++async fn f24_import_budget_control(absolute: bool) {
++    let imports = (0..2200)
++        .map(|index| format!("use function F24BudgetTools\\fn{index};\n"))
++        .collect::<String>();
++    let hint = if absolute {
++        "\\F24BudgetKnown"
++    } else {
++        "F24BudgetKnown"
++    };
++    let source = format!(
++        "<?php\n{imports}class F24BudgetKnown {{ public function ping(): void {{}} }}\nfunction budgetControl({hint} $value): void {{ $value->ping(); }}\n"
++    );
++    let backend = create_test_backend();
++    let uri = Url::parse("file:///f24-budget-controls.php").unwrap();
++    open_php(&backend, &uri, &source).await;
++    let item = anonymous_hierarchy_prepare(&backend, &uri, &source, "budgetControl(").await;
++    let reply = hierarchy_analysis_outgoing(&backend, &item).await;
++    assert_eq!(reply.items.len(), usize::from(absolute));
++    assert_eq!(
++        reply.analysis.state,
++        phpantom_lsp::HierarchyAnalysisState::Partial
++    );
++    assert!(reply.analysis.issues_truncated);
++    assert!(
++        reply
++            .analysis
++            .issues
++            .iter()
++            .any(|issue| issue.kind == phpantom_lsp::HierarchyIssueKind::Limit && issue.uri == uri)
++    );
++    backend.shutdown().await.unwrap();
++}
++#[tokio::test]
++async fn f24_alternative_import_limit_retains_absolute_known_target() {
++    f24_import_budget_control(true).await;
++}
++#[tokio::test]
++async fn f24_alternative_import_limit_reports_unknown_target_as_limited() {
++    f24_import_budget_control(false).await;
++}
++
++// Append proposal for tests/integration/call_hierarchy.rs. Existing helpers and
++// public Backend APIs only; no index flags, symbol-map injection or fake source.
++const UNPUBLISHED_INDEX_LEAF: &str =
++    "<?php\r\nnamespace SourceReceipt;\r\nfinal class Leaf { public function ping(): void {} }\r\n";
++const UNPUBLISHED_INDEX_CALLER: &str = "<?php\r\nnamespace SourceReceipt;\r\nfinal class Caller { public function run(Leaf $leaf): void { /* café 🐘 */ $leaf->ping(); } }\r\n";
++const UNPUBLISHED_INDEX_BAD: &[u8] = b"<?php\r\n\xff\xfe\r\n";
++const UNPUBLISHED_INDEX_REPAIRED: &[u8] =
++    b"<?php\r\nnamespace SourceReceipt; final class Repaired {}\r\n";
++
++async fn unpublished_index_fixture(
++    excluded: bool,
++) -> (Backend, tempfile::TempDir, Url, Url, Url, CallHierarchyItem) {
++    let (backend, directory) = create_psr4_workspace(
++        r#"{"name":"owned/hierarchy-source-receipt","autoload":{"psr-4":{"SourceReceipt\\":"src/"}}}"#,
++        &[
++            ("src/Leaf.php", UNPUBLISHED_INDEX_LEAF),
++            ("src/Caller.php", UNPUBLISHED_INDEX_CALLER),
++        ],
++    );
++    let root = directory.path().canonicalize().unwrap();
++    let config = if excluded {
++        "[indexing]\nstrategy=\"full\"\nexclude=[\"src/InvalidUTF8.php\"]\n[external_tools]\nenabled=false\n"
++    } else {
++        "[indexing]\nstrategy=\"full\"\n[external_tools]\nenabled=false\n"
++    };
++    std::fs::write(root.join(".phpantom.toml"), config).unwrap();
++    let bad_path = root.join("src/InvalidUTF8.php");
++    std::fs::write(&bad_path, UNPUBLISHED_INDEX_BAD).unwrap();
++    let leaf_uri = Url::from_file_path(root.join("src/Leaf.php")).unwrap();
++    let caller_uri = Url::from_file_path(root.join("src/Caller.php")).unwrap();
++    let bad_uri = Url::from_file_path(&bad_path).unwrap();
++    backend
++        .initialize(InitializeParams {
++            root_uri: Some(Url::from_directory_path(&root).unwrap()),
++            workspace_folders: Some(vec![WorkspaceFolder {
++                uri: Url::from_directory_path(&root).unwrap(),
++                name: "source-receipt".into(),
++            }]),
++            ..Default::default()
++        })
++        .await
++        .unwrap();
++    backend.initialized(InitializedParams {}).await;
++    // Do not open Caller.php or InvalidUTF8.php: the first incoming handler
++    // must use actual workspace discovery/full indexing, not open-file maps.
++    open_php(&backend, &leaf_uri, UNPUBLISHED_INDEX_LEAF).await;
++    let position = noncall_exact_range(UNPUBLISHED_INDEX_LEAF, "function ping()", "ping").start;
++    let mut prepared = prepare_at(&backend, &leaf_uri, position.line, position.character).await;
++    assert_eq!(prepared.len(), 1);
++    let leaf = prepared.remove(0);
++    (backend, directory, leaf_uri, caller_uri, bad_uri, leaf)
++}
++
++async fn unpublished_index_incoming(
++    backend: &Backend,
++    leaf: &CallHierarchyItem,
++) -> phpantom_lsp::HierarchyReply<CallHierarchyIncomingCall> {
++    // This public handler waits for the actual full-index attempt; it does not
++    // infer readiness from a timeout, wall-clock silence or a seeded flag.
++    backend
++        .call_hierarchy_incoming_analysis(CallHierarchyIncomingCallsParams {
++            item: leaf.clone(),
++            work_done_progress_params: Default::default(),
++            partial_result_params: Default::default(),
++        })
++        .await
++        .unwrap()
++}
++
++fn unpublished_index_assert_known_caller(
++    reply: &phpantom_lsp::HierarchyReply<CallHierarchyIncomingCall>,
++    caller_uri: &Url,
++) {
++    assert_eq!(
++        reply.items.len(),
++        1,
++        "an unpublished peer must not erase the real caller edge"
++    );
++    assert_eq!(reply.items[0].from.uri, *caller_uri);
++    assert_eq!(reply.items[0].from.name, "run");
++    assert_eq!(
++        reply.items[0].from_ranges,
++        [noncall_exact_range(
++            UNPUBLISHED_INDEX_CALLER,
++            "$leaf->ping()",
++            "ping"
++        )]
++    );
++    let data = reply.items[0]
++        .from
++        .data
++        .as_ref()
++        .expect("real current-source caller receipt");
++    assert!(data.get("source_sha256").is_some());
++}
++
++fn unpublished_index_assert_partial(
++    reply: &phpantom_lsp::HierarchyReply<CallHierarchyIncomingCall>,
++    bad_uri: &Url,
++) {
++    use phpantom_lsp::{HierarchyAnalysisState as State, HierarchyIssueKind as Kind};
++    assert_eq!(
++        reply.analysis.state,
++        State::Partial,
++        "a discovered user source rejected before publication cannot certify complete incoming coverage"
++    );
++    assert!(!reply.analysis.issues_truncated);
++    assert!(
++        reply.analysis.issues.iter().any(|issue| {
++            issue.kind == Kind::SourceUnavailable
++                && issue.uri == *bad_uri
++                && issue.range.start <= issue.range.end
++        }),
++        "the current query must identify the admitted unreadable source rather than relying on a past startup warning"
++    );
++}
++
++#[tokio::test]
++async fn hierarchy_analysis_unpublished_user_source_recovers_after_accepted_disk_repair() {
++    use phpantom_lsp::HierarchyAnalysisState as State;
++    let (backend, directory, leaf_uri, caller_uri, bad_uri, leaf) =
++        unpublished_index_fixture(false).await;
++    let original_receipt = leaf.data.clone();
++    let before = unpublished_index_incoming(&backend, &leaf).await;
++    unpublished_index_assert_known_caller(&before, &caller_uri);
++    unpublished_index_assert_partial(&before, &bad_uri);
++    let repeat = unpublished_index_incoming(&backend, &leaf).await;
++    unpublished_index_assert_known_caller(&repeat, &caller_uri);
++    unpublished_index_assert_partial(&repeat, &bad_uri);
++    assert_eq!(
++        std::fs::read(bad_uri.to_file_path().unwrap()).unwrap(),
++        UNPUBLISHED_INDEX_BAD
++    );
++    std::fs::write(bad_uri.to_file_path().unwrap(), UNPUBLISHED_INDEX_REPAIRED).unwrap();
++    backend
++        .did_change_watched_files(DidChangeWatchedFilesParams {
++            changes: vec![FileEvent {
++                uri: bad_uri.clone(),
++                typ: FileChangeType::CHANGED,
++            }],
++        })
++        .await;
++    let after = unpublished_index_incoming(&backend, &leaf).await;
++    unpublished_index_assert_known_caller(&after, &caller_uri);
++    assert_eq!(after.analysis.state, State::Resolved);
++    assert!(after.analysis.issues.is_empty());
++    assert!(!after.analysis.issues_truncated);
++    assert_eq!(after.items[0].from, before.items[0].from);
++    assert_eq!(after.items[0].from_ranges, before.items[0].from_ranges);
++    assert_eq!(
++        leaf.data, original_receipt,
++        "repair of an unrelated source does not rewrite the prepared leaf receipt"
++    );
++    assert_eq!(
++        std::fs::read_to_string(leaf_uri.to_file_path().unwrap()).unwrap(),
++        UNPUBLISHED_INDEX_LEAF
++    );
++    assert_eq!(
++        std::fs::read_to_string(caller_uri.to_file_path().unwrap()).unwrap(),
++        UNPUBLISHED_INDEX_CALLER
++    );
++    assert_eq!(
++        std::fs::read(directory.path().join("src/InvalidUTF8.php")).unwrap(),
++        UNPUBLISHED_INDEX_REPAIRED
++    );
++    backend.shutdown().await.unwrap();
++}
++
++#[tokio::test]
++async fn hierarchy_analysis_unpublished_user_source_recovers_after_accepted_deletion() {
++    use phpantom_lsp::HierarchyAnalysisState as State;
++    let (backend, _directory, _leaf_uri, caller_uri, bad_uri, leaf) =
++        unpublished_index_fixture(false).await;
++    let before = unpublished_index_incoming(&backend, &leaf).await;
++    unpublished_index_assert_known_caller(&before, &caller_uri);
++    unpublished_index_assert_partial(&before, &bad_uri);
++    std::fs::remove_file(bad_uri.to_file_path().unwrap()).unwrap();
++    backend
++        .did_change_watched_files(DidChangeWatchedFilesParams {
++            changes: vec![FileEvent {
++                uri: bad_uri.clone(),
++                typ: FileChangeType::DELETED,
++            }],
++        })
++        .await;
++    let after = unpublished_index_incoming(&backend, &leaf).await;
++    unpublished_index_assert_known_caller(&after, &caller_uri);
++    assert_eq!(after.analysis.state, State::Resolved);
++    assert!(after.analysis.issues.is_empty());
++    assert!(!after.analysis.issues_truncated);
++    assert_eq!(after.items[0].from, before.items[0].from);
++    assert_eq!(after.items[0].from_ranges, before.items[0].from_ranges);
++    assert!(!bad_uri.to_file_path().unwrap().exists());
++    backend.shutdown().await.unwrap();
++}
++
++#[tokio::test]
++async fn hierarchy_analysis_configured_excluded_invalid_source_does_not_reduce_coverage() {
++    use phpantom_lsp::HierarchyAnalysisState as State;
++    let (backend, _directory, _leaf_uri, caller_uri, bad_uri, leaf) =
++        unpublished_index_fixture(true).await;
++    let reply = unpublished_index_incoming(&backend, &leaf).await;
++    unpublished_index_assert_known_caller(&reply, &caller_uri);
++    assert_eq!(reply.analysis.state, State::Resolved);
++    assert!(reply.analysis.issues.is_empty());
++    assert!(!reply.analysis.issues_truncated);
++    assert_eq!(
++        std::fs::read(bad_uri.to_file_path().unwrap()).unwrap(),
++        UNPUBLISHED_INDEX_BAD
++    );
++    backend.shutdown().await.unwrap();
++}
++
++#[tokio::test]
++async fn f24_alternative_imported_type_alias_keeps_declaration_context() {
++    f24_extra_control(
++        "importedAliasOrigin(",
++        1,
++        phpantom_lsp::HierarchyAnalysisState::Resolved,
++    )
++    .await;
++}
+diff --git a/tests/integration/type_definition.rs b/tests/integration/type_definition.rs
+index b54c0d7f2bbb4858c782ff086bba2bff0ead0f09..f89f9038938f32a7b9457f02ba0f0733c7df9c02 100644
+--- a/tests/integration/type_definition.rs
++++ b/tests/integration/type_definition.rs
+@@ -717,3 +717,154 @@ async fn test_parameter_type_definition() {
+     assert!(result.is_some(), "Should resolve parameter type definition");
+     assert_single_location(result.unwrap(), 1); // Request on line 1
+ }
++
++// Optional actual public controls for tests/integration/type_definition.rs.
++// Source-only proposal; root owns execution and existing failure expectations.
++fn rooted_type_position(source: &str, context: &str, token: &str) -> Position {
++    let context_start = source.find(context).expect("unique source context");
++    let relative = source[context_start..context_start + context.len()]
++        .find(token)
++        .unwrap();
++    let offset = context_start + relative;
++    let prefix = &source[..offset];
++    let line = prefix.bytes().filter(|byte| *byte == b'\n').count() as u32;
++    let character = prefix.rsplit('\n').next().unwrap().encode_utf16().count() as u32;
++    Position::new(line, character)
++}
++
++#[tokio::test]
++async fn type_definition_absolute_native_doc_and_source_hints_keep_global_target() {
++    let backend = create_test_backend();
++    let uri = Url::parse("file:///type-definition-root-global.php").unwrap();
++    let source = concat!(
++        "<?php\r\n",
++        "namespace {\r\n",
++        "class RootModel {}\r\n",
++        "}\r\n",
++        "namespace Decoy {\r\n",
++        "class RootModel {}\r\n",
++        "}\r\n",
++        "namespace Consumer {\r\n",
++        "use Decoy\\RootModel as RootModel;\r\n",
++        "function native(\\RootModel $nativeValue): void { /* café 🐘 */ $nativeValue; }\r\n",
++        "/** @param \\RootModel $docValue */\r\n",
++        "function documented($docValue): void { $docValue; }\r\n",
++        "}\r\n",
++    );
++    open_php(&backend, &uri, source).await;
++    for (context, token) in [
++        ("$nativeValue;", "$nativeValue"),
++        ("$docValue;", "$docValue"),
++        ("function native(\\RootModel", "RootModel"),
++        ("/** @param \\RootModel $docValue */", "RootModel"),
++    ] {
++        let position = rooted_type_position(source, context, token);
++        let response = goto_type_definition(&backend, &uri, position.line, position.character)
++            .await
++            .expect("absolute source/inferred type has a real global declaration");
++        let location = assert_single_location(response, 2);
++        assert_eq!(location.uri, uri);
++        assert_eq!(
++            location.range.start.character, 0,
++            "navigate to the actual global class keyword"
++        );
++    }
++    backend.shutdown().await.unwrap();
++}
++
++#[tokio::test]
++async fn type_definition_rooted_imported_value_is_not_rebound_by_caller_namespace_alias() {
++    let (backend, directory) = create_psr4_workspace(
++        r#"{"autoload":{"psr-4":{"Real\\":"real/","Fake\\":"fake/"}}}"#,
++        &[
++            (
++                "real/Source/Model.php",
++                "<?php\nnamespace Real\\Source;\nclass Model {}\n",
++            ),
++            (
++                "fake/Source/Model.php",
++                "<?php\nnamespace Fake\\Source;\nclass Model {}\n",
++            ),
++        ],
++    );
++    let uri = Url::from_file_path(directory.path().join("Consumer.php")).unwrap();
++    let source = "<?php\r\nnamespace Consumer;\r\nuse Real\\Source\\Model as Imported;\r\nuse Fake as Real;\r\nfunction probe(Imported $value): void { /* café 🐘 */ $value; }\r\n";
++    open_php(&backend, &uri, source).await;
++    for (context, token) in [("$value;", "$value"), ("probe(Imported", "Imported")] {
++        let position = rooted_type_position(source, context, token);
++        let response = goto_type_definition(&backend, &uri, position.line, position.character)
++            .await
++            .unwrap();
++        let location = assert_single_location(response, 2);
++        assert_eq!(
++            location.uri.to_file_path().unwrap().canonicalize().unwrap(),
++            directory
++                .path()
++                .join("real/Source/Model.php")
++                .canonicalize()
++                .unwrap()
++        );
++        assert_ne!(
++            location.uri.to_file_path().unwrap().canonicalize().unwrap(),
++            directory
++                .path()
++                .join("fake/Source/Model.php")
++                .canonicalize()
++                .unwrap()
++        );
++    }
++    backend.shutdown().await.unwrap();
++}
++
++#[tokio::test]
++async fn type_definition_missing_absolute_source_and_value_do_not_use_relative_homonym() {
++    let backend = create_test_backend();
++    let uri = Url::parse("file:///type-definition-root-missing.php").unwrap();
++    let source = "<?php\r\nnamespace Consumer\\Absent { class Missing {} }\r\nnamespace Consumer { function probe(\\Absent\\Missing $value): void { $value; } }\r\n";
++    open_php(&backend, &uri, source).await;
++    for (context, token) in [
++        ("$value;", "$value"),
++        ("probe(\\Absent\\Missing", "Missing"),
++    ] {
++        let position = rooted_type_position(source, context, token);
++        assert!(
++            goto_type_definition(&backend, &uri, position.line, position.character)
++                .await
++                .is_none(),
++            "a missing absolute class must not navigate to the caller namespace's loaded relative homonym"
++        );
++    }
++    backend.shutdown().await.unwrap();
++}
++
++#[tokio::test]
++async fn type_definition_missing_absolute_class_does_not_become_template_parameter() {
++    let backend = create_test_backend();
++    let uri = Url::parse("file:///type-definition-root-template.php").unwrap();
++    let source = "<?php\n/** @template T of object */\nclass GenericContext { public function inspect(\\T $value): void { $value; } }\n";
++    open_php(&backend, &uri, source).await;
++    for (context, token) in [("$value;", "$value"), ("inspect(\\T", "T")] {
++        let position = rooted_type_position(source, context, token);
++        assert!(
++            goto_type_definition(&backend, &uri, position.line, position.character)
++                .await
++                .is_none(),
++            "an absolute class name cannot become a same-spelled PHPDoc template"
++        );
++    }
++    backend.shutdown().await.unwrap();
++}
++
++#[tokio::test]
++async fn type_definition_unrooted_documented_template_keeps_its_declaration() {
++    let backend = create_test_backend();
++    let uri = Url::parse("file:///type-definition-template-positive.php").unwrap();
++    let source = "<?php\n/** @template T of object */\nclass GenericContext {\n/** @param T $value */\npublic function documented($value): void {}\n}\n";
++    open_php(&backend, &uri, source).await;
++    let position = rooted_type_position(source, "@param T $value", "T");
++    let result = goto_type_definition(&backend, &uri, position.line, position.character)
++        .await
++        .expect("the relative PHPDoc template still names its declaration");
++    assert_eq!(assert_single_location(result, 1).uri, uri);
++    backend.shutdown().await.unwrap();
++}

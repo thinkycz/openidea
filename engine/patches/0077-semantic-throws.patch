@@ -1,0 +1,1267 @@
+diff --git a/docs/CHANGELOG.md b/docs/CHANGELOG.md
+index 3dcf8c6..bb1b44f 100644
+--- a/docs/CHANGELOG.md
++++ b/docs/CHANGELOG.md
+@@ -15,6 +15,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
+ 
+ ## [Unreleased]
+ 
++- **Document escaping exceptions from resolved calls.** Explicit PHPDoc generation follows callable declarations and call arguments, preserves uncaught alternatives and keeps deferred bodies separate. Contributed by PHP Workbench downstream.
++
+ - **Preserve constructor parameter contracts.** Generated constructors retain native property types and defaults, while PHPDoc types and refinements remain parameter documentation. Contributed by PHP Workbench downstream.
+ 
+ - **Explain ambiguous accessor names.** Generation refuses grouped properties that would create duplicate PHP method names and identifies the properties to rename. Independent non-conflicting accessors remain available. Contributed by PHP Workbench downstream.
+diff --git a/examples/php/code_actions.php b/examples/php/code_actions.php
+index 0ad53b6..7394cae 100644
+--- a/examples/php/code_actions.php
++++ b/examples/php/code_actions.php
+@@ -137,6 +137,20 @@ class PhpDocGenerationDemo extends Scaffolding\ScaffoldingException
+ 
+         return [];
+     }
++
++    // Try Generate PHPDoc on this header: the resolved receiver contributes
++    // the inherited AuthorizationException declared by throwsException().
++    public function documentedReceiver(): void
++    {
++        (new self())->throwsException();
++    }
++
++    // Creating a closure does not execute its body; Generate PHPDoc must not
++    // document AuthorizationException as escaping this method.
++    public function deferredOperation(): Closure
++    {
++        return fn () => $this->throwsException();
++    }
+ }
+ 
+ 
+diff --git a/src/code_actions/generate_docblock.rs b/src/code_actions/generate_docblock.rs
+index 6b73ec0..06bd6e2 100644
+--- a/src/code_actions/generate_docblock.rs
++++ b/src/code_actions/generate_docblock.rs
+@@ -138,11 +138,13 @@ impl Backend {
+                 use_map: &ctx.use_map,
+                 file_namespace: &ctx.namespace,
+             };
+-            throws = throws_analysis::find_uncaught_throw_types_in_body(
++            let semantics = self.documentation_throws_semantics(content, &function.body, &ctx);
++            throws = throws_analysis::find_uncaught_throw_types_in_body_with_semantics(
+                 content,
+                 &content[function.body],
+                 &content[function.signature],
+                 Some(&throws_ctx),
++                Some(&semantics),
+             );
+             inferred_return = self
+                 .infer_return_type_at(uri, content, function.name, false)
+@@ -458,3 +460,170 @@ fn class_declaration<'a>(
+     }
+     None
+ }
++
++/// Record lexical bodies that are created rather than executed by this
++/// declaration. Directly invoked closures remain part of its execution path.
++struct DocumentationScopes;
++
++struct DocumentationScopeState {
++    body: std::ops::Range<usize>,
++    immediate: std::collections::HashSet<u32>,
++    deferred: Vec<std::ops::Range<usize>>,
++    constructors_without_arguments: Vec<std::ops::Range<usize>>,
++}
++
++impl DocumentationScopeState {
++    fn defer(&mut self, span: Span) {
++        let start = span.start.offset as usize;
++        let end = span.end.offset as usize;
++        if self.body.contains(&start) && end <= self.body.end {
++            self.deferred
++                .push(start - self.body.start..end - self.body.start);
++        }
++    }
++}
++
++impl<'ast, 'arena> mago_syntax::walker::Walker<'ast, 'arena, DocumentationScopeState>
++    for DocumentationScopes
++{
++    fn walk_in_call(&self, call: &'ast Call<'arena>, state: &mut DocumentationScopeState) {
++        if let Call::Function(call) = call {
++            let mut target = call.function;
++            while let Expression::Parenthesized(parenthesized) = target {
++                target = parenthesized.expression;
++            }
++            if matches!(
++                target,
++                Expression::Closure(_) | Expression::ArrowFunction(_)
++            ) {
++                state.immediate.insert(target.span().start.offset);
++            }
++        }
++    }
++
++    fn walk_in_expression(
++        &self,
++        expression: &'ast Expression<'arena>,
++        state: &mut DocumentationScopeState,
++    ) {
++        match expression {
++            Expression::Instantiation(instantiation) if instantiation.argument_list.is_none() => {
++                let span = expression.span();
++                state
++                    .constructors_without_arguments
++                    .push(span.start.offset as usize..span.end.offset as usize);
++            }
++            Expression::Closure(_) | Expression::ArrowFunction(_)
++                if !state.immediate.contains(&expression.span().start.offset) =>
++            {
++                state.defer(expression.span())
++            }
++            Expression::AnonymousClass(class) => {
++                state.defer(Span::new(
++                    class.left_brace.file_id,
++                    class.left_brace.start,
++                    class.right_brace.end,
++                ));
++            }
++            _ => {}
++        }
++    }
++
++    fn walk_in_attribute_list(
++        &self,
++        attributes: &'ast mago_syntax::cst::attribute::AttributeList<'arena>,
++        state: &mut DocumentationScopeState,
++    ) {
++        state.defer(attributes.span());
++    }
++
++    fn walk_in_statement(
++        &self,
++        statement: &'ast Statement<'arena>,
++        state: &mut DocumentationScopeState,
++    ) {
++        if matches!(
++            statement,
++            Statement::Function(_)
++                | Statement::Class(_)
++                | Statement::Interface(_)
++                | Statement::Trait(_)
++                | Statement::Enum(_)
++        ) {
++            state.defer(statement.span());
++        }
++    }
++}
++
++impl Backend {
++    fn documentation_throws_semantics(
++        &self,
++        content: &str,
++        body: &std::ops::Range<usize>,
++        context: &crate::types::FileContext,
++    ) -> throws_analysis::ThrowsSemantics {
++        use mago_syntax::walker::Walker;
++        let (deferred, call_sites, constructors) = crate::parser::with_parsed_program(
++            content,
++            "documentation_throws_scopes",
++            |program, _| {
++                let mut state = DocumentationScopeState {
++                    body: body.clone(),
++                    immediate: std::collections::HashSet::new(),
++                    deferred: Vec::new(),
++                    constructors_without_arguments: Vec::new(),
++                };
++                DocumentationScopes.walk_program(program, &mut state);
++                let call_sites =
++                    crate::symbol_map::extraction::extract_symbol_map(program, content).call_sites;
++                (
++                    state.deferred,
++                    call_sites,
++                    state.constructors_without_arguments,
++                )
++            },
++        );
++        let mut semantics = throws_analysis::ThrowsSemantics::new(deferred);
++        let mut collect = |expression: &str, absolute: usize, arguments: Option<&str>| {
++            if !body.contains(&absolute) {
++                return;
++            }
++            let relative = absolute - body.start;
++            if !semantics.executes(relative) {
++                return;
++            }
++            if let Some(target) = self.resolve_callable_target_with_args_at_offset(
++                expression,
++                content,
++                absolute as u32,
++                context,
++                arguments,
++            ) {
++                semantics.calls.extend(
++                    target
++                        .throws
++                        .iter()
++                        .flat_map(|types| types.iter())
++                        .cloned()
++                        .map(|type_name| throws_analysis::ThrowInfo {
++                            type_name,
++                            origin: throws_analysis::ThrowTypeOrigin::Resolved,
++                            offset: relative,
++                        }),
++                );
++            }
++        };
++        for call in &call_sites {
++            collect(
++                &call.call_expression,
++                call.args_start as usize,
++                Some(&content[call.args_start as usize..call.args_end as usize]),
++            );
++        }
++        // Signature-help call sites require parentheses; PHP construction does not.
++        for constructor in constructors {
++            collect(&content[constructor.clone()], constructor.start, Some(""));
++        }
++        semantics
++    }
++}
+diff --git a/src/completion/source/throws_analysis/cross_file.rs b/src/completion/source/throws_analysis/cross_file.rs
+index d740128..0d49bc9 100644
+--- a/src/completion/source/throws_analysis/cross_file.rs
++++ b/src/completion/source/throws_analysis/cross_file.rs
+@@ -22,7 +22,7 @@ use std::sync::Arc;
+ use tower_lsp::lsp_types::Position;
+ 
+ use crate::completion::source::comment_position::position_to_byte_offset;
+-use crate::php_type::PhpType;
++use crate::php_type::{PhpType, TypeKind};
+ use crate::text_scan::{skip_block_comment, skip_line_comment, skip_string_forward};
+ use crate::types::{ClassInfo, FunctionLoader};
+ 
+@@ -104,17 +104,70 @@ pub(crate) fn find_uncaught_throw_types_in_body(
+     signature: &str,
+     ctx: Option<&ThrowsContext<'_>>,
+ ) -> Vec<PhpType> {
++    find_uncaught_throw_types_in_body_with_semantics(content, body, signature, ctx, None)
++}
++
++/// Calls and deferred scopes derived from the current parsed declaration.
++/// Offsets are relative to the selected body, matching the catch analysis.
++pub(crate) struct ThrowsSemantics {
++    pub calls: Vec<ThrowInfo>,
++    deferred: Vec<std::ops::Range<usize>>,
++}
++
++impl ThrowsSemantics {
++    pub(crate) fn new(mut deferred: Vec<std::ops::Range<usize>>) -> Self {
++        deferred.sort_unstable_by_key(|scope| scope.start);
++        let mut merged: Vec<std::ops::Range<usize>> = Vec::with_capacity(deferred.len());
++        for scope in deferred {
++            if let Some(last) = merged.last_mut()
++                && scope.start <= last.end
++            {
++                last.end = last.end.max(scope.end);
++            } else {
++                merged.push(scope);
++            }
++        }
++        Self {
++            calls: Vec::new(),
++            deferred: merged,
++        }
++    }
++
++    pub(crate) fn executes(&self, offset: usize) -> bool {
++        let next = self.deferred.partition_point(|scope| scope.start <= offset);
++        next == 0 || !self.deferred[next - 1].contains(&offset)
++    }
++}
++
++/// Analyze resolved calls at their individual execution sites before folding
++/// duplicate exception types. Text-only callers retain the compatibility path.
++pub(crate) fn find_uncaught_throw_types_in_body_with_semantics(
++    content: &str,
++    body: &str,
++    signature: &str,
++    ctx: Option<&ThrowsContext<'_>>,
++    semantics: Option<&ThrowsSemantics>,
++) -> Vec<PhpType> {
++    let executes = |offset: usize| semantics.is_none_or(|semantics| semantics.executes(offset));
+     let throws = find_throw_statements(body);
+     let throw_expr_types = find_throw_expression_types(body, content);
+-    let propagated = find_propagated_throws(body, content);
++    let propagated = if semantics.is_some() {
++        Vec::new()
++    } else {
++        find_propagated_throws(body, content)
++    };
+     let catches = find_catch_blocks(body);
+     let throw_vars = find_throw_variable_types(body, &catches);
+ 
+     // Cross-file propagated throws from all call patterns.
+-    let cross_file_propagated = if let Some(throws_ctx) = ctx {
+-        find_cross_file_propagated_throws(body, signature, content, throws_ctx)
++    let scanned_calls;
++    let cross_file_propagated = if let Some(semantics) = semantics {
++        semantics.calls.as_slice()
+     } else {
+-        Vec::new()
++        scanned_calls = ctx.map_or_else(Vec::new, |throws_ctx| {
++            find_cross_file_propagated_throws(body, signature, content, throws_ctx)
++        });
++        &scanned_calls
+     };
+ 
+     let mut uncaught: Vec<PhpType> = Vec::new();
+@@ -163,8 +216,7 @@ pub(crate) fn find_uncaught_throw_types_in_body(
+         })
+     }
+ 
+-    /// Normalize a ThrowInfo's type_name into a TypeKind::Named,
+-    /// resolving short names to FQN when use_map/namespace are available.
++    /// Resolve source names while retaining structured exception alternatives.
+     fn normalize_throw_type(
+         info: &ThrowInfo,
+         use_map: &HashMap<String, String>,
+@@ -174,11 +226,14 @@ pub(crate) fn find_uncaught_throw_types_in_body(
+         if raw.is_empty() {
+             return None;
+         }
+-        let canonical = match info.origin {
+-            ThrowTypeOrigin::Source => crate::util::resolve_to_fqn(&raw, use_map, file_namespace),
+-            ThrowTypeOrigin::Resolved => raw.trim_start_matches('\\').to_string(),
+-        };
+-        Some(PhpType::named(atom(&canonical)))
++        Some(match info.origin {
++            ThrowTypeOrigin::Source => info
++                .type_name
++                .resolve_names(&|name| crate::util::resolve_to_fqn(name, use_map, file_namespace)),
++            ThrowTypeOrigin::Resolved => info
++                .type_name
++                .resolve_names(&|name| name.trim_start_matches('\\').to_string()),
++        })
+     }
+ 
+     // Determine name-resolution context: use the ThrowsContext fields
+@@ -194,106 +249,37 @@ pub(crate) fn find_uncaught_throw_types_in_body(
+     let class_loader: OptClassLoader<'_> =
+         ctx.map(|c| c.class_loader as &dyn Fn(&str) -> Option<Arc<ClassInfo>>);
+ 
+-    // 1. Direct `throw new Type(…)` statements
+-    for throw in &throws {
+-        if let Some(exc_type) = normalize_throw_type(throw, use_map, file_namespace)
+-            && !is_caught_by(
+-                &catches,
+-                throw.offset,
+-                &exc_type,
+-                use_map,
+-                file_namespace,
+-                class_loader,
+-            )
+-            && seen.insert(exc_type.to_string())
+-        {
+-            uncaught.push(exc_type);
+-        }
+-    }
+-
+-    // 2. `throw $this->method()` -- return type of method is the thrown type
+-    for te in &throw_expr_types {
+-        if let Some(exc_type) = normalize_throw_type(te, use_map, file_namespace)
+-            && !is_caught_by(
+-                &catches,
+-                te.offset,
+-                &exc_type,
+-                use_map,
+-                file_namespace,
+-                class_loader,
+-            )
+-            && seen.insert(exc_type.to_string())
+-        {
+-            uncaught.push(exc_type);
+-        }
+-    }
+-
+-    // 3. Propagated @throws from called methods (same-file text search)
+-    for prop in &propagated {
+-        if let Some(exc_type) = normalize_throw_type(prop, use_map, file_namespace)
+-            && !is_caught_by(
+-                &catches,
+-                prop.offset,
+-                &exc_type,
+-                use_map,
+-                file_namespace,
+-                class_loader,
+-            )
+-            && seen.insert(exc_type.to_string())
+-        {
+-            uncaught.push(exc_type);
+-        }
+-    }
+-
+-    // 4. Inline `/** @throws ExceptionType */` annotations in the body
+     let inline = find_inline_throws_annotations(body);
+-    for info in &inline {
+-        if let Some(exc_type) = normalize_throw_type(info, use_map, file_namespace)
+-            && !is_caught_by(
+-                &catches,
+-                info.offset,
+-                &exc_type,
+-                use_map,
+-                file_namespace,
+-                class_loader,
+-            )
+-            && seen.insert(exc_type.to_string())
+-        {
+-            uncaught.push(exc_type);
+-        }
+-    }
+-
+-    // 5. `throw $variable` — resolved from catch clause variable type
+-    for tv in &throw_vars {
+-        if let Some(exc_type) = normalize_throw_type(tv, use_map, file_namespace)
+-            && !is_caught_by(
+-                &catches,
+-                tv.offset,
+-                &exc_type,
+-                use_map,
+-                file_namespace,
+-                class_loader,
+-            )
+-            && seen.insert(exc_type.to_string())
+-        {
+-            uncaught.push(exc_type);
++    for info in throws
++        .iter()
++        .chain(&throw_expr_types)
++        .chain(&propagated)
++        .chain(&inline)
++        .chain(&throw_vars)
++        .chain(cross_file_propagated)
++    {
++        if !executes(info.offset) {
++            continue;
+         }
+-    }
+-
+-    // 6. Cross-file propagated @throws from all call patterns
+-    for prop in &cross_file_propagated {
+-        if let Some(exc_type) = normalize_throw_type(prop, use_map, file_namespace)
+-            && !is_caught_by(
++        let Some(exception) = normalize_throw_type(info, use_map, file_namespace) else {
++            continue;
++        };
++        let alternatives = match exception.kind() {
++            TypeKind::Union(members) => members.as_ref(),
++            _ => std::slice::from_ref(&exception),
++        };
++        for alternative in alternatives {
++            if !is_caught_by(
+                 &catches,
+-                prop.offset,
+-                &exc_type,
++                info.offset,
++                alternative,
+                 use_map,
+                 file_namespace,
+                 class_loader,
+-            )
+-            && seen.insert(exc_type.to_string())
+-        {
+-            uncaught.push(exc_type);
++            ) && seen.insert(alternative.to_string())
++            {
++                uncaught.push(alternative.clone());
++            }
+         }
+     }
+ 
+diff --git a/src/signature_help.rs b/src/signature_help.rs
+index d2203d8..d40d4f6 100644
+--- a/src/signature_help.rs
++++ b/src/signature_help.rs
+@@ -335,20 +335,32 @@ fn build_signature(
+ use mago_span::HasSpan;
+ use mago_syntax::cst::*;
+ 
+-/// Walk statements looking for the last assignment to `var_name` (with
+-/// `$` prefix) before `cursor_offset` where the RHS is a
+-/// `PartialApplication` (first-class callable).  Returns the callable
+-/// target text extracted from `content`.
++/// A first-class callable captures its receiver at this source position.
++#[derive(Clone, Debug, PartialEq, Eq)]
++pub(crate) struct CapturedCallable {
++    pub(crate) expression: String,
++    pub(crate) creation_offset: u32,
++}
++
++/// A relevant write is distinct from an unrelated expression: an ordinary
++/// reassignment revokes an earlier first-class callable capture.
++enum CallableWrite {
++    NoWrite,
++    Capture(CapturedCallable),
++    Invalidated,
++}
++
++/// Track completed direct writes before the cursor.
+ fn find_fcc_target_in_stmts<'a, I>(
+     stmts: I,
+     var_name: &str,
+     cursor_offset: u32,
+     content: &str,
+-) -> Option<String>
++) -> Option<CapturedCallable>
+ where
+     I: Iterator<Item = &'a Statement<'a>>,
+ {
+-    let mut best: Option<String> = None;
++    let mut best: Option<CapturedCallable> = None;
+     for stmt in stmts {
+         collect_fcc_targets(stmt, var_name, cursor_offset, content, &mut best);
+     }
+@@ -362,7 +374,7 @@ fn collect_fcc_targets(
+     var_name: &str,
+     cursor_offset: u32,
+     content: &str,
+-    best: &mut Option<String>,
++    best: &mut Option<CapturedCallable>,
+ ) {
+     macro_rules! walk {
+         ($iter:expr) => {
+@@ -374,10 +386,10 @@ fn collect_fcc_targets(
+ 
+     match stmt {
+         Statement::Expression(expr_stmt) => {
+-            if let Some(found) =
+-                find_fcc_target_in_expr(expr_stmt.expression, var_name, cursor_offset, content)
+-            {
+-                *best = Some(found);
++            match find_fcc_target_in_expr(expr_stmt.expression, var_name, cursor_offset, content) {
++                CallableWrite::NoWrite => {}
++                CallableWrite::Capture(found) => *best = Some(found),
++                CallableWrite::Invalidated => *best = None,
+             }
+         }
+         Statement::Block(block) => walk!(block.statements.iter()),
+@@ -478,32 +490,32 @@ fn collect_fcc_targets(
+     }
+ }
+ 
+-/// Check if an expression is an assignment to `var_name` with a
+-/// `PartialApplication` RHS, and extract the callable target text.
++/// Classify a completed direct write to the selected callable variable.
+ fn find_fcc_target_in_expr(
+     expr: &Expression<'_>,
+     var_name: &str,
+     cursor_offset: u32,
+     content: &str,
+-) -> Option<String> {
+-    if let Expression::Assignment(assignment) = expr {
+-        // Only consider assignments that end before the cursor.
+-        let assign_end = assignment.span().end.offset;
+-        if assign_end > cursor_offset {
+-            return None;
+-        }
+-
+-        if let Expression::Variable(Variable::Direct(dv)) = assignment.lhs {
+-            if dv.name != var_name.as_bytes() {
+-                return None;
+-            }
+-
+-            if let Expression::PartialApplication(pa) = assignment.rhs {
+-                return extract_callable_text_from_partial(pa, content);
+-            }
+-        }
++) -> CallableWrite {
++    let Expression::Assignment(assignment) = expr else {
++        return CallableWrite::NoWrite;
++    };
++    if assignment.span().end.offset > cursor_offset {
++        return CallableWrite::NoWrite;
++    }
++    let Expression::Variable(Variable::Direct(variable)) = assignment.lhs else {
++        return CallableWrite::NoWrite;
++    };
++    if variable.name != var_name.as_bytes() {
++        return CallableWrite::NoWrite;
++    }
++    if assignment.operator.is_assign()
++        && let Expression::PartialApplication(partial) = assignment.rhs
++        && let Some(captured) = extract_callable_text_from_partial(partial, content)
++    {
++        return CallableWrite::Capture(captured);
+     }
+-    None
++    CallableWrite::Invalidated
+ }
+ 
+ /// Extract the callable target text from a `PartialApplication` AST
+@@ -512,7 +524,7 @@ fn find_fcc_target_in_expr(
+ fn extract_callable_text_from_partial(
+     pa: &partial_application::PartialApplication<'_>,
+     content: &str,
+-) -> Option<String> {
++) -> Option<CapturedCallable> {
+     let (callee_start, callee_end) = match pa {
+         partial_application::PartialApplication::Function(f) => {
+             let span = f.function.span();
+@@ -534,7 +546,10 @@ fn extract_callable_text_from_partial(
+     if text.is_empty() {
+         return None;
+     }
+-    Some(text.to_string())
++    Some(CapturedCallable {
++        expression: text.to_string(),
++        creation_offset: u32::try_from(callee_start).ok()?,
++    })
+ }
+ 
+ impl Backend {
+@@ -856,21 +871,20 @@ impl Backend {
+         })
+     }
+ 
+-    /// Find the callable target for a first-class callable assignment
+-    /// like `$fn = someTarget(...)` and return the callable target string
+-    /// (e.g. `"makePen"`, `"$obj->method"`, `"ClassName::method"`).
++    /// Find the current first-class callable assignment and return its target
++    /// expression together with the creation-time source offset. A subsequent
++    /// completed direct non-FCC write revokes an earlier capture.
+     ///
+     /// This enables signature help for first-class callable invocations:
+     /// `$fn = makePen(...); $fn()` shows `makePen`'s parameters.
+     ///
+-    /// Uses the AST to find assignments to `var_name` before
+-    /// `cursor_offset` where the RHS is a `PartialApplication` node,
+-    /// then extracts the callable portion from the source text.
++    /// Uses canonical AST assignment/partial-application nodes and exact source
++    /// spans.
+     pub(crate) fn extract_callable_target_from_variable(
+         var_name: &str,
+         content: &str,
+         cursor_offset: u32,
+-    ) -> Option<String> {
++    ) -> Option<CapturedCallable> {
+         crate::parser::with_parsed_program(
+             content,
+             "extract_callable_target",
+diff --git a/src/signature_help_tests.rs b/src/signature_help_tests.rs
+index b446d79..da6d372 100644
+--- a/src/signature_help_tests.rs
++++ b/src/signature_help_tests.rs
+@@ -1065,10 +1065,16 @@ fn defn_paren_suffix_not_keyword() {
+ 
+ #[test]
+ fn fcc_extract_simple_function() {
+-    let content = "<?php\nfunction makePen(string $ink): Pen { return new Pen(); }\nclass Pen {}\nclass Demo {\n    public function test() {\n        $fn = makePen(...);\n        $fn();\n    }\n}\n";
++    let content = "<?php\n// café 🐘\nfunction makePen(string $ink): Pen { return new Pen(); }\nclass Pen {}\nclass Demo {\n    public function test() {\n        $fn = makePen(...);\n        $fn();\n    }\n}\n";
+     // cursor_offset should be somewhere on line 6 (`$fn();`)
+     // Find the offset of `$fn()` on line 6.
+     let cursor_offset = content.find("$fn();").unwrap() as u32 + 4; // inside parens
+     let result = Backend::extract_callable_target_from_variable("$fn", content, cursor_offset);
+-    assert_eq!(result, Some("makePen".to_string()));
++    assert_eq!(
++        result,
++        Some(CapturedCallable {
++            expression: "makePen".to_string(),
++            creation_offset: content.find("makePen(...)").unwrap() as u32,
++        })
++    );
+ }
+diff --git a/src/type_engine/call_resolution/callable_target.rs b/src/type_engine/call_resolution/callable_target.rs
+index 69c5691..397887e 100644
+--- a/src/type_engine/call_resolution/callable_target.rs
++++ b/src/type_engine/call_resolution/callable_target.rs
+@@ -19,6 +19,13 @@ use tower_lsp::lsp_types::Position;
+ use super::target_cache::CALLABLE_TARGET_CACHE;
+ use super::template_subs::evaluate_constant_operands;
+ 
++/// Invocation arguments keep their source context when a captured receiver
++/// resolves against an earlier position in the same document.
++struct CallableArguments<'text, 'borrow, 'context> {
++    text: Option<&'text str>,
++    resolution: Option<&'borrow ResolutionCtx<'context>>,
++}
++
+ impl Backend {
+     /// Bind each alternate from its own declaration using the shared type engine.
+     fn bind_overload_templates(
+@@ -127,6 +134,9 @@ impl Backend {
+         let method_subs = Self::build_method_template_subs(owner, method_name, &split_args, rctx);
+         if !method_subs.is_empty() {
+             crate::inheritance::apply_substitution_to_method(&mut bound, &method_subs);
++            for exception in &mut bound.throws {
++                *exception = exception.substitute(&method_subs);
++            }
+             self_bound_params = super::template_subs::self_bound_template_params(
+                 &declared.template_bindings,
+                 &declared.parameters,
+@@ -187,6 +197,7 @@ impl Backend {
+         method_name: &str,
+         rctx: &ResolutionCtx<'_>,
+         args_text: Option<&str>,
++        argument_rctx: &ResolutionCtx<'_>,
+     ) -> Option<ResolvedCallableTarget> {
+         let subject_text = base.to_subject_text();
+         let resolved_types: Vec<ResolvedType> = if base.is_self_like() {
+@@ -295,14 +306,21 @@ impl Backend {
+             );
+ 
+             if let Some(m) = effective.get_method_ci(&method_lower) {
+-                let (result_method, self_bound_params) =
+-                    Self::bind_method_to_call_site(m, &effective, method_name, args_text, rctx);
++                let (result_method, self_bound_params) = Self::bind_method_to_call_site(
++                    m,
++                    &effective,
++                    method_name,
++                    args_text,
++                    argument_rctx,
++                );
+ 
+                 let target = ResolvedCallableTarget {
+                     parameters: result_method.parameters.clone(),
+                     return_type: result_method.return_type.clone(),
+                     description: result_method.description.clone(),
+                     return_description: result_method.return_description.clone(),
++                    throws: (!result_method.throws.is_empty())
++                        .then(|| result_method.throws.clone().into()),
+                     overloads: result_method.overloads.clone(),
+                     owner_class: Some(owner.fqn()),
+                     self_bound_params,
+@@ -332,6 +350,7 @@ impl Backend {
+                     return_type: m.return_type.clone(),
+                     description: m.description.clone(),
+                     return_description: m.return_description.clone(),
++                    throws: (!m.throws.is_empty()).then(|| m.throws.clone().into()),
+                     owner_class: Some(owner.fqn()),
+                     ..Default::default()
+                 };
+@@ -372,6 +391,7 @@ impl Backend {
+         method_name: &str,
+         rctx: &ResolutionCtx<'_>,
+         args_text: Option<&str>,
++        argument_rctx: &ResolutionCtx<'_>,
+     ) -> Option<ResolvedCallableTarget> {
+         let owner = crate::type_engine::resolver::resolve_static_owner_class(class, rctx)?;
+ 
+@@ -404,13 +424,14 @@ impl Backend {
+         let m = merged.get_method_ci(method_name)?;
+ 
+         let (result_method, self_bound_params) =
+-            Self::bind_method_to_call_site(m, &merged, method_name, args_text, rctx);
++            Self::bind_method_to_call_site(m, &merged, method_name, args_text, argument_rctx);
+ 
+         Some(ResolvedCallableTarget {
+             parameters: result_method.parameters.clone(),
+             return_type: result_method.return_type.clone(),
+             description: result_method.description.clone(),
+             return_description: result_method.return_description.clone(),
++            throws: (!result_method.throws.is_empty()).then(|| result_method.throws.clone().into()),
+             overloads: result_method.overloads.clone(),
+             owner_class: Some(owner.fqn()),
+             self_bound_params,
+@@ -425,6 +446,7 @@ impl Backend {
+             return_type: func.return_type.clone(),
+             description: func.description.clone(),
+             return_description: func.return_description.clone(),
++            throws: (!func.throws.is_empty()).then(|| func.throws.clone().into()),
+             overloads: func.overloads.clone(),
+             ..Default::default()
+         }
+@@ -471,6 +493,11 @@ impl Backend {
+                     }
+                 }
+                 target.return_type = func.return_type.as_ref().map(|ty| ty.substitute(&subs));
++                if let Some(throws) = &mut target.throws {
++                    for exception in throws.make_mut() {
++                        *exception = exception.substitute(&subs);
++                    }
++                }
+                 target.self_bound_params = super::self_bound_template_params(
+                     &func.template_bindings,
+                     &func.parameters,
+@@ -556,11 +583,16 @@ impl Backend {
+                 let mut result_ctor = ctor;
+                 result_ctor.overloads.clear();
+                 crate::inheritance::apply_substitution_to_method(&mut result_ctor, &subs);
++                for exception in &mut result_ctor.throws {
++                    *exception = exception.substitute(&subs);
++                }
+                 return Some(ResolvedCallableTarget {
+                     parameters: result_ctor.parameters.clone(),
+                     return_type: result_ctor.return_type.clone(),
+                     description: result_ctor.description.clone(),
+                     return_description: result_ctor.return_description.clone(),
++                    throws: (!result_ctor.throws.is_empty())
++                        .then(|| result_ctor.throws.clone().into()),
+                     overloads,
+                     owner_class: Some(ci.fqn()),
+                     self_bound_params,
+@@ -574,6 +606,7 @@ impl Backend {
+             return_type: ctor.return_type.clone(),
+             description: ctor.description.clone(),
+             return_description: ctor.return_description.clone(),
++            throws: (!ctor.throws.is_empty()).then(|| ctor.throws.clone().into()),
+             overloads,
+             owner_class: Some(ci.fqn()),
+             ..Default::default()
+@@ -655,7 +688,10 @@ impl Backend {
+             content,
+             cursor_offset,
+             file_ctx,
+-            call_args_text,
++            CallableArguments {
++                text: call_args_text,
++                resolution: None,
++            },
+             &mut Vec::new(),
+         )
+     }
+@@ -678,9 +714,13 @@ impl Backend {
+         content: &str,
+         cursor_offset: u32,
+         file_ctx: &FileContext,
+-        call_args_text: Option<&str>,
++        arguments: CallableArguments<'_, '_, '_>,
+         visited_vars: &mut Vec<String>,
+     ) -> Option<ResolvedCallableTarget> {
++        let CallableArguments {
++            text: call_args_text,
++            resolution: argument_rctx,
++        } = arguments;
+         // A file may declare several `namespace` blocks, so the namespace
+         // and imports every name here resolves against are those of the
+         // block covering this call site.
+@@ -704,6 +744,9 @@ impl Backend {
+             ),
+         );
+ 
++        // An FCC retains the creation-time receiver, while its supplied
++        // argument expressions are evaluated at the original invocation.
++        let argument_rctx = argument_rctx.unwrap_or(&rctx);
+         let parsed = SubjectExpr::parse(expr);
+ 
+         // Unwrap `CallExpr` wrapper so downstream arms match the inner
+@@ -749,13 +792,23 @@ impl Backend {
+             }
+ 
+             // ── Instance method call: `$subject->method(…)` ─────────
+-            SubjectExpr::MethodCall { base, method } => {
+-                Self::resolve_instance_method_callable(base, method, &rctx, effective_args_text)
+-            }
++            SubjectExpr::MethodCall { base, method } => Self::resolve_instance_method_callable(
++                base,
++                method,
++                &rctx,
++                effective_args_text,
++                argument_rctx,
++            ),
+ 
+             // ── Static method call: `Class::method(…)` ──────────────
+             SubjectExpr::StaticMethodCall { class, method } => {
+-                Self::resolve_static_method_callable(class, method, &rctx, effective_args_text)
++                Self::resolve_static_method_callable(
++                    class,
++                    method,
++                    &rctx,
++                    effective_args_text,
++                    argument_rctx,
++                )
+             }
+ 
+             // ── Standalone function call: `functionName(…)` ─────────
+@@ -764,7 +817,7 @@ impl Backend {
+                 Some(Self::function_to_callable_with_subs(
+                     &func,
+                     effective_args_text,
+-                    &rctx,
++                    argument_rctx,
+                 ))
+             }
+ 
+@@ -775,11 +828,14 @@ impl Backend {
+                     Self::extract_callable_target_from_variable(var_name, content, cursor_offset)?;
+                 visited_vars.push(var_name.clone());
+                 let resolved = self.resolve_callable_target_inner(
+-                    &callable_target,
++                    &callable_target.expression,
+                     content,
+-                    cursor_offset,
++                    callable_target.creation_offset,
+                     file_ctx,
+-                    call_args_text,
++                    CallableArguments {
++                        text: effective_args_text,
++                        resolution: Some(argument_rctx),
++                    },
+                     visited_vars,
+                 );
+                 visited_vars.pop();
+@@ -796,7 +852,7 @@ impl Backend {
+                 Some(Self::function_to_callable_with_subs(
+                     &func,
+                     effective_args_text,
+-                    &rctx,
++                    argument_rctx,
+                 ))
+             }
+ 
+@@ -806,15 +862,25 @@ impl Backend {
+             // `SubjectExpr::parse` produces as `PropertyChain`.  Treat
+             // the trailing property as a method name.
+             SubjectExpr::PropertyChain { base, property } => {
+-                Self::resolve_instance_method_callable(base, property, &rctx, effective_args_text)
++                Self::resolve_instance_method_callable(
++                    base,
++                    property,
++                    &rctx,
++                    effective_args_text,
++                    argument_rctx,
++                )
+             }
+ 
+             // ── StaticAccess used as a callable target ──────────────
+             // Same situation: `"ClassName::method"` without `()` parses
+             // as `StaticAccess` rather than `StaticMethodCall`.
+-            SubjectExpr::StaticAccess { class, member } => {
+-                Self::resolve_static_method_callable(class, member, &rctx, effective_args_text)
+-            }
++            SubjectExpr::StaticAccess { class, member } => Self::resolve_static_method_callable(
++                class,
++                member,
++                &rctx,
++                effective_args_text,
++                argument_rctx,
++            ),
+ 
+             // ── Anything else doesn't resolve to a callable ─────────
+             _ => None,
+diff --git a/src/types/mod.rs b/src/types/mod.rs
+index 07899f9..1764aef 100644
+--- a/src/types/mod.rs
++++ b/src/types/mod.rs
+@@ -1218,6 +1218,11 @@ pub(crate) struct ResolvedCallableTarget {
+     /// Display metadata from the resolved declaration (including inheritance).
+     pub description: Option<String>,
+     pub return_description: Option<String>,
++    /// Declared exception types from the resolved callable's `@throws` tags.
++    /// Names retain their declaration-side namespace/import resolution. The
++    /// shared list avoids copying it when a cached target is cloned. No list
++    /// is allocated when the declaration has no exception metadata.
++    pub throws: Option<SharedVec<PhpType>>,
+     /// Whether the callable accepts any number of arguments without error,
+     /// regardless of `parameters`. Set for a class with no explicit
+     /// constructor: PHP silently ignores arguments to `new Foo(...)`, so
+diff --git a/tests/integration/code_action_generate_docblock.rs b/tests/integration/code_action_generate_docblock.rs
+index 242917e..0052021 100644
+--- a/tests/integration/code_action_generate_docblock.rs
++++ b/tests/integration/code_action_generate_docblock.rs
+@@ -296,3 +296,308 @@ fn documentation_cross_file_throws_keep_the_declaration_namespace() {
+     assert!(result.contains("@throws \\Vendor\\Failure"), "{result}");
+     assert!(!result.contains("@throws \\App\\Vendor"), "{result}");
+ }
++
++fn semantic_throw_workspace() -> (phpantom_lsp::Backend, tempfile::TempDir) {
++    crate::common::create_psr4_workspace_with_exception_stubs(
++        r#"{"autoload":{"psr-4":{"Vendor\\":"src/"}}}"#,
++        &[
++            (
++                "src/Failure.php",
++                "<?php namespace Vendor; class Failure extends \\RuntimeException {}",
++            ),
++            (
++                "src/Service.php",
++                "<?php namespace Vendor; class Service { /** @throws Failure */ public function fetch(): void { throw new Failure(); } }",
++            ),
++            (
++                "src/Other.php",
++                "<?php namespace Vendor; class Other { public function fetch(): void {} }",
++            ),
++            (
++                "src/ServiceChild.php",
++                "<?php namespace Vendor; class ServiceChild extends Service {}",
++            ),
++            (
++                "src/ThrowingConstructor.php",
++                "<?php namespace Vendor; class ThrowingConstructor { /** @throws Failure */ public function __construct() { throw new Failure(); } }",
++            ),
++            (
++                "src/StaticService.php",
++                "<?php namespace Vendor; class StaticService { /** @throws Failure */ public static function perform(): void { throw new Failure(); } }",
++            ),
++            (
++                "src/OtherFailure.php",
++                "<?php namespace Vendor; class OtherFailure extends \\Exception {}",
++            ),
++            (
++                "src/TemplateService.php",
++                r#"<?php namespace Vendor; class TemplateService {
++                /**
++                 * @template T of \Throwable
++                 * @param class-string<T> $type
++                 * @throws T
++                 */
++                public function fail(string $type): void { throw new $type(); }
++            }"#,
++            ),
++            (
++                "src/UnionService.php",
++                "<?php namespace Vendor; class UnionService { /** @throws Failure|OtherFailure */ public function fetch(): void {} }",
++            ),
++        ],
++    )
++}
++
++fn semantic_throw_documentation(body: &str) -> String {
++    let (backend, _directory) = semantic_throw_workspace();
++    generated_with_backend(
++        &format!(
++            "<?php\nnamespace App;\nuse Vendor\\Service as Client;\nuse Vendor\\Other;\nclass Documentation {{\n    public function |run(Client $client): void {{ {body} }}\n}}\n"
++        ),
++        &backend,
++    )
++}
++
++#[test]
++fn documentation_semantic_throws_resolves_new_receiver_in_composer_dependency() {
++    let result = semantic_throw_documentation("(new Client())->fetch();");
++    assert!(result.contains("@throws \\Vendor\\Failure"), "{result}");
++}
++
++#[test]
++fn documentation_semantic_throws_parameter_control_keeps_declared_exception() {
++    let result = semantic_throw_documentation("$client->fetch();");
++    assert!(result.contains("@throws \\Vendor\\Failure"), "{result}");
++}
++
++#[test]
++fn documentation_semantic_throws_same_callee_after_caught_call_still_escapes() {
++    let result = semantic_throw_documentation(
++        "try { $client->fetch(); } catch (\\Vendor\\Failure $failure) {} $client->fetch();",
++    );
++    assert!(result.contains("@throws \\Vendor\\Failure"), "{result}");
++    assert_eq!(result.matches("@throws").count(), 1, "{result}");
++}
++
++#[test]
++fn documentation_semantic_throws_caught_call_does_not_escape() {
++    let result = semantic_throw_documentation(
++        "try { (new Client())->fetch(); } catch (\\RuntimeException $failure) {}",
++    );
++    assert!(!result.contains("@throws"), "{result}");
++}
++
++#[test]
++fn documentation_semantic_throws_deferred_closure_does_not_execute_call() {
++    let result = semantic_throw_documentation(
++        "$deferred = static function () use ($client) { $client->fetch(); };",
++    );
++    assert!(!result.contains("@throws"), "{result}");
++}
++
++#[test]
++fn documentation_semantic_throws_deferred_arrow_does_not_execute_call() {
++    let result = semantic_throw_documentation("$deferred = fn () => $client->fetch();");
++    assert!(!result.contains("@throws"), "{result}");
++}
++
++#[test]
++fn documentation_semantic_throws_other_receiver_does_not_borrow_same_name() {
++    let result = semantic_throw_documentation("(new Other())->fetch();");
++    assert!(!result.contains("@throws"), "{result}");
++}
++
++#[test]
++fn documentation_semantic_throws_anonymous_constructor_arguments_execute() {
++    let result = semantic_throw_documentation("$object = new class($client->fetch()) {};");
++    assert!(result.contains("@throws \\Vendor\\Failure"), "{result}");
++}
++
++#[test]
++fn documentation_semantic_throws_anonymous_method_body_is_deferred() {
++    let result = semantic_throw_documentation(
++        "$object = new class { public function later(Client $client): void { $client->fetch(); } };",
++    );
++    assert!(!result.contains("@throws"), "{result}");
++}
++
++#[test]
++fn documentation_semantic_throws_immediately_invoked_closure_executes_body() {
++    let result =
++        semantic_throw_documentation("(static function () use ($client) { $client->fetch(); })();");
++    assert!(result.contains("@throws \\Vendor\\Failure"), "{result}");
++}
++
++#[test]
++fn documentation_semantic_throws_inherited_method_keeps_declaring_identity() {
++    let result = semantic_throw_documentation("(new \\Vendor\\ServiceChild())->fetch();");
++    assert!(result.contains("@throws \\Vendor\\Failure"), "{result}");
++}
++
++#[test]
++fn documentation_semantic_throws_constructor_metadata_is_preserved() {
++    let result = semantic_throw_documentation("new \\Vendor\\ThrowingConstructor();");
++    assert!(result.contains("@throws \\Vendor\\Failure"), "{result}");
++}
++
++#[test]
++fn documentation_semantic_throws_static_method_metadata_is_preserved() {
++    let result = semantic_throw_documentation("\\Vendor\\StaticService::perform();");
++    assert!(result.contains("@throws \\Vendor\\Failure"), "{result}");
++}
++
++#[test]
++fn documentation_semantic_throws_partial_union_catch_keeps_only_escaping_member() {
++    let result = semantic_throw_documentation(
++        "try { (new \\Vendor\\UnionService())->fetch(); } catch (\\Vendor\\Failure $failure) {}",
++    );
++    assert!(
++        result.contains("@throws \\Vendor\\OtherFailure"),
++        "{result}"
++    );
++    assert!(!result.contains("@throws \\Vendor\\Failure"), "{result}");
++}
++
++fn semantic_throw_with_unpublished_source(previous: &str, current: &str) -> String {
++    let (backend, _directory) = semantic_throw_workspace();
++    let prefix = "<?php\nnamespace App;\nuse Vendor\\Service as Client;\nuse Vendor\\Other;\nclass Documentation {\n public function |run(Client $first, Other $other): void { ";
++    let old = format!("{prefix}{previous} }}\n}}\n");
++    let new = format!("{prefix}{current} }}\n}}\n");
++    let (old, _) = at_marker(&old);
++    let (current, position) = at_marker(&new);
++    assert_eq!(
++        old.len(),
++        current.len(),
++        "exercise same-length stale offsets"
++    );
++    backend.update_ast("file:///test.php", &old);
++    let actions = get_code_actions_at(
++        &backend,
++        "file:///test.php",
++        &current,
++        position.line,
++        position.character,
++    );
++    let action = find_action_titled(&actions, "Generate PHPDoc block")
++        .expect("current-source action remains available");
++    apply_workspace_edit(&current, action.edit.as_ref().unwrap())
++}
++
++#[test]
++fn documentation_semantic_throws_current_source_does_not_borrow_stale_receiver() {
++    let result = semantic_throw_with_unpublished_source("$first->fetch();", "$other->fetch();");
++    assert!(!result.contains("@throws"), "{result}");
++}
++
++#[test]
++fn documentation_semantic_throws_current_source_keeps_new_receiver_exception() {
++    let result = semantic_throw_with_unpublished_source("$other->fetch();", "$first->fetch();");
++    assert!(result.contains("@throws \\Vendor\\Failure"), "{result}");
++}
++
++#[test]
++fn documentation_semantic_throws_without_cached_call_map_uses_supplied_ast() {
++    let (backend, _directory) = semantic_throw_workspace();
++    let (source, position) =
++        at_marker("<?php\nfunction |run(): void { (new \\Vendor\\Service())->fetch(); }\n");
++    let actions = get_code_actions_at(
++        &backend,
++        "file:///uncached.php",
++        &source,
++        position.line,
++        position.character,
++    );
++    let action = find_action_titled(&actions, "Generate PHPDoc block")
++        .expect("uncached-source action remains available");
++    let result = apply_workspace_edit(&source, action.edit.as_ref().unwrap());
++    assert!(
++        result.contains("@throws Vendor\\Failure") || result.contains("@throws \\Vendor\\Failure"),
++        "{result}"
++    );
++}
++
++#[test]
++fn documentation_semantic_throws_global_function_expression_receiver_control() {
++    let (backend, _directory) = semantic_throw_workspace();
++    let result = generated_with_backend(
++        "<?php\nfunction |run(): void { (new \\Vendor\\Service())->fetch(); }\n",
++        &backend,
++    );
++    assert!(
++        result.contains("@throws Vendor\\Failure") || result.contains("@throws \\Vendor\\Failure"),
++        "{result}"
++    );
++}
++
++#[test]
++fn documentation_semantic_throws_binds_exception_template_from_arguments() {
++    let result = semantic_throw_documentation(
++        "(new \\Vendor\\TemplateService())->fail(\\Vendor\\Failure::class);",
++    );
++    assert!(result.contains("@throws \\Vendor\\Failure"), "{result}");
++    assert!(!result.contains("@throws T"), "{result}");
++}
++
++#[test]
++fn documentation_semantic_throws_anonymous_class_attributes_are_metadata() {
++    let result = semantic_throw_documentation("new #[\\Vendor\\ThrowingConstructor()] class {};");
++    assert!(!result.contains("@throws"), "{result}");
++}
++
++#[test]
++fn documentation_semantic_throws_constructor_without_parentheses_executes() {
++    let result = semantic_throw_documentation("new \\Vendor\\ThrowingConstructor;");
++    assert!(result.contains("@throws \\Vendor\\Failure"), "{result}");
++}
++
++#[test]
++fn documentation_semantic_throws_first_class_callable_creation_is_deferred() {
++    let result = semantic_throw_documentation("$callback = $client->fetch(...);");
++    assert!(!result.contains("@throws"), "{result}");
++}
++
++#[test]
++fn documentation_semantic_throws_first_class_callable_invocation_executes() {
++    let result = semantic_throw_documentation("$callback = $client->fetch(...); $callback();");
++    assert!(result.contains("@throws \\Vendor\\Failure"), "{result}");
++}
++
++#[test]
++fn documentation_semantic_throws_overwritten_callable_does_not_borrow_old_target() {
++    let result = semantic_throw_documentation(
++        "$callback = $client->fetch(...); $callback = static function () {}; $callback();",
++    );
++    assert!(!result.contains("@throws"), "{result}");
++}
++
++#[test]
++fn documentation_semantic_throws_callable_keeps_captured_receiver() {
++    let result = semantic_throw_documentation(
++        "$callback = $client->fetch(...); $client = new Other(); $callback();",
++    );
++    assert!(result.contains("@throws \\Vendor\\Failure"), "{result}");
++}
++
++#[test]
++fn documentation_semantic_throws_callable_binds_arguments_at_invocation() {
++    let result = semantic_throw_documentation(
++        "$service = new \\Vendor\\TemplateService(); $callback = $service->fail(...); $type = \\Vendor\\Failure::class; $callback($type);",
++    );
++    assert!(result.contains("@throws \\Vendor\\Failure"), "{result}");
++}
++
++#[test]
++fn documentation_semantic_throws_callable_fresh_capture_after_overwrite_executes() {
++    let result = semantic_throw_documentation(
++        "$callback = $client->fetch(...); $callback = static function () {}; $callback = $client->fetch(...); $callback();",
++    );
++    assert!(result.contains("@throws \\Vendor\\Failure"), "{result}");
++}
++
++#[test]
++fn documentation_semantic_throws_callable_does_not_borrow_later_receiver() {
++    let result = semantic_throw_documentation(
++        "$other = new Other(); $callback = $other->fetch(...); $other = $client; $callback();",
++    );
++    assert!(!result.contains("@throws"), "{result}");
++}

@@ -1,0 +1,1593 @@
+diff --git a/docs/CHANGELOG.md b/docs/CHANGELOG.md
+index 426f5da..1d47ca8 100644
+--- a/docs/CHANGELOG.md
++++ b/docs/CHANGELOG.md
+@@ -15,6 +15,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
+ 
+ ## [Unreleased]
+ 
++- **Built-in function suggestions stay consistent after loading.** Completion respects declaration availability before and after sibling lookups, preserves available alternatives and keeps namespace attribute aliases separate. Contributed by PHP Workbench downstream.
++
++- **Project release notes preserve real PHP symbols.** Package removal notes and availability attributes no longer hide project methods, functions, classes or parameters. Explicit version-filtered parsing retains its existing behavior. Contributed by PHP Workbench downstream.
++
++- **Built-in properties follow the project PHP target.** Completion, hover and navigation exclude newer or removed properties while preserving project and package declarations. Contributed by PHP Workbench downstream.
++
+ - **Global constants follow the project PHP target.** Completion and hover exclude newer or removed built-in constants while preserving project polyfills and package release notes. Fully qualified `\define()` calls retain their declared constant names. Contributed by PHP Workbench downstream.
+ 
+ - **Built-in suggestions follow the project PHP version.** Class constants and sibling declarations introduced in newer PHP releases stay unavailable on older targets. Navigation opens the matching bundled source while preserving project declarations. Contributed by PHP Workbench downstream.
+diff --git a/src/lib.rs b/src/lib.rs
+index 9940c42..3e14acf 100644
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -2404,12 +2404,23 @@ impl Backend {
+                 .or_insert_with(|| source.contains("@removed"))
+         };
+         let mut mentions_since: HashMap<usize, bool> = HashMap::new();
++        // Classify declaration headers once per immutable source. Startup
++        // completion and lazy parsing must agree without expanding function models.
++        let mut function_unavailable: HashMap<(usize, usize), HashSet<String>> = HashMap::new();
+         self.stub_function_index.write().retain(|name, source| {
+-            (!may_be_removed(source) || !stubs::is_stub_function_removed(source, name, version))
+-                && (!*mentions_since
+-                    .entry(source.as_ptr() as usize)
+-                    .or_insert_with(|| source.contains("@since"))
+-                    || !stubs::is_stub_function_introduced_after(source, name, version))
++            let unavailable = function_unavailable
++                .entry((source.as_ptr() as usize, source.len()))
++                .or_insert_with(|| {
++                    if source.contains("@since")
++                        || source.contains("@removed")
++                        || source.contains("PhpStormStubsElementAvailable")
++                    {
++                        Self::unavailable_builtin_function_names(source, version)
++                    } else {
++                        HashSet::new()
++                    }
++                });
++            !unavailable.contains(&name.trim_start_matches('\\').to_ascii_lowercase())
+         });
+         self.stub_index.write().retain(|name, source| {
+             (!may_be_removed(source) || !stubs::is_stub_class_removed(source, name, version))
+diff --git a/src/parser/ast_update.rs b/src/parser/ast_update.rs
+index 5e0c5a1..c8fe4bf 100644
+--- a/src/parser/ast_update.rs
++++ b/src/parser/ast_update.rs
+@@ -880,6 +880,7 @@ impl Backend {
+                 content,
+                 php_version: Some(self.php_version()),
+                 stub_introductions: embedded_source.is_some(),
++                explicit_version_filtering: false,
+                 defer_inferred_name_resolution: true,
+                 use_map: top_level_use_map,
+                 namespace: None,
+@@ -936,6 +937,7 @@ impl Backend {
+                             content: doc_ctx.content,
+                             php_version: doc_ctx.php_version,
+                             stub_introductions: doc_ctx.stub_introductions,
++                            explicit_version_filtering: doc_ctx.explicit_version_filtering,
+                             defer_inferred_name_resolution: doc_ctx.defer_inferred_name_resolution,
+                             use_map: block_use_map.clone(),
+                             namespace: block_ns.clone(),
+@@ -1069,6 +1071,7 @@ impl Backend {
+                 content: doc_ctx.content,
+                 php_version: doc_ctx.php_version,
+                 stub_introductions: doc_ctx.stub_introductions,
++                explicit_version_filtering: doc_ctx.explicit_version_filtering,
+                 defer_inferred_name_resolution: doc_ctx.defer_inferred_name_resolution,
+                 use_map: use_map.clone(),
+                 namespace: namespace.clone(),
+@@ -1088,6 +1091,7 @@ impl Backend {
+                     content: doc_ctx.content,
+                     php_version: doc_ctx.php_version,
+                     stub_introductions: doc_ctx.stub_introductions,
++                    explicit_version_filtering: doc_ctx.explicit_version_filtering,
+                     defer_inferred_name_resolution: doc_ctx.defer_inferred_name_resolution,
+                     use_map: span.use_map.clone(),
+                     namespace: span.namespace.clone(),
+diff --git a/src/parser/classes.rs b/src/parser/classes.rs
+index efce35e..c42aa04 100644
+--- a/src/parser/classes.rs
++++ b/src/parser/classes.rs
+@@ -1413,9 +1413,6 @@ impl Backend {
+                     method_bodies.push((methods.len() - 1, &method.body));
+                 }
+                 ClassLikeMember::Property(property) => {
+-                    let mut prop_infos =
+-                        extract_property_info(property, doc_ctx.map(|c| c.content));
+-
+                     // Extract the attribute lists from the property variant
+                     // so we can check for #[Deprecated] below.
+                     let prop_attr_lists: Option<&Sequence<'_, AttributeList<'_>>> = match property {
+@@ -1423,6 +1420,25 @@ impl Backend {
+                         Property::Hooked(h) => Some(&h.attribute_lists),
+                     };
+ 
++                    let prop_docblock_text = doc_ctx.and_then(|ctx| {
++                        docblock::get_docblock_text_for_node(ctx.trivias, ctx.content, member)
++                    });
++                    // Existence metadata has PHP-release authority only in embedded stubs.
++                    if let Some(ctx) = doc_ctx
++                        && ctx.stub_introductions
++                        && let Some(version) = ctx.php_version
++                        && (prop_attr_lists
++                            .is_some_and(|attrs| !is_available_for_version(attrs, ctx, version))
++                            || is_removed_for_version(member, ctx, version)
++                            || prop_docblock_text.is_some_and(|text| {
++                                crate::stubs::docblock_introduced_after(text, version)
++                            }))
++                    {
++                        continue;
++                    }
++                    let mut prop_infos =
++                        extract_property_info(property, doc_ctx.map(|c| c.content));
++
+                     // Apply #[LanguageLevelTypeAware] override to property types.
+                     // When present, the attribute's version-appropriate type
+                     // string replaces the native type hint.
+@@ -1440,10 +1456,7 @@ impl Backend {
+ 
+                     // Apply PHPDoc `@var` override, `@deprecated`, `@see`, and
+                     // description for each property.
+-                    if let Some(ctx) = doc_ctx
+-                        && let Some(doc_text) =
+-                            docblock::get_docblock_text_for_node(ctx.trivias, ctx.content, member)
+-                    {
++                    if let Some(doc_text) = prop_docblock_text {
+                         let info = docblock::parse_docblock_for_tags(doc_text);
+                         let docblock_msg = info
+                             .as_ref()
+diff --git a/src/parser/function_availability.rs b/src/parser/function_availability.rs
+new file mode 100644
+index 0000000..48e826c
+--- /dev/null
++++ b/src/parser/function_availability.rs
+@@ -0,0 +1,152 @@
++//! Declaration-only availability for embedded function indexes.
++use std::collections::{HashMap, HashSet};
++
++use mago_syntax::cst::*;
++
++use super::{
++    DocblockCtx, is_available_for_version, is_future_builtin_declaration, is_removed_for_version,
++    with_parsed_program,
++};
++use crate::{Backend, atom::bytes_to_str, types::PhpVersion};
++
++// Canonical function identity is ASCII-case-insensitive and namespace-qualified.
++fn key(namespace: Option<&str>, name: &str) -> String {
++    match namespace.filter(|namespace| !namespace.is_empty()) {
++        Some(namespace) => format!("{namespace}\\{name}"),
++        None => name.to_owned(),
++    }
++    .to_ascii_lowercase()
++}
++
++// Namespace imports apply throughout their declaration scope. Collect only its
++// own direct `use` statements, never aliases from a sibling namespace. Block/if
++// recursion below preserves that scope, matching extract_functions' traversal.
++fn scope<'a>(
++    statements: impl Iterator<Item = &'a Statement<'a>> + std::clone::Clone,
++    parent: &DocblockCtx<'a>,
++    namespace: Option<String>,
++    states: &mut HashMap<String, bool>,
++) {
++    let mut use_map = HashMap::new();
++    for statement in statements.clone() {
++        if let Statement::Use(import) = statement {
++            Backend::extract_use_items(&import.items, &mut use_map);
++        }
++    }
++    let ctx = DocblockCtx {
++        trivias: parent.trivias,
++        content: parent.content,
++        php_version: parent.php_version,
++        explicit_version_filtering: false,
++        stub_introductions: true,
++        defer_inferred_name_resolution: false,
++        use_map,
++        namespace,
++        scope_attribute_offsets: None,
++    };
++    for statement in statements {
++        visit(statement, &ctx, states);
++    }
++}
++
++fn visit<'a>(
++    statement: &'a Statement<'a>,
++    ctx: &DocblockCtx<'a>,
++    states: &mut HashMap<String, bool>,
++) {
++    match statement {
++        Statement::Function(function) => {
++            let version = ctx
++                .php_version
++                .expect("classifier always supplies a target");
++            let admitted = !is_future_builtin_declaration(function, Some(ctx))
++                && is_available_for_version(&function.attribute_lists, ctx, version)
++                && !is_removed_for_version(function, ctx, version);
++            // No body/parameter/type/doc expansion. Header identity and own
++            // metadata are sufficient for startup index admission.
++            let name = key(ctx.namespace.as_deref(), bytes_to_str(function.name.value));
++            states
++                .entry(name)
++                .and_modify(|any| *any |= admitted)
++                .or_insert(admitted);
++        }
++        Statement::Namespace(namespace) => {
++            // An anonymous namespace resets to global, not the parent scope.
++            let name = namespace
++                .name
++                .as_ref()
++                .map(|name| bytes_to_str(name.value()).to_owned())
++                .filter(|name| !name.is_empty());
++            scope(namespace.statements().iter(), ctx, name, states);
++        }
++        Statement::Block(block) => {
++            for statement in block.statements.iter() {
++                visit(statement, ctx, states);
++            }
++        }
++        Statement::If(statement) => visit_if(&statement.body, ctx, states),
++        // Deliberately match canonical extract_functions traversal. Methods,
++        // closures and classes are not standalone function declarations.
++        _ => {}
++    }
++}
++
++fn visit_if<'a>(body: &'a IfBody<'a>, ctx: &DocblockCtx<'a>, states: &mut HashMap<String, bool>) {
++    match body {
++        IfBody::Statement(body) => {
++            visit(body.statement, ctx, states);
++            for branch in body.else_if_clauses.iter() {
++                visit(branch.statement, ctx, states);
++            }
++            if let Some(branch) = &body.else_clause {
++                visit(branch.statement, ctx, states);
++            }
++        }
++        IfBody::ColonDelimited(body) => {
++            for statement in body.statements.iter() {
++                visit(statement, ctx, states);
++            }
++            for branch in body.else_if_clauses.iter() {
++                for statement in branch.statements.iter() {
++                    visit(statement, ctx, states);
++                }
++            }
++            if let Some(branch) = &body.else_clause {
++                for statement in branch.statements.iter() {
++                    visit(statement, ctx, states);
++                }
++            }
++        }
++    }
++}
++
++impl Backend {
++    /// Names positively classified unavailable in one immutable embedded source.
++    /// Any admitted alternative preserves its exact namespace-qualified key.
++    /// Names not found in the parsed declaration set remain UNKNOWN, so callers
++    /// must retain them rather than treating this as an exhaustive allowlist.
++    pub(crate) fn unavailable_builtin_function_names(
++        content: &str,
++        version: PhpVersion,
++    ) -> HashSet<String> {
++        with_parsed_program(content, "builtin_function_admission", |program, content| {
++            let ctx = DocblockCtx {
++                trivias: program.trivia.as_slice(),
++                content,
++                php_version: Some(version),
++                explicit_version_filtering: false,
++                stub_introductions: true,
++                defer_inferred_name_resolution: false,
++                use_map: HashMap::new(),
++                namespace: None,
++                scope_attribute_offsets: None,
++            };
++            let mut states = HashMap::new();
++            scope(program.statements.iter(), &ctx, None, &mut states);
++            states
++                .into_iter()
++                .filter_map(|(name, any)| (!any).then_some(name))
++                .collect()
++        })
++    }
++}
+diff --git a/src/parser/functions.rs b/src/parser/functions.rs
+index 22c8cde..b94d3b9 100644
+--- a/src/parser/functions.rs
++++ b/src/parser/functions.rs
+@@ -3,6 +3,8 @@
+ /// This module handles extracting standalone (non-method) function
+ /// definitions and `define('NAME', value)` constant declarations from
+ /// the PHP AST.
++use std::collections::HashMap;
++
+ use mago_span::HasSpan;
+ use mago_syntax::cst::*;
+ 
+@@ -425,11 +427,30 @@ impl Backend {
+                         .map(|ident| bytes_to_str(ident.value()).to_string())
+                         .filter(|s| !s.is_empty());
+ 
++                    let namespace_ctx = doc_ctx.map(|ctx| {
++                        let mut use_map = HashMap::new();
++                        for statement in namespace.statements().iter() {
++                            if let Statement::Use(import) = statement {
++                                Self::extract_use_items(&import.items, &mut use_map);
++                            }
++                        }
++                        DocblockCtx {
++                            trivias: ctx.trivias,
++                            content: ctx.content,
++                            php_version: ctx.php_version,
++                            stub_introductions: ctx.stub_introductions,
++                            explicit_version_filtering: ctx.explicit_version_filtering,
++                            defer_inferred_name_resolution: ctx.defer_inferred_name_resolution,
++                            use_map,
++                            namespace: ns_name.clone(),
++                            scope_attribute_offsets: ctx.scope_attribute_offsets.clone(),
++                        }
++                    });
+                     Self::extract_functions_from_statements(
+                         namespace.statements().iter(),
+                         functions,
+                         &ns_name,
+-                        doc_ctx,
++                        namespace_ctx.as_ref(),
+                     );
+                 }
+                 // Recurse into block statements `{ ... }` to find nested
+diff --git a/src/parser/mod.rs b/src/parser/mod.rs
+index 44bd10d..84c307a 100644
+--- a/src/parser/mod.rs
++++ b/src/parser/mod.rs
+@@ -23,6 +23,7 @@ mod ast_update;
+ mod attributes;
+ mod classes;
+ pub(crate) mod error_format;
++mod function_availability;
+ mod functions;
+ mod use_statements;
+ 
+@@ -47,6 +48,8 @@ pub(crate) struct DocblockCtx<'a> {
+     /// Bundled PHP introduction tags additionally require `stub_introductions`:
+     /// project code also carries a target for its version-aware metadata.
+     pub php_version: Option<PhpVersion>,
++    /// Explicit public parser callers may request declaration-range filtering.
++    pub explicit_version_filtering: bool,
+     /// Apply numeric PHP introduction tags only to bundled stubs.
+     pub stub_introductions: bool,
+     /// The caller will qualify inferred `new` names during block-aware finalization.
+@@ -115,6 +118,10 @@ const ATTR_ARRAY_SHAPE: &str = "ArrayShape";
+ const DEPRECATED_FQNS: &[&str] = &["Deprecated", "JetBrains\\PhpStorm\\Deprecated"];
+ 
+ impl DocblockCtx<'_> {
++    fn filters_declaration_versions(&self) -> bool {
++        self.stub_introductions || self.explicit_version_filtering
++    }
++
+     /// Resolve an attribute's short name through the file's use-map and
+     /// return the last segment of the resolved FQN.
+     ///
+@@ -178,6 +185,9 @@ pub(crate) fn is_available_for_version(
+     ctx: &DocblockCtx<'_>,
+     php_version: PhpVersion,
+ ) -> bool {
++    if !ctx.filters_declaration_versions() {
++        return true;
++    }
+     if let Some(avail) = extract_version_availability(attribute_lists, ctx) {
+         php_version.matches_range(avail.from, avail.to)
+     } else {
+@@ -199,6 +209,9 @@ pub(crate) fn is_removed_for_version(
+     ctx: &DocblockCtx<'_>,
+     php_version: PhpVersion,
+ ) -> bool {
++    if !ctx.filters_declaration_versions() {
++        return false;
++    }
+     let docblock_text = crate::docblock::get_docblock_text_for_node(ctx.trivias, ctx.content, node);
+     if let Some(text) = docblock_text
+         && let Some(removed_ver) = crate::docblock::extract_removed_version(text)
+@@ -232,6 +245,9 @@ pub(crate) fn is_param_available_for_version(
+     ctx: &DocblockCtx<'_>,
+     php_version: PhpVersion,
+ ) -> bool {
++    if !ctx.filters_declaration_versions() {
++        return true;
++    }
+     if let Some(avail) = extract_version_availability(&param.attribute_lists, ctx) {
+         php_version.matches_range(avail.from, avail.to)
+     } else {
+@@ -1494,11 +1510,17 @@ impl Backend {
+         content: &str,
+         php_version: Option<PhpVersion>,
+     ) -> Vec<(ClassInfo, Option<String>)> {
+-        Self::parse_php_classes_by_block(content, php_version, false, false)
+-            .0
+-            .into_iter()
+-            .map(|(cls, ns, _)| (cls, ns))
+-            .collect()
++        Self::parse_php_classes_by_block_with_authority(
++            content,
++            php_version,
++            false,
++            false,
++            php_version.is_some(),
++        )
++        .0
++        .into_iter()
++        .map(|(cls, ns, _)| (cls, ns))
++        .collect()
+     }
+ 
+     /// Like [`parse_php_versioned_with_namespaces`] but also returns the
+@@ -1520,6 +1542,26 @@ impl Backend {
+     ) -> (
+         Vec<(ClassInfo, Option<String>, Option<usize>)>,
+         Vec<NamespaceSpan>,
++    ) {
++        Self::parse_php_classes_by_block_with_authority(
++            content,
++            php_version,
++            stub_introductions,
++            defer_inferred_name_resolution,
++            false,
++        )
++    }
++
++    #[allow(clippy::type_complexity)]
++    fn parse_php_classes_by_block_with_authority(
++        content: &str,
++        php_version: Option<PhpVersion>,
++        stub_introductions: bool,
++        defer_inferred_name_resolution: bool,
++        explicit_version_filtering: bool,
++    ) -> (
++        Vec<(ClassInfo, Option<String>, Option<usize>)>,
++        Vec<NamespaceSpan>,
+     ) {
+         with_parsed_program(content, "parse_php", |program, content| {
+             let mut use_map = HashMap::new();
+@@ -1556,6 +1598,7 @@ impl Backend {
+                 content,
+                 php_version,
+                 stub_introductions,
++                explicit_version_filtering,
+                 defer_inferred_name_resolution,
+                 use_map,
+                 namespace,
+@@ -1581,6 +1624,7 @@ impl Backend {
+                             content: doc_ctx.content,
+                             php_version: doc_ctx.php_version,
+                             stub_introductions: doc_ctx.stub_introductions,
++                            explicit_version_filtering: doc_ctx.explicit_version_filtering,
+                             defer_inferred_name_resolution: doc_ctx.defer_inferred_name_resolution,
+                             use_map: span.use_map.clone(),
+                             namespace: span.namespace.clone(),
+@@ -1638,6 +1682,23 @@ impl Backend {
+         &self,
+         content: &str,
+         php_version: Option<PhpVersion>,
++    ) -> Vec<FunctionInfo> {
++        self.parse_functions_with_authority(content, php_version, false)
++    }
++
++    pub(crate) fn parse_builtin_functions(
++        &self,
++        content: &str,
++        version: PhpVersion,
++    ) -> Vec<FunctionInfo> {
++        self.parse_functions_with_authority(content, Some(version), true)
++    }
++
++    fn parse_functions_with_authority(
++        &self,
++        content: &str,
++        php_version: Option<PhpVersion>,
++        stub_introductions: bool,
+     ) -> Vec<FunctionInfo> {
+         with_parsed_program(content, "parse_functions", |program, content| {
+             let mut use_map = HashMap::new();
+@@ -1648,7 +1709,8 @@ impl Backend {
+                 trivias: program.trivia.as_slice(),
+                 content,
+                 php_version,
+-                stub_introductions: false,
++                stub_introductions,
++                explicit_version_filtering: php_version.is_some(),
+                 defer_inferred_name_resolution: false,
+                 use_map,
+                 namespace,
+@@ -1706,6 +1768,7 @@ impl Backend {
+                     content,
+                     php_version: Some(version),
+                     stub_introductions: true,
++                    explicit_version_filtering: false,
+                     defer_inferred_name_resolution: false,
+                     use_map: HashMap::new(),
+                     namespace: None,
+diff --git a/src/resolution.rs b/src/resolution.rs
+index 38ea5e0..48084b4 100644
+--- a/src/resolution.rs
++++ b/src/resolution.rs
+@@ -1251,17 +1251,7 @@ impl Backend {
+         for &name in candidates {
+             if let Some(&stub_content) = stub_fn_idx.get(name) {
+                 let ver = Some(self.php_version());
+-                let mut functions = self.parse_functions_versioned(stub_content, ver);
+-                if stub_content.contains("@since") {
+-                    let version = self.php_version();
+-                    functions.retain(|function| {
+-                        !crate::stubs::is_stub_function_introduced_after_offset(
+-                            stub_content,
+-                            function.name_offset as usize,
+-                            version,
+-                        )
+-                    });
+-                }
++                let mut functions = self.parse_builtin_functions(stub_content, self.php_version());
+ 
+                 if functions.is_empty() {
+                     continue;
+diff --git a/src/stubs.rs b/src/stubs.rs
+index ddc7bbd..25f70f4 100644
+--- a/src/stubs.rs
++++ b/src/stubs.rs
+@@ -294,19 +294,6 @@ pub(crate) fn is_stub_class_introduced_after_offset(
+     keyword_offset > 0 && introduced_after_at(source, keyword_offset as usize, version)
+ }
+ 
+-/// Check a parsed stub function using its identifier offset, avoiding another
+-/// whole-file name search while its sibling declarations are cached.
+-pub(crate) fn is_stub_function_introduced_after_offset(
+-    source: &str,
+-    name_offset: usize,
+-    php_version: crate::types::PhpVersion,
+-) -> bool {
+-    source
+-        .get(..name_offset)
+-        .and_then(|before| before.rfind("function"))
+-        .is_some_and(|position| introduced_after_at(source, position, php_version))
+-}
+-
+ fn introduced_after_at(source: &str, position: usize, version: crate::types::PhpVersion) -> bool {
+     let Some(docblock) = preceding_docblock(source, position) else {
+         return false;
+@@ -469,11 +456,10 @@ mod tests {
+             "future",
+             PhpVersion::new(8, 4)
+         ));
+-        assert!(is_stub_function_introduced_after_offset(
+-            source,
+-            source.find("future").unwrap(),
+-            PhpVersion::new(8, 3)
+-        ));
++        assert!(
++            crate::Backend::unavailable_builtin_function_names(source, PhpVersion::new(8, 3))
++                .contains("future")
++        );
+     }
+ 
+     #[test]
+diff --git a/tests/integration/main.rs b/tests/integration/main.rs
+index f3020c8..a2f011c 100644
+--- a/tests/integration/main.rs
++++ b/tests/integration/main.rs
+@@ -287,6 +287,7 @@ mod blade_generated_diagnostics;
+ mod stub_global_constant_versions;
+ mod stub_global_siblings;
+ mod stub_method_versions;
++mod stub_property_versions;
+ 
+ mod keyword_php_target;
+ 
+@@ -300,3 +301,5 @@ mod workbench_rename;
+ mod workbench_rename_project_compat;
+ 
+ mod workbench_rename_external_authority;
++
++mod release_metadata_authority;
+diff --git a/tests/integration/release_metadata_authority.rs b/tests/integration/release_metadata_authority.rs
+new file mode 100644
+index 0000000..3d191f3
+--- /dev/null
++++ b/tests/integration/release_metadata_authority.rs
+@@ -0,0 +1,599 @@
++//! PHP-release filtering has authority only in embedded or explicitly versioned parsing.
++use crate::common::{complete_at, create_psr4_workspace, hover_text_at, open_php};
++use phpantom_lsp::{Backend, types::PhpVersion};
++use std::collections::HashMap;
++use tower_lsp::{LanguageServer, lsp_types::*};
++
++const SOURCE: &str = r#"<?php
++namespace ReleaseNotes;
++use JetBrains\PhpStorm\Internal\PhpStormStubsElementAvailable as Available;
++class Carrier {
++    public function stableMethod(): string { return 'stable'; }
++    /** @removed 8.1 */ public function removedMethod(): string { return 'package'; }
++    #[Available(from: '99.0')] public function rangedMethod(): string { return 'package'; }
++    /** @since 99.0 */ public function sinceMethod(): string { return 'package'; }
++    public function parameterMethod(string $before, #[Available(from: '8.2')] int $packageParam, bool $after): string { return 'params'; }
++}
++function authorityStable(): string { return 'stable'; }
++/** @removed 8.1 */ function authorityRemoved(): string { return 'package'; }
++#[Available(from: '99.0')] function authorityRanged(): string { return 'package'; }
++/** @since 99.0 */ function authoritySince(): string { return 'package'; }
++function authorityParameters(string $before, #[Available(from: '8.2')] int $packageParam, bool $after): string { return 'params'; }
++/** @removed 8.1 */ class RemovedClass { public function retained(): string { return 'class'; } }
++/** @removed 8.1 */ interface RemovedInterface { public function retained(): string; }
++/** @removed 8.1 */ trait RemovedTrait { public function retained(): string { return 'trait'; } }
++class UsesTrait { use RemovedTrait; }
++/** @removed 8.1 */ enum RemovedEnum { case One; public function retained(): string { return 'enum'; } }
++/** @since 99.0 */ class SinceClass { public function retained(): string { return 'since'; } }
++"#;
++
++async fn methods(backend: &Backend, receiver: &str) -> Vec<CompletionItem> {
++    let prefix = format!(
++        "function authorityMemberQuery(\\ReleaseNotes\\{receiver} $value): void {{ $value->"
++    );
++    let source = format!("<?php\n{prefix} }}\n");
++    complete_at(
++        backend,
++        &Url::parse("file:///authority-member-query.php").unwrap(),
++        &source,
++        1,
++        prefix.encode_utf16().count() as u32,
++    )
++    .await
++}
++
++fn contains(items: &[CompletionItem], name: &str) -> bool {
++    items.iter().any(|item| {
++        item.filter_text
++            .as_deref()
++            .unwrap_or(item.label.split('(').next().unwrap())
++            == name
++    })
++}
++
++async fn functions(backend: &Backend) -> Vec<CompletionItem> {
++    complete_at(
++        backend,
++        &Url::parse("file:///authority-function-query.php").unwrap(),
++        "<?php\nnamespace ReleaseNotes;\nauthority",
++        2,
++        9,
++    )
++    .await
++}
++
++async fn signature(backend: &Backend, method: bool) -> SignatureHelp {
++    let marked = if method {
++        "<?php\nfunction authoritySignatureQuery(\\ReleaseNotes\\Carrier $value): void { $value->parameterMethod(<caret>); }\n"
++    } else {
++        "<?php\n\\ReleaseNotes\\authorityParameters(<caret>);\n"
++    };
++    let (prefix, _) = marked.split_once("<caret>").unwrap();
++    let pos = Position::new(
++        prefix.bytes().filter(|byte| *byte == b'\n').count() as u32,
++        prefix.rsplit('\n').next().unwrap().encode_utf16().count() as u32,
++    );
++    let uri = Url::parse(if method {
++        "file:///authority-method-signature.php"
++    } else {
++        "file:///authority-function-signature.php"
++    })
++    .unwrap();
++    open_php(backend, &uri, &marked.replace("<caret>", "")).await;
++    backend
++        .signature_help(SignatureHelpParams {
++            text_document_position_params: TextDocumentPositionParams {
++                text_document: TextDocumentIdentifier { uri },
++                position: pos,
++            },
++            work_done_progress_params: WorkDoneProgressParams::default(),
++            context: None,
++        })
++        .await
++        .unwrap()
++        .expect("callable must have signature")
++}
++
++fn assert_parameter_order(help: &SignatureHelp, middle: bool) {
++    let sig = &help.signatures[0];
++    assert_eq!(
++        sig.parameters.as_ref().unwrap().len(),
++        if middle { 3 } else { 2 }
++    );
++    let before = sig.label.find("$before").unwrap();
++    let after = sig.label.find("$after").unwrap();
++    assert!(before < after);
++    if middle {
++        let parameter = sig
++            .label
++            .find("$packageParam")
++            .expect("ordinary middle parameter cannot be dropped");
++        assert!(before < parameter && parameter < after);
++    } else {
++        assert!(!sig.label.contains("$packageParam"));
++    }
++}
++
++async fn assert_parameter_hover_order(backend: &Backend, method: bool, middle: bool) {
++    let (source, symbol) = if method {
++        (
++            "<?php\nfunction inspectHover(\\ReleaseNotes\\Carrier $value): void { $value->parameterMethod(); }\n",
++            "parameterMethod",
++        )
++    } else {
++        (
++            "<?php\n\\ReleaseNotes\\authorityParameters();\n",
++            "authorityParameters",
++        )
++    };
++    let at = source.find(symbol).unwrap() + 2;
++    let prefix = &source[..at];
++    let uri = Url::parse(if method {
++        "file:///authority-method-param-hover.php"
++    } else {
++        "file:///authority-function-param-hover.php"
++    })
++    .unwrap();
++    open_php(backend, &uri, source).await;
++    let doc = hover_text_at(
++        backend,
++        &uri,
++        prefix.bytes().filter(|byte| *byte == b'\n').count() as u32,
++        prefix.rsplit('\n').next().unwrap().encode_utf16().count() as u32,
++    )
++    .await
++    .expect("parameter callable must hover");
++    let before = doc.find("$before").unwrap();
++    let after = doc.find("$after").unwrap();
++    assert!(before < after);
++    if middle {
++        let package = doc
++            .find("$packageParam")
++            .expect("ordinary middle parameter must remain in hover");
++        assert!(before < package && package < after);
++    } else {
++        assert!(!doc.contains("$packageParam"));
++    }
++}
++
++async fn assert_ordinary(backend: &Backend) {
++    let member_items = methods(backend, "Carrier").await;
++    for name in [
++        "stableMethod",
++        "removedMethod",
++        "rangedMethod",
++        "sinceMethod",
++        "parameterMethod",
++    ] {
++        assert!(
++            contains(&member_items, name),
++            "ordinary method hidden: {name}"
++        );
++    }
++    let function_items = functions(backend).await;
++    for name in [
++        "authorityStable",
++        "authorityRemoved",
++        "authorityRanged",
++        "authoritySince",
++        "authorityParameters",
++    ] {
++        assert!(
++            contains(&function_items, name),
++            "ordinary function hidden: {name}"
++        );
++    }
++    for receiver in [
++        "RemovedClass",
++        "RemovedInterface",
++        "UsesTrait",
++        "RemovedEnum",
++        "SinceClass",
++    ] {
++        assert!(
++            contains(&methods(backend, receiver).await, "retained"),
++            "ordinary classlike hidden: {receiver}"
++        );
++    }
++    for method in [false, true] {
++        assert_parameter_order(&signature(backend, method).await, true);
++        assert_parameter_hover_order(backend, method, true).await;
++    }
++}
++
++#[tokio::test]
++async fn release_authority_live_project_keeps_methods_functions_classlikes_and_parameters() {
++    let backend = Backend::new_test();
++    backend.set_php_version(PhpVersion::new(8, 1));
++    open_php(
++        &backend,
++        &Url::parse("file:///release-notes.php").unwrap(),
++        SOURCE,
++    )
++    .await;
++    assert_ordinary(&backend).await;
++}
++
++#[tokio::test]
++async fn release_authority_unopened_composer_keeps_package_metadata_and_parameter_order() {
++    let (backend, dir) = create_psr4_workspace(
++        r#"{"require":{"php":"^8.1"},"autoload":{"psr-4":{"ReleaseNotes\\":"package/src/"},"files":["package/src/Carrier.php"]}}"#,
++        &[
++            (
++                ".phpantom.toml",
++                "[php]\nversion = \"8.1\"\n[external_tools]\nenabled = false\n",
++            ),
++            (
++                "package/composer.json",
++                r#"{"name":"acme/release-notes","autoload":{"psr-4":{"ReleaseNotes\\":"src/"},"files":["src/Carrier.php"]}}"#,
++            ),
++            ("package/src/Carrier.php", SOURCE),
++            // Generated Composer data, consumed by the actual startup scanner.
++            // Root-package autoload files use $baseDir; no PHP is executed.
++            (
++                "vendor/composer/autoload_files.php",
++                r#"<?php
++$vendorDir = dirname(__DIR__);
++$baseDir = dirname($vendorDir);
++return array(
++    'release-notes-fixture' => $baseDir . '/package/src/Carrier.php',
++);
++"#,
++            ),
++        ],
++    );
++    let path = dir.path().join("package/src/Carrier.php");
++    let before = std::fs::read(&path).unwrap();
++    // create_psr4_workspace sets mappings only. initialized performs real
++    // configured Composer discovery and eager parsing of declared files.
++    // Declaration source is never didOpened and no model/index is injected.
++    backend.initialized(InitializedParams {}).await;
++    assert_eq!(backend.php_version(), PhpVersion::new(8, 1));
++    assert!(
++        backend
++            .find_or_load_function(&["ReleaseNotes\\authorityStable"])
++            .is_some(),
++        "actual Composer startup must discover the stable function control"
++    );
++    // All original semantic assertions remain unchanged.
++    assert_ordinary(&backend).await;
++    assert_eq!(std::fs::read(&path).unwrap(), before);
++    assert_eq!(std::fs::read_to_string(path).unwrap(), SOURCE);
++    backend.shutdown().await.unwrap();
++}
++
++#[tokio::test]
++async fn release_authority_client_uri_cannot_make_project_metadata_builtin() {
++    let backend = Backend::new_test();
++    backend.set_php_version(PhpVersion::new(8, 1));
++    open_php(
++        &backend,
++        &Url::parse("phpantom-stub://const/CLIENT_RELEASE_NOTES").unwrap(),
++        SOURCE,
++    )
++    .await;
++    assert_ordinary(&backend).await;
++}
++
++fn trusted(minor: u8) -> Backend {
++    let classes = [
++        "Carrier",
++        "RemovedClass",
++        "RemovedInterface",
++        "RemovedTrait",
++        "UsesTrait",
++        "RemovedEnum",
++        "SinceClass",
++    ]
++    .into_iter()
++    .map(|name| {
++        // Fixture uses static literals for the public index constructor.
++        match name {
++            "Carrier" => ("ReleaseNotes\\Carrier", SOURCE),
++            "RemovedClass" => ("ReleaseNotes\\RemovedClass", SOURCE),
++            "RemovedInterface" => ("ReleaseNotes\\RemovedInterface", SOURCE),
++            "RemovedTrait" => ("ReleaseNotes\\RemovedTrait", SOURCE),
++            "UsesTrait" => ("ReleaseNotes\\UsesTrait", SOURCE),
++            "RemovedEnum" => ("ReleaseNotes\\RemovedEnum", SOURCE),
++            _ => ("ReleaseNotes\\SinceClass", SOURCE),
++        }
++    })
++    .collect();
++    let functions = HashMap::from([
++        ("ReleaseNotes\\authorityStable", SOURCE),
++        ("ReleaseNotes\\authorityRemoved", SOURCE),
++        ("ReleaseNotes\\authorityRanged", SOURCE),
++        ("ReleaseNotes\\authoritySince", SOURCE),
++        ("ReleaseNotes\\authorityParameters", SOURCE),
++    ]);
++    let backend = Backend::new_test_with_all_stubs(classes, functions, HashMap::new());
++    backend.set_php_version(PhpVersion::new(8, minor));
++    backend
++}
++
++#[tokio::test]
++async fn release_authority_trusted_loader_still_filters_methods_functions_and_parameters() {
++    for minor in [1, 2] {
++        let backend = trusted(minor);
++        let member_items = methods(&backend, "Carrier").await;
++        assert!(contains(&member_items, "stableMethod"));
++        assert!(contains(&member_items, "parameterMethod"));
++        for name in ["removedMethod", "rangedMethod", "sinceMethod"] {
++            assert!(
++                !contains(&member_items, name),
++                "trusted method metadata ignored: {name}"
++            );
++        }
++        let function_items = functions(&backend).await;
++        assert!(contains(&function_items, "authorityStable"));
++        for name in ["authorityRemoved", "authorityRanged", "authoritySince"] {
++            assert!(
++                !contains(&function_items, name),
++                "trusted function metadata ignored: {name}"
++            );
++        }
++        for method in [false, true] {
++            assert_parameter_order(&signature(&backend, method).await, minor >= 2);
++            assert_parameter_hover_order(&backend, method, minor >= 2).await;
++        }
++    }
++}
++
++#[test]
++fn release_authority_explicit_versioned_parser_contracts_stay_filtered() {
++    let classes = Backend::parse_php_versioned(SOURCE, Some(PhpVersion::new(8, 1)));
++    let carrier = classes
++        .iter()
++        .find(|class| class.name == "Carrier")
++        .unwrap();
++    assert!(
++        carrier
++            .methods
++            .iter()
++            .any(|method| method.name == "stableMethod")
++    );
++    assert!(
++        carrier
++            .methods
++            .iter()
++            .any(|method| method.name == "sinceMethod")
++    );
++    for name in ["removedMethod", "rangedMethod"] {
++        assert!(!carrier.methods.iter().any(|method| method.name == name));
++    }
++    let backend = Backend::new_test();
++    let parsed = backend.parse_functions_versioned(SOURCE, Some(PhpVersion::new(8, 1)));
++    assert!(
++        parsed
++            .iter()
++            .any(|function| function.name == "authorityStable")
++    );
++    assert!(
++        parsed
++            .iter()
++            .any(|function| function.name == "authoritySince")
++    );
++    for name in ["authorityRemoved", "authorityRanged"] {
++        assert!(!parsed.iter().any(|function| function.name == name));
++    }
++}
++
++const FUNCTION_ADMISSION_SOURCE: &str = r#"<?php
++namespace FunctionAdmissionLeft {
++    use JetBrains\PhpStorm\Internal\PhpStormStubsElementAvailable as Available;
++    function authorityStable(): string { return 'stable'; }
++    /** @removed 8.1 */ function authorityGone(): string { return 'gone'; }
++    /** @since 8.2 */ function authorityFuture(): string { return 'future'; }
++    #[Available(from: '8.2', to: '8.3')]
++    function authorityRange(): string { return 'range'; }
++    /** @removed 8.1 */ function authorityTwin(): string { return 'left'; }
++    if (PHP_VERSION_ID < 80100) {
++        /** @removed 8.1 */ function authorityAlternative(): string { return 'old'; }
++    } else {
++        /** @since 8.1 */ function authorityAlternative(): string { return 'new'; }
++    }
++}
++namespace FunctionAdmissionRight {
++    use JetBrains\PhpStorm\Internal\PhpStormStubsElementAvailable as Available;
++    function authorityTwin(): string { return 'right'; }
++    #[Available(from: '8.1', to: '8.2')]
++    function authorityRightRange(): string { return 'right-range'; }
++    /** @since PECL 99.0 */ function authorityExtensionRelease(): string { return 'extension'; }
++    function authorityAdjacent(): string { return 'adjacent'; }
++}
++"#;
++
++#[tokio::test]
++async fn release_authority_cold_function_index_uses_exact_declarations_and_available_alternatives()
++{
++    let declarations = [
++        (
++            "FunctionAdmissionLeft\\authorityStable",
++            true,
++            true,
++            true,
++            true,
++        ),
++        (
++            "FunctionAdmissionLeft\\authorityGone",
++            true,
++            false,
++            false,
++            false,
++        ),
++        (
++            "FunctionAdmissionLeft\\authorityFuture",
++            false,
++            false,
++            true,
++            true,
++        ),
++        (
++            "FunctionAdmissionLeft\\authorityRange",
++            false,
++            false,
++            true,
++            false,
++        ),
++        (
++            "FunctionAdmissionLeft\\authorityTwin",
++            true,
++            false,
++            false,
++            false,
++        ),
++        (
++            "FunctionAdmissionLeft\\authorityAlternative",
++            true,
++            true,
++            true,
++            true,
++        ),
++        (
++            "FunctionAdmissionRight\\authorityTwin",
++            true,
++            true,
++            true,
++            true,
++        ),
++        (
++            "FunctionAdmissionRight\\authorityRightRange",
++            false,
++            true,
++            true,
++            false,
++        ),
++        (
++            "FunctionAdmissionRight\\authorityExtensionRelease",
++            true,
++            true,
++            true,
++            true,
++        ),
++        (
++            "FunctionAdmissionRight\\authorityAdjacent",
++            true,
++            true,
++            true,
++            true,
++        ),
++    ];
++    for (column, minor) in [0, 1, 2, 4].into_iter().enumerate() {
++        let backend = Backend::new_test();
++        // Supply the complete immutable input before the first target snapshot.
++        for entry in declarations {
++            backend
++                .stub_function_index_mut()
++                .insert(entry.0.to_string(), FUNCTION_ADMISSION_SOURCE);
++        }
++        backend.set_php_version(PhpVersion::new(8, minor));
++        let cold = functions(&backend).await;
++        for entry in declarations {
++            let expected = [entry.1, entry.2, entry.3, entry.4][column];
++            let offered = cold.iter().any(|item| {
++                item.data
++                    .as_ref()
++                    .and_then(|data| data.get("m"))
++                    .and_then(serde_json::Value::as_str)
++                    == Some(entry.0)
++            });
++            assert_eq!(offered, expected, "cold target8.{minor}: {}", entry.0);
++        }
++        // Parsing one sibling must preserve the same admission in warmed lists.
++        assert!(
++            backend
++                .find_or_load_function(&["FunctionAdmissionLeft\\authorityStable"])
++                .is_some()
++        );
++        let warm = functions(&backend).await;
++        for entry in declarations {
++            let expected = [entry.1, entry.2, entry.3, entry.4][column];
++            let offered = warm.iter().any(|item| {
++                item.data
++                    .as_ref()
++                    .and_then(|data| data.get("m"))
++                    .and_then(serde_json::Value::as_str)
++                    == Some(entry.0)
++            });
++            assert_eq!(offered, expected, "warm target8.{minor}: {}", entry.0);
++            assert_eq!(
++                backend.find_or_load_function(&[entry.0]).is_some(),
++                expected,
++                "lookup target8.{minor}: {}",
++                entry.0
++            );
++        }
++    }
++}
++
++#[tokio::test]
++async fn release_authority_future_first_alternative_survives_sibling_loading() {
++    const SOURCE: &str = r#"<?php
++function authorityStable(): string { return 'stable'; }
++if (PHP_VERSION_ID >= 80200) {
++    /** @since 8.2 */ function authorityAlternative(): string { return 'new'; }
++} else {
++    function authorityAlternative(): string { return 'old'; }
++}
++"#;
++    let backend = Backend::new_test();
++    for name in ["authorityStable", "authorityAlternative"] {
++        backend
++            .stub_function_index_mut()
++            .insert(name.to_string(), SOURCE);
++    }
++    backend.set_php_version(PhpVersion::new(8, 0));
++    assert!(contains(&functions(&backend).await, "authorityAlternative"));
++    assert!(
++        backend
++            .find_or_load_function(&["authorityStable"])
++            .is_some()
++    );
++    assert!(
++        backend
++            .find_or_load_function(&["authorityAlternative"])
++            .is_some(),
++        "available fallback must survive future-first sibling parsing"
++    );
++}
++
++#[tokio::test]
++async fn release_authority_namespace_aliases_stay_local_after_sibling_loading() {
++    const SOURCE: &str = r#"<?php
++namespace AuthorityAliasLeft {
++    use JetBrains\PhpStorm\Internal\PhpStormStubsElementAvailable as Gate;
++    function authorityStable(): string { return 'stable'; }
++    #[Gate(from: '8.2')] function authorityFuture(): string { return 'future'; }
++}
++namespace AuthorityAliasRight {
++    use Other\Attribute as Gate;
++    #[Gate(from: '99.0')] function authorityPackage(): string { return 'package'; }
++}
++"#;
++    let backend = Backend::new_test();
++    for name in [
++        "AuthorityAliasLeft\\authorityStable",
++        "AuthorityAliasLeft\\authorityFuture",
++        "AuthorityAliasRight\\authorityPackage",
++    ] {
++        backend
++            .stub_function_index_mut()
++            .insert(name.to_string(), SOURCE);
++    }
++    backend.set_php_version(PhpVersion::new(8, 0));
++    assert!(!contains(&functions(&backend).await, "authorityFuture"));
++    assert!(
++        backend
++            .find_or_load_function(&["AuthorityAliasLeft\\authorityStable"])
++            .is_some()
++    );
++    assert!(
++        !contains(&functions(&backend).await, "authorityFuture"),
++        "sibling namespace alias must not republish an excluded function"
++    );
++    assert!(
++        backend
++            .find_or_load_function(&["AuthorityAliasRight\\authorityPackage"])
++            .is_some()
++    );
++}
+diff --git a/tests/integration/stub_property_versions.rs b/tests/integration/stub_property_versions.rs
+new file mode 100644
+index 0000000..924e5e1
+--- /dev/null
++++ b/tests/integration/stub_property_versions.rs
+@@ -0,0 +1,390 @@
++//! Built-in property declarations follow their target without suppressing package metadata.
++use crate::common::{
++    complete_at, create_psr4_workspace, goto_definition_at, hover_text_at, open_php,
++};
++use phpantom_lsp::{Backend, types::PhpVersion};
++use std::collections::HashMap;
++use tower_lsp::{LanguageServer, lsp_types::*};
++
++async fn property_items(backend: &Backend, receiver: &str, inherited: bool) -> Vec<CompletionItem> {
++    let declaration = if inherited {
++        format!("class PropertyQueryChild extends \\{receiver} {{}}\n")
++    } else {
++        String::new()
++    };
++    let ty = if inherited {
++        "PropertyQueryChild"
++    } else {
++        receiver
++    };
++    let source =
++        format!("<?php\n{declaration}function inspect(\\{ty} $value): void {{ $value-> }}\n");
++    let line = if inherited { 2 } else { 1 };
++    let col = format!("function inspect(\\{ty} $value): void {{ $value->")
++        .encode_utf16()
++        .count() as u32;
++    complete_at(
++        backend,
++        &Url::parse("file:///property-target-items.php").unwrap(),
++        &source,
++        line,
++        col,
++    )
++    .await
++}
++
++fn property_named<'a>(items: &'a [CompletionItem], name: &str) -> Option<&'a CompletionItem> {
++    items.iter().find(|item| {
++        item.kind == Some(CompletionItemKind::PROPERTY)
++            && item
++                .filter_text
++                .as_deref()
++                .unwrap_or(&item.label)
++                .trim_start_matches('$')
++                == name
++    })
++}
++
++async fn property_hover(backend: &Backend, receiver: &str, name: &str) -> Option<String> {
++    let uri = Url::parse("file:///property-target-hover.php").unwrap();
++    let prefix = format!("function inspect(\\{receiver} $value): void {{ $value->");
++    let source = format!("<?php\n{prefix}{name}; }}\n");
++    open_php(backend, &uri, &source).await;
++    hover_text_at(backend, &uri, 1, prefix.encode_utf16().count() as u32 + 2).await
++}
++
++async fn property_location(backend: &Backend, receiver: &str, name: &str) -> Option<Url> {
++    let uri = Url::parse("file:///property-target-definition.php").unwrap();
++    let prefix = format!("function inspect(\\{receiver} $value): void {{ $value->");
++    let source = format!("<?php\n{prefix}{name}; }}\n");
++    open_php(backend, &uri, &source).await;
++    match goto_definition_at(backend, &uri, 1, prefix.encode_utf16().count() as u32 + 2).await {
++        None => None,
++        Some(GotoDefinitionResponse::Scalar(location)) => Some(location.uri),
++        Some(GotoDefinitionResponse::Array(locations)) => {
++            assert_eq!(locations.len(), 1);
++            Some(locations[0].uri.clone())
++        }
++        Some(GotoDefinitionResponse::Link(locations)) => {
++            assert_eq!(locations.len(), 1);
++            Some(locations[0].target_uri.clone())
++        }
++    }
++}
++
++fn date_period_backend(minor: u8) -> Backend {
++    let backend = Backend::new_test_with_stubs(phpantom_lsp::stubs::build_stub_class_index());
++    backend.set_php_version(PhpVersion::new(8, minor));
++    backend
++}
++
++#[tokio::test]
++async fn stub_property_actual_date_period_cold_warm_and_inherited_target_boundaries() {
++    for minor in [1, 2] {
++        for inherited in [false, true] {
++            let backend = date_period_backend(minor);
++            let cold = property_items(&backend, "DatePeriod", inherited).await;
++            assert!(
++                property_named(&cold, "include_start_date").is_some(),
++                "stable DatePeriod control"
++            );
++            assert_eq!(
++                property_named(&cold, "include_end_date").is_some(),
++                minor >= 2,
++                "cold DatePeriod inherited={inherited} on8.{minor}"
++            );
++            // Stable pre8.2 member has type-changing metadata, not an existence
++            // boundary. Require presence, not an invented pre8.2 native type.
++            assert!(
++                property_hover(&backend, "DatePeriod", "include_start_date")
++                    .await
++                    .is_some()
++            );
++            let warm = property_items(&backend, "DatePeriod", inherited).await;
++            assert!(property_named(&warm, "include_start_date").is_some());
++            assert_eq!(
++                property_named(&warm, "include_end_date").is_some(),
++                minor >= 2
++            );
++            assert_eq!(
++                property_hover(&backend, "DatePeriod", "include_end_date")
++                    .await
++                    .is_some(),
++                minor >= 2
++            );
++            assert_eq!(
++                property_location(&backend, "DatePeriod", "include_end_date")
++                    .await
++                    .is_some(),
++                minor >= 2
++            );
++            if let Some(item) = property_named(&warm, "include_end_date") {
++                let mut item = item.clone();
++                item.documentation = None;
++                assert!(
++                    backend
++                        .completion_resolve(item)
++                        .await
++                        .unwrap()
++                        .documentation
++                        .is_some()
++                );
++            }
++        }
++    }
++}
++
++#[tokio::test]
++async fn stub_property_unavailable_target_does_not_resolve_available_newer_item() {
++    let newer = date_period_backend(2);
++    let older = date_period_backend(1);
++    let available = property_items(&newer, "DatePeriod", false).await;
++    let mut item = property_named(&available, "include_end_date")
++        .expect("8.2 positive control")
++        .clone();
++    item.documentation = None;
++    item.detail = None;
++    assert!(
++        property_hover(&older, "DatePeriod", "include_start_date")
++            .await
++            .is_some()
++    );
++    let resolved = older.completion_resolve(item).await.unwrap();
++    assert!(
++        resolved.documentation.is_none(),
++        "old target must not resolve future property"
++    );
++}
++
++const PROPERTY_STUB: &str = r#"<?php
++namespace { const PROPERTY_TARGET_SENTINEL = 74001; function property_target_trigger(): int { return 74002; } }
++namespace PropertyTarget {
++use JetBrains\PhpStorm\Internal\PhpStormStubsElementAvailable as Available;
++use JetBrains\PhpStorm\Internal\LanguageLevelTypeAware as TypeAware;
++class Carrier {
++    public $stable;
++    /** @since 8.2 */
++    public int $futureFirst, $futureSecond;
++    public $afterFuture;
++    /** @removed 8.2 */
++    public $removed;
++    #[Available(from: '8.2', to: '8.3')]
++    public $ranged;
++    /** @var bool */
++    #[TypeAware(['8.2' => 'bool'], default: '')]
++    public $typeOnly;
++    /** @since PECL 9.0 */
++    public $extensionRelease;
++    /** @since 8.2 */
++    public const FUTURE_CONSTANT = 1;
++    public $afterConstant;
++    /** @since 8.2 */
++    public function futureMethod() {}
++    public $afterMethod;
++}
++}
++"#;
++
++fn synthetic_property_backend(minor: u8) -> Backend {
++    let backend = Backend::new_test_with_all_stubs(
++        HashMap::from([("PropertyTarget\\Carrier", PROPERTY_STUB)]),
++        HashMap::from([("property_target_trigger", PROPERTY_STUB)]),
++        HashMap::new(),
++    );
++    // Constructor already filtered its default target; seed the stable global
++    // entry before applying the one target snapshot used by this fixture.
++    backend
++        .stub_constant_index_mut()
++        .insert("PROPERTY_TARGET_SENTINEL", PROPERTY_STUB);
++    backend.set_php_version(PhpVersion::new(8, minor));
++    backend
++}
++
++#[tokio::test]
++async fn stub_property_grouped_declaration_own_metadata_alias_ranges_and_adjacency() {
++    for minor in [1, 2, 3, 4] {
++        for inherited in [false, true] {
++            let backend = synthetic_property_backend(minor);
++            let items = property_items(&backend, "PropertyTarget\\Carrier", inherited).await;
++            for name in [
++                "stable",
++                "afterFuture",
++                "typeOnly",
++                "extensionRelease",
++                "afterConstant",
++                "afterMethod",
++            ] {
++                assert!(property_named(&items, name).is_some(), "{name} on8.{minor}");
++            }
++            for name in ["futureFirst", "futureSecond"] {
++                assert_eq!(
++                    property_named(&items, name).is_some(),
++                    minor >= 2,
++                    "group {name} on8.{minor}"
++                );
++            }
++            assert_eq!(property_named(&items, "removed").is_some(), minor < 2);
++            assert_eq!(
++                property_named(&items, "ranged").is_some(),
++                (2..=3).contains(&minor)
++            );
++        }
++    }
++}
++
++#[tokio::test]
++async fn stub_property_global_first_trusted_ast_keeps_property_admission() {
++    for minor in [1, 2] {
++        let backend = synthetic_property_backend(minor);
++        let uri = Url::parse("file:///property-target-sentinel-query.php").unwrap();
++        open_php(&backend, &uri, "<?php\nPROPERTY_TARGET_SENTINEL;\n").await;
++        assert!(
++            hover_text_at(&backend, &uri, 1, 2)
++                .await
++                .unwrap()
++                .contains("74001")
++        );
++        assert!(
++            backend
++                .global_defines()
++                .read()
++                .contains_key("PROPERTY_TARGET_SENTINEL")
++        );
++        let items = property_items(&backend, "PropertyTarget\\Carrier", false).await;
++        assert!(property_named(&items, "stable").is_some());
++        assert!(property_named(&items, "typeOnly").is_some());
++        assert_eq!(property_named(&items, "futureFirst").is_some(), minor >= 2);
++        assert_eq!(
++            property_hover(&backend, "PropertyTarget\\Carrier", "futureFirst")
++                .await
++                .is_some(),
++            minor >= 2
++        );
++        assert_eq!(
++            property_location(&backend, "PropertyTarget\\Carrier", "futureFirst")
++                .await
++                .is_some(),
++            minor >= 2
++        );
++    }
++}
++
++const PROPERTY_NOTES: &str = r#"<?php
++namespace PropertyNotes;
++use JetBrains\PhpStorm\Internal\PhpStormStubsElementAvailable as Available;
++class Carrier {
++    /** @since 99.0 */ public $futureFirst;
++    /** @removed 8.1 */ public $removed;
++    #[Available(from: '99.0')] public $ranged;
++}
++"#;
++
++async fn assert_property_notes(backend: &Backend, uri: &Url) {
++    let items = property_items(backend, "PropertyNotes\\Carrier", false).await;
++    for name in ["futureFirst", "removed", "ranged"] {
++        assert!(
++            property_named(&items, name).is_some(),
++            "ordinary release notes hid {name}"
++        );
++        assert!(
++            property_hover(backend, "PropertyNotes\\Carrier", name)
++                .await
++                .is_some()
++        );
++        assert_eq!(
++            property_location(backend, "PropertyNotes\\Carrier", name).await,
++            Some(uri.clone())
++        );
++    }
++}
++
++#[tokio::test]
++async fn stub_property_project_and_client_uri_metadata_stay_nonauthoritative() {
++    for identity in [
++        "file:///property-target-project.php",
++        "phpantom-stub://const/PROPERTY_TARGET_SENTINEL",
++    ] {
++        let backend = synthetic_property_backend(1);
++        let uri = Url::parse(identity).unwrap();
++        open_php(&backend, &uri, PROPERTY_NOTES).await;
++        assert_property_notes(&backend, &uri).await;
++    }
++}
++
++#[tokio::test]
++async fn stub_property_unopened_composer_source_preserves_package_release_metadata() {
++    let (backend, dir) = create_psr4_workspace(
++        r#"{"autoload":{"psr-4":{"PropertyNotes\\":"vendor/acme/notes/src/"}}}"#,
++        &[
++            (
++                "vendor/acme/notes/composer.json",
++                r#"{"name":"acme/notes","autoload":{"psr-4":{"PropertyNotes\\":"src/"}}}"#,
++            ),
++            ("vendor/acme/notes/src/Carrier.php", PROPERTY_NOTES),
++        ],
++    );
++    backend.set_php_version(PhpVersion::new(8, 1));
++    let path = dir.path().join("vendor/acme/notes/src/Carrier.php");
++    let uri = Url::from_file_path(&path).unwrap();
++    // Only queries are didOpened; the declaration is loaded from PSR-4.
++    assert_property_notes(&backend, &uri).await;
++    assert_eq!(std::fs::read_to_string(path).unwrap(), PROPERTY_NOTES);
++}
++
++const HOOKED_PROPERTY_STUB: &str = r#"<?php
++namespace PropertyHookTarget;
++use JetBrains\PhpStorm\Internal\PhpStormStubsElementAvailable as Available;
++class Carrier {
++    public string $stableHook { get => 'stable'; }
++    /** @since 8.5 */
++    public string $futureHook { get => 'future'; }
++    public string $afterFutureHook { get => 'adjacent'; }
++    #[Available(from: '8.5')]
++    public string $rangedHook { get => 'ranged'; }
++    /** @removed 8.5 */
++    public string $removedHook { get => 'removed'; }
++}
++"#;
++
++#[tokio::test]
++async fn stub_property_hooked_declaration_uses_own_release_metadata() {
++    for minor in [4, 5] {
++        let backend = Backend::new_test_with_stubs(HashMap::from([(
++            "PropertyHookTarget\\Carrier",
++            HOOKED_PROPERTY_STUB,
++        )]));
++        backend.set_php_version(PhpVersion::new(8, minor));
++        let items = property_items(&backend, "PropertyHookTarget\\Carrier", false).await;
++        for name in ["stableHook", "afterFutureHook"] {
++            assert!(property_named(&items, name).is_some(), "{name} on8.{minor}");
++        }
++        for name in ["futureHook", "rangedHook"] {
++            assert_eq!(
++                property_named(&items, name).is_some(),
++                minor >= 5,
++                "{name} on8.{minor}"
++            );
++        }
++        assert_eq!(property_named(&items, "removedHook").is_some(), minor < 5);
++    }
++}
++
++#[tokio::test]
++async fn stub_property_function_first_loader_keeps_sibling_target_admission() {
++    for minor in [1, 2] {
++        let backend = synthetic_property_backend(minor);
++        let function = backend
++            .find_or_load_function(&["property_target_trigger"])
++            .expect("actual embedded function loader positive control");
++        assert_eq!(function.name, "property_target_trigger");
++        let items = property_items(&backend, "PropertyTarget\\Carrier", false).await;
++        assert!(property_named(&items, "stable").is_some());
++        assert_eq!(property_named(&items, "futureFirst").is_some(), minor >= 2);
++        assert_eq!(
++            property_hover(&backend, "PropertyTarget\\Carrier", "futureFirst")
++                .await
++                .is_some(),
++            minor >= 2
++        );
++    }
++}

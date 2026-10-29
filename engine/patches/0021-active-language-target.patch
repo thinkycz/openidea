@@ -1,0 +1,390 @@
+diff --git a/docs/CHANGELOG.md b/docs/CHANGELOG.md
+index 5490860..c111454 100644
+--- a/docs/CHANGELOG.md
++++ b/docs/CHANGELOG.md
+@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
+ 
+ ### Added
+ 
++- **Active PHP target snapshot.** Editors can read the version and extension profile already applied by the current service, even after saved settings change. Contributed by PHP Workbench (local downstream patch).
++
+ - **Project PHP extension profiles.** Set `[php] extensions` to the extensions available on your deployment target. Completion and built-in lookup keep project polyfills and exclude unavailable extension declarations after restarting the service. Contributed by PHP Workbench (local downstream patch).
+ 
+ ### Fixed
+diff --git a/src/backend/startup.rs b/src/backend/startup.rs
+index 4882a7a..35caa57 100644
+--- a/src/backend/startup.rs
++++ b/src/backend/startup.rs
+@@ -279,7 +279,7 @@ impl Backend {
+                     ..ExecuteCommandOptions::default()
+                 }),
+                 experimental: Some(
+-                    serde_json::json!({"phpWorkbenchRoutes": true, "phpWorkbenchViews": true, "phpWorkbenchBuiltins": true}),
++                    serde_json::json!({"phpWorkbenchRoutes": true, "phpWorkbenchViews": true, "phpWorkbenchBuiltins": true, "phpWorkbenchActiveTarget": true}),
+                 ),
+                 ..ServerCapabilities::default()
+             },
+@@ -425,6 +425,7 @@ impl Backend {
+                     .await;
+             }
+         } else {
++            self.set_php_version(self.php_version());
+             self.log(MessageType::INFO, "PHPantom initialized!".to_string())
+                 .await;
+         }
+diff --git a/src/lib.rs b/src/lib.rs
+index 12fab63..eb369f3 100644
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -85,6 +85,7 @@
+ //!     parsing (`parse_object_shape`, `extract_object_shape_property_type`,
+ //!     `is_object_shape`)
+ 
++pub mod workbench_active_target;
+ pub mod workbench_builtins;
+ pub mod workbench_routes;
+ pub mod workbench_views;
+@@ -2317,8 +2318,9 @@ impl Backend {
+         // Like the version indices below, extension availability is a startup
+         // snapshot. Saved profile changes use a fresh service, never mutate a
+         // shared lazy cache while requests are reading it.
+-        if let Some(names) = self.config().php.extensions {
+-            let disabled = stubs::disabled_extension_sources(&names);
++        let extensions = self.config().php.extensions;
++        if let Some(names) = &extensions {
++            let disabled = stubs::disabled_extension_sources(names);
+             let available =
+                 |source: &str| !disabled.contains(&(source.as_ptr() as usize, source.len()));
+             self.stub_index
+@@ -2358,5 +2360,11 @@ impl Backend {
+         self.stub_constant_index.write().retain(|name, source| {
+             !may_be_removed(source) || !stubs::is_stub_constant_removed(source, name, version)
+         });
++        *self.workspace.active_php_target.write() =
++            Some(workbench_active_target::ActiveTarget::applied(
++                version,
++                extensions.as_deref(),
++                &self.version,
++            ));
+     }
+ }
+diff --git a/src/main.rs b/src/main.rs
+index f3ff629..432f84b 100644
+--- a/src/main.rs
++++ b/src/main.rs
+@@ -568,6 +568,10 @@ async fn async_main() {
+                     .custom_method("phpWorkbench/routes", Backend::workbench_routes)
+                     .custom_method("phpWorkbench/views", Backend::workbench_views)
+                     .custom_method("phpWorkbench/builtin", Backend::workbench_builtin)
++                    .custom_method(
++                        "phpWorkbench/activeTarget",
++                        Backend::workbench_active_target,
++                    )
+                     .finish();
+                 Server::new(read, write, socket)
+                     .concurrency_level(LSP_CONCURRENCY)
+@@ -588,6 +592,10 @@ async fn async_main() {
+                     .custom_method("phpWorkbench/routes", Backend::workbench_routes)
+                     .custom_method("phpWorkbench/views", Backend::workbench_views)
+                     .custom_method("phpWorkbench/builtin", Backend::workbench_builtin)
++                    .custom_method(
++                        "phpWorkbench/activeTarget",
++                        Backend::workbench_active_target,
++                    )
+                     .finish();
+                 Server::new(stdin, stdout, socket)
+                     .concurrency_level(LSP_CONCURRENCY)
+diff --git a/src/stubs.rs b/src/stubs.rs
+index d0492e4..c2a7d10 100644
+--- a/src/stubs.rs
++++ b/src/stubs.rs
+@@ -84,6 +84,24 @@ fn extension_name(name: &str) -> String {
+     }
+ }
+ 
++/// Describe actual selected groups and unknown names without reading disk.
++pub(crate) fn describe_extension_selection(
++    names: Option<&[String]>,
++) -> (Option<Vec<String>>, Vec<String>) {
++    use std::collections::BTreeSet;
++    let Some(names) = names.filter(|names| !names.iter().any(|name| name == "*")) else {
++        return (None, Vec::new());
++    };
++    let known: BTreeSet<String> = STUB_FILE_EXTENSIONS
++        .iter()
++        .map(|name| extension_name(name))
++        .collect();
++    let requested: BTreeSet<String> = names.iter().map(|name| extension_name(name)).collect();
++    let (enabled, unknown): (Vec<_>, Vec<_>) =
++        requested.into_iter().partition(|name| known.contains(name));
++    (Some(enabled), unknown)
++}
++
+ /// Stub sources excluded by an explicit extension profile. Pointer plus length
+ /// avoids hashing megabytes of source once for every symbol in a shared file.
+ /// Identical embedded strings may share storage: keep a source if any owner is
+diff --git a/src/workbench_active_target.rs b/src/workbench_active_target.rs
+new file mode 100644
+index 0000000..a70354d
+--- /dev/null
++++ b/src/workbench_active_target.rs
+@@ -0,0 +1,51 @@
++//! Applied language-intelligence settings, independent of watched saved config.
++use crate::{Backend, stubs, types::PhpVersion};
++use serde::{Deserialize, Serialize};
++use tower_lsp::jsonrpc::{Error, Result};
++
++/// Read-only active-target query; no project files or processes are accessed.
++#[derive(Debug, Default, Deserialize)]
++pub struct TargetQuery {}
++
++/// Settings already applied to the current service's built-in indexes.
++#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
++pub struct ActiveTarget {
++    /// Major/minor language target used by the service.
++    pub php_version: String,
++    /// Available selected extension groups; `None` means all bundled groups.
++    pub extensions: Option<Vec<String>>,
++    /// Requested groups without declarations in the pinned bundled stubs.
++    pub unknown_extensions: Vec<String>,
++    /// Version of the service producing this snapshot.
++    pub engine_version: String,
++    /// Version of the embedded declaration corpus.
++    pub stubs_version: String,
++}
++
++impl ActiveTarget {
++    pub(crate) fn applied(version: PhpVersion, names: Option<&[String]>, engine: &str) -> Self {
++        let (extensions, unknown_extensions) = stubs::describe_extension_selection(names);
++        Self {
++            php_version: version.to_string(),
++            extensions,
++            unknown_extensions,
++            engine_version: engine.to_string(),
++            stubs_version: stubs::STUBS_VERSION.to_string(),
++        }
++    }
++}
++
++impl Backend {
++    /// Return only applied settings, never relabel a service from changed TOML.
++    pub async fn workbench_active_target(&self, _: TargetQuery) -> Result<ActiveTarget> {
++        self.workspace
++            .active_php_target
++            .read()
++            .clone()
++            .ok_or_else(|| {
++                let mut error = Error::new(tower_lsp::jsonrpc::ErrorCode::ServerError(-32002));
++                error.message = "PHP target is still initializing; retry shortly".into();
++                error
++            })
++    }
++}
+diff --git a/src/workspace_env.rs b/src/workspace_env.rs
+index 3a0b9c5..0540d6d 100644
+--- a/src/workspace_env.rs
++++ b/src/workspace_env.rs
+@@ -35,6 +35,8 @@ pub(crate) struct WorkspaceEnv {
+         Arc<RwLock<Vec<(PathBuf, ClassCompletionOrigin, String)>>>,
+     /// The target PHP version used for version-aware stub filtering.
+     pub(crate) php_version: Mutex<PhpVersion>,
++    /// Immutable applied target shared with request/worker clones.
++    pub(crate) active_php_target: Arc<RwLock<Option<crate::workbench_active_target::ActiveTarget>>>,
+     /// Per-project configuration loaded from `.phpantom.toml`.
+     ///
+     /// Shared by `Arc` (unlike `php_version` and the other plain `Mutex`
+@@ -102,6 +104,7 @@ impl WorkspaceEnv {
+             vendor_dir_paths: Mutex::new(Vec::new()),
+             vendor_package_origin_roots: Arc::new(RwLock::new(Vec::new())),
+             php_version: Mutex::new(PhpVersion::default()),
++            active_php_target: Arc::new(RwLock::new(None)),
+             config: Arc::new(Mutex::new(config::Config::default())),
+             global_config_path,
+             index_filters: Arc::new(RwLock::new(None)),
+@@ -121,6 +124,7 @@ impl Clone for WorkspaceEnv {
+             vendor_dir_paths: Mutex::new(self.vendor_dir_paths.lock().clone()),
+             vendor_package_origin_roots: Arc::clone(&self.vendor_package_origin_roots),
+             php_version: Mutex::new(*self.php_version.lock()),
++            active_php_target: Arc::clone(&self.active_php_target),
+             config: Arc::clone(&self.config),
+             global_config_path: self.global_config_path.clone(),
+             index_filters: Arc::clone(&self.index_filters),
+@@ -135,6 +139,37 @@ impl Clone for WorkspaceEnv {
+ mod tests {
+     use crate::{Backend, config};
+ 
++    #[tokio::test]
++    async fn active_target_is_shared_with_workers_and_stable_across_config_reload() {
++        let backend = Backend::new_test();
++        backend.set_config(toml::from_str("[php]\nextensions=['curl']").unwrap());
++        backend.set_php_version(crate::types::PhpVersion::new(8, 3));
++        let clone = backend.clone_for_blocking();
++        let original = clone
++            .workbench_active_target(crate::workbench_active_target::TargetQuery {})
++            .await
++            .unwrap();
++        let root = tempfile::tempdir().unwrap();
++        std::fs::write(
++            root.path().join(".phpantom.toml"),
++            "[php]\nversion='7.4'\nextensions=[]",
++        )
++        .unwrap();
++        clone.reload_config(root.path());
++        assert_eq!(backend.config().php.version.as_deref(), Some("7.4"));
++        assert_eq!(
++            clone
++                .workbench_active_target(crate::workbench_active_target::TargetQuery {})
++                .await
++                .unwrap(),
++            original
++        );
++        assert!(std::sync::Arc::ptr_eq(
++            &clone.workspace.active_php_target,
++            &backend.workspace.active_php_target
++        ));
++    }
++
+     /// A test that writes a `.phpantom.toml` into a temp workspace has to
+     /// be judged against that file alone. When the test constructors
+     /// carry the platform global config path, whatever sits in the
+diff --git a/tests/integration/active_php_target.rs b/tests/integration/active_php_target.rs
+new file mode 100644
+index 0000000..b829ce3
+--- /dev/null
++++ b/tests/integration/active_php_target.rs
+@@ -0,0 +1,124 @@
++use phpantom_lsp::{
++    Backend, config::Config, types::PhpVersion, workbench_active_target::TargetQuery,
++};
++use tower_lsp::{
++    LanguageServer,
++    lsp_types::{InitializeParams, InitializedParams},
++};
++
++#[tokio::test]
++async fn target_snapshot_refuses_to_claim_defaults_before_settings_are_applied() {
++    let backend = Backend::new_test();
++    let error = backend
++        .workbench_active_target(TargetQuery {})
++        .await
++        .unwrap_err();
++    assert_eq!(error.code.code(), -32002);
++}
++
++#[tokio::test]
++async fn target_snapshot_describes_canonical_extensions_unknown_names_and_versions() {
++    let backend = Backend::new_test();
++    let config: Config =
++        toml::from_str("[php]\nextensions=['ext-CuRL', 'PDO', 'curl', 'future_private']").unwrap();
++    backend.set_config(config);
++    backend.set_php_version(PhpVersion::new(8, 3));
++    let target = backend
++        .workbench_active_target(TargetQuery {})
++        .await
++        .unwrap();
++    assert_eq!(target.php_version, "8.3");
++    assert_eq!(target.extensions, Some(vec!["curl".into(), "pdo".into()]));
++    assert_eq!(target.unknown_extensions, vec!["future_private"]);
++    assert!(!target.engine_version.is_empty());
++    assert!(!target.stubs_version.is_empty());
++}
++
++#[tokio::test]
++async fn target_snapshot_does_not_follow_config_without_application() {
++    let backend = Backend::new_test();
++    backend.set_config(toml::from_str("[php]\nversion='8.3'\nextensions=['curl']").unwrap());
++    backend.set_php_version(PhpVersion::new(8, 3));
++    let original = backend
++        .workbench_active_target(TargetQuery {})
++        .await
++        .unwrap();
++    backend.set_config(toml::from_str("[php]\nversion='7.4'\nextensions=[]").unwrap());
++    let current = backend
++        .workbench_active_target(TargetQuery {})
++        .await
++        .unwrap();
++    assert_eq!(current, original);
++}
++
++#[tokio::test]
++async fn target_snapshot_distinguishes_all_and_core_only() {
++    for (text, expected) in [
++        ("", None),
++        ("[php]\nextensions=['*']", None),
++        ("[php]\nextensions=[]", Some(Vec::new())),
++    ] {
++        let backend = Backend::new_test();
++        backend.set_config(toml::from_str(text).unwrap());
++        backend.set_php_version(PhpVersion::new(8, 2));
++        assert_eq!(
++            backend
++                .workbench_active_target(TargetQuery {})
++                .await
++                .unwrap()
++                .extensions,
++            expected
++        );
++    }
++}
++
++#[tokio::test]
++async fn target_snapshot_query_is_advertised_independently_of_readiness() {
++    let backend = Backend::new_test();
++    let response = backend
++        .initialize(InitializeParams::default())
++        .await
++        .unwrap();
++    assert_eq!(
++        response.capabilities.experimental.unwrap()["phpWorkbenchActiveTarget"],
++        true
++    );
++    assert!(
++        backend
++            .workbench_active_target(TargetQuery {})
++            .await
++            .is_err()
++    );
++}
++
++#[tokio::test]
++async fn target_snapshot_does_not_read_new_saved_project_settings() {
++    let root = tempfile::tempdir().unwrap();
++    let backend = Backend::new_test_with_workspace(root.path().to_path_buf(), Vec::new());
++    backend.set_config(toml::from_str("[php]\nextensions=['pdo']").unwrap());
++    backend.set_php_version(PhpVersion::new(8, 1));
++    let config = root.path().join(".phpantom.toml");
++    std::fs::write(&config, "[php]\nversion='8.5'\nextensions=['*']\n").unwrap();
++    let target = backend
++        .workbench_active_target(TargetQuery {})
++        .await
++        .unwrap();
++    assert_eq!(target.php_version, "8.1");
++    assert_eq!(target.extensions, Some(vec!["pdo".into()]));
++}
++
++#[tokio::test]
++async fn standalone_initialization_applies_the_default_target_before_reporting_it() {
++    let backend = Backend::new_test();
++    backend
++        .initialize(InitializeParams::default())
++        .await
++        .unwrap();
++    backend.initialized(InitializedParams {}).await;
++    let target = backend
++        .workbench_active_target(TargetQuery {})
++        .await
++        .unwrap();
++    assert_eq!(target.php_version, backend.php_version().to_string());
++    assert!(target.extensions.is_none());
++}
+diff --git a/tests/integration/main.rs b/tests/integration/main.rs
+index eed9205..4b888e3 100644
+--- a/tests/integration/main.rs
++++ b/tests/integration/main.rs
+@@ -1,5 +1,6 @@
+ mod common;
+ 
++mod active_php_target;
+ mod array_func_generics;
+ mod array_key_types;
+ mod blade;

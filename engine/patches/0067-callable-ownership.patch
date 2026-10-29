@@ -1,0 +1,218 @@
+diff --git a/docs/CHANGELOG.md b/docs/CHANGELOG.md
+index 1d47ca8..36cf84d 100644
+--- a/docs/CHANGELOG.md
++++ b/docs/CHANGELOG.md
+@@ -15,6 +15,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
+ 
+ ## [Unreleased]
+ 
++- **Call hierarchy keeps nested bodies separate.** Calls inside nested methods, functions, closures and arrow functions no longer appear as direct calls of their enclosing declaration. Contributed by PHP Workbench downstream.
++
+ - **Built-in function suggestions stay consistent after loading.** Completion respects declaration availability before and after sibling lookups, preserves available alternatives and keeps namespace attribute aliases separate. Contributed by PHP Workbench downstream.
+ 
+ - **Project release notes preserve real PHP symbols.** Package removal notes and availability attributes no longer hide project methods, functions, classes or parameters. Explicit version-filtered parsing retains its existing behavior. Contributed by PHP Workbench downstream.
+diff --git a/src/call_hierarchy.rs b/src/call_hierarchy.rs
+index f863e20..7c4e78f 100644
+--- a/src/call_hierarchy.rs
++++ b/src/call_hierarchy.rs
+@@ -147,7 +147,12 @@ impl Backend {
+         let call_sites: Vec<SymbolSpan> = symbol_map
+             .spans
+             .iter()
+-            .filter(|span| span.start >= body_start && span.start <= body_end && is_call_site(span))
++            .filter(|span| {
++                span.start >= body_start
++                    && span.start <= body_end
++                    && is_call_site(span)
++                    && symbol_map.find_enclosing_scope(span.start) == body_start
++            })
+             .cloned()
+             .collect();
+ 
+@@ -308,17 +313,71 @@ impl Backend {
+             .map(|(functions, _)| functions.clone())
+             .unwrap_or_default();
+         let functions = self.symbols.global_functions.read();
+-        for fqn in function_names {
+-            let Some((declaring_uri, function)) = functions.get(&fqn) else {
++        for fqn in &function_names {
++            let Some((declaring_uri, function)) = functions.get(fqn) else {
+                 continue;
+             };
+             if declaring_uri == uri {
+                 consider(function_callable_at(
+-                    uri, content, symbol_map, &fqn, function, offset,
++                    uri, content, symbol_map, fqn, function, offset,
+                 ));
+             }
+         }
+-        best
++        drop(functions);
++        // Nested named functions have declaration spans even when the global
++        // index omits them. Inspect only the declaration at the name or just
++        // before the innermost body, rather than scanning all spans per caller.
++        let scope = symbol_map.find_enclosing_scope(offset);
++        let is_function_definition = |span: &&SymbolSpan| {
++            matches!(
++                span.kind,
++                SymbolKind::FunctionCall {
++                    is_definition: true,
++                    is_docblock_reference: false,
++                    ..
++                }
++            )
++        };
++        let definition = symbol_map
++            .lookup(offset)
++            .filter(is_function_definition)
++            .or_else(|| {
++                let end = symbol_map.spans.partition_point(|span| span.start < scope);
++                symbol_map.spans[..end]
++                    .iter()
++                    .rev()
++                    .find(is_function_definition)
++            });
++        if symbol_map.embedded_source.is_none()
++            && let Some(span) = definition
++            && let SymbolKind::FunctionCall { name, .. } = &span.kind
++            && symbol_map.find_enclosing_scope(span.start) != 0
++            && let Some(body) = declaration_body(symbol_map, span.start, content.len() as u32)
++            && ((span.start..=span.end).contains(&offset) || body.0 == scope)
++        {
++            let namespace = self.namespace_at_offset(uri, span.start);
++            let fqn = namespace.as_ref().map_or_else(
++                || name.to_string(),
++                |namespace| format!("{namespace}\\{name}"),
++            );
++            consider(build_callable(
++                uri,
++                content,
++                (name, span.start),
++                LspSymbolKind::FUNCTION,
++                namespace,
++                serde_json::json!({"kind": "php", "function": fqn, "offset": span.start}),
++                Some(body),
++            ));
++        }
++
++        // A closure or arrow function has no named hierarchy item. Its calls
++        // must not acquire the enclosing method/function as a fabricated caller.
++        best.filter(|candidate| {
++            candidate.body.is_none_or(|(start, end)| {
++                offset < start || offset > end || symbol_map.find_enclosing_scope(offset) == start
++            })
++        })
+     }
+ 
+     fn cached_file(&self, cache: &mut FileCache, uri: &str) -> Option<ParsedFile> {
+@@ -744,6 +803,110 @@ abstract class Partial {
+         assert_eq!(incoming[0].from.name, "driver");
+     }
+ 
++    #[test]
++    fn nested_method_calls_do_not_belong_to_the_outer_body() {
++        let content = r#"<?php
++function directLeaf(): void {}
++function nestedLeaf(): void {}
++class Host {
++    public function outer(): void {
++        /* ž🐘 */ directLeaf(); directLeaf();
++        $object = new class {
++            public function inner(): void { /* ž🐘 */ nestedLeaf(); nestedLeaf(); }
++        };
++    }
++}
++"#;
++        let backend = parse(content);
++        let outer = prepare_at(&backend, content, "function outer");
++        assert_eq!(outgoing_names(&backend, &outer), vec!["directLeaf"]);
++        let inner = prepare_at(&backend, content, "function inner");
++        let calls = backend.outgoing_calls_impl(&inner).unwrap();
++        assert_eq!(calls.len(), 1);
++        assert_eq!(calls[0].to.name, "nestedLeaf");
++        let expected: Vec<_> = content
++            .match_indices("nestedLeaf();")
++            .map(|(start, _)| byte_range_to_lsp_range(content, start, start + "nestedLeaf".len()))
++            .collect();
++        assert_eq!(calls[0].from_ranges, expected);
++        let leaf = prepare_at(&backend, content, "function nestedLeaf");
++        let callers = backend.incoming_calls_impl(&leaf).unwrap();
++        assert_eq!(callers.len(), 1);
++        assert_eq!(callers[0].from.name, "inner");
++        assert_eq!(callers[0].from_ranges, expected);
++    }
++
++    #[test]
++    fn nested_closure_and_arrow_calls_do_not_borrow_a_named_caller() {
++        for body in ["function () { nestedLeaf(); }", "fn() => nestedLeaf()"] {
++            let content = format!(
++                r#"<?php
++function directLeaf(): void {{}}
++function nestedLeaf(): void {{}}
++function outer(): void {{
++    directLeaf();
++    $callback = {body};
++}}
++"#
++            );
++            let backend = parse(&content);
++            let outer = prepare_at(&backend, &content, "function outer");
++            assert_eq!(
++                outgoing_names(&backend, &outer),
++                vec!["directLeaf"],
++                "{body}"
++            );
++            let leaf = prepare_at(&backend, &content, "function nestedLeaf");
++            assert!(
++                backend.incoming_calls_impl(&leaf).unwrap().is_empty(),
++                "{body}"
++            );
++        }
++    }
++
++    #[test]
++    fn nested_named_function_keeps_its_own_calls() {
++        let content = r#"<?php
++function directLeaf(): void {}
++function nestedLeaf(): void {}
++function outer(): void {
++    directLeaf();
++    function inner(): void { nestedLeaf(); }
++}
++"#;
++        let backend = parse(content);
++        let outer = prepare_at(&backend, content, "function outer");
++        assert_eq!(outgoing_names(&backend, &outer), vec!["directLeaf"]);
++        let inner = prepare_at(&backend, content, "function inner");
++        assert_eq!(outgoing_names(&backend, &inner), vec!["nestedLeaf"]);
++        let leaf = prepare_at(&backend, content, "function nestedLeaf");
++        let callers = backend.incoming_calls_impl(&leaf).unwrap();
++        assert_eq!(callers.len(), 1);
++        assert_eq!(callers[0].from.name, "inner");
++    }
++
++    #[test]
++    fn nested_function_declarations_keep_their_namespace_not_function_imports() {
++        let content = r#"<?php
++namespace App;
++use function Foreign\inner;
++function leaf(): void {}
++class Host {
++    public function outer(): void {
++        function inner(): void { leaf(); }
++    }
++}
++"#;
++        let backend = parse(content);
++        let inner = prepare_at(&backend, content, "function inner()");
++        assert_eq!(inner.name, "inner");
++        assert_eq!(inner.detail.as_deref(), Some("App"));
++        assert_eq!(inner.data.as_ref().unwrap()["function"], "App\\inner");
++        assert_eq!(outgoing_names(&backend, &inner), vec!["leaf"]);
++        let outer = prepare_at(&backend, content, "function outer");
++        assert!(outgoing_names(&backend, &outer).is_empty());
++    }
++
+     #[test]
+     fn a_method_of_a_nested_anonymous_class_wins_over_its_host() {
+         let content = r#"<?php

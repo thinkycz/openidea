@@ -201,6 +201,7 @@ pub fn find_text_occurrences(
     let mut files = found.into_inner();
     files.sort_by(|a, b| a.0.cmp(&b.0));
     WorkspaceEdit {
+        guard: None,
         files: files.into_iter().map(|(path, edits)| FileEdit::Edit { path: path.into(), edits }).collect(),
     }
 }

@@ -1,0 +1,696 @@
+--- a/docs/CHANGELOG.md
++++ b/docs/CHANGELOG.md
+@@ -30,6 +30,8 @@
+ - **Project PHP extension profiles.** Set `[php] extensions` to the extensions available on your deployment target. Completion and built-in lookup keep project polyfills and exclude unavailable extension declarations after restarting the service. Contributed by PHP Workbench (local downstream patch).
+ 
+ ### Fixed
++
++- **Eloquent scopes and decimal casts match the model.** Builder suggestions recognize aliased framework scope attributes, include public scopes and exclude private or unrelated attributes. Decimal-cast properties are strings that retain their precision. Contributed by PHP Workbench downstream.
+ 
+ - **Follow variables in computed member access.** Navigation and rename include selector variables, and diagnostics recognize their reads in computed constants and first-class callables. Unused outer assignments remain visible when a nested callback declares the same parameter name. Contributed by PHP Workbench downstream.
+ 
+--- a/examples/laravel/app/Demo.php
++++ b/examples/laravel/app/Demo.php
+@@ -95,7 +95,7 @@
+         $bakery->dough_temp;          // $casts 'float'             → float
+         $bakery->egg_count;           // $attributes default        → int
+         $bakery->flour;               // $fillable (no cast/attr)   → mixed
+-        $bakery->freshlyBaked();      // #[Scope] attribute method  → Builder
++        $bakery->freshlyBaked();      // aliased #[QueryScope]       → Builder
+         $bakery->gluten_free;         // $attributes default        → bool
+         $bakery->headBaker;           // relationship HasOne        → Baker
+         $bakery->head_baker_count;    // relationship count         → int
+@@ -178,6 +178,7 @@
+         $sample->blurb;                          // AsHtmlString → HtmlString
+         $sample->embedding;                      // AsBinary::uuid → string
+         $sample->ulid;                           // AsBinary::ulid → string
++        $sample->price;                          // decimal:2 → string, preserving precision
+     }
+ 
+     // ── Eloquent Query Builder ──────────────────────────────────────────────
+--- a/examples/laravel/app/Models/Bakery.php
++++ b/examples/laravel/app/Models/Bakery.php
+@@ -2,7 +2,7 @@
+ 
+ namespace App\Models;
+ 
+-use Illuminate\Database\Eloquent\Attributes\Scope;
++use Illuminate\Database\Eloquent\Attributes\Scope as QueryScope;
+ use Illuminate\Database\Eloquent\Builder;
+ use Illuminate\Database\Eloquent\Casts\Attribute;
+ use Illuminate\Database\Eloquent\Model;
+@@ -70,7 +70,7 @@
+         $query->where('baked', false);
+     }
+ 
+-    #[Scope]
++    #[QueryScope]
+     protected function freshlyBaked(Builder $query): void
+     {
+         $query->where('fresh', true);
+--- a/examples/laravel/app/Models/CastSample.php
++++ b/examples/laravel/app/Models/CastSample.php
+@@ -27,6 +27,7 @@
+             'homepage' => AsUri::class,
+             'notes' => AsCollection::using(PostCollection::class),
+             'options' => AsArrayObject::class,
++            'price' => 'decimal:2',
+             'secret_options' => AsEncryptedArrayObject::class,
+             'secrets' => AsEncryptedCollection::of(Frosting::class),
+             'settings' => AsFluent::class,
+--- a/examples/laravel/assertions.php
++++ b/examples/laravel/assertions.php
+@@ -1704,6 +1704,11 @@
+ 
+ $castSample = new \App\Models\CastSample();
+ $castSampleCasts = $castSample->getCasts();
++$castSample->setRawAttributes(['price' => '123456789012345678.125']);
++check(
++    'decimal:2 returns an exact scaled string',
++    $castSample->price === '123456789012345678.13'
++);
+ check(
+     'CastSample::statuses is an AsEnumCollection of OrderStatus',
+     ($castSampleCasts['statuses'] ?? null) === \Illuminate\Database\Eloquent\Casts\AsEnumCollection::class . ':' . \App\Models\OrderStatus::class
+--- a/src/parser/ast_update.rs
++++ b/src/parser/ast_update.rs
+@@ -689,6 +689,11 @@
+                 stub_introductions: false,
+                 use_map: HashMap::new(),
+                 namespace: None,
++                scope_attribute_offsets: if content.contains("#[") {
++                    super::scope_attribute_offsets(&mago_resolved)
++                } else {
++                    None
++                },
+             };
+ 
+             // Extract all three in a single parse pass.
+@@ -857,6 +862,7 @@
+                 stub_introductions: false,
+                 use_map: use_map.clone(),
+                 namespace: namespace.clone(),
++                scope_attribute_offsets: doc_ctx.scope_attribute_offsets.clone(),
+             };
+             let mut block_index = 0;
+             for statement in program.statements.iter() {
+@@ -874,6 +880,7 @@
+                     stub_introductions: false,
+                     use_map: span.use_map.clone(),
+                     namespace: span.namespace.clone(),
++                    scope_attribute_offsets: doc_ctx.scope_attribute_offsets.clone(),
+                 });
+                 Self::extract_functions_from_statements(
+                     std::iter::once(statement),
+--- a/src/parser/classes.rs
++++ b/src/parser/classes.rs
+@@ -1270,7 +1270,7 @@
+                         });
+                     }
+ 
+-                    let has_scope_attr = has_scope_attribute(method);
++                    let has_scope_attr = has_scope_attribute(method, doc_ctx);
+ 
+                     // Extract description, return description, link, and
+                     // per-parameter descriptions from the method's docblock.
+--- a/src/parser/mod.rs
++++ b/src/parser/mod.rs
+@@ -1,5 +1,5 @@
+ use std::cell::RefCell;
+-use std::collections::HashMap;
++use std::collections::{HashMap, HashSet};
+ use std::rc::Rc;
+ use std::sync::Arc;
+ 
+@@ -62,6 +62,37 @@
+     /// 8.4 attribute) from `#[Deprecated]` inside a user namespace (which
+     /// would resolve to `App\Deprecated`, not the built-in).
+     pub namespace: Option<String>,
++    /// Source offsets whose names resolve to the exact Eloquent Scope class.
++    /// Shared only for this parse; ordinary import/type resolution is unchanged.
++    pub scope_attribute_offsets: Option<Arc<HashSet<u32>>>,
++}
++
++fn scope_attribute_offsets(resolved: &mago_names::ResolvedNames<'_>) -> Option<Arc<HashSet<u32>>> {
++    const SCOPE: &[u8] = b"Illuminate\\Database\\Eloquent\\Attributes\\Scope";
++    let offsets: HashSet<_> = resolved
++        .iter()
++        .filter_map(|(start, _, name, _)| {
++            name.strip_prefix(b"\\")
++                .unwrap_or(name)
++                .eq_ignore_ascii_case(SCOPE)
++                .then_some(start)
++        })
++        .collect();
++    (!offsets.is_empty()).then(|| Arc::new(offsets))
++}
++
++fn parse_scope_attribute_offsets(
++    program: &Program<'_>,
++    content: &str,
++) -> Option<Arc<HashSet<u32>>> {
++    // This is only a cheap skip for files without attributes. Identity comes
++    // from the same class-name resolver the live indexing pass already uses.
++    if !content.contains("#[") {
++        return None;
++    }
++    let arena = mago_allocator::LocalArena::new();
++    let names = mago_names::resolver::NameResolver::new(&arena).resolve(program);
++    scope_attribute_offsets(&names)
+ }
+ 
+ /// FQN constants for the JetBrains stub attributes we recognise.
+@@ -1510,6 +1541,7 @@
+                 stub_introductions,
+                 use_map,
+                 namespace,
++                scope_attribute_offsets: parse_scope_attribute_offsets(program, content),
+             };
+ 
+             let mut result: Vec<(ClassInfo, Option<String>, Option<usize>)> = Vec::new();
+@@ -1533,6 +1565,7 @@
+                             stub_introductions: doc_ctx.stub_introductions,
+                             use_map: span.use_map.clone(),
+                             namespace: span.namespace.clone(),
++                            scope_attribute_offsets: doc_ctx.scope_attribute_offsets.clone(),
+                         });
+ 
+                         let mut block_classes = Vec::new();
+@@ -1599,6 +1632,7 @@
+                 stub_introductions: false,
+                 use_map,
+                 namespace,
++                scope_attribute_offsets: None,
+             };
+ 
+             let mut functions = Vec::new();
+--- a/src/virtual_members/laravel/casts.rs
++++ b/src/virtual_members/laravel/casts.rs
+@@ -89,7 +89,7 @@
+ /// Map an Eloquent cast type string to a PHP type.
+ ///
+ /// Handles built-in cast strings (`datetime`, `boolean`, `array`, etc.),
+-/// `decimal:N` variants (e.g. `decimal:2` → `float`), Laravel's `As*`
++/// `decimal:N` variants (e.g. `decimal:2` → `string`), Laravel's `As*`
+ /// class casts (the property type is the value the cast returns, with
+ /// generics filled from `of()` / `using()`), custom cast classes, enum
+ /// classes (the property type is the enum itself), and `Castable`
+@@ -116,7 +116,8 @@
+ 
+     // 2. Handle `decimal:N` variants (e.g. `decimal:2`, `decimal:8`).
+     if lower.starts_with("decimal:") || lower == "decimal" {
+-        return PhpType::float();
++        // Eloquent returns BigDecimal's scaled string, preserving precision.
++        return PhpType::string();
+     }
+ 
+     // 3. Handle `datetime:format` variants (e.g. `datetime:Y-m-d`).
+--- a/src/virtual_members/laravel/casts_tests.rs
++++ b/src/virtual_members/laravel/casts_tests.rs
+@@ -183,19 +183,37 @@
+ // ── cast_type_to_php_type: decimal variants ─────────────────────────
+ 
+ #[test]
+-fn cast_decimal_with_precision_maps_to_float() {
++fn cast_decimal_with_precision_maps_to_string() {
+     assert_eq!(
+         cast_type_to_php_type("decimal:2", &no_loader).to_string(),
+-        "float"
+-    );
+-}
+-
+-#[test]
+-fn cast_decimal_bare_maps_to_float() {
++        "string"
++    );
++}
++
++#[test]
++fn cast_decimal_bare_maps_to_string() {
+     assert_eq!(
+         cast_type_to_php_type("decimal", &no_loader).to_string(),
+-        "float"
+-    );
++        "string"
++    );
++}
++
++#[test]
++fn decimal_precision_variants_keep_exact_string_without_changing_float_controls() {
++    for cast in ["decimal:0", "decimal:8", "Decimal:2", "DECIMAL:18"] {
++        assert_eq!(
++            cast_type_to_php_type(cast, &no_loader).to_string(),
++            "string",
++            "{cast}"
++        );
++    }
++    for cast in ["float", "double", "real"] {
++        assert_eq!(
++            cast_type_to_php_type(cast, &no_loader).to_string(),
++            "float",
++            "{cast}"
++        );
++    }
+ }
+ 
+ // ── cast_type_to_php_type: datetime/date format variants ────────────
+--- a/src/virtual_members/laravel/magic_uses.rs
++++ b/src/virtual_members/laravel/magic_uses.rs
+@@ -8,7 +8,7 @@
+ //! forward mapping the model provider applies when it synthesizes the
+ //! virtual members.
+ 
+-use crate::types::{MethodInfo, Visibility};
++use crate::types::MethodInfo;
+ 
+ use super::accessors::{is_legacy_accessor, is_legacy_mutator, is_modern_accessor};
+ use super::helpers::snake_to_camel;
+@@ -39,8 +39,7 @@
+     /// synthesized.
+     pub(crate) fn of(method: &MethodInfo) -> Option<Self> {
+         if method.has_scope_attribute {
+-            // Laravel ignores a public `#[Scope]` method.
+-            return (method.visibility != Visibility::Public).then_some(Self::AttributeScope);
++            return super::scopes::is_attribute_scope(method).then_some(Self::AttributeScope);
+         }
+         if method.name.starts_with("scope") && method.name.len() > 5 {
+             return Some(Self::Scope);
+--- a/src/virtual_members/laravel/magic_uses_tests.rs
++++ b/src/virtual_members/laravel/magic_uses_tests.rs
+@@ -1,4 +1,40 @@
+ use super::*;
++use crate::types::Visibility;
++
++#[test]
++fn eloquent_scope_magic_public_attribute_matches_builder_classification() {
++    let method = crate::types::MethodInfo {
++        has_scope_attribute: true,
++        visibility: Visibility::Public,
++        ..crate::test_fixtures::make_method("active", Some("void"))
++    };
++    assert_eq!(
++        MagicMemberKind::of(&method),
++        Some(MagicMemberKind::AttributeScope)
++    );
++}
++
++#[test]
++fn eloquent_scope_magic_private_attribute_is_not_a_magic_reference() {
++    let method = crate::types::MethodInfo {
++        has_scope_attribute: true,
++        visibility: Visibility::Private,
++        ..crate::test_fixtures::make_method("active", Some("void"))
++    };
++    assert_eq!(MagicMemberKind::of(&method), None);
++}
++
++#[test]
++fn eloquent_scope_magic_legacy_reference_name_is_preserved() {
++    let method = crate::test_fixtures::make_method("scopeActive", Some("void"));
++    assert_eq!(MagicMemberKind::of(&method), Some(MagicMemberKind::Scope));
++    assert_eq!(
++        MagicMemberKind::of(&method)
++            .unwrap()
++            .use_name("scopeActive"),
++        Some("active".to_string())
++    );
++}
+ 
+ #[test]
+ fn a_renamed_scope_keeps_its_prefix_or_has_no_use_name() {
+--- a/src/virtual_members/laravel/model_extraction.rs
++++ b/src/virtual_members/laravel/model_extraction.rs
+@@ -30,15 +30,17 @@
+     infer_relationship_from_body, is_soft_deletes_trait,
+ };
+ 
+-/// Check whether a method has the `#[Scope]` attribute (Laravel 11+).
+-///
+-/// Scans the method's attribute lists for an attribute whose short name
+-/// is `Scope` (matching `#[Scope]`, `#[\Illuminate\Database\Eloquent\Attributes\Scope]`,
+-/// or any use-imported alias that ends with `Scope`).
+-pub(crate) fn has_scope_attribute(method: &class_like::method::Method<'_>) -> bool {
++/// Check attribute heads against the class names resolved for this exact parse.
++pub(crate) fn has_scope_attribute(
++    method: &class_like::method::Method<'_>,
++    doc_ctx: Option<&DocblockCtx<'_>>,
++) -> bool {
++    let Some(offsets) = doc_ctx.and_then(|ctx| ctx.scope_attribute_offsets.as_deref()) else {
++        return false;
++    };
+     for attr_list in method.attribute_lists.iter() {
+         for attr in attr_list.attributes.iter() {
+-            if last_segment(attr.name.value()) == b"Scope" {
++            if offsets.contains(&attr.name.span().start.offset) {
+                 return true;
+             }
+         }
+@@ -1656,6 +1658,127 @@
+ 
+     use crate::Backend;
+     use crate::atom::atom;
++
++    fn scope_attribute_flag(source: &str, class_name: &str) -> bool {
++        let classes = Backend::parse_php_versioned_with_namespaces(source, None);
++        classes
++            .iter()
++            .find(|(class, _)| class.name == class_name)
++            .and_then(|(class, _)| class.get_method("active"))
++            .expect("fixture class and method must parse")
++            .has_scope_attribute
++    }
++
++    #[test]
++    fn eloquent_scope_attr_imported_alias_resolves_exact_class() {
++        assert!(scope_attribute_flag(
++            r"<?php namespace App; use Illuminate\Database\Eloquent\Attributes\Scope as QueryScope; class Invoice { #[QueryScope] protected function active(): void {} }",
++            "Invoice"
++        ));
++    }
++
++    #[test]
++    fn eloquent_scope_attr_alias_lookup_is_case_insensitive() {
++        assert!(scope_attribute_flag(
++            r"<?php namespace App; use Illuminate\Database\Eloquent\Attributes\Scope as QueryScope; class Invoice { #[qUeRyScOpE] protected function active(): void {} }",
++            "Invoice"
++        ));
++    }
++
++    #[test]
++    fn eloquent_scope_attr_qualified_prefix_alias_resolves() {
++        assert!(scope_attribute_flag(
++            r"<?php namespace App; use Illuminate\Database\Eloquent\Attributes as Attrs; class Invoice { #[Attrs\Scope] protected function active(): void {} }",
++            "Invoice"
++        ));
++    }
++
++    #[test]
++    fn eloquent_scope_attr_grouped_class_alias_resolves() {
++        assert!(scope_attribute_flag(
++            r"<?php namespace App; use Illuminate\Database\Eloquent\Attributes\{Scope as QueryScope, ObservedBy}; class Invoice { #[QueryScope] protected function active(): void {} }",
++            "Invoice"
++        ));
++    }
++
++    #[test]
++    fn eloquent_scope_attr_fully_qualified_case_is_reflection_compatible() {
++        assert!(scope_attribute_flag(
++            r"<?php namespace App; class Invoice { #[\iLlUmInAtE\Database\Eloquent\Attributes\sCoPe] protected function active(): void {} }",
++            "Invoice"
++        ));
++    }
++
++    #[test]
++    fn eloquent_scope_attr_namespace_relative_uses_current_namespace() {
++        assert!(scope_attribute_flag(
++            r"<?php namespace Illuminate\Database\Eloquent; class Invoice { #[namespace\Attributes\Scope] protected function active(): void {} }",
++            "Invoice"
++        ));
++    }
++
++    #[test]
++    fn eloquent_scope_attr_local_short_name_is_not_global_fallback() {
++        assert!(!scope_attribute_flag(
++            r"<?php namespace App; class Invoice { #[Scope] protected function active(): void {} }",
++            "Invoice"
++        ));
++    }
++
++    #[test]
++    fn eloquent_scope_attr_foreign_fully_qualified_short_name_is_rejected() {
++        assert!(!scope_attribute_flag(
++            r"<?php namespace App; class Invoice { #[\App\Attributes\Scope] protected function active(): void {} }",
++            "Invoice"
++        ));
++    }
++
++    #[test]
++    fn eloquent_scope_attr_foreign_prefix_import_is_rejected() {
++        assert!(!scope_attribute_flag(
++            r"<?php namespace App; use App\Attributes as Attrs; class Invoice { #[Attrs\Scope] protected function active(): void {} }",
++            "Invoice"
++        ));
++    }
++
++    #[test]
++    fn eloquent_scope_attr_function_import_cannot_grant_class_identity() {
++        assert!(!scope_attribute_flag(
++            r"<?php namespace App; use function Illuminate\Database\Eloquent\Attributes\Scope; class Invoice { #[Scope] protected function active(): void {} }",
++            "Invoice"
++        ));
++    }
++
++    #[test]
++    fn eloquent_scope_attr_const_import_cannot_grant_class_identity() {
++        assert!(!scope_attribute_flag(
++            r"<?php namespace App; use const Illuminate\Database\Eloquent\Attributes\Scope; class Invoice { #[Scope] protected function active(): void {} }",
++            "Invoice"
++        ));
++    }
++
++    #[test]
++    fn eloquent_scope_attr_namespace_blocks_do_not_share_imports() {
++        let source = r"<?php namespace First { use Illuminate\Database\Eloquent\Attributes\Scope; class Good { #[Scope] protected function active(): void {} } } namespace Second { use App\Attributes\Scope; class Bad { #[Scope] protected function active(): void {} } }";
++        assert!(scope_attribute_flag(source, "Good"));
++        assert!(!scope_attribute_flag(source, "Bad"));
++    }
++
++    #[test]
++    fn eloquent_scope_attr_argument_names_do_not_become_attribute_heads() {
++        assert!(!scope_attribute_flag(
++            r"<?php namespace App; class Invoice { #[Marker('Scope', \Illuminate\Database\Eloquent\Attributes\Scope::class)] protected function active(): void {} }",
++            "Invoice"
++        ));
++    }
++
++    #[test]
++    fn eloquent_scope_attr_canonical_import_remains_recognized() {
++        assert!(scope_attribute_flag(
++            r"<?php namespace App; use Illuminate\Database\Eloquent\Attributes\Scope; class Invoice { #[Scope] protected function active(): void {} }",
++            "Invoice"
++        ));
++    }
+ 
+     #[test]
+     fn casts_method_returning_a_single_line_array_keeps_its_last_entry() {
+--- a/src/virtual_members/laravel/scopes.rs
++++ b/src/virtual_members/laravel/scopes.rs
+@@ -2,7 +2,7 @@
+ //! synthesis.
+ //!
+ //! This module handles both convention-based (`scopeX`) and
+-//! attribute-based (`#[Scope]`, Laravel 11+) scope methods, building
++//! attribute-based (`#[Scope]`) scope methods, building
+ //! virtual instance and static methods with the `scope` prefix stripped
+ //! and the first `$query` parameter removed.
+ 
+@@ -32,13 +32,11 @@
+ /// character for the scope name).  For example, `scopeActive` is a
+ /// scope, but `scope` alone is not.
+ ///
+-/// Also returns `true` for methods decorated with `#[Scope]`
+-/// (Laravel 11+), regardless of their name.
++/// Also returns `true` for non-private methods decorated with the
++/// Eloquent `#[Scope]` attribute, regardless of their name.
+ pub(super) fn is_scope_method(method: &MethodInfo) -> bool {
+-    // Laravel requires #[Scope] methods to be protected; public methods
+-    // with the attribute are silently ignored by the framework.
+     if method.has_scope_attribute {
+-        return method.visibility != crate::types::Visibility::Public;
++        return is_attribute_scope(method);
+     }
+     method.name.starts_with("scope") && method.name.len() > 5
+ }
+@@ -46,7 +44,8 @@
+ /// Returns `true` when the method uses the `#[Scope]` attribute
+ /// rather than the `scopeX` naming convention.
+ pub(super) fn is_attribute_scope(method: &MethodInfo) -> bool {
+-    method.has_scope_attribute
++    // Laravel's reflection check accepts public and protected scope methods.
++    method.has_scope_attribute && method.visibility != crate::types::Visibility::Private
+ }
+ 
+ /// Transform a scope method name into the public-facing scope name.
+--- a/src/virtual_members/laravel/scopes_tests.rs
++++ b/src/virtual_members/laravel/scopes_tests.rs
+@@ -28,17 +28,56 @@
+     }
+ }
+ 
+-// ── public #[Scope] excluded ────────────────────────────────────────
+-
+-#[test]
+-fn public_scope_attribute_not_treated_as_scope() {
+-    // Laravel silently ignores #[Scope] on public methods.
++// ── #[Scope] visibility ──────────────────────────────────────────────
++
++#[test]
++fn eloquent_scope_visibility_public_attribute_is_builder_api() {
++    let method = MethodInfo {
++        visibility: Visibility::Public,
++        ..make_scope_attr_method("active", Some("void"))
++    };
++    assert!(is_scope_method(&method));
++}
++
++#[test]
++fn eloquent_scope_visibility_private_attribute_is_not_builder_api() {
++    let method = MethodInfo {
++        visibility: Visibility::Private,
++        ..make_scope_attr_method("active", Some("void"))
++    };
++    assert!(!is_scope_method(&method));
++}
++
++#[test]
++fn eloquent_scope_visibility_legacy_name_is_preserved() {
++    let method = make_method_with_params(
++        "scopeActive",
++        Some("void"),
++        vec![
++            make_param(
++                "$query",
++                Some("Illuminate\\Database\\Eloquent\\Builder"),
++                true,
++            ),
++            make_param("$tenant", Some("string"), true),
++        ],
++    );
++    assert!(is_scope_method(&method));
++    let [instance, static_method] = build_scope_methods(&method);
++    assert_eq!(instance.name, "active");
++    assert_eq!(instance.parameters.len(), 1);
++    assert_eq!(instance.parameters[0].name, "$tenant");
++    assert!(static_method.is_static);
++}
++
++#[test]
++fn public_scope_attribute_treated_as_scope() {
+     let method = MethodInfo {
+         has_scope_attribute: true,
+         visibility: Visibility::Public,
+         ..make_method("notAScope", Some("void"))
+     };
+-    assert!(!is_scope_method(&method));
++    assert!(is_scope_method(&method));
+ }
+ 
+ #[test]
+--- a/src/virtual_members/laravel/tests.rs
++++ b/src/virtual_members/laravel/tests.rs
+@@ -1828,7 +1828,7 @@
+ }
+ 
+ #[test]
+-fn cast_decimal_with_precision_synthesizes_float() {
++fn cast_decimal_with_precision_synthesizes_string() {
+     let provider = LaravelModelProvider;
+     let mut user = make_class(ELOQUENT_MODEL_FQN);
+     user.name = crate::atom::atom("User");
+@@ -1841,7 +1841,7 @@
+         .iter()
+         .find(|p| p.name == "price")
+         .unwrap();
+-    assert_eq!(prop.type_hint_str().as_deref(), Some("float"));
++    assert_eq!(prop.type_hint_str().as_deref(), Some("string"));
+ }
+ 
+ // ── $dates property synthesis tests ─────────────────────────────────
+--- a/tests/integration/completion_laravel.rs
++++ b/tests/integration/completion_laravel.rs
+@@ -12470,12 +12470,9 @@
+     );
+ }
+ 
+-/// Laravel requires `#[Scope]` methods to be `protected`. A public method
+-/// with `#[Scope]` is silently ignored by the framework and should NOT
+-/// be injected as a scope on a Builder instance.
+-/// Ported from Larastan `model-scope-attribute-l12.php` (`notAScope` assertion).
+-#[tokio::test]
+-async fn test_public_scope_attribute_not_treated_as_scope() {
++/// Laravel exposes public and protected attributed methods as Builder scopes.
++#[tokio::test]
++async fn test_public_scope_attribute_treated_as_scope() {
+     let user_php = "\
+ <?php
+ namespace App\\Models;
+@@ -12506,8 +12503,8 @@
+         methods
+     );
+     assert!(
+-        !methods.contains(&"notAScope"),
+-        "public #[Scope] should NOT be injected onto Builder, got: {:?}",
++        methods.contains(&"notAScope"),
++        "public #[Scope] should be injected onto Builder, got: {:?}",
+         methods
+     );
+     assert!(
+--- a/tests/integration/laravel_eloquent_magic.rs
++++ b/tests/integration/laravel_eloquent_magic.rs
+@@ -367,6 +367,66 @@
+ 
+ // ─── Scopes ─────────────────────────────────────────────────────────────────
+ 
++async fn scope_attribute_builder_items(model: &str) -> Vec<CompletionItem> {
++    let (backend, dir) = make_workspace(&[("src/Models/ScopeUser.php", model)]);
++    let model_uri = Url::from_file_path(dir.path().join("src/Models/ScopeUser.php")).unwrap();
++    // Drive the real didOpen/update_ast path, not only direct parse_php.
++    open_php(&backend, &model_uri, model).await;
++    let (caller, pos) =
++        split_cursor("<?php\nuse App\\Models\\ScopeUser;\nScopeUser::query()->§;\n");
++    complete(&backend, &dir, "src/Models/Consumer.php", &caller, pos).await
++}
++
++#[tokio::test]
++async fn eloquent_scope_builder_live_alias_is_offered_without_query_argument() {
++    let model = r"<?php namespace App\Models; use Illuminate\Database\Eloquent\Model; use Illuminate\Database\Eloquent\Builder; use Illuminate\Database\Eloquent\Attributes\Scope as QueryScope; class ScopeUser extends Model { #[QueryScope] protected function billable(Builder $query, string $tenant): void {} }";
++    let items = scope_attribute_builder_items(model).await;
++    let methods = method_names(&items);
++    assert!(
++        methods.contains(&"billable"),
++        "alias scope must reach the live Builder: {methods:?}"
++    );
++    let item = items
++        .iter()
++        .find(|item| item.filter_text.as_deref() == Some("billable"))
++        .expect("one billable completion");
++    assert!(
++        item.detail
++            .as_deref()
++            .is_some_and(|detail| detail.contains("Builder<ScopeUser>")),
++        "scope must retain model receiver: {item:?}"
++    );
++    assert!(
++        !item
++            .insert_text
++            .as_deref()
++            .unwrap_or_default()
++            .contains("query"),
++        "framework-injected query must not be a user argument: {item:?}"
++    );
++}
++
++#[tokio::test]
++async fn eloquent_scope_builder_public_attribute_is_exposed() {
++    let model = r"<?php namespace App\Models; use Illuminate\Database\Eloquent\Model; use Illuminate\Database\Eloquent\Builder; use Illuminate\Database\Eloquent\Attributes\Scope; class ScopeUser extends Model { #[Scope] public function visibleScope(Builder $query): void {} }";
++    let items = scope_attribute_builder_items(model).await;
++    assert!(method_names(&items).contains(&"visibleScope"));
++}
++
++#[tokio::test]
++async fn eloquent_scope_builder_private_attribute_is_excluded() {
++    let model = r"<?php namespace App\Models; use Illuminate\Database\Eloquent\Model; use Illuminate\Database\Eloquent\Builder; use Illuminate\Database\Eloquent\Attributes\Scope; class ScopeUser extends Model { #[Scope] private function hiddenScope(Builder $query): void {} }";
++    let items = scope_attribute_builder_items(model).await;
++    assert!(!method_names(&items).contains(&"hiddenScope"));
++}
++
++#[tokio::test]
++async fn eloquent_scope_builder_foreign_attribute_is_excluded() {
++    let model = r"<?php namespace App\Models; use Illuminate\Database\Eloquent\Model; use Illuminate\Database\Eloquent\Builder; use App\Attributes\Scope; class ScopeUser extends Model { #[Scope] protected function foreignOnly(Builder $query): void {} }";
++    let items = scope_attribute_builder_items(model).await;
++    assert!(!method_names(&items).contains(&"foreignOnly"));
++}
++
+ #[tokio::test]
+ async fn scope_is_offered_as_a_method_but_not_as_a_property() {
+     let (user_php, pos) = split_cursor(

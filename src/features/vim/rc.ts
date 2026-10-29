@@ -1,7 +1,7 @@
 /**
  * `~/.openideavimrc` / `~/.ideavimrc`: the safe subset IdeaVim users keep in
  * their rc file — `set` options, `map` variants, `let mapleader` — plus
- * IdeaVim's `:action <id>` / `<Action>(id)` mappings, which run OpenIDEA
+ * IdeaVim's `:action <id>` / `<Action>(id)` mappings, which run OpenStorm
  * actions. Everything else is reported as ignored, never executed.
  */
 
@@ -122,7 +122,7 @@ export function parseVimrc(text: string): RcParseResult {
 }
 
 /**
- * IdeaVim (IntelliJ) action ids → OpenIDEA action ids, for `:action` and
+ * IdeaVim (IntelliJ) action ids → OpenStorm action ids, for `:action` and
  * `<Action>()`. Our own ids (`code.reformat`) work as well.
  */
 export const IDEA_ACTIONS: Readonly<Record<string, string>> = {
@@ -220,7 +220,7 @@ export const IDEA_ACTIONS: Readonly<Record<string, string>> = {
   "Compare.SameVersion": "vcs.showDiff",
 };
 
-/** The OpenIDEA action for an `:action` argument: an IdeaVim id, or one of ours as is. */
+/** The OpenStorm action for an `:action` argument: an IdeaVim id, or one of ours as is. */
 export function resolveActionId(id: string): string {
   return IDEA_ACTIONS[id] ?? id;
 }

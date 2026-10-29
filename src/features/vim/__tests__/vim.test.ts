@@ -78,7 +78,7 @@ describe("Vim engine", () => {
     Vim.mapclear();
   });
 
-  it(":action runs OpenIDEA actions by IdeaVim or OpenIDEA id", async () => {
+  it(":action runs OpenStorm actions by IdeaVim or OpenStorm id", async () => {
     const view = makeView();
     _handleEx(view, "action GotoDeclaration");
     _handleEx(view, "action code.reformat");

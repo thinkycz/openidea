@@ -1,0 +1,291 @@
+diff --git a/docs/CHANGELOG.md b/docs/CHANGELOG.md
+index 5862b28..e713615 100644
+--- a/docs/CHANGELOG.md
++++ b/docs/CHANGELOG.md
+@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
+ 
+ ### Added
+ 
++- **Restricted project-tool mode.** `--no-project-tools` keeps static intelligence and built-in formatting available while refusing external project processes, including after configuration reloads. Contributed by PHP Workbench (local downstream build).
++
+ ### Changed
+ 
+ ### Fixed
+diff --git a/src/formatting/mod.rs b/src/formatting/mod.rs
+index 6fb7bfb..a86fd2c 100644
+--- a/src/formatting/mod.rs
++++ b/src/formatting/mod.rs
+@@ -192,6 +192,13 @@ pub fn resolve_strategy(
+         return FormattingStrategy::Disabled;
+     }
+ 
++    if !crate::process::project_tools_allowed() {
++        let config_path = workspace_root
++            .filter(|root| crate::mago::has_mago_config(root))
++            .map(|root| root.join("mago.toml"));
++        return FormattingStrategy::BuiltIn(config_path);
++    }
++
+     // Explicit config wins, and skips detection entirely.
+     let explicit: Vec<ResolvedTool> = Tool::ALL
+         .into_iter()
+diff --git a/src/lib.rs b/src/lib.rs
+index c0fc909..94f27db 100644
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -287,6 +287,19 @@ mod phpmd;
+ mod phpstan;
+ pub(crate) mod phpstan_ignore;
+ pub(crate) mod process;
++
++/// Irreversibly disable external project tools in this server process.
++/// Call before constructing an LSP backend. Static analysis and built-in
++/// formatting remain available; project configuration cannot re-enable execution.
++pub fn restrict_project_tools() {
++    process::restrict_project_tools();
++}
++
++/// Require a user-owned workspace grant for every external tool launch.
++/// Running services observe removal or corruption without being restarted.
++pub fn require_project_tool_grant(registry: PathBuf, workspace: PathBuf) {
++    process::require_project_tool_grant(registry, workspace);
++}
+ pub mod progress;
+ mod reference_counts;
+ mod reference_index;
+@@ -2169,7 +2182,13 @@ impl Backend {
+     /// to enable opt-in diagnostics like `unresolved-member-access`
+     /// without needing a `.phpantom.toml` file. Resets the compiled
+     /// `[indexing]` filters so the next scan sees the new settings.
+-    pub fn set_config(&self, config: config::Config) {
++    pub fn set_config(&self, mut config: config::Config) {
++        if !process::project_tools_allowed() {
++            config.phpstan.command = Some(String::new());
++            config.phpcs.command = Some(String::new());
++            config.phpmd.command = Some(String::new());
++            config.mago.command = Some(String::new());
++        }
+         *self.workspace.config.lock() = config;
+         *self.workspace.index_filters.write() = None;
+     }
+diff --git a/src/main.rs b/src/main.rs
+index cffe71b..496bfbc 100644
+--- a/src/main.rs
++++ b/src/main.rs
+@@ -38,6 +38,18 @@ struct Cli {
+     #[arg(long)]
+     stdio: bool,
+ 
++    /// Keep static intelligence and built-in formatting without executing project tools.
++    #[arg(long)]
++    no_project_tools: bool,
++
++    /// User-owned grant registry, checked before and during project tool runs.
++    #[arg(long, requires = "project_tools_workspace")]
++    project_tools_grant: Option<std::path::PathBuf>,
++
++    /// Exact canonical workspace covered by the user-owned grant.
++    #[arg(long, requires = "project_tools_grant")]
++    project_tools_workspace: Option<std::path::PathBuf>,
++
+     /// Listen on a TCP address instead of stdin/stdout.
+     ///
+     /// Accepts a full address (e.g. 127.0.0.1:9257) or just a port number
+@@ -334,6 +346,14 @@ fn main() {
+ 
+ async fn async_main() {
+     let cli = Cli::parse();
++    if cli.no_project_tools {
++        phpantom_lsp::restrict_project_tools();
++    }
++    if let (Some(registry), Some(workspace)) =
++        (cli.project_tools_grant, cli.project_tools_workspace)
++    {
++        phpantom_lsp::require_project_tool_grant(registry, workspace);
++    }
+ 
+     match cli.command {
+         Some(Command::Init { global, yes }) => {
+diff --git a/src/process.rs b/src/process.rs
+index 0ae34cc..9ddd915 100644
+--- a/src/process.rs
++++ b/src/process.rs
+@@ -3,6 +3,55 @@
+ //! stdout/stderr draining, binary auto-detection, and tool-reported
+ //! path matching.
+ 
++use std::sync::atomic::{AtomicBool, Ordering};
++use std::{path::PathBuf, sync::OnceLock};
++
++static PROJECT_TOOLS_ALLOWED: AtomicBool = AtomicBool::new(true);
++static PROJECT_TOOL_GRANT: OnceLock<ProjectToolGrant> = OnceLock::new();
++
++struct ProjectToolGrant {
++    registry: PathBuf,
++    workspace: PathBuf,
++}
++
++impl ProjectToolGrant {
++    fn allowed(&self) -> bool {
++        #[derive(serde::Deserialize)]
++        struct Grants {
++            schema: u32,
++            workspaces: Vec<PathBuf>,
++        }
++        std::fs::read(&self.registry)
++            .ok()
++            .and_then(|content| serde_json::from_slice::<Grants>(&content).ok())
++            .is_some_and(|grants| grants.schema == 1 && grants.workspaces.contains(&self.workspace))
++    }
++}
++
++pub(crate) fn require_project_tool_grant(registry: PathBuf, workspace: PathBuf) {
++    // Configured once, before the backend or any worker is constructed.
++    if PROJECT_TOOL_GRANT
++        .set(ProjectToolGrant {
++            registry,
++            workspace,
++        })
++        .is_err()
++    {
++        restrict_project_tools();
++    }
++}
++
++pub(crate) fn restrict_project_tools() {
++    PROJECT_TOOLS_ALLOWED.store(false, Ordering::Release);
++}
++
++pub(crate) fn project_tools_allowed() -> bool {
++    PROJECT_TOOLS_ALLOWED.load(Ordering::Acquire)
++        && PROJECT_TOOL_GRANT
++            .get()
++            .is_none_or(ProjectToolGrant::allowed)
++}
++
+ /// Result of running an external command via [`run_command_with_timeout`].
+ #[derive(Debug)]
+ pub struct CommandOutput {
+@@ -38,11 +87,32 @@ pub fn run_command_with_timeout(
+     cancelled: &std::sync::atomic::AtomicBool,
+     tool_name: &str,
+     stdin_content: Option<&str>,
++) -> Result<CommandOutput, String> {
++    run_command_with_permission(
++        command,
++        timeout,
++        cancelled,
++        tool_name,
++        stdin_content,
++        project_tools_allowed,
++    )
++}
++
++fn run_command_with_permission(
++    command: &mut std::process::Command,
++    timeout: std::time::Duration,
++    cancelled: &std::sync::atomic::AtomicBool,
++    tool_name: &str,
++    stdin_content: Option<&str>,
++    allowed: impl Fn() -> bool,
+ ) -> Result<CommandOutput, String> {
+     use std::io::{Read, Write};
+     use std::process::Stdio;
+     use std::sync::atomic::Ordering;
+ 
++    if !allowed() {
++        return Err("Project tools are disabled for this workspace.".to_owned());
++    }
+     command.stdout(Stdio::piped()).stderr(Stdio::piped());
+     if stdin_content.is_some() {
+         command.stdin(Stdio::piped());
+@@ -83,6 +153,11 @@ pub fn run_command_with_timeout(
+         match child.try_wait() {
+             Ok(Some(status)) => break status,
+             Ok(None) => {
++                if !allowed() {
++                    let _ = child.kill();
++                    let _ = child.wait();
++                    return Err("Project tool permission was revoked.".to_owned());
++                }
+                 if start.elapsed() >= timeout {
+                     let _ = child.kill();
+                     let _ = child.wait();
+@@ -414,3 +489,77 @@ mod tests {
+         );
+     }
+ }
++
++#[cfg(test)]
++mod execution_policy_tests {
++    #[test]
++    fn restricted_launch_cannot_write_a_marker() {
++        let directory = tempfile::tempdir().unwrap();
++        let marker = directory.path().join("executed");
++        let mut command = std::process::Command::new("sh");
++        command
++            .arg("-c")
++            .arg("printf executed > \"$1\"")
++            .arg("guard-test")
++            .arg(&marker);
++        let result = super::run_command_with_permission(
++            &mut command,
++            std::time::Duration::from_secs(1),
++            &std::sync::atomic::AtomicBool::new(false),
++            "test project tool",
++            None,
++            || false,
++        );
++        assert!(result.unwrap_err().contains("disabled"));
++        assert!(!marker.exists());
++    }
++
++    #[test]
++    fn grants_are_exact_and_revocation_is_observed_by_running_services() {
++        let directory = tempfile::tempdir().unwrap();
++        let registry = directory.path().join("trust.json");
++        let workspace = directory.path().join("project");
++        let grant = super::ProjectToolGrant {
++            registry: registry.clone(),
++            workspace: workspace.clone(),
++        };
++        assert!(!grant.allowed());
++        std::fs::write(
++            &registry,
++            serde_json::json!({"schema": 1, "workspaces": [workspace]}).to_string(),
++        )
++        .unwrap();
++        assert!(grant.allowed());
++        let nested = super::ProjectToolGrant {
++            registry: registry.clone(),
++            workspace: workspace.join("nested"),
++        };
++        assert!(!nested.allowed());
++        std::fs::write(&registry, "invalid").unwrap();
++        assert!(!grant.allowed());
++        std::fs::write(&registry, r#"{"schema": 1, "workspaces": []}"#).unwrap();
++        assert!(!grant.allowed());
++    }
++
++    #[cfg(unix)]
++    #[test]
++    fn revoking_permission_stops_a_running_tool() {
++        let calls = std::cell::Cell::new(0);
++        let mut command = std::process::Command::new("sleep");
++        command.arg("10");
++        let start = std::time::Instant::now();
++        let result = super::run_command_with_permission(
++            &mut command,
++            std::time::Duration::from_secs(5),
++            &std::sync::atomic::AtomicBool::new(false),
++            "test tool",
++            None,
++            || {
++                calls.set(calls.get() + 1);
++                calls.get() < 3
++            },
++        );
++        assert!(result.unwrap_err().contains("revoked"));
++        assert!(start.elapsed() < std::time::Duration::from_secs(2));
++    }
++}

@@ -1,0 +1,2047 @@
+diff --git a/docs/CHANGELOG.md b/docs/CHANGELOG.md
+index ade677c..7c538db 100644
+--- a/docs/CHANGELOG.md
++++ b/docs/CHANGELOG.md
+@@ -53,6 +53,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
+ 
+ ### Fixed
+ 
++- **Rename refuses occupied names.** Member and class renames preserve distinct declarations, PHP case rules and private inheritance boundaries. Case-only changes and unrelated owners remain available. Parent trait members also follow their effective visibility and class declaration precedence, while inaccessible accesses still report their owning class. Contributed by PHP Workbench downstream.
++
++- **Fresh suggestions after edits.** Background class resolution cannot restore outdated members after an unsaved dependency changes. Nested resolutions and generic specializations retain the same invalidation boundary. Contributed by PHP Workbench downstream.
++
+ - **References respect unknown receivers.** Finding usages or renaming a member on an untyped receiver no longer selects same-named members from unrelated classes. Macro registration searches also exclude unrelated or unknown call chains. Known typed and framework receivers keep their scoped results. Contributed by @longdo
+ 
+ - **Nested Composer projects keep independent completion and PHP settings.** Opening a containing Composer workspace also discovers its child projects. Installed libraries retain the consuming application's configuration, and saved manifest changes preserve current unsaved buffers. Contributed by PHP Workbench downstream.
+diff --git a/src/diagnostics/member_visibility.rs b/src/diagnostics/member_visibility.rs
+index c78a3d5..21cbf51 100644
+--- a/src/diagnostics/member_visibility.rs
++++ b/src/diagnostics/member_visibility.rs
+@@ -32,14 +32,13 @@
+ //!
+ //! ## Why the merged class is not enough on its own
+ //!
+-//! The merged class records what a class *has*.  It does not record who
+-//! declared it, and the two come apart further than they look: the merge
+-//! folds an *ancestor's* traits straight into the descendant, so even a
+-//! private member sitting on the merged class may have been written in a
+-//! trait a parent uses.  Reasoning backwards from "the member is on this
+-//! class, so it belongs to this class" is therefore wrong, and wrong in
+-//! both directions — it lets a scope in that should be kept out and
+-//! keeps one out that PHP lets in.
++//! The merged class records what a class *has*, not who declared it.
++//! Public and protected members may come from an ancestor's traits,
++//! while private ancestor members are excluded altogether. The checker
++//! therefore traces non-public declarations to their owning class and
++//! checks missing members against each ancestor's effective surface.
++//! Composing that ancestor preserves its own trait visibility adaptations
++//! without making private members part of the descendant's surface.
+ //!
+ //! So the declaring class is *computed*, by [`declaring_class`], and
+ //! only when it is actually needed.  It is not needed for a public
+@@ -72,7 +71,7 @@ use std::sync::Arc;
+ use super::member_lookup::{MemberKind, declared_member, display_class_name};
+ use crate::atom::Atom;
+ use crate::class_lookup::is_subtype_of;
+-use crate::inheritance::ancestors;
++use crate::inheritance::{ancestors, resolve_class_with_inheritance};
+ use crate::types::{ClassInfo, ClassLikeKind, Visibility};
+ 
+ /// Diagnostic code for an access to a member the calling scope may not see.
+@@ -83,6 +82,9 @@ enum BranchVerdict {
+     /// The scope may reach the member, or nothing here can be judged —
+     /// either way the access must not be reported.
+     Permitted,
++    /// A private ancestor declaration is positively known and reachable
++    /// from the lexical scope, despite being absent from inheritance.
++    AccessiblePrivateAncestor,
+     /// The member exists on this branch and the scope may not reach it.
+     Rejected(Rejection),
+     /// This branch declares no such member.  The unknown-member check
+@@ -123,8 +125,20 @@ impl Restriction {
+     }
+ }
+ 
+-/// Build the diagnostic message for an access PHP would reject, or
+-/// `None` when the access is fine — or cannot be judged.
++/// The visibility check can establish a private member that the ordinary
++/// inherited surface intentionally excludes, or reject an access. Other
++/// cases leave ordinary member-existence resolution to the caller.
++pub(crate) enum MemberAccessVerdict {
++    /// The lexical scope owns a positively identified private ancestor member.
++    AccessiblePrivateAncestor,
++    /// Every resolved branch rejects the access with this diagnostic message.
++    Inaccessible(String),
++    /// Member existence or access cannot be established by this check.
++    Unresolved,
++}
++
++/// Resolve visibility, preserving known accessible private ancestors
++/// separately from cases left to ordinary member-existence resolution.
+ ///
+ /// `merged_classes` are the fully-resolved branches of the subject's
+ /// type, as the surrounding pass produced them.
+@@ -152,7 +166,7 @@ impl Restriction {
+ /// `parent::` is deliberately not included: it names a class to look the
+ /// member up in, while the scope stays the class doing the looking.
+ #[allow(clippy::too_many_arguments)]
+-pub(crate) fn inaccessible_member_message(
++pub(crate) fn member_access_verdict(
+     merged_classes: &[Arc<ClassInfo>],
+     member_name: &str,
+     is_static: bool,
+@@ -160,14 +174,15 @@ pub(crate) fn inaccessible_member_message(
+     current_class: Option<&ClassInfo>,
+     subject_binds_scope: bool,
+     class_loader: &dyn Fn(&str) -> Option<Arc<ClassInfo>>,
+-) -> Option<String> {
++) -> MemberAccessVerdict {
+     // Inside a trait the host class that supplies `$this` is unknown,
+     // so every visibility answer would be a guess.
+     if current_class.is_some_and(|c| c.kind == ClassLikeKind::Trait) {
+-        return None;
++        return MemberAccessVerdict::Unresolved;
+     }
+ 
+     let mut rejected: Option<Rejection> = None;
++    let mut unresolved = false;
+     for class in merged_classes {
+         match judge_branch(
+             class,
+@@ -178,8 +193,10 @@ pub(crate) fn inaccessible_member_message(
+             subject_binds_scope,
+             class_loader,
+         ) {
+-            BranchVerdict::Permitted => return None,
+-            BranchVerdict::Missing => return None,
++            BranchVerdict::AccessiblePrivateAncestor => {
++                return MemberAccessVerdict::AccessiblePrivateAncestor;
++            }
++            BranchVerdict::Permitted | BranchVerdict::Missing => unresolved = true,
+             BranchVerdict::Rejected(rejection) => {
+                 if rejected.is_none() {
+                     rejected = Some(rejection);
+@@ -188,8 +205,15 @@ pub(crate) fn inaccessible_member_message(
+         }
+     }
+ 
+-    let rejection = rejected?;
+-    Some(build_message(&rejection, member_name))
++    if unresolved {
++        return MemberAccessVerdict::Unresolved;
++    }
++    match rejected {
++        Some(rejection) => {
++            MemberAccessVerdict::Inaccessible(build_message(&rejection, member_name))
++        }
++        None => MemberAccessVerdict::Unresolved,
++    }
+ }
+ 
+ /// Judge the access against one branch of the union.
+@@ -234,7 +258,7 @@ fn judge_branch(
+             Some(rejection) if !is_accessible(&rejection, current_class, class_loader) => {
+                 BranchVerdict::Rejected(rejection)
+             }
+-            Some(_) => BranchVerdict::Permitted,
++            Some(_) => BranchVerdict::AccessiblePrivateAncestor,
+             None => BranchVerdict::Missing,
+         };
+     };
+@@ -333,12 +357,10 @@ fn judge_branch(
+ /// Find the class that wrote the declaration of a non-public member that
+ /// is present on the assembled class.
+ ///
+-/// The assembled class records what a class *has*, never who declared
+-/// it, and the two differ more than they look: the inheritance merge
+-/// folds an ancestor's traits straight into the descendant, so even a
+-/// private member sitting on the merged class may have been written in a
+-/// trait used by a parent.  Every rule below is therefore about where
+-/// the raw declaration lives, not about which merged class carries it.
++/// The assembled class records what a class *has*, not who declared
++/// it. Inherited protected members can originate in an ancestor's traits.
++/// Every rule below concerns where the declaration lives, rather than
++/// which merged class carries it.
+ ///
+ /// Returns `None` when the hierarchy cannot be read far enough to be
+ /// sure, which the caller treats as "say nothing".
+@@ -498,9 +520,19 @@ fn private_ancestor_declaration(
+     class_loader: &dyn Fn(&str) -> Option<Arc<ClassInfo>>,
+ ) -> Option<Rejection> {
+     for (_, ancestor) in ancestors(merged, class_loader) {
+-        let Some((visibility, kind)) =
+-            declared_member(&ancestor, member_name, is_static, is_method_call)
+-        else {
++        let declaration = declared_member(&ancestor, member_name, is_static, is_method_call)
++            .or_else(|| {
++                if ancestor.used_traits.is_empty() {
++                    return None;
++                }
++                // An ancestor owns its composed trait members, including
++                // private aliases, even though its descendants do not inherit
++                // them. Use the canonical composition to retain precedence
++                // and visibility adaptations.
++                let effective = resolve_class_with_inheritance(&ancestor, class_loader);
++                declared_member(&effective, member_name, is_static, is_method_call)
++            });
++        let Some((visibility, kind)) = declaration else {
+             continue;
+         };
+         // A public or protected ancestor member would have been merged
+diff --git a/src/diagnostics/unknown_members/mod.rs b/src/diagnostics/unknown_members/mod.rs
+index 1dd5b27..d130ef9 100644
+--- a/src/diagnostics/unknown_members/mod.rs
++++ b/src/diagnostics/unknown_members/mod.rs
+@@ -92,7 +92,9 @@ use super::member_lookup::{
+     display_class_name, has_magic_method_for_access, member_exists, member_exists_relaxed,
+     member_is_public,
+ };
+-use super::member_visibility::{INVALID_MEMBER_ACCESS_CODE, inaccessible_member_message};
++use super::member_visibility::{
++    INVALID_MEMBER_ACCESS_CODE, MemberAccessVerdict, member_access_verdict,
++};
+ use super::subject_cache::SubjectCacheKey;
+ 
+ /// Diagnostic code used for unknown-member diagnostics so that code
+@@ -599,8 +601,10 @@ impl Backend {
+         }
+     }
+ 
+-    /// Emit an access diagnostic when the member exists but the calling
+-    /// scope may not reach it.  Returns whether one was emitted.
++    /// Handle visibility of a known member, including private ancestor
++    /// members omitted from the inherited surface. Returns true when an
++    /// access diagnostic was emitted or an accessible private ancestor
++    /// declaration was positively resolved.
+     ///
+     /// Called wherever the member check has settled what the classes
+     /// hold: at the two points that declare the member found, and once
+@@ -610,7 +614,7 @@ impl Backend {
+     /// A docblock reference is exempt — `@see Foo::$secret` documents a
+     /// member, it does not read one.
+     #[allow(clippy::too_many_arguments)]
+-    fn push_inaccessible_member(
++    fn handle_member_visibility(
+         &self,
+         uri: &str,
+         classes: &[Arc<ClassInfo>],
+@@ -629,7 +633,7 @@ impl Backend {
+         if is_docblock_ref {
+             return false;
+         }
+-        let Some(message) = inaccessible_member_message(
++        let verdict = member_access_verdict(
+             classes,
+             member_name,
+             is_static,
+@@ -637,8 +641,11 @@ impl Backend {
+             current_class,
+             subject_binds_scope,
+             class_loader,
+-        ) else {
+-            return false;
++        );
++        let message = match verdict {
++            MemberAccessVerdict::AccessiblePrivateAncestor => return true,
++            MemberAccessVerdict::Inaccessible(message) => message,
++            MemberAccessVerdict::Unresolved => return false,
+         };
+         let Some(range) =
+             self.offset_range_to_lsp_range(uri, content, start as usize, end as usize)
+@@ -755,7 +762,7 @@ impl Backend {
+             member_exists(c, member_name, is_static, is_method_call)
+                 || (is_docblock_ref && member_exists_relaxed(c, member_name))
+         }) {
+-            self.push_inaccessible_member(
++            self.handle_member_visibility(
+                 uri,
+                 &resolved_classes,
+                 member_name,
+@@ -796,11 +803,12 @@ impl Backend {
+             return (MemberCheckResult::MagicFallback, diagnostics);
+         }
+ 
+-        // ── A parent's private member is unreachable, not missing ──
+-        // The inheritance merge drops it, so without this the access
+-        // would be reported as an unknown member and the real reason
+-        // — that PHP does not inherit private members — would be lost.
+-        if self.push_inaccessible_member(
++        // ── Resolve private ancestor declarations and visibility ──
++        // The inheritance merge excludes these members, but the parent
++        // scope can still access its own private declaration through a
++        // child-typed receiver. Other scopes receive an access violation
++        // rather than an unknown-member warning.
++        if self.handle_member_visibility(
+             uri,
+             &resolved_classes,
+             member_name,
+diff --git a/src/inheritance/inheritance_tests.rs b/src/inheritance/inheritance_tests.rs
+index 70dc0f5..8e6de9b 100644
+--- a/src/inheritance/inheritance_tests.rs
++++ b/src/inheritance/inheritance_tests.rs
+@@ -3,6 +3,332 @@ use crate::atom::{AtomMap, atom};
+ use crate::php_type::PhpType;
+ use crate::types::{ClassLikeKind, MethodInfo};
+ 
++#[test]
++fn inherited_private_trait_parent_own_private_override_blocks_public_trait_method() {
++    let models = inherited_private_trait_models(concat!(
++        "<?php\n",
++        "trait PublicSource {\n",
++        "    public function target(): string { return 'trait'; }\n",
++        "    public function visible(): string { return 'visible'; }\n",
++        "}\n",
++        "class Consumer {\n",
++        "    use PublicSource;\n",
++        "    private function target(): string { return 'consumer'; }\n",
++        "}\n",
++        "class Child extends Consumer {}\n",
++        "class Grandchild extends Child {}\n",
++    ));
++    let own = models.get("Consumer").unwrap();
++    let consumer = inherited_private_trait_resolved(&models, "Consumer");
++    let target = consumer
++        .methods
++        .iter()
++        .find(|method| method.name == "target")
++        .unwrap();
++    assert_eq!(target.visibility, Visibility::Private);
++    assert_eq!(
++        target.name_offset,
++        own.methods
++            .iter()
++            .find(|method| method.name == "target")
++            .unwrap()
++            .name_offset
++    );
++    for name in ["Child", "Grandchild"] {
++        let inherited = inherited_private_trait_resolved(&models, name);
++        assert!(
++            !inherited
++                .methods
++                .iter()
++                .any(|method| method.name == "target"),
++            "{name} cannot resurrect the public trait method shadowed by Consumer's own private method"
++        );
++        assert_eq!(
++            inherited
++                .methods
++                .iter()
++                .find(|method| method.name == "visible")
++                .unwrap()
++                .visibility,
++            Visibility::Public
++        );
++    }
++}
++
++fn inherited_private_trait_models(source: &str) -> HashMap<String, Arc<ClassInfo>> {
++    crate::Backend::parse_php_versioned(source, None)
++        .into_iter()
++        .map(|class| (class.fqn().to_string(), Arc::new(class)))
++        .collect()
++}
++
++fn inherited_private_trait_resolved(
++    models: &HashMap<String, Arc<ClassInfo>>,
++    name: &str,
++) -> ClassInfo {
++    let loader = |fqn: &str| models.get(fqn).cloned();
++    resolve_class_with_inheritance(models.get(name).expect("parsed class"), &loader)
++}
++
++#[test]
++fn inherited_private_trait_members_stop_at_consumer_boundary() {
++    let models = inherited_private_trait_models(concat!(
++        "<?php\n",
++        "trait MemberSource {\n",
++        "    private function hidden(): string { return ''; }\n",
++        "    protected function guarded(): string { return ''; }\n",
++        "    public function visible(): string { return ''; }\n",
++        "    private string $hiddenField = '';\n",
++        "    protected string $guardedField = '';\n",
++        "    public string $visibleField = '';\n",
++        "    private const HIDDEN_MARKER = 1;\n",
++        "    protected const GUARDED_MARKER = 2;\n",
++        "    public const VISIBLE_MARKER = 3;\n",
++        "}\n",
++        "class Consumer { use MemberSource; }\n",
++        "class Child extends Consumer {}\n",
++        "class Grandchild extends Child {}\n",
++    ));
++    let consumer = inherited_private_trait_resolved(&models, "Consumer");
++    assert_eq!(
++        consumer
++            .methods
++            .iter()
++            .find(|m| m.name == "hidden")
++            .unwrap()
++            .visibility,
++        Visibility::Private
++    );
++    assert_eq!(
++        consumer
++            .properties
++            .iter()
++            .find(|p| p.name == "hiddenField")
++            .unwrap()
++            .visibility,
++        Visibility::Private
++    );
++    assert_eq!(
++        consumer
++            .constants
++            .iter()
++            .find(|c| c.name == "HIDDEN_MARKER")
++            .unwrap()
++            .visibility,
++        Visibility::Private
++    );
++    for name in ["Child", "Grandchild"] {
++        let inherited = inherited_private_trait_resolved(&models, name);
++        assert!(
++            !inherited.methods.iter().any(|m| m.name == "hidden"),
++            "{name} cannot inherit a private trait method from Consumer"
++        );
++        assert!(
++            !inherited.properties.iter().any(|p| p.name == "hiddenField"),
++            "{name} cannot inherit a private trait property from Consumer"
++        );
++        assert!(
++            !inherited
++                .constants
++                .iter()
++                .any(|c| c.name == "HIDDEN_MARKER"),
++            "{name} cannot inherit a private trait constant from Consumer"
++        );
++        for (method, property, constant, visibility) in [
++            (
++                "guarded",
++                "guardedField",
++                "GUARDED_MARKER",
++                Visibility::Protected,
++            ),
++            (
++                "visible",
++                "visibleField",
++                "VISIBLE_MARKER",
++                Visibility::Public,
++            ),
++        ] {
++            assert_eq!(
++                inherited
++                    .methods
++                    .iter()
++                    .find(|m| m.name == method)
++                    .unwrap()
++                    .visibility,
++                visibility
++            );
++            assert_eq!(
++                inherited
++                    .properties
++                    .iter()
++                    .find(|p| p.name == property)
++                    .unwrap()
++                    .visibility,
++                visibility
++            );
++            assert_eq!(
++                inherited
++                    .constants
++                    .iter()
++                    .find(|c| c.name == constant)
++                    .unwrap()
++                    .visibility,
++                visibility
++            );
++        }
++    }
++}
++
++#[test]
++fn inherited_private_trait_aliases_use_effective_consumer_visibility() {
++    let models = inherited_private_trait_models(concat!(
++        "<?php\n",
++        "trait AliasSource {\n",
++        "    private function hiddenPublic(): string { return ''; }\n",
++        "    private function hiddenProtected(): string { return ''; }\n",
++        "    public function publicBeforeAlias(): string { return ''; }\n",
++        "}\n",
++        "class AliasConsumer {\n",
++        "    use AliasSource {\n",
++        "        hiddenPublic as public exposed;\n",
++        "        hiddenProtected as protected guarded;\n",
++        "        publicBeforeAlias as private;\n",
++        "    }\n",
++        "}\n",
++        "class AliasChild extends AliasConsumer {}\n",
++    ));
++    let consumer = inherited_private_trait_resolved(&models, "AliasConsumer");
++    for (name, visibility) in [
++        ("hiddenPublic", Visibility::Private),
++        ("hiddenProtected", Visibility::Private),
++        ("exposed", Visibility::Public),
++        ("guarded", Visibility::Protected),
++        ("publicBeforeAlias", Visibility::Private),
++    ] {
++        assert_eq!(
++            consumer
++                .methods
++                .iter()
++                .find(|m| m.name == name)
++                .unwrap()
++                .visibility,
++            visibility
++        );
++    }
++    let child = inherited_private_trait_resolved(&models, "AliasChild");
++    for name in ["hiddenPublic", "hiddenProtected", "publicBeforeAlias"] {
++        assert!(
++            !child.methods.iter().any(|m| m.name == name),
++            "private effective method {name} must not leak into child"
++        );
++    }
++    assert_eq!(
++        child
++            .methods
++            .iter()
++            .find(|m| m.name == "exposed")
++            .unwrap()
++            .visibility,
++        Visibility::Public
++    );
++    assert_eq!(
++        child
++            .methods
++            .iter()
++            .find(|m| m.name == "guarded")
++            .unwrap()
++            .visibility,
++        Visibility::Protected
++    );
++}
++
++#[test]
++fn inherited_private_trait_filter_preserves_child_own_private_members() {
++    let models = inherited_private_trait_models(concat!(
++        "<?php\n",
++        "trait PrivateSource {\n",
++        "    private function localName(): string { return ''; }\n",
++        "    private string $localField = '';\n",
++        "    private const LOCAL_MARKER = 1;\n",
++        "}\n",
++        "class Consumer { use PrivateSource; }\n",
++        "class Child extends Consumer {\n",
++        "    private function localName(): int { return 2; }\n",
++        "    private int $localField = 2;\n",
++        "    private const LOCAL_MARKER = 2;\n",
++        "}\n",
++    ));
++    let own = models.get("Child").unwrap();
++    let resolved = inherited_private_trait_resolved(&models, "Child");
++    let method = resolved
++        .methods
++        .iter()
++        .find(|m| m.name == "localName")
++        .unwrap();
++    assert_eq!(method.visibility, Visibility::Private);
++    assert_eq!(
++        method.name_offset,
++        own.methods
++            .iter()
++            .find(|m| m.name == "localName")
++            .unwrap()
++            .name_offset
++    );
++    assert_eq!(method.return_type.as_ref().unwrap().to_string(), "int");
++    assert_eq!(
++        resolved
++            .methods
++            .iter()
++            .filter(|m| m.name == "localName")
++            .count(),
++        1
++    );
++    let property = resolved
++        .properties
++        .iter()
++        .find(|p| p.name == "localField")
++        .unwrap();
++    assert_eq!(property.visibility, Visibility::Private);
++    assert_eq!(
++        property.name_offset,
++        own.properties
++            .iter()
++            .find(|p| p.name == "localField")
++            .unwrap()
++            .name_offset
++    );
++    assert_eq!(
++        resolved
++            .properties
++            .iter()
++            .filter(|p| p.name == "localField")
++            .count(),
++        1
++    );
++    let constant = resolved
++        .constants
++        .iter()
++        .find(|c| c.name == "LOCAL_MARKER")
++        .unwrap();
++    assert_eq!(constant.visibility, Visibility::Private);
++    assert_eq!(
++        constant.name_offset,
++        own.constants
++            .iter()
++            .find(|c| c.name == "LOCAL_MARKER")
++            .unwrap()
++            .name_offset
++    );
++    assert_eq!(
++        resolved
++            .constants
++            .iter()
++            .filter(|c| c.name == "LOCAL_MARKER")
++            .count(),
++        1
++    );
++}
++
+ /// Helper to build a `HashMap<String, PhpType>` from `(&str, &str)` pairs.
+ fn make_subs(pairs: &[(&str, &str)]) -> HashMap<String, PhpType> {
+     pairs
+diff --git a/src/inheritance/mod.rs b/src/inheritance/mod.rs
+index 075f71d..c84b811 100644
+--- a/src/inheritance/mod.rs
++++ b/src/inheritance/mod.rs
+@@ -100,6 +100,12 @@ pub(crate) struct MergeDedup {
+     pub constants: AtomSet,
+ }
+ 
++struct MemberReservations {
++    methods: Vec<Atom>,
++    properties: Vec<Atom>,
++    constants: Vec<Atom>,
++}
++
+ impl MergeDedup {
+     /// Build from the members already present on a `ClassInfo`.
+     fn from_class(class: &ClassInfo) -> Self {
+@@ -114,6 +120,99 @@ impl MergeDedup {
+         }
+     }
+ 
++    // Parent declarations win over its composed traits, even when a private
++    // declaration itself will not be inherited by the child.
++    fn reserve_own_members(&mut self, owner: &ClassInfo) -> MemberReservations {
++        MemberReservations {
++            methods: owner
++                .methods
++                .iter()
++                .filter_map(|method| {
++                    let name = crate::atom::ascii_lowercase_atom(&method.name);
++                    self.methods.insert(name).then_some(name)
++                })
++                .collect(),
++            properties: owner
++                .properties
++                .iter()
++                .filter_map(|property| {
++                    self.properties
++                        .insert(property.name)
++                        .then_some(property.name)
++                })
++                .collect(),
++            constants: owner
++                .constants
++                .iter()
++                .filter_map(|constant| {
++                    self.constants
++                        .insert(constant.name)
++                        .then_some(constant.name)
++                })
++                .collect(),
++        }
++    }
++
++    fn release_own_members(&mut self, reserved: MemberReservations) {
++        for name in reserved.methods {
++            self.methods.remove(&name);
++        }
++        for name in reserved.properties {
++            self.properties.remove(&name);
++        }
++        for name in reserved.constants {
++            self.constants.remove(&name);
++        }
++    }
++
++    // Alias composition must finish before visibility is tested. Keep the
++    // existing child prefix, including its own private declarations, intact.
++    fn discard_private_trait_additions(&mut self, merged: &mut ClassInfo, starts: [usize; 3]) {
++        if merged.methods[starts[0]..]
++            .iter()
++            .any(|m| m.visibility == Visibility::Private)
++        {
++            let mut index = 0;
++            merged.methods.make_mut().retain(|method| {
++                let keep = index < starts[0] || method.visibility != Visibility::Private;
++                index += 1;
++                if !keep {
++                    self.methods
++                        .remove(&crate::atom::ascii_lowercase_atom(&method.name));
++                }
++                keep
++            });
++        }
++        if merged.properties[starts[1]..]
++            .iter()
++            .any(|p| p.visibility == Visibility::Private)
++        {
++            let mut index = 0;
++            merged.properties.make_mut().retain(|property| {
++                let keep = index < starts[1] || property.visibility != Visibility::Private;
++                index += 1;
++                if !keep {
++                    self.properties.remove(&property.name);
++                }
++                keep
++            });
++        }
++        if merged.constants[starts[2]..]
++            .iter()
++            .any(|c| c.visibility == Visibility::Private)
++        {
++            let mut index = 0;
++            merged.constants.make_mut().retain(|constant| {
++                let keep = index < starts[2] || constant.visibility != Visibility::Private;
++                index += 1;
++                if !keep {
++                    self.constants.remove(&constant.name);
++                }
++                keep
++            });
++        }
++    }
++
+     /// Copy every member of `source` a subclass inherits into `merged`,
+     /// sharing each one's `Arc` rather than cloning it.
+     ///
+@@ -318,6 +417,12 @@ pub(crate) fn resolve_class_with_inheritance(
+                 .collect()
+         };
+ 
++        let reserved = (!parent.used_traits.is_empty()).then(|| dedup.reserve_own_members(&parent));
++        let trait_starts = [
++            merged.methods.len(),
++            merged.properties.len(),
++            merged.constants.len(),
++        ];
+         traits::merge_traits_into(
+             &mut merged,
+             &parent.used_traits,
+@@ -331,6 +436,10 @@ pub(crate) fn resolve_class_with_inheritance(
+             &mut dedup,
+             &parent.fqn(),
+         );
++        dedup.discard_private_trait_additions(&mut merged, trait_starts);
++        if let Some(reserved) = reserved {
++            dedup.release_own_members(reserved);
++        }
+ 
+         // Template parameter names substituted at this level, used to
+         // decide per member whether substitution would change anything.
+diff --git a/src/references/member_scope.rs b/src/references/member_scope.rs
+index 36163f1..5c3e2be 100644
+--- a/src/references/member_scope.rs
++++ b/src/references/member_scope.rs
+@@ -435,7 +435,11 @@ impl Backend {
+ 
+     /// `seeds` and every class that extends or implements one of them,
+     /// transitively.
+-    fn descendants_closure(&self, seeds: impl IntoIterator<Item = String>) -> HashSet<String> {
++    /// Indexed descendants, including the supplied roots, using the canonical inheritance graph.
++    pub(crate) fn descendants_closure(
++        &self,
++        seeds: impl IntoIterator<Item = String>,
++    ) -> HashSet<String> {
+         let mut closure: HashSet<String> = HashSet::new();
+         let mut queue: std::collections::VecDeque<String> = std::collections::VecDeque::new();
+         for seed in seeds {
+diff --git a/src/rename/class/layout.rs b/src/rename/class/layout.rs
+index 3d06c25..349c80b 100644
+--- a/src/rename/class/layout.rs
++++ b/src/rename/class/layout.rs
+@@ -308,7 +308,23 @@ impl Backend {
+             .and_then(|u| Url::parse(u).ok())
+             .and_then(|u| u.to_file_path().ok());
+ 
+-        if new_path.exists() && old_path.as_deref() != Some(new_path.as_path()) {
++        // A case-only rename on a case-insensitive filesystem names the same
++        // directory entry. Keep distinct occupied files and symlinks refused.
++        let same_case_only_file = old_fqn.eq_ignore_ascii_case(new_fqn)
++            && old_path.as_ref().is_some_and(|old| {
++                new_path
++                    .symlink_metadata()
++                    .is_ok_and(|meta| !meta.file_type().is_symlink())
++                    && old
++                        .canonicalize()
++                        .ok()
++                        .zip(new_path.canonicalize().ok())
++                        .is_some_and(|(old, new)| old == new)
++            });
++        if new_path.exists()
++            && old_path.as_deref() != Some(new_path.as_path())
++            && !same_case_only_file
++        {
+             return Some(format!(
+                 "Cannot rename to `{}`: {} already exists.",
+                 new_fqn,
+diff --git a/src/rename/class/mod.rs b/src/rename/class/mod.rs
+index 782c1b6..29ceea2 100644
+--- a/src/rename/class/mod.rs
++++ b/src/rename/class/mod.rs
+@@ -174,7 +174,7 @@ impl Backend {
+         old_fqn: &str,
+         new_short_name: &str,
+         locations: &[Location],
+-    ) -> Option<WorkspaceEdit> {
++    ) -> RenameOutcome {
+         let old_fqn_normalized = strip_fqn_prefix(old_fqn);
+         let old_short_name = crate::util::short_name(old_fqn_normalized);
+ 
+@@ -184,6 +184,10 @@ impl Backend {
+             new_short_name.to_string()
+         };
+ 
++        if let Some(conflict) = self.class_move_conflict(old_fqn_normalized, &new_fqn) {
++            return Err(conflict);
++        }
++
+         let locations_by_file = group_locations_by_file(locations);
+ 
+         let mut changes: HashMap<Url, Vec<TextEdit>> = HashMap::new();
+@@ -243,11 +247,11 @@ impl Backend {
+         }
+ 
+         if changes.is_empty() {
+-            return None;
++            return Ok(None);
+         }
+ 
+         let file_move = self.should_rename_file(old_fqn_normalized, new_short_name);
+-        Some(Self::class_rename_workspace_edit(changes, file_move))
++        Ok(Some(Self::class_rename_workspace_edit(changes, file_move)))
+     }
+ 
+     /// Build a `WorkspaceEdit` that moves a class to a new FQN.
+diff --git a/src/rename/collisions.rs b/src/rename/collisions.rs
+new file mode 100644
+index 0000000..9a08f72
+--- /dev/null
++++ b/src/rename/collisions.rs
+@@ -0,0 +1,130 @@
++//! Destination identity checks before emitting member rename edits.
++use std::collections::{HashMap, HashSet};
++
++use tower_lsp::lsp_types::Location;
++
++use crate::{
++    Backend,
++    inheritance::resolve_class_with_inheritance,
++    text_position::position_to_byte_offset,
++    types::{ClassLikeKind, Visibility},
++};
++
++#[derive(Clone, Copy, PartialEq, Eq, Hash)]
++enum MemberKind {
++    Method,
++    Property,
++    Constant,
++}
++
++impl Backend {
++    pub(super) fn rename_member_conflict(
++        &self,
++        locations: &[Location],
++        new_name: &str,
++    ) -> Option<String> {
++        let mut checked = HashSet::new();
++        let mut files = HashMap::new();
++        let loader = |name: &str| self.find_or_load_class(name);
++        for location in locations {
++            let uri = location.uri.as_str();
++            let Some((content, classes)) = files
++                .entry(uri)
++                .or_insert_with(|| {
++                    Some((
++                        self.reference_file_content(uri)?,
++                        self.shared_classes_for_uri(uri)?,
++                    ))
++                })
++                .as_ref()
++            else {
++                continue;
++            };
++            let offset = position_to_byte_offset(content, location.range.start) as u32;
++            for owner in classes {
++                // Only declarations identify an owner. A call written inside an
++                // unrelated class must not make that caller a rename target.
++                let declaration = if let Some(method) = owner
++                    .methods
++                    .iter()
++                    .find(|m| m.name_offset != 0 && m.name_offset == offset)
++                {
++                    Some((MemberKind::Method, method.name.as_str(), method.visibility))
++                } else if let Some(property) = owner
++                    .properties
++                    .iter()
++                    .find(|p| p.name_offset != 0 && p.name_offset == offset)
++                {
++                    Some((
++                        MemberKind::Property,
++                        property.name.as_str(),
++                        property.visibility,
++                    ))
++                } else {
++                    owner
++                        .constants
++                        .iter()
++                        .find(|c| c.name_offset != 0 && c.name_offset == offset)
++                        .map(|c| (MemberKind::Constant, c.name.as_str(), c.visibility))
++                };
++                let Some((kind, old_name, visibility)) = declaration else {
++                    continue;
++                };
++                let destination = if kind == MemberKind::Property {
++                    new_name.strip_prefix('$').unwrap_or(new_name)
++                } else {
++                    new_name
++                };
++                if kind != MemberKind::Property && new_name.starts_with('$') {
++                    return Some(format!("`{new_name}` is not a valid PHP member name"));
++                }
++                if if kind == MemberKind::Method {
++                    old_name.eq_ignore_ascii_case(destination)
++                } else {
++                    old_name == destination
++                } {
++                    continue;
++                }
++                let fqn = owner.fqn().to_string();
++                if !checked.insert((fqn.clone(), kind)) {
++                    continue;
++                }
++                let mut receivers: Vec<_> =
++                    if visibility == Visibility::Private && owner.kind != ClassLikeKind::Trait {
++                        vec![fqn]
++                    } else {
++                        self.descendants_closure([fqn]).into_iter().collect()
++                    };
++                receivers.sort();
++                for receiver in receivers {
++                    let Some(class) = loader(&receiver) else {
++                        continue;
++                    };
++                    let effective = resolve_class_with_inheritance(&class, &loader);
++                    // Private trait members stop at their consuming class; an
++                    // indexed descendant that does not inherit the old member
++                    // cannot capture this rename.
++                    let carries_source = match kind {
++                        MemberKind::Method => effective.has_method(old_name),
++                        MemberKind::Property => effective.has_property(old_name),
++                        MemberKind::Constant => effective.get_constant(old_name).is_some(),
++                    };
++                    if !carries_source {
++                        continue;
++                    }
++                    let exists = match kind {
++                        MemberKind::Method => effective.has_method(destination),
++                        MemberKind::Property => effective.has_property(destination),
++                        MemberKind::Constant => effective.get_constant(destination).is_some(),
++                    };
++                    if exists {
++                        return Some(format!(
++                            "Cannot rename to `{destination}`: class `{receiver}` already has a member with that name."
++                        ));
++                    }
++                }
++            }
++        }
++        None
++    }
++}
+diff --git a/src/rename/mod.rs b/src/rename/mod.rs
+index 3b5bd12..94f366b 100644
+--- a/src/rename/mod.rs
++++ b/src/rename/mod.rs
+@@ -32,6 +32,7 @@
+ 
+ mod blade;
+ mod class;
++mod collisions;
+ mod namespace;
+ mod prepare;
+ mod route;
+diff --git a/src/rename/prepare.rs b/src/rename/prepare.rs
+index 146b819..b870d71 100644
+--- a/src/rename/prepare.rs
++++ b/src/rename/prepare.rs
+@@ -228,6 +228,18 @@ impl Backend {
+             return Ok(None);
+         }
+ 
++        if new_name.starts_with('$')
++            && matches!(
++                &span.kind,
++                SymbolKind::MemberAccess {
++                    is_method_call: true,
++                    ..
++                }
++            )
++        {
++            return Err(format!("`{new_name}` is not a valid PHP method name"));
++        }
++
+         if !is_valid_new_name(&span.kind, new_name) {
+             return Err(format!("`{new_name}` is not a valid PHP name"));
+         }
+@@ -328,7 +340,11 @@ impl Backend {
+             if new_name.contains('\\') {
+                 return self.build_class_move_edit(fqn, new_name, &locations);
+             }
+-            return Ok(self.build_class_rename_edit(fqn, new_name, &locations));
++            return self.build_class_rename_edit(fqn, new_name, &locations);
++        }
++
++        if let Some(conflict) = self.rename_member_conflict(&locations, new_name) {
++            return Err(conflict);
+         }
+ 
+         // Build the workspace edit.  Group text edits by document URI.
+diff --git a/src/resolution.rs b/src/resolution.rs
+index a0f885b..ee117e2 100644
+--- a/src/resolution.rs
++++ b/src/resolution.rs
+@@ -298,6 +298,8 @@ impl Backend {
+         if !aliases::has_imported_type_aliases(&class) {
+             return class;
+         }
++        let generation =
++            crate::virtual_members::cache::resolution_generation(&self.resolved_class_cache);
+         if let Some((linked, sources)) = self.resolved_class_cache.read().get_linked_aliases(&class)
+         {
+             // Whoever is recording what this lookup depends on depends on
+@@ -317,11 +319,10 @@ impl Backend {
+         let (linked, complete) = aliases::link_imported_type_aliases(&class, &loader);
+         let result = linked.map_or_else(|| Arc::clone(&class), Arc::new);
+         if complete {
+-            self.resolved_class_cache.write().insert_linked_aliases(
+-                &class,
+-                Arc::clone(&result),
+-                sources.into_inner(),
+-            );
++            let mut cache = self.resolved_class_cache.write();
++            if cache.generation() == generation {
++                cache.insert_linked_aliases(&class, Arc::clone(&result), sources.into_inner());
++            }
+         }
+         result
+     }
+diff --git a/src/virtual_members/cache.rs b/src/virtual_members/cache.rs
+index b847cc3..b8e5794 100644
+--- a/src/virtual_members/cache.rs
++++ b/src/virtual_members/cache.rs
+@@ -7,7 +7,7 @@
+ //! eviction walk (`evict_fqn`).  The resolution logic that populates
+ //! the cache lives in [`super::resolve`].
+ 
+-use std::cell::Cell;
++use std::cell::{Cell, RefCell};
+ use std::collections::{HashMap, HashSet};
+ use std::sync::{Arc, Weak};
+ 
+@@ -47,6 +47,9 @@ pub type ResolvedClassCacheKey = (Atom, Vec<String>);
+ /// All three structures are kept consistent by going through [`Self::insert`],
+ /// [`Self::clear`], and [`evict_fqn`]; callers never mutate the map directly.
+ pub struct ResolvedCacheInner {
++    /// Invalidates publication by computations that began before an edit,
++    /// including misses that have no completed reverse-dependency edges yet.
++    generation: u64,
+     /// Resolved classes keyed by FQN + concrete generic args.
+     map: HashMap<ResolvedClassCacheKey, Arc<ClassInfo>>,
+     /// FQN → all cache keys (generic-arg variants) stored under it.
+@@ -211,6 +214,7 @@ const SUBSTITUTED_METHODS_CAP: usize = 1 << 20;
+ impl Default for ResolvedCacheInner {
+     fn default() -> Self {
+         ResolvedCacheInner {
++            generation: 0,
+             map: HashMap::new(),
+             fqn_keys: HashMap::new(),
+             reverse_deps: HashMap::new(),
+@@ -227,6 +231,24 @@ impl Default for ResolvedCacheInner {
+ }
+ 
+ impl ResolvedCacheInner {
++    /// Publication generation captured before loading resolution inputs.
++    pub(crate) fn generation(&self) -> u64 {
++        self.generation
++    }
++
++    /// Store only when no invalidation crossed this computation. Existing
++    /// unaffected entries retain selective eviction and cache reuse.
++    pub(crate) fn insert_if_current(
++        &mut self,
++        generation: u64,
++        key: ResolvedClassCacheKey,
++        value: Arc<ClassInfo>,
++    ) {
++        if generation == self.generation {
++            self.insert(key, value);
++        }
++    }
++
+     /// Look up a resolved class by its `(FQN, generic args)` key.
+     pub fn get(&self, key: &ResolvedClassCacheKey) -> Option<&Arc<ClassInfo>> {
+         self.map.get(key)
+@@ -390,6 +412,7 @@ impl ResolvedCacheInner {
+     /// belong to resolution call trees currently running on other
+     /// threads, not to the cached contents being invalidated.
+     pub fn clear(&mut self) {
++        self.generation = self.generation.wrapping_add(1);
+         self.map.clear();
+         self.fqn_keys.clear();
+         self.reverse_deps.clear();
+@@ -601,6 +624,9 @@ thread_local! {
+     /// [`active_resolved_class_cache`].  The pointer is valid for the
+     /// lifetime of the [`ResolvedCacheGuard`] that set it.
+     static ACTIVE_RESOLVED_CACHE: Cell<*const ResolvedClassCache> = const { Cell::new(std::ptr::null()) };
++    // A calculation keeps its publication generation across nested calls,
++    // including switching through another project's cache and back.
++    static ACTIVE_RESOLVED_GENERATIONS: RefCell<Vec<(usize, u64)>> = const { RefCell::new(Vec::new()) };
+ }
+ 
+ /// RAII guard that clears the thread-local cache pointer on drop.
+@@ -610,6 +636,7 @@ pub struct ResolvedCacheGuard {
+ 
+ impl Drop for ResolvedCacheGuard {
+     fn drop(&mut self) {
++        ACTIVE_RESOLVED_GENERATIONS.with(|frames| frames.borrow_mut().pop());
+         ACTIVE_RESOLVED_CACHE.with(|c| c.set(self.prev));
+     }
+ }
+@@ -618,7 +645,8 @@ impl Drop for ResolvedCacheGuard {
+ ///
+ /// While the returned guard is alive, [`active_resolved_class_cache`]
+ /// returns `Some(&cache)`.  Supports nesting (restores the previous
+-/// cache on drop).
++/// cache on drop). Nested scopes for the same underlying cache retain
++/// the outer calculation's publication generation across invalidation.
+ ///
+ /// # Example
+ ///
+@@ -627,11 +655,30 @@ impl Drop for ResolvedCacheGuard {
+ /// // … deep call stacks can now use active_resolved_class_cache()
+ /// ```
+ pub fn with_active_resolved_class_cache(cache: &ResolvedClassCache) -> ResolvedCacheGuard {
++    let generation = resolution_generation(cache);
++    let identity = Arc::as_ptr(cache) as usize;
+     let prev = ACTIVE_RESOLVED_CACHE.with(|c| c.get());
++    ACTIVE_RESOLVED_GENERATIONS.with(|frames| frames.borrow_mut().push((identity, generation)));
+     ACTIVE_RESOLVED_CACHE.with(|c| c.set(cache as *const _));
+     ResolvedCacheGuard { prev }
+ }
+ 
++/// Publication generation for this cache in the current calculation.
++/// Nested scopes preserve the original generation so old raw class values
++/// cannot acquire a fresh publication lease after an intervening edit.
++pub(crate) fn resolution_generation(cache: &ResolvedClassCache) -> u64 {
++    let identity = Arc::as_ptr(cache) as usize;
++    ACTIVE_RESOLVED_GENERATIONS
++        .with(|frames| {
++            frames
++                .borrow()
++                .iter()
++                .rev()
++                .find_map(|&(owner, generation)| (owner == identity).then_some(generation))
++        })
++        .unwrap_or_else(|| cache.read().generation())
++}
++
+ /// Return the currently-active [`ResolvedClassCache`], if any.
+ ///
+ /// Returns `None` when no [`with_active_resolved_class_cache`] guard
+@@ -817,6 +864,8 @@ pub(crate) fn intern_transformed_property(
+ /// The returned vector lists the seed FQN followed by every transitively
+ /// evicted dependent, or is empty when nothing matched.
+ pub fn evict_fqn(cache: &mut ResolvedCacheInner, fqn: &str) -> Vec<String> {
++    // Even an empty cache can have a resolver holding an older raw class.
++    cache.generation = cache.generation.wrapping_add(1);
+     // A class that imported a type alias from `fqn` has it linked into its
+     // members, so it changed along with `fqn` and its dependents go too.
+     let importers = cache.evict_linked_aliases_reading(fqn);
+diff --git a/src/virtual_members/resolve.rs b/src/virtual_members/resolve.rs
+index fd398b1..e39786b 100644
+--- a/src/virtual_members/resolve.rs
++++ b/src/virtual_members/resolve.rs
+@@ -24,7 +24,7 @@ use crate::php_type::PhpType;
+ use crate::types::ClassInfo;
+ use crate::virtual_members::laravel::patches::apply_laravel_patches;
+ 
+-use super::cache::PendingClaim;
++use super::cache::{PendingClaim, resolution_generation};
+ use super::laravel;
+ use super::{
+     ResolvedClassCache, ResolvedClassCacheKey, active_resolved_class_cache, apply_virtual_members,
+@@ -373,6 +373,7 @@ pub(crate) fn resolve_class_base_cached(
+         return Arc::new(resolve_class_with_inheritance(class, class_loader));
+     };
+ 
++    let generation = resolution_generation(cache);
+     let key: ResolvedClassCacheKey = (class.fqn(), vec![BASE_RESOLUTION_MARKER.to_string()]);
+ 
+     {
+@@ -383,7 +384,9 @@ pub(crate) fn resolve_class_base_cached(
+     }
+ 
+     let result = Arc::new(resolve_class_with_inheritance(class, class_loader));
+-    cache.write().insert(key, Arc::clone(&result));
++    cache
++        .write()
++        .insert_if_current(generation, key, Arc::clone(&result));
+     result
+ }
+ 
+@@ -416,6 +419,10 @@ pub fn resolve_class_fully_with_generics(
+         return resolve_class_fully_inner(class, class_loader, cache);
+     }
+ 
++    // Keep one publication generation through the base and specialised
++    // calculations, even when a nested resolution starts after an edit.
++    let _active_guard = cache.map(super::cache::with_active_resolved_class_cache);
++    let generation = cache.map(resolution_generation);
+     // Check the cache for (FQN, generic_args).
+     let fqn = class.fqn();
+     let cache_key: ResolvedClassCacheKey = (fqn, generic_arg_strings.to_vec());
+@@ -493,7 +500,11 @@ pub fn resolve_class_fully_with_generics(
+     if let Some(c) = cache
+         && !post_merge_skipped
+     {
+-        c.write().insert(cache_key, Arc::clone(&result));
++        c.write().insert_if_current(
++            generation.expect("explicit cache captured its generation"),
++            cache_key,
++            Arc::clone(&result),
++        );
+     }
+ 
+     let elapsed = started.elapsed();
+@@ -580,6 +591,8 @@ fn resolve_class_fully_inner(
+     // fully synchronous, so the thread-local cannot leak across an
+     // `.await`.
+     let _active_guard = super::cache::with_active_resolved_class_cache(cache);
++    // Capture before the raw reload and preserve any outer scope's lease.
++    let generation = resolution_generation(cache);
+ 
+     let fqn = class.fqn();
+     let cache_key: ResolvedClassCacheKey = (fqn, Vec::new());
+@@ -673,7 +686,9 @@ fn resolve_class_fully_inner(
+     // ── Cache store ─────────────────────────────────────────────────
+     merged.rebuild_method_index();
+     let result = Arc::new(merged);
+-    cache.write().insert(cache_key, Arc::clone(&result));
++    cache
++        .write()
++        .insert_if_current(generation, cache_key, Arc::clone(&result));
+     drop(pending_guard);
+ 
+     result
+diff --git a/src/virtual_members/tests.rs b/src/virtual_members/tests.rs
+index 9cba3f0..6d907e3 100644
+--- a/src/virtual_members/tests.rs
++++ b/src/virtual_members/tests.rs
+@@ -5,6 +5,184 @@ use crate::test_fixtures::{make_class, make_method, make_property};
+ use crate::types::{ClassLikeKind, ConstantInfo, Visibility};
+ use std::sync::Arc;
+ 
++#[test]
++fn evict_fqn_during_inflight_resolution_cannot_republish_old_members() {
++    assert_invalidation_fences_inflight_resolution(false, false);
++}
++
++#[test]
++fn clear_during_inflight_resolution_cannot_republish_old_members() {
++    assert_invalidation_fences_inflight_resolution(true, false);
++}
++
++#[test]
++fn stale_active_scope_cannot_publish_nested_base_resolution_after_eviction() {
++    assert_stale_scope_fences_base_resolution(false);
++}
++
++#[test]
++fn switching_cache_scopes_restores_each_cache_publication_generation() {
++    assert_stale_scope_fences_base_resolution(true);
++}
++
++fn assert_stale_scope_fences_base_resolution(switch_cache: bool) {
++    let mut original = make_class("Service");
++    original
++        .methods
++        .push(Arc::new(make_method("fromA", Some("void"))));
++    original.rebuild_method_index();
++    let mut updated = original.clone();
++    updated.methods = vec![Arc::new(make_method("fromAUnsaved", Some("void")))].into();
++    updated.rebuild_method_index();
++    let cache = new_resolved_class_cache();
++    let alias = Arc::clone(&cache);
++    let other_cache = new_resolved_class_cache();
++    let missing_loader = |_: &str| None;
++    {
++        let _outer = with_active_resolved_class_cache(&cache);
++        // The caller has already retained `original`, then its dependency is
++        // replaced while this computation's cache scope is still alive.
++        evict_fqn(&mut cache.write(), "Service");
++        if switch_cache {
++            let _other = with_active_resolved_class_cache(&other_cache);
++            assert!(Arc::ptr_eq(
++                active_resolved_class_cache().unwrap(),
++                &other_cache
++            ));
++            let result = resolve_class_base_cached(&updated, &missing_loader);
++            assert!(result.has_method("fromAUnsaved"));
++            assert!(
++                !other_cache.read().is_empty(),
++                "a fresh unrelated cache scope must remain usable"
++            );
++        }
++        assert!(Arc::ptr_eq(active_resolved_class_cache().unwrap(), &cache));
++        {
++            // Different Arc handles to the same cache must inherit the old
++            // scope epoch, rather than falsely starting a fresh computation.
++            let _nested = with_active_resolved_class_cache(&alias);
++            let _old_result = resolve_class_base_cached(&original, &missing_loader);
++        }
++        assert!(Arc::ptr_eq(active_resolved_class_cache().unwrap(), &cache));
++    }
++    let _fresh = with_active_resolved_class_cache(&cache);
++    let current = resolve_class_base_cached(&updated, &missing_loader);
++    assert!(
++        current.has_method("fromAUnsaved"),
++        "fresh scope must not reuse the old nested computation"
++    );
++    assert!(!current.has_method("fromA"));
++    if switch_cache {
++        let _other = with_active_resolved_class_cache(&other_cache);
++        let current = resolve_class_base_cached(&updated, &missing_loader);
++        assert!(current.has_method("fromAUnsaved"));
++        assert!(!current.has_method("fromA"));
++    }
++}
++
++#[test]
++fn evict_fqn_during_inflight_generic_resolution_cannot_republish_old_members() {
++    assert_invalidation_fences_inflight_resolution(false, true);
++}
++
++fn assert_invalidation_fences_inflight_resolution(clear: bool, generic: bool) {
++    use std::sync::{
++        RwLock,
++        atomic::{AtomicBool, Ordering},
++        mpsc,
++    };
++    use std::time::Duration;
++
++    let mut original = make_class("Service");
++    original.parent_class = Some(atom("Parent"));
++    if generic {
++        original.template_params.push(atom("T"));
++    }
++    original
++        .methods
++        .push(Arc::new(make_method("fromA", Some("void"))));
++    let original = Arc::new(original);
++    let mut updated = (*original).clone();
++    updated.methods = vec![Arc::new(make_method("fromAUnsaved", Some("void")))].into();
++    updated.rebuild_method_index();
++    let updated = Arc::new(updated);
++    let current = Arc::new(RwLock::new(Arc::clone(&original)));
++    let parent = Arc::new(make_class("Parent"));
++    let cache = new_resolved_class_cache();
++    let (entered_tx, entered_rx) = mpsc::channel();
++    let (release_tx, release_rx) = mpsc::channel();
++    let worker_cache = Arc::clone(&cache);
++    let worker_current = Arc::clone(&current);
++    let worker_parent = Arc::clone(&parent);
++    let worker = std::thread::spawn(move || {
++        let paused = AtomicBool::new(false);
++        let loader = |name: &str| match name {
++            "Service" => Some(Arc::clone(&worker_current.read().unwrap())),
++            "Parent" => {
++                // This lookup occurs after the resolver has captured Service's
++                // raw declaration and claimed the missing cache entry.
++                if !paused.swap(true, Ordering::SeqCst) {
++                    entered_tx.send(()).unwrap();
++                    release_rx.recv_timeout(Duration::from_secs(10)).unwrap();
++                }
++                Some(Arc::clone(&worker_parent))
++            }
++            _ => None,
++        };
++        if generic {
++            resolve_class_fully_with_generics(
++                &original,
++                &loader,
++                Some(&worker_cache),
++                &["string".to_owned()],
++                &[PhpType::parse("string")],
++            )
++        } else {
++            resolve_class_fully_cached(&original, &loader, &worker_cache)
++        }
++    });
++
++    let entered = entered_rx.recv_timeout(Duration::from_secs(10));
++    if entered.is_ok() {
++        *current.write().unwrap() = Arc::clone(&updated);
++        // The actual production edit invalidation API must fence results
++        // already being computed, even when no completed entry exists yet.
++        if clear {
++            cache.write().clear();
++        } else {
++            evict_fqn(&mut cache.write(), "Service");
++        }
++    }
++    let _ = release_tx.send(());
++    let _old_inflight_result = worker.join().expect("resolver worker must finish");
++    entered.expect("old resolution must reach the controlled parent lookup");
++
++    let loader = |name: &str| match name {
++        "Service" => Some(Arc::clone(&current.read().unwrap())),
++        "Parent" => Some(Arc::clone(&parent)),
++        _ => None,
++    };
++    let fresh = if generic {
++        resolve_class_fully_with_generics(
++            &updated,
++            &loader,
++            Some(&cache),
++            &["string".to_owned()],
++            &[PhpType::parse("string")],
++        )
++    } else {
++        resolve_class_fully_cached(&updated, &loader, &cache)
++    };
++    assert!(
++        fresh.has_method("fromAUnsaved"),
++        "fresh request must resolve the current declaration"
++    );
++    assert!(
++        !fresh.has_method("fromA"),
++        "an invalidated in-flight result must not poison the current cache"
++    );
++}
++
+ // ── VirtualMembers tests ────────────────────────────────────────────
+ 
+ #[test]
+diff --git a/tests/integration/diagnostics_member_visibility.rs b/tests/integration/diagnostics_member_visibility.rs
+index d67a4f8..6fbe3df 100644
+--- a/tests/integration/diagnostics_member_visibility.rs
++++ b/tests/integration/diagnostics_member_visibility.rs
+@@ -42,6 +42,238 @@ fn all_codes(php: &str) -> Vec<String> {
+         .collect()
+ }
+ 
++#[test]
++fn private_ancestor_trait_property_and_constant_name_the_consuming_parent() {
++    let php = r#"<?php
++trait SecretMembers {
++    private string $secret = 'x';
++    private const TOKEN = 'x';
++}
++class Consumer {
++    use SecretMembers;
++    public function ownScope(): void {
++        echo $this->secret;
++        echo self::TOKEN;
++    }
++}
++class Child extends Consumer {
++    public function childScope(): void {
++        echo $this->secret;
++        echo self::TOKEN;
++    }
++}
++"#;
++    let msgs = messages(php);
++    assert_eq!(
++        msgs.len(),
++        2,
++        "only the two descendant accesses are invalid: {msgs:?}"
++    );
++    assert!(
++        msgs.iter()
++            .any(|message| message.contains("private property")
++                && message.contains("Consumer::$secret")),
++        "{msgs:?}"
++    );
++    assert!(
++        msgs.iter()
++            .any(|message| message.contains("private constant")
++                && message.contains("Consumer::TOKEN")),
++        "{msgs:?}"
++    );
++    let codes = all_codes(php);
++    assert_eq!(
++        codes
++            .iter()
++            .filter(|code| code.as_str() == "invalid_member_access")
++            .count(),
++        2
++    );
++    assert!(
++        !codes.iter().any(|code| code == "unknown_member"),
++        "private ancestor trait members are inaccessible, not missing: {codes:?}"
++    );
++}
++
++#[test]
++fn private_ancestor_trait_public_and_protected_aliases_remain_accessible() {
++    let php = r#"<?php
++trait PrivateMethods {
++    private function first(): void {}
++    private function second(): void {}
++}
++class Consumer {
++    use PrivateMethods {
++        first as public exposed;
++        second as protected guarded;
++    }
++}
++class Child extends Consumer {
++    public function run(): void {
++        $this->exposed();
++        $this->guarded();
++    }
++}
++(new Child())->exposed();
++"#;
++    assert!(
++        messages(php).is_empty(),
++        "effective public/protected aliases are inherited independently of private originals: {:?}",
++        messages(php)
++    );
++    let codes = all_codes(php);
++    assert!(
++        !codes.iter().any(|code| code == "unknown_member"),
++        "visible inherited aliases must not be reported missing: {codes:?}"
++    );
++}
++
++#[test]
++fn private_ancestor_trait_private_alias_is_diagnosed_in_consuming_parent_scope() {
++    let php = r#"<?php
++trait PublicMethods {
++    public function original(): void {}
++}
++class Consumer {
++    use PublicMethods { original as private hidden; }
++    public function ownScope(): void { $this->hidden(); }
++}
++class Child extends Consumer {
++    public function childScope(): void {
++        $this->original();
++        $this->hidden();
++    }
++}
++(new Child())->original();
++"#;
++    let msgs = messages(php);
++    assert_eq!(
++        msgs.len(),
++        1,
++        "only the private alias in Child is inaccessible: {msgs:?}"
++    );
++    assert!(
++        msgs[0].contains("private method") && msgs[0].contains("Consumer::hidden()"),
++        "visibility adaptation belongs to the consuming class, not the trait or child: {msgs:?}"
++    );
++    let codes = all_codes(php);
++    assert_eq!(
++        codes
++            .iter()
++            .filter(|code| code.as_str() == "invalid_member_access")
++            .count(),
++        1
++    );
++    assert!(
++        !codes.iter().any(|code| code == "unknown_member"),
++        "the adapted private method must not also become an unknown-member diagnostic: {codes:?}"
++    );
++}
++
++#[test]
++fn private_ancestor_trait_parent_lexical_scope_accepts_child_typed_receiver() {
++    let php = r#"<?php
++trait PrivateState {
++    private function hidden(): void {}
++    private string $secret = 'x';
++}
++class Consumer {
++    use PrivateState;
++    public function read(Child $child): void {
++        $child->hidden();
++        echo $child->secret;
++    }
++}
++class Child extends Consumer {}
++"#;
++    assert!(
++        messages(php).is_empty(),
++        "Consumer owns both private trait members regardless of the descendant receiver type: {:?}",
++        messages(php)
++    );
++    let codes = all_codes(php);
++    assert!(
++        !codes
++            .iter()
++            .any(|code| code == "invalid_member_access" || code == "unknown_member"),
++        "accessible known private members are neither inaccessible nor missing: {codes:?}"
++    );
++}
++
++#[test]
++fn private_ancestor_trait_parent_lexical_scope_raw_private_control() {
++    let php = r#"<?php
++class Consumer {
++    private function hidden(): void {}
++    private string $secret = 'x';
++    public function read(Child $child): void {
++        $child->hidden();
++        echo $child->secret;
++    }
++}
++class Child extends Consumer {}
++"#;
++    assert!(
++        messages(php).is_empty(),
++        "the same lexical rule applies to directly declared private members: {:?}",
++        messages(php)
++    );
++    let codes = all_codes(php);
++    assert!(
++        !codes
++            .iter()
++            .any(|code| code == "invalid_member_access" || code == "unknown_member"),
++        "raw private members cannot become missing through a descendant type: {codes:?}"
++    );
++}
++
++#[test]
++fn private_ancestor_trait_child_lexical_scope_rejects_child_typed_receiver() {
++    let php = r#"<?php
++trait PrivateState {
++    private function hidden(): void {}
++    private string $secret = 'x';
++}
++class Consumer { use PrivateState; }
++class Child extends Consumer {
++    public function read(Child $child): void {
++        $child->hidden();
++        echo $child->secret;
++    }
++}
++"#;
++    let msgs = messages(php);
++    assert_eq!(
++        msgs.len(),
++        2,
++        "the descendant scope does not own either private member: {msgs:?}"
++    );
++    assert!(
++        msgs.iter()
++            .any(|message| message.contains("private method")
++                && message.contains("Consumer::hidden()")),
++        "{msgs:?}"
++    );
++    assert!(
++        msgs.iter()
++            .any(|message| message.contains("private property")
++                && message.contains("Consumer::$secret")),
++        "{msgs:?}"
++    );
++    let codes = all_codes(php);
++    assert_eq!(
++        codes
++            .iter()
++            .filter(|code| code.as_str() == "invalid_member_access")
++            .count(),
++        2
++    );
++    assert!(
++        !codes.iter().any(|code| code == "unknown_member"),
++        "inaccessible known members must not also be diagnosed as unknown: {codes:?}"
++    );
++}
++
+ // ─── Private members from outside ───────────────────────────────────────────
+ 
+ #[test]
+diff --git a/tests/integration/rename_class.rs b/tests/integration/rename_class.rs
+index f0068ce..c846631 100644
+--- a/tests/integration/rename_class.rs
++++ b/tests/integration/rename_class.rs
+@@ -6,6 +6,69 @@ use crate::common::{
+ };
+ use tower_lsp::lsp_types::*;
+ 
++const RENAME_COLLISION_CLASS_SOURCE: &str = concat!(
++    "<?php\n",
++    "namespace App {\n",
++    "    class SourceWidget {}\n",
++    "    class ExistingWidget {}\n",
++    "    function demo(SourceWidget $widget): void { $other = new SourceWidget(); }\n",
++    "}\n",
++    "namespace Other { class FreshWidget {} }\n",
++);
++
++#[tokio::test]
++async fn rename_collision_class_rejects_existing_same_namespace_case_insensitively() {
++    for target in ["ExistingWidget", "eXiStInGwIdGeT"] {
++        for needle in ["class SourceWidget", "new SourceWidget"] {
++            let backend = create_test_backend();
++            let uri = Url::parse("file:///class-collision.php").unwrap();
++            open_php(&backend, &uri, RENAME_COLLISION_CLASS_SOURCE).await;
++            let (line, character) =
++                crate::common::line_char_of(RENAME_COLLISION_CLASS_SOURCE, needle);
++            let offset = needle.find("SourceWidget").unwrap() as u32;
++            let result = rename_result(&backend, &uri, line, character + offset + 1, target).await;
++            assert!(
++                matches!(result, Ok(None) | Err(_)),
++                "class rename must not duplicate another same-namespace declaration: {needle:?} -> {target}: {result:?}"
++            );
++        }
++    }
++}
++
++async fn rename_collision_class_positive(target: &str) {
++    let backend = create_test_backend();
++    let uri = Url::parse("file:///class-collision-control.php").unwrap();
++    open_php(&backend, &uri, RENAME_COLLISION_CLASS_SOURCE).await;
++    let (line, character) =
++        crate::common::line_char_of(RENAME_COLLISION_CLASS_SOURCE, "class SourceWidget");
++    let edit = rename_result(&backend, &uri, line, character + 7, target)
++        .await
++        .expect("safe class rename must not be refused")
++        .expect("safe class rename needs an edit");
++    let edits = edits_for_uri(&edit, &uri);
++    assert_eq!(
++        edits.len(),
++        3,
++        "declaration, type hint and construction only"
++    );
++    let expected = RENAME_COLLISION_CLASS_SOURCE.replace("SourceWidget", target);
++    assert_eq!(
++        apply_edits(RENAME_COLLISION_CLASS_SOURCE, &edits),
++        expected,
++        "unrelated namespaces and other declarations stay exact"
++    );
++}
++
++#[tokio::test]
++async fn rename_collision_class_fresh_name_in_other_namespace_remains_allowed() {
++    rename_collision_class_positive("FreshWidget").await;
++}
++
++#[tokio::test]
++async fn rename_collision_class_case_only_rename_keeps_its_own_identity() {
++    rename_collision_class_positive("SOURCEWIDGET").await;
++}
++
+ // ─── Class Rename ───────────────────────────────────────────────────────────
+ 
+ #[tokio::test]
+diff --git a/tests/integration/rename_member.rs b/tests/integration/rename_member.rs
+index 5dd5ee1..7ba012c 100644
+--- a/tests/integration/rename_member.rs
++++ b/tests/integration/rename_member.rs
+@@ -7,6 +7,276 @@ use crate::common::{
+ };
+ use tower_lsp::lsp_types::*;
+ 
++const RENAME_COLLISION_METHOD_SOURCE: &str = concat!(
++    "<?php\n",
++    "class Service {\n",
++    "    public function process(): void {}\n",
++    "    public function existing(): void {}\n",
++    "}\n",
++    "class Other { public function fresh(): void {} }\n",
++    "function demo(Service $s): void { $s->process(); $literal = 'process'; }\n",
++);
++
++#[tokio::test]
++async fn rename_collision_method_rejects_existing_same_class_case_insensitively() {
++    for target in ["existing", "ExIsTiNg"] {
++        for needle in ["function process", "$s->process"] {
++            let backend = create_test_backend();
++            let uri = Url::parse("file:///method-collision.php").unwrap();
++            open_php(&backend, &uri, RENAME_COLLISION_METHOD_SOURCE).await;
++            let (line, character) = line_char_of(RENAME_COLLISION_METHOD_SOURCE, needle);
++            let offset = needle.find("process").unwrap() as u32;
++            let result = rename_result(&backend, &uri, line, character + offset + 1, target).await;
++            assert!(
++                matches!(result, Ok(None) | Err(_)),
++                "a same-class method collision must not produce edits: {needle:?} -> {target}: {result:?}"
++            );
++        }
++    }
++}
++
++async fn rename_collision_method_positive(target: &str) {
++    let backend = create_test_backend();
++    let uri = Url::parse("file:///method-collision-control.php").unwrap();
++    open_php(&backend, &uri, RENAME_COLLISION_METHOD_SOURCE).await;
++    let (line, character) = line_char_of(RENAME_COLLISION_METHOD_SOURCE, "$s->process");
++    let edit = rename_result(&backend, &uri, line, character + 5, target)
++        .await
++        .expect("safe method rename must not be refused")
++        .expect("safe method rename needs an edit");
++    let edits = edits_for_uri(&edit, &uri);
++    assert_eq!(edits.len(), 2, "the declaration and bound call only");
++    let expected = RENAME_COLLISION_METHOD_SOURCE
++        .replace("function process(", &format!("function {target}("))
++        .replace("$s->process()", &format!("$s->{target}()"));
++    assert_eq!(
++        apply_edits(RENAME_COLLISION_METHOD_SOURCE, &edits),
++        expected
++    );
++}
++
++#[tokio::test]
++async fn rename_collision_method_fresh_name_in_unrelated_class_remains_allowed() {
++    rename_collision_method_positive("fresh").await;
++}
++
++#[tokio::test]
++async fn rename_collision_method_case_only_rename_keeps_its_own_identity() {
++    rename_collision_method_positive("PROCESS").await;
++}
++
++const RENAME_COLLISION_PROPERTY_SOURCE: &str = concat!(
++    "<?php\n",
++    "class Fields { public string $source = ''; public string $target = ''; }\n",
++    "class OtherFields { public string $Target = ''; }\n",
++    "function demo(Fields $f): void { echo $f->source; $literal = 'source'; }\n",
++);
++
++#[tokio::test]
++async fn rename_collision_property_rejects_existing_exact_same_class_name() {
++    for needle in ["$source =", "$f->source"] {
++        let backend = create_test_backend();
++        let uri = Url::parse("file:///property-collision.php").unwrap();
++        open_php(&backend, &uri, RENAME_COLLISION_PROPERTY_SOURCE).await;
++        let (line, character) = line_char_of(RENAME_COLLISION_PROPERTY_SOURCE, needle);
++        let offset = needle.find("source").unwrap() as u32;
++        let result = rename_result(&backend, &uri, line, character + offset + 1, "target").await;
++        assert!(
++            matches!(result, Ok(None) | Err(_)),
++            "a same-class property collision must not produce edits: {result:?}"
++        );
++    }
++}
++
++#[tokio::test]
++async fn rename_collision_property_opposite_case_and_unrelated_owner_remain_allowed() {
++    let backend = create_test_backend();
++    let uri = Url::parse("file:///property-collision-control.php").unwrap();
++    open_php(&backend, &uri, RENAME_COLLISION_PROPERTY_SOURCE).await;
++    let (line, character) = line_char_of(RENAME_COLLISION_PROPERTY_SOURCE, "$f->source");
++    let edit = rename_result(&backend, &uri, line, character + 5, "Target")
++        .await
++        .expect("properties are case-sensitive")
++        .expect("fresh property needs an edit");
++    let edits = edits_for_uri(&edit, &uri);
++    assert_eq!(edits.len(), 2);
++    let expected = RENAME_COLLISION_PROPERTY_SOURCE
++        .replace("$source =", "$Target =")
++        .replace("$f->source", "$f->Target");
++    assert_eq!(
++        apply_edits(RENAME_COLLISION_PROPERTY_SOURCE, &edits),
++        expected,
++        "same-owner $target and OtherFields::$Target stay unchanged"
++    );
++}
++
++#[tokio::test]
++async fn rename_collision_method_cannot_override_inherited_final_method() {
++    let source = concat!(
++        "<?php\n",
++        "class BaseReceiver { final public function locked(): void {} }\n",
++        "class ChildReceiver extends BaseReceiver { public function work(): void {} }\n",
++        "function demo(ChildReceiver $child): void { $child->work(); }\n",
++    );
++    for target in ["locked", "LOCKED"] {
++        let backend = create_test_backend();
++        let uri = Url::parse("file:///final-method-collision.php").unwrap();
++        open_php(&backend, &uri, source).await;
++        let (line, character) = line_char_of(source, "$child->work");
++        let result = rename_result(&backend, &uri, line, character + 9, target).await;
++        assert!(
++            matches!(result, Ok(None) | Err(_)),
++            "renaming a child method over a final ancestor method is invalid: {result:?}"
++        );
++    }
++}
++
++async fn rename_collision_refuses_occupied_member(
++    source: &str,
++    needle: &str,
++    old_name: &str,
++    target: &str,
++) {
++    let backend = create_test_backend();
++    let uri = Url::parse("file:///member-owner-collision.php").unwrap();
++    open_php(&backend, &uri, source).await;
++    let (line, character) = line_char_of(source, needle);
++    let offset = needle.find(old_name).unwrap() as u32;
++    let result = rename_result(&backend, &uri, line, character + offset + 1, target).await;
++    assert!(
++        matches!(result, Ok(None) | Err(_)),
++        "rename must not merge distinct occupied member identities: {needle:?} -> {target}: {result:?}"
++    );
++}
++
++async fn rename_collision_keeps_private_member_owner(source: &str, needle: &str, expected: &str) {
++    let backend = create_test_backend();
++    let uri = Url::parse("file:///private-member-owner-control.php").unwrap();
++    open_php(&backend, &uri, source).await;
++    let (line, character) = line_char_of(source, needle);
++    let offset = needle.find("source").unwrap() as u32;
++    let edit = rename_result(&backend, &uri, line, character + offset + 1, "target")
++        .await
++        .expect("a distinct private owner is not a collision")
++        .expect("safe private-owner rename needs a proposal");
++    let edits = edits_for_uri(&edit, &uri);
++    assert_eq!(
++        edits.len(),
++        2,
++        "only the source declaration and its bound call"
++    );
++    assert_eq!(
++        apply_edits(source, &edits),
++        expected,
++        "existing destination members and their calls must stay byte-exact"
++    );
++}
++
++#[tokio::test]
++async fn rename_collision_parent_public_method_rejects_existing_child_destination() {
++    let source = concat!(
++        "<?php\n",
++        "class BaseOwner { public function source(): void {} }\n",
++        "class ChildOwner extends BaseOwner { public function target(): void {} }\n",
++        "function demo(BaseOwner $base, ChildOwner $child): void {\n",
++        "    $base->source(); $child->source(); $child->target();\n",
++        "}\n",
++    );
++    rename_collision_refuses_occupied_member(source, "function source", "source", "target").await;
++}
++
++#[tokio::test]
++async fn rename_collision_own_method_rejects_existing_trait_destination() {
++    let source = concat!(
++        "<?php\n",
++        "trait HasTarget { public function target(): void {} }\n",
++        "class Owner { use HasTarget; public function source(): void {} }\n",
++        "function demo(Owner $owner): void { $owner->source(); $owner->target(); }\n",
++    );
++    rename_collision_refuses_occupied_member(source, "$owner->source", "source", "target").await;
++}
++
++#[tokio::test]
++async fn rename_collision_private_ancestor_destination_is_not_inherited_by_child() {
++    let source = concat!(
++        "<?php\n",
++        "class BaseOwner {\n",
++        "    private function target(): void {}\n",
++        "    public function invokeBase(): void { $this->target(); }\n",
++        "}\n",
++        "class ChildOwner extends BaseOwner { public function source(): void {} }\n",
++        "function demo(ChildOwner $child): void { $child->source(); }\n",
++    );
++    let expected = source
++        .replace("function source(", "function target(")
++        .replace("$child->source()", "$child->target()");
++    rename_collision_keeps_private_member_owner(source, "$child->source", &expected).await;
++}
++
++#[tokio::test]
++async fn rename_collision_private_class_source_ignores_child_destination() {
++    let source = concat!(
++        "<?php\n",
++        "class BaseOwner {\n",
++        "    private function source(): void {}\n",
++        "    public function invokeBase(): void { $this->source(); }\n",
++        "}\n",
++        "class ChildOwner extends BaseOwner { public function target(): void {} }\n",
++        "function demo(ChildOwner $child): void { $child->target(); }\n",
++    );
++    let expected = source
++        .replace("function source(", "function target(")
++        .replace("$this->source()", "$this->target()");
++    rename_collision_keeps_private_member_owner(source, "function source", &expected).await;
++}
++
++#[tokio::test]
++async fn rename_collision_private_trait_source_ignores_consumer_child_destination() {
++    let source = concat!(
++        "<?php\n",
++        "trait PrivateSource { private function source(): void {} }\n",
++        "class Consumer {\n",
++        "    use PrivateSource;\n",
++        "    public function invoke(): void { $this->source(); }\n",
++        "}\n",
++        "class ConsumerChild extends Consumer { public function target(): void {} }\n",
++        "function demo(ConsumerChild $child): void { $child->target(); }\n",
++    );
++    let expected = source
++        .replace("function source(", "function target(")
++        .replace("$this->source()", "$this->target()");
++    rename_collision_keeps_private_member_owner(source, "function source", &expected).await;
++}
++
++#[tokio::test]
++async fn rename_collision_static_and_instance_properties_share_destination_namespace() {
++    for (fields, usage) in [
++        (
++            "public string $source = ''; public static string $target = '';",
++            "$box->source",
++        ),
++        (
++            "public static string $source = ''; public string $target = '';",
++            "Box::$source",
++        ),
++    ] {
++        let source = format!(
++            "<?php\nclass Box {{ {fields} }}\nfunction demo(Box $box): void {{ echo {usage}; }}\n"
++        );
++        rename_collision_refuses_occupied_member(&source, "$source =", "source", "target").await;
++    }
++}
++
++#[tokio::test]
++async fn rename_collision_missing_method_rejects_sigil_name() {
++    let source = concat!(
++        "<?php\n",
++        "class PlainBox {}\n",
++        "function demo(PlainBox $box): void { $box->missing(); }\n",
++    );
++    rename_collision_refuses_occupied_member(source, "$box->missing", "missing", "$other").await;
++}
++
+ // ─── Method Rename ──────────────────────────────────────────────────────────
+ 
+ #[tokio::test]

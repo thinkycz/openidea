@@ -1,0 +1,707 @@
+{
+  "source": "PHP Workbench PHP-Laravel-feature-matrix.json (requirements only)",
+  "baseline": "OpenStorm 0.1.21 foundation preserved; 0.1.22 development batch packaged, final native acceptance partial",
+  "features": [
+    {
+      "id": "FEAT-001",
+      "area": "Editor",
+      "feature": "Buffers, files and encoding",
+      "milestone": 6,
+      "status": "partial",
+      "acceptance_gate": "Undo/redo, external conflict detection, UTF-8/UTF-16 ranges, non-ASCII round trip",
+      "openstorm_evidence": [],
+      "remaining": "Reassess current OpenStorm implementation against this full gate; Workbench acceptance does not transfer."
+    },
+    {
+      "id": "FEAT-002",
+      "area": "Editor",
+      "feature": "Multiple carets and selections",
+      "milestone": 6,
+      "status": "partial",
+      "acceptance_gate": "Add/remove carets; rectangular selections; edits preserve all selection ranges",
+      "openstorm_evidence": [],
+      "remaining": "Reassess current OpenStorm implementation against this full gate; Workbench acceptance does not transfer."
+    },
+    {
+      "id": "FEAT-003",
+      "area": "Editor",
+      "feature": "Syntax highlighting and mixed documents",
+      "milestone": 3,
+      "status": "partial",
+      "acceptance_gate": "PHP/HTML/Blade highlights survive incomplete syntax without range drift",
+      "openstorm_evidence": [],
+      "remaining": "Reassess current OpenStorm implementation against this full gate; Workbench acceptance does not transfer."
+    },
+    {
+      "id": "FEAT-004",
+      "area": "Editor",
+      "feature": "Tabs, splits and workspace recovery",
+      "milestone": 6,
+      "status": "partial",
+      "acceptance_gate": "Restore dirty buffers and focus after restart; keyboard switch/move/split",
+      "openstorm_evidence": [],
+      "remaining": "Reassess current OpenStorm implementation against this full gate; Workbench acceptance does not transfer."
+    },
+    {
+      "id": "FEAT-005",
+      "area": "Editor",
+      "feature": "Find/replace and project search",
+      "milestone": 6,
+      "status": "partial",
+      "acceptance_gate": "Cancel stale search; preview replacement; never search excluded generated caches by accident",
+      "openstorm_evidence": [],
+      "remaining": "Reassess current OpenStorm implementation against this full gate; Workbench acceptance does not transfer."
+    },
+    {
+      "id": "FEAT-006",
+      "area": "Editor",
+      "feature": "Folding, breadcrumbs, outline and minimap option",
+      "milestone": 6,
+      "status": "partial",
+      "acceptance_gate": "Navigate matching symbol, preserve caret and collapse state after edits",
+      "openstorm_evidence": [],
+      "remaining": "Reassess current OpenStorm implementation against this full gate; Workbench acceptance does not transfer."
+    },
+    {
+      "id": "FEAT-007",
+      "area": "Editor",
+      "feature": "Smart indentation, pairs and snippets",
+      "milestone": 6,
+      "status": "partial",
+      "acceptance_gate": "No duplicate brackets; one undo group; configurable tab stops and code style",
+      "openstorm_evidence": [],
+      "remaining": "Reassess current OpenStorm implementation against this full gate; Workbench acceptance does not transfer."
+    },
+    {
+      "id": "FEAT-008",
+      "area": "Editor",
+      "feature": "Large files and resource limits",
+      "milestone": 6,
+      "status": "partial",
+      "acceptance_gate": "Large file remains editable; explicitly reduced analysis rather than stalled UI",
+      "openstorm_evidence": [],
+      "remaining": "Reassess current OpenStorm implementation against this full gate; Workbench acceptance does not transfer."
+    },
+    {
+      "id": "FEAT-009",
+      "area": "Editor",
+      "feature": "IME, Unicode and accessibility",
+      "milestone": 6,
+      "status": "partial",
+      "acceptance_gate": "Composition, candidate windows, grapheme movement, VoiceOver, keyboard-only operation",
+      "openstorm_evidence": [],
+      "remaining": "Reassess current OpenStorm implementation against this full gate; Workbench acceptance does not transfer."
+    },
+    {
+      "id": "FEAT-010",
+      "area": "Editor",
+      "feature": "Local history and recovery",
+      "milestone": 6,
+      "status": "partial",
+      "acceptance_gate": "Recover unsaved changes and compare/revert without Git",
+      "openstorm_evidence": [],
+      "remaining": "Reassess current OpenStorm implementation against this full gate; Workbench acceptance does not transfer."
+    },
+    {
+      "id": "FEAT-011",
+      "area": "PHP intelligence",
+      "feature": "Contextual PHP autocomplete",
+      "milestone": 1,
+      "status": "partial",
+      "acceptance_gate": "Typed/chained members, visibility, PHPDoc, arrays, named arguments and incomplete cursor fixtures",
+      "openstorm_evidence": [],
+      "remaining": "Reassess current OpenStorm implementation against this full gate; Workbench acceptance does not transfer."
+    },
+    {
+      "id": "FEAT-012",
+      "area": "PHP intelligence",
+      "feature": "Expected-type and name ranking",
+      "milestone": 1,
+      "status": "partial",
+      "acceptance_gate": "Correctly typed argument outranks unrelated alphabetically earlier variable",
+      "openstorm_evidence": [],
+      "remaining": "Reassess current OpenStorm implementation against this full gate; Workbench acceptance does not transfer."
+    },
+    {
+      "id": "FEAT-013",
+      "area": "PHP intelligence",
+      "feature": "Hover and signature help",
+      "milestone": 1,
+      "status": "partial",
+      "acceptance_gate": "Accurate overload/parameter/return/docs; cheap list then resolve",
+      "openstorm_evidence": [],
+      "remaining": "Reassess current OpenStorm implementation against this full gate; Workbench acceptance does not transfer."
+    },
+    {
+      "id": "FEAT-014",
+      "area": "PHP intelligence",
+      "feature": "Definition/implementation/type navigation",
+      "milestone": 1,
+      "status": "partial",
+      "acceptance_gate": "Jump to correct declaration; ambiguous choices shown",
+      "openstorm_evidence": [],
+      "remaining": "Reassess current OpenStorm implementation against this full gate; Workbench acceptance does not transfer."
+    },
+    {
+      "id": "FEAT-015",
+      "area": "PHP intelligence",
+      "feature": "References and usages",
+      "milestone": 1,
+      "status": "partial",
+      "acceptance_gate": "Exclude same-name unrelated symbols and strings",
+      "openstorm_evidence": [],
+      "remaining": "Reassess current OpenStorm implementation against this full gate; Workbench acceptance does not transfer."
+    },
+    {
+      "id": "FEAT-016",
+      "area": "PHP intelligence",
+      "feature": "Rename",
+      "milestone": 1,
+      "status": "partial",
+      "acceptance_gate": "Class/method/property/import references correct; collisions/stale edits rejected",
+      "openstorm_evidence": [
+        "0.1.22: eight guarded transaction regressions, four PHP protocol cases, real-client and actual-host checked-edit cases passed; native method rename/import checks observed; final-copy native recheck pending. See docs/OPENSTORM.md."
+      ],
+      "remaining": "Class/property/import alias corpus, single global cross-file undo/redo, cancellation and final native recheck remain unaccepted. Reviewed file creation/move/deletion is refused."
+    },
+    {
+      "id": "FEAT-017",
+      "area": "PHP intelligence",
+      "feature": "Diagnostics and intentions",
+      "milestone": 1,
+      "status": "partial",
+      "acceptance_gate": "Debounce, cancel stale diagnostics; fixes edit correct snapshot",
+      "openstorm_evidence": [],
+      "remaining": "Reassess current OpenStorm implementation against this full gate; Workbench acceptance does not transfer."
+    },
+    {
+      "id": "FEAT-018",
+      "area": "PHP intelligence",
+      "feature": "Format and import optimization",
+      "milestone": 1,
+      "status": "partial",
+      "acceptance_gate": "Minimal diff, correct PHP version/style, no save race",
+      "openstorm_evidence": [
+        "0.1.22: eight guarded transaction regressions, four PHP protocol cases, real-client and actual-host checked-edit cases passed; native method rename/import checks observed; final-copy native recheck pending. See docs/OPENSTORM.md."
+      ],
+      "remaining": "PHP formatter/version/style matrices, save-participant races and final-copy native recheck remain unaccepted; manual Optimize Imports and editor undo/redo were exercised."
+    },
+    {
+      "id": "FEAT-019",
+      "area": "PHP intelligence",
+      "feature": "PHP version and extension profiles",
+      "milestone": 1,
+      "status": "partial",
+      "acceptance_gate": "Do not suggest unavailable syntax/functions; version change invalidates facts",
+      "openstorm_evidence": [],
+      "remaining": "Reassess current OpenStorm implementation against this full gate; Workbench acceptance does not transfer."
+    },
+    {
+      "id": "FEAT-020",
+      "area": "PHP intelligence",
+      "feature": "Composer project understanding",
+      "milestone": 1,
+      "status": "partial",
+      "acceptance_gate": "Resolve project/vendor/functions; custom vendor path and workspaces",
+      "openstorm_evidence": [],
+      "remaining": "Reassess current OpenStorm implementation against this full gate; Workbench acceptance does not transfer."
+    },
+    {
+      "id": "FEAT-021",
+      "area": "PHP intelligence",
+      "feature": "Flow, generics and shapes",
+      "milestone": 1,
+      "status": "partial",
+      "acceptance_gate": "Assignments/guards/foreach/templates and shape fixture suite",
+      "openstorm_evidence": [],
+      "remaining": "Reassess current OpenStorm implementation against this full gate; Workbench acceptance does not transfer."
+    },
+    {
+      "id": "FEAT-022",
+      "area": "PHP intelligence",
+      "feature": "Extract/inline/change-signature refactorings",
+      "milestone": 4,
+      "status": "partial",
+      "acceptance_gate": "Preview and validate control-flow, references and side effects; unsupported cases refuse",
+      "openstorm_evidence": [],
+      "remaining": "Reassess current OpenStorm implementation against this full gate; Workbench acceptance does not transfer."
+    },
+    {
+      "id": "FEAT-023",
+      "area": "PHP intelligence",
+      "feature": "Generate constructors/accessors/overrides/docs",
+      "milestone": 1,
+      "status": "partial",
+      "acceptance_gate": "Uses real member types/inheritance; no duplicate or illegal generated symbols",
+      "openstorm_evidence": [],
+      "remaining": "Reassess current OpenStorm implementation against this full gate; Workbench acceptance does not transfer."
+    },
+    {
+      "id": "FEAT-024",
+      "area": "PHP intelligence",
+      "feature": "Call/type hierarchy and structural search",
+      "milestone": 4,
+      "status": "partial",
+      "acceptance_gate": "Complete known edges; mark dynamic/unknown calls rather than inventing them",
+      "openstorm_evidence": [],
+      "remaining": "Reassess current OpenStorm implementation against this full gate; Workbench acceptance does not transfer."
+    },
+    {
+      "id": "FEAT-025",
+      "area": "Laravel",
+      "feature": "Framework/version detection",
+      "milestone": 2,
+      "status": "partial",
+      "acceptance_gate": "Laravel12/PHP8.2 and Laravel13/PHP8.3 baselines; gate static noncapturing attribute-argument closures on PHP8.5 while retaining legal BindWhen class availability; invalidate on dependency changes",
+      "openstorm_evidence": [],
+      "remaining": "Reassess current OpenStorm implementation against this full gate; Workbench acceptance does not transfer."
+    },
+    {
+      "id": "FEAT-026",
+      "area": "Laravel",
+      "feature": "Eloquent model fields and casts",
+      "milestone": 2,
+      "status": "partial",
+      "acceptance_gate": "Attributes/properties correct with nullability, dates/enums/casts and provenance",
+      "openstorm_evidence": [],
+      "remaining": "Reassess current OpenStorm implementation against this full gate; Workbench acceptance does not transfer."
+    },
+    {
+      "id": "FEAT-027",
+      "area": "Laravel",
+      "feature": "Eloquent builders, scopes and collections",
+      "milestone": 2,
+      "status": "partial",
+      "acceptance_gate": "Fluent chains retain model; protected attributed scopes visible as framework API",
+      "openstorm_evidence": [],
+      "remaining": "Reassess current OpenStorm implementation against this full gate; Workbench acceptance does not transfer."
+    },
+    {
+      "id": "FEAT-028",
+      "area": "Laravel",
+      "feature": "Relationships, pivots and morphs",
+      "milestone": 2,
+      "status": "partial",
+      "acceptance_gate": "Differentiate method/query vs dynamic property; preserve pivot and unknown morph targets",
+      "openstorm_evidence": [],
+      "remaining": "Reassess current OpenStorm implementation against this full gate; Workbench acceptance does not transfer."
+    },
+    {
+      "id": "FEAT-029",
+      "area": "Laravel",
+      "feature": "Facades and container inference",
+      "milestone": 2,
+      "status": "partial",
+      "acceptance_gate": "Underlying service methods; contextual/env binding not collapsed into one false type",
+      "openstorm_evidence": [],
+      "remaining": "Reassess current OpenStorm implementation against this full gate; Workbench acceptance does not transfer."
+    },
+    {
+      "id": "FEAT-030",
+      "area": "Laravel",
+      "feature": "Routes and controller actions",
+      "milestone": 2,
+      "status": "partial",
+      "acceptance_gate": "P1: names/parameters and goto; P2: semantic usages/rename and duplicate diagnostics",
+      "openstorm_evidence": [],
+      "remaining": "Reassess current OpenStorm implementation against this full gate; Workbench acceptance does not transfer."
+    },
+    {
+      "id": "FEAT-031",
+      "area": "Laravel",
+      "feature": "Config, environment references and translations",
+      "milestone": 2,
+      "status": "partial",
+      "acceptance_gate": "Key completion/goto/usages; local-only env value handling, no secrets in logs",
+      "openstorm_evidence": [],
+      "remaining": "Reassess current OpenStorm implementation against this full gate; Workbench acceptance does not transfer."
+    },
+    {
+      "id": "FEAT-032",
+      "area": "Laravel",
+      "feature": "Views and cross-file data",
+      "milestone": 2,
+      "status": "partial",
+      "acceptance_gate": "P1: view-name completion/goto; P2: typed cross-file variables and scoped shadowing",
+      "openstorm_evidence": [],
+      "remaining": "Reassess current OpenStorm implementation against this full gate; Workbench acceptance does not transfer."
+    },
+    {
+      "id": "FEAT-033",
+      "area": "Laravel",
+      "feature": "Blade PHP + HTML/CSS/JS source mapping",
+      "milestone": 3,
+      "status": "partial",
+      "acceptance_gate": "PHP expressions/edits mapped back; no diagnostics from generated wrapper text",
+      "openstorm_evidence": [],
+      "remaining": "Reassess current OpenStorm implementation against this full gate; Workbench acceptance does not transfer."
+    },
+    {
+      "id": "FEAT-034",
+      "area": "Laravel",
+      "feature": "Blade components, props, slots and directives",
+      "milestone": 3,
+      "status": "partial",
+      "acceptance_gate": "Props/slot names/types; component navigation; nested arguments; custom roots",
+      "openstorm_evidence": [],
+      "remaining": "Reassess current OpenStorm implementation against this full gate; Workbench acceptance does not transfer."
+    },
+    {
+      "id": "FEAT-035",
+      "area": "Laravel",
+      "feature": "Validation, FormRequest and auth policies",
+      "milestone": 2,
+      "status": "partial",
+      "acceptance_gate": "Rule names/field refs/action abilities navigate and validate by context",
+      "openstorm_evidence": [],
+      "remaining": "Reassess current OpenStorm implementation against this full gate; Workbench acceptance does not transfer."
+    },
+    {
+      "id": "FEAT-036",
+      "area": "Laravel",
+      "feature": "Migrations and schema-aware assistance",
+      "milestone": 2,
+      "status": "partial",
+      "acceptance_gate": "Table/column completion retains origin; raw SQL/DB-specific dynamic gaps explicit",
+      "openstorm_evidence": [],
+      "remaining": "Reassess current OpenStorm implementation against this full gate; Workbench acceptance does not transfer."
+    },
+    {
+      "id": "FEAT-037",
+      "area": "Laravel",
+      "feature": "Factories, seeders and generated resources",
+      "milestone": 2,
+      "status": "partial",
+      "acceptance_gate": "Factory states/types and scaffolding correct for installed version",
+      "openstorm_evidence": [],
+      "remaining": "Reassess current OpenStorm implementation against this full gate; Workbench acceptance does not transfer."
+    },
+    {
+      "id": "FEAT-038",
+      "area": "Laravel",
+      "feature": "Artisan panel and command runner",
+      "milestone": 5,
+      "status": "partial",
+      "acceptance_gate": "Arguments/options/env/cwd correct; output/rerun/cancel/history",
+      "openstorm_evidence": [],
+      "remaining": "Reassess current OpenStorm implementation against this full gate; Workbench acceptance does not transfer."
+    },
+    {
+      "id": "FEAT-039",
+      "area": "Laravel",
+      "feature": "Laravel logs and exception navigation",
+      "milestone": 5,
+      "status": "partial",
+      "acceptance_gate": "Navigate stack frame to local source; redact secrets in shared/export views",
+      "openstorm_evidence": [],
+      "remaining": "Reassess current OpenStorm implementation against this full gate; Workbench acceptance does not transfer."
+    },
+    {
+      "id": "FEAT-040",
+      "area": "Laravel",
+      "feature": "Livewire, Alpine and Inertia",
+      "milestone": 3,
+      "status": "partial",
+      "acceptance_gate": "wire:model/actions, Alpine scopes, component props/types and cross-language goto",
+      "openstorm_evidence": [],
+      "remaining": "Reassess current OpenStorm implementation against this full gate; Workbench acceptance does not transfer."
+    },
+    {
+      "id": "FEAT-041",
+      "area": "Laravel",
+      "feature": "Pint, Larastan and Laravel coding actions",
+      "milestone": 2,
+      "status": "partial",
+      "acceptance_gate": "Correct tool version/config, structured diagnostics, stale-result cancellation",
+      "openstorm_evidence": [],
+      "remaining": "Reassess current OpenStorm implementation against this full gate; Workbench acceptance does not transfer."
+    },
+    {
+      "id": "FEAT-042",
+      "area": "Laravel",
+      "feature": "Project dashboard, jobs/events and resource generation",
+      "milestone": 2,
+      "status": "partial",
+      "acceptance_gate": "Discover models/routes/jobs; generate previewed files without arbitrary background boot",
+      "openstorm_evidence": [],
+      "remaining": "Reassess current OpenStorm implementation against this full gate; Workbench acceptance does not transfer."
+    },
+    {
+      "id": "FEAT-043",
+      "area": "Tooling and full stack",
+      "feature": "PHP interpreters: local/Herd/container/SSH",
+      "milestone": 5,
+      "status": "partial",
+      "acceptance_gate": "Correct PHP binary and working directory across run/analyzer/debug tasks",
+      "openstorm_evidence": [],
+      "remaining": "Reassess current OpenStorm implementation against this full gate; Workbench acceptance does not transfer."
+    },
+    {
+      "id": "FEAT-044",
+      "area": "Tooling and full stack",
+      "feature": "Composer commands and package UI",
+      "milestone": 5,
+      "status": "partial",
+      "acceptance_gate": "Install/update chosen scope only; scripts run only as explicit tasks",
+      "openstorm_evidence": [],
+      "remaining": "Reassess current OpenStorm implementation against this full gate; Workbench acceptance does not transfer."
+    },
+    {
+      "id": "FEAT-045",
+      "area": "Tooling and full stack",
+      "feature": "PHPUnit and Pest test explorer",
+      "milestone": 5,
+      "status": "partial",
+      "acceptance_gate": "Run caret/file/suite/filter; datasets, rerun failures, cancel, stack navigation",
+      "openstorm_evidence": [],
+      "remaining": "Reassess current OpenStorm implementation against this full gate; Workbench acceptance does not transfer."
+    },
+    {
+      "id": "FEAT-046",
+      "area": "Tooling and full stack",
+      "feature": "Coverage and profiling",
+      "milestone": 5,
+      "status": "partial",
+      "acceptance_gate": "Correct path mapping and source revision; runtime overhead visible",
+      "openstorm_evidence": [],
+      "remaining": "Reassess current OpenStorm implementation against this full gate; Workbench acceptance does not transfer."
+    },
+    {
+      "id": "FEAT-047",
+      "area": "Tooling and full stack",
+      "feature": "Xdebug stepping and variables",
+      "milestone": "retained-debugger",
+      "status": "user-deferred",
+      "acceptance_gate": "Verified/conditional breakpoints, steps, stack, lazy variables, watches/evaluate",
+      "openstorm_evidence": [],
+      "remaining": "Retain existing debugger; no new debugger work."
+    },
+    {
+      "id": "FEAT-048",
+      "area": "Tooling and full stack",
+      "feature": "Remote/container debugging",
+      "milestone": "retained-debugger",
+      "status": "user-deferred",
+      "acceptance_gate": "Container vs local breakpoints bind correctly; reconnect and multiple sessions",
+      "openstorm_evidence": [],
+      "remaining": "Retain existing debugger; no new debugger work."
+    },
+    {
+      "id": "FEAT-049",
+      "area": "Tooling and full stack",
+      "feature": "Git status/diff/blame/staging",
+      "milestone": 6,
+      "status": "partial",
+      "acceptance_gate": "Dirty-buffer-aware diff, hunk staging, conflict editor and navigation",
+      "openstorm_evidence": [],
+      "remaining": "Reassess current OpenStorm implementation against this full gate; Workbench acceptance does not transfer."
+    },
+    {
+      "id": "FEAT-050",
+      "area": "Tooling and full stack",
+      "feature": "Terminal and run configurations",
+      "milestone": 5,
+      "status": "partial",
+      "acceptance_gate": "Ctrl-C/process groups, ANSI/links, unicode, resize, persistent config",
+      "openstorm_evidence": [],
+      "remaining": "Reassess current OpenStorm implementation against this full gate; Workbench acceptance does not transfer."
+    },
+    {
+      "id": "FEAT-051",
+      "area": "Tooling and full stack",
+      "feature": "HTTP request files and response viewer",
+      "milestone": 5,
+      "status": "partial",
+      "acceptance_gate": "Methods/headers/body/auth variables; response navigation; no implicit execution",
+      "openstorm_evidence": [],
+      "remaining": "Reassess current OpenStorm implementation against this full gate; Workbench acceptance does not transfer."
+    },
+    {
+      "id": "FEAT-052",
+      "area": "Tooling and full stack",
+      "feature": "Database browser, SQL and migrations",
+      "milestone": 5,
+      "status": "partial",
+      "acceptance_gate": "Connect explicitly; introspection identity; parameters/results/transactions/path context",
+      "openstorm_evidence": [],
+      "remaining": "Reassess current OpenStorm implementation against this full gate; Workbench acceptance does not transfer."
+    },
+    {
+      "id": "FEAT-053",
+      "area": "Tooling and full stack",
+      "feature": "HTML/CSS/JS/TS, Vue/React and Vite",
+      "milestone": 3,
+      "status": "partial",
+      "acceptance_gate": "Completion/goto/format/rename in supported documents; Vite tasks explicit",
+      "openstorm_evidence": [],
+      "remaining": "Reassess current OpenStorm implementation against this full gate; Workbench acceptance does not transfer."
+    },
+    {
+      "id": "FEAT-054",
+      "area": "Tooling and full stack",
+      "feature": "Tailwind classes and CSS assets",
+      "milestone": 3,
+      "status": "partial",
+      "acceptance_gate": "Class completion/color/hover through Blade attributes; version-aware validation",
+      "openstorm_evidence": [],
+      "remaining": "Reassess current OpenStorm implementation against this full gate; Workbench acceptance does not transfer."
+    },
+    {
+      "id": "FEAT-055",
+      "area": "Tooling and full stack",
+      "feature": "Remote SSH/SFTP/deployment workflows",
+      "milestone": 7,
+      "status": "partial",
+      "acceptance_gate": "Atomic file writes, path maps, reconnect, exclusions and local recovery",
+      "openstorm_evidence": [],
+      "remaining": "Reassess current OpenStorm implementation against this full gate; Workbench acceptance does not transfer."
+    },
+    {
+      "id": "FEAT-056",
+      "area": "Tooling and full stack",
+      "feature": "Docker/Sail environments",
+      "milestone": 5,
+      "status": "partial",
+      "acceptance_gate": "Run/analyze/test/debug use same container and correct path maps",
+      "openstorm_evidence": [],
+      "remaining": "Reassess current OpenStorm implementation against this full gate; Workbench acceptance does not transfer."
+    },
+    {
+      "id": "FEAT-057",
+      "area": "Tooling and full stack",
+      "feature": "AI full-line/chat/agents and MCP",
+      "milestone": 7,
+      "status": "partial",
+      "acceptance_gate": "No dependency of core completion; preview tool edits and trace provenance",
+      "openstorm_evidence": [],
+      "remaining": "Reassess current OpenStorm implementation against this full gate; Workbench acceptance does not transfer."
+    },
+    {
+      "id": "FEAT-058",
+      "area": "Workbench",
+      "feature": "Islands Dark/Light/contrast and density",
+      "milestone": 6,
+      "status": "partial",
+      "acceptance_gate": "Compare reference views at1x/2x, compact/normal, light/dark/high contrast",
+      "openstorm_evidence": [],
+      "remaining": "Reassess current OpenStorm implementation against this full gate; Workbench acceptance does not transfer.",
+      "openstorm_acceptance": "Preserve OpenIDEA default appearance and existing theme/density settings; verify light/dark/contrast and 1x/2x rendering through those settings. Do not impose a new theme."
+    },
+    {
+      "id": "FEAT-059",
+      "area": "Workbench",
+      "feature": "Project/editor/tool-window docking",
+      "milestone": 6,
+      "status": "partial",
+      "acceptance_gate": "User-directed compact left Files/Source Control/Tests sidebar, main-area tool tabs, terminal-only bottom, no right dock; supported panels resize/hide/restore without focus loss, including restart.",
+      "openstorm_evidence": [],
+      "remaining": "Reassess current OpenStorm implementation against this full gate; Workbench acceptance does not transfer.",
+      "openstorm_acceptance": "Preserve OpenIDEA default docking and layout; verify resize/hide/restore, panel focus, keyboard access, persistence and multi-display behavior. Do not impose the earlier Workbench compact-sidebar layout."
+    },
+    {
+      "id": "FEAT-060",
+      "area": "Workbench",
+      "feature": "PhpStorm-familiar keymaps",
+      "milestone": 6,
+      "status": "partial",
+      "acceptance_gate": "100 mapped commands; contextual conflicts; multi-stroke and double Shift",
+      "openstorm_evidence": [],
+      "remaining": "Reassess current OpenStorm implementation against this full gate; Workbench acceptance does not transfer."
+    },
+    {
+      "id": "FEAT-061",
+      "area": "Workbench",
+      "feature": "Search Everywhere / action palette / recent files",
+      "milestone": 6,
+      "status": "partial",
+      "acceptance_gate": "Keyboard discovery, previews, async stale-query cancellation",
+      "openstorm_evidence": [],
+      "remaining": "Reassess current OpenStorm implementation against this full gate; Workbench acceptance does not transfer."
+    },
+    {
+      "id": "FEAT-062",
+      "area": "Workbench",
+      "feature": "Settings and import/migration",
+      "milestone": 6,
+      "status": "partial",
+      "acceptance_gate": "Versioned overrides; workspace/global distinction; reversible changes",
+      "openstorm_evidence": [],
+      "remaining": "Reassess current OpenStorm implementation against this full gate; Workbench acceptance does not transfer."
+    },
+    {
+      "id": "FEAT-063",
+      "area": "Workbench",
+      "feature": "Notifications, indexing and crash states",
+      "milestone": 6,
+      "status": "partial",
+      "acceptance_gate": "Editor remains responsive; no fake ready indicator on partial index",
+      "openstorm_evidence": [],
+      "remaining": "Reassess current OpenStorm implementation against this full gate; Workbench acceptance does not transfer."
+    },
+    {
+      "id": "FEAT-064",
+      "area": "Workbench",
+      "feature": "Install/update and platform services",
+      "milestone": 6,
+      "status": "partial",
+      "acceptance_gate": "Signed/notarized Mac build, migrations/rollback, open-with and native dialogs",
+      "openstorm_evidence": [
+        "0.1.21 optimized app preserved; 0.1.22 development app packaged with verified ad-hoc signature and build/source receipt. Native final gate partial; publishing, automatic updates, notarization and real-profile migration deferred."
+      ],
+      "remaining": "Reassess current OpenStorm implementation against this full gate; Workbench acceptance does not transfer."
+    },
+    {
+      "id": "FEAT-065",
+      "area": "Quality",
+      "feature": "Performance and memory",
+      "milestone": "cross-cutting",
+      "status": "partial",
+      "acceptance_gate": "Comparable corpora; first-use/warm p95, peak/steady RSS, idle CPU and cancellation",
+      "openstorm_evidence": [],
+      "remaining": "Reassess current OpenStorm implementation against this full gate; Workbench acceptance does not transfer."
+    },
+    {
+      "id": "FEAT-066",
+      "area": "Quality",
+      "feature": "Versioned semantic snapshot correctness",
+      "milestone": "cross-cutting",
+      "status": "partial",
+      "acceptance_gate": "No stale diagnostics/completions/rename; unsaved dependency edits invalidate",
+      "openstorm_evidence": [
+        "0.1.22: eight guarded transaction regressions, four PHP protocol cases, real-client and actual-host checked-edit cases passed; native method rename/import checks observed; final-copy native recheck pending. See docs/OPENSTORM.md."
+      ],
+      "remaining": "Completion/diagnostic stale responses, target-profile builtin-cache invalidation, broader project/configuration and multi-project cases remain unaccepted."
+    },
+    {
+      "id": "FEAT-067",
+      "area": "Quality",
+      "feature": "Trust and execution boundaries",
+      "milestone": "cross-cutting",
+      "status": "partial",
+      "acceptance_gate": "Opening code does not boot app/run Composer scripts or query DB",
+      "openstorm_evidence": [],
+      "remaining": "Reassess current OpenStorm implementation against this full gate; Workbench acceptance does not transfer."
+    },
+    {
+      "id": "FEAT-068",
+      "area": "Quality",
+      "feature": "Language service/process isolation",
+      "milestone": "cross-cutting",
+      "status": "partial",
+      "acceptance_gate": "Engine crash preserves buffers; retries limited; logs omit source/secrets by policy",
+      "openstorm_evidence": [],
+      "remaining": "Reassess current OpenStorm implementation against this full gate; Workbench acceptance does not transfer."
+    },
+    {
+      "id": "FEAT-069",
+      "area": "Quality",
+      "feature": "Reference corpus and parity reporting",
+      "milestone": "cross-cutting",
+      "status": "partial",
+      "acceptance_gate": "No parity claim from capability flags/presence-only tests; record precision and edits",
+      "openstorm_evidence": [],
+      "remaining": "Reassess current OpenStorm implementation against this full gate; Workbench acceptance does not transfer."
+    }
+  ],
+  "source_sha256": "1099a56789f19e555b26336df06f3aa756b52ec9e3f08d17a09ab10195c133fa"
+}

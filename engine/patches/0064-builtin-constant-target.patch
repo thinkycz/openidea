@@ -1,0 +1,2165 @@
+diff --git a/docs/CHANGELOG.md b/docs/CHANGELOG.md
+index b9681fb..c17547b 100644
+--- a/docs/CHANGELOG.md
++++ b/docs/CHANGELOG.md
+@@ -15,6 +15,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
+ 
+ ## [Unreleased]
+ 
++- **Built-in suggestions follow the project PHP version.** Class constants and sibling declarations introduced in newer PHP releases stay unavailable on older targets. Navigation opens the matching bundled source while preserving project declarations. Contributed by PHP Workbench downstream.
++
+ - **Formatting preserves unchanged surrounding code.** Formatting edits retain shared leading and trailing text, including Unicode and CRLF boundaries, so token rewrites in one function do not replace untouched functions after it. Contributed by PHP Workbench downstream.
+ 
+ - **Keep member suggestions while typing.** Completion recovers enclosing function and class scopes before their closing braces are written, preserving visibility and typed chains. Strict membership checks against broad or unavailable object types retain valid member suggestions. Contributed by PHP Workbench downstream.
+diff --git a/src/completion/array_shape.rs b/src/completion/array_shape.rs
+index 2e4b406..b214a89 100644
+--- a/src/completion/array_shape.rs
++++ b/src/completion/array_shape.rs
+@@ -543,7 +543,7 @@ impl Backend {
+     ) -> FileContext {
+         let offset = position_to_offset(content, position);
+         let _parse = crate::parser::with_parse_cache(content);
+-        let (mut classes, blocks) = Self::parse_php_classes_by_block(content, None, false);
++        let (mut classes, blocks) = Self::parse_php_classes_by_block(content, None, false, true);
+         let (use_map, namespace, resolved_names) = crate::parser::with_parsed_program(
+             content,
+             "array_key_recovery_context",
+diff --git a/src/definition/member/file_lookup.rs b/src/definition/member/file_lookup.rs
+index 3a54a19..2b990be 100644
+--- a/src/definition/member/file_lookup.rs
++++ b/src/definition/member/file_lookup.rs
+@@ -56,10 +56,14 @@ impl Backend {
+         current_uri: &str,
+         current_content: &str,
+     ) -> Option<(String, String)> {
+-        let uri = self.find_class_file_uri(class_name, current_uri)?;
++        let raw_uri = self.find_raw_class_file_uri(class_name, current_uri)?;
++        let uri = self.class_navigation_uri(class_name, raw_uri.clone());
+ 
+-        // Get the file content.
+-        let file_content = if uri == current_uri {
++        // A remapped builtin location must use the same immutable bytes as its
++        // viewer, even if a client has opened unrelated text at that identity.
++        let file_content = if uri != raw_uri {
++            self.published_builtin_source(&raw_uri)?.to_string()
++        } else if uri == current_uri {
+             current_content.to_string()
+         } else {
+             self.get_file_content(&uri)?
+@@ -78,6 +82,11 @@ impl Backend {
+         class_name: &str,
+         current_uri: &str,
+     ) -> Option<String> {
++        self.find_raw_class_file_uri(class_name, current_uri)
++            .map(|uri| self.class_navigation_uri(class_name, uri))
++    }
++
++    fn find_raw_class_file_uri(&self, class_name: &str, current_uri: &str) -> Option<String> {
+         let last_segment = short_name(class_name);
+         let expected_ns: Option<&str> = if class_name.contains('\\') {
+             Some(&class_name[..class_name.len() - last_segment.len() - 1])
+@@ -155,6 +164,37 @@ impl Backend {
+         })
+     }
+ 
++    /// Classes first published while loading a global constant still navigate
++    /// through the existing class-stub viewer. Only remap when its source is
++    /// exactly the same, preserving every stored declaration coordinate.
++    pub(in crate::definition) fn class_navigation_uri(
++        &self,
++        class_name: &str,
++        uri: String,
++    ) -> String {
++        if let Some(source) = self.published_builtin_source(&uri) {
++            let classes = self.stub_index.read();
++            if let Some((canonical, class_source)) = classes.get_key_value(class_name)
++                && *class_source == source
++            {
++                return format!("phpantom-stub://{canonical}");
++            }
++        }
++        uri
++    }
++
++    /// Return source only when the selected AST was published from these exact
++    /// embedded bytes. A client update at the same URI clears this provenance.
++    pub(in crate::definition) fn published_builtin_source(
++        &self,
++        uri: &str,
++    ) -> Option<&'static str> {
++        let constant = uri.strip_prefix("phpantom-stub://const/")?;
++        let source = self.stub_constant_index.read().get(constant).copied()?;
++        let published = self.symbol_maps.read().get(uri)?.embedded_source?;
++        (published == source).then_some(source)
++    }
++
+     /// Find the position of a member declaration (method, property, or
+     /// constant) in source content.
+     ///
+diff --git a/src/definition/member/mod.rs b/src/definition/member/mod.rs
+index cb6345a..cd0198e 100644
+--- a/src/definition/member/mod.rs
++++ b/src/definition/member/mod.rs
+@@ -543,7 +543,7 @@ impl Backend {
+             member_kind,
+             declaring_class.member_name_offset(search_name, member_kind.as_str()),
+         )?;
+-        let parsed_uri = Url::parse(&class_uri).ok()?;
++        let parsed_uri = crate::util::declaration_uri(&class_uri)?;
+         Some(point_location(parsed_uri, member_position))
+     }
+ 
+@@ -563,7 +563,7 @@ impl Backend {
+             self.find_class_file_content(declaring_fqn, uri, content)?;
+         let entry_position =
+             Self::find_eloquent_array_entry(&class_content, entry_name, Some(class_bounds))?;
+-        let parsed_uri = Url::parse(&class_uri).ok()?;
++        let parsed_uri = crate::util::declaration_uri(&class_uri)?;
+         Some(point_location(parsed_uri, entry_position))
+     }
+ 
+diff --git a/src/definition/resolve.rs b/src/definition/resolve.rs
+index 86a631e..b7e8735 100644
+--- a/src/definition/resolve.rs
++++ b/src/definition/resolve.rs
+@@ -803,8 +803,27 @@ impl Backend {
+             })
+         };
+ 
+-        // Read the file content (try open files first, then disk).
+-        let file_content = self.get_file_content(&file_uri)?;
++        let (file_uri, embedded_content) =
++            if let Some(source) = self.published_builtin_source(&file_uri) {
++                let name = match &func_info.namespace {
++                    Some(namespace) => format!("{namespace}\\{}", func_info.name),
++                    None => func_info.name.to_string(),
++                };
++                let functions = self.stub_function_index.read();
++                match functions.get_key_value(name.as_str()) {
++                    Some((canonical, function_source)) if *function_source == source => {
++                        (format!("phpantom-stub-fn://{canonical}"), Some(source))
++                    }
++                    _ => (file_uri, None),
++                }
++            } else {
++                (file_uri, None)
++            };
++
++        let file_content = match embedded_content {
++            Some(source) => source.to_string(),
++            None => self.get_file_content(&file_uri)?,
++        };
+ 
+         // Use the stored byte offset.  A name_offset of 0 means "not
+         // available" — return None in that case (should not happen for
+@@ -814,7 +833,7 @@ impl Backend {
+         }
+         let position =
+             crate::text_position::offset_to_position(&file_content, func_info.name_offset as usize);
+-        let parsed_uri = Url::parse(&file_uri).ok()?;
++        let parsed_uri = crate::util::declaration_uri(&file_uri)?;
+ 
+         Some(point_location(parsed_uri, position))
+     }
+@@ -921,8 +940,13 @@ impl Backend {
+             c.fqn() == fqn
+         })?;
+ 
+-        let content = self.get_file_content(target_uri)?;
+-        let parsed_uri = Url::parse(target_uri).ok()?;
++        let navigation_uri = self.class_navigation_uri(fqn, target_uri.to_owned());
++        let content = if navigation_uri != target_uri {
++            self.published_builtin_source(target_uri)?.to_string()
++        } else {
++            self.get_file_content(&navigation_uri)?
++        };
++        let parsed_uri = crate::util::declaration_uri(&navigation_uri)?;
+ 
+         if class_info.keyword_offset == 0 {
+             return None;
+diff --git a/src/hover/constants.rs b/src/hover/constants.rs
+index 35cab84..bcff725 100644
+--- a/src/hover/constants.rs
++++ b/src/hover/constants.rs
+@@ -115,14 +115,14 @@ impl Backend {
+         }
+ 
+         // Phase 4: built-in PHP constants from embedded stubs.
+-        // Parse the stub via update_ast (which populates global_defines),
++        // Parse the trusted stub with builtin authority (which populates global_defines),
+         // then re-check.  This is the same lazy-parse pattern as Phases
+         // 2 and 3 — no special raw-source scanning needed.
+         for name in candidates {
+             let stub_source = self.stub_constant_index.read().get(*name).copied();
+             if let Some(stub_source) = stub_source {
+                 let stub_uri = format!("phpantom-stub://const/{}", name);
+-                self.update_ast(&stub_uri, stub_source);
++                self.update_builtin_stub_ast(&stub_uri, stub_source);
+                 let lookup = self
+                     .symbols
+                     .global_defines
+diff --git a/src/parser/ast_update.rs b/src/parser/ast_update.rs
+index 680d699..2b77461 100644
+--- a/src/parser/ast_update.rs
++++ b/src/parser/ast_update.rs
+@@ -474,6 +474,21 @@ impl Backend {
+     /// changed (or a class was added/removed), meaning other open files
+     /// that reference those classes may have stale diagnostics.
+     pub fn update_ast(&self, uri: &str, content: &str) -> bool {
++        self.update_ast_with_authority(uri, content, None)
++    }
++
++    /// Publish an embedded stub selected by a trusted builtin index loader.
++    /// Client/file updates never gain release-metadata authority from a URI.
++    pub(crate) fn update_builtin_stub_ast(&self, uri: &str, content: &'static str) -> bool {
++        self.update_ast_with_authority(uri, content, Some(content))
++    }
++
++    fn update_ast_with_authority(
++        &self,
++        uri: &str,
++        content: &str,
++        embedded_source: Option<&'static str>,
++    ) -> bool {
+         let blade = self.lower_blade_template(uri, content);
+         let content_to_parse = blade.as_ref().map_or_else(
+             || Arc::new(content.to_string()),
+@@ -499,7 +514,7 @@ impl Backend {
+         let uri_owned = uri.to_string();
+ 
+         let result = crate::util::catch_panic_unwind_safe("parse", uri, None, || {
+-            self.update_ast_inner(&uri_owned, &content_owned, blade)
++            self.update_ast_inner(&uri_owned, &content_owned, blade, embedded_source)
+         });
+ 
+         // The refreshes below that rebuild from the registered provider list
+@@ -553,8 +568,14 @@ impl Backend {
+ 
+     /// Inner implementation of [`update_ast`] that performs the actual parse
+     /// and publishes the resulting single-file update.
+-    fn update_ast_inner(&self, uri: &str, content: &str, blade: Option<BladeLowering>) -> bool {
+-        let mut update = self.build_ast_index_update(uri, content);
++    fn update_ast_inner(
++        &self,
++        uri: &str,
++        content: &str,
++        blade: Option<BladeLowering>,
++        embedded_source: Option<&'static str>,
++    ) -> bool {
++        let mut update = self.build_ast_index_update(uri, content, embedded_source);
+         update.blade = blade;
+         self.apply_ast_index_updates_batch(vec![update])
+     }
+@@ -678,7 +699,7 @@ impl Backend {
+             .map_or(content, |lowering| lowering.virtual_php.as_str());
+ 
+         match crate::util::catch_panic_unwind_safe("parse", uri, None, || {
+-            self.build_ast_index_update(uri, content)
++            self.build_ast_index_update(uri, content, None)
+         }) {
+             Some(mut update) => {
+                 update.blade = blade;
+@@ -814,7 +835,12 @@ impl Backend {
+         changed
+     }
+ 
+-    fn build_ast_index_update(&self, uri: &str, content: &str) -> AstIndexUpdate {
++    fn build_ast_index_update(
++        &self,
++        uri: &str,
++        content: &str,
++        embedded_source: Option<&'static str>,
++    ) -> AstIndexUpdate {
+         with_reusable_arena(|arena| {
+             let file_id = mago_database::file::FileId::new(b"input.php");
+             let program = parse_file_content(arena, file_id, content.as_bytes());
+@@ -841,12 +867,21 @@ impl Backend {
+                 })
+                 .collect();
+ 
++            // Imports are namespace-scoped and apply throughout that scope,
++            // including to availability attributes before class extraction.
++            let mut top_level_use_map = HashMap::new();
++            for statement in program.statements.iter() {
++                if let Statement::Use(import) = statement {
++                    Self::extract_use_items(&import.items, &mut top_level_use_map);
++                }
++            }
+             let doc_ctx = DocblockCtx {
+                 trivias: program.trivia.as_slice(),
+                 content,
+                 php_version: Some(self.php_version()),
+-                stub_introductions: false,
+-                use_map: HashMap::new(),
++                stub_introductions: embedded_source.is_some(),
++                defer_inferred_name_resolution: true,
++                use_map: top_level_use_map,
+                 namespace: None,
+                 scope_attribute_offsets: if content.contains("#[") {
+                     super::scope_attribute_offsets(&mago_resolved)
+@@ -891,6 +926,21 @@ impl Backend {
+                         // each with the block's namespace.
+                         let mut block_classes = Vec::new();
+                         let mut block_use_map = HashMap::new();
++                        for inner in ns.statements().iter() {
++                            if let Statement::Use(import) = inner {
++                                Self::extract_use_items(&import.items, &mut block_use_map);
++                            }
++                        }
++                        let block_doc_ctx = DocblockCtx {
++                            trivias: doc_ctx.trivias,
++                            content: doc_ctx.content,
++                            php_version: doc_ctx.php_version,
++                            stub_introductions: doc_ctx.stub_introductions,
++                            defer_inferred_name_resolution: doc_ctx.defer_inferred_name_resolution,
++                            use_map: block_use_map.clone(),
++                            namespace: block_ns.clone(),
++                            scope_attribute_offsets: doc_ctx.scope_attribute_offsets.clone(),
++                        };
+                         for inner in ns.statements().iter() {
+                             match inner {
+                                 Statement::Use(use_stmt) => {
+@@ -900,7 +950,7 @@ impl Backend {
+                                     Self::extract_classes_from_statements(
+                                         std::iter::once(inner),
+                                         &mut block_classes,
+-                                        Some(&doc_ctx),
++                                        Some(&block_doc_ctx),
+                                     );
+                                 }
+                                 Statement::Namespace(inner_ns) => {
+@@ -912,7 +962,7 @@ impl Backend {
+                                     Self::extract_classes_from_statements(
+                                         inner_ns.statements().iter(),
+                                         &mut block_classes,
+-                                        Some(&doc_ctx),
++                                        Some(&block_doc_ctx),
+                                     );
+                                 }
+                                 _ => {
+@@ -921,7 +971,7 @@ impl Backend {
+                                     Self::find_anonymous_classes_in_statement(
+                                         inner,
+                                         &mut block_classes,
+-                                        Some(&doc_ctx),
++                                        Some(&block_doc_ctx),
+                                     );
+                                 }
+                             }
+@@ -1018,7 +1068,8 @@ impl Backend {
+                 trivias: doc_ctx.trivias,
+                 content: doc_ctx.content,
+                 php_version: doc_ctx.php_version,
+-                stub_introductions: false,
++                stub_introductions: doc_ctx.stub_introductions,
++                defer_inferred_name_resolution: doc_ctx.defer_inferred_name_resolution,
+                 use_map: use_map.clone(),
+                 namespace: namespace.clone(),
+                 scope_attribute_offsets: doc_ctx.scope_attribute_offsets.clone(),
+@@ -1036,7 +1087,8 @@ impl Backend {
+                     trivias: doc_ctx.trivias,
+                     content: doc_ctx.content,
+                     php_version: doc_ctx.php_version,
+-                    stub_introductions: false,
++                    stub_introductions: doc_ctx.stub_introductions,
++                    defer_inferred_name_resolution: doc_ctx.defer_inferred_name_resolution,
+                     use_map: span.use_map.clone(),
+                     namespace: span.namespace.clone(),
+                     scope_attribute_offsets: doc_ctx.scope_attribute_offsets.clone(),
+@@ -1206,11 +1258,9 @@ impl Backend {
+ 
+             // Build the precomputed symbol map while the AST is still alive.
+             // This must happen before the `Program` (and its arena) are dropped.
+-            let symbol_map = Arc::new(extract_symbol_map_for_index(
+-                program,
+-                content,
+-                &owned_resolved,
+-            ));
++            let mut symbol_map = extract_symbol_map_for_index(program, content, &owned_resolved);
++            symbol_map.embedded_source = embedded_source;
++            let symbol_map = Arc::new(symbol_map);
+ 
+             // For files without any explicit namespace blocks, synthesize a
+             // single span covering the entire file with the detected namespace
+diff --git a/src/parser/classes.rs b/src/parser/classes.rs
+index fb7cb55..efce35e 100644
+--- a/src/parser/classes.rs
++++ b/src/parser/classes.rs
+@@ -272,6 +272,16 @@ impl Backend {
+         doc_ctx: Option<&DocblockCtx<'a>>,
+     ) {
+         for statement in statements {
++            let future_builtin = match statement {
++                Statement::Class(node) => super::is_future_builtin_declaration(node, doc_ctx),
++                Statement::Interface(node) => super::is_future_builtin_declaration(node, doc_ctx),
++                Statement::Trait(node) => super::is_future_builtin_declaration(node, doc_ctx),
++                Statement::Enum(node) => super::is_future_builtin_declaration(node, doc_ctx),
++                _ => false,
++            };
++            if future_builtin {
++                continue;
++            }
+             match statement {
+                 Statement::Class(class) => {
+                     // Skip classes whose docblock has `@removed X.Y`
+@@ -859,6 +869,11 @@ impl Backend {
+         /// and namespace from [`DocblockCtx`].  When no context is
+         /// available the name is returned as-is.
+         fn resolve_name_via_ctx(name: &str, doc_ctx: Option<&DocblockCtx<'_>>) -> String {
++            // Live/lazy index publication qualifies all property types later.
++            // Keep lexical names until that pass instead of qualifying twice.
++            if doc_ctx.is_some_and(|ctx| ctx.defer_inferred_name_resolution) {
++                return name.to_string();
++            }
+             // Already fully-qualified — strip the leading `\`.
+             if let Some(stripped) = name.strip_prefix('\\') {
+                 return stripped.to_string();
+@@ -1516,6 +1531,18 @@ impl Backend {
+                     let const_docblock_text = doc_ctx.and_then(|ctx| {
+                         docblock::get_docblock_text_for_node(ctx.trivias, ctx.content, member)
+                     });
++                    // Only bundled stub metadata has PHP-release authority.
++                    if let Some(ctx) = doc_ctx
++                        && ctx.stub_introductions
++                        && let Some(version) = ctx.php_version
++                        && (!is_available_for_version(&constant.attribute_lists, ctx, version)
++                            || is_removed_for_version(member, ctx, version)
++                            || const_docblock_text.is_some_and(|text| {
++                                crate::stubs::docblock_introduced_after(text, version)
++                            }))
++                    {
++                        continue;
++                    }
+                     let const_docblock_info =
+                         const_docblock_text.and_then(docblock::parse_docblock_for_tags);
+                     let depr_info = {
+diff --git a/src/parser/functions.rs b/src/parser/functions.rs
+index 6beeb74..2c72f47 100644
+--- a/src/parser/functions.rs
++++ b/src/parser/functions.rs
+@@ -87,6 +87,9 @@ impl Backend {
+         for statement in statements {
+             match statement {
+                 Statement::Function(func) => {
++                    if super::is_future_builtin_declaration(func, doc_ctx) {
++                        continue;
++                    }
+                     // Skip functions whose #[PhpStormStubsElementAvailable]
+                     // range excludes the target PHP version.
+                     if let Some(ctx) = doc_ctx
+diff --git a/src/parser/mod.rs b/src/parser/mod.rs
+index 848488f..fd8c33b 100644
+--- a/src/parser/mod.rs
++++ b/src/parser/mod.rs
+@@ -49,6 +49,8 @@ pub(crate) struct DocblockCtx<'a> {
+     pub php_version: Option<PhpVersion>,
+     /// Apply numeric PHP introduction tags only to bundled stubs.
+     pub stub_introductions: bool,
++    /// The caller will qualify inferred `new` names during block-aware finalization.
++    pub defer_inferred_name_resolution: bool,
+     /// Use-statement map for the file being parsed.
+     ///
+     /// Maps short (imported or aliased) names to their fully-qualified
+@@ -206,6 +208,20 @@ pub(crate) fn is_removed_for_version(
+     false
+ }
+ 
++/// Numeric PHP introduction notes have release authority only in embedded stubs.
++pub(crate) fn is_future_builtin_declaration(
++    node: &impl HasSpan,
++    doc_ctx: Option<&DocblockCtx<'_>>,
++) -> bool {
++    doc_ctx.is_some_and(|ctx| {
++        ctx.stub_introductions
++            && ctx.php_version.is_some_and(|version| {
++                crate::docblock::get_docblock_text_for_node(ctx.trivias, ctx.content, node)
++                    .is_some_and(|text| crate::stubs::docblock_introduced_after(text, version))
++            })
++    })
++}
++
+ /// Check whether a parameter is available for the given PHP version
+ /// based on its `#[PhpStormStubsElementAvailable]` attributes.
+ ///
+@@ -1478,7 +1494,7 @@ impl Backend {
+         content: &str,
+         php_version: Option<PhpVersion>,
+     ) -> Vec<(ClassInfo, Option<String>)> {
+-        Self::parse_php_classes_by_block(content, php_version, false)
++        Self::parse_php_classes_by_block(content, php_version, false, false)
+             .0
+             .into_iter()
+             .map(|(cls, ns, _)| (cls, ns))
+@@ -1500,6 +1516,7 @@ impl Backend {
+         content: &str,
+         php_version: Option<PhpVersion>,
+         stub_introductions: bool,
++        defer_inferred_name_resolution: bool,
+     ) -> (
+         Vec<(ClassInfo, Option<String>, Option<usize>)>,
+         Vec<NamespaceSpan>,
+@@ -1539,6 +1556,7 @@ impl Backend {
+                 content,
+                 php_version,
+                 stub_introductions,
++                defer_inferred_name_resolution,
+                 use_map,
+                 namespace,
+                 scope_attribute_offsets: parse_scope_attribute_offsets(program, content),
+@@ -1563,6 +1581,7 @@ impl Backend {
+                             content: doc_ctx.content,
+                             php_version: doc_ctx.php_version,
+                             stub_introductions: doc_ctx.stub_introductions,
++                            defer_inferred_name_resolution: doc_ctx.defer_inferred_name_resolution,
+                             use_map: span.use_map.clone(),
+                             namespace: span.namespace.clone(),
+                             scope_attribute_offsets: doc_ctx.scope_attribute_offsets.clone(),
+@@ -1630,6 +1649,7 @@ impl Backend {
+                 content,
+                 php_version,
+                 stub_introductions: false,
++                defer_inferred_name_resolution: false,
+                 use_map,
+                 namespace,
+                 scope_attribute_offsets: None,
+diff --git a/src/resolution.rs b/src/resolution.rs
+index bb7d4cb..38ea5e0 100644
+--- a/src/resolution.rs
++++ b/src/resolution.rs
+@@ -848,6 +848,7 @@ impl Backend {
+             content,
+             php_version,
+             uri.starts_with("phpantom-stub://") || uri.starts_with("phpantom-stub-fn://"),
++            true,
+         );
+         if (uri.starts_with("phpantom-stub://") || uri.starts_with("phpantom-stub-fn://"))
+             && content.contains("@since")
+diff --git a/src/stubs.rs b/src/stubs.rs
+index 4ebdc17..ddc7bbd 100644
+--- a/src/stubs.rs
++++ b/src/stubs.rs
+@@ -272,7 +272,7 @@ pub fn is_stub_class_introduced_after(
+     } else {
+         // Duplicate short names or unusual declaration layout need the same
+         // canonical parser used by resolution, not a second namespace parser.
+-        let (classes, _) = crate::Backend::parse_php_classes_by_block(source, None, false);
++        let (classes, _) = crate::Backend::parse_php_classes_by_block(source, None, false, false);
+         classes.into_iter().find_map(|(class, namespace, _)| {
+             let fqn = namespace.filter(|ns| !ns.is_empty()).map_or_else(
+                 || class.name.to_string(),
+diff --git a/src/symbol_map/extraction/mod.rs b/src/symbol_map/extraction/mod.rs
+index d023d21..1f566cc 100644
+--- a/src/symbol_map/extraction/mod.rs
++++ b/src/symbol_map/extraction/mod.rs
+@@ -341,6 +341,7 @@ fn extract_symbol_map_inner(
+     }
+ 
+     SymbolMap {
++        embedded_source: None,
+         spans: ctx.spans,
+         conditional_laravel_spans: ctx.conditional_laravel_spans,
+         member_access_indices,
+diff --git a/src/symbol_map/mod.rs b/src/symbol_map/mod.rs
+index 5cd36a1..bde1aa9 100644
+--- a/src/symbol_map/mod.rs
++++ b/src/symbol_map/mod.rs
+@@ -982,6 +982,9 @@ pub(crate) enum VarDefKind {
+ /// immediately — no parsing, no text scanning.
+ #[derive(Debug, Clone, Default)]
+ pub(crate) struct SymbolMap {
++    /// Exact embedded bytes used by the trusted stub publisher. Ordinary client
++    /// updates never inherit this provenance, even at a stub-shaped URI.
++    pub embedded_source: Option<&'static str>,
+     pub spans: Vec<SymbolSpan>,
+     /// Laravel string spans gated by cross-file function/class membership.
+     /// Empty for ordinary PHP files and never consulted by request handlers.
+diff --git a/src/util.rs b/src/util.rs
+index c4eda50..5dd9521 100644
+--- a/src/util.rs
++++ b/src/util.rs
+@@ -25,6 +25,16 @@ use tower_lsp::lsp_types::*;
+ 
+ use crate::php_type::PhpType;
+ 
++/// Convert a declaration identity into an LSP URI. Builtin keys retain raw
++/// PHP namespace separators internally; an opaque URI host must encode them.
++pub(crate) fn declaration_uri(uri: &str) -> Option<Url> {
++    if uri.starts_with("phpantom-stub://") || uri.starts_with("phpantom-stub-fn://") {
++        Url::parse(&uri.replace('\\', "%5C")).ok()
++    } else {
++        Url::parse(uri).ok()
++    }
++}
++
+ /// Resolve an unqualified or partially-qualified PHP class/function name
+ /// to a fully-qualified name using the file's `use` map and namespace.
+ ///
+diff --git a/tests/integration/definition_members.rs b/tests/integration/definition_members.rs
+index 83df843..862b450 100644
+--- a/tests/integration/definition_members.rs
++++ b/tests/integration/definition_members.rs
+@@ -6135,3 +6135,167 @@ async fn test_definition_unterminated_final_method_rejects_trivia_arguments_and_
+         assert!(locations.is_empty(), "must not guess at {tail}");
+     }
+ }
++
++const INFERENCE_PHASE_APP_REPOSITORY: &str = "<?php\nnamespace App\\Sub;\nclass Repository {\n    public function findById(int $id): void {}\n}\n";
++const INFERENCE_PHASE_VENDOR_REPOSITORY: &str = "<?php\nnamespace Vendor;\nclass Repository {\n    public function findById(int $id): void {}\n}\n";
++
++async fn assert_inference_phase_member_target(
++    backend: &phpantom_lsp::Backend,
++    uri: &Url,
++    content: &str,
++    needle: &str,
++    expected_uri: Url,
++) {
++    let at =
++        content.find(needle).expect("fixture call marker") + needle.find("findById").unwrap() + 2;
++    let prefix = &content[..at];
++    let line = prefix.bytes().filter(|byte| *byte == b'\n').count() as u32;
++    let column = prefix.rsplit('\n').next().unwrap().encode_utf16().count() as u32;
++    let result = crate::common::goto_definition_at(backend, uri, line, column).await;
++    match result {
++        Some(GotoDefinitionResponse::Scalar(location)) => {
++            assert_eq!(
++                location.uri, expected_uri,
++                "incorrect inferred target for {needle}"
++            );
++            assert_eq!(location.range.start, Position::new(3, 20));
++        }
++        other => panic!("expected unique exact target for {needle}, got {other:?}"),
++    }
++}
++
++#[tokio::test]
++async fn test_inferred_name_phase_live_assignment_and_promoted_defaults_resolve_once() {
++    for promoted in [false, true] {
++        for (imports, written, expected) in [
++            ("", "Sub\\Repository", "src/Sub/Repository.php"),
++            (
++                "use Vendor\\Repository as Repo;\n",
++                "Repo",
++                "vendor-src/Repository.php",
++            ),
++        ] {
++            let property = if promoted {
++                format!("public function __construct(public $repository = new {written}()) {{}}\n")
++            } else {
++                format!(
++                    "public $repository;\npublic function __construct() {{ $this->repository = new {written}(); }}\n"
++                )
++            };
++            let service = format!(
++                "<?php\nnamespace App;\n{imports}class Service {{\n{property}public function run(): void {{ $this->repository->findById(1); }}\n}}\n"
++            );
++            let (backend, dir) = create_psr4_workspace(
++                r#"{"autoload":{"psr-4":{"App\\":"src/","Vendor\\":"vendor-src/"}}}"#,
++                &[
++                    ("src/Sub/Repository.php", INFERENCE_PHASE_APP_REPOSITORY),
++                    (
++                        "vendor-src/Repository.php",
++                        INFERENCE_PHASE_VENDOR_REPOSITORY,
++                    ),
++                    ("src/Service.php", service.as_str()),
++                ],
++            );
++            let uri = Url::from_file_path(dir.path().join("src/Service.php")).unwrap();
++            open_php(&backend, &uri, &service).await;
++            assert_inference_phase_member_target(
++                &backend,
++                &uri,
++                &service,
++                "$this->repository->findById",
++                Url::from_file_path(dir.path().join(expected)).unwrap(),
++            )
++            .await;
++        }
++    }
++}
++
++#[tokio::test]
++async fn test_inferred_name_phase_unopened_lazy_service_resolves_once() {
++    for promoted in [false, true] {
++        for (imports, written, expected) in [
++            ("", "Sub\\Repository", "src/Sub/Repository.php"),
++            (
++                "use Vendor\\Repository as Repo;\n",
++                "Repo",
++                "vendor-src/Repository.php",
++            ),
++        ] {
++            let property = if promoted {
++                format!("public function __construct(public $repository = new {written}()) {{}}\n")
++            } else {
++                format!(
++                    "public $repository;\npublic function __construct() {{ $this->repository = new {written}(); }}\n"
++                )
++            };
++            let service =
++                format!("<?php\nnamespace App;\n{imports}class Service {{\n{property}}}\n");
++            let (backend, dir) = create_psr4_workspace(
++                r#"{"autoload":{"psr-4":{"App\\":"src/","Vendor\\":"vendor-src/"}}}"#,
++                &[
++                    ("src/Sub/Repository.php", INFERENCE_PHASE_APP_REPOSITORY),
++                    (
++                        "vendor-src/Repository.php",
++                        INFERENCE_PHASE_VENDOR_REPOSITORY,
++                    ),
++                    ("src/Service.php", service.as_str()),
++                ],
++            );
++            // Service is intentionally never didOpened: the consumer forces
++            // the real PSR-4 lazy parse and its class finalization path.
++            let consumer = "<?php\nfunction run(\\App\\Service $service): void { $service->repository->findById(1); }\n";
++            let uri = Url::from_file_path(dir.path().join("consumer.php")).unwrap();
++            open_php(&backend, &uri, consumer).await;
++            assert_inference_phase_member_target(
++                &backend,
++                &uri,
++                consumer,
++                "$service->repository->findById",
++                Url::from_file_path(dir.path().join(expected)).unwrap(),
++            )
++            .await;
++        }
++    }
++}
++
++#[tokio::test]
++async fn test_inferred_name_phase_two_namespace_import_maps_do_not_leak() {
++    let services = r#"<?php
++namespace App {
++    use App\Sub\Repository as Repo;
++    class Service { public $repository; public function __construct() { $this->repository = new Repo(); } }
++}
++namespace Other {
++    use Vendor\Repository as Repo;
++    class Service { public function __construct(public $repository = new Repo()) {} }
++}
++"#;
++    let (backend, dir) = create_psr4_workspace(
++        r#"{"autoload":{"psr-4":{"App\\":"src/","Vendor\\":"vendor-src/"}}}"#,
++        &[
++            ("src/Sub/Repository.php", INFERENCE_PHASE_APP_REPOSITORY),
++            (
++                "vendor-src/Repository.php",
++                INFERENCE_PHASE_VENDOR_REPOSITORY,
++            ),
++        ],
++    );
++    let services_uri = Url::from_file_path(dir.path().join("services.php")).unwrap();
++    open_php(&backend, &services_uri, services).await;
++    let consumer = "<?php\nfunction run(\\App\\Service $first, \\Other\\Service $second): void {\n$first->repository->findById(1);\n$second->repository->findById(2);\n}\n";
++    let uri = Url::from_file_path(dir.path().join("consumer.php")).unwrap();
++    open_php(&backend, &uri, consumer).await;
++    for (call, target) in [
++        ("$first->repository->findById", "src/Sub/Repository.php"),
++        ("$second->repository->findById", "vendor-src/Repository.php"),
++    ] {
++        assert_inference_phase_member_target(
++            &backend,
++            &uri,
++            consumer,
++            call,
++            Url::from_file_path(dir.path().join(target)).unwrap(),
++        )
++        .await;
++    }
++}
+diff --git a/tests/integration/main.rs b/tests/integration/main.rs
+index 77c1f22..1dd2ee9 100644
+--- a/tests/integration/main.rs
++++ b/tests/integration/main.rs
+@@ -284,6 +284,7 @@ mod workbench_views;
+ 
+ mod blade_generated_diagnostics;
+ 
++mod stub_global_siblings;
+ mod stub_method_versions;
+ 
+ mod keyword_php_target;
+diff --git a/tests/integration/stub_method_versions.rs b/tests/integration/stub_method_versions.rs
+index 8316ba5..4e5f946 100644
+--- a/tests/integration/stub_method_versions.rs
++++ b/tests/integration/stub_method_versions.rs
+@@ -103,3 +103,966 @@ async fn member_tags_do_not_leak_to_adjacent_undocumented_methods() {
+     assert!(has(&b, "<?php\nAdjacent::create", "createLegacy").await);
+     assert!(has(&b, "<?php\nAdjacent::create", "createOther").await);
+ }
++
++use tower_lsp::LanguageServer;
++
++fn builtin_constant_backend(minor: u8) -> Backend {
++    let backend = Backend::new_test_with_stubs(phpantom_lsp::stubs::build_stub_class_index());
++    backend.set_php_version(PhpVersion::new(8, minor));
++    backend
++}
++
++async fn constant_items(
++    backend: &Backend,
++    receiver: &str,
++) -> Vec<tower_lsp::lsp_types::CompletionItem> {
++    let source = format!("<?php\n{receiver}::");
++    complete_at(
++        backend,
++        &Url::parse("file:///constant-target.php").unwrap(),
++        &source,
++        1,
++        receiver.len() as u32 + 2,
++    )
++    .await
++}
++
++fn constant_named<'a>(
++    items: &'a [tower_lsp::lsp_types::CompletionItem],
++    name: &str,
++) -> Option<&'a tower_lsp::lsp_types::CompletionItem> {
++    items
++        .iter()
++        .find(|item| item.filter_text.as_deref().unwrap_or(&item.label) == name)
++}
++
++#[tokio::test]
++async fn stub_constant_builtin_direct_and_inherited_completion_boundaries() {
++    for minor in [1, 2] {
++        let backend = builtin_constant_backend(minor);
++        for receiver in ["DateTimeInterface", "DateTime", "DateTimeImmutable"] {
++            let items = constant_items(&backend, receiver).await;
++            assert!(
++                constant_named(&items, "ATOM").is_some(),
++                "stable {receiver}::ATOM on 8.{minor}"
++            );
++            let future = constant_named(&items, "ISO8601_EXPANDED");
++            assert_eq!(future.is_some(), minor >= 2, "{receiver} on 8.{minor}");
++            if let Some(item) = future {
++                let mut item = item.clone();
++                item.documentation = None;
++                let resolved = backend.completion_resolve(item).await.unwrap();
++                assert!(
++                    resolved.documentation.is_some(),
++                    "available inherited constant must resolve: {receiver}"
++                );
++            }
++        }
++    }
++}
++
++#[tokio::test]
++async fn stub_constant_unavailable_target_does_not_resolve_newer_item() {
++    let newer = builtin_constant_backend(2);
++    let older = builtin_constant_backend(1);
++    for receiver in ["DateTimeInterface", "DateTime", "DateTimeImmutable"] {
++        // Load a stable sibling first: the whole shared date stub file must
++        // not publish future constants into the older target's lazy cache.
++        assert!(constant_named(&constant_items(&older, receiver).await, "ATOM").is_some());
++        let items = constant_items(&newer, receiver).await;
++        let mut stale = constant_named(&items, "ISO8601_EXPANDED")
++            .expect("8.2 provider control")
++            .clone();
++        stale.documentation = None;
++        stale.detail = None;
++        let resolved = older.completion_resolve(stale).await.unwrap();
++        assert!(
++            resolved.documentation.is_none(),
++            "8.1 resolved future {receiver} constant"
++        );
++    }
++}
++
++#[tokio::test]
++async fn stub_constant_builtin_navigation_uses_target_filtered_model() {
++    for minor in [1, 2] {
++        let backend = builtin_constant_backend(minor);
++        let uri = Url::parse("file:///constant-navigation.php").unwrap();
++        for receiver in ["DateTimeInterface", "DateTime", "DateTimeImmutable"] {
++            for name in ["ATOM", "ISO8601_EXPANDED"] {
++                let source = format!("<?php\n{receiver}::{name};\n");
++                crate::common::open_php(&backend, &uri, &source).await;
++                let result =
++                    crate::common::goto_definition_at(&backend, &uri, 1, receiver.len() as u32 + 3)
++                        .await;
++                let locations = match result {
++                    None => 0,
++                    Some(tower_lsp::lsp_types::GotoDefinitionResponse::Scalar(_)) => 1,
++                    Some(tower_lsp::lsp_types::GotoDefinitionResponse::Array(locations)) => {
++                        locations.len()
++                    }
++                    Some(tower_lsp::lsp_types::GotoDefinitionResponse::Link(locations)) => {
++                        locations.len()
++                    }
++                };
++                assert_eq!(
++                    locations > 0,
++                    name == "ATOM" || minor >= 2,
++                    "{receiver}::{name} navigation on 8.{minor}"
++                );
++            }
++        }
++    }
++}
++
++const CONSTANT_AVAILABILITY_STUB: &str = r#"<?php
++use JetBrains\PhpStorm\Internal\PhpStormStubsElementAvailable as Available;
++interface ConstantAvailabilityCarrier {
++    public const STABLE = 1;
++    /** @since 8.2 */
++    public const INTRODUCED = 2, INTRODUCED_SECOND = 3;
++    /** @since PECL 9.0 */
++    public const EXTENSION_RELEASE = 4;
++    #[Available(from: '8.2', to: '8.3')]
++    public const RANGED = 5;
++    /** @removed 8.2 */
++    public const REMOVED = 6;
++}
++class ConstantAvailabilityClock implements ConstantAvailabilityCarrier {}
++class ConstantAvailabilityNeighbors {
++    /** @since 8.4 */
++    public $futureProperty;
++    public const AFTER_PROPERTY = 1;
++    /** @since 8.4 */
++    public function futureMethod() {}
++    public const AFTER_METHOD = 2;
++    /** @since 8.2 */
++    public const FUTURE_NEIGHBOR = 3;
++    public const AFTER_CONSTANT = 4;
++}
++/** @since 8.2 */
++class OptionalPolyfillClock {
++    /** @since 8.2 */
++    public const ADDED = 'builtin';
++}
++"#;
++
++// This public test constructor seeds the real stub index. Lazy class lookup
++// assigns the canonical phpantom-stub URI and builtin-authority parse context.
++fn constant_fixture_backend(minor: u8) -> Backend {
++    let backend = Backend::new_test_with_stubs(HashMap::from([
++        ("ConstantAvailabilityCarrier", CONSTANT_AVAILABILITY_STUB),
++        ("ConstantAvailabilityClock", CONSTANT_AVAILABILITY_STUB),
++        ("ConstantAvailabilityNeighbors", CONSTANT_AVAILABILITY_STUB),
++        ("OptionalPolyfillClock", CONSTANT_AVAILABILITY_STUB),
++    ]));
++    backend.set_php_version(PhpVersion::new(8, minor));
++    backend
++}
++
++#[tokio::test]
++async fn stub_constant_shared_availability_metadata_and_multi_item_declarations() {
++    for minor in [1, 2, 3, 4] {
++        let backend = constant_fixture_backend(minor);
++        for receiver in ["ConstantAvailabilityCarrier", "ConstantAvailabilityClock"] {
++            let items = constant_items(&backend, receiver).await;
++            assert_eq!(
++                constant_navigation_uri(&backend, receiver, "STABLE")
++                    .await
++                    .scheme(),
++                "phpantom-stub",
++                "synthetic fixture must use actual stub parser authority"
++            );
++            for name in ["STABLE", "EXTENSION_RELEASE"] {
++                assert!(
++                    constant_named(&items, name).is_some(),
++                    "{receiver}::{name} on 8.{minor}"
++                );
++            }
++            for name in ["INTRODUCED", "INTRODUCED_SECOND"] {
++                assert_eq!(
++                    constant_named(&items, name).is_some(),
++                    minor >= 2,
++                    "{receiver}::{name} on 8.{minor}"
++                );
++            }
++            assert_eq!(
++                constant_named(&items, "RANGED").is_some(),
++                (2..=3).contains(&minor),
++                "{receiver} range 8.{minor}"
++            );
++            assert_eq!(
++                constant_named(&items, "REMOVED").is_some(),
++                minor < 2,
++                "{receiver} removal 8.{minor}"
++            );
++        }
++    }
++}
++
++#[tokio::test]
++async fn stub_constant_metadata_does_not_leak_across_adjacent_members() {
++    let backend = constant_fixture_backend(1);
++    let items = constant_items(&backend, "ConstantAvailabilityNeighbors").await;
++    for name in ["AFTER_PROPERTY", "AFTER_METHOD", "AFTER_CONSTANT"] {
++        assert!(
++            constant_named(&items, name).is_some(),
++            "adjacent metadata hid {name}"
++        );
++    }
++    assert!(constant_named(&items, "FUTURE_NEIGHBOR").is_none());
++}
++
++#[tokio::test]
++async fn stub_constant_project_release_notes_and_polyfill_are_preserved() {
++    let backend = constant_fixture_backend(1);
++    let uri = Url::parse("file:///project-constant-polyfill.php").unwrap();
++    let source = concat!(
++        "<?php\n",
++        "class ProjectConstantParent { /** @since 99.0 */ public const PACKAGE_RELEASE = 1; }\n",
++        "class ProjectConstantChild extends ProjectConstantParent {}\n",
++        "class OptionalPolyfillClock { /** @since 99.0 */ public const ADDED = 'polyfill'; }\n",
++    );
++    crate::common::open_php(&backend, &uri, source).await;
++    for (receiver, name) in [
++        ("ProjectConstantParent", "PACKAGE_RELEASE"),
++        ("ProjectConstantChild", "PACKAGE_RELEASE"),
++        ("OptionalPolyfillClock", "ADDED"),
++    ] {
++        let items = constant_items(&backend, receiver).await;
++        let item = constant_named(&items, name)
++            .expect("project/package since tag is not a PHP release constraint");
++        let mut item = item.clone();
++        item.documentation = None;
++        assert!(
++            backend
++                .completion_resolve(item)
++                .await
++                .unwrap()
++                .documentation
++                .is_some()
++        );
++    }
++}
++
++async fn constant_navigation_uri(backend: &Backend, receiver: &str, name: &str) -> Url {
++    let uri = Url::parse("file:///constant-authority-query.php").unwrap();
++    let source = format!("<?php\n{receiver}::{name};\n");
++    crate::common::open_php(backend, &uri, &source).await;
++    let response = crate::common::goto_definition_at(backend, &uri, 1, receiver.len() as u32 + 3)
++        .await
++        .expect("constant declaration must navigate");
++    match response {
++        tower_lsp::lsp_types::GotoDefinitionResponse::Scalar(location) => location.uri,
++        tower_lsp::lsp_types::GotoDefinitionResponse::Array(locations) => {
++            assert_eq!(locations.len(), 1);
++            locations[0].uri.clone()
++        }
++        tower_lsp::lsp_types::GotoDefinitionResponse::Link(locations) => {
++            assert_eq!(locations.len(), 1);
++            locations[0].target_uri.clone()
++        }
++    }
++}
++
++const PROJECT_CONSTANT_METADATA: &str = r#"<?php
++use JetBrains\PhpStorm\Internal\PhpStormStubsElementAvailable as Available;
++class ProjectMetadataConstants {
++    /** @since 99.0 */
++    public const SINCE_NOTE = 1;
++    /** @removed 1.0 */
++    public const REMOVED_NOTE = 2;
++    #[Available(from: '99.0')]
++    public const ATTRIBUTE_NOTE = 3;
++}
++class ProjectMetadataChild extends ProjectMetadataConstants {}
++"#;
++
++#[tokio::test]
++async fn stub_constant_project_metadata_never_claims_builtin_release_authority() {
++    let backend = constant_fixture_backend(1);
++    let uri = Url::parse("file:///project-constant-metadata.php").unwrap();
++    crate::common::open_php(&backend, &uri, PROJECT_CONSTANT_METADATA).await;
++    for receiver in ["ProjectMetadataConstants", "ProjectMetadataChild"] {
++        let items = constant_items(&backend, receiver).await;
++        for name in ["SINCE_NOTE", "REMOVED_NOTE", "ATTRIBUTE_NOTE"] {
++            let item = constant_named(&items, name)
++                .expect("ordinary project metadata must not hide declarations");
++            let mut item = item.clone();
++            item.documentation = None;
++            assert!(
++                backend
++                    .completion_resolve(item)
++                    .await
++                    .unwrap()
++                    .documentation
++                    .is_some()
++            );
++            assert_eq!(constant_navigation_uri(&backend, receiver, name).await, uri);
++        }
++    }
++}
++
++#[tokio::test]
++async fn stub_constant_composer_file_metadata_keeps_package_release_notes() {
++    const PACKAGE: &str = r#"<?php
++namespace Acme;
++use JetBrains\PhpStorm\Internal\PhpStormStubsElementAvailable as Available;
++class MetadataConstants {
++    /** @since 99.0 */
++    public const SINCE_NOTE = 1;
++    /** @removed 1.0 */
++    public const REMOVED_NOTE = 2;
++    #[Available(from: '99.0')]
++    public const ATTRIBUTE_NOTE = 3;
++}
++class MetadataChild extends MetadataConstants {}
++"#;
++    // A Composer PSR-4 library source file is loaded through the ordinary
++    // filesystem resolver, without opening or pretending it is an embedded stub.
++    let (backend, dir) = crate::common::create_psr4_workspace(
++        r#"{"autoload":{"psr-4":{"Acme\\":"packages/acme/src/"}}}"#,
++        &[
++            (
++                "packages/acme/composer.json",
++                r#"{"name":"acme/library","autoload":{"psr-4":{"Acme\\":"src/"}}}"#,
++            ),
++            ("packages/acme/src/MetadataConstants.php", PACKAGE),
++        ],
++    );
++    backend.set_php_version(PhpVersion::new(8, 1));
++    let package_uri =
++        Url::from_file_path(dir.path().join("packages/acme/src/MetadataConstants.php")).unwrap();
++    // Load the primary PSR-4 filename first; the sibling class is then indexed.
++    for receiver in ["Acme\\MetadataConstants", "Acme\\MetadataChild"] {
++        let items = constant_items(&backend, receiver).await;
++        for name in ["SINCE_NOTE", "REMOVED_NOTE", "ATTRIBUTE_NOTE"] {
++            let item = constant_named(&items, name)
++                .expect("Composer release metadata is not PHP builtin authority");
++            let mut item = item.clone();
++            item.documentation = None;
++            assert!(
++                backend
++                    .completion_resolve(item)
++                    .await
++                    .unwrap()
++                    .documentation
++                    .is_some()
++            );
++            assert_eq!(
++                constant_navigation_uri(&backend, receiver, name).await,
++                package_uri
++            );
++        }
++    }
++    assert_eq!(
++        std::fs::read_to_string(dir.path().join("packages/acme/src/MetadataConstants.php"))
++            .unwrap(),
++        PACKAGE
++    );
++}
++
++const GLOBAL_LOADER_CONSTANT_STUB: &str = r#"<?php
++const CONSTANT_ADMISSION_SENTINEL = 73019;
++interface GlobalLoaderConstantCarrier {
++    public const STABLE = 1;
++    /** @since 8.2 */
++    public const FUTURE = 2;
++}
++class GlobalLoaderConstantChild implements GlobalLoaderConstantCarrier {}
++"#;
++
++fn global_loader_constant_backend(minor: u8) -> Backend {
++    let backend = Backend::new_test_with_all_stubs(
++        HashMap::from([
++            ("GlobalLoaderConstantCarrier", GLOBAL_LOADER_CONSTANT_STUB),
++            ("GlobalLoaderConstantChild", GLOBAL_LOADER_CONSTANT_STUB),
++        ]),
++        HashMap::new(),
++        HashMap::from([("CONSTANT_ADMISSION_SENTINEL", GLOBAL_LOADER_CONSTANT_STUB)]),
++    );
++    backend.set_php_version(PhpVersion::new(8, minor));
++    backend
++}
++
++async fn trigger_real_global_constant_stub_loader(backend: &Backend) {
++    // No fake didOpen stub URI: only a normal query document is opened.
++    // A successful hover must reach the injected embedded-global-constant
++    // index and its production update_ast publisher.
++    assert!(
++        !backend
++            .global_defines()
++            .read()
++            .contains_key("CONSTANT_ADMISSION_SENTINEL")
++    );
++    let uri = Url::parse("file:///global-constant-loader-query.php").unwrap();
++    crate::common::open_php(backend, &uri, "<?php\nCONSTANT_ADMISSION_SENTINEL;\n").await;
++    let hover = crate::common::hover_text_at(backend, &uri, 1, 2)
++        .await
++        .expect("real global-constant hover must load embedded source");
++    assert!(
++        hover.contains("73019"),
++        "unexpected sentinel hover: {hover}"
++    );
++    assert!(
++        backend
++            .global_defines()
++            .read()
++            .contains_key("CONSTANT_ADMISSION_SENTINEL")
++    );
++}
++
++async fn global_loader_navigation_exists(backend: &Backend, receiver: &str, name: &str) -> bool {
++    let uri = Url::parse("file:///global-constant-loader-member-query.php").unwrap();
++    let source = format!("<?php\n{receiver}::{name};\n");
++    crate::common::open_php(backend, &uri, &source).await;
++    match crate::common::goto_definition_at(backend, &uri, 1, receiver.len() as u32 + 3).await {
++        None => false,
++        Some(tower_lsp::lsp_types::GotoDefinitionResponse::Scalar(_)) => true,
++        Some(tower_lsp::lsp_types::GotoDefinitionResponse::Array(locations)) => {
++            !locations.is_empty()
++        }
++        Some(tower_lsp::lsp_types::GotoDefinitionResponse::Link(locations)) => {
++            !locations.is_empty()
++        }
++    }
++}
++
++#[tokio::test]
++async fn stub_constant_global_loader_first_keeps_target_filtered_completion_resolve_and_navigation()
++{
++    // Fresh 8.2 items carry genuine selected-constant identity for the stale
++    // resolve check; clearing docs forces resolution in the queried backend.
++    let newer = global_loader_constant_backend(2);
++    for minor in [1, 2] {
++        let backend = global_loader_constant_backend(minor);
++        trigger_real_global_constant_stub_loader(&backend).await;
++        for receiver in ["GlobalLoaderConstantCarrier", "GlobalLoaderConstantChild"] {
++            let items = constant_items(&backend, receiver).await;
++            assert!(constant_named(&items, "STABLE").is_some());
++            assert_eq!(
++                constant_named(&items, "FUTURE").is_some(),
++                minor >= 2,
++                "global-first {receiver} 8.{minor}"
++            );
++            assert!(global_loader_navigation_exists(&backend, receiver, "STABLE").await);
++            assert_eq!(
++                global_loader_navigation_exists(&backend, receiver, "FUTURE").await,
++                minor >= 2
++            );
++            let new_items = constant_items(&newer, receiver).await;
++            let mut stale = constant_named(&new_items, "FUTURE")
++                .expect("new target control")
++                .clone();
++            stale.documentation = None;
++            stale.detail = None;
++            let resolved = backend.completion_resolve(stale).await.unwrap();
++            assert_eq!(
++                resolved.documentation.is_some(),
++                minor >= 2,
++                "global-first resolve {receiver} 8.{minor}"
++            );
++        }
++    }
++}
++
++#[tokio::test]
++async fn stub_constant_global_loader_after_filtered_class_load_cannot_overwrite_model() {
++    let backend = global_loader_constant_backend(1);
++    let before = constant_items(&backend, "GlobalLoaderConstantChild").await;
++    assert!(constant_named(&before, "STABLE").is_some());
++    assert!(constant_named(&before, "FUTURE").is_none());
++    trigger_real_global_constant_stub_loader(&backend).await;
++    for receiver in ["GlobalLoaderConstantCarrier", "GlobalLoaderConstantChild"] {
++        let after = constant_items(&backend, receiver).await;
++        assert!(constant_named(&after, "STABLE").is_some());
++        assert!(
++            constant_named(&after, "FUTURE").is_none(),
++            "global load overwrote filtered {receiver}"
++        );
++        assert!(!global_loader_navigation_exists(&backend, receiver, "FUTURE").await);
++    }
++}
++
++#[tokio::test]
++async fn stub_constant_global_loader_does_not_grant_project_release_metadata_authority() {
++    let backend = global_loader_constant_backend(1);
++    trigger_real_global_constant_stub_loader(&backend).await;
++    let uri = Url::parse("file:///global-loader-project-control.php").unwrap();
++    let source = r#"<?php
++use JetBrains\PhpStorm\Internal\PhpStormStubsElementAvailable as Available;
++class GlobalLoaderProjectControl {
++    /** @since 99.0 */
++    public const PROJECT_SINCE = 1;
++    /** @removed 1.0 */
++    public const PROJECT_REMOVED = 2;
++    #[Available(from: '99.0')]
++    public const PROJECT_ATTRIBUTE = 3;
++}
++class GlobalLoaderProjectChild extends GlobalLoaderProjectControl {}
++"#;
++    crate::common::open_php(&backend, &uri, source).await;
++    for receiver in ["GlobalLoaderProjectControl", "GlobalLoaderProjectChild"] {
++        let items = constant_items(&backend, receiver).await;
++        for name in ["PROJECT_SINCE", "PROJECT_REMOVED", "PROJECT_ATTRIBUTE"] {
++            let mut item = constant_named(&items, name)
++                .expect("project metadata must remain nonauthoritative")
++                .clone();
++            item.documentation = None;
++            assert!(
++                backend
++                    .completion_resolve(item)
++                    .await
++                    .unwrap()
++                    .documentation
++                    .is_some()
++            );
++            assert_eq!(constant_navigation_uri(&backend, receiver, name).await, uri);
++        }
++    }
++}
++
++const NAMESPACED_GLOBAL_CONSTANT_STUB: &str = r#"<?php
++namespace { const NAMESPACED_ADMISSION_SENTINEL = 73023; }
++namespace FirstBuiltin {
++    use JetBrains\PhpStorm\Internal\PhpStormStubsElementAvailable as Available;
++    class Carrier {
++        public const STABLE = 1;
++        /** @since 8.2 */ public const FUTURE = 2;
++        /** @removed 8.2 */ public const REMOVED = 3;
++        #[Available(from: '8.2')] public const ATTRIBUTE_FUTURE = 4;
++        public static function createStable() {}
++        /** @since 8.2 */ public static function createFuture() {}
++    }
++}
++namespace SecondBuiltin {
++    use JetBrains\PhpStorm\Internal\PhpStormStubsElementAvailable as Available;
++    class Carrier {
++        public const STABLE = 1;
++        /** @since 8.3 */ public const FUTURE = 2;
++        #[Available(from: '8.3')] public const ATTRIBUTE_FUTURE = 4;
++        public static function createStable() {}
++        /** @since 8.3 */ public static function createFuture() {}
++    }
++}
++"#;
++
++#[tokio::test]
++async fn stub_constant_global_loader_preserves_explicit_authority_in_each_namespace() {
++    for minor in [1, 2, 3] {
++        let backend = Backend::new_test_with_all_stubs(
++            HashMap::from([
++                ("FirstBuiltin\\Carrier", NAMESPACED_GLOBAL_CONSTANT_STUB),
++                ("SecondBuiltin\\Carrier", NAMESPACED_GLOBAL_CONSTANT_STUB),
++            ]),
++            HashMap::new(),
++            HashMap::from([(
++                "NAMESPACED_ADMISSION_SENTINEL",
++                NAMESPACED_GLOBAL_CONSTANT_STUB,
++            )]),
++        );
++        backend.set_php_version(PhpVersion::new(8, minor));
++        let uri = Url::parse("file:///namespaced-builtin-authority-query.php").unwrap();
++        crate::common::open_php(&backend, &uri, "<?php\nNAMESPACED_ADMISSION_SENTINEL;\n").await;
++        let hover = crate::common::hover_text_at(&backend, &uri, 1, 2)
++            .await
++            .expect("real embedded sentinel loader");
++        assert!(hover.contains("73023"));
++        assert!(
++            backend
++                .global_defines()
++                .read()
++                .contains_key("NAMESPACED_ADMISSION_SENTINEL")
++        );
++        for (receiver, introduced) in [("FirstBuiltin\\Carrier", 2), ("SecondBuiltin\\Carrier", 3)]
++        {
++            let items = constant_items(&backend, receiver).await;
++            assert!(constant_named(&items, "STABLE").is_some());
++            for name in ["FUTURE", "ATTRIBUTE_FUTURE"] {
++                assert_eq!(
++                    constant_named(&items, name).is_some(),
++                    minor >= introduced,
++                    "{receiver}::{name} on8.{minor}"
++                );
++                assert_eq!(
++                    global_loader_navigation_exists(&backend, receiver, name).await,
++                    minor >= introduced,
++                    "{receiver}::{name} navigation on8.{minor}"
++                );
++                if minor >= introduced {
++                    let location = constant_navigation_uri(&backend, receiver, name).await;
++                    assert_eq!(
++                        location.as_str(),
++                        format!("phpantom-stub://{}", receiver.replace('\\', "%5C"))
++                    );
++                    let document = backend
++                        .workbench_builtin(phpantom_lsp::workbench_builtins::BuiltinQuery {
++                            uri: location.to_string(),
++                        })
++                        .await
++                        .expect("canonical builtin navigation must open exact source");
++                    assert_eq!(document.content, NAMESPACED_GLOBAL_CONSTANT_STUB);
++                }
++            }
++            assert!(
++                has(
++                    &backend,
++                    &format!("<?php\n{receiver}::create"),
++                    "createStable"
++                )
++                .await
++            );
++            assert_eq!(
++                has(
++                    &backend,
++                    &format!("<?php\n{receiver}::create"),
++                    "createFuture"
++                )
++                .await,
++                minor >= introduced,
++                "method authority must agree for {receiver}"
++            );
++        }
++        let first = constant_items(&backend, "FirstBuiltin\\Carrier").await;
++        assert_eq!(constant_named(&first, "REMOVED").is_some(), minor < 2);
++    }
++}
++
++#[tokio::test]
++async fn stub_constant_client_didopen_uri_spelling_does_not_grant_builtin_authority() {
++    let backend = Backend::new_test();
++    backend.set_php_version(PhpVersion::new(8, 1));
++    let uri = Url::parse("phpantom-stub://const/CLIENT_AUTHORITY_SPOOF").unwrap();
++    // A client-owned source update is deliberately delivered through didOpen,
++    // not the new crate-private trusted index loader. URI text is insufficient.
++    let source = r#"<?php
++use JetBrains\PhpStorm\Internal\PhpStormStubsElementAvailable as Available;
++class ClientUriAuthorityControl {
++    /** @since 99.0 */ public const SINCE_NOTE = 1;
++    /** @removed 1.0 */ public const REMOVED_NOTE = 2;
++    #[Available(from: '99.0')] public const ATTRIBUTE_NOTE = 3;
++    /** @since 99.0 */ public static function createFuture() {}
++}
++"#;
++    crate::common::open_php(&backend, &uri, source).await;
++    let items = constant_items(&backend, "ClientUriAuthorityControl").await;
++    for name in ["SINCE_NOTE", "REMOVED_NOTE", "ATTRIBUTE_NOTE"] {
++        assert!(
++            constant_named(&items, name).is_some(),
++            "client URI text hid {name}"
++        );
++        assert_eq!(
++            constant_navigation_uri(&backend, "ClientUriAuthorityControl", name).await,
++            uri
++        );
++    }
++    assert!(
++        has(
++            &backend,
++            "<?php\nClientUriAuthorityControl::create",
++            "createFuture"
++        )
++        .await
++    );
++}
++
++const CANONICAL_NAV_SHARED: &str = r#"<?php
++namespace { const CANONICAL_NAV_SENTINEL = 73029; }
++namespace CanonicalBuiltin {
++    // café 🐘: canonical viewer must retain these exact declaration coordinates.
++    class Carrier {
++        public const STABLE = 41;
++    }
++}
++"#;
++
++const CANONICAL_NAV_DIFFERENT: &str = r#"<?php
++namespace CanonicalBuiltin;
++// A different declaration source with deliberately different offsets.
++class Carrier { public const STABLE = 99001; }
++"#;
++
++async fn trigger_canonical_nav_global_loader(backend: &Backend) {
++    let uri = Url::parse("file:///canonical-navigation-sentinel-query.php").unwrap();
++    crate::common::open_php(backend, &uri, "<?php\nCANONICAL_NAV_SENTINEL;\n").await;
++    let hover = crate::common::hover_text_at(backend, &uri, 1, 2)
++        .await
++        .expect("embedded global loader control");
++    assert!(hover.contains("73029"));
++    assert!(
++        backend
++            .global_defines()
++            .read()
++            .contains_key("CANONICAL_NAV_SENTINEL")
++    );
++}
++
++async fn canonical_nav_locations(backend: &Backend) -> Vec<tower_lsp::lsp_types::Location> {
++    let uri = Url::parse("file:///canonical-navigation-member-query.php").unwrap();
++    crate::common::open_php(backend, &uri, "<?php\nCanonicalBuiltin\\Carrier::STABLE;\n").await;
++    match crate::common::goto_definition_at(
++        backend,
++        &uri,
++        1,
++        "CanonicalBuiltin\\Carrier::".len() as u32 + 2,
++    )
++    .await
++    {
++        None => vec![],
++        Some(tower_lsp::lsp_types::GotoDefinitionResponse::Scalar(location)) => vec![location],
++        Some(tower_lsp::lsp_types::GotoDefinitionResponse::Array(locations)) => locations,
++        Some(tower_lsp::lsp_types::GotoDefinitionResponse::Link(links)) => links
++            .into_iter()
++            .map(|link| tower_lsp::lsp_types::Location {
++                uri: link.target_uri,
++                range: link.target_selection_range,
++            })
++            .collect(),
++    }
++}
++
++#[tokio::test]
++async fn stub_constant_global_loader_canonical_navigation_requires_identical_source() {
++    let backend = Backend::new_test_with_all_stubs(
++        HashMap::from([("CanonicalBuiltin\\Carrier", CANONICAL_NAV_SHARED)]),
++        HashMap::new(),
++        HashMap::from([("CANONICAL_NAV_SENTINEL", CANONICAL_NAV_SHARED)]),
++    );
++    backend.set_php_version(PhpVersion::new(8, 1));
++    trigger_canonical_nav_global_loader(&backend).await;
++    let locations = canonical_nav_locations(&backend).await;
++    assert_eq!(locations.len(), 1);
++    let location = &locations[0];
++    assert_eq!(
++        location.uri.as_str(),
++        "phpantom-stub://CanonicalBuiltin%5CCarrier"
++    );
++    let document = backend
++        .workbench_builtin(phpantom_lsp::workbench_builtins::BuiltinQuery {
++            uri: location.uri.to_string(),
++        })
++        .await
++        .expect("same-source canonical declaration must use existing viewer");
++    assert_eq!(document.content, CANONICAL_NAV_SHARED);
++    let start = CANONICAL_NAV_SHARED.find("STABLE").unwrap();
++    let prefix = &CANONICAL_NAV_SHARED[..start];
++    let expected_line = prefix.bytes().filter(|byte| *byte == b'\n').count() as u32;
++    let expected_column = prefix.rsplit('\n').next().unwrap().encode_utf16().count() as u32;
++    assert_eq!(
++        location.range.start,
++        tower_lsp::lsp_types::Position::new(expected_line, expected_column)
++    );
++}
++
++#[tokio::test]
++async fn stub_constant_global_loader_different_class_source_cannot_redirect_coordinates() {
++    let backend = Backend::new_test_with_all_stubs(
++        HashMap::from([("CanonicalBuiltin\\Carrier", CANONICAL_NAV_DIFFERENT)]),
++        HashMap::new(),
++        HashMap::from([("CANONICAL_NAV_SENTINEL", CANONICAL_NAV_SHARED)]),
++    );
++    backend.set_php_version(PhpVersion::new(8, 1));
++    trigger_canonical_nav_global_loader(&backend).await;
++    let items = constant_items(&backend, "CanonicalBuiltin\\Carrier").await;
++    assert!(
++        constant_named(&items, "STABLE").is_some(),
++        "actual published class must exist"
++    );
++    // This deliberately inconsistent injected corpus has no viewer identity
++    // for the published source. Refusal is safe; opening a different file
++    // under the published byte offsets is not. Do not demand unsafe remapping.
++    for location in canonical_nav_locations(&backend).await {
++        assert_ne!(
++            location.uri.as_str(),
++            "phpantom-stub://CanonicalBuiltin%5CCarrier"
++        );
++        assert!(
++            backend
++                .workbench_builtin(phpantom_lsp::workbench_builtins::BuiltinQuery {
++                    uri: location.uri.to_string(),
++                })
++                .await
++                .is_err(),
++            "unmapped publisher URI must not expose different class source"
++        );
++    }
++    // Confirm the negative is meaningful: the canonical class index really
++    // does contain the different source, rather than merely being missing.
++    let other = backend
++        .workbench_builtin(phpantom_lsp::workbench_builtins::BuiltinQuery {
++            uri: "phpantom-stub://CanonicalBuiltin%5CCarrier".into(),
++        })
++        .await
++        .unwrap();
++    assert_eq!(other.content, CANONICAL_NAV_DIFFERENT);
++    assert_ne!(other.content, CANONICAL_NAV_SHARED);
++}
++
++#[tokio::test]
++async fn stub_constant_client_update_of_real_publisher_uri_cannot_borrow_builtin_coordinates() {
++    let backend = Backend::new_test_with_all_stubs(
++        HashMap::from([("CanonicalBuiltin\\Carrier", CANONICAL_NAV_SHARED)]),
++        HashMap::new(),
++        HashMap::from([("CANONICAL_NAV_SENTINEL", CANONICAL_NAV_SHARED)]),
++    );
++    backend.set_php_version(PhpVersion::new(8, 1));
++    trigger_canonical_nav_global_loader(&backend).await;
++    let uri = Url::parse("phpantom-stub://const/CANONICAL_NAV_SENTINEL").unwrap();
++    // Same URI, different actual client-owned bytes and declaration offset.
++    // Embedded-index equality alone cannot authenticate this selected AST.
++    crate::common::open_php(&backend, &uri, CANONICAL_NAV_DIFFERENT).await;
++    for location in canonical_nav_locations(&backend).await {
++        assert_ne!(
++            location.uri.as_str(),
++            "phpantom-stub://CanonicalBuiltin%5CCarrier",
++            "client declaration offset was redirected into unrelated embedded bytes"
++        );
++    }
++    let document = backend
++        .workbench_builtin(phpantom_lsp::workbench_builtins::BuiltinQuery {
++            uri: "phpantom-stub://CanonicalBuiltin%5CCarrier".into(),
++        })
++        .await
++        .unwrap();
++    assert_eq!(
++        document.content, CANONICAL_NAV_SHARED,
++        "viewer must remain immutable despite client update"
++    );
++}
++
++const VIEWER_OVERRIDE_SOURCE: &str = r#"<?php
++const VIEWER_OVERRIDE_SENTINEL = 91531;
++// An immutable embedded declaration with non-ASCII UTF-16 coordinates.
++/* café 🐘 */ class viewer_override_carrier {
++    public const STABLE = 53;
++}
++"#;
++const VIEWER_OVERRIDE_CLIENT: &str = r#"<?php
++// Client-owned text deliberately has a very long line instead of the embedded source's declaration lines: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
++// No class or function declarations in this client document.
++"#;
++
++fn viewer_override_backend() -> Backend {
++    let backend = Backend::new_test_with_all_stubs(
++        HashMap::from([("viewer_override_carrier", VIEWER_OVERRIDE_SOURCE)]),
++        HashMap::new(),
++        HashMap::from([("VIEWER_OVERRIDE_SENTINEL", VIEWER_OVERRIDE_SOURCE)]),
++    );
++    backend.set_php_version(PhpVersion::new(8, 1));
++    backend
++}
++
++async fn viewer_override_load_and_open_client(backend: &Backend) {
++    let query = Url::parse("file:///viewer-override-sentinel.php").unwrap();
++    crate::common::open_php(backend, &query, "<?php\nVIEWER_OVERRIDE_SENTINEL;\n").await;
++    let hover = crate::common::hover_text_at(backend, &query, 1, 2)
++        .await
++        .expect("trusted global-first publication control");
++    assert!(hover.contains("91531"), "{hover}");
++    let canonical = Url::parse("phpantom-stub://viewer_override_carrier").unwrap();
++    crate::common::open_php(backend, &canonical, VIEWER_OVERRIDE_CLIENT).await;
++}
++
++fn viewer_override_position(source: &str, marker: &str) -> tower_lsp::lsp_types::Position {
++    let prefix = &source[..source.find(marker).expect("fixture declaration marker")];
++    tower_lsp::lsp_types::Position::new(
++        prefix.bytes().filter(|byte| *byte == b'\n').count() as u32,
++        prefix.rsplit('\n').next().unwrap().encode_utf16().count() as u32,
++    )
++}
++
++async fn viewer_override_query(
++    backend: &Backend,
++    source: &str,
++    character: u32,
++) -> Vec<tower_lsp::lsp_types::Location> {
++    let query = Url::parse("file:///viewer-override-definition-query.php").unwrap();
++    crate::common::open_php(backend, &query, source).await;
++    match crate::common::goto_definition_at(backend, &query, 1, character).await {
++        None => vec![],
++        Some(tower_lsp::lsp_types::GotoDefinitionResponse::Scalar(location)) => vec![location],
++        Some(tower_lsp::lsp_types::GotoDefinitionResponse::Array(locations)) => locations,
++        Some(tower_lsp::lsp_types::GotoDefinitionResponse::Link(links)) => links
++            .into_iter()
++            .map(|link| {
++                tower_lsp::lsp_types::Location::new(link.target_uri, link.target_selection_range)
++            })
++            .collect(),
++    }
++}
++
++#[tokio::test]
++async fn stub_canonical_class_viewer_override_cannot_change_embedded_coordinates() {
++    let backend = viewer_override_backend();
++    viewer_override_load_and_open_client(&backend).await;
++    for (query, character, marker) in [
++        (
++            "<?php\nnew viewer_override_carrier();\n",
++            6,
++            "class viewer_override_carrier",
++        ),
++        (
++            "<?php\nviewer_override_carrier::STABLE;\n",
++            "viewer_override_carrier::".len() as u32 + 2,
++            "STABLE",
++        ),
++    ] {
++        let locations = viewer_override_query(&backend, query, character).await;
++        assert_eq!(
++            locations.len(),
++            1,
++            "trusted embedded declaration must still navigate: {query}"
++        );
++        let location = &locations[0];
++        assert_eq!(
++            location.uri.as_str(),
++            "phpantom-stub://viewer_override_carrier"
++        );
++        let document = backend
++            .workbench_builtin(phpantom_lsp::workbench_builtins::BuiltinQuery {
++                uri: location.uri.to_string(),
++            })
++            .await
++            .expect("canonical viewer control");
++        assert_eq!(document.content, VIEWER_OVERRIDE_SOURCE);
++        assert_ne!(document.content, VIEWER_OVERRIDE_CLIENT);
++        assert_eq!(
++            location.range.start,
++            viewer_override_position(&document.content, marker),
++            "navigation must compute coordinates in the exact immutable source opened by its viewer"
++        );
++    }
++}
++
++#[tokio::test]
++async fn stub_canonical_class_viewer_override_preserves_project_file_coordinates() {
++    let backend = viewer_override_backend();
++    viewer_override_load_and_open_client(&backend).await;
++    let project = Url::parse("file:///viewer-override-project.php").unwrap();
++    let source = "<?php\n/** @since 99.0 */\n/* café 🐘 */ class viewer_override_project {\n    public const LOCAL = 67;\n}\n";
++    crate::common::open_php(&backend, &project, source).await;
++    for (query, character, marker) in [
++        (
++            "<?php\nnew viewer_override_project();\n",
++            6,
++            "class viewer_override_project",
++        ),
++        (
++            "<?php\nviewer_override_project::LOCAL;\n",
++            "viewer_override_project::".len() as u32 + 2,
++            "LOCAL",
++        ),
++    ] {
++        let locations = viewer_override_query(&backend, query, character).await;
++        assert_eq!(
++            locations.len(),
++            1,
++            "ordinary project declaration remains navigable: {query}"
++        );
++        assert_eq!(locations[0].uri, project);
++        assert_eq!(
++            locations[0].range.start,
++            viewer_override_position(source, marker)
++        );
++    }
++}
+diff --git a/tests/integration/stub_global_siblings.rs b/tests/integration/stub_global_siblings.rs
+new file mode 100644
+index 0000000..2f5ece1
+--- /dev/null
++++ b/tests/integration/stub_global_siblings.rs
+@@ -0,0 +1,408 @@
++//! A global builtin constant must not publish unavailable sibling declarations.
++use crate::common::{complete_at, goto_definition_at, hover_text_at, open_php};
++use phpantom_lsp::{Backend, types::PhpVersion};
++use std::collections::HashMap;
++use tower_lsp::LanguageServer;
++use tower_lsp::lsp_types::*;
++
++const SIBLING_STUB: &str = r#"<?php
++const GLOBAL_SIBLING_SENTINEL = 37;
++function siblingLegacyFunction(): string { return 'legacy'; }
++/** @since 8.2 */
++function siblingFutureFunction(): string { return 'future'; }
++class SiblingLegacyClass {}
++/** @since 8.2 */
++class SiblingFutureClass {}
++interface SiblingLegacyInterface {}
++/** @since 8.2 */ interface SiblingFutureInterface {}
++trait SiblingLegacyTrait {}
++/** @since 8.2 */ trait SiblingFutureTrait {}
++enum SiblingLegacyEnum { case One; }
++/** @since 8.2 */ enum SiblingFutureEnum { case One; }
++"#;
++
++fn sibling_backend(minor: u8) -> Backend {
++    let backend = Backend::new_test_with_all_stubs(
++        HashMap::from([
++            ("SiblingLegacyClass", SIBLING_STUB),
++            ("SiblingFutureClass", SIBLING_STUB),
++            ("SiblingLegacyInterface", SIBLING_STUB),
++            ("SiblingFutureInterface", SIBLING_STUB),
++            ("SiblingLegacyTrait", SIBLING_STUB),
++            ("SiblingFutureTrait", SIBLING_STUB),
++            ("SiblingLegacyEnum", SIBLING_STUB),
++            ("SiblingFutureEnum", SIBLING_STUB),
++        ]),
++        HashMap::from([
++            ("siblingLegacyFunction", SIBLING_STUB),
++            ("siblingFutureFunction", SIBLING_STUB),
++        ]),
++        HashMap::from([("GLOBAL_SIBLING_SENTINEL", SIBLING_STUB)]),
++    );
++    backend.set_php_version(PhpVersion::new(8, minor));
++    backend
++}
++
++async fn load_sibling_global_first(backend: &Backend) {
++    let uri = Url::parse("file:///global-sibling-sentinel.php").unwrap();
++    open_php(backend, &uri, "<?php\nGLOBAL_SIBLING_SENTINEL;\n").await;
++    let hover = hover_text_at(backend, &uri, 1, 1)
++        .await
++        .expect("global sentinel must resolve through its stub index");
++    assert!(hover.contains("37"), "{hover}");
++}
++
++async fn sibling_items(backend: &Backend, source: &str) -> Vec<CompletionItem> {
++    complete_at(
++        backend,
++        &Url::parse("file:///sibling-completion.php").unwrap(),
++        source,
++        1,
++        source.lines().last().unwrap().len() as u32,
++    )
++    .await
++}
++
++fn sibling_named<'a>(items: &'a [CompletionItem], name: &str) -> Option<&'a CompletionItem> {
++    items.iter().find(|item| {
++        item.filter_text
++            .as_deref()
++            .unwrap_or(item.label.split('(').next().unwrap())
++            == name
++    })
++}
++
++#[tokio::test]
++async fn stub_global_first_function_completion_respects_numeric_introduction() {
++    for minor in [1, 2] {
++        let backend = sibling_backend(minor);
++        // Startup index filtering is a control: only the global-constant load
++        // below should be able to reveal the bypass under investigation.
++        let index_control = sibling_backend(minor);
++        let before = sibling_items(&index_control, "<?php\nsibling").await;
++        assert!(sibling_named(&before, "siblingLegacyFunction").is_some());
++        assert_eq!(
++            sibling_named(&before, "siblingFutureFunction").is_some(),
++            minor >= 2
++        );
++        load_sibling_global_first(&backend).await;
++        let after = sibling_items(&backend, "<?php\nsibling").await;
++        assert!(sibling_named(&after, "siblingLegacyFunction").is_some());
++        assert_eq!(
++            sibling_named(&after, "siblingFutureFunction").is_some(),
++            minor >= 2,
++            "global-first function cache on 8.{minor}"
++        );
++    }
++}
++
++#[tokio::test]
++async fn stub_global_first_class_completion_respects_numeric_introduction() {
++    for minor in [1, 2] {
++        let backend = sibling_backend(minor);
++        let index_control = sibling_backend(minor);
++        let before = sibling_items(&index_control, "<?php\nnew Sibling").await;
++        assert!(sibling_named(&before, "SiblingLegacyClass").is_some());
++        assert_eq!(
++            sibling_named(&before, "SiblingFutureClass").is_some(),
++            minor >= 2
++        );
++        load_sibling_global_first(&backend).await;
++        let after = sibling_items(&backend, "<?php\nnew Sibling").await;
++        assert!(sibling_named(&after, "SiblingLegacyClass").is_some());
++        assert_eq!(
++            sibling_named(&after, "SiblingFutureClass").is_some(),
++            minor >= 2,
++            "global-first class cache on 8.{minor}"
++        );
++    }
++}
++
++#[tokio::test]
++async fn stub_global_first_future_siblings_cannot_resolve_under_older_target() {
++    let newer = sibling_backend(2);
++    let older = sibling_backend(1);
++    load_sibling_global_first(&newer).await;
++    load_sibling_global_first(&older).await;
++    for (source, name) in [
++        ("<?php\nsibling", "siblingFutureFunction"),
++        ("<?php\nnew Sibling", "SiblingFutureClass"),
++    ] {
++        let items = sibling_items(&newer, source).await;
++        let mut donor = sibling_named(&items, name)
++            .expect("8.2 provider positive control")
++            .clone();
++        donor.documentation = None;
++        donor.detail = None;
++        assert!(
++            newer
++                .completion_resolve(donor.clone())
++                .await
++                .unwrap()
++                .documentation
++                .is_some(),
++            "available sibling {name} must resolve"
++        );
++        assert!(
++            older
++                .completion_resolve(donor)
++                .await
++                .unwrap()
++                .documentation
++                .is_none(),
++            "global-first 8.1 must not resolve future sibling {name}"
++        );
++    }
++}
++
++fn navigation_count(response: Option<GotoDefinitionResponse>) -> usize {
++    match response {
++        None => 0,
++        Some(GotoDefinitionResponse::Scalar(_)) => 1,
++        Some(GotoDefinitionResponse::Array(items)) => items.len(),
++        Some(GotoDefinitionResponse::Link(items)) => items.len(),
++    }
++}
++
++#[tokio::test]
++async fn stub_global_first_sibling_navigation_respects_target() {
++    for minor in [1, 2] {
++        let backend = sibling_backend(minor);
++        load_sibling_global_first(&backend).await;
++        let uri = Url::parse("file:///sibling-navigation.php").unwrap();
++        for (source, character, future) in [
++            ("<?php\nsiblingLegacyFunction();\n", 1, false),
++            ("<?php\nsiblingFutureFunction();\n", 1, true),
++            ("<?php\nnew SiblingLegacyClass();\n", 5, false),
++            ("<?php\nnew SiblingFutureClass();\n", 5, true),
++        ] {
++            open_php(&backend, &uri, source).await;
++            let response = goto_definition_at(&backend, &uri, 1, character).await;
++            assert_eq!(
++                navigation_count(response) > 0,
++                !future || minor >= 2,
++                "{source} at 8.{minor}"
++            );
++        }
++    }
++}
++
++#[tokio::test]
++async fn stub_global_first_preserves_project_since_release_notes() {
++    let backend = sibling_backend(1);
++    let uri = Url::parse("file:///project-sibling-notes.php").unwrap();
++    open_php(&backend, &uri, "<?php\n/** @since 99.0 */\nfunction projectFutureFunction(): string { return 'project'; }\n/** @since 99.0 */\nclass ProjectFutureClass {}\n").await;
++    load_sibling_global_first(&backend).await;
++    for (source, name) in [
++        ("<?php\nprojectFuture", "projectFutureFunction"),
++        ("<?php\nnew ProjectFuture", "ProjectFutureClass"),
++    ] {
++        let items = sibling_items(&backend, source).await;
++        let mut item = sibling_named(&items, name)
++            .expect("project release note must not hide a declaration")
++            .clone();
++        item.documentation = None;
++        assert!(
++            backend
++                .completion_resolve(item)
++                .await
++                .unwrap()
++                .documentation
++                .is_some()
++        );
++    }
++    let query_uri = Url::parse("file:///project-sibling-navigation.php").unwrap();
++    for (source, character) in [
++        ("<?php\nprojectFutureFunction();\n", 1),
++        ("<?php\nnew ProjectFutureClass();\n", 5),
++    ] {
++        open_php(&backend, &query_uri, source).await;
++        assert!(navigation_count(goto_definition_at(&backend, &query_uri, 1, character).await) > 0);
++    }
++}
++
++#[tokio::test]
++async fn stub_global_first_classlike_imports_respect_numeric_introduction() {
++    for minor in [1, 2] {
++        let backend = sibling_backend(minor);
++        load_sibling_global_first(&backend).await;
++        let items = sibling_items(&backend, "<?php\nuse Sibling").await;
++        for kind in ["Class", "Interface", "Trait", "Enum"] {
++            let stable = format!("SiblingLegacy{kind}");
++            let future = format!("SiblingFuture{kind}");
++            assert!(
++                sibling_named(&items, &stable).is_some(),
++                "stable {kind} import missing on8.{minor}"
++            );
++            assert_eq!(
++                sibling_named(&items, &future).is_some(),
++                minor >= 2,
++                "future {kind} import on8.{minor}"
++            );
++        }
++    }
++}
++
++const FUNCTION_NAV_SHARED: &str = r#"<?php
++namespace { const FUNCTION_NAV_SENTINEL = 64023; }
++namespace FunctionBuiltin {
++    // café 🐘: preserve original declaration offsets in the immutable viewer.
++    function stable(): string { return 'canonical'; }
++    /** @since 8.2 */
++    function future(): string { return 'future'; }
++}
++"#;
++const FUNCTION_NAV_DIFFERENT: &str = r#"<?php
++namespace FunctionBuiltin;
++// Different actual source, deliberately different declaration coordinates.
++function stable(): string { return 'different'; }
++"#;
++
++fn function_nav_backend(minor: u8, stable_source: &'static str) -> Backend {
++    let backend = Backend::new_test_with_all_stubs(
++        HashMap::new(),
++        HashMap::from([
++            ("FunctionBuiltin\\stable", stable_source),
++            ("FunctionBuiltin\\future", FUNCTION_NAV_SHARED),
++        ]),
++        HashMap::from([("FUNCTION_NAV_SENTINEL", FUNCTION_NAV_SHARED)]),
++    );
++    backend.set_php_version(PhpVersion::new(8, minor));
++    backend
++}
++
++async fn function_nav_global_first(backend: &Backend) {
++    let uri = Url::parse("file:///function-navigation-sentinel.php").unwrap();
++    open_php(backend, &uri, "<?php\nFUNCTION_NAV_SENTINEL;\n").await;
++    let hover = hover_text_at(backend, &uri, 1, 2)
++        .await
++        .expect("trusted global loader control");
++    assert!(hover.contains("64023"), "{hover}");
++}
++
++async fn function_nav_locations(backend: &Backend, name: &str) -> Vec<Location> {
++    let uri = Url::parse("file:///function-navigation-query.php").unwrap();
++    let source = format!("<?php\n\\FunctionBuiltin\\{name}();\n");
++    open_php(backend, &uri, &source).await;
++    match goto_definition_at(backend, &uri, 1, 3).await {
++        None => vec![],
++        Some(GotoDefinitionResponse::Scalar(location)) => vec![location],
++        Some(GotoDefinitionResponse::Array(locations)) => locations,
++        Some(GotoDefinitionResponse::Link(links)) => links
++            .into_iter()
++            .map(|link| Location::new(link.target_uri, link.target_selection_range))
++            .collect(),
++    }
++}
++
++fn function_nav_expected_position(source: &str, name: &str) -> Position {
++    let marker = format!("function {name}");
++    let offset = source.find(&marker).unwrap() + "function ".len();
++    let prefix = &source[..offset];
++    Position::new(
++        prefix.bytes().filter(|byte| *byte == b'\n').count() as u32,
++        prefix.rsplit('\n').next().unwrap().encode_utf16().count() as u32,
++    )
++}
++
++#[tokio::test]
++async fn stub_global_first_namespaced_function_navigation_reads_identical_embedded_source() {
++    for minor in [1, 2] {
++        let backend = function_nav_backend(minor, FUNCTION_NAV_SHARED);
++        function_nav_global_first(&backend).await;
++        for name in ["stable", "future"] {
++            let locations = function_nav_locations(&backend, name).await;
++            if name == "future" && minor < 2 {
++                assert!(
++                    locations.is_empty(),
++                    "unavailable namespaced function must not navigate"
++                );
++                continue;
++            }
++            assert_eq!(locations.len(), 1, "available {name} on 8.{minor}");
++            let location = &locations[0];
++            assert_eq!(
++                location.uri.as_str(),
++                format!("phpantom-stub-fn://FunctionBuiltin%5C{name}")
++            );
++            let document = backend
++                .workbench_builtin(phpantom_lsp::workbench_builtins::BuiltinQuery {
++                    uri: location.uri.to_string(),
++                })
++                .await
++                .expect("semantic navigation must return an existing readable builtin identity");
++            assert_eq!(document.content, FUNCTION_NAV_SHARED);
++            assert_eq!(
++                location.range.start,
++                function_nav_expected_position(FUNCTION_NAV_SHARED, name)
++            );
++        }
++    }
++}
++
++#[tokio::test]
++async fn stub_global_first_namespaced_function_different_source_cannot_borrow_coordinates() {
++    let backend = function_nav_backend(1, FUNCTION_NAV_DIFFERENT);
++    function_nav_global_first(&backend).await;
++    for location in function_nav_locations(&backend, "stable").await {
++        assert_ne!(
++            location.uri.as_str(),
++            "phpantom-stub-fn://FunctionBuiltin%5Cstable"
++        );
++        assert!(
++            backend
++                .workbench_builtin(phpantom_lsp::workbench_builtins::BuiltinQuery {
++                    uri: location.uri.to_string(),
++                })
++                .await
++                .is_err(),
++            "unmapped source may refuse, never open different embedded bytes at its offset"
++        );
++    }
++    let canonical = backend
++        .workbench_builtin(phpantom_lsp::workbench_builtins::BuiltinQuery {
++            uri: "phpantom-stub-fn://FunctionBuiltin%5Cstable".into(),
++        })
++        .await
++        .unwrap();
++    assert_eq!(canonical.content, FUNCTION_NAV_DIFFERENT);
++    assert_ne!(canonical.content, FUNCTION_NAV_SHARED);
++}
++
++#[tokio::test]
++async fn stub_global_first_namespaced_function_client_replacement_has_no_embedded_provenance() {
++    let backend = function_nav_backend(1, FUNCTION_NAV_SHARED);
++    function_nav_global_first(&backend).await;
++    let publisher = Url::parse("phpantom-stub://const/FUNCTION_NAV_SENTINEL").unwrap();
++    open_php(&backend, &publisher, FUNCTION_NAV_DIFFERENT).await;
++    for location in function_nav_locations(&backend, "stable").await {
++        assert_ne!(
++            location.uri.as_str(),
++            "phpantom-stub-fn://FunctionBuiltin%5Cstable",
++            "client-selected AST cannot borrow trusted embedded coordinates from an equal URI spelling"
++        );
++    }
++    let canonical = backend
++        .workbench_builtin(phpantom_lsp::workbench_builtins::BuiltinQuery {
++            uri: "phpantom-stub-fn://FunctionBuiltin%5Cstable".into(),
++        })
++        .await
++        .unwrap();
++    assert_eq!(canonical.content, FUNCTION_NAV_SHARED);
++}
++
++#[tokio::test]
++async fn stub_global_first_namespaced_function_project_notes_keep_file_navigation() {
++    let backend = function_nav_backend(1, FUNCTION_NAV_SHARED);
++    let uri = Url::parse("file:///project-function-notes.php").unwrap();
++    let source = "<?php\nnamespace FunctionBuiltin;\n/** @since 99.0 */\nfunction projectFunction(): string { return 'project'; }\n";
++    open_php(&backend, &uri, source).await;
++    function_nav_global_first(&backend).await;
++    let locations = function_nav_locations(&backend, "projectFunction").await;
++    assert_eq!(locations.len(), 1);
++    assert_eq!(locations[0].uri, uri);
++    assert_eq!(
++        locations[0].range.start,
++        function_nav_expected_position(source, "projectFunction")
++    );
++}

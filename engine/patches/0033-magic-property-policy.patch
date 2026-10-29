@@ -1,0 +1,175 @@
+diff --git a/src/diagnostics/unknown_members/mod.rs b/src/diagnostics/unknown_members/mod.rs
+index 295ec74..1dd5b27 100644
+--- a/src/diagnostics/unknown_members/mod.rs
++++ b/src/diagnostics/unknown_members/mod.rs
+@@ -693,10 +693,11 @@ impl Backend {
+         // the cache and the resolver disagree.
+ 
+         // ── Suppress property access on __get classes ───────────────
+-        // `__get` handles arbitrary property names.  Unlike __call,
+-        // we suppress the diagnostic entirely because there is no
+-        // meaningful return-type recovery to perform.
++        // Default mode trusts arbitrary `__get` access immediately. The
++        // opted-in policy needs the resolved virtual property surface: raw
++        // classes may not carry PHPDoc/provider properties until merged.
+         if !is_method_call
++            && !report_magic
+             && base_classes
+                 .iter()
+                 .any(|c| has_magic_method_for_access(c, is_static, false, report_magic))
+@@ -935,3 +936,155 @@ fn is_downstream_of_broken_chain(subject_text: &str, broken_prefixes: &[String])
+         }
+     })
+ }
++
++#[cfg(test)]
++mod magic_property_policy_tests {
++    use crate::Backend;
++    use std::sync::Arc;
++    use tower_lsp::lsp_types::Diagnostic;
++
++    const MAGIC: &str =
++        "class Magic { public function __get(string $name): mixed { return null; } }";
++    fn source(annotation: &str, extra: &str, receiver: &str, member: &str) -> String {
++        format!(
++            "<?php namespace App;\n{annotation}\n{MAGIC}\n{extra}\nclass Caller {{ public function read({receiver} $subject): mixed {{ return $subject->{member}; }} }}"
++        )
++    }
++    fn backend(enabled: bool) -> Backend {
++        let backend = Backend::new_test();
++        let mut config = backend.config();
++        config.diagnostics.report_magic_properties = Some(enabled);
++        backend.set_config(config);
++        backend
++    }
++    fn publish(backend: &Backend, uri: &str, source: &str) {
++        backend
++            .open_files
++            .write()
++            .insert(uri.to_owned(), Arc::new(source.to_owned()));
++        backend.update_ast(uri, source);
++    }
++    fn collect(source: &str, enabled: bool) -> Vec<Diagnostic> {
++        let backend = backend(enabled);
++        let uri = "file:///magic-policy.php";
++        publish(&backend, uri, source);
++        if source.contains("@property") {
++            assert!(
++                backend
++                    .find_class_in_uri_classes_index("App\\Magic")
++                    .unwrap()
++                    .doc_members
++                    .as_ref()
++                    .is_some_and(|doc| !doc.properties.is_empty()),
++                "the fixture's virtual property declaration is parsed"
++            );
++        }
++        let mut diags = Vec::new();
++        backend.collect_unknown_member_diagnostics(uri, source, &mut diags);
++        diags
++    }
++    fn missing(diags: &[Diagnostic]) {
++        assert_eq!(
++            diags.len(),
++            1,
++            "one unknown property must be reported: {diags:?}"
++        );
++        assert!(diags[0].message.contains("Property 'missing'"));
++    }
++    #[test]
++    fn declared_virtual_surface_reports_unknown_property_when_enabled() {
++        missing(&collect(
++            &source("/** @property string $known */", "", "Magic", "missing"),
++            true,
++        ));
++    }
++    #[test]
++    fn known_virtual_property_remains_valid() {
++        assert!(
++            collect(
++                &source("/** @property string $known */", "", "Magic", "known"),
++                true
++            )
++            .is_empty()
++        );
++    }
++    #[test]
++    fn arbitrary_magic_class_without_virtual_surface_remains_permissive() {
++        assert!(collect(&source("", "", "Magic", "missing"), true).is_empty());
++    }
++    #[test]
++    fn disabled_policy_preserves_permissive_magic_behavior() {
++        assert!(
++            collect(
++                &source("/** @property string $known */", "", "Magic", "missing"),
++                false
++            )
++            .is_empty()
++        );
++    }
++    #[test]
++    fn readonly_virtual_surface_reports_unknown_property() {
++        missing(&collect(
++            &source(
++                "/** @property-read string $known */",
++                "",
++                "Magic",
++                "missing",
++            ),
++            true,
++        ));
++    }
++    #[test]
++    fn inherited_magic_surface_reports_unknown_property() {
++        missing(&collect(
++            &source(
++                "/** @property string $known */",
++                "class Child extends Magic {}",
++                "Child",
++                "missing",
++            ),
++            true,
++        ));
++    }
++    #[test]
++    fn separate_file_phpdoc_surface_reports_unknown_property() {
++        let backend = backend(true);
++        let helper = format!("<?php namespace App;\n/** @property string $known */\n{MAGIC}");
++        publish(&backend, "file:///app/Magic.php", &helper);
++        let caller = "<?php namespace App; class Caller { public function read(Magic $subject): mixed { return $subject->missing; } }";
++        publish(&backend, "file:///app/Caller.php", caller);
++        let mut diags = Vec::new();
++        backend.collect_unknown_member_diagnostics("file:///app/Caller.php", caller, &mut diags);
++        missing(&diags);
++    }
++    #[test]
++    fn union_with_arbitrary_magic_branch_remains_permissive() {
++        let extra = "class Loose { public function __get(string $name): mixed { return null; } }";
++        assert!(
++            collect(
++                &source(
++                    "/** @property string $known */",
++                    extra,
++                    "Magic|Loose",
++                    "missing"
++                ),
++                true
++            )
++            .is_empty()
++        );
++    }
++    #[test]
++    fn property_magic_does_not_suppress_an_unknown_method() {
++        let diags = collect(
++            &source(
++                "/** @property string $known */",
++                "",
++                "Magic",
++                "missingMethod()",
++            ),
++            true,
++        );
++        assert_eq!(diags.len(), 1);
++        assert!(diags[0].message.contains("Method 'missingMethod'"));
++    }
++}

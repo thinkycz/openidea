@@ -1,0 +1,270 @@
+diff --git a/docs/CHANGELOG.md b/docs/CHANGELOG.md
+index c8b3633..b9681fb 100644
+--- a/docs/CHANGELOG.md
++++ b/docs/CHANGELOG.md
+@@ -15,6 +15,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
+ 
+ ## [Unreleased]
+ 
++- **Formatting preserves unchanged surrounding code.** Formatting edits retain shared leading and trailing text, including Unicode and CRLF boundaries, so token rewrites in one function do not replace untouched functions after it. Contributed by PHP Workbench downstream.
++
+ - **Keep member suggestions while typing.** Completion recovers enclosing function and class scopes before their closing braces are written, preserving visibility and typed chains. Strict membership checks against broad or unavailable object types retain valid member suggestions. Contributed by PHP Workbench downstream.
+ 
+ - **Rename preserves import bindings.** Class renames update every matching import while retaining explicit aliases and choosing available names for collisions. Moving grouped imports keeps unrelated bindings and surrounding code. Contributed by PHP Workbench downstream.
+diff --git a/src/formatting/mod.rs b/src/formatting/mod.rs
+index a86fd2c..9ead238 100644
+--- a/src/formatting/mod.rs
++++ b/src/formatting/mod.rs
+@@ -61,7 +61,7 @@
+ use std::path::{Path, PathBuf};
+ use std::sync::atomic::AtomicBool;
+ 
+-use tower_lsp::lsp_types::{Position, Range, TextEdit};
++use tower_lsp::lsp_types::TextEdit;
+ 
+ use crate::Backend;
+ use crate::composer::{self, ComposerPackage};
+@@ -378,23 +378,46 @@ pub fn execute_strategy(
+     Ok(formatted.map(|formatted| compute_edits(content, &formatted)))
+ }
+ 
+-/// Compute the `TextEdit`s needed to transform `original` into `formatted`.
++/// Compute a single bounded edit that transforms original into formatted.
+ ///
+-/// Returns a single `TextEdit` that replaces the entire document.  Only
+-/// returns edits if the content actually changed.
++/// Shared leading and trailing text stays outside the replacement. Separate
++/// changes can still include unchanged text between them; no global diff is
++/// computed. Edges are Unicode scalar boundaries and never split CRLF pairs.
+ pub(crate) fn compute_edits(original: &str, formatted: &str) -> Vec<TextEdit> {
+     if original == formatted {
+         return Vec::new();
+     }
+ 
++    let mut prefix: usize = original
++        .chars()
++        .zip(formatted.chars())
++        .take_while(|(a, b)| a == b)
++        .map(|(ch, _)| ch.len_utf8())
++        .sum();
++    let suffix: usize = original[prefix..]
++        .chars()
++        .rev()
++        .zip(formatted[prefix..].chars().rev())
++        .take_while(|(a, b)| a == b)
++        .map(|(ch, _)| ch.len_utf8())
++        .sum();
++    let mut original_end = original.len() - suffix;
++    let mut formatted_end = formatted.len() - suffix;
++    let splits_crlf = |text: &str, offset: usize| {
++        offset > 0
++            && text.as_bytes()[offset - 1] == b'\r'
++            && text.as_bytes().get(offset) == Some(&b'\n')
++    };
++    if splits_crlf(original, prefix) || splits_crlf(formatted, prefix) {
++        prefix -= 1;
++    }
++    if splits_crlf(original, original_end) || splits_crlf(formatted, formatted_end) {
++        original_end += 1;
++        formatted_end += 1;
++    }
++
+     vec![TextEdit {
+-        range: Range {
+-            start: Position {
+-                line: 0,
+-                character: 0,
+-            },
+-            end: crate::text_position::offset_to_position(original, original.len()),
+-        },
+-        new_text: formatted.to_string(),
++        range: crate::text_position::byte_range_to_lsp_range(original, prefix, original_end),
++        new_text: formatted[prefix..formatted_end].to_string(),
+     }]
+ }
+diff --git a/src/formatting/tests.rs b/src/formatting/tests.rs
+index 7dadbfc..6d25e94 100644
+--- a/src/formatting/tests.rs
++++ b/src/formatting/tests.rs
+@@ -23,11 +23,11 @@ fn compute_edits_with_change() {
+     let edits = compute_edits(original, formatted);
+     assert_eq!(edits.len(), 1);
+     let edit = &edits[0];
+-    assert_eq!(edit.range.start.line, 0);
++    assert_eq!(edit.range.start.line, 1);
+     assert_eq!(edit.range.start.character, 0);
+-    assert_eq!(edit.range.end.line, 2);
++    assert_eq!(edit.range.end.line, 1);
+     assert_eq!(edit.range.end.character, 0);
+-    assert_eq!(edit.new_text, formatted);
++    assert_eq!(edit.new_text, "\n");
+ }
+ 
+ #[test]
+@@ -712,8 +712,8 @@ fn execute_builtin_reformats_messy_class() {
+     assert!(edits.is_some(), "Expected edits for messy class, got None");
+     let edits = edits.unwrap();
+     assert!(!edits.is_empty());
+-    // The replacement text should have proper PER-CS formatting.
+-    let new_text = &edits[0].new_text;
++    // Inspect the document after applying all provider edits.
++    let new_text = apply_computed_format_edits(content, &edits);
+     assert!(
+         new_text.contains("class User\n{"),
+         "Expected class brace on next line, got:\n{}",
+@@ -841,3 +841,83 @@ fn run_pint_on_blade_rejects_empty_stdout_for_nonempty_input() {
+     let err = result.expect_err("empty stdout for non-empty input must be rejected");
+     assert!(err.contains("pint"), "unexpected error: {err}");
+ }
++
++const CAPTURED_FORMAT_SOURCE: &str = "<?php\nfunction changed() { $text = \"hello\"; return (new Example())->run(); }\n\n// unchanged café 🐘\nfunction untouched(): string\n{\n    return 'keep';\n}\n";
++const CAPTURED_FORMAT_PHP83: &str = "<?php\n\nfunction changed()\n{\n    $text = 'hello';\n    return ( new Example() )->run();\n}\n\n// unchanged café 🐘\nfunction untouched(): string\n{\n    return 'keep';\n}\n";
++const CAPTURED_FORMAT_PHP84: &str = "<?php\n\nfunction changed()\n{\n    $text = 'hello';\n    return new Example()->run();\n}\n\n// unchanged café 🐘\nfunction untouched(): string\n{\n    return 'keep';\n}\n";
++
++fn apply_computed_format_edits(original: &str, edits: &[tower_lsp::lsp_types::TextEdit]) -> String {
++    let mut result = original.to_string();
++    for edit in edits.iter().rev() {
++        let start = crate::text_position::position_to_byte_offset(original, edit.range.start);
++        let end = crate::text_position::position_to_byte_offset(original, edit.range.end);
++        result.replace_range(start..end, &edit.new_text);
++    }
++    result
++}
++
++#[test]
++fn compute_edits_captured_mago_output_excludes_unchanged_function() {
++    use tower_lsp::lsp_types::{Position, Range};
++    // Actual captured PHP 8.3/8.4 Mago output; CRLF variants test edit
++    // encoding without asserting that Mago itself preserves line endings.
++    for output in [CAPTURED_FORMAT_PHP83, CAPTURED_FORMAT_PHP84] {
++        for crlf in [false, true] {
++            let original = if crlf {
++                CAPTURED_FORMAT_SOURCE.replace('\n', "\r\n")
++            } else {
++                CAPTURED_FORMAT_SOURCE.to_string()
++            };
++            let formatted = if crlf {
++                output.replace('\n', "\r\n")
++            } else {
++                output.to_string()
++            };
++            let edits = compute_edits(&original, &formatted);
++            assert_eq!(edits.len(), 1);
++            assert_eq!(
++                edits[0].range,
++                Range::new(Position::new(1, 0), Position::new(1, 69))
++            );
++            assert!(!edits[0].new_text.contains("untouched"));
++            assert!(!edits[0].new_text.contains("unchanged café 🐘"));
++            assert_eq!(apply_computed_format_edits(&original, &edits), formatted);
++        }
++    }
++}
++
++#[test]
++fn compute_edits_unicode_boundaries_have_exact_utf16_columns() {
++    use tower_lsp::lsp_types::{Position, Range};
++    let original = "<?php\r\n$text = 'café 🐘'; $count=1;\r\n\r\nfunction untouched(): string { return 'keep'; }\r\n";
++    let cases = [
++        (original.replace("$count=1", "$count = 1"), 25, 26, " = "),
++        (original.replace("café", "cafè"), 12, 13, "è"),
++        (original.replace('🐘', "🐈"), 14, 16, "🐈"),
++    ];
++    for (formatted, start, end, replacement) in cases {
++        let edits = compute_edits(original, &formatted);
++        assert_eq!(edits.len(), 1);
++        assert_eq!(
++            edits[0].range,
++            Range::new(Position::new(1, start), Position::new(1, end))
++        );
++        assert_eq!(edits[0].new_text, replacement);
++        assert_eq!(apply_computed_format_edits(original, &edits), formatted);
++    }
++}
++
++#[test]
++fn compute_edits_does_not_split_crlf_when_line_ending_changes() {
++    use tower_lsp::lsp_types::{Position, Range};
++    let original = "A\r\nB";
++    let formatted = "A\nB";
++    let edits = compute_edits(original, formatted);
++    assert_eq!(edits.len(), 1);
++    assert_eq!(
++        edits[0].range,
++        Range::new(Position::new(0, 1), Position::new(1, 0))
++    );
++    assert_eq!(edits[0].new_text, "\n");
++    assert_eq!(apply_computed_format_edits(original, &edits), formatted);
++}
+diff --git a/tests/integration/formatting_blade.rs b/tests/integration/formatting_blade.rs
+index ff41ed5..673509a 100644
+--- a/tests/integration/formatting_blade.rs
++++ b/tests/integration/formatting_blade.rs
+@@ -1,6 +1,6 @@
+ #[cfg(test)]
+ mod tests {
+-    use crate::common::{create_test_backend, open_document};
++    use crate::common::{apply_edits, create_test_backend, open_document};
+     use tower_lsp::LanguageServer;
+     use tower_lsp::lsp_types::*;
+ 
+@@ -43,11 +43,11 @@ mod tests {
+         .await
+     }
+ 
+-    /// The single whole-document edit's replacement text.
+-    fn new_text(edits: Option<Vec<TextEdit>>) -> String {
++    /// Apply the actual ranged edit rather than assuming a whole-file replacement.
++    fn new_text(original: &str, edits: Option<Vec<TextEdit>>) -> String {
+         let edits = edits.expect("expected edits");
+         assert_eq!(edits.len(), 1);
+-        edits.into_iter().next().unwrap().new_text
++        apply_edits(original, &edits)
+     }
+ 
+     #[tokio::test]
+@@ -58,7 +58,10 @@ mod tests {
+ 
+         let result = format(&backend, uri, "php", text).await;
+ 
+-        assert_eq!(new_text(result), "@if($x)\n    <p>hello</p>\n@endif\n");
++        assert_eq!(
++            new_text(text, result),
++            "@if($x)\n    <p>hello</p>\n@endif\n"
++        );
+     }
+ 
+     #[tokio::test]
+@@ -69,7 +72,10 @@ mod tests {
+ 
+         let result = format(&backend, uri, "blade", text).await;
+ 
+-        assert_eq!(new_text(result), "@if($x)\n    <p>hello</p>\n@endif\n");
++        assert_eq!(
++            new_text(text, result),
++            "@if($x)\n    <p>hello</p>\n@endif\n"
++        );
+     }
+ 
+     #[tokio::test]
+@@ -82,7 +88,10 @@ mod tests {
+ 
+         let result = format(&backend, uri, "php", text).await;
+ 
+-        assert_eq!(new_text(result), "@php\n    echo   'hello' ;\n@endphp\n");
++        assert_eq!(
++            new_text(text, result),
++            "@php\n    echo   'hello' ;\n@endphp\n"
++        );
+     }
+ 
+     #[tokio::test]
+@@ -104,7 +113,7 @@ mod tests {
+         )
+         .await;
+ 
+-        assert_eq!(new_text(result), "<div>\n\t<p>hello</p>\n</div>\n");
++        assert_eq!(new_text(text, result), "<div>\n\t<p>hello</p>\n</div>\n");
+     }
+ 
+     #[tokio::test]

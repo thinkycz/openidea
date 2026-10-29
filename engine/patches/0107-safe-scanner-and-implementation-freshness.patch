@@ -1,0 +1,662 @@
+diff --git a/src/classmap_scanner/mod.rs b/src/classmap_scanner/mod.rs
+index decd43c..293d151 100644
+--- a/src/classmap_scanner/mod.rs
++++ b/src/classmap_scanner/mod.rs
+@@ -70,11 +70,8 @@
+ //!   lexer.
+ 
+ use std::collections::HashMap;
+-use std::ops::Deref;
+ use std::path::{Path, PathBuf};
+ 
+-use memmap2::Mmap;
+-
+ mod discovery;
+ mod filters;
+ mod lexer;
+@@ -92,56 +89,66 @@ pub(crate) use walk::{collect_php_files_gitignore, collect_workspace_index_files
+ 
+ // ─── File reading ────────────────────────────────────────────────────────────
+ 
+-/// Bytes of a file made available to the byte-level scanners.
+-///
+-/// [`read_for_scan`] prefers a memory-mapped view so the OS page cache
+-/// is shared without copying the file into the heap, falling back to a
+-/// heap read when mapping is not possible (empty files cannot be mapped,
+-/// and some filesystems do not support it).
+-pub(crate) enum FileBytes {
+-    /// A read-only memory map of the file's pages.
+-    Mapped(Mmap),
+-    /// A heap copy of the file's contents (mapping fallback).
+-    Owned(Vec<u8>),
++/// Read a regular file into owned bytes before scanning. A mapping can fault
++/// after another process truncates its file, even after mapping succeeds.
++/// The returned bytes are safe to access but may be partial or mixed when
++/// another process writes concurrently; this does not prove a stable version.
++pub(crate) fn read_for_scan(path: &Path) -> std::io::Result<Vec<u8>> {
++    let file = open_scan_file(path)?;
++    let metadata = file.metadata()?;
++    if !metadata.is_file() {
++        return Err(std::io::Error::new(
++            std::io::ErrorKind::InvalidInput,
++            "scanner input is not a regular file",
++        ));
++    }
++    read_observed_length(file, metadata.len())
+ }
+ 
+-impl Deref for FileBytes {
+-    type Target = [u8];
++#[cfg(unix)]
++fn open_scan_file(path: &Path) -> std::io::Result<std::fs::File> {
++    use rustix::fs::{Mode, OFlags};
++    // NONBLOCK prevents a FIFO substituted for a source file from hanging
++    // open; descriptor metadata is checked after the actual open.
++    rustix::fs::open(
++        path,
++        OFlags::RDONLY | OFlags::NONBLOCK | OFlags::CLOEXEC,
++        Mode::empty(),
++    )
++    .map(std::fs::File::from)
++    .map_err(Into::into)
++}
+ 
+-    fn deref(&self) -> &[u8] {
+-        match self {
+-            FileBytes::Mapped(map) => map,
+-            FileBytes::Owned(bytes) => bytes,
+-        }
++#[cfg(not(unix))]
++fn open_scan_file(path: &Path) -> std::io::Result<std::fs::File> {
++    // This preflight reduces accidental non-regular opens on other targets;
++    // unlike Unix it is not an atomic guarantee against path replacement.
++    if !std::fs::metadata(path)?.is_file() {
++        return Err(std::io::Error::new(
++            std::io::ErrorKind::InvalidInput,
++            "scanner input is not a regular file",
++        ));
+     }
++    std::fs::File::open(path)
+ }
+ 
+-/// Read a file's bytes for scanning, preferring a memory-mapped view.
+-///
+-/// The scanners read the returned bytes synchronously and drop them
+-/// before returning, so the map never outlives the scan.
+-pub(crate) fn read_for_scan(path: &Path) -> std::io::Result<FileBytes> {
++fn read_observed_length(file: std::fs::File, length: u64) -> std::io::Result<Vec<u8>> {
+     use std::io::Read;
+-
+-    let file = std::fs::File::open(path)?;
+-    let len = file.metadata().map(|m| m.len()).unwrap_or(0);
+-    if len >= MMAP_MIN_BYTES {
+-        // SAFETY: The map is read synchronously and dropped before this
+-        // scan returns. A concurrent truncation could raise SIGBUS, but
+-        // index scanning does not run while the user is deleting files; the
+-        // heap-read fallback covers filesystems that reject mapping.
+-        if let Ok(map) = unsafe { Mmap::map(&file) } {
+-            return Ok(FileBytes::Mapped(map));
+-        }
++    // Metadata is only an allocation hint: avoid an enormous initial
++    // reservation while allowing files of any observed length. The read
++    // stops at the captured length and cannot chase an expanding file.
++    const INITIAL_RESERVATION_LIMIT: u64 = 32 * 1024 * 1024;
++    let mut bytes = Vec::with_capacity(length.min(INITIAL_RESERVATION_LIMIT) as usize);
++    file.take(length).read_to_end(&mut bytes)?;
++    if (bytes.len() as u64) < length {
++        return Err(std::io::Error::new(
++            std::io::ErrorKind::UnexpectedEof,
++            "scanner input was truncated during read",
++        ));
+     }
+-    let mut buf = Vec::with_capacity(len as usize);
+-    (&file).read_to_end(&mut buf)?;
+-    Ok(FileBytes::Owned(buf))
++    Ok(bytes)
+ }
+ 
+-/// Below this size a file is copied to the heap instead of mapped.
+-const MMAP_MIN_BYTES: u64 = 256 * 1024;
+-
+ // ─── Data structures ────────────────────────────────────────────────────────
+ 
+ /// All symbols discovered in a single PHP file by [`find_symbols`].
+@@ -228,3 +235,166 @@ pub fn scan_file_full(path: &Path) -> ScanResult {
+     }
+     find_symbols(&content)
+ }
++
++#[cfg(test)]
++mod read_safety_tests {
++    use super::*;
++    use std::{
++        io::Write,
++        sync::{
++            Arc,
++            atomic::{AtomicBool, Ordering},
++        },
++        thread,
++    };
++
++    #[test]
++    fn watched_reader_survives_concurrent_truncate() {
++        const CHILD: &str = "PHPWB_READER_TRUNCATE_CHILD";
++        if let Some(path) = std::env::var_os(CHILD) {
++            let path = PathBuf::from(path);
++            let bytes = read_for_scan(&path).unwrap();
++            assert_eq!(bytes.len(), 2 * 1024 * 1024);
++            let truncate_path = path.clone();
++            thread::spawn(move || {
++                std::fs::OpenOptions::new()
++                    .write(true)
++                    .open(truncate_path)
++                    .unwrap()
++                    .set_len(0)
++                    .unwrap()
++            })
++            .join()
++            .unwrap();
++            // Actual read after another thread has truncated the file. A live
++            // file mapping can SIGBUS here; a heap snapshot remains readable.
++            assert_eq!(bytes[0], b'A');
++            assert_eq!(bytes[bytes.len() - 1], b'A');
++            drop(bytes);
++            let stop = Arc::new(AtomicBool::new(false));
++            let writer_stop = stop.clone();
++            let writer_path = path.clone();
++            let writer = thread::spawn(move || {
++                while !writer_stop.load(Ordering::Relaxed) {
++                    let mut file = std::fs::OpenOptions::new()
++                        .write(true)
++                        .truncate(true)
++                        .open(&writer_path)
++                        .unwrap();
++                    file.write_all(&vec![b'B'; 512 * 1024]).unwrap();
++                }
++            });
++            for _ in 0..100 {
++                match read_for_scan(&path) {
++                    Ok(snapshot) => {
++                        std::hint::black_box(
++                            snapshot
++                                .iter()
++                                .fold(0u8, |sum, byte| sum.wrapping_add(*byte)),
++                        );
++                    }
++                    Err(error) if error.kind() == std::io::ErrorKind::UnexpectedEof => {}
++                    Err(error) => panic!("unexpected read error: {error}"),
++                }
++            }
++            stop.store(true, Ordering::Relaxed);
++            writer.join().unwrap();
++            return;
++        }
++        let dir = tempfile::tempdir().unwrap();
++        let path = dir.path().join("peer.php");
++        std::fs::write(&path, vec![b'A'; 2 * 1024 * 1024]).unwrap();
++        // Isolate a SIGBUS from the test runner so an unsafe implementation
++        // yields a normal failing test rather than aborting the whole suite.
++        let child = std::process::Command::new(std::env::current_exe().unwrap())
++            .args([
++                "--exact",
++                "classmap_scanner::read_safety_tests::watched_reader_survives_concurrent_truncate",
++                "--nocapture",
++            ])
++            .env(CHILD, &path)
++            .output()
++            .unwrap();
++        assert!(
++            child.status.success(),
++            "reader child failed: status={} stdout={} stderr={}",
++            child.status,
++            String::from_utf8_lossy(&child.stdout),
++            String::from_utf8_lossy(&child.stderr)
++        );
++    }
++
++    #[test]
++    fn watched_reader_bounds_growth_and_accepts_short_truncation() {
++        let dir = tempfile::tempdir().unwrap();
++        let path = dir.path().join("growing.php");
++        std::fs::write(&path, b"abc").unwrap();
++        let file = std::fs::File::open(&path).unwrap();
++        let observed = file.metadata().unwrap().len();
++        std::fs::OpenOptions::new()
++            .append(true)
++            .open(&path)
++            .unwrap()
++            .write_all(b"def")
++            .unwrap();
++        assert_eq!(read_observed_length(file, observed).unwrap(), b"abc");
++        let file = std::fs::File::open(&path).unwrap();
++        let observed = file.metadata().unwrap().len();
++        std::fs::write(&path, b"a").unwrap();
++        assert_eq!(
++            read_observed_length(file, observed).unwrap_err().kind(),
++            std::io::ErrorKind::UnexpectedEof
++        );
++    }
++
++    #[cfg(unix)]
++    #[test]
++    fn watched_reader_rejects_fifo_without_blocking() {
++        const CHILD: &str = "PHPWB_READER_FIFO_CHILD";
++        if let Some(path) = std::env::var_os(CHILD) {
++            let error = read_for_scan(Path::new(&path)).unwrap_err();
++            assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
++            return;
++        }
++        let dir = tempfile::tempdir().unwrap();
++        let path = dir.path().join("source.php");
++        assert!(
++            std::process::Command::new("/usr/bin/mkfifo")
++                .arg(&path)
++                .status()
++                .unwrap()
++                .success()
++        );
++        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
++            .args([
++                "--exact",
++                "classmap_scanner::read_safety_tests::watched_reader_rejects_fifo_without_blocking",
++            ])
++            .env(CHILD, &path)
++            .spawn()
++            .unwrap();
++        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
++        let status = loop {
++            if let Some(status) = child.try_wait().unwrap() {
++                break status;
++            }
++            if std::time::Instant::now() >= deadline {
++                child.kill().unwrap();
++                child.wait().unwrap();
++                panic!("FIFO open blocked");
++            }
++            thread::sleep(std::time::Duration::from_millis(10));
++        };
++        assert!(status.success(), "FIFO reader child failed: {status}");
++    }
++
++    #[test]
++    fn watched_reader_preserves_empty_binary_and_large_content() {
++        let dir = tempfile::tempdir().unwrap();
++        let path = dir.path().join("data.php");
++        for content in [Vec::new(), vec![0, 255, 0, 1], vec![b'X'; 3 * 1024 * 1024]] {
++            std::fs::write(&path, &content).unwrap();
++            assert_eq!(&*read_for_scan(&path).unwrap(), &content);
++        }
++    }
++}
+diff --git a/src/definition/implementation.rs b/src/definition/implementation.rs
+index 573bbb6..38e2eb8 100644
+--- a/src/definition/implementation.rs
++++ b/src/definition/implementation.rs
+@@ -927,8 +927,8 @@ impl Backend {
+ 
+     /// Check every class defined in a freshly parsed file's `classes`
+     /// against the target and record matches.  Shared by the phases that
+-    /// pre-filter a file's content by different means (an mmap-backed
+-    /// byte search for indexed/vendor files, a `read_to_string` scan for a
++    /// pre-filter a file's content by different means (a byte search for
++    /// indexed/vendor files, a `read_to_string` scan for a
+     /// PSR-4 directory walk) before parsing it.
+     #[allow(clippy::too_many_arguments)]
+     fn check_candidates_in_file(
+diff --git a/src/indexing/scan.rs b/src/indexing/scan.rs
+index f213839..23f0357 100644
+--- a/src/indexing/scan.rs
++++ b/src/indexing/scan.rs
+@@ -368,9 +368,8 @@ impl Backend {
+             return;
+         }
+ 
+-        // Map the archive rather than copying it onto the heap: the scan
+-        // below only touches the pages of the `.php` entries it reads, and
+-        // the map is dropped when this function returns.
++        // Read owned bytes so truncating an archive cannot invalidate pages
++        // while the manifest is being parsed.
+         let data = match classmap_scanner::read_for_scan(phar_path) {
+             Ok(d) => d,
+             Err(_) => return,
+diff --git a/src/phar.rs b/src/phar.rs
+index 859e6b6..4bdb5f8 100644
+--- a/src/phar.rs
++++ b/src/phar.rs
+@@ -326,6 +326,21 @@ mod tests {
+         Some((dir, archive))
+     }
+ 
++    #[test]
++    fn watched_large_phar_parses_from_scanner_reader() {
++        let mut source = b"<?php class LargeArchiveClass {}\n".to_vec();
++        source.resize(3 * 1024 * 1024, b' ');
++        let bytes = build_test_phar(&[("src/Large.php", &source)]);
++        let dir = tempfile::tempdir().unwrap();
++        let path = dir.path().join("large.phar");
++        std::fs::write(&path, &bytes).unwrap();
++        let scanner_bytes = crate::classmap_scanner::read_for_scan(&path).unwrap();
++        assert_eq!(&*scanner_bytes, &bytes);
++        let archive = PharArchive::parse(&path, &scanner_bytes).expect("parse scanner bytes");
++        assert!(archive.file_paths().any(|p| p == "src/Large.php"));
++        assert_eq!(archive.read_file("src/Large.php"), Some(source));
++    }
++
+     #[test]
+     fn parse_minimal_phar() {
+         let phar_bytes = build_test_phar(&[
+diff --git a/src/server.rs b/src/server.rs
+index 785711e..622d641 100644
+--- a/src/server.rs
++++ b/src/server.rs
+@@ -40,6 +40,17 @@ use tower_lsp::lsp_types::*;
+ use crate::Backend;
+ use crate::formatting;
+ 
++#[cfg(test)]
++type ImplementationResultHook = (
++    String,
++    Box<dyn FnOnce(&Option<GotoImplementationResponse>) + Send>,
++);
++
++#[cfg(test)]
++static IMPLEMENTATION_RESULT_HOOK: std::sync::OnceLock<
++    parking_lot::Mutex<Option<ImplementationResultHook>>,
++> = std::sync::OnceLock::new();
++
+ /// Run `f` on a blocking thread in a way that survives `$/cancelRequest`.
+ ///
+ /// tower-lsp 0.20 wedges its serve loop if a request handler future is
+@@ -343,21 +354,41 @@ impl LanguageServer for Backend {
+         });
+         let uri_clone = uri.clone();
+         let result = run_blocking_cancel_safe("goto_implementation", move || {
+-            backend.handle_with_position(
+-                "goto_implementation",
+-                &uri_clone,
+-                position,
+-                |content, pos| {
+-                    backend
+-                        .resolve_implementation(&uri_clone, content, pos)
+-                        .map(|locs| {
+-                            locs.into_iter()
+-                                .map(|l| backend.translate_location(l))
+-                                .collect()
+-                        })
+-                        .and_then(wrap_locations)
+-                },
+-            )
++            backend.with_prepared_current_semantics(|| {
++                backend.ensure_blade_refresh_ready(&uri_clone)?;
++                let result = backend.handle_with_position(
++                    "goto_implementation",
++                    &uri_clone,
++                    position,
++                    |content, pos| {
++                        backend
++                            .resolve_implementation(&uri_clone, content, pos)
++                            .map(|locs| {
++                                locs.into_iter()
++                                    .map(|l| backend.translate_location(l))
++                                    .collect()
++                            })
++                            .and_then(wrap_locations)
++                    },
++                )?;
++                #[cfg(test)]
++                {
++                    let hook = IMPLEMENTATION_RESULT_HOOK.get_or_init(Default::default);
++                    let selected = {
++                        let mut slot = hook.lock();
++                        if slot.as_ref().is_some_and(|(uri, _)| uri == &uri_clone) {
++                            slot.take()
++                        } else {
++                            None
++                        }
++                    };
++                    if let Some((_, run)) = selected {
++                        run(&result);
++                    }
++                }
++                backend.ensure_blade_refresh_ready(&uri_clone)?;
++                Ok(result)
++            })
+         })
+         .await
+         .unwrap_or(Ok(None));
+@@ -369,7 +400,12 @@ impl LanguageServer for Backend {
+             self.progress_end(tok, Some("Done".to_string())).await;
+         }
+ 
+-        result
++        match result {
++            Err(error) if error.code == tower_lsp::jsonrpc::ErrorCode::ServerError(-32801) => {
++                Ok(None)
++            }
++            result => result,
++        }
+     }
+ 
+     async fn goto_type_definition(
+@@ -1472,6 +1508,221 @@ mod semantic_source_tests {
+             .map(|item| item.label.split('(').next().unwrap().to_owned())
+             .collect()
+     }
++    async fn implementation(
++        backend: &Backend,
++        interface_uri: &str,
++    ) -> Option<GotoImplementationResponse> {
++        let params = serde_json::from_value(json!({
++            "textDocument": {"uri": interface_uri}, "position": {"line": 1, "character": 12}
++        }))
++        .unwrap();
++        LanguageServer::goto_implementation(backend, params)
++            .await
++            .unwrap()
++    }
++
++    fn implementation_uris(result: Option<GotoImplementationResponse>) -> Vec<Url> {
++        let mut uris = match result {
++            Some(GotoImplementationResponse::Scalar(location)) => vec![location.uri],
++            Some(GotoImplementationResponse::Array(locations)) => {
++                locations.into_iter().map(|location| location.uri).collect()
++            }
++            _ => Vec::new(),
++        };
++        uris.sort_by(|a, b| a.as_str().cmp(b.as_str()));
++        uris
++    }
++
++    #[tokio::test]
++    async fn implementation_pending_addition_returns_current_implementor_uri() {
++        let backend = Backend::new_test();
++        let interface = "file:///Service.php";
++        let implementor = "file:///Added.php";
++        install(&backend, interface, "<?php\ninterface Service {}\n");
++        install(&backend, implementor, "<?php\nclass Added {}\n");
++        backend.mark_workspace_indexed();
++        pending(
++            &backend,
++            implementor,
++            "<?php\nclass Added implements Service {}\n",
++        );
++        let found = implementation(&backend, interface).await;
++        assert_eq!(
++            implementation_uris(found.clone()),
++            vec![Url::parse(implementor).unwrap()]
++        );
++        match found {
++            Some(GotoImplementationResponse::Scalar(location)) => {
++                let point = Position {
++                    line: 1,
++                    character: 0,
++                };
++                assert_eq!(
++                    location.range,
++                    Range {
++                        start: point,
++                        end: point
++                    }
++                );
++            }
++            other => panic!("expected one point location, got {other:?}"),
++        }
++    }
++
++    #[tokio::test]
++    async fn implementation_pending_removal_returns_no_location() {
++        let backend = Backend::new_test();
++        let interface = "file:///Service.php";
++        let implementor = "file:///Removed.php";
++        install(&backend, interface, "<?php\ninterface Service {}\n");
++        install(
++            &backend,
++            implementor,
++            "<?php\nclass Removed implements Service {}\n",
++        );
++        backend.mark_workspace_indexed();
++        assert_eq!(
++            implementation_uris(implementation(&backend, interface).await),
++            vec![Url::parse(implementor).unwrap()]
++        );
++        pending(&backend, implementor, "<?php\nclass Removed {}\n");
++        assert!(implementation_uris(implementation(&backend, interface).await).is_empty());
++    }
++
++    #[tokio::test]
++    async fn implementation_returns_both_current_implementor_uris() {
++        let backend = Backend::new_test();
++        let interface = "file:///Service.php";
++        let first = "file:///First.php";
++        let second = "file:///Second.php";
++        install(&backend, interface, "<?php\ninterface Service {}\n");
++        install(
++            &backend,
++            first,
++            "<?php\nclass First implements Service {}\n",
++        );
++        install(
++            &backend,
++            second,
++            "<?php\nclass Second implements Service {}\n",
++        );
++        backend.mark_workspace_indexed();
++        assert_eq!(
++            implementation_uris(implementation(&backend, interface).await),
++            vec![Url::parse(first).unwrap(), Url::parse(second).unwrap()]
++        );
++    }
++
++    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
++    async fn implementation_discards_result_when_real_change_arrives_during_resolution() {
++        use std::sync::mpsc;
++        use std::time::Duration;
++        let backend = Arc::new(Backend::new_test());
++        let interface = "file:///RaceService.php";
++        let implementor = "file:///RaceImplementor.php";
++        install(&backend, interface, "<?php\ninterface RaceService {}\n");
++        install(
++            &backend,
++            implementor,
++            "<?php\nclass RaceImplementor implements RaceService {}\n",
++        );
++        backend.mark_workspace_indexed();
++        let (started_tx, started_rx) = mpsc::channel();
++        let (release_tx, release_rx) = mpsc::channel();
++        *IMPLEMENTATION_RESULT_HOOK
++            .get_or_init(Default::default)
++            .lock() = Some((
++            interface.to_owned(),
++            Box::new(move |resolved| {
++                match resolved {
++                    Some(GotoImplementationResponse::Scalar(location)) => {
++                        assert_eq!(location.uri.as_str(), implementor);
++                        let point = Position {
++                            line: 1,
++                            character: 0,
++                        };
++                        assert_eq!(
++                            location.range,
++                            Range {
++                                start: point,
++                                end: point
++                            }
++                        );
++                    }
++                    other => panic!("expected old implementation before change, got {other:?}"),
++                }
++                started_tx.send(()).unwrap();
++                release_rx.recv_timeout(Duration::from_secs(10)).unwrap();
++            }),
++        ));
++        let worker = Arc::clone(&backend);
++        let request = tokio::spawn(async move { implementation(&worker, interface).await });
++        tokio::task::spawn_blocking(move || {
++            started_rx.recv_timeout(Duration::from_secs(5)).unwrap()
++        })
++        .await
++        .unwrap();
++        let change = serde_json::from_value(json!({
++            "textDocument": {"uri": implementor, "version": 2},
++            "contentChanges": [{"text": "<?php\nclass RaceImplementor {}\n"}]
++        }))
++        .unwrap();
++        LanguageServer::did_change(&*backend, change).await;
++        release_tx.send(()).unwrap();
++        let stale = tokio::time::timeout(Duration::from_secs(10), request)
++            .await
++            .unwrap()
++            .unwrap();
++        assert!(
++            stale.is_none(),
++            "the result computed before didChange must be discarded"
++        );
++        assert!(implementation(&backend, interface).await.is_none());
++    }
++
++    #[tokio::test]
++    async fn implementation_prepares_pending_open_implementor_before_resolving() {
++        let backend = Backend::new_test();
++        let interface = "file:///Service.php";
++        let implementor = "file:///ServiceImpl.php";
++        install(&backend, interface, "<?php\ninterface Service {}\n");
++        install(
++            &backend,
++            implementor,
++            "<?php\nclass OldImpl implements Service {}\n",
++        );
++        backend.mark_workspace_indexed();
++        pending(
++            &backend,
++            implementor,
++            "<?php\nclass NewImpl implements Service {}\n",
++        );
++        let result = implementation(&backend, interface).await;
++        assert!(result.is_some(), "the current implementation must resolve");
++        let classes = backend.symbols.fqn_class_index.read();
++        assert!(classes.contains_key("NewImpl"));
++        assert!(!classes.contains_key("OldImpl"));
++    }
++
++    #[tokio::test]
++    async fn implementation_does_not_return_during_active_semantic_publication() {
++        let backend = Backend::new_test();
++        let interface = "file:///Service.php";
++        let implementor = "file:///ServiceImpl.php";
++        install(&backend, interface, "<?php\ninterface Service {}\n");
++        install(
++            &backend,
++            implementor,
++            "<?php\nclass ConcreteImpl implements Service {}\n",
++        );
++        backend.mark_workspace_indexed();
++        assert!(implementation(&backend, interface).await.is_some());
++        let publication = backend.begin_semantic_publication();
++        assert!(implementation(&backend, interface).await.is_none());
++        drop(publication);
++        assert!(implementation(&backend, interface).await.is_some());
++    }
++
+     #[tokio::test]
+     async fn completion_refreshes_a_dependency_whose_parse_is_pending() {
+         let backend = Backend::new_test();

@@ -1,0 +1,139 @@
+diff --git a/docs/CHANGELOG.md b/docs/CHANGELOG.md
+index 7908899..f9250dc 100644
+--- a/docs/CHANGELOG.md
++++ b/docs/CHANGELOG.md
+@@ -15,6 +15,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
+ 
+ ## [Unreleased]
+ 
++- **Readonly-class accessors.** Getter generation remains available for readonly classes, while setter actions are omitted for their readonly properties. Contributed by PHP Workbench downstream.
++
+ - **Preview PHP structural replacements.** Prepare selected call transformations against current editor text, with captured expressions and checked source identities. The editor reviews changes before applying them. Contributed by PHP Workbench downstream.
+ 
+ - **Document symbols follow unsaved edits immediately.** Outlines and breadcrumbs use the accepted editor revision even before its background parse finishes, including undo. Contributed by PHP Workbench downstream.
+diff --git a/src/code_actions/generate_getter_setter.rs b/src/code_actions/generate_getter_setter.rs
+index 47b4303..72cc860 100644
+--- a/src/code_actions/generate_getter_setter.rs
++++ b/src/code_actions/generate_getter_setter.rs
+@@ -94,12 +94,13 @@ impl Backend {
+             |program, content| {
+                 let ctx = find_cursor_context(&program.statements, cursor_offset);
+ 
+-                let (property, all_members) = match &ctx {
++                let (property, all_members, class_readonly) = match &ctx {
+                     CursorContext::InClassLike {
+                         member: MemberContext::Property(prop),
+                         all_members,
++                        class_readonly,
+                         ..
+-                    } => (*prop, *all_members),
++                    } => (*prop, *all_members, *class_readonly),
+                     _ => return None,
+                 };
+ 
+@@ -136,7 +137,7 @@ impl Backend {
+                     };
+ 
+                     let can_getter = !has_getter && !has_is;
+-                    let can_setter = !has_setter && !prop.is_readonly;
++                    let can_setter = !has_setter && !prop.is_readonly && !class_readonly;
+ 
+                     if can_getter || can_setter {
+                         available.push(AvailableAccessors {
+diff --git a/tests/integration/code_action_generate_getter_setter.rs b/tests/integration/code_action_generate_getter_setter.rs
+index afb6a46..e54707f 100644
+--- a/tests/integration/code_action_generate_getter_setter.rs
++++ b/tests/integration/code_action_generate_getter_setter.rs
+@@ -272,3 +272,92 @@ fn static_property_generates_static_methods() {
+         edits[0].new_text
+     );
+ }
++
++#[test]
++fn readonly_class_accessor_implicit_properties_offer_getters_without_setters() {
++    let backend = create_test_backend();
++    let content = "<?php\r\n// ž🐘\r\nreadonly class ImmutableLabel\r\n{\r\n    private string $name;\r\n}\r\n";
++    assert!(content.contains("\r\n"));
++    let actions = actions_at(&backend, content, "private string $name");
++    assert!(find_action_titled(&actions, "Generate setter").is_none());
++    assert!(find_action_titled(&actions, "Generate getter and setter").is_none());
++    let getter =
++        find_action_titled(&actions, "Generate getter").expect("readonly class retains its getter");
++    let edits = extract_edits(getter);
++    assert_eq!(edits.len(), 1);
++    assert_eq!(edits[0].range.start, edits[0].range.end);
++    assert!(
++        edits[0]
++            .new_text
++            .contains("public function getName(): string")
++    );
++    assert!(edits[0].new_text.contains("return $this->name;"));
++    assert!(!edits[0].new_text.contains("$this->name ="));
++}
++
++#[test]
++fn readonly_class_accessor_multi_property_declaration_keeps_both_typed_getters() {
++    let backend = create_test_backend();
++    let content = "<?php\nreadonly class ImmutableFlags\n{\n    private bool $active, $ready;\n}\n";
++    let actions = actions_at(&backend, content, "private bool $active");
++    assert!(find_action_titled(&actions, "Generate setter").is_none());
++    assert!(find_action_titled(&actions, "Generate getter and setter").is_none());
++    let getter = find_action_titled(&actions, "Generate getter")
++        .expect("all implicit readonly properties retain getters");
++    let edits = extract_edits(getter);
++    assert_eq!(edits.len(), 1);
++    assert!(
++        edits[0]
++            .new_text
++            .contains("public function isActive(): bool")
++    );
++    assert!(
++        edits[0]
++            .new_text
++            .contains("public function isReady(): bool")
++    );
++    assert!(edits[0].new_text.contains("return $this->active;"));
++    assert!(edits[0].new_text.contains("return $this->ready;"));
++}
++
++#[test]
++fn readonly_class_accessor_mutable_class_preserves_setter_and_combined_actions() {
++    let backend = create_test_backend();
++    let content = "<?php\nclass MutableLabel\n{\n    private string $name;\n}\n";
++    let actions = actions_at(&backend, content, "private string $name");
++    assert!(find_action_titled(&actions, "Generate getter").is_some());
++    assert!(find_action_titled(&actions, "Generate getter and setter").is_some());
++    let setter =
++        find_action_titled(&actions, "Generate setter").expect("mutable class retains its setter");
++    let edits = extract_edits(setter);
++    assert_eq!(edits.len(), 1);
++    assert!(
++        edits[0]
++            .new_text
++            .contains("public function setName(string $name): self")
++    );
++    assert!(edits[0].new_text.contains("$this->name = $name;"));
++    assert!(edits[0].new_text.contains("return $this;"));
++}
++
++#[test]
++fn readonly_class_accessor_explicit_readonly_property_policy_is_preserved() {
++    let backend = create_test_backend();
++    for keyword in ["class", "readonly class"] {
++        let content =
++            format!("<?php\n{keyword} ExplicitLabel\n{{\n    private readonly string $name;\n}}\n");
++        let actions = actions_at(&backend, &content, "private readonly string $name");
++        assert!(
++            find_action_titled(&actions, "Generate getter").is_some(),
++            "{keyword}"
++        );
++        assert!(
++            find_action_titled(&actions, "Generate setter").is_none(),
++            "{keyword}"
++        );
++        assert!(
++            find_action_titled(&actions, "Generate getter and setter").is_none(),
++            "{keyword}"
++        );
++    }
++}

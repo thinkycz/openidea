@@ -1,0 +1,843 @@
+diff --git a/docs/CHANGELOG.md b/docs/CHANGELOG.md
+--- a/docs/CHANGELOG.md
++++ b/docs/CHANGELOG.md
+@@ -30,6 +30,8 @@
+ - **Project PHP extension profiles.** Set `[php] extensions` to the extensions available on your deployment target. Completion and built-in lookup keep project polyfills and exclude unavailable extension declarations after restarting the service. Contributed by PHP Workbench (local downstream patch).
+ 
+ ### Fixed
++
++- **Follow variables in computed member access.** Navigation and rename include selector variables, and diagnostics recognize their reads in computed constants and first-class callables. Unused outer assignments remain visible when a nested callback declares the same parameter name. Contributed by PHP Workbench downstream.
+ 
+ - **Complete native DNF types while editing.** Parenthesized intersections and following scalar union members follow the selected PHP version and declaration kind, without repeating an existing type. Contributed by PHP Workbench (local downstream patch).
+ 
+diff --git a/examples/php/definition.php b/examples/php/definition.php
+--- a/examples/php/definition.php
++++ b/examples/php/definition.php
+@@ -40,6 +40,19 @@
+         GtdParent::CONNECTION;                    // Ctrl+Click → GtdParent (not Scaffolding\Model::CONNECTION)
+         GtdTarget::$defaultRole;                  // Ctrl+Click → GtdTarget (not Scaffolding\User::$defaultRole)
+ 
++        // Ctrl+Click / Rename on each selector variable reaches its local
++        // declaration. Renaming $method leaves the string 'label' unchanged.
++        $method = 'label';
++        $target->$method();
++        $methods = ['label'];
++        $target->{$methods[0]}();
++        $callable = $target->$method(...);
++        $callable();
++        $field = 'defaultRole';
++        GtdTarget::${$field};
++        $constant = 'FORMAT';
++        GtdTarget::{$constant};
++
+         $helper = gtdHelper();
+         echo $helper;                             // Ctrl+Click on $helper → jumps to assignment
+ 
+diff --git a/src/diagnostics/unused_variables.rs b/src/diagnostics/unused_variables.rs
+--- a/src/diagnostics/unused_variables.rs
++++ b/src/diagnostics/unused_variables.rs
+@@ -441,8 +441,8 @@
+ 
+ /// Check whether the variable `name` has any read accesses within the
+ /// given frame, including reads inside nested arrow functions and catch
+-/// blocks (which inherit the parent scope), but excluding reads inside
+-/// nested closures (which have their own scope).
++/// blocks, but excluding reads inside nested closures and reads of an
++/// arrow function's own parameters (which shadow the outer binding).
+ fn has_reads_in_scope(name: &str, frame: &crate::scope_collector::Frame, scope: &ScopeMap) -> bool {
+     scope.accesses.iter().any(|a| {
+         a.name == name
+@@ -450,6 +450,14 @@
+             && a.offset >= frame.start
+             && a.offset <= frame.end
+             && !is_in_nested_closure(a.offset, frame, &scope.frames)
++            && !scope.frames.iter().any(|nested| {
++                nested.kind == FrameKind::ArrowFunction
++                    && nested.start > frame.start
++                    && nested.end < frame.end
++                    && a.offset >= nested.start
++                    && a.offset <= nested.end
++                    && nested.parameters.iter().any(|parameter| parameter == name)
++            })
+     })
+ }
+ 
+@@ -509,7 +517,8 @@
+             && f.start > parent.start
+             && f.end < parent.end
+             && f.parameters.iter().any(|p| p.as_str() == name)
+-            && offset < f.start
++            && f.parameter_range
++                .is_some_and(|(start, end)| offset >= start && offset < end)
+     })
+ }
+ 
+@@ -544,11 +553,10 @@
+         // Only consider frames nested within the parent.
+         f.start > parent.start
+             && f.end < parent.end
+-            // The parameter declaration is between the parent body start
+-            // and the child body start (e.g. in the parameter list of a
+-            // closure or arrow function).
+-            && offset < f.start
+-            && offset > parent.start
++            // A same-named outer assignment before the child is not its
++            // parameter declaration; only the actual signature owns it.
++            && f.parameter_range
++                .is_some_and(|(start, end)| offset >= start && offset < end)
+             // Check that this variable is actually a parameter of this frame.
+             && f.parameters.iter().any(|p| p.as_str() == name)
+     })
+diff --git a/src/scope_collector/build.rs b/src/scope_collector/build.rs
+--- a/src/scope_collector/build.rs
++++ b/src/scope_collector/build.rs
+@@ -282,6 +282,7 @@
+         kind: FrameKind::TopLevel,
+         captures: Vec::new(),
+         parameters: Vec::new(),
++        parameter_range: None,
+     });
+ 
+     for stmt in statements {
+@@ -439,6 +440,10 @@
+         kind,
+         captures: Vec::new(),
+         parameters: param_names,
++        parameter_range: params.declared.map(|p| {
++            let span = p.span();
++            (span.start.offset, span.end.offset)
++        }),
+     });
+ 
+     // Record parameters as writes.
+diff --git a/src/scope_collector/collector.rs b/src/scope_collector/collector.rs
+--- a/src/scope_collector/collector.rs
++++ b/src/scope_collector/collector.rs
+@@ -234,6 +234,10 @@
+                     kind: FrameKind::Catch,
+                     captures: Vec::new(),
+                     parameters: catch_params,
++                    parameter_range: catch.variable.as_ref().map(|var| {
++                        let span = var.span();
++                        (span.start.offset, span.end.offset)
++                    }),
+                 });
+                 if let Some(ref var) = catch.variable {
+                     let name = bytes_to_str(var.name).to_string();
+@@ -374,6 +378,9 @@
+             }
+             Access::ClassConstant(cca) => {
+                 walk_expression(cca.class, collector);
++                if let ClassLikeConstantSelector::Expression(selector) = &cca.constant {
++                    walk_expression(selector.expression, collector);
++                }
+             }
+         },
+         Expression::ArrayAccess(access) => {
+@@ -566,9 +573,11 @@
+             }
+             PartialApplication::Method(method_pa) => {
+                 walk_expression(method_pa.object, collector);
++                walk_member_selector_read(&method_pa.method, collector);
+             }
+             PartialApplication::StaticMethod(static_pa) => {
+                 walk_expression(static_pa.class, collector);
++                walk_member_selector_read(&static_pa.method, collector);
+             }
+         },
+         // ── Anonymous class ──
+@@ -1154,6 +1163,10 @@
+         kind: FrameKind::Closure,
+         captures: captures.clone(),
+         parameters: param_names,
++        parameter_range: Some((
++            closure.parameter_list.span().start.offset,
++            closure.parameter_list.span().end.offset,
++        )),
+     });
+ 
+     for param in closure.parameter_list.parameters.iter() {
+@@ -1202,6 +1215,10 @@
+         kind: FrameKind::ArrowFunction,
+         captures: Vec::new(), // Arrow functions capture implicitly.
+         parameters: param_names,
++        parameter_range: Some((
++            arrow.parameter_list.span().start.offset,
++            arrow.parameter_list.span().end.offset,
++        )),
+     });
+ 
+     for param in arrow.parameter_list.parameters.iter() {
+diff --git a/src/scope_collector/scope_map.rs b/src/scope_collector/scope_map.rs
+--- a/src/scope_collector/scope_map.rs
++++ b/src/scope_collector/scope_map.rs
+@@ -121,6 +121,9 @@
+     /// before the frame's `start` and cannot be distinguished from
+     /// outer-scope writes by offset alone).
+     pub parameters: Vec<String>,
++    /// Exact half-open byte range of the declared parameter list (or catch
++    /// variable). Implicit hook parameters and top-level frames have none.
++    pub parameter_range: Option<(u32, u32)>,
+ }
+ 
+ /// The kind of scope boundary a [`Frame`] represents.
+diff --git a/src/symbol_map/extraction/expressions/calls.rs b/src/symbol_map/extraction/expressions/calls.rs
+--- a/src/symbol_map/extraction/expressions/calls.rs
++++ b/src/symbol_map/extraction/expressions/calls.rs
+@@ -445,6 +445,7 @@
+                 extract_from_expression(method_call.object, ctx, scope_start);
+             }
+ 
++            extract_dynamic_member_selector(&method_call.method, ctx, scope_start);
+             if let ClassLikeMemberSelector::Identifier(ident) = &method_call.method {
+                 let member_name = crate::atom::atom_bytes(ident.value);
+                 if member_name.eq_ignore_ascii_case("macro") {
+@@ -663,6 +664,7 @@
+                 extract_from_expression(method_call.object, ctx, scope_start);
+             }
+ 
++            extract_dynamic_member_selector(&method_call.method, ctx, scope_start);
+             if let ClassLikeMemberSelector::Identifier(ident) = &method_call.method {
+                 let member_name = crate::atom::atom_bytes(ident.value);
+                 if is_laravel_config_repository_call(method_call.object, &member_name) {
+@@ -711,6 +713,7 @@
+             let subject_text = expr_to_subject_text(static_call.class);
+             emit_class_expr_span(static_call.class, ctx, scope_start);
+ 
++            extract_dynamic_member_selector(&static_call.method, ctx, scope_start);
+             if let ClassLikeMemberSelector::Identifier(ident) = &static_call.method {
+                 let member_name = crate::atom::atom_bytes(ident.value);
+                 if member_name.eq_ignore_ascii_case("macro") {
+@@ -1160,6 +1163,7 @@
+                 ctx.content,
+             );
+             extract_from_expression(method_pa.object, ctx, scope_start);
++            extract_dynamic_member_selector(&method_pa.method, ctx, scope_start);
+             if let ClassLikeMemberSelector::Identifier(ident) = &method_pa.method {
+                 let member_name = crate::atom::atom_bytes(ident.value);
+                 ctx.spans.push(SymbolSpan {
+@@ -1186,6 +1190,7 @@
+                 ctx.content,
+             );
+             emit_class_expr_span(static_pa.class, ctx, scope_start);
++            extract_dynamic_member_selector(&static_pa.method, ctx, scope_start);
+             if let ClassLikeMemberSelector::Identifier(ident) = &static_pa.method {
+                 let member_name = crate::atom::atom_bytes(ident.value);
+                 ctx.spans.push(SymbolSpan {
+diff --git a/src/symbol_map/extraction/expressions/member_access.rs b/src/symbol_map/extraction/expressions/member_access.rs
+--- a/src/symbol_map/extraction/expressions/member_access.rs
++++ b/src/symbol_map/extraction/expressions/member_access.rs
+@@ -110,6 +110,10 @@
+                         is_nullsafe: false,
+                     },
+                 });
++            } else {
++                // `Class::$name` names a property; only `${…}` / `$$…`
++                // evaluate a local variable in the static-property selector.
++                extract_variable_symbol_spans(&spa.property, ctx, scope_start);
+             }
+         }
+         Access::ClassConstant(cca) => {
+@@ -141,6 +145,8 @@
+                         },
+                     });
+                 }
++            } else if let ClassLikeConstantSelector::Expression(selector) = &cca.constant {
++                extract_from_expression(selector.expression, ctx, scope_start);
+             }
+         }
+     }
+diff --git a/src/symbol_map/extraction/expressions/mod.rs b/src/symbol_map/extraction/expressions/mod.rs
+--- a/src/symbol_map/extraction/expressions/mod.rs
++++ b/src/symbol_map/extraction/expressions/mod.rs
+@@ -48,6 +48,24 @@
+         }
+         Variable::Indirect(iv) => extract_indirect_variable(iv.expression, ctx, scope_start),
+         Variable::Nested(nv) => extract_variable_symbol_spans(nv.variable, ctx, scope_start),
++    }
++}
++
++/// Visit computed selectors as expressions in the surrounding variable scope.
++/// Identifier selectors name members instead of local variables.
++pub(super) fn extract_dynamic_member_selector<'a>(
++    selector: &'a ClassLikeMemberSelector<'a>,
++    ctx: &mut ExtractionCtx<'a>,
++    scope_start: u32,
++) {
++    match selector {
++        ClassLikeMemberSelector::Variable(var) => {
++            extract_variable_symbol_spans(var, ctx, scope_start)
++        }
++        ClassLikeMemberSelector::Expression(selector) => {
++            extract_from_expression(selector.expression, ctx, scope_start)
++        }
++        ClassLikeMemberSelector::Identifier(_) | ClassLikeMemberSelector::Missing(_) => {}
+     }
+ }
+ 
+diff --git a/tests/integration/diagnostics_unused_variables.rs b/tests/integration/diagnostics_unused_variables.rs
+--- a/tests/integration/diagnostics_unused_variables.rs
++++ b/tests/integration/diagnostics_unused_variables.rs
+@@ -994,4 +994,71 @@
+         assert_eq!(diags.len(), 1, "got: {diags:?}");
+         assert!(diags[0].message.contains("$outer"));
+     }
+-}
++
++    fn assert_parameter_ownership(php: &str, unused_line: Option<u32>) {
++        let diagnostics = collect(php);
++        match unused_line {
++            Some(line) => {
++                assert_eq!(
++                    diagnostics.len(),
++                    1,
++                    "expected only the unused outer assignment: {diagnostics:?}"
++                );
++                assert!(diagnostics[0].message.contains("$name"));
++                assert_eq!(diagnostics[0].range.start.line, line);
++            }
++            None => assert!(
++                diagnostics.is_empty(),
++                "a capture reads the outer assignment: {diagnostics:?}"
++            ),
++        }
++    }
++
++    #[test]
++    fn nested_parameter_ownership_closure_does_not_hide_prior_outer_write() {
++        assert_parameter_ownership(
++            "<?php\nfunction demo(): void {\n    $name = 'unused';\n    $callback = function (string $name): string { return $name; };\n    echo $callback('used');\n}\n",
++            Some(2),
++        );
++    }
++
++    #[test]
++    fn nested_parameter_ownership_arrow_parameter_shadows_outer_write() {
++        assert_parameter_ownership(
++            "<?php\nfunction demo(): void {\n    $name = 'unused';\n    $callback = fn(string $name): string => $name;\n    echo $callback('used');\n}\n",
++            Some(2),
++        );
++    }
++
++    #[test]
++    fn nested_parameter_ownership_later_outer_write_is_not_a_parameter() {
++        assert_parameter_ownership(
++            "<?php\nfunction demo(): void {\n    $callback = function (string $name): string { return $name; };\n    echo $callback('used');\n    $name = 'unused';\n}\n",
++            Some(4),
++        );
++    }
++
++    #[test]
++    fn nested_parameter_ownership_explicit_capture_keeps_outer_read() {
++        assert_parameter_ownership(
++            "<?php\nfunction demo(): void {\n    $name = 'used';\n    $callback = function (string $other) use ($name): string { return $name . $other; };\n    echo $callback('suffix');\n}\n",
++            None,
++        );
++    }
++
++    #[test]
++    fn nested_parameter_ownership_implicit_arrow_capture_keeps_outer_read() {
++        assert_parameter_ownership(
++            "<?php\nfunction demo(): void {\n    $name = 'used';\n    $callback = fn(string $other): string => $name . $other;\n    echo $callback('suffix');\n}\n",
++            None,
++        );
++    }
++
++    #[test]
++    fn nested_parameter_ownership_catch_body_keeps_shared_scope_read() {
++        assert_parameter_ownership(
++            "<?php\nfunction demo(): void {\n    $name = 'unused';\n    try { throw new \\Exception(); } catch (\\Exception $name) { echo $name; }\n}\n",
++            None,
++        );
++    }
++}
+diff --git a/tests/integration/dynamic_selector_variables.rs b/tests/integration/dynamic_selector_variables.rs
+new file mode 100644
+--- /dev/null
++++ b/tests/integration/dynamic_selector_variables.rs
+@@ -0,0 +1,474 @@
++//! Local variables inside dynamic member selectors participate in navigation
++//! and rename without inferring which runtime member the expression names.
++
++use crate::common::{
++    apply_edits, create_test_backend, definition_locations, edits_for_uri, find_references,
++    goto_definition_at, open_php, position_of, rename,
++};
++use tower_lsp::lsp_types::{Position, Url};
++
++fn in_context(text: &str, context: &str, token: &str) -> Position {
++    let mut position = position_of(text, context);
++    let offset = context.find(token).expect("token inside context");
++    position.character += context[..offset].encode_utf16().count() as u32;
++    position
++}
++
++async fn assert_selector_variable(selector: &str, initial: &str) {
++    let backend = create_test_backend();
++    let uri = Url::parse("file:///dynamic-selector.php").unwrap();
++    let text = format!(
++        "<?php\nclass SelectorTarget {{\n    public static string $name = 'static';\n    public const VALUE = 'value';\n    public function next(): self {{ return $this; }}\n}}\nfunction demo(SelectorTarget $object, ?SelectorTarget $nullable): void {{\n    $name = {initial};\n    $literal = '$name';\n    {selector}\n}}\n"
++    );
++    open_php(&backend, &uri, &text).await;
++    let declaration = position_of(&text, &format!("$name = {initial};"));
++    let use_position = in_context(&text, selector, "$name");
++    let locations = definition_locations(
++        goto_definition_at(
++            &backend,
++            &uri,
++            use_position.line,
++            use_position.character + 2,
++        )
++        .await,
++    );
++    assert_eq!(locations.len(), 1, "selector {selector}");
++    assert_eq!(locations[0].uri, uri);
++    assert_eq!(locations[0].range.start, declaration, "selector {selector}");
++
++    let references = find_references(&backend, &uri, use_position, true).await;
++    let mut actual: Vec<_> = references
++        .iter()
++        .map(|location| location.range.start)
++        .collect();
++    actual.sort_by_key(|position| (position.line, position.character));
++    assert_eq!(
++        actual,
++        vec![declaration, use_position],
++        "selector {selector}"
++    );
++    assert!(references.iter().all(|location| location.uri == uri));
++
++    let edit = rename(
++        &backend,
++        &uri,
++        use_position.line,
++        use_position.character + 2,
++        "operation",
++    )
++    .await
++    .expect("selector variable can be renamed from its use");
++    let file_edits = edits_for_uri(&edit, &uri);
++    assert_eq!(file_edits.len(), 2, "selector {selector}");
++    let expected = text
++        .replace(
++            &format!("$name = {initial};"),
++            &format!("$operation = {initial};"),
++        )
++        .replace(selector, &selector.replace("$name", "$operation"));
++    assert_eq!(apply_edits(&text, &file_edits), expected);
++}
++
++macro_rules! selector_case {
++    ($name:ident, $selector:literal, $initial:literal) => {
++        #[tokio::test]
++        async fn $name() {
++            assert_selector_variable($selector, $initial).await;
++        }
++    };
++}
++
++selector_case!(method_direct_variable, "$object->$name();", "'request'");
++selector_case!(method_braced_variable, "$object->{$name}();", "'request'");
++selector_case!(
++    method_nested_variable,
++    "$object->$$name();",
++    "'methodVariable'"
++);
++selector_case!(
++    method_array_expression,
++    "$object->{$name['method']}();",
++    "['method' => 'request']"
++);
++selector_case!(
++    method_nested_call_expression,
++    "$object->{strtolower($name)}();",
++    "'REQUEST'"
++);
++selector_case!(
++    method_array_index_expression,
++    "$object->{['request'][$name]}();",
++    "0"
++);
++selector_case!(
++    method_conditional_expression,
++    "$object->{true ? $name : 'request'}();",
++    "'request'"
++);
++selector_case!(
++    nullsafe_direct_variable,
++    "$nullable?->$name();",
++    "'request'"
++);
++selector_case!(
++    nullsafe_array_expression,
++    "$nullable?->{$name[0]}();",
++    "['request']"
++);
++selector_case!(
++    static_method_direct_variable,
++    "SelectorTarget::$name();",
++    "'request'"
++);
++selector_case!(
++    static_method_array_expression,
++    "SelectorTarget::{$name[0]}();",
++    "['request']"
++);
++selector_case!(
++    method_first_class_callable,
++    "$callable = $object->$name(...);",
++    "'request'"
++);
++selector_case!(
++    method_first_class_expression,
++    "$callable = $object->{$name[0]}(...);",
++    "['request']"
++);
++selector_case!(
++    static_first_class_callable,
++    "$callable = SelectorTarget::$name(...);",
++    "'request'"
++);
++selector_case!(
++    static_first_class_expression,
++    "$callable = SelectorTarget::{$name[0]}(...);",
++    "['request']"
++);
++selector_case!(
++    static_property_indirect_variable,
++    "echo SelectorTarget::${$name};",
++    "'name'"
++);
++selector_case!(
++    static_property_nested_variable,
++    "echo SelectorTarget::$$name;",
++    "'fieldVariable'"
++);
++selector_case!(
++    constant_dynamic_expression,
++    "echo SelectorTarget::{$name};",
++    "'VALUE'"
++);
++selector_case!(
++    constant_array_expression,
++    "echo SelectorTarget::{$name[0]};",
++    "['VALUE']"
++);
++selector_case!(
++    receiver_chain_keeps_selector_scope,
++    "$object->next()->$name();",
++    "'request'"
++);
++
++#[tokio::test]
++async fn rename_dispatch_includes_the_dynamic_call_use() {
++    let backend = create_test_backend();
++    let uri = Url::parse("file:///dispatch.php").unwrap();
++    let text = "<?php\nfunction dispatch(object $client): mixed {\n    $method = 'request';\n    return $client->$method();\n}\n";
++    open_php(&backend, &uri, text).await;
++    let declaration = position_of(text, "$method =");
++    let edit = rename(
++        &backend,
++        &uri,
++        declaration.line,
++        declaration.character + 2,
++        "operation",
++    )
++    .await
++    .expect("local declaration rename");
++    let edits = edits_for_uri(&edit, &uri);
++    assert_eq!(
++        edits.len(),
++        2,
++        "declaration and dynamic call must change together"
++    );
++    assert_eq!(
++        apply_edits(text, &edits),
++        "<?php\nfunction dispatch(object $client): mixed {\n    $operation = 'request';\n    return $client->$operation();\n}\n"
++    );
++}
++
++#[tokio::test]
++async fn unknown_selector_parameter_has_a_variable_definition_and_references() {
++    let backend = create_test_backend();
++    let uri = Url::parse("file:///unknown-selector.php").unwrap();
++    let text = "<?php\nfunction dispatch(object $client, string $unknown): void {\n    $client->$unknown();\n    $client->{$unknown}();\n}\n";
++    open_php(&backend, &uri, text).await;
++    let declaration = position_of(text, "$unknown");
++    let use_position = in_context(text, "$client->{$unknown}();", "$unknown");
++    let locations = definition_locations(
++        goto_definition_at(
++            &backend,
++            &uri,
++            use_position.line,
++            use_position.character + 2,
++        )
++        .await,
++    );
++    assert_eq!(locations.len(), 1);
++    assert_eq!(locations[0].range.start, declaration);
++    let references = find_references(&backend, &uri, declaration, true).await;
++    assert_eq!(references.len(), 3);
++    let edit = rename(
++        &backend,
++        &uri,
++        declaration.line,
++        declaration.character + 2,
++        "operation",
++    )
++    .await
++    .unwrap();
++    assert_eq!(
++        apply_edits(text, &edits_for_uri(&edit, &uri)),
++        text.replace("$unknown", "$operation")
++    );
++}
++
++#[tokio::test]
++async fn nested_selector_keeps_each_repeated_variable_reference() {
++    let backend = create_test_backend();
++    let uri = Url::parse("file:///repeated-selector.php").unwrap();
++    let text = "<?php\nfunction demo(object $object): void {\n    $name = 'request';\n    $object->{$name . $name}();\n}\n";
++    open_php(&backend, &uri, text).await;
++    let declaration = position_of(text, "$name =");
++    let references = find_references(&backend, &uri, declaration, true).await;
++    assert_eq!(references.len(), 3);
++    let edit = rename(
++        &backend,
++        &uri,
++        declaration.line,
++        declaration.character + 2,
++        "operation",
++    )
++    .await
++    .unwrap();
++    assert_eq!(
++        apply_edits(text, &edits_for_uri(&edit, &uri)),
++        text.replace("$name", "$operation")
++    );
++}
++
++#[tokio::test]
++async fn closure_capture_and_shadowed_selector_variables_keep_their_scopes() {
++    let backend = create_test_backend();
++    let uri = Url::parse("file:///selector-scopes.php").unwrap();
++    let text = concat!(
++        "<?php\n",
++        "function demo(object $object, string $name): void {\n",
++        "    $shadow = function (string $name) use ($object) { $object->$name(); };\n",
++        "    $captured = function () use ($object, $name) { $object->{$name}(); };\n",
++        "    $arrow = fn(string $name) => $object->$name();\n",
++        "    $object->$name();\n",
++        "}\n",
++    );
++    open_php(&backend, &uri, text).await;
++    let declaration = position_of(text, "$name");
++    let edit = rename(
++        &backend,
++        &uri,
++        declaration.line,
++        declaration.character + 2,
++        "operation",
++    )
++    .await
++    .unwrap();
++    let edits = edits_for_uri(&edit, &uri);
++    assert_eq!(edits.len(), 4);
++    assert_eq!(
++        apply_edits(text, &edits),
++        concat!(
++            "<?php\n",
++            "function demo(object $object, string $operation): void {\n",
++            "    $shadow = function (string $name) use ($object) { $object->$name(); };\n",
++            "    $captured = function () use ($object, $operation) { $object->{$operation}(); };\n",
++            "    $arrow = fn(string $name) => $object->$name();\n",
++            "    $object->$operation();\n",
++            "}\n",
++        )
++    );
++}
++
++#[tokio::test]
++async fn direct_static_property_and_single_quoted_text_are_not_local_variables() {
++    let backend = create_test_backend();
++    let uri = Url::parse("file:///static-property-control.php").unwrap();
++    let text = "<?php\nclass Target { public static string $name = 'field'; }\nfunction demo(): void {\n    $name = 'request';\n    $literal = '$name';\n    echo Target::$name;\n}\n";
++    open_php(&backend, &uri, text).await;
++    let declaration = position_of(text, "$name = 'request'");
++    let references = find_references(&backend, &uri, declaration, true).await;
++    assert_eq!(references.len(), 1);
++    let edit = rename(
++        &backend,
++        &uri,
++        declaration.line,
++        declaration.character + 2,
++        "operation",
++    )
++    .await
++    .unwrap();
++    assert_eq!(
++        apply_edits(text, &edits_for_uri(&edit, &uri)),
++        text.replace("$name = 'request'", "$operation = 'request'")
++    );
++    let property = in_context(text, "Target::$name", "$name");
++    let locations = definition_locations(
++        goto_definition_at(&backend, &uri, property.line, property.character + 2).await,
++    );
++    assert_eq!(locations.len(), 1);
++    assert_eq!(locations[0].range.start.line, 1);
++    assert_ne!(locations[0].range.start, declaration);
++    let literal = in_context(text, "'$name'", "$name");
++    assert!(
++        definition_locations(
++            goto_definition_at(&backend, &uri, literal.line, literal.character + 2).await
++        )
++        .is_empty()
++    );
++}
++
++#[tokio::test]
++async fn ordinary_member_receiver_chain_is_still_navigable() {
++    let backend = create_test_backend();
++    let uri = Url::parse("file:///receiver-chain-control.php").unwrap();
++    let text = "<?php\nclass Target { public function next(): self { return $this; } public function request(): void {} }\nfunction demo(Target $object): void { $object->next()->request(); }\n";
++    open_php(&backend, &uri, text).await;
++    let use_position = in_context(text, "->request()", "request");
++    let locations = definition_locations(
++        goto_definition_at(
++            &backend,
++            &uri,
++            use_position.line,
++            use_position.character + 2,
++        )
++        .await,
++    );
++    assert_eq!(locations.len(), 1);
++    assert_eq!(locations[0].uri, uri);
++    assert_eq!(locations[0].range.start.line, 1);
++    assert_eq!(
++        locations[0].range.start,
++        position_of(text, "request(): void")
++    );
++}
++
++fn assert_selector_read_diagnostics(selector: &str, initial: &str) {
++    let php = format!(
++        "<?php\nclass SelectorTarget {{ public static string $name = 'field'; public const VALUE = 'value'; }}\nfunction demo(object $object, ?object $nullable): void {{\n    $name = {initial};\n    {selector}\n}}\n"
++    );
++    let diagnostics = crate::common::collect_diagnostics_with(
++        &phpantom_lsp::Backend::new_test(),
++        &php,
++        phpantom_lsp::Backend::collect_unused_variable_diagnostics,
++    );
++    assert!(
++        diagnostics.is_empty(),
++        "selector {selector} reads its local variable: {diagnostics:?}"
++    );
++}
++
++macro_rules! selector_diagnostic_case {
++    ($name:ident, $selector:literal, $initial:literal) => {
++        #[test]
++        fn $name() {
++            assert_selector_read_diagnostics($selector, $initial);
++        }
++    };
++}
++
++selector_diagnostic_case!(
++    diagnostics_dynamic_selector_method_variable,
++    "$object->$name();",
++    "'request'"
++);
++selector_diagnostic_case!(
++    diagnostics_dynamic_selector_method_expression,
++    "$object->{$name[0]}();",
++    "['request']"
++);
++selector_diagnostic_case!(
++    diagnostics_dynamic_selector_nullsafe,
++    "$nullable?->{$name}();",
++    "'request'"
++);
++selector_diagnostic_case!(
++    diagnostics_dynamic_selector_static_method,
++    "SelectorTarget::$name();",
++    "'request'"
++);
++selector_diagnostic_case!(
++    diagnostics_dynamic_selector_property,
++    "echo $object->{$name};",
++    "'field'"
++);
++selector_diagnostic_case!(
++    diagnostics_dynamic_selector_indirect_static_property,
++    "echo SelectorTarget::${$name};",
++    "'name'"
++);
++selector_diagnostic_case!(
++    diagnostics_dynamic_selector_callable_variable,
++    "($object->$name(...))();",
++    "'request'"
++);
++selector_diagnostic_case!(
++    diagnostics_dynamic_selector_callable_expression,
++    "($object->{$name[0]}(...))();",
++    "['request']"
++);
++selector_diagnostic_case!(
++    diagnostics_dynamic_selector_static_callable_variable,
++    "(SelectorTarget::$name(...))();",
++    "'request'"
++);
++selector_diagnostic_case!(
++    diagnostics_dynamic_selector_static_callable_expression,
++    "(SelectorTarget::{$name[0]}(...))();",
++    "['request']"
++);
++selector_diagnostic_case!(
++    diagnostics_dynamic_selector_constant,
++    "echo SelectorTarget::{$name};",
++    "'VALUE'"
++);
++selector_diagnostic_case!(
++    diagnostics_dynamic_selector_constant_expression,
++    "echo SelectorTarget::{$name[0]};",
++    "['VALUE']"
++);
++
++#[test]
++fn diagnostics_dynamic_selector_literal_and_direct_static_property_do_not_read_local() {
++    let php = "<?php\nclass Target { public static string $name = 'field'; }\nfunction demo(): void {\n    $name = 'field';\n    echo Target::$name;\n    echo '$name';\n}\n";
++    let diagnostics = crate::common::collect_diagnostics_with(
++        &phpantom_lsp::Backend::new_test(),
++        php,
++        phpantom_lsp::Backend::collect_unused_variable_diagnostics,
++    );
++    assert_eq!(diagnostics.len(), 1);
++    assert!(diagnostics[0].message.contains("$name"));
++    assert_eq!(diagnostics[0].range.start.line, 3);
++}
++
++#[test]
++fn diagnostics_dynamic_selector_keeps_shadowed_closure_scope() {
++    let php = "<?php\nfunction demo(): void {\n    $name = 'unused';\n    $callable = function (string $name): mixed { return Target::{$name}; };\n    echo $callable('VALUE');\n}\n";
++    let diagnostics = crate::common::collect_diagnostics_with(
++        &phpantom_lsp::Backend::new_test(),
++        php,
++        phpantom_lsp::Backend::collect_unused_variable_diagnostics,
++    );
++    assert_eq!(diagnostics.len(), 1);
++    assert!(diagnostics[0].message.contains("$name"));
++    assert_eq!(diagnostics[0].range.start.line, 2);
++}
+diff --git a/tests/integration/main.rs b/tests/integration/main.rs
+--- a/tests/integration/main.rs
++++ b/tests/integration/main.rs
+@@ -173,6 +173,7 @@
+ mod document_symbols_blade;
+ mod duplicate_class_declarations;
+ mod duplicate_function_declarations;
++mod dynamic_selector_variables;
+ mod extension_profiles;
+ mod fix_cli;
+ mod folding_blade;

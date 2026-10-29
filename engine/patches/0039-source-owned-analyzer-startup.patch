@@ -1,0 +1,806 @@
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -522,20 +522,29 @@
+     }
+ }
+ 
++/// One explicitly requested source snapshot. Weak ownership keeps pending work
++/// bounded without retaining superseded editor buffers.
++#[derive(Clone)]
++pub(crate) struct ExternalToolRequest {
++    pub(crate) uri: String,
++    pub(crate) revision: Option<crate::diagnostics::revision::Revision>,
++    pub(crate) source: std::sync::Weak<String>,
++}
++
+ /// Shared state for one external diagnostic tool's dedicated background
+ /// worker (PHPStan, PHPCS, PHPMD, Mago lint, Mago analyze).
+ ///
+ /// Each worker runs as its own task so that a slow external process never
+ /// blocks native diagnostics or the other external tools. At most one
+ /// process per tool runs at a time; if the user edits while it is running,
+-/// `pending_uri` is overwritten and the worker picks up the newest file
++/// `pending_request` is overwritten and the worker picks up the newest file
+ /// once the current run finishes (older requests are superseded, not
+ /// queued — these tools are too slow to queue).
+ pub(crate) struct ExternalToolWorker {
+     /// Wakes the worker task when a new URI is pending.
+     pub(crate) notify: Arc<tokio::sync::Notify>,
+-    /// The single file URI the worker should analyse next.
+-    pub(crate) pending_uri: Arc<Mutex<Option<String>>>,
++    /// The single source-stamped request the worker should analyse next.
++    pub(crate) pending_request: Arc<Mutex<Option<ExternalToolRequest>>>,
+     /// Last-published diagnostics per file URI, merged into fast/slow
+     /// diagnostic publishes so results stay visible between tool runs.
+     pub(crate) last_diags: Arc<Mutex<HashMap<String, Vec<tower_lsp::lsp_types::Diagnostic>>>>,
+@@ -587,7 +596,7 @@
+     fn new() -> Self {
+         Self {
+             notify: Arc::new(tokio::sync::Notify::new()),
+-            pending_uri: Arc::new(Mutex::new(None)),
++            pending_request: Arc::new(Mutex::new(None)),
+             last_diags: Arc::new(Mutex::new(HashMap::new())),
+             generations: Arc::new(Mutex::new(HashMap::new())),
+             snapshots: Arc::new(Mutex::new(HashMap::new())),
+@@ -649,7 +658,7 @@
+     fn clone(&self) -> Self {
+         Self {
+             notify: Arc::clone(&self.notify),
+-            pending_uri: Arc::clone(&self.pending_uri),
++            pending_request: Arc::clone(&self.pending_request),
+             last_diags: Arc::clone(&self.last_diags),
+             generations: Arc::clone(&self.generations),
+             snapshots: Arc::clone(&self.snapshots),
+--- a/src/diagnostics/mod.rs
++++ b/src/diagnostics/mod.rs
+@@ -1042,15 +1042,18 @@
+     /// External tools are expensive (seconds per run) and at most one
+     /// process runs at a time per tool, so triggering them on every
+     /// keystroke would block save-triggered runs.
+-    pub(crate) fn schedule_external_diagnostics(&self, uri: String) {
+-        if !self.init_complete.load(Ordering::Acquire) {
+-            return;
+-        }
+-        self.schedule_phpstan(uri.clone());
+-        self.schedule_phpcs(uri.clone());
+-        self.schedule_phpmd(uri.clone());
+-        self.schedule_mago_lint(uri.clone());
+-        self.schedule_mago_analyze(uri);
++    pub(crate) fn schedule_external_diagnostics(&self, uri: String, source: &Arc<String>) {
++        self.schedule_external_tools(
++            &[
++                &self.phpstan_tool,
++                &self.phpcs_tool,
++                &self.phpmd_tool,
++                &self.mago_lint_tool,
++                &self.mago_analyze_tool,
++            ],
++            uri,
++            source,
++        );
+     }
+ 
+     /// Invalidate diagnostics for the open files a save can affect.
+--- a/src/diagnostics/revision.rs
++++ b/src/diagnostics/revision.rs
+@@ -210,6 +210,12 @@
+         if self.configuration_changing() {
+             return Err(());
+         }
++        self.capture_source(uri, text)
++    }
++
++    /// Capture only opening/version/source ownership, even while configuration
++    /// changes diagnostic phases. Used for deferred external-tool intent.
++    pub fn capture_source(&self, uri: &str, text: &Arc<String>) -> Result<Option<Revision>, ()> {
+         match self.0.get(uri) {
+             None => Ok(None),
+             Some(entry) => entry
+--- a/src/diagnostics/external/mod.rs
++++ b/src/diagnostics/external/mod.rs
+@@ -40,9 +40,38 @@
+     ///
+     /// Only the most recent file is kept: if the user switches files or
+     /// saves rapidly, earlier requests are superseded.
+-    fn schedule_external_tool(tool: &crate::ExternalToolWorker, uri: String) {
+-        *tool.pending_uri.lock() = Some(uri);
+-        tool.notify.notify_one();
++    pub(crate) fn schedule_external_tools(
++        &self,
++        tools: &[&crate::ExternalToolWorker],
++        uri: String,
++        source: &Arc<String>,
++    ) {
++        {
++            let documents = self.diag.documents.lock();
++            let files = self.open_files.read();
++            let Some(content) = files.get(&uri) else {
++                return;
++            };
++            if !Arc::ptr_eq(source, content) {
++                return;
++            }
++            let Ok(revision) = documents.capture_source(&uri, content) else {
++                return;
++            };
++            let request = crate::ExternalToolRequest {
++                uri,
++                revision,
++                source: Arc::downgrade(content),
++            };
++            // Keep capture and insertion serialized with document changes, so
++            // an older event cannot overwrite a newer request after capture.
++            for tool in tools {
++                *tool.pending_request.lock() = Some(request.clone());
++            }
++        }
++        for tool in tools {
++            tool.notify.notify_one();
++        }
+     }
+ 
+     /// Long-lived background task that runs one external tool on pending
+@@ -88,27 +117,42 @@
+                 return;
+             }
+ 
++            // Initial opens may arrive while initialization is awaiting client
++            // responses. Keep the latest stamped intent in its slot until ready.
++            // No queue or document lock is held across this wait.
++            if !self.wait_for_init_complete().await || self.shutdown_flag.load(Ordering::Acquire) {
++                return;
++            }
++
+             // Drain any extra stored permits so that notifications that
+             // arrived between the last run finishing and this
+             // `notified()` call don't cause an immediate second run.
+             let _ = tokio::time::timeout(std::time::Duration::ZERO, tool.notify.notified()).await;
+ 
+-            // ── Step 2: snapshot the pending URI ────────────────────
+-            let uri = match tool.pending_uri.lock().take() {
+-                Some(u) => u,
++            // ── Step 2: consume only the explicitly requested source ──
++            let request = match tool.pending_request.lock().take() {
++                Some(request) => request,
+                 None => continue,
+             };
+-
+-            let content = {
++            let uri = request.uri;
++            let requested_revision = request.revision;
++            let (content, revision) = {
++                let documents = self.diag.documents.lock();
+                 let files = self.open_files.read();
+-                match files.get(&uri) {
+-                    Some(c) => c.clone(),
+-                    None => continue,
++                let Some(content) = files.get(&uri) else {
++                    continue;
++                };
++                if !request.source.ptr_eq(&Arc::downgrade(content))
++                    || !documents.current(&uri, requested_revision.as_ref())
++                {
++                    continue;
+                 }
+-            };
+-
+-            let Ok(revision) = self.diag.documents.lock().capture(&uri, &content) else {
+-                continue;
++                // Source intent survives configuration refresh, but execution
++                // retains the ordinary guard against an in-progress reload.
++                let Ok(revision) = documents.capture(&uri, content) else {
++                    continue;
++                };
++                (Arc::clone(content), revision)
+             };
+             // ── Step 3: resolve the tool's binary ───────────────────
+             let file_path = match uri.parse::<Url>().ok().and_then(|u| u.to_file_path().ok()) {
+@@ -126,6 +170,10 @@
+                 Some(run) => run,
+                 None => continue,
+             };
++
++            if self.shutdown_flag.load(Ordering::Acquire) {
++                return;
++            }
+ 
+             // ── Step 4: run the tool (the slow part) ────────────────
+             // Move the blocking execution onto a dedicated OS thread.
+@@ -172,3 +220,274 @@
+         }
+     }
+ }
++
++#[cfg(test)]
++mod startup_tests {
++    use super::*;
++    use crate::ExternalToolWorker;
++    use std::time::Duration;
++
++    fn open_source(backend: &Backend, root: &Path, name: &str, text: &str) -> String {
++        let uri = Url::from_file_path(root.join(name)).unwrap().to_string();
++        let content = Arc::new(text.to_owned());
++        let mut documents = backend.diag.documents.lock();
++        documents.open(&uri, 1, &content);
++        let revision = documents.capture_source(&uri, &content).unwrap();
++        documents.mark_parsed(&uri, revision.as_ref());
++        backend.open_files.write().insert(uri.clone(), content);
++        uri
++    }
++
++    fn schedule(backend: &Backend, tool: &ExternalToolWorker, uri: String) {
++        let source = Arc::clone(backend.open_files.read().get(&uri).unwrap());
++        backend.schedule_external_tools(&[tool], uri, &source);
++    }
++
++    fn worker(
++        backend: &Backend,
++        tool: &ExternalToolWorker,
++    ) -> (
++        tokio::task::JoinHandle<()>,
++        tokio::sync::mpsc::UnboundedReceiver<String>,
++    ) {
++        let backend = backend.clone_for_diagnostic_worker();
++        let tool = tool.clone();
++        let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
++        let handle = tokio::spawn(async move {
++            backend
++                .external_tool_worker(&tool, "startup-test", move |_, _| {
++                    let sender = sender.clone();
++                    Some(Box::new(move |content, _, _, _| {
++                        sender.send(content.to_owned()).unwrap();
++                        Ok(Vec::new())
++                    }))
++                })
++                .await;
++        });
++        (handle, receiver)
++    }
++
++    async fn stop(
++        backend: &Backend,
++        tool: &ExternalToolWorker,
++        handle: tokio::task::JoinHandle<()>,
++    ) {
++        backend.shutdown_flag.store(true, Ordering::Release);
++        tool.notify.notify_one();
++        tokio::time::timeout(Duration::from_secs(1), handle)
++            .await
++            .unwrap()
++            .unwrap();
++    }
++
++    #[tokio::test]
++    async fn analyzer_startup_latest_slot_survives_configuration_refresh_without_duplicates() {
++        let directory = tempfile::tempdir().unwrap();
++        let backend = Backend::new_test_with_workspace(directory.path().to_owned(), Vec::new());
++        let tool = ExternalToolWorker::new();
++        let first = open_source(&backend, directory.path(), "First.php", "first");
++        let latest = open_source(&backend, directory.path(), "Latest.php", "latest");
++        backend.diag.documents.lock().begin_configuration_change();
++        // A bounded slot supersedes both repeated requests and other URIs.
++        for _ in 0..1000 {
++            schedule(&backend, &tool, first.clone());
++        }
++        schedule(&backend, &tool, latest.clone());
++        assert_eq!(tool.pending_request.lock().as_ref().unwrap().uri, latest);
++        let content = Arc::clone(backend.open_files.read().get(&latest).unwrap());
++        assert_eq!(
++            Arc::strong_count(&content),
++            2,
++            "pending work retains no source payload"
++        );
++        assert!(
++            backend
++                .diag
++                .documents
++                .lock()
++                .capture(&latest, &content)
++                .is_err(),
++            "ordinary diagnostic capture stays configuration-sensitive"
++        );
++        backend.diag.documents.lock().finish_configuration_change();
++        backend.diag.documents.lock().begin_configuration_change();
++        backend.diag.documents.lock().finish_configuration_change();
++        let (handle, mut receiver) = worker(&backend, &tool);
++        assert!(
++            tokio::time::timeout(Duration::from_millis(30), receiver.recv())
++                .await
++                .is_err()
++        );
++        backend.init_complete.store(true, Ordering::Release);
++        assert_eq!(
++            tokio::time::timeout(Duration::from_secs(1), receiver.recv())
++                .await
++                .unwrap()
++                .as_deref(),
++            Some("latest")
++        );
++        assert!(
++            tokio::time::timeout(Duration::from_millis(60), receiver.recv())
++                .await
++                .is_err(),
++            "coalesced permits must not duplicate a run"
++        );
++        // A fresh save of unchanged source must still request another run.
++        schedule(&backend, &tool, latest);
++        assert_eq!(
++            tokio::time::timeout(Duration::from_secs(1), receiver.recv())
++                .await
++                .unwrap()
++                .as_deref(),
++            Some("latest")
++        );
++        stop(&backend, &tool, handle).await;
++    }
++
++    #[tokio::test]
++    async fn analyzer_startup_consumption_rejects_changed_source() {
++        let directory = tempfile::tempdir().unwrap();
++        let backend = Backend::new_test_with_workspace(directory.path().to_owned(), Vec::new());
++        let tool = ExternalToolWorker::new();
++        let uri = open_source(&backend, directory.path(), "Changed.php", "original");
++        schedule(&backend, &tool, uri.clone());
++        let (handle, mut receiver) = worker(&backend, &tool);
++        let content = Arc::new("unsaved replacement".to_owned());
++        {
++            let mut documents = backend.diag.documents.lock();
++            assert!(documents.change(&uri, 2, &content));
++            backend.open_files.write().insert(uri, content);
++        }
++        backend.init_complete.store(true, Ordering::Release);
++        assert!(
++            tokio::time::timeout(Duration::from_millis(300), receiver.recv())
++                .await
++                .is_err()
++        );
++        assert!(
++            tool.pending_request.lock().is_none(),
++            "obsolete request was consumed without a run"
++        );
++        stop(&backend, &tool, handle).await;
++    }
++
++    #[tokio::test]
++    async fn analyzer_startup_shutdown_cancels_readiness_wait() {
++        let directory = tempfile::tempdir().unwrap();
++        let backend = Backend::new_test_with_workspace(directory.path().to_owned(), Vec::new());
++        let tool = ExternalToolWorker::new();
++        let uri = open_source(&backend, directory.path(), "Shutdown.php", "original");
++        schedule(&backend, &tool, uri);
++        let (handle, mut receiver) = worker(&backend, &tool);
++        tokio::time::sleep(Duration::from_millis(30)).await;
++        stop(&backend, &tool, handle).await;
++        assert_eq!(receiver.recv().await, None);
++    }
++
++    #[tokio::test]
++    async fn analyzer_startup_untracked_source_still_uses_pointer_identity() {
++        let directory = tempfile::tempdir().unwrap();
++        let backend = Backend::new_test_with_workspace(directory.path().to_owned(), Vec::new());
++        let tool = ExternalToolWorker::new();
++        let uri = Url::from_file_path(directory.path().join("Legacy.php"))
++            .unwrap()
++            .to_string();
++        backend
++            .open_files
++            .write()
++            .insert(uri.clone(), Arc::new("original".to_owned()));
++        schedule(&backend, &tool, uri.clone());
++        assert!(
++            tool.pending_request
++                .lock()
++                .as_ref()
++                .unwrap()
++                .revision
++                .is_none()
++        );
++        backend
++            .open_files
++            .write()
++            .insert(uri.clone(), Arc::new("replacement".to_owned()));
++        backend.init_complete.store(true, Ordering::Release);
++        let (handle, mut receiver) = worker(&backend, &tool);
++        assert!(
++            tokio::time::timeout(Duration::from_millis(100), receiver.recv())
++                .await
++                .is_err()
++        );
++        schedule(&backend, &tool, uri);
++        assert_eq!(
++            tokio::time::timeout(Duration::from_secs(1), receiver.recv())
++                .await
++                .unwrap()
++                .as_deref(),
++            Some("replacement")
++        );
++        stop(&backend, &tool, handle).await;
++    }
++
++    #[tokio::test]
++    async fn analyzer_startup_execution_keeps_configuration_change_guard() {
++        let directory = tempfile::tempdir().unwrap();
++        let backend = Backend::new_test_with_workspace(directory.path().to_owned(), Vec::new());
++        let tool = ExternalToolWorker::new();
++        let uri = open_source(&backend, directory.path(), "Reload.php", "unchanged");
++        backend.init_complete.store(true, Ordering::Release);
++        backend.diag.documents.lock().begin_configuration_change();
++        schedule(&backend, &tool, uri.clone());
++        assert!(
++            tool.pending_request.lock().is_some(),
++            "intent capture remains source-only"
++        );
++        let (handle, mut receiver) = worker(&backend, &tool);
++        assert!(
++            tokio::time::timeout(Duration::from_millis(100), receiver.recv())
++                .await
++                .is_err(),
++            "execution must not prepare a tool during configuration reload"
++        );
++        assert!(tool.pending_request.lock().is_none());
++        backend.diag.documents.lock().finish_configuration_change();
++        schedule(&backend, &tool, uri);
++        assert_eq!(
++            tokio::time::timeout(Duration::from_secs(1), receiver.recv())
++                .await
++                .unwrap()
++                .as_deref(),
++            Some("unchanged")
++        );
++        stop(&backend, &tool, handle).await;
++    }
++
++    #[test]
++    fn analyzer_startup_obsolete_event_source_cannot_enqueue_a_later_edit() {
++        let directory = tempfile::tempdir().unwrap();
++        let backend = Backend::new_test_with_workspace(directory.path().to_owned(), Vec::new());
++        let tool = ExternalToolWorker::new();
++        let uri = open_source(&backend, directory.path(), "Event.php", "opened");
++        let original = Arc::clone(backend.open_files.read().get(&uri).unwrap());
++        let edited = Arc::new("later unsaved edit".to_owned());
++        {
++            let mut documents = backend.diag.documents.lock();
++            assert!(documents.change(&uri, 2, &edited));
++            backend
++                .open_files
++                .write()
++                .insert(uri.clone(), Arc::clone(&edited));
++        }
++        backend.schedule_external_tools(&[&tool], uri.clone(), &original);
++        assert!(tool.pending_request.lock().is_none());
++        backend.schedule_external_tools(&[&tool], uri.clone(), &edited);
++        backend.schedule_external_tools(&[&tool], uri, &original);
++        let request = tool.pending_request.lock();
++        assert!(
++            request
++                .as_ref()
++                .unwrap()
++                .source
++                .ptr_eq(&Arc::downgrade(&edited)),
++            "obsolete event must not overwrite a fresh request"
++        );
++    }
++}
+--- a/src/diagnostics/external/phpstan.rs
++++ b/src/diagnostics/external/phpstan.rs
+@@ -42,11 +42,6 @@
+ impl Backend {
+     // ── PHPStan worker ──────────────────────────────────────────────
+ 
+-    /// Schedule a PHPStan run for a single file.
+-    pub(crate) fn schedule_phpstan(&self, uri: String) {
+-        Self::schedule_external_tool(&self.phpstan_tool, uri);
+-    }
+-
+     /// Run PHPStan on pending files. See [`Backend::external_tool_worker`].
+     pub(crate) async fn phpstan_worker(&self) {
+         self.external_tool_worker(&self.phpstan_tool, "phpstan", prepare_phpstan)
+--- a/src/diagnostics/external/phpcs.rs
++++ b/src/diagnostics/external/phpcs.rs
+@@ -42,11 +42,6 @@
+ impl Backend {
+     // ── PHPCS worker ────────────────────────────────────────────────
+ 
+-    /// Schedule a PHPCS run for a single file.
+-    pub(crate) fn schedule_phpcs(&self, uri: String) {
+-        Self::schedule_external_tool(&self.phpcs_tool, uri);
+-    }
+-
+     /// Run PHPCS on pending files. See [`Backend::external_tool_worker`].
+     pub(crate) async fn phpcs_worker(&self) {
+         self.external_tool_worker(&self.phpcs_tool, "phpcs", prepare_phpcs)
+--- a/src/diagnostics/external/phpmd.rs
++++ b/src/diagnostics/external/phpmd.rs
+@@ -30,11 +30,6 @@
+ impl Backend {
+     // ── PHPMD worker ────────────────────────────────────────────────
+ 
+-    /// Schedule a PHPMD run for a single file.
+-    pub(crate) fn schedule_phpmd(&self, uri: String) {
+-        Self::schedule_external_tool(&self.phpmd_tool, uri);
+-    }
+-
+     /// Run PHPMD on pending files. See [`Backend::external_tool_worker`].
+     pub(crate) async fn phpmd_worker(&self) {
+         self.external_tool_worker(&self.phpmd_tool, "phpmd", prepare_phpmd)
+--- a/src/diagnostics/external/mago.rs
++++ b/src/diagnostics/external/mago.rs
+@@ -65,11 +65,6 @@
+ impl Backend {
+     // ── Mago lint worker ────────────────────────────────────────────
+ 
+-    /// Schedule a Mago lint run for a single file.
+-    pub(crate) fn schedule_mago_lint(&self, uri: String) {
+-        Self::schedule_external_tool(&self.mago_lint_tool, uri);
+-    }
+-
+     /// Run `mago lint` on pending files.
+     /// See [`Backend::external_tool_worker`].
+     pub(crate) async fn mago_lint_worker(&self) {
+@@ -80,11 +75,6 @@
+     }
+ 
+     // ── Mago analyze worker ─────────────────────────────────────────
+-
+-    /// Schedule a Mago analyze run for a single file.
+-    pub(crate) fn schedule_mago_analyze(&self, uri: String) {
+-        Self::schedule_external_tool(&self.mago_analyze_tool, uri);
+-    }
+ 
+     /// Run `mago analyze` on pending files.
+     /// See [`Backend::external_tool_worker`].
+--- a/src/backend/documents.rs
++++ b/src/backend/documents.rs
+@@ -102,7 +102,7 @@
+         // would see no PHPStan/PHPCS/Mago diagnostics until the first
+         // save.  (During editing they are gated to save only; see
+         // `did_save`.)
+-        self.schedule_external_diagnostics(uri.clone());
++        self.schedule_external_diagnostics(uri.clone(), &text);
+ 
+         self.log(MessageType::INFO, format!("Opened file: {}", uri))
+             .await;
+@@ -311,6 +311,10 @@
+             return;
+         }
+ 
++        // Bind this save event to its current source before diagnostic and
++        // inference scheduling can overlap a later document change.
++        let saved_source = self.open_files.read().get(&uri).cloned();
++
+         // A save is a reliable sync point: re-diagnose the saved file
+         // and all other open files.  This catches cross-file changes
+         // (e.g. a function signature change in test2.php that affects
+@@ -335,8 +339,10 @@
+ 
+         // External tools (PHPStan, PHPCS, Mago) are expensive and
+         // serialized, so they are only triggered on save — not on
+-        // every keystroke.  This is the only place they are scheduled.
+-        self.schedule_external_diagnostics(uri);
++        // every keystroke. Opening also requests an initial run.
++        if let Some(source) = saved_source {
++            self.schedule_external_diagnostics(uri, &source);
++        }
+     }
+ 
+     pub(crate) async fn on_did_change_watched_files(&self, params: DidChangeWatchedFilesParams) {
+--- /dev/null
++++ b/tests/analyzer_startup.rs
+@@ -0,0 +1,217 @@
++//! Startup intent at the public document/initialization lifecycle boundary.
++#![cfg(unix)]
++
++use std::{fs, os::unix::fs::PermissionsExt, path::PathBuf, time::Duration};
++
++use phpantom_lsp::Backend;
++use tower_lsp::{LanguageServer, lsp_types::*};
++
++const A: &str = "<?php // DOC_A\n";
++const B: &str = "<?php // DOC_B\n";
++
++struct Fixture {
++    backend: Backend,
++    _directory: tempfile::TempDir,
++    root: PathBuf,
++    uri: Url,
++}
++
++impl Fixture {
++    fn new() -> Self {
++        let directory = tempfile::tempdir().unwrap();
++        let root = directory.path().canonicalize().unwrap();
++        let command = root.join("fake-phpstan");
++        fs::write(&command, "#!/bin/sh\nfile=''\nfor argument in \"$@\"; do\n case \"$argument\" in\n --tmp-file=*) file=${argument#--tmp-file=} ;;\n *.php) if [ -z \"$file\" ]; then file=$argument; fi ;;\n esac\ndone\nif grep -q DOC_B \"$file\"; then printf 'B\\n'; else printf 'A\\n'; fi >> analyzer-runs.txt\nprintf '{\"totals\":{\"errors\":0,\"file_errors\":0},\"files\":{}}'\n").unwrap();
++        fs::set_permissions(&command, fs::Permissions::from_mode(0o755)).unwrap();
++        fs::write(root.join(".phpantom.toml"), format!("[phpstan]\ncommand = {}\ntimeout = 1500\n[phpcs]\ncommand = \"\"\n[phpmd]\ncommand = \"\"\n[mago]\ncommand = \"\"\n", serde_json::to_string(command.to_str().unwrap()).unwrap())).unwrap();
++        let path = root.join("Startup.php");
++        fs::write(&path, A).unwrap();
++        let uri = Url::from_file_path(path).unwrap();
++        let backend = Backend::new_test_with_workspace(root.clone(), Vec::new());
++        Self {
++            backend,
++            _directory: directory,
++            root,
++            uri,
++        }
++    }
++
++    async fn open(&self, text: &str) {
++        self.backend
++            .did_open(DidOpenTextDocumentParams {
++                text_document: TextDocumentItem {
++                    uri: self.uri.clone(),
++                    language_id: "php".into(),
++                    version: 1,
++                    text: text.into(),
++                },
++            })
++            .await;
++    }
++
++    async fn initialize(&self) {
++        self.backend.initialized(InitializedParams {}).await;
++    }
++
++    async fn save(&self, text: &str) {
++        fs::write(self.uri.to_file_path().unwrap(), text).unwrap();
++        self.backend
++            .did_save(DidSaveTextDocumentParams {
++                text_document: TextDocumentIdentifier {
++                    uri: self.uri.clone(),
++                },
++                text: Some(text.into()),
++            })
++            .await;
++    }
++
++    fn runs(&self) -> Vec<String> {
++        fs::read_to_string(self.root.join("analyzer-runs.txt"))
++            .unwrap_or_default()
++            .lines()
++            .map(str::to_owned)
++            .collect()
++    }
++
++    async fn wait_for_runs(&self, count: usize) -> bool {
++        tokio::time::timeout(Duration::from_secs(2), async {
++            loop {
++                if self.runs().len() >= count {
++                    return;
++                }
++                tokio::time::sleep(Duration::from_millis(10)).await;
++            }
++        })
++        .await
++        .is_ok()
++    }
++}
++
++#[tokio::test]
++async fn analyzer_startup_open_intent_runs_without_an_extra_save() {
++    let fixture = Fixture::new();
++    fixture.open(A).await;
++    assert!(
++        fixture.runs().is_empty(),
++        "opening before initialized must not execute a tool early"
++    );
++    fixture.initialize().await;
++    let caught_up = fixture.wait_for_runs(1).await;
++    let before_save = fixture.runs();
++    fixture.save(A).await;
++    assert!(
++        fixture.wait_for_runs(before_save.len() + 1).await,
++        "positive control: explicitly saving after initialized must invoke the configured executable"
++    );
++    fixture.backend.shutdown().await.unwrap();
++    assert!(
++        caught_up,
++        "initial open intent was dropped: initialization completed without analysis, while the explicit-save positive control works"
++    );
++    assert_eq!(before_save, ["A"]);
++}
++
++#[tokio::test]
++async fn analyzer_startup_reopen_keeps_only_current_incarnation_intent() {
++    let fixture = Fixture::new();
++    fixture.open(A).await;
++    fixture
++        .backend
++        .did_close(DidCloseTextDocumentParams {
++            text_document: TextDocumentIdentifier {
++                uri: fixture.uri.clone(),
++            },
++        })
++        .await;
++    fs::write(fixture.uri.to_file_path().unwrap(), B).unwrap();
++    fixture.open(B).await;
++    fixture.initialize().await;
++    let caught_up = fixture.wait_for_runs(1).await;
++    let before_save = fixture.runs();
++    fixture.save(B).await;
++    assert!(
++        fixture.wait_for_runs(before_save.len() + 1).await,
++        "positive control: current reopen can be analyzed after explicit save"
++    );
++    fixture.backend.shutdown().await.unwrap();
++    assert!(
++        caught_up,
++        "the latest reopened source needs startup catch-up without reviving the closed incarnation"
++    );
++    assert_eq!(before_save, ["B"]);
++}
++
++#[tokio::test]
++async fn analyzer_startup_closed_document_has_no_catch_up_process() {
++    let fixture = Fixture::new();
++    fixture.open(A).await;
++    fixture
++        .backend
++        .did_close(DidCloseTextDocumentParams {
++            text_document: TextDocumentIdentifier {
++                uri: fixture.uri.clone(),
++            },
++        })
++        .await;
++    fixture.initialize().await;
++    assert!(!fixture.wait_for_runs(1).await);
++    fixture.backend.shutdown().await.unwrap();
++}
++
++#[tokio::test]
++async fn analyzer_startup_unsaved_edit_retires_open_intent_until_save() {
++    let fixture = Fixture::new();
++    fixture.open(A).await;
++    fixture
++        .backend
++        .did_change(DidChangeTextDocumentParams {
++            text_document: VersionedTextDocumentIdentifier {
++                uri: fixture.uri.clone(),
++                version: 2,
++            },
++            content_changes: vec![TextDocumentContentChangeEvent {
++                range: None,
++                range_length: None,
++                text: B.into(),
++            }],
++        })
++        .await;
++    fixture.initialize().await;
++    assert!(
++        !fixture.wait_for_runs(1).await,
++        "catch-up must not silently turn an initial open into analysis of a later unsaved edit"
++    );
++    fixture.save(B).await;
++    assert!(fixture.wait_for_runs(1).await);
++    assert_eq!(fixture.runs(), ["B"]);
++    fixture.backend.shutdown().await.unwrap();
++}
++
++#[tokio::test]
++async fn analyzer_startup_multiple_uris_coalesce_to_latest_once() {
++    let fixture = Fixture::new();
++    fixture.open(A).await;
++    let path = fixture.root.join("Latest.php");
++    fs::write(&path, B).unwrap();
++    fixture
++        .backend
++        .did_open(DidOpenTextDocumentParams {
++            text_document: TextDocumentItem {
++                uri: Url::from_file_path(path).unwrap(),
++                language_id: "php".into(),
++                version: 1,
++                text: B.into(),
++            },
++        })
++        .await;
++    fixture.initialize().await;
++    assert!(fixture.wait_for_runs(1).await);
++    tokio::time::sleep(Duration::from_millis(250)).await;
++    let runs = fixture.runs();
++    fixture.backend.shutdown().await.unwrap();
++    assert_eq!(
++        runs,
++        ["B"],
++        "one latest slot per analyzer, rather than one queued request per opened file"
++    );
++}

@@ -134,6 +134,7 @@ export const commands = {
 	 */
 	docEdit: (doc: DocId, baseVersion: number, changes: ChangeSet) => typedError<number, IdeError>(__TAURI_INVOKE("doc_edit", { doc, baseVersion, changes })),
 	docSave: (doc: DocId) => typedError<null, IdeError>(__TAURI_INVOKE("doc_save", { doc })),
+	docSaveChecked: (doc: DocId, overwriteRevision: string | null) => typedError<string | null, IdeError>(__TAURI_INVOKE("doc_save_checked", { doc, overwriteRevision })),
 	docSaveAll: () => typedError<null, IdeError>(__TAURI_INVOKE("doc_save_all")),
 	docSnapshot: (doc: DocId) => typedError<DocumentInfo, IdeError>(__TAURI_INVOKE("doc_snapshot", { doc })),
 	/**  "Reload with Encoding" (`reload`) or "Convert to Encoding"; returns the new encoding label. */
@@ -204,17 +205,17 @@ export const commands = {
 	 */
 	historyRestore: (path: string, id: string) => typedError<null, IdeError>(__TAURI_INVOKE("history_restore", { path, id })),
 	/**  `workspace/willRenameFiles` on every interested server (before the move). Cancellable. */
-	refactorFileMoveEdits: (request: RequestId, moves: FileMove[]) => typedError<FileRenameEdits, IdeError>(__TAURI_INVOKE("refactor_file_move_edits", { request, moves })),
+	refactorFileMoveEdits: (request: RequestId, moves: FileMove[]) => typedError<FileRenameEdits_Serialize, IdeError>(__TAURI_INVOKE("refactor_file_move_edits", { request, moves })),
 	/**
 	 *  "Search in comments and strings": textual occurrences of the moved files'
 	 *  names, qualified names and paths (before the move). Cancellable.
 	 */
-	refactorFileMoveTextEdits: (request: RequestId, moves: FileMove[]) => typedError<WorkspaceEdit, IdeError>(__TAURI_INVOKE("refactor_file_move_text_edits", { request, moves })),
+	refactorFileMoveTextEdits: (request: RequestId, moves: FileMove[]) => typedError<WorkspaceEdit_Serialize, IdeError>(__TAURI_INVOKE("refactor_file_move_text_edits", { request, moves })),
 	/**
 	 *  Applies `edit` (from [`refactor_file_move_edits`], possibly empty), moves the
 	 *  files and notifies the servers. Returns the id for [`refactor_undo_file_move`].
 	 */
-	refactorMoveFiles: (moves: FileMove[], edit: WorkspaceEdit, label: string) => typedError<number, IdeError>(__TAURI_INVOKE("refactor_move_files", { moves, edit, label })),
+	refactorMoveFiles: (moves: FileMove[], edit: WorkspaceEdit_Deserialize, label: string) => typedError<number, IdeError>(__TAURI_INVOKE("refactor_move_files", { moves, edit, label })),
 	/**  Undoes a file move: moves back and reverts the reference updates. */
 	refactorUndoFileMove: (id: number) => typedError<UndoOutcome, IdeError>(__TAURI_INVOKE("refactor_undo_file_move", { id })),
 	/**  Whether the file move `id` can still be undone. */
@@ -308,19 +309,19 @@ export const commands = {
 	lspReferences: (request: RequestId, doc: DocId, pos: Pos, includeDeclaration: boolean, projectWide: boolean) => typedError<References, IdeError>(__TAURI_INVOKE("lsp_references", { request, doc, pos, includeDeclaration, projectWide })),
 	lspDocumentHighlights: (doc: DocId, pos: Pos) => typedError<Highlight[], IdeError>(__TAURI_INVOKE("lsp_document_highlights", { doc, pos })),
 	lspWorkspaceSymbols: (request: RequestId, query: string) => typedError<WorkspaceSymbol[], IdeError>(__TAURI_INVOKE("lsp_workspace_symbols", { request, query })),
-	lspCodeActions: (doc: DocId, range: Range, only: string[]) => typedError<CodeAction[], IdeError>(__TAURI_INVOKE("lsp_code_actions", { doc, range, only })),
+	lspCodeActions: (doc: DocId, range: Range, only: string[]) => typedError<CodeAction_Serialize[], IdeError>(__TAURI_INVOKE("lsp_code_actions", { doc, range, only })),
 	/**  Cancellable code actions with the kinds the servers advertise (Refactor This, refactoring availability). */
-	lspCodeActionQuery: (request: RequestId, doc: DocId, range: Range, only: string[]) => typedError<CodeActionQuery, IdeError>(__TAURI_INVOKE("lsp_code_action_query", { request, doc, range, only })),
+	lspCodeActionQuery: (request: RequestId, doc: DocId, range: Range, only: string[]) => typedError<CodeActionQuery_Serialize, IdeError>(__TAURI_INVOKE("lsp_code_action_query", { request, doc, range, only })),
 	/**  Resolves a code action's edit without applying it (intention preview). */
-	lspResolveCodeAction: (doc: DocId, action: CodeAction) => typedError<CodeAction, IdeError>(__TAURI_INVOKE("lsp_resolve_code_action", { doc, action })),
+	lspResolveCodeAction: (doc: DocId, action: CodeAction_Deserialize) => typedError<CodeAction_Serialize, IdeError>(__TAURI_INVOKE("lsp_resolve_code_action", { doc, action })),
 	/**  Resolves (if needed), applies the edit, then runs the command of a code action. */
-	lspApplyCodeAction: (doc: DocId, action: CodeAction) => typedError<null, IdeError>(__TAURI_INVOKE("lsp_apply_code_action", { doc, action })),
+	lspApplyCodeAction: (doc: DocId, action: CodeAction_Deserialize) => typedError<null, IdeError>(__TAURI_INVOKE("lsp_apply_code_action", { doc, action })),
 	lspPrepareRename: (doc: DocId, pos: Pos) => typedError<{
 	start: Pos,
 	end: Pos,
 } | null, IdeError>(__TAURI_INVOKE("lsp_prepare_rename", { doc, pos })),
 	/**  Computes the rename edit without applying it, so the UI can preview conflicts. */
-	lspRename: (doc: DocId, pos: Pos, newName: string) => typedError<WorkspaceEdit, IdeError>(__TAURI_INVOKE("lsp_rename", { doc, pos, newName })),
+	lspRename: (doc: DocId, pos: Pos, newName: string) => typedError<WorkspaceEdit_Serialize, IdeError>(__TAURI_INVOKE("lsp_rename", { doc, pos, newName })),
 	lspFormat: (doc: DocId, range: {
 	start: Pos,
 	end: Pos,
@@ -342,7 +343,7 @@ export const commands = {
 	lspResendDiagnostics: () => typedError<null, IdeError>(__TAURI_INVOKE("lsp_resend_diagnostics")),
 	lspRestart: (server: ServerId) => typedError<null, IdeError>(__TAURI_INVOKE("lsp_restart", { server })),
 	/**  Applies a (previewed) workspace edit, e.g. after rename confirmation. */
-	applyWorkspaceEdit: (edit: WorkspaceEdit) => typedError<null, IdeError>(__TAURI_INVOKE("apply_workspace_edit", { edit })),
+	applyWorkspaceEdit: (edit: WorkspaceEdit_Deserialize) => typedError<null, IdeError>(__TAURI_INVOKE("apply_workspace_edit", { edit })),
 	/**
 	 *  Runs a server command (`workspace/executeCommand`), e.g. a completion item's
 	 *  follow-up command. Edits the server requests arrive via `workspace/applyEdit`.
@@ -1510,16 +1511,24 @@ export type CloseContext = {
 	windows: number,
 };
 
-export type CodeAction = {
-	title: string,
-	/**  LSP kind, e.g. `quickfix`, `refactor.extract`, `source.organizeImports`. */
-	kind: string | null,
-	isPreferred: boolean,
-	disabledReason: string | null,
-	edit: WorkspaceEdit | null,
-	command: Command | null,
-	data: string | null,
-	server: ServerId,
+export type CodeAction = CodeAction_Serialize | CodeAction_Deserialize;
+
+/**
+ *  Code actions at a range plus the kinds the servers advertise
+ *  (`codeActionProvider.codeActionKinds`), so the UI can tell "not available
+ *  here" from "not supported by the server".
+ */
+export type CodeActionQuery = CodeActionQuery_Serialize | CodeActionQuery_Deserialize;
+
+/**
+ *  Code actions at a range plus the kinds the servers advertise
+ *  (`codeActionProvider.codeActionKinds`), so the UI can tell "not available
+ *  here" from "not supported by the server".
+ */
+export type CodeActionQuery_Deserialize = {
+	actions: CodeAction_Deserialize[],
+	/**  Union of the advertised kinds; `None` when a server does not list them. */
+	advertisedKinds: string[] | null,
 };
 
 /**
@@ -1527,10 +1536,34 @@ export type CodeAction = {
  *  (`codeActionProvider.codeActionKinds`), so the UI can tell "not available
  *  here" from "not supported by the server".
  */
-export type CodeActionQuery = {
-	actions: CodeAction[],
+export type CodeActionQuery_Serialize = {
+	actions: CodeAction_Serialize[],
 	/**  Union of the advertised kinds; `None` when a server does not list them. */
 	advertisedKinds: string[] | null,
+};
+
+export type CodeAction_Deserialize = {
+	title: string,
+	/**  LSP kind, e.g. `quickfix`, `refactor.extract`, `source.organizeImports`. */
+	kind: string | null,
+	isPreferred: boolean,
+	disabledReason: string | null,
+	edit: WorkspaceEdit_Deserialize | null,
+	command: Command | null,
+	data: string | null,
+	server: ServerId,
+};
+
+export type CodeAction_Serialize = {
+	title: string,
+	/**  LSP kind, e.g. `quickfix`, `refactor.extract`, `source.organizeImports`. */
+	kind: string | null,
+	isPreferred: boolean,
+	disabledReason: string | null,
+	edit: WorkspaceEdit_Serialize | null,
+	command: Command | null,
+	data: string | null,
+	server: ServerId,
 };
 
 /**  Editor › Code Editing. */
@@ -2750,9 +2783,22 @@ export type FileReference = {
 };
 
 /**  Reference updates for a file / folder move (`workspace/willRenameFiles`). */
-export type FileRenameEdits = {
+export type FileRenameEdits = FileRenameEdits_Serialize | FileRenameEdits_Deserialize;
+
+/**  Reference updates for a file / folder move (`workspace/willRenameFiles`). */
+export type FileRenameEdits_Deserialize = {
 	/**  Edits of every server that took part, in terms of the paths before the move. */
-	edit: WorkspaceEdit,
+	edit: WorkspaceEdit_Deserialize,
+	/**  Servers asked (their filters matched one of the moved paths). */
+	servers: string[],
+	/**  Servers that failed; their references are not updated. */
+	errors: string[],
+};
+
+/**  Reference updates for a file / folder move (`workspace/willRenameFiles`). */
+export type FileRenameEdits_Serialize = {
+	/**  Edits of every server that took part, in terms of the paths before the move. */
+	edit: WorkspaceEdit_Serialize,
 	/**  Servers asked (their filters matched one of the moved paths). */
 	servers: string[],
 	/**  Servers that failed; their references are not updated. */
@@ -5690,8 +5736,27 @@ export type WebReferenceKind =
 "cssVariable";
 
 /**  Edits to many files, applied atomically from the user's point of view. */
-export type WorkspaceEdit = {
+export type WorkspaceEdit = WorkspaceEdit_Serialize | WorkspaceEdit_Deserialize;
+
+export type WorkspaceEditGuard = {
+	projectRevision: string,
+	documentsRevision: string,
+	diskRevisions?: ([IpcPath, string])[],
+	engineGenerations?: ([ServerId, number | null])[],
+};
+
+/**  Edits to many files, applied atomically from the user's point of view. */
+export type WorkspaceEdit_Deserialize = {
 	files: FileEdit[],
+	/**  Host-issued revision witnesses for reviewed semantic edits. */
+	guard?: WorkspaceEditGuard | null,
+};
+
+/**  Edits to many files, applied atomically from the user's point of view. */
+export type WorkspaceEdit_Serialize = {
+	files: FileEdit[],
+	/**  Host-issued revision witnesses for reviewed semantic edits. */
+	guard?: WorkspaceEditGuard | null,
 };
 
 export type WorkspaceSymbol = {

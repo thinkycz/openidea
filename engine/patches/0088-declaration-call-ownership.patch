@@ -1,0 +1,2128 @@
+diff --git a/docs/CHANGELOG.md b/docs/CHANGELOG.md
+index 6b08dbe..3811070 100644
+--- a/docs/CHANGELOG.md
++++ b/docs/CHANGELOG.md
+@@ -15,6 +15,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
+ 
+ ## [Unreleased]
+ 
++- **Keep call hierarchies faithful to execution.** Optional parameter constructors belong to their declared callable. Imports, stored callbacks and deferred metadata remain navigable references without becoming callers; known keyword constructors retain their source locations while ambiguous runtime targets stay unresolved. Contributed by PHP Workbench downstream.
++
+ - **Keep Blade caller types consistent.** Component-bound variables honor source PHPDoc, and cross-file view data inference stays independent of another file’s diagnostic scope. Contributed by PHP Workbench downstream.
+ 
+ - **Show direct anonymous invocations and file callers.** Call hierarchy follows literal immediately invoked closures and arrows, and preserves known calls made at file scope. Creating a first-class callable remains a reference rather than an invocation; other callback and file-entry callers stay unknown. Contributed by PHP Workbench downstream.
+diff --git a/examples/php/definition.php b/examples/php/definition.php
+index f5d5ace..1623af8 100644
+--- a/examples/php/definition.php
++++ b/examples/php/definition.php
+@@ -397,3 +397,15 @@ function anonymousHierarchyDemo(): void
+ // this literal arrow invocation separately from its known body call.
+ gtdHelper();
+ (static fn () => gtdHelper())();
++
++// Try: Show Callees on hierarchyDefaultNavigation. The optional initializer
++// belongs to this function, rather than to file execution. Show Callers on
++// Scaffolding\Number::__construct to follow it back to this declaration.
++function hierarchyDefaultNavigation(
++    Scaffolding\Number $number = new Scaffolding\Number('1'),
++): void {}
++
++// Try: navigate or find references on either 'label'. Both name the method,
++// but only the immediately invoked array contributes a call hierarchy edge.
++$storedHierarchyCallback = [$definitionAtEof, 'label'];
++([$definitionAtEof, 'label'])();
+diff --git a/src/call_hierarchy.rs b/src/call_hierarchy.rs
+index 7b30575..21f4b1c 100644
+--- a/src/call_hierarchy.rs
++++ b/src/call_hierarchy.rs
+@@ -20,7 +20,9 @@ use tower_lsp::lsp_types::{
+ };
+ 
+ use crate::Backend;
+-use crate::symbol_map::{AnonymousCallable, ClassRefContext, SymbolKind, SymbolMap, SymbolSpan};
++use crate::symbol_map::{
++    AnonymousCallable, CallExecutionOwner, ClassRefContext, SymbolKind, SymbolMap, SymbolSpan,
++};
+ use crate::text_position::{byte_range_to_lsp_range, offset_to_position, position_to_offset};
+ use crate::types::{ClassInfo, FunctionInfo, MethodInfo};
+ 
+@@ -156,14 +158,37 @@ impl Backend {
+             // Find References answers for the whole member, so a same-named
+             // property read and a `@see` tag naming the method come back
+             // alongside the calls.  Only the calls belong in a hierarchy.
+-            if !symbol_map
+-                .lookup(offset)
+-                .is_some_and(|span| is_hierarchy_call_site(&symbol_map, span))
+-            {
++            let Some(span) = symbol_map.lookup(offset) else {
++                continue;
++            };
++            if !is_candidate_call_site(&symbol_map, span) {
+                 continue;
+             }
++            let execution_owner = symbol_map.call_execution_owner(span.start);
++            if !is_hierarchy_call_site_with_owner(&symbol_map, span, execution_owner) {
++                continue;
++            }
++            if symbol_map.is_keyword_constructor_span(span) {
++                let Some(callee) = self.constructor_callable(&mut cache, uri, span) else {
++                    continue;
++                };
++                if callee.item.uri != target.item.uri
++                    || callee.item.selection_range != target.item.selection_range
++                    || callee.item.name != target.item.name
++                {
++                    continue;
++                }
++            }
+             let scope = symbol_map.find_enclosing_scope(offset);
+-            let caller = if self.logical_file_scope_candidate(uri, scope) {
++            let caller = if let Some(CallExecutionOwner::Callable(declaration)) = execution_owner {
++                self.php_callable_at(
++                    uri,
++                    &ref_content,
++                    &symbol_map,
++                    declaration,
++                    source_hash.as_ref(),
++                )
++            } else if self.logical_file_scope_candidate(uri, scope) {
+                 source_hash.as_ref().and_then(|hash| {
+                     self.logical_file_callable(&mut cache, uri, &ref_content, hash)
+                 })
+@@ -208,10 +233,29 @@ impl Backend {
+             .spans
+             .iter()
+             .filter(|span| {
+-                span.start >= body_start
+-                    && span.start <= body_end
+-                    && is_hierarchy_call_site(&symbol_map, span)
+-                    && Some(symbol_map.find_enclosing_scope(span.start)) == callable.scope_start
++                if !is_candidate_call_site(&symbol_map, span) {
++                    return false;
++                }
++                let execution_owner = symbol_map.call_execution_owner(span.start);
++                is_hierarchy_call_site_with_owner(&symbol_map, span, execution_owner)
++                    && match execution_owner {
++                        Some(CallExecutionOwner::Callable(declaration)) => {
++                            callable
++                                .item
++                                .data
++                                .as_ref()
++                                .and_then(|data| data.get("offset"))
++                                .and_then(|value| value.as_u64())
++                                == Some(u64::from(declaration))
++                        }
++                        Some(CallExecutionOwner::Deferred) => false,
++                        None => {
++                            span.start >= body_start
++                                && span.start <= body_end
++                                && Some(symbol_map.find_enclosing_scope(span.start))
++                                    == callable.scope_start
++                        }
++                    }
+             })
+             .cloned()
+             .collect();
+@@ -224,7 +268,9 @@ impl Backend {
+             // `new Foo(...)` resolves to the class, not to the constructor the
+             // hierarchy wants, so the constructor is looked up directly.
+             let callees: Vec<PhpCallable> =
+-                if matches!(span.kind, SymbolKind::ClassReference { .. }) {
++                if matches!(span.kind, SymbolKind::ClassReference { .. })
++                    || symbol_map.is_keyword_constructor_span(&span)
++                {
+                     self.constructor_callable(&mut cache, uri, &span)
+                         .into_iter()
+                         .collect()
+@@ -301,15 +347,27 @@ impl Backend {
+         uri: &str,
+         span: &SymbolSpan,
+     ) -> Option<PhpCallable> {
+-        let SymbolKind::ClassReference { name, is_fqn, .. } = &span.kind else {
+-            return None;
+-        };
+-        let fqn = if *is_fqn {
+-            name.trim_start_matches('\\').to_string()
+-        } else {
+-            self.file_context(uri).resolve_name_at(name, span.start)
++        let fqn = match &span.kind {
++            SymbolKind::ClassReference { name, is_fqn, .. } => {
++                if *is_fqn {
++                    name.trim_start_matches('\\').to_string()
++                } else {
++                    self.file_context(uri).resolve_name_at(name, span.start)
++                }
++            }
++            SymbolKind::SelfStaticParent(kind) => {
++                // Reuse the reference engine's lexical self/static/parent policy.
++                // Late-bound runtime subclasses are not guessed or enumerated.
++                self.resolve_keyword_to_fqn(kind, uri, span.start)?
++            }
++            _ => return None,
+         };
+         let class = self.find_or_load_class(&fqn)?;
++        if matches!(span.kind, SymbolKind::SelfStaticParent(_))
++            && class.kind == crate::types::ClassLikeKind::Trait
++        {
++            return None;
++        }
+         let loader = |name: &str| self.find_or_load_class(name);
+         let crate::inheritance::ancestry::MethodOrigin::Known { owner, method } =
+             crate::inheritance::ancestry::resolve_concrete_method_origin(
+@@ -323,6 +381,15 @@ impl Backend {
+         if method.name_offset == 0 {
+             return None;
+         }
++        if matches!(
++            span.kind,
++            SymbolKind::SelfStaticParent(crate::symbol_map::SelfStaticParentKind::Static)
++        ) && !class.is_final
++            && !method.is_final
++        {
++            // A runtime subclass can override the lexical constructor.
++            return None;
++        }
+         let (owner_uri, _) = self.find_class_file_content(&owner.fqn(), "", "")?;
+         let (content, symbol_map, source_hash) = self.cached_file(cache, &owner_uri)?;
+         self.php_callable_at(
+@@ -396,6 +463,20 @@ impl Backend {
+         offset: u32,
+         source_hash: Option<&[u8; 32]>,
+     ) -> Option<PhpCallable> {
++        if (!symbol_map.call_execution_regions.is_empty()
++            || !symbol_map.keyword_constructor_spans.is_empty())
++            && source_hash.is_none()
++        {
++            return None;
++        }
++        if let Some(span) = symbol_map.lookup(offset)
++            && is_hierarchy_call_site(symbol_map, span)
++            && let Some(CallExecutionOwner::Callable(declaration)) =
++                symbol_map.call_execution_owner(span.start)
++            && declaration != offset
++        {
++            return self.php_callable_at(uri, content, symbol_map, declaration, source_hash);
++        }
+         if !symbol_map.anonymous_callables.is_empty()
+             && symbol_map.anonymous_source_sha256.as_ref() != source_hash
+         {
+@@ -671,6 +752,12 @@ impl Backend {
+         let content = self.reference_file_content_arc(uri)?;
+         if let Some(symbol_map) = self.symbol_map_for(uri) {
+             let source_hash = hierarchy_source_hash(&symbol_map, &content);
++            if (!symbol_map.call_execution_regions.is_empty()
++                || !symbol_map.keyword_constructor_spans.is_empty())
++                && source_hash.is_none()
++            {
++                return None;
++            }
+             return Some((content, symbol_map, source_hash));
+         }
+         // A call site can sit in a file the background indexer has not reached
+@@ -726,13 +813,31 @@ impl Backend {
+ /// `@see` tag, and calling it (`$this->leaf()`) all reference the same member,
+ /// so both directions filter down to the occurrences that actually invoke it.
+ fn is_hierarchy_call_site(symbol_map: &SymbolMap, span: &SymbolSpan) -> bool {
+-    is_call_site(span)
++    is_candidate_call_site(symbol_map, span)
++        && is_hierarchy_call_site_with_owner(
++            symbol_map,
++            span,
++            symbol_map.call_execution_owner(span.start),
++        )
++}
++
++fn is_hierarchy_call_site_with_owner(
++    symbol_map: &SymbolMap,
++    span: &SymbolSpan,
++    owner: Option<CallExecutionOwner>,
++) -> bool {
++    !matches!(owner, Some(CallExecutionOwner::Deferred))
++        && is_candidate_call_site(symbol_map, span)
+         && symbol_map
+             .non_invoked_callable_spans
+             .binary_search(&(span.start, span.end))
+             .is_err()
+ }
+ 
++fn is_candidate_call_site(symbol_map: &SymbolMap, span: &SymbolSpan) -> bool {
++    is_call_site(span) || symbol_map.is_keyword_constructor_span(span)
++}
++
+ fn is_call_site(span: &SymbolSpan) -> bool {
+     match &span.kind {
+         SymbolKind::FunctionCall {
+@@ -869,13 +974,8 @@ fn build_callable(
+ /// The existing fingerprint is checked without adding a SHA pass to all parses;
+ /// a request computes SHA only once per touched file for guarded hierarchy items.
+ fn hierarchy_source_hash(symbol_map: &SymbolMap, content: &str) -> Option<[u8; 32]> {
+-    use std::hash::{Hash, Hasher};
+-    if !symbol_map.matches_source(content) {
+-        return None;
+-    }
+-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+-    content.hash(&mut hasher);
+-    (hasher.finish() == symbol_map.source_fingerprint)
++    symbol_map
++        .matches_source_fingerprint(content)
+         .then(|| AnonymousCallable::source_hash(content))
+ }
+ 
+@@ -1395,3 +1495,55 @@ class Child extends Base {
+         assert_eq!(incoming[0].from_ranges.len(), 1);
+     }
+ }
++
++#[cfg(test)]
++mod keyword_role_source_authority_tests {
++    use super::*;
++
++    #[test]
++    fn keyword_constructor_outgoing_refuses_same_length_stale_ast_roles() {
++        let backend = Backend::new_test();
++        let uri = "file:///keyword-hierarchy-source-authority.php";
++        let source = "<?php final class KeywordSourceHierarchy { public function __construct() {} public function make() { new self()     ; } }";
++        backend
++            .open_files
++            .write()
++            .insert(uri.to_owned(), Arc::new(source.to_owned()));
++        backend.update_ast(uri, source);
++        let position = offset_to_position(source, source.find("make()").unwrap());
++        let item = backend
++            .prepare_call_hierarchy_impl(uri, source, position)
++            .unwrap()
++            .remove(0);
++        assert_eq!(
++            backend.outgoing_calls_impl(&item).unwrap().len(),
++            1,
++            "positive known constructor before source change"
++        );
++        let changed = source.replace("new self()     ", "    self::class");
++        assert_eq!(source.len(), changed.len());
++        backend
++            .open_files
++            .write()
++            .insert(uri.to_owned(), Arc::new(changed.clone()));
++        assert!(
++            backend.outgoing_calls_impl(&item).is_none(),
++            "old keyword-role map cannot claim an edge against changed authoritative bytes"
++        );
++        backend
++            .open_files
++            .write()
++            .insert(uri.to_owned(), Arc::new(source.to_owned()));
++        assert_eq!(backend.outgoing_calls_impl(&item).unwrap().len(), 1);
++        backend
++            .open_files
++            .write()
++            .insert(uri.to_owned(), Arc::new(changed.clone()));
++        backend.update_ast(uri, &changed);
++        let fresh = backend
++            .prepare_call_hierarchy_impl(uri, &changed, position)
++            .unwrap()
++            .remove(0);
++        assert!(backend.outgoing_calls_impl(&fresh).unwrap().is_empty());
++    }
++}
+diff --git a/src/references/classes.rs b/src/references/classes.rs
+index 039146a..b056f9c 100644
+--- a/src/references/classes.rs
++++ b/src/references/classes.rs
+@@ -203,6 +203,9 @@ impl Backend {
+                 // accesses, so their receivers go through the same pass (and
+                 // the same recorded answers) as every other member search.
+                 let receivers = OnceCell::new();
++                // Snapshot maps and authoritative content are fetched separately.
++                // Validate keyword AST provenance once per touched source file.
++                let keyword_source_current = OnceCell::new();
+                 let constructor_receivers = || {
+                     receivers
+                         .get_or_init(|| {
+@@ -242,16 +245,17 @@ impl Backend {
+                         SymbolKind::SelfStaticParent(ssp_kind)
+                             if *ssp_kind != SelfStaticParentKind::This =>
+                         {
+-                            match file.content() {
+-                                Some(content) if is_new_operand(content, span.start) => {
+-                                    match self
+-                                        .resolve_keyword_to_fqn(ssp_kind, file_uri, span.start)
+-                                    {
+-                                        Some(fqn) => matches_constructor(&fqn),
+-                                        None => false,
+-                                    }
+-                                }
+-                                _ => false,
++                            if symbol_map.is_keyword_constructor_span(span)
++                                && *keyword_source_current.get_or_init(|| {
++                                    file.content().is_some_and(|content| {
++                                        symbol_map.matches_source_fingerprint(content)
++                                    })
++                                })
++                            {
++                                self.resolve_keyword_to_fqn(ssp_kind, file_uri, span.start)
++                                    .is_some_and(|fqn| matches_constructor(&fqn))
++                            } else {
++                                false
+                             }
+                         }
+                         // Explicit constructor delegation written as
+@@ -332,7 +336,7 @@ impl Backend {
+ 
+     /// The class a `self`/`static`/`parent` keyword at `offset` names, by
+     /// the enclosing class's own FQN.
+-    fn resolve_keyword_to_fqn(
++    pub(crate) fn resolve_keyword_to_fqn(
+         &self,
+         ssp_kind: &SelfStaticParentKind,
+         uri: &str,
+@@ -353,31 +357,3 @@ impl Backend {
+         crate::class_lookup::resolve_class_keyword(keyword, current_class)
+     }
+ }
+-
+-/// Whether the `self`/`static`/`parent` keyword at `start` is the operand of
+-/// `new` (`new self()`) rather than the subject of a static access
+-/// (`self::__construct()`), which the same `SelfStaticParent` span kind is
+-/// also used for.
+-fn is_new_operand(content: &str, start: u32) -> bool {
+-    // The content is read after the symbol map was snapshotted, so a file
+-    // that shrank on disk in between can place `start` past its end.
+-    let Some(before) = content.get(..start as usize) else {
+-        return false;
+-    };
+-    let bytes = before.as_bytes();
+-    let mut i = bytes.len();
+-    while i > 0 && bytes[i - 1].is_ascii_whitespace() {
+-        i -= 1;
+-    }
+-    if i < 3 {
+-        return false;
+-    }
+-    let word_start = i - 3;
+-    if word_start > 0 {
+-        let prev = bytes[word_start - 1];
+-        if prev.is_ascii_alphanumeric() || prev == b'_' {
+-            return false;
+-        }
+-    }
+-    bytes[word_start..i].eq_ignore_ascii_case(b"new")
+-}
+diff --git a/src/references/tests.rs b/src/references/tests.rs
+index f990922..a24d022 100644
+--- a/src/references/tests.rs
++++ b/src/references/tests.rs
+@@ -1849,3 +1849,51 @@ async fn known_missing_member_rename_never_changes_unique_foreign_macro_registra
+         "rename requests propose changes; all open source bytes remain exact"
+     );
+ }
++
++#[test]
++fn keyword_constructor_references_refuse_same_length_stale_ast_roles() {
++    let backend = Backend::new_test();
++    let uri = "file:///keyword-reference-source-authority.php";
++    let source = "<?php final class KeywordSourceReference { public function __construct() {} public function make() { new self()     ; } }";
++    backend
++        .open_files
++        .write()
++        .insert(uri.to_owned(), std::sync::Arc::new(source.to_owned()));
++    backend.update_ast(uri, source);
++    let owners = ["KeywordSourceReference".to_owned()];
++    let before = backend.find_constructor_references(&owners, false);
++    assert_eq!(before.len(), 1, "positive genuine new keyword control");
++    let changed = source.replace("new self()     ", "    self::class");
++    assert_eq!(source.len(), changed.len());
++    // Emulate the existing separately captured map/content seam; do not reparse.
++    backend
++        .open_files
++        .write()
++        .insert(uri.to_owned(), std::sync::Arc::new(changed.clone()));
++    assert!(
++        backend
++            .find_constructor_references(&owners, false)
++            .is_empty(),
++        "same-length current self::class must not inherit the old new-self AST role"
++    );
++    backend
++        .open_files
++        .write()
++        .insert(uri.to_owned(), std::sync::Arc::new(source.to_owned()));
++    assert_eq!(
++        backend.find_constructor_references(&owners, false).len(),
++        1,
++        "restoring exact source keeps valid provenance usable"
++    );
++    backend
++        .open_files
++        .write()
++        .insert(uri.to_owned(), std::sync::Arc::new(changed.clone()));
++    backend.update_ast(uri, &changed);
++    assert!(
++        backend
++            .find_constructor_references(&owners, false)
++            .is_empty(),
++        "fresh non-invocation map stays negative"
++    );
++}
+diff --git a/src/symbol_map/extraction/attribute_closures.rs b/src/symbol_map/extraction/attribute_closures.rs
+index f7a833a..ae0f658 100644
+--- a/src/symbol_map/extraction/attribute_closures.rs
++++ b/src/symbol_map/extraction/attribute_closures.rs
+@@ -1,5 +1,6 @@
+ //! Target-independent attribute argument features collected from an already parsed AST.
+ use crate::symbol_map::AttributeClosureKind;
++use mago_span::HasSpan;
+ use mago_syntax::cst::*;
+ use mago_syntax::walker::Walker;
+ 
+@@ -82,3 +83,46 @@ impl<'ast, 'arena> Walker<'ast, 'arena, Vec<(u32, u32, AttributeClosureKind)>>
+         }
+     }
+ }
++
++/// New expressions directly in attribute metadata are not declaration-time
++/// invocations. Stop at value-producing callable/class body boundaries: their
++/// real body calls remain known and parameter defaults have separate ownership.
++pub(super) fn deferred_new_spans(expression: &Expression<'_>) -> Vec<(u32, u32)> {
++    let mut spans = Vec::new();
++    DeferredNew.walk_expression(expression, &mut spans);
++    spans
++}
++struct DeferredNew;
++impl<'ast, 'arena> Walker<'ast, 'arena, Vec<(u32, u32)>> for DeferredNew {
++    fn walk_in_instantiation(
++        &self,
++        instantiation: &'ast Instantiation<'arena>,
++        spans: &mut Vec<(u32, u32)>,
++    ) {
++        // Keyword constructors retain their shared navigation symbol kind,
++        // but have the same deferred execution timing as named constructors.
++        // Mask recovered `new static` too; its invalid attribute syntax is
++        // diagnosed separately and must not invent an eager caller.
++        if matches!(
++            instantiation.class,
++            Expression::Identifier(_)
++                | Expression::Self_(_)
++                | Expression::Parent(_)
++                | Expression::Static(_)
++        ) {
++            let span = instantiation.class.span();
++            spans.push((span.start.offset, span.end.offset));
++        }
++    }
++    fn walk_closure(&self, _: &'ast Closure<'arena>, _: &mut Vec<(u32, u32)>) {}
++    fn walk_arrow_function(&self, _: &'ast ArrowFunction<'arena>, _: &mut Vec<(u32, u32)>) {}
++    fn walk_anonymous_class(
++        &self,
++        class: &'ast AnonymousClass<'arena>,
++        spans: &mut Vec<(u32, u32)>,
++    ) {
++        if let Some(arguments) = &class.argument_list {
++            self.walk_partial_argument_list(arguments, spans);
++        }
++    }
++}
+diff --git a/src/symbol_map/extraction/class_like.rs b/src/symbol_map/extraction/class_like.rs
+index 114988b..5fa9f5a 100644
+--- a/src/symbol_map/extraction/class_like.rs
++++ b/src/symbol_map/extraction/class_like.rs
+@@ -292,6 +292,15 @@ pub(super) fn extract_from_attribute_lists<'a>(
+             // inside `#[Attr(...)]` just like `new Attr(...)`.
+             if let Some(ref arg_list) = attr.argument_list {
+                 extract_from_partial_arguments(&arg_list.arguments, ctx, scope_start);
++                // Attribute argument initializers are deferred metadata. Do not
++                // assign their constructors to FILE or a physically outer body.
++                // Anonymous bodies/defaults keep their own extraction ownership.
++                for argument in &arg_list.arguments {
++                    if let Some(value) = argument.value() {
++                        ctx.non_invoked_callable_spans
++                            .extend(attribute_closures::deferred_new_spans(value));
++                    }
++                }
+                 let class_name = raw.trim_start_matches('\\');
+                 if !class_name.is_empty() {
+                     emit_partial_call_site(
+@@ -361,6 +370,7 @@ pub(super) fn extract_from_attribute_lists<'a>(
+                 // 'bar')], #[CoversFunction('baz')], #[DataProvider('qux')]
+                 // — the target is a string literal, so nothing else makes
+                 // it navigable.
++                let phpunit_first = ctx.spans.len();
+                 try_emit_phpunit_attribute_spans(
+                     class_name,
+                     arg_list,
+@@ -368,6 +378,14 @@ pub(super) fn extract_from_attribute_lists<'a>(
+                     ctx.content,
+                     &mut ctx.spans,
+                 );
++                // CoversFunction/UsesFunction name code units; shared reference
++                // spans stay intact while hierarchy refuses metadata invokers.
++                ctx.non_invoked_callable_spans.extend(
++                    ctx.spans[phpunit_first..].iter().filter_map(|span| {
++                        matches!(span.kind, SymbolKind::FunctionCall { .. })
++                            .then_some((span.start, span.end))
++                    }),
++                );
+             }
+         }
+     }
+@@ -734,6 +752,16 @@ pub(super) fn extract_from_method<'a>(method: &'a Method<'a>, ctx: &mut Extracti
+             block_end: ctx.cond_block_end_stack.last().copied().unwrap_or(u32::MAX),
+         });
+         if let Some(ref default) = param.default_value {
++            let span = default.value.span();
++            ctx.call_execution_regions.push(CallExecutionRegion {
++                start: span.start.offset,
++                end: span.end.offset,
++                owner: if matches!(&method.body, MethodBody::Concrete(_)) {
++                    CallExecutionOwner::Callable(method.name.span.start.offset)
++                } else {
++                    CallExecutionOwner::Deferred
++                },
++            });
+             extract_from_expression(default.value, ctx, method_scope_start);
+         }
+         // A constructor-promoted property may declare hooks of its own,
+@@ -1108,6 +1136,12 @@ pub(super) fn extract_from_function<'a>(func: &'a Function<'a>, ctx: &mut Extrac
+             block_end: ctx.cond_block_end_stack.last().copied().unwrap_or(u32::MAX),
+         });
+         if let Some(ref default) = param.default_value {
++            let span = default.value.span();
++            ctx.call_execution_regions.push(CallExecutionRegion {
++                start: span.start.offset,
++                end: span.end.offset,
++                owner: CallExecutionOwner::Callable(func.name.span.start.offset),
++            });
+             extract_from_expression(default.value, ctx, func_scope_start);
+         }
+     }
+diff --git a/src/symbol_map/extraction/expressions/calls.rs b/src/symbol_map/extraction/expressions/calls.rs
+index 17a88bd..7373aef 100644
+--- a/src/symbol_map/extraction/expressions/calls.rs
++++ b/src/symbol_map/extraction/expressions/calls.rs
+@@ -21,6 +21,8 @@ pub(super) fn extract_instantiation_expr<'a>(
+             ));
+         }
+         Expression::Self_(kw) => {
++            ctx.keyword_constructor_spans
++                .push((kw.span.start.offset, kw.span.end.offset));
+             ctx.spans.push(SymbolSpan {
+                 start: kw.span.start.offset,
+                 end: kw.span.end.offset,
+@@ -28,6 +30,8 @@ pub(super) fn extract_instantiation_expr<'a>(
+             });
+         }
+         Expression::Static(kw) => {
++            ctx.keyword_constructor_spans
++                .push((kw.span.start.offset, kw.span.end.offset));
+             ctx.spans.push(SymbolSpan {
+                 start: kw.span.start.offset,
+                 end: kw.span.end.offset,
+@@ -35,6 +39,8 @@ pub(super) fn extract_instantiation_expr<'a>(
+             });
+         }
+         Expression::Parent(kw) => {
++            ctx.keyword_constructor_spans
++                .push((kw.span.start.offset, kw.span.end.offset));
+             ctx.spans.push(SymbolSpan {
+                 start: kw.span.start.offset,
+                 end: kw.span.end.offset,
+@@ -287,6 +293,7 @@ fn extract_call<'a>(
+                     invocation_end: func_call.argument_list.right_parenthesis.end.offset,
+                 });
+             }
++            let callee_span_base = ctx.spans.len();
+             match func_call.function {
+                 Expression::Identifier(ident) => {
+                     let raw = bytes_to_str(ident.value());
+@@ -462,6 +469,34 @@ fn extract_call<'a>(
+                     extract_from_expression(func_call.function, ctx, scope_start);
+                 }
+             }
++            // A literal array value is normally only a callable reference.
++            // An actual Call with that exact literal as callee invokes it.
++            // Match the emitted method token, not all mentions nested in an
++            // arbitrary array expression; this preserves known direct calls.
++            let elements = match literal {
++                Expression::Array(array) => Some(&array.elements),
++                Expression::LegacyArray(array) => Some(&array.elements),
++                _ => None,
++            };
++            if let Some(elements) = elements
++                && let Some(ArrayElement::Value(value)) = elements.iter().nth(1)
++                && let Expression::Literal(literal::Literal::String(method)) = value.value
++            {
++                let range = (method.span.start.offset + 1, method.span.end.offset - 1);
++                if ctx.spans[callee_span_base..].iter().any(|span| {
++                    (span.start, span.end) == range
++                        && matches!(
++                            span.kind,
++                            SymbolKind::MemberAccess {
++                                is_array_callable: true,
++                                ..
++                            }
++                        )
++                }) {
++                    ctx.non_invoked_callable_spans
++                        .retain(|candidate| *candidate != range);
++                }
++            }
+             let func_text = expr_to_subject_text(func_call.function);
+             if !func_text.is_empty() {
+                 emit_call_site(
+@@ -690,6 +725,7 @@ fn extract_call<'a>(
+                     && let Some(controller) =
+                         laravel_route_find_controller_in_chain(method_call.object)
+                 {
++                    let first_route_action = ctx.spans.len();
+                     for arg in method_call.argument_list.arguments.iter() {
+                         laravel_route_scan_group_body(
+                             arg.value(),
+@@ -698,6 +734,15 @@ fn extract_call<'a>(
+                             &mut ctx.spans,
+                         );
+                     }
++                    // The scanner emits route action method-name references,
++                    // not controller invocations during route registration.
++                    // Ordinary calls extracted from the closure below retain
++                    // their own known edges and source ranges.
++                    ctx.non_invoked_callable_spans.extend(
++                        ctx.spans[first_route_action..]
++                            .iter()
++                            .map(|span| (span.start, span.end)),
++                    );
+                 }
+             }
+             extract_from_arguments(&method_call.argument_list.arguments, ctx, scope_start);
+diff --git a/src/symbol_map/extraction/expressions/closures.rs b/src/symbol_map/extraction/expressions/closures.rs
+index 6d2eabb..c2aa6ae 100644
+--- a/src/symbol_map/extraction/expressions/closures.rs
++++ b/src/symbol_map/extraction/expressions/closures.rs
+@@ -50,6 +50,12 @@ pub(super) fn extract_closure_expr<'a>(closure: &'a Closure<'a>, ctx: &mut Extra
+             block_end: ctx.cond_block_end_stack.last().copied().unwrap_or(u32::MAX),
+         });
+         if let Some(ref default) = param.default_value {
++            let span = default.value.span();
++            ctx.call_execution_regions.push(CallExecutionRegion {
++                start: span.start.offset,
++                end: span.end.offset,
++                owner: CallExecutionOwner::Callable(closure.function.span.start.offset),
++            });
+             extract_from_expression(default.value, ctx, closure_scope_start);
+         }
+     }
+@@ -143,6 +149,12 @@ pub(super) fn extract_arrow_function_expr<'a>(
+             block_end: ctx.cond_block_end_stack.last().copied().unwrap_or(u32::MAX),
+         });
+         if let Some(ref default) = param.default_value {
++            let span = default.value.span();
++            ctx.call_execution_regions.push(CallExecutionRegion {
++                start: span.start.offset,
++                end: span.end.offset,
++                owner: CallExecutionOwner::Callable(arrow.r#fn.span.start.offset),
++            });
+             extract_from_expression(default.value, ctx, arrow_scope_start);
+         }
+     }
+diff --git a/src/symbol_map/extraction/expressions/mod.rs b/src/symbol_map/extraction/expressions/mod.rs
+index c4e771b..f9b931b 100644
+--- a/src/symbol_map/extraction/expressions/mod.rs
++++ b/src/symbol_map/extraction/expressions/mod.rs
+@@ -286,11 +286,19 @@ pub(super) fn extract_from_expression<'a>(
+ 
+         // ── Array ──
+         Expression::Array(array) => {
+-            try_emit_array_callable_span(&array.elements, ctx.content, &mut ctx.spans);
++            if let Some(range) =
++                try_emit_array_callable_span(&array.elements, ctx.content, &mut ctx.spans)
++            {
++                ctx.non_invoked_callable_spans.push(range);
++            }
+             extract_from_array_elements(&array.elements, ctx, scope_start);
+         }
+         Expression::LegacyArray(array) => {
+-            try_emit_array_callable_span(&array.elements, ctx.content, &mut ctx.spans);
++            if let Some(range) =
++                try_emit_array_callable_span(&array.elements, ctx.content, &mut ctx.spans)
++            {
++                ctx.non_invoked_callable_spans.push(range);
++            }
+             extract_from_array_elements(&array.elements, ctx, scope_start);
+         }
+         Expression::List(list) => {
+diff --git a/src/symbol_map/extraction/laravel.rs b/src/symbol_map/extraction/laravel.rs
+index ff562c0..3be956e 100644
+--- a/src/symbol_map/extraction/laravel.rs
++++ b/src/symbol_map/extraction/laravel.rs
+@@ -1616,24 +1616,24 @@ pub(super) fn try_emit_array_callable_span(
+     elements: &TokenSeparatedSequence<'_, ArrayElement<'_>>,
+     content: &str,
+     spans: &mut Vec<SymbolSpan>,
+-) {
++) -> Option<(u32, u32)> {
+     // Exactly two positional (value) elements: `[<callee>, '<method>']`.
+     let mut values = elements.iter().filter_map(|el| match el {
+         ArrayElement::Value(v) => Some(v.value),
+         _ => None,
+     });
+     let (Some(first), Some(second), None) = (values.next(), values.next(), values.next()) else {
+-        return;
++        return None;
+     };
+     // The whole array must have been exactly those two elements (no
+     // key/value or variadic entries mixed in).
+     if elements.iter().count() != 2 {
+-        return;
++        return None;
+     }
+ 
+     // Second element must be a plain string literal — the method name.
+     let Expression::Literal(literal::Literal::String(s)) = second else {
+-        return;
++        return None;
+     };
+ 
+     // First element determines the subject and access kind.
+@@ -1646,7 +1646,7 @@ pub(super) fn try_emit_array_callable_span(
+                     if bytes_to_str(ident.value).eq_ignore_ascii_case("class")
+             );
+             if !is_class_const {
+-                return;
++                return None;
+             }
+             (expr_to_subject_text(cca.class), cca.class.span(), true)
+         }
+@@ -1654,16 +1654,16 @@ pub(super) fn try_emit_array_callable_span(
+         Expression::Variable(Variable::Direct(dv)) => {
+             (bytes_to_str(dv.name).to_string(), dv.span, false)
+         }
+-        _ => return,
++        _ => return None,
+     };
+     if subject_text.is_empty() {
+-        return;
++        return None;
+     }
+ 
+     let inner_start = s.span.start.offset + 1;
+     let inner_end = s.span.end.offset - 1;
+     if inner_start >= inner_end || inner_end as usize > content.len() {
+-        return;
++        return None;
+     }
+     // A value that is not UTF-8 (`"\x8b"`) falls back to the source text,
+     // which the identifier-shape check below then rejects.
+@@ -1681,7 +1681,7 @@ pub(super) fn try_emit_array_callable_span(
+             .next()
+             .is_some_and(|c| c.is_ascii_digit())
+     {
+-        return;
++        return None;
+     }
+ 
+     spans.push(SymbolSpan {
+@@ -1702,6 +1702,7 @@ pub(super) fn try_emit_array_callable_span(
+             is_nullsafe: false,
+         },
+     });
++    Some((inner_start, inner_end))
+ }
+ 
+ /// If `argument_list` belongs to a `compact()` call, emit one
+diff --git a/src/symbol_map/extraction/mod.rs b/src/symbol_map/extraction/mod.rs
+index 22eb72b..ab67263 100644
+--- a/src/symbol_map/extraction/mod.rs
++++ b/src/symbol_map/extraction/mod.rs
+@@ -12,10 +12,10 @@ use super::docblock::{
+     extract_docblock_symbols_covering, get_docblock_text_with_offset, is_navigable_type,
+ };
+ use super::{
+-    AnonymousCallable, AnonymousCallableKind, AnonymousInvocation, CallSite, ClassRefContext,
+-    DocblockMemberRef, SelfStaticParentKind, SubjectText, SymbolKind, SymbolMap, SymbolSpan,
+-    TemplateParamDef, UntypedClosureSite, VarDefKind, VarDefSite, ViewReceiverClass,
+-    ViewReceiverSite,
++    AnonymousCallable, AnonymousCallableKind, AnonymousInvocation, CallExecutionOwner,
++    CallExecutionRegion, CallSite, ClassRefContext, DocblockMemberRef, SelfStaticParentKind,
++    SubjectText, SymbolKind, SymbolMap, SymbolSpan, TemplateParamDef, UntypedClosureSite,
++    VarDefKind, VarDefSite, ViewReceiverClass, ViewReceiverSite,
+ };
+ use crate::atom::{bytes_to_str, literal_bytes_to_str};
+ use crate::names::OwnedResolvedNames;
+@@ -38,9 +38,11 @@ struct ExtractionCtx<'a> {
+     var_defs: Vec<VarDefSite>,
+     /// Scope ranges `(start, end)` for functions, methods, closures, etc.
+     scopes: Vec<(u32, u32)>,
++    call_execution_regions: Vec<CallExecutionRegion>,
+     anonymous_callables: Vec<AnonymousCallable>,
+     anonymous_invocations: Vec<AnonymousInvocation>,
+     non_invoked_callable_spans: Vec<(u32, u32)>,
++    keyword_constructor_spans: Vec<(u32, u32)>,
+     /// Scope start offsets of arrow functions (inheriting scopes).
+     arrow_fn_scopes: Vec<u32>,
+     /// Body boundaries `(body_start, body_end)` for closures and arrow fns.
+@@ -219,9 +221,11 @@ fn extract_symbol_map_inner(
+         spans: Vec::new(),
+         var_defs: Vec::new(),
+         scopes: Vec::new(),
++        call_execution_regions: Vec::new(),
+         anonymous_callables: Vec::new(),
+         anonymous_invocations: Vec::new(),
+         non_invoked_callable_spans: Vec::new(),
++        keyword_constructor_spans: Vec::new(),
+         arrow_fn_scopes: Vec::new(),
+         body_scopes: Vec::new(),
+         narrowing_blocks: Vec::new(),
+@@ -333,6 +337,8 @@ fn extract_symbol_map_inner(
+     ctx.call_sites.sort_by_key(|cs| cs.args_start);
+     ctx.non_invoked_callable_spans.sort_unstable();
+     ctx.non_invoked_callable_spans.dedup();
++    ctx.keyword_constructor_spans.sort_unstable();
++    ctx.keyword_constructor_spans.dedup();
+     ctx.breakable_scopes.sort_by_key(|s| s.0);
+     ctx.loop_scopes.sort_by_key(|s| s.0);
+     ctx.switch_scopes.sort_by_key(|s| s.0);
+@@ -350,6 +356,8 @@ fn extract_symbol_map_inner(
+         }
+     }
+ 
++    let (call_execution_regions, call_execution_region_parents) =
++        CallExecutionRegion::index(ctx.call_execution_regions);
+     SymbolMap {
+         attribute_closure_spans: if content.contains("#[") {
+             attribute_closures::collect(program)
+@@ -362,11 +370,14 @@ fn extract_symbol_map_inner(
+         member_access_indices,
+         var_defs: ctx.var_defs,
+         scopes: ctx.scopes,
++        call_execution_regions,
++        call_execution_region_parents,
+         anonymous_source_sha256: (!ctx.anonymous_callables.is_empty())
+             .then(|| AnonymousCallable::source_hash(content)),
+         anonymous_callables: ctx.anonymous_callables,
+         anonymous_invocations: ctx.anonymous_invocations,
+         non_invoked_callable_spans: ctx.non_invoked_callable_spans,
++        keyword_constructor_spans: ctx.keyword_constructor_spans,
+         arrow_fn_scopes: ctx.arrow_fn_scopes,
+         body_scopes: ctx.body_scopes,
+         narrowing_blocks: ctx.narrowing_blocks,
+diff --git a/src/symbol_map/extraction/statements.rs b/src/symbol_map/extraction/statements.rs
+index d3daa7a..67f794c 100644
+--- a/src/symbol_map/extraction/statements.rs
++++ b/src/symbol_map/extraction/statements.rs
+@@ -44,7 +44,14 @@ pub(super) fn extract_from_statement<'a>(
+         }
+         Statement::Use(use_stmt) => {
+             emit_keyword(&use_stmt.r#use, ctx);
++            let first = ctx.spans.len();
+             extract_from_use_statement(use_stmt, &mut ctx.spans);
++            // Function imports remain navigable references, never invocations.
++            ctx.non_invoked_callable_spans
++                .extend(ctx.spans[first..].iter().filter_map(|span| {
++                    matches!(span.kind, SymbolKind::FunctionCall { .. })
++                        .then_some((span.start, span.end))
++                }));
+         }
+         Statement::Expression(expr_stmt) => {
+             extract_inline_docblock(expr_stmt, ctx, scope_start);
+diff --git a/src/symbol_map/mod.rs b/src/symbol_map/mod.rs
+index 56384fc..f6cf2a6 100644
+--- a/src/symbol_map/mod.rs
++++ b/src/symbol_map/mod.rs
+@@ -1043,6 +1043,48 @@ pub(crate) struct AnonymousInvocation {
+     pub invocation_end: u32,
+ }
+ 
++/// Execution ownership of an initializer, independently of variable lexical scope.
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++pub(crate) enum CallExecutionOwner {
++    /// Declaration keyword/name byte offset owning an omitted-argument initializer.
++    Callable(u32),
++    /// Bodyless method defaults are only materialized by explicit reflection.
++    Deferred,
++}
++
++/// Exact CST parameter-default expression and its separate execution role.
++#[derive(Debug, Clone, Copy)]
++pub(crate) struct CallExecutionRegion {
++    /// Inclusive byte start of the exact default expression.
++    pub start: u32,
++    /// Exclusive byte end of the exact default expression.
++    pub end: u32,
++    /// Callable or deferred execution role, separate from variable scope.
++    pub owner: CallExecutionOwner,
++}
++
++impl CallExecutionRegion {
++    /// AST expression intervals are nested or disjoint. Index their immediate
++    /// parents once, so a point query climbs only the containing ancestor chain.
++    pub(crate) fn index(mut regions: Vec<Self>) -> (Vec<Self>, Vec<Option<usize>>) {
++        regions.sort_by_key(|region| (region.start, std::cmp::Reverse(region.end)));
++        let mut parents = Vec::with_capacity(regions.len());
++        let mut stack: Vec<usize> = Vec::new();
++        for index in 0..regions.len() {
++            while stack
++                .last()
++                .is_some_and(|parent| regions[*parent].end <= regions[index].start)
++            {
++                stack.pop();
++            }
++            let parent = stack.last().copied();
++            parents.push(parent);
++            stack.push(index);
++        }
++        (regions, parents)
++    }
++}
++
+ /// Per-file symbol location index.
+ ///
+ /// The `spans` vec is sorted by `start` offset.  Gaps between spans
+@@ -1073,12 +1115,18 @@ pub(crate) struct SymbolMap {
+     /// methods, closures, and arrow functions.  Used by
+     /// `find_enclosing_scope` to determine which scope the cursor is in.
+     pub scopes: Vec<(u32, u32)>,
++    /// Parameter initializer execution roles, without broadening lexical scopes.
++    pub call_execution_regions: Vec<CallExecutionRegion>,
++    /// Immediate parent index for each sorted AST initializer interval.
++    pub call_execution_region_parents: Vec<Option<usize>>,
+     /// Anonymous bodies collected in the existing CST extraction pass.
+     pub anonymous_callables: Vec<AnonymousCallable>,
+     /// Direct literal invocations, retaining caller ownership separately from callee syntax.
+     pub anonymous_invocations: Vec<AnonymousInvocation>,
+-    /// Sorted callee-token spans that create first-class callable values rather than invoke them.
++    /// Sorted reference-only callee tokens, including metadata, imports and callable values.
+     pub non_invoked_callable_spans: Vec<(u32, u32)>,
++    /// Sorted exact self/static/parent operands from actual new AST nodes.
++    pub keyword_constructor_spans: Vec<(u32, u32)>,
+     /// Exact source authority for anonymous offsets; absent in closure-free maps.
+     pub anonymous_source_sha256: Option<[u8; 32]>,
+     /// Scope start offsets of arrow functions.  Arrow functions inherit
+@@ -1176,6 +1224,54 @@ pub(crate) struct SymbolMap {
+ }
+ 
+ impl SymbolMap {
++    /// Exact publication fingerprint check for consumers of cached AST roles.
++    /// This is intentionally separate from the cheap length-only offset check.
++    pub(crate) fn matches_source_fingerprint(&self, content: &str) -> bool {
++        use std::hash::{Hash, Hasher};
++        if !self.matches_source(content) {
++            return false;
++        }
++        let mut hasher = std::collections::hash_map::DefaultHasher::new();
++        content.hash(&mut hasher);
++        hasher.finish() == self.source_fingerprint
++    }
++
++    /// Whether this exact navigable keyword span is an actual construction operand.
++    pub(crate) fn is_keyword_constructor_span(&self, span: &SymbolSpan) -> bool {
++        matches!(span.kind, SymbolKind::SelfStaticParent(kind) if kind != SelfStaticParentKind::This)
++            && self
++                .keyword_constructor_spans
++                .binary_search(&(span.start, span.end))
++                .is_ok()
++    }
++
++    /// Parameter defaults execute for their declared callable, not where its
++    /// declaration was encountered. Nested callable bodies keep their own scope.
++    pub(crate) fn call_execution_owner(&self, offset: u32) -> Option<CallExecutionOwner> {
++        if self.call_execution_regions.is_empty() {
++            return None;
++        }
++        let mut index = self
++            .call_execution_regions
++            .partition_point(|region| region.start <= offset)
++            .checked_sub(1)?;
++        let mut scope = None;
++        loop {
++            let region = self.call_execution_regions.get(index)?;
++            if offset < region.end {
++                let scope = *scope.get_or_insert_with(|| self.find_enclosing_scope(offset));
++                if self.find_enclosing_scope(region.start) == scope {
++                    return Some(region.owner);
++                }
++            }
++            index = self
++                .call_execution_region_parents
++                .get(index)
++                .copied()
++                .flatten()?;
++        }
++    }
++
+     /// Whether this map has a dormant span gated by one of `affected`.
+     pub(crate) fn has_conditional_laravel_dependency(
+         &self,
+@@ -1610,3 +1706,77 @@ impl SymbolMap {
+ 
+ #[cfg(test)]
+ mod tests;
++
++#[cfg(test)]
++mod call_execution_region_index_tests {
++    use super::*;
++
++    fn map(regions: Vec<(u32, u32, u32)>, scopes: Vec<(u32, u32)>) -> SymbolMap {
++        let regions = regions
++            .into_iter()
++            .map(|(start, end, declaration)| CallExecutionRegion {
++                start,
++                end,
++                owner: CallExecutionOwner::Callable(declaration),
++            })
++            .collect();
++        let (call_execution_regions, call_execution_region_parents) =
++            CallExecutionRegion::index(regions);
++        SymbolMap {
++            call_execution_regions,
++            call_execution_region_parents,
++            scopes,
++            ..SymbolMap::default()
++        }
++    }
++
++    #[test]
++    fn initializer_index_preserves_nested_owner_and_half_open_boundaries() {
++        let map = map(
++            vec![(40, 50, 3), (42, 45, 4), (10, 1000, 1), (20, 30, 2)],
++            vec![],
++        );
++        for (point, owner) in [
++            (9, None),
++            (10, Some(1)),
++            (25, Some(2)),
++            (30, Some(1)),
++            (43, Some(4)),
++            (45, Some(3)),
++            (80, Some(1)),
++            (1000, None),
++        ] {
++            assert_eq!(
++                map.call_execution_owner(point),
++                owner.map(CallExecutionOwner::Callable)
++            );
++        }
++    }
++
++    #[test]
++    fn initializer_index_finds_outer_after_many_finished_siblings() {
++        let mut regions = vec![(10, 10000, 1)];
++        regions.extend((0..1000).map(|n| (20 + n * 4, 22 + n * 4, 2 + n)));
++        let map = map(regions, vec![]);
++        assert_eq!(
++            map.call_execution_owner(9000),
++            Some(CallExecutionOwner::Callable(1))
++        );
++        assert_eq!(map.call_execution_owner(20001), None);
++    }
++
++    #[test]
++    fn initializer_index_does_not_steal_nested_callable_body_calls() {
++        let map = map(vec![(10, 200, 1), (140, 145, 2)], vec![(100, 180)]);
++        assert_eq!(
++            map.call_execution_owner(142),
++            Some(CallExecutionOwner::Callable(2))
++        );
++        assert_eq!(map.call_execution_owner(150), None);
++        assert_eq!(
++            map.call_execution_owner(190),
++            Some(CallExecutionOwner::Callable(1))
++        );
++        assert_eq!(SymbolMap::default().call_execution_owner(0), None);
++    }
++}
+diff --git a/tests/integration/call_hierarchy.rs b/tests/integration/call_hierarchy.rs
+index 55a47bf..1c9d006 100644
+--- a/tests/integration/call_hierarchy.rs
++++ b/tests/integration/call_hierarchy.rs
+@@ -2000,3 +2000,993 @@ async fn blade_leading_unicode_use_keeps_file_scope_visible_origin_reprepare_and
+     assert_eq!(file_caller.from_ranges, direct.from_ranges);
+     assert!(leaf_callers.iter().any(|call| call.from.data == arrow.data));
+ }
++
++async fn declaration_default_constructor(
++    backend: &Backend,
++    uri: &Url,
++    source: &str,
++    class: &str,
++) -> CallHierarchyItem {
++    let prefix = format!("class {class} {{ public function ");
++    let start = source.find(&prefix).expect("fixture class") + prefix.len();
++    let prefix = &source[..start];
++    let position = Position::new(
++        prefix.bytes().filter(|b| *b == b'\n').count() as u32,
++        prefix.rsplit('\n').next().unwrap().encode_utf16().count() as u32,
++    );
++    let items = prepare_at(backend, uri, position.line, position.character).await;
++    assert_eq!(items.len(), 1, "constructor control for {class}");
++    items[0].clone()
++}
++
++#[tokio::test]
++async fn declaration_parameter_defaults_have_callable_owners_not_file_execution() {
++    let backend = create_test_backend();
++    let uri = Url::parse("file:///declaration-default-owners.php").unwrap();
++    let source = concat!(
++        "<?php\n",
++        "class FunctionDefaultToken { public function __construct() {} }\n",
++        "class MethodDefaultToken { public function __construct() {} }\n",
++        "class ClosureDefaultToken { public function __construct() {} }\n",
++        "class ArrowDefaultToken { public function __construct() {} }\n",
++        "function defaultFunction($arg = new FunctionDefaultToken()): void {}\n",
++        "class DefaultOwner { public function defaultMethod($arg = new MethodDefaultToken()): void {} }\n",
++        "$closure = function ($arg = new ClosureDefaultToken()): void {};\n",
++        "$arrow = fn($arg = new ArrowDefaultToken()) => $arg;\n",
++    );
++    open_php(&backend, &uri, source).await;
++    let file = prepare_at(&backend, &uri, 0, 0).await;
++    assert_eq!(file.len(), 1);
++    assert!(
++        outgoing(&backend, &file[0]).await.is_empty(),
++        "declarations do not evaluate optional parameter defaults at file execution"
++    );
++    for (class, needle) in [
++        ("FunctionDefaultToken", "defaultFunction"),
++        ("MethodDefaultToken", "defaultMethod"),
++        ("ClosureDefaultToken", "function ($arg"),
++        ("ArrowDefaultToken", "fn($arg"),
++    ] {
++        let owner = anonymous_hierarchy_prepare(&backend, &uri, source, needle).await;
++        let default_call = format!("{class}()");
++        let prepared = anonymous_hierarchy_prepare(&backend, &uri, source, &default_call).await;
++        assert_eq!(
++            prepared.selection_range, owner.selection_range,
++            "{class}: prepare on the default call belongs to its declaration"
++        );
++        let ctor = declaration_default_constructor(&backend, &uri, source, class).await;
++        let calls = incoming(&backend, &ctor).await;
++        assert_eq!(
++            calls.len(),
++            1,
++            "{class}: known optional default constructor is owned by its declaration"
++        );
++        assert_eq!(
++            calls[0].from.selection_range, owner.selection_range,
++            "{class}: no file/outer caller borrowing"
++        );
++        assert_eq!(calls[0].from.uri, owner.uri);
++        let outgoing = outgoing(&backend, &owner).await;
++        assert_eq!(
++            outgoing.len(),
++            1,
++            "{class}: static possible default edge, conditional on omitted argument"
++        );
++        assert_eq!(outgoing[0].to.selection_range, ctor.selection_range);
++        assert_eq!(outgoing[0].from_ranges, calls[0].from_ranges);
++    }
++}
++
++#[tokio::test]
++async fn nested_declaration_defaults_do_not_borrow_the_enclosing_function_body() {
++    let backend = create_test_backend();
++    let uri = Url::parse("file:///nested-declaration-defaults.php").unwrap();
++    let source = concat!(
++        "<?php\nclass NestedDefaultToken { public function __construct() {} }\n",
++        "function enclosingDefaultOwner(): void {\n",
++        "    function nestedDefaultOwner($arg = new NestedDefaultToken()): void {}\n",
++        "}\n",
++    );
++    open_php(&backend, &uri, source).await;
++    let outer = anonymous_hierarchy_prepare(&backend, &uri, source, "enclosingDefaultOwner").await;
++    assert!(
++        outgoing(&backend, &outer).await.is_empty(),
++        "declaring nested function does not execute its parameter initializer"
++    );
++    let nested = anonymous_hierarchy_prepare(&backend, &uri, source, "nestedDefaultOwner").await;
++    let ctor = declaration_default_constructor(&backend, &uri, source, "NestedDefaultToken").await;
++    let calls = incoming(&backend, &ctor).await;
++    assert_eq!(calls.len(), 1);
++    assert_eq!(calls[0].from.selection_range, nested.selection_range);
++}
++
++#[tokio::test]
++async fn attribute_constructor_arguments_are_not_file_execution_calls() {
++    let backend = create_test_backend();
++    let uri = Url::parse("file:///attribute-deferred-initializer.php").unwrap();
++    let source = concat!(
++        "<?php\nclass AttributeArgumentToken { public function __construct() {} }\n",
++        "#[\\Attribute] class OwnedDeferredAttribute { public function __construct(public mixed $value) {} }\n",
++        "#[OwnedDeferredAttribute(new AttributeArgumentToken())] class DecoratedDeclaration {}\n",
++    );
++    open_php(&backend, &uri, source).await;
++    let file = prepare_at(&backend, &uri, 0, 0).await;
++    assert_eq!(file.len(), 1);
++    assert!(
++        outgoing(&backend, &file[0]).await.is_empty(),
++        "attribute argument construction is deferred, not file execution"
++    );
++    let ctor =
++        declaration_default_constructor(&backend, &uri, source, "AttributeArgumentToken").await;
++    assert!(
++        incoming(&backend, &ctor)
++            .await
++            .iter()
++            .all(|call| call.from.kind != SymbolKind::FILE),
++        "no invented eager file caller before explicit reflection/attribute instantiation"
++    );
++}
++
++#[tokio::test]
++async fn bodyless_parameter_defaults_are_deferred_and_do_not_become_file_calls() {
++    let backend = create_test_backend();
++    let uri = Url::parse("file:///bodyless-default-ownership.php").unwrap();
++    let source = concat!(
++        "<?php\nclass InterfaceDefaultToken { public function __construct() {} }\n",
++        "class AbstractDefaultToken { public function __construct() {} }\n",
++        "interface DeferredInterface { public function deferredInterface($arg = new InterfaceDefaultToken()); }\n",
++        "abstract class DeferredAbstract { abstract public function deferredAbstract($arg = new AbstractDefaultToken()); }\n",
++    );
++    open_php(&backend, &uri, source).await;
++    let file = prepare_at(&backend, &uri, 0, 0).await;
++    assert_eq!(file.len(), 1);
++    assert!(outgoing(&backend, &file[0]).await.is_empty());
++    for class in ["InterfaceDefaultToken", "AbstractDefaultToken"] {
++        let ctor = declaration_default_constructor(&backend, &uri, source, class).await;
++        assert!(
++            incoming(&backend, &ctor).await.is_empty(),
++            "bodyless declarations require explicit reflection to materialize defaults"
++        );
++    }
++}
++
++#[tokio::test]
++async fn nested_new_arguments_in_parameter_default_share_the_declared_owner() {
++    let backend = create_test_backend();
++    let uri = Url::parse("file:///nested-new-default-ownership.php").unwrap();
++    let source = concat!(
++        "<?php\nclass InnerDefaultToken { public function __construct() {} }\n",
++        "class OuterDefaultToken { public function __construct(public mixed $inner) {} }\n",
++        "function nestedNewDefaultOwner($arg = new OuterDefaultToken(new InnerDefaultToken())): void {}\n",
++    );
++    open_php(&backend, &uri, source).await;
++    let owner = anonymous_hierarchy_prepare(&backend, &uri, source, "nestedNewDefaultOwner").await;
++    let edges = outgoing(&backend, &owner).await;
++    assert_eq!(edges.len(), 2);
++    for class in ["InnerDefaultToken", "OuterDefaultToken"] {
++        let ctor = declaration_default_constructor(&backend, &uri, source, class).await;
++        let calls = incoming(&backend, &ctor).await;
++        assert_eq!(calls.len(), 1);
++        assert_eq!(calls[0].from.selection_range, owner.selection_range);
++        assert!(
++            edges
++                .iter()
++                .any(|edge| edge.to.selection_range == ctor.selection_range
++                    && edge.from_ranges == calls[0].from_ranges)
++        );
++    }
++    for needle in ["OuterDefaultToken(new", "InnerDefaultToken()))"] {
++        let prepared = anonymous_hierarchy_prepare(&backend, &uri, source, needle).await;
++        assert_eq!(
++            prepared.selection_range, owner.selection_range,
++            "prepare on a default constructor mirrors prepare on a body call"
++        );
++    }
++}
++
++// Append to tests/integration/call_hierarchy.rs; uses its existing public helpers.
++fn noncall_exact_range(source: &str, needle: &str, token: &str) -> Range {
++    let base = source.find(needle).expect("unique fixture context");
++    let offset = base + needle.find(token).expect("token in context");
++    let prefix = &source[..offset];
++    let start = Position::new(
++        prefix.bytes().filter(|b| *b == b'\n').count() as u32,
++        prefix.rsplit('\n').next().unwrap().encode_utf16().count() as u32,
++    );
++    Range::new(
++        start,
++        Position::new(
++            start.line,
++            start.character + token.encode_utf16().count() as u32,
++        ),
++    )
++}
++
++async fn noncall_assert_navigation_retained(
++    backend: &Backend,
++    uri: &Url,
++    source: &str,
++    context: &str,
++    token: &str,
++    declaration_line: u32,
++) {
++    let range = noncall_exact_range(source, context, token);
++    let target = backend
++        .goto_definition(GotoDefinitionParams {
++            text_document_position_params: TextDocumentPositionParams {
++                text_document: TextDocumentIdentifier { uri: uri.clone() },
++                position: range.start,
++            },
++            work_done_progress_params: Default::default(),
++            partial_result_params: Default::default(),
++        })
++        .await
++        .unwrap()
++        .expect("metadata/reference remains navigable");
++    let locations = match target {
++        GotoDefinitionResponse::Scalar(location) => vec![location],
++        GotoDefinitionResponse::Array(locations) => locations,
++        GotoDefinitionResponse::Link(links) => links
++            .into_iter()
++            .map(|link| Location::new(link.target_uri, link.target_selection_range))
++            .collect(),
++    };
++    assert!(
++        locations
++            .iter()
++            .any(|location| location.uri == *uri && location.range.start.line == declaration_line),
++        "{context}: {locations:?}"
++    );
++    let references = backend
++        .references(ReferenceParams {
++            text_document_position: TextDocumentPositionParams {
++                text_document: TextDocumentIdentifier { uri: uri.clone() },
++                position: range.start,
++            },
++            context: ReferenceContext {
++                include_declaration: false,
++            },
++            work_done_progress_params: Default::default(),
++            partial_result_params: Default::default(),
++        })
++        .await
++        .unwrap()
++        .unwrap_or_default();
++    assert!(
++        references
++            .iter()
++            .any(|reference| reference.uri == *uri && reference.range == range),
++        "reference survives hierarchy filtering: {context}: {references:?}"
++    );
++}
++
++#[tokio::test]
++async fn function_imports_remain_references_without_becoming_file_calls() {
++    let backend = create_test_backend();
++    let uri = Url::parse("file:///noncall-function-imports.php").unwrap();
++    let source = concat!(
++        "<?php\nnamespace ImportedLibrary { function importLeafA() {} function importLeafB() {} function importLeafC() {} }\n",
++        "namespace ImportConsumer {\n",
++        "use function ImportedLibrary\\importLeafA;\n",
++        "use function ImportedLibrary\\{importLeafB};\n",
++        "use ImportedLibrary\\{function importLeafC};\n",
++        "importLeafA(); importLeafB(); importLeafC();\n}\n",
++    );
++    open_php(&backend, &uri, source).await;
++    let file = prepare_at(&backend, &uri, 0, 0).await.remove(0);
++    assert_eq!(file.kind, SymbolKind::FILE);
++    let edges = outgoing(&backend, &file).await;
++    assert_eq!(edges.len(), 3);
++    for name in ["importLeafA", "importLeafB", "importLeafC"] {
++        let edge = edges
++            .iter()
++            .find(|edge| edge.to.name == name)
++            .expect("real call retained");
++        let expected = noncall_exact_range(source, &format!("{name}();"), name);
++        assert_eq!(edge.from_ranges, [expected]);
++        let reverse = incoming(&backend, &edge.to).await;
++        assert_eq!(reverse.len(), 1);
++        assert_eq!(reverse[0].from_ranges, [expected]);
++    }
++    for (context, token) in [
++        (
++            "use function ImportedLibrary\\importLeafA;",
++            "ImportedLibrary\\importLeafA",
++        ),
++        (
++            "use function ImportedLibrary\\{importLeafB};",
++            "importLeafB",
++        ),
++        (
++            "use ImportedLibrary\\{function importLeafC};",
++            "importLeafC",
++        ),
++    ] {
++        noncall_assert_navigation_retained(&backend, &uri, source, context, token, 1).await;
++    }
++}
++
++#[tokio::test]
++async fn stored_array_callables_are_references_but_direct_literal_calls_are_edges() {
++    let backend = create_test_backend();
++    let uri = Url::parse("file:///noncall-array-callables.php").unwrap();
++    let source = concat!(
++        "<?php\nclass NoncallArrayHandler { public static function run() {} }\n",
++        "$stored = [NoncallArrayHandler::class, 'run'];\n",
++        "$legacy = array(NoncallArrayHandler::class, 'run');\n",
++        "([NoncallArrayHandler::class, 'run'])();\n",
++        "(array(NoncallArrayHandler::class, 'run'))();\n",
++        "NoncallArrayHandler::run();\n",
++        "$partial = ([NoncallArrayHandler::class, 'run'])(...);\n",
++        // Nested reference in an unsupported outer callee must not be unmasked.
++        "([[NoncallArrayHandler::class, 'run'], 'invalid'])();\n",
++    );
++    open_php(&backend, &uri, source).await;
++    let file = prepare_at(&backend, &uri, 0, 0).await.remove(0);
++    let edges = outgoing(&backend, &file).await;
++    assert_eq!(edges.len(), 1);
++    assert_eq!(edges[0].to.name, "run");
++    let expected = vec![
++        noncall_exact_range(source, "([NoncallArrayHandler::class, 'run'])();", "run"),
++        noncall_exact_range(
++            source,
++            "(array(NoncallArrayHandler::class, 'run'))();",
++            "run",
++        ),
++        noncall_exact_range(source, "NoncallArrayHandler::run();", "run"),
++    ];
++    assert_eq!(edges[0].from_ranges, expected);
++    let reverse = incoming(&backend, &edges[0].to).await;
++    assert_eq!(reverse.len(), 1);
++    assert_eq!(reverse[0].from_ranges, expected);
++    noncall_assert_navigation_retained(
++        &backend,
++        &uri,
++        source,
++        "$stored = [NoncallArrayHandler::class, 'run'];",
++        "run",
++        1,
++    )
++    .await;
++    noncall_assert_navigation_retained(
++        &backend,
++        &uri,
++        source,
++        "$legacy = array(NoncallArrayHandler::class, 'run');",
++        "run",
++        1,
++    )
++    .await;
++}
++
++#[tokio::test]
++async fn phpunit_function_metadata_remains_navigable_without_execution_edges() {
++    let backend = create_test_backend();
++    let uri = Url::parse("file:///noncall-phpunit-functions.php").unwrap();
++    let source = concat!(
++        "<?php\nfunction noncallCoveredLeaf() {}\n",
++        "#[\\PHPUnit\\Framework\\Attributes\\CoversFunction('noncallCoveredLeaf')]\n",
++        "#[\\PHPUnit\\Framework\\Attributes\\UsesFunction('noncallCoveredLeaf')]\n",
++        "class NoncallMetadataTest {}\n",
++        "noncallCoveredLeaf();\n",
++    );
++    open_php(&backend, &uri, source).await;
++    let file = prepare_at(&backend, &uri, 0, 0).await.remove(0);
++    let edges = outgoing(&backend, &file).await;
++    assert_eq!(edges.len(), 1);
++    let expected = noncall_exact_range(source, "noncallCoveredLeaf();", "noncallCoveredLeaf");
++    assert_eq!(edges[0].from_ranges, [expected]);
++    assert_eq!(
++        incoming(&backend, &edges[0].to).await[0].from_ranges,
++        [expected]
++    );
++    for attribute in ["CoversFunction", "UsesFunction"] {
++        noncall_assert_navigation_retained(
++            &backend,
++            &uri,
++            source,
++            &format!("{attribute}('noncallCoveredLeaf')"),
++            "noncallCoveredLeaf",
++            1,
++        )
++        .await;
++    }
++}
++
++#[tokio::test]
++async fn nested_attribute_new_does_not_borrow_file_or_enclosing_body_ownership() {
++    let backend = create_test_backend();
++    let uri = Url::parse("file:///noncall-attribute-new.php").unwrap();
++    let source = concat!(
++        "<?php\nclass NoncallPayload { public function __construct() {} }\n",
++        "#[\\Attribute] class NoncallAttribute { public function __construct(public mixed $value) {} }\n",
++        "#[NoncallAttribute([new NoncallPayload()])] function decoratedNoncall() {}\n",
++        "function enclosingNoncall(): void {\n",
++        "    #[NoncallAttribute(new NoncallPayload())] function nestedDecoratedNoncall() {}\n",
++        "    new NoncallPayload(); // body-positive\n",
++        "}\n",
++        "new NoncallPayload(); // file-positive\n",
++    );
++    open_php(&backend, &uri, source).await;
++    let file = prepare_at(&backend, &uri, 0, 0).await.remove(0);
++    let outer = anonymous_hierarchy_prepare(&backend, &uri, source, "enclosingNoncall").await;
++    let ctor = anonymous_hierarchy_prepare(&backend, &uri, source, "__construct").await;
++    let expected_file = noncall_exact_range(
++        source,
++        "new NoncallPayload(); // file-positive",
++        "NoncallPayload",
++    );
++    let expected_body = noncall_exact_range(
++        source,
++        "new NoncallPayload(); // body-positive",
++        "NoncallPayload",
++    );
++    for (owner, expected) in [(&file, expected_file), (&outer, expected_body)] {
++        let edges = outgoing(&backend, owner).await;
++        assert_eq!(edges.len(), 1);
++        assert_eq!(edges[0].to.selection_range, ctor.selection_range);
++        assert_eq!(edges[0].from_ranges, [expected]);
++    }
++    let calls = incoming(&backend, &ctor).await;
++    assert_eq!(calls.len(), 2);
++    assert_eq!(
++        calls
++            .iter()
++            .map(|call| call.from_ranges.len())
++            .sum::<usize>(),
++        2
++    );
++    for declaration in ["decoratedNoncall", "nestedDecoratedNoncall"] {
++        let item = anonymous_hierarchy_prepare(&backend, &uri, source, declaration).await;
++        assert!(outgoing(&backend, &item).await.is_empty());
++    }
++    noncall_assert_navigation_retained(
++        &backend,
++        &uri,
++        source,
++        "#[NoncallAttribute([new NoncallPayload()])]",
++        "NoncallPayload",
++        1,
++    )
++    .await;
++}
++
++// Append after proposal-noncall-fix/tests-append.rs (uses its navigation/range helper).
++#[tokio::test]
++async fn route_group_action_strings_are_references_without_controller_execution_edges() {
++    let backend = create_test_backend();
++    let uri = Url::parse("file:///noncall-route-action.php").unwrap();
++    let source = concat!(
++        "<?php\nclass NoncallRouteController { public static function show() {} }\n",
++        "class NoncallRouteBuilder { public function group(Closure $callback): void {} }\n",
++        "class Route {\n",
++        " public static function controller(string $class): NoncallRouteBuilder { return new NoncallRouteBuilder(); }\n",
++        " public static function get(string $path, mixed $action): void {}\n",
++        " public static function post(string $path, mixed $action): void {}\n",
++        "}\n",
++        "Route::controller(NoncallRouteController::class)->group(function () {\n",
++        "    Route::get('/show', 'show');\n",
++        "    Route::post('/show', 'show');\n",
++        "    NoncallRouteController::show(); // actual-body-call\n",
++        "});\n",
++    );
++    open_php(&backend, &uri, source).await;
++    let closure = anonymous_hierarchy_prepare(&backend, &uri, source, "function ()").await;
++    let edges = outgoing(&backend, &closure).await;
++    assert_eq!(
++        sorted(edges.iter().map(|edge| edge.to.name.clone()).collect()),
++        ["get", "post", "show"]
++    );
++    let expected = noncall_exact_range(
++        source,
++        "NoncallRouteController::show(); // actual-body-call",
++        "show",
++    );
++    let action_edge = edges.iter().find(|edge| edge.to.name == "show").unwrap();
++    assert_eq!(action_edge.from_ranges, [expected]);
++    let reverse = incoming(&backend, &action_edge.to).await;
++    assert_eq!(reverse.len(), 1);
++    assert_eq!(reverse[0].from.selection_range, closure.selection_range);
++    assert_eq!(reverse[0].from_ranges, [expected]);
++    let file = prepare_at(&backend, &uri, 0, 0).await.remove(0);
++    let file_edges = outgoing(&backend, &file).await;
++    assert_eq!(
++        sorted(file_edges.iter().map(|edge| edge.to.name.clone()).collect()),
++        ["controller", "group"]
++    );
++    for context in [
++        "Route::get('/show', 'show');",
++        "Route::post('/show', 'show');",
++    ] {
++        // Include the quote so the second string, rather than URI, is selected.
++        let range_context = context.rsplit_once(", ").unwrap().1;
++        let start = source.find(context).unwrap() + context.find(range_context).unwrap() + 1;
++        let prefix = &source[..start];
++        let position = Position::new(
++            prefix.bytes().filter(|byte| *byte == b'\n').count() as u32,
++            prefix.rsplit('\n').next().unwrap().encode_utf16().count() as u32,
++        );
++        let response = backend
++            .goto_definition(GotoDefinitionParams {
++                text_document_position_params: TextDocumentPositionParams {
++                    text_document: TextDocumentIdentifier { uri: uri.clone() },
++                    position,
++                },
++                work_done_progress_params: Default::default(),
++                partial_result_params: Default::default(),
++            })
++            .await
++            .unwrap();
++        let locations = match response.expect("route action navigation retained") {
++            GotoDefinitionResponse::Scalar(location) => vec![location],
++            GotoDefinitionResponse::Array(locations) => locations,
++            GotoDefinitionResponse::Link(links) => links
++                .into_iter()
++                .map(|link| Location::new(link.target_uri, link.target_selection_range))
++                .collect(),
++        };
++        assert!(
++            locations
++                .iter()
++                .any(|location| location.uri == uri && location.range.start.line == 1),
++            "controller method selected: {context}: {locations:?}"
++        );
++    }
++}
++
++fn keyword_constructor_range(source: &str, needle: &str, token: &str) -> Range {
++    let start =
++        source.find(needle).expect("fixture needle") + needle.rfind(token).expect("callee token");
++    let prefix = &source[..start];
++    let position = Position::new(
++        prefix.bytes().filter(|b| *b == b'\n').count() as u32,
++        prefix.rsplit('\n').next().unwrap().encode_utf16().count() as u32,
++    );
++    Range::new(
++        position,
++        Position::new(
++            position.line,
++            position.character + token.encode_utf16().count() as u32,
++        ),
++    )
++}
++
++async fn keyword_constructor_prepare(
++    backend: &Backend,
++    uri: &Url,
++    source: &str,
++    needle: &str,
++    token: &str,
++) -> CallHierarchyItem {
++    let range = keyword_constructor_range(source, needle, token);
++    let mut items = prepare_at(backend, uri, range.start.line, range.start.character).await;
++    assert_eq!(items.len(), 1, "unique prepare {needle}");
++    let item = items.remove(0);
++    assert_eq!(
++        item.selection_range, range,
++        "exact keyword/declaration selection"
++    );
++    item
++}
++
++#[tokio::test]
++async fn hierarchy_keyword_constructors_have_ast_provenance_and_reciprocal_utf16_ranges() {
++    let backend = create_test_backend();
++    let uri = Url::parse("file:///keyword-constructor-provenance.php").unwrap();
++    let source = concat!(
++        "<?php\r\n",
++        "class KeywordBase { public function __construct() {} }\r\n",
++        "final class KeywordChild extends KeywordBase {\r\n",
++        " public function __construct() {}\r\n",
++        " private ?self $property = null; private static ?self $cache = null;\r\n",
++        " public function makeSelf(): void { /* café 🐘 */ new /* gap */ self(); }\r\n",
++        " public function makeStatic(): void { /* café 🐘 */ new /* gap */\r\n static(); }\r\n",
++        " public function makeParent(): void { /* café 🐘 */ new /* gap */ parent(); }\r\n",
++        " public function mentions(?self $value): self { $names = [self::class, static::class, parent::class]; $x = self::$cache; $y = $this->property; return $this; }\r\n",
++        "}\r\n",
++    );
++    open_php(&backend, &uri, source).await;
++    let base = keyword_constructor_prepare(
++        &backend,
++        &uri,
++        source,
++        "class KeywordBase { public function __construct",
++        "__construct",
++    )
++    .await;
++    let child = keyword_constructor_prepare(
++        &backend,
++        &uri,
++        source,
++        "\r\n public function __construct",
++        "__construct",
++    )
++    .await;
++    let cases = [
++        (
++            "function makeSelf",
++            "makeSelf",
++            "new /* gap */ self",
++            "self",
++            &child,
++        ),
++        (
++            "function makeStatic",
++            "makeStatic",
++            "new /* gap */\r\n static",
++            "static",
++            &child,
++        ),
++        (
++            "function makeParent",
++            "makeParent",
++            "new /* gap */ parent",
++            "parent",
++            &base,
++        ),
++    ];
++    let mut expected_child = Vec::new();
++    let mut expected_base = Vec::new();
++    for (needle, name, site, keyword, target) in cases {
++        let owner = keyword_constructor_prepare(&backend, &uri, source, needle, name).await;
++        let range = keyword_constructor_range(source, site, keyword);
++        let edges = outgoing(&backend, &owner).await;
++        assert_eq!(edges.len(), 1, "one actual keyword construction");
++        assert_eq!(edges[0].to.uri, target.uri);
++        assert_eq!(edges[0].to.selection_range, target.selection_range);
++        assert_eq!(edges[0].from_ranges, vec![range]);
++        let expected = (owner.selection_range, vec![range]);
++        if keyword == "parent" {
++            expected_base.push(expected);
++        } else {
++            expected_child.push(expected);
++        }
++    }
++    for (target, expected) in [(&base, expected_base), (&child, expected_child)] {
++        let calls = incoming(&backend, target).await;
++        assert_eq!(
++            calls.len(),
++            expected.len(),
++            "no constructor caller from navigable keyword mentions"
++        );
++        for (selection, ranges) in expected {
++            assert_eq!(
++                calls
++                    .iter()
++                    .filter(|call| call.from.uri == uri
++                        && call.from.selection_range == selection
++                        && call.from_ranges == ranges)
++                    .count(),
++                1
++            );
++        }
++    }
++    let mentions =
++        keyword_constructor_prepare(&backend, &uri, source, "function mentions", "mentions").await;
++    assert!(
++        outgoing(&backend, &mentions).await.is_empty(),
++        "type, return, ::class and property mentions are not constructors"
++    );
++}
++
++#[tokio::test]
++async fn hierarchy_keyword_constructors_reuse_inherited_and_trait_alias_origins() {
++    let backend = create_test_backend();
++    let uri = Url::parse("file:///keyword-constructor-origins.php").unwrap();
++    let source = concat!(
++        "<?php\r\n",
++        "class KeywordAncestor { public function __construct() {} }\r\n",
++        "final class KeywordInherited extends KeywordAncestor { public function create(): void { /* café 🐘 */ new self(); new static(); new parent(); } }\r\n",
++        "trait KeywordInitializer { public function initialize() {} }\r\n",
++        "final class KeywordTraitFactory { use KeywordInitializer { initialize as __construct; } public function createTrait(): void { /* café 🐘 */ new /* comment */ self(); } }\r\n",
++    );
++    open_php(&backend, &uri, source).await;
++    let ancestor = keyword_constructor_prepare(
++        &backend,
++        &uri,
++        source,
++        "class KeywordAncestor { public function __construct",
++        "__construct",
++    )
++    .await;
++    let inherited =
++        keyword_constructor_prepare(&backend, &uri, source, "function create()", "create").await;
++    let ranges = ["self", "static", "parent"]
++        .map(|word| keyword_constructor_range(source, &format!("new {word}()"), word))
++        .to_vec();
++    let edges = outgoing(&backend, &inherited).await;
++    assert_eq!(edges.len(), 1);
++    assert_eq!(edges[0].to.selection_range, ancestor.selection_range);
++    assert_eq!(edges[0].from_ranges, ranges);
++    let back = incoming(&backend, &ancestor).await;
++    assert_eq!(back.len(), 1);
++    assert_eq!(back[0].from.selection_range, inherited.selection_range);
++    assert_eq!(back[0].from_ranges, ranges);
++    let initialization =
++        keyword_constructor_prepare(&backend, &uri, source, "function initialize", "initialize")
++            .await;
++    let factory = keyword_constructor_prepare(
++        &backend,
++        &uri,
++        source,
++        "function createTrait",
++        "createTrait",
++    )
++    .await;
++    let range = keyword_constructor_range(source, "new /* comment */ self", "self");
++    let edges = outgoing(&backend, &factory).await;
++    assert_eq!(edges.len(), 1);
++    assert_eq!(edges[0].to.selection_range, initialization.selection_range);
++    assert_eq!(edges[0].from_ranges, vec![range]);
++    let back = incoming(&backend, &initialization).await;
++    assert_eq!(back.len(), 1, "trait adaptation metadata is not an invoker");
++    assert_eq!(back[0].from.selection_range, factory.selection_range);
++    assert_eq!(back[0].from_ranges, vec![range]);
++}
++
++// Append to call_hierarchy.rs after the noncall and keyword-constructor tests.
++async fn attribute_keyword_assert_deferred(keyword: &str) {
++    let backend = create_test_backend();
++    backend.set_php_version(phpantom_lsp::types::PhpVersion::new(8, 3));
++    let uri = Url::parse(&format!("file:///attribute-deferred-{keyword}.php")).unwrap();
++    let source = format!(
++        concat!(
++            "<?php\r\n",
++            "class AttributeKeywordBase {{ public function __construct() {{}} }}\r\n",
++            "#[\\Attribute] class AttributeKeywordMetadata {{ public function __construct(public mixed $value) {{}} }}\r\n",
++            "class AttributeKeywordChild extends AttributeKeywordBase {{\r\n",
++            " public function __construct() {{}}\r\n",
++            " #[AttributeKeywordMetadata([new /* deferred */ {0}()])]\r\n",
++            " public function decorated(): void {{}}\r\n",
++            " public function instantiate(): void {{ /* café 🐘 */ new /* real */ {0}(); }}\r\n",
++            "}}\r\n",
++        ),
++        keyword
++    );
++    open_php(&backend, &uri, &source).await;
++    let constructor_needle = if keyword == "self" {
++        "\r\n public function __construct"
++    } else {
++        "class AttributeKeywordBase { public function __construct"
++    };
++    let ctor =
++        keyword_constructor_prepare(&backend, &uri, &source, constructor_needle, "__construct")
++            .await;
++    let body = keyword_constructor_prepare(
++        &backend,
++        &uri,
++        &source,
++        "function instantiate",
++        "instantiate",
++    )
++    .await;
++    let expected =
++        keyword_constructor_range(&source, &format!("new /* real */ {keyword}"), keyword);
++    let calls = incoming(&backend, &ctor).await;
++    assert_eq!(
++        calls.len(),
++        1,
++        "attribute reflection metadata must not add a file/declaration caller: {keyword}"
++    );
++    assert_eq!(calls[0].from.selection_range, body.selection_range);
++    assert_eq!(calls[0].from_ranges, [expected]);
++    let edges = outgoing(&backend, &body).await;
++    assert_eq!(edges.len(), 1);
++    assert_eq!(edges[0].to.selection_range, ctor.selection_range);
++    assert_eq!(edges[0].from_ranges, [expected]);
++    let file = prepare_at(&backend, &uri, 0, 0).await.remove(0);
++    assert!(
++        outgoing(&backend, &file).await.is_empty(),
++        "no eager file execution from deferred {keyword}"
++    );
++    let decorated =
++        keyword_constructor_prepare(&backend, &uri, &source, "function decorated", "decorated")
++            .await;
++    assert!(outgoing(&backend, &decorated).await.is_empty());
++}
++
++#[tokio::test]
++async fn attribute_new_self_is_deferred_but_body_self_construction_remains_known() {
++    attribute_keyword_assert_deferred("self").await;
++}
++
++#[tokio::test]
++async fn attribute_new_parent_is_deferred_but_body_parent_construction_remains_known() {
++    attribute_keyword_assert_deferred("parent").await;
++}
++
++#[tokio::test]
++async fn attribute_closure_body_new_remains_owned_by_its_anonymous_callable() {
++    let backend = create_test_backend();
++    backend.set_php_version(phpantom_lsp::types::PhpVersion::new(8, 5));
++    let uri = Url::parse("file:///attribute-closure-body-construction.php").unwrap();
++    let source = concat!(
++        "<?php\nclass AttributeClosurePayload { public function __construct() {} }\n",
++        "#[\\Attribute] class AttributeClosureMetadata { public function __construct(public mixed $value) {} }\n",
++        "#[AttributeClosureMetadata(static function () { new AttributeClosurePayload(); })]\n",
++        "function attributeClosureDecorated(): void {}\n",
++    );
++    open_php(&backend, &uri, source).await;
++    let closure = anonymous_hierarchy_prepare(&backend, &uri, source, "function ()").await;
++    let ctor = keyword_constructor_prepare(
++        &backend,
++        &uri,
++        source,
++        "class AttributeClosurePayload { public function __construct",
++        "__construct",
++    )
++    .await;
++    let expected = keyword_constructor_range(
++        source,
++        "new AttributeClosurePayload",
++        "AttributeClosurePayload",
++    );
++    let edges = outgoing(&backend, &closure).await;
++    assert_eq!(edges.len(), 1);
++    assert_eq!(edges[0].to.selection_range, ctor.selection_range);
++    assert_eq!(edges[0].from_ranges, [expected]);
++    let calls = incoming(&backend, &ctor).await;
++    assert_eq!(calls.len(), 1);
++    assert_eq!(calls[0].from.selection_range, closure.selection_range);
++    assert_eq!(calls[0].from_ranges, [expected]);
++    let file = prepare_at(&backend, &uri, 0, 0).await.remove(0);
++    assert!(outgoing(&backend, &file).await.is_empty());
++}
++
++#[tokio::test]
++async fn hierarchy_late_static_constructor_requires_unique_final_implementation() {
++    let backend = create_test_backend();
++    let uri = Url::parse("file:///keyword-constructor-certainty.php").unwrap();
++    let source = concat!(
++        "<?php\r\n",
++        "class OpenCtorBase { public function __construct() {} public function maybeStatic(): void { /* café 🐘 */ new static(); } public function knownSelf(): void { new self(); } }\r\n",
++        "class OpenCtorChild extends OpenCtorBase { public function __construct() {} }\r\n",
++        "class LockedCtorBase { final public function __construct() {} public function lockedStatic(): void { /* café 🐘 */ new /* gap */ static(); } }\r\n",
++        "class LockedCtorChild extends LockedCtorBase {}\r\n",
++    );
++    open_php(&backend, &uri, source).await;
++    let base = keyword_constructor_prepare(
++        &backend,
++        &uri,
++        source,
++        "class OpenCtorBase { public function __construct",
++        "__construct",
++    )
++    .await;
++    let child = keyword_constructor_prepare(
++        &backend,
++        &uri,
++        source,
++        "class OpenCtorChild extends OpenCtorBase { public function __construct",
++        "__construct",
++    )
++    .await;
++    let ambiguous = keyword_constructor_prepare(
++        &backend,
++        &uri,
++        source,
++        "function maybeStatic",
++        "maybeStatic",
++    )
++    .await;
++    assert!(
++        outgoing(&backend, &ambiguous).await.is_empty(),
++        "late static cannot choose base or overriding subclass"
++    );
++    let known_self =
++        keyword_constructor_prepare(&backend, &uri, source, "function knownSelf", "knownSelf")
++            .await;
++    let self_range = keyword_constructor_range(source, "new self()", "self");
++    let known_edges = outgoing(&backend, &known_self).await;
++    assert_eq!(
++        known_edges.len(),
++        1,
++        "new self remains lexical even in a nonfinal class"
++    );
++    assert_eq!(known_edges[0].to.selection_range, base.selection_range);
++    assert_eq!(known_edges[0].from_ranges, vec![self_range]);
++    let base_in = incoming(&backend, &base).await;
++    assert_eq!(
++        base_in.len(),
++        1,
++        "incoming must not borrow broader static keyword references"
++    );
++    assert_eq!(base_in[0].from.selection_range, known_self.selection_range);
++    assert_eq!(base_in[0].from_ranges, vec![self_range]);
++    assert!(
++        incoming(&backend, &child).await.is_empty(),
++        "no guessed overriding subclass target"
++    );
++    let locked = keyword_constructor_prepare(
++        &backend,
++        &uri,
++        source,
++        "final public function __construct",
++        "__construct",
++    )
++    .await;
++    let factory = keyword_constructor_prepare(
++        &backend,
++        &uri,
++        source,
++        "function lockedStatic",
++        "lockedStatic",
++    )
++    .await;
++    let range = keyword_constructor_range(source, "new /* gap */ static()", "static");
++    let edges = outgoing(&backend, &factory).await;
++    assert_eq!(
++        edges.len(),
++        1,
++        "a final concrete constructor cannot be overridden"
++    );
++    assert_eq!(edges[0].to.selection_range, locked.selection_range);
++    assert_eq!(edges[0].from_ranges, vec![range]);
++    let back = incoming(&backend, &locked).await;
++    assert_eq!(back.len(), 1);
++    assert_eq!(back[0].from.selection_range, factory.selection_range);
++    assert_eq!(back[0].from_ranges, vec![range]);
++}
++
++#[tokio::test]
++async fn hierarchy_trait_keyword_construction_stays_unknown_without_consumer_identity() {
++    let backend = create_test_backend();
++    let uri = Url::parse("file:///keyword-constructor-trait-context.php").unwrap();
++    let source = concat!(
++        "<?php\r\n",
++        "class FixedCtor { public function __construct() {} }\r\n",
++        "trait UnboundFactory { public function __construct() {} public function traitSelf(): void { new self(); } public function traitStatic(): void { new static(); } public function explicitClass(): void { /* café 🐘 */ new FixedCtor(); } }\r\n",
++        "final class ConsumerOne { use UnboundFactory; }\r\n",
++        "final class ConsumerTwo { use UnboundFactory; public function __construct() {} }\r\n",
++    );
++    open_php(&backend, &uri, source).await;
++    for name in ["traitSelf", "traitStatic"] {
++        let owner =
++            keyword_constructor_prepare(&backend, &uri, source, &format!("function {name}"), name)
++                .await;
++        assert!(
++            outgoing(&backend, &owner).await.is_empty(),
++            "trait keyword cannot invent a consuming class"
++        );
++    }
++    for needle in [
++        "trait UnboundFactory { public function __construct",
++        "class ConsumerTwo { use UnboundFactory; public function __construct",
++    ] {
++        let constructor =
++            keyword_constructor_prepare(&backend, &uri, source, needle, "__construct").await;
++        assert!(
++            incoming(&backend, &constructor).await.is_empty(),
++            "incoming must validate the same constructor certainty"
++        );
++    }
++    let fixed = keyword_constructor_prepare(
++        &backend,
++        &uri,
++        source,
++        "class FixedCtor { public function __construct",
++        "__construct",
++    )
++    .await;
++    let explicit = keyword_constructor_prepare(
++        &backend,
++        &uri,
++        source,
++        "function explicitClass",
++        "explicitClass",
++    )
++    .await;
++    let range = keyword_constructor_range(source, "new FixedCtor()", "FixedCtor");
++    let edges = outgoing(&backend, &explicit).await;
++    assert_eq!(
++        edges.len(),
++        1,
++        "explicit named construction inside a trait remains known"
++    );
++    assert_eq!(edges[0].to.selection_range, fixed.selection_range);
++    assert_eq!(edges[0].from_ranges, vec![range]);
++    let back = incoming(&backend, &fixed).await;
++    assert_eq!(back.len(), 1);
++    assert_eq!(back[0].from.selection_range, explicit.selection_range);
++    assert_eq!(back[0].from_ranges, vec![range]);
++}

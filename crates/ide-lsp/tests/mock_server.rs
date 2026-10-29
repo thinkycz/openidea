@@ -2258,3 +2258,106 @@ async fn checked_php_rename_refusal_cannot_be_masked_by_another_provider() {
     assert!(h.mgr.rename(doc, Pos::new(0, 7), "renamed".into()).await.is_err());
     assert!(other.requested("textDocument/rename").is_empty());
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn reused_progress_token_keeps_one_task_and_current_cancel_handle() {
+    let h = harness(&[("mock", incremental_caps())]);
+    h.open("a.mk", "x");
+    h.wait_status("mock", ServerStatus::Ready).await;
+    let state = h.launcher.state("mock");
+    let peer = state.peer();
+    let begin = || json!({"token":"reused","value":{"kind":"begin","title":"Resolving","cancellable":true}});
+    peer.notify("$/progress", begin()).unwrap();
+    h.wait_status("mock", ServerStatus::Busy).await;
+    peer.notify("$/progress", begin()).unwrap();
+    eventually(|| {
+        h.events
+            .lock()
+            .iter()
+            .filter(|e| matches!(e,IdeEvent::Task {title,done:false,..} if title=="Resolving"))
+            .count()
+            == 2
+    })
+    .await;
+    let tasks: HashSet<_> = h
+        .events
+        .lock()
+        .iter()
+        .filter_map(|e| match e {
+            IdeEvent::Task { id, title, done: false, .. } if title == "Resolving" => Some(*id),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(tasks.len(), 1, "one server progress token must not create orphaned UI tasks");
+    let task = *tasks.iter().next().unwrap();
+    assert!(ide_core::task::cancel(task), "replacing a progress token must retain the newest cancel handle");
+    eventually(|| state.notified("window/workDoneProgress/cancel").len() == 1).await;
+    peer.notify("$/progress", json!({"token":"reused","value":{"kind":"end"}})).unwrap();
+    h.wait_status("mock", ServerStatus::Ready).await;
+    assert!(h.events.lock().iter().any(|e| matches!(e,IdeEvent::Task {id,done:true,..} if *id==task)));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn laravel_queries_require_capabilities_and_preserve_incomplete_duplicates() {
+    let mut caps = incremental_caps();
+    caps["experimental"] = json!({"phpWorkbenchRoutes":true,"phpWorkbenchViews":true});
+    let h = harness_for("php", "php", &[("phpantom", caps)], &[]);
+    let (doc, path) = h.open("main.php", "<?php\n");
+    h.wait_status("phpantom", ServerStatus::Ready).await;
+    let state = h.launcher.state("phpantom");
+    let loc = json!({"uri":uri_of(&path),"range":php_range(0,0,0,5)});
+    state.respond(
+        "phpWorkbench/routes",
+        json!({
+            "routes":[{"name":"invoice.show","uri":"invoices/{invoice}","parameters":["invoice"],"from_vendor":true}],
+            "locations":[loc.clone(),loc.clone()],"incomplete":true
+        }),
+    );
+    let result = h.mgr.laravel_routes(doc, None, 10, Default::default()).await.unwrap();
+    assert!(result.incomplete);
+    assert_eq!(result.routes[0].name, "invoice.show");
+    assert!(result.routes[0].from_vendor);
+    assert_eq!(result.routes[0].parameters.as_ref().unwrap(), &["invoice"]);
+    assert_eq!(result.locations.len(), 2, "duplicate registrations must remain visible");
+    assert_eq!(state.requested("phpWorkbench/routes"), vec![json!({"name":null,"limit":10})]);
+    state.respond("phpWorkbench/views", json!({"views":["invoices.show"],"locations":[loc],"incomplete":true}));
+    let result = h.mgr.laravel_views(doc, Some("invoices.show".into()), 10, Default::default()).await.unwrap();
+    assert!(result.incomplete);
+    assert_eq!(result.views, vec!["invoices.show"]);
+    assert_eq!(result.locations.len(), 1);
+    assert!(h.mgr.laravel_routes(doc, None, 0, Default::default()).await.is_err());
+    assert!(h.mgr.laravel_views(doc, None, 5001, Default::default()).await.is_err());
+    assert_eq!(state.requested("phpWorkbench/routes").len(), 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn laravel_queries_do_not_probe_unsupported_servers() {
+    let h = harness_for("php", "php", &[("phpantom", incremental_caps())], &[]);
+    let (doc, _) = h.open("main.php", "<?php\n");
+    h.wait_status("phpantom", ServerStatus::Ready).await;
+    assert!(h.mgr.laravel_routes(doc, None, 10, Default::default()).await.is_err());
+    assert!(h.mgr.laravel_views(doc, None, 10, Default::default()).await.is_err());
+    let state = h.launcher.state("phpantom");
+    assert!(state.requested("phpWorkbench/routes").is_empty());
+    assert!(state.requested("phpWorkbench/views").is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn laravel_query_refuses_an_unsaved_dependency_change_during_response() {
+    let mut caps = incremental_caps();
+    caps["experimental"] = json!({"phpWorkbenchRoutes":true});
+    let h = harness_for("php", "php", &[("phpantom", caps)], &[]);
+    let (doc, _) = h.open("main.php", "<?php\n");
+    let (dependency, _) = h.open("routes.php", "<?php\n");
+    h.wait_status("phpantom", ServerStatus::Ready).await;
+    let mgr = Arc::downgrade(&h.mgr);
+    h.launcher.state("phpantom").responder.lock().replace(Arc::new(move |_, method, _| {
+        if method != "phpWorkbench/routes" {
+            return None;
+        }
+        mgr.upgrade().unwrap().did_change(dependency, 2, &[change(rng(0, 5, 0, 5), " // edited")], &|| unreachable!());
+        Some(json!({"routes":[],"locations":[],"incomplete":false}))
+    }));
+    let result = h.mgr.laravel_routes(doc, None, 10, Default::default()).await.unwrap_err();
+    assert_eq!(result.kind, ide_core::error::ErrorKind::OutOfSync);
+}

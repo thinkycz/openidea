@@ -1,0 +1,25 @@
+.content {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 14px;
+}
+.hint {
+  color: var(--fg-subtle);
+  font-size: var(--fs-small);
+  line-height: 1.5;
+}
+.error {
+  color: var(--danger);
+}
+.list {
+  height: 240px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control, 4px);
+}
+.row {
+  padding: 0 8px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}

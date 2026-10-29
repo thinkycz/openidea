@@ -189,3 +189,110 @@ impl LspManager {
         })
     }
 }
+
+#[derive(Serialize)]
+struct LaravelQuery {
+    name: Option<String>,
+    limit: usize,
+}
+
+#[derive(Deserialize)]
+struct RouteItem {
+    name: String,
+    uri: String,
+    parameters: Option<Vec<String>>,
+    from_vendor: bool,
+}
+
+#[derive(Deserialize)]
+struct RouteReply {
+    routes: Vec<RouteItem>,
+    locations: Vec<lsp::Location>,
+    incomplete: bool,
+}
+
+#[derive(Deserialize)]
+struct ViewReply {
+    views: Vec<String>,
+    locations: Vec<lsp::Location>,
+    incomplete: bool,
+}
+
+impl LspManager {
+    async fn laravel_query<R: serde::de::DeserializeOwned>(
+        &self,
+        doc: DocId,
+        name: Option<String>,
+        limit: usize,
+        cancel: &CancellationToken,
+        feature: &str,
+    ) -> IdeResult<(R, Target)> {
+        if !(1..=5000).contains(&limit) {
+            return Err(IdeError::invalid("Laravel query limit must be between 1 and 5000"));
+        }
+        let capability = format!("/experimental/phpWorkbench{feature}");
+        let (snap, targets) = self
+            .doc_targets(doc, feature, |caps| caps.raw.pointer(&capability).and_then(Value::as_bool) == Some(true))
+            .await?;
+        if snap.language.as_str() != "php" {
+            return Err(IdeError::unavailable("Open a PHP source file to browse Laravel routes and views"));
+        }
+        let target = targets.into_iter().next().expect("doc_targets requires a target");
+        let before = self.php_sources(&snap, &target)?;
+        let method = match feature {
+            "Routes" => "phpWorkbench/routes",
+            "Views" => "phpWorkbench/views",
+            _ => unreachable!(),
+        };
+        let reply = self.call(&target, method, LaravelQuery { name, limit }, Some(cancel), LONG_TIMEOUT).await?;
+        if target.server.running_gen(target.run.generation).is_none()
+            || self.php_sources(&self.snapshot(doc)?, &target)? != before
+        {
+            return Err(IdeError::new(ErrorKind::OutOfSync, "PHP sources or server changed during Laravel lookup"));
+        }
+        Ok((reply, target))
+    }
+
+    /// Static index only: never executes PHP, Composer, or Artisan.
+    pub async fn laravel_routes(
+        &self,
+        doc: DocId,
+        name: Option<String>,
+        limit: usize,
+        cancel: CancellationToken,
+    ) -> IdeResult<LaravelRoutes> {
+        let (reply, target): (RouteReply, _) = self.laravel_query(doc, name, limit, &cancel, "Routes").await?;
+        let conv = self.conv(target.enc());
+        Ok(LaravelRoutes {
+            routes: reply
+                .routes
+                .into_iter()
+                .map(|r| LaravelRoute {
+                    name: r.name,
+                    uri: r.uri,
+                    parameters: r.parameters,
+                    from_vendor: r.from_vendor,
+                })
+                .collect(),
+            locations: reply.locations.iter().filter_map(|l| conv.location(l)).collect(),
+            incomplete: reply.incomplete,
+        })
+    }
+
+    /// Dotted template names and their current targets from PHPantom's static index.
+    pub async fn laravel_views(
+        &self,
+        doc: DocId,
+        name: Option<String>,
+        limit: usize,
+        cancel: CancellationToken,
+    ) -> IdeResult<LaravelViews> {
+        let (reply, target): (ViewReply, _) = self.laravel_query(doc, name, limit, &cancel, "Views").await?;
+        let conv = self.conv(target.enc());
+        Ok(LaravelViews {
+            views: reply.views,
+            locations: reply.locations.iter().filter_map(|l| conv.location(l)).collect(),
+            incomplete: reply.incomplete,
+        })
+    }
+}

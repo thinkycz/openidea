@@ -242,6 +242,38 @@ pub async fn lsp_rename(host: &Host, window: &str, doc: DocId, pos: Pos, new_nam
     Ok(edit)
 }
 
+/// Static PHPantom Laravel routes lookup; cancellable and scoped to this project.
+pub async fn lsp_laravel_routes(
+    host: &Host,
+    window: &str,
+    request: RequestId,
+    doc: DocId,
+    name: Option<String>,
+    limit: usize,
+) -> IdeResult<LaravelRoutes> {
+    let lsp = host.project(window)?.lsp.clone();
+    let cancel = host.begin_request(request);
+    let result = lsp.laravel_routes(doc, name, limit, cancel).await;
+    host.end_request(request);
+    result
+}
+
+/// Static PHPantom Laravel views lookup; cancellable and scoped to this project.
+pub async fn lsp_laravel_views(
+    host: &Host,
+    window: &str,
+    request: RequestId,
+    doc: DocId,
+    name: Option<String>,
+    limit: usize,
+) -> IdeResult<LaravelViews> {
+    let lsp = host.project(window)?.lsp.clone();
+    let cancel = host.begin_request(request);
+    let result = lsp.laravel_views(doc, name, limit, cancel).await;
+    host.end_request(request);
+    result
+}
+
 pub async fn lsp_format(
     host: &Host,
     window: &str,
@@ -391,6 +423,12 @@ pub(crate) fn register(d: &mut Dispatcher) {
     });
     d.add("lsp_rename", |c| async move {
         lsp_rename(&c.host, &c.window, c.arg("doc")?, c.arg("pos")?, c.arg("newName")?).await
+    });
+    d.add("lsp_laravel_routes", |c| async move {
+        lsp_laravel_routes(&c.host, &c.window, c.arg("request")?, c.arg("doc")?, c.arg("name")?, c.arg("limit")?).await
+    });
+    d.add("lsp_laravel_views", |c| async move {
+        lsp_laravel_views(&c.host, &c.window, c.arg("request")?, c.arg("doc")?, c.arg("name")?, c.arg("limit")?).await
     });
     d.add("lsp_format", |c| async move {
         lsp_format(&c.host, &c.window, c.arg("doc")?, c.arg("range")?, c.arg("options")?).await

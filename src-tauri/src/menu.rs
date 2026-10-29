@@ -413,6 +413,8 @@ pub fn spec(os: Os) -> Vec<Entry> {
             act("navigate.showFilePath", "File Path"),
             act("navigate.callHierarchy", "Call Hierarchy"),
             act("navigate.typeHierarchy", "Type Hierarchy"),
+            act("navigate.laravelRoutes", "Laravel Routes…"),
+            act("navigate.laravelViews", "Laravel Views…"),
             act("navigate.customRegion", "Custom Folding…"),
             SEP,
             act("navigate.nextMethod", "Next Method"),

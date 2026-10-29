@@ -377,3 +377,143 @@ fix. Broader checks and a corrected packaged native pass remain required.
 The next dependent delivery stays behind the first batch's remaining native gate.
 All 69 areas remain tracked individually; no PhpStorm parity or roadmap completion
 is claimed.
+
+## Post-sync native validation (2026-10-29)
+
+The signed 0.1.23 development copy at `artifacts/batches/0.1.23/OpenStorm.app`
+was launched directly with a disposable profile and a syntax-checked synthetic
+Composer PSR-4 fixture. The installed optimized 0.1.21 app was preserved.
+`artifacts/checks/native-0.1.23-build-receipt.json` identifies the clean merge
+source; fixture paths and runtime output are in the adjacent fixture/runtime files.
+
+Observed through the native UI and persisted fixture files:
+
+- Optimize Imports removed the unused import; Cmd+Z and Cmd+Shift+Z restored and
+  reapplied it. Cmd+S persisted the result.
+- Shift+F6 preview found the declaration and two callers across three files,
+  excluding an unrelated same-name method. Cancel wrote nothing. Changing a caller
+  externally invalidated the preview; a fresh rename preserved that comment and
+  Unicode text. All affected PHP files passed syntax checks.
+- Cmd+B navigated to the newly renamed, previously closed declaration without an
+  engine restart; Problems reported no diagnostics.
+- Autosave persisted a changed text file when focus moved to another file.
+- External-save conflict focused Cancel. Cancellation kept both the dirty editor
+  text and external disk text. Quit / Save All / Cancel kept the app open. An
+  external change made while the overwrite prompt was open invalidated approval
+  and required a fresh prompt. Explicit approval of the current disk revision
+  persisted the editor text.
+- Controlled Cmd+Q exited both app and bundled engine; deep/strict signature
+  verification still passed after runtime.
+
+The run exposed orphaned background tasks: PHPantom reuses work-done tokens for
+concurrent lookups, while the client replaced their task IDs without finishing the
+old UI tasks. A failing regression demonstrated two IDs for one token. The client
+now reuses the task ID and drops its previous cancellation handle before replacing
+it. The regression also checks that cancellation reaches the server and the final
+end notification completes the task. All 51 mock-server regressions passed.
+
+Corrected 0.1.24 packaging, saved-session relaunch, and native task-cleanup checks
+are in progress. This is normal saved-session recovery evidence, not acceptance
+of crash recovery for unsaved drafts. The wider rename matrices, global cross-file
+undo, builtin target-cache invalidation and corpus performance checks remain open.
+
+### Corrected native candidate 0.1.24
+
+`artifacts/batches/0.1.24/OpenStorm.app` is a separate Apple Silicon development
+bundle with an ad-hoc local signature. Its build/source receipt is
+`artifacts/checks/native-0.1.24-build-receipt.json`; native results are recorded in
+`native-0.1.24-acceptance.json` and `native-0.1.24-runtime.log`.
+
+The same disposable profile reopened its four saved tabs and selected conflict
+file, showing the explicitly approved editor contents. The renamed caller and
+closed declaration remained correct, PHP syntax passed, Find Usages returned two
+callers, and code lenses showed three class / two method usages. No orphaned task
+remained visible. Restart PHPantom from Language Servers reinitialized version
+0.11.1-workbench.114 and reopened its overlays; Cmd+B then navigated correctly.
+Cmd+Q exited app and engine; post-runtime deep/strict signature verification passed.
+The installed optimized app remains unchanged. Saved-session relaunch is accepted
+for this fixture; crash recovery of unsaved drafts remains unaccepted.
+
+The first workspace test run hit an inherited JDWP temporary-port collision
+(`Address already in use`). Its focused retry passed; the final full non-fail-fast rerun
+passed: 1,296 tests, 0 failed, 24 ignored. Frontend 2,986 tests, type checking, lint (inherited warnings), packaged
+asset build, Rust formatting and workspace Clippy passed for the correction.
+
+The remaining native gate for the first guarded-edit batch is accepted on this
+disposable fixture. Laravel static route/view navigation is the next batch.
+
+## Laravel static navigation batch (static slice accepted)
+
+Adds typed `phpWorkbench/routes` and `phpWorkbench/views` adapters, advertised
+capability checks, request cancellation and IDE-coordinate locations. The wire
+`incomplete` flag is retained, including when a subsequent selected-name reply is
+complete. Route metadata retains URI, parameters and package origin; duplicate
+registrations remain separate targets. Bounds outside 1–5000 are rejected locally.
+Open PHP overlays and the engine generation are checked again after each query;
+a changed unsaved dependency rejects the response.
+
+Navigate → Laravel Routes / Laravel Views and the existing action search open a
+searchable chooser using the established Dialog/Input/List components. A selected
+logical name is resolved again, then the user selects a target. Closing the chooser
+cancels the pending request. A project switch cancels/discards old results. This
+initial entry point requires an open PHP document; it does not start a new server
+from a Blade-only context. No Artisan, Composer or application boot runs from it.
+
+Current evidence: three adapter regressions pass (capability refusal, bounded
+incomplete/duplicate results and unsaved-dependency freshness); five chooser tests
+pass (selection, incomplete notices, filtering, cancellation and stale responses).
+A selection regression caught opening the active row instead of the clicked target;
+the corrected handler now uses the clicked item. The released engine's actual
+OpenStorm client test passed route listing, duplicate registration targets, bounded
+incomplete results, dotted view resolution and invalid logical-path refusal.
+Translations were added after the catalog tests identified the new UI strings.
+
+The disposable Laravel 12 fixture copies dependencies and excludes environment
+files. Its inherited incomplete completion scratch was replaced in this new copy;
+all non-vendor PHP syntax and the `App\\` Composer autoload check pass. Existing
+Workbench/evaluation fixtures remain unchanged. Build 0.1.25, broad checks and native menu/search/filter/target/cancel/reopen/quit
+acceptance are recorded below.
+
+### Laravel navigation 0.1.25 acceptance
+
+Local app: `artifacts/batches/0.1.25/OpenStorm.app` (Apple Silicon development
+profile, ad-hoc signature). Build/source receipt:
+`artifacts/checks/laravel-0.1.25-build-receipt.json`. Native results and fixture
+identity: `laravel-0.1.25-acceptance.json`, `laravel-0.1.25-fixture.json`; runtime
+and relaunch logs use the same prefix.
+
+Observed in this exact copy:
+
+- Both actions appeared in the native Navigate menu and standard action search;
+  the existing shortcut-assignment affordance remained available.
+- Filtering `invoice` listed `invoice.show` and its `{invoice}` URI parameter.
+  The dynamic prefix produced a visible incomplete notice, retained when resolving
+  the selected name. Both duplicate registrations appeared. Keyboard and mouse
+  selection of the second target opened `routes/web.php:5:83`.
+- The view chooser resolved `invoices.show` to its Blade file. Existing Cmd+B
+  navigation worked from a route's `'show'` action string to the controller method,
+  and from the controller's view literal to the template.
+- Two intentional duplicate-route diagnostics were visible. An initially genuine
+  `getenv()` string/false argument error was corrected by casting the dynamic prefix
+  in the synthetic fixture; external refresh then showed zero errors / two warnings.
+- Cancel closed the chooser; navigation preserved source bytes. A query immediately
+  during engine shutdown reported unavailable; closing/reopening after initialization
+  recovered. A fresh query after restart succeeded. No background task was orphaned.
+- Quit exited app and engine. Relaunch restored three tabs and the selected target
+  caret; view lookup worked again. Final quit/process cleanup and post-runtime
+  deep/strict signature verification passed. The installed optimized app is unchanged.
+
+Checks: 2,991 frontend tests passed; type checking, lint (inherited warnings),
+format checking and asset build passed. Rust workspace: 1,299 passed, 0 failed,
+25 ignored, including the three new adapter regressions. Workspace Clippy
+(`-D warnings`) and Rust formatting passed. The real-engine route/view client case
+was explicitly run and passed; ignored real-service/platform cases remain separate.
+The initial catalog failures and selection regression are retained in check logs.
+
+This accepts the static browse/resolve/navigation slice on the disposable Laravel 12
+fixture. FEAT-030 and FEAT-032 remain partial: semantic route rename, wider registration
+forms, Laravel 13/version gates, cross-file view-data inference, native project-switch
+cancellation, and large route/view corpus performance still need acceptance. An open
+PHP document is required for this initial entry point. The next Laravel slice should
+exercise inherited config/translation navigation and completion through the actual
+client/native editor, then address integration failures before expanding workflows.

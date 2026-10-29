@@ -17,6 +17,9 @@ import { resetHierarchy, showHierarchy } from "./hierarchy";
 import { installServerEvents } from "./servers";
 import { ServerStatus } from "./ServerStatus";
 
+import { LaravelNavigation } from "./LaravelNavigation";
+import { closeLaravelNavigation, installLaravelNavigationEvents, openLaravelNavigation } from "./laravel";
+
 const EDITOR_WHEN = "textEditorActive && (editorFocus || popupOpen || !toolWindowFocus)";
 
 function useErrorBadge(): number | null {
@@ -44,6 +47,9 @@ export function activate(): () => void {
     installProblemsEvents(),
     installProblemDecorations(),
     installServerEvents(),
+    installLaravelNavigationEvents(),
+    closeLaravelNavigation,
+    registerOverlay({ id: "code-insight.laravel", component: LaravelNavigation }),
     registerToolWindow({
       id: "problems",
       title: "Problems",
@@ -86,6 +92,20 @@ export function activate(): () => void {
     }),
     registerOverlay({ id: "code-insight.usagesPopup", component: UsagesPopup }),
     registerActions([
+      {
+        id: "navigate.laravelRoutes",
+        title: "Laravel Routes…",
+        category: "Navigate",
+        when: EDITOR_WHEN,
+        run: () => openLaravelNavigation("routes"),
+      },
+      {
+        id: "navigate.laravelViews",
+        title: "Laravel Views…",
+        category: "Navigate",
+        when: EDITOR_WHEN,
+        run: () => openLaravelNavigation("views"),
+      },
       { id: "find.usages", title: "Find Usages", category: "Find", when: EDITOR_WHEN, run: () => findUsages() },
       {
         id: "find.showUsages",

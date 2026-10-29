@@ -231,6 +231,32 @@ pub async fn lsp_rename(
 
 #[tauri::command]
 #[specta::specta]
+pub async fn lsp_laravel_routes(
+    window: Window,
+    state: State<'_, AppState>,
+    request: RequestId,
+    doc: DocId,
+    name: Option<String>,
+    limit: usize,
+) -> IdeResult<LaravelRoutes> {
+    ide_host::ops::lsp::lsp_laravel_routes(&state.host, window.label(), request, doc, name, limit).await
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn lsp_laravel_views(
+    window: Window,
+    state: State<'_, AppState>,
+    request: RequestId,
+    doc: DocId,
+    name: Option<String>,
+    limit: usize,
+) -> IdeResult<LaravelViews> {
+    ide_host::ops::lsp::lsp_laravel_views(&state.host, window.label(), request, doc, name, limit).await
+}
+
+#[tauri::command]
+#[specta::specta]
 pub async fn lsp_format(
     window: Window,
     state: State<'_, AppState>,

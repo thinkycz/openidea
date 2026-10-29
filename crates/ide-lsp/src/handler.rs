@@ -61,7 +61,9 @@ impl ClientHandler {
                         .filter(|t| !t.is_empty())
                         .map(str::to_owned)
                         .unwrap_or_else(|| self.server.name.clone());
-                    let task = TaskId::next();
+                    // Some servers reuse tokens for concurrent lookups. Keep one UI
+                    // task and drop its old cancel handle before registering another.
+                    let task = progress.remove(&token).map(|previous| previous.task).unwrap_or_else(TaskId::next);
                     let cancel = (cancellable == Some(true)).then(|| self.cancel_handle(task, &params["token"]));
                     let cancellable = cancel.is_some();
                     progress.insert(token, Progress { task, title: title.clone(), message: message.clone(), cancel });

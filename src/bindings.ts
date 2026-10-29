@@ -362,6 +362,8 @@ export const commands = {
 } | null, IdeError>(__TAURI_INVOKE("lsp_prepare_rename", { doc, pos })),
 	/**  Computes the rename edit without applying it, so the UI can preview conflicts. */
 	lspRename: (doc: DocId, pos: Pos, newName: string) => typedError<WorkspaceEdit_Serialize, IdeError>(__TAURI_INVOKE("lsp_rename", { doc, pos, newName })),
+	lspLaravelRoutes: (request: RequestId, doc: DocId, name: string | null, limit: number) => typedError<LaravelRoutes, IdeError>(__TAURI_INVOKE("lsp_laravel_routes", { request, doc, name, limit })),
+	lspLaravelViews: (request: RequestId, doc: DocId, name: string | null, limit: number) => typedError<LaravelViews, IdeError>(__TAURI_INVOKE("lsp_laravel_views", { request, doc, name, limit })),
 	lspFormat: (doc: DocId, range: {
 	start: Pos,
 	end: Pos,
@@ -3772,6 +3774,26 @@ export type LanguagesSettings = {
 	go?: GoSettings,
 	typescript?: TypeScriptSettings,
 	java?: JavaSettings,
+};
+
+/**  A statically recovered Laravel route; an empty URI is unknown, not `/`. */
+export type LaravelRoute = {
+	name: string,
+	uri: string,
+	parameters: string[] | null,
+	fromVendor: boolean,
+};
+
+export type LaravelRoutes = {
+	routes: LaravelRoute[],
+	locations: Location[],
+	incomplete: boolean,
+};
+
+export type LaravelViews = {
+	views: string[],
+	locations: Location[],
+	incomplete: boolean,
 };
 
 /**  What a freshly opened window should do once its frontend is up. */

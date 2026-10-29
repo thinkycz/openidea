@@ -236,3 +236,55 @@ async fn checked_import_optimization_removes_unused_imports_and_keeps_used_alias
     assert_eq!(std::fs::read_to_string(path).unwrap(), source, "query must not write files");
     mgr.shutdown_all().await;
 }
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires the pinned macOS Apple Silicon PHPantom executable"]
+async fn laravel_static_routes_and_views_through_typed_client() {
+    let bin = std::env::var_os("OPENSTORM_TEST_PHPANTOM_BIN").map(PathBuf::from).unwrap_or_else(|| {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../src-tauri/resources/phpantom/phpantom_lsp")
+    });
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().canonicalize().unwrap();
+    std::fs::create_dir_all(root.join("routes")).unwrap();
+    std::fs::create_dir_all(root.join("resources/views/invoices")).unwrap();
+    std::fs::write(
+        root.join("composer.json"),
+        r#"{"require":{"php":"^8.2","laravel/framework":"12.*"},"autoload":{"psr-4":{"App\\":"app/"}}}"#,
+    )
+    .unwrap();
+    let routes = "<?php\nuse Illuminate\\Support\\Facades\\Route;\nRoute::get('/invoices/{invoice}', fn () => 'a')->name('invoice.show');\nRoute::get('/invoices/{invoice}/copy', fn () => 'b')->name('invoice.show');\nRoute::get('/health', fn () => 'ok')->name('health');\n";
+    std::fs::write(root.join("routes/web.php"), routes).unwrap();
+    std::fs::write(root.join("resources/views/invoices/show.blade.php"), "<h1>Invoice</h1>\n").unwrap();
+    let mut php = LanguageRegistry::load(None).unwrap().get(&LanguageId::new("php")).unwrap();
+    php.language_servers.retain(|s| s.name == "phpantom");
+    php.language_servers[0].command = bin.to_string_lossy().into_owned();
+    let mgr =
+        LspManager::new(root.clone(), Arc::new(LanguageRegistry::from_configs(vec![php])), Arc::new(|_: IdeEvent| {}));
+    let doc = DocId::next();
+    mgr.did_open(doc, &root.join("routes/web.php"), &LanguageId::new("php"), 1, routes);
+    let mut names = Vec::new();
+    for _ in 0..80 {
+        if let Ok(reply) = mgr.laravel_routes(doc, None, 2000, Default::default()).await {
+            names = reply.routes.into_iter().map(|r| r.name).collect();
+            if names.iter().any(|n| n == "invoice.show") {
+                break;
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    assert!(names.iter().any(|n| n == "invoice.show"), "got {names:?}");
+    let bounded = mgr.laravel_routes(doc, None, 1, Default::default()).await.unwrap();
+    assert!(bounded.incomplete);
+    assert_eq!(bounded.routes.len(), 1);
+    let targets = mgr.laravel_routes(doc, Some("invoice.show".into()), 2000, Default::default()).await.unwrap();
+    assert_eq!(targets.locations.len(), 2);
+    assert_eq!(targets.locations[0].range.start.line, 2);
+    assert_eq!(targets.locations[1].range.start.line, 3);
+    let views = mgr.laravel_views(doc, None, 2000, Default::default()).await.unwrap();
+    assert!(views.views.iter().any(|v| v == "invoices.show"), "got {:?}", views.views);
+    let target = mgr.laravel_views(doc, Some("invoices.show".into()), 2000, Default::default()).await.unwrap();
+    assert_eq!(target.locations.len(), 1);
+    assert!(target.locations[0].path.to_string_lossy().ends_with("resources/views/invoices/show.blade.php"));
+    assert!(mgr.laravel_views(doc, Some("../secret".into()), 2000, Default::default()).await.is_err());
+    mgr.shutdown_all().await;
+}

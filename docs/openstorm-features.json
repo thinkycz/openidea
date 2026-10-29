@@ -1,6 +1,6 @@
 {
   "source": "PHP Workbench PHP-Laravel-feature-matrix.json (requirements only)",
-  "baseline": "OpenStorm 0.1.21 foundation preserved; 0.1.22 development batch packaged, final native acceptance partial",
+  "baseline": "OpenStorm foundation and upstream sync preserved; native guarded-edit gate accepted in 0.1.24 and static Laravel navigation slice accepted in signed development 0.1.25; all wider area gates remain visible",
   "features": [
     {
       "id": "FEAT-001",
@@ -9,7 +9,9 @@
       "milestone": 6,
       "status": "partial",
       "acceptance_gate": "Undo/redo, external conflict detection, UTF-8/UTF-16 ranges, non-ASCII round trip",
-      "openstorm_evidence": [],
+      "openstorm_evidence": [
+        "0.1.23 native: autosave persisted; save-conflict Cancel preserved editor/disk; stale overwrite approval re-prompted; explicit current approval saved. Normal quit exited app and engine."
+      ],
       "remaining": "Reassess current OpenStorm implementation against this full gate; Workbench acceptance does not transfer."
     },
     {
@@ -39,7 +41,9 @@
       "milestone": 6,
       "status": "partial",
       "acceptance_gate": "Restore dirty buffers and focus after restart; keyboard switch/move/split",
-      "openstorm_evidence": [],
+      "openstorm_evidence": [
+        "0.1.24 native: saved project reopened with four tabs, selected conflict file and saved contents. Unsaved-draft crash recovery is not accepted."
+      ],
       "remaining": "Reassess current OpenStorm implementation against this full gate; Workbench acceptance does not transfer."
     },
     {
@@ -139,7 +143,10 @@
       "milestone": 1,
       "status": "partial",
       "acceptance_gate": "Jump to correct declaration; ambiguous choices shown",
-      "openstorm_evidence": [],
+      "openstorm_evidence": [
+        "0.1.23 native: Cmd+B opened the renamed closed declaration without a server restart. Broader definition/implementation/type matrices remain open.",
+        "0.1.24 native: definition navigation passed after restarting bundled PHPantom through Language Servers."
+      ],
       "remaining": "Reassess current OpenStorm implementation against this full gate; Workbench acceptance does not transfer."
     },
     {
@@ -149,7 +156,9 @@
       "milestone": 1,
       "status": "partial",
       "acceptance_gate": "Exclude same-name unrelated symbols and strings",
-      "openstorm_evidence": [],
+      "openstorm_evidence": [
+        "0.1.24 native: Find Usages returned two subtotal callers; class/method code lenses showed three/two usages. Wider reference matrices remain open."
+      ],
       "remaining": "Reassess current OpenStorm implementation against this full gate; Workbench acceptance does not transfer."
     },
     {
@@ -160,7 +169,8 @@
       "status": "partial",
       "acceptance_gate": "Class/method/property/import references correct; collisions/stale edits rejected",
       "openstorm_evidence": [
-        "0.1.22: eight guarded transaction regressions, four PHP protocol cases, real-client and actual-host checked-edit cases passed; native method rename/import checks observed; final-copy native recheck pending. See docs/OPENSTORM.md."
+        "0.1.22: eight guarded transaction regressions, four PHP protocol cases, real-client and actual-host checked-edit cases passed; native method rename/import checks observed; final-copy native recheck pending. See docs/OPENSTORM.md.",
+        "0.1.23 native: three-file method rename preview/cancel/stale refusal/apply preserved external comment and Unicode, excluded unrelated method; PHP syntax passed. Wider rename matrices remain open."
       ],
       "remaining": "Class/property/import alias corpus, single global cross-file undo/redo, cancellation and final native recheck remain unaccepted. Reviewed file creation/move/deletion is refused."
     },
@@ -182,7 +192,8 @@
       "status": "partial",
       "acceptance_gate": "Minimal diff, correct PHP version/style, no save race",
       "openstorm_evidence": [
-        "0.1.22: eight guarded transaction regressions, four PHP protocol cases, real-client and actual-host checked-edit cases passed; native method rename/import checks observed; final-copy native recheck pending. See docs/OPENSTORM.md."
+        "0.1.22: eight guarded transaction regressions, four PHP protocol cases, real-client and actual-host checked-edit cases passed; native method rename/import checks observed; final-copy native recheck pending. See docs/OPENSTORM.md.",
+        "0.1.23 native: Optimize Imports removed unused RuntimeException; Cmd+Z/Cmd+Shift+Z restored/reapplied, Cmd+S persisted. Broader formatting/style/version acceptance remains open."
       ],
       "remaining": "PHP formatter/version/style matrices, save-participant races and final-copy native recheck remain unaccepted; manual Optimize Imports and editor undo/redo were exercised."
     },
@@ -303,7 +314,9 @@
       "milestone": 2,
       "status": "partial",
       "acceptance_gate": "P1: names/parameters and goto; P2: semantic usages/rename and duplicate diagnostics",
-      "openstorm_evidence": [],
+      "openstorm_evidence": [
+        "0.1.25 signed development native: route-name filtering, {invoice} parameter URI, incomplete notice retained, duplicate targets, mouse/keyboard target selection, controller-action Cmd+B and two intentional duplicate diagnostics passed. Real-engine typed client passed. Semantic route rename and broader forms remain open."
+      ],
       "remaining": "Reassess current OpenStorm implementation against this full gate; Workbench acceptance does not transfer."
     },
     {
@@ -323,7 +336,9 @@
       "milestone": 2,
       "status": "partial",
       "acceptance_gate": "P1: view-name completion/goto; P2: typed cross-file variables and scoped shadowing",
-      "openstorm_evidence": [],
+      "openstorm_evidence": [
+        "0.1.25 signed development native: dotted view chooser and existing view-literal Cmd+B opened invoices/show.blade.php; relaunch repeated lookup. Real-engine typed client passed. Cross-file view-data inference and broader view-name matrices remain open."
+      ],
       "remaining": "Reassess current OpenStorm implementation against this full gate; Workbench acceptance does not transfer."
     },
     {
@@ -615,7 +630,9 @@
       "milestone": 6,
       "status": "partial",
       "acceptance_gate": "Keyboard discovery, previews, async stale-query cancellation",
-      "openstorm_evidence": [],
+      "openstorm_evidence": [
+        "0.1.25 native: new navigation actions found in Navigate and action search; existing shortcut assignment affordance visible. No default keybindings changed."
+      ],
       "remaining": "Reassess current OpenStorm implementation against this full gate; Workbench acceptance does not transfer."
     },
     {
@@ -635,7 +652,9 @@
       "milestone": 6,
       "status": "partial",
       "acceptance_gate": "Editor remains responsive; no fake ready indicator on partial index",
-      "openstorm_evidence": [],
+      "openstorm_evidence": [
+        "0.1.25 native: incomplete results visible, cancel closed chooser, engine-shutdown unavailable state recovered by reopening after initialization. Automated chooser tests cover cancellation and discarding late/project-switched responses; native project-switch case remains open."
+      ],
       "remaining": "Reassess current OpenStorm implementation against this full gate; Workbench acceptance does not transfer."
     },
     {
@@ -646,7 +665,10 @@
       "status": "partial",
       "acceptance_gate": "Signed/notarized Mac build, migrations/rollback, open-with and native dialogs",
       "openstorm_evidence": [
-        "0.1.21 optimized app preserved; 0.1.22 development app packaged with verified ad-hoc signature and build/source receipt. Native final gate partial; publishing, automatic updates, notarization and real-profile migration deferred."
+        "0.1.21 optimized app preserved; 0.1.22 development app packaged with verified ad-hoc signature and build/source receipt. Native final gate partial; publishing, automatic updates, notarization and real-profile migration deferred.",
+        "0.1.23 development bundle: isolated profile, ad-hoc deep/strict signature passed after runtime; controlled quit exited app/server. Saved-session relaunch awaits corrected 0.1.24.",
+        "0.1.24 separate signed development app: saved-session reopen, engine restart, quit/process cleanup and post-runtime deep/strict signature passed. Installed optimized app unchanged; notarization/platform-service gates remain open.",
+        "0.1.25 separate signed Apple Silicon development app: native navigation, saved-session relaunch, app/server cleanup, post-runtime signature passed. Installed optimized app preserved. Notarization/update feed/platform integration remain open."
       ],
       "remaining": "Reassess current OpenStorm implementation against this full gate; Workbench acceptance does not transfer."
     },
@@ -668,7 +690,10 @@
       "status": "partial",
       "acceptance_gate": "No stale diagnostics/completions/rename; unsaved dependency edits invalidate",
       "openstorm_evidence": [
-        "0.1.22: eight guarded transaction regressions, four PHP protocol cases, real-client and actual-host checked-edit cases passed; native method rename/import checks observed; final-copy native recheck pending. See docs/OPENSTORM.md."
+        "0.1.22: eight guarded transaction regressions, four PHP protocol cases, real-client and actual-host checked-edit cases passed; native method rename/import checks observed; final-copy native recheck pending. See docs/OPENSTORM.md.",
+        "0.1.23 native: closed declaration refreshed after rename. Reused PHPantom progress tokens exposed orphan UI tasks; failing regression reproduced and 51 mock-server checks passed after client correction. Corrected native pass pending.",
+        "0.1.24 native: reused progress-token fix left no orphan task after references/code lenses/restart; final notifications clear the shared task. Broader freshness gates remain open.",
+        "Laravel adapter validates open PHP source receipts/engine generation after queries; unsaved-dependency change regression refuses stale results. Project-switch cancellation/late-response regression passes; native project-switch/performance remain open."
       ],
       "remaining": "Completion/diagnostic stale responses, target-profile builtin-cache invalidation, broader project/configuration and multi-project cases remain unaccepted."
     },
@@ -708,6 +733,15 @@
     "commit": "200ed6a52835e9d66923a2b4f5ad53f420afd24c",
     "commits_since_base": 69,
     "source_version": "0.1.23",
-    "native_acceptance": "not rerun after source sync; 0.1.22 native evidence is historical"
+    "native_acceptance": "0.1.23 conflict/rename/import native checks and corrected 0.1.24 saved-session/task-cleanup/restart/quit passed on disposable fixture"
+  },
+  "laravel_navigation_batch": {
+    "version": "0.1.25",
+    "native_fixture": "disposable Laravel 12 with copied dependencies; environment files excluded",
+    "acceptance_receipt": "artifacts/checks/laravel-0.1.25-acceptance.json",
+    "frontend_tests_passed": 2991,
+    "rust_tests_passed": 1299,
+    "rust_tests_ignored": 25,
+    "scope": "static route/view browsing and resolution; full FEAT-030/032 remain partial"
   }
 }

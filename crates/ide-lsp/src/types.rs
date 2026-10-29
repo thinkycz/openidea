@@ -339,3 +339,29 @@ pub struct References {
     pub locations: Vec<Location>,
     pub incomplete: Option<ReferencesIncomplete>,
 }
+
+/// A statically recovered Laravel route; an empty URI is unknown, not `/`.
+#[derive(Clone, Debug, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct LaravelRoute {
+    pub name: String,
+    pub uri: String,
+    pub parameters: Option<Vec<String>>,
+    pub from_vendor: bool,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct LaravelRoutes {
+    pub routes: Vec<LaravelRoute>,
+    pub locations: Vec<Location>,
+    pub incomplete: bool,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct LaravelViews {
+    pub views: Vec<String>,
+    pub locations: Vec<Location>,
+    pub incomplete: bool,
+}

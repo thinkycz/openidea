@@ -4735,5 +4735,18 @@
   "Python Interpreter: {label}": "Python 解释器：{label}",
   "Welcome to OpenStorm": "欢迎使用 OpenStorm",
   "OpenStorm settings": "OpenStorm 设置",
-  "Save cancelled": "保存已取消"
+  "Save cancelled": "保存已取消",
+  "Laravel Routes": "Laravel 路由",
+  "Laravel Views": "Laravel 视图",
+  "Laravel Routes…": "Laravel 路由…",
+  "Laravel Views…": "Laravel 视图…",
+  "Show Targets": "显示目标",
+  "Static source index; dynamic registrations may be unavailable.": "静态源代码索引；动态注册的内容可能不可用。",
+  "Results are incomplete: dynamic names or additional matches may exist.": "结果不完整：可能存在动态名称或其他匹配项。",
+  "Filter Laravel results": "筛选 Laravel 结果",
+  "Laravel results": "Laravel 结果",
+  "No static matches found": "未找到静态匹配项",
+  "(unknown URI)": "（未知 URI）",
+  "(package)": "（依赖包）",
+  "Open a PHP source file to browse Laravel routes and views": "打开 PHP 源文件以浏览 Laravel 路由和视图"
 }

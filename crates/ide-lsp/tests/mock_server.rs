@@ -2361,3 +2361,144 @@ async fn laravel_query_refuses_an_unsaved_dependency_change_during_response() {
     let result = h.mgr.laravel_routes(doc, None, 10, Default::default()).await.unwrap_err();
     assert_eq!(result.kind, ide_core::error::ErrorKind::OutOfSync);
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn laravel_translation_json_shares_phpantom_for_references_only() {
+    let mut caps = incremental_caps();
+    caps["experimental"] = json!({"phpWorkbenchJsonTranslations":true});
+    let h = harness_for("php", "php", &[("phpantom", caps)], &[]);
+    std::fs::write(h.root.join("composer.json"), r#"{"require":{"laravel/framework":"12.*"}}"#).unwrap();
+    std::fs::create_dir_all(h.root.join("lang")).unwrap();
+    let doc = DocId::next();
+    let path = h.root.join("lang/en.json");
+    h.mgr.did_open(doc, &path, &LanguageId::new("json"), 1, r#"{"Hello":"Greeting"}"#);
+    eventually(|| h.launcher.state("phpantom").launches.load(Ordering::SeqCst) > 0).await;
+    h.wait_status("phpantom", ServerStatus::Ready).await;
+    let state = h.launcher.state("phpantom");
+    state.respond("textDocument/references", json!([]));
+    h.mgr.references(doc, Pos::new(0, 3), false, false, Default::default()).await.unwrap();
+    assert_eq!(state.requested("textDocument/references").len(), 1);
+    let opened = state.notified("textDocument/didOpen");
+    assert_eq!(opened[0]["textDocument"]["languageId"], "json");
+    let peer = state.peer();
+    peer.notify("textDocument/publishDiagnostics", json!({
+        "uri":uri_of(&path), "diagnostics":[{"range":php_range(0,0,0,1),"severity":1,"message":"PHP parse error in translation text"}]
+    })).unwrap();
+    let _: Value = peer.request("workspace/configuration", json!({"items":[]}), None).await.unwrap();
+    assert!(
+        !h.events.lock().iter().any(|e| matches!(e, IdeEvent::Diagnostics {source,..} if source=="phpantom")),
+        "a references-only bridge must not publish PHP diagnostics for JSON"
+    );
+    assert!(h.mgr.completion(doc, Pos::new(0, 3), None, Default::default()).await.is_err());
+    assert!(h.mgr.rename(doc, Pos::new(0, 3), "Changed".into()).await.is_err());
+    assert!(h.mgr.format(doc, None, FormatOptions { tab_size: 2, insert_spaces: true }).await.is_err());
+    assert!(state.requested("textDocument/completion").is_empty());
+    assert!(state.requested("textDocument/rename").is_empty());
+    assert!(state.requested("textDocument/formatting").is_empty());
+    h.mgr.did_change(doc, 2, &[change(rng(0, 2, 0, 7), "Updated")], &|| unreachable!());
+    eventually(|| !state.notified("textDocument/didChange").is_empty()).await;
+    h.mgr.did_close(doc);
+    eventually(|| !state.notified("textDocument/didClose").is_empty()).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn laravel_json_bridge_excludes_unrelated_files_projects_and_other_php_servers() {
+    let h = harness_for("php", "php", &[("phpantom", incremental_caps())], &[]);
+    std::fs::write(h.root.join("composer.json"), r#"{"require":{"laravel/framework":"12.*"}}"#).unwrap();
+    for relative in ["config/en.json", "lang/nested/en.json", "en.json"] {
+        h.mgr.did_open(DocId::next(), &h.root.join(relative), &LanguageId::new("json"), 1, "{}");
+    }
+    assert!(h.mgr.servers().is_empty());
+    std::fs::write(h.root.join("composer.json"), r#"{"require":{"php":"^8.2"}}"#).unwrap();
+    h.mgr.did_open(DocId::next(), &h.root.join("lang/en.json"), &LanguageId::new("json"), 1, "{}");
+    assert!(h.mgr.servers().is_empty());
+    let other = harness_for("php", "php", &[("phpactor", incremental_caps())], &[]);
+    std::fs::write(other.root.join("composer.json"), r#"{"require":{"laravel/framework":"12.*"}}"#).unwrap();
+    other.mgr.did_open(DocId::next(), &other.root.join("lang/en.json"), &LanguageId::new("json"), 1, "{}");
+    assert!(other.mgr.servers().is_empty(), "respect the configured alternative; do not invent a PHPantom server");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn explicitly_configured_json_provider_keeps_its_normal_capabilities() {
+    let h = harness_for("json", "json", &[("phpantom", incremental_caps())], &[]);
+    let (doc, _) = h.open("data.json", "{}");
+    h.wait_status("phpantom", ServerStatus::Ready).await;
+    let state = h.launcher.state("phpantom");
+    state.respond("textDocument/completion", json!([]));
+    h.mgr.completion(doc, Pos::new(0, 1), None, Default::default()).await.unwrap();
+    assert_eq!(state.requested("textDocument/completion").len(), 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn older_phpantom_does_not_receive_json_overlays_without_the_safe_resource_capability() {
+    let h = harness_for("php", "php", &[("phpantom", incremental_caps())], &[]);
+    std::fs::write(h.root.join("composer.json"), r#"{"require":{"laravel/framework":"12.*"}}"#).unwrap();
+    let doc = DocId::next();
+    h.mgr.did_open(doc, &h.root.join("lang/en.json"), &LanguageId::new("json"), 1, r#"{"Example":"<?php code ?>"}"#);
+    h.wait_status("phpantom", ServerStatus::Ready).await;
+    let state = h.launcher.state("phpantom");
+    assert!(state.notified("textDocument/didOpen").is_empty());
+    assert!(h.mgr.references(doc, Pos::new(0, 3), false, false, Default::default()).await.is_err());
+    assert!(state.requested("textDocument/references").is_empty());
+    h.open("main.php", "<?php\n");
+    eventually(|| state.notified("textDocument/didOpen").len() == 1).await;
+    assert_eq!(state.notified("textDocument/didOpen")[0]["textDocument"]["languageId"], "php");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn laravel_dotenv_bridge_is_reference_only_and_requires_its_own_safe_capability() {
+    let mut caps = incremental_caps();
+    caps["experimental"] = json!({"phpWorkbenchEnvironmentResources":true});
+    let h = harness_for("php", "php", &[("phpantom", caps)], &[]);
+    std::fs::write(h.root.join("composer.json"), r#"{"require":{"laravel/framework":"12.*"}}"#).unwrap();
+    let doc = DocId::next();
+    let path = h.root.join(".env");
+    h.mgr.did_open(doc, &path, &LanguageId::new("dotenv"), 1, "OPENSTORM_DEMO_LABEL=sample\n");
+    h.wait_status("phpantom", ServerStatus::Ready).await;
+    let state = h.launcher.state("phpantom");
+    state.respond("textDocument/references", json!([]));
+    h.mgr.references(doc, Pos::new(0, 5), false, false, Default::default()).await.unwrap();
+    assert_eq!(state.requested("textDocument/references").len(), 1);
+    assert_eq!(state.notified("textDocument/didOpen")[0]["textDocument"]["languageId"], "dotenv");
+    assert!(h.mgr.completion(doc, Pos::new(0, 5), None, Default::default()).await.is_err());
+    assert!(h.mgr.rename(doc, Pos::new(0, 5), "Changed".into()).await.is_err());
+    assert!(h.mgr.format(doc, None, FormatOptions { tab_size: 2, insert_spaces: true }).await.is_err());
+    state.peer().notify("textDocument/publishDiagnostics", json!({
+        "uri":uri_of(&path), "diagnostics":[{"range":php_range(0,0,0,1),"severity":1,"message":"PHP error in environment data"}]
+    })).unwrap();
+    let _: Value = state.peer().request("workspace/configuration", json!({"items":[]}), None).await.unwrap();
+    assert!(!h.events.lock().iter().any(|e| matches!(e, IdeEvent::Diagnostics { source, .. } if source=="phpantom")));
+    h.mgr.did_change(doc, 2, &[change(rng(0, 0, 0, 20), "OPENSTORM_DEMO_MODE")], &|| unreachable!());
+    eventually(|| !state.notified("textDocument/didChange").is_empty()).await;
+    h.mgr.did_close(doc);
+    eventually(|| !state.notified("textDocument/didClose").is_empty()).await;
+
+    let mut old_caps = incremental_caps();
+    old_caps["experimental"] = json!({"phpWorkbenchJsonTranslations":true});
+    let old = harness_for("php", "php", &[("phpantom", old_caps)], &[]);
+    std::fs::write(old.root.join("composer.json"), r#"{"require":{"laravel/framework":"12.*"}}"#).unwrap();
+    let old_doc = DocId::next();
+    old.mgr.did_open(old_doc, &old.root.join(".env"), &LanguageId::new("dotenv"), 1, "OPENSTORM_DEMO_LABEL=sample\n");
+    old.wait_status("phpantom", ServerStatus::Ready).await;
+    assert!(old.mgr.references(old_doc, Pos::new(0, 5), false, false, Default::default()).await.is_err());
+    assert!(old.launcher.state("phpantom").notified("textDocument/didOpen").is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn dotenv_bridge_excludes_nested_environment_files_and_unrelated_projects() {
+    let h = harness_for("php", "php", &[("phpantom", incremental_caps())], &[]);
+    std::fs::write(h.root.join("composer.json"), r#"{"require":{"laravel/framework":"12.*"}}"#).unwrap();
+    for relative in ["config/.env", "app/.env.local", ".flaskenv", "deployment.env"] {
+        h.mgr.did_open(
+            DocId::next(),
+            &h.root.join(relative),
+            &LanguageId::new("dotenv"),
+            1,
+            "OPENSTORM_DEMO_LABEL=sample\n",
+        );
+    }
+    assert!(h.mgr.servers().is_empty());
+    std::fs::write(h.root.join("composer.json"), r#"{"require":{"php":"^8.2"}}"#).unwrap();
+    h.mgr.did_open(DocId::next(), &h.root.join(".env"), &LanguageId::new("dotenv"), 1, "OPENSTORM_DEMO_LABEL=sample\n");
+    assert!(h.mgr.servers().is_empty());
+}

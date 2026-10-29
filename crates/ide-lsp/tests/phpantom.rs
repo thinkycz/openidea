@@ -149,7 +149,7 @@ async fn composer_intelligence_builtins_unsaved_changes_and_restart() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "requires OPENSTORM_TEST_LARAVEL_ROOT with installed Laravel dependencies"]
+#[ignore = "requires OPENSTORM_TEST_LARAVEL_ROOT with Laravel and App\\Models\\User::displayName fixture"]
 async fn laravel_model_and_eloquent_builder_completion() {
     let root = PathBuf::from(std::env::var_os("OPENSTORM_TEST_LARAVEL_ROOT").expect("Laravel fixture root"))
         .canonicalize()
@@ -158,7 +158,8 @@ async fn laravel_model_and_eloquent_builder_completion() {
     let composer: serde_json::Value =
         serde_json::from_slice(&std::fs::read(root.join("composer.json")).unwrap()).unwrap();
     assert_eq!(composer["autoload"]["psr-4"].get("App\\").and_then(serde_json::Value::as_str), Some("app/"));
-    let model = std::fs::read_to_string(root.join("app/Models/User.php")).unwrap();
+    let model = std::fs::read_to_string(root.join("app/Models/User.php"))
+        .expect("OpenStorm User/displayName acceptance fixture");
     assert!(model.contains("namespace App\\Models;"), "fixture must use valid PHP namespace separators");
     let bin = std::env::var_os("OPENSTORM_TEST_PHPANTOM_BIN").map(PathBuf::from).unwrap_or_else(|| {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../src-tauri/resources/phpantom/phpantom_lsp")
@@ -286,5 +287,229 @@ async fn laravel_static_routes_and_views_through_typed_client() {
     assert_eq!(target.locations.len(), 1);
     assert!(target.locations[0].path.to_string_lossy().ends_with("resources/views/invoices/show.blade.php"));
     assert!(mgr.laravel_views(doc, Some("../secret".into()), 2000, Default::default()).await.is_err());
+    mgr.shutdown_all().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires the pinned macOS Apple Silicon PHPantom executable"]
+async fn laravel_config_and_translation_navigation_completion_and_unsaved_sources() {
+    let bin = std::env::var_os("OPENSTORM_TEST_PHPANTOM_BIN").map(PathBuf::from).unwrap_or_else(|| {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../src-tauri/resources/phpantom/phpantom_lsp")
+    });
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().canonicalize().unwrap();
+    for dir in ["config", "lang/en", "lang/cs", "app"] {
+        std::fs::create_dir_all(root.join(dir)).unwrap();
+    }
+    std::fs::write(
+        root.join("composer.json"),
+        r#"{"require":{"php":"^8.2","laravel/framework":"12.*"},"autoload":{"psr-4":{"App\\":"app/"}}}"#,
+    )
+    .unwrap();
+    let config = "<?php\nreturn [\n    'retries' => 3,\n    'limits' => ['daily' => 10],\n];\n";
+    std::fs::write(root.join("config/billing.php"), config).unwrap();
+    let translation = "<?php\nreturn [\n    'welcome' => 'Welcome',\n    'invoice' => ['paid' => 'Paid'],\n];\n";
+    for locale in ["en", "cs"] {
+        std::fs::write(root.join(format!("lang/{locale}/messages.php")), translation).unwrap();
+    }
+    std::fs::write(root.join("lang/en.json"), r#"{"Hello invoice":"Invoice greeting"}"#).unwrap();
+    let main = "<?php\n$label = '😀'; $count = config('billing.retries');\n$title = __('messages.welcome');\n$greeting = __('Hello invoice');\nopenstorm_scope_probe();\n";
+    let other = "<?php\nfunction openstorm_scope_probe(): void {}\nconfig('billing.retries');\n__('messages.welcome');\n__('Hello invoice');\n";
+    std::fs::write(root.join("main.php"), main).unwrap();
+    std::fs::write(root.join("app/other.php"), other).unwrap();
+    let mut php = LanguageRegistry::load(None).unwrap().get(&LanguageId::new("php")).unwrap();
+    php.language_servers.retain(|s| s.name == "phpantom");
+    php.language_servers[0].command = bin.to_string_lossy().into_owned();
+    let mgr =
+        LspManager::new(root.clone(), Arc::new(LanguageRegistry::from_configs(vec![php])), Arc::new(|_: IdeEvent| {}));
+    let candidates =
+        ["main.php", "app/other.php", "config/billing.php", "lang/en/messages.php", "lang/cs/messages.php"]
+            .map(|p| root.join(p));
+    mgr.set_candidates_hook(Box::new(move |_, _| ide_lsp::CandidateFiles {
+        files: candidates.to_vec(),
+        limit_hit: false,
+    }));
+    let doc = DocId::next();
+    mgr.did_open(doc, &root.join("main.php"), &LanguageId::new("php"), 1, main);
+    let mut config_target = Vec::new();
+    for _ in 0..80 {
+        config_target = mgr.goto(doc, pos(main, "retries'"), GotoKind::Definition).await.unwrap_or_default();
+        if !config_target.is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    assert_eq!(config_target.len(), 1, "config definition: {config_target:?}");
+    assert!(config_target[0].path.ends_with("config/billing.php"));
+    assert_eq!(config_target[0].range.start.line, 2);
+    let target = mgr.goto(doc, pos(main, "welcome'"), GotoKind::Definition).await.unwrap();
+    assert_eq!(target.len(), 2, "keep locale alternatives: {target:?}");
+    for loc in &target {
+        assert!(loc.path.ends_with("messages.php"));
+        assert_eq!(loc.range.start.line, 2);
+    }
+    let json_target = mgr.goto(doc, pos(main, "Hello invoice"), GotoKind::Definition).await.unwrap();
+    assert_eq!(json_target.len(), 1);
+    assert!(json_target[0].path.ends_with("lang/en.json"));
+    let json_doc = DocId::next();
+    mgr.did_open(
+        json_doc,
+        &root.join("lang/en.json"),
+        &LanguageId::new("json"),
+        1,
+        r#"{"Hello invoice":"Invoice greeting"}"#,
+    );
+    let json_refs = mgr.references(json_doc, Pos::new(0, 4), false, true, Default::default()).await.unwrap();
+    assert!(json_refs.locations.iter().any(|l| l.path.ends_with("main.php")));
+    assert!(json_refs.locations.iter().any(|l| l.path.ends_with("app/other.php")));
+    let checked = mgr.rename(doc, pos(main, "openstorm_scope_probe"), "openstorm_scope_changed".into()).await.unwrap();
+    assert_eq!(checked.files.len(), 2, "checked PHP rename still works with a shared JSON overlay");
+    for (needle, expected) in [("retries'", "billing.php"), ("welcome'", "messages.php"), ("Hello invoice", "en.json")]
+    {
+        let refs = mgr.references(doc, pos(main, needle), true, true, Default::default()).await.unwrap();
+        assert!(refs.locations.iter().any(|l| l.path.ends_with("main.php")), "{expected} main usage: {refs:?}");
+        assert!(
+            refs.locations.iter().any(|l| l.path.ends_with("app/other.php")),
+            "{expected} cross-file usage: {refs:?}"
+        );
+    }
+    let mut previous = main.to_owned();
+    for (version, expression, expected) in [
+        (2, "config('billing.ret');", "billing.retries"),
+        (3, "__('messages.wel');", "messages.welcome"),
+        (4, "config('billing.limits.da');", "billing.limits.daily"),
+        (5, "__('messages.invoice.pa');", "messages.invoice.paid"),
+        (6, "__('Hello inv');", "Hello invoice"),
+    ] {
+        let text = format!("<?php\n{expression}\n");
+        replace(&mgr, doc, version, &previous, &text);
+        let result = mgr.completion(doc, pos(&text, "');"), None, Default::default()).await.unwrap();
+        assert!(
+            result.items.iter().any(|i| i.label == expected),
+            "{expression}: {:?}",
+            result.items.iter().map(|i| &i.label).collect::<Vec<_>>()
+        );
+        previous = text;
+    }
+    let config_doc = DocId::next();
+    mgr.did_open(config_doc, &root.join("config/billing.php"), &LanguageId::new("php"), 1, config);
+    let changed = config.replace("'retries'", "'attempts'");
+    replace(&mgr, config_doc, 2, config, &changed);
+    let text = "<?php\nconfig('billing.');\n";
+    replace(&mgr, doc, 7, &previous, text);
+    let result = mgr.completion(doc, pos(text, "');"), None, Default::default()).await.unwrap();
+    assert!(
+        result.items.iter().any(|i| i.label == "billing.attempts"),
+        "unsaved config key: {:?}",
+        result.items.iter().map(|i| &i.label).collect::<Vec<_>>()
+    );
+    assert!(!result.items.iter().any(|i| i.label == "billing.retries"));
+    assert_eq!(std::fs::read_to_string(root.join("config/billing.php")).unwrap(), config);
+    let translation_doc = DocId::next();
+    mgr.did_open(translation_doc, &root.join("lang/cs/messages.php"), &LanguageId::new("php"), 1, translation);
+    replace(&mgr, translation_doc, 2, translation, &translation.replace("'welcome'", "'greeting'"));
+    let text2 = "<?php\n__('messages.greeting');\n__('messages.welcome');\n";
+    replace(&mgr, doc, 8, text, text2);
+    let new_target = mgr.goto(doc, pos(text2, "greeting'"), GotoKind::Definition).await.unwrap();
+    assert_eq!(new_target.len(), 1, "new unsaved locale key: {new_target:?}");
+    assert!(new_target[0].path.ends_with("lang/cs/messages.php"));
+    let old_target = mgr.goto(doc, pos(text2, "welcome'"), GotoKind::Definition).await.unwrap();
+    assert_eq!(old_target.len(), 1, "only the unchanged locale retains the old key: {old_target:?}");
+    assert!(old_target[0].path.ends_with("lang/en/messages.php"));
+    assert_eq!(std::fs::read_to_string(root.join("lang/cs/messages.php")).unwrap(), translation);
+    let original_json = r#"{"Hello invoice":"Invoice greeting"}"#;
+    replace(&mgr, json_doc, 2, original_json, &original_json.replace("Hello invoice", "Hello account"));
+    let json_caller = "<?php\n__('Hello account');\n";
+    replace(&mgr, doc, 9, text2, json_caller);
+    let refs = mgr.references(json_doc, Pos::new(0, 4), false, true, Default::default()).await.unwrap();
+    assert!(refs.locations.iter().any(|l| l.path.ends_with("main.php")), "unsaved JSON key: {refs:?}");
+    assert!(!refs.locations.iter().any(|l| l.path.ends_with("app/other.php")), "old key must stay separate");
+    assert_eq!(std::fs::read_to_string(root.join("lang/en.json")).unwrap(), original_json);
+    let account_json = original_json.replace("Hello invoice", "Hello account");
+    let code_sample = r#"{"Hello account":"<?php function openstorm_translation_fake(): void {} ?>"}"#;
+    replace(&mgr, json_doc, 3, &account_json, code_sample);
+    let sample_caller = "<?php\nopenstorm_translation_fake();\n";
+    replace(&mgr, doc, 10, json_caller, sample_caller);
+    let spurious = mgr.goto(doc, pos(sample_caller, "openstorm_translation_fake"), GotoKind::Definition).await.unwrap();
+    assert!(
+        spurious.is_empty(),
+        "PHP examples inside JSON translation values must not define PHP symbols: {spurious:?}"
+    );
+    mgr.shutdown_all().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires the pinned macOS Apple Silicon PHPantom executable"]
+async fn laravel_environment_helper_keys_use_only_approved_synthetic_values() {
+    let bin = std::env::var_os("OPENSTORM_TEST_PHPANTOM_BIN").map(PathBuf::from).unwrap_or_else(|| {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../src-tauri/resources/phpantom/phpantom_lsp")
+    });
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().canonicalize().unwrap();
+    std::fs::create_dir(root.join("app")).unwrap();
+    std::fs::write(
+        root.join("composer.json"),
+        r#"{"require":{"php":"^8.2","laravel/framework":"12.*"},"autoload":{"psr-4":{"App\\":"app/"}}}"#,
+    )
+    .unwrap();
+    // The user authorized exactly these fake values in disposable test fixtures.
+    let environment = "OPENSTORM_DEMO_LABEL=sample\nOPENSTORM_DEMO_MODE=local\n";
+    std::fs::write(root.join(".env"), environment).unwrap();
+    let main = "<?php\n$label = env('OPENSTORM_DEMO_LABEL');\n";
+    std::fs::write(root.join("main.php"), main).unwrap();
+    std::fs::write(root.join("app/other.php"), "<?php\nenv('OPENSTORM_DEMO_LABEL');\n").unwrap();
+    let mut php = LanguageRegistry::load(None).unwrap().get(&LanguageId::new("php")).unwrap();
+    php.language_servers.retain(|s| s.name == "phpantom");
+    php.language_servers[0].command = bin.to_string_lossy().into_owned();
+    let mgr =
+        LspManager::new(root.clone(), Arc::new(LanguageRegistry::from_configs(vec![php])), Arc::new(|_: IdeEvent| {}));
+    let candidates = [root.join("main.php"), root.join("app/other.php")];
+    mgr.set_candidates_hook(Box::new(move |_, _| ide_lsp::CandidateFiles {
+        files: candidates.to_vec(),
+        limit_hit: false,
+    }));
+    let doc = DocId::next();
+    mgr.did_open(doc, &root.join("main.php"), &LanguageId::new("php"), 1, main);
+    let mut targets = Vec::new();
+    for _ in 0..80 {
+        targets = mgr.goto(doc, pos(main, "OPENSTORM_DEMO_LABEL"), GotoKind::Definition).await.unwrap_or_default();
+        if !targets.is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    assert_eq!(targets.len(), 1);
+    assert!(targets[0].path.ends_with(".env"));
+    assert_eq!(targets[0].range.start.line, 0);
+    let env_doc = DocId::next();
+    mgr.did_open(env_doc, &root.join(".env"), &LanguageId::new("dotenv"), 1, environment);
+    let declaration_refs = mgr.references(env_doc, Pos::new(0, 5), false, true, Default::default()).await.unwrap();
+    assert!(declaration_refs.locations.iter().any(|l| l.path.ends_with("app/other.php")));
+    assert!(declaration_refs.locations.iter().any(|l| l.path.ends_with("main.php")));
+    let refs = mgr.references(doc, pos(main, "OPENSTORM_DEMO_LABEL"), false, true, Default::default()).await.unwrap();
+    assert!(refs.locations.iter().any(|l| l.path.ends_with("app/other.php")));
+    let partial = "<?php\nenv('OPENSTORM_DEMO_L');\n";
+    replace(&mgr, doc, 2, main, partial);
+    let completions = mgr.completion(doc, pos(partial, "');"), None, Default::default()).await.unwrap();
+    assert!(completions.items.iter().any(|i| i.label == "OPENSTORM_DEMO_LABEL"));
+    let environment_updated = "  export OPENSTORM_DEMO_MODE=local\n";
+    replace(&mgr, env_doc, 2, environment, environment_updated);
+    let all_keys = "<?php\nenv('OPENSTORM_DEMO_');\n";
+    replace(&mgr, doc, 3, partial, all_keys);
+    let completions = mgr.completion(doc, pos(all_keys, "');"), None, Default::default()).await.unwrap();
+    assert!(completions.items.iter().any(|i| i.label == "OPENSTORM_DEMO_MODE"));
+    assert!(!completions.items.iter().any(|i| i.label == "OPENSTORM_DEMO_LABEL"));
+    let mode_call = "<?php\nenv('OPENSTORM_DEMO_MODE');\n";
+    replace(&mgr, doc, 4, all_keys, mode_call);
+    let definitions = mgr.goto(doc, pos(mode_call, "OPENSTORM_DEMO_MODE"), GotoKind::Definition).await.unwrap();
+    let target = definitions.iter().find(|target| target.path.ends_with(".env")).unwrap();
+    assert_eq!(target.range.start.col, 9, "navigation must land on the key after indentation and export");
+    let refs = mgr.references(env_doc, target.range.start, false, true, Default::default()).await.unwrap();
+    assert!(refs.locations.iter().any(|l| l.path.ends_with("main.php")));
+    mgr.did_close(env_doc);
+    replace(&mgr, doc, 5, mode_call, all_keys);
+    let completions = mgr.completion(doc, pos(all_keys, "');"), None, Default::default()).await.unwrap();
+    assert!(completions.items.iter().any(|i| i.label == "OPENSTORM_DEMO_LABEL"));
+    assert_eq!(std::fs::read_to_string(root.join(".env")).unwrap(), environment);
     mgr.shutdown_all().await;
 }

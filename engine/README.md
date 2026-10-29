@@ -1,8 +1,9 @@
 # Pinned PHPantom engine
 
-OpenStorm bundles PHPantom `0.11.1-workbench.114` for Apple Silicon macOS.
-`source.json` pins upstream source, its archive checksum, and every patch in the
-114-patch PHP Workbench series. The released executable is verified by
+The local OpenStorm candidate bundles PHPantom `0.11.1-openstorm.117` for Apple
+Silicon macOS. This is a local rebuild, not an upstream release. `source.json` pins
+upstream source, its archive checksum, the unchanged 114-patch PHP Workbench series,
+and OpenStorm patches 0115–0117 for JSON/environment resource isolation and precise key destinations. The executable is verified by
 `node scripts/verify-phpantom.mjs`; its provenance and licenses are under
 `src-tauri/resources/phpantom/`.
 
@@ -24,16 +25,23 @@ The build uses Cargo's locked dependency graph and the pinned upstream
 `stubs.lock` (the upstream build script verifies the PHP stub archive).
 Use Rust 1.99.1 and record `rustc -Vv`, Cargo version, host architecture and the
 printed source/binary SHA-256 receipt when producing a replacement. The recipe
-preserves the released engine version through `PHPANTOM_GIT_VERSION`; byte-for-byte
+preserves the pinned engine version through `PHPANTOM_GIT_VERSION`; byte-for-byte
 identity across different toolchains is not claimed. A rebuilt engine must pass
 OpenStorm client regressions before replacing the resource and updating provenance.
+Use the same `PHPANTOM_GIT_VERSION` value for direct Cargo source checks: integration
+tests can rebuild the executable in the shared target directory. Treat that directory
+as a mutable compiler cache, not a permanent binary receipt. The accepted 115 binary,
+licenses and provenance are separately archived at
+`artifacts/engines/0.11.1-openstorm.115/`.
 
-The local continuation verified archive acquisition, 114 patch applications,
+The foundation continuation verified archive acquisition, 114 patch applications,
 reverse checks immediately after each application, cached-source fingerprints,
 deliberate cached-source tamper refusal, and a fresh locked release compilation.
 The rebuilt executable reported the pinned version and passed OpenStorm's two
 client integration cases and actual-host checked-rename commit case. The original
-released executable remains bundled; byte identity across builds is not claimed.
+released executable is retained in the 0.1.25 app and
+`artifacts/engines/released-0.11.1-workbench.114/`; its provenance is also preserved in
+`engine/releases/0.11.1-workbench.114.json`. Byte identity across builds is not claimed.
 Receipts and logs are under `artifacts/checks/phpantom-rebuild*` and
 `artifacts/checks/phpantom-rebuilt-*`. The local rust-objcopy/libLLVM warning during
 stripping was non-fatal.
@@ -47,3 +55,25 @@ python3 scripts/openstorm-build-receipt.py /path/to/OpenStorm.app --profile deve
 Use `--profile release` for an optimized bundle. The receipt verifies bundle
 identity, engine checksum and deep/strict signature; it records the dirty source
 snapshot instead of implying that uncommitted changes belong to the base commit.
+
+The 116 candidate prevents PHP examples inside JSON translations and dotenv values from
+entering the PHP symbol index. It retains overlay ownership and key-cache invalidation
+through the non-PHP resource path, and advertises `phpWorkbenchJsonTranslations` and `phpWorkbenchEnvironmentResources`.
+OpenStorm requires that capability before sharing JSON or root dotenv overlays; the
+implicit bridge only supplies references, leaving JSON formatting/completion/rename
+to the configured JSON provider. The six real-client cases and the actual-host
+checked-rename case passed on the rebuilt binary. Engine source and final packaged
+acceptance evidence are tracked in `docs/OPENSTORM.md`.
+
+Root dotenv declarations now find PHP/Blade callers through the existing Laravel
+string-key index. Environment names/definitions/hover read current open overlays,
+including an unsaved root `.env.*`, before disk, and closing an overlay restores disk
+semantics. Resource files never contribute PHP declarations. The original 115 JSON
+candidate is retained in its signed app/archive and tracked provenance under
+`engine/candidates/`; 116 native and full-source evidence is tracked in the progress
+record rather than inferred from advertised capabilities.
+
+Patch 0117 reuses the dotenv key-offset parser to navigate past indentation and the
+optional `export` prefix. Definition locations use UTF-16 columns, so a subsequent
+reference request starts on the declared key. The native 116 destination failure
+and actual-client failing regression are retained in the progress/check record.

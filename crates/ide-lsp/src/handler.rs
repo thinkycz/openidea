@@ -121,6 +121,18 @@ impl ClientHandler {
             }
         };
         let Some(path) = uri_to_path(params.uri.as_str()) else { return };
+        let resource_language = if path.extension().and_then(|e| e.to_str()) == Some("json") {
+            Some("json")
+        } else if path.file_name().and_then(|n| n.to_str()).is_some_and(|n| n == ".env" || n.starts_with(".env.")) {
+            Some("dotenv")
+        } else {
+            None
+        };
+        if resource_language
+            .is_some_and(|language| mgr.php_resource_bridge(&ide_core::LanguageId::new(language), &self.server))
+        {
+            return;
+        }
         // Files opened only for a request (references search) are not the user's problems.
         if self.server.suppresses_diagnostics(&path) {
             return;

@@ -1,0 +1,139 @@
+--- a/src/virtual_members/laravel/env_vars.rs
++++ b/src/virtual_members/laravel/env_vars.rs
+@@ -71,11 +71,8 @@
+         let Some(content) = backend.get_file_content(uri.as_str()) else {
+             continue;
+         };
+-        match declaring_line(&content, key) {
+-            Some(line) => declarations.push(crate::definition::point_location(
+-                uri,
+-                Position::new(line, 0),
+-            )),
++        match declaring_position(&content, key) {
++            Some(position) => declarations.push(crate::definition::point_location(uri, position)),
+             None if fallback.is_none() => {
+                 fallback = Some(crate::definition::point_location(uri, Position::new(0, 0)));
+             }
+@@ -105,10 +102,7 @@
+         return None;
+     }
+     let line = content.lines().nth(position.line as usize)?;
+-    let key = declared_key(line)?;
+-    let body = line.trim_start();
+-    let body = body.strip_prefix("export ").unwrap_or(body).trim_start();
+-    let start = line.len() - body.len();
++    let (key, start) = declared_key_with_offset(line)?;
+     let offset =
+         crate::text_position::position_to_offset(line, Position::new(0, position.character))
+             as usize;
+@@ -211,6 +205,14 @@
+ /// line, or anything else that is not an assignment.
+ fn declared_key(line: &str) -> Option<&str> {
+     declared_entry(line).map(|(key, _)| key)
++}
++
++/// Preserve the key's original byte offset after optional indentation/export.
++fn declared_key_with_offset(line: &str) -> Option<(&str, usize)> {
++    let key = declared_key(line)?;
++    let body = line.trim_start();
++    let body = body.strip_prefix("export ").unwrap_or(body).trim_start();
++    Some((key, line.len() - body.len()))
+ }
+ 
+ /// The variable and the raw right-hand side one dotenv line declares.
+@@ -280,11 +282,12 @@
+ 
+ /// The zero-based line `key` is declared on, or `None` when this file does
+ /// not declare it.
+-fn declaring_line(env_content: &str, key: &str) -> Option<u32> {
+-    env_content
+-        .lines()
+-        .position(|line| declared_key(line) == Some(key))
+-        .map(|index| index as u32)
++fn declaring_position(env_content: &str, key: &str) -> Option<Position> {
++    env_content.lines().enumerate().find_map(|(index, line)| {
++        let (name, start) = declared_key_with_offset(line)?;
++        (name == key)
++            .then(|| Position::new(index as u32, line[..start].encode_utf16().count() as u32))
++    })
+ }
+ 
+ #[cfg(test)]
+@@ -292,15 +295,27 @@
+     use super::*;
+ 
+     #[test]
+-    fn finds_env_key_line() {
++    fn finds_env_key_position() {
+         let env = "APP_NAME=Laravel\nDB_HOST=127.0.0.1\n";
+-        assert_eq!(declaring_line(env, "DB_HOST"), Some(1));
++        assert_eq!(
++            declaring_position(env, "DB_HOST"),
++            Some(Position::new(1, 0))
++        );
++    }
++
++    #[test]
++    fn declaration_position_skips_export_and_indentation_with_crlf() {
++        let env = "# 😀\r\n  export OPENSTORM_DEMO_MODE=local\r\n";
++        assert_eq!(
++            declaring_position(env, "OPENSTORM_DEMO_MODE"),
++            Some(Position::new(1, 9))
++        );
+     }
+ 
+     #[test]
+     fn an_undeclared_key_has_no_line() {
+         let env = "APP_NAME=Laravel\n";
+-        assert_eq!(declaring_line(env, "MISSING"), None);
++        assert_eq!(declaring_position(env, "MISSING"), None);
+     }
+ 
+     /// A commented-out variable is documentation of what could be set, not a
+@@ -317,8 +332,11 @@
+     #[test]
+     fn a_prefix_of_a_declared_name_is_not_declared() {
+         let env = "DB_HOSTNAME=example.test\n";
+-        assert_eq!(declaring_line(env, "DB_HOST"), None);
+-        assert_eq!(declaring_line(env, "DB_HOSTNAME"), Some(0));
++        assert_eq!(declaring_position(env, "DB_HOST"), None);
++        assert_eq!(
++            declaring_position(env, "DB_HOSTNAME"),
++            Some(Position::new(0, 0))
++        );
+     }
+ 
+     #[test]
+--- a/tests/integration/laravel_env_keys.rs
++++ b/tests/integration/laravel_env_keys.rs
+@@ -453,7 +453,18 @@
+         })
+         .await;
+     let after = definitions_at(&backend, &caller_uri, &php, "OPENSTORM_DEMO_MODE").await;
+-    assert!(after.iter().any(|location| location.range.start.line == 2));
++    let destination = after
++        .iter()
++        .find(|location| location.uri == env_uri)
++        .unwrap();
++    assert_eq!(destination.range.start, Position::new(2, 9));
++    let from_destination =
++        crate::common::find_references(&backend, &env_uri, destination.range.start, false).await;
++    assert!(
++        from_destination
++            .iter()
++            .any(|location| location.uri == caller_uri)
++    );
+     assert!(
+         !backend
+             .global_functions()
+--- a/docs/CHANGELOG.md
++++ b/docs/CHANGELOG.md
+@@ -14,6 +14,8 @@
+ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+ 
+ ## [Unreleased]
++
++- **Land on environment keys after `export` and indentation.** Go to Definition now places the caret on the declared name, so Find Usages works immediately from that destination. Contributed by @thinkycz.
+ 
+ - **Find environment-key usages from dotenv declarations.** Unsaved environment keys now stay current for navigation and completion, while environment values remain data rather than PHP source. Contributed by @thinkycz.
+ 

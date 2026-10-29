@@ -7,7 +7,9 @@ Branch: codex/openstorm-php-laravel. Target: macOS Apple Silicon, local delivery
 
 Preserve OpenIDEA layout, default keymap, autosave and debugger. Use separate
 cz.thinky.openstorm application data; retain .openidea project settings.
-Bundle released PHPantom 0.11.1-workbench.114; support builtins and PHP target context.
+Preserve the released PHPantom 0.11.1-workbench.114 foundation and its provenance.
+The current local candidate uses rebuilt 0.11.1-openstorm.117 for safe JSON translation
+and environment sources; preserve builtin documents and PHP target context.
 The current scope is the full 69-area roadmap in `docs/openstorm-features.json`,
 with Laravel/Blade/workflow work authorized in milestone order. New debugger
 functionality, upstream automatic updates, public app releases, notarization,
@@ -517,3 +519,300 @@ cancellation, and large route/view corpus performance still need acceptance. An 
 PHP document is required for this initial entry point. The next Laravel slice should
 exercise inherited config/translation navigation and completion through the actual
 client/native editor, then address integration failures before expanding workflows.
+
+## Config, environment and translation navigation batch (0.1.27, native gate pending)
+
+FEAT-031 is being reassessed through OpenStorm's inherited LSP client/editor path.
+The actual-client regressions now cover config-key definitions, locale alternatives,
+cross-file usages, nested and literal JSON-key completions, unsaved config/PHP-locale/JSON
+changes, and absence of PHP declarations from JSON message text. The separately approved
+two-key environment fixture covers completion, navigation and usages through the client.
+Environment-value privacy and native environment-key acceptance remain open.
+
+Native findings on signed 0.1.25 using a new disposable Laravel fixture:
+
+- Cmd+B on a config key after Unicode text opened `config/billing.php`; native
+  Find Usages from the declaration found both callers.
+- Translation Cmd+B retained both locale definitions with `lang/cs` and `lang/en`
+  paths, and selecting the Czech result with the mouse opened the right declaration.
+  Config and translation completion inserted the full dotted key with intact quotes.
+- Keyboard activation exposed an inherited chooser focus bug: the header pin button
+  received focus before the result list, so Enter pinned results instead of opening
+  the selected declaration. A failing regression reproduced the wrong initial focus.
+  The List primitive now supports a preferred-focus marker, and the LSP chooser opts
+  into it. The regression checks initial focus, ArrowDown/Enter selection and no pin
+  action; the existing header-button test still passes. All 17 focused popup/list
+  tests passed after the correction.
+- The fixture was restored through the editor after completion checks and saved;
+  app/server exited on quit. Broader acceptance must use the corrected 0.1.26 copy.
+
+The corrected 0.1.26 development build was signed and exercised below. Frontend:
+2,992 passed; type checking, lint, formatting and build passed (inherited lint warnings).
+The installed optimized app and earlier evaluation artifacts remain unchanged.
+
+### Further JSON findings and current engine candidate
+
+The corrected 0.1.26 copy passed native Down/Enter selection of the English locale
+and refreshed a closed translation's target from line 3 to line 4 after an external
+edit. Native JSON-key completion preserved a key containing a space and Cmd+B opened
+its JSON declaration. Find Usages from that declaration then exposed missing routing:
+only the optional JSON server owned the file, so PHPantom was never asked.
+
+OpenStorm now shares standard `lang/*.json` / `resources/lang/*.json` overlays with
+configured PHPantom instances in declared Laravel projects. Only references use this
+implicit bridge; PHP formatting, completion and rename remain excluded for JSON.
+Regular user-configured JSON providers keep their existing capabilities, unrelated
+JSON/projects are excluded, and old PHPantom instances receive no JSON overlay unless
+they advertise `phpWorkbenchJsonTranslations`. JSON changes/close/restart use normal
+client synchronization. PHP diagnostics from the implicit bridge are suppressed.
+All 58 mock-server cases passed after capability gating and diagnostic filtering.
+
+The real client test exposed a second, engine-level fault: PHP examples in a JSON
+translation value became global PHP functions. The client routing is therefore not
+accepted on the released 114 engine. A local engine candidate,
+`0.11.1-openstorm.115`, adds patch 0115: JSON translations are non-PHP resources with
+empty PHP symbol maps, current-source ownership and translation-key cache invalidation.
+It advertises the safe-JSON capability. The patch adds private and handler regressions,
+a changelog entry, and engine-local formatting rules matching its existing style.
+The original 114 patch series is unchanged. Pinned replay and the rebuilt binary checks passed as detailed below. The candidate
+is bundled in the signed 0.1.27 development app; native acceptance is still pending.
+
+The user explicitly approved only `OPENSTORM_DEMO_LABEL=sample` and
+`OPENSTORM_DEMO_MODE=local` in disposable `.env` fixtures. A real-client environment
+helper case passed completion, declaration navigation and cross-file usages while
+preserving the two-line file. The native fixture now has the same approved values;
+no existing environment file was changed. Broader environment-value privacy and AI
+exclusion acceptance remain open.
+
+Repeated versioned builds filled the compiler cache. With no compiler running, older
+regenerable incremental entries were pruned (about 20 GiB estimated); app bundles,
+source snapshots, PHP Workbench and evaluation outputs were preserved. The receipt is
+`artifacts/checks/compiler-cache-prune.json`. The first workspace run also hit an
+inherited mock Godot startup failure; its focused retry passed. The final frozen-source
+workspace run passed after the engine/resource changes, as detailed below.
+
+The pinned 115 build completed (SHA-256
+`8c5254b512627ac40289ce168cfdd295bc8e99ea75497c5b4a4d83035e24239d`).
+All six actual-client cases and the actual-host checked-rename case passed, including
+PHP-example isolation, JSON declaration usages, unsaved JSON/PHP locale keys,
+checked PHP rename with a shared JSON overlay, Laravel inference and builtin docs.
+The local bundled resource/provenance and tool version now identify this custom
+build. The released 114 binary/licenses/provenance are archived locally and its
+provenance is tracked under `engine/releases/`; earlier signed apps are unchanged.
+Final workspace checks: 1,303 passed, 0 failed, 27 ignored; all-target workspace Clippy
+with `-D warnings` and Rust formatting passed. The additional actual-host JSON-first
+regression passed separately after this run: opening only a JSON translation starts
+PHPantom and finds both PHP callers, including UTF-16 positions after a Unicode value.
+The 58 mock-server checks include safe capability gating, JSON-only reference routing,
+normal explicitly configured JSON providers, diagnostics filtering and unrelated paths.
+
+Engine checks: release all-target Clippy and formatting passed; resource units (6)
+and translation handler regressions (2) passed from the immutable pinned replay.
+Compatibility checks also passed: YAML/XML resource navigation (9), and broader
+Laravel translation keys, locale/package resources and Blade callers (41). The later
+JSON-first host regression passed focused all-target Clippy and Rust formatting.
+The preceding scratch copy also passed required Clippy fixes followed by formatting.
+The source fingerprint was rechecked after the build. The inherited stripping step
+still warns that its `rust-objcopy` cannot load `@rpath/libLLVM.dylib`; build and binary
+checks succeeded. The full engine suite remains pending approval because inherited
+tests create additional temporary `.env*` files outside the approved two-key scope.
+Engine example lint with installed PHP 8.3.31 passed 10 of 13 files, including the
+Laravel demo; three upstream examples require newer PHP syntax. Runtime assertions
+and the dependency-backed Laravel example diagnostic gate remain unverified.
+
+Current local candidate: `artifacts/batches/0.1.27/OpenStorm.app` (Apple Silicon,
+ad-hoc signature verified, not notarized). Build receipt:
+`artifacts/checks/laravel-config-0.1.27-build-receipt.json`. Its bundled engine is the
+115 binary above. Runtime source matches the receipt; later changes affect only a host regression,
+the progress/feature ledger and engine build documentation. The installed
+0.1.21 app remains untouched. A fresh isolated profile and JSON-first fixture were
+launched, but computer use reported the Mac locked before any 0.1.27 UI acceptance.
+Unlock was requested; final native JSON/environment navigation, keyboard selection,
+restart/relaunch, quit/process cleanup and post-runtime signature checks remain open.
+The current running development app must not be promoted as accepted.
+
+Evidence logs are under `artifacts/checks/`: `laravel-config-frozen-{workspace,clippy,rustfmt}.log`,
+`laravel-config-final-format.log`, `phpantom-115-{resource-final,trans-integration,openstorm-client,openstorm-host}.log`,
+`phpantom-115-{resource,translation}-compatibility.log`, `phpantom-115-example-lint.json`,
+and `laravel-json-first-host-{final,clippy,format}.log`.
+FEAT-031, FEAT-064, FEAT-066 and the other 65 ledger areas retain their current status;
+this batch adds evidence without claiming full-area acceptance.
+
+### Native gate blocked on desktop access
+
+Computer use confirmed the Mac locked across three consecutive goal turns. The
+remaining 0.1.27 native workflows cannot proceed until the user unlocks it. All
+currently authorized command-line checks for this batch are finished; no native
+acceptance, promotion or subsequent dependent batch is claimed. Source changes,
+the signed candidate, disposable fixtures and evidence remain preserved. Resume
+with the existing isolated 0.1.27 app/profile after unlock; the full engine suite
+still needs the separately requested broader synthetic environment-fixture approval.
+
+### Resumed native checks and environment declaration regression (2026-10-29)
+
+The user unlocked the Mac and explicitly approved the full pinned regression suite's
+suite-owned temporary `.env*` files with built-in fake data (including creation,
+changes and cleanup); existing environment files remain outside that scope.
+The full 115 source suite is now running from its unchanged verified snapshot.
+
+Signed 0.1.27 native observations: JSON declaration Find Usages found three PHP
+callers, result selection showed a preview and double-click opened the caller.
+Environment helper Cmd+B opened the exact `.env` key; Ctrl+Space inserted the full
+approved key with intact quotes, and Find Usages from PHP found three callers.
+The locale chooser retained both paths and Down/Enter opened English line 4.
+The PHP completion fixture was restored and saved. Save All quit exited both app
+and server; relaunch recovered the saved session. Native PHPantom Restart changed
+the child PID, and JSON declaration usages worked afterward. Final normal quit
+again exited both processes. Deep/strict signature verification passed after runtime,
+and the two-key environment checksum remained unchanged. Evidence:
+`artifacts/checks/laravel-config-0.1.27-native-result.json` and the relaunch log.
+A background relaunched window initially had no visible web content through computer
+use; keyboard activation exposed its recovered editor and controls. This observation
+is retained, without claiming a reproducible startup defect or a passed visual gate.
+
+Find Usages from an environment declaration exposed a separate gap: no server owns
+`dotenv` documents. The existing real-client environment regression now reproduces
+that failure (`laravel-env-declaration-red.log`). In-progress 116 engine/client work
+adds a separate safe environment-resource capability and a references-only bridge;
+old engines receive no dotenv overlays. The 60 current mock-server checks passed,
+including capability separation from JSON, diagnostics filtering, overlay change/close,
+unsupported edit features, nested files and unrelated projects. Engine changes are
+isolated in mutable scratch until source/client/native checks pass; 115 bundled and
+archived artifacts remain the current packaged baseline. No 116 acceptance is claimed.
+
+The full 115 source run completed all targets. Two integration assertions compared
+macOS `/var` temporary paths with engine-canonical `/private/var` paths while
+returning the correct helper definitions. The entire integration target rerun with
+canonical `TMPDIR` and the crate source working directory passed 9,871 cases,
+0 failed, 2 ignored. A first direct rerun used the wrong working directory and
+therefore failed four relative Blade fixture lookups; that invocation is preserved
+separately. Other source targets passed in the original Cargo run. The per-target
+results and corrections are recorded in `phpantom-115-full-suite-result.json`;
+source files were not changed to make these assertions pass.
+
+The pinned 116 source replay and locked release build completed. Engine SHA-256:
+`6f3ddc900bf78ad21121e59791acf04e1c8e41bfbb81c4cd3714d8b97532ebba`;
+patch-series SHA-256: `1215ad50b01a5776801a53dacd1940dd9a980d5192ab13345a7974302b10f2a0`.
+All six real-client cases passed, including the reproduced environment declaration
+failure, unsaved key removal and close-to-disk recovery. Three actual-host cases
+passed, including opening only a dotenv document and finding both closed PHP callers.
+The source resources/provenance/tool version now use 116; the 115 app/archive and
+tracked candidate provenance remain preserved. The full 116 source suite is running;
+0.1.28 frontend tests/type checking/lint/build passed (existing warnings retained).
+Native 0.1.28 acceptance has not started.
+
+Installed PHP 8.3 could not parse three inherited engine examples. The current
+StaticPHP 8.4.27 artifact endpoint returned HTTP 403; its documented older 8.4.23
+macOS ARM64 archive downloaded successfully. Only its `php` executable was extracted
+inside `artifacts/toolchains/`, with observed SHA-256 provenance (no independent
+vendor SHA-256 is claimed). No system PHP/Herd settings or environment files were
+changed. All 13 engine example syntax checks and runtime assertions then passed
+using this workspace-only PHP 8.4.23 with `-n` (no existing php.ini loaded).
+
+### Environment resources: 0.1.28 acceptance and follow-up (2026-10-30)
+
+The full pinned 116 Cargo suite passed: 18,359 tests, 0 failed, 17 ignored (the
+separate spawned bootstrap child output is not double-counted). Workspace checks
+passed 1,305 tests, 0 failed, 29 ignored; all-target Clippy and Rust formatting
+passed. Frontend: 2,992 passed, type checking/lint/build/formatting passed with the
+inherited warnings. Engine Clippy passed; the required package `cargo fmt --check`
+passed. An extra `--all` formatting attempt incorrectly crossed into the vendored
+Tower LSP dependency's enclosing workspace; its failure is retained separately,
+and no vendor/source change was made to work around it. Source integrity passed
+again after the checks. The known rust-objcopy/libLLVM build warning remains.
+
+The original Laravel example lock is 13.24.0. Static analyze correctly returned five
+diagnostics: the three deliberate demo errors plus two unsupported higher-order
+`sole` proxy properties. Both 115 and 116 returned the same five; the installed
+framework's proxy list omits `sole`. A separate disposable copy was explicitly
+updated to exact Laravel 13.37.0 with plugins/scripts disabled, matching the demo's
+version-aware runtime oracle. It returned exactly the three expected intentional
+diagnostics and passed all 267 runtime assertions using in-memory SQLite. Neither
+fixture contains an environment file. Composer execution profiles and logs are
+stored with the check artifacts; the original lock and system tooling were retained.
+
+Signed development `artifacts/batches/0.1.28/OpenStorm.app` passed the native first-open
+`.env` path on a fresh Laravel 13.37 fixture: no PHP server existed before opening
+that file, then the bundled 116 process started and declaration usages found two
+closed PHP callers. Default focus autosave persisted the first exploratory edit.
+It was temporarily disabled through Settings in the disposable profile for the
+unsaved checks, then restored to its original true; idle save remained false.
+With both env/PHP disk files still original, completion followed an unsaved env-key
+removal and reference search included an unsaved PHP caller. An external fixture
+change produced the paused-autosave warning and an overwrite question on Cmd+S;
+Cancel was focused, Return preserved external bytes and both unsaved buffers.
+An explicit overwrite approval then restored only the synthetic fixture. Final
+PHP/env data and autosave preferences were restored, normal quit exited app/server,
+and post-runtime deep/strict signature verification passed.
+
+A further native failure remains: Go to Definition on an indented `export` assignment
+lands at column zero before the key, so an immediate Find Usages returns nothing.
+The actual-client regression reproduced `0` instead of expected column `9`.
+In-progress 117 scratch work shares key-offset parsing between definitions and
+references, emits UTF-16 key positions, and strengthens both private and handler
+regressions. It has passed required Clippy fixes followed by formatting; final
+source/client/native checks remain open. 0.1.28 remains a development candidate
+with this known failure, rather than an accepted full environment-navigation batch.
+Evidence: `laravel-env-0.1.28-{build-receipt,native-result,fixture}.json`,
+`laravel-env-export-destination-red.log`, `phpantom-116-full-suite.log`,
+`phpantom-116-laravel13-37-{analyze,runtime}.log`, and the workspace/frontend logs.
+
+A second cache prune removed only older inactive generated incremental entries
+(252 directories, about 14.7 GiB estimated), freeing room for the versioned native
+bundle. No signed app, source snapshot, PHP Workbench or evaluation result was
+removed. Receipt: `compiler-cache-prune-0.1.28.json`.
+
+The 117 correction passed scratch all-target Clippy and formatting, then replayed
+from the pinned source with patch-series SHA-256
+`13df68d2a64638e30a3e238bd6e14fac21d3d232c2983f2f6f1493ddab2e71ef`.
+The locked release build produced engine SHA-256
+`11b101f95b869af2cc88e7f4d48eeda227bab511b3da7ddf9774ddde01ec5f29`.
+The stronger real-client export-destination regression passed, including reference
+search directly from the returned destination. Three real-host cases passed. The
+first Eloquent client invocation accidentally selected the new playground fixture,
+which lacks the required custom `App\Models\User::displayName` model; its retry
+against the existing acceptance fixture passed. The test requirement/error now names
+that fixture explicitly, and a final complete client run uses the correct fixture.
+The original failed invocation is retained. Full 117 source gates and native 0.1.29
+checks remain in progress; no acceptance is inferred from Clippy or capability flags.
+The 0.1.28 isolated profile's `settings.toml` was read back with `autoSave = true`,
+and original PHP/environment bytes and process exit were verified after cleanup.
+
+### 0.1.29 native resource-navigation gate accepted (2026-10-30)
+
+The user's Mac-unlocked reply resumed native acceptance, and their explicit full
+synthetic-fixture approval covered the pinned engine suite's owned temporary
+`.env*` data. Existing user environment files were not changed. Engine 117 completed
+18,360 tests with zero failures and 17 ignored; the bootstrap subprocess's one test
+is counted once. All six real-client cases and three actual-host cases passed.
+OpenStorm completed 1,305 workspace tests with 29 ignored and 2,992 frontend tests;
+all-target Clippy, Rust/frontend formatting, type checking, lint and build passed.
+The documented nonfatal engine build-script rust-objcopy/libLLVM warning remains.
+
+The signed Apple Silicon development app at
+`artifacts/batches/0.1.29/OpenStorm.app` passed a fresh dotenv-only open, starting the
+bundled 117 engine and finding two closed PHP callers. With autosave temporarily
+disabled in its isolated profile, unsaved environment and PHP edits drove completion
+and usages while both disk files retained their original bytes. An indented export
+now opens the exact key at UI 1:10; immediate Find Usages finds the expected two
+callers, including the unsaved PHP buffer. Engine restart preserves those overlays.
+Undo/redo changes navigation between the original 2:1 and exported 1:10 positions.
+This supersedes the 0.1.28 exported-key failure above. JSON translation declaration
+usages found three PHP callers; preview/double-click navigation and Down/Enter locale
+selection opened the correct targets. Fixture PHP/environment bytes were restored.
+
+Settings UI restored focus autosave to true; idle-save stayed at its false default.
+Read-back of the isolated profile's settings TOML confirmed `autoSave = true`.
+Normal quit exited app and engine. A controlled relaunch restored all five tabs,
+selected file and layout; environment usages immediately found both PHP callers.
+A second normal quit exited both processes. Post-runtime deep/strict signature
+verification passed, and the bundled engine still matched SHA-256
+`11b101f95b869af2cc88e7f4d48eeda227bab511b3da7ddf9774ddde01ec5f29`.
+The installed optimized 0.1.21 app remains unchanged. This is a development build,
+not notarized or published. Saved-session recovery does not establish dirty-buffer
+crash recovery. Broader locale/helper/project changes, environment-value privacy/AI
+exclusion and performance remain open; all 69 areas retain individual status.
+
+Evidence: `artifacts/checks/laravel-env-0.1.29-{build-receipt,native-result,fixture}.json`,
+`laravel-env-0.1.29-{native,relaunch,workspace,clippy,frontend-tests}.log`,
+`phpantom-117-{full-suite,client-final,openstorm-host,final-clippy,final-fmt}.log`.

@@ -1,0 +1,200 @@
+--- a/src/resource_navigation.rs
++++ b/src/resource_navigation.rs
+@@ -31,8 +31,25 @@
+     member: Option<(String, usize, usize)>,
+ }
+ 
+-/// Whether `uri` names a YAML or XML document that can carry PHP symbols.
++/// Laravel JSON translations are data, even when their values contain PHP examples.
++pub(crate) fn is_json_translation_document(uri: &str) -> bool {
++    let path = uri.split(['?', '#']).next().unwrap_or(uri);
++    let Some((parent, name)) = path.rsplit_once('/') else {
++        return false;
++    };
++    name.rsplit_once('.')
++        .is_some_and(|(_, extension)| extension.eq_ignore_ascii_case("json"))
++        && parent
++            .rsplit('/')
++            .next()
++            .is_some_and(|directory| directory.eq_ignore_ascii_case("lang"))
++}
++
++/// Whether `uri` names a non-PHP resource or a JSON translation document.
+ pub(crate) fn is_resource_document(uri: &str) -> bool {
++    if is_json_translation_document(uri) {
++        return true;
++    }
+     let path = uri
+         .split(['?', '#'])
+         .next()
+@@ -51,8 +68,20 @@
+     .any(|suffix| path.ends_with(suffix))
+ }
+ 
+-/// Whether a filesystem path is a YAML/XML resource document.
++/// Whether a filesystem path is a non-PHP resource document.
+ pub(crate) fn is_resource_path(path: &Path) -> bool {
++    if path
++        .extension()
++        .and_then(|s| s.to_str())
++        .is_some_and(|s| s.eq_ignore_ascii_case("json"))
++        && path
++            .parent()
++            .and_then(Path::file_name)
++            .and_then(|s| s.to_str())
++            .is_some_and(|s| s.eq_ignore_ascii_case("lang"))
++    {
++        return true;
++    }
+     path.file_name()
+         .and_then(|name| name.to_str())
+         .is_some_and(is_resource_document)
+@@ -78,7 +107,7 @@
+     /// Replace one resource document's synthetic symbol map and reference
+     /// contributions.
+     pub(crate) fn update_resource_symbol_index(&self, uri: &str, content: &str) {
+-        let symbol_map = Arc::new(self.resource_symbol_map(content));
++        let symbol_map = Arc::new(self.resource_symbol_map_for_uri(uri, content));
+         let _merge = self.index_merge_gate.lock();
+         self.diag.documents.lock().retire_index_source(uri);
+         self.symbol_maps
+@@ -94,7 +123,7 @@
+         uri: &str,
+         content: &Arc<String>,
+     ) -> bool {
+-        let symbol_map = Arc::new(self.resource_symbol_map(content));
++        let symbol_map = Arc::new(self.resource_symbol_map_for_uri(uri, content));
+         let _merge = self.index_merge_gate.lock();
+         if self
+             .diag
+@@ -130,7 +159,7 @@
+                 };
+                 Some((
+                     uri.clone(),
+-                    Arc::new(self.resource_symbol_map(&content)),
++                    Arc::new(self.resource_symbol_map_for_uri(uri, &content)),
+                     ticket,
+                 ))
+             })
+@@ -160,6 +189,20 @@
+             }
+         }
+         self.reindex_references_for_symbol_maps_batch(maps);
++    }
++
++    fn resource_symbol_map_for_uri(&self, uri: &str, content: &str) -> SymbolMap {
++        if is_json_translation_document(uri) {
++            self.laravel_string_key_cache
++                .write()
++                .invalidate_for_uri(uri, content);
++            // Do not extract PHP classes, members or functions from translated text.
++            return SymbolMap {
++                source_len: u32::try_from(content.len()).unwrap_or(u32::MAX),
++                ..SymbolMap::default()
++            };
++        }
++        self.resource_symbol_map(content)
+     }
+ 
+     fn resource_symbol_map(&self, content: &str) -> SymbolMap {
+@@ -369,6 +412,22 @@
+ #[cfg(test)]
+ mod tests {
+     use super::*;
++
++    #[test]
++    fn json_translation_resources_do_not_extract_php_symbols() {
++        let backend = Backend::new_test();
++        let uri = "file:///project/lang/en.json";
++        let text = r#"{"Example":"<?php function openstorm_translation_fake(): void {} ?>"}"#;
++        assert!(is_resource_document(uri));
++        assert!(is_resource_path(Path::new("/project/lang/en.json")));
++        assert!(!is_resource_document("file:///project/config/en.json"));
++        assert!(
++            backend
++                .resource_symbol_map_for_uri(uri, text)
++                .spans
++                .is_empty()
++        );
++    }
+ 
+     #[test]
+     fn resource_notification_rejects_an_older_or_closed_source() {
+--- a/src/backend/startup.rs
++++ b/src/backend/startup.rs
+@@ -282,7 +282,7 @@
+                     ..ExecuteCommandOptions::default()
+                 }),
+                 experimental: Some(
+-                    serde_json::json!({"phpWorkbenchRoutes": true, "phpWorkbenchViews": true, "phpWorkbenchBuiltins": true, "phpWorkbenchActiveTarget": true, "phpWorkbenchRenameChecked": true, (crate::workbench_optimize_imports::CAPABILITY): true, "phpWorkbenchCallHierarchyAnalysis": true, (crate::structural_search::wire::EXPERIMENTAL_CAPABILITY): true, (crate::structural_search::wire::REPLACE_EXPERIMENTAL_CAPABILITY): true}),
++                    serde_json::json!({"phpWorkbenchJsonTranslations": true, "phpWorkbenchRoutes": true, "phpWorkbenchViews": true, "phpWorkbenchBuiltins": true, "phpWorkbenchActiveTarget": true, "phpWorkbenchRenameChecked": true, (crate::workbench_optimize_imports::CAPABILITY): true, "phpWorkbenchCallHierarchyAnalysis": true, (crate::structural_search::wire::EXPERIMENTAL_CAPABILITY): true, (crate::structural_search::wire::REPLACE_EXPERIMENTAL_CAPABILITY): true}),
+                 ),
+                 ..ServerCapabilities::default()
+             },
+@@ -712,7 +712,9 @@
+                     Some((
+                         crate::indexing::preload::WorkspaceIndexOutcome::Complete,
+                         indexed_files,
+-                    )) => format!("Parsed {indexed_files} files"),
++                    )) => {
++                        format!("Parsed {indexed_files} files")
++                    }
+                     Some((outcome, _)) => outcome.message(),
+                     None => "Workspace indexing failed".to_string(),
+                 };
+--- a/tests/integration/references_laravel_trans.rs
++++ b/tests/integration/references_laravel_trans.rs
+@@ -96,3 +96,36 @@
+         "Should find Traditional Chinese definition"
+     );
+ }
++
++#[tokio::test]
++async fn json_translation_php_examples_do_not_publish_php_declarations() {
++    let text = r#"{"Example":"<?php function openstorm_translation_fake(): void {} ?>"}"#;
++    let (backend, dir) = create_psr4_workspace(COMPOSER_JSON, &[("lang/en.json", text)]);
++    let uri = Url::from_file_path(dir.path().join("lang/en.json")).unwrap();
++    crate::common::open_document(&backend, &uri, "json", text).await;
++    assert!(
++        !backend
++            .global_functions()
++            .read()
++            .contains_key("openstorm_translation_fake")
++    );
++    backend
++        .did_change(DidChangeTextDocumentParams {
++            text_document: VersionedTextDocumentIdentifier { uri, version: 2 },
++            content_changes: vec![TextDocumentContentChangeEvent {
++                range: None,
++                range_length: None,
++                text: text.replace(
++                    "openstorm_translation_fake",
++                    "openstorm_translation_updated",
++                ),
++            }],
++        })
++        .await;
++    assert!(
++        !backend
++            .global_functions()
++            .read()
++            .contains_key("openstorm_translation_updated")
++    );
++}
+--- a/docs/CHANGELOG.md
++++ b/docs/CHANGELOG.md
+@@ -14,6 +14,8 @@
+ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+ 
+ ## [Unreleased]
++
++- **Keep PHP examples in JSON translations as text.** Opening or editing a translation no longer creates PHP declarations or diagnostics from its message values. Unsaved translation keys remain available to navigation. Contributed by @thinkycz.
+ 
+ - **Keep call hierarchy coverage accurate.** Known targets remain visible alongside missing alternatives, and class imports keep their meaning through native hints, PHPDoc and class-string values. Incoming analysis identifies unreadable project sources and recovers after they are repaired or removed. Contributed by PHP Workbench downstream.
+ 
+--- /dev/null
++++ b/rustfmt.toml
+@@ -0,0 +1,3 @@
++edition = "2024"
++max_width = 100
++use_small_heuristics = "Default"

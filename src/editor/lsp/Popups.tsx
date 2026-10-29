@@ -199,6 +199,7 @@ function ListPopup({ popup }: { popup: Extract<LspPopup, { kind: "list" }> }) {
         </div>
         <div ref={bodyRef} onKeyDown={onKeyDown} className={styles.listBody} style={{ height }}>
           <List
+            autoFocus
             items={filtered}
             getKey={(r) => r.item.id}
             activeIndex={activeIndex}

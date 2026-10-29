@@ -42,7 +42,8 @@
       "status": "partial",
       "acceptance_gate": "Restore dirty buffers and focus after restart; keyboard switch/move/split",
       "openstorm_evidence": [
-        "0.1.24 native: saved project reopened with four tabs, selected conflict file and saved contents. Unsaved-draft crash recovery is not accepted."
+        "0.1.24 native: saved project reopened with four tabs, selected conflict file and saved contents. Unsaved-draft crash recovery is not accepted.",
+        "0.1.29 native saved-session relaunch restores five tabs, selected file and layout; dirty crash recovery remains open."
       ],
       "remaining": "Reassess current OpenStorm implementation against this full gate; Workbench acceptance does not transfer."
     },
@@ -326,8 +327,12 @@
       "milestone": 2,
       "status": "partial",
       "acceptance_gate": "Key completion/goto/usages; local-only env value handling, no secrets in logs",
-      "openstorm_evidence": [],
-      "remaining": "Reassess current OpenStorm implementation against this full gate; Workbench acceptance does not transfer."
+      "openstorm_evidence": [
+        "0.1.25/26 native: config/translation definitions, completions, usages, locale choice and external target refresh. 0.1.27 client/host: nested config, unsaved PHP/JSON translations, JSON-first cross-file usages, approved two-key env navigation/completion/usages. Native 0.1.27 gate pending Mac unlock.",
+        "0.1.28 native Laravel 13.37: dotenv-only first open starts bundled engine and finds closed PHP callers; unsaved env completion and PHP usages follow live buffers; external conflict defaults to Cancel, restores fixtures/preferences and exits cleanly. Export destination chaining failure reproduced and addressed in 117 client/host checks; native 0.1.29 pending.",
+        "0.1.29 signed native: dotenv first-open, unsaved key completion/usages, exact exported-key goto and immediate refs, undo/redo, engine restart, JSON declaration usages, locale chooser and saved-session relaunch passed. External conflict Cancel/approval verified in 0.1.28 unchanged save path."
+      ],
+      "remaining": "Broader locale/helper/project-change cases and complete environment-value privacy/AI-exclusion acceptance remain open."
     },
     {
       "id": "FEAT-032",
@@ -668,7 +673,9 @@
         "0.1.21 optimized app preserved; 0.1.22 development app packaged with verified ad-hoc signature and build/source receipt. Native final gate partial; publishing, automatic updates, notarization and real-profile migration deferred.",
         "0.1.23 development bundle: isolated profile, ad-hoc deep/strict signature passed after runtime; controlled quit exited app/server. Saved-session relaunch awaits corrected 0.1.24.",
         "0.1.24 separate signed development app: saved-session reopen, engine restart, quit/process cleanup and post-runtime deep/strict signature passed. Installed optimized app unchanged; notarization/platform-service gates remain open.",
-        "0.1.25 separate signed Apple Silicon development app: native navigation, saved-session relaunch, app/server cleanup, post-runtime signature passed. Installed optimized app preserved. Notarization/update feed/platform integration remain open."
+        "0.1.25 separate signed Apple Silicon development app: native navigation, saved-session relaunch, app/server cleanup, post-runtime signature passed. Installed optimized app preserved. Notarization/update feed/platform integration remain open.",
+        "0.1.27 signed local Apple Silicon development candidate bundles reproducibly pinned OpenStorm PHPantom 115; original released 114 and installed app preserved. Native gate remains pending.",
+        "0.1.29 separate signed Apple Silicon development app: native resource navigation, saved-session relaunch, normal app/server exit twice and post-runtime deep/strict signature passed; bundled engine 117 checksum verified. Installed optimized app preserved."
       ],
       "remaining": "Reassess current OpenStorm implementation against this full gate; Workbench acceptance does not transfer."
     },
@@ -693,7 +700,10 @@
         "0.1.22: eight guarded transaction regressions, four PHP protocol cases, real-client and actual-host checked-edit cases passed; native method rename/import checks observed; final-copy native recheck pending. See docs/OPENSTORM.md.",
         "0.1.23 native: closed declaration refreshed after rename. Reused PHPantom progress tokens exposed orphan UI tasks; failing regression reproduced and 51 mock-server checks passed after client correction. Corrected native pass pending.",
         "0.1.24 native: reused progress-token fix left no orphan task after references/code lenses/restart; final notifications clear the shared task. Broader freshness gates remain open.",
-        "Laravel adapter validates open PHP source receipts/engine generation after queries; unsaved-dependency change regression refuses stale results. Project-switch cancellation/late-response regression passes; native project-switch/performance remain open."
+        "Laravel adapter validates open PHP source receipts/engine generation after queries; unsaved-dependency change regression refuses stale results. Project-switch cancellation/late-response regression passes; native project-switch/performance remain open.",
+        "0.1.27 client/host regressions cover unsaved config/PHP/JSON keys, Unicode JSON positions, JSON-first PHP references and PHP example isolation. 58 mock cases passed with safe-capability gating; native final-copy checks pending.",
+        "0.1.28 native: unsaved dotenv key removal updates PHP completion with disk unchanged; usages include another unsaved PHP buffer; external disk bytes survive Cancel. 117 adds accurate UTF-16 exported-key destinations; native follow-up pending.",
+        "0.1.29 native unsaved dotenv/PHP overlays survive engine restart; undo/redo updates precise goto destinations and chained references. All six real-client and three actual-host cases pass with bundled 117."
       ],
       "remaining": "Completion/diagnostic stale responses, target-profile builtin-cache invalidation, broader project/configuration and multi-project cases remain unaccepted."
     },
@@ -724,7 +734,10 @@
       "milestone": "cross-cutting",
       "status": "partial",
       "acceptance_gate": "No parity claim from capability flags/presence-only tests; record precision and edits",
-      "openstorm_evidence": [],
+      "openstorm_evidence": [
+        "Pinned 116 engine full suite: 18359 passed, 17 ignored. Source example lint/runtime passed with temporary PHP 8.4.23. Original Laravel 13.24 reports five expected/version-dependent diagnostics; separate exact 13.37 copy reports three intentional errors and passes all 267 runtime assertions. Logs and dependency receipts retained.",
+        "Pinned 117 full engine suite: 18360 passed, 17 ignored (nested bootstrap child counted once). OpenStorm workspace 1305 passed/29 ignored; frontend 2992 passed; Clippy, formatting, typecheck, lint, build and signed native resource checks passed. No blanket parity claim."
+      ],
       "remaining": "Reassess current OpenStorm implementation against this full gate; Workbench acceptance does not transfer."
     }
   ],

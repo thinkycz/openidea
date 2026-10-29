@@ -340,6 +340,13 @@ impl LspManager {
             available_before |= !sc.require_root_marker && server.status() != ide_core::event::ServerStatus::Missing;
             out.push(server);
         }
+        if matches!(language.as_str(), "json" | "dotenv") {
+            for server in self.php_resource_servers(language, path) {
+                if !out.iter().any(|s| s.id == server.id) {
+                    out.push(server);
+                }
+            }
+        }
         out
     }
 
@@ -371,10 +378,13 @@ impl LspManager {
                     }
                     let mut attached = Attached { server: server.clone(), opened_gen: None };
                     if let Some(run) = server.running() {
-                        if run.caps.read().open_close {
+                        let supported = self.php_resource_supported(&d.language, server, &run.caps.read());
+                        if supported && run.caps.read().open_close {
                             user_did_open(server, &run, &d.path, &d.uri, d.did_open_params());
                         }
-                        attached.opened_gen = Some(run.generation);
+                        if supported {
+                            attached.opened_gen = Some(run.generation);
+                        }
                     }
                     d.servers.push(attached);
                     if !start.iter().any(|s: &Arc<Server>| s.id == server.id) {
@@ -496,6 +506,9 @@ impl LspManager {
             }
             let open_close = run.caps.read().open_close;
             for d in docs.values_mut() {
+                if !self.php_resource_supported(&d.language, &server, &run.caps.read()) {
+                    continue;
+                }
                 let params = d.did_open_params();
                 for a in d.servers.iter_mut().filter(|a| a.server.id == server.id && a.opened_gen != Some(generation)) {
                     if open_close && let Err(e) = peer.notify("textDocument/didOpen", params.clone()) {
@@ -688,6 +701,9 @@ impl LspManager {
             let params = state.did_open_params();
             for a in &mut state.servers {
                 if let Some(run) = a.server.running() {
+                    if !self.php_resource_supported(language, &a.server, &run.caps.read()) {
+                        continue;
+                    }
                     if run.caps.read().open_close {
                         user_did_open(&a.server, &run, &state.path, &state.uri, params.clone());
                     }
@@ -838,7 +854,11 @@ impl LspManager {
         pred: impl Fn(&ServerCaps) -> bool,
     ) -> IdeResult<(DocSnap, Vec<Target>)> {
         let snap = self.snapshot(doc)?;
-        let targets = self.ready_targets(&snap.servers, pred).await;
+        // Automatically shared Laravel resource sources support PHP references,
+        // not PHP formatting, completion, rename, or other PHP-only operations.
+        let servers: Vec<_> =
+            snap.servers.iter().filter(|s| !self.php_resource_bridge(&snap.language, s)).cloned().collect();
+        let targets = self.ready_targets(&servers, pred).await;
         if targets.is_empty() {
             return Err(unsupported(&snap.servers, feature));
         }
@@ -1077,7 +1097,16 @@ impl LspManager {
         project_wide: bool,
         cancel: CancellationToken,
     ) -> IdeResult<References> {
-        let (snap, targets) = self.doc_targets(doc, "find references", |c| c.has("referencesProvider")).await?;
+        let snap = self.snapshot(doc)?;
+        let targets: Vec<_> = self
+            .ready_targets(&snap.servers, |c| c.has("referencesProvider"))
+            .await
+            .into_iter()
+            .filter(|t| self.php_resource_supported(&snap.language, &t.server, &t.caps()))
+            .collect();
+        if targets.is_empty() {
+            return Err(unsupported(&snap.servers, "find references"));
+        }
         let requests = targets.iter().map(|t| {
             let (snap, cancel) = (&snap, &cancel);
             async move {

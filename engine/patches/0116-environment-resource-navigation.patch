@@ -1,0 +1,324 @@
+--- a/src/resource_navigation.rs
++++ b/src/resource_navigation.rs
+@@ -45,9 +45,21 @@
+             .is_some_and(|directory| directory.eq_ignore_ascii_case("lang"))
+ }
+ 
++/// Dotenv values are data and must never enter the PHP symbol parser.
++pub(crate) fn is_dotenv_document(uri: &str) -> bool {
++    let name = uri
++        .split(['?', '#'])
++        .next()
++        .unwrap_or(uri)
++        .rsplit('/')
++        .next()
++        .unwrap_or(uri);
++    name == ".env" || name.starts_with(".env.")
++}
++
+ /// Whether `uri` names a non-PHP resource or a JSON translation document.
+ pub(crate) fn is_resource_document(uri: &str) -> bool {
+-    if is_json_translation_document(uri) {
++    if is_json_translation_document(uri) || is_dotenv_document(uri) {
+         return true;
+     }
+     let path = uri
+@@ -192,11 +204,13 @@
+     }
+ 
+     fn resource_symbol_map_for_uri(&self, uri: &str, content: &str) -> SymbolMap {
+-        if is_json_translation_document(uri) {
+-            self.laravel_string_key_cache
+-                .write()
+-                .invalidate_for_uri(uri, content);
+-            // Do not extract PHP classes, members or functions from translated text.
++        if is_json_translation_document(uri) || is_dotenv_document(uri) {
++            if is_json_translation_document(uri) {
++                self.laravel_string_key_cache
++                    .write()
++                    .invalidate_for_uri(uri, content);
++            }
++            // Neither translation text nor environment values define PHP symbols.
+             return SymbolMap {
+                 source_len: u32::try_from(content.len()).unwrap_or(u32::MAX),
+                 ..SymbolMap::default()
+--- a/src/backend/startup.rs
++++ b/src/backend/startup.rs
+@@ -282,7 +282,7 @@
+                     ..ExecuteCommandOptions::default()
+                 }),
+                 experimental: Some(
+-                    serde_json::json!({"phpWorkbenchJsonTranslations": true, "phpWorkbenchRoutes": true, "phpWorkbenchViews": true, "phpWorkbenchBuiltins": true, "phpWorkbenchActiveTarget": true, "phpWorkbenchRenameChecked": true, (crate::workbench_optimize_imports::CAPABILITY): true, "phpWorkbenchCallHierarchyAnalysis": true, (crate::structural_search::wire::EXPERIMENTAL_CAPABILITY): true, (crate::structural_search::wire::REPLACE_EXPERIMENTAL_CAPABILITY): true}),
++                    serde_json::json!({"phpWorkbenchEnvironmentResources": true, "phpWorkbenchJsonTranslations": true, "phpWorkbenchRoutes": true, "phpWorkbenchViews": true, "phpWorkbenchBuiltins": true, "phpWorkbenchActiveTarget": true, "phpWorkbenchRenameChecked": true, (crate::workbench_optimize_imports::CAPABILITY): true, "phpWorkbenchCallHierarchyAnalysis": true, (crate::structural_search::wire::EXPERIMENTAL_CAPABILITY): true, (crate::structural_search::wire::REPLACE_EXPERIMENTAL_CAPABILITY): true}),
+                 ),
+                 ..ServerCapabilities::default()
+             },
+--- a/src/references/dispatch.rs
++++ b/src/references/dispatch.rs
+@@ -150,6 +150,20 @@
+             }
+         }
+ 
++        if mode == ReferenceSearchMode::References
++            && self.resolved_class_cache.read().is_laravel()
++            && let Some(mut locations) = laravel::find_env_declaration_references(
++                self,
++                uri,
++                content,
++                position,
++                include_declaration,
++            )
++        {
++            sort_locations_for_references(&mut locations);
++            return Some(locations);
++        }
++
+         if self.resolved_class_cache.read().is_laravel()
+             && let Some(locations) = laravel::find_json_trans_references(
+                 self,
+--- a/src/virtual_members/laravel/env_vars.rs
++++ b/src/virtual_members/laravel/env_vars.rs
+@@ -21,7 +21,7 @@
+ /// file (e.g. `.env.testing`) in place of `.env` when it exists. Which
+ /// environment is active is not statically known, so the workspace root is
+ /// scanned for every name that matches rather than checking a fixed list.
+-fn dotenv_file_names(root: &Path) -> Vec<String> {
++fn dotenv_file_names(backend: &Backend, root: &Path) -> Vec<String> {
+     let mut names: Vec<String> = std::fs::read_dir(root)
+         .into_iter()
+         .flatten()
+@@ -30,6 +30,18 @@
+         .filter_map(|entry| entry.file_name().into_string().ok())
+         .filter(|name| name == ".env" || name.starts_with(".env."))
+         .collect();
++    names.extend(backend.open_files.read().keys().filter_map(|uri| {
++        if !crate::resource_navigation::is_dotenv_document(uri) {
++            return None;
++        }
++        let path = Url::parse(uri).ok()?.to_file_path().ok()?;
++        if path.parent() != Some(root) {
++            return None;
++        }
++        path.file_name()?.to_str().map(str::to_owned)
++    }));
++    names.sort();
++    names.dedup();
+     names.sort_by_key(|name| match name.as_str() {
+         ".env" => (0u8, String::new()),
+         ".env.example" => (1u8, String::new()),
+@@ -51,10 +63,12 @@
+     };
+     let mut fallback = None;
+     let mut declarations = Vec::new();
+-    for name in dotenv_file_names(&root) {
++    for name in dotenv_file_names(backend, &root) {
+         let path = root.join(&name);
+-        let (Ok(content), Ok(uri)) = (std::fs::read_to_string(&path), Url::from_file_path(&path))
+-        else {
++        let Ok(uri) = Url::from_file_path(&path) else {
++            continue;
++        };
++        let Some(content) = backend.get_file_content(uri.as_str()) else {
+             continue;
+         };
+         match declaring_line(&content, key) {
+@@ -74,6 +88,50 @@
+     declarations
+ }
+ 
++/// Find PHP/Blade callers from a root dotenv declaration without indexing its value.
++pub(crate) fn find_env_declaration_references(
++    backend: &Backend,
++    uri: &str,
++    content: &str,
++    position: Position,
++    include_declaration: bool,
++) -> Option<Vec<Location>> {
++    if !crate::resource_navigation::is_dotenv_document(uri) {
++        return None;
++    }
++    let path = Url::parse(uri).ok()?.to_file_path().ok()?;
++    let root = backend.workspace.workspace_root.read().clone()?;
++    if path.parent() != Some(root.as_path()) {
++        return None;
++    }
++    let line = content.lines().nth(position.line as usize)?;
++    let key = declared_key(line)?;
++    let body = line.trim_start();
++    let body = body.strip_prefix("export ").unwrap_or(body).trim_start();
++    let start = line.len() - body.len();
++    let offset =
++        crate::text_position::position_to_offset(line, Position::new(0, position.character))
++            as usize;
++    if offset < start || offset > start + key.len() {
++        return None;
++    }
++    let kind = crate::symbol_map::LaravelStringKind::Env;
++    let snapshot = backend.user_file_symbol_maps_for_reference_keys(&[
++        crate::reference_index::ReferenceIndexKey::LaravelString {
++            kind,
++            key: key.into(),
++        },
++    ]);
++    Some(super::string_keys::find_laravel_string_key_references(
++        backend,
++        &kind,
++        key,
++        uri,
++        &snapshot,
++        include_declaration,
++    ))
++}
++
+ /// What a dotenv file says about one variable: which file declares it and
+ /// the value it is set to.
+ pub(crate) struct EnvDeclaration {
+@@ -90,11 +148,14 @@
+ /// when nothing in it declares the name: hover has to tell the two apart.
+ pub(crate) fn env_declaration(backend: &Backend, key: &str) -> Option<EnvDeclaration> {
+     let root = backend.workspace.workspace_root.read().clone()?;
+-    dotenv_file_names(&root).into_iter().find_map(|file| {
+-        let content = std::fs::read_to_string(root.join(&file)).ok()?;
+-        let value = declared_value(&content, key)?;
+-        Some(EnvDeclaration { file, value })
+-    })
++    dotenv_file_names(backend, &root)
++        .into_iter()
++        .find_map(|file| {
++            let uri = Url::from_file_path(root.join(&file)).ok()?;
++            let content = backend.get_file_content(uri.as_str())?;
++            let value = declared_value(&content, key)?;
++            Some(EnvDeclaration { file, value })
++        })
+ }
+ 
+ /// Whether a variable's name reads as naming a credential, in which case
+@@ -127,9 +188,12 @@
+     let Some(root) = backend.workspace.workspace_root.read().clone() else {
+         return Vec::new();
+     };
+-    let mut keys: Vec<String> = dotenv_file_names(&root)
++    let mut keys: Vec<String> = dotenv_file_names(backend, &root)
+         .into_iter()
+-        .filter_map(|name| std::fs::read_to_string(root.join(name)).ok())
++        .filter_map(|name| {
++            let uri = Url::from_file_path(root.join(name)).ok()?;
++            backend.get_file_content(uri.as_str())
++        })
+         .flat_map(|content| {
+             content
+                 .lines()
+--- a/src/virtual_members/laravel/mod.rs
++++ b/src/virtual_members/laravel/mod.rs
+@@ -161,7 +161,9 @@
+     resolve_config_key_declaration_exact, resolve_config_key_definition_fallback,
+ };
+ pub(crate) use const_eval::ClassContext;
+-pub(crate) use env_vars::{enumerate_env_keys, env_declaration, env_name_is_sensitive};
++pub(crate) use env_vars::{
++    enumerate_env_keys, env_declaration, env_name_is_sensitive, find_env_declaration_references,
++};
+ pub(crate) use gates::{
+     LaravelGateIndex, enumerate_gate_abilities, model_policy_abilities, scan_gate_registrations,
+ };
+--- a/tests/integration/laravel_env_keys.rs
++++ b/tests/integration/laravel_env_keys.rs
+@@ -420,3 +420,87 @@
+         );
+     }
+ }
++
++#[tokio::test]
++async fn dotenv_declaration_usages_and_unsaved_keys_are_data_only() {
++    let environment = "OPENSTORM_DEMO_LABEL=sample\nOPENSTORM_DEMO_MODE=local\n";
++    let (backend, dir, caller_uri, php) = workspace(
++        &[(".env", environment)],
++        "env('OPENSTORM_DEMO_LABEL'); env('OPENSTORM_DEMO_MODE');",
++    )
++    .await;
++    let env_uri = Url::from_file_path(dir.path().join(".env")).unwrap();
++    crate::common::open_document(&backend, &env_uri, "dotenv", environment).await;
++    let references =
++        crate::common::find_references(&backend, &env_uri, Position::new(0, 5), false).await;
++    assert!(references.iter().any(|location| location.uri == caller_uri));
++    assert!(references.iter().all(|location| location.uri != env_uri));
++    let value_references =
++        crate::common::find_references(&backend, &env_uri, Position::new(0, 24), false).await;
++    assert!(value_references.is_empty());
++    let updated = "# 😀\r\n\r\n  export OPENSTORM_DEMO_MODE=local # <?php function openstorm_env_fake(): void {} ?>\r\n";
++    backend
++        .did_change(DidChangeTextDocumentParams {
++            text_document: VersionedTextDocumentIdentifier {
++                uri: env_uri.clone(),
++                version: 2,
++            },
++            content_changes: vec![TextDocumentContentChangeEvent {
++                range: None,
++                range_length: None,
++                text: updated.into(),
++            }],
++        })
++        .await;
++    let after = definitions_at(&backend, &caller_uri, &php, "OPENSTORM_DEMO_MODE").await;
++    assert!(after.iter().any(|location| location.range.start.line == 2));
++    assert!(
++        !backend
++            .global_functions()
++            .read()
++            .contains_key("openstorm_env_fake")
++    );
++    let labels = env_completion_labels(&backend, &caller_uri, &php).await;
++    assert!(!labels.iter().any(|label| label == "OPENSTORM_DEMO_LABEL"));
++    assert!(labels.iter().any(|label| label == "OPENSTORM_DEMO_MODE"));
++    let updated_refs =
++        crate::common::find_references(&backend, &env_uri, Position::new(2, 15), true).await;
++    assert!(
++        updated_refs
++            .iter()
++            .any(|location| location.uri == caller_uri)
++    );
++    assert!(
++        updated_refs
++            .iter()
++            .any(|location| location.uri == env_uri && location.range.start.line == 2)
++    );
++    let extra_uri = Url::from_file_path(dir.path().join(".env.testing")).unwrap();
++    crate::common::open_document(
++        &backend,
++        &extra_uri,
++        "dotenv",
++        "OPENSTORM_DEMO_LABEL=sample\n",
++    )
++    .await;
++    let labels = env_completion_labels(&backend, &caller_uri, &php).await;
++    assert!(labels.iter().any(|label| label == "OPENSTORM_DEMO_LABEL"));
++    backend
++        .did_close(DidCloseTextDocumentParams {
++            text_document: TextDocumentIdentifier { uri: extra_uri },
++        })
++        .await;
++    let labels = env_completion_labels(&backend, &caller_uri, &php).await;
++    assert!(!labels.iter().any(|label| label == "OPENSTORM_DEMO_LABEL"));
++    assert_eq!(
++        std::fs::read_to_string(dir.path().join(".env")).unwrap(),
++        environment
++    );
++    backend
++        .did_close(DidCloseTextDocumentParams {
++            text_document: TextDocumentIdentifier { uri: env_uri },
++        })
++        .await;
++    let labels = env_completion_labels(&backend, &caller_uri, &php).await;
++    assert!(labels.iter().any(|label| label == "OPENSTORM_DEMO_LABEL"));
++}
+--- a/docs/CHANGELOG.md
++++ b/docs/CHANGELOG.md
+@@ -14,6 +14,8 @@
+ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+ 
+ ## [Unreleased]
++
++- **Find environment-key usages from dotenv declarations.** Unsaved environment keys now stay current for navigation and completion, while environment values remain data rather than PHP source. Contributed by @thinkycz.
+ 
+ - **Keep PHP examples in JSON translations as text.** Opening or editing a translation no longer creates PHP declarations or diagnostics from its message values. Unsaved translation keys remain available to navigation. Contributed by @thinkycz.
+ 

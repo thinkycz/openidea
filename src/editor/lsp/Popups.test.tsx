@@ -99,6 +99,29 @@ describe("list popup", () => {
     expect(onClose).toHaveBeenCalledOnce();
   });
 
+  it("focuses declaration results so arrows and Enter open a target instead of pinning", () => {
+    const first = vi.fn();
+    const second = vi.fn();
+    const pin = vi.fn();
+    openPopup({
+      kind: "list",
+      anchor: { x: 0, y: 0 },
+      title: "Choose Declaration",
+      items: [
+        { id: "cs", label: "Czech", run: first },
+        { id: "en", label: "English", run: second },
+      ],
+      pin: { label: "Open in Find Tool Window", run: pin },
+    });
+    render(<LspPopups />);
+    expect(document.activeElement).toBe(screen.getByRole("listbox"));
+    fireEvent.keyDown(document.activeElement!, { key: "ArrowDown" });
+    fireEvent.keyDown(document.activeElement!, { key: "Enter" });
+    expect(second).toHaveBeenCalledOnce();
+    expect(first).not.toHaveBeenCalled();
+    expect(pin).not.toHaveBeenCalled();
+  });
+
   it("pins the results elsewhere from the header button", () => {
     const pin = vi.fn();
     openPopup({

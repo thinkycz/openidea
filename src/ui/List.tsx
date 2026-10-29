@@ -42,6 +42,8 @@ export interface ListProps<T> {
   sectionHeightOf?: (item: T) => number | undefined;
   /** `false` when an external input drives navigation (rows still respond to the mouse). */
   focusable?: boolean;
+  /** Prefer the list for initial focus inside a Popup or Dialog. */
+  autoFocus?: boolean;
   /** Move the active row with the pointer (popup choosers). */
   hoverSelects?: boolean;
   empty?: ReactNode;
@@ -122,6 +124,7 @@ export function List<T>({
   sectionHeight = 24,
   sectionHeightOf,
   focusable = true,
+  autoFocus = false,
   hoverSelects = false,
   empty,
   className,
@@ -186,6 +189,7 @@ export function List<T>({
           : undefined
       }
       tabIndex={focusable ? 0 : -1}
+      data-autofocus={autoFocus && focusable ? "" : undefined}
       className={clsx(styles.list, className)}
       onKeyDown={focusable ? onKeyDown : undefined}
     >

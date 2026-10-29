@@ -296,3 +296,61 @@ impl LspManager {
         })
     }
 }
+
+impl LspManager {
+    /// Share standard Laravel data overlays with the selected PHPantom instance.
+    /// Their implicit bridge supports references only and requires an advertised
+    /// safe-resource capability before sending any non-PHP document content.
+    pub(crate) fn php_resource_servers(&self, language: &LanguageId, path: &Path) -> Vec<Arc<Server>> {
+        use std::io::Read;
+        let json = language.as_str() == "json"
+            && path.extension().and_then(|e| e.to_str()) == Some("json")
+            && path.parent().and_then(Path::file_name).and_then(|n| n.to_str()) == Some("lang");
+        let dotenv = language.as_str() == "dotenv"
+            && path.file_name().and_then(|n| n.to_str()).is_some_and(|n| n == ".env" || n.starts_with(".env."));
+        if !json && !dotenv {
+            return Vec::new();
+        }
+        let php = LanguageId::new("php");
+        self.language_servers(&php)
+            .into_iter()
+            .filter(|cfg| cfg.name == "phpantom")
+            .filter_map(|cfg| {
+                let root = launch::find_root(&self.project_root, path, &cfg.root_markers)?;
+                let relative = path.strip_prefix(&root).ok()?;
+                if json && !matches!(relative.parent()?.to_str()?, "lang" | "resources/lang")
+                    || dotenv && relative.components().count() != 1
+                {
+                    return None;
+                }
+                let mut bytes = Vec::new();
+                std::fs::File::open(root.join("composer.json")).ok()?.take(1_048_577).read_to_end(&mut bytes).ok()?;
+                if bytes.len() > 1_048_576 {
+                    return None;
+                }
+                let composer: Value = serde_json::from_slice(&bytes).ok()?;
+                if !["require", "require-dev"].iter().any(|section| {
+                    composer.get(section).and_then(|r| r.get("laravel/framework")).and_then(Value::as_str).is_some()
+                }) {
+                    return None;
+                }
+                Some(self.server_for(&cfg, &php, path))
+            })
+            .collect()
+    }
+
+    pub(crate) fn php_resource_bridge(&self, language: &LanguageId, server: &Server) -> bool {
+        matches!(language.as_str(), "json" | "dotenv")
+            && server.name == "phpantom"
+            && !self.language_servers(language).iter().any(|cfg| cfg.name == server.name)
+    }
+
+    pub(crate) fn php_resource_supported(&self, language: &LanguageId, server: &Server, caps: &ServerCaps) -> bool {
+        let capability = match language.as_str() {
+            "dotenv" => "/experimental/phpWorkbenchEnvironmentResources",
+            _ => "/experimental/phpWorkbenchJsonTranslations",
+        };
+        !self.php_resource_bridge(language, server)
+            || caps.raw.pointer(capability).and_then(Value::as_bool) == Some(true)
+    }
+}

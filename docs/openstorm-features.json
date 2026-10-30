@@ -350,9 +350,13 @@
       "status": "partial",
       "acceptance_gate": "P1: view-name completion/goto; P2: typed cross-file variables and scoped shadowing",
       "openstorm_evidence": [
-        "0.1.25 signed development native: dotted view chooser and existing view-literal Cmd+B opened invoices/show.blade.php; relaunch repeated lookup. Real-engine typed client passed. Cross-file view-data inference and broader view-name matrices remain open."
+        "0.1.25 signed development native: dotted view chooser and existing view-literal Cmd+B opened invoices/show.blade.php; relaunch repeated lookup. Real-engine typed client passed. Cross-file view-data inference and broader view-name matrices remain open.",
+        "0.1.29 client: closed-expression controller compact() data, unsaved caller/template refresh, retiring old members, local shadowing and mapped member goto passed. Native Item goto and unsaved Stock quantity completion/documentation passed. Incomplete echo completion fails in client/native; 118 correction in progress.",
+        "0.1.30 native fixes unfinished escaped/raw echo completion, Unicode edit boundaries and undo/redo; unsaved dependency completion observed with unchanged disk. Restart/first-open scope failure with Composer autoload helpers remains red. Candidate is not accepted; see combined progress record.",
+        "119 optimized engine: deterministic startup input-publication regression red before fix and green after; all nine actual-client cases pass, including broad Composer helper autoload fixture across three unsaved open/restart cycles. Full-source and native 0.1.31 acceptance remain open.",
+        "0.1.31 signed development native: unfinished escaped/raw Unicode echo completion and undo/redo, unsaved Stock caller/template data with disk unchanged, actual engine restart with documentation/goto/completion retained, quit Cancel/Save All and saved project/tab reopening with quantity documentation passed. Full 119 source 18363 passed / 17 ignored; 9 client / 3 host passed. Previous 0.1.30 failure retained in combined record."
       ],
-      "remaining": "Reassess current OpenStorm implementation against this full gate; Workbench acceptance does not transfer."
+      "remaining": "Broader view-data propagation, cycles, include/component boundaries and shadowing matrices remain open; unfinished-echo and startup recovery batch accepted in 0.1.31."
     },
     {
       "id": "FEAT-033",
@@ -712,7 +716,10 @@
         "0.1.27 client/host regressions cover unsaved config/PHP/JSON keys, Unicode JSON positions, JSON-first PHP references and PHP example isolation. 58 mock cases passed with safe-capability gating; native final-copy checks pending.",
         "0.1.28 native: unsaved dotenv key removal updates PHP completion with disk unchanged; usages include another unsaved PHP buffer; external disk bytes survive Cancel. 117 adds accurate UTF-16 exported-key destinations; native follow-up pending.",
         "0.1.29 native unsaved dotenv/PHP overlays survive engine restart; undo/redo updates precise goto destinations and chained references. All six real-client and three actual-host cases pass with bundled 117.",
-        "0.1.29 Eloquent real-client: unsaved cast change float to bool updates dependent hover without disk write; closing model overlay restores float."
+        "0.1.29 Eloquent real-client: unsaved cast change float to bool updates dependent hover without disk write; closing model overlay restores float.",
+        "New native-fixture client regression finds unavailable Blade variable scope with Composer autoload helpers on first unsaved opens/restart; minimal/custom-root fixtures pass. Investigation remains open, with no semantic-freshness acceptance inferred.",
+        "119 optimized engine: deterministic startup input-publication regression red before fix and green after; all nine actual-client cases pass, including broad Composer helper autoload fixture across three unsaved open/restart cycles. Full-source and native 0.1.31 acceptance remain open.",
+        "0.1.31 signed development native: unfinished escaped/raw Unicode echo completion and undo/redo, unsaved Stock caller/template data with disk unchanged, actual engine restart with documentation/goto/completion retained, quit Cancel/Save All and saved project/tab reopening with quantity documentation passed. Full 119 source 18363 passed / 17 ignored; 9 client / 3 host passed. Previous 0.1.30 failure retained in combined record."
       ],
       "remaining": "Completion/diagnostic stale responses, target-profile builtin-cache invalidation, broader project/configuration and multi-project cases remain unaccepted."
     },

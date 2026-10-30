@@ -2,8 +2,8 @@
   "repository": "https://github.com/PHPantom-dev/phpantom_lsp",
   "commit": "1756b1f920c1290d4c4fdd4d2c902fad53a75cd3",
   "archive_sha256": "f0a1dc7fa44d309e6d5e8ed65a2075749c1fc177b45820031f58290f1aec5cee",
-  "patches_sha256": "13df68d2a64638e30a3e238bd6e14fac21d3d232c2983f2f6f1493ddab2e71ef",
-  "version": "0.11.1-openstorm.117",
+  "patches_sha256": "3f1f69ce0f9092aa9be2b64041db6935615afb2ed7f80496963645c0c61c2aa8",
+  "version": "0.11.1-openstorm.119",
   "patches": [
     {
       "file": "0001-workspace-tool-policy.patch",
@@ -472,6 +472,14 @@
     {
       "file": "0117-environment-key-destinations.patch",
       "sha256": "758a20df65c35f15ebe19856349e2920b265aad754d4aa85b2c9181d9aeb6fd1"
+    },
+    {
+      "file": "0118-unfinished-blade-echo-cursors.patch",
+      "sha256": "f141b2f7ee781633b5b6cb65924c430affe281e50b64018183ec9f6ffe5ba07b"
+    },
+    {
+      "file": "0119-blade-input-refresh-recovery.patch",
+      "sha256": "5051acccae5b7add85f26c0e7267a69990002f037e3183093f1c84da3f0dc105"
     }
   ]
 }

@@ -1,0 +1,90 @@
+--- a/src/blade/call_site_inference.rs
++++ b/src/blade/call_site_inference.rs
+@@ -1752,6 +1752,7 @@
+ 
+     /// Only accepted pending roots participate; this is not a workspace pass.
+     pub(crate) fn drain_pending_blade_refreshes(&self) {
++        let input = self.diag.documents.lock().input_epoch();
+         let mut callers: Vec<_> = self
+             .blade_pending_refreshes
+             .lock()
+@@ -1765,6 +1766,14 @@
+             if !self.blade_pending_refreshes.lock().contains_key(&caller) {
+                 self.schedule_diagnostics(caller);
+             }
++        }
++        // An input change during this pass invalidates its staged scopes,
++        // even when the changed source does not render any view. Retained work
++        // needs another pass against the new inputs. Stable unsupported components
++        // remain pending without a retry loop.
++        let input_changed = !self.diag.documents.lock().input_matches(&input);
++        if input_changed {
++            self.schedule_pending_blade_refreshes();
+         }
+     }
+ 
+@@ -3279,6 +3288,29 @@
+     }
+ 
+     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
++    async fn blade_caller_refresh_configuration_input_retries_without_further_edits() {
++        let f = fixture().await;
++        let (entered, release) = pause(&f, &f.page, BladeRefreshTestPhase::TargetStaged);
++        changed(&f.backend, &f.caller, 2, &PHP.replace("User()", "Other()")).await;
++        entered
++            .recv_timeout(std::time::Duration::from_secs(10))
++            .expect("dependency barrier reached");
++        // A startup/configuration producer changes the input generation but
++        // does not admit another document whose lifecycle would schedule us.
++        drop(f.backend.begin_configuration_publication());
++        release.send(()).unwrap();
++        settled(&f, || {
++            has_type(&f.backend, &f.page, "Other")
++                && f.backend.blade_pending_refreshes.lock().is_empty()
++        })
++        .await;
++        assert_eq!(
++            std::fs::read_to_string(f.root.join("app/Caller.php")).unwrap(),
++            PHP
++        );
++    }
++
++    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+     async fn blade_caller_refresh_owned_unrelated_open_retries_without_further_edits() {
+         let f = fixture().await;
+         let (entered, release) = pause(&f, &f.page, BladeRefreshTestPhase::TargetStaged);
+--- a/tests/integration/completion_blade.rs
++++ b/tests/integration/completion_blade.rs
+@@ -789,12 +789,14 @@
+             .iter()
+             .find(|i| i.label == "name")
+             .unwrap_or_else(|| panic!("{expression}: {:?}", labels(&items)));
+-        let edit = match item.text_edit.as_ref().expect("member text edit") {
+-            CompletionTextEdit::Edit(edit) => edit,
+-            other => panic!("expected plain edit: {other:?}"),
+-        };
+-        assert_eq!(edit.range.start, Position::new(1, column - 2));
+-        assert_eq!(edit.range.end, Position::new(1, column));
+-        assert_eq!(edit.new_text, "name");
++        match item.text_edit.as_ref() {
++            Some(CompletionTextEdit::Edit(edit)) => {
++                assert_eq!(edit.range.start, Position::new(1, column - 2));
++                assert_eq!(edit.range.end, Position::new(1, column));
++                assert_eq!(edit.new_text, "name");
++            }
++            None => assert_eq!(item.insert_text.as_deref().unwrap_or(&item.label), "name"),
++            other => panic!("expected plain edit or default word replacement: {other:?}"),
++        }
+     }
+ }
+--- a/docs/CHANGELOG.md
++++ b/docs/CHANGELOG.md
+@@ -14,6 +14,8 @@
+ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+ 
+ ## [Unreleased]
++
++- **Recover view-data assistance when startup inputs change.** Unsaved controller data remains available in Blade after opening and restarting the language server. Contributed by @thinkycz.
+ 
+ - **Complete PHP members while typing an unfinished Blade echo.** Member suggestions remain available before the closing `}}` or `!!}` is typed, with edits kept in template coordinates. Contributed by @thinkycz.
+ 

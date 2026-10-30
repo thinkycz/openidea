@@ -1,0 +1,154 @@
+--- a/src/blade/source_map.rs
++++ b/src/blade/source_map.rs
+@@ -25,6 +25,10 @@
+     /// PHP line.  Between two adjacent anchors the mapping is linear (1:1
+     /// for PHP content, 0:N for boilerplate replacements).
+     pub adjustments: Vec<Vec<(u32, u32)>>,
++    /// Visible line/end column and PHP column before a synthetic terminator.
++    /// An unfinished echo's editing caret belongs inside its expression,
++    /// while reverse mappings still clamp generated suffixes to the visible end.
++    pub(crate) incomplete_echo_ends: Vec<(u32, u32, u32)>,
+     /// Number of prologue lines the preprocessor injected before the
+     /// first template line.  At least [`super::PROLOGUE_LINES`]; larger
+     /// when call-site-inferred `@var` declarations are injected.
+@@ -37,6 +41,7 @@
+     fn default() -> Self {
+         Self {
+             adjustments: Vec::new(),
++            incomplete_echo_ends: Vec::new(),
+             prologue_lines: super::PROLOGUE_LINES,
+             hierarchy_projection: None,
+         }
+@@ -82,6 +87,19 @@
+     pub fn blade_to_php(&self, pos: Position) -> Position {
+         let line = pos.line as usize;
+         let virtual_line = line as u32 + self.prologue_lines;
++
++        if let Some((_, _, php_column)) =
++            self.incomplete_echo_ends
++                .iter()
++                .find(|(echo_line, blade_column, _)| {
++                    *echo_line == pos.line && *blade_column == pos.character
++                })
++        {
++            return Position {
++                line: virtual_line,
++                character: *php_column,
++            };
++        }
+ 
+         if line >= self.adjustments.len() {
+             return Position {
+--- a/src/blade/preprocessor/mod.rs
++++ b/src/blade/preprocessor/mod.rs
+@@ -504,6 +504,11 @@
+                 current_utf16_col,
+                 &mut adjustments,
+             );
++            source_map.incomplete_echo_ends.push((
++                line_idx as u32,
++                current_utf16_col,
++                utf16_count(&processed) as u32,
++            ));
+             processed.push_str(if raw_echo { "; " } else { "); " });
+             adjustments.push((current_utf16_col, utf16_count(&processed) as u32));
+             mode = Mode::Html;
+--- a/src/blade/preprocessor/tests.rs
++++ b/src/blade/preprocessor/tests.rs
+@@ -2460,3 +2460,38 @@
+     let origin = tower_lsp::lsp_types::Position::new(0, 0);
+     assert_eq!(map.try_php_to_blade(map.blade_to_php(origin)), Some(origin));
+ }
++
++#[test]
++fn unfinished_echo_cursor_precedes_generated_terminator() {
++    for text in [
++        "{{ $item->na",
++        "{!! $item->na",
++        "😀 {{ $item->na",
++        "😀 {!! $item->na",
++    ] {
++        let (php, map) = preprocess(text);
++        let end = tower_lsp::lsp_types::Position::new(0, text.encode_utf16().count() as u32);
++        let mapped = map.blade_to_php(end);
++        let line = php.lines().nth(mapped.line as usize).unwrap();
++        let prefix: String = line
++            .chars()
++            .scan(0usize, |count, c| {
++                *count += c.len_utf16();
++                Some((*count <= mapped.character as usize).then_some(c))
++            })
++            .flatten()
++            .collect();
++        assert!(
++            prefix.ends_with("$item->na"),
++            "cursor must precede generated suffix: {prefix:?}"
++        );
++        assert_eq!(map.php_to_blade(mapped), end);
++        let suffix_end =
++            tower_lsp::lsp_types::Position::new(mapped.line, line.encode_utf16().count() as u32);
++        assert_eq!(
++            map.php_to_blade(suffix_end),
++            end,
++            "generated suffix must still map to visible end"
++        );
++    }
++}
+--- a/tests/integration/completion_blade.rs
++++ b/tests/integration/completion_blade.rs
+@@ -757,3 +757,44 @@
+         "@php\nuse App\\Models\\Widget;\n    $widget = new Widg\n@endphp\n"
+     );
+ }
++
++#[tokio::test]
++async fn unfinished_echo_member_completion_keeps_original_edit_ranges() {
++    let composer = r#"{"autoload":{"psr-4":{"App\\":"app/"}}}"#;
++    let (backend, _dir) = create_psr4_workspace(
++        composer,
++        &[(
++            "app/Item.php",
++            "<?php namespace App; class Item { public string $name; public int $price; }",
++        )],
++    );
++    for (index, expression) in [
++        "{{ $item->na",
++        "{!! $item->na",
++        "😀 {{ $item->na",
++        "😀 {!! $item->na",
++    ]
++    .iter()
++    .enumerate()
++    {
++        let uri = workspace_uri(
++            &backend,
++            &format!("resources/views/unfinished{index}.blade.php"),
++        );
++        let template = format!("@php $item = new \\App\\Item(); @endphp\n{expression}");
++        open_document(&backend, &uri, "blade", &template).await;
++        let column = expression.encode_utf16().count() as u32;
++        let items = complete_typed(&backend, &uri, 1, column).await;
++        let item = items
++            .iter()
++            .find(|i| i.label == "name")
++            .unwrap_or_else(|| panic!("{expression}: {:?}", labels(&items)));
++        let edit = match item.text_edit.as_ref().expect("member text edit") {
++            CompletionTextEdit::Edit(edit) => edit,
++            other => panic!("expected plain edit: {other:?}"),
++        };
++        assert_eq!(edit.range.start, Position::new(1, column - 2));
++        assert_eq!(edit.range.end, Position::new(1, column));
++        assert_eq!(edit.new_text, "name");
++    }
++}
+--- a/docs/CHANGELOG.md
++++ b/docs/CHANGELOG.md
+@@ -14,6 +14,8 @@
+ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+ 
+ ## [Unreleased]
++
++- **Complete PHP members while typing an unfinished Blade echo.** Member suggestions remain available before the closing `}}` or `!!}` is typed, with edits kept in template coordinates. Contributed by @thinkycz.
+ 
+ - **Land on environment keys after `export` and indentation.** Go to Definition now places the caret on the declared name, so Find Usages works immediately from that destination. Contributed by @thinkycz.
+ 

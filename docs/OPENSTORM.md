@@ -8,7 +8,7 @@ Branch: codex/openstorm-php-laravel. Target: macOS Apple Silicon, local delivery
 Preserve OpenIDEA layout, default keymap, autosave and debugger. Use separate
 cz.thinky.openstorm application data; retain .openidea project settings.
 Preserve the released PHPantom 0.11.1-workbench.114 foundation and its provenance.
-The current local candidate uses rebuilt 0.11.1-openstorm.117 for safe JSON translation
+The current local candidate uses rebuilt 0.11.1-openstorm.118 for safe JSON translation
 and environment sources; preserve builtin documents and PHP target context.
 The current scope is the full 69-area roadmap in `docs/openstorm-features.json`,
 with Laravel/Blade/workflow work authorized in milestone order. New debugger
@@ -851,3 +851,189 @@ FEAT-026–029 and FEAT-066 gain evidence, while their broader gates remain part
 pivots, unknown morphs, contextual/environment container bindings and wider version
 matrices remain open. Evidence: `laravel-eloquent-0.1.29-{native-result.json,
 client-full.log,all-client-final.log,clippy.log,rustfmt.log}` in `artifacts/checks/`.
+
+### Cross-file Blade view-data continuation (2026-10-30, in progress)
+
+A new actual-client scenario verifies `compact()` controller data reaching Blade
+hover/completion/definitions, a Unicode HTML prefix, unsaved controller and template
+buffers, retiring the previous caller type, and a template-local assignment taking
+precedence. Closed-expression checks passed on bundled 117. Immediate queries may
+receive ContentModified while the semantic snapshot refreshes; the scenario retries
+only this cancellation, then asserts the first successful result is current.
+
+Native 0.1.29 opened the owned `openstorm-stock.blade.php` and displayed the Item
+member type, then navigated to Item.php. With focus autosave temporarily disabled
+only in the isolated profile, an unsaved controller change to Stock updated the
+template: a closed expression completed `quantity` and documentation showed its
+integer type. Fixture files were restored byte-for-byte, autosave restored to true
+and read back, and normal quit exited both app and server.
+
+Native editing exposed a real remaining failure: before typing the closing `}}`,
+member completion falls back to HTML tags. The actual-client incomplete-echo case
+also returns no members. The preprocessor retains incomplete expression text but
+its source map puts the end caret after a generated terminator. A scratch 118
+correction is being tested against this red case; no replacement binary or new app
+is accepted yet. Logs: `laravel-view-data-client-settled.log`,
+`laravel-view-data-incomplete-red.log`, `phpantom-118-map-red.log`; fixture receipt:
+`laravel-view-data-native-fixture.json`. An earlier test invocation misspelled the
+binary path; it is retained separately and is not evidence of an engine failure.
+
+The private mapping regression confirmed the cursor was placed after
+`echo e( $item->na); `, rather than after the member prefix. Scratch 118 records the
+visible end and PHP expression end separately for unfinished escaped/raw echoes;
+reverse anchors retain generated-suffix clamping. The correction adds a public
+completion/edit-range regression for both echo forms and Unicode prefixes.
+Required Clippy fixes followed by formatting and all-target Clippy passed, with
+the existing nonfatal build-script stripping warning. Patch 0118 replayed against
+the pinned upstream source; its new complete series hash is
+`5ffbc565d9d3e5cace35ee78215f0ce06f9f278d2631f80f613a9fdf544716ff`.
+A locked release build is running. Runtime promotion, green regressions, full engine
+suite and a new signed native bundle remain open. Candidate 117 provenance/binary
+and the accepted 0.1.29 app remain preserved.
+
+Frontend follow-up completed with all 2,992 tests passing, type checking passing,
+and lint passing with the existing warnings. Formatting and diff whitespace checks
+passed. The engine release compiler remains live; resumable handle and next steps
+are recorded in `artifacts/checks/phpantom-118-active.json`. Do not restart a live
+build or promote the engine before the new real-client regression turns green.
+
+The locked 118 build completed and its immutable archived binary has SHA-256
+`d8a36840ba16625008a6fe85f25d3107f37d90c4230f97456aec608be6cfaefb`.
+The previously red OpenStorm client scenario is now green, including completion
+before the echo terminator. All eight real-client regressions and three actual-host
+cases passed with that exact archived executable. Resources, provenance, tool
+version and application metadata now target engine 118 / app 0.1.30; candidate 117
+is retained under `engine/candidates/` and its immutable binary/archive is preserved.
+
+Full pinned-source tests, final source Clippy/formatting, workspace tests/Clippy and
+the new native bundle build are running with handles recorded in the active receipt.
+The first app build was deliberately interrupted to correct metadata formatting and
+restore the non-incremental compiler setting before continuing; its log is retained
+as `laravel-view-0.1.30-native-build-interrupted.log`. The corrected build uses a fresh
+log. The new native fixture has 95 lint-clean non-Blade PHP files, an unchanged
+13.37.0 Composer lock, and only the two previously approved synthetic environment
+keys. Native 0.1.30 acceptance and batch commit remain open; 0.1.29 is still the last
+accepted signed app.
+
+### 0.1.30 native follow-up: fix observed, further gate failures retained
+
+Signed `artifacts/batches/0.1.30/OpenStorm.app` passed fresh-profile Blade-first
+startup, unfinished escaped-echo completion, and unfinished raw-echo completion
+with a same-line Unicode prefix. Native undo restores `pr`, redo restores `price`,
+and saving after closing the raw echo persisted exactly `😀 {!! $item->price !!}`
+plus newline. Diagnostics settled to no problems. With focus autosave temporarily
+disabled, an unsaved Stock controller and unfinished template accepted `quantity`
+while disk still held the Item controller and prior saved raw-price template.
+
+The batch is not accepted: after engine restart, documentation/definition/completion
+for that unsaved template variable were unavailable. A stronger actual-client case
+reproduces this on first unsaved opens in the broad native fixture too. The minimal
+fixture passes three opening/restart cycles; nested namespaces, a hyphenated view
+name and configured custom view roots also pass. Adding the real vendor tree
+reproduces the failure. Excluding only Composer's helper autoload manifest in a
+separate owned fixture restores all cycles; using only Foundation/helpers.php can
+reproduce on a later cycle. These are controlled fixture changes, not a proposed
+product workaround. A same-offset caller variation still fails, ruling out a simple
+one-character view-span shift. Stock itself resolves in the controller, while the
+Blade variable hover is absent. Further helper/index interaction tracing is underway
+in unpromoted scratch 119. No production change is inferred from these probes.
+
+The original 118 source suite has one new test-contract failure: its member
+completion assertion requires textEdit, but insertText with the protocol's default
+word replacement is valid. The item itself is found. This assertion is corrected in
+scratch 119; the original source/binary and failed log remain preserved. The suite
+stopped at integration tests, so it is not reported as a full pass. Final source
+Clippy and formatting passed independently. OpenStorm workspace checks passed
+1,305 tests with 31 ignored, Clippy and formatting; this preceded the newest native
+fixture regression. All 2,992 frontend tests/typecheck/lint and the app build passed.
+
+Fixture data and synthetic environment hashes were restored/read back, focus
+autosave restored true with idle-save still false default, and normal quit exited
+app 41727 and restarted engine 45206. Post-runtime deep/strict signature verification
+passed. 0.1.29 remains the last accepted signed app; 0.1.30 is retained as a failed
+candidate. Evidence: `laravel-view-0.1.30-{native-result,unsaved-witness,fixture,
+build-receipt}.json`, `laravel-view-data-{native-client-red,minimal-client-probe,
+custom-roots-probe,no-autoload-files-probe,foundation-helper-probe}.log`, and
+`phpantom-118-full-suite.log` in `artifacts/checks/`.
+
+### Blade startup recovery: 119 regression and reproducible fixtures
+
+The stronger native-fixture regression exposed repeated ContentModified cancellation,
+not an accepted empty completion result. Tracing confirmed the current unsaved Stock
+caller was parsed and inferred correctly, but startup input publication invalidated
+the staged Blade scope. Its retained refresh was never scheduled again. Patch 0119
+retries pending work when the input epoch changes during a drain; stable unsupported
+components retain their existing non-looping behavior. A deterministic configuration
+publication barrier test fails without the fix (pending work does not settle) and
+passes with it. Scratch Clippy fix, formatting and all-target Clippy passed. The
+prototype passes three actual-client open/restart cycles in both the broad native
+fixture and the controlled full-vendor fixture. This is not packaged acceptance.
+
+`scripts/create-openstorm-view-fixture.py` now creates a disposable, reproducible
+view-data project/profile from the pinned Laravel example. It verifies 108 baseline
+source files, exact Laravel 13.37.0 lock/install metadata and Composer autoloading,
+excludes all environment files, then lints 88 non-Blade PHP files with the explicit
+PHP CLI. The valid run passed; a missing baseline was rejected before fixture
+creation. The generator executes no application/Composer code. No environment files
+are created by it. Full synthetic engine-suite environment fixtures remain within
+the user-approved suite-owned fake-data scope.
+
+Compiler-cache cleanup preserved all source, fixtures, signed bundles and evidence;
+only inactive generated incremental directories were pruned after checking active
+compiler processes. Free disk space was observed at 20 GiB afterward. Source 119 is
+now pinned for a normal optimized build; full-source, real-client and corrected
+native app gates remain open. 0.1.29 remains the last accepted bundle.
+
+The normal optimized 119 release build passed and reports the pinned version.
+Archived SHA-256: `4940b94d33c7e5a02fbfe38bf18b7cb6e8bb0cd11d51ad930d1e5d623720db92`.
+All nine actual-client regressions passed against that immutable executable,
+including the broad generated fixture's three unsaved open/restart cycles.
+Host/source/native gates remain open; no candidate acceptance is implied.
+
+119 follow-up: all three actual-host cases passed. Workspace checks passed 1,305
+with 32 ignored, all-target Clippy and formatting. Frontend passed 2,992 tests,
+type checking, lint (inherited warnings) and build. The exact Laravel 13.37.0 corpus
+still reports only its three intentional diagnostics at Demo.php lines 731/951.
+An initial error-only severity invocation showed one because two diagnostics are
+lower severity; the documented unfiltered invocation matches the baseline. Both
+logs are retained. Native candidate 0.1.31 now bundles the archived 119 engine and
+is building separately; the full source suite is still running.
+
+### 0.1.31 Blade batch accepted locally
+
+Signed development app: `artifacts/batches/0.1.31/OpenStorm.app`, bundled engine
+119 SHA-256 `4940b94d33c7e5a02fbfe38bf18b7cb6e8bb0cd11d51ad930d1e5d623720db92`.
+Native escaped/raw unfinished echoes complete before their terminator; Unicode raw
+completion supports undo/redo and exact saved bytes. Both unsaved controller and
+Blade changes resolve Stock quantity while disk retains the Item controller and
+saved raw-price template. Actual server restart changes PID 39083 to 39541;
+documentation, Cmd+B into Stock::$quantity and completion still work afterward.
+
+Quit prompts for both unsaved files. Cancel retains them; Save All writes both
+expected texts, then exits app 38202 and its server. Deep/strict signature verifies
+after runtime. Relaunch without a project argument reopens the project and all
+three tabs; quantity documentation still resolves. This checks saved relaunch,
+not crash recovery. Native fixture restoration was saved; paste-added indentation
+was removed only from the owned Controller file after final quit, returning all
+four source files byte-for-byte. Focus autosave is restored true and idle autosave
+remains false default. Final app/server exit and signature verification passed.
+No environment files were created by this fixture.
+
+Final engine source suite: 18,363 passed, 17 ignored, excluding the separate spawned
+bootstrap child from the count. Final engine Clippy fix, formatting, all-target
+Clippy and format check passed; clean-source fingerprint verification passed after
+them. All nine actual-client and three host cases passed against the archived 119
+binary. Workspace 1,305 passed / 32 ignored and Clippy/fmt passed before version bump;
+afterward focused bundle-resolution tests (2), all-target workspace Clippy and
+format check passed on 0.1.31. Frontend 2,992/typecheck/lint/build passed and native
+build rebuilt frontend. Existing toolchain strip warnings remain non-fatal.
+
+Observed first-IPC timings: 2,979 ms first-profile launch and 662 ms same-profile
+relaunch. The first overlapped compilation; these are development IPC timings,
+not normalized startup/UI-ready or parity measurements. See
+`artifacts/checks/laravel-view-0.1.31-{build-receipt,native-result,unsaved-witness,
+quit-witness,fixture}.json`, runtime/relaunch logs, `phpantom-119-*`, and
+`laravel-view-119-*`. 0.1.29 and failed 0.1.30 bundles remain recoverable;
+installed optimized 0.1.21 is unchanged. No publishing/push/notarization occurred.
+All 69 areas remain visible and partial/deferred; broader Blade/component and
+semantic freshness matrices continue after this accepted batch.

@@ -291,7 +291,7 @@ SOFTWARE
 
 ## OpenStorm bundled PHP engine
 
-PHPantom 0.11.1-openstorm.117 (MIT), locally rebuilt from PHPantom-dev/phpantom_lsp
+PHPantom 0.11.1-openstorm.119 (MIT), locally rebuilt from PHPantom-dev/phpantom_lsp
 commit 1756b1f920c1290d4c4fdd4d2c902fad53a75cd3 with the 114 PHP Workbench
 patches and OpenStorm JSON-translation isolation patch 0115.
 Embedded phpstorm-stubs are Apache-2.0. Exact binary checksum, patch identity,

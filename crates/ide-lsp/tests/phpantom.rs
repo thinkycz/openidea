@@ -630,3 +630,174 @@ async fn laravel_casts_relationships_scopes_and_facades_through_client() {
     assert!(!path.exists(), "intelligence queries must not write the overlay to disk");
     mgr.shutdown_all().await;
 }
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires the pinned macOS Apple Silicon PHPantom executable"]
+async fn laravel_view_data_tracks_unsaved_callers_and_template_shadowing() {
+    async fn settled_completion(mgr: &LspManager, doc: DocId, at: Pos) -> ide_lsp::types::CompletionList {
+        for _ in 0..80 {
+            match mgr.completion(doc, at, None, Default::default()).await {
+                Ok(list) => return list,
+                Err(error) if error.kind == ide_core::error::ErrorKind::Cancelled => {
+                    tokio::time::sleep(Duration::from_millis(25)).await;
+                }
+                Err(error) => panic!("completion failed: {error}"),
+            }
+        }
+        panic!("view-data semantic snapshot did not settle");
+    }
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().canonicalize().unwrap();
+    for dir in ["app", "resources/views"] {
+        std::fs::create_dir_all(root.join(dir)).unwrap();
+    }
+    std::fs::write(
+        root.join("composer.json"),
+        r#"{"require":{"php":"^8.2","laravel/framework":"12.*"},"autoload":{"psr-4":{"App\\":"app/"}}}"#,
+    )
+    .unwrap();
+    let item = "<?php\nnamespace App;\nclass Item { public string $name; public int $price; }\n";
+    let stock = "<?php\nnamespace App;\nclass Stock { public string $sku; public int $quantity; }\n";
+    std::fs::write(root.join("app/Item.php"), item).unwrap();
+    std::fs::write(root.join("app/Stock.php"), stock).unwrap();
+    let controller = "<?php\nnamespace App;\nclass Controller { public function show(): mixed {\n$item = new Item();\nreturn view('shop', compact('item'));\n} }\n";
+    std::fs::write(root.join("app/Controller.php"), controller).unwrap();
+    let template = "<h1>😀 shop</h1>\n{{ $item->name }}\n";
+    let template_path = root.join("resources/views/shop.blade.php");
+    std::fs::write(&template_path, template).unwrap();
+    let bin = std::env::var_os("OPENSTORM_TEST_PHPANTOM_BIN").map(PathBuf::from).unwrap_or_else(|| {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../src-tauri/resources/phpantom/phpantom_lsp")
+    });
+    let mut php = LanguageRegistry::load(None).unwrap().get(&LanguageId::new("php")).unwrap();
+    php.language_servers.retain(|s| s.name == "phpantom");
+    php.language_servers[0].command = bin.to_string_lossy().into_owned();
+    let mgr = LspManager::new(root.clone(), Arc::new(LanguageRegistry::from_configs(vec![php])), Arc::new(|_| {}));
+    let caller = DocId::next();
+    mgr.did_open(caller, &root.join("app/Controller.php"), &LanguageId::new("php"), 1, controller);
+    let blade = DocId::next();
+    // OpenStorm currently detects .blade.php as PHP; test the actual client path.
+    mgr.did_open(blade, &template_path, &LanguageId::new("php"), 1, template);
+    let mut hover = String::new();
+    for _ in 0..80 {
+        if let Ok(Some(h)) = mgr.hover(blade, Pos::new(1, 10), Default::default()).await {
+            hover = h.contents.value;
+            if hover.contains("string") {
+                break;
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(hover.contains("string"), "call-site data reaches Blade hover: {hover}");
+    let locations = mgr.goto(blade, Pos::new(1, 10), GotoKind::Definition).await.unwrap();
+    assert!(
+        locations.iter().any(|l| l.path == root.join("app/Item.php") && l.range.start.line == 2),
+        "Blade member definition: {locations:?}"
+    );
+    let list = settled_completion(&mgr, blade, Pos::new(1, 10)).await;
+    assert!(list.items.iter().any(|i| i.label == "name"));
+    assert!(list.items.iter().any(|i| i.label == "price"));
+    let changed_template = "{{-- unsaved template --}}\n<h1>😀 shop</h1>\n{{ $item->sku }}\n";
+    replace(&mgr, blade, 2, template, changed_template);
+    let changed_controller = controller.replace("new Item()", "new Stock()");
+    replace(&mgr, caller, 2, controller, &changed_controller);
+    let list = settled_completion(&mgr, blade, Pos::new(2, 10)).await;
+    let labels: Vec<_> = list.items.iter().map(|i| i.label.as_str()).collect();
+    assert!(labels.contains(&"sku") && labels.contains(&"quantity"), "unsaved caller updates template: {labels:?}");
+    assert!(!labels.contains(&"price"), "stale caller type must retire: {labels:?}");
+    let locations = mgr.goto(blade, Pos::new(2, 10), GotoKind::Definition).await.unwrap();
+    assert!(locations.iter().any(|l| l.path == root.join("app/Stock.php")), "new member maps to Stock: {locations:?}");
+    let partial = "{{-- unsaved template --}}\n<h1>😀 shop</h1>\n{{ $item->qu";
+    replace(&mgr, blade, 3, changed_template, partial);
+    let list = settled_completion(&mgr, blade, Pos::new(2, 12)).await;
+    assert!(
+        list.items.iter().any(|i| i.label == "quantity"),
+        "incomplete Blade echo must retain PHP member completion: {:?}",
+        list.items.iter().map(|i| &i.label).collect::<Vec<_>>()
+    );
+    let completed_partial = partial.replace("->qu", "->quantity");
+    replace(&mgr, blade, 4, partial, &completed_partial);
+    let _ = settled_completion(&mgr, blade, Pos::new(2, 18)).await;
+    let before_restart = mgr.goto(blade, Pos::new(2, 12), GotoKind::Definition).await.unwrap();
+    assert!(
+        before_restart.iter().any(|l| l.path == root.join("app/Stock.php")),
+        "unsaved incomplete member before restart: {before_restart:?}"
+    );
+    mgr.restart(mgr.servers()[0].id).await.unwrap();
+    let list = settled_completion(&mgr, blade, Pos::new(2, 18)).await;
+    assert!(
+        list.items.iter().any(|i| i.label == "quantity"),
+        "restart restores unsaved caller and template: {:?}",
+        list.items.iter().map(|i| &i.label).collect::<Vec<_>>()
+    );
+    let after_restart = mgr.goto(blade, Pos::new(2, 12), GotoKind::Definition).await.unwrap();
+    assert!(
+        after_restart.iter().any(|l| l.path == root.join("app/Stock.php")),
+        "unsaved incomplete member after restart: {after_restart:?}"
+    );
+    replace(&mgr, blade, 5, &completed_partial, changed_template);
+    let shadowed = "@php $item = new \\App\\Item(); @endphp\n{{ $item->name }}\n";
+    replace(&mgr, blade, 6, changed_template, shadowed);
+    let list = settled_completion(&mgr, blade, Pos::new(1, 10)).await;
+    let labels: Vec<_> = list.items.iter().map(|i| i.label.as_str()).collect();
+    assert!(labels.contains(&"name") && labels.contains(&"price"), "template-local assignment wins: {labels:?}");
+    assert!(!labels.contains(&"quantity"), "caller cannot override local binding: {labels:?}");
+    assert_eq!(std::fs::read_to_string(root.join("app/Controller.php")).unwrap(), controller);
+    assert_eq!(std::fs::read_to_string(template_path).unwrap(), template);
+    mgr.shutdown_all().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires OPENSTORM_TEST_VIEW_ROOT disposable native view-data fixture"]
+async fn laravel_native_view_fixture_reopens_unsaved_dependencies() {
+    let root = PathBuf::from(std::env::var_os("OPENSTORM_TEST_VIEW_ROOT").expect("native view fixture"))
+        .canonicalize()
+        .unwrap();
+    let caller_path = root.join("app/OpenStormFixtures/Controller.php");
+    let original = std::fs::read_to_string(&caller_path).unwrap();
+    let caller_text = original.replace("new Item()", "new Stock()");
+    assert_ne!(original, caller_text);
+    let template_path = root.join("resources/views/openstorm-stock.blade.php");
+    let original_template = std::fs::read_to_string(&template_path).unwrap();
+    let template_text = "{{-- unsaved template --}}\n<h1>😀 shop</h1>\n{{ $item->quantity";
+    let mut php = LanguageRegistry::load(None).unwrap().get(&LanguageId::new("php")).unwrap();
+    php.language_servers.retain(|s| s.name == "phpantom");
+    php.language_servers[0].command = std::env::var("OPENSTORM_TEST_PHPANTOM_BIN").expect("engine executable");
+    let mgr = LspManager::new(root.clone(), Arc::new(LanguageRegistry::from_configs(vec![php])), Arc::new(|_| {}));
+    let blade = DocId::next();
+    let caller = DocId::next();
+    mgr.did_open(blade, &template_path, &LanguageId::new("php"), 1, template_text);
+    mgr.did_open(caller, &caller_path, &LanguageId::new("php"), 1, &caller_text);
+    for cycle in 0..3 {
+        if cycle > 0 {
+            mgr.restart(mgr.servers()[0].id).await.unwrap();
+        }
+        let mut ready = false;
+        let mut cancellations = 0;
+        for _ in 0..150 {
+            match mgr.completion(blade, Pos::new(2, 18), None, Default::default()).await {
+                Ok(list) => {
+                    let labels: Vec<_> = list.items.iter().map(|i| i.label.as_str()).collect();
+                    assert!(labels.contains(&"quantity"), "first successful response in cycle {cycle}: {labels:?}");
+                    ready = true;
+                    break;
+                }
+                Err(error) if error.kind == ide_core::error::ErrorKind::Cancelled => {
+                    cancellations += 1;
+                }
+                Err(error) => panic!("{error}"),
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        assert!(ready, "cycle {cycle}: {cancellations} cancellations without a current response");
+        let hover = mgr.hover(blade, Pos::new(2, 12), Default::default()).await.unwrap().unwrap();
+        assert!(hover.contents.value.contains("public int $quantity"), "cycle {cycle}: {}", hover.contents.value);
+        let targets = mgr.goto(blade, Pos::new(2, 12), GotoKind::Definition).await.unwrap();
+        assert!(
+            targets.iter().any(|l| l.path == root.join("app/OpenStormFixtures/Stock.php")),
+            "cycle {cycle}: {targets:?}"
+        );
+    }
+    assert_eq!(std::fs::read_to_string(caller_path).unwrap(), original);
+    assert_eq!(std::fs::read_to_string(template_path).unwrap(), original_template);
+    mgr.shutdown_all().await;
+}

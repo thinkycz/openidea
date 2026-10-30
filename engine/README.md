@@ -1,9 +1,9 @@
 # Pinned PHPantom engine
 
-The local OpenStorm candidate bundles PHPantom `0.11.1-openstorm.117` for Apple
+The local OpenStorm candidate bundles PHPantom `0.11.1-openstorm.119` for Apple
 Silicon macOS. This is a local rebuild, not an upstream release. `source.json` pins
 upstream source, its archive checksum, the unchanged 114-patch PHP Workbench series,
-and OpenStorm patches 0115–0117 for JSON/environment resource isolation and precise key destinations. The executable is verified by
+and OpenStorm patches 0115–0119 for JSON/environment resource isolation and precise key destinations. The executable is verified by
 `node scripts/verify-phpantom.mjs`; its provenance and licenses are under
 `src-tauri/resources/phpantom/`.
 
@@ -87,5 +87,31 @@ Do not point this variable at a real user project. The existing
 `OPENSTORM_TEST_LARAVEL_ROOT` test uses the separate User/displayName fixture.
 `OPENSTORM_TEST_PHPANTOM_BIN` should select the checksum-verified packaged engine.
 Run `cargo test -p ide-lsp --test phpantom -- --ignored --nocapture` to exercise all
-seven client cases. This creates only test-owned resources and overlays; the
+nine client cases. This creates only test-owned resources and overlays; the
 synthetic environment case requires authorization for its fake fixture data.
+
+Patch 0118 keeps an unfinished escaped/raw echo's editing caret before its generated
+terminator while retaining reverse source-map anchors. Its public handler checks
+completion replacement ranges with ASCII and Unicode prefixes; the OpenStorm client
+regression also covers unsaved controller/template data and local shadowing. The
+118 binary passes eight client and three actual-host cases. Full-source and native
+0.1.30 acceptance remain tracked in the combined progress record.
+
+Patch 0119 retries retained Blade refreshes when startup/configuration publication
+changes the input generation during a drain. Its barrier regression must fail
+without the retry and pass with it. Source and packaged acceptance remain separate
+in `docs/OPENSTORM.md`.
+
+Create a disposable view-data fixture without copying environment files:
+
+```sh
+python3 scripts/create-openstorm-view-fixture.py \
+  --baseline artifacts/checks/engine-laravel13-37-116/project \
+  --php artifacts/toolchains/php-8.4.23-static/php --label view-acceptance
+```
+
+The baseline must be the owned, installed pinned example at Laravel 13.37.0.
+The script checks source fingerprints, lock/install metadata and PHP syntax before
+returning project/profile paths. It never runs Composer or framework commands.
+Set `OPENSTORM_TEST_VIEW_ROOT` to its returned project for the ninth real-client
+case, covering Blade-first unsaved dependencies through repeated server starts.

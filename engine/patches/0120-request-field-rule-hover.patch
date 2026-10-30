@@ -1,0 +1,441 @@
+--- a/src/hover/mod.rs
++++ b/src/hover/mod.rs
+@@ -18,6 +18,7 @@
+ pub(crate) mod constants;
+ mod formatting;
+ mod html_tables;
++mod laravel_request;
+ mod laravel_trans;
+ mod member;
+ mod see_refs;
+@@ -119,6 +120,10 @@
+         // is typed as model-property<Model>, show the property's type
+         // and source info (same as hovering over $model->property).
+         if let Some(hover) = self.try_model_property_hover(uri, content, position) {
++            return Some(hover);
++        }
++
++        if let Some(hover) = self.try_request_field_hover(uri, content, position) {
+             return Some(hover);
+         }
+ 
+--- a/src/virtual_members/laravel/request_fields.rs
++++ b/src/virtual_members/laravel/request_fields.rs
+@@ -14,7 +14,7 @@
+ 
+ use std::sync::Arc;
+ 
+-use tower_lsp::lsp_types::{Location, Position, Url};
++use tower_lsp::lsp_types::{Location, Position, Range, Url};
+ 
+ use crate::Backend;
+ use crate::class_lookup::find_class_at_offset;
+@@ -294,34 +294,64 @@
+ 
+ // ─── Go to definition ───────────────────────────────────────────────────────
+ 
+-/// Resolve go-to-definition on a request input-field string to the rule that
+-/// declares it.
+-pub(crate) fn resolve_request_field_definition(
++/// One input field and the validation declaration that describes it.
++pub(crate) struct ResolvedRequestField {
++    /// The addressed input key, including a root contributed by a wildcard rule.
++    pub name: String,
++    /// The statically recovered rule specification; empty for a computed value.
++    pub rules: String,
++    /// Whether rule text contains only literal string tokens.
++    pub literal_value: bool,
++    /// Exact declaration, including an inherited rule's original file.
++    pub location: Location,
++    /// The input literal's content range in the caller, in UTF-16 columns.
++    pub range: Range,
++    /// Whether all keys of the governing rules array were recovered.
++    pub complete: bool,
++}
++
++/// Resolve an input-field string once for navigation and documentation.
++pub(crate) fn resolve_request_field(
+     backend: &Backend,
+     uri: &str,
+     content: &str,
+     position: Position,
+-) -> Option<Location> {
+-    let ctx = backend.file_context(uri);
++) -> Option<ResolvedRequestField> {
+     let cursor_offset = position_to_offset(content, position) as usize;
+     let code = code_context_at(content, cursor_offset)?;
++    code.open_string?;
++    let ctx = backend.file_context(uri);
+     let (field_ctx, rules, fields) =
+         request_fields_at_position(backend, uri, content, position, &ctx, &code)?;
+     let value = field_ctx.full_value(content)?;
+ 
+     // An exact rule key wins over the root segment it also contributes, so
+     // `input('address.city')` lands on that key rather than on `address`.
+-    let (key_start, origin) = rules
++    let (key_start, origin, specification, literal_value) = rules
+         .rules
+         .entries
+         .iter()
+         .find(|rule| rule.key == value)
+-        .map(|rule| (rule.key_start, rule.origin.as_ref()))
++        .map(|rule| {
++            (
++                rule.key_start,
++                rule.origin.as_ref(),
++                rule.rules.as_str(),
++                rule.literal_value,
++            )
++        })
+         .or_else(|| {
+             fields
+                 .iter()
+                 .find(|field| field.name == value)
+-                .map(|field| (field.key_start, field.origin.as_ref()))
++                .map(|field| {
++                    (
++                        field.key_start,
++                        field.origin.as_ref(),
++                        field.rules.as_str(),
++                        field.literal_value,
++                    )
++                })
+         })?;
+ 
+     // A key merged in from `parent::rules()` lives in the ancestor's file, not
+@@ -333,10 +363,30 @@
+     };
+ 
+     let position = crate::text_position::offset_to_position(target_content, key_start);
+-    Some(crate::definition::point_location(
+-        Url::parse(target_uri).ok()?,
+-        position,
+-    ))
++    Some(ResolvedRequestField {
++        name: value.to_string(),
++        rules: specification.to_string(),
++        literal_value,
++        location: crate::definition::point_location(Url::parse(target_uri).ok()?, position),
++        range: Range::new(
++            crate::text_position::offset_to_position(content, field_ctx.content_start),
++            crate::text_position::offset_to_position(
++                content,
++                field_ctx.content_start + value.len(),
++            ),
++        ),
++        complete: rules.rules.keys_complete,
++    })
++}
++
++/// Resolve go-to-definition on an input string to its validation rule declaration.
++pub(crate) fn resolve_request_field_definition(
++    backend: &Backend,
++    uri: &str,
++    content: &str,
++    position: Position,
++) -> Option<Location> {
++    resolve_request_field(backend, uri, content, position).map(|field| field.location)
+ }
+ 
+ #[cfg(test)]
+--- a/src/virtual_members/laravel/mod.rs
++++ b/src/virtual_members/laravel/mod.rs
+@@ -188,7 +188,9 @@
+     ProviderIdentity, ProviderOrigin, ProviderResources, ProviderScan, ProviderScans,
+     extract_provider_resources,
+ };
+-pub(crate) use request_fields::{request_fields_at_position, resolve_request_field_definition};
++pub(crate) use request_fields::{
++    request_fields_at_position, resolve_request_field, resolve_request_field_definition,
++};
+ pub(crate) use route_names::{
+     RouteDiscovery, enumerate_all_routes, find_route_registration_references,
+     resolve_route_definitions, route_name_matches, route_uri_parameters,
+--- a/tests/integration/laravel_request_keys.rs
++++ b/tests/integration/laravel_request_keys.rs
+@@ -4,8 +4,9 @@
+ 
+ use crate::common::{
+     FORM_REQUEST_STUB, complete_at_opened, create_psr4_workspace, definition_locations,
+-    goto_definition_at, item_labels, open_php_at, split_cursor,
++    goto_definition_at, hover_text_at, item_labels, open_php_at, split_cursor,
+ };
++use tower_lsp::LanguageServer;
+ use tower_lsp::lsp_types::*;
+ 
+ // ─── Shared stubs ───────────────────────────────────────────────────────────
+@@ -723,3 +724,121 @@
+         "a key that no rule declares has no definition"
+     );
+ }
++
++#[tokio::test]
++async fn form_request_field_hover_documents_rules_and_ancestor_origin() {
++    for (request, key, expected_rules, origin) in [
++        (
++            "StorePostRequest",
++            "title",
++            "required|string",
++            "StorePostRequest.php",
++        ),
++        (
++            "UpdatePostRequest",
++            "title",
++            "required|string",
++            "StorePostRequest.php",
++        ),
++        (
++            "UpdatePostRequest",
++            "slug",
++            "required|string",
++            "UpdatePostRequest.php",
++        ),
++    ] {
++        let consumer = format!(
++            "<?php\n// 😀 source-map prefix\nnamespace App;\nuse App\\Http\\Requests\\{request};\nfunction probe({request} $request): void {{\n$request->input('{key}§');\n}}\n"
++        );
++        let (backend, _dir, uri, position) =
++            open_at_cursor("src/HoverConsumer.php", &consumer).await;
++        let hover = hover_text_at(&backend, &uri, position.line, position.character)
++            .await
++            .expect("field rule documentation");
++        assert!(
++            hover.contains(key) && hover.contains(expected_rules) && hover.contains(origin),
++            "{request}/{key}: {hover}"
++        );
++    }
++}
++
++#[tokio::test]
++async fn form_request_field_hover_preserves_unicode_literal_range() {
++    let consumer = "<?php\nnamespace App;\nuse App\\Http\\Requests\\StorePostRequest;\nfunction probe(StorePostRequest $request): void {\n/* 😀 */ $request->input('title§');\n}\n";
++    let (backend, _dir, uri, position) = open_at_cursor("src/RangeConsumer.php", consumer).await;
++    let hover = backend
++        .hover(HoverParams {
++            text_document_position_params: TextDocumentPositionParams {
++                text_document: TextDocumentIdentifier { uri },
++                position,
++            },
++            work_done_progress_params: WorkDoneProgressParams::default(),
++        })
++        .await
++        .unwrap()
++        .expect("field rule documentation");
++    assert_eq!(
++        hover.range,
++        Some(Range::new(Position::new(4, 26), Position::new(4, 31)))
++    );
++}
++
++#[tokio::test]
++async fn form_request_field_hover_refuses_unknown_and_unrelated_keys() {
++    for (receiver, key) in [("StorePostRequest", "not_a_rule"), ("\\stdClass", "title")] {
++        let consumer = format!(
++            "<?php\nnamespace App;\nuse App\\Http\\Requests\\StorePostRequest;\nfunction probe({receiver} $request): void {{\n$request->input('{key}§');\n}}\n"
++        );
++        let (backend, _dir, uri, position) =
++            open_at_cursor("src/UnknownConsumer.php", &consumer).await;
++        assert!(
++            hover_text_at(&backend, &uri, position.line, position.character)
++                .await
++                .is_none(),
++            "{receiver}/{key} is not a resolved request key"
++        );
++    }
++}
++
++#[tokio::test]
++async fn form_request_field_hover_retains_dynamic_rule_uncertainty() {
++    for (rules, expected) in [
++        ("['title' => $this->dynamicRules()]", "not evaluated"),
++        (
++            "['title' => 'string', $dynamic => 'numeric']",
++            "may be incomplete",
++        ),
++    ] {
++        let consumer = format!(
++            "<?php\nnamespace App\\Http\\Requests;\nuse Illuminate\\Foundation\\Http\\FormRequest;\nclass DynamicRequest extends FormRequest {{\npublic function rules(): array {{ return {rules}; }}\npublic function inspect(): void {{ $this->input('title§'); }}\n}}\n"
++        );
++        let (backend, _dir, uri, position) =
++            open_at_cursor("src/Http/Requests/DynamicRequest.php", &consumer).await;
++        let hover = hover_text_at(&backend, &uri, position.line, position.character)
++            .await
++            .expect("known key retains documentation");
++        assert!(hover.contains(expected), "{rules}: {hover}");
++    }
++}
++
++#[tokio::test]
++async fn form_request_field_hover_supports_array_and_validated_accessors() {
++    for expression in [
++        "$request['title§'];",
++        "$request->validated('title§');",
++        "$request->safe()->only(['title§']);",
++    ] {
++        let consumer = format!(
++            "<?php\nnamespace App;\nuse App\\Http\\Requests\\StorePostRequest;\nfunction probe(StorePostRequest $request): void {{\n{expression}\n}}\n"
++        );
++        let (backend, _dir, uri, position) =
++            open_at_cursor("src/AccessorConsumer.php", &consumer).await;
++        let hover = hover_text_at(&backend, &uri, position.line, position.character)
++            .await
++            .expect("request accessor field documentation");
++        assert!(
++            hover.contains("title") && hover.contains("required|string"),
++            "{expression}: {hover}"
++        );
++    }
++}
+--- a/docs/CHANGELOG.md
++++ b/docs/CHANGELOG.md
+@@ -14,6 +14,8 @@
+ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+ 
+ ## [Unreleased]
++
++- **Inspect validation rules from a request input key.** Hover shows the field's known rules and links to the declaring request, including inherited rules. Contributed by @thinkycz.
+ 
+ - **Recover view-data assistance when startup inputs change.** Unsaved controller data remains available in Blade after opening and restarting the language server. Contributed by @thinkycz.
+ 
+--- /dev/null
++++ b/src/hover/laravel_request.rs
+@@ -0,0 +1,46 @@
++//! Documentation for input keys recovered from Laravel validation rules.
++
++use crate::Backend;
++use tower_lsp::lsp_types::{Hover, Position};
++
++use super::{inline_code, make_hover};
++
++impl Backend {
++    /// Show the governing rules and their exact declaration without executing PHP.
++    pub(super) fn try_request_field_hover(
++        &self,
++        uri: &str,
++        content: &str,
++        position: Position,
++    ) -> Option<Hover> {
++        let field =
++            crate::virtual_members::laravel::resolve_request_field(self, uri, content, position)?;
++        let mut detail = format!("**Request input** {}", inline_code(&field.name));
++        if field.rules.is_empty() {
++            detail.push_str("\n\nSee the rule declaration for details.");
++        } else if field.literal_value {
++            detail.push_str(&format!(
++                "\n\n**Validation rules:** {}",
++                inline_code(&field.rules)
++            ));
++        } else {
++            detail.push_str(&format!(
++                "\n\n**Rule expression (not evaluated):** {}",
++                inline_code(&field.rules)
++            ));
++        }
++        if !field.complete {
++            detail.push_str("\n\nRule information may be incomplete.");
++        }
++        let file = field.location.uri.path().rsplit('/').next().unwrap_or("");
++        detail.push_str(&format!(
++            "\n\nDefined in [{}](<{}#L{}>)",
++            inline_code(file),
++            field.location.uri,
++            field.location.range.start.line + 1,
++        ));
++        let mut hover = make_hover(detail);
++        hover.range = Some(field.range);
++        Some(hover)
++    }
++}
+--- a/src/virtual_members/laravel/validation_rules.rs
++++ b/src/virtual_members/laravel/validation_rules.rs
+@@ -45,8 +45,10 @@
+     /// The field name exactly as written, e.g. `"name"` or `"items.*.id"`.
+     pub key: String,
+     /// The rule specification rendered for display, e.g.
+-    /// `"required|string|max:255"`.  Empty when the value is not literal.
++    /// `"required|string|max:255"`. Computed expressions retain their source text.
+     pub rules: String,
++    /// Whether the specification consists only of literal string rule tokens.
++    pub literal_value: bool,
+     /// Byte offset of the key literal's content (just inside the quotes),
+     /// in the file named by [`Self::origin`], or by the owning
+     /// [`RulesSource`] when that is `None`.
+@@ -218,6 +220,7 @@
+         out.merge_entry(ValidationRule {
+             key: key.to_string(),
+             rules: render_rule_value(kv.value, content),
++            literal_value: rule_value_is_literal(kv.value),
+             key_start,
+             origin: None,
+             enum_class: enum_rule_class(kv.value),
+@@ -239,6 +242,24 @@
+         Expression::LegacyArray(arr) => render_rule_list(arr.elements.iter(), content),
+         other => condense(source_text(other, content)),
+     }
++}
++
++fn rule_value_is_literal(expr: &Expression<'_>) -> bool {
++    match expr {
++        Expression::Literal(literal::Literal::String(_)) => true,
++        Expression::Array(arr) => rule_list_is_literal(arr.elements.iter()),
++        Expression::LegacyArray(arr) => rule_list_is_literal(arr.elements.iter()),
++        _ => false,
++    }
++}
++
++fn rule_list_is_literal<'a>(elements: impl Iterator<Item = &'a ArrayElement<'a>>) -> bool {
++    elements.into_iter().all(|element| {
++        matches!(element,
++            ArrayElement::Value(value)
++                if matches!(value.value, Expression::Literal(literal::Literal::String(_)))
++        )
++    })
+ }
+ 
+ fn render_rule_list<'a>(
+@@ -989,6 +1010,8 @@
+     pub name: String,
+     /// The rule specification of the entry this name came from.
+     pub rules: String,
++    /// Whether the specification contains only literal rule tokens.
++    pub literal_value: bool,
+     /// Byte offset of the declaring key literal's content.
+     pub key_start: usize,
+     /// The file [`Self::key_start`] indexes, when the declaring entry was
+@@ -1014,6 +1037,7 @@
+             out.push(RuleField {
+                 name: rule.key.clone(),
+                 rules: rule.rules.clone(),
++                literal_value: rule.literal_value,
+                 key_start: rule.key_start,
+                 origin: rule.origin.clone(),
+             });
+@@ -1031,6 +1055,7 @@
+             out.push(RuleField {
+                 name: root.to_string(),
+                 rules: String::new(),
++                literal_value: false,
+                 key_start: rule.key_start,
+                 origin: rule.origin.clone(),
+             });
+--- a/src/virtual_members/laravel/validation_rules_tests.rs
++++ b/src/virtual_members/laravel/validation_rules_tests.rs
+@@ -351,6 +351,7 @@
+     ValidationRule {
+         key: key.to_string(),
+         rules: "required".to_string(),
++        literal_value: true,
+         key_start: 0,
+         origin: None,
+         enum_class: None,
+--- a/examples/laravel/app/Demo.php
++++ b/examples/laravel/app/Demo.php
+@@ -1197,6 +1197,8 @@
+         // StoreBakeryRequest::rules() names every input this request can
+         // carry, so the string arguments below complete to those keys and
+         // go-to-definition jumps to the rule that declares them.
++        // Hover a field key for its rules and a link to the declaring request,
++        // including the original ancestor when the rule is inherited.
+         $request->input('name');          // → 'name' => 'required|string|max:255'
+         $request->boolean('apricot');     // → 'apricot' => 'boolean'
+         $request->has('dough_temp');      // → 'dough_temp' => 'nullable|numeric'

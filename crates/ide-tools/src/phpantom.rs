@@ -3,7 +3,7 @@ use ide_language::LanguageServerConfig;
 use std::path::{Path, PathBuf};
 
 pub const COMMAND: &str = "phpantom_lsp";
-pub const VERSION: &str = "0.11.1-openstorm.119";
+pub const VERSION: &str = "0.11.1-openstorm.120";
 
 pub fn bundled() -> Option<PathBuf> {
     if !cfg!(all(target_os = "macos", target_arch = "aarch64")) {

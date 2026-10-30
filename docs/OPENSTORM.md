@@ -1150,3 +1150,99 @@ limits are in `tab-close-0.1.32-idle-sample.json`. Startup first-IPC observation
 in the native result receipt, separate from UI-ready latency. Broader performance,
 crash recovery and editor matrices remain unaccepted. Previous 0.1.31 and installed
 optimized 0.1.21 remain preserved. No push, publishing or notarization occurred.
+
+### Policy / FormRequest acceptance slice started
+
+Tab-close protection checkpoint `959f771` is local only; committed runtime files
+were byte-checked against the signed0.1.32 build receipt. New actual-client policy
+checks pass ability completion (excluding hooks/protected methods), precise gate /
+convention-policy / registered-policy navigation and policy documentation.
+FormRequest field goto reaches the exact rule declaration, but field-key hover
+returns no result. The original failing expectation is retained in
+`laravel-policy-119-client-identify.log` and the complete new test in
+`laravel-policy-client-with-field-hover.rs`. A temporary probe limits hover checks
+to policies to reach the remaining validation/unsaved checks; this is not field
+hover acceptance. Engine119 has no FormRequest-key hover hook. Investigate and add
+that missing documentation through the engine's existing validation-rule metadata;
+restore the full field-hover assertion before accepting a replacement.
+
+The field-hover public regression fails on119 and passes in scratch120. Four
+focused checks pass: direct/inherited rule documentation, same-line Unicode UTF-16
+literal range, refusal of unknown/unrelated keys and retained uncertainty. The
+parser preserves computed expressions as source; new literal-value metadata lets
+hover label those as not evaluated. Unknown rule keys retain an incompleteness
+qualifier. Navigation and documentation share one resolution and ancestor origin.
+All29 request-key regressions, scratch Clippyfix/fmt/all-target Clippy passed.
+
+The temporary probe restriction is removed. All11 actual-client cases pass against
+the archived opt0 prototype, including unsaved field-hover updates, restart recovery
+and retiring old documentation after closing the rule overlay. All3 host cases also
+pass. Seven extracted actual-client PHP caller variants passed explicit PHP -n -l
+on stdin without execution. Final optimized source/binary and native0.1.33 gates
+remain open; resources and accepted0.1.32 still use119. Inactive incremental
+compiler caches were pruned after checking no app compiler used them; all binaries,
+source, receipts, signed apps and earlier evaluation artifacts were preserved.
+
+Final scratch checks pass after all five public hover cases and30 validation-rule
+unit checks. The diagnostic per-package opt0 profile is removed. Patch0120 changes
+nine reviewed source files, including a short usage comment in the Laravel example;
+clean acquisition replays the series with SHA-256
+`d8724ece5749022374bad91de25c9d0c81dd46c64d3cc9126e0caef81f7ae5b4`.
+Normal optimized build is running. Fresh installed corpus
+`artifacts/checks/engine-laravel13-37-120/project` preserves the exact13.37.0 lock and
+vendor tree, updates only the pinned Demo comment, verifies108 source fingerprints
+and lints85 PHP files. Original116 corpus and every accepted engine/app remain
+preserved. Corpus copying excludes all environment files. Remaining optimized,
+source and native gates are in `artifacts/checks/phpantom-120-active.json`.
+
+Optimized120 build passed, archived SHA-256
+`4db75680a66966955ed6d5aa43b92301f40d030383109bab80ed9deb790b38c2`.
+All11 actual-client and3host scenarios pass against this exact executable and the
+fresh pinned120 Laravel13.37 corpus. Unfiltered static analysis retains only the
+three intentional Demo diagnostics at731/951. Frontend3,004/typecheck/lint/build
+passed. Full engine source suite/final lint and root workspace/native0.1.33 gates
+are running. Resources/provenance/version now target120/0.1.33 as an unaccepted
+candidate; accepted0.1.32/119 remain preserved. Candidate119 provenance is retained
+under `engine/candidates/`. The native fixture is linted, fingerprint-checked and
+records exact1-based Demo locations for field/policy navigation. Remaining native
+steps and active job handles are in `artifacts/checks/phpantom-120-active.json`.
+
+Full engine source gates passed:18,368 tests /17ignored (excluding the separate
+bootstrap child), Clippyfix/fmt/all-target Clippy and clean-cache fingerprint check.
+0.1.33 workspace passed1,305 /34ignored, Clippy and formatting. The first native
+build failed with ENOSPC while producing an unused static library archive; its log
+is retained. Only duplicate non-executable libopenidea_lib.a build outputs were
+removed after verifying preserved0.1.32 signature; source, signed apps, executables,
+fixtures and earlier evaluation receipts are unchanged. Free space was observed
+at3.57GiB afterward. Retry explicitly selects the desktop binary through Tauri's
+supported runner arguments (`-- --bin openidea`). Native acceptance remains open.
+
+### Accepted local slice: 0.1.33 / engine 120
+
+The desktop retry built successfully. Selecting `--bin openidea` still produced
+the static archive; removing its previous generated copy freed the required peak
+space. Both failed and successful build logs remain preserved. The signed arm64
+development app is `artifacts/batches/0.1.33/OpenStorm.app`; its source/build receipt
+is `artifacts/checks/laravel-policy-0.1.33-build-receipt.json`. Installed optimized
+0.1.21 and all earlier accepted apps remain unchanged.
+
+Native About confirmed 0.1.33 and its disposable profile. F1 showed literal request
+rules and the declaring ancestor; clicking the source link opened line 29, and
+CmdB selected the exact field at 29:14. Gate registration opened provider 91:23;
+convention `update` opened BakeryPolicy 29:21; registered `publish` opened
+PublishingPolicy 15:21. Their documentation identified the correct handlers.
+With focus autosave temporarily disabled, an unsaved max:255 -> max:120 rule change
+updated the consumer tooltip with disk bytes unchanged. A real status-bar restart
+changed the engine PID and preserved max:120. Closing the modified request prompted;
+explicit Don't Save restored max:255 documentation. Autosave defaults were restored.
+All baseline app PHP files remain byte-identical. Quit, project/four-tab recovery,
+settled field documentation, final process cleanup and deep strict signature pass.
+Detailed observations: `artifacts/checks/laravel-policy-0.1.33-native-result.json`.
+
+One early relaunch documentation request returned no result, then a later explicit
+F1 resolved the expected rules. This is retained as a startup-readiness limitation,
+not a full freshness acceptance. Rule-name catalog completion and the broader
+validation/auth matrix also remain open. FEAT-035 and FEAT-066 stay partial;
+all 69 areas remain visible (67 partial, 2 user-deferred). The completed source,
+client/host, frontend and workspace gates above apply to this exact engine/app.
+No new push, publishing, migration or replacement of the installed app occurred.

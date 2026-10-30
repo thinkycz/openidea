@@ -389,8 +389,10 @@
       "milestone": 2,
       "status": "partial",
       "acceptance_gate": "Rule names/field refs/action abilities navigate and validate by context",
-      "openstorm_evidence": [],
-      "remaining": "Reassess current OpenStorm implementation against this full gate; Workbench acceptance does not transfer."
+      "openstorm_evidence": [
+        "0.1.33 / engine120: five public field-hover cases, all 11 actual-client and 3 host cases pass. Policy completion excludes hooks/protected methods; exact gate/convention/registered policy and inherited request-key navigation, documentation, unsaved field changes/restart/close restoration and wrong-model ability diagnostics pass. Native F1/CmdB/source links, unsaved rule changes, actual server restart, explicit discard, relaunch and cleanup observed; see docs/OPENSTORM.md."
+      ],
+      "remaining": "Rule-name catalog completion/navigation and the broader validation/auth context matrix remain unaccepted. One early native relaunch hover returned no result before a settled retry; startup readiness remains open."
     },
     {
       "id": "FEAT-036",
@@ -725,7 +727,8 @@
         "0.1.29 Eloquent real-client: unsaved cast change float to bool updates dependent hover without disk write; closing model overlay restores float.",
         "New native-fixture client regression finds unavailable Blade variable scope with Composer autoload helpers on first unsaved opens/restart; minimal/custom-root fixtures pass. Investigation remains open, with no semantic-freshness acceptance inferred.",
         "119 optimized engine: deterministic startup input-publication regression red before fix and green after; all nine actual-client cases pass, including broad Composer helper autoload fixture across three unsaved open/restart cycles. Full-source and native 0.1.31 acceptance remain open.",
-        "0.1.31 signed development native: unfinished escaped/raw Unicode echo completion and undo/redo, unsaved Stock caller/template data with disk unchanged, actual engine restart with documentation/goto/completion retained, quit Cancel/Save All and saved project/tab reopening with quantity documentation passed. Full 119 source 18363 passed / 17 ignored; 9 client / 3 host passed. Previous 0.1.30 failure retained in combined record."
+        "0.1.31 signed development native: unfinished escaped/raw Unicode echo completion and undo/redo, unsaved Stock caller/template data with disk unchanged, actual engine restart with documentation/goto/completion retained, quit Cancel/Save All and saved project/tab reopening with quantity documentation passed. Full 119 source 18363 passed / 17 ignored; 9 client / 3 host passed. Previous 0.1.30 failure retained in combined record.",
+        "0.1.33 native: unsaved parent request rule changes update consumer documentation, survive real server restart and revert after explicit discard without disk writes. Relaunch recovers settled documentation, but one early request returned no result; startup readiness is still partial."
       ],
       "remaining": "Completion/diagnostic stale responses, target-profile builtin-cache invalidation, broader project/configuration and multi-project cases remain unaccepted."
     },

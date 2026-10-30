@@ -877,3 +877,161 @@ async fn laravel_view_data_propagates_through_unsaved_includes() {
     }
     mgr.shutdown_all().await;
 }
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires OPENSTORM_TEST_ENGINE_LARAVEL_ROOT pinned Laravel 13.37.0 fixture"]
+async fn laravel_policy_and_request_keys_through_client() {
+    let root = PathBuf::from(std::env::var_os("OPENSTORM_TEST_ENGINE_LARAVEL_ROOT").expect("engine Laravel fixture"))
+        .canonicalize()
+        .unwrap();
+    let lock: serde_json::Value = serde_json::from_slice(&std::fs::read(root.join("composer.lock")).unwrap()).unwrap();
+    assert!(
+        lock["packages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|p| p["name"] == "laravel/framework" && p["version"] == "v13.37.0")
+    );
+    let mut php = LanguageRegistry::load(None).unwrap().get(&LanguageId::new("php")).unwrap();
+    php.language_servers.retain(|s| s.name == "phpantom");
+    php.language_servers[0].command = std::env::var("OPENSTORM_TEST_PHPANTOM_BIN").expect("engine executable");
+    let events: Arc<Mutex<Vec<IdeEvent>>> = Arc::default();
+    let capture = events.clone();
+    let mgr = LspManager::new(
+        root.clone(),
+        Arc::new(LanguageRegistry::from_configs(vec![php])),
+        Arc::new(move |event| capture.lock().push(event)),
+    );
+    let path = root.join("openstorm-policy-client.php");
+    assert!(!path.exists(), "acceptance caller must remain an overlay");
+    let prefix = "<?php\n// 😀 policy and validation acceptance\nuse App\\Http\\Requests\\{StoreBakeryRequest, UpdateBakeryRequest};\nuse App\\Models\\{Bakery, BlogPost};\nuse Illuminate\\Support\\Facades\\Gate;\nfunction probe(StoreBakeryRequest $request, UpdateBakeryRequest $update): void {\n$bakery = new Bakery();\n";
+    let mut text = format!("{prefix}Gate::allows('');\n}}\n");
+    let doc = DocId::next();
+    mgr.did_open(doc, &path, &LanguageId::new("php"), 1, &text);
+    let abilities = settled_completion(&mgr, doc, pos(&text, "');")).await;
+    let labels: Vec<_> = abilities.items.iter().map(|i| i.label.as_str()).collect();
+    for name in ["manage-bakery-network", "update", "publish", "moderate"] {
+        assert!(labels.contains(&name), "missing ability {name}: {labels:?}");
+    }
+    assert!(
+        !labels.contains(&"before") && !labels.contains(&"sameOwner"),
+        "hooks/protected methods are not abilities: {labels:?}"
+    );
+    let targets = [
+        (
+            "Gate::allows('manage-bakery-network', 'north');",
+            "manage-bakery-network",
+            "app/Providers/DemoServiceProvider.php",
+            "Gate::define('manage-bakery-network'",
+        ),
+        ("Gate::allows('update', $bakery);", "update", "app/Policies/BakeryPolicy.php", "function update("),
+        (
+            "Gate::allows('publish', BlogPost::class);",
+            "publish",
+            "app/Policies/PublishingPolicy.php",
+            "function publish(",
+        ),
+        ("$request->input('name');", "name", "app/Http/Requests/StoreBakeryRequest.php", "'name' =>"),
+        ("$update->input('name');", "name", "app/Http/Requests/StoreBakeryRequest.php", "'name' =>"),
+        ("$update->input('slug');", "slug", "app/Http/Requests/UpdateBakeryRequest.php", "'slug' =>"),
+    ];
+    for (index, (expression, symbol, target, declaration)) in targets.iter().enumerate() {
+        let next = format!("{prefix}{expression}\n}}\n");
+        replace(&mgr, doc, index as u32 + 2, &text, &next);
+        text = next;
+        let at = Pos::new(7, expression.find(symbol).unwrap() as u32);
+        let _ = settled_completion(&mgr, doc, at).await;
+        let locations = mgr.goto(doc, at, GotoKind::Definition).await.unwrap();
+        let found = locations
+            .iter()
+            .find(|l| l.path == root.join(target))
+            .unwrap_or_else(|| panic!("{expression}: {locations:?}"));
+        let source = std::fs::read_to_string(&found.path).unwrap();
+        assert!(
+            source.lines().nth(found.range.start.line as usize).unwrap().contains(declaration),
+            "exact declaration for {expression}: {found:?}"
+        );
+        let hover = mgr
+            .hover(doc, at, Default::default())
+            .await
+            .unwrap()
+            .unwrap_or_else(|| panic!("missing hover for {expression} at {at:?}"));
+        assert!(hover.contents.value.contains(symbol), "documentation for {expression}: {}", hover.contents.value);
+    }
+    let expression = "$update->input('');";
+    let next = format!("{prefix}{expression}\n}}\n");
+    replace(&mgr, doc, 20, &text, &next);
+    text = next;
+    let at = pos(&text, "');");
+    let list = settled_completion(&mgr, doc, at).await;
+    let labels: Vec<_> = list.items.iter().map(|i| i.label.as_str()).collect();
+    for key in ["slug", "name", "apricot", "notes", "owner.email"] {
+        assert!(labels.contains(&key), "inherited validation field {key}: {labels:?}");
+    }
+    assert!(!labels.contains(&"notes.*.body"), "wildcard rule offers its addressable root: {labels:?}");
+    let request_path = root.join("app/Http/Requests/StoreBakeryRequest.php");
+    let original = std::fs::read_to_string(&request_path).unwrap();
+    let changed =
+        original.replace("'name' => 'required|string|max:255'", "'business_name' => 'required|string|max:255'");
+    assert_ne!(original, changed);
+    let request = DocId::next();
+    mgr.did_open(request, &request_path, &LanguageId::new("php"), 1, &changed);
+    let list = settled_completion(&mgr, doc, at).await;
+    let labels: Vec<_> = list.items.iter().map(|i| i.label.as_str()).collect();
+    assert!(
+        labels.contains(&"business_name") && !labels.contains(&"name"),
+        "unsaved inherited rules refresh input keys: {labels:?}"
+    );
+    let current = format!("{prefix}$update->input('business_name');\n}}\n");
+    replace(&mgr, doc, 21, &text, &current);
+    text = current;
+    let current_at = pos(&text, "business_name");
+    let _ = settled_completion(&mgr, doc, current_at).await;
+    let hover = mgr.hover(doc, current_at, Default::default()).await.unwrap().expect("unsaved field documentation");
+    assert!(hover.contents.value.contains("business_name") && hover.contents.value.contains("required|string|max:255"));
+    mgr.restart(mgr.servers()[0].id).await.unwrap();
+    let list = settled_completion(&mgr, doc, at).await;
+    assert!(list.items.iter().any(|i| i.label == "business_name"), "restart preserves unsaved rule declaration");
+    let hover =
+        mgr.hover(doc, current_at, Default::default()).await.unwrap().expect("restart restores field documentation");
+    assert!(hover.contents.value.contains("business_name"));
+    mgr.did_close(request);
+    let list = settled_completion(&mgr, doc, at).await;
+    let labels: Vec<_> = list.items.iter().map(|i| i.label.as_str()).collect();
+    assert!(
+        labels.contains(&"name") && !labels.contains(&"business_name"),
+        "closing rule overlay restores disk contract: {labels:?}"
+    );
+    assert!(
+        mgr.hover(doc, current_at, Default::default()).await.unwrap().is_none(),
+        "retired field must not retain stale documentation"
+    );
+    let bad = format!("{prefix}Gate::allows('publish', $bakery);\n}}\n");
+    replace(&mgr, doc, 40, &text, &bad);
+    let mut rejected = false;
+    for _ in 0..100 {
+        rejected = events
+            .lock()
+            .iter()
+            .rev()
+            .find_map(|e| match e {
+                IdeEvent::Diagnostics { path: diagnostic_path, items, .. } if diagnostic_path.0 == path => {
+                    Some(items.iter().any(|d| {
+                        d.code.as_deref() == Some("invalid_laravel_ability")
+                            && d.message.contains("publish")
+                            && d.message.contains("BakeryPolicy")
+                    }))
+                }
+                _ => None,
+            })
+            .unwrap_or(false);
+        if rejected {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(rejected, "an ability from another model must be diagnosed");
+    assert_eq!(std::fs::read_to_string(request_path).unwrap(), original);
+    assert!(!path.exists(), "queries must not persist the caller overlay");
+    mgr.shutdown_all().await;
+}

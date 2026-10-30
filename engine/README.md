@@ -1,9 +1,9 @@
 # Pinned PHPantom engine
 
-The local OpenStorm candidate bundles PHPantom `0.11.1-openstorm.119` for Apple
+The local OpenStorm candidate bundles PHPantom `0.11.1-openstorm.120` for Apple
 Silicon macOS. This is a local rebuild, not an upstream release. `source.json` pins
 upstream source, its archive checksum, the unchanged 114-patch PHP Workbench series,
-and OpenStorm patches 0115–0119 for JSON/environment resource isolation and precise key destinations. The executable is verified by
+and OpenStorm patches 0115–0120 for JSON/environment resource isolation and precise key destinations. The executable is verified by
 `node scripts/verify-phpantom.mjs`; its provenance and licenses are under
 `src-tauri/resources/phpantom/`.
 
@@ -120,3 +120,12 @@ Use `--nested-includes` with the fixture generator for a page -> partial chain.
 The tenth actual-client scenario verifies unsaved controller/intermediate data,
 member navigation, restart and closing an overlay. Its native observations and
 separate tab-close protection gap are recorded in `docs/OPENSTORM.md`.
+
+Patch 0120 adds request-key hover using the same current rule resolution as
+navigation. It shows literal rules, labels unevaluated expressions, preserves
+incomplete-rule information and links inherited keys to their declaring request.
+The eleventh actual-client case covers policies, field documentation/navigation,
+unsaved inherited rule changes, server restart and retired field documentation.
+Use the pinned 120 Laravel 13.37 corpus for `OPENSTORM_TEST_ENGINE_LARAVEL_ROOT`;
+its source fingerprints include the new documentation comment. Native/source
+acceptance remains tracked in the combined progress record.

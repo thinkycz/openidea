@@ -1,0 +1,981 @@
+diff --git a/docs/CHANGELOG.md b/docs/CHANGELOG.md
+--- a/docs/CHANGELOG.md
++++ b/docs/CHANGELOG.md
+@@ -14,6 +14,8 @@
+ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+ 
+ ## [Unreleased]
++
++- **Complete and inspect Laravel validation rule names.** Suggestions use the installed framework, preserve parameters, and link rule documentation and definitions to its source. Contributed by @thinkycz.
+ 
+ - **Retry documentation while PHP source updates settle.** Hover distinguishes a superseded result from a symbol with no documentation. Contributed by @thinkycz.
+ 
+diff --git a/examples/laravel/app/Demo.php b/examples/laravel/app/Demo.php
+--- a/examples/laravel/app/Demo.php
++++ b/examples/laravel/app/Demo.php
+@@ -1194,6 +1194,9 @@
+ 
+     public function requestInputKeys(StoreBakeryRequest $request): void
+     {
++        // Open StoreBakeryRequest::rules(): complete a rule name inside its
++        // strings, or inspect `required` with Hover and Go to Definition to
++        // read the installed framework validator method. Parameters stay intact.
+         // StoreBakeryRequest::rules() names every input this request can
+         // carry, so the string arguments below complete to those keys and
+         // go-to-definition jumps to the rule that declares them.
+diff --git a/src/completion/handler/mod.rs b/src/completion/handler/mod.rs
+--- a/src/completion/handler/mod.rs
++++ b/src/completion/handler/mod.rs
+@@ -462,6 +462,12 @@
+                     {
+                         return Ok(Some(response));
+                     }
++                }
++
++                if let Some(response) =
++                    self.try_validation_rule_completion(&content, position, &ctx)
++                {
++                    return Ok(Some(response));
+                 }
+ 
+                 // ── Request input key completion ────────────────────────
+diff --git a/src/completion/laravel_validation_rules.rs b/src/completion/laravel_validation_rules.rs
+new file mode 100644
+--- /dev/null
++++ b/src/completion/laravel_validation_rules.rs
+@@ -0,0 +1,42 @@
++//! Complete a Laravel validation rule name, leaving its parameters intact.
++use crate::virtual_members::laravel::validation_names::{rule_catalog, rule_name_at};
++use crate::{Backend, types::FileContext};
++use tower_lsp::lsp_types::*;
++impl Backend {
++    /// Complete only the current rule token, preserving its parameters and imports.
++    pub(crate) fn try_validation_rule_completion(
++        &self,
++        content: &str,
++        position: Position,
++        ctx: &FileContext,
++    ) -> Option<CompletionResponse> {
++        let site = rule_name_at(self, content, position, ctx)?;
++        let entries = rule_catalog(self)?;
++        let prefix = site.prefix.to_ascii_lowercase();
++        let items = entries
++            .into_iter()
++            .filter(|e| e.name.starts_with(&prefix))
++            .map(|e| CompletionItem {
++                label: e.name.clone(),
++                kind: Some(CompletionItemKind::VALUE),
++                detail: Some("Laravel validation rule".into()),
++                documentation: e.method.description.as_ref().map(|value| {
++                    Documentation::MarkupContent(MarkupContent {
++                        kind: MarkupKind::Markdown,
++                        value: value.clone(),
++                    })
++                }),
++                text_edit: Some(CompletionTextEdit::Edit(TextEdit {
++                    range: site.range,
++                    new_text: e.name,
++                })),
++                ..Default::default()
++            })
++            .collect();
++        // Runtime extensions may add names not present in installed source.
++        Some(CompletionResponse::List(CompletionList {
++            is_incomplete: true,
++            items,
++        }))
++    }
++}
+diff --git a/src/completion/mod.rs b/src/completion/mod.rs
+--- a/src/completion/mod.rs
++++ b/src/completion/mod.rs
+@@ -86,6 +86,7 @@
+ pub(crate) mod laravel_route_params;
+ pub(crate) mod laravel_string_keys;
+ pub(crate) mod laravel_translation_args;
++mod laravel_validation_rules;
+ pub mod named_args;
+ pub(crate) mod resolve;
+ pub(crate) mod target;
+diff --git a/src/definition/resolve.rs b/src/definition/resolve.rs
+--- a/src/definition/resolve.rs
++++ b/src/definition/resolve.rs
+@@ -138,6 +138,27 @@
+                 laravel::resolve_config_key_definition_fallback(self, uri, content, position)
+         {
+             return vec![loc];
++        }
++
++        {
++            use crate::virtual_members::laravel::validation_names::{
++                RULE_TRAIT, canonical_rule_name, rule_catalog, rule_name_at,
++            };
++            let ctx = self.file_context_at(
++                uri,
++                crate::text_position::position_to_offset(content, position),
++            );
++            if let Some(site) = rule_name_at(self, content, position, &ctx)
++                && let Some(entry) = rule_catalog(self).and_then(|rules| {
++                    rules
++                        .into_iter()
++                        .find(|e| e.name.eq_ignore_ascii_case(canonical_rule_name(site.name)))
++                })
++                && let Some(location) =
++                    self.class_member_declaration_location(RULE_TRAIT, &entry.method.name)
++            {
++                return vec![location];
++            }
+         }
+ 
+         // Request input keys: jump to the validation rule that declares them.
+diff --git a/src/hover/laravel_request.rs b/src/hover/laravel_request.rs
+--- a/src/hover/laravel_request.rs
++++ b/src/hover/laravel_request.rs
+@@ -6,6 +6,42 @@
+ use super::{inline_code, make_hover};
+ 
+ impl Backend {
++    /// Show the installed validation method documentation and source link.
++    pub(super) fn try_validation_rule_hover(
++        &self,
++        uri: &str,
++        content: &str,
++        position: Position,
++    ) -> Option<Hover> {
++        use crate::virtual_members::laravel::validation_names::{
++            RULE_TRAIT, canonical_rule_name, rule_catalog, rule_name_at,
++        };
++        let ctx = self.file_context_at(
++            uri,
++            crate::text_position::position_to_offset(content, position),
++        );
++        let site = rule_name_at(self, content, position, &ctx)?;
++        let entry = rule_catalog(self)?
++            .into_iter()
++            .find(|e| e.name.eq_ignore_ascii_case(canonical_rule_name(site.name)))?;
++        let mut detail = format!("**Laravel validation rule** {}", inline_code(&entry.name));
++        if let Some(description) = entry.method.description.as_ref() {
++            detail.push_str("\n\n");
++            detail.push_str(description);
++        }
++        if let Some(location) =
++            self.class_member_declaration_location(RULE_TRAIT, &entry.method.name)
++        {
++            detail.push_str(&format!(
++                "\n\n[Rule declaration](<{}#L{}>)",
++                location.uri,
++                location.range.start.line + 1
++            ));
++        }
++        let mut hover = make_hover(detail);
++        hover.range = Some(site.range);
++        Some(hover)
++    }
+     /// Show the governing rules and their exact declaration without executing PHP.
+     pub(super) fn try_request_field_hover(
+         &self,
+diff --git a/src/hover/mod.rs b/src/hover/mod.rs
+--- a/src/hover/mod.rs
++++ b/src/hover/mod.rs
+@@ -120,6 +120,10 @@
+         // is typed as model-property<Model>, show the property's type
+         // and source info (same as hovering over $model->property).
+         if let Some(hover) = self.try_model_property_hover(uri, content, position) {
++            return Some(hover);
++        }
++
++        if let Some(hover) = self.try_validation_rule_hover(uri, content, position) {
+             return Some(hover);
+         }
+ 
+diff --git a/src/virtual_members/laravel/mod.rs b/src/virtual_members/laravel/mod.rs
+--- a/src/virtual_members/laravel/mod.rs
++++ b/src/virtual_members/laravel/mod.rs
+@@ -143,6 +143,7 @@
+ mod trans_keys;
+ mod unique_ids;
+ pub(crate) mod validated_shape;
++pub(crate) mod validation_names;
+ pub(crate) mod validation_rules;
+ mod view_data;
+ mod view_names;
+diff --git a/src/virtual_members/laravel/validation_names.rs b/src/virtual_members/laravel/validation_names.rs
+new file mode 100644
+--- /dev/null
++++ b/src/virtual_members/laravel/validation_names.rs
+@@ -0,0 +1,499 @@
++//! Rule-name sites and the installed framework's validation methods.
++use std::sync::Arc;
++
++use mago_allocator::LocalArena;
++use mago_database::file::FileId;
++use mago_span::HasSpan;
++use mago_syntax::cst::*;
++use tower_lsp::lsp_types::{Position, Range};
++
++use crate::Backend;
++use crate::atom::bytes_to_str;
++use crate::class_lookup::find_class_at_offset;
++use crate::completion::source::code_context::code_context_at;
++use crate::php_type::TypeKind;
++use crate::text_position::{offset_to_position, position_to_offset};
++use crate::type_engine::resolver::{CtxLoaders, resolve_target_classes};
++use crate::types::{
++    AccessKind, ClassInfo, FileContext, MAX_INHERITANCE_DEPTH, MethodInfo, Visibility,
++};
++
++use super::helpers::{camel_to_snake, walks_parent_chain};
++use super::validation_rules::{is_form_request, is_request_like};
++
++pub(crate) const RULE_TRAIT: &str = "Illuminate\\Validation\\Concerns\\ValidatesAttributes";
++
++/// The current rule name, excluding surrounding pipes, quotes and parameters.
++pub(crate) struct RuleNameSite<'a> {
++    /// The complete name under the caret.
++    pub name: &'a str,
++    /// The typed prefix preceding the caret.
++    pub prefix: &'a str,
++    /// The name-only replacement range in UTF-16 coordinates.
++    pub range: Range,
++}
++
++/// One public built-in rule, retaining the installed source's documentation.
++pub(crate) struct RuleNameEntry {
++    /// Laravel's snake-case rule spelling.
++    pub name: String,
++    /// The installed validator method and its documentation.
++    pub method: Arc<MethodInfo>,
++}
++
++/// Normalize Laravel's short scalar aliases before looking up their methods.
++pub(crate) fn canonical_rule_name(name: &str) -> &str {
++    if name.eq_ignore_ascii_case("int") {
++        "integer"
++    } else if name.eq_ignore_ascii_case("bool") {
++        "boolean"
++    } else {
++        name
++    }
++}
++
++/// Read the built-in rule catalog from the project's installed framework.
++pub(crate) fn rule_catalog(backend: &Backend) -> Option<Vec<RuleNameEntry>> {
++    let class = backend.find_or_load_class(RULE_TRAIT)?;
++    let mut entries: Vec<_> = class
++        .methods
++        .iter()
++        .filter_map(|method| {
++            if method.visibility != Visibility::Public || method.is_static {
++                return None;
++            }
++            let suffix = method.name.strip_prefix("validate")?;
++            if suffix.is_empty() {
++                return None;
++            }
++            Some(RuleNameEntry {
++                name: camel_to_snake(suffix),
++                method: Arc::clone(method),
++            })
++        })
++        .collect();
++    entries.sort_by(|a, b| a.name.cmp(&b.name));
++    entries.dedup_by(|a, b| a.name == b.name);
++    Some(entries)
++}
++
++/// Locate a literal rule token only in a statically proven validation context.
++pub(crate) fn rule_name_at<'a>(
++    backend: &Backend,
++    content: &'a str,
++    position: Position,
++    ctx: &FileContext,
++) -> Option<RuleNameSite<'a>> {
++    let cursor = position_to_offset(content, position) as usize;
++    let code = code_context_at(content, cursor)?;
++    let (quote, _) = code.open_string?;
++    // Ordinary string arguments cannot be rule values. Avoid an AST walk for
++    // hover/completion on those frequently queried sites.
++    if !code.open_brackets.iter().any(|b| {
++        b.byte == b'[' || (b.byte == b'(' && content[..b.code_before].trim_end().ends_with("array"))
++    }) {
++        return None;
++    }
++    // Mago drops the containing statement/class for an unclosed literal.
++    // For typing at EOF only, close its lexical delimiters in a private parse
++    // buffer. Never publish these synthetic bytes or put them in an edit.
++    let repaired = if cursor == content.len() {
++        let mut value = content.to_owned();
++        value.push(code.open_string?.1);
++        let mut terminated = false;
++        for bracket in code.open_brackets.iter().rev() {
++            match bracket.byte {
++                b'[' => value.push(']'),
++                b'(' => value.push(')'),
++                b'{' => {
++                    if !terminated {
++                        value.push(';');
++                        terminated = true;
++                    }
++                    value.push('}');
++                }
++                _ => return None,
++            }
++        }
++        if !terminated {
++            value.push(';');
++        }
++        Some(value)
++    } else {
++        None
++    };
++    let recovered_classes;
++    let classes = if let Some(source) = repaired.as_ref() {
++        let (mut parsed, blocks) =
++            Backend::parse_php_classes_by_block(source, Some(backend.php_version()), false, false);
++        Backend::resolve_parent_class_names_by_block(
++            &mut parsed,
++            &blocks,
++            &ctx.use_map,
++            &ctx.namespace,
++        );
++        recovered_classes = parsed
++            .into_iter()
++            .map(|(class, _, _)| Arc::new(class))
++            .collect::<Vec<_>>();
++        &recovered_classes
++    } else {
++        &ctx.classes
++    };
++    let class_loader = backend.class_loader(ctx);
++    let class = find_class_at_offset(classes, cursor as u32);
++    let form_request = class.is_some_and(|c| is_form_request(c, &class_loader));
++    let arena = LocalArena::new();
++    let program = mago_syntax::parser::parse_file_content(
++        &arena,
++        FileId::new(b"rules.php"),
++        repaired.as_deref().unwrap_or(content).as_bytes(),
++    );
++    let search = RuleSearch {
++        backend,
++        content,
++        parse_content: repaired.as_deref().unwrap_or(content),
++        ctx,
++        classes,
++        cursor: cursor as u32,
++        quote,
++        form_request,
++    };
++    let (start, end, pipe_list) = search.walk(Node::Program(program), false)?;
++    let value = content.get(start..end)?;
++    let local = cursor.checked_sub(start)?;
++    if local > value.len() {
++        return None;
++    }
++    let segment_start = if pipe_list {
++        value[..local].rfind('|').map_or(0, |p| p + 1)
++    } else {
++        0
++    };
++    let segment_end = if pipe_list {
++        value[segment_start..]
++            .find('|')
++            .map_or(value.len(), |p| segment_start + p)
++    } else {
++        value.len()
++    };
++    let name_end = value[segment_start..segment_end]
++        .bytes()
++        .position(|c| !(c.is_ascii_alphanumeric() || c == b'_'))
++        .map_or(segment_end, |n| segment_start + n);
++    if local < segment_start || local > name_end {
++        return None;
++    }
++    Some(RuleNameSite {
++        name: &value[segment_start..name_end],
++        prefix: &value[segment_start..local],
++        range: Range::new(
++            offset_to_position(content, start + segment_start),
++            offset_to_position(content, start + name_end),
++        ),
++    })
++}
++
++struct RuleSearch<'a> {
++    backend: &'a Backend,
++    content: &'a str,
++    parse_content: &'a str,
++    ctx: &'a FileContext,
++    classes: &'a [Arc<ClassInfo>],
++    cursor: u32,
++    quote: usize,
++    form_request: bool,
++}
++
++impl RuleSearch<'_> {
++    fn walk(&self, node: Node<'_, '_>, in_rules: bool) -> Option<(usize, usize, bool)> {
++        let span = node.span();
++        if self.quote < span.start.offset as usize || self.quote > span.end.offset as usize {
++            return None;
++        }
++        let in_rules = match node {
++            Node::Method(m) => {
++                self.form_request && bytes_to_str(m.name.value).eq_ignore_ascii_case("rules")
++            }
++            Node::Closure(_) | Node::ArrowFunction(_) | Node::Function(_) => false,
++            _ => in_rules,
++        };
++        let rules = match node {
++            Node::Return(ret) if in_rules => ret.value,
++            Node::MethodCall(call) => {
++                self.call_argument(call.object, &call.method, &call.argument_list, false)
++            }
++            Node::NullSafeMethodCall(call) => {
++                self.call_argument(call.object, &call.method, &call.argument_list, false)
++            }
++            Node::StaticMethodCall(call) => {
++                self.call_argument(call.class, &call.method, &call.argument_list, true)
++            }
++            _ => None,
++        };
++        if let Some(rules) = rules
++            && let Some(site) = rule_value_site(rules, self.content, self.quote)
++        {
++            return Some(site);
++        }
++        let mut found = None;
++        node.visit_children(|child| {
++            if found.is_none() {
++                found = self.walk(child, in_rules);
++            }
++        });
++        found
++    }
++
++    fn call_argument<'ast, 'arena>(
++        &self,
++        receiver: &Expression<'arena>,
++        method: &ClassLikeMemberSelector<'arena>,
++        arguments: &'ast ArgumentList<'arena>,
++        is_static: bool,
++    ) -> Option<&'ast Expression<'arena>> {
++        let ClassLikeMemberSelector::Identifier(ident) = method else {
++            return None;
++        };
++        let method = bytes_to_str(ident.value);
++        if ![
++            "validate",
++            "validateWithBag",
++            "validateWith",
++            "make",
++            "setRules",
++            "addRules",
++        ]
++        .iter()
++        .any(|n| method.eq_ignore_ascii_case(n))
++        {
++            return None;
++        }
++        let span = receiver.span();
++        let subject = self
++            .content
++            .get(span.start.offset as usize..span.end.offset as usize)?;
++        let class_loader = self.backend.class_loader(self.ctx);
++        let function_loader = self.backend.function_loader(self.ctx);
++        let macro_this = self.backend.laravel_macro_this_resolver(&class_loader);
++        let rctx = self.backend.resolution_ctx_at(
++            find_class_at_offset(self.classes, self.cursor),
++            self.classes,
++            self.parse_content,
++            self.cursor,
++            CtxLoaders::new(&class_loader, &function_loader, &macro_this),
++        );
++        let access = if is_static {
++            AccessKind::DoubleColon
++        } else {
++            AccessKind::Arrow
++        };
++        let mut indices = Vec::new();
++        for target in resolve_target_classes(subject, access, &rctx) {
++            let Some(class) = target.class_info else {
++                if target.type_string.is_null() {
++                    continue;
++                }
++                return None;
++            };
++            // One loaded class may carry a union hint with unresolved or
++            // scalar peers. ClassInfo alone is not proof of that whole union.
++            if let TypeKind::Union(members) = target.type_string.kind()
++                && members.iter().any(|member| {
++                    !member.is_null()
++                        && member.base_name().is_none_or(|name| {
++                            class_loader(name.trim_start_matches('\\'))
++                                .is_none_or(|peer| peer.fqn() != class.fqn())
++                        })
++                })
++            {
++                return None;
++            }
++            let index = if is_static
++                && class
++                    .fqn()
++                    .eq_ignore_ascii_case("Illuminate\\Support\\Facades\\Validator")
++            {
++                if method.eq_ignore_ascii_case("make") || method.eq_ignore_ascii_case("validate") {
++                    Some(1)
++                } else {
++                    None
++                }
++            } else if !is_static && is_request_like(&class, &class_loader) {
++                if method.eq_ignore_ascii_case("validate") {
++                    Some(0)
++                } else if method.eq_ignore_ascii_case("validateWithBag") {
++                    Some(1)
++                } else {
++                    None
++                }
++            } else if !is_static && has_validation_trait(&class, &class_loader, 0) {
++                if method.eq_ignore_ascii_case("validate") {
++                    Some(1)
++                } else if method.eq_ignore_ascii_case("validateWithBag") {
++                    Some(2)
++                } else if method.eq_ignore_ascii_case("validateWith") {
++                    Some(0)
++                } else {
++                    None
++                }
++            } else if !is_static && class_family(&class, &class_loader, is_factory) {
++                if method.eq_ignore_ascii_case("make") || method.eq_ignore_ascii_case("validate") {
++                    Some(1)
++                } else {
++                    None
++                }
++            } else if !is_static && class_family(&class, &class_loader, is_validator) {
++                if method.eq_ignore_ascii_case("setRules")
++                    || method.eq_ignore_ascii_case("addRules")
++                {
++                    Some(0)
++                } else {
++                    None
++                }
++            } else {
++                None
++            };
++            // A union with a non-validation receiver is ambiguous.
++            indices.push(index?);
++        }
++        let index = *indices.first()?;
++        if indices.iter().any(|i| *i != index) {
++            return None;
++        }
++        let name = if method.eq_ignore_ascii_case("validateWith") {
++            "validator"
++        } else {
++            "rules"
++        };
++        rule_argument(arguments, index, name)
++    }
++}
++
++fn rule_argument<'ast, 'arena>(
++    args: &'ast ArgumentList<'arena>,
++    index: usize,
++    name: &str,
++) -> Option<&'ast Expression<'arena>> {
++    for (ordinal, argument) in args.arguments.iter().enumerate() {
++        match argument {
++            Argument::Named(named) if bytes_to_str(named.name.value).eq_ignore_ascii_case(name) => {
++                return Some(named.value);
++            }
++            Argument::Positional(positional) if ordinal == index => return Some(positional.value),
++            _ => {}
++        }
++    }
++    None
++}
++
++fn class_family(
++    class: &ClassInfo,
++    loader: &dyn Fn(&str) -> Option<Arc<ClassInfo>>,
++    predicate: fn(&str) -> bool,
++) -> bool {
++    predicate(&class.fqn()) || walks_parent_chain(class, loader, predicate)
++}
++fn is_factory(name: &str) -> bool {
++    [
++        "Illuminate\\Validation\\Factory",
++        "Illuminate\\Contracts\\Validation\\Factory",
++    ]
++    .iter()
++    .any(|n| name.eq_ignore_ascii_case(n))
++}
++fn is_validator(name: &str) -> bool {
++    [
++        "Illuminate\\Validation\\Validator",
++        "Illuminate\\Contracts\\Validation\\Validator",
++    ]
++    .iter()
++    .any(|n| name.eq_ignore_ascii_case(n))
++}
++fn has_validation_trait(
++    class: &ClassInfo,
++    loader: &dyn Fn(&str) -> Option<Arc<ClassInfo>>,
++    depth: u32,
++) -> bool {
++    if depth > MAX_INHERITANCE_DEPTH {
++        return false;
++    }
++    class.used_traits.iter().any(|name| {
++        name.eq_ignore_ascii_case("Illuminate\\Foundation\\Validation\\ValidatesRequests")
++            || loader(name).is_some_and(|c| has_validation_trait(&c, loader, depth + 1))
++    }) || class
++        .parent_class
++        .as_ref()
++        .and_then(|p| loader(p))
++        .is_some_and(|c| has_validation_trait(&c, loader, depth + 1))
++}
++
++fn rule_value_site(
++    expr: &Expression<'_>,
++    content: &str,
++    quote: usize,
++) -> Option<(usize, usize, bool)> {
++    match expr {
++        Expression::Parenthesized(p) => rule_value_site(p.expression, content, quote),
++        Expression::Array(a) => rule_elements(a.elements.iter(), content, quote),
++        Expression::LegacyArray(a) => rule_elements(a.elements.iter(), content, quote),
++        Expression::Call(Call::Function(call)) if matches!(call.function,Expression::Identifier(i) if i.value().eq_ignore_ascii_case(b"array_merge")) => {
++            call.argument_list
++                .arguments
++                .iter()
++                .find_map(|a| rule_value_site(a.value(), content, quote))
++        }
++        _ => None,
++    }
++}
++fn rule_elements<'a>(
++    elements: impl Iterator<Item = &'a ArrayElement<'a>>,
++    content: &str,
++    quote: usize,
++) -> Option<(usize, usize, bool)> {
++    for element in elements {
++        let ArrayElement::KeyValue(kv) = element else {
++            continue;
++        };
++        if !matches!(kv.key, Expression::Literal(literal::Literal::String(_))) {
++            continue;
++        }
++        if let Some((s, e)) = literal_site(kv.value, content, quote) {
++            return Some((s, e, true));
++        }
++        let values = match kv.value {
++            Expression::Array(a) => Some(a.elements.iter()),
++            Expression::LegacyArray(a) => Some(a.elements.iter()),
++            _ => None,
++        };
++        if let Some(values) = values {
++            for value in values {
++                if let ArrayElement::Value(v) = value
++                    && let Some((s, e)) = literal_site(v.value, content, quote)
++                {
++                    return Some((s, e, false));
++                }
++            }
++        }
++    }
++    None
++}
++fn literal_site(expr: &Expression<'_>, content: &str, quote: usize) -> Option<(usize, usize)> {
++    let Expression::Literal(literal::Literal::String(s)) = expr else {
++        return None;
++    };
++    let start = s.span.start.offset as usize;
++    let end = (s.span.end.offset as usize).min(content.len());
++    if start != quote || end <= start {
++        return None;
++    }
++    if end >= start + 2 && content.as_bytes().get(start) == content.as_bytes().get(end - 1) {
++        Some((start + 1, end - 1))
++    } else if end == content.len() {
++        // The private parse buffer supplied the closing quote; the original
++        // token ends at EOF, so that synthetic quote is outside the edit.
++        Some((start + 1, end))
++    } else {
++        None
++    }
++}
+diff --git a/tests/integration/common/mod.rs b/tests/integration/common/mod.rs
+--- a/tests/integration/common/mod.rs
++++ b/tests/integration/common/mod.rs
+@@ -1479,7 +1479,12 @@
+     let offset = content.find('§').expect("test source needs a § cursor");
+     let before = &content[..offset];
+     let line = before.matches('\n').count() as u32;
+-    let character = before.rsplit('\n').next().unwrap_or("").chars().count() as u32;
++    let character = before
++        .rsplit('\n')
++        .next()
++        .unwrap_or("")
++        .encode_utf16()
++        .count() as u32;
+     (content.replace('§', ""), Position { line, character })
+ }
+ 
+diff --git a/tests/integration/laravel_validation_names.rs b/tests/integration/laravel_validation_names.rs
+new file mode 100644
+--- /dev/null
++++ b/tests/integration/laravel_validation_names.rs
+@@ -0,0 +1,243 @@
++//! Rule names must come from installed validation source and a proven rule site.
++use crate::common::{
++    apply_edits, complete_at_opened, create_psr4_workspace, definition_locations,
++    goto_definition_at, hover_text_at, item_labels, open_php_at, split_cursor,
++};
++use tower_lsp::LanguageServer;
++use tower_lsp::lsp_types::*;
++
++const COMPOSER: &str = r#"{"require":{"laravel/framework":"*"},"autoload":{"psr-4":{"App\\":"src/","Illuminate\\":"vendor/illuminate/"}}}"#;
++const TRAIT: &str = "<?php namespace Illuminate\\Validation\\Concerns; trait ValidatesAttributes {
++/** The value must be supplied. */ public function validateRequired($attribute,$value): bool { return true; }
++/** The value must not exceed its limit. */ public function validateMax($attribute,$value,$parameters): bool { return true; }
++public function validateInteger($attribute,$value): bool { return true; }
++public function validateBoolean($attribute,$value): bool { return true; }
++protected function validateInternal() {} public static function validateStaticHelper() {} }";
++const PREFIX: &str = "<?php\nnamespace App;\nuse Illuminate\\Foundation\\Http\\FormRequest;\nuse Illuminate\\Http\\Request;\nuse Illuminate\\Support\\Facades\\Validator as V;\n";
++
++async fn opened(
++    body: &str,
++) -> (
++    phpantom_lsp::Backend,
++    tempfile::TempDir,
++    Url,
++    Position,
++    String,
++) {
++    let (source, at) = split_cursor(&format!("{PREFIX}{body}"));
++    let files = [
++        (
++            "vendor/illuminate/Foundation/Http/FormRequest.php",
++            "<?php namespace Illuminate\\Foundation\\Http; class FormRequest extends \\Illuminate\\Http\\Request {}",
++        ),
++        (
++            "vendor/illuminate/Http/Request.php",
++            "<?php namespace Illuminate\\Http; class Request { public function validate(array $rules): array { return []; } public function validateWithBag($bag,array $rules): array { return []; } }",
++        ),
++        (
++            "vendor/illuminate/Support/Facades/Validator.php",
++            "<?php namespace Illuminate\\Support\\Facades; class Validator { public static function make($data,array $rules) {} public static function validate($data,array $rules) {} }",
++        ),
++        (
++            "vendor/illuminate/Foundation/Validation/ValidatesRequests.php",
++            "<?php namespace Illuminate\\Foundation\\Validation; trait ValidatesRequests { public function validate($request,array $rules): array { return []; } public function validateWithBag($bag,$request,array $rules): array { return []; } }",
++        ),
++        (
++            "vendor/illuminate/Contracts/Validation/Factory.php",
++            "<?php namespace Illuminate\\Contracts\\Validation; interface Factory { public function make($data,array $rules); }",
++        ),
++        (
++            "vendor/illuminate/Validation/Validator.php",
++            "<?php namespace Illuminate\\Validation; class Validator { public function setRules(array $rules) {} public function addRules(array $rules) {} }",
++        ),
++        (
++            "vendor/illuminate/Validation/Concerns/ValidatesAttributes.php",
++            TRAIT,
++        ),
++        ("src/Probe.php", source.as_str()),
++    ];
++    let (backend, dir) = create_psr4_workspace(COMPOSER, &files);
++    let uri = open_php_at(&backend, &dir, "src/Probe.php", &source).await;
++    (backend, dir, uri, at, source)
++}
++
++#[tokio::test]
++async fn validation_names_complete_literal_pipe_array_legacy_and_merged_rules() {
++    for expression in [
++        "['title'=>'string|req§']",
++        "['title'=>['string','req§']]",
++        "array('title'=>'req§')",
++        "array_merge(parent::rules(), ['title'=>'req§'])",
++        "['title'=>'§']",
++    ] {
++        let body = format!(
++            "class Probe extends FormRequest {{ public function rules(): array {{ return {expression}; }} }}"
++        );
++        let (backend, _dir, uri, at, _) = opened(&body).await;
++        let labels = item_labels(complete_at_opened(&backend, &uri, at.line, at.character).await);
++        assert!(
++            labels.contains(&"required".into()),
++            "{expression}: {labels:?}"
++        );
++        assert!(
++            !labels.contains(&"internal".into()) && !labels.contains(&"static_helper".into()),
++            "helpers are not validation rules: {labels:?}"
++        );
++    }
++}
++
++#[tokio::test]
++async fn validation_names_prove_inline_receiver_and_named_rules_argument() {
++    for body in [
++        "function probe(?Request $r) { $r?->validate(['title'=>'req§']); }",
++        "function probe(Request $r) { $r->validate(['title'=>'req§']); }",
++        "function probe(Request $r) { $r->validateWithBag('bag', rules: ['title'=>'req§']); }",
++        "function probe() { V::make(rules: ['title'=>'req§'], data: []); }",
++        "function probe() { V::make([], ['title'=>'req§'], messages: []); }",
++        "function probe() { V::validate([], ['title'=>'req§']); }",
++        "class Probe { use \\Illuminate\\Foundation\\Validation\\ValidatesRequests; public function probe(Request $r) { $this->validate($r, ['title'=>'req§']); } }",
++        "class Probe { use \\Illuminate\\Foundation\\Validation\\ValidatesRequests; public function probe(Request $r) { $this->validateWithBag('bag', $r, ['title'=>'req§']); } }",
++        "function probe(\\Illuminate\\Contracts\\Validation\\Factory $f) { $f->make([], ['title'=>'req§']); }",
++        "function probe(\\Illuminate\\Validation\\Validator $v) { $v->setRules(['title'=>'req§']); }",
++    ] {
++        let (backend, _dir, uri, at, _) = opened(body).await;
++        let labels = item_labels(complete_at_opened(&backend, &uri, at.line, at.character).await);
++        assert!(labels.contains(&"required".into()), "{body}: {labels:?}");
++    }
++}
++
++#[tokio::test]
++async fn validation_names_refuse_other_arrays_parameter_payloads_and_ambiguous_receivers() {
++    for body in [
++        "function ordinary() { return ['title'=>'req§']; }",
++        "class Probe { public function rules() { return ['title'=>'req§']; } }",
++        "class Probe extends FormRequest { public function messages() { return ['title'=>'req§']; } }",
++        "class Probe extends FormRequest { public function rules() { return ['title'=>'min:req§']; } }",
++        "class Probe extends FormRequest { public function rules() { return ['title'=>['regex:/a|req§/']]; } }",
++        "class Fake { public function validate(array $rules) {} } function probe(Fake $r) { $r->validate(['title'=>'req§']); }",
++        "class Fake { public function validate(array $rules) {} } function probe(Request|Fake $r) { $r->validate(['title'=>'req§']); }",
++        "function probe(Request|UnknownReceiver $r) { $r->validate(['title'=>'req§']); }",
++        "function probe(Request|int $r) { $r->validate(['title'=>'req§']); }",
++        "class Probe extends FormRequest { public function rules() { return ['title'=>'required','req§'=>'string']; } }",
++    ] {
++        let (backend, _dir, uri, at, _) = opened(body).await;
++        let labels = item_labels(complete_at_opened(&backend, &uri, at.line, at.character).await);
++        assert!(!labels.contains(&"required".into()), "{body}: {labels:?}");
++    }
++}
++
++#[tokio::test]
++async fn validation_names_replace_only_name_with_unicode_and_preserve_parameters() {
++    let body = "class Probe extends FormRequest { public function rules() { /* 😀 */ return ['title'=>['ma§:12','required']]; } }";
++    let (backend, _dir, uri, at, source) = opened(body).await;
++    let items = complete_at_opened(&backend, &uri, at.line, at.character).await;
++    let item = items
++        .iter()
++        .find(|i| i.label == "max")
++        .expect("max rule from installed source");
++    let Some(CompletionTextEdit::Edit(edit)) = &item.text_edit else {
++        panic!("a precise edit is required")
++    };
++    assert_eq!(
++        edit.range,
++        Range::new(Position::new(at.line, at.character - 2), at)
++    );
++    assert_eq!(
++        apply_edits(&source, std::slice::from_ref(edit)),
++        source.replace("'ma:12'", "'max:12'")
++    );
++}
++
++#[tokio::test]
++async fn validation_names_hover_and_definition_retain_rule_token_origin() {
++    let body = "class Probe extends FormRequest { public function rules() { /* 😀 */ return ['title'=>'string|ma§x:12']; } }";
++    let (backend, _dir, uri, at, _) = opened(body).await;
++    let hover = hover_text_at(&backend, &uri, at.line, at.character)
++        .await
++        .unwrap();
++    assert!(
++        hover.contains("max")
++            && hover.contains("must not exceed")
++            && hover.contains("Rule declaration"),
++        "{hover}"
++    );
++    let locations =
++        definition_locations(goto_definition_at(&backend, &uri, at.line, at.character).await);
++    let location = locations.first().expect("rule definition");
++    let source = std::fs::read_to_string(location.uri.to_file_path().unwrap()).unwrap();
++    assert!(
++        source
++            .lines()
++            .nth(location.range.start.line as usize)
++            .unwrap()
++            .contains("function validateMax(")
++    );
++}
++
++#[tokio::test]
++async fn validation_names_laravel_int_bool_aliases_resolve_to_installed_methods() {
++    for (alias, method) in [("in§t", "validateInteger"), ("bo§ol", "validateBoolean")] {
++        let body = format!(
++            "class Probe extends FormRequest {{ public function rules() {{ return ['title'=>'{alias}']; }} }}"
++        );
++        let (backend, _dir, uri, at, _) = opened(&body).await;
++        let locations =
++            definition_locations(goto_definition_at(&backend, &uri, at.line, at.character).await);
++        let location = locations.first().expect("Laravel's normalized rule alias");
++        let source = std::fs::read_to_string(location.uri.to_file_path().unwrap()).unwrap();
++        assert!(
++            source
++                .lines()
++                .nth(location.range.start.line as usize)
++                .unwrap()
++                .contains(method)
++        );
++    }
++}
++
++#[tokio::test]
++async fn validation_names_follow_unsaved_installed_trait_and_restore_after_close() {
++    let body = "class Probe extends FormRequest { public function rules() { return ['title'=>'fresh§']; } }";
++    let (backend, dir, uri, at, _) = opened(body).await;
++    let file = "vendor/illuminate/Validation/Concerns/ValidatesAttributes.php";
++    let changed=TRAIT.replacen("protected function validateInternal", "public function validateFreshRule($attribute,$value): bool { return true; } protected function validateInternal",1);
++    let trait_uri = open_php_at(&backend, &dir, file, &changed).await;
++    let labels = item_labels(complete_at_opened(&backend, &uri, at.line, at.character).await);
++    assert!(labels.contains(&"fresh_rule".into()), "{labels:?}");
++    backend
++        .did_close(DidCloseTextDocumentParams {
++            text_document: TextDocumentIdentifier { uri: trait_uri },
++        })
++        .await;
++    let labels = item_labels(complete_at_opened(&backend, &uri, at.line, at.character).await);
++    assert!(
++        !labels.contains(&"fresh_rule".into()),
++        "closed overlay must restore disk methods: {labels:?}"
++    );
++    assert_eq!(
++        std::fs::read_to_string(dir.path().join(file)).unwrap(),
++        TRAIT
++    );
++}
++
++#[tokio::test]
++async fn validation_names_complete_unclosed_rule_string() {
++    for body in [
++        "class Probe extends FormRequest { public function rules() { return ['title'=>'string|req§",
++        "function probe(Request $r) { $r->validate(['title'=>'req§",
++        "function probe() { V::make(rules: ['title'=>'req§",
++    ] {
++        let (backend, _dir, uri, at, _) = opened(body).await;
++        let labels = item_labels(complete_at_opened(&backend, &uri, at.line, at.character).await);
++        assert!(
++            labels.contains(&"required".into()),
++            "completion while typing an unclosed rule: {body}: {labels:?}"
++        );
++    }
++    let (backend, _dir, uri, at, _) = opened("function ordinary() { return ['title'=>'req§").await;
++    let labels = item_labels(complete_at_opened(&backend, &uri, at.line, at.character).await);
++    assert!(
++        !labels.contains(&"required".into()),
++        "repair must not invent a validation context"
++    );
++}
+diff --git a/tests/integration/main.rs b/tests/integration/main.rs
+--- a/tests/integration/main.rs
++++ b/tests/integration/main.rs
+@@ -243,6 +243,7 @@
+ mod laravel_translation_keys;
+ mod laravel_unique_ids;
+ mod laravel_validated_shape;
++mod laravel_validation_names;
+ mod laravel_view_names;
+ mod lsp_concurrency;
+ mod lsp_refresh_resilience;

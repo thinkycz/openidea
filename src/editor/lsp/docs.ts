@@ -111,8 +111,13 @@ const DECLARATION_KEYWORDS =
 export function hoverCandidates(lineText: string, col: number): number[] {
   const out = [col];
   const re = /[A-Za-z_$][\w$]*/g;
+  const parameters = lineText.indexOf("(");
   for (let m = re.exec(lineText); m && out.length < 5; m = re.exec(lineText)) {
-    if (m.index < col || DECLARATION_KEYWORDS.test(m[0])) continue;
+    if (m.index < col) continue;
+    // A line link names the declaration, not one of its parameters. Keep
+    // an explicit link column above, but never guess a neighboring argument.
+    if (parameters >= 0 && m.index > parameters) break;
+    if (DECLARATION_KEYWORDS.test(m[0])) continue;
     if (!out.includes(m.index)) out.push(m.index);
   }
   return out;

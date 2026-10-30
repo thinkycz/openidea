@@ -138,7 +138,8 @@
       "status": "partial",
       "acceptance_gate": "Accurate overload/parameter/return/docs; cheap list then resolve",
       "openstorm_evidence": [
-        "0.1.35 / engine121: first-request documentation works without completion warmup in the real client and native F1; typed/switched/moved/closed/superseded source answers are refused, and Escape cancels pending documentation. Native immediate restart, genuine empty response, typing/discard/reopen and relaunch pass. See docs/OPENSTORM.md."
+        "0.1.35 / engine121: first-request documentation works without completion warmup in the real client and native F1; typed/switched/moved/closed/superseded source answers are refused, and Escape cancels pending documentation. Native immediate restart, genuine empty response, typing/discard/reopen and relaunch pass. See docs/OPENSTORM.md.",
+        "0.1.37: native plain declaration link no longer documents a neighboring parameter; exact Edit Source, first rule documentation, initial post-restart documentation, Escape cancellation and relaunch documentation observed. Three public link-handler regressions protect fallback, method docs and explicit parameter links. Later native server stall remains unaccepted."
       ],
       "remaining": "Reassess current OpenStorm implementation against this full gate; Workbench acceptance does not transfer."
     },
@@ -392,9 +393,12 @@
       "status": "partial",
       "acceptance_gate": "Rule names/field refs/action abilities navigate and validate by context",
       "openstorm_evidence": [
-        "0.1.33 / engine120: five public field-hover cases, all 11 actual-client and 3 host cases pass. Policy completion excludes hooks/protected methods; exact gate/convention/registered policy and inherited request-key navigation, documentation, unsaved field changes/restart/close restoration and wrong-model ability diagnostics pass. Native F1/CmdB/source links, unsaved rule changes, actual server restart, explicit discard, relaunch and cleanup observed; see docs/OPENSTORM.md."
+        "0.1.33 / engine120: five public field-hover cases, all 11 actual-client and 3 host cases pass. Policy completion excludes hooks/protected methods; exact gate/convention/registered policy and inherited request-key navigation, documentation, unsaved field changes/restart/close restoration and wrong-model ability diagnostics pass. Native F1/CmdB/source links, unsaved rule changes, actual server restart, explicit discard, relaunch and cleanup observed; see docs/OPENSTORM.md.",
+        "Engine122 pre-native: 8 new public rule-name tests and all 13 OpenStorm client / 3 host cases pass against archived normal-release executable f1b2a6b06587afd007c9f74508525d54f37b609be49aa78ba0807273069189e2. Catalog retains installed trait origin, Unicode name-only edits, parameters/imports, incomplete status, aliases, receiver narrowing, unsaved trait restoration and private EOF parse recovery. Native 0.1.36 remains pending; see docs/OPENSTORM.md.",
+        "0.1.36 native diagnostic candidate: F1 rule docs, CmdB exact installed method, requ completion and persisted undo/redo pass; quit/app-server exit and post-runtime signature pass. Plain declaration link incorrectly documents the adjacent parameter, so candidate remains unaccepted. Frontend fallback correction has red/green public handler tests; native 0.1.37 is pending.",
+        "0.1.37 native: declaration-link correction opens method source; max list/selection and parameter-preserving persisted undo/redo pass. Owned profile recovers with no project argument, first docs and initial post-restart docs pass, relaunch/quit cleanup/signature pass. Candidate remains unaccepted: later background reference timeouts and semantic-resolution stall after restart with framework trait open. Native sample points into pending class-resolution waits during Blade dependency inspection; see docs/OPENSTORM.md."
       ],
-      "remaining": "Rule-name catalog completion/navigation and the broader validation/auth context matrix remain unaccepted. The earlier first-hover/startup limitation is corrected and observed in 0.1.35; this does not accept the full feature area."
+      "remaining": "Resolve the observed 0.1.37 post-restart semantic-resolution stall before accepting this batch. Runtime custom rules, computed rule arrays, parameter field references, unknown-rule diagnostics and broader validation/auth contexts remain open; full area stays partial."
     },
     {
       "id": "FEAT-036",
@@ -709,9 +713,10 @@
       "status": "partial",
       "acceptance_gate": "Comparable corpora; first-use/warm p95, peak/steady RSS, idle CPU and cancellation",
       "openstorm_evidence": [
-        "0.1.32 four-second native-process sample on tiny 4-file plain PHP/text fixture: app 210.56 MiB RSS / 1.70% CPU, PHPantom 49.33 MiB RSS / 0.00% CPU. Excludes WebKit/GPU/network helpers; not total footprint or parity. Normal quit confirmed app/server exit; broader normalized performance remains open."
+        "0.1.32 four-second native-process sample on tiny 4-file plain PHP/text fixture: app 210.56 MiB RSS / 1.70% CPU, PHPantom 49.33 MiB RSS / 0.00% CPU. Excludes WebKit/GPU/network helpers; not total footprint or parity. Normal quit confirmed app/server exit; broader normalized performance remains open.",
+        "0.1.37 Laravel 13.37.0: active 4-second post-restart sample native RSS 203.45 MiB / 1.00% CPU, engine 163.56 MiB / 19.45%; excludes WebKit/GPU/network total. Engine remains active for minutes and references time out with framework source open. Not an idle, controlled fresh/warm or parity result. Receipts and sample in docs/OPENSTORM.md."
       ],
-      "remaining": "Reassess current OpenStorm implementation against this full gate; Workbench acceptance does not transfer."
+      "remaining": "Investigate and fix the observed post-restart class-resolution waits before accepting the rule-name batch. Complete controlled startup/idle/large-source/cancellation measurements and the wider performance gate."
     },
     {
       "id": "FEAT-066",
@@ -754,7 +759,9 @@
       "milestone": "cross-cutting",
       "status": "partial",
       "acceptance_gate": "Engine crash preserves buffers; retries limited; logs omit source/secrets by policy",
-      "openstorm_evidence": [],
+      "openstorm_evidence": [
+        "0.1.37: quit exits app and engine even after the observed semantic-resolution stall. Separate no-argument relaunch recovers owned project/tabs/caret and first docs; final app/server exit and signature verified. Stall itself remains open, so full isolation gate stays partial."
+      ],
       "remaining": "Reassess current OpenStorm implementation against this full gate; Workbench acceptance does not transfer."
     },
     {

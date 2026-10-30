@@ -1,9 +1,10 @@
 # Pinned PHPantom engine
 
-The local OpenStorm candidate bundles PHPantom `0.11.1-openstorm.121` for Apple
+The local OpenStorm candidate bundles PHPantom `0.11.1-openstorm.122` for Apple
 Silicon macOS. This is a local rebuild, not an upstream release. `source.json` pins
 upstream source, its archive checksum, the unchanged 114-patch PHP Workbench series,
-and OpenStorm patches 0115–0121 for JSON/environment resource isolation and precise key destinations. The executable is verified by
+and OpenStorm patches 0115–0122 for resource isolation, Blade and Laravel assistance,
+and source-update recovery. The executable is verified by
 `node scripts/verify-phpantom.mjs`; its provenance and licenses are under
 `src-tauri/resources/phpantom/`.
 
@@ -138,3 +139,14 @@ requests documentation immediately after opening the pinned Demo and after each
 restart, without completion/navigation warmup. The 120 Laravel corpus remains
 compatible because 0121 changes no example source. Native acceptance is tracked
 in `docs/OPENSTORM.md`; a candidate pin does not imply full release acceptance.
+
+The 122 candidate completes literal Laravel validation rule names from the installed
+framework and opens their documentation/declarations. Name-only edits preserve
+parameters and imports, with UTF-16 ranges and incomplete-result status retained.
+EOF completion uses a private recovered parse; ambiguous receiver alternatives
+are refused. Eight new public engine tests, all 13 OpenStorm client cases and all
+3 host cases pass against the final archived normal-release executable. Dynamic
+rule extensions and computed rule arrays remain outside this catalog slice.
+Native 0.1.36/0.1.37 candidates remain unaccepted: the client link fallback is
+corrected, but a post-restart resolution stall is under investigation. Evidence
+and acceptance gates remain in docs/OPENSTORM.md.

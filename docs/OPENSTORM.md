@@ -1387,3 +1387,173 @@ catalog and broader validation/auth matrix remain open; first-hover recovery doe
 not accept a whole feature area. No new push, publishing, migration or replacement
 of installed optimized 0.1.21 occurred. The next dependent Laravel slice can now
 proceed from this locally accepted batch.
+
+### Validation rule-name assistance started
+
+Previous goal turn made verified progress: accepted native 0.1.35 and local
+checkpoint `a844533`, with clean worktree and runtime hashes matching the signed
+receipt. FEAT-035 still lacks rule-name catalog assistance. A thirteenth actual-client
+regression is red on archived engine 121: `string|requ` inside FormRequest::rules()
+returns an empty completion list. The acceptance test also requires exact replacement,
+installed trait-method navigation/documentation, array rules, inline validation and
+negative ordinary-array/parameter/regex contexts. No candidate is accepted yet.
+
+Only inactive generated SDK unit/integration test executables were pruned from the
+compiler cache, retaining recent copies and every output from 0.1.35 validation.
+Application bin targets, signed bundles, source, fixtures, receipts/logs, PHP
+Workbench and earlier saved evaluations were preserved. Free space rose from
+2.22 GiB to 15.64 GiB. Selection receipts: `unit-compiler-cache-prune-122.json` and
+`integration-compiler-cache-prune-122.json` in artifacts/checks. Scratch engine work
+is isolated at `artifacts/phpantom-work/122-validation-rule-names`; source pin,
+bundled 121 and signed 0.1.35 remain unchanged.
+
+The first engine regression pass found two failures (5/7 passed): short `int` /
+`bool` aliases did not navigate, and the shared test cursor helper counted Unicode
+scalars rather than UTF-16 units. The engine's emoji replacement range was correct;
+the helper now uses UTF-16. A second pass passed those checks and found gaps in
+mixed positional/named arguments and an unfinished EOF string (6/8 passed). Both
+have focused fixes under verification. The prototype's actual OpenStorm client
+path already passed the initial closed-string completion/navigation/documentation
+checks; this is development evidence, not native acceptance or engine promotion.
+
+The parser probe confirmed Mago reports `UnclosedLiteralString` and drops the
+containing class, so treating the token as an ordinary literal cannot work. EOF
+completion now reparses a private buffer with only the open lexical delimiters
+closed and uses the existing version-aware class parser/type resolver. Synthetic
+bytes are never indexed, saved or included in edits. An unresolved non-null union
+branch now refuses suggestions rather than silently accepting only its Request
+branch. Probe output/source are retained in artifacts/checks.
+
+Focused engine tests now pass 8/8 (`validation-rules-122-public-tests-6.log`),
+including named/positional calls, aliases, Unicode replacement, ambiguous loaded
+and unresolved receivers, unsaved trait changes/close restoration, and private
+EOF recovery for FormRequest, Request and facade calls. The expanded real-client
+regression also passes, including EOF completion and retained incomplete status
+(`validation-rules-122-client-probe-3.log`). These used an explicitly archived
+diagnostic prototype with opt-level=0; Cargo.toml has been restored byte-for-byte
+to its baseline before linting and the eventual optimized rebuild. No prototype
+has replaced the bundled engine.
+
+The formatted 13-file engine change is exported as patch 0122 (SHA-256
+`ff571197bca88d4319e0dc8e0cee2c78f4a988e84bf7c7bc918eb62e8978d1f4`).
+The 122-patch identity is `cc0563320fa7` (full identity in engine/source.json).
+Acquisition/replay produced a new verified source tree; full suite, clean-source
+Clippy/format and the normal optimized recipe build are running before binary
+promotion. A separate Laravel 13.37.0 corpus copies the preserved 120 baseline,
+excludes all environment files, and updates only the pinned Demo.php comment.
+The 0.1.36 native fixture validates 108 pinned baseline fingerprints and passes
+non-Blade PHP syntax checks with the explicit workspace PHP 8.4.23 CLI. Receipt:
+`artifacts/checks/validation-0.1.36-fixture.json`. No app 0.1.36 has been built yet.
+
+This slice completes a statically proven built-in catalog, not the entire
+validation/auth gate. Runtime rule extensions, variable/computed rule arrays,
+parameter field references, custom receiver implementations and remaining policy
+contexts still require separate acceptance. Unknown-rule diagnostics have not
+been added by this slice; completion retains incomplete status for dynamic rules.
+
+0.1.36 preparation: frontend 3,012 tests, typecheck, lint and production asset
+build pass. Existing hook/chunk/import warnings remain; no new frontend behavior
+was introduced. The offline lock refresh changes only the 34 workspace package
+versions (receipt `validation-0.1.36-lock-verification.json`). Root all-target
+Clippy is running. The full engine suite is still compiling its optimized test
+executables; no full-suite success or engine promotion is claimed yet.
+
+Two existing OpenStorm process-launch tests create disposable environment files
+with fake FROM_FILE/OVERRIDDEN/PYTHONPATH data, beyond the exact PHPantom-suite
+approval. An asynchronous request asks to include those two tests under
+`env-file-mutation-guard/SKILL.md`'s explicit-scope rule. They are not run while
+that answer is pending; other checks continue. The thirteenth real-client test
+also verifies unresolved-union refusal and instanceof narrowing, using no disk
+source or environment-file writes (`validation-rules-122-client-narrowing.log`).
+
+The clean 122 suite passes: 18,377 suite tests / 17 ignored, plus one separately
+reported FIFO-reader child harness (raw log total 18,378). Its interleaved output
+is accounted for in `phpantom-122-source-test-counts.json`. Clean-source all-target
+Clippy and format pass. The normal recipe build is finishing; the archived
+pre-suite optimized executable reports version 122 and its static Laravel analyze
+finds exactly the intentional errors at Demo.php 731 (two) and 951 (one). The
+final recipe executable will be checked separately before promotion if its digest
+differs. Existing rust-objcopy/libLLVM strip warnings remain nonfatal.
+
+The final normal-release recipe executable is separately archived with licenses,
+provenance, toolchain and build receipt at artifacts/engines/0.11.1-openstorm.122.
+SHA-256: `f1b2a6b06587afd007c9f74508525d54f37b609be49aa78ba0807273069189e2`.
+All 13 real-client and 3 host edit cases pass on that exact digest, and the final
+Laravel analyze again finds only the three expected Demo.php errors. Resource
+promotion and checksum verification pass; engine121 and previous signed apps
+remain archived. Root Clippy/format pass, and workspace tests pass 1,307 / 36
+ignored with the two permission-dependent tests excluded (not an unfiltered
+workspace gate). No app/engine process remains before native setup. The 0.1.36
+development app is building; native acceptance is not yet claimed.
+
+### 0.1.36 native finding: declaration-link fallback
+
+Signed app 0.1.36 launched in its isolated profile with system-only PATH and used
+its bundled engine (exact app/child paths recorded). F1 on required displays the
+installed rule documentation. CmdB lands on validateRequired at 2168:21. Editing
+required to requ produces a required completion; accepting preserves parameters
+and neighbors. CmdZ/CmdS produces the exact expected disk diff; redo/CmdS restores
+the original file byte-for-byte. Quit exits app/server and post-runtime deep strict
+signature verifies. Receipt: `validation-0.1.36-native-result.json`.
+
+The candidate is **not accepted**: plain Rule declaration link follows the existing
+in-place documentation convention, but its fallback probes subsequent parameters
+and displays `$attribute = string` instead of the method or source. Native
+restart/relaunch acceptance is held for the corrected app. A public link-handler
+regression reproduces this exact wrong-target behavior; two compatibility cases
+cover method docs and explicitly targeted parameter links. The minimal client fix
+stops guessed targets at the parameter-list boundary while retaining an explicit
+link column. Focused red then green: `validation-doc-link-{red,green}.log`, 14 tests
+green including the existing popup suite. Engine122 source/binary are unchanged;
+0.1.37 will carry the corrected client with a distinct signed bundle/receipt.
+
+0.1.37 validation: all 3,015 frontend tests pass. Two optional-access checks in the
+new test harness were corrected after strict typecheck flagged unchecked array
+indexes; final typecheck/lint/build and the final 14 focused documentation tests
+pass. Full Rust checks are rerunning on the new version; PHPantom122 has unchanged
+source and archived executable, so its passed 18,377 source / 13 client / 3 host
+checks remain applicable. The next native run reuses only the owned disposable
+0.1.36 profile/project (source restored), exercising a synthetic upgrade and
+relaunch without touching installed-user state.
+
+### 0.1.37 native checks: link correction passes; restart stall retained
+
+Signed development app 0.1.37 recovers the owned 0.1.36 fixture/profile with no
+project argument. Required/max F1 docs are correct. Plain Rule declaration now
+opens the installed method line (2168:1) rather than parameter documentation;
+Edit Source opens validateMax exactly at 1710:21. The actual completion list
+visually shows mac_address, max and max_digits; Down selects max. Accepting the
+completion preserves :255 and neighboring rules. CmdZ/CmdS has an exact disk
+witness (only max becomes ma); redo/CmdS restores the original file bytes.
+
+Restart is available in the existing status-bar Language Servers control. Action
+search for Restart Language Server had no result; the broader discovery gate
+remains open. The restart changes the bundled engine PID (46532 -> 47207), and
+initial post-restart F1 max succeeds. F1/Escape leaves no late popup in the
+observed cancellation cycle.
+
+The candidate is **not accepted**. After restart with the large framework trait
+open, two background widened reference searches time out at 30 seconds. Server
+CPU continues for minutes; a later foreground F1 produces no docs by 12 seconds.
+One 4.0-second sample observes native RSS 203.45 MiB / 1.00% one-core CPU and
+engine RSS 163.56 MiB / 19.45% CPU; this is active post-restart work, **not idle**.
+Native RSS excludes WebKit/GPU/network services. First IPC is 3,419 ms on the owned
+previous profile, not UI-ready time; OS caches and other system activity were
+not controlled. Receipt: validation-0.1.37-runtime-metrics.json.
+
+A two-second native engine sample places the main LSP thread in did_open -> Blade
+dependency receiver inference -> Laravel model/mixin class resolution ->
+wait_for_pending/nanosleep. Source has a five-second pending-owner escape hatch
+and per-thread recursion guard after the pending wait. A cross-thread/variant
+cycle is a hypothesis, not yet proven: owner/key instrumentation and a real-client
+restart regression must identify it before a fix. Sample and logs are retained
+under validation-0.1.37-engine-busy*.
+
+Quit exits the stalled app and engine cleanly. A separate no-argument relaunch
+recovers both tabs/caret; first F1 max succeeds. Final quit leaves no app/server
+process and post-runtime deep strict signature verifies. Source file is restored
+byte-for-byte. Native receipt: validation-0.1.37-native-result.json. Apps 0.1.36
+and 0.1.37 remain diagnostic candidates; 0.1.35 is the last fully accepted local
+app, and installed optimized 0.1.21 remains untouched. Two existing process-env
+tests still await explicit scope approval. All 69 areas remain 67 partial /
+2 user-deferred. No push or publication occurred.

@@ -1067,3 +1067,91 @@ async fn laravel_request_documentation_as_first_request_after_open_and_restart()
     assert_eq!(std::fs::read_to_string(path).unwrap(), text);
     mgr.shutdown_all().await;
 }
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires OPENSTORM_TEST_ENGINE_LARAVEL_ROOT pinned Laravel 13.37.0 fixture"]
+async fn laravel_validation_rule_names_through_client() {
+    let root = PathBuf::from(std::env::var_os("OPENSTORM_TEST_ENGINE_LARAVEL_ROOT").expect("engine Laravel fixture"))
+        .canonicalize()
+        .unwrap();
+    let mut php = LanguageRegistry::load(None).unwrap().get(&LanguageId::new("php")).unwrap();
+    php.language_servers.retain(|s| s.name == "phpantom");
+    php.language_servers[0].command = std::env::var("OPENSTORM_TEST_PHPANTOM_BIN").expect("engine executable");
+    let mgr = LspManager::new(root.clone(), Arc::new(LanguageRegistry::from_configs(vec![php])), Arc::new(|_| {}));
+    let path = root.join("openstorm-rule-names-client.php");
+    assert!(!path.exists(), "the acceptance source stays an overlay");
+    let prefix = "<?php\nnamespace App;\nuse Illuminate\\Foundation\\Http\\FormRequest;\nuse Illuminate\\Http\\Request;\nuse Illuminate\\Support\\Facades\\Validator;\n";
+    let scenarios = [
+        "class RuleNameProbe extends FormRequest { public function rules(): array { /* 😀 */ return ['title' => 'string|requ']; } }",
+        "class RuleNameProbe extends FormRequest { public function rules(): array { return ['title' => ['string', 'requ']]; } }",
+        "function probe(Request $request): void { $request->validate(['title' => 'string|requ']); }",
+        "function probe(Request|UnknownRuleReceiver $request): void { if ($request instanceof Request) { $request->validate(['title' => 'string|requ']); } }",
+        "function probe(array $data): void { Validator::make($data, ['title' => 'string|requ']); }",
+        "function probe(array $data): void { Validator::make($data, ['title' => 'string|requ'], messages: []); }",
+        "function probe(array $data): void { Validator::make(rules: ['title' => 'string|requ'], data: $data); }",
+    ];
+    let doc = DocId::next();
+    let mut text = format!("{prefix}{}\n", scenarios[0]);
+    mgr.did_open(doc, &path, &LanguageId::new("php"), 1, &text);
+    for (index, scenario) in scenarios.iter().enumerate() {
+        let next = format!("{prefix}{scenario}\n");
+        if index > 0 {
+            replace(&mgr, doc, index as u32 + 1, &text, &next);
+            text = next;
+        }
+        let start = pos(&text, "requ'");
+        let end = Pos::new(start.line, start.col + 4);
+        let list = settled_completion(&mgr, doc, end).await;
+        assert!(list.is_incomplete, "runtime extensions remain explicitly incomplete");
+        let required = list
+            .items
+            .iter()
+            .find(|i| i.label == "required")
+            .unwrap_or_else(|| panic!("validation rule names for {scenario}: {list:?}"));
+        assert_eq!(required.insert_text, "required");
+        assert_eq!(required.replace_range, Some(Range::new(start, end)), "only the current rule name is replaced");
+        assert!(required.additional_edits.is_empty());
+    }
+    let next = format!("{prefix}{}\n", scenarios[0].replace("requ'", "required'"));
+    replace(&mgr, doc, 10, &text, &next);
+    text = next;
+    let at = pos(&text, "required'");
+    let _ = settled_completion(&mgr, doc, at).await;
+    let definitions = mgr.goto(doc, at, GotoKind::Definition).await.unwrap();
+    let definition = definitions
+        .iter()
+        .find(|d| d.path.ends_with("Validation/Concerns/ValidatesAttributes.php"))
+        .unwrap_or_else(|| panic!("installed validation method origin: {definitions:?}"));
+    let declaration = std::fs::read_to_string(&definition.path).unwrap();
+    assert!(
+        declaration.lines().nth(definition.range.start.line as usize).unwrap().contains("function validateRequired(")
+    );
+    let hover = mgr.hover(doc, at, Default::default()).await.unwrap().expect("validation rule documentation");
+    assert!(hover.contents.value.to_lowercase().contains("required"));
+    for (index, expression) in [
+        "function unrelated(): array { return ['title' => 'requ']; }",
+        "function probe(Request|UnknownRuleReceiver $request): void { $request->validate(['title' => 'requ']); }",
+        "class Ordinary { public function rules(): array { return ['title' => 'requ']; } }",
+        "class RuleNameProbe extends FormRequest { public function messages(): array { return ['title' => 'requ']; } }",
+        "class RuleNameProbe extends FormRequest { public function rules(): array { return ['title' => 'min:requ']; } }",
+        "class RuleNameProbe extends FormRequest { public function rules(): array { return ['title' => ['regex:/requ/']]; } }",
+    ].iter().enumerate() {
+        let next = format!("{prefix}{expression}\n");
+        replace(&mgr, doc, 20 + index as u32, &text, &next); text = next;
+        let marker = if expression.contains("/requ/") { "requ/" } else { "requ'" };
+        let start = pos(&text, marker);
+        let list = settled_completion(&mgr, doc, Pos::new(start.line, start.col + 4)).await;
+        assert!(!list.items.iter().any(|i| i.label == "required"), "not a validation rule name: {expression}");
+    }
+    let next = format!(
+        "{prefix}class RuleNameProbe extends FormRequest {{ public function rules(): array {{ return ['title' => 'string|requ"
+    );
+    replace(&mgr, doc, 30, &text, &next);
+    text = next;
+    let start = pos(&text, "requ");
+    let list = settled_completion(&mgr, doc, Pos::new(start.line, start.col + 4)).await;
+    let item = list.items.iter().find(|item| item.label == "required").expect("unfinished EOF rule completion");
+    assert_eq!(item.replace_range, Some(Range::new(start, Pos::new(start.line, start.col + 4))));
+    mgr.shutdown_all().await;
+    assert!(!path.exists());
+}

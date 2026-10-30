@@ -29,6 +29,19 @@ fn replace(mgr: &LspManager, doc: DocId, version: u32, old: &str, new: &str) {
     );
 }
 
+async fn settled_completion(mgr: &LspManager, doc: DocId, at: Pos) -> ide_lsp::types::CompletionList {
+    for _ in 0..80 {
+        match mgr.completion(doc, at, None, Default::default()).await {
+            Ok(list) => return list,
+            Err(error) if error.kind == ide_core::error::ErrorKind::Cancelled => {
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+            Err(error) => panic!("completion failed: {error}"),
+        }
+    }
+    panic!("view-data semantic snapshot did not settle");
+}
+
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires the pinned macOS Apple Silicon PHPantom executable"]
 async fn composer_intelligence_builtins_unsaved_changes_and_restart() {
@@ -634,18 +647,6 @@ async fn laravel_casts_relationships_scopes_and_facades_through_client() {
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires the pinned macOS Apple Silicon PHPantom executable"]
 async fn laravel_view_data_tracks_unsaved_callers_and_template_shadowing() {
-    async fn settled_completion(mgr: &LspManager, doc: DocId, at: Pos) -> ide_lsp::types::CompletionList {
-        for _ in 0..80 {
-            match mgr.completion(doc, at, None, Default::default()).await {
-                Ok(list) => return list,
-                Err(error) if error.kind == ide_core::error::ErrorKind::Cancelled => {
-                    tokio::time::sleep(Duration::from_millis(25)).await;
-                }
-                Err(error) => panic!("completion failed: {error}"),
-            }
-        }
-        panic!("view-data semantic snapshot did not settle");
-    }
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path().canonicalize().unwrap();
     for dir in ["app", "resources/views"] {
@@ -799,5 +800,80 @@ async fn laravel_native_view_fixture_reopens_unsaved_dependencies() {
     }
     assert_eq!(std::fs::read_to_string(caller_path).unwrap(), original);
     assert_eq!(std::fs::read_to_string(template_path).unwrap(), original_template);
+    mgr.shutdown_all().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires the pinned macOS Apple Silicon PHPantom executable"]
+async fn laravel_view_data_propagates_through_unsaved_includes() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().canonicalize().unwrap();
+    for dir in ["app", "resources/views/partials"] {
+        std::fs::create_dir_all(root.join(dir)).unwrap();
+    }
+    let controller = "<?php\nnamespace App;\nclass Controller { public function show(): mixed {\n$item = new Item();\nreturn view('page', compact('item'));\n} }\n";
+    let page = "@include('partials.row', ['row' => $item])\n";
+    let partial = "<p>😀</p>\n{{ $row->name }}\n";
+    let files = [
+        (
+            "composer.json",
+            r#"{"require":{"php":"^8.2","laravel/framework":"12.*"},"autoload":{"psr-4":{"App\\":"app/"}}}"#,
+        ),
+        ("app/Item.php", "<?php\nnamespace App;\nclass Item { public string $name; public int $price; }\n"),
+        ("app/Stock.php", "<?php\nnamespace App;\nclass Stock { public string $sku; public int $quantity; }\n"),
+        ("app/Controller.php", controller),
+        ("resources/views/page.blade.php", page),
+        ("resources/views/partials/row.blade.php", partial),
+    ];
+    for (name, text) in files {
+        std::fs::write(root.join(name), text).unwrap();
+    }
+    let mut php = LanguageRegistry::load(None).unwrap().get(&LanguageId::new("php")).unwrap();
+    php.language_servers.retain(|s| s.name == "phpantom");
+    php.language_servers[0].command = std::env::var("OPENSTORM_TEST_PHPANTOM_BIN").expect("engine executable");
+    let mgr = LspManager::new(root.clone(), Arc::new(LanguageRegistry::from_configs(vec![php])), Arc::new(|_| {}));
+    let leaf = DocId::next();
+    let middle = DocId::next();
+    let caller = DocId::next();
+    // Open the leaf first: earlier startup publication must not strand its inferred scope.
+    for (doc, name, text) in [
+        (leaf, "resources/views/partials/row.blade.php", partial),
+        (middle, "resources/views/page.blade.php", page),
+        (caller, "app/Controller.php", controller),
+    ] {
+        mgr.did_open(doc, &root.join(name), &LanguageId::new("php"), 1, text);
+    }
+    let list = settled_completion(&mgr, leaf, Pos::new(1, 9)).await;
+    assert!(list.items.iter().any(|i| i.label == "price"), "controller -> page -> partial: {:?}", list.items);
+    let changed_controller = controller.replace("new Item()", "new Stock()");
+    replace(&mgr, caller, 2, controller, &changed_controller);
+    let changed_partial = partial.replace("->name", "->quantity");
+    replace(&mgr, leaf, 2, partial, &changed_partial);
+    let list = settled_completion(&mgr, leaf, Pos::new(1, 9)).await;
+    let labels: Vec<_> = list.items.iter().map(|i| i.label.as_str()).collect();
+    assert!(labels.contains(&"quantity") && !labels.contains(&"price"), "current caller reaches partial: {labels:?}");
+    let targets = mgr.goto(leaf, Pos::new(1, 11), GotoKind::Definition).await.unwrap();
+    assert!(targets.iter().any(|l| l.path == root.join("app/Stock.php")), "mapped nested member target: {targets:?}");
+    let shadowed_page = format!("@php $item = new \\App\\Item(); @endphp\n{page}");
+    replace(&mgr, middle, 2, page, &shadowed_page);
+    let list = settled_completion(&mgr, leaf, Pos::new(1, 9)).await;
+    let labels: Vec<_> = list.items.iter().map(|i| i.label.as_str()).collect();
+    assert!(
+        labels.contains(&"price") && !labels.contains(&"quantity"),
+        "unsaved intermediate binding wins: {labels:?}"
+    );
+    mgr.restart(mgr.servers()[0].id).await.unwrap();
+    let list = settled_completion(&mgr, leaf, Pos::new(1, 9)).await;
+    assert!(list.items.iter().any(|i| i.label == "price"), "restart retains unsaved intermediate include scope");
+    mgr.did_close(middle);
+    let list = settled_completion(&mgr, leaf, Pos::new(1, 9)).await;
+    let labels: Vec<_> = list.items.iter().map(|i| i.label.as_str()).collect();
+    assert!(
+        labels.contains(&"quantity") && !labels.contains(&"price"),
+        "closing intermediate overlay restores disk include and current caller: {labels:?}"
+    );
+    for (name, text) in files {
+        assert_eq!(std::fs::read_to_string(root.join(name)).unwrap(), text);
+    }
     mgr.shutdown_all().await;
 }

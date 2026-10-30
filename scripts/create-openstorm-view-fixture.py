@@ -15,6 +15,8 @@ parser.add_argument('--baseline', type=Path, required=True,
                     help='Disposable pinned engine example with Laravel 13.37.0 already installed')
 parser.add_argument('--php', type=Path, required=True, help='Explicit PHP 8.4+ CLI used only for syntax checks')
 parser.add_argument('--label', default='view', help='Short label for the new temporary fixture')
+parser.add_argument('--nested-includes', action='store_true',
+                    help='Render the data through an intermediate page and included partial')
 args = parser.parse_args()
 if not re.fullmatch(r'[A-Za-z0-9._-]+', args.label):
     parser.error('Label must contain only letters, digits, periods, underscores or hyphens')
@@ -59,6 +61,9 @@ files = {
     'app/OpenStormFixtures/Controller.php': "<?php\nnamespace App\\OpenStormFixtures;\nclass Controller { public function show(): mixed {\n$item = new Item();\nreturn view('openstorm-stock', compact('item'));\n} }\n",
     'resources/views/openstorm-stock.blade.php': '<h1>😀 shop</h1>\n{{ $item->name }}\n',
 }
+if args.nested_includes:
+    files['resources/views/openstorm-stock.blade.php'] = "@include('partials.openstorm-stock-row', ['row' => $item])\n"
+    files['resources/views/partials/openstorm-stock-row.blade.php'] = '<p>😀 stock</p>\n{{ $row->name }}\n'
 if any((baseline / name).exists() for name in files):
     parser.error('Baseline already contains the owned view-data fixture files')
 base = Path(tempfile.mkdtemp(prefix=f'openstorm-{args.label}-')).resolve()
@@ -84,6 +89,7 @@ receipt = {
     'environment_files': 'excluded; none created',
     'verified_pinned_baseline_files': verified,
     'syntax': f'{len(php_files)} non-Blade PHP files linted with explicit PHP CLI and -n',
+    'scenario': 'nested includes' if args.nested_includes else 'direct view data',
     'files': files,
 }
 print(json.dumps(receipt, indent=2))

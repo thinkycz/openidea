@@ -115,3 +115,8 @@ The script checks source fingerprints, lock/install metadata and PHP syntax befo
 returning project/profile paths. It never runs Composer or framework commands.
 Set `OPENSTORM_TEST_VIEW_ROOT` to its returned project for the ninth real-client
 case, covering Blade-first unsaved dependencies through repeated server starts.
+
+Use `--nested-includes` with the fixture generator for a page -> partial chain.
+The tenth actual-client scenario verifies unsaved controller/intermediate data,
+member navigation, restart and closing an overlay. Its native observations and
+separate tab-close protection gap are recorded in `docs/OPENSTORM.md`.

@@ -1037,3 +1037,40 @@ quit-witness,fixture}.json`, runtime/relaunch logs, `phpantom-119-*`, and
 installed optimized 0.1.21 is unchanged. No publishing/push/notarization occurred.
 All 69 areas remain visible and partial/deferred; broader Blade/component and
 semantic freshness matrices continue after this accepted batch.
+
+### Next view-data slice: nested includes
+
+Accepted Blade recovery batch checkpoint: `27820e7` (local only). Working tree was
+clean immediately after the commit. Next actual-client acceptance scenario follows
+controller -> page -> partial, opening the leaf first, then changing the unsaved
+controller model and the intermediate page binding. It checks mapped member goto,
+retirement of previous members, restart and closing the intermediate overlay.
+The first run is in progress against archived119; no nested-include acceptance is
+claimed yet. No engine or application runtime code changed for this check.
+
+Nested-include actual-client case passes against119; all ten real-client cases
+pass together. Focused client-test Clippy and workspace formatting pass. The
+runtime/source engine is unchanged from the accepted0.1.31 build, so its full
+source/workspace/frontend/host/build gates are reused rather than rerun.
+
+Native0.1.31 nested fixture: leaf-first Item name documentation resolves with both
+providers closed. Unsaved controller Stock data completes quantity in the partial.
+An unsaved intermediate Item binding overrides it, with Item name completion and
+documentation. Server restart41043 ->41056 retains that binding. Closing the
+intermediate overlay returns Stock quantity completion/documentation. All five
+fixture source files remain byte-identical on disk throughout; no environment
+files exist. Final normal quit discards only the owned overlays, exits app41016
+and server41056, and post-runtime signature verifies. Focus autosave was restored
+true only in the owned profile after quitting. Actual-client mapped member goto
+passed; nested native goto was not separately exercised.
+
+A separate editor gap was observed: with focus autosave disabled, closing the
+modified intermediate tab silently loses the unsaved page binding. Reopening
+shows disk text, and quitting reports three dirty files including that closed page.
+Code inspection confirms DocumentManager.release disposes dirty models when
+files.autoSave=false, and closeGuard retains docDirty ids after document close.
+The next batch must guard individual/bulk tab closure and clear closed-document
+dirty tracking, preserving default autosave and external-conflict protection.
+This limits editor acceptance, not the observed include-data transitions.
+Evidence: `laravel-include-119-client-{first,all}.log`, client-clippy/fmt logs and
+`laravel-include-0.1.31-{fixture,unsaved-witness,native-result}.json`.

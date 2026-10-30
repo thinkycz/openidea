@@ -1,9 +1,9 @@
 # Pinned PHPantom engine
 
-The local OpenStorm candidate bundles PHPantom `0.11.1-openstorm.120` for Apple
+The local OpenStorm candidate bundles PHPantom `0.11.1-openstorm.121` for Apple
 Silicon macOS. This is a local rebuild, not an upstream release. `source.json` pins
 upstream source, its archive checksum, the unchanged 114-patch PHP Workbench series,
-and OpenStorm patches 0115–0120 for JSON/environment resource isolation and precise key destinations. The executable is verified by
+and OpenStorm patches 0115–0121 for JSON/environment resource isolation and precise key destinations. The executable is verified by
 `node scripts/verify-phpantom.mjs`; its provenance and licenses are under
 `src-tauri/resources/phpantom/`.
 
@@ -129,3 +129,12 @@ unsaved inherited rule changes, server restart and retired field documentation.
 Use the pinned 120 Laravel 13.37 corpus for `OPENSTORM_TEST_ENGINE_LARAVEL_ROOT`;
 its source fingerprints include the new documentation comment. Native/source
 acceptance remains tracked in the combined progress record.
+
+Patch 0121 preserves ContentModified for hover when an admitted source update
+has not finished. The client retries this explicit error within one request
+deadline, cancelling on source edits, document replacement or engine restart.
+Genuine missing documentation remains final. The twelfth actual-client scenario
+requests documentation immediately after opening the pinned Demo and after each
+restart, without completion/navigation warmup. The 120 Laravel corpus remains
+compatible because 0121 changes no example source. Native acceptance is tracked
+in `docs/OPENSTORM.md`; a candidate pin does not imply full release acceptance.

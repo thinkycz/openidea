@@ -211,23 +211,28 @@ impl Server {
     }
 
     /// Ready → Stopping, returning the instance to shut down. An in-flight
-    /// start is abandoned instead.
-    pub fn begin_stop(&self) -> Option<Running> {
+    /// start is abandoned instead. During a restart, new requests wait for
+    /// the replacement rather than observing a temporary unavailable phase.
+    pub fn begin_stop(&self, restarting: bool) -> Option<Running> {
         let mut st = self.state.lock();
+        let phase = if restarting { Phase::Starting } else { Phase::Down };
         match std::mem::replace(&mut st.conn, Conn::Idle) {
             Conn::Ready(run) => {
                 st.conn = Conn::Stopping;
-                self.phase.send_replace(Phase::Down);
+                self.phase.send_replace(phase);
                 Some(run)
             }
             Conn::Starting => {
                 st.generation += 1; // invalidates the in-flight start
                 self.start_cancel.lock().cancel();
-                self.phase.send_replace(Phase::Down);
+                self.phase.send_replace(phase);
                 None
             }
             other => {
                 st.conn = other;
+                if !restarting {
+                    self.phase.send_replace(Phase::Down);
+                }
                 None
             }
         }

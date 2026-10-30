@@ -977,8 +977,7 @@ impl LspManager {
         let (snap, targets) = self.doc_targets(doc, "hover", |c| c.has("hoverProvider")).await?;
         let mut out = Outcome::new();
         for t in targets.iter().filter(|t| snap.asks(t, pos)) {
-            let r: IdeResult<Option<lsp::Hover>> =
-                self.call(t, "textDocument/hover", snap.pos_params(t, pos), Some(&cancel), DEFAULT_TIMEOUT).await;
+            let r = self.current_hover(doc, &snap, t, pos, &cancel).await;
             match r {
                 Ok(Some(h)) => {
                     if let Some(h) = convert::hover(&self.conv(t.enc()), &snap.path, h) {
@@ -992,6 +991,60 @@ impl LspManager {
             }
         }
         out.finish(None)
+    }
+
+    /// A pending semantic publication is not an authoritative empty hover.
+    /// Retry only that explicit protocol error, within one normal request deadline.
+    async fn current_hover(
+        &self,
+        doc: DocId,
+        snap: &DocSnap,
+        t: &Target,
+        pos: Pos,
+        cancel: &CancellationToken,
+    ) -> IdeResult<Option<lsp::Hover>> {
+        let method = "textDocument/hover";
+        let params = snap.pos_params(t, pos);
+        let deadline = tokio::time::Instant::now() + DEFAULT_TIMEOUT;
+        let current = || {
+            !cancel.is_cancelled()
+                && t.server.running_gen(t.run.generation).is_some()
+                && self.docs.lock().get(&doc).is_some_and(|d| {
+                    d.uri == snap.uri
+                        && Arc::ptr_eq(&d.text, &snap.text)
+                        && d.servers
+                            .iter()
+                            .any(|a| a.server.id == t.server.id && a.opened_gen == Some(t.run.generation))
+                })
+        };
+        loop {
+            if !current() {
+                return Err(IdeError::cancelled());
+            }
+            let response = tokio::time::timeout_at(
+                deadline,
+                t.run.peer.request::<_, Option<lsp::Hover>>(method, &params, Some(cancel.clone())),
+            )
+            .await
+            .unwrap_or(Err(RpcError::Timeout));
+            if !current() {
+                return Err(IdeError::cancelled());
+            }
+            match response {
+                Err(RpcError::Server { code, .. }) if code == ide_jsonrpc::codes::CONTENT_MODIFIED => {
+                    // Give the admitted producer time to publish. Never retry a
+                    // genuine null result, other server errors or caller edits.
+                    if tokio::time::Instant::now() + Duration::from_millis(50) >= deadline {
+                        return Err(IdeError::cancelled());
+                    }
+                    tokio::select! {
+                        () = cancel.cancelled() => return Err(IdeError::cancelled()),
+                        () = tokio::time::sleep(Duration::from_millis(50)) => {}
+                    }
+                }
+                result => return result.map_err(|e| rpc_err(&t.server.name, method, e)),
+            }
+        }
     }
 
     pub async fn signature_help(&self, doc: DocId, pos: Pos) -> IdeResult<Option<SignatureHelp>> {
@@ -2185,7 +2238,7 @@ impl LspManager {
 
     /// Gracefully stops the current instance (`shutdown` + `exit`, then kill).
     async fn stop_instance(&self, server: &Arc<Server>, final_stop: bool) {
-        let Some(run) = server.begin_stop() else {
+        let Some(run) = server.begin_stop(!final_stop) else {
             if final_stop {
                 server.set_status(&self.sink, ide_core::event::ServerStatus::Stopped, None);
             }

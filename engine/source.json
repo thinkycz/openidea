@@ -2,8 +2,8 @@
   "repository": "https://github.com/PHPantom-dev/phpantom_lsp",
   "commit": "1756b1f920c1290d4c4fdd4d2c902fad53a75cd3",
   "archive_sha256": "f0a1dc7fa44d309e6d5e8ed65a2075749c1fc177b45820031f58290f1aec5cee",
-  "patches_sha256": "d8724ece5749022374bad91de25c9d0c81dd46c64d3cc9126e0caef81f7ae5b4",
-  "version": "0.11.1-openstorm.120",
+  "patches_sha256": "72e046472a6affe511f1af18e9b03dbae04f9fa301f0b83a31c645096a219de7",
+  "version": "0.11.1-openstorm.121",
   "patches": [
     {
       "file": "0001-workspace-tool-policy.patch",
@@ -484,6 +484,10 @@
     {
       "file": "0120-request-field-rule-hover.patch",
       "sha256": "dca0c87f41a7bd4064d498f1aa3f8ab90b28ccc8561d096099a2ffed3328122e"
+    },
+    {
+      "file": "0121-hover-content-modified.patch",
+      "sha256": "459c811a785d6058c9943b77c6d64cc680cd21d57577c3843801dcd067bd194a"
     }
   ]
 }

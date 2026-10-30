@@ -12,6 +12,7 @@ pub fn client_capabilities() -> Value {
             "staleRequestSupport": {
                 "cancel": true,
                 "retryOnContentModified": [
+                    "textDocument/hover",
                     "textDocument/semanticTokens/full",
                     "textDocument/inlayHint",
                     "textDocument/codeLens"

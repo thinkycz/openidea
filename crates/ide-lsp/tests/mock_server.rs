@@ -29,10 +29,14 @@ struct MockState {
     responses: Mutex<HashMap<String, Value>>,
     /// Computes a response from the request and the open documents (before `responses`).
     responder: Mutex<Option<Responder>>,
+    fault: Mutex<Option<FaultResponder>>,
+    shutdown_pause: Mutex<Option<ShutdownPause>>,
     peer: Mutex<Option<Peer>>,
 }
 
 type Responder = Arc<dyn Fn(&MockState, &str, &Value) -> Option<Value> + Send + Sync>;
+type FaultResponder = Arc<dyn Fn(&MockState, &str) -> Option<(i64, String)> + Send + Sync>;
+type ShutdownPause = (std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>);
 
 impl MockState {
     fn notified(&self, method: &str) -> Vec<Value> {
@@ -120,8 +124,19 @@ impl Handler for MockHandler {
         s.requests.lock().push((method.to_owned(), params.clone()));
         match method {
             "initialize" => Ok(json!({ "capabilities": s.caps.lock().clone(), "serverInfo": { "name": "mock" } })),
-            "shutdown" => Ok(Value::Null),
+            "shutdown" => {
+                let pause = s.shutdown_pause.lock().take();
+                if let Some((started, release)) = pause {
+                    started.send(()).unwrap();
+                    release.recv_timeout(Duration::from_secs(5)).expect("release the test shutdown");
+                }
+                Ok(Value::Null)
+            }
             _ => {
+                let fault = s.fault.lock().clone();
+                if let Some(error) = fault.and_then(|f| f(s, method)) {
+                    return Err(error);
+                }
                 let responder = s.responder.lock().clone();
                 if let Some(v) = responder.and_then(|f| f(s, method, &params)) {
                     return Ok(v);
@@ -167,6 +182,134 @@ impl Launcher for MockLauncher {
 }
 
 // ------------------------------------------------------------------ harness
+
+#[tokio::test]
+async fn hover_retries_content_modified_but_not_a_genuine_empty_result() {
+    let h = harness(&[("mock", incremental_caps())]);
+    let s = h.launcher.state("mock");
+    *s.fault.lock() = Some(Arc::new(|s, method| {
+        (method == "textDocument/hover" && s.requested(method).len() == 1)
+            .then(|| (ide_jsonrpc::codes::CONTENT_MODIFIED, "index publication".into()))
+    }));
+    s.respond("textDocument/hover", json!({"contents": {"kind": "markdown", "value": "current rules"}}));
+    let (doc, _) = h.open("main.mk", "field");
+    let hover = h.mgr.hover(doc, Pos::new(0, 2), Default::default()).await.unwrap().unwrap();
+    assert_eq!(hover.contents.value, "current rules");
+    assert_eq!(s.requested("textDocument/hover").len(), 2);
+    s.respond("textDocument/hover", Value::Null);
+    assert!(h.mgr.hover(doc, Pos::new(0, 2), Default::default()).await.unwrap().is_none());
+    assert_eq!(s.requested("textDocument/hover").len(), 3, "empty documentation is final");
+    h.mgr.shutdown_all().await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn hover_content_modified_retry_is_bounded_and_stops_after_typing_or_cancellation() {
+    for mode in ["busy", "typed", "typed success", "closed", "cancelled", "server error"] {
+        let h = harness(&[("mock", incremental_caps())]);
+        let s = h.launcher.state("mock");
+        s.respond("textDocument/hover", json!({"contents": {"kind": "markdown", "value": "outdated documentation"}}));
+        let (doc, _) = h.open("main.mk", "field");
+        let cancel = ide_core::CancellationToken::new();
+        let weak = Arc::downgrade(&h.mgr);
+        let token = cancel.clone();
+        *s.fault.lock() = Some(Arc::new(move |_, method| {
+            if method != "textDocument/hover" {
+                return None;
+            }
+            if matches!(mode, "typed" | "typed success") {
+                weak.upgrade().unwrap().did_change(
+                    doc,
+                    2,
+                    &[AppliedChange {
+                        range: Range::new(Pos::new(0, 0), Pos::new(0, 5)),
+                        text: "different field".into(),
+                    }],
+                    &|| "different field".into(),
+                );
+            }
+            if mode == "closed" {
+                weak.upgrade().unwrap().did_close(doc);
+            }
+            if mode == "cancelled" {
+                token.cancel();
+            }
+            if mode == "typed success" {
+                return None;
+            }
+            Some((
+                if mode == "server error" { -32603 } else { ide_jsonrpc::codes::CONTENT_MODIFIED },
+                "not ready".into(),
+            ))
+        }));
+        let start = tokio::time::Instant::now();
+        let result = h.mgr.hover(doc, Pos::new(0, 2), cancel).await;
+        assert!(result.is_err(), "{mode} must not produce documentation");
+        let attempts = s.requested("textDocument/hover").len();
+        if mode == "busy" {
+            assert!((2..=200).contains(&attempts), "bounded busy retry: {attempts}");
+            assert!(start.elapsed() >= Duration::from_secs(9) && start.elapsed() <= Duration::from_secs(10));
+        } else {
+            assert_eq!(attempts, 1, "{mode}");
+        }
+        h.mgr.shutdown_all().await;
+    }
+}
+
+#[tokio::test]
+async fn hover_retry_does_not_cross_server_restart() {
+    let h = harness(&[("mock", incremental_caps())]);
+    let s = h.launcher.state("mock");
+    let attempted = Arc::new(tokio::sync::Notify::new());
+    let notify = attempted.clone();
+    *s.fault.lock() = Some(Arc::new(move |_, method| {
+        if method != "textDocument/hover" {
+            return None;
+        }
+        notify.notify_one();
+        Some((ide_jsonrpc::codes::CONTENT_MODIFIED, "publishing".into()))
+    }));
+    let (doc, _) = h.open("main.mk", "field");
+    let mgr = h.mgr.clone();
+    let pending = tokio::spawn(async move { mgr.hover(doc, Pos::new(0, 2), Default::default()).await });
+    attempted.notified().await;
+    h.mgr.restart(h.mgr.servers()[0].id).await.unwrap();
+    let error = pending.await.unwrap().unwrap_err();
+    assert_eq!(error.kind, ide_core::error::ErrorKind::Cancelled);
+    *s.fault.lock() = None;
+    s.respond("textDocument/hover", json!({"contents": {"kind": "markdown", "value": "new instance"}}));
+    let hover = h.mgr.hover(doc, Pos::new(0, 2), Default::default()).await.unwrap().unwrap();
+    assert_eq!(hover.contents.value, "new instance");
+    h.mgr.shutdown_all().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn new_hover_during_restart_waits_for_replacement_instance() {
+    let h = harness(&[("mock", incremental_caps())]);
+    let s = h.launcher.state("mock");
+    s.respond("textDocument/hover", json!({"contents": {"kind": "markdown", "value": "replacement instance"}}));
+    let (doc, _) = h.open("main.mk", "field");
+    h.wait_status("mock", ServerStatus::Ready).await;
+    let (started, observed) = std::sync::mpsc::channel();
+    let (release, paused) = std::sync::mpsc::channel();
+    *s.shutdown_pause.lock() = Some((started, paused));
+    let mgr = h.mgr.clone();
+    let server = mgr.servers()[0].id;
+    let restart = tokio::spawn(async move { mgr.restart(server).await });
+    tokio::task::spawn_blocking(move || observed.recv_timeout(Duration::from_secs(3))).await.unwrap().unwrap();
+    let mgr = h.mgr.clone();
+    let mut request = tokio::spawn(async move { mgr.hover(doc, Pos::new(0, 2), Default::default()).await });
+    let early = tokio::time::timeout(Duration::from_millis(100), &mut request).await;
+    release.send(()).unwrap();
+    restart.await.unwrap().unwrap();
+    let result = match early {
+        Ok(result) => result.unwrap(),
+        Err(_) => request.await.unwrap(),
+    };
+    h.mgr.shutdown_all().await;
+    let hover = result.expect("a new request must wait through the restart handover").unwrap();
+    assert_eq!(hover.contents.value, "replacement instance");
+    assert_eq!(s.launches.load(Ordering::SeqCst), 2);
+}
 
 fn incremental_caps() -> Value {
     json!({

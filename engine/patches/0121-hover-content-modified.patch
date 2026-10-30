@@ -1,0 +1,61 @@
+--- a/docs/CHANGELOG.md
++++ b/docs/CHANGELOG.md
+@@ -14,6 +14,9 @@
+ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+ 
+ ## [Unreleased]
++
++- **Retry documentation while PHP source updates settle.** Hover distinguishes a superseded result from a symbol with no documentation. Contributed by @thinkycz.
++
+ 
+ - **Inspect validation rules from a request input key.** Hover shows the field's known rules and links to the declaring request, including inherited rules. Contributed by @thinkycz.
+ 
+--- a/src/server.rs
++++ b/src/server.rs
+@@ -142,7 +142,13 @@
+         .unwrap_or(Ok(None));
+         match result {
+             Err(error) if error.code == tower_lsp::jsonrpc::ErrorCode::ServerError(-32801) => {
+-                Ok(None)
++                // Hover clients can retry a stale semantic capture. Returning
++                // null here would incorrectly say the symbol has no docs.
++                if name == "hover" {
++                    Err(error)
++                } else {
++                    Ok(None)
++                }
+             }
+             result => result,
+         }
+@@ -1235,6 +1241,31 @@
+     use super::*;
+ 
+     #[tokio::test]
++    async fn hover_reports_pending_publication_instead_of_missing_documentation() {
++        let backend = Backend::new_test();
++        let publication = backend.begin_background_index_publication();
++        let params: HoverParams = serde_json::from_value(serde_json::json!({
++            "textDocument": { "uri": "file:///pending.php" },
++            "position": { "line": 0, "character": 0 }
++        }))
++        .unwrap();
++        let error = LanguageServer::hover(&backend, params.clone())
++            .await
++            .unwrap_err();
++        assert_eq!(
++            error.code,
++            tower_lsp::jsonrpc::ErrorCode::ServerError(-32801)
++        );
++        drop(publication);
++        assert!(
++            LanguageServer::hover(&backend, params)
++                .await
++                .unwrap()
++                .is_none()
++        );
++    }
++
++    #[tokio::test]
+     async fn workspace_symbol_prepares_pending_open_change_and_close_sources() {
+         for changed in [false, true] {
+             let dir = tempfile::tempdir().unwrap();

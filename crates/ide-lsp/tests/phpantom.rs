@@ -1035,3 +1035,35 @@ async fn laravel_policy_and_request_keys_through_client() {
     assert!(!path.exists(), "queries must not persist the caller overlay");
     mgr.shutdown_all().await;
 }
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires OPENSTORM_TEST_ENGINE_LARAVEL_ROOT pinned Laravel 13.37.0 fixture"]
+async fn laravel_request_documentation_as_first_request_after_open_and_restart() {
+    let root = PathBuf::from(std::env::var_os("OPENSTORM_TEST_ENGINE_LARAVEL_ROOT").expect("engine Laravel fixture"))
+        .canonicalize()
+        .unwrap();
+    let mut php = LanguageRegistry::load(None).unwrap().get(&LanguageId::new("php")).unwrap();
+    php.language_servers.retain(|s| s.name == "phpantom");
+    php.language_servers[0].command = std::env::var("OPENSTORM_TEST_PHPANTOM_BIN").expect("engine executable");
+    let mgr = LspManager::new(root.clone(), Arc::new(LanguageRegistry::from_configs(vec![php])), Arc::new(|_| {}));
+    let path = root.join("app/Demo.php");
+    let text = std::fs::read_to_string(&path).unwrap();
+    let at = pos(&text, "'name');          // → 'name' => 'required|string|max:255'");
+    let at = Pos::new(at.line, at.col + 2);
+    let doc = DocId::next();
+    mgr.did_open(doc, &path, &LanguageId::new("php"), 1, &text);
+    for cycle in 0..3 {
+        if cycle > 0 {
+            mgr.restart(mgr.servers()[0].id).await.unwrap();
+        }
+        let start = std::time::Instant::now();
+        let hover = mgr.hover(doc, at, Default::default()).await.unwrap();
+        eprintln!("first request cycle {cycle}: {:?}, hover={hover:?}", start.elapsed());
+        assert!(
+            hover.is_some_and(|h| h.contents.value.contains("required|string|max:255")),
+            "first request cycle {cycle}"
+        );
+    }
+    assert_eq!(std::fs::read_to_string(path).unwrap(), text);
+    mgr.shutdown_all().await;
+}

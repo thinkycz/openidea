@@ -1246,3 +1246,144 @@ validation/auth matrix also remain open. FEAT-035 and FEAT-066 stay partial;
 all 69 areas remain visible (67 partial, 2 user-deferred). The completed source,
 client/host, frontend and workspace gates above apply to this exact engine/app.
 No new push, publishing, migration or replacement of the installed app occurred.
+
+### First-request documentation investigation
+
+Accepted policy/rule slice checkpoint: `6cdcb03` (local only). Runtime source
+hashes still match its signed 0.1.33 receipt; only progress/ledger/engine README
+changed after the build. A new actual-client regression opens the pinned Demo
+and asks for request-field hover before any completion/navigation warmup, then
+repeats after restart. Engine 120 returns `None` on the first cycle (828 ms),
+reproducing the native empty first response. This test remains red during diagnosis;
+resources and the accepted app remain unchanged. A scratch-only instrumented 121
+probe is building to distinguish semantic invalidation from genuine missing data.
+
+The diagnostic trace confirms `ContentModified` (-32801) is being converted to
+`null` by the shared position handler. At capture, editor inputs and semantic epoch
+still match, but an admitted source publication remains active. Opened PHP callers
+with dependent Blade work can retain that publication on their background worker.
+The client therefore cannot distinguish temporary invalidation from absent docs.
+Scratch 121 now preserves this error for hover only; the client retries that explicit
+error within one normal 10-second request deadline, with cancellable 50 ms spacing.
+It checks the source buffer identity and engine generation before and after each
+attempt. Null results and other errors are final. Two new protocol regressions fail
+before the client change and pass afterward: successful retry versus genuine empty,
+and bounded retries versus typing/cancellation (tab-close coverage added next).
+Full mock suite, Clippy and scratch handler checks are running. No candidate engine
+is promoted and no new native acceptance is claimed.
+
+The first-hover actual-client regression now passes on first open and both engine
+restarts against the scratch 121 executable (816/725/686 ms observed in that run;
+not a startup benchmark). All 12 actual-client and 3 host cases pass. The pending
+publication handler regression passes, and scratch Clippyfix/fmt/all-target Clippy
+and fmt check pass. All 63 client protocol tests passed, including rejecting an old
+response across server restart; a focused follow-up also rejects a successful
+response after typing. A premature prototype run failed at setup because its binary
+was not yet available; that log is retained separately from the green real run.
+
+Patch 0121 changes only the hover error boundary and its handler regression plus
+the changelog. Its pinned series SHA-256 is
+`72e046472a6affe511f1af18e9b03dbae04f9fa301f0b83a31c645096a219de7`.
+Clean acquisition/build is running; bundled resources remain accepted engine 120.
+Source 121, final exact-executable tests and native 0.1.34 gates remain open.
+State/handles are tracked in `artifacts/checks/phpantom-121-active.json`.
+
+With no app/client compiler running, 826 inactive generated SDK archives were
+removed from the compiler cache, keeping eight newest archives per SDK crate.
+Signed 0.1.33 was verified before pruning. Source, signed apps, executables,
+fixtures, receipts, earlier evaluations and PHP Workbench remain unchanged. Free
+space was observed at 2.35 GiB before and 21.72 GiB after; the exact selection is
+recorded in `artifacts/checks/sdk-archive-cache-prune-121.json`.
+
+Candidate 0.1.34 now bundles the clean optimized 121 executable, SHA-256
+`91164d9684450ebdabc96fe0dc7cf125d929f91e2bdb807af5f01e3aba665554`.
+Its archive, licenses, toolchain and source/build receipt are preserved under
+`artifacts/engines/0.11.1-openstorm.121/`; 120 provenance is retained as a tracked
+candidate. The final seven frontend freshness cases reject typing, replacement,
+file moves, closed views and superseded requests without a false missing-doc hint.
+Their focused affected run passes 60 checks. Final frontend gates pass 3,011 tests,
+type checking, lint and build (inherited build warnings retained).
+
+The default Herd CLI is PHP 8.3 and rejected the inherited property-hook example;
+no example was changed to accommodate it. Rechecking with the preserved workspace
+PHP 8.4.23 and `-n` passed all 13 playground/Demo syntax checks and the executable
+playground assertions. The native fixture's 88 non-Blade PHP files also pass this
+explicit CLI. Static analysis retains exactly the three intentional Demo errors
+at 731/951. No system PHP configuration or environment file changed. Full final
+engine and root workspace/client gates remain running; native 0.1.34 is not yet
+accepted.
+
+Final 121 gates pass: 18,369 source tests / 17 ignored (excluding the separate
+bootstrap child), all-target Clippy, formatting and cached source fingerprints.
+The exact optimized 121 executable passes all 12 actual-client and 3 host cases.
+0.1.34 workspace passes 1,308 / 35 ignored, Clippy and formatting. Native build,
+shallow local signing, deep strict verification and source/build receipt passed.
+
+Native 0.1.34 About confirmed arm64, the disposable configuration and attribution.
+First F1 correctly showed the request rules/source. A very fast F1 during the
+status-bar restart exposed a different handover gap: No language server available
+while the old instance stops. A settled retry then worked. The signed candidate
+is preserved but this batch is not accepted yet. A new deterministic client test
+pauses shutdown and reproduces the exact unavailable response. The correction
+keeps the request readiness phase pending through an intentional restart, while
+old in-flight requests still cancel at their generation boundary. Tests are running.
+The next native candidate must have a distinct 0.1.35 version.
+
+An old automation helper also reopened the previous 0.1.33 app. It was quit; a
+unique 0.1.34 binding and About confirmed the correct target before documentation
+observations. No editor changes occurred in the extra instance; its session
+metadata impact was not audited. The automation session will be reset before the
+next candidate. Both app/server processes are now gone and all native fixture app
+PHP sources remain unchanged. Details: `artifacts/checks/hover-0.1.34-native-result.json`.
+
+### Accepted local slice: 0.1.35 / engine 121
+
+The restart handover regression passes with 64 protocol checks. New requests wait
+through intentional shutdown/startup, while a request already bound to the old
+instance still cancels. An additional public editor-extension test reproduced a
+late documentation popup after Escape. The final editor correction cancels pending
+hover without consuming Escape, preserving ordinary key handling; destruction also
+cancels the request belonging to that view. Eight frontend freshness cases now pass,
+including unchanged/empty results, typing, document replacement, file moves,
+closed views, supersession and Escape. The preliminary 0.1.35 build was not frozen
+or signed; the final rebuild includes the Escape correction.
+
+Final gates: 3,012 frontend tests, type checking, lint/build; 1,309 workspace tests /
+35 ignored, all-target Clippy and formatting; all 12 actual-client and 3 host cases
+against the exact archived 121 executable. Engine 121's 18,369 source tests /
+17 ignored, Clippy, formatting, source fingerprints and playground checks above
+remain applicable: this handover correction changes the client only.
+
+Signed arm64 development app: `artifacts/batches/0.1.35/OpenStorm.app`.
+Frozen source/build receipt: `artifacts/checks/hover-0.1.35-build-receipt.json`.
+Native details: `artifacts/checks/hover-0.1.35-native-result.json`. About confirmed
+0.1.35, Tauri 2.12.4, the disposable configuration and upstream attribution. First
+F1, F1 immediately during a real server restart, Escape with no late popup, genuine
+empty hover, and typing an unsaved `xname` while a request was pending all produced
+the expected result. Closing the edited tab prompted; Cancel retained it, explicit
+Don't Save closed it. Disk source stayed unchanged. Reopening restored `name` and
+its rules. Autosave defaults were restored; quit/relaunch without a project argument
+recovered the project, tab, caret and first documentation request. Final app/server
+exit and post-runtime deep strict signature passed. Exact IPC race boundaries are
+covered by deterministic tests; native observations establish the visible outcomes.
+
+One 4.08-second settled sample on this Laravel fixture observed native app RSS
+206.31 MiB / 0.49% CPU and engine RSS 159.16 MiB / 0.00% CPU. This excludes WebKit,
+GPU/network services and total system footprint. First IPC was 3,408 ms with a
+fresh fixture profile and 747 ms on relaunch, not UI-ready time. These startup
+observations did not control other validation activity or OS caches. Receipt:
+`artifacts/checks/hover-0.1.35-runtime-metrics.json`. No parity claim is made.
+
+The extra 0.1.33 instance's profile metadata was audited without logging settings
+values: settings.toml is unchanged since October 28. Its one owned fixture entry
+was removed from the real recent-project list with a private backup, preserving
+all other entries. Window-state metadata was written by that instance; no earlier
+baseline exists, so it was not guessed or restored. Receipts are
+`extra-instance-real-profile-metadata-audit.json` and `extra-instance-profile-cleanup.json`.
+The CUA session was reset, and subsequent runs used distinct exact-app bindings.
+
+All 69 areas stay visible: 67 partial and 2 user-deferred. In particular, the rule
+catalog and broader validation/auth matrix remain open; first-hover recovery does
+not accept a whole feature area. No new push, publishing, migration or replacement
+of installed optimized 0.1.21 occurred. The next dependent Laravel slice can now
+proceed from this locally accepted batch.

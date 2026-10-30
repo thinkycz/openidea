@@ -137,7 +137,9 @@
       "milestone": 1,
       "status": "partial",
       "acceptance_gate": "Accurate overload/parameter/return/docs; cheap list then resolve",
-      "openstorm_evidence": [],
+      "openstorm_evidence": [
+        "0.1.35 / engine121: first-request documentation works without completion warmup in the real client and native F1; typed/switched/moved/closed/superseded source answers are refused, and Escape cancels pending documentation. Native immediate restart, genuine empty response, typing/discard/reopen and relaunch pass. See docs/OPENSTORM.md."
+      ],
       "remaining": "Reassess current OpenStorm implementation against this full gate; Workbench acceptance does not transfer."
     },
     {
@@ -392,7 +394,7 @@
       "openstorm_evidence": [
         "0.1.33 / engine120: five public field-hover cases, all 11 actual-client and 3 host cases pass. Policy completion excludes hooks/protected methods; exact gate/convention/registered policy and inherited request-key navigation, documentation, unsaved field changes/restart/close restoration and wrong-model ability diagnostics pass. Native F1/CmdB/source links, unsaved rule changes, actual server restart, explicit discard, relaunch and cleanup observed; see docs/OPENSTORM.md."
       ],
-      "remaining": "Rule-name catalog completion/navigation and the broader validation/auth context matrix remain unaccepted. One early native relaunch hover returned no result before a settled retry; startup readiness remains open."
+      "remaining": "Rule-name catalog completion/navigation and the broader validation/auth context matrix remain unaccepted. The earlier first-hover/startup limitation is corrected and observed in 0.1.35; this does not accept the full feature area."
     },
     {
       "id": "FEAT-036",
@@ -676,7 +678,8 @@
       "status": "partial",
       "acceptance_gate": "Editor remains responsive; no fake ready indicator on partial index",
       "openstorm_evidence": [
-        "0.1.25 native: incomplete results visible, cancel closed chooser, engine-shutdown unavailable state recovered by reopening after initialization. Automated chooser tests cover cancellation and discarding late/project-switched responses; native project-switch case remains open."
+        "0.1.25 native: incomplete results visible, cancel closed chooser, engine-shutdown unavailable state recovered by reopening after initialization. Automated chooser tests cover cancellation and discarding late/project-switched responses; native project-switch case remains open.",
+        "0.1.35: deterministic shutdown-handover regression and native immediate F1 during restart pass; new requests wait for the replacement, old-generation requests cancel. Escape and source edits do not produce a false missing-documentation hint. Broader progress/error-state matrix remains open."
       ],
       "remaining": "Reassess current OpenStorm implementation against this full gate; Workbench acceptance does not transfer."
     },
@@ -693,7 +696,8 @@
         "0.1.24 separate signed development app: saved-session reopen, engine restart, quit/process cleanup and post-runtime deep/strict signature passed. Installed optimized app unchanged; notarization/platform-service gates remain open.",
         "0.1.25 separate signed Apple Silicon development app: native navigation, saved-session relaunch, app/server cleanup, post-runtime signature passed. Installed optimized app preserved. Notarization/update feed/platform integration remain open.",
         "0.1.27 signed local Apple Silicon development candidate bundles reproducibly pinned OpenStorm PHPantom 115; original released 114 and installed app preserved. Native gate remains pending.",
-        "0.1.29 separate signed Apple Silicon development app: native resource navigation, saved-session relaunch, normal app/server exit twice and post-runtime deep/strict signature passed; bundled engine 117 checksum verified. Installed optimized app preserved."
+        "0.1.29 separate signed Apple Silicon development app: native resource navigation, saved-session relaunch, normal app/server exit twice and post-runtime deep/strict signature passed; bundled engine 117 checksum verified. Installed optimized app preserved.",
+        "0.1.35 local arm64 development app built and shallow-signed; deep strict signature, source/build receipt, native About, quit/relaunch recovery and app/server cleanup verified. Installed optimized0.1.21 retained; publishing/notarization/updater activation remain deferred. See docs/OPENSTORM.md."
       ],
       "remaining": "Reassess current OpenStorm implementation against this full gate; Workbench acceptance does not transfer."
     },
@@ -728,7 +732,8 @@
         "New native-fixture client regression finds unavailable Blade variable scope with Composer autoload helpers on first unsaved opens/restart; minimal/custom-root fixtures pass. Investigation remains open, with no semantic-freshness acceptance inferred.",
         "119 optimized engine: deterministic startup input-publication regression red before fix and green after; all nine actual-client cases pass, including broad Composer helper autoload fixture across three unsaved open/restart cycles. Full-source and native 0.1.31 acceptance remain open.",
         "0.1.31 signed development native: unfinished escaped/raw Unicode echo completion and undo/redo, unsaved Stock caller/template data with disk unchanged, actual engine restart with documentation/goto/completion retained, quit Cancel/Save All and saved project/tab reopening with quantity documentation passed. Full 119 source 18363 passed / 17 ignored; 9 client / 3 host passed. Previous 0.1.30 failure retained in combined record.",
-        "0.1.33 native: unsaved parent request rule changes update consumer documentation, survive real server restart and revert after explicit discard without disk writes. Relaunch recovers settled documentation, but one early request returned no result; startup readiness is still partial."
+        "0.1.33 native: unsaved parent request rule changes update consumer documentation, survive real server restart and revert after explicit discard without disk writes. Relaunch recovers settled documentation, but one early request returned no result; startup readiness is still partial.",
+        "0.1.35 / engine121: first-request hover distinguishes ContentModified from null; one bounded request deadline, source/URI/attachment/generation checks and frontend source/view checks reject stale results. 64 protocol checks, 8 frontend freshness cases, 12 real-client and 3 host scenarios pass. Native restart, Escape, typing, tab close/discard/reopen and quit/relaunch recovery observed. Remaining semantic matrix is partial."
       ],
       "remaining": "Completion/diagnostic stale responses, target-profile builtin-cache invalidation, broader project/configuration and multi-project cases remain unaccepted."
     },

@@ -7,6 +7,7 @@ import { EditorSelection } from "@codemirror/state";
 import { closeHoverTooltips, hasHoverTooltips, hoverTooltip, ViewPlugin, type EditorView } from "@codemirror/view";
 import type { Extension } from "@codemirror/state";
 import {
+  IpcError,
   commands,
   isTauri,
   nextRequestId,
@@ -37,8 +38,18 @@ import { CONTRIBUTED_HOVER, contributedAt, type ContributedHover } from "@/edito
 import { navigationModifierHeld, onNavigationModifier, pointerTarget } from "@/platform/navigationModifier";
 
 let hoverRequest: RequestId | null = null;
+let hoverRequestView: EditorView | null = null;
+
+function cancelPendingHover(view?: EditorView) {
+  if (hoverRequest === null || (view && hoverRequestView !== view)) return;
+  const request = hoverRequest;
+  hoverRequest = null;
+  hoverRequestView = null;
+  if (isTauri()) void commands.cancelRequest(request).catch(() => {});
+}
 
 export async function requestHover(view: EditorView, pos: number): Promise<Hover | null> {
+  cancelPendingHover();
   const own = contributedAt<ContributedHover>(view.state, CONTRIBUTED_HOVER, pos);
   if (own) {
     const h = own(view.state, pos);
@@ -48,16 +59,26 @@ export async function requestHover(view: EditorView, pos: number): Promise<Hover
   }
   const doc = docOf(view);
   if (!doc) return null;
-  if (hoverRequest !== null && isTauri()) void commands.cancelRequest(hoverRequest);
+  const source = view.state.doc;
+  const path = doc.path;
   const id = (hoverRequest = nextRequestId());
+  hoverRequestView = view;
+  const wanted = () => {
+    if (!view.dom.isConnected) return false;
+    const current = docOf(view);
+    return hoverRequest === id && view.state.doc === source && current?.doc === doc.doc && current.path === path;
+  };
   try {
-    const h = await lspRequest(
-      () => commands.lspHover(id, doc.doc, offsetToPos(view.state.doc, pos)),
-      () => hoverRequest === id,
-    );
+    const h = await lspRequest(() => commands.lspHover(id, doc.doc, offsetToPos(view.state.doc, pos)), wanted);
+    // An IPC answer can arrive after typing or replacing this view's document,
+    // including after the backend finished its guarded retry.
+    if (!wanted()) throw new IpcError({ kind: "cancelled", message: "cancelled" });
     return h && !isEmptyMarkup(h.contents) ? h : null;
   } finally {
-    if (hoverRequest === id) hoverRequest = null;
+    if (hoverRequest === id) {
+      hoverRequest = null;
+      hoverRequestView = null;
+    }
   }
 }
 
@@ -181,7 +202,18 @@ export async function hoverSource(view: EditorView, pos: number) {
 const hoverYieldsToNavigation = ViewPlugin.fromClass(
   class {
     private off: () => void;
+    private offEscape: () => void;
     constructor(view: EditorView) {
+      // Cancel before ordinary Escape handlers (find bars, hints, popups).
+      // They still receive the key; an outstanding answer must not reopen docs.
+      const onKeyDown = (event: KeyboardEvent) => {
+        if (event.key === "Escape") cancelPendingHover();
+      };
+      view.dom.addEventListener("keydown", onKeyDown, true);
+      this.offEscape = () => {
+        cancelPendingHover(view);
+        view.dom.removeEventListener("keydown", onKeyDown, true);
+      };
       this.off = onNavigationModifier((held) => {
         if (!held || !hasHoverTooltips(view.state)) return;
         if (pointerTarget()?.closest?.(".cm-tooltip")) return;
@@ -189,6 +221,7 @@ const hoverYieldsToNavigation = ViewPlugin.fromClass(
       });
     }
     destroy() {
+      this.offEscape();
       this.off();
     }
   },

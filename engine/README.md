@@ -1,9 +1,9 @@
 # Pinned PHPantom engine
 
-The local OpenStorm candidate bundles PHPantom `0.11.1-openstorm.122` for Apple
+The local OpenStorm candidate bundles PHPantom `0.11.1-openstorm.123` for Apple
 Silicon macOS. This is a local rebuild, not an upstream release. `source.json` pins
 upstream source, its archive checksum, the unchanged 114-patch PHP Workbench series,
-and OpenStorm patches 0115–0122 for resource isolation, Blade and Laravel assistance,
+and OpenStorm patches 0115–0123 for resource isolation, Blade and Laravel assistance,
 and source-update recovery. The executable is verified by
 `node scripts/verify-phpantom.mjs`; its provenance and licenses are under
 `src-tauri/resources/phpantom/`.
@@ -88,7 +88,7 @@ Do not point this variable at a real user project. The existing
 `OPENSTORM_TEST_LARAVEL_ROOT` test uses the separate User/displayName fixture.
 `OPENSTORM_TEST_PHPANTOM_BIN` should select the checksum-verified packaged engine.
 Run `cargo test -p ide-lsp --test phpantom -- --ignored --nocapture` to exercise all
-nine client cases. This creates only test-owned resources and overlays; the
+14 client cases. This creates only test-owned resources and overlays; the
 synthetic environment case requires authorization for its fake fixture data.
 
 Patch 0118 keeps an unfinished escaped/raw echo's editing caret before its generated
@@ -150,3 +150,15 @@ rule extensions and computed rule arrays remain outside this catalog slice.
 Native 0.1.36/0.1.37 candidates remain unaccepted: the client link fallback is
 corrected, but a post-restart resolution stall is under investigation. Evidence
 and acceptance gates remain in docs/OPENSTORM.md.
+
+Patch 0123 detects circular pending ownership across resolver threads before a
+wait, using the existing independent-resolution and per-thread cycle-break paths.
+Normal contention continues to share the cached result; wait edges are released
+on completion and unwind. Two- and three-owner concurrent mixin regressions retain
+all methods without hitting the escape hatch. The final normal-release binary
+passes 18,379 source tests (17 ignored), all 14 actual-client and all 4 actual-host
+cases, including background reference widening through three server starts with
+framework source open. The Laravel analyzer retains exactly its three intentional
+errors. The signed 0.1.38 native rule-name/restart slice passes; its full unfiltered
+workspace/release gate remains open pending two separately scoped process-env
+tests. Evidence is in docs/OPENSTORM.md; 0.1.36/0.1.37 failures remain preserved.

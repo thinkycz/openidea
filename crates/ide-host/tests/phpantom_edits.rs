@@ -161,3 +161,103 @@ async fn environment_first_open_starts_phpantom_and_finds_php_callers() {
     project.lsp.shutdown_all().await;
     host.close_project("main");
 }
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires OPENSTORM_TEST_ENGINE_LARAVEL_ROOT pinned Laravel 13.37.0 fixture"]
+async fn framework_source_restart_keeps_host_widening_and_hover_responsive() {
+    let root = dunce::canonicalize(PathBuf::from(
+        std::env::var_os("OPENSTORM_TEST_ENGINE_LARAVEL_ROOT").expect("engine Laravel fixture"),
+    ))
+    .unwrap();
+    let bin = PathBuf::from(std::env::var_os("OPENSTORM_TEST_PHPANTOM_BIN").expect("engine executable"));
+    let tmp = tempfile::tempdir().unwrap();
+    let host = Host::new(HostConfig {
+        project_environment: false,
+        config_dir: tmp.path().join("config"),
+        data_dir: tmp.path().join("data"),
+        languages: Arc::new(ide_language::LanguageRegistry::load(None).unwrap()),
+        syntax: Arc::default(),
+        sink_for: Box::new(|_| Arc::new(|_| {})),
+        owner: |w| w,
+        runtime: tokio::runtime::Handle::current(),
+    });
+    let project = host.open_project("main", &root).unwrap();
+    project.lsp.set_config_hook(Box::new(move |cfg, _| {
+        if cfg.name == "phpantom" {
+            cfg.command = bin.to_string_lossy().into_owned();
+        }
+    }));
+    let weak = Arc::downgrade(&project);
+    project.lsp.set_candidates_hook(Box::new(move |q, cancel| {
+        let found = weak.upgrade().map(|p| p.reference_candidates(q, cancel)).unwrap_or_default();
+        eprintln!("native host candidates word={} count={} files={:?}", q.word, found.files.len(), found.files);
+        found
+    }));
+    let request_path = root.join("app/Http/Requests/StoreBakeryRequest.php");
+    let trait_path = root.join("vendor/laravel/framework/src/Illuminate/Validation/Concerns/ValidatesAttributes.php");
+    let request = std::fs::read_to_string(&request_path).unwrap();
+    let trait_source = std::fs::read_to_string(&trait_path).unwrap();
+    let doc = project.documents.open(&request_path).unwrap();
+    let _trait_doc = project.documents.open(&trait_path).unwrap();
+    let position = |needle: &str, extra: u32| {
+        let offset = request.find(needle).unwrap();
+        let prefix = &request[..offset];
+        Pos::new(
+            prefix.bytes().filter(|b| *b == b'\n').count() as u32,
+            prefix.rsplit('\n').next().unwrap().encode_utf16().count() as u32 + extra,
+        )
+    };
+    let at = position("'name');", 2);
+    let class = position("StoreBakeryRequest extends", 0);
+    let method = position("rules(): array", 0);
+    let authorize = position("authorize(): bool", 0);
+    let with_validator = position("withValidator(): void", 0);
+    let outcome: Result<(), String> = async {
+        for cycle in 0..3 {
+            if cycle > 0 {
+                project
+                    .lsp
+                    .restart(project.lsp.servers()[0].id)
+                    .await
+                    .map_err(|e| format!("restart {cycle}: {e:?}"))?;
+            }
+            let initial = project
+                .lsp
+                .hover(doc.id, at, Default::default())
+                .await
+                .map_err(|e| format!("initial hover {cycle}: {e:?}"))?;
+            if !initial.is_some_and(|h| h.contents.value.contains("required|string|max:255")) {
+                return Err(format!("initial request-field docs missing in host cycle {cycle}"));
+            }
+            let start = std::time::Instant::now();
+            let results = tokio::time::timeout(std::time::Duration::from_secs(15), async {
+                tokio::join!(
+                    project.lsp.references(doc.id, class, false, true, Default::default()),
+                    project.lsp.references(doc.id, authorize, false, true, Default::default()),
+                    project.lsp.references(doc.id, method, false, true, Default::default()),
+                    project.lsp.references(doc.id, with_validator, false, true, Default::default()),
+                    async {
+                        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+                        project.lsp.hover(doc.id, at, Default::default()).await
+                    }
+                )
+            })
+            .await;
+            eprintln!("framework host cycle {cycle}: {:?}, settled={}", start.elapsed(), results.is_ok());
+            match results {
+                Ok((Ok(class_refs), Ok(_authorize_refs), Ok(method_refs), Ok(_validator_refs), Ok(Some(hover))))
+                    if !class_refs.locations.is_empty()
+                        && !method_refs.locations.is_empty()
+                        && hover.contents.value.contains("required|string|max:255") => {}
+                other => return Err(format!("framework host cycle {cycle} did not settle: {other:?}")),
+            }
+        }
+        Ok(())
+    }
+    .await;
+    project.lsp.shutdown_all().await;
+    host.close_project("main");
+    assert_eq!(std::fs::read_to_string(request_path).unwrap(), request);
+    assert_eq!(std::fs::read_to_string(trait_path).unwrap(), trait_source);
+    assert!(outcome.is_ok(), "{}", outcome.unwrap_err());
+}

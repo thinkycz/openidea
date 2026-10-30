@@ -1155,3 +1155,65 @@ async fn laravel_validation_rule_names_through_client() {
     mgr.shutdown_all().await;
     assert!(!path.exists());
 }
+
+/// Control without the host candidate-file hook; the host regression covers widening.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires OPENSTORM_TEST_ENGINE_LARAVEL_ROOT pinned Laravel 13.37.0 fixture"]
+async fn laravel_framework_source_direct_references_and_hover_control() {
+    let root = PathBuf::from(std::env::var_os("OPENSTORM_TEST_ENGINE_LARAVEL_ROOT").expect("engine Laravel fixture"))
+        .canonicalize()
+        .unwrap();
+    let mut php = LanguageRegistry::load(None).unwrap().get(&LanguageId::new("php")).unwrap();
+    php.language_servers.retain(|s| s.name == "phpantom");
+    php.language_servers[0].command = std::env::var("OPENSTORM_TEST_PHPANTOM_BIN").expect("engine executable");
+    let mgr = LspManager::new(root.clone(), Arc::new(LanguageRegistry::from_configs(vec![php])), Arc::new(|_| {}));
+    let request_path = root.join("app/Http/Requests/StoreBakeryRequest.php");
+    let trait_path = root.join("vendor/laravel/framework/src/Illuminate/Validation/Concerns/ValidatesAttributes.php");
+    let request = std::fs::read_to_string(&request_path).unwrap();
+    let trait_source = std::fs::read_to_string(&trait_path).unwrap();
+    let doc = DocId::next();
+    mgr.did_open(doc, &request_path, &LanguageId::new("php"), 1, &request);
+    mgr.did_open(DocId::next(), &trait_path, &LanguageId::new("php"), 1, &trait_source);
+    let at = pos(&request, "'name');");
+    let at = Pos::new(at.line, at.col + 2);
+    let class = pos(&request, "StoreBakeryRequest extends");
+    let method = pos(&request, "rules(): array");
+    let outcome: Result<(), String> = async {
+        for cycle in 0..3 {
+            if cycle > 0 {
+                mgr.restart(mgr.servers()[0].id).await.map_err(|e| format!("restart {cycle}: {e:?}"))?;
+            }
+            let initial =
+                mgr.hover(doc, at, Default::default()).await.map_err(|e| format!("initial hover {cycle}: {e:?}"))?;
+            if !initial.is_some_and(|h| h.contents.value.contains("required|string|max:255")) {
+                return Err(format!("initial request-field docs missing in cycle {cycle}"));
+            }
+            let start = std::time::Instant::now();
+            let results = tokio::time::timeout(Duration::from_secs(15), async {
+                tokio::join!(
+                    mgr.references(doc, class, false, true, Default::default()),
+                    mgr.references(doc, method, false, true, Default::default()),
+                    async {
+                        tokio::time::sleep(Duration::from_millis(150)).await;
+                        mgr.hover(doc, at, Default::default()).await
+                    }
+                )
+            })
+            .await;
+            eprintln!("framework direct-reference control {cycle}: {:?}, settled={}", start.elapsed(), results.is_ok());
+            match results {
+                Ok((Ok(class_refs), Ok(method_refs), Ok(Some(hover))))
+                    if !class_refs.locations.is_empty()
+                        && !method_refs.locations.is_empty()
+                        && hover.contents.value.contains("required|string|max:255") => {}
+                other => return Err(format!("framework direct-reference control {cycle} did not settle: {other:?}")),
+            }
+        }
+        Ok(())
+    }
+    .await;
+    mgr.shutdown_all().await;
+    assert_eq!(std::fs::read_to_string(request_path).unwrap(), request);
+    assert_eq!(std::fs::read_to_string(trait_path).unwrap(), trait_source);
+    assert!(outcome.is_ok(), "{}", outcome.unwrap_err());
+}

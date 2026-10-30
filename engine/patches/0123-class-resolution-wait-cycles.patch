@@ -1,0 +1,232 @@
+diff --git a/docs/ARCHITECTURE.md b/docs/ARCHITECTURE.md
+--- a/docs/ARCHITECTURE.md
++++ b/docs/ARCHITECTURE.md
+@@ -34,6 +34,17 @@
+ - **Layer 4: Full index (default).** Background-parse every file in the fqn_uri_index. Enables workspace symbols, fast find-references, and rich completion item detail.
+ 
+ Each layer builds on the one below it. A bug in the FQN index doesn't break single-file completion. A slow full index doesn't block on-demand resolution. New features can be developed and tested against the lower layers without waiting for a full project scan. This is also why PHPantom starts fast: Layer 0-2 are ready in milliseconds, Layer 3 takes seconds, and Layer 4 fills in afterward.
++
++### Concurrent class resolution
++
++Resolved member merges have one pending owner per class and generic-argument key.
++Ordinary waiters reuse that owner's cached result. Waiters register the key they
++need, so following pending ownership detects circular dependencies between
++resolver threads before they sleep. A detected cycle takes the existing
++independent-resolution path and per-thread base-inheritance cycle break. The
++wait edge is removed on completion or unwinding; storing keys avoids stale
++owner relationships when claims are released or replaced. The bounded escape
++hatch remains for an abnormally stuck owner outside a detected cycle.
+ 
+ ## Module Layout
+ 
+diff --git a/docs/CHANGELOG.md b/docs/CHANGELOG.md
+--- a/docs/CHANGELOG.md
++++ b/docs/CHANGELOG.md
+@@ -14,6 +14,8 @@
+ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+ 
+ ## [Unreleased]
++
++- **Keep PHP intelligence responsive through circular type dependencies.** Opening framework source and restarting no longer stalls background analysis on cyclic model and mixin resolution. Contributed by @thinkycz.
+ 
+ - **Complete and inspect Laravel validation rule names.** Suggestions use the installed framework, preserve parameters, and link rule documentation and definitions to its source. Contributed by @thinkycz.
+ 
+diff --git a/examples/laravel/app/Demo.php b/examples/laravel/app/Demo.php
+--- a/examples/laravel/app/Demo.php
++++ b/examples/laravel/app/Demo.php
+@@ -1197,6 +1197,8 @@
+         // Open StoreBakeryRequest::rules(): complete a rule name inside its
+         // strings, or inspect `required` with Hover and Go to Definition to
+         // read the installed framework validator method. Parameters stay intact.
++        // With its framework source open, restart the server and inspect these
++        // request fields again while the background usage counts refresh.
+         // StoreBakeryRequest::rules() names every input this request can
+         // carry, so the string arguments below complete to those keys and
+         // go-to-definition jumps to the rule that declares them.
+diff --git a/src/virtual_members/cache.rs b/src/virtual_members/cache.rs
+--- a/src/virtual_members/cache.rs
++++ b/src/virtual_members/cache.rs
+@@ -122,6 +122,10 @@
+     /// computation instead of racing it. See
+     /// [`claim_pending`](Self::claim_pending).
+     pending: HashMap<ResolvedClassCacheKey, std::thread::ThreadId>,
++    /// The key each thread is currently waiting for. Following its pending
++    /// owner detects cross-thread dependency cycles before a waiter sleeps.
++    /// Entries live only while the synchronous wait's RAII guard is alive.
++    waiting: HashMap<std::thread::ThreadId, ResolvedClassCacheKey>,
+     /// Interned transformed methods, keyed by the identity of the
+     /// original `Arc<MethodInfo>` plus a fingerprint of the transform
+     /// (template substitution map, bare-`self` replacement target,
+@@ -223,6 +227,7 @@
+             laravel_aliases: crate::virtual_members::laravel::new_alias_slot(),
+             in_flight: HashSet::new(),
+             pending: HashMap::new(),
++            waiting: HashMap::new(),
+             substituted_methods: HashMap::new(),
+             substituted_properties: HashMap::new(),
+             linked_aliases: HashMap::new(),
+@@ -332,6 +337,32 @@
+         }
+     }
+ 
++    /// Register a pending wait unless it would participate in a dependency cycle.
++    /// Edges retain keys rather than owner IDs, so released/replaced claims
++    /// cannot leave a stale owner relationship in the graph.
++    pub(crate) fn begin_pending_wait(&mut self, key: &ResolvedClassCacheKey) -> bool {
++        let current = std::thread::current().id();
++        self.waiting.insert(current, key.clone());
++        let mut thread = current;
++        let mut seen = HashSet::new();
++        while seen.insert(thread) {
++            let Some(waited_key) = self.waiting.get(&thread) else {
++                return true;
++            };
++            let Some(owner) = self.pending.get(waited_key) else {
++                return true;
++            };
++            thread = *owner;
++        }
++        self.waiting.remove(&current);
++        false
++    }
++
++    /// Remove this thread's pending wait on completion or unwinding.
++    pub(crate) fn end_pending_wait(&mut self) {
++        self.waiting.remove(&std::thread::current().id());
++    }
++
+     /// Release a [`PendingClaim::Fresh`] claim on `key`, letting any
+     /// thread waiting in `claim_pending` proceed.
+     pub(crate) fn release_pending(&mut self, key: &ResolvedClassCacheKey) {
+@@ -408,7 +439,7 @@
+ 
+     /// Remove all entries and indices.
+     ///
+-    /// `in_flight` and `pending` are left untouched: their entries
++    /// `in_flight`, `pending` and `waiting` are left untouched: their entries
+     /// belong to resolution call trees currently running on other
+     /// threads, not to the cached contents being invalidated.
+     pub fn clear(&mut self) {
+diff --git a/src/virtual_members/resolve.rs b/src/virtual_members/resolve.rs
+--- a/src/virtual_members/resolve.rs
++++ b/src/virtual_members/resolve.rs
+@@ -73,6 +73,17 @@
+     }
+ }
+ 
++/// Removes a wait edge when the synchronous wait completes or unwinds.
++struct PendingWaitGuard<'a> {
++    cache: &'a ResolvedClassCache,
++}
++
++impl Drop for PendingWaitGuard<'_> {
++    fn drop(&mut self) {
++        self.cache.write().end_pending_wait();
++    }
++}
++
+ /// Bound on how long a thread waits for another thread's first-time
+ /// resolution of the same not-yet-cached class before giving up and
+ /// resolving it independently.
+@@ -90,12 +101,18 @@
+ /// Returns `None` when the caller should give up waiting and resolve
+ /// the class itself instead: either the owning thread released its
+ /// claim without inserting a result (e.g. it hit its own cycle break
+-/// at this very key from a different angle), or the wait exceeded
++/// at this very key from a different angle), a dependency cycle would
++/// prevent either owner from finishing, or the wait exceeded
+ /// [`PENDING_WAIT_ESCAPE_HATCH`].
+ fn wait_for_pending(
+     cache: &ResolvedClassCache,
+     key: &ResolvedClassCacheKey,
+ ) -> Option<Arc<ClassInfo>> {
++    let can_wait = cache.write().begin_pending_wait(key);
++    if !can_wait {
++        return None;
++    }
++    let _wait = PendingWaitGuard { cache };
+     let deadline = std::time::Instant::now() + PENDING_WAIT_ESCAPE_HATCH;
+     loop {
+         std::thread::sleep(std::time::Duration::from_micros(50));
+diff --git a/src/virtual_members/tests.rs b/src/virtual_members/tests.rs
+--- a/src/virtual_members/tests.rs
++++ b/src/virtual_members/tests.rs
+@@ -2123,3 +2123,78 @@
+         "the interface method must survive the merge"
+     );
+ }
++
++#[test]
++fn concurrent_mixin_cycle_does_not_wait_for_the_pending_escape_hatch() {
++    assert_concurrent_mixin_cycle(2);
++}
++
++#[test]
++fn concurrent_mixin_cycle_detects_transitive_wait_owners() {
++    assert_concurrent_mixin_cycle(3);
++}
++
++fn assert_concurrent_mixin_cycle(count: usize) {
++    use std::cell::Cell;
++    use std::sync::Barrier;
++    use std::time::{Duration, Instant};
++    let classes = Arc::new(
++        (0..count)
++            .map(|index| {
++                let mut class = make_class(&format!("Cycle\\Node{index}"));
++                class.mixins = vec![atom(&format!("Cycle\\Node{}", (index + 1) % count))];
++                class
++                    .methods
++                    .push(Arc::new(make_method(&format!("from{index}"), Some("void"))));
++                class.rebuild_method_index();
++                Arc::new(class)
++            })
++            .collect::<Vec<_>>(),
++    );
++    let cache = new_resolved_class_cache();
++    let gate = Arc::new(Barrier::new(count));
++    let start = Instant::now();
++    let workers = (0..count)
++        .map(|index| {
++            let classes = Arc::clone(&classes);
++            let cache = Arc::clone(&cache);
++            let gate = Arc::clone(&gate);
++            std::thread::spawn(move || {
++                let first = Cell::new(true);
++                let other = classes[(index + 1) % count].fqn();
++                let loader = |name: &str| {
++                    let name = name.trim_start_matches('\\');
++                    if name == other.as_str() && first.replace(false) {
++                        gate.wait();
++                    }
++                    classes
++                        .iter()
++                        .find(|class| class.fqn().as_str() == name)
++                        .cloned()
++                };
++                resolve_class_fully_cached(&classes[index], &loader, &cache)
++            })
++        })
++        .collect::<Vec<_>>();
++    let results = workers
++        .into_iter()
++        .map(|worker| worker.join().unwrap())
++        .collect::<Vec<_>>();
++    let elapsed = start.elapsed();
++    for class in results {
++        for index in 0..count {
++            let name = format!("from{index}");
++            assert!(
++                class
++                    .methods
++                    .iter()
++                    .any(|method| method.name.as_str() == name.as_str())
++            );
++        }
++    }
++    eprintln!("{count}-owner mixin cycle: {elapsed:?}");
++    assert!(
++        elapsed < Duration::from_secs(1),
++        "a real dependency cycle must not wait for the five-second escape hatch: {elapsed:?}"
++    );
++}

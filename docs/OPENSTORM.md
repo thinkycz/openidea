@@ -1557,3 +1557,133 @@ and 0.1.37 remain diagnostic candidates; 0.1.35 is the last fully accepted local
 app, and installed optimized 0.1.21 remains untouched. Two existing process-env
 tests still await explicit scope approval. All 69 areas remain 67 partial /
 2 user-deferred. No push or publication occurred.
+
+### Restart-stall reproduction after local checkpoint bd60163
+
+Checkpoint bd60163 preserves the rule catalog/client link fix and the native
+failures. Its compiled runtime hashes match signed 0.1.37; only progress/ledger
+and engine README changed after building. Worktree was clean at that checkpoint;
+subsequent probe tests are separate uncommitted work.
+
+A direct LspManager control stays responsive for three restart cycles (about
+153 ms per paired query), but it has no CandidateFn hook and therefore does not
+exercise the host's widened-file path. A real Host project supplies the native
+hook. With all four visible request-method/class usage queries, engine122 fails
+cycle 2: foreground hover returns Cancelled after about ten seconds. The test
+shuts the engine down before asserting and leaves source files unchanged.
+Engine121 passes three cycles but has two ten-second waits on this broader case;
+this does not establish an engine122-specific cause. Logs: laravel-framework-
+restart-{121,122}-four-lens-host-probe.log.
+
+A disposable 123-trace source copy (temporary opt-level=0, bounded explicit-path
+trace; no production fix) reproduces the failed hover in cycle 0. Its pending-owner
+trace captures circular ownership, including BlogPost/PostCollection and Eloquent/
+Query Builder dependencies. The minimal two-class cyclic-mixin test retains both
+methods but takes 30.0059 seconds, repeatedly hitting the five-second escape
+hatch. This is a focused red regression for class-resolution wait cycles, not a
+change to declaration inference or a diagnostic suppression.
+
+A scratch wait-graph correction is under test: retain the key each thread waits
+for, detect circular pending ownership before sleeping, and remove wait edges
+with an RAII guard. A cycle uses the existing independent-resolution/per-thread
+cycle-break path; ordinary contention must still share the identical cached Arc.
+No source pin, candidate executable or application resource has been promoted
+beyond engine122. Source/trace/binaries and red logs are in artifacts/phpantom-work
+and artifacts/checks/pending-waits-123*.
+
+The scratch cycle correction passes five focused concurrent tests, including
+ordinary first-resolution Arc sharing. Two- and three-owner mixin cycles each
+finish in about seven milliseconds with every method retained, versus the
+30-second two-owner red run. The actual Host four-lens/restart case passes three
+cycles at 425/385/439 ms with foreground docs retained; trace records two cycle
+breaks and no pending-owner timeout. Receipts: pending-waits-123-concurrent-green-2
+and laravel-framework-restart-123-cycle-host-probe logs.
+
+Temporary owner tracing and opt-level=0 have now been removed; Cargo.toml matches
+the pinned parent byte-for-byte. Scratch production lint/format checks are
+running before patch export and an optimized reproducible build. Neither the
+engine123 source pin nor a new bundle has been promoted yet.
+
+To preserve build space, 430 inactive generated SDK library/integration test
+executables were pruned (13,063,033,856 bytes selected). Two newest copies per
+target and every 0.1.37 output were retained; bin targets, signed apps, sources,
+fixtures, library objects, receipts/logs, Workbench and evaluation artifacts
+remain preserved. The SDK compiler cache was idle; the engine uses a separate
+target. Detailed selection/free-space receipt: sdk-test-cache-prune-123.json.
+
+### Engine123 optimized-build gate in progress
+
+The cycle correction is now exported as patch 0123, SHA-256
+28f21d9e0e10ba0b63e5b5601e21e14f2e4f09eec7b97a79148747a5fe13019d.
+Source acquisition replays all 123 patches into a fresh verified tree with series
+161aaafc178c30a81dc28ad8b4392b4efd085ebb7fdd32592a58dc572d9c6860.
+The app version is prepared as 0.1.38; resource promotion still awaits the final
+normal-release executable and its real-client/host checks. Temporary tracing and
+the probe build profile are absent from the exported patch.
+
+Frontend checks pass: 3,015 tests across 348 files, type checking, lint (existing
+warnings) and production build. Thirteen engine PHP example files pass syntax
+checks and assertions with the isolated PHP 8.4.23 executable. A fresh native
+fixture excludes environment files and validates 108 pinned baseline files plus
+88 non-Blade PHP files. Engine/workspace regressions and optimized engine build
+remain in progress; no new app acceptance or release claim is made.
+
+Clean engine123 gates now pass: 18,379 suite tests / 17 ignored, plus the separate
+FIFO-reader child harness. All-target release Clippy and formatting pass; the
+inherited nonfatal rust-objcopy/libLLVM stripping warning remains in the logs.
+Frontend remains 3,015 passing tests; root workspace is 1,307 passed / 38 ignored,
+with only the two process-env tests filtered pending exact-scope approval. Root
+all-target Clippy and formatting pass. Lock verification confirms exactly the
+34 workspace package versions changed from 0.1.37 to 0.1.38, without dependency
+changes. Counts and logs are under artifacts/checks/{phpantom-123,validation-0.1.38}*.
+The final normal-release recipe binary and native acceptance are still pending.
+
+The final recipe engine123 executable is archived at
+artifacts/engines/0.11.1-openstorm.123/phpantom_lsp with SHA-256
+0f53940f50625d031a4a2457b74d439f69757203db92949ef49dfd95abdfd28e.
+The archive includes licenses, provenance, recipe receipt and Rust/Cargo identity.
+All 14 real-client and 4 actual-host cases pass against those exact bytes. The
+Host's four-reference/foreground-hover cycle completes in 154/154/152 ms after
+initial documentation through three starts; files remain unchanged. The final
+analyzer reports exactly the expected Demo.php errors (two at 731, one at 951).
+Source acquisition fingerprints reverify after build.
+
+Engine123 is now promoted to resources and checksum verification passes. A unique
+0.1.38 development bundle is building. Native acceptance remains pending; source
+tests and mock capability flags do not establish it. All 69 statuses remain
+67 partial / 2 user-deferred. No push, publication, installed-app replacement or
+update-feed activation occurred.
+
+### 0.1.38 native rule-name/restart slice accepted
+
+Signed development app artifacts/batches/0.1.38/OpenStorm.app runs with a fresh
+owned profile and system-only PATH; its engine is the exact archived 123 binary.
+About confirms 0.1.38 debug, macOS aarch64, isolated configuration path and upstream
+attribution. F1 required/max docs are correct. Plain declaration opens required
+source at 2168:1; Edit Source max opens 1710:21. The visual completion list offers
+mac_address/max/max_digits, Down selects max, and acceptance retains :255. Saved
+undo changes only max to ma; saved redo restores every original byte.
+
+With ValidatesAttributes.php open, the existing status control restarts engine
+PID 99490 -> 99831. Initial F1 max arrives and later F1 remains responsive after
+usage refresh and caller navigation. The rules usage list contains three expected
+assertions callers; selecting the first opens assertions.php at 654:63. The
+observed F1/Escape cycle leaves no late popup. Neither first-launch nor relaunch
+log contains a reference timeout. This corrects the observed 0.1.37 stall; its
+failed bundle, logs and red reproduction remain preserved.
+
+One four-second settled post-restart sample observes native RSS 200.08 MiB /
+2.45% one-core CPU and engine RSS 194.88 MiB / 0.00%. Fresh-profile first IPC is
+4,946 ms, not UI-ready time. These are single observations with uncontrolled
+OS caches/other activity; native RSS excludes WebKit/GPU/network services. They
+do not establish controlled fresh/warm performance or parity. Receipt:
+validation-0.1.38-runtime-metrics.json.
+
+Quit exits both processes. No-argument relaunch recovers project, two tabs and
+caret 29:41; the first F1 max succeeds. Final quit leaves neither app nor server,
+request bytes are exact, and post-runtime deep strict signature verifies. Native
+receipt: validation-0.1.38-native-result.json. This native slice is accepted; the
+full unfiltered workspace/release gate remains open because two existing process
+tests need their separate synthetic-env scope approval. Broader validation/auth,
+controlled performance and all 69 area gates remain partial/deferred as tracked.
+Installed optimized 0.1.21 is untouched. Local only; no push or publication.

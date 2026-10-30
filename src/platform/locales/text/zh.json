@@ -4213,6 +4213,7 @@
   "Changed: {names}.": "已更改：{names}。",
   "Terminals and processes already running keep their old environment; new ones get the new one.": "已在运行的终端和进程保留原有环境；新启动的将使用新环境。",
   "Restart Language Servers": "重启语言服务器",
+  "Restart the language servers in the current project.": "重启当前项目的语言服务器。",
   "Could not reload the environment": "无法重新加载环境",
   "Environment reloaded": "环境已重新加载",
   "devcontainer.json was not applied": "未应用 devcontainer.json",

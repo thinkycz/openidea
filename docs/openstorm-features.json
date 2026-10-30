@@ -652,7 +652,9 @@
       "milestone": 6,
       "status": "partial",
       "acceptance_gate": "100 mapped commands; contextual conflicts; multi-stroke and double Shift",
-      "openstorm_evidence": [],
+      "openstorm_evidence": [
+        "0.1.39 native Settings > Keymap action search lists Restart Language Servers; selecting it enables Add Keyboard Shortcut. Cancel leaves the default keymap intact. Eight source action regressions protect registration/enablement/disposal and current-project recovery boundaries; wider shortcut parity remains partial."
+      ],
       "remaining": "Reassess current OpenStorm implementation against this full gate; Workbench acceptance does not transfer."
     },
     {
@@ -663,7 +665,8 @@
       "status": "partial",
       "acceptance_gate": "Keyboard discovery, previews, async stale-query cancellation",
       "openstorm_evidence": [
-        "0.1.25 native: new navigation actions found in Navigate and action search; existing shortcut assignment affordance visible. No default keybindings changed."
+        "0.1.25 native: new navigation actions found in Navigate and action search; existing shortcut assignment affordance visible. No default keybindings changed.",
+        "0.1.39 native CmdShiftA discovers Restart Language Servers by title and by PHPantom keyword, with description/shortcut-assignment hint. Executing the result restarts the bundled server and first/later rule docs remain correct. Prior native 0.1.37 missing search result is corrected; full search/recent-file gate stays partial."
       ],
       "remaining": "Reassess current OpenStorm implementation against this full gate; Workbench acceptance does not transfer."
     },
@@ -768,7 +771,8 @@
       "acceptance_gate": "Engine crash preserves buffers; retries limited; logs omit source/secrets by policy",
       "openstorm_evidence": [
         "0.1.37: quit exits app and engine even after the observed semantic-resolution stall. Separate no-argument relaunch recovers owned project/tabs/caret and first docs; final app/server exit and signature verified. Stall itself remains open, so full isolation gate stays partial.",
-        "0.1.38 native: both normal quits exit app/server, no-project-argument relaunch recovers project/tabs/caret and first docs, and final deep strict signature remains valid. Owned profile/resources verified; installed app untouched."
+        "0.1.38 native: both normal quits exit app/server, no-project-argument relaunch recovers project/tabs/caret and first docs, and final deep strict signature remains valid. Owned profile/resources verified; installed app untouched.",
+        "0.1.39 native explicit action-search restart changes bundled PHPantom PID; first/later docs correct. Fresh backend lookup, same/different-root project replacement and per-server failure/waiting covered by eight source action regressions. Native quit/relaunch/first-docs/final process cleanup/signature pass; no real remote recovery claim."
       ],
       "remaining": "Reassess current OpenStorm implementation against this full gate; Workbench acceptance does not transfer."
     },

@@ -1687,3 +1687,71 @@ full unfiltered workspace/release gate remains open because two existing process
 tests need their separate synthetic-env scope approval. Broader validation/auth,
 controlled performance and all 69 area gates remain partial/deferred as tracked.
 Installed optimized 0.1.21 is untouched. Local only; no push or publication.
+
+### Independent follow-up: discoverable language-server recovery
+
+The rule-name/restart slice is checkpointed locally at 8aefe1a; runtime hashes
+match its signed 0.1.38 receipt, with only docs/ledger/engine README changed after
+build. The full unfiltered workspace gate still awaits the two separately scoped
+process-env checks. Independent action discovery work continues while that
+permission is pending.
+
+Native testing found no Restart Language Server action in search; restart was
+accessible only through the status popup. A focused registry test fails against
+that baseline. The correction registers code.restartLanguageServers as Restart
+Language Servers in Code, available for an open project and searchable using
+PHPantom/PHP/Laravel/LSP/reload/recovery keywords. It adds no default shortcut.
+The handler reads the backend list, ignores a late lookup after project replacement
+(including the same root reopened), and waits for all restarts while reporting
+individual failures. The existing environment-reload notification shares that
+handler; it does not modify environment files.
+
+Focused checks pass for registration/enablement/disposal, current backend versus
+stale status state, partial failure and waiting, project replacement, lookup
+failure and closed/opening projects. Version 0.1.39 full checks and a new owned
+native fixture are in progress. Native discoverability/execution remain pending.
+
+The restart action's final frontend gates pass: 3,023 tests / 349 files, type
+checking, lint (existing warnings), and production build. The initial full run
+caught the new description's missing Chinese catalog entry; that failure is
+retained as restart-action-0.1.39-frontend-tests-red-locale.log and the catalog
+is corrected. Notification recovery delegates through the shared action registry,
+matching feature boundaries; the focused tests exercise this actual delegation
+with an open-project context. Eight action regressions protect current-project
+lookup, disposal/enablement, late responses and per-server failure isolation.
+The engine123 binary and client/host paths are unchanged from the accepted 0.1.38
+slice. Root workspace checks and a unique 0.1.39 development bundle are running.
+
+### 0.1.39 native recovery-action slice accepted
+
+The signed development app artifacts/batches/0.1.39/OpenStorm.app launches the
+same checksum-pinned engine123 with system-only PATH and a fresh owned profile.
+CmdShiftA finds Restart Language Servers, its description and the shortcut-
+assignment hint. Executing that result changes PHPantom PID 8754 -> 9581; the
+first F1 max response arrives and later docs remain correct. Searching PHPantom
+also finds the command. Existing Settings > Keymap > Search actions lists it;
+selecting the row enables Add Keyboard Shortcut. Cancel leaves the keymap intact.
+
+Normal quit exits app/server. No-argument relaunch recovers the owned project,
+request tab and caret 29:41, and the first F1 max is correct. About confirms
+0.1.39 debug/macOS aarch64, the owned profile and upstream attribution. Final quit
+leaves neither process, the fixture is byte-identical, and the post-runtime deep
+strict signature verifies. Neither native log contains a timeout. Native receipt:
+restart-action-0.1.39-native-result.json. This is functional acceptance, without
+a new performance claim; workspace tests were running separately.
+
+Current-project replacement and partial-failure boundaries pass focused source
+tests; native partial-failure notifications and real remote recovery remain
+unexercised. Full workspace release acceptance still excludes the two separately
+scoped environment-file tests. The installed optimized app and all previous
+bundles/fixtures remain preserved. No push or publication occurred.
+
+Final 0.1.39 root gates pass: 1,307 workspace tests / 38 ignored / two explicitly
+filtered process-env cases, all-target Clippy and formatting. Frontend is 3,023
+passed with typecheck/lint/build; existing lint/chunk warnings remain. Lock check
+permits only the 34 workspace version changes from 0.1.38 to 0.1.39. Bundle receipt
+hashes match every runtime source; only this progress file and feature ledger
+changed after build. Native/source receipts are under
+artifacts/checks/restart-action-0.1.39-*. Full unfiltered release acceptance stays
+open for the pending exact-scope synthetic-env tests, and all 69 statuses remain
+67 partial / 2 user-deferred. This local checkpoint does not complete the roadmap.

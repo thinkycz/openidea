@@ -14,7 +14,7 @@ import { UsagesPopup } from "./UsagesPopup";
 import { findUsages, rerunActiveUsages, resetUsages, showUsageResults, showUsagesPopup } from "./usages";
 import { HierarchyTabs, HierarchyView } from "./HierarchyView";
 import { resetHierarchy, showHierarchy } from "./hierarchy";
-import { installServerEvents } from "./servers";
+import { installServerEvents, restartLanguageServers } from "./servers";
 import { ServerStatus } from "./ServerStatus";
 
 import { LaravelNavigation } from "./LaravelNavigation";
@@ -92,6 +92,15 @@ export function activate(): () => void {
     }),
     registerOverlay({ id: "code-insight.usagesPopup", component: UsagesPopup }),
     registerActions([
+      {
+        id: "code.restartLanguageServers",
+        title: "Restart Language Servers",
+        category: "Code",
+        description: "Restart the language servers in the current project.",
+        keywords: ["PHPantom", "PHP", "Laravel", "LSP", "reload", "recovery"],
+        when: "projectOpen",
+        run: restartLanguageServers,
+      },
       {
         id: "navigate.laravelRoutes",
         title: "Laravel Routes…",

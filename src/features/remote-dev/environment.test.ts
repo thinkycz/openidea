@@ -1,6 +1,7 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { EnvReloaded, IdeError } from "@/bindings";
 import type { NotificationService } from "@/workbench/contributions";
+import { setContext } from "@/platform/context";
 
 type Outcome = { status: "ok"; data: EnvReloaded } | { status: "error"; error: IdeError };
 let outcome: Outcome;
@@ -14,14 +15,24 @@ vi.mock("@/platform/ipc", async (orig) => {
 
 const { reloadEnvironment, reloadSummary } = await import("./environment");
 const { provideNotificationService } = await import("@/workbench/contributions");
+const { useProject } = await import("@/platform/project");
+const { activate } = await import("@/features/code-insight");
 
 type Note = Parameters<NotificationService["notify"]>[0];
 let notes: Note[];
+let dispose: () => void;
 
 beforeEach(() => {
+  setContext("projectOpen", true);
+  useProject.setState({ project: { root: "/test", name: "test", settings: {}, isGit: false }, opening: false });
   notes = [];
   provideNotificationService({ notify: (n) => void notes.push(n) });
   vi.clearAllMocks();
+  dispose = activate();
+});
+afterEach(() => {
+  dispose();
+  setContext("projectOpen", false);
 });
 
 const reloaded = (changed: string[]): EnvReloaded => ({ changed, devcontainer: null, shellRead: true });

@@ -4,6 +4,7 @@
  * `remoteEnv`) without restarting the backend. What is already running keeps its own.
  */
 import { tx } from "@/platform/i18n";
+import { executeAction } from "@/platform/actions";
 import { call, commands, type EnvReloaded } from "@/platform/ipc";
 import { notifications } from "@/workbench/contributions";
 
@@ -25,20 +26,6 @@ export function reloadSummary(r: EnvReloaded): string {
   return [changed, keep].join(" ");
 }
 
-async function restartLanguageServers() {
-  try {
-    const servers = await call(commands.lspServers());
-    await Promise.all(servers.map((s) => call(commands.lspRestart(s.id))));
-  } catch (e) {
-    notifications().notify({
-      group: "lsp",
-      level: "error",
-      title: "Failed to restart language server",
-      body: e instanceof Error ? e.message : String(e),
-    });
-  }
-}
-
 export async function reloadEnvironment() {
   let result: EnvReloaded;
   try {
@@ -58,7 +45,7 @@ export async function reloadEnvironment() {
     title: "Environment reloaded",
     body: reloadSummary(result),
     actions: result.changed.length
-      ? [{ label: "Restart Language Servers", run: () => void restartLanguageServers() }]
+      ? [{ label: "Restart Language Servers", run: () => void executeAction("code.restartLanguageServers") }]
       : [],
   });
 }

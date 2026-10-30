@@ -100,6 +100,25 @@ export async function restartServer(id: ServerId) {
   }
 }
 
+/** Explicit recovery for this window's current project, using a fresh server list. */
+export async function restartLanguageServers() {
+  const project = useProject.getState().project;
+  if (!project || useProject.getState().opening) return;
+  try {
+    const servers = await call(commands.lspServers());
+    if (useProject.getState().project !== project || useProject.getState().opening) return;
+    await Promise.all(servers.map((server) => restartServer(server.id)));
+  } catch (e) {
+    if (useProject.getState().project !== project) return;
+    notifications().notify({
+      group: "lsp",
+      level: "error",
+      title: "Failed to restart language server",
+      body: e instanceof Error ? e.message : String(e),
+    });
+  }
+}
+
 export function installServerEvents(): () => void {
   const off = onIdeEvent("languageServer", (e) => {
     const known = useServers.getState().servers.has(e.server);

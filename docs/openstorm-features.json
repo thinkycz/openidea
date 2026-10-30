@@ -11,9 +11,11 @@
       "acceptance_gate": "Undo/redo, external conflict detection, UTF-8/UTF-16 ranges, non-ASCII round trip",
       "openstorm_evidence": [
         "0.1.23 native: autosave persisted; save-conflict Cancel preserved editor/disk; stale overwrite approval re-prompted; explicit current approval saved. Normal quit exited app and engine.",
-        "0.1.31 native nested-include acceptance exposed silent unsaved-tab discard when files.autoSave=false; reopening shows disk version and quit dirty count includes closed document. Guarded single/bulk close and dirty tracking correction are required next."
+        "0.1.31 native nested-include acceptance exposed silent unsaved-tab discard when files.autoSave=false; reopening shows disk version and quit dirty count includes closed document. Guarded single/bulk close and dirty tracking correction are required next.",
+        "0.1.32 source correction: guarded last-visible modified-tab and bulk close, stale-consent refusal, checked save conflict cancellation, explicit discard and closed-id dirty tracking. Final 41 focused tests and 3004 frontend/typecheck/lint/build pass; native candidate build/acceptance pending.",
+        "0.1.32 signed development native: manual CmdW/X close asks; Cancel retains modified text; Save uses external-overwrite confirmation and cancellation retains visible tab; explicit discard preserves disk and clears quit dirty count. Split-copy closure and discovered CloseAllTabs Cancel/SaveAll pass with exact disk witnesses. Original modified Blade reproduction passes. All 3004 frontend / 41 focused / workspace 1305/Clippy/fmt/build gates passed."
       ],
-      "remaining": "Reassess full gate; correct confirmed unsaved-tab-close data loss and closed-document dirty count before editor acceptance."
+      "remaining": "Reassess full buffer/selections/recovery gate; corrected manual-save tab closure accepted in 0.1.32. Crash recovery, broader pane/menu and large-file matrices remain open."
     },
     {
       "id": "FEAT-002",
@@ -356,7 +358,7 @@
         "0.1.30 native fixes unfinished escaped/raw echo completion, Unicode edit boundaries and undo/redo; unsaved dependency completion observed with unchanged disk. Restart/first-open scope failure with Composer autoload helpers remains red. Candidate is not accepted; see combined progress record.",
         "119 optimized engine: deterministic startup input-publication regression red before fix and green after; all nine actual-client cases pass, including broad Composer helper autoload fixture across three unsaved open/restart cycles. Full-source and native 0.1.31 acceptance remain open.",
         "0.1.31 signed development native: unfinished escaped/raw Unicode echo completion and undo/redo, unsaved Stock caller/template data with disk unchanged, actual engine restart with documentation/goto/completion retained, quit Cancel/Save All and saved project/tab reopening with quantity documentation passed. Full 119 source 18363 passed / 17 ignored; 9 client / 3 host passed. Previous 0.1.30 failure retained in combined record.",
-        "119 tenth actual-client case and signed0.1.31 native: controller -> page -> partial inference, unsaved controller model change, intermediate local override, restart and closing intermediate overlay update leaf completion/documentation. Native disk witnesses unchanged. Mapped goto verified through actual client. Separate modified-tab-close protection gap remains tracked in FEAT-001."
+        "119 tenth actual-client case and signed 0.1.31 native: controller -> page -> partial inference, unsaved controller model change, intermediate local override, restart and closing intermediate overlay update leaf completion/documentation. Native disk witnesses unchanged. Mapped goto verified through actual client. Separate modified-tab-close protection gap remains tracked in FEAT-001."
       ],
       "remaining": "Broader view-data propagation, cycles, include/component boundaries and shadowing matrices remain open; unfinished-echo and startup recovery batch accepted in 0.1.31."
     },
@@ -700,7 +702,9 @@
       "milestone": "cross-cutting",
       "status": "partial",
       "acceptance_gate": "Comparable corpora; first-use/warm p95, peak/steady RSS, idle CPU and cancellation",
-      "openstorm_evidence": [],
+      "openstorm_evidence": [
+        "0.1.32 four-second native-process sample on tiny 4-file plain PHP/text fixture: app 210.56 MiB RSS / 1.70% CPU, PHPantom 49.33 MiB RSS / 0.00% CPU. Excludes WebKit/GPU/network helpers; not total footprint or parity. Normal quit confirmed app/server exit; broader normalized performance remains open."
+      ],
       "remaining": "Reassess current OpenStorm implementation against this full gate; Workbench acceptance does not transfer."
     },
     {

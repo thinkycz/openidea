@@ -1,6 +1,15 @@
+import { _emitEditorEvent } from "@/editor/api";
 import { IpcError } from "@/platform/ipc";
 import { describe, expect, it, vi } from "vitest";
-import { confirmExitEnabled, decideClose, type CloseDeps, type CloseInput } from "../closeGuard";
+import {
+  confirmExitEnabled,
+  decideClose,
+  installCloseGuard,
+  dirtyCount,
+  _setDirtyForTests,
+  type CloseDeps,
+  type CloseInput,
+} from "../closeGuard";
 import type { MessageRequest as PromptRequest, MessageResult as PromptResult } from "@/workbench/messages";
 
 function deps(answers: PromptResult[]) {
@@ -89,4 +98,19 @@ it("keeps the window open without an error when overwrite confirmation is cancel
   });
   await expect(decideClose({ ...base, dirty: 1, quitting: true }, d)).resolves.toBe(false);
   expect(d.onSaveFailed).not.toHaveBeenCalled();
+});
+
+describe("closed document dirty tracking", () => {
+  it("removes a closed document without clearing another unsaved document", () => {
+    const { d } = deps([]);
+    const stop = installCloseGuard(d);
+    try {
+      _setDirtyForTests([501, 502]);
+      _emitEditorEvent({ type: "docClosed", doc: 501, path: "/p/a.txt" });
+      expect(dirtyCount()).toBe(1);
+    } finally {
+      stop();
+      _setDirtyForTests([]);
+    }
+  });
 });

@@ -222,6 +222,10 @@ export class DocModel {
   hasSaveConflict(): boolean {
     return this.conflictRevision !== null;
   }
+  /** Called only after explicit discard consent, so closing may release a conflicted buffer. */
+  confirmDiscardOnClose() {
+    this.conflictRevision = null;
+  }
   private meta: DocMeta;
 
   constructor(

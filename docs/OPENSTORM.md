@@ -1048,19 +1048,19 @@ retirement of previous members, restart and closing the intermediate overlay.
 The first run is in progress against archived119; no nested-include acceptance is
 claimed yet. No engine or application runtime code changed for this check.
 
-Nested-include actual-client case passes against119; all ten real-client cases
+Nested-include actual-client case passes against 119; all ten real-client cases
 pass together. Focused client-test Clippy and workspace formatting pass. The
 runtime/source engine is unchanged from the accepted0.1.31 build, so its full
 source/workspace/frontend/host/build gates are reused rather than rerun.
 
-Native0.1.31 nested fixture: leaf-first Item name documentation resolves with both
+Native 0.1.31 nested fixture: leaf-first Item name documentation resolves with both
 providers closed. Unsaved controller Stock data completes quantity in the partial.
 An unsaved intermediate Item binding overrides it, with Item name completion and
-documentation. Server restart41043 ->41056 retains that binding. Closing the
+documentation. Server restart 41043 -> 41056 retains that binding. Closing the
 intermediate overlay returns Stock quantity completion/documentation. All five
 fixture source files remain byte-identical on disk throughout; no environment
-files exist. Final normal quit discards only the owned overlays, exits app41016
-and server41056, and post-runtime signature verifies. Focus autosave was restored
+files exist. Final normal quit discards only the owned overlays, exits app 41016
+and server 41056, and post-runtime signature verifies. Focus autosave was restored
 true only in the owned profile after quitting. Actual-client mapped member goto
 passed; nested native goto was not separately exercised.
 
@@ -1074,3 +1074,79 @@ dirty tracking, preserving default autosave and external-conflict protection.
 This limits editor acceptance, not the observed include-data transitions.
 Evidence: `laravel-include-119-client-{first,all}.log`, client-clippy/fmt logs and
 `laravel-include-0.1.31-{fixture,unsaved-witness,native-result}.json`.
+
+### Modified tab closure protection (next native candidate)
+
+Nested-include evidence checkpoint `3ecbbbd` is local only. Native testing exposed
+silent unsaved-tab discard when focus autosave is disabled and a stale quit dirty
+count after closing a document. New controller regressions reproduced five missing
+close prompts; separate regressions reproduced the retained conflict buffer after
+explicit discard and closed-document dirty-count leak. All intended red logs are
+retained (an initial test accessor typo was corrected before assessing the reds).
+
+Tab-close actions now review the last visible copy of each modified document when
+autosave is off. Cancel leaves tabs/buffers, Save uses the existing checked save
+flow, and explicit discard leaves disk unchanged. Bulk closure reviews all targets
+once; split copies are preserved. Deferred consent is rejected if tabs or document
+revisions change. Existing default autosave remains on the unchanged path. Explicit
+discard releases prior conflict retention; document-close events clear only that
+id from quit tracking. Focused controller/document/quit tests passed 39 before the
+last bulk-save/layout scenarios were added; final frontend/build/native gates remain
+open. No engine changes are required; accepted 119 and 0.1.31 remain preserved.
+
+Final focused tab-close/document/quit tests pass 41. Complete frontend passes 3,004,
+with typecheck/lint/build passing. The final targeted rerun and typecheck also pass
+after keeping the default-autosave path free of the new guard scans. New tests
+cover explicit discard of a cancelled external conflict, delayed consent with newer
+edits/tabs, bulk Save All, split sharing and default autosave. Native 0.1.32 is being
+built with workspace tests/Clippy/fmt first, using CARGO_INCREMENTAL=0. Its isolated
+plain-text/PHP fixture is `artifacts/checks/tab-close-0.1.32-fixture.json` with no
+environment files. Resumable jobs and remaining gates are in the adjacent active
+receipt. Do not infer packaged acceptance from these source tests.
+
+0.1.32 workspace passed 1,305 tests with 33 ignored, all-target Clippy and formatting.
+The native build is now running and independently verifies the unchanged119 engine
+checksum before rebuilding frontend assets. No app/server is running yet. Full
+PHPantom/client/host gates from the accepted119 runtime are unchanged and retained.
+
+### 0.1.32 modified-tab protection accepted locally
+
+Signed development bundle `artifacts/batches/0.1.32/OpenStorm.app` preserves the
+accepted 119 engine checksum. Default Cmd+W still autosaves exact text without a
+new prompt. With focus autosave disabled, close asks Save / Don't Save / Cancel;
+Cancel keeps the modified tab and disk unchanged. A synthetic external edit then
+Close -> Save uses the existing overwrite dialog with Cancel focused. Cancelling
+keeps both versions and the tab visible. Explicit Don't Save subsequently closes
+the buffer without writing disk, and normal quit has no phantom dirty prompt.
+
+Relaunch without a project argument reopens the project; the discarded file opens
+with external disk text. Closing one split keeps the shared modified buffer without
+a prompt. Find Action discovers Close All Tabs; one prompt covers both modified
+files. Cancel retains both tabs and prior disk versions; Save All writes both exact
+new texts and closes both. Opening Note.php starts bundled 119. Focus autosave is
+restored true, idle autosave stays false, and normal quit stops app 91082 / server 91124.
+
+The original Laravel reproduction also passes in 0.1.32: modified intermediate Blade
+close via Cmd+W and the X button asks first. Cancel retains the unsaved Stock binding;
+explicit Don't Save closes it. All five project source files stay byte-identical.
+Quit has no phantom dirty prompt and stops app 91187 / server 91195. The temporary Blade
+profile's explicit manual-save setting was restored true after quitting. Deep/strict
+signature verification passes after both runtime checks. Plain fixture sources were
+restored byte-for-byte after their successful persistence checks. No environment
+files were created or changed by these native fixtures.
+
+Complete source gates: frontend 3,004 tests/typecheck/lint/build, final focused 41
+editor/document/quit checks, workspace 1,305 passed / 33 ignored, Clippy/fmt and native
+build passed. The unchanged 119 engine source 18,363 passed / 17 ignored, actual-client 10 and
+host 3 gates are retained from the preceding accepted build. No new engine claims
+are inferred from UI event activity. Evidence: `tab-close-0.1.32-{build-receipt,
+native-result,fixture,blade-fixture,conflict-witness,bulk-witness}.json`, native logs,
+`tab-close-guard-*` and workspace/build logs in `artifacts/checks/`.
+
+A short 4-second idle sample on the tiny 4-file PHP/text project recorded native app
+RSS 210.56 MiB / CPU 1.70% and engine RSS 49.33 MiB / CPU 0.00%. This excludes WebKit/GPU/
+network helpers and is not total app memory or a parity benchmark; raw samples and
+limits are in `tab-close-0.1.32-idle-sample.json`. Startup first-IPC observations are
+in the native result receipt, separate from UI-ready latency. Broader performance,
+crash recovery and editor matrices remain unaccepted. Previous 0.1.31 and installed
+optimized 0.1.21 remain preserved. No push, publishing or notarization occurred.

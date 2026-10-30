@@ -7,6 +7,7 @@
  * documents have unsaved changes. Quit confirms once, then the backend closes
  * every window, each of which runs only its unsaved-changes check.
  */
+import { onEditorEvent } from "@/editor/api";
 import { commands, isTauri, isCancelled, onIdeEvent, type Settings } from "@/platform/ipc";
 import { t } from "@/platform/i18n";
 import { closeProject, provideLeaveProjectGuard, useProject } from "@/platform/project";
@@ -143,6 +144,9 @@ export async function quitApp(deps: CloseDeps = defaultDeps): Promise<void> {
 
 export function installCloseGuard(deps: CloseDeps = defaultDeps): () => void {
   const unsubs = [
+    onEditorEvent((event) => {
+      if (event.type === "docClosed") dirtyDocs.delete(event.doc);
+    }),
     onIdeEvent("docDirty", (e) => {
       if (e.dirty) dirtyDocs.add(e.doc);
       else dirtyDocs.delete(e.doc);

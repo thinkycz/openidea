@@ -360,6 +360,11 @@ export const commands = {
 	start: Pos,
 	end: Pos,
 } | null, IdeError>(__TAURI_INVOKE("lsp_prepare_rename", { doc, pos })),
+	/**  Retains the server's semantic rename name as well as the source span. */
+	lspPrepareRenameDetails: (doc: DocId, pos: Pos) => typedError<{
+	range: Range,
+	placeholder: string | null,
+} | null, IdeError>(__TAURI_INVOKE("lsp_prepare_rename_details", { doc, pos })),
 	/**  Computes the rename edit without applying it, so the UI can preview conflicts. */
 	lspRename: (doc: DocId, pos: Pos, newName: string) => typedError<WorkspaceEdit_Serialize, IdeError>(__TAURI_INVOKE("lsp_rename", { doc, pos, newName })),
 	lspLaravelRoutes: (request: RequestId, doc: DocId, name: string | null, limit: number) => typedError<LaravelRoutes, IdeError>(__TAURI_INVOKE("lsp_laravel_routes", { request, doc, name, limit })),
@@ -4878,6 +4883,12 @@ export type RemoteSession = {
 
 /**  Where [`remote_connect`] is (`fraction`: 0..1 of a download / upload). */
 export type RemoteStage = "connecting" | "checking" | "downloading" | "uploading" | "starting" | "opening";
+
+/**  A source span and the semantic name the server expects when renaming it. */
+export type RenamePreparation = {
+	range: Range,
+	placeholder: string | null,
+};
 
 export type ReplaceEvent = 
 /**  A file was changed (`replacements` > 0) or had nothing left to replace. */

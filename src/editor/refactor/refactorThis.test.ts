@@ -13,6 +13,10 @@ const lspCodeActionQuery = vi.fn(async (request: number, _doc: number, _range: u
   query(request),
 );
 const lspPrepareRename = vi.fn(async () => prepare);
+const lspPrepareRenameDetails = vi.fn(async () => {
+  const result = await lspPrepareRename();
+  return result.status === "ok" && result.data !== null ? ok({ range: result.data, placeholder: null }) : result;
+});
 let onApply: (() => void) | null = null;
 const lspApplyCodeAction = vi.fn(async () => {
   onApply?.();
@@ -31,6 +35,7 @@ vi.mock("@/platform/ipc", async (orig) => {
       ...actual.commands,
       lspCodeActionQuery,
       lspPrepareRename,
+      lspPrepareRenameDetails,
       lspApplyCodeAction,
       lspCodeActions,
       cancelRequest,

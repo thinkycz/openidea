@@ -2645,3 +2645,194 @@ async fn dotenv_bridge_excludes_nested_environment_files_and_unrelated_projects(
     h.mgr.did_open(DocId::next(), &h.root.join(".env"), &LanguageId::new("dotenv"), 1, "OPENSTORM_DEMO_LABEL=sample\n");
     assert!(h.mgr.servers().is_empty());
 }
+
+fn checked_php_caps() -> Value {
+    let mut caps = incremental_caps();
+    caps["experimental"] = json!({"phpWorkbenchRenameChecked": true});
+    caps
+}
+
+#[tokio::test]
+async fn checked_php_rename_retries_pending_publication_with_the_same_receipts_and_transient_hold() {
+    let h = harness_for("php", "php", &[("phpantom", checked_php_caps())], &[]);
+    let (doc, path) = h.open("main.php", "<?php total();\n");
+    let helper = h.root.join("helper.php");
+    std::fs::write(&helper, "<?php function total() {}\n").unwrap();
+    let files = vec![path.clone(), helper.clone()];
+    h.mgr.set_candidates_hook(Box::new(move |_, _| ide_lsp::CandidateFiles { files: files.clone(), limit_hit: false }));
+    let s = h.launcher.state("phpantom");
+    *s.fault.lock() = Some(Arc::new(|s, method| {
+        (method == "phpWorkbench/renameChecked" && s.requested(method).len() == 1)
+            .then(|| (ide_jsonrpc::codes::CONTENT_MODIFIED, "pending project publication".into()))
+    }));
+    s.respond(
+        "phpWorkbench/renameChecked",
+        json!({"changes": {uri_of(&path): [{"range":php_range(0,6,0,11),"newText":"subtotal"}]}}),
+    );
+    let result = h.mgr.rename(doc, Pos::new(0, 7), "subtotal".into()).await;
+    h.mgr.shutdown_all().await;
+    assert_eq!(result.unwrap().files.len(), 1);
+    let requests = s.requested("phpWorkbench/renameChecked");
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[0], requests[1], "retry must not rebase the source receipts or rename target");
+    assert_eq!(
+        s.notified("textDocument/didOpen").iter().filter(|p| p["textDocument"]["uri"] == uri_of(&helper)).count(),
+        1
+    );
+    assert_eq!(
+        s.notified("textDocument/didClose").iter().filter(|p| p["textDocument"]["uri"] == uri_of(&helper)).count(),
+        1
+    );
+    assert!(s.requested("textDocument/rename").is_empty());
+}
+
+#[tokio::test(start_paused = true)]
+async fn checked_php_rename_retry_is_bounded_and_rejects_changed_inputs_or_other_results() {
+    for mode in ["busy", "typed", "typed success", "dependency typed", "closed", "replaced", "server error", "empty"] {
+        let h = harness_for("php", "php", &[("phpantom", checked_php_caps())], &[]);
+        let original = "<?php total();\n";
+        let (doc, path) = h.open("main.php", original);
+        let (dependency, _) = h.open("dependency.php", "<?php function total() {}\n");
+        let candidate = path.clone();
+        h.mgr.set_candidates_hook(Box::new(move |_, _| ide_lsp::CandidateFiles {
+            files: vec![candidate.clone()],
+            limit_hit: false,
+        }));
+        let s = h.launcher.state("phpantom");
+        s.respond(
+            "phpWorkbench/renameChecked",
+            if mode == "empty" {
+                Value::Null
+            } else {
+                json!({"changes": {uri_of(&path): [{"range":php_range(0,6,0,11),"newText":"subtotal"}]}})
+            },
+        );
+        let weak = Arc::downgrade(&h.mgr);
+        *s.fault.lock() = Some(Arc::new(move |_, method| {
+            if method != "phpWorkbench/renameChecked" {
+                return None;
+            }
+            let mgr = weak.upgrade().unwrap();
+            if matches!(mode, "typed" | "typed success") {
+                mgr.did_change(
+                    doc,
+                    2,
+                    &[AppliedChange { range: rng(0, 0, 1, 0), text: "<?php changed();\n".into() }],
+                    &|| "<?php changed();\n".into(),
+                );
+            }
+            if mode == "dependency typed" {
+                mgr.did_change(
+                    dependency,
+                    2,
+                    &[AppliedChange { range: rng(0, 0, 1, 0), text: "<?php function total(int $n) {}\n".into() }],
+                    &|| "<?php function total(int $n) {}\n".into(),
+                );
+            }
+            if matches!(mode, "closed" | "replaced") {
+                mgr.did_close(doc);
+            }
+            if mode == "replaced" {
+                mgr.did_open(DocId::next(), &path, &LanguageId::new("php"), 1, original);
+            }
+            if matches!(mode, "typed success" | "empty") {
+                return None;
+            }
+            Some((
+                if mode == "server error" { -32603 } else { ide_jsonrpc::codes::CONTENT_MODIFIED },
+                "not ready".into(),
+            ))
+        }));
+        let start = tokio::time::Instant::now();
+        let result = h.mgr.rename(doc, Pos::new(0, 7), "subtotal".into()).await;
+        let attempts = s.requested("phpWorkbench/renameChecked").len();
+        h.mgr.shutdown_all().await;
+        if mode == "empty" {
+            assert!(result.unwrap().files.is_empty());
+        } else {
+            assert!(result.is_err(), "{mode} must not return an edit");
+        }
+        if mode == "busy" {
+            assert!((2..=600).contains(&attempts), "bounded checked-rename retry: {attempts}");
+            assert!(start.elapsed() >= Duration::from_secs(29) && start.elapsed() <= Duration::from_secs(30));
+        } else {
+            assert_eq!(attempts, 1, "{mode}");
+        }
+    }
+}
+
+#[tokio::test]
+async fn checked_php_rename_retry_does_not_cross_server_restart() {
+    let h = harness_for("php", "php", &[("phpantom", checked_php_caps())], &[]);
+    let (doc, path) = h.open("main.php", "<?php total();\n");
+    h.mgr.set_candidates_hook(Box::new(move |_, _| ide_lsp::CandidateFiles {
+        files: vec![path.clone()],
+        limit_hit: false,
+    }));
+    let s = h.launcher.state("phpantom");
+    let attempted = Arc::new(tokio::sync::Notify::new());
+    let notify = attempted.clone();
+    *s.fault.lock() = Some(Arc::new(move |_, method| {
+        if method != "phpWorkbench/renameChecked" {
+            return None;
+        }
+        notify.notify_one();
+        Some((ide_jsonrpc::codes::CONTENT_MODIFIED, "publishing".into()))
+    }));
+    let mgr = h.mgr.clone();
+    let pending = tokio::spawn(async move { mgr.rename(doc, Pos::new(0, 7), "subtotal".into()).await });
+    attempted.notified().await;
+    h.mgr.restart(h.mgr.servers()[0].id).await.unwrap();
+    let result = pending.await.unwrap();
+    h.mgr.shutdown_all().await;
+    assert_eq!(result.unwrap_err().kind, ide_core::error::ErrorKind::Cancelled);
+    assert_eq!(s.requested("phpWorkbench/renameChecked").len(), 1);
+}
+
+#[tokio::test]
+async fn prepare_rename_details_retains_a_semantic_name_distinct_from_the_source_span() {
+    let h = harness(&[("mock", incremental_caps())]);
+    let (doc, _) = h.open("main.mk", "😀 name('invoice');\n");
+    let s = h.launcher.state("mock");
+    s.respond(
+        "textDocument/prepareRename",
+        json!({"range": php_range(0,9,0,16), "placeholder":"openstorm.billing.invoice"}),
+    );
+    let prepared = h.mgr.prepare_rename_details(doc, Pos::new(0, 10)).await.unwrap().unwrap();
+    let legacy = h.mgr.prepare_rename(doc, Pos::new(0, 10)).await.unwrap();
+    h.mgr.shutdown_all().await;
+    assert_eq!(prepared.placeholder.as_deref(), Some("openstorm.billing.invoice"));
+    assert_eq!(prepared.range, rng(0, 9, 0, 16));
+    assert_eq!(legacy, Some(prepared.range), "existing range-only API remains compatible");
+}
+
+#[tokio::test]
+async fn prepare_rename_details_discards_a_late_result_after_typing_or_document_replacement() {
+    for replaced in [false, true] {
+        let h = harness(&[("mock", incremental_caps())]);
+        let (doc, path) = h.open("main.mk", "invoice");
+        let s = h.launcher.state("mock");
+        s.respond("textDocument/prepareRename", json!({"range":php_range(0,0,0,7),"placeholder":"billing.invoice"}));
+        let weak = Arc::downgrade(&h.mgr);
+        *s.fault.lock() = Some(Arc::new(move |_, method| {
+            if method == "textDocument/prepareRename" {
+                let mgr = weak.upgrade().unwrap();
+                if replaced {
+                    mgr.did_close(doc);
+                    mgr.did_open(DocId::next(), &path, &LanguageId::new("mock"), 1, "invoice");
+                } else {
+                    mgr.did_change(
+                        doc,
+                        2,
+                        &[AppliedChange { range: rng(0, 0, 0, 7), text: "another".into() }],
+                        &|| "another".into(),
+                    );
+                }
+            }
+            None
+        }));
+        let result = h.mgr.prepare_rename_details(doc, Pos::new(0, 2)).await;
+        h.mgr.shutdown_all().await;
+        assert_eq!(result.unwrap_err().kind, ide_core::error::ErrorKind::Cancelled);
+    }
+}

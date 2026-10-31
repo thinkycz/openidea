@@ -13,6 +13,7 @@ pub fn client_capabilities() -> Value {
                 "cancel": true,
                 "retryOnContentModified": [
                     "textDocument/hover",
+                    "phpWorkbench/renameChecked",
                     "textDocument/semanticTokens/full",
                     "textDocument/inlayHint",
                     "textDocument/codeLens"

@@ -224,6 +224,15 @@ pub async fn lsp_prepare_rename(host: &Host, window: &str, doc: DocId, pos: Pos)
     host.project(window)?.lsp.prepare_rename(doc, pos).await
 }
 
+pub async fn lsp_prepare_rename_details(
+    host: &Host,
+    window: &str,
+    doc: DocId,
+    pos: Pos,
+) -> IdeResult<Option<RenamePreparation>> {
+    host.project(window)?.lsp.prepare_rename_details(doc, pos).await
+}
+
 /// Computes the rename edit without applying it, so the UI can preview conflicts.
 pub async fn lsp_rename(host: &Host, window: &str, doc: DocId, pos: Pos, new_name: String) -> IdeResult<WorkspaceEdit> {
     let project = host.project(window)?;
@@ -420,6 +429,9 @@ pub(crate) fn register(d: &mut Dispatcher) {
     });
     d.add("lsp_prepare_rename", |c| async move {
         lsp_prepare_rename(&c.host, &c.window, c.arg("doc")?, c.arg("pos")?).await
+    });
+    d.add("lsp_prepare_rename_details", |c| async move {
+        lsp_prepare_rename_details(&c.host, &c.window, c.arg("doc")?, c.arg("pos")?).await
     });
     d.add("lsp_rename", |c| async move {
         lsp_rename(&c.host, &c.window, c.arg("doc")?, c.arg("pos")?, c.arg("newName")?).await

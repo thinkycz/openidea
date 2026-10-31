@@ -216,6 +216,18 @@ pub async fn lsp_prepare_rename(
     ide_host::ops::lsp::lsp_prepare_rename(&state.host, window.label(), doc, pos).await
 }
 
+/// Retains the server's semantic rename name as well as the source span.
+#[tauri::command]
+#[specta::specta]
+pub async fn lsp_prepare_rename_details(
+    window: Window,
+    state: State<'_, AppState>,
+    doc: DocId,
+    pos: Pos,
+) -> IdeResult<Option<RenamePreparation>> {
+    ide_host::ops::lsp::lsp_prepare_rename_details(&state.host, window.label(), doc, pos).await
+}
+
 /// Computes the rename edit without applying it, so the UI can preview conflicts.
 #[tauri::command]
 #[specta::specta]

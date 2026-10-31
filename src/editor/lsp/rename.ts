@@ -1,5 +1,5 @@
 /**
- * Rename (⇧F6): `lsp_prepare_rename` → the name is edited in place with this
+ * Rename (⇧F6): `lsp_prepare_rename_details` → the name is edited in place with this
  * file's occurrences linked (`inplaceRename.ts`; ⇧F6 again opens the name
  * dialog) → `lsp_rename` → preview dialog when the edit spans several files
  * (or moves files), otherwise applied directly via `apply_workspace_edit`.
@@ -62,40 +62,57 @@ export async function startRename(view: EditorView) {
     return;
   }
   await whenSynced(view);
+  const source = view.state.doc;
+  const current = () => view.state.doc === source && docOf(view) === doc;
   const head = view.state.selection.main.head;
   const pos = offsetToPos(view.state.doc, head);
-  let range;
+  let prepared;
   try {
-    range = await lspRequest(() => commands.lspPrepareRename(doc.doc, pos));
+    prepared = await lspRequest(() => commands.lspPrepareRenameDetails(doc.doc, pos), current);
   } catch (e) {
+    if (!current()) return;
     if (isCancelled(e)) return;
     if (!(await startSyntaxRename(view, doc, pos))) reportLspError(view, e, true);
     return;
   }
-  if (!range) {
+  if (!current()) return;
+  if (!prepared) {
     // A normal "can't rename" is respected; over broken code the server may just have given up.
     if ((await hasSyntaxErrors(doc.doc)) && (await startSyntaxRename(view, doc, pos))) return;
     showHint(view, "This element can't be renamed");
     return;
   }
-  const { from, to } = rangeToOffsets(view.state.doc, range);
-  const oldName = view.state.sliceDoc(from, to);
-  const dialog = (initial: string) =>
+  const { from, to } = rangeToOffsets(source, prepared.range);
+  const sourceName = source.sliceString(from, to);
+  const oldName = prepared.placeholder ?? sourceName;
+  const dialog = (initial: string) => {
+    const dialogSource = view.state.doc;
+    const dialogContext = docOf(view);
+    if (!dialogContext || dialogContext.doc !== doc.doc || dialogContext.path !== doc.path || dialogContext.readOnly)
+      return;
     openPopup({
       kind: "rename",
       anchor: caretAnchor(view, from),
       title: tx`Rename '${oldName}'`,
       initial,
-      onSubmit: (newName) => void finishRename(view, doc, pos, oldName, newName),
+      onSubmit: (newName) => {
+        if (!newName || newName === oldName) return;
+        if (view.state.doc !== dialogSource || docOf(view) !== dialogContext || dialogContext.readOnly) {
+          showHint(view, "The file changed; rename cancelled", { tone: "warning" });
+          return;
+        }
+        void finishRename(view, doc, pos, oldName, newName);
+      },
     });
-  if (from === to) {
+  };
+  if (from === to || oldName !== sourceName) {
     dialog(oldName);
     return;
   }
   // IDEA renames in place by default: occurrences in this file follow live.
   const state = view.state;
   const others = await linkedOccurrences(view, doc.doc, pos, { from, to }, oldName);
-  if (view.state.doc !== state.doc) return;
+  if (view.state.doc !== state.doc || !current()) return;
   const keys = shortcutLabel("refactor.rename");
   startInplaceRename(view, {
     primary: { from, to },
@@ -204,19 +221,27 @@ export function linkedSpans(spans: readonly Span[], primary: Span, accept: (s: S
 async function commitInplace(view: EditorView, doc: EditorDocContext, pos: Pos, oldName: string, newName: string) {
   if (!newName.trim() || newName === oldName) return;
   // The server renames from the original text, which the session just restored.
+  const source = view.state.doc;
   await whenSynced(view);
+  if (view.state.doc !== source || docOf(view) !== doc) return;
   await finishRename(view, doc, pos, oldName, newName);
 }
 
 async function finishRename(view: EditorView, doc: EditorDocContext, pos: Pos, oldName: string, newName: string) {
   if (!newName || newName === oldName) return;
+  const source = view.state.doc;
+  const context = docOf(view);
+  if (!context || context.doc !== doc.doc || context.path !== doc.path || context.readOnly) return;
+  const current = () => view.state.doc === source && docOf(view) === context && !context.readOnly;
   let edit: WorkspaceEdit;
   try {
-    edit = await lspRequest(() => commands.lspRename(doc.doc, pos, newName));
+    edit = await lspRequest(() => commands.lspRename(doc.doc, pos, newName), current);
   } catch (e) {
+    if (!current()) return;
     reportLspError(view, e, true);
     return;
   }
+  if (!current()) return;
   const summary = summarizeWorkspaceEdit(edit);
   if (!summary.files) {
     if (await hasSyntaxErrors(doc.doc)) {

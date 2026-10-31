@@ -15,6 +15,7 @@ const cmd = {
   lspGoto: vi.fn((): R<unknown> => unavailable()),
   lspDocumentHighlights: vi.fn((): R<unknown> => unavailable()),
   lspPrepareRename: vi.fn((): R<unknown> => unavailable()),
+  lspPrepareRenameDetails: vi.fn((): R<unknown> => unavailable()),
   lspRename: vi.fn((): R<unknown> => unavailable()),
   syntaxSupport: vi.fn(() => ok({ tree: true, locals: true })),
   syntaxLocals: vi.fn((): R<Locals> => ok({ status: "noIdentifier" })),
@@ -93,6 +94,12 @@ function editor(doc: string, language = "typescript", anchor = 0) {
 
 beforeEach(() => {
   for (const f of Object.values(cmd)) f.mockClear();
+  cmd.lspPrepareRenameDetails.mockImplementation(async () => {
+    const result = await cmd.lspPrepareRename();
+    return result.status === "ok" && result.data !== null
+      ? { ...result, data: { range: result.data, placeholder: null } }
+      : result;
+  });
   openFile.mockClear();
   closePopup();
 });

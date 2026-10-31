@@ -1755,3 +1755,133 @@ changed after build. Native/source receipts are under
 artifacts/checks/restart-action-0.1.39-*. Full unfiltered release acceptance stays
 open for the pending exact-scope synthetic-env tests, and all 69 statuses remain
 67 partial / 2 user-deferred. This local checkpoint does not complete the roadmap.
+
+### Laravel route usages/refactoring acceptance in progress
+
+Continuation after 9b508bc is progress: the 0.1.38/0.1.39 native slices are complete,
+and the next Laravel gate is FEAT-030 semantic route usages/rename through the
+actual OpenStorm host and guarded editor edit path. The original Workbench matrix
+requirement is retained, without adopting its acceptance claims. Static schema
+assistance (FEAT-036) and factory workflows remain visible and unaccepted.
+
+A reproducible owned route fixture wraps the existing pinned Laravel acquisition
+and syntax/autoload validation. It adds grouped route names, PHP/Blade callers,
+Unicode on a caller line, a same-text non-route literal, colliding and duplicate
+names, and generated resource routes. No framework boot, database, Composer or
+Artisan command is run; environment files are excluded. Script:
+scripts/create-openstorm-route-fixture.py; initial receipt:
+artifacts/checks/route-refactor-probe-fixture.json.
+
+The first actual-host test finds expected PHP/Blade references and a prepare-rename
+range, but the later checked rename returns Cancelled before a guarded preview.
+This is a red integration result, not accepted route refactoring. A diagnostic
+client build temporarily records only checked-rename error responses to identify
+the protocol boundary; this logging must be removed before delivery. Collision
+checks are being strengthened to require the specific collision error rather than
+treating arbitrary cancellation as a successful refusal. The owned test files are
+restored and the engine is shut down before reporting failure. Initial log:
+route-refactor-123-host-probe.log.
+
+The diagnostic run proves PHPantom returns -32801 with "PHP project state changed
+during the request" while project inputs are being published. It is not a route
+collision refusal. The client now keeps one checked-rename deadline, exact source
+receipts/target and transient holds across retries of this explicit protocol error.
+It stops when any open overlay receipt, primary attachment or engine generation
+changes; normal errors/null results are final. Exhausting the publication retry
+reports an actionable indexing/retry message. Capability advertisement now lists
+the checked-rename extension among explicitly retried methods.
+
+Two focused protocol regressions fail on the prior client; all three pass with
+the correction (the restart-invalidation case already passed before it).
+They cover identical request receipts and one transient open/close across retry,
+a single 30-second virtual deadline, typing/dependency changes/close/replacement,
+genuine null/server errors and server restart. Temporary RPC trace logging has
+been removed. The strengthened real-host route scenario is rerunning; native
+acceptance is pending.
+
+To retain build room, 136 inactive generated SDK library/integration test
+executables (3,599,903,056 nominal bytes) were pruned with a detailed receipt,
+retaining the newest two per target and every 0.1.38/0.1.39 output. All binary
+targets, symlinks, sources, libraries, app bundles, fixtures, engine archives,
+Workbench and evaluation deliverables remain preserved. APFS reclaimed space
+after a delay; sdk-test-cache-prune-route-refactor.json records observations.
+
+The strengthened real-host case passes after the retry correction: semantic
+collision/duplicate/generated/prefix refusals, guarded four-file rename, an
+unsaved Blade overlay with two callers, and rejection of a stale preview after
+an external caller edit. Explicit reviewed refactoring persists both open and
+closed targets by the existing shared transaction contract; the first test's
+assumption that an open consumer remained unsaved was corrected against that
+contract. Both buffers and exact persisted content are now checked. All owned
+fixture files are restored after the case.
+
+Preserved native 0.1.39 exposes a second issue at a grouped declaration: ShiftF6
+and its existing dialog show only invoice, discarding PHPantom's full semantic
+placeholder openstorm.billing.invoice. Submitting details produces no preview
+in the observed cycle; all fixture bytes remain original. Source confirms the
+client throws away RangeWithPlaceholder.placeholder. Baseline app/server exit
+and post-runtime signature pass. Receipt: route-refactor-baseline-native-result.
+
+A typed RenamePreparation and prepare_rename_details path now retain the semantic
+name plus UTF-16 source range. The range-only API/command remains compatible. The
+editor uses the existing rename dialog when the semantic placeholder differs from
+source text, retaining normal in-place rename otherwise; late preparation is
+ignored after edits, document replacement or read-only changes. The native issue
+and focused protocol/UI regressions are red before the correction; the initial
+corrected run passes 69 protocol and 53 related frontend checks. Updated shared
+host/Tauri dispatch and generated bindings are being validated for 0.1.40.
+Native acceptance of the corrected bundle remains pending.
+
+Frozen Rust 0.1.40 gates pass: 1,312 workspace tests / 39 ignored, with exactly
+the two process-env cases filtered pending their separate scope approval.
+All-target Clippy, formatting and binding export pass. All 14 live client cases
+and all 5 actual-host cases pass against archived engine123. The host route case
+also verifies the renamed grouped declaration's full semantic preparation name
+after closed-file edits. A single global cross-file undo transaction remains a
+known unaccepted shared-edit limitation from the first batch; native route tests
+must record its actual behavior and must not claim global undo parity.
+
+Two additional public frontend regressions expose stale dialog submission and a
+late edit-plan response after source changes. Both are now refused, while the
+normal in-place -> second ShiftF6 dialog flow remains valid after source restoration.
+The final 55 focused editor checks pass. The complete final frontend pass and
+refreshed native bundle are rebuilding after this last guard correction.
+Earlier unpromoted 0.1.40 bundle output is not the final artifact.
+
+A further 71 inactive generated SDK test executables (1,931,886,128 bytes) were
+pruned with the compiler idle, preserving newest-two copies and all 0.1.39/0.1.40
+outputs. Apps/source/libraries/fixtures/engine archives/Workbench/evaluation
+deliverables remain untouched. Receipt: sdk-test-cache-prune-route-040.json.
+
+Final 0.1.40 frontend gates pass: 3,031 tests, type checking, lint and build.
+The final arm64 development bundle is locally signed at
+`artifacts/batches/0.1.40/OpenStorm.app`; engine123 is unchanged. This is a
+**diagnostic build, not an accepted route-refactoring batch**.
+
+Native checks pass full semantic grouped-route naming, collision refusal,
+four-file/five-occurrence preview including two unsaved Blade callers, preview
+cancellation, external-change stale refusal without partial writes, and fresh
+apply preserving the external comment, Unicode, parameters and unrelated
+literal. Blade definition and four PHP/Blade usage results navigate correctly.
+Settled navigation after server restart passes; the first immediate request is
+not accepted. Native error-hint visibility and fresh startup performance were
+not established. CmdZ restored only the active route declaration, leaving the
+callers renamed; CmdShiftZ returned all targets to the applied state. The
+shared global undo gap is now a reproduced release blocker for this batch.
+
+An early UI binding before controlled app registration launched a second
+normal-profile instance. Only read-only navigation occurred; that instance was
+quit, inventory checked, and subsequent mutations used the disposable profile.
+Its startup timing is excluded. After normal quit, the four owned fixture files
+were restored. Relaunch without a project argument recovered the saved project,
+tabs and caret; semantic rename preparation and Blade text reflected restored
+disk contents. Final quit exited app and engine, and strict signature and all
+four original fixture hashes pass. Native receipt:
+`artifacts/checks/route-refactor-0.1.40-native-result.json`.
+
+Next required work stays in this batch: shared guarded cross-file undo/redo,
+including closed targets, unsaved pre-refactor buffers, later external changes,
+and normal editor history ordering. No subsequent dependent Laravel generation
+batch starts before this acceptance gap is resolved. The 69-area ledger remains
+67 partial / 2 user-deferred. Installed optimized 0.1.21 and previous accepted
+0.1.39 recovery-action slice remain preserved.

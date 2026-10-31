@@ -1434,12 +1434,29 @@ impl LspManager {
         Ok(())
     }
 
-    pub async fn prepare_rename(&self, doc: DocId, pos: Pos) -> IdeResult<Option<Range>> {
+    pub async fn prepare_rename_details(&self, doc: DocId, pos: Pos) -> IdeResult<Option<RenamePreparation>> {
         let (snap, targets) = self.doc_targets(doc, "rename", |c| c.has("renameProvider")).await?;
+        let current = |t: &Target| {
+            t.server.running_gen(t.run.generation).is_some()
+                && self.docs.lock().get(&doc).is_some_and(|d| {
+                    d.uri == snap.uri
+                        && Arc::ptr_eq(&d.text, &snap.text)
+                        && d.servers
+                            .iter()
+                            .any(|a| a.server.id == t.server.id && a.opened_gen == Some(t.run.generation))
+                })
+        };
         let mut out = Outcome::new();
         for t in &targets {
-            match self.prepare_rename_on(&snap, t, pos).await {
-                Ok(Some(range)) => return Ok(Some(range)),
+            if !current(t) {
+                return Err(IdeError::cancelled());
+            }
+            let response = self.prepare_rename_on(&snap, t, pos).await;
+            if !current(t) {
+                return Err(IdeError::cancelled());
+            }
+            match response {
+                Ok(Some(prepared)) => return Ok(Some(prepared)),
                 Ok(None) => out.value = Some(None),
                 Err(e) => out.fail(e),
             }
@@ -1447,21 +1464,30 @@ impl LspManager {
         out.finish(None)
     }
 
+    /// Compatibility for callers that only need the source span.
+    pub async fn prepare_rename(&self, doc: DocId, pos: Pos) -> IdeResult<Option<Range>> {
+        Ok(self.prepare_rename_details(doc, pos).await?.map(|prepared| prepared.range))
+    }
+
     /// What `t` renames at `pos`; one without `prepareRename` renames the word there.
-    async fn prepare_rename_on(&self, snap: &DocSnap, t: &Target, pos: Pos) -> IdeResult<Option<Range>> {
+    async fn prepare_rename_on(&self, snap: &DocSnap, t: &Target, pos: Pos) -> IdeResult<Option<RenamePreparation>> {
         if !t.caps().has_sub("renameProvider", "prepareProvider") {
-            return Ok(snap.text.word_range_at(pos));
+            return Ok(snap.text.word_range_at(pos).map(|range| RenamePreparation { range, placeholder: None }));
         }
         let r: Option<lsp::PrepareRenameResponse> =
             self.call(t, "textDocument/prepareRename", snap.pos_params(t, pos), None, DEFAULT_TIMEOUT).await?;
         let conv = self.conv(t.enc());
         Ok(match r {
             None => None,
-            Some(lsp::PrepareRenameResponse::Range(r)) => Some(conv.range(&snap.path, r)),
-            Some(lsp::PrepareRenameResponse::RangeWithPlaceholder { range, .. }) => Some(conv.range(&snap.path, range)),
+            Some(lsp::PrepareRenameResponse::Range(r)) => {
+                Some(RenamePreparation { range: conv.range(&snap.path, r), placeholder: None })
+            }
+            Some(lsp::PrepareRenameResponse::RangeWithPlaceholder { range, placeholder }) => {
+                Some(RenamePreparation { range: conv.range(&snap.path, range), placeholder: Some(placeholder) })
+            }
             Some(lsp::PrepareRenameResponse::DefaultBehavior { default_behavior }) => {
                 if default_behavior {
-                    snap.text.word_range_at(pos)
+                    snap.text.word_range_at(pos).map(|range| RenamePreparation { range, placeholder: None })
                 } else {
                     None
                 }

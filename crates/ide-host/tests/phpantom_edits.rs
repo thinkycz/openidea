@@ -261,3 +261,141 @@ async fn framework_source_restart_keeps_host_widening_and_hover_responsive() {
     assert_eq!(std::fs::read_to_string(trait_path).unwrap(), trait_source);
     assert!(outcome.is_ok(), "{}", outcome.unwrap_err());
 }
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires OPENSTORM_TEST_ROUTE_ROOT owned Laravel route-refactoring fixture"]
+async fn grouped_route_checked_rename_keeps_php_blade_callers_and_group_prefix() {
+    let root =
+        dunce::canonicalize(PathBuf::from(std::env::var_os("OPENSTORM_TEST_ROUTE_ROOT").expect("route fixture")))
+            .unwrap();
+    let bin = PathBuf::from(std::env::var_os("OPENSTORM_TEST_PHPANTOM_BIN").expect("engine executable"));
+    let names = [
+        "routes/openstorm_refactor.php",
+        "app/OpenStormFixtures/RoutesConsumer.php",
+        "app/OpenStormFixtures/RouteMailer.php",
+        "resources/views/openstorm-invoice.blade.php",
+    ];
+    let originals: Vec<_> =
+        names.iter().map(|name| (root.join(name), std::fs::read_to_string(root.join(name)).unwrap())).collect();
+    let tmp = tempfile::tempdir().unwrap();
+    let host = Host::new(HostConfig {
+        project_environment: false,
+        config_dir: tmp.path().join("config"),
+        data_dir: tmp.path().join("data"),
+        languages: Arc::new(ide_language::LanguageRegistry::load(None).unwrap()),
+        syntax: Arc::default(),
+        sink_for: Box::new(|_| Arc::new(|_| {})),
+        owner: |w| w,
+        runtime: tokio::runtime::Handle::current(),
+    });
+    let project = host.open_project("main", &root).unwrap();
+    project.lsp.set_config_hook(Box::new(move |cfg, _| {
+        if cfg.name == "phpantom" {
+            cfg.command = bin.to_string_lossy().into_owned();
+        }
+    }));
+    let doc = project.documents.open(&originals[1].0).unwrap();
+    let text = &originals[1].1;
+    let at = |needle: &str| {
+        let prefix = &text[..text.find(needle).unwrap()];
+        Pos::new(
+            prefix.bytes().filter(|b| *b == b'\n').count() as u32,
+            prefix.rsplit('\n').next().unwrap().encode_utf16().count() as u32,
+        )
+    };
+    let mut position = at("route('openstorm.billing.invoice'");
+    position.col += 10;
+    let outcome: Result<(), String> = async {
+        let prepared = project.lsp.prepare_rename(doc.id, position).await.map_err(|e| format!("prepare: {e:?}"))?;
+        if prepared.is_none() {
+            return Err("route rename was not offered".into());
+        }
+        let refs = project
+            .lsp
+            .references(doc.id, position, true, true, Default::default())
+            .await
+            .map_err(|e| format!("references: {e:?}"))?;
+        for index in [2, 3] {
+            if !refs.locations.iter().any(|loc| loc.path == originals[index].0) {
+                return Err(format!("missing route caller {}: {refs:?}", names[index]));
+            }
+        }
+        let collision = ide_host::ops::lsp::lsp_rename(&host, "main", doc.id, position, "openstorm.billing.list".into()).await;
+        if !matches!(&collision, Err(error) if error.message.contains("Another route already uses the new name")) {
+            return Err(format!("route collision was not evaluated: {collision:?}"));
+        }
+        for (needle, destination, reason) in [
+            ("route('openstorm.ambiguous'", "openstorm.unique", "more than one declaration"),
+            ("route('openstorm-items.show'", "openstorm-items.details", "route identity"),
+            ("route('openstorm.billing.invoice'", "other.invoice", "Keep the route group prefix"),
+        ] {
+            let mut p = at(needle); p.col += 10;
+            let result = ide_host::ops::lsp::lsp_rename(&host, "main", doc.id, p, destination.into()).await;
+            if !matches!(&result, Err(error) if error.message.contains(reason)) {
+                return Err(format!("expected semantic refusal {reason:?}: {result:?}"));
+            }
+        }
+        let blade = project.documents.open(&originals[3].0).unwrap();
+        let unsaved_blade = format!("{}<a>{{{{ route('openstorm.billing.invoice', ['invoice' => 9]) }}}}</a>\n", originals[3].1.replace("=> 7", "=> 9"));
+        project.documents.replace_all(blade.id, &unsaved_blade).unwrap();
+        let edit = ide_host::ops::lsp::lsp_rename(&host, "main", doc.id, position, "openstorm.billing.details".into())
+            .await
+            .map_err(|e| format!("checked rename: {e:?}"))?;
+        if edit.guard.is_none() || edit.files.len() != 4 {
+            return Err(format!("expected guarded four-file route plan: {edit:?}"));
+        }
+        if !edit.files.iter().all(|file| matches!(file, ide_core::FileEdit::Edit { path, .. } if originals.iter().any(|(owned, _)| owned == path))) {
+            return Err("route plan included a target outside the owned four-file corpus".into());
+        }
+        let external = format!("{}// external edit in owned fixture\n", originals[2].1);
+        std::fs::write(&originals[2].0, &external).unwrap();
+        if ide_host::ops::lsp::apply_workspace_edit(&host, "main", edit).await.is_ok() {
+            return Err("stale route plan overwrote an external caller edit".into());
+        }
+        for (index, (path, source)) in originals.iter().enumerate() {
+            let expected = if index == 2 { &external } else { source };
+            if std::fs::read_to_string(path).unwrap() != *expected { return Err(format!("stale plan changed {}", names[index])); }
+        }
+        if project.documents.snapshot(blade.id).unwrap().text != unsaved_blade { return Err("stale plan changed an unsaved Blade overlay".into()); }
+        std::fs::write(&originals[2].0, &originals[2].1).unwrap();
+        let edit = ide_host::ops::lsp::lsp_rename(&host, "main", doc.id, position, "openstorm.billing.details".into()).await.map_err(|e| format!("fresh checked rename: {e:?}"))?;
+        if edit.guard.is_none() || edit.files.len() != 4 || !edit.files.iter().all(|file| matches!(file, ide_core::FileEdit::Edit { path, .. } if originals.iter().any(|(owned, _)| owned == path))) { return Err("fresh route plan has unexpected targets".into()); }
+        ide_host::ops::lsp::apply_workspace_edit(&host, "main", edit).await.map_err(|e| format!("apply: {e:?}"))?;
+        let expected = text.replace("route('openstorm.billing.invoice'", "route('openstorm.billing.details'");
+        if project.documents.snapshot(doc.id).unwrap().text != expected {
+            return Err("consumer overlay changed unrelated bytes".into());
+        }
+        if std::fs::read_to_string(&originals[1].0).unwrap() != expected {
+            return Err("reviewed refactoring did not persist the consumer consistently".into());
+        }
+        for index in [0, 2, 3] {
+            let (path, source) = &originals[index];
+            let expected = if index == 0 {
+                source.replace("name('invoice')", "name('details')")
+            } else if index == 3 {
+                unsaved_blade.replace("openstorm.billing.invoice", "openstorm.billing.details")
+            } else {
+                source.replace("openstorm.billing.invoice", "openstorm.billing.details")
+            };
+            if std::fs::read_to_string(path).unwrap() != expected {
+                return Err(format!("wrong persisted edit in {}", names[index]));
+            }
+        }
+        if project.documents.snapshot(blade.id).unwrap().text != unsaved_blade.replace("openstorm.billing.invoice", "openstorm.billing.details") { return Err("Blade overlay did not retain unsaved content and both renamed callers".into()); }
+        let route_doc = project.documents.open(&originals[0].0).unwrap();
+        let route_source = std::fs::read_to_string(&originals[0].0).unwrap();
+        let line = route_source.lines().nth(4).unwrap();
+        let col = line.rfind("'details'").unwrap() as u32 + 2;
+        let prepared = project.lsp.prepare_rename_details(route_doc.id, Pos::new(4, col)).await.map_err(|e| format!("declaration preparation: {e:?}"))?;
+        if prepared.as_ref().and_then(|p| p.placeholder.as_deref()) != Some("openstorm.billing.details") { return Err(format!("grouped declaration lost its semantic name: {prepared:?}")); }
+        Ok(())
+    }
+    .await;
+    project.lsp.shutdown_all().await;
+    host.close_project("main");
+    drop(project);
+    for (path, source) in &originals {
+        std::fs::write(path, source).unwrap();
+    }
+    assert!(outcome.is_ok(), "{}", outcome.unwrap_err());
+}

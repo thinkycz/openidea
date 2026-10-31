@@ -177,6 +177,7 @@ pub fn builder() -> tauri_specta::Builder<tauri::Wry> {
         lsp::lsp_resolve_code_action,
         lsp::lsp_apply_code_action,
         lsp::lsp_prepare_rename,
+        lsp::lsp_prepare_rename_details,
         lsp::lsp_rename,
         lsp::lsp_laravel_routes,
         lsp::lsp_laravel_views,

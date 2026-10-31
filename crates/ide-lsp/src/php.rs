@@ -113,7 +113,8 @@ impl LspManager {
         }
         let paths = candidates.files;
         let opened = self.open_transient(t, paths.clone(), &cancel).await;
-        let mut sources = self.php_sources(snap, t)?;
+        let overlays = self.php_sources(snap, t)?;
+        let mut sources = overlays.clone();
         sources.extend(opened.sources.clone());
         if sources.len() > 1024 {
             return Err(IdeError::invalid("Too many PHP overlays for a checked rename"));
@@ -125,12 +126,12 @@ impl LspManager {
         let mut rename = snap.pos_params(t, pos);
         rename["newName"] = json!(new_name);
         let result: Option<lsp::WorkspaceEdit> = self
-            .call(
+            .current_php_rename(
+                snap,
                 t,
-                "phpWorkbench/renameChecked",
                 RenameCheckedParams { rename, expected_sources: sources.clone() },
-                None,
-                LONG_TIMEOUT,
+                &overlays,
+                &cancel,
             )
             .await?;
         let edit = result.map(|e| convert::workspace_edit(&self.conv(t.enc()), e)).unwrap_or_default();
@@ -144,6 +145,64 @@ impl LspManager {
             }
         }
         Ok(edit)
+    }
+
+    /// A semantic publication can retire an attempt while transient files open.
+    /// Keep the exact receipts and holds; never rebase a rename onto newer inputs.
+    async fn current_php_rename(
+        &self,
+        snap: &DocSnap,
+        t: &Target,
+        params: RenameCheckedParams,
+        overlays: &[ExpectedSource],
+        cancel: &CancellationToken,
+    ) -> IdeResult<Option<lsp::WorkspaceEdit>> {
+        let method = "phpWorkbench/renameChecked";
+        let deadline = tokio::time::Instant::now() + LONG_TIMEOUT;
+        let current = || {
+            let attached = {
+                let docs = self.docs.lock();
+                docs.values().any(|d| {
+                    d.uri == snap.uri
+                        && Arc::ptr_eq(&d.text, &snap.text)
+                        && d.servers
+                            .iter()
+                            .any(|a| a.server.id == t.server.id && a.opened_gen == Some(t.run.generation))
+                })
+            };
+            !cancel.is_cancelled()
+                && t.server.running_gen(t.run.generation).is_some()
+                && attached
+                && self.php_sources(snap, t).is_ok_and(|sources| sources == overlays)
+        };
+        loop {
+            if !current() {
+                return Err(IdeError::cancelled());
+            }
+            let response = tokio::time::timeout_at(
+                deadline,
+                t.run.peer.request::<_, Option<lsp::WorkspaceEdit>>(method, &params, Some(cancel.clone())),
+            )
+            .await
+            .unwrap_or(Err(RpcError::Timeout));
+            if !current() {
+                return Err(IdeError::cancelled());
+            }
+            match response {
+                Err(RpcError::Server { code, .. }) if code == ide_jsonrpc::codes::CONTENT_MODIFIED => {
+                    if tokio::time::Instant::now() + Duration::from_millis(50) >= deadline {
+                        return Err(IdeError::unavailable(
+                            "PHP project is still updating. Retry Rename after indexing finishes.",
+                        ));
+                    }
+                    tokio::select! {
+                        () = cancel.cancelled() => return Err(IdeError::cancelled()),
+                        () = tokio::time::sleep(Duration::from_millis(50)) => {}
+                    }
+                }
+                result => return result.map_err(|error| rpc_err(&t.server.name, method, error)),
+            }
+        }
     }
 
     pub(crate) async fn php_optimize_imports(

@@ -5,6 +5,14 @@ use ide_core::{Location, Range, ServerId, SymbolKind, TextEdit, WorkspaceEdit};
 use serde::{Deserialize, Serialize};
 use specta::Type;
 
+/// A source span and the semantic name the server expects when renaming it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct RenamePreparation {
+    pub range: Range,
+    pub placeholder: Option<String>,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct CompletionList {

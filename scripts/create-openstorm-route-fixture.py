@@ -62,7 +62,7 @@ class NavigationController {
 use App\\OpenStormFixtures\\NavigationController;
 use Illuminate\\Support\\Facades\\Route as Routes;
 Routes::name('nav.billing.')->controller(NavigationController::class)->group(static function (): void {
-    Routes::get('/nav/invoices/{invoice}/{tab?}', 'show')->name('show');
+    Routes::get('/nav/😀/invoices/{invoice}/{tab?}', 'show')->name('show');
 });
 Routes::apiResource('openstorm-receipts', NavigationController::class)->parameters(['openstorm-receipts' => 'record']);
 Routes::get('/nav/duplicate/a', [NavigationController::class, 'index'])->name('nav.duplicate');

@@ -319,7 +319,7 @@ async fn laravel_route_parameters_controller_targets_and_unsaved_registrations()
         r#"{"require":{"php":"^8.2","laravel/framework":"13.*"},"autoload":{"psr-4":{"App\\":"app/"}}}"#,
     )
     .unwrap();
-    let routes = "<?php\nuse Illuminate\\Support\\Facades\\Route as Routes;\nuse App\\InvoiceController;\nRoutes::name('billing.')->controller(InvoiceController::class)->group(function () {\n    Routes::get('/invoices/{invoice}/{tab?}', 'show')->name('show');\n});\nRoutes::apiResource('receipts', InvoiceController::class)->parameters(['receipts' => 'record']);\n";
+    let routes = "<?php\nuse Illuminate\\Support\\Facades\\Route as Routes;\nuse App\\InvoiceController;\nRoutes::name('billing.')->controller(InvoiceController::class)->group(function () {\n    Routes::get('/😀/invoices/{invoice}/{tab?}', 'show')->name('show');\n});\nRoutes::apiResource('receipts', InvoiceController::class)->parameters(['receipts' => 'record']);\n";
     let controller =
         "<?php\nnamespace App;\nclass InvoiceController { public function show(): string { return 'invoice'; } }\n";
     let caller = "<?php\n// 😀 žluťoučký\nroute('billing.show', ['in']);\nroute(name: 'billing.show', parameters: ['ta']);\nroute('receipts.show', ['re']);\n";
@@ -363,6 +363,19 @@ async fn laravel_route_parameters_controller_targets_and_unsaved_registrations()
         let list = settled_completion(&mgr, caller_doc, at).await;
         assert!(list.items.iter().any(|i| i.label == label), "{label}: {:?}", list.items);
     }
+    let action_start = pos(routes, "show')->");
+    let action_at = Pos::new(action_start.line, action_start.col + 1);
+    let list = settled_completion(&mgr, route_doc, action_at).await;
+    let method = list.items.into_iter().find(|item| item.insert_text == "show").expect("controller method candidate");
+    let expected_range = Range::new(action_start, Pos::new(action_start.line, action_start.col + 4));
+    assert_eq!(
+        method.replace_range,
+        Some(expected_range),
+        "quoted action must replace its whole UTF16 identifier on ordinary insertion"
+    );
+    assert!(!method.is_snippet, "route action must remain plain text");
+    let resolved = mgr.resolve_completion(route_doc, method).await.unwrap();
+    assert_eq!(resolved.replace_range, Some(expected_range), "resolving docs must retain the provider edit");
     let target = mgr.goto(route_doc, pos(routes, "show')->"), GotoKind::Definition).await.unwrap();
     let canonical = routes.replace(" as Routes", "").replace("Routes::", "Route::");
     replace(&mgr, route_doc, 2, routes, &canonical);

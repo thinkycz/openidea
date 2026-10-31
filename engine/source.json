@@ -2,8 +2,8 @@
   "repository": "https://github.com/PHPantom-dev/phpantom_lsp",
   "commit": "1756b1f920c1290d4c4fdd4d2c902fad53a75cd3",
   "archive_sha256": "f0a1dc7fa44d309e6d5e8ed65a2075749c1fc177b45820031f58290f1aec5cee",
-  "patches_sha256": "d25f6d9b17b014e377ee10de68ae06c9c8253855d112ccd68846ed059d8923b7",
-  "version": "0.11.1-openstorm.124",
+  "patches_sha256": "c56c54f6402325af9178ed27177df5ff9efe1e4cdee7e1c82ab34c05bf9921f1",
+  "version": "0.11.1-openstorm.125",
   "patches": [
     {
       "file": "0001-workspace-tool-policy.patch",
@@ -500,6 +500,10 @@
     {
       "file": "0124-route-controller-facade-identity.patch",
       "sha256": "0276e82ee615c8c1b4995846a01f1feb629016824a7589e5d186a72293ca3b8b"
+    },
+    {
+      "file": "0125-route-controller-completion-range.patch",
+      "sha256": "48e4381bff2a56c4ad6b87dde22bf4111292523b7726305d7fc12db11bed5a16"
     }
   ]
 }

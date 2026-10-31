@@ -1,0 +1,122 @@
+--- a/src/completion/laravel_route_controller.rs
++++ b/src/completion/laravel_route_controller.rs
+@@ -25,7 +25,7 @@
+ use mago_syntax::cst::*;
+ 
+ use crate::Backend;
+-use crate::text_position::position_to_offset;
++use crate::text_position::{offset_to_position, position_to_offset};
+ use crate::types::{AccessKind, FileContext};
+ 
+ // ─── Context ────────────────────────────────────────────────────────────────
+@@ -39,6 +39,8 @@
+     pub controller_class: String,
+     /// The partial method name the user has typed so far.
+     pub prefix: String,
++    /// The entire existing method identifier, excluding its surrounding quotes.
++    pub replace_range: Range,
+ }
+ 
+ // ─── Route HTTP methods ─────────────────────────────────────────────────────
+@@ -189,9 +191,19 @@
+     let controller =
+         find_enclosing_controller_class(content, cursor_offset as u32, resolved_names)?;
+ 
++    // An explicit edit keeps sole-candidate/Enter insertion from retaining the
++    // old suffix. PHP identifier bytes may include a complete UTF-8 suffix.
++    let mut end = cursor_offset;
++    while end < bytes.len() && (crate::text_scan::is_ident_byte(bytes[end]) || bytes[end] >= 0x80) {
++        end += 1;
++    }
+     Some(LaravelRouteControllerContext {
+         controller_class: controller,
+         prefix,
++        replace_range: Range::new(
++            offset_to_position(content, quote_pos + 1),
++            offset_to_position(content, end),
++        ),
+     })
+ }
+ 
+@@ -296,6 +308,10 @@
+             if item.kind == Some(CompletionItemKind::METHOD) {
+                 if let Some(ref filter) = item.filter_text {
+                     item.insert_text = Some(filter.clone());
++                    item.text_edit = Some(CompletionTextEdit::Edit(TextEdit {
++                        range: rc_ctx.replace_range,
++                        new_text: filter.clone(),
++                    }));
+                 }
+                 item.insert_text_format = None;
+             }
+--- a/tests/integration/laravel_route_controller.rs
++++ b/tests/integration/laravel_route_controller.rs
+@@ -328,3 +328,57 @@
+         );
+     }
+ }
++
++#[tokio::test]
++async fn quoted_controller_action_completion_commits_whole_name_with_utf16_ranges() {
++    use crate::common::{apply_edits, position_after};
++    for (existing, prefix_len) in [
++        ("showInvoice", 0),
++        ("showInvoice", 1),
++        ("showInvoice", 2),
++        ("showInvoice", 11),
++        ("showInvoiceExtra", 2),
++        ("showInvoicé", 2),
++    ] {
++        let backend = create_test_backend();
++        let uri = Url::parse("file:///route-action.php").unwrap();
++        let text = format!(
++            "<?php\nuse Illuminate\\Support\\Facades\\Route as Routes;\nclass InvoiceController {{ public function showInvoice() {{}} }}\nRoutes::controller(InvoiceController::class)->group(function () {{\n    Routes::get('/😀/invoice', '{existing}');\n}});\n"
++        );
++        let at = position_after(&text, &format!(", '{}", &existing[..prefix_len]));
++        let items = complete_at(&backend, &uri, &text, at.line, at.character).await;
++        let item = items
++            .into_iter()
++            .find(|i| i.filter_text.as_deref() == Some("showInvoice"))
++            .expect("controller method candidate");
++        // Sole-candidate insertion follows the client's normal prefix-only Enter
++        // behavior unless the provider supplies a replacement edit for this atom.
++        let resolved = backend.completion_resolve(item.clone()).await.unwrap();
++        for item in [item, resolved] {
++            let edit = match item.text_edit {
++                Some(CompletionTextEdit::Edit(edit)) => edit,
++                Some(CompletionTextEdit::InsertAndReplace(edit)) => TextEdit {
++                    range: edit.insert,
++                    new_text: edit.new_text,
++                },
++                None => TextEdit {
++                    range: Range::new(
++                        {
++                            let mut start = at;
++                            start.character -= prefix_len as u32;
++                            start
++                        },
++                        at,
++                    ),
++                    new_text: item.insert_text.unwrap_or(item.label),
++                },
++            };
++            let updated = apply_edits(&text, &[edit]);
++            let expected = text.replace(&format!("'{existing}'"), "'showInvoice'");
++            assert_eq!(
++                updated, expected,
++                "commit at {at:?} must preserve the quote, URI and controller group without duplicating the suffix"
++            );
++        }
++    }
++}
+--- a/docs/CHANGELOG.md
++++ b/docs/CHANGELOG.md
+@@ -14,6 +14,8 @@
+ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+ 
+ ## [Unreleased]
++
++- **Complete quoted controller actions without duplicated suffixes.** Selecting a method inside an existing route action replaces the complete name while preserving quotes and surrounding Unicode text. Contributed by @thinkycz.
+ 
+ - **Laravel controller groups follow imported Route aliases.** Controller action navigation and completion now recognize imported and fully qualified facades without borrowing Laravel actions for unrelated namespaced classes. Contributed by @thinkycz
+ 

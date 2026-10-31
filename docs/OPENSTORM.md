@@ -3,13 +3,21 @@
 Base: thinkycz/openidea 50212e73972d6f05bf16050cb0ba10102a6c8054 (0.1.21).
 Branch: codex/openstorm-php-laravel. Target: macOS Apple Silicon, local delivery.
 
+Current checkpoint (2026-10-31): .43 is accepted for guarded history and field
+shortcuts. .44 / engine .124 is diagnostic: alias navigation passes, but a quoted
+controller completion commit duplicates its suffix. Engine .125 fixes the suffix duplication; native .45 exposes an additional
+client issue that appends call parentheses to a quoted method. .45 remains
+a diagnostic build. The next correction is in the client completion path. Installed optimized .21
+is preserved. The full 69-area ledger remains 67 partial / two user-deferred.
+
 ## Contract
 
 Preserve OpenIDEA layout, default keymap, autosave and debugger. Use separate
 cz.thinky.openstorm application data; retain .openidea project settings.
 Preserve the released PHPantom 0.11.1-workbench.114 foundation and its provenance.
-The current local candidate uses rebuilt 0.11.1-openstorm.118 for safe JSON translation
-and environment sources; preserve builtin documents and PHP target context.
+Use the checksum-verified bundled PHPantom with pinned source and patch provenance;
+preserve builtin documents and PHP target context. Acceptance belongs to the
+observed package and workflow, not to capability flags or a source test alone.
 The current scope is the full 69-area roadmap in `docs/openstorm-features.json`,
 with Laravel/Blade/workflow work authorized in milestone order. New debugger
 functionality, upstream automatic updates, public app releases, notarization,
@@ -2278,3 +2286,61 @@ restored. Normal quit exits app and server; all 12 owned source files remain
 original and strict signature passes. Installed optimized .21 and its signature
 remain unchanged. No publishing, new push or promotion of .44. All 69 ledger
 areas remain visible at 67 partial / two user-deferred.
+
+Quoted-action .125 correction in progress. A public-handler regression applies
+the returned completion edit to real PHP source with a Unicode URI. Against
+unchanged .124 it executes and fails with showInvoicehowInvoice, matching the
+native .44 failure. Initial unqualified --exact invocation selected zero tests
+and is invalid as red evidence; the fully qualified case was run directly from
+the just-built executable and executed one failing test. A redundant owned
+Cargo rebuild was cancelled after the intended direct regression completed;
+its terminal143 is not a test result. Receipts: route-controller-125-red-direct.log
+and red-result.json.
+
+The actual OpenStorm client regression also fails against .124: it receives
+None where a whole-method UTF16 replacement range is required. It now verifies
+raw and resolved edits, plain-text insertion and a Unicode URI before the field.
+The provider fix retains the existing insertText and adds a standard TextEdit
+covering the complete identifier inside the quotes, including a Unicode suffix.
+It uses existing position conversion and identifier scanning; global Enter,
+Tab and single-candidate completion conventions are unchanged. Six commit cases
+(empty/mid/end prefix and changed ASCII/Unicode suffixes), before/after resolve,
+are included in the handler test. Working all-target release Clippy passes;
+formatting ran afterward.
+
+Patch0125 and recipe .125 replay into
+`1756b1f920c1-c56c54f64023-verified`; series SHA-256
+c56c54f6402325af9178ed27177df5ff9efe1e4cdee7e1c82ab34c05bf9921f1.
+All ten controller source tests pass. The full pinned source suite passes
+18,382 tests / 17 ignored, with its separate FIFO child passing one test.
+Pinned-source Clippy, formatting and source fingerprint checks pass. Actual
+OpenStorm client tests pass15/15 and host tests5/5; PHP example syntax and
+assertions pass, and the analyzer retains its three expected intentional errors.
+Canonical TMPDIR is used for macOS URI equality, as documented above.
+The .125 resource checksum is21a7b6ed5e6040898b8d8922040b2057f03b5f4a6ea7c3487b524d4036d61ba8.
+.45 application gates pass: frontend3044tests, type checking/lint/build,
+workspace1318passed/40ignored/2filtered, formatting and Clippy. The workspace
+executes binding export; no schema changed. The same two SDK environment cases
+remain excluded pending their separate approval; engine fixture approval does
+not extend to them. Native .45 acceptance remains pending. A new .45 disposable navigation fixture is syntax and
+pinned-baseline/autoload checked. The .44 archive/receipts remain preserved.
+A post-native regenerable static link archive was removed at rest because
+free space was1.7GiB; only that compiler cache was removed, restoring build
+headroom without changing any runnable app, source or provenance. Receipt:
+route-navigation-0.1.44-post-native-link-cache.json.
+
+Native .45 / engine .125 diagnostic (2026-10-31): signed development app
+`artifacts/batches/0.1.45/OpenStorm.app` launches from its isolated owned profile.
+CtrlSpace at5:56 after the Unicode route URI replaces the entire method atom,
+but the client then appends call parentheses: `'show()'`. This is persisted and
+recorded in route-navigation-0.1.45-method-completion-failure.json; it is not
+accepted. CmdZ plus CmdS restores all12owned fixture files. CmdB still navigates
+to NavigationController.php4:21. Normal quit exits app/server. No release or push.
+The frontend callParens helper treats method-kind plain text as a call without
+checking whether the replaced atom is surrounded by quotes. A focused client
+regression and bounded quoted-atom guard are the next gate. Remaining native
+parameter, duplicate, checked rename, restart and recovery checks are pending.
+Workspace binding export passed in the full workspace gate; no separate
+feature-variant export rebuild was required. SDK compiler-cache pruning receipts
+record .45 library/test retention and exact static archive removal at idle;
+all installed, archived, Workbench and evaluation deliveries are preserved.

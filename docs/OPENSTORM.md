@@ -2115,3 +2115,23 @@ No installed-app replacement, publishing or new push. All 69 areas remain
 visible, 67 partial / two user-deferred. Next: continue FEAT-030 Laravel route
 parameter/controller/registration and duplicate-diagnostic corpus, preserving
 static-only inspection and guarded edits.
+
+Next FEAT-030 corpus started after the 0.1.43 history gate. A new ignored/live
+OpenStorm-client regression covers grouped optional parameters, named argument
+keys, resource parameter overrides, controller groups and unsaved URI changes.
+The pinned bundled .123 engine passes index parameters and completion for
+invoice, optional tab and custom resource record. The controller comparison
+exposes a real failure: the imported `Routes` facade alias yields no definition;
+changing only the facade spelling/import to canonical `Route` resolves the same
+controller method in app/InvoiceController.php at line 3. Unsaved-parameter
+assertions after that failure are not reached and are not accepted.
+
+The failure is preserved in `route-navigation-next-client-control.log` and
+`route-navigation-next-reproduction.json`. The initial run had an incorrect
+resource path and is invalid evidence; subsequent corrected-path/control runs
+use the actual signed bundle resource. Source inspection finds spelling-only
+checks in both controller completion context and controller action span
+extraction. Next engine patch must resolve facade identity (aliases/FQN/local
+non-Laravel controls) while preserving nested controller groups, then repeat
+source/client and native gates. This next route corpus remains unaccepted;
+0.1.43 history acceptance and the installed optimized app are unchanged.

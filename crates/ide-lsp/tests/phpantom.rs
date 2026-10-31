@@ -305,6 +305,106 @@ async fn laravel_static_routes_and_views_through_typed_client() {
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires the pinned macOS Apple Silicon PHPantom executable"]
+async fn laravel_route_parameters_controller_targets_and_unsaved_registrations() {
+    let bin = std::env::var_os("OPENSTORM_TEST_PHPANTOM_BIN").map(PathBuf::from).unwrap_or_else(|| {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../src-tauri/resources/phpantom/phpantom_lsp")
+    });
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().canonicalize().unwrap();
+    for dir in ["routes", "app"] {
+        std::fs::create_dir_all(root.join(dir)).unwrap();
+    }
+    std::fs::write(
+        root.join("composer.json"),
+        r#"{"require":{"php":"^8.2","laravel/framework":"13.*"},"autoload":{"psr-4":{"App\\":"app/"}}}"#,
+    )
+    .unwrap();
+    let routes = "<?php\nuse Illuminate\\Support\\Facades\\Route as Routes;\nuse App\\InvoiceController;\nRoutes::name('billing.')->controller(InvoiceController::class)->group(function () {\n    Routes::get('/invoices/{invoice}/{tab?}', 'show')->name('show');\n});\nRoutes::apiResource('receipts', InvoiceController::class)->parameters(['receipts' => 'record']);\n";
+    let controller =
+        "<?php\nnamespace App;\nclass InvoiceController { public function show(): string { return 'invoice'; } }\n";
+    let caller = "<?php\n// 😀 žluťoučký\nroute('billing.show', ['in']);\nroute(name: 'billing.show', parameters: ['ta']);\nroute('receipts.show', ['re']);\n";
+    for (name, text) in
+        [("routes/web.php", routes), ("app/InvoiceController.php", controller), ("app/Caller.php", caller)]
+    {
+        std::fs::write(root.join(name), text).unwrap();
+    }
+    let mut php = LanguageRegistry::load(None).unwrap().get(&LanguageId::new("php")).unwrap();
+    php.language_servers.retain(|s| s.name == "phpantom");
+    php.language_servers[0].command = bin.to_string_lossy().into_owned();
+    let mgr =
+        LspManager::new(root.clone(), Arc::new(LanguageRegistry::from_configs(vec![php])), Arc::new(|_: IdeEvent| {}));
+    let route_doc = DocId::next();
+    let caller_doc = DocId::next();
+    let controller_doc = DocId::next();
+    for (doc, name, text) in [
+        (route_doc, "routes/web.php", routes),
+        (caller_doc, "app/Caller.php", caller),
+        (controller_doc, "app/InvoiceController.php", controller),
+    ] {
+        mgr.did_open(doc, &root.join(name), &LanguageId::new("php"), 1, text);
+    }
+    let mut indexed = false;
+    for _ in 0..80 {
+        if let Ok(reply) = mgr.laravel_routes(route_doc, None, 2000, Default::default()).await {
+            indexed = reply
+                .routes
+                .iter()
+                .any(|r| r.name == "billing.show" && r.parameters.as_ref().is_some_and(|p| p == &["invoice", "tab"]));
+            if indexed {
+                break;
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(indexed, "grouped optional URI parameters must survive the typed adapter");
+    for (needle, label) in [("in']);", "invoice"), ("ta']);", "tab"), ("re']);", "record")] {
+        let mut at = pos(caller, needle);
+        at.col += 2;
+        let list = settled_completion(&mgr, caller_doc, at).await;
+        assert!(list.items.iter().any(|i| i.label == label), "{label}: {:?}", list.items);
+    }
+    let target = mgr.goto(route_doc, pos(routes, "show')->"), GotoKind::Definition).await.unwrap();
+    let canonical = routes.replace(" as Routes", "").replace("Routes::", "Route::");
+    replace(&mgr, route_doc, 2, routes, &canonical);
+    let control = mgr.goto(route_doc, pos(&canonical, "show')->"), GotoKind::Definition).await.unwrap();
+    assert!(
+        control.iter().any(|l| l.path == root.join("app/InvoiceController.php") && l.range.start.line == 2),
+        "canonical controller target: {control:?}"
+    );
+    replace(&mgr, route_doc, 3, &canonical, routes);
+    assert!(
+        target.iter().any(|l| l.path == root.join("app/InvoiceController.php") && l.range.start.line == 2),
+        "aliased controller group target: {target:?}; canonical control: {control:?}"
+    );
+    let unsaved = routes.replace("{invoice}", "{receipt}");
+    replace(&mgr, route_doc, 4, routes, &unsaved);
+    let updated = caller.replace("['in']", "['re']");
+    replace(&mgr, caller_doc, 2, caller, &updated);
+    let mut at = pos(&updated, "re']);");
+    at.col += 2;
+    let mut labels = Vec::new();
+    for _ in 0..80 {
+        labels = settled_completion(&mgr, caller_doc, at).await.items.into_iter().map(|i| i.label).collect();
+        if labels.iter().any(|l| l == "receipt") {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(
+        labels.iter().any(|l| l == "receipt") && !labels.iter().any(|l| l == "invoice"),
+        "unsaved URI parameters: {labels:?}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(root.join("routes/web.php")).unwrap(),
+        routes,
+        "inspection must not persist unsaved registrations"
+    );
+    assert_eq!(std::fs::read_to_string(root.join("app/Caller.php")).unwrap(), caller);
+    mgr.shutdown_all().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires the pinned macOS Apple Silicon PHPantom executable"]
 async fn laravel_config_and_translation_navigation_completion_and_unsaved_sources() {
     let bin = std::env::var_os("OPENSTORM_TEST_PHPANTOM_BIN").map(PathBuf::from).unwrap_or_else(|| {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../src-tauri/resources/phpantom/phpantom_lsp")

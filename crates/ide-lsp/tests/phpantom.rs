@@ -2006,3 +2006,122 @@ async fn laravel_component_props_preserve_supplied_models_and_scope_through_clie
     }
     assert!(outcome.is_ok(), "{}", outcome.unwrap_err());
 }
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires the pinned macOS Apple Silicon PHPantom executable"]
+async fn laravel_nested_component_forwarding_tracks_unsaved_scope_boundaries() {
+    async fn members(mgr: &LspManager, doc: DocId, text: &str, yes: &[&str], no: &[&str]) -> Result<(), String> {
+        tokio::time::timeout(Duration::from_secs(8), async {
+            let mut last = Vec::new();
+            for _ in 0..80 {
+                match mgr.completion(doc, pos(text, "userOnly"), None, Default::default()).await {
+                    Ok(reply) => {
+                        last = reply.items.into_iter().map(|item| item.label).collect();
+                        if yes.iter().all(|name| last.iter().any(|item| item == name))
+                            && no.iter().all(|name| last.iter().all(|item| item != name))
+                        {
+                            return Ok(());
+                        }
+                    }
+                    Err(error) if error.kind == ide_core::error::ErrorKind::Cancelled => {}
+                    Err(error) => return Err(error.to_string()),
+                }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+            Err(format!("required {yes:?}, forbidden {no:?}; got {last:?}"))
+        })
+        .await
+        .map_err(|_| "nested component query exceeded eight-second deadline".to_string())?
+    }
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().canonicalize().unwrap();
+    let caller = "<?php\nnamespace App;\nclass Caller { public function show(): mixed {\n$person = new User();\n$leaked = new Other();\nreturn view('page', compact('person', 'leaked'));\n} }\n";
+    let page = "<x-card :person=\"$person\"><x-slot:label><p>😀</p>{{ $leaked->userOnly }}</x-slot:label></x-card>\n";
+    let card = "@props(['person'])\n<x-badge :account=\"$person\" />\n";
+    let badge = "@props(['account'])\n<p>😀</p>{{ $account->userOnly }}\n";
+    let files = [
+        ("composer.json", r#"{"require":{"laravel/framework":"^13.0"},"autoload":{"psr-4":{"App\\":"app/"}}}"#),
+        ("app/User.php", "<?php namespace App; class User { public string $userOnly; }\n"),
+        ("app/Other.php", "<?php namespace App; class Other { public int $otherOnly; }\n"),
+        ("app/Caller.php", caller),
+        ("resources/views/page.blade.php", page),
+        ("resources/views/components/card.blade.php", card),
+        ("resources/views/components/badge.blade.php", badge),
+    ];
+    for (name, text) in files {
+        let path = root.join(name);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, text).unwrap();
+    }
+    let mut php = LanguageRegistry::load(None).unwrap().get(&LanguageId::new("php")).unwrap();
+    php.language_servers.retain(|server| server.name == "phpantom");
+    php.language_servers[0].command = std::env::var("OPENSTORM_TEST_PHPANTOM_BIN").expect("engine executable");
+    let mgr = LspManager::new(root.clone(), Arc::new(LanguageRegistry::from_configs(vec![php])), Arc::new(|_| {}));
+    let leaf = DocId::next();
+    let middle = DocId::next();
+    let controller = DocId::next();
+    let parent = DocId::next();
+    for (doc, path, text) in [
+        (leaf, "resources/views/components/badge.blade.php", badge),
+        (middle, "resources/views/components/card.blade.php", card),
+        (controller, "app/Caller.php", caller),
+    ] {
+        mgr.did_open(doc, &root.join(path), &LanguageId::new("php"), 1, text);
+    }
+    let outcome: Result<(), String> = async {
+        members(&mgr, leaf, badge, &["userOnly"], &["otherOnly"]).await?;
+        eprintln!("Nested aliased prop follows closed page and open outer component");
+        mgr.did_open(parent, &root.join("resources/views/page.blade.php"), &LanguageId::new("php"), 1, page);
+        members(&mgr, parent, page, &["otherOnly"], &["userOnly"]).await?;
+        let slot_targets = mgr.goto(parent, pos(page, "userOnly"), GotoKind::Definition).await.map_err(|e| e.to_string())?;
+        // Completion uses an intentionally obsolete member; navigation must use
+        // the selected current member to verify the mapped Unicode range.
+        let selected = page.replace("userOnly", "otherOnly");
+        replace(&mgr, parent, 2, page, &selected);
+        let current = settled_completion(&mgr, parent, pos(&selected, "otherOnly")).await;
+        if !current.items.iter().any(|item| item.label == "otherOnly") || current.items.iter().any(|item| item.label == "userOnly") {
+            return Err(format!("settled slot completion must retain Other: {:?}", current.items));
+        }
+        let current_hover = mgr.hover(parent, pos(&selected, "$leaked"), Default::default()).await.map_err(|e| e.to_string())?;
+        let slot_type = current_hover.map(|reply| reply.contents.value).unwrap_or_default();
+        if !slot_type.contains("Other") || slot_type.contains("User") {
+            return Err(format!("slot hover must retain caller Other: {slot_type}"));
+        }
+        let selected_targets = mgr.goto(parent, pos(&selected, "otherOnly"), GotoKind::Definition).await.map_err(|e| e.to_string())?;
+        if !slot_targets.is_empty() || !selected_targets.iter().any(|target| target.path == root.join("app/Other.php") && target.range.start == pos(files[2].1, "otherOnly")) {
+            return Err(format!("slot body must retain caller scope and exact Other property: obsolete={slot_targets:?}, selected={selected_targets:?}"));
+        }
+        eprintln!("Named slot body retains caller scope after same-line Unicode prefix");
+        let targets = mgr.goto(leaf, pos(badge, "userOnly"), GotoKind::Definition).await.map_err(|e| e.to_string())?;
+        if !targets
+            .iter()
+            .any(|target| target.path == root.join("app/User.php") && target.range.start == pos(files[1].1, "userOnly"))
+        {
+            return Err(format!("nested prop must reach exact User property: {targets:?}"));
+        }
+        let changed = caller.replace("new User()", "new Other()");
+        replace(&mgr, controller, 2, caller, &changed);
+        members(&mgr, leaf, badge, &["otherOnly"], &["userOnly"]).await?;
+        eprintln!("Unsaved caller retires User through both component edges");
+        // An unbound parent variable must not become available merely because
+        // a child names it in a binding. Blade components have isolated data.
+        let isolated = card.replace("$person", "$leaked");
+        replace(&mgr, middle, 2, card, &isolated);
+        members(&mgr, leaf, badge, &[], &["userOnly", "otherOnly"]).await?;
+        eprintln!("Unbound grandparent data does not leak through a nested binding");
+        replace(&mgr, middle, 3, &isolated, card);
+        members(&mgr, leaf, badge, &["otherOnly"], &["userOnly"]).await?;
+        mgr.restart(mgr.servers()[0].id).await.map_err(|error| error.to_string())?;
+        members(&mgr, leaf, badge, &["otherOnly"], &["userOnly"]).await?;
+        mgr.did_close(controller);
+        members(&mgr, leaf, badge, &["userOnly"], &["otherOnly"]).await?;
+        eprintln!("Restart replays nested overlays; closing caller restores disk User");
+        Ok(())
+    }
+    .await;
+    mgr.shutdown_all().await;
+    for (name, text) in files {
+        assert_eq!(std::fs::read_to_string(root.join(name)).unwrap(), text, "disk original: {name}");
+    }
+    assert!(outcome.is_ok(), "{}", outcome.unwrap_err());
+}

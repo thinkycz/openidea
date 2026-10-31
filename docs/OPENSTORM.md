@@ -2940,7 +2940,7 @@ requirements open. New debugger expansion, production signing/notarization,
 public release, update activation, real profile migration and deployment stay
 deferred.
 
-### Batch 0.1.50: component prop inference (in progress)
+### Batch 0.1.50: component prop inference (narrow slice accepted)
 
 This continues FEAT-032/033 after accepted checkpoint `76efd3e`. Required
 anonymous-component `@props` bindings now preserve supplied model types. Prop
@@ -3069,3 +3069,70 @@ separate conflict, autosave, Settings-close and launch receipts. The props fix,
 all code gates and the signed candidate are reviewable; final native acceptance
 remains partial. No public publishing, new push, migration, update-feed activation,
 notarization or debugger expansion was performed.
+
+**Final native follow-up.** A normal macOS project-open event to the exact running
+50 bundle recovered the full workbench without replacing app40934/server40945.
+The original source, three tabs and correctly clamped caret4:1 were visible; the
+inspector console showed no errors and was closed. This supersedes the pending
+user-observation/cleanup status above. The earlier gray/control and Settings-close
+failures remain recorded; no renderer or caret fix was justified, and general
+first-window reliability remains unaccepted.
+
+A ten-second healthy, warmed sample measured app RSS273,120KiB and server
+RSS148,240KiB at the end, with CPU-time growth0.02s/0.00s. These two processes
+exclude WebContent/GPU and do not establish total memory or startup parity.
+Final native Command-Q stopped both40934/40945; no owned candidate app/server
+remained. All five fixture hashes match the originals. Candidate50 and preserved
+installed21 still pass deep/strict signature verification.
+
+`component-props-0.1.50-native-final.json` consolidates this follow-up with the
+prior workflow evidence. This accepts the bounded required/supplied-prop slice,
+with the activation limitation above. The broader roadmap remains active.
+Next: probe nested anonymous-component forwarding, caller/component scope
+boundaries and unsaved dependency freshness through the actual OpenStorm client
+before deciding whether another engine correction is needed.
+
+### Nested component forwarding and named-slot scope: engine128 acceptance
+
+The new actual-client regression
+`laravel_nested_component_forwarding_tracks_unsaved_scope_boundaries` verifies
+Controller → closed page → card → badge, including an aliased child prop. It
+checks exact property navigation after a same-line Unicode prefix, unsaved
+User→Other propagation across both component edges, isolation of an unbound
+grandparent variable, restoration of the valid binding, engine restart and
+closing the caller overlay. All seven disk originals remain unchanged. Named
+slot bodies retain the caller's Other model, with completion, hover and exact
+property navigation after the Unicode prefix. This is inherited engine128
+behavior; no additional engine correction or runtime build was needed.
+
+The first slot-navigation probe requested a definition immediately after a
+change and returned no target; a diagnostic completion received cancellation.
+Using the established settled-completion barrier before navigation produces the
+correct current result. These preliminary logs are retained; they do not prove
+an engine defect or general in-flight navigation readiness. The focused settled
+run passes6.89s. The full actual-client corpus then passes21/21, zero filtered,
+in143.69s. Evidence: `nested-components-slots-128-*` and
+`nested-components-128-client-host-result.json`.
+
+The same signed50 candidate also passed saved-source native navigation in a new
+owned Laravel13.37 fixture: badge Command-L2:23 / Command-B opens User.php3:29,
+and the named-slot Command-L1:79 / Command-B opens Other.php3:27. Both positions
+follow a same-line emoji. The fixture passes61 PHP syntax checks and App PSR-4
+validation; no environment files were copied. Normal quit, no-argument relaunch
+with all four tabs and exact Other3:27 caret, and final normal quit pass. No
+candidate app/server remains, and all six fixture originals match. Native
+unsaved/restart/isolation acceptance is not newly claimed for this nested case;
+those checks used the actual client. Receipt:
+`nested-components-0.1.50-native-result.json`.
+
+Rust follow-up passes1,321 workspace tests,46 ignored and zero filtered; both
+approved disposable environment-file tests positively pass. Full workspace/all-
+target Clippy with warnings denied, formatting and diff whitespace checks pass.
+The consolidated receipt is `nested-components-128-final-gates.json`; all eight
+frozen runtime-input hashes still match. Candidate50 and preserved installed21
+retain deep/strict signature verification. The preceding50 frontend,
+engine-source and host gates still describe the unchanged runtime; this follow-up
+changes only regression coverage and this record. All69 areas remain visible at
+67partial/2deferred. Parent-component `@aware` consumable-data inference, broader
+component/slot combinations and the earlier native activation limitation remain
+open. No new push, installation, publication or debugger expansion.

@@ -2063,3 +2063,55 @@ passes. No relaunch/performance acceptance is claimed for this diagnostic
 candidate. Runtime source hashes match its signed receipt. The combined native
 receipt is `menu-history-0.1.42-native-result.json`; all 69 areas remain visible
 at 67 partial / 2 user-deferred.
+
+0.1.43 field-key compatibility correction in progress. The native 0.1.42 failure
+is protected by failing plain-field CmdZ/CmdShiftZ regressions. Browser guards,
+already installed in both workbench and secondary Settings windows, now supply
+native macOS field history through browser edit commands. Editor-owned targets,
+IME/composition-ending keys, already-handled events and other modifier shortcuts
+stay outside that path. The logical shortcut key is honored independently of
+physical keyboard layout; a further regression caught the page-key guard
+interfering with that case and is corrected. The normal browser path is retained.
+The workaround is desktop macOS only and adds no settings interface or keymap
+binding. Focused source gates and a new uniquely versioned package are required;
+no native field-key acceptance is inferred from mocks.
+
+0.1.43 field-key correction accepted in the signed arm64 development app at
+`artifacts/batches/0.1.43/OpenStorm.app`. Native Settings query CmdZ/CmdShiftZ
+passes with explicit focus, including after menu Undo/Redo. While the reviewed
+route refactoring remains undoable, those field commands change only the query:
+all four persisted project targets stay applied. Main Go to Line also restores
+5:93 / 11:1 through keyboard Undo/Redo and Cancel retains the editor caret.
+
+The packaged route corpus passes preview Cancel, fresh five-occurrence/four-file
+apply with two unsaved Blade callers, exact Unicode/parameter preservation and
+an unchanged unrelated same-name literal. Native menu Undo restores all four
+disk originals plus the two-call unsaved Blade overlay / parameter 9 / modified
+indicator. Redo from the Blade tab reapplies all targets. A later external caller
+edit visibly refuses menu Undo without changing any target. Removing only the
+suite-owned external comment permits editor CmdZ/CmdShiftZ to restore/reapply
+all four files. Blade CmdB reaches route 5:93 after these cycles; ShiftF6 sees
+the full renamed semantic key and was cancelled.
+
+The disposable profile's original switch-app autosave true / idle autosave false
+was restored. Normal quit exited the app and engine. After restoring only the
+four owned fixture files, no-project-argument relaunch reopened the project and
+two tabs with original invoice declaration and Blade one-call / parameter 7
+content. Second normal quit also cleaned up both processes. Strict bundle
+signature passes. Installed optimized 0.1.21 remains unchanged (binary SHA-256
+048064d8cc6beb3985f36a445a5524992624e0413c919c1faa61cbd27d49fa16).
+
+Final source gates: 3,044 frontend tests / 352 files, type checking, lint, frontend
+build, 1,318 workspace tests / 39 ignored / two separately pending SDK env cases
+filtered, formatting, all-target Clippy with warnings denied, five live host
+PHPantom integration cases, binding export and native app build pass. The two
+SDK env cases still await their distinct mutation-scope answer; the unfiltered
+root gate is not claimed. Engine .123 is unchanged. Source-key exclusions cover
+IME/editor/already-handled events; other-OS native and IME acceptance remain open.
+Evidence: `field-history-0.1.43-native-result.json`, build receipt, workspace
+counts and per-phase exact disk witnesses under artifacts/checks. The .41/.42
+apps remain preserved diagnostic candidates; .43 resolves their history blockers.
+No installed-app replacement, publishing or new push. All 69 areas remain
+visible, 67 partial / two user-deferred. Next: continue FEAT-030 Laravel route
+parameter/controller/registration and duplicate-diagnostic corpus, preserving
+static-only inspection and guarded edits.

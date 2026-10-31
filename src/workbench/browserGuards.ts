@@ -2,9 +2,13 @@
  * Makes the webview behave like a desktop app: never the browser context menu
  * (its Reload/AutoFill items would act on the webview), no reload/print/
  * save-page/history shortcuts, no navigation on file drop. Copy/paste/undo
- * shortcuts stay untouched. A right-click no component handled on selected or
+ * shortcuts stay untouched in editors. Native macOS fields use browser edit
+ * commands for history when menu history routes through the IDE. A right-click no component handled on selected or
  * selectable read-only text gets IDEA's Copy menu instead of nothing.
  */
+import { isImeKey } from "@/platform/ime";
+import { isTauri } from "@/platform/ipc";
+import { guessOs } from "@/platform/platformInfo";
 import { copyMenuFor, showContextMenu, useContextMenuStore } from "@/ui";
 
 const BLOCKED = new Set([
@@ -35,8 +39,9 @@ function keyId(e: KeyboardEvent) {
     .join("+");
 }
 
-export function installBrowserGuards(opts: { blockReload?: boolean } = {}): () => void {
+export function installBrowserGuards(opts: { blockReload?: boolean; nativeFieldHistory?: boolean } = {}): () => void {
   const blockReload = opts.blockReload ?? import.meta.env.PROD;
+  const nativeFieldHistory = opts.nativeFieldHistory ?? (isTauri() && guessOs() === "macos");
   let menuBefore: unknown = null;
   const beforeContextMenu = () => {
     menuBefore = useContextMenuStore.getState().menu;
@@ -50,6 +55,28 @@ export function installBrowserGuards(opts: { blockReload?: boolean } = {}): () =
   };
   const onKeyDown = (e: KeyboardEvent) => {
     const id = keyId(e);
+    // AppKit no longer supplies a native Undo role. Keep its field shortcuts
+    // without taking history away from editors, IME or component/keymap handlers.
+    if (
+      nativeFieldHistory &&
+      !e.defaultPrevented &&
+      !isImeKey(e) &&
+      e.metaKey &&
+      !e.ctrlKey &&
+      !e.altKey &&
+      e.key.toLowerCase() === "z"
+    ) {
+      const active = document.activeElement;
+      if (
+        active instanceof HTMLElement &&
+        !active.closest(".cm-editor") &&
+        (active instanceof HTMLInputElement || active instanceof HTMLTextAreaElement || active.isContentEditable)
+      ) {
+        e.preventDefault();
+        document.execCommand(e.shiftKey ? "redo" : "undo");
+        return;
+      }
+    }
     if (BLOCKED.has(id) || (blockReload && RELOAD.has(id))) e.preventDefault();
   };
   const onDrag = (e: DragEvent) => {

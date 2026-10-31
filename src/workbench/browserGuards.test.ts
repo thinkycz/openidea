@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { hideContextMenu, selectableText, showContextMenu, useContextMenuStore } from "@/ui";
 import { installBrowserGuards } from "./browserGuards";
 
@@ -55,5 +55,79 @@ describe("browser guards: context menu", () => {
     p.addEventListener("contextmenu", (e) => e.preventDefault());
     rightClick(p);
     expect(useContextMenuStore.getState().menu).toBeNull();
+  });
+});
+
+describe("native macOS field history keys", () => {
+  let descriptor: PropertyDescriptor | undefined;
+  const exec = vi.fn();
+  beforeEach(() => {
+    dispose();
+    dispose = installBrowserGuards({ blockReload: false, nativeFieldHistory: true });
+    descriptor = Object.getOwnPropertyDescriptor(document, "execCommand");
+    Object.defineProperty(document, "execCommand", { configurable: true, value: exec });
+    exec.mockClear();
+  });
+  afterEach(() => {
+    if (descriptor) Object.defineProperty(document, "execCommand", descriptor);
+    else Reflect.deleteProperty(document, "execCommand");
+  });
+  function field(tag: "input" | "textarea" = "input") {
+    const el = document.createElement(tag);
+    document.body.append(el);
+    el.focus();
+    return el;
+  }
+  function key(el: Element, opts: KeyboardEventInit = {}) {
+    const e = new KeyboardEvent("keydown", {
+      key: "z",
+      code: "KeyZ",
+      metaKey: true,
+      bubbles: true,
+      cancelable: true,
+      ...opts,
+    });
+    el.dispatchEvent(e);
+    return e;
+  }
+  it("restores CmdZ and CmdShiftZ for focused plain inputs and textareas", () => {
+    const input = field();
+    expect(key(input).defaultPrevented).toBe(true);
+    const textarea = field("textarea");
+    expect(key(textarea, { shiftKey: true, key: "Z" }).defaultPrevented).toBe(true);
+    expect(exec.mock.calls).toEqual([["undo"], ["redo"]]);
+  });
+  it("uses the logical shortcut key for another keyboard layout", () => {
+    const input = field();
+    for (const code of ["KeyY", "KeyR", "KeyS"]) expect(key(input, { code }).defaultPrevented).toBe(true);
+    expect(exec.mock.calls).toEqual([["undo"], ["undo"], ["undo"]]);
+  });
+  it("leaves editor-owned, IME and already-handled shortcuts alone", () => {
+    const input = field();
+    for (const options of [
+      { isComposing: true },
+      { keyCode: 229 },
+      { altKey: true },
+      { ctrlKey: true },
+      { metaKey: false, ctrlKey: true },
+      { key: "x" },
+    ])
+      expect(key(input, options).defaultPrevented).toBe(false);
+    input.addEventListener("keydown", (e) => e.preventDefault(), { once: true });
+    key(input);
+    const editor = document.createElement("div");
+    editor.className = "cm-editor";
+    document.body.append(editor);
+    editor.append(input);
+    input.focus();
+    expect(key(input).defaultPrevented).toBe(false);
+    expect(exec).not.toHaveBeenCalled();
+  });
+  it("keeps normal browser history handling when the native workaround is disabled", () => {
+    dispose();
+    dispose = installBrowserGuards({ blockReload: false, nativeFieldHistory: false });
+    const input = field();
+    expect(key(input).defaultPrevented).toBe(false);
+    expect(exec).not.toHaveBeenCalled();
   });
 });

@@ -1,6 +1,7 @@
 import { describe, it, expect, vi } from "vitest";
-import { EditorState, ChangeSet, Transaction } from "@codemirror/state";
+import { EditorState, EditorSelection, ChangeSet, Transaction } from "@codemirror/state";
 import { history, isolateHistory } from "@codemirror/commands";
+import { minimalChange } from "../sync/diff";
 import { reviewedUndo as undo, reviewedRedo as redo, reviewedHistory, reviewedTransaction } from "./reviewedHistory";
 
 function setup() {
@@ -108,4 +109,67 @@ it("native Edit-menu beforeinput requests shared undo without changing one file 
   } finally {
     view.destroy();
   }
+});
+
+it.each(["\n", "\r\n"])(
+  "preserves an unchanged backward selection through reviewed history with %j line breaks",
+  (lineBreak) => {
+    const before = "$label = '😀';\nroute('nav.billing.show', ['invoice']);\nroute('nav.billing.show', ['tab']);\n";
+    const after = before.replaceAll("nav.billing.show", "nav.billing.details");
+    const from = before.indexOf("invoice");
+    let state = EditorState.create({
+      doc: before.replaceAll("\n", lineBreak),
+      selection: EditorSelection.range(from + 7, from),
+      extensions: [
+        EditorState.lineSeparator.of(lineBreak),
+        history(),
+        reviewedHistory(
+          vi.fn(async () => {}),
+          vi.fn(),
+        ),
+      ],
+    });
+    for (const [text, action] of [
+      [after, "apply"],
+      [before, "undo"],
+      [after, "redo"],
+    ] as const) {
+      const change = minimalChange(state.doc.toString(), text)!;
+      state = reviewedTransaction(
+        state,
+        ChangeSet.of(change, state.doc.length),
+        { group: "selection", action },
+        true,
+      ).state;
+      expect(state.doc.toString()).toBe(text);
+      const range = state.selection.main;
+      expect(range.from).toBeLessThanOrEqual(range.to);
+      expect(state.sliceDoc(range.from, range.to)).toBe("invoice");
+      expect(range.anchor).toBeGreaterThan(range.head);
+    }
+  },
+);
+
+it("keeps a replaced selection valid when a large reviewed change exceeds the refinement budget", () => {
+  let state = EditorState.create({
+    doc: "a".repeat(80_000),
+    selection: EditorSelection.range(10, 20),
+    extensions: [
+      history(),
+      reviewedHistory(
+        vi.fn(async () => {}),
+        vi.fn(),
+      ),
+    ],
+  });
+  const after = "b".repeat(80_000);
+  state = reviewedTransaction(
+    state,
+    ChangeSet.of({ from: 0, to: state.doc.length, insert: after }, state.doc.length),
+    { group: "large", action: "apply" },
+    true,
+  ).state;
+  expect(state.doc.toString()).toBe(after);
+  expect(state.selection.main.empty).toBe(true);
+  expect(state.selection.main.from).toBeLessThanOrEqual(state.selection.main.to);
 });

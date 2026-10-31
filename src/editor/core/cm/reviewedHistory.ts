@@ -1,6 +1,17 @@
 /** Shared reviewed edits stay one history entry even across closed files. */
-import { StateEffect, Facet, Prec, Transaction, EditorState, type ChangeSet, type Extension } from "@codemirror/state";
+import {
+  StateEffect,
+  Facet,
+  Prec,
+  Transaction,
+  EditorState,
+  EditorSelection,
+  ChangeSet,
+  type ChangeSpec,
+  type Extension,
+} from "@codemirror/state";
 import { EditorView } from "@codemirror/view";
+import { diff } from "@codemirror/merge";
 import {
   invertedEffects,
   isolateHistory,
@@ -98,6 +109,40 @@ export function reviewedHistory(restore: Restore, error: (e: unknown) => void): 
   ];
 }
 
+/** Compact replacements can cover unchanged selected text. Refine only when
+ * default mapping would invert a range, keeping work bounded for large edits. */
+function reviewedChanges(state: EditorState, changes: ChangeSet) {
+  const mapped = state.selection.ranges.map((range) => range.map(changes));
+  const affected = state.selection.ranges.filter((_, i) => mapped[i]!.from > mapped[i]!.to);
+  if (!affected.length) return { changes };
+  const deadline = performance.now() + 10;
+  const specs: ChangeSpec[] = [];
+  changes.iterChanges((from, to, _fromB, _toB, inserted) => {
+    if (
+      to - from + inserted.length > 65_536 ||
+      performance.now() >= deadline ||
+      !affected.some((range) => from <= range.from && to >= range.to)
+    ) {
+      specs.push({ from, to, insert: inserted });
+      return;
+    }
+    const before = state.doc.sliceString(from, to);
+    const after = inserted.toString();
+    for (const part of diff(before, after, { scanLimit: 500, timeout: Math.max(1, deadline - performance.now()) })) {
+      specs.push({ from: from + part.fromA, to: from + part.toA, insert: after.slice(part.fromB, part.toB) });
+    }
+  });
+  const refined = ChangeSet.of(specs, state.doc.length);
+  const selection = EditorSelection.create(
+    state.selection.ranges.map((range) => {
+      const next = range.map(refined);
+      return next.from <= next.to ? next : EditorSelection.cursor(refined.mapPos(range.head, 1));
+    }),
+    state.selection.mainIndex,
+  );
+  return { changes: refined, selection };
+}
+
 /** Consume the matching CM undo/redo entry instead of adding a second history
  * entry for its backend patch. Split panes without that entry just mirror it. */
 export function reviewedTransaction(
@@ -128,10 +173,13 @@ export function reviewedTransaction(
     ) {
       return candidate;
     }
-    return state.update({ changes, annotations: [remoteChange.of(true), Transaction.addToHistory.of(false)] });
+    return state.update({
+      ...reviewedChanges(state, changes),
+      annotations: [remoteChange.of(true), Transaction.addToHistory.of(false)],
+    });
   }
   return state.update({
-    changes,
+    ...reviewedChanges(state, changes),
     effects: primary ? groupEffect.of(history.group) : [],
     annotations: [remoteChange.of(true), Transaction.addToHistory.of(primary), isolateHistory.of("full")],
   });

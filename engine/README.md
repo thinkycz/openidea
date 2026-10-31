@@ -1,17 +1,17 @@
 # Pinned PHPantom engine
 
-The local OpenStorm candidate bundles PHPantom `0.11.1-openstorm.125` for Apple
-Silicon macOS. This is a local rebuild, not an upstream release. Source .125
-adds a whole-identifier replacement edit for quoted controller actions, including
-UTF16 positions after Unicode route paths. Source, live client and host gates
-pass; native .45 verifies the range but exposes client-added parentheses
-inside the quoted action. The .46 client correction passes native completion;
-.46 instead exposes stale sibling duplicate-route diagnostics after an unsaved
-registration change and remains diagnostic pending publication refresh. Archived .44 / .124 demonstrates
-the original completion failure and remains a diagnostic delivery.
+The local OpenStorm candidate bundles PHPantom `0.11.1-openstorm.126` for Apple
+Silicon macOS. This is a local rebuild, not an upstream release. Source .126
+refreshes affected open route diagnostics after registration changes. The full
+pinned-source suite passes18,384tests/17ignored plus its separate FIFO child;
+all16OpenStorm client and5host cases pass, including unsaved sibling refresh.
+Examples, Clippy, formatting and source fingerprints pass. Signed development
+0.1.47 accepts the route diagnostic/navigation slice, including unsaved sibling
+refresh, undo, reviewed CRLF selections and restart/session cleanup. Wider gates
+remain in docs/OPENSTORM.md. Archived .44–.46 diagnostic deliveries stay preserved.
 `source.json` pins upstream source,
 its archive checksum, the unchanged 114-patch PHP Workbench series, and OpenStorm
-patches 0115–0125 for resource isolation, Blade and Laravel assistance, and
+patches 0115–0126 for resource isolation, Blade and Laravel assistance, and
 source-update recovery. The bundled executable is verified by
 `node scripts/verify-phpantom.mjs`; its provenance and licenses are under
 `src-tauri/resources/phpantom/`.

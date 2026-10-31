@@ -1330,3 +1330,75 @@ async fn laravel_framework_source_direct_references_and_hover_control() {
     assert_eq!(std::fs::read_to_string(trait_path).unwrap(), trait_source);
     assert!(outcome.is_ok(), "{}", outcome.unwrap_err());
 }
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires the pinned macOS Apple Silicon PHPantom executable"]
+async fn unsaved_route_registration_refreshes_sibling_diagnostics_through_client() {
+    async fn wait_duplicate(
+        events: &Mutex<Vec<IdeEvent>>,
+        path: &std::path::Path,
+        since: usize,
+        expected: bool,
+    ) -> bool {
+        for _ in 0..200 {
+            let state = events.lock()[since..].iter().rev().find_map(|event| match event {
+                IdeEvent::Diagnostics { path: target, items, .. } if target.0 == path => {
+                    Some(items.iter().any(|d| d.code.as_deref() == Some("duplicate_laravel_route")))
+                }
+                _ => None,
+            });
+            if state == Some(expected) {
+                return true;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        false
+    }
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().canonicalize().unwrap();
+    std::fs::create_dir(root.join("routes")).unwrap();
+    std::fs::write(root.join("composer.json"), r#"{"require":{"laravel/framework":"^13.0"}}"#).unwrap();
+    std::fs::write(root.join(".phpantom.toml"), "[indexing]\nstrategy = \"none\"\n[diagnostics]\nworkspace = false\n")
+        .unwrap();
+    let base =
+        "<?php\nuse Illuminate\\Support\\Facades\\Route as Routes;\nRoutes::get('/a/😀', 'show')->name('shared');\n";
+    let other =
+        "<?php\nuse Illuminate\\Support\\Facades\\Route as Routes;\nRoutes::get('/b', 'show')->name('shared');\n";
+    let paths = [root.join("routes/web.php"), root.join("routes/api.php")];
+    for (path, text) in paths.iter().zip([base, other]) {
+        std::fs::write(path, text).unwrap();
+    }
+    let bin = std::env::var_os("OPENSTORM_TEST_PHPANTOM_BIN").map(PathBuf::from).unwrap_or_else(|| {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../src-tauri/resources/phpantom/phpantom_lsp")
+    });
+    let mut php = LanguageRegistry::load(None).unwrap().get(&LanguageId::new("php")).unwrap();
+    php.language_servers.retain(|s| s.name == "phpantom");
+    php.language_servers[0].command = bin.to_string_lossy().into_owned();
+    let events: Arc<Mutex<Vec<IdeEvent>>> = Arc::default();
+    let capture = events.clone();
+    let mgr = LspManager::new(
+        root,
+        Arc::new(LanguageRegistry::from_configs(vec![php])),
+        Arc::new(move |e| capture.lock().push(e)),
+    );
+    let docs = [DocId::next(), DocId::next()];
+    for ((path, text), doc) in paths.iter().zip([base, other]).zip(docs) {
+        mgr.did_open(doc, path, &LanguageId::new("php"), 1, text);
+    }
+    let initial =
+        wait_duplicate(&events, &paths[0], 0, true).await && wait_duplicate(&events, &paths[1], 0, true).await;
+    if !initial {
+        mgr.shutdown_all().await;
+        panic!("fixture must first publish both duplicate warnings");
+    }
+    let since = events.lock().len();
+    replace(&mgr, docs[1], 2, other, &other.replace("'shared'", "'unique'"));
+    let edited_refreshed = wait_duplicate(&events, &paths[1], since, false).await;
+    let sibling_refreshed = wait_duplicate(&events, &paths[0], since, false).await;
+    mgr.shutdown_all().await;
+    for (path, text) in paths.iter().zip([base, other]) {
+        assert_eq!(std::fs::read_to_string(path).unwrap(), text, "diagnostics must not persist the overlay");
+    }
+    assert!(edited_refreshed, "edited registration must clear its own duplicate warning");
+    assert!(sibling_refreshed, "unchanged open sibling must receive fresh diagnostics after unsaved registration edit");
+}

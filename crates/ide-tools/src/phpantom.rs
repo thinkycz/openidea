@@ -3,7 +3,18 @@ use ide_language::LanguageServerConfig;
 use std::path::{Path, PathBuf};
 
 pub const COMMAND: &str = "phpantom_lsp";
-pub const VERSION: &str = "0.11.1-openstorm.123";
+/// The Tools row describes the checked executable shipped with this build.
+pub fn version() -> &'static str {
+    static VERSION: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    VERSION
+        .get_or_init(|| {
+            let provenance: serde_json::Value =
+                serde_json::from_str(include_str!("../../../src-tauri/resources/phpantom/provenance.json"))
+                    .expect("checked bundled PHPantom provenance");
+            provenance["version"].as_str().expect("bundled PHPantom version").to_owned()
+        })
+        .as_str()
+}
 
 pub fn bundled() -> Option<PathBuf> {
     if !cfg!(all(target_os = "macos", target_arch = "aarch64")) {
@@ -66,5 +77,22 @@ mod tests {
         let mut custom = cfg("/custom/phpantom");
         configure(&mut custom);
         assert_eq!(custom.command, "/custom/phpantom");
+    }
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    #[test]
+    fn bundled_tools_row_reports_the_actual_engine_version() {
+        let tmp = tempfile::tempdir().unwrap();
+        let registry = ide_language::LanguageRegistry::load(None).unwrap();
+        let php = registry.get(&ide_core::LanguageId::new("php")).unwrap();
+        let tools =
+            crate::Tools::with_paths(tmp.path().to_path_buf(), std::ffi::OsString::new(), crate::Platform::current());
+        let row = tools.list(&[php]).into_iter().find(|tool| tool.command == COMMAND).unwrap();
+        let path = row.path.as_ref().expect("bundled tool path");
+        let output =
+            std::process::Command::new(&path.0).arg("--version").current_dir(tmp.path()).env_clear().output().unwrap();
+        assert!(output.status.success());
+        let actual = String::from_utf8(output.stdout).unwrap();
+        let actual = actual.trim().strip_prefix("phpantom_lsp ").unwrap();
+        assert_eq!(row.version.as_deref(), Some(actual), "Tools must identify its shipped executable");
     }
 }

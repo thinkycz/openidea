@@ -478,7 +478,7 @@ impl Tools {
                 command,
                 languages,
                 path: path.map(Into::into),
-                version: bundled.map(|_| phpantom::VERSION.to_owned()),
+                version: bundled.map(|_| phpantom::version().to_owned()),
                 install_method: None,
                 can_install: false,
                 unavailable_reason: None,

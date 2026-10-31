@@ -1,0 +1,292 @@
+--- a/src/diagnostics/cross_file.rs
++++ b/src/diagnostics/cross_file.rs
+@@ -120,6 +120,60 @@
+ 
+         self.retain_reference_candidates(&keys, &mut uris);
+         uris
++    }
++
++    /// Route names affect sibling declarations and route callers even when no
++    /// PHP class/function signature changed. Only inspect open semantic maps;
++    /// route discovery and external tools stay off this publication path.
++    pub(crate) fn open_files_affected_by_route_sources<'a>(
++        &self,
++        changed_uris: impl Iterator<Item = &'a str>,
++        excluded: &HashSet<&str>,
++    ) -> Vec<String> {
++        let mut changed_uris = changed_uris.peekable();
++        if changed_uris.peek().is_none() || !self.resolved_class_cache.read().is_laravel() {
++            return Vec::new();
++        }
++        let known = self.laravel_string_key_cache.read().routes.clone();
++        let is_route_source = |uri: &str| {
++            uri.contains("/routes/")
++                || known
++                    .as_ref()
++                    .is_some_and(|routes| routes.sources.contains_key(uri))
++                || tower_lsp::lsp_types::Url::parse(uri)
++                    .ok()
++                    .and_then(|url| url.to_file_path().ok())
++                    .is_some_and(|path| {
++                        self.laravel_provider_resources
++                            .read()
++                            .route_files
++                            .contains(&path)
++                    })
++        };
++        if !changed_uris.any(is_route_source) {
++            return Vec::new();
++        }
++        // Explicit provider/include sources need the same invalidation as a
++        // conventional routes/ file. Keep the old provenance for target selection.
++        self.laravel_string_key_cache.write().routes = None;
++        let open: Vec<_> = self.open_files.read().keys().cloned().collect();
++        open.into_iter()
++            .filter(|uri| !excluded.contains(uri.as_str()))
++            .filter(|uri| {
++                is_route_source(uri)
++                    || self.symbol_maps.read().get(uri).is_some_and(|map| {
++                        map.spans.iter().any(|span| {
++                            matches!(
++                                span.kind,
++                                crate::symbol_map::SymbolKind::LaravelStringKey {
++                                    kind: crate::symbol_map::LaravelStringKind::Route,
++                                    ..
++                                }
++                            )
++                        })
++                    })
++            })
++            .collect()
+     }
+ 
+     /// Narrow an AST publication to open consumers after its indexes are visible.
+@@ -520,6 +574,64 @@
+     }
+ 
+     #[test]
++    fn route_publication_queues_open_declarations_and_callers_without_unrelated_files() {
++        for source in [
++            "file:///project/routes/api.php",
++            "file:///project/registered.php",
++        ] {
++            let backend = Backend::new_test();
++            backend.resolved_class_cache.write().set_laravel(true);
++            backend.laravel_provider_resources.write().route_files.push(
++                tower_lsp::lsp_types::Url::parse(source)
++                    .unwrap()
++                    .to_file_path()
++                    .unwrap(),
++            );
++            let sibling = "file:///project/routes/web.php";
++            let closed = "file:///project/Closed.php";
++            let registration = "<?php\nRoute::get('/a', 'show')->name('shared');\n";
++            for (uri, text) in [
++                (source, registration),
++                (sibling, registration),
++                (CONSUMER, "<?php\nroute('shared');\n"),
++                (BYSTANDER, "<?php\n$label = 'shared';\n"),
++                (closed, "<?php\nroute('shared');\n"),
++            ] {
++                backend
++                    .open_files
++                    .write()
++                    .insert(uri.to_owned(), Arc::new(text.to_owned()));
++                backend.update_ast(uri, text);
++            }
++            backend.open_files.write().remove(closed);
++            backend.init_complete.store(true, Ordering::Release);
++            backend.diag.pending_uris.lock().clear();
++            let changed = registration.replace("'shared'", "'unique'");
++            backend
++                .open_files
++                .write()
++                .insert(source.to_owned(), Arc::new(changed.clone()));
++            backend.update_ast(source, &changed);
++            let queued = backend.diag.pending_uris.lock().clone();
++            assert_eq!(
++                queued,
++                HashSet::from([sibling.to_owned(), CONSUMER.to_owned()]),
++                "{source}"
++            );
++            backend.diag.pending_uris.lock().clear();
++            backend.open_files.write().insert(
++                BYSTANDER.to_owned(),
++                Arc::new("<?php\n$label = 'changed';\n".to_owned()),
++            );
++            backend.update_ast(BYSTANDER, "<?php\n$label = 'changed';\n");
++            assert!(
++                backend.diag.pending_uris.lock().is_empty(),
++                "unrelated edits must not fan out"
++            );
++        }
++    }
++
++    #[test]
+     fn only_the_affected_files_reach_the_diagnostic_queue() {
+         let backend = workspace("  public function handle(int $n): void {}\n");
+         backend.init_complete.store(true, Ordering::Release);
+--- a/src/parser/ast_update.rs
++++ b/src/parser/ast_update.rs
+@@ -2173,6 +2173,13 @@
+                     .collect(),
+             )
+         };
++        let route_dependents = self.open_files_affected_by_route_sources(
++            prepared
++                .iter()
++                .filter(|update| update.source_changed)
++                .map(|update| update.uri.as_str()),
++            &prepared_uris,
++        );
+         // A template's lowering and its symbol map go out under one hold of
+         // the publish lock, so that of two parses of the same template racing
+         // each other, one publishes all three maps before the other starts.
+@@ -2207,7 +2214,11 @@
+         }
+ 
+         let mut scheduled = HashSet::new();
+-        for uri in refreshed_open.into_iter().chain(dependent_open) {
++        for uri in refreshed_open
++            .into_iter()
++            .chain(dependent_open)
++            .chain(route_dependents)
++        {
+             if scheduled.insert(uri.clone()) {
+                 self.schedule_diagnostics(uri);
+             }
+--- a/tests/integration/composer_project_diagnostics.rs
++++ b/tests/integration/composer_project_diagnostics.rs
+@@ -326,3 +326,121 @@
+         original
+     );
+ }
++
++#[tokio::test]
++async fn unsaved_route_changes_republish_unchanged_sibling_duplicate_diagnostics() {
++    let (_directory, root) = projects();
++    let project = root.join("apps/a");
++    write(
++        &project,
++        "composer.json",
++        crate::common::LARAVEL_SRC_COMPOSER,
++    );
++    let first = "<?php\nuse Illuminate\\Support\\Facades\\Route as Routes;\nRoutes::get('/a/😀', 'show')->name('shared');\n";
++    let original = "<?php\nuse Illuminate\\Support\\Facades\\Route as Routes;\nRoutes::get('/b', 'show')->name('shared');\n";
++    write(&project, "routes/web.php", first);
++    write(&project, "routes/api.php", original);
++    let first_uri = Url::from_file_path(project.join("routes/web.php")).unwrap();
++    let other_uri = Url::from_file_path(project.join("routes/api.php")).unwrap();
++    let mut wire = Wire::start(&root).await;
++    wire.open(&first_uri, 1, first).await;
++    wire.open(&other_uri, 1, original).await;
++    let has_duplicate = |p: &Value| {
++        p["diagnostics"]
++            .as_array()
++            .unwrap()
++            .iter()
++            .any(|d| d["code"].as_str() == Some("duplicate_laravel_route"))
++    };
++    let initial = wire.publication(&first_uri, 1, Some(true), 0).await;
++    assert!(
++        has_duplicate(&initial),
++        "initial sibling warning: {initial}"
++    );
++    eprintln!("initial unchanged sibling warning published");
++    let mut sequence = envelope(&initial, 1, 1);
++    let initial_other = wire.publication(&other_uri, 1, Some(true), 0).await;
++    assert!(has_duplicate(&initial_other));
++    eprintln!("both initial duplicate warnings published");
++    for (version, changed, expected) in [
++        (2, original.replace("'shared'", "'unique'"), false),
++        (
++            3,
++            original.replacen("<?php\n", "<?php\n// moved 😀\n", 1),
++            true,
++        ),
++        (4, "<?php\n".to_owned(), false),
++    ] {
++        let since = wire.seen.len();
++        wire.change(&other_uri, version, &changed).await;
++        wire.barrier(&other_uri).await;
++        let edited = wire
++            .publication(&other_uri, version, Some(true), since)
++            .await;
++        assert_eq!(
++            has_duplicate(&edited),
++            expected,
++            "edited version {version}: {edited}"
++        );
++        eprintln!("edited version {version} complete; awaiting unchanged sibling");
++        let sibling = wire.publication(&first_uri, 1, Some(true), since).await;
++        assert_eq!(
++            has_duplicate(&sibling),
++            expected,
++            "unchanged sibling at edit {version}: {sibling}"
++        );
++        if version == 3 {
++            let warning = sibling["diagnostics"]
++                .as_array()
++                .unwrap()
++                .iter()
++                .find(|d| d["code"].as_str() == Some("duplicate_laravel_route"))
++                .unwrap();
++            assert_eq!(
++                warning["relatedInformation"][0]["location"]["range"]["start"]["line"],
++                3
++            );
++        }
++        let next_sequence = envelope(&sibling, 1, 1);
++        assert!(
++            next_sequence > sequence,
++            "sibling refresh must advance its publication sequence"
++        );
++        sequence = next_sequence;
++        assert_eq!(
++            fs::read_to_string(project.join("routes/api.php")).unwrap(),
++            original
++        );
++    }
++    let since = wire.seen.len();
++    wire.notify(
++        "textDocument/didClose",
++        json!({"textDocument":{"uri":other_uri}}),
++    )
++    .await;
++    wire.barrier(&first_uri).await;
++    let restored = wire.publication(&first_uri, 1, Some(true), since).await;
++    assert!(
++        has_duplicate(&restored),
++        "closing overlay must restore the disk registration: {restored}"
++    );
++    let since = wire.seen.len();
++    wire.open(&other_uri, 1, &original.replace("'shared'", "'unique'"))
++        .await;
++    let reopened = wire.publication(&other_uri, 1, Some(true), since).await;
++    assert!(!has_duplicate(&reopened));
++    let opening = reopened["phpantomDocumentOpen"].as_u64().unwrap();
++    assert!(opening > initial_other["phpantomDocumentOpen"].as_u64().unwrap());
++    envelope(&reopened, 1, opening);
++
++    let sibling = wire.publication(&first_uri, 1, Some(true), since).await;
++    assert!(
++        !has_duplicate(&sibling),
++        "reopened overlay must refresh the unchanged sibling: {sibling}"
++    );
++    assert_eq!(
++        fs::read_to_string(project.join("routes/api.php")).unwrap(),
++        original
++    );
++    wire.finish().await;
++}
+--- a/docs/CHANGELOG.md
++++ b/docs/CHANGELOG.md
+@@ -189,6 +189,8 @@
+ - **Project PHP extension profiles.** Set `[php] extensions` to the extensions available on your deployment target. Completion and built-in lookup keep project polyfills and exclude unavailable extension declarations after restarting the service. Contributed by PHP Workbench (local downstream patch).
+ 
+ ### Fixed
++
++- **Route warnings refresh across open files.** Editing or discarding a route registration now refreshes affected open route declarations and callers without saving. Contributed by @thinkycz.
+ 
+ - **Call hierarchy follows trait constructors.** Constructor calls point to the composed trait implementation, including inherited constructors and named aliases, and incoming calls retain those construction sites. Ambiguous trait aliases do not invent a target. Contributed by @thinkycz.
+ 

@@ -3,14 +3,14 @@
 Base: thinkycz/openidea 50212e73972d6f05bf16050cb0ba10102a6c8054 (0.1.21).
 Branch: codex/openstorm-php-laravel. Target: macOS Apple Silicon, local delivery.
 
-Current checkpoint (2026-10-31): .43 remains accepted for guarded history and
-field shortcuts. .46 / engine .125 passes native quoted controller completion,
-parameter keys/unsaved dependencies, static route targets, reviewed grouped
-rename and shared history, settled restart, reopen and process cleanup. It is
-a diagnostic build: an unsaved duplicate route edit clears its own warning but
-leaves a stale warning in an unchanged open sibling. Fix diagnostic republishing
-before route-batch acceptance. Installed optimized .21 is preserved. The full
-69-area ledger remains67partial / two user-deferred.
+Current checkpoint (2026-10-31): signed development0.1.47/engine126 accepts
+this route batch: quoted controller completion/navigation, parameter completion
+and unsaved dependencies, static grouped/duplicate targets, checked rename,
+shared native history with CRLF backward selections, sibling diagnostic refresh,
+save-conflict refusal, settled restart and session/process recovery. The prior
+.44–.46 diagnostic failures remain documented. Installed optimized.21 is preserved.
+The full69-area ledger remains67partial/two user-deferred; no blanket parity or
+full unfiltered/release acceptance is claimed.
 
 ## Contract
 
@@ -2409,3 +2409,154 @@ installed optimized21 checksum/signature remain unchanged. No new push/release.
 Native result: artifacts/checks/route-navigation-0.1.46-native-result.json.
 All69areas stay visible at67partial/two deferred. Wider platforms, real services,
 performance parity and the two separately pending SDK env tests are unaccepted.
+
+.126 diagnostic-publication regression started in ignored working clone
+`artifacts/phpantom/route-diagnostics-126-work` of immutable125verifiedsource.
+The test extends the existing real ProjectRouter transport harness and waits
+for new complete, versioned, sequenced publishDiagnostics on the unchanged
+sibling after an unsaved edit. Its initial warning must exist first; collection
+helpers are not called directly. Current engine logic and bundled125stay
+unchanged; the red test build is pending in route-diagnostics-126-red.log.
+No test result or source126 acceptance is inferred from compilation.
+
+Actual OpenStorm client .126 regression now executes and fails on the signed
+.46 bundled125engine: both initial duplicate warnings exist, and the edited
+registration clears its own warning, but the unchanged open sibling receives
+no fresh diagnostics. The manager shuts down before the failing assertion.
+Receipt route-diagnostics-126-client-red-result.json. The engine transport case
+also executes one failed timeout; detailed stage instrumentation is still
+compiling, so its precise timeout stage is not yet claimed as red evidence.
+
+The detailed engine transport red case now confirms both initial warnings and
+edited version2complete publication before timing out on the unchanged sibling.
+One actual sourcecase executes/fails101; the old uninstrumented timeout remains
+preserved. The working126fix hooks guarded AST publication and reuses the
+existing native diagnostic queue: only open route sources and semantic route
+callers are queued, with standard/provider/known include provenance, excluding
+changed targets and unrelated or closed files. The route catalog is invalidated
+at accepted publication. A scope-queue regression covers standard/provider
+sources and unrelated/closed callers; the transport test adds close/reopen
+recovery. Focused green build is pending. No source126pin/bundle/native acceptance.
+
+Working126focus now passes: the real transport case completes6.99s across
+add/move/remove and unsaved close/reopen, retaining disk originals. The actual
+OpenStorm client case passes5.99s against the working126executable. These are
+working-source checks; the queue-scope unit, Clippy/fmt, pinned-source rebuild,
+full suite and .47native gates remain open. Root bundled125is unchanged.
+
+Source126is pinned by patch0126 (SHA256
+7af10cad10621dd6e7bb64d7d37c43dec89e3cc532b775873cff07f580b24e37), series
+beeee3552967208dffe35bb32d7c1af1aa0e6badc73aac337fc888eea22235bc,
+reconstructed independently at1756b1f920c1-beeee3552967-verified. The working
+scope-queue unit passes; release all-target Clippy--fix passes and formatting
+runs afterward. Full pinned-source suite/Clippy/fmt/fingerprint is running.
+Final transport assertions add moved related-location and new opening-identity
+checks, pending the full pinned run. Resource125stays unchanged until source
+and SDK pipelines finish at a safe boundary.
+
+The .46 shared Redo also displayed a negative selection length. A focused
+frontend regression reproduces a compact reviewed replacement mapping an
+unchanged backward selection to from84/to34. Shared reviewed transactions now
+refine only otherwise-inverted mappings with bounded size/time using the existing
+merge diff utility. Large/over-budget replaced selections collapse safely;
+valid ordinary mappings stay unchanged. Six focused reviewed-history tests pass,
+including selected invoice text/backward direction across apply/undo/redo and
+a large-change fallback. .47native verification is still required.
+
+Compiler-space recovery:640older workspace-only Mach-O object files in40groups
+were removed while retaining the newest two groups. Only temporary SDK inputs
+were removed; engine compilation used a separately verified target. Logical
+selected bytes8,748,652,720; immediate free space rose about1.8GB, and laterdf
+showed12GiB after delayed reclamation. No app/source/fixture/engine/Workbench or
+evaluation delivery changed. Selection/pruning receipts use
+route-navigation-0.1.47-sdk-object-cache-selection/pruned.json.
+
+App47versions agree across34workspace packages. The initial version-only count
+also matched the already-pinned num-integer0.1.47, so the receipt now verifies
+workspace package identity and proves all nonworkspace lock records unchanged.
+Application gates are running; the same two separately pending SDK environment
+cases stay filtered. No .47packaged/native acceptance is inferred.
+
+Pinned126source gate completes:18,384passed/17ignored, plus separate FIFO child1;
+all-target release Clippy, fmt and repeated source fingerprints pass. Engine
+SHA25634d2de51be91e8e3c48f850b4314542bce8ff955376a3de0b27c63c1a11d5b69;
+archive/provenance/licenses are retained, and the application resource now
+matches this exact binary. All16actual client cases and5host cases pass; the
+12owned47fixture sources return to original state. The12PHPexamples lint,
+explicitly enabled zend.assertions=1 execution and Demo syntax pass. Analyzer
+reports exactly the three intentional Demo errors at731/731/951 (expectedexit1).
+The inherited LLVM stripping warning is retained; it is not a Rust code warning.
+
+The selection guard's CRLF fixture initially only varied a label, so that run
+is invalid as CRLF evidence. The corrected real lineSeparator facet exposes
+wrong document text before correction: state.sliceDoc serializes CRLF while
+ChangeSet offsets count internal LF. Using state.doc.sliceString corrects the
+coordinate basis. Final focused history7and full frontend3049tests pass, with
+final typecheck/lint/build. New engine126native acceptance is still pending.
+
+Tools metadata regression executes against the real checked executable with
+an empty PATH: the old status row reports123while the binary reports126.
+Version now derives once from build provenance, avoiding a manually drifting
+label. All three bundled-resolution/override/version cases pass. Only Tools
+presentation changed after the16client/5host run; server configuration and the
+engine binary remain identical. Final workspace/fmt/Clippy gates are rerunning
+for this Rust change; previous intermediate workspace count is1318/41ignored/
+2separately pending env tests filtered. No47bundle/native acceptance yet.
+
+Final SDK gate storage recovery: the first final rebuild stopped at ENOSPC
+before running tests. At an idle boundary, reviewed 4,996 pre-Oct31 root
+workspace Mach-O compiler objects (7,257,093,512 logical bytes) and the exact
+regenerable static archive were removed. Recent objects, libraries, executables,
+apps, engine sources/archives and fixtures remain preserved. Physical free space
+was measured at13GiB before retry, rather than inferred from deletion. Receipts:
+route-navigation-0.1.47-old-object-cache-selection/pruned.json. The retry uses
+new logs; the failed gate is retained and is not acceptance evidence.
+
+Final47SDK retry passes:1319tests/41ignored/2separately pending environment
+cases filtered, binding export, formatting and workspace all-target Clippy
+-Dwarnings. Failed ENOSPC log remains retained. Final frontend3049/typecheck/
+lint/build is unchanged. Development Tauri packaging is now running; native
+acceptance still pending.
+
+Signed development47 native observations: quoted midword controller completion
+keeps plain show; empty-prefix index choice persists exactly and keyboard Undo
+restores it. Controller alias CmdB reaches4:21. Settings field CmdZ/CmdShiftZ
+and native PHPantom126version/resource path pass. Invoice/tab/custom record
+key completions persist exactly. Unsaved URI invoice->receipt propagates to
+completion in another unsaved buffer without disk writes; overlays restored.
+Find Action discovers Laravel Routes; grouped Unicode target5:69 and both
+duplicate targets8:80/4:80 open correctly. Both initial duplicate warnings
+clear after only the second declaration changes unsaved, and Undo republishes
+both warnings. Exact disk witnesses remain unchanged.
+
+Checked rename Cancel writes nothing;3occurrences/2files apply exact changes.
+Native Edit Undo from declaration restores both files; Redo from caller reapplies
+both. The unchanged backward invoice selection remains7characters across all
+three transitions, with10physicalCRLF breaks intact in the caller. Newly renamed
+route CmdB reaches5:69. Explicit restart exits15169and initializes126as15551;
+quoted method completion and controller/settled route navigation pass. No instant
+startup readiness claim; earlier46transient lookup limitation remains tracked.
+
+Save-conflict native check: unsaved local comment plus separately changed owned
+route disk file prompts File changed on disk before overwrite. Cancel preserves
+exact external bytes and local overlay. Reload refuses dirty state; explicit
+guarded-close Don t Save then reopen shows external witness. Defaults restored
+to focus autoSave=true/idle defaultfalse. First normalquit exits app15139and both
+engine generations. Only12owned fixture sources restored after exit; no-argument
+relaunch reopens same project/fourtabs with original route/caller sources. Final
+secondquit/signature/installed-app checks are pending before batch acceptance.
+
+Final47native batch is accepted within its recorded slice. Second normalquit
+exits the owned relaunched app16584/server16592. A subsequent UI read reopened
+an extra candidate16655/server16934; resetting the stale CUA binding and normal
+CmdQ without a post-quit UI read exits both. All observed app/server generations
+are absent. This tool lifecycle correction is recorded separately from app quit.
+All12fixture sources original; focus autosave persistedtrue/idle defaultfalse;
+strict candidate/installed21signatures pass and installed21hash is unchanged.
+First profile launch IPC3,139ms, warm noargrelaunch847ms on122filefixture.
+Three desktop-idle ps samples over10.026s show parent RSS193,744–193,904KiB and
+server134,064KiB; parent CPUtime increases0.07s and server stays3.10s. These are
+development process snapshots, excluding WebContent/OS cache and wider workloads.
+No memory/performance parity or release benchmark claim. Native result receipt:
+artifacts/checks/route-navigation-0.1.47-native-result.json. Next work remains
+milestone2 acceptance; full69area goal stays active. No new push or installation.

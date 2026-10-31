@@ -32,7 +32,7 @@ import {
 import { zoomActions } from "./appearanceRuntime";
 import { activateFileTypes } from "./fileTypesRuntime";
 import { trackRuntimeSettings } from "./runtime";
-import { installActionProxies, installSettingsHost } from "./window/bridge";
+import { installActionProxies, installSettingsHistoryMenu, installSettingsHost } from "./window/bridge";
 import { AssignShortcutOverlay, showAssignShortcut } from "./keymap/AssignShortcut";
 import { settingsSearchEntries } from "./searchIndex";
 import { activatePythonStatus } from "./languages/PythonStatus";
@@ -191,6 +191,7 @@ export function activateSettingsWindow(parent: string): () => void {
     trackRuntimeSettings(),
     unloadBuiltinPages,
     registerActions(settingsActions((page, newProjects) => relaunch({ page, newProjects: !!newProjects }))),
+    installSettingsHistoryMenu(),
     installActionProxies(parent),
     listenLaunch(),
     installWindowKeys(),

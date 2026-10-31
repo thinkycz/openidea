@@ -31,7 +31,10 @@ async fn bind(host: &str, port: u16) -> IdeResult<TcpListener> {
 /// Waits for a JVM to connect to `host:port`, then returns a loopback port that relays
 /// to it (accepts one connection). Cancelled through `cancel` while waiting.
 pub async fn listen_for_jvm(host: &str, port: u16, cancel: CancellationToken) -> IdeResult<u16> {
-    let listener = bind(host, port).await?;
+    accept_jvm(bind(host, port).await?, cancel).await
+}
+
+async fn accept_jvm(listener: TcpListener, cancel: CancellationToken) -> IdeResult<u16> {
     let jvm = tokio::select! {
         _ = cancel.cancelled() => return Err(IdeError::cancelled()),
         accepted = listener.accept() => accepted.map_err(IdeError::from)?.0,
@@ -64,25 +67,27 @@ mod tests {
 
     #[tokio::test]
     async fn relays_the_jdwp_handshake_both_ways() {
-        let port = TcpListener::bind(("127.0.0.1", 0)).await.unwrap().local_addr().unwrap().port();
-        let waiting = tokio::spawn(listen_for_jvm("127.0.0.1", port, CancellationToken::new()));
-        // The remote JVM (`server=n`) connects to the IDE.
-        let mut jvm = loop {
-            if let Ok(s) = TcpStream::connect(("127.0.0.1", port)).await {
-                break s;
-            }
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        };
-        let local = waiting.await.unwrap().unwrap();
-        // java-debug attaches to the relay and starts the handshake.
-        let mut debugger = TcpStream::connect(("127.0.0.1", local)).await.unwrap();
-        debugger.write_all(b"JDWP-Handshake").await.unwrap();
-        let mut buf = [0u8; 14];
-        jvm.read_exact(&mut buf).await.unwrap();
-        assert_eq!(&buf, b"JDWP-Handshake");
-        jvm.write_all(b"JDWP-Handshake").await.unwrap();
-        debugger.read_exact(&mut buf).await.unwrap();
-        assert_eq!(&buf, b"JDWP-Handshake");
+        tokio::time::timeout(Duration::from_secs(10), async {
+            // Keep ownership of the actual listener; dropping a port reservation
+            // before rebinding can strand the client in an endless retry loop.
+            let listener = bind("127.0.0.1", 0).await.unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let waiting = tokio::spawn(accept_jvm(listener, CancellationToken::new()));
+            // The remote JVM (`server=n`) connects to the IDE.
+            let mut jvm = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+            let local = waiting.await.unwrap().unwrap();
+            // java-debug attaches to the relay and starts the handshake.
+            let mut debugger = TcpStream::connect(("127.0.0.1", local)).await.unwrap();
+            debugger.write_all(b"JDWP-Handshake").await.unwrap();
+            let mut buf = [0u8; 14];
+            jvm.read_exact(&mut buf).await.unwrap();
+            assert_eq!(&buf, b"JDWP-Handshake");
+            jvm.write_all(b"JDWP-Handshake").await.unwrap();
+            debugger.read_exact(&mut buf).await.unwrap();
+            assert_eq!(&buf, b"JDWP-Handshake");
+        })
+        .await
+        .expect("JDWP test handshake timed out");
     }
 
     #[tokio::test]

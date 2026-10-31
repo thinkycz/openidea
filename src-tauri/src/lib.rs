@@ -156,16 +156,7 @@ fn on_menu_event(app: &tauri::AppHandle, event: tauri::menu::MenuEvent) {
     let Some(route) = menu::route(&menu::spec(menu::Os::current()), id) else { return };
     match windows::target_window(app) {
         Some(w) => {
-            // Settings is modal for its project window: only app-level items get through, to the parent.
-            let label = match windows::settings_parent(w.label()) {
-                Some(parent)
-                    if matches!(route.action.as_str(), "app.quit" | "file.settings" | "file.newProjectsSettings") =>
-                {
-                    parent
-                }
-                Some(_) => return,
-                None => w.label(),
-            };
+            let Some(label) = windows::menu_target(w.label(), &route.action) else { return };
             if let Err(e) = app.emit_to(label, menu::MENU_EVENT, &route) {
                 tracing::warn!("failed to deliver menu event {id}: {e}");
             }

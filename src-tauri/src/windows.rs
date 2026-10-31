@@ -129,6 +129,17 @@ pub fn settings_parent(label: &str) -> Option<&str> {
     label.strip_prefix(SETTINGS_PREFIX)
 }
 
+/// Modal Settings accepts field history locally; project actions stay blocked
+/// except the existing application/settings actions sent to the parent.
+pub fn menu_target<'a>(label: &'a str, action: &str) -> Option<&'a str> {
+    let Some(parent) = settings_parent(label) else { return Some(label) };
+    match action {
+        "edit.undo" | "edit.redo" => Some(label),
+        "app.quit" | "file.settings" | "file.newProjectsSettings" => Some(parent),
+        _ => None,
+    }
+}
+
 pub fn is_settings_window(label: &str) -> bool {
     settings_parent(label).is_some()
 }
@@ -990,6 +1001,20 @@ mod tests {
         assert_eq!(settings_parent("main"), None);
         assert!(is_settings_window("settings-project-1"));
         assert!(!is_settings_window("project-1"));
+    }
+
+    #[test]
+    fn settings_menu_history_stays_local_and_project_actions_remain_blocked() {
+        for action in ["edit.undo", "edit.redo"] {
+            assert_eq!(menu_target("settings-project-2", action), Some("settings-project-2"));
+        }
+        for action in ["app.quit", "file.settings", "file.newProjectsSettings"] {
+            assert_eq!(menu_target("settings-project-2", action), Some("project-2"));
+        }
+        for action in ["file.save", "refactor.rename", "run.run", "", "edit.unknown"] {
+            assert_eq!(menu_target("settings-project-2", action), None);
+        }
+        assert_eq!(menu_target("project-2", "edit.undo"), Some("project-2"));
     }
 
     #[test]

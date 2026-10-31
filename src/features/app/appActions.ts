@@ -1,5 +1,5 @@
-import { redo, undo } from "@codemirror/commands";
-import { EditorView } from "@codemirror/view";
+import { editCommand } from "./editCommand";
+export { editCommand } from "./editCommand";
 import type { Action } from "@/platform/actions";
 import { t } from "@/platform/i18n";
 import { call, commands, isTauri } from "@/platform/ipc";
@@ -23,30 +23,6 @@ export async function showLog(): Promise<void> {
   } catch (e) {
     notifications().notify({ level: "error", title: t("app.log.failed"), body: errorText(e) });
   }
-}
-
-/**
- * Edit menu items on Windows/Linux (macOS uses native roles). They act on the
- * focused element like the native commands would. Undo / Redo in an editor go
- * to its own history: the native stack misses programmatic edits (templates,
- * completion, refactorings).
- */
-export function editCommand(command: "undo" | "redo" | "cut" | "copy" | "paste" | "selectAll") {
-  return () => {
-    if (command === "undo" || command === "redo") {
-      const focused = document.activeElement;
-      const view = focused instanceof HTMLElement ? EditorView.findFromDOM(focused) : null;
-      if (view) {
-        (command === "undo" ? undo : redo)(view);
-        return;
-      }
-    }
-    if (command === "paste" && navigator.clipboard?.readText) {
-      void navigator.clipboard.readText().then((text) => document.execCommand("insertText", false, text));
-      return;
-    }
-    document.execCommand(command);
-  };
 }
 
 /** Registered only when the build has an update endpoint (`BuildInfo.updates`). */

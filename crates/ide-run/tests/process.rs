@@ -56,7 +56,8 @@ fn start(h: &Harness, config: &RunConfig) -> (RunId, Chunks) {
         .pm
         .start(h.root.path(), config, &StartOptions::default(), h.sink.clone(), Box::new(move |c| sink.lock().push(c)))
         .expect("start");
-    assert!(info.running);
+    // Immediate commands can exit before start() returns its first snapshot.
+    // Scenarios verify output/exit events or explicitly inspect held processes.
     assert_eq!(info.config_id, config.id);
     (info.id, chunks)
 }

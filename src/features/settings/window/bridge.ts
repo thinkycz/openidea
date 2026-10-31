@@ -7,6 +7,8 @@
  * description of every action (Keymap page, links that run actions) and runs
  * the actions the settings window forwards.
  */
+import { editCommand } from "@/features/app/editCommand";
+import { MENU_EVENT, isMenuRoute } from "@/features/app/menuBridge";
 import { emitTo } from "@tauri-apps/api/event";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { allActions, executeAction, getAction, registerAction, useActions, type Action } from "@/platform/actions";
@@ -63,6 +65,17 @@ function listen<T>(event: string, handler: (payload: T) => void, onReady?: () =>
     disposed = true;
     off?.();
   };
+}
+
+/** History in a modal settings field belongs to this window, never to the
+ * mirrored parent actions. Do not activate the project menu/config bridge. */
+export function installSettingsHistoryMenu(): () => void {
+  if (!settingsWindowParent()) return () => {};
+  return listen<unknown>(MENU_EVENT, (payload) => {
+    if (!isMenuRoute(payload)) return;
+    if (payload.action === "edit.undo") editCommand("undo")();
+    else if (payload.action === "edit.redo") editCommand("redo")();
+  });
 }
 
 /** Project window side: serves the action list and runs forwarded actions. */

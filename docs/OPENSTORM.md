@@ -1975,3 +1975,91 @@ Receipts: `reviewed-history-0.1.41-build-receipt.json` and
 `reviewed-history-0.1.41-native-result.json`. History is session-local, bounded,
 and not accepted as persistent global history. No new performance parity claim
 or blanket 69-area acceptance is made; ledger remains 67 partial / 2 deferred.
+
+0.1.42 menu correction in progress. A public editCommand regression reproduces
+partial local history mutation on the prior action adapter; it is green with
+shared reviewedUndo/reviewedRedo. Ordinary programmatic editor edits and focused
+text-field browser delegation remain covered. The macOS menu spec regression is
+red on the prior OS-role entries. Undo/Redo now route through the existing edit
+menu actions on every OS; macOS clipboard, Select All, Services and other native
+roles remain intact. No native history accelerator is added, preserving the
+existing editor/input shortcut dispatch. All 19 menu specification checks and
+22 focused frontend checks pass. Actual packaged input/editor menu acceptance
+remains required; the 0.1.41 diagnostic app is preserved.
+
+With compilers idle, obsolete regenerable SDK rlib/rmeta compiler caches were
+pruned, retaining newest two per workspace SDK crate/extension. This extends
+cache maintenance only to compiler inputs that Cargo can regenerate; external
+dependencies, loadable libraries, app packages, source, fixtures, provenance
+archives, Workbench and earlier evaluation delivery artifacts are excluded.
+Receipt: menu-history-obsolete-sdk-compiler-cache.json. The 0.1.42 version bump
+and full affected gates are next; no publishing or new push is authorized here.
+
+Source review caught a modal-window consequence before packaging: native Settings
+blocks ordinary project menu actions and does not activate the project menu
+bridge. Routing its Undo through the parent proxy would undo a background editor.
+A focused Settings listener now handles only local history through the same edit
+adapter, without project action execution or project menu reconfiguration. Two
+new regressions are red before the listener; all 31 focused Settings/action/menu
+checks pass after it. Backend modal routing still needs its targeted correction
+and gate. Main editor/action tests alone do not prove Settings field behavior;
+actual native text-field checks remain required.
+
+The obsolete compiler-cache receipt records 4,314 files / 23,327,731,712 bytes
+pruned with compilers idle. Durable app/engine/source/provenance deliverables
+remain untouched. This restored enough room for reproducible later builds;
+temporary Rust compiler caches are distinct from the preserved delivery artifacts.
+
+The initial workspace run exposed an inherited JDWP relay-test stall: the test
+released its selected port before rebinding, then retried the client forever
+with no live listener. The confirmed live stalled SDK test process was stopped;
+that workspace attempt is a failure, not acceptance. Receipt:
+menu-history-workspace-jdwp-stall.json. The existing listener acceptance body is
+now shared privately with the test, which owns its actual bound listener and
+has a 10-second handshake deadline. Public debugger behavior and features remain
+unchanged; FEAT-047/048 stay user-deferred. Both focused JDWP cases pass, and the
+relay case passes 20 repeated runs. The final workspace gate is rerunning.
+
+The backend Settings menu-routing regression also reproduces the missing path
+and is green after explicit routing: Undo/Redo stay in the Settings window,
+existing app/settings actions go to its parent, other project actions remain
+blocked. All 48 native-unit cases pass, including all 19 menu specification
+cases. Final frontend and packaged Settings/editor menu evidence are pending.
+
+The first final workspace retry passed JDWP, then failed the process-test helper's
+unconditional `info.running` assertion while starting `true`. Source shows the
+waiter/pump runs before `start()` returns its snapshot, so an already-completed
+command is valid. The test helper now accepts that race; its scenarios still
+assert output/exit events, and the pruning case explicitly checks its held
+second process is running with a PID. No production process-launch behavior is
+changed. The two environment-file cases remain excluded under their separately
+pending scope; no environment files were changed for this correction.
+
+Final frozen 0.1.42 source gates pass: 3,040 frontend tests / 352 files, type
+checking, lint/build, Rust workspace 1,318 passed / 39 ignored / the same two
+pending environment-fixture cases filtered, formatting, all-target Clippy with
+warnings denied, five live actual-host cases and binding export. The signed
+arm64 development app is preserved at `artifacts/batches/0.1.42/OpenStorm.app`.
+
+Native menu history now works: Settings menu Undo/Redo/Undo changes only its
+query while all four project files remain renamed; project Edit -> Undo restores
+all four disk originals plus the original two unsaved Blade invoice callers /
+parameter 9 / modified state, and menu Redo from the Blade tab reapplies all
+four targets. A subsequent external caller edit refuses menu Undo with a visible
+warning and no writes. Editor CmdZ/CmdShiftZ still works, and Blade definition
+after these cycles navigates to route 5:93. Preview cancellation and exact apply
+also pass, preserving Unicode, parameters and an unrelated same-name literal.
+
+**0.1.42 remains diagnostic / batch not accepted.** The native field check found
+that Settings CmdZ has no effect after the native undo role was replaced, while
+menu Undo still clears the query. Restore field keyboard compatibility without
+intercepting editor keymaps, IME or already-handled events; repeat main/Settings
+field and editor checks in the next candidate before advancing Laravel work.
+The field failure receipt is menu-history-0.1.42-field-shortcut-failure.json.
+
+The disposable profile's switch-app autosave default was restored. Normal quit
+exited app and engine, all four owned files were restored, and strict signature
+passes. No relaunch/performance acceptance is claimed for this diagnostic
+candidate. Runtime source hashes match its signed receipt. The combined native
+receipt is `menu-history-0.1.42-native-result.json`; all 69 areas remain visible
+at 67 partial / 2 user-deferred.

@@ -14,7 +14,7 @@
 //! accelerator column and macOS/GTK as trailing text. The shortcut text comes
 //! from the frontend keymap ([`MenuConfig::shortcuts`]), so the JS keymap stays
 //! the single source of truth. Native accelerators are only used for keys the
-//! webview never handles: the macOS clipboard/undo roles (required for text
+//! webview never handles: the macOS clipboard roles (required for text
 //! inputs), Hide, Minimize, Quit and window cycling.
 
 use parking_lot::Mutex;
@@ -57,8 +57,6 @@ impl Os {
 /// Native (role) items, implemented by the OS.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Native {
-    Undo,
-    Redo,
     Cut,
     Copy,
     Paste,
@@ -75,8 +73,6 @@ pub enum Native {
 impl Native {
     fn key(self) -> &'static str {
         match self {
-            Native::Undo => "native.undo",
-            Native::Redo => "native.redo",
             Native::Cut => "native.cut",
             Native::Copy => "native.copy",
             Native::Paste => "native.paste",
@@ -93,8 +89,6 @@ impl Native {
 
     fn default_label(self) -> &'static str {
         match self {
-            Native::Undo => "Undo",
-            Native::Redo => "Redo",
             Native::Cut => "Cut",
             Native::Copy => "Copy",
             Native::Paste => "Paste",
@@ -113,8 +107,6 @@ impl Native {
     #[cfg(test)]
     fn implicit_accelerator(self) -> Option<&'static str> {
         match self {
-            Native::Undo => Some("Meta+Z"),
-            Native::Redo => Some("Meta+Shift+Z"),
             Native::Cut => Some("Meta+X"),
             Native::Copy => Some("Meta+C"),
             Native::Paste => Some("Meta+V"),
@@ -292,8 +284,10 @@ pub fn spec(os: Os) -> Vec<Entry> {
     };
     let edit = if mac {
         vec![
-            Entry::Native(Native::Undo),
-            Entry::Native(Native::Redo),
+            // WKWebView's native undo stack misses CodeMirror programmatic
+            // edits. Use the same checked history actions as other platforms.
+            hinted("edit.undo", "Undo", "⌘Z"),
+            hinted("edit.redo", "Redo", "⇧⌘Z"),
             SEP,
             Entry::Native(Native::Cut),
             Entry::Native(Native::Copy),
@@ -1087,8 +1081,6 @@ fn native<R: Runtime>(app: &AppHandle<R>, config: &MenuConfig, n: Native) -> tau
     let text = config.label(n.key(), n.default_label());
     let t = Some(text.as_str());
     let item = match n {
-        Native::Undo => PredefinedMenuItem::undo(app, t)?,
-        Native::Redo => PredefinedMenuItem::redo(app, t)?,
         Native::Cut => PredefinedMenuItem::cut(app, t)?,
         Native::Copy => PredefinedMenuItem::copy(app, t)?,
         Native::Paste => PredefinedMenuItem::paste(app, t)?,
@@ -1318,10 +1310,21 @@ mod tests {
     }
 
     #[test]
+    fn history_menus_route_to_the_shared_editor_actions_on_every_os() {
+        for os in ALL_OS {
+            let menu = spec(os);
+            for id in ["edit.undo", "edit.redo"] {
+                assert_eq!(route(&menu, id), Some(MenuRoute { action: id.into(), arg: None }), "{os:?}");
+            }
+        }
+    }
+
+    #[test]
     fn edit_roles_are_native_only_on_macos() {
         let mut mac = Vec::new();
         natives(&spec(Os::Mac), &mut mac);
-        assert!(mac.contains(&Native::Copy) && mac.contains(&Native::Undo));
+        assert!(mac.contains(&Native::Copy));
+        assert!(action_ids(&spec(Os::Mac)).contains(&"edit.undo"));
         for os in [Os::Windows, Os::Linux] {
             let mut n = Vec::new();
             natives(&spec(os), &mut n);
@@ -1428,7 +1431,7 @@ mod tests {
         let spec = vec![sub(
             "file",
             "File",
-            vec![Entry::Native(Native::Undo), act("file.save", "Save All"), SEP, Entry::RecentProjects],
+            vec![Entry::Native(Native::Copy), act("file.save", "Save All"), SEP, Entry::RecentProjects],
         )];
         let recent = [RecentItem { path: "/p/a".into(), label: "a  —  ~/a".into() }];
         let MenuNode::Submenu { children, .. } = &model(&spec, &recent, &MenuConfig::default())[0] else {

@@ -292,6 +292,9 @@ export function callParens(
   if (item.isSnippet || !item.kind || !CALLABLE.has(item.kind) || /[(<[{]/.test(item.insertText)) return null;
   const next = line.text.charAt(end - line.from);
   if (next && /[(\p{L}\p{N}_$]/u.test(next)) return null;
+  // A server may classify a quoted symbol name (for example a PHP route action)
+  // as a method. Its replacement starts after the quote, so it is not a call.
+  if (/['"`]/.test(line.text.charAt(start - line.from - 1))) return null;
   if (IMPORT_LINE.test(line.text.slice(0, start - line.from))) return null;
   const sig = item.labelDetail ?? item.detail ?? "";
   return /^\s*\(\s*\)/.test(sig) || /^\s*fn\s*\(\s*\)|^\s*\(\)\s*(=>|->|:)/.test(sig) ? "after" : "inside";

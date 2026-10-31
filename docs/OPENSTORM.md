@@ -3,12 +3,14 @@
 Base: thinkycz/openidea 50212e73972d6f05bf16050cb0ba10102a6c8054 (0.1.21).
 Branch: codex/openstorm-php-laravel. Target: macOS Apple Silicon, local delivery.
 
-Current checkpoint (2026-10-31): .43 is accepted for guarded history and field
-shortcuts. .44 / engine .124 is diagnostic: alias navigation passes, but a quoted
-controller completion commit duplicates its suffix. Engine .125 fixes the suffix duplication; native .45 exposes an additional
-client issue that appends call parentheses to a quoted method. .45 remains
-a diagnostic build. The next correction is in the client completion path. Installed optimized .21
-is preserved. The full 69-area ledger remains 67 partial / two user-deferred.
+Current checkpoint (2026-10-31): .43 remains accepted for guarded history and
+field shortcuts. .46 / engine .125 passes native quoted controller completion,
+parameter keys/unsaved dependencies, static route targets, reviewed grouped
+rename and shared history, settled restart, reopen and process cleanup. It is
+a diagnostic build: an unsaved duplicate route edit clears its own warning but
+leaves a stale warning in an unchanged open sibling. Fix diagnostic republishing
+before route-batch acceptance. Installed optimized .21 is preserved. The full
+69-area ledger remains67partial / two user-deferred.
 
 ## Contract
 
@@ -2344,3 +2346,66 @@ Workspace binding export passed in the full workspace gate; no separate
 feature-variant export rebuild was required. SDK compiler-cache pruning receipts
 record .45 library/test retention and exact static archive removal at idle;
 all installed, archived, Workbench and evaluation deliveries are preserved.
+
+Client quoted-action correction for .46: the production completion-application
+regression reproduces .45's exact persisted `show()` failure before the fix.
+callParens now skips atoms whose replacement begins immediately after a quote.
+The scope includes single/double/backtick quoted symbols and unfinished quotes;
+existing ordinary-call, parameterless-call, snippet, Enter/Tab, import and
+late-edit tests remain in the same suite. The focused32test suite passes after
+the fix. PHPantom .125 remains unchanged and checksum-verified, so its completed
+source/client/host gates are reused. Fresh .46 application/native gates are
+running; no native success is inferred. All69areas remain visible.
+
+.46 source gates complete: frontend3046/352files, final focused completion32,
+type checking, final lint, build, workspace1318/40ignored/2separately pending SDK
+env cases filtered, binding export, formatting and all-target Clippy pass.
+Initial lint caught only three unnecessary test-literal escapes; these were
+removed and the affected suite/lint/build rerun successfully. Existing unrelated
+lint/Rollup/canvas warnings remain recorded. Native packaging is next.
+
+.46 packaging receipts retain two storage failures (initial bundle copy and
+first retry static-archive replacement) followed by a successful retry2.
+No source changed between attempts. Only regenerable exact workspace compiler
+libraries/test executables and the idle static link archive were pruned with
+selection/stat receipts; installed and archived apps, engine archives, source,
+fixtures, PHP Workbench and earlier evaluation deliveries were preserved.
+Tauri retry2 completed successfully; native acceptance is still pending.
+
+Native .46 diagnostic completion (2026-10-31). Signed app executable SHA256
+8a8482aac588b73bfb68cca328b04c18a6f37ea2c14e6860e0d2899c2441d8c0;
+PHPantom .125 checksum unchanged. Midword sole-candidate CtrlSpace keeps show
+plain inside quotes after the Unicode route path. Empty-prefix choice index()
+commits exactly index, preserving all surrounding source and11otherfiles; Undo
+restores. CmdB reaches controller4:21. Settings focused query Undo/Redo passes.
+Native required invoice, optional named tab and custom resource record parameter
+keys persist exactly. Unsaved URI invoice->receipt supplies receipt completion
+in another unsaved file while both disk files stay at the saved keys state.
+The static Laravel Routes action discovers the grouped Unicode target5:69 and
+both duplicate targets8:80/4:80; selecting the second opens the correct file.
+
+Grouped route rename previews3occurrences/2files. Cancel writes nothing; Apply
+changes the leaf and two consumer names, preserving controller action show,
+controller declaration, resource route, duplicate names, Unicode URI and keys.
+Native menu Undo restores both files; keyboard Redo from the consumer reapplies
+both. Renamed route declaration navigation reaches5:69. Restart exits the old
+server and initializes bundled125; method completion/controller navigation pass.
+The first renamed-route lookup after switching files reports no declaration;
+a settled retry succeeds. Immediate readiness is not claimed.
+
+Failure: changing only the second duplicate registration to nav.unique in an
+unsaved buffer clears its own duplicate_laravel_route warning, but the unchanged
+open sibling continues reporting the old duplicate after repeated switching.
+Disk witnesses remain unchanged. This blocks acceptance; .46 is not promoted.
+Record: route-navigation-0.1.46-duplicate-diagnostic-failure.json. Next: add an
+actual publication regression and fix cross-file route-diagnostic refresh.
+
+The synthetic profile restores switch-app autosave true and default idle false;
+its settings.toml contains only files.autoSave=true. Normal quit exits app and
+server. After restoring only the12owned fixture files, no-argument relaunch
+reopens the project/four tabs and reads original disk source; final normal quit
+exits app/server, all12files stay original, strict bundle signature passes, and
+installed optimized21 checksum/signature remain unchanged. No new push/release.
+Native result: artifacts/checks/route-navigation-0.1.46-native-result.json.
+All69areas stay visible at67partial/two deferred. Wider platforms, real services,
+performance parity and the two separately pending SDK env tests are unaccepted.

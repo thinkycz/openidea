@@ -236,6 +236,28 @@ describe("applying completions", () => {
     expect(view.state.selection.main.head).toBe(11);
   });
 
+  it("commits a whole quoted controller action without adding call parentheses", () => {
+    for (const quote of ["'", '"', "`"]) {
+      const text = `Routes::get('/😀/invoice', ${quote}s|how${quote});`;
+      const { view, req, pos } = setup(text);
+      const start = pos - 1;
+      const end = start + 4;
+      const c = makeCompletion(
+        item({
+          label: "show",
+          insertText: "show",
+          replaceRange: { start: { line: 0, col: start }, end: { line: 0, col: end } },
+        }),
+        req,
+      );
+      apply(view, c, start);
+      expect(view.state.doc.toString()).toBe(text.replace("|", ""));
+      expect(view.state.selection.main.head).toBe(end);
+      view.destroy();
+    }
+    view = null;
+  });
+
   it("places the caret after the parentheses of a parameterless call", () => {
     const { view, req } = setup("svc.cl|");
     apply(view, makeCompletion(item({ insertText: "close", labelDetail: "()" }), req), 4);
@@ -259,6 +281,12 @@ describe("insert parentheses", () => {
     expect(callParens(item({ kind: "field" }), line("a.cr"), 2, 4)).toBeNull();
     expect(callParens(item({ isSnippet: true }), line("a.cr"), 2, 4)).toBeNull();
     expect(callParens(item({ insertText: "create()" }), line("a.cr"), 2, 4)).toBeNull();
+  });
+
+  it("does not add a call to a quoted symbol, including an unfinished quote", () => {
+    for (const text of ["'cr'", '"cr"', "`cr`", "'cr"]) {
+      expect(callParens(item(), line(text), 1, 3)).toBeNull();
+    }
   });
 
   it("skips calls that already have parentheses and imports", () => {

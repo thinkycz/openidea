@@ -5,7 +5,9 @@ Silicon macOS. This is a local rebuild, not an upstream release. Source .125
 adds a whole-identifier replacement edit for quoted controller actions, including
 UTF16 positions after Unicode route paths. Source, live client and host gates
 pass; native .45 verifies the range but exposes client-added parentheses
-inside the quoted action. .45 remains diagnostic pending the client correction. Archived .44 / .124 demonstrates
+inside the quoted action. The .46 client correction passes native completion;
+.46 instead exposes stale sibling duplicate-route diagnostics after an unsaved
+registration change and remains diagnostic pending publication refresh. Archived .44 / .124 demonstrates
 the original completion failure and remains a diagnostic delivery.
 `source.json` pins upstream source,
 its archive checksum, the unchanged 114-patch PHP Workbench series, and OpenStorm

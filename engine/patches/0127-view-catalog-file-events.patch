@@ -1,0 +1,428 @@
+--- a/src/blade/call_site_inference.rs
++++ b/src/blade/call_site_inference.rs
+@@ -28,6 +28,7 @@
+ use mago_span::HasSpan;
+ use mago_syntax::cst::*;
+ 
++use super::view_paths::canonical_path_for_comparison;
+ use crate::Backend;
+ use crate::atom::bytes_to_str;
+ use crate::parser::with_parsed_program;
+@@ -963,26 +964,6 @@
+     }
+     for (name, ty) in vars {
+         merged.entry(name).or_default().push(ty);
+-    }
+-}
+-
+-/// The canonical spelling of a template path, for comparing against a
+-/// canonical view root.
+-///
+-/// A template that has just been deleted has no canonical form of its
+-/// own, so its directory is canonicalized instead: the file still has to
+-/// resolve to the view name it had, or the callers that render it are
+-/// left holding a name nothing answers to.
+-fn canonical_path_for_comparison(path: &std::path::Path) -> std::path::PathBuf {
+-    if let Ok(canonical) = path.canonicalize() {
+-        return canonical;
+-    }
+-    match (
+-        path.parent().and_then(|parent| parent.canonicalize().ok()),
+-        path.file_name(),
+-    ) {
+-        (Some(parent), Some(name)) => parent.join(name),
+-        _ => path.to_path_buf(),
+     }
+ }
+ 
+--- a/src/blade/view_paths.rs
++++ b/src/blade/view_paths.rs
+@@ -70,7 +70,66 @@
+     })
+ }
+ 
++/// The canonical spelling of a template path, for comparing against a
++/// canonical view root.
++///
++/// A template that has just been deleted has no canonical form of its
++/// own, so its directory is canonicalized instead: the file still has to
++/// resolve to the view name it had, or the callers that render it are
++/// left holding a name nothing answers to.
++pub(crate) fn canonical_path_for_comparison(path: &std::path::Path) -> std::path::PathBuf {
++    if let Ok(canonical) = path.canonicalize() {
++        return canonical;
++    }
++    match (
++        path.parent().and_then(|parent| parent.canonicalize().ok()),
++        path.file_name(),
++    ) {
++        (Some(parent), Some(name)) => parent.join(name),
++        _ => path.to_path_buf(),
++    }
++}
++
+ impl crate::Backend {
++    /// Check one structural file batch against current configured and registered
++    /// roots. Refresh config roots once, including directories created since the
++    /// last scan, without mutating the catalog before publication.
++    pub(crate) fn view_template_structure_changed(&self, paths: &[PathBuf]) -> bool {
++        if paths.is_empty() {
++            return false;
++        }
++        let Some(root) = self.workspace.workspace_root.read().clone() else {
++            return false;
++        };
++        let config_uri = crate::util::path_to_uri(&root.join("config/view.php"));
++        let config = self.get_file_content_arc(&config_uri);
++        let mut roots = view_paths_from_config(config.as_deref().map(String::as_str), &root);
++        // A removed directory no longer appears in fresh discovery, but its
++        // cached paths still have to be retired.
++        if let Some(cached) = self.laravel_string_key_cache.read().view_roots.as_ref() {
++            roots.extend(cached.iter().map(|root| root.path.clone()));
++            roots.extend(cached.iter().filter_map(|root| root.canonical.clone()));
++        }
++        roots.extend(
++            self.laravel_provider_resources
++                .read()
++                .view_dirs
++                .iter()
++                .map(|dir| dir.path.clone()),
++        );
++        roots.sort_unstable();
++        roots.dedup();
++        let canonical: Vec<_> = roots
++            .iter()
++            .filter_map(|root| root.canonicalize().ok())
++            .collect();
++        roots.extend(canonical);
++        let covered = |path: &Path| roots.iter().any(|root| path.starts_with(root));
++        paths
++            .iter()
++            .any(|path| covered(path) || covered(&canonical_path_for_comparison(path)))
++    }
++
+     /// The configured Blade view root directories.
+     ///
+     /// Reads the `paths` array from `config/view.php` (falling back to
+--- a/src/indexing/watch.rs
++++ b/src/indexing/watch.rs
+@@ -13,6 +13,7 @@
+ use tower_lsp::lsp_types::*;
+ 
+ use crate::Backend;
++use crate::blade::view_paths::canonical_path_for_comparison;
+ 
+ /// How often [`Backend::global_config_watcher`] stats the global config
+ /// file. A single `stat` call is cheap enough that sub-second polling
+@@ -61,9 +62,12 @@
+         let mut migration_changes: Vec<(PathBuf, FileChangeType)> = Vec::new();
+         let mut php_changes: Vec<(String, PathBuf, FileChangeType)> = Vec::new();
+         let mut resource_changes: Vec<(String, PathBuf, FileChangeType)> = Vec::new();
++        let mut view_structure_changes = Vec::new();
++        let mut view_config_changed = false;
+         let mut migration_discovery =
+             crate::virtual_members::laravel::database_schema::MigrationDiscovery::default();
+         let is_laravel = self.resolved_class_cache.read().is_laravel();
++        let view_config_path = is_laravel.then(|| root.join("config/view.php"));
+         let config_path = root.join(crate::config::CONFIG_FILE_NAME);
+         let changes = self.spell_changes_as_indexed(&params.changes);
+         {
+@@ -176,10 +180,6 @@
+                     continue;
+                 }
+ 
+-                // Open files are already tracked via did_open/did_change.
+-                if open.contains_key(&uri_str) {
+-                    continue;
+-                }
+                 let Ok(file_path) = change.uri.to_file_path() else {
+                     continue;
+                 };
+@@ -190,7 +190,23 @@
+                     continue;
+                 }
+ 
+-                if change.typ == FileChangeType::CHANGED {
++                if is_laravel && change.typ != FileChangeType::CHANGED {
++                    view_structure_changes.push(file_path.clone());
++                }
++                // Text ownership stays with the editor, but a newly saved or
++                // removed template still changes the disk-backed view catalog.
++                if open.contains_key(&uri_str) {
++                    continue;
++                }
++
++                let is_view_config = view_config_path.as_ref().is_some_and(|config| {
++                    &file_path == config
++                        || (file_path.ends_with("config/view.php")
++                            && canonical_path_for_comparison(&file_path)
++                                == canonical_path_for_comparison(config))
++                });
++                view_config_changed |= is_view_config;
++                if change.typ == FileChangeType::CHANGED && !is_view_config {
+                     // `parsed_uris` records the editor URI for open files and
+                     // the canonical `file://` URI for lazily loaded ones;
+                     // check both spellings.
+@@ -206,6 +222,8 @@
+             }
+         }
+ 
++        let view_catalog_changed =
++            view_config_changed || self.view_template_structure_changed(&view_structure_changes);
+         if php_changes.is_empty()
+             && resource_changes.is_empty()
+             && !composer_changed
+@@ -213,6 +231,7 @@
+             && !config_changed
+             && !schema_full_rebuild
+             && migration_changes.is_empty()
++            && !view_catalog_changed
+         {
+             return false;
+         }
+@@ -221,6 +240,14 @@
+         // reloads and Composer/resource reconciliation. Ignored watcher noise
+         // returns above and keeps current requests and diagnostic runs valid.
+         let _publication = self.begin_semantic_publication();
++
++        if view_catalog_changed {
++            let mut cache = self.laravel_string_key_cache.write();
++            cache.view_roots = None;
++            cache.view_names = None;
++            cache.blade_discovery = None;
++            cache.blade_blocks = None;
++        }
+ 
+         if translations_changed {
+             self.laravel_string_key_cache.write().translations = None;
+@@ -620,6 +647,218 @@
+     use super::*;
+ 
+     #[test]
++    fn custom_view_template_creation_deletion_and_precedence_refresh_cached_names() {
++        for editor_owned in [false, true] {
++            let dir = tempfile::tempdir().unwrap();
++            let root = dir.path().canonicalize().unwrap();
++            std::fs::create_dir_all(root.join("config")).unwrap();
++            std::fs::create_dir_all(root.join("themes/current")).unwrap();
++            std::fs::write(root.join("composer.json"), "{}").unwrap();
++            std::fs::write(root.join("config/view.php"), "<?php return ['paths' => [base_path('themes/current'), base_path('themes/later')]];").unwrap();
++            let plain = root.join("themes/current/panel.php");
++            std::fs::write(&plain, "<p>Plain</p>").unwrap();
++            let backend = Backend::new_test_with_workspace(root.clone(), Vec::new());
++            backend.resolved_class_cache.write().set_laravel(true);
++            assert_eq!(backend.blade_view_path("panel"), Some(plain.clone()));
++
++            let added = root.join("themes/current/live-report.php");
++            let added_uri = Url::from_file_path(&added).unwrap().to_string();
++            if editor_owned {
++                backend.open_files.write().insert(
++                    added_uri.clone(),
++                    std::sync::Arc::new("<p>Unsaved</p>".into()),
++                );
++            }
++            std::fs::write(&added, "<p>Added</p>").unwrap();
++            backend.apply_watched_file_changes(&created_event(&added), &root);
++            assert!(
++                backend
++                    .blade_view_names()
++                    .iter()
++                    .any(|n| n == "live-report"),
++                "editor_owned={editor_owned}"
++            );
++            let cached = backend.blade_discovery();
++            std::fs::write(&added, "<p>Updated content</p>").unwrap();
++            let event = |path: &std::path::Path, typ| DidChangeWatchedFilesParams {
++                changes: vec![FileEvent {
++                    uri: Url::from_file_path(path).unwrap(),
++                    typ,
++                }],
++            };
++            backend.apply_watched_file_changes(&event(&added, FileChangeType::CHANGED), &root);
++            assert!(
++                std::sync::Arc::ptr_eq(&cached, &backend.blade_discovery()),
++                "ordinary content edits must retain name cache"
++            );
++
++            let blade = root.join("themes/current/panel.blade.php");
++            std::fs::write(&blade, "<p>Preferred Blade</p>").unwrap();
++            backend.apply_watched_file_changes(&created_event(&blade), &root);
++            assert_eq!(backend.blade_view_path("panel"), Some(blade.clone()));
++            std::fs::remove_file(&blade).unwrap();
++            backend.apply_watched_file_changes(&event(&blade, FileChangeType::DELETED), &root);
++            assert_eq!(backend.blade_view_path("panel"), Some(plain));
++
++            std::fs::remove_file(&added).unwrap();
++            backend.apply_watched_file_changes(&event(&added, FileChangeType::DELETED), &root);
++            assert!(
++                !backend
++                    .blade_view_names()
++                    .iter()
++                    .any(|n| n == "live-report")
++            );
++            let first = root.join("themes/later/first.php");
++            std::fs::create_dir_all(first.parent().unwrap()).unwrap();
++            std::fs::write(&first, "<p>First template</p>").unwrap();
++            backend.apply_watched_file_changes(&created_event(&first), &root);
++            assert_eq!(backend.blade_view_path("first"), Some(first.clone()));
++            std::fs::remove_file(&first).unwrap();
++            std::fs::remove_dir(first.parent().unwrap()).unwrap();
++            backend.apply_watched_file_changes(&event(&first, FileChangeType::DELETED), &root);
++            assert!(!backend.blade_view_names().iter().any(|n| n == "first"));
++            let cached = backend.blade_discovery();
++            let unrelated = root.join("unrelated.php");
++            std::fs::write(&unrelated, "<?php // not a template").unwrap();
++            backend.apply_watched_file_changes(&created_event(&unrelated), &root);
++            assert!(
++                std::sync::Arc::ptr_eq(&cached, &backend.blade_discovery()),
++                "unrelated PHP additions must retain name cache"
++            );
++        }
++    }
++
++    #[test]
++    #[cfg(unix)]
++    fn removed_symlinked_view_root_retires_its_canonical_template_name() {
++        let dir = tempfile::tempdir().unwrap();
++        let root = dir.path().canonicalize().unwrap();
++        std::fs::create_dir_all(root.join("config")).unwrap();
++        std::fs::create_dir_all(root.join("shared")).unwrap();
++        std::fs::write(root.join("composer.json"), "{}").unwrap();
++        std::fs::write(
++            root.join("config/view.php"),
++            "<?php return ['paths' => [base_path('templates')]];",
++        )
++        .unwrap();
++        std::os::unix::fs::symlink(root.join("shared"), root.join("templates")).unwrap();
++        let file = root.join("shared/report.php");
++        std::fs::write(&file, "<p>Shared template</p>").unwrap();
++        let backend = Backend::new_test_with_workspace(root.clone(), Vec::new());
++        backend.resolved_class_cache.write().set_laravel(true);
++        assert!(
++            backend
++                .blade_view_names()
++                .iter()
++                .any(|name| name == "report")
++        );
++        std::fs::remove_file(&file).unwrap();
++        std::fs::remove_dir(root.join("shared")).unwrap();
++        backend.apply_watched_file_changes(
++            &DidChangeWatchedFilesParams {
++                changes: vec![FileEvent {
++                    uri: Url::from_file_path(file).unwrap(),
++                    typ: FileChangeType::DELETED,
++                }],
++            },
++            &root,
++        );
++        assert!(
++            !backend
++                .blade_view_names()
++                .iter()
++                .any(|name| name == "report")
++        );
++    }
++
++    #[test]
++    fn closed_view_configuration_changes_and_removal_refresh_cached_roots() {
++        let dir = tempfile::tempdir().unwrap();
++        let root = dir.path().canonicalize().unwrap();
++        for directory in [
++            "config",
++            "themes/current",
++            "themes/alternate",
++            "resources/views",
++        ] {
++            std::fs::create_dir_all(root.join(directory)).unwrap();
++        }
++        std::fs::write(root.join("composer.json"), "{}").unwrap();
++        let config = root.join("config/view.php");
++        let original = "<?php return ['paths' => [base_path('themes/current')]];";
++        let alternate = original.replace("themes/current", "themes/alternate");
++        std::fs::write(&config, original).unwrap();
++        for (name, text) in [
++            ("themes/current/current-only.blade.php", "current"),
++            ("themes/alternate/alternate-only.blade.php", "alternate"),
++            ("resources/views/default-only.blade.php", "default"),
++        ] {
++            std::fs::write(root.join(name), text).unwrap();
++        }
++        let backend = Backend::new_test_with_workspace(root.clone(), Vec::new());
++        backend.resolved_class_cache.write().set_laravel(true);
++        let uri = Url::from_file_path(&config).unwrap();
++        assert_eq!(backend.blade_view_names(), ["current-only"]);
++        assert!(
++            !backend.parsed_uris.read().contains(uri.as_str()),
++            "configuration must remain cold"
++        );
++        let event = |typ| DidChangeWatchedFilesParams {
++            changes: vec![FileEvent {
++                uri: uri.clone(),
++                typ,
++            }],
++        };
++        std::fs::write(&config, &alternate).unwrap();
++        backend.apply_watched_file_changes(&event(FileChangeType::CHANGED), &root);
++        assert_eq!(backend.blade_view_names(), ["alternate-only"]);
++        std::fs::remove_file(&config).unwrap();
++        backend.apply_watched_file_changes(&event(FileChangeType::DELETED), &root);
++        assert_eq!(backend.blade_view_names(), ["default-only"]);
++        std::fs::write(&config, original).unwrap();
++        backend.apply_watched_file_changes(&event(FileChangeType::CREATED), &root);
++        assert_eq!(backend.blade_view_names(), ["current-only"]);
++
++        backend
++            .open_files
++            .write()
++            .insert(uri.to_string(), std::sync::Arc::new(alternate.clone()));
++        backend.update_ast(uri.as_str(), &alternate);
++        assert_eq!(backend.blade_view_names(), ["alternate-only"]);
++        std::fs::remove_file(&config).unwrap();
++        backend.apply_watched_file_changes(&event(FileChangeType::DELETED), &root);
++        assert_eq!(
++            backend.blade_view_names(),
++            ["alternate-only"],
++            "external config removal must not replace its open editor overlay"
++        );
++        #[cfg(unix)]
++        {
++            std::fs::write(&config, original).unwrap();
++            let alias = root.join("alias");
++            std::os::unix::fs::symlink(&root, &alias).unwrap();
++            let backend = Backend::new_test_with_workspace(root.clone(), Vec::new());
++            backend.resolved_class_cache.write().set_laravel(true);
++            assert_eq!(backend.blade_view_names(), ["current-only"]);
++            std::fs::write(&config, &alternate).unwrap();
++            backend.apply_watched_file_changes(
++                &DidChangeWatchedFilesParams {
++                    changes: vec![FileEvent {
++                        uri: Url::from_file_path(alias.join("config/view.php")).unwrap(),
++                        typ: FileChangeType::CHANGED,
++                    }],
++                },
++                &root,
++            );
++            assert_eq!(
++                backend.blade_view_names(),
++                ["alternate-only"],
++                "configuration aliases must invalidate the same roots"
++            );
++        }
++    }
++
++    #[test]
+     fn non_laravel_projects_ignore_schema_watch_changes() {
+         let dir = tempfile::tempdir().unwrap();
+         let schema = dir.path().join("database/schema/default-schema.sql");
+--- a/docs/CHANGELOG.md
++++ b/docs/CHANGELOG.md
+@@ -189,6 +189,9 @@
+ - **Project PHP extension profiles.** Set `[php] extensions` to the extensions available on your deployment target. Completion and built-in lookup keep project polyfills and exclude unavailable extension declarations after restarting the service. Contributed by PHP Workbench (local downstream patch).
+ 
+ ### Fixed
++
++- **Keep Laravel view navigation current when templates are added or removed.** Custom roots, published package views, external view configuration changes, and Blade/plain PHP precedence refresh without restarting. Contributed by @thinkycz.
++
+ 
+ - **Route warnings refresh across open files.** Editing or discarding a route registration now refreshes affected open route declarations and callers without saving. Contributed by @thinkycz.
+ 

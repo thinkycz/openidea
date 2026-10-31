@@ -3,14 +3,28 @@
 Base: thinkycz/openidea 50212e73972d6f05bf16050cb0ba10102a6c8054 (0.1.21).
 Branch: codex/openstorm-php-laravel. Target: macOS Apple Silicon, local delivery.
 
-Current checkpoint (2026-10-31): signed development0.1.47/engine126 accepts
-this route batch: quoted controller completion/navigation, parameter completion
-and unsaved dependencies, static grouped/duplicate targets, checked rename,
-shared native history with CRLF backward selections, sibling diagnostic refresh,
-save-conflict refusal, settled restart and session/process recovery. The prior
-.44–.46 diagnostic failures remain documented. Installed optimized.21 is preserved.
-The full69-area ledger remains67partial/two user-deferred; no blanket parity or
-full unfiltered/release acceptance is claimed.
+Current checkpoint (2026-10-31): signed development **0.1.48**, bundled
+PHPantom **0.11.1-openstorm.127**, accepts the view-root/package navigation batch.
+The native app refreshes a previously cached view chooser after closed
+`config/view.php` changes, deletion and restoration, and after custom-root PHP
+template creation/deletion. Published overrides, published-only package views,
+plain PHP templates, Unicode destinations and unsaved provider/config overlays
+were exercised. Settled server restart, normal quit and no-argument project/tab
+recovery passed. The installed optimized 0.1.21 and earlier diagnostic builds
+remain preserved. The accepted 0.1.47 route/history/save-conflict slice remains
+covered by the separate live-client/host regressions.
+
+Local app: `artifacts/batches/0.1.48/OpenStorm.app`. Native evidence:
+`artifacts/checks/view-navigation-0.1.48-{cold,full}-native-result.json`.
+Checks: 3,049 frontend tests; 1,319 workspace tests; all 18 actual PHPantom client
+and five host scenarios; 18,387 engine tests plus the separate FIFO child.
+Formatting, type checking, lint, Clippy and builds passed. The general workspace
+run retains 43 ignored tests and filters the two separately pending SDK environment
+cases; it is not an unfiltered acceptance claim. Navigation immediately during
+restart required retry after initialization. Native in-flight project-switch
+cancellation and the broader view-data/cycle/component matrix remain open.
+All 69 areas remain visible: 67 partial and two user-deferred. No blanket parity,
+installation, public release, notarization or new push is claimed.
 
 ## Contract
 
@@ -2560,3 +2574,187 @@ development process snapshots, excluding WebContent/OS cache and wider workloads
 No memory/performance parity or release benchmark claim. Native result receipt:
 artifacts/checks/route-navigation-0.1.47-native-result.json. Next work remains
 milestone2 acceptance; full69area goal stays active. No new push or installation.
+
+## View roots and package navigation follow-up (in progress)
+
+After accepted47, FEAT-032 broadening starts against its exact bundled126binary.
+A seventeenth actual-client scenario passes configured-root precedence, published
+package overrides/only-published views, plain PHP templates and unsaved provider
+namespace changes without disk writes (initial log). Expanded scenario confirms
+unsaved config root switching, then fails cached chooser names after creating a
+plain PHP template under a custom themes/ root: direct target resolves but list
+omits it after80queries/deadline. Both initial and deadline red logs retained.
+Working127source clone preserves immutable verified126. Next: focused engine
+watcher regression/fix, then source/client/host/native gates. No127pin/bundle or
+view-batch acceptance yet.
+
+View follow-up native comparison: separateLaravel13.37fixture passes88PHP
+syntax checks and AppPSR4 mapping, with all environment files excluded. The exact
+47/126bundle lists custom-root live-report after external creation and opens
+themes/current/live-report.php1:1 in this full-framework run. This is a positive
+observation, not the minimal-client failure reproduction. The minimal client
+(strategy none) still fails after its80querydeadline; both observations retained.
+Diagnostic app normalquit exits;11fixture originals match and only the newly
+created owned PHP template is removed after exit. Focused engine red build is
+still running; no fix/native candidate acceptance claimed.
+
+Working127engine TDD: the watcher unit fails the first new custom-root name
+assertion on126logic (one actual failure/6926filtered), then passes with the
+initial fix across editor-owned/closed creation/removal, Blade-over-PHP
+precedence/fallback, and cache retention for content edits/unrelated files.
+The refined batch implementation reads configured/provider roots once, includes
+previously missing configured directories, and reuses canonical-path comparison.
+Clippy--fix, fmt-after-Clippy and the expanded working unit are running. Root
+client case additionally covers new directories, bounded results, cancellation,
+restart and closing provider/config overlays; those later steps remain unrun
+until a corrected executable is available. Archive/resource126still unchanged.
+
+Initial127pin: patch0127b28e63c895fc8cb88fa202e66c95f17dc2b28afbc6db97f27dd966e458f753f1,
+seriesf9f2c3e61d6d78237595f473ad16f08806dd6a69ada1b95b1eb594c6a9397351,
+verifiedsource1756b1f920c1-f9f2c3e61d6d-verified. Its full source pipeline is
+running under handle12634; do not amend root source.json until terminal because
+the final build-recipe stage reads that pin. This initial pin is not accepted.
+
+An eighteenth actual-client case proves a second view-freshness failure against
+the unchanged47/126binary: config/view.php is never opened, initial current-only
+view list is confirmed, then external closed config change to alternate root
+still returnscurrent-only after80queries/deadline. Original disk restored after
+server shutdown. Log:view-config-0.1.47-client-red.log. Working127clone now adds
+closed config CHANGED eligibility without a parsed-file prerequisite, retires
+the catalog on configuration deletion/creation, retains open-overlay authority,
+and handles canonical config aliases. A new backend regression covers these
+cases. These amendments are not yet pinned/tested; draft backed up under
+view-navigation-127-amended-working-draft.patch. Next: after initial pipeline
+finishes, working Clippy--fix/fmt, amend127patch/checksum, reconstruct a new
+immutable source identity and rerun full pinned gates plus all18client/5host
+cases before resource replacement/native48.
+
+Storage receipts record1,252compiler object groups/2,681hardlink paths and the
+exact regenerable SDK static archive removed at idle; all library archives,
+apps/executables/source/fixtures/engine/evaluation deliveries retained. Physical
+space did not materially increase, so no SDK full-gate/package readiness claim.
+Current engine-only pipeline started with5.67GiB measuredfree; SDK full rebuild
+should wait for adequate measured headroom. No TimeMachine/snapshot purge.
+
+Initial127source pipeline finishes successfully:18,386tests/17ignored plus
+FIFO child1, Clippy/fmt/fingerprint and normal release build. Preliminary binary
+SHA2565c6abde3c9c831229b97b9f9d1a3db981c26d06eaa6f8ccfbb1459730cacda4f
+is preserved atartifacts/engine-diagnostics/0.11.1-openstorm.127-f9f2c3e61d6d,
+with source pin/patch and licenses. Expanded main client case passes7.22s against
+this copy across file/root creation/deletion, namespace/config overlays, bounded
+results, cancellation, restart and closing overlays. Separate cold config case
+fails this initial127as well, so these green source gates do not accept the batch.
+
+Focused native47/126cold-config reproduction now fails too: fullLaravel13.37
+fixture syntax86andAppautoload validated; only synthetic test profile code-vision
+counts disabled and indexing none. Only bare PHP caller opened; initial Views
+listcurrent-only observed, then closed config file externally changed to alternate.
+Reopening Views still showscurrent-only and alternate-only filter shows No static
+matches found. Log confirms config was never opened. Normalquit exits app21759/
+server21792; all6owned source/config originals restored after exit. Synthetic
+profile overrides intentionally retained for the corrected comparison; restore
+counts defaults after final native acceptance. Receipt:view-config-native-47-result.json.
+
+Amended127working Clippy--fix/fmt pass. Final patch0127SHA256
+29437fd3b06e8254f24cc5dbe228f1dc445d83ffd1a16baafa0a7b9a407fd300;
+series747e151275eaa1404d7ad3b2025d56ef9ffc9af66f51d80292c8bad619855e82,
+source1756b1f920c1-747e151275ea-verified. Final full source pipeline28191is
+running; do not change the pin before its final build recipe finishes. Added
+cold config regression protects creation/change/removal, open overlay authority
+and canonical aliases. Root manifests/34workspace lock packages now48with all
+thirdparty lock blocks unchanged. Frontend/typecheck/lint/build pipeline65149is
+running. Actual18client/5host, SDK final and packaged48native gates remain open.
+
+Amended127full source gate finishes:18,387passed/17ignored plus FIFO child1,
+Clippy/fmt/fingerprint and normalrelease build. EngineSHA256
+0ef92bcb1199ea7f054d2d0aa0fcd20ebcf08d575f311514d1438cb2ff8d531c.
+The expanded cold-config actual-client case also checks invalid-view diagnostics
+appear after the root change and clear after restoring the original configuration;
+it passes7.06s. The complete18client cases pass108.59s; all5host cases pass35.84s,
+with all12shared47fixture sources original after each stage. PHP examples12lint,
+explicit zend.assertions=1 runtime and Demo syntax pass. Analyzer retains exactly
+three intentional diagnostics at731/731/951 (expectedexit1). The127archive includes
+licenses, provenance, toolchain, build and validation receipts. Resource127now
+matches the checked archive; node checksum verification passes. Native acceptance
+is stillfalse. All3049frontend/typecheck/lint/build gates pass; inherited warnings
+remain. Final48SDKworkspace/fmt/Clippy is running with only the two separately
+pending environment cases skipped. No new push/installation/public release.
+
+Final48workspace test run finishes with1,319passed/43ignored/2filtered, nofailed
+test groups. The18pinned-client and5host ignored cases were executed separately
+and passed above; remaining inherited ignored cases are not accepted by this run.
+Only the two pending SDK environment cases were filtered. Finalfmt completed;
+Clippy still running. Native48bundle acceptance remains open.
+
+Final48Clippy workspace/all-targets-Dwarnings passes1m57s; SDK pipeline2599
+terminal0. sdk-gates.json records exact logs/counts. Tauri debugbundle pipeline17359
+started with unchanged runtime inputs. All69area statuses remain67partial/2deferred.
+
+### View roots and package navigation: 0.1.48 accepted locally
+
+The previous 0.1.47/126 cold-config failure is preserved. The corrected comparison
+used the same full Laravel 13.37 fixture with `config/view.php` never opened,
+indexing set to none, and only the disposable profile's code-vision counts
+temporarily disabled. Initial `current-only` changed to `alternate-only` after an
+external closed-file change and opened the alternate template at 1:1. Deleting
+that owned config selected the default resource-root template; restoring it
+returned `current-only`. Runtime logs confirm the config document stayed closed.
+Explicit restart replaced server 72343 with 72372 and retained correct lookup.
+Both count defaults were restored through Settings. App 72323 and both server
+generations exited on normal quit. No-argument relaunch restored the same project,
+original caller and three tabs; final quit left no owned processes.
+
+The second native fixture exercised custom-root precedence, published package
+card override, a published-only banner, `legacy.report` as a plain PHP template,
+and `žluťoučký.účtenka-😀` as a Unicode path. The chooser and Cmd+B opened the
+expected files, preserving OpenIDEA's existing layout and shortcuts. With focus
+autosave temporarily disabled in this disposable profile (idle autosave stayed
+off), unsaved provider namespace changes opened the original package template,
+and an unsaved config root change redirected `panel` to the alternate theme.
+All 12 disk witnesses stayed original during these overlay checks. Restart
+replaced server 73102 with 73461; after initialization, both overlays survived.
+The first definition requested during startup did not navigate and needed retry;
+this limitation is retained rather than claiming immediate restart readiness.
+Problems displayed the old package name as `invalid_laravel_view` and cleared it
+after normal Undo/save restored the namespace.
+
+A new plain PHP template outside `views/` appeared in the already cached chooser
+and opened at 1:1. External deletion while its editor was open removed the tab;
+reopening and filtering the chooser produced no static matches. Chooser Cancel
+left files unchanged. One batched tab-switch/Undo test action ran before focus
+settled; repeating with confirmed editor focus restored the original config.
+Normal save and explicit disk read-back verified all 12 originals. Focus autosave
+was restored to true, idle autosave remained false, and Problems was hidden again.
+Normal quit, no-argument relaunch (all ten tabs and original source), and final
+quit passed. All owned app/server processes were absent afterwards. No existing
+environment files were changed.
+
+The development bundle executable SHA256 is
+`38636f7677c0a5da337d99a4974d42df3bdde6cee1522cb833dbd1c1cef3f169`;
+engine SHA256 is
+`0ef92bcb1199ea7f054d2d0aa0fcd20ebcf08d575f311514d1438cb2ff8d531c`.
+Root-only local signing and post-runtime deep/strict signature verification pass.
+Installed 0.1.21 retains SHA256
+`048064d8cc6beb3985f36a445a5524992624e0413c919c1faa61cbd27d49fa16`
+and a valid signature. Build/source, SDK-gate and both native receipts are under
+`artifacts/checks/view-navigation-0.1.48-*`. Full-source 127 provenance, licenses,
+source checks and validation receipts remain in its engine archive.
+
+Storage: only idle task-owned PHPantom compiler `.rlib`/`.rmeta` cache files
+were additionally pruned after verifying the preserved 127 archive. The receipt
+`view-navigation-engine-compiler-libraries-pruned.json` records all 934 paths,
+hashes and measured space. Engine executables, apps, sources, archives, fixtures,
+installed tools and earlier deliveries were preserved. The successful Tauri debug
+build finished compilation in 2m12s and produced a 330.33 MiB bundle.
+
+This accepts the narrow FEAT-032 view-root/package/freshness slice. Cross-file
+view-data cycles, include/component boundaries, broader shadowing and native
+in-flight project-switch cancellation remain open. No production signing,
+notarization, installation, publishing, updater activation or further push.
+
+Post-commit verification: the hook reformatted only the Tauri icon array among
+runtime inputs. Serializing the committed JSON values with the build-time
+indentation reproduces the frozen config SHA256 exactly, so configuration values
+are identical. All runtime code/engine inputs match the frozen build; other
+post-build differences are documentation. This is recorded explicitly in the
+checkpoint receipt instead of claiming every source byte stayed identical.

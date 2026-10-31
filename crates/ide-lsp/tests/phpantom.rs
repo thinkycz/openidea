@@ -1402,3 +1402,326 @@ async fn unsaved_route_registration_refreshes_sibling_diagnostics_through_client
     assert!(edited_refreshed, "edited registration must clear its own duplicate warning");
     assert!(sibling_refreshed, "unchanged open sibling must receive fresh diagnostics after unsaved registration edit");
 }
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires the pinned macOS Apple Silicon PHPantom executable"]
+async fn laravel_view_roots_packages_and_unsaved_provider_navigation() {
+    async fn target(mgr: &LspManager, doc: DocId, name: &str, expected: &std::path::Path) -> Result<(), String> {
+        let mut last = Vec::new();
+        for _ in 0..80 {
+            let reply =
+                mgr.laravel_views(doc, Some(name.into()), 2000, Default::default()).await.map_err(|e| e.to_string())?;
+            if reply.locations.len() == 1 && reply.locations[0].path.0 == expected {
+                return Ok(());
+            }
+            last = reply.locations;
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        Err(format!("{name} did not resolve to {expected:?}: {last:?}"))
+    }
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().canonicalize().unwrap();
+    let provider = "<?php\nnamespace App\\Providers;\nclass NavigationViewsProvider {\n public function boot(): void {\n  $this->loadViewsFrom(__DIR__.'/../../packages/widgets/templates', 'openstorm-widgets');\n }\n}\n";
+    let config = "<?php\nreturn ['paths' => [base_path('themes/current'), resource_path('views')]];\n";
+    let caller = "<?php\nnamespace App;\nclass NavigationViews {\n public function render(): void {\n  $label = '😀 žluťoučký';\n  view('openstorm-widgets::card');\n  view('panel');\n  view('legacy.report');\n }\n}\n";
+    let files = [
+        (
+            "composer.json",
+            r#"{"require":{"php":"^8.3","laravel/framework":"^13.0"},"autoload":{"psr-4":{"App\\":"app/"}}}"#,
+        ),
+        (".phpantom.toml", "[indexing]\nstrategy = \"none\"\n[diagnostics]\nworkspace = false\n"),
+        ("bootstrap/providers.php", "<?php\nreturn [App\\Providers\\NavigationViewsProvider::class];\n"),
+        ("app/Providers/NavigationViewsProvider.php", provider),
+        ("config/view.php", config),
+        ("app/NavigationViews.php", caller),
+        ("packages/widgets/templates/card.blade.php", "<p>Package original</p>\n"),
+        ("resources/views/vendor/openstorm-widgets/card.blade.php", "<p>Published override</p>\n"),
+        ("resources/views/vendor/openstorm-widgets/banner.blade.php", "<p>Published only</p>\n"),
+        ("themes/current/panel.blade.php", "<p>Current theme</p>\n"),
+        ("themes/alternate/panel.blade.php", "<p>Alternate theme</p>\n"),
+        ("resources/views/panel.blade.php", "<p>Default theme</p>\n"),
+        ("resources/views/legacy/report.php", "<p>Plain PHP template</p>\n"),
+    ];
+    for (name, text) in files {
+        let path = root.join(name);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, text).unwrap();
+    }
+    let bin = std::env::var_os("OPENSTORM_TEST_PHPANTOM_BIN").map(PathBuf::from).unwrap_or_else(|| {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../src-tauri/resources/phpantom/phpantom_lsp")
+    });
+    let mut php = LanguageRegistry::load(None).unwrap().get(&LanguageId::new("php")).unwrap();
+    php.language_servers.retain(|s| s.name == "phpantom");
+    php.language_servers[0].command = bin.to_string_lossy().into_owned();
+    let mgr = LspManager::new(root.clone(), Arc::new(LanguageRegistry::from_configs(vec![php])), Arc::new(|_| {}));
+    let doc = DocId::next();
+    let provider_doc = DocId::next();
+    let config_doc = DocId::next();
+    mgr.did_open(doc, &root.join("app/NavigationViews.php"), &LanguageId::new("php"), 1, caller);
+    mgr.did_open(
+        provider_doc,
+        &root.join("app/Providers/NavigationViewsProvider.php"),
+        &LanguageId::new("php"),
+        1,
+        provider,
+    );
+    mgr.did_open(config_doc, &root.join("config/view.php"), &LanguageId::new("php"), 1, config);
+    let outcome: Result<(), String> = async {
+        let names = mgr.laravel_views(doc, None, 2000, Default::default()).await.map_err(|e| e.to_string())?;
+        for name in ["openstorm-widgets::card", "openstorm-widgets::banner", "panel", "legacy.report"] {
+            if !names.views.iter().any(|v| v == name) {
+                return Err(format!("missing view {name}: {:?}", names.views));
+            }
+        }
+        for (name, expected) in [
+            ("openstorm-widgets::card", "resources/views/vendor/openstorm-widgets/card.blade.php"),
+            ("openstorm-widgets::banner", "resources/views/vendor/openstorm-widgets/banner.blade.php"),
+            ("panel", "themes/current/panel.blade.php"),
+            ("legacy.report", "resources/views/legacy/report.php"),
+        ] {
+            let reply =
+                mgr.laravel_views(doc, Some(name.into()), 2000, Default::default()).await.map_err(|e| e.to_string())?;
+            if reply.locations.len() != 1 || reply.locations[0].path.0 != root.join(expected) {
+                return Err(format!("{name} must use rendering precedence {expected}: {:?}", reply.locations));
+            }
+        }
+        let changed = provider.replace("'openstorm-widgets'", "'openstorm-preview'");
+        replace(&mgr, provider_doc, 2, provider, &changed);
+        let mut refreshed = false;
+        for _ in 0..80 {
+            let reply = mgr
+                .laravel_views(doc, Some("openstorm-preview::card".into()), 2000, Default::default())
+                .await
+                .map_err(|e| e.to_string())?;
+            if reply.locations.len() == 1
+                && reply.locations[0].path.0 == root.join("packages/widgets/templates/card.blade.php")
+            {
+                refreshed = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        if !refreshed {
+            return Err("unsaved provider namespace did not refresh package view targets".into());
+        }
+        let old = mgr
+            .laravel_views(doc, Some("openstorm-widgets::card".into()), 2000, Default::default())
+            .await
+            .map_err(|e| e.to_string())?;
+        if !old.locations.is_empty() {
+            return Err(format!("old namespace must no longer resolve: {:?}", old.locations));
+        }
+        let config_changed = config
+            .replace("themes/current", "themes/alternate")
+            .replace("resource_path('views')", "resource_path('views'), base_path('themes/later')");
+        replace(&mgr, config_doc, 2, config, &config_changed);
+        target(&mgr, doc, "panel", &root.join("themes/alternate/panel.blade.php")).await?;
+
+        let created = root.join("themes/alternate/live-report.php");
+        std::fs::write(&created, "<p>Added plain PHP view</p>\n").map_err(|e| e.to_string())?;
+        mgr.php_files_changed(std::slice::from_ref(&created), &[], &[]);
+        target(&mgr, doc, "live-report", &created).await?;
+        let mut added = false;
+        let mut last_names = Vec::new();
+        for _ in 0..80 {
+            let names = mgr.laravel_views(doc, None, 2000, Default::default()).await.map_err(|e| e.to_string())?;
+            last_names = names.views;
+            if last_names.iter().any(|v| v == "live-report") {
+                added = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        if !added {
+            return Err(format!(
+                "created custom-root PHP template missing from chooser after watched-file deadline: {last_names:?}"
+            ));
+        }
+        std::fs::remove_file(&created).map_err(|e| e.to_string())?;
+        mgr.php_files_changed(&[], &[], std::slice::from_ref(&created));
+        let mut removed = false;
+        for _ in 0..80 {
+            let names = mgr.laravel_views(doc, None, 2000, Default::default()).await.map_err(|e| e.to_string())?;
+            let reply = mgr
+                .laravel_views(doc, Some("live-report".into()), 2000, Default::default())
+                .await
+                .map_err(|e| e.to_string())?;
+            if !names.views.iter().any(|v| v == "live-report") && reply.locations.is_empty() {
+                removed = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        if !removed {
+            return Err("deleted custom-root template remains in chooser or navigation".into());
+        }
+        let first_in_new_root = root.join("themes/later/first.php");
+        std::fs::create_dir_all(first_in_new_root.parent().unwrap()).map_err(|e| e.to_string())?;
+        std::fs::write(&first_in_new_root, "<p>First template in a configured root</p>\n")
+            .map_err(|e| e.to_string())?;
+        mgr.php_files_changed(std::slice::from_ref(&first_in_new_root), &[], &[]);
+        target(&mgr, doc, "first", &first_in_new_root).await?;
+        let mut discovered = false;
+        for _ in 0..80 {
+            let names = mgr.laravel_views(doc, None, 2000, Default::default()).await.map_err(|e| e.to_string())?;
+            if names.views.iter().any(|v| v == "first") {
+                discovered = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        if !discovered {
+            return Err("first plain PHP template in newly created configured root missing from chooser".into());
+        }
+        std::fs::remove_file(&first_in_new_root).map_err(|e| e.to_string())?;
+        mgr.php_files_changed(&[], &[], std::slice::from_ref(&first_in_new_root));
+        mgr.restart(mgr.servers()[0].id).await.map_err(|e| e.to_string())?;
+        target(&mgr, doc, "panel", &root.join("themes/alternate/panel.blade.php")).await?;
+        target(&mgr, doc, "openstorm-preview::card", &root.join("packages/widgets/templates/card.blade.php")).await?;
+        let bounded = mgr.laravel_views(doc, None, 1, Default::default()).await.map_err(|e| e.to_string())?;
+        if bounded.views.len() != 1 || !bounded.incomplete {
+            return Err(format!("view list must retain bounded incomplete result: {bounded:?}"));
+        }
+        let cancel = ide_core::CancellationToken::new();
+        cancel.cancel();
+        match mgr.laravel_views(doc, None, 2000, cancel).await {
+            Err(error) if error.kind == ide_core::error::ErrorKind::Cancelled => {}
+            other => return Err(format!("cancelled view query must not produce results: {other:?}")),
+        }
+        mgr.did_close(provider_doc);
+        mgr.did_close(config_doc);
+        target(&mgr, doc, "panel", &root.join("themes/current/panel.blade.php")).await?;
+        target(
+            &mgr,
+            doc,
+            "openstorm-widgets::card",
+            &root.join("resources/views/vendor/openstorm-widgets/card.blade.php"),
+        )
+        .await?;
+        Ok(())
+    }
+    .await;
+    mgr.shutdown_all().await;
+    for (name, original) in files {
+        assert_eq!(std::fs::read_to_string(root.join(name)).unwrap(), original, "query must preserve {name}");
+    }
+    assert!(outcome.is_ok(), "{}", outcome.unwrap_err());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires the pinned macOS Apple Silicon PHPantom executable"]
+async fn laravel_closed_view_config_disk_changes_refresh_navigation() {
+    async fn diagnostic(events: &Mutex<Vec<IdeEvent>>, path: &std::path::Path, since: usize, invalid: bool) -> bool {
+        for _ in 0..200 {
+            let current = events.lock()[since..].iter().rev().find_map(|event| match event {
+                IdeEvent::Diagnostics { path: target, items, .. } if target.0 == path => {
+                    Some(items.iter().any(|item| item.code.as_deref() == Some("invalid_laravel_view")))
+                }
+                _ => None,
+            });
+            if current == Some(invalid) {
+                return true;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        false
+    }
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().canonicalize().unwrap();
+    let original = "<?php return ['paths' => [base_path('themes/current')]];\n";
+    let caller = "<?php view('current-only');\n";
+    let files = [
+        ("composer.json", r#"{"require":{"laravel/framework":"^13.0"}}"#),
+        (".phpantom.toml", "[indexing]\nstrategy = \"none\"\n[diagnostics]\nworkspace = false\n"),
+        ("config/view.php", original),
+        ("main.php", caller),
+        ("themes/current/current-only.blade.php", "<p>Current root</p>\n"),
+        ("themes/alternate/alternate-only.blade.php", "<p>Alternate root</p>\n"),
+        ("resources/views/default-only.blade.php", "<p>Default root</p>\n"),
+    ];
+    for (name, text) in files {
+        let p = root.join(name);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, text).unwrap();
+    }
+    let bin = std::env::var_os("OPENSTORM_TEST_PHPANTOM_BIN").map(PathBuf::from).unwrap_or_else(|| {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../src-tauri/resources/phpantom/phpantom_lsp")
+    });
+    let mut php = LanguageRegistry::load(None).unwrap().get(&LanguageId::new("php")).unwrap();
+    php.language_servers.retain(|s| s.name == "phpantom");
+    php.language_servers[0].command = bin.to_string_lossy().into_owned();
+    let events: Arc<Mutex<Vec<IdeEvent>>> = Arc::default();
+    let capture = events.clone();
+    let mgr = LspManager::new(
+        root.clone(),
+        Arc::new(LanguageRegistry::from_configs(vec![php])),
+        Arc::new(move |event| capture.lock().push(event)),
+    );
+    let doc = DocId::next();
+    mgr.did_open(doc, &root.join("main.php"), &LanguageId::new("php"), 1, caller);
+    let config_path = root.join("config/view.php");
+    let outcome: Result<(), String> = async {
+        let initial = mgr.laravel_views(doc, None, 2000, Default::default()).await.map_err(|e| e.to_string())?;
+        if initial.views != ["current-only"] {
+            return Err(format!("initial closed config must select current root: {:?}", initial.views));
+        }
+        eprintln!("Initial closed configuration selects current-only; config document has never been opened");
+        if !diagnostic(&events, &root.join("main.php"), 0, false).await { return Err("initial view caller diagnostics were not published".into()); }
+        for (deleted, expected, absent) in
+            [(false, "alternate-only", "current-only"), (true, "default-only", "alternate-only")]
+        {
+            let since = events.lock().len();
+            if deleted {
+                std::fs::remove_file(&config_path).map_err(|e| e.to_string())?;
+                mgr.php_files_changed(&[], &[], std::slice::from_ref(&config_path));
+            } else {
+                std::fs::write(&config_path, original.replace("themes/current", "themes/alternate"))
+                    .map_err(|e| e.to_string())?;
+                mgr.php_files_changed(&[], std::slice::from_ref(&config_path), &[]);
+            }
+            let mut refreshed = false;
+            let mut last = Vec::new();
+            for _ in 0..80 {
+                let reply = mgr.laravel_views(doc, None, 2000, Default::default()).await.map_err(|e| e.to_string())?;
+                last = reply.views;
+                if last.iter().any(|v| v == expected) && !last.iter().any(|v| v == absent) {
+                    refreshed = true;
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+            if !refreshed {
+                return Err(format!(
+                    "closed config deleted={deleted}: expected {expected}, absent {absent}; got {last:?}"
+                ));
+            }
+            let reply = mgr
+                .laravel_views(doc, Some(expected.into()), 2000, Default::default())
+                .await
+                .map_err(|e| e.to_string())?;
+            let suffix = if deleted {
+                "resources/views/default-only.blade.php"
+            } else {
+                "themes/alternate/alternate-only.blade.php"
+            };
+            if reply.locations.len() != 1 || reply.locations[0].path.0 != root.join(suffix) {
+                return Err(format!("closed config target must follow {suffix}: {:?}", reply.locations));
+            }
+            if !deleted && !diagnostic(&events, &root.join("main.php"), since, true).await {
+                return Err("closed configuration lookup refreshed, but unchanged open caller never received its invalid-view diagnostic".into());
+            }
+        }
+        let since = events.lock().len();
+        std::fs::write(&config_path, original).map_err(|e| e.to_string())?;
+        mgr.php_files_changed(&[], std::slice::from_ref(&config_path), &[]);
+        if !diagnostic(&events, &root.join("main.php"), since, false).await { return Err("restoring closed view configuration did not clear the caller diagnostic".into()); }
+        Ok(())
+    }
+    .await;
+    mgr.shutdown_all().await;
+    std::fs::write(&config_path, original).unwrap();
+    for (name, text) in files {
+        assert_eq!(std::fs::read_to_string(root.join(name)).unwrap(), text);
+    }
+    assert!(outcome.is_ok(), "{}", outcome.unwrap_err());
+}

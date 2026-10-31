@@ -1,17 +1,20 @@
 # Pinned PHPantom engine
 
-The local OpenStorm candidate bundles PHPantom `0.11.1-openstorm.126` for Apple
-Silicon macOS. This is a local rebuild, not an upstream release. Source .126
-refreshes affected open route diagnostics after registration changes. The full
-pinned-source suite passes18,384tests/17ignored plus its separate FIFO child;
-all16OpenStorm client and5host cases pass, including unsaved sibling refresh.
-Examples, Clippy, formatting and source fingerprints pass. Signed development
-0.1.47 accepts the route diagnostic/navigation slice, including unsaved sibling
-refresh, undo, reviewed CRLF selections and restart/session cleanup. Wider gates
-remain in docs/OPENSTORM.md. Archived .44–.46 diagnostic deliveries stay preserved.
+The local OpenStorm candidate bundles PHPantom `0.11.1-openstorm.127` for Apple
+Silicon macOS. This is a local rebuild, not an upstream release. Source127
+refreshes view catalogs for template creation/deletion, custom and package roots,
+and closed configuration changes while preserving editor overlays. Its full
+pinned-source suite passes18,387tests/17ignored plus the separate FIFO child;
+all18OpenStorm client and5host cases pass, including cold-config navigation and
+live diagnostic refresh. Examples, Clippy, formatting and source fingerprints
+pass. Signed development 0.1.48 native acceptance passes the narrow view-root,
+package, closed-config and template-event workflows, including unsaved overlays,
+settled restart and quit/relaunch recovery. The signed 47/126 route slice and
+earlier diagnostic source identities remain preserved. Broader view-data and
+native in-flight cancellation acceptance remain open.
 `source.json` pins upstream source,
 its archive checksum, the unchanged 114-patch PHP Workbench series, and OpenStorm
-patches 0115–0126 for resource isolation, Blade and Laravel assistance, and
+patches 0115–0127 for resource isolation, Blade and Laravel assistance, and
 source-update recovery. The bundled executable is verified by
 `node scripts/verify-phpantom.mjs`; its provenance and licenses are under
 `src-tauri/resources/phpantom/`.

@@ -57,6 +57,7 @@ pub type DetectLanguage = dyn Fn(&Path, Option<&str>) -> LanguageId + Send + Syn
 /// and observers see them in version order.
 pub struct Documents {
     registry: Mutex<Registry>,
+    reviewed_history: Mutex<guarded_edits::ReviewedHistory>,
     observers: RwLock<Vec<Arc<dyn DocumentObserver>>>,
     sink: SharedSink,
     detect_language: Box<DetectLanguage>,
@@ -157,6 +158,7 @@ impl Documents {
     pub fn new(sink: SharedSink, detect_language: Box<DetectLanguage>) -> Self {
         Self {
             registry: Mutex::default(),
+            reviewed_history: Mutex::default(),
             observers: RwLock::default(),
             sink,
             detect_language,
@@ -468,7 +470,13 @@ impl Documents {
         edits: &[ByteEdit],
     ) {
         self.notify_changed(doc, st, applied, edits);
-        self.sink.emit(IdeEvent::DocPatched { doc, base_version, version: st.doc.version(), changes: set.changes });
+        self.sink.emit(IdeEvent::DocPatched {
+            doc,
+            base_version,
+            version: st.doc.version(),
+            changes: set.changes,
+            history: None,
+        });
     }
 
     /// Minimal-diff replacement; no event when the text is unchanged.

@@ -379,3 +379,14 @@ pub async fn lsp_execute_command(
 ) -> IdeResult<()> {
     ide_host::ops::lsp::lsp_execute_command(&state.host, window.label(), doc, command).await
 }
+
+#[tauri::command]
+#[specta::specta]
+pub async fn restore_reviewed_edit(
+    window: Window,
+    state: State<'_, AppState>,
+    group: String,
+    redo: bool,
+) -> IdeResult<()> {
+    ide_host::ops::lsp::restore_reviewed_edit(&state.host, window.label(), group, redo).await
+}

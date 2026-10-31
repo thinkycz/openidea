@@ -1885,3 +1885,93 @@ and normal editor history ordering. No subsequent dependent Laravel generation
 batch starts before this acceptance gap is resolved. The 69-area ledger remains
 67 partial / 2 user-deferred. Installed optimized 0.1.21 and previous accepted
 0.1.39 recovery-action slice remain preserved.
+
+0.1.41 work in progress addresses the reproduced shared Undo gap. Reviewed
+transactions retain bounded original disk bytes and buffer text, including
+unsaved originals. Undo/redo validates every target's current disk and overlay,
+encoding, line ending, writability, aliases, project roots and history ordering
+before the first write. The existing staged recovery/rollback path is shared.
+Closed unsaved originals require reopening their target before restoration;
+history is session-local and bounded to 16 groups / 64 MiB, independently of
+Local History. An unavailable group refuses rather than performing partial undo.
+
+The editor carries a typed shared-history receipt through document sync. Each
+open tab/split and attached diff receives the history marker; ordinary typing
+retains its existing ordering. Existing key bindings and native menu history
+input call the shared restore at the marker, retaining text/history until the
+backend transaction succeeds. Source regressions now cover four-file-style
+closed/unsaved restoration, later disk/overlay edits, out-of-order transactions,
+reopening an unsaved original, split-pane undo/redo and failed-command retry.
+Packaged acceptance remains pending; 0.1.40 remains a diagnostic artifact.
+
+The first broad 0.1.41 frontend run found one missing Chinese notification
+translation; its targeted catalog gate passes after adding the entry. All 3,036
+frontend tests then passed. A later review also wrapped selection-history
+commands so they cannot bypass shared undo; its focused 30 checks pass and the
+final frontend gates are rerunning. The workspace attempt hit disk exhaustion
+while linking the native static library (not a test assertion failure). With
+compilers idle, 94 inactive generated SDK library/integration test executables
+(3,203,204,184 nominal bytes) were pruned, retaining the newest one per target.
+Binary targets/libraries/apps/source/fixtures/engine archives and Workbench /
+evaluation deliverables remain preserved. Receipt:
+`artifacts/checks/sdk-test-cache-prune-reviewed-041.json`. Verification retry is
+in progress; no 0.1.41 app has yet been promoted.
+
+The frozen 0.1.41 source gates pass: 3,036 frontend tests / 351 files, type
+checking, lint, production frontend build, Rust formatting and all-target Clippy
+with warnings denied. Workspace retry: 1,316 passed / 39 ignored / the same two
+process-environment fixture cases filtered pending their separate approval.
+All five live actual-host PHPantom cases pass. The route case now verifies
+four-target undo/redo, restoration of original unsaved Blade content and dirty
+state, and all-or-nothing refusal after a subsequent external caller change.
+
+Before the next static-library link, the owned verification launcher was paused
+while its active host tests finished. With all compilers idle after workspace
+completion, 126 completed SDK library/integration test executables
+(2,737,005,912 bytes) were removed, retaining the newest actual-host executable.
+All test results/receipts remain; target binary outputs, libraries, apps,
+fixtures, source, archives and Workbench/evaluation deliverables stay preserved.
+Receipt: sdk-test-cache-prune-reviewed-041-after-tests.json. The launcher was
+resumed for binding verification; the packaged development build is next.
+
+Binding export and post-export type checking pass. The first native package link
+again exhausted disk space. Additional test-cache pruning could not supply its
+peak space requirement, so the idle, regenerable current SDK static archive
+`debug/deps/libopenidea_lib.a` (2,124,015,376 bytes; recorded hash) was removed for
+replacement. This supersedes the earlier blanket library-cache preservation
+choice only for that intermediate static archive. No rlib inputs, loadable
+libraries, app bundles, engine binaries, sources, fixtures, archive provenance,
+Workbench or earlier evaluation delivery artifacts were removed. Receipt:
+reviewed-history-041-static-link-cache-receipt.json. The native link is retrying;
+no packaged acceptance claim is made from successful source tests alone.
+
+Signed 0.1.41 native checks reproduce and correct the original keyboard undo
+failure: one CmdZ restores all four disk originals plus the original two unsaved
+Blade invoice callers (parameter 9, Unicode retained, modified tab visible).
+CmdShiftZ from the Blade tab redoes all four targets. Ordinary typing undoes
+first; the next CmdZ undoes the shared refactoring. An external caller change
+refuses Undo with a visible actionable notification and no target writes. Removing
+only the owned test comment permits retry. Stale preview refusal, exact apply,
+post-redo Blade definition navigation (route 5:93), and full semantic preparation
+name also pass.
+
+**0.1.41 remains a diagnostic build / batch not accepted.** Native Edit -> Undo
+produced no change while keyboard history worked. Source review finds macOS uses
+OS predefined history roles, whereas Windows/Linux `appActions.editCommand`
+still calls raw CodeMirror undo/redo and can bypass the shared marker. Fix both
+menu paths next, preserving text-field behavior, shortcuts and clipboard roles;
+add public action/menu regressions and repeat packaged native menu/keyboard
+checks before advancing dependent Laravel generated-edit work. A synthetic
+beforeinput unit pass did not establish the actual macOS menu behavior.
+
+The native profile's temporary switch-app autosave setting was restored. Normal
+quit exited app and engine; the four owned files were restored, then relaunch
+without a project argument recovered two tabs and the restored invoice identity.
+At the explicit declaration position, rename preparation supplies the full
+invoice name; Blade shows the original single caller / parameter 7. Final quit,
+strict signature and exact original fixture hashes pass. Installed optimized
+0.1.21 remains preserved. Runtime source hashes match the signed bundle.
+Receipts: `reviewed-history-0.1.41-build-receipt.json` and
+`reviewed-history-0.1.41-native-result.json`. History is session-local, bounded,
+and not accepted as persistent global history. No new performance parity claim
+or blanket 69-area acceptance is made; ledger remains 67 partial / 2 deferred.

@@ -191,3 +191,41 @@ describe("external save conflicts", () => {
     await expect(manager.saveAll("explicit")).rejects.toMatchObject({ kind: "cancelled" });
   });
 });
+
+describe("reviewed refactoring history across document slots", () => {
+  it("undo in one target requests one shared restore and consumes both histories", async () => {
+    const { manager, backend } = setup({ "/p/a.txt": "Old", "/p/b.txt": "Old" });
+    const a = await manager.acquire("/p/a.txt");
+    const b = await manager.acquire("/p/b.txt");
+    const left = new EditorSlot(a, "a", host);
+    const split = new EditorSlot(a, "a-split", host);
+    const other = new EditorSlot(b, "b", host);
+    backend.restoreReviewed = vi.fn(async (_group, redo) => {
+      for (const model of [a, b])
+        backend.patch(model.doc, [{ from: 0, to: 3, insert: redo ? "New" : "Old" }], {
+          group: "g",
+          action: redo ? "redo" : "undo",
+        });
+    });
+    for (const model of [a, b])
+      backend.patch(model.doc, [{ from: 0, to: 3, insert: "New" }], { group: "g", action: "apply" });
+    const { reviewedUndo, reviewedRedo } = await import("../cm/reviewedHistory");
+    const target = (slot: EditorSlot) => ({
+      get state() {
+        return slot.currentState();
+      },
+      dispatch(tr: import("@codemirror/state").Transaction) {
+        slot.state = tr.state;
+      },
+    });
+    reviewedUndo(target(left));
+    await settle();
+    expect(backend.restoreReviewed).toHaveBeenCalledExactlyOnceWith("g", false);
+    for (const slot of [left, split, other]) expect(slot.currentState().doc.toString()).toBe("Old");
+    reviewedRedo(target(split));
+    await settle();
+    expect(backend.restoreReviewed).toHaveBeenLastCalledWith("g", true);
+    for (const slot of [left, split, other]) expect(slot.currentState().doc.toString()).toBe("New");
+    manager.stop();
+  });
+});

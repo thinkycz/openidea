@@ -743,3 +743,130 @@ fn reviewed_edits_invalidate_when_save_encoding_properties_change() {
     assert_eq!(f.docs.apply_guarded_edits(&plan, &f.root.join("recovery")).unwrap_err().kind, ErrorKind::OutOfSync);
     assert_eq!(fs::read_to_string(path).unwrap(), "Old\n");
 }
+
+#[test]
+fn reviewed_history_restores_closed_disk_and_unsaved_overlay_as_one_transaction() {
+    let f = fixture();
+    let a = f.root.join("a.php");
+    let b = f.root.join("b.php");
+    fs::write(&a, "Old").unwrap();
+    fs::write(&b, "Old\n").unwrap();
+    let open = f.docs.open(&b).unwrap();
+    f.docs.replace_all(open.id, "Old unsaved 😀\n").unwrap();
+    let plan = reviewed_plan(&f.docs, vec![replace_name(&a, 0, 3, "New"), replace_name(&b, 0, 3, "New")]);
+    let recovery = f.root.join("recovery");
+    f.docs.apply_guarded_edits(&plan, &recovery).unwrap();
+    let group = f
+        .events
+        .lock()
+        .iter()
+        .find_map(|e| match e {
+            IdeEvent::DocPatched { history: Some(h), .. } => Some(h.group.clone()),
+            _ => None,
+        })
+        .unwrap();
+    f.docs.restore_reviewed_edit(&group, false, &recovery).unwrap();
+    assert_eq!(fs::read_to_string(&a).unwrap(), "Old");
+    assert_eq!(fs::read_to_string(&b).unwrap(), "Old\n");
+    let restored = f.docs.snapshot(open.id).unwrap();
+    assert_eq!(restored.text, "Old unsaved 😀\n");
+    assert!(restored.dirty);
+    f.docs.restore_reviewed_edit(&group, true, &recovery).unwrap();
+    assert_eq!(fs::read_to_string(&a).unwrap(), "New");
+    assert_eq!(fs::read_to_string(&b).unwrap(), "New unsaved 😀\n");
+    assert!(!f.docs.snapshot(open.id).unwrap().dirty);
+    fs::write(&a, "external").unwrap();
+    assert!(f.docs.restore_reviewed_edit(&group, false, &recovery).is_err());
+    assert_eq!(fs::read_to_string(&a).unwrap(), "external");
+    assert_eq!(fs::read_to_string(&b).unwrap(), "New unsaved 😀\n");
+    assert_eq!(f.docs.snapshot(open.id).unwrap().text, "New unsaved 😀\n");
+}
+
+fn last_reviewed_group(f: &Fixture) -> String {
+    f.events
+        .lock()
+        .iter()
+        .rev()
+        .find_map(|e| match e {
+            IdeEvent::DocPatched { history: Some(h), .. } => Some(h.group.clone()),
+            _ => None,
+        })
+        .unwrap()
+}
+
+#[test]
+fn reviewed_history_refuses_later_overlay_and_out_of_order_transactions() {
+    let f = fixture();
+    let a = f.root.join("a.php");
+    let b = f.root.join("b.php");
+    fs::write(&a, "Old").unwrap();
+    fs::write(&b, "Old").unwrap();
+    let open = f.docs.open(&a).unwrap();
+    let recovery = f.root.join("recovery");
+    let plan = reviewed_plan(&f.docs, vec![replace_name(&a, 0, 3, "New"), replace_name(&b, 0, 3, "New")]);
+    f.docs.apply_guarded_edits(&plan, &recovery).unwrap();
+    let first = last_reviewed_group(&f);
+    f.docs.replace_all(open.id, "New typing").unwrap();
+    assert!(f.docs.restore_reviewed_edit(&first, false, &recovery).is_err());
+    assert_eq!(fs::read_to_string(&b).unwrap(), "New");
+    assert_eq!(f.docs.snapshot(open.id).unwrap().text, "New typing");
+    f.docs.replace_all(open.id, "New").unwrap();
+    let plan = reviewed_plan(&f.docs, vec![replace_name(&a, 0, 3, "Next"), replace_name(&b, 0, 3, "Next")]);
+    f.docs.apply_guarded_edits(&plan, &recovery).unwrap();
+    let second = last_reviewed_group(&f);
+    assert!(f.docs.restore_reviewed_edit(&first, false, &recovery).is_err());
+    assert_eq!(fs::read_to_string(&a).unwrap(), "Next");
+    f.docs.restore_reviewed_edit(&second, false, &recovery).unwrap();
+    f.docs.restore_reviewed_edit(&first, false, &recovery).unwrap();
+    assert_eq!(fs::read_to_string(&b).unwrap(), "Old");
+    assert!(f.docs.restore_reviewed_edit(&second, true, &recovery).is_err());
+    f.docs.restore_reviewed_edit(&first, true, &recovery).unwrap();
+    f.docs.restore_reviewed_edit(&second, true, &recovery).unwrap();
+    assert_eq!(fs::read_to_string(&b).unwrap(), "Next");
+}
+
+#[test]
+fn reviewed_history_does_not_drop_closed_unsaved_originals() {
+    let f = fixture();
+    let a = f.root.join("a.php");
+    fs::write(&a, "Old").unwrap();
+    let doc = f.docs.open(&a).unwrap();
+    f.docs.replace_all(doc.id, "Old unsaved").unwrap();
+    let recovery = f.root.join("recovery");
+    let plan = reviewed_plan(&f.docs, vec![replace_name(&a, 0, 3, "New")]);
+    f.docs.apply_guarded_edits(&plan, &recovery).unwrap();
+    let group = last_reviewed_group(&f);
+    f.docs.close(doc.id);
+    assert!(f.docs.restore_reviewed_edit(&group, false, &recovery).unwrap_err().message.contains("Reopen"));
+    assert_eq!(fs::read_to_string(&a).unwrap(), "New unsaved");
+    let reopened = f.docs.open(&a).unwrap();
+    f.docs.restore_reviewed_edit(&group, false, &recovery).unwrap();
+    assert_eq!(fs::read_to_string(&a).unwrap(), "Old");
+    assert_eq!(f.docs.snapshot(reopened.id).unwrap().text, "Old unsaved");
+    assert!(f.docs.snapshot(reopened.id).unwrap().dirty);
+}
+
+#[cfg(unix)]
+#[test]
+fn reviewed_history_rejects_read_only_and_new_physical_aliases_before_writes() {
+    use std::os::unix::fs::PermissionsExt;
+    let f = fixture();
+    let a = f.root.join("a.php");
+    let b = f.root.join("b.php");
+    fs::write(&a, "Old").unwrap();
+    fs::write(&b, "Old").unwrap();
+    f.docs.open(&a).unwrap();
+    let recovery = f.root.join("recovery");
+    let plan = reviewed_plan(&f.docs, vec![replace_name(&a, 0, 3, "New"), replace_name(&b, 0, 3, "New")]);
+    f.docs.apply_guarded_edits(&plan, &recovery).unwrap();
+    let group = last_reviewed_group(&f);
+    fs::set_permissions(&b, fs::Permissions::from_mode(0o444)).unwrap();
+    assert!(f.docs.restore_reviewed_edit(&group, false, &recovery).is_err());
+    fs::set_permissions(&b, fs::Permissions::from_mode(0o644)).unwrap();
+    assert_eq!(fs::read_to_string(&a).unwrap(), "New");
+    fs::remove_file(&b).unwrap();
+    fs::hard_link(&a, &b).unwrap();
+    assert!(f.docs.restore_reviewed_edit(&group, false, &recovery).unwrap_err().message.contains("aliased"));
+    assert_eq!(fs::read_to_string(&a).unwrap(), "New");
+    assert_eq!(fs::read_to_string(&b).unwrap(), "New");
+}

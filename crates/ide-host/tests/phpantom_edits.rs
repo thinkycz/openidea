@@ -278,13 +278,20 @@ async fn grouped_route_checked_rename_keeps_php_blade_callers_and_group_prefix()
     let originals: Vec<_> =
         names.iter().map(|name| (root.join(name), std::fs::read_to_string(root.join(name)).unwrap())).collect();
     let tmp = tempfile::tempdir().unwrap();
+    let events = Arc::new(std::sync::Mutex::new(Vec::<ide_core::IdeEvent>::new()));
+    let recorded = events.clone();
     let host = Host::new(HostConfig {
         project_environment: false,
         config_dir: tmp.path().join("config"),
         data_dir: tmp.path().join("data"),
         languages: Arc::new(ide_language::LanguageRegistry::load(None).unwrap()),
         syntax: Arc::default(),
-        sink_for: Box::new(|_| Arc::new(|_| {})),
+        sink_for: Box::new(move |_| {
+            let events = recorded.clone();
+            Arc::new(move |event| {
+                events.lock().unwrap().push(event);
+            })
+        }),
         owner: |w| w,
         runtime: tokio::runtime::Handle::current(),
     });
@@ -388,6 +395,22 @@ async fn grouped_route_checked_rename_keeps_php_blade_callers_and_group_prefix()
         let col = line.rfind("'details'").unwrap() as u32 + 2;
         let prepared = project.lsp.prepare_rename_details(route_doc.id, Pos::new(4, col)).await.map_err(|e| format!("declaration preparation: {e:?}"))?;
         if prepared.as_ref().and_then(|p| p.placeholder.as_deref()) != Some("openstorm.billing.details") { return Err(format!("grouped declaration lost its semantic name: {prepared:?}")); }
+        let group = events.lock().unwrap().iter().rev().find_map(|event| match event {
+            ide_core::IdeEvent::DocPatched { history: Some(h), .. } => Some(h.group.clone()), _ => None,
+        }).ok_or("missing shared edit history receipt")?;
+        ide_host::ops::lsp::restore_reviewed_edit(&host, "main", group.clone(), false).await.map_err(|e| format!("shared undo: {e:?}"))?;
+        for (path, source) in &originals {
+            if std::fs::read_to_string(path).unwrap() != *source { return Err(format!("shared undo left changed disk target {}", path.display())); }
+        }
+        let restored = project.documents.snapshot(blade.id).unwrap();
+        if restored.text != unsaved_blade || !restored.dirty { return Err("shared undo lost the original unsaved Blade overlay".into()); }
+        ide_host::ops::lsp::restore_reviewed_edit(&host, "main", group.clone(), true).await.map_err(|e| format!("shared redo: {e:?}"))?;
+        if std::fs::read_to_string(&originals[0].0).unwrap() != originals[0].1.replace("name('invoice')", "name('details')") { return Err("shared redo did not rename closed declaration".into()); }
+        if project.documents.snapshot(blade.id).unwrap().text != unsaved_blade.replace("openstorm.billing.invoice", "openstorm.billing.details") { return Err("shared redo lost Blade callers".into()); }
+        let changed_mailer = format!("{}// external change after refactoring\n", std::fs::read_to_string(&originals[2].0).unwrap());
+        std::fs::write(&originals[2].0, &changed_mailer).unwrap();
+        if ide_host::ops::lsp::restore_reviewed_edit(&host, "main", group, false).await.is_ok() { return Err("shared undo overwrote a subsequent external change".into()); }
+        if std::fs::read_to_string(&originals[2].0).unwrap() != changed_mailer || project.documents.snapshot(doc.id).unwrap().text != expected { return Err("failed shared undo changed a target".into()); }
         Ok(())
     }
     .await;

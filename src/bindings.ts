@@ -391,6 +391,7 @@ export const commands = {
 	lspRestart: (server: ServerId) => typedError<null, IdeError>(__TAURI_INVOKE("lsp_restart", { server })),
 	/**  Applies a (previewed) workspace edit, e.g. after rename confirmation. */
 	applyWorkspaceEdit: (edit: WorkspaceEdit_Deserialize) => typedError<null, IdeError>(__TAURI_INVOKE("apply_workspace_edit", { edit })),
+	restoreReviewedEdit: (group: string, redo: boolean) => typedError<null, IdeError>(__TAURI_INVOKE("restore_reviewed_edit", { group, redo })),
 	/**
 	 *  Runs a server command (`workspace/executeCommand`), e.g. a completion item's
 	 *  follow-up command. Edits the server requests arrive via `workspace/applyEdit`.
@@ -3339,7 +3340,7 @@ export type IdeEvent =
  *  The backend changed a document (reload from disk, formatting, refactoring).
  *  The UI applies `changes` on top of `base_version`, yielding `version`.
  */
-{ type: "docPatched"; doc: DocId; baseVersion: number; version: number; changes: TextChange[] } | 
+{ type: "docPatched"; doc: DocId; baseVersion: number; version: number; changes: TextChange[]; history?: ReviewedEditHistory | null } | 
 /**  A document's dirty flag changed (saved / modified externally). */
 { type: "docDirty"; doc: DocId; dirty: boolean } | 
 /**  An open document's language changed (Settings › File Types, Override File Type). */
@@ -4928,6 +4929,14 @@ export type RequestId = number;
 export type ResetMode = "soft" | "mixed" | "hard" | "keep";
 
 export type ReviewEvent = "approve" | "requestChanges" | "comment";
+
+export type ReviewedEditAction = "apply" | "undo" | "redo";
+
+/**  A reviewed multi-file edit's position in editor history. */
+export type ReviewedEditHistory = {
+	group: string,
+	action: ReviewedEditAction,
+};
 
 /**  A file changed across several commits: its content at `before` ↔ at `after`. */
 export type RevisionChange = {

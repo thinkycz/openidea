@@ -4,7 +4,8 @@ import { useCallback, useEffect, useId, useMemo, useRef, useState, type Keyboard
 import clsx from "clsx";
 import { EditorView, keymap } from "@codemirror/view";
 import { Prec, Text, type Extension } from "@codemirror/state";
-import { history, historyKeymap } from "@codemirror/commands";
+import { reviewedHistoryKeymap } from "@/editor/core/cm/reviewedHistory";
+import { history } from "@codemirror/commands";
 import {
   MergeView,
   getChunks,
@@ -115,7 +116,7 @@ async function attachSide(side: DiffSide, path: string): Promise<DocumentAttachm
   }
 }
 
-const editableExtensions = (): Extension => [history(), keymap.of(historyKeymap)];
+const editableExtensions = (): Extension => [history(), keymap.of(reviewedHistoryKeymap)];
 
 type Side = "a" | "b";
 type ViewUpdateFn = (u: { docChanged: boolean; selectionSet: boolean }) => void;

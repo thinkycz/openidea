@@ -27,12 +27,38 @@ fn revision(states: &[(DocId, parking_lot::MutexGuard<'_, DocState>)]) -> IdeRes
     Ok(hash.finalize().to_hex().to_string())
 }
 
+#[derive(Clone)]
+struct Side {
+    disk: Vec<u8>,
+    text: String,
+    dirty: bool,
+}
+#[derive(Clone)]
+struct HistoryFile {
+    path: PathBuf,
+    before: Side,
+    after: Side,
+    encoding: String,
+    bom: bool,
+    line_ending: LineEnding,
+}
+struct Entry {
+    group: String,
+    files: Vec<HistoryFile>,
+}
+#[derive(Default)]
+pub(super) struct ReviewedHistory {
+    entries: Vec<Entry>,
+    cursor: usize,
+}
+
 struct Staged {
     path: PathBuf,
     original: Vec<u8>,
     replacement: Vec<u8>,
     text: String,
     open: Option<DocId>,
+    dirty: bool,
 }
 
 impl Documents {
@@ -50,6 +76,7 @@ impl Documents {
     /// writes; rollback never overwrites a subsequent external modification.
     pub fn apply_guarded_edits(&self, edit: &WorkspaceEdit, recovery_root: &Path) -> IdeResult<()> {
         let guard = edit.guard.as_ref().ok_or_else(|| IdeError::invalid("Missing edit revision"))?;
+        let mut history = self.reviewed_history.lock();
         let registry = self.registry.lock();
         let mut slots: Vec<_> = registry.docs.iter().map(|(id, entry)| (*id, entry.slot.clone())).collect();
         slots.sort_by_key(|(id, _)| id.0);
@@ -61,6 +88,8 @@ impl Documents {
         #[cfg(unix)]
         let mut identities = HashSet::new();
         let mut staged = Vec::new();
+        let mut history_files = Vec::new();
+        let mut history_bytes = 0usize;
         let mut staged_bytes = 0u64;
         for file in &edit.files {
             let FileEdit::Edit { path, edits } = file else {
@@ -124,6 +153,8 @@ impl Documents {
             // Document's generic LSP mapping clamps positions; reviewed plans
             // must instead reject invalid lines, columns and split surrogates.
             let source = proposal.text();
+            let before_dirty = open.is_some_and(|id| states.iter().any(|(key, st)| *key == id && st.dirty));
+            let before = Side { disk: original.clone(), text: source.clone(), dirty: before_dirty };
             let lines: Vec<_> = source.split('\n').collect();
             let mut ranges = Vec::new();
             for e in edits {
@@ -147,17 +178,181 @@ impl Documents {
                 return Err(IdeError::invalid("The edit plan contains overlapping or colliding edits"));
             }
             proposal.apply_edits_detailed(edits)?;
+            history_files.push(HistoryFile {
+                path: path.clone(),
+                before,
+                after: Side {
+                    disk: ide_vfs::encode(&proposal.text_for_save(), &encoding, bom)?,
+                    text: proposal.text(),
+                    dirty: false,
+                },
+                encoding: encoding.clone(),
+                bom,
+                line_ending: proposal.line_ending(),
+            });
+            let retained = history_files.last().unwrap();
+            history_bytes = history_bytes
+                .saturating_add(retained.before.disk.len())
+                .saturating_add(retained.after.disk.len())
+                .saturating_add(retained.before.text.len())
+                .saturating_add(retained.after.text.len());
+            if history_bytes > 64 * 1024 * 1024 {
+                return Err(IdeError::unavailable("The edit plan exceeds the safe history size limit"));
+            }
             staged.push(Staged {
                 path,
                 original,
                 replacement: ide_vfs::encode(&proposal.text_for_save(), &encoding, bom)?,
                 text: proposal.text(),
                 open,
+                dirty: false,
             });
         }
         if staged.is_empty() {
             return Ok(());
         }
+        let group = format!(
+            "{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos()
+        );
+        self.commit_reviewed(
+            &staged,
+            &mut states,
+            recovery_root,
+            ide_core::event::ReviewedEditHistory {
+                group: group.clone(),
+                action: ide_core::event::ReviewedEditAction::Apply,
+            },
+        )?;
+        let cursor = history.cursor;
+        history.entries.truncate(cursor);
+        history.entries.push(Entry { group, files: history_files });
+        // Bound resident originals; Local History remains available independently.
+        while history.entries.len() > 16
+            || (history.entries.len() > 1
+                && history
+                    .entries
+                    .iter()
+                    .flat_map(|e| &e.files)
+                    .map(|f| f.before.disk.len() + f.after.disk.len() + f.before.text.len() + f.after.text.len())
+                    .sum::<usize>()
+                    > 64 * 1024 * 1024)
+        {
+            history.entries.remove(0);
+        }
+        history.cursor = history.entries.len();
+        Ok(())
+    }
+
+    pub fn reviewed_edit_paths(&self, group: &str, redo: bool) -> IdeResult<Vec<PathBuf>> {
+        let history = self.reviewed_history.lock();
+        let index = if redo { Some(history.cursor) } else { history.cursor.checked_sub(1) };
+        let entry = index
+            .and_then(|i| history.entries.get(i))
+            .filter(|e| e.group == group)
+            .ok_or_else(|| IdeError::invalid("This reviewed edit is no longer next in project history"))?;
+        Ok(entry.files.iter().map(|f| f.path.clone()).collect())
+    }
+
+    /// Undo/redo exactly one reviewed transaction. Validate every disk and open
+    /// overlay before writing. Never merge history into subsequent user edits.
+    pub fn restore_reviewed_edit(&self, group: &str, redo: bool, recovery_root: &Path) -> IdeResult<Vec<PathBuf>> {
+        let mut history = self.reviewed_history.lock();
+        let index = if redo { Some(history.cursor) } else { history.cursor.checked_sub(1) };
+        let entry = index
+            .and_then(|i| history.entries.get(i))
+            .filter(|e| e.group == group)
+            .ok_or_else(|| IdeError::invalid("This reviewed edit is no longer next in project history"))?;
+        let registry = self.registry.lock();
+        let mut slots: Vec<_> = registry.docs.iter().map(|(id, entry)| (*id, entry.slot.clone())).collect();
+        slots.sort_by_key(|(id, _)| id.0);
+        let mut states: Vec<_> = slots.iter().map(|(id, slot)| (*id, slot.lock())).collect();
+        let mut staged = Vec::new();
+        #[cfg(unix)]
+        let mut identities = HashSet::new();
+        for file in &entry.files {
+            let (expected, target) = if redo { (&file.before, &file.after) } else { (&file.after, &file.before) };
+            if dunce::canonicalize(&file.path)? != file.path || std::fs::read(&file.path)? != expected.disk {
+                return Err(IdeError::new(
+                    ErrorKind::OutOfSync,
+                    "A refactoring target changed on disk. Undo/redo was cancelled without changes.",
+                ));
+            }
+            let metadata = std::fs::metadata(&file.path)?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::MetadataExt;
+                if !identities.insert((metadata.dev(), metadata.ino())) {
+                    return Err(IdeError::invalid(
+                        "Refactoring targets are now physically aliased. Undo/redo was cancelled.",
+                    ));
+                }
+            }
+            if metadata.permissions().readonly() {
+                return Err(read_only_error(&file.path));
+            }
+            let open = Self::lookup(&registry, &file.path);
+            if let Some(id) = open {
+                let st = &states.iter().find(|(key, _)| *key == id).ok_or_else(stale)?.1;
+                if st.closed
+                    || st.read_only
+                    || st.binary
+                    || st.uri.is_some()
+                    || st.doc.text() != expected.text
+                    || st.encoding != file.encoding
+                    || st.has_bom != file.bom
+                    || st.doc.line_ending() != file.line_ending
+                    || st.disk_revision != blake3::hash(&expected.disk).to_hex().as_str()
+                {
+                    return Err(IdeError::new(
+                        ErrorKind::OutOfSync,
+                        "A refactoring target changed in the editor. Undo/redo was cancelled without changes.",
+                    ));
+                }
+            } else if expected.dirty || target.dirty {
+                return Err(IdeError::invalid(format!(
+                    "Reopen {} before undo/redo to restore its unsaved buffer",
+                    file.path.display()
+                )));
+            }
+            staged.push(Staged {
+                path: file.path.clone(),
+                original: expected.disk.clone(),
+                replacement: target.disk.clone(),
+                text: target.text.clone(),
+                open,
+                dirty: target.dirty,
+            });
+        }
+        self.commit_reviewed(
+            &staged,
+            &mut states,
+            recovery_root,
+            ide_core::event::ReviewedEditHistory {
+                group: group.into(),
+                action: if redo {
+                    ide_core::event::ReviewedEditAction::Redo
+                } else {
+                    ide_core::event::ReviewedEditAction::Undo
+                },
+            },
+        )?;
+        if redo {
+            history.cursor += 1;
+        } else {
+            history.cursor -= 1;
+        }
+        Ok(staged.into_iter().map(|f| f.path).collect())
+    }
+
+    fn commit_reviewed(
+        &self,
+        staged: &[Staged],
+        states: &mut [(DocId, parking_lot::MutexGuard<'_, DocState>)],
+        recovery_root: &Path,
+        history: ide_core::event::ReviewedEditHistory,
+    ) -> IdeResult<()> {
         let receipt = format!(
             "{}-{}",
             std::process::id(),
@@ -193,15 +388,25 @@ impl Documents {
                 ));
             }
         }
-        for file in &staged {
+        for file in staged {
             if let Some(id) = file.open {
                 let st = &mut states.iter_mut().find(|(key, _)| *key == id).ok_or_else(stale)?.1;
-                self.replace_locked(id, st, &file.text)?;
+                let set = st.doc.diff(&file.text);
+                let base_version = st.doc.version();
+                let (applied, edits) = st.doc.apply_detailed(base_version, &set)?;
+                self.notify_changed(id, st, &applied, &edits);
+                self.sink.emit(IdeEvent::DocPatched {
+                    doc: id,
+                    base_version,
+                    version: st.doc.version(),
+                    changes: set.changes,
+                    history: Some(history.clone()),
+                });
                 st.disk_revision = blake3::hash(&file.replacement).to_hex().to_string();
                 st.disk_mtime = ide_vfs::mtime_ms(&std::fs::metadata(&file.path)?);
                 st.disk_len = file.replacement.len() as u64;
-                self.set_dirty(id, st, false);
-                if st.observed {
+                self.set_dirty(id, st, file.dirty);
+                if st.observed && !file.dirty {
                     for observer in self.observers() {
                         observer.saved(id, &st.path, &file.text);
                     }

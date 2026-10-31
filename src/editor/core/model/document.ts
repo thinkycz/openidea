@@ -6,7 +6,7 @@ import { ChangeSet, Transaction, type Annotation, type EditorState, type StateEf
 import { EditorView } from "@codemirror/view";
 import type { LanguageDescription, LanguageSupport } from "@codemirror/language";
 import { create } from "zustand";
-import type { EditorConfigProps } from "@/bindings";
+import type { ReviewedEditHistory, EditorConfigProps } from "@/bindings";
 import type {
   DocId,
   DocumentInfo,
@@ -70,6 +70,7 @@ export type Banner = "binary" | "tooLarge" | "readOnly" | "library" | null;
 export interface DocAttachmentTarget {
   /** Applies changes that are already in the model (another view / the backend). */
   applyExternal(changes: ChangeSet, annotations: Annotation<unknown>[]): void;
+  applyReviewed?(changes: ChangeSet, history: ReviewedEditHistory, primary: boolean): void;
 }
 
 export interface DocMeta {
@@ -266,7 +267,7 @@ export class DocModel {
         snapshot: () => manager.backend.snapshot(this.doc),
       },
       {
-        applyRemote: (cs) => this.applyRemote(cs),
+        applyRemote: (cs, history) => this.applyRemote(cs, history),
         onDiscarded: () =>
           manager.notify({
             level: "warning",
@@ -350,16 +351,31 @@ export class DocModel {
     this.scheduleRefresh();
   }
 
-  private applyRemote(cs: ChangeSet) {
+  async restoreReviewed(group: string, redo: boolean) {
+    await this.manager.restoreReviewed(group, redo);
+  }
+
+  historyError(e: unknown) {
+    this.manager.notify({
+      level: "warning",
+      title: "Could not restore refactoring",
+      body: e instanceof Error ? e.message : String(e),
+    });
+  }
+
+  private applyRemote(cs: ChangeSet, history?: ReviewedEditHistory | null) {
     this.modified.map(cs);
     this.changeCounter++;
     const primary = this.primarySlot();
-    for (const s of this.slots)
-      s.applyExternal(cs, [remoteChange.of(true), Transaction.addToHistory.of(s === primary)]);
+    for (const s of this.slots) {
+      if (history) s.applyReviewed(cs, history, true);
+      else s.applyExternal(cs, [remoteChange.of(true), Transaction.addToHistory.of(s === primary)]);
+    }
     // Without a tab, the first attached view keeps backend edits (Replace in Files…) undoable.
     let first = !primary;
     for (const a of this.attachments) {
-      a.applyExternal(cs, [remoteChange.of(true), Transaction.addToHistory.of(first)]);
+      if (history && a.applyReviewed) a.applyReviewed(cs, history, true);
+      else a.applyExternal(cs, [remoteChange.of(true), Transaction.addToHistory.of(first && !history)]);
       first = false;
     }
     this.scheduleRefresh();
@@ -666,6 +682,12 @@ export class DocumentManager {
     private host: ManagerHost,
     readonly scheduler: Scheduler = frameScheduler,
   ) {}
+
+  async restoreReviewed(group: string, redo: boolean) {
+    await Promise.all([...this.byId.values()].map((m) => m.sync.whenIdle()));
+    if (!this.backend.restoreReviewed) throw new Error("Reviewed edit history is unavailable");
+    await this.backend.restoreReviewed(group, redo);
+  }
 
   settings() {
     return this.host.settings();

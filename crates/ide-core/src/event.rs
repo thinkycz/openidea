@@ -10,6 +10,22 @@ use serde::{Deserialize, Serialize};
 use specta::Type;
 use std::sync::Arc;
 
+/// A reviewed multi-file edit's position in editor history.
+#[derive(Clone, Debug, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct ReviewedEditHistory {
+    pub group: String,
+    pub action: ReviewedEditAction,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub enum ReviewedEditAction {
+    Apply,
+    Undo,
+    Redo,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, Type)]
 #[serde(tag = "type", rename_all = "camelCase", rename_all_fields = "camelCase")]
 pub enum IdeEvent {
@@ -26,6 +42,8 @@ pub enum IdeEvent {
         base_version: u32,
         version: u32,
         changes: Vec<TextChange>,
+        #[serde(default)]
+        history: Option<ReviewedEditHistory>,
     },
     /// A document's dirty flag changed (saved / modified externally).
     DocDirty {

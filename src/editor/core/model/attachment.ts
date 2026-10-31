@@ -3,6 +3,8 @@
  * diff): local edits flow view → model → backend and other editors; edits
  * from elsewhere are mirrored into the view. See `attachDocument` in editor/api.
  */
+import type { ReviewedEditHistory } from "@/bindings";
+import { reviewedHistory, reviewedTransaction } from "../cm/reviewedHistory";
 import { Transaction, type Annotation, type ChangeSet } from "@codemirror/state";
 import { EditorView, ViewPlugin } from "@codemirror/view";
 import {
@@ -18,6 +20,10 @@ import type { DocAttachmentTarget, DocumentManager } from "./document";
 
 class AttachedView implements DocAttachmentTarget {
   view: EditorView | null = null;
+
+  applyReviewed(changes: ChangeSet, history: ReviewedEditHistory, primary: boolean) {
+    if (this.view) this.view.dispatch(reviewedTransaction(this.view.state, changes, history, primary));
+  }
 
   applyExternal(changes: ChangeSet, annotations: Annotation<unknown>[]) {
     this.view?.dispatch({ changes, annotations });
@@ -57,6 +63,10 @@ export async function attachDocument(manager: DocumentManager, path: string): Pr
     text: () => model.sync.localText.toString(),
     readOnly: model.getMeta().readOnly || model.virtual,
     extension: [
+      reviewedHistory(
+        (group, redo) => model.restoreReviewed(group, redo),
+        (e) => model.historyError(e),
+      ),
       plugin,
       documentSynced.of(() => model.sync.whenIdle()),
       EditorView.updateListener.of((u) => {

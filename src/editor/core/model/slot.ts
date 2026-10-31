@@ -26,6 +26,8 @@ import {
   type EditorDocContext,
   type TextEditorHandle,
 } from "@/editor/api";
+import { reviewedHistory, reviewedTransaction } from "../cm/reviewedHistory";
+import type { ReviewedEditHistory } from "@/bindings";
 import { showContextMenu } from "@/ui";
 import { baseExtensions, compartments, contributionExtensions } from "../cm/setup";
 import { gutterMenuItems, inGutterMenuArea } from "../gutterMenu";
@@ -75,16 +77,22 @@ export class EditorSlot {
     this.state = EditorState.create({
       doc: model.sync.localText,
       selection: source ? source.currentState().selection : undefined,
-      extensions: baseExtensions({
-        ctx: model.ctx(),
-        settings: model.settings(),
-        info: model.info,
-        language: model.language,
-        docLength: model.sync.localText.length,
-        indent: model.effectiveIndent(),
-        wrapOverride: model.softWrapOverride,
-        extra: this.slotExtensions(),
-      }),
+      extensions: [
+        reviewedHistory(
+          (group, redo) => model.restoreReviewed(group, redo),
+          (e) => model.historyError(e),
+        ),
+        baseExtensions({
+          ctx: model.ctx(),
+          settings: model.settings(),
+          info: model.info,
+          language: model.language,
+          docLength: model.sync.localText.length,
+          indent: model.effectiveIndent(),
+          wrapOverride: model.softWrapOverride,
+          extra: this.slotExtensions(),
+        }),
+      ],
     });
     this.contributionsVersion = model.manager.contributionsVersion;
     if (source?.view) this.scroll = source.view.scrollSnapshot();
@@ -223,6 +231,12 @@ export class EditorSlot {
     const spec: TransactionSpec = { changes, annotations };
     if (this.view) this.view.dispatch(spec);
     else this.state = this.state.update(spec).state;
+  }
+
+  applyReviewed(changes: ChangeSet, history: ReviewedEditHistory, primary: boolean) {
+    const tr = reviewedTransaction(this.currentState(), changes, history, primary);
+    if (this.view) this.view.dispatch(tr);
+    else this.state = tr.state;
   }
 
   /** Applies effects (reconfiguration) to the view or the stored state. */

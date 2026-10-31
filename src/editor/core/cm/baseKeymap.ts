@@ -12,16 +12,15 @@ import {
   cursorLineDown as cmCursorLineDown,
   cursorLineUp as cmCursorLineUp,
   defaultKeymap,
-  historyKeymap,
   indentLess,
   indentMore,
   insertBlankLine,
-  redo,
   selectLine,
   selectLineDown as cmSelectLineDown,
   selectLineUp as cmSelectLineUp,
   toggleTabFocusMode,
 } from "@codemirror/commands";
+import { reviewedHistoryKeymap, reviewedRedo } from "./reviewedHistory";
 import { cursorLineDown, cursorLineUp, selectLineDown, selectLineUp } from "./verticalMotion";
 
 const DROPPED = new Set<unknown>([
@@ -48,7 +47,7 @@ const vertical = (b: KeyBinding): KeyBinding =>
 
 export const editorBaseKeymap: readonly KeyBinding[] = [
   ...defaultKeymap.filter((b) => !DROPPED.has(b.run)).map(vertical),
-  ...historyKeymap,
+  ...reviewedHistoryKeymap,
   // IDEA's Windows Redo is Ctrl+Shift+Z (Ctrl+Y is Delete Line); CodeMirror only binds it on macOS and Linux.
-  { win: "Ctrl-Shift-z", run: redo, preventDefault: true },
+  { win: "Ctrl-Shift-z", run: reviewedRedo, preventDefault: true },
 ];

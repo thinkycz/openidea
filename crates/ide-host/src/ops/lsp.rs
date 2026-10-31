@@ -1,7 +1,7 @@
 use crate::Host;
 use crate::apply_workspace_edit as apply_edit;
 use crate::rpc::Dispatcher;
-use ide_core::{DocId, IdeResult, Location, Pos, Range, RequestId, ServerId, TextEdit, WorkspaceEdit};
+use ide_core::{DocId, IdeError, IdeResult, Location, Pos, Range, RequestId, ServerId, TextEdit, WorkspaceEdit};
 use ide_lsp::types::*;
 
 pub async fn lsp_completion(
@@ -370,6 +370,28 @@ pub async fn lsp_execute_command(host: &Host, window: &str, doc: DocId, command:
     host.project(window)?.lsp.execute_command(doc, command).await
 }
 
+/// Restore a reviewed transaction only while all of its target witnesses match.
+pub async fn restore_reviewed_edit(host: &Host, window: &str, group: String, redo: bool) -> IdeResult<()> {
+    let project = host.project(window)?;
+    host.blocking(move || {
+        let settings = project.settings.effective();
+        let mut roots = vec![dunce::canonicalize(&project.root)?];
+        for root in crate::project::content_roots(&settings, &project.root) {
+            roots.push(dunce::canonicalize(root)?);
+        }
+        for path in project.documents.reviewed_edit_paths(&group, redo)? {
+            if !roots.iter().any(|root| path.starts_with(root)) {
+                return Err(IdeError::invalid("A history target is outside this project's current editable roots"));
+            }
+        }
+        let changed =
+            project.documents.restore_reviewed_edit(&group, redo, &project.cache_dir.join("edit-recovery"))?;
+        project.lsp.php_files_changed(&[], &changed, &[]);
+        Ok(())
+    })
+    .await
+}
+
 /// Commands of this module the remote server answers.
 pub(crate) fn register(d: &mut Dispatcher) {
     d.add("lsp_completion", |c| async move {
@@ -461,6 +483,9 @@ pub(crate) fn register(d: &mut Dispatcher) {
     d.add("lsp_servers", |c| async move { lsp_servers(&c.host, &c.window) });
     d.add("lsp_resend_diagnostics", |c| async move { lsp_resend_diagnostics(&c.host, &c.window) });
     d.add("lsp_restart", |c| async move { lsp_restart(&c.host, &c.window, c.arg("server")?).await });
+    d.add("restore_reviewed_edit", |c| async move {
+        restore_reviewed_edit(&c.host, &c.window, c.arg("group")?, c.arg("redo")?).await
+    });
     d.add("apply_workspace_edit", |c| async move { apply_workspace_edit(&c.host, &c.window, c.arg("edit")?).await });
     d.add("lsp_execute_command", |c| async move {
         lsp_execute_command(&c.host, &c.window, c.arg("doc")?, c.arg("command")?).await

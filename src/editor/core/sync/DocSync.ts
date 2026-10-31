@@ -25,7 +25,7 @@
  * the snapshot, selections mapped).
  */
 import { ChangeSet, Text } from "@codemirror/state";
-import type { TextChange } from "@/platform/ipc";
+import type { TextChange, ReviewedEditHistory } from "@/platform/ipc";
 import { minimalChange } from "./diff";
 
 export interface SyncTransport {
@@ -35,7 +35,7 @@ export interface SyncTransport {
 
 export interface SyncHost {
   /** Apply a change set (in local-text coordinates) to every view, annotated as remote. */
-  applyRemote(changes: ChangeSet): void;
+  applyRemote(changes: ChangeSet, history?: ReviewedEditHistory | null): void;
   /** Called after a hard resync discarded local changes the backend never saw. */
   onDiscarded?(reason: unknown): void;
   /** Non-recoverable transport errors (logged by default). */
@@ -76,6 +76,7 @@ interface RemotePatch {
   baseVersion: number;
   version: number;
   changes: TextChange[];
+  history?: ReviewedEditHistory | null;
 }
 
 /** How long a rejection waits for the matching `docPatched` before fetching a snapshot. */
@@ -298,7 +299,8 @@ export class DocSync {
     }
     if (p.empty) return;
     this.localText = p.apply(this.localText);
-    this.host.applyRemote(p);
+    if (patch.history) this.host.applyRemote(p, patch.history);
+    else this.host.applyRemote(p);
   }
 
   /** Last resort: adopt the backend text, dropping unacknowledged local changes. */

@@ -425,6 +425,7 @@
   "Could not open project": "无法打开项目",
   "Could not open the folder picker": "无法打开文件夹选择器",
   "Could not reach GitHub": "无法连接到 GitHub",
+  "Could not restore refactoring": "无法恢复重构",
   "Could not save": "无法保存",
   "Could not submit the review": "无法提交审查",
   "Coverage": "覆盖率",

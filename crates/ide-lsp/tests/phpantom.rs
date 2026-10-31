@@ -2125,3 +2125,301 @@ async fn laravel_nested_component_forwarding_tracks_unsaved_scope_boundaries() {
     }
     assert!(outcome.is_ok(), "{}", outcome.unwrap_err());
 }
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires the pinned macOS Apple Silicon PHPantom executable"]
+async fn laravel_aware_component_data_tracks_explicit_ancestors_and_unsaved_callers() {
+    async fn members(mgr: &LspManager, doc: DocId, text: &str, yes: &[&str], no: &[&str]) -> Result<(), String> {
+        tokio::time::timeout(Duration::from_secs(8), async {
+            let mut last = Vec::new();
+            for _ in 0..80 {
+                match mgr.completion(doc, pos(text, "userOnly"), None, Default::default()).await {
+                    Ok(reply) => {
+                        last = reply.items.into_iter().map(|item| item.label).collect();
+                        if yes.iter().all(|name| last.iter().any(|item| item == name))
+                            && no.iter().all(|name| last.iter().all(|item| item != name))
+                        {
+                            return Ok(());
+                        }
+                    }
+                    Err(error) if error.kind == ide_core::error::ErrorKind::Cancelled => {}
+                    Err(error) => return Err(error.to_string()),
+                }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+            Err(format!("required {yes:?}, forbidden {no:?}; got {last:?}"))
+        })
+        .await
+        .map_err(|_| "nested component query exceeded eight-second deadline".to_string())?
+    }
+    async fn type_at(
+        mgr: &LspManager,
+        doc: DocId,
+        text: &str,
+        expected_any: &[&str],
+        absent: &[&str],
+    ) -> Result<(), String> {
+        tokio::time::timeout(Duration::from_secs(8), async {
+            let mut last = String::new();
+            for _ in 0..80 {
+                match mgr.hover(doc, pos(text, "$person"), Default::default()).await {
+                    Ok(reply) => {
+                        last = reply.map(|reply| reply.contents.value).unwrap_or_default();
+                        if expected_any.iter().any(|ty| last.contains(ty)) && absent.iter().all(|ty| !last.contains(ty))
+                        {
+                            return Ok(());
+                        }
+                    }
+                    Err(error) if error.kind == ide_core::error::ErrorKind::Cancelled => {}
+                    Err(error) => return Err(error.to_string()),
+                }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+            Err(format!("aware type needs one of {expected_any:?}, excludes {absent:?}; got {last}"))
+        })
+        .await
+        .map_err(|_| "aware hover exceeded eight-second deadline".to_string())?
+    }
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().canonicalize().unwrap();
+    let caller = "<?php\nnamespace App;\nclass Caller { public function show(): mixed {\n$person = new User();\n$leaked = new Other();\nreturn view('page', compact('person', 'leaked'));\n} }\n";
+    let page = "<x-card :person=\"$person\" />\n";
+    let card = "@props(['person'])\n<x-badge :person=\"$person\" />\n";
+    let badge = "@props(['person'])\n<p>😀</p>{{ $person->userOnly }}\n";
+    let user_source = "<?php namespace App; class User { public string $userOnly; }\n";
+    let files = [
+        (
+            "composer.json",
+            r#"{"require":{"laravel/framework":"^13.0"},"autoload":{"psr-4":{"App\\":"app/","Illuminate\\":"stubs/Illuminate/"}}}"#,
+        ),
+        (
+            "stubs/Illuminate/View/ComponentAttributeBag.php",
+            r#"<?php namespace Illuminate\View; class ComponentAttributeBag { public function __construct(private array $attributes = []) {} public function getAttributes(): array { return $this->attributes; } }"#,
+        ),
+        ("app/User.php", user_source),
+        ("app/Other.php", "<?php namespace App; class Other { public int $otherOnly; }\n"),
+        ("app/Caller.php", caller),
+        ("resources/views/page.blade.php", page),
+        ("resources/views/components/card.blade.php", card),
+        ("resources/views/components/badge.blade.php", badge),
+    ];
+    for (name, text) in files {
+        let path = root.join(name);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, text).unwrap();
+    }
+    let mut php = LanguageRegistry::load(None).unwrap().get(&LanguageId::new("php")).unwrap();
+    php.language_servers.retain(|server| server.name == "phpantom");
+    php.language_servers[0].command = std::env::var("OPENSTORM_TEST_PHPANTOM_BIN").expect("engine executable");
+    let mgr = LspManager::new(root.clone(), Arc::new(LanguageRegistry::from_configs(vec![php])), Arc::new(|_| {}));
+    let leaf = DocId::next();
+    let middle = DocId::next();
+    let controller = DocId::next();
+    let parent = DocId::next();
+    for (doc, path, text) in [
+        (leaf, "resources/views/components/badge.blade.php", badge),
+        (middle, "resources/views/components/card.blade.php", card),
+        (controller, "app/Caller.php", caller),
+    ] {
+        mgr.did_open(doc, &root.join(path), &LanguageId::new("php"), 1, text);
+    }
+    let outcome: Result<(), String> = async {
+        members(&mgr, leaf, badge, &["userOnly"], &["otherOnly"]).await?;
+        eprintln!("Control: explicit prop forwarding reaches User");
+        let aware = badge.replace("@props(['person'])", "@aware(['person'])");
+        let implicit = card.replace(" :person=\"$person\"", "");
+        replace(&mgr, leaf, 2, badge, &aware);
+        replace(&mgr, middle, 2, card, &implicit);
+        members(&mgr, leaf, &aware, &["userOnly"], &["otherOnly"]).await?;
+        eprintln!("Aware binding consumes the explicit parent data without child forwarding");
+        let targets = mgr.goto(leaf, pos(&aware, "userOnly"), GotoKind::Definition).await.map_err(|e| e.to_string())?;
+        if !targets
+            .iter()
+            .any(|target| target.path == root.join("app/User.php") && target.range.start == pos(user_source, "userOnly"))
+        {
+            return Err(format!("aware model must map to exact User property: {targets:?}"));
+        }
+        mgr.did_open(parent, &root.join("resources/views/page.blade.php"), &LanguageId::new("php"), 1, page);
+        let slotted = "<x-card :person=\"$person\"><x-slot:person>Owned slot</x-slot></x-card>\n";
+        replace(&mgr, parent, 2, page, slotted);
+        type_at(&mgr, leaf, &aware, &["ComponentSlot"], &["User", "Other"]).await?;
+        mgr.did_close(parent);
+        members(&mgr, leaf, &aware, &["userOnly"], &["otherOnly"]).await?;
+        eprintln!("Unsaved named-slot data overrides the attribute only at render; close restores User");
+        let bag_page = DocId::next();
+        mgr.did_open(bag_page, &root.join("resources/views/page.blade.php"), &LanguageId::new("php"), 1, page);
+        let bag = r#"<x-card :attributes="new \Illuminate\View\ComponentAttributeBag(['person' => new \App\Other()])" />"#;
+        replace(&mgr, bag_page, 2, page, bag);
+        type_at(&mgr, leaf, &aware, &["mixed", "Other"], &["User"]).await?;
+        eprintln!("Unknown expanded attribute-bag keys are not proven absent");
+        let explicit = r#"<x-card :attributes="new \Illuminate\View\ComponentAttributeBag(['person' => new \App\Other()])" :person="$person" />"#;
+        replace(&mgr, bag_page, 3, bag, explicit);
+        members(&mgr, leaf, &aware, &["userOnly"], &["otherOnly"]).await?;
+        let raw = r#"@php $attributes = new \Illuminate\View\ComponentAttributeBag(['person' => new \App\Other()]); @endphp
+<x-card {{ $attributes }} />"#;
+        replace(&mgr, bag_page, 4, explicit, raw);
+        type_at(&mgr, leaf, &aware, &["mixed", "Other"], &["User"]).await?;
+        mgr.did_close(bag_page);
+        members(&mgr, leaf, &aware, &["userOnly"], &["otherOnly"]).await?;
+        eprintln!("Explicit data wins over a bag; raw-bag close restores the disk model");
+        let changed = caller.replace("new User()", "new Other()");
+        replace(&mgr, controller, 2, caller, &changed);
+        members(&mgr, leaf, &aware, &["otherOnly"], &["userOnly"]).await?;
+        mgr.restart(mgr.servers()[0].id).await.map_err(|error| error.to_string())?;
+        members(&mgr, leaf, &aware, &["otherOnly"], &["userOnly"]).await?;
+        mgr.did_close(controller);
+        members(&mgr, leaf, &aware, &["userOnly"], &["otherOnly"]).await?;
+        Ok(())
+    }
+    .await;
+    mgr.shutdown_all().await;
+    for (name, text) in files {
+        assert_eq!(std::fs::read_to_string(root.join(name)).unwrap(), text, "disk original: {name}");
+    }
+    assert!(outcome.is_ok(), "{}", outcome.unwrap_err());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires the pinned macOS Apple Silicon PHPantom executable"]
+async fn laravel_consumable_slot_map_accepts_numeric_keys_through_client() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().canonicalize().unwrap();
+    let leaf = "@aware(['__laravel_slots'])\n<p>😀</p>{{ $__laravel_slots }}\n";
+    let files = [
+        ("composer.json", r#"{"require":{"laravel/framework":"^13.0"},"autoload":{"psr-4":{"App\\":"app/"}}}"#),
+        (
+            "app/MapCaller.php",
+            "<?php namespace App; class MapCaller { public function show(): mixed { return view('page'); } }\n",
+        ),
+        ("resources/views/page.blade.php", "<x-parent><x-slot name=\"1\">Owned</x-slot></x-parent>\n"),
+        ("resources/views/components/parent.blade.php", "@include('components.leaf')\n"),
+        ("resources/views/components/leaf.blade.php", leaf),
+    ];
+    for (name, text) in files {
+        let path = root.join(name);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, text).unwrap();
+    }
+    let mut php = LanguageRegistry::load(None).unwrap().get(&LanguageId::new("php")).unwrap();
+    php.language_servers.retain(|server| server.name == "phpantom");
+    php.language_servers[0].command = std::env::var("OPENSTORM_TEST_PHPANTOM_BIN").expect("engine executable");
+    let mgr = LspManager::new(root.clone(), Arc::new(LanguageRegistry::from_configs(vec![php])), Arc::new(|_| {}));
+    let mut leaf_doc = None;
+    for (name, text) in files.iter().skip(1) {
+        let doc = DocId::next();
+        mgr.did_open(doc, &root.join(name), &LanguageId::new("php"), 1, text);
+        if *name == "resources/views/components/leaf.blade.php" {
+            leaf_doc = Some(doc);
+        }
+    }
+    let outcome = tokio::time::timeout(Duration::from_secs(8), async {
+        let mut last = String::new();
+        for _ in 0..80 {
+            match mgr.hover(leaf_doc.unwrap(), pos(leaf, "$__laravel_slots"), Default::default()).await {
+                Ok(reply) => {
+                    last = reply.map(|reply| reply.contents.value).unwrap_or_default();
+                    let normalized = last.chars().filter(|ch| !ch.is_whitespace()).collect::<String>();
+                    if normalized.contains("array") && !normalized.contains("array<string,mixed>") {
+                        return Ok(());
+                    }
+                }
+                Err(error) if error.kind == ide_core::error::ErrorKind::Cancelled => {}
+                Err(error) => return Err(error.to_string()),
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        Err(format!("factory slot map must allow integer keys, not only string keys: {last}"))
+    })
+    .await
+    .map_err(|_| "slot-map hover exceeded eight-second deadline".to_string())
+    .and_then(|reply| reply);
+    mgr.shutdown_all().await;
+    for (name, text) in files {
+        assert_eq!(std::fs::read_to_string(root.join(name)).unwrap(), text, "disk original: {name}");
+    }
+    assert!(outcome.is_ok(), "{}", outcome.unwrap_err());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires the pinned macOS Apple Silicon PHPantom executable"]
+async fn laravel_component_binding_correlation_ignores_frontend_bindings_and_blade_arguments() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().canonicalize().unwrap();
+    let caller = "<?php namespace App; class Caller { public function show(): mixed { $person = new User(); return view('page', compact('person')); } }\n";
+    let page = "<x-parent :person=\"$person\" />\n";
+    let leaf = "@aware(['person'])\n<p>😀</p>{{ $person->userOnly }}\n";
+    let files = [
+        ("composer.json", r#"{"require":{"laravel/framework":"^13.0"},"autoload":{"psr-4":{"App\\":"app/"}}}"#),
+        ("app/User.php", "<?php namespace App; class User { public string $userOnly; }\n"),
+        ("app/Other.php", "<?php namespace App; class Other { public int $otherOnly; }\n"),
+        ("app/Caller.php", caller),
+        ("resources/views/page.blade.php", page),
+        ("resources/views/components/parent.blade.php", "@props(['person'])\n<x-leaf />\n"),
+        ("resources/views/components/leaf.blade.php", leaf),
+    ];
+    for (name, text) in files {
+        let path = root.join(name);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, text).unwrap();
+    }
+    let mut php = LanguageRegistry::load(None).unwrap().get(&LanguageId::new("php")).unwrap();
+    php.language_servers.retain(|server| server.name == "phpantom");
+    php.language_servers[0].command = std::env::var("OPENSTORM_TEST_PHPANTOM_BIN").expect("engine executable");
+    let mgr = LspManager::new(root.clone(), Arc::new(LanguageRegistry::from_configs(vec![php])), Arc::new(|_| {}));
+    let leaf_doc = DocId::next();
+    let page_doc = DocId::next();
+    let caller_doc = DocId::next();
+    for (doc, name, text) in [
+        (leaf_doc, "resources/views/components/leaf.blade.php", leaf),
+        (DocId::next(), "resources/views/components/parent.blade.php", files[5].1),
+        (page_doc, "resources/views/page.blade.php", page),
+        (caller_doc, "app/Caller.php", caller),
+    ] {
+        mgr.did_open(doc, &root.join(name), &LanguageId::new("php"), 1, text);
+    }
+    let model = |yes: &'static str, no: &'static str| {
+        let mgr = &mgr;
+        async move {
+            tokio::time::timeout(Duration::from_secs(8), async {
+                let mut last = Vec::new();
+                for _ in 0..80 {
+                    match mgr.completion(leaf_doc, pos(leaf, "userOnly"), None, Default::default()).await {
+                        Ok(reply) => {
+                            last = reply.items.into_iter().map(|item| item.label).collect::<Vec<_>>();
+                            if last.iter().any(|item| item == yes) && last.iter().all(|item| item != no) {
+                                return Ok(());
+                            }
+                        }
+                        Err(error) if error.kind == ide_core::error::ErrorKind::Cancelled => {}
+                        Err(error) => return Err(error.to_string()),
+                    }
+                    tokio::time::sleep(Duration::from_millis(25)).await;
+                }
+                Err(format!("required {yes}, excluded {no}; got {last:?}"))
+            })
+            .await
+            .map_err(|_| "binding correlation exceeded eight-second deadline".to_string())?
+        }
+    };
+    let outcome: Result<(), String> = async {
+        model("userOnly", "otherOnly").await?;
+        let frontend = "<div :class=\"{ active: true }\"></div>\n<x-parent :person=\"$person\" />\n";
+        let other = caller.replace("new User()", "new Other()");
+        replace(&mgr, page_doc, 2, page, frontend);
+        replace(&mgr, caller_doc, 2, caller, &other);
+        model("otherOnly", "userOnly").await?;
+        eprintln!("Frontend JavaScript binding does not consume a PHP marker index");
+        let directive = "<x-parent @class(['active' => true]) :person=\"$person\" />\n";
+        replace(&mgr, page_doc, 3, frontend, directive);
+        replace(&mgr, caller_doc, 3, &other, caller);
+        model("userOnly", "otherOnly").await?;
+        eprintln!("Blade directive arguments do not truncate the following component attribute");
+        Ok(())
+    }
+    .await;
+    mgr.shutdown_all().await;
+    for (name, text) in files {
+        assert_eq!(std::fs::read_to_string(root.join(name)).unwrap(), text, "disk original: {name}");
+    }
+    assert!(outcome.is_ok(), "{}", outcome.unwrap_err());
+}

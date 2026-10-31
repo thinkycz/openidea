@@ -8,7 +8,7 @@ import { create } from "zustand";
 import { setContext } from "@/platform/context";
 import { shortcutLabel } from "@/platform/keymap";
 import { t } from "@/platform/i18n";
-import { isCancelled } from "@/platform/ipc";
+import { isCancelled, isTauri } from "@/platform/ipc";
 import { ask } from "@/workbench/messages";
 import { basename, useProject } from "@/platform/project";
 import { editorPrefs } from "@/platform/editorSettings";
@@ -243,6 +243,7 @@ export class EditorController implements SlotHost {
           this.saveSession();
           this.sessionRoot = null;
           this.closeEverything(true);
+          this.manager.resetProject();
           this.nav.clear();
           this.edits.clear();
           if (root) this.restoreSession(root);
@@ -268,6 +269,26 @@ export class EditorController implements SlotHost {
         window.removeEventListener("pagehide", onPageHide);
         window.removeEventListener("beforeunload", onPageHide);
       });
+      // WKWebView can keep DOM focus when another native application activates.
+      if (isTauri()) {
+        let disposed = false;
+        let unlisten: (() => void) | undefined;
+        void import("@tauri-apps/api/window")
+          .then(async ({ getCurrentWindow }) => {
+            const off = await getCurrentWindow().onFocusChanged(({ payload }) => {
+              if (!disposed && !payload) onWindowBlur();
+            });
+            if (disposed) off();
+            else unlisten = off;
+          })
+          .catch((error) => {
+            if (!disposed) console.warn("Native focus autosave listener unavailable", error);
+          });
+        this.disposers.push(() => {
+          disposed = true;
+          unlisten?.();
+        });
+      }
     }
     this.publishContext();
   }

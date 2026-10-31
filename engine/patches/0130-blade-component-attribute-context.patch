@@ -1,0 +1,396 @@
+diff --git a/docs/CHANGELOG.md b/docs/CHANGELOG.md
+index ab40083..d8a2c9a 100644
+--- a/docs/CHANGELOG.md
++++ b/docs/CHANGELOG.md
+@@ -190,6 +190,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
+ 
+ ### Fixed
+ 
++- **Keep expanded Blade attribute data uncertain when its keys are unknown.** `@aware` no longer treats an unreadable attribute bag as definitely missing data, while explicit attributes keep priority. Slot maps also retain support for numeric keys. Contributed by @thinkycz.
++
++
+ - **Keep anonymous-component parent data available to `@aware`.** Hover, completion and navigation follow supplied ancestor values and rendered named slots, preserve supplied null, and refresh after unsaved caller changes. Dynamic and class-provided data remains conservative where its exposed keys cannot be established. Contributed by @thinkycz.
+ 
+ 
+diff --git a/src/blade/call_site_inference.rs b/src/blade/call_site_inference.rs
+index cfa4a2b..2be11fd 100644
+--- a/src/blade/call_site_inference.rs
++++ b/src/blade/call_site_inference.rs
+@@ -1058,13 +1058,28 @@ impl Backend {
+                 });
+                 // Constructor-backed and dynamic data may expose keys beyond the
+                 // attribute bag; unknown data cannot assert absence or an old type.
+-                let initial_data = if anonymous {
+-                    ComponentData::supplied(vars.iter().cloned().chain([(
+-                        "attributes".into(),
+-                        PhpType::parse("\\Illuminate\\View\\ComponentAttributeBag"),
+-                    )]))
+-                } else {
++                let attributes = ComponentData::supplied([(
++                    "attributes".into(),
++                    PhpType::parse("\\Illuminate\\View\\ComponentAttributeBag"),
++                )]);
++                let opening =
++                    crate::blade::component_tags::lex_tag_attributes(content, span.name_span.end);
++                let incomplete = !opening.closed || opening.unresolved_attributes;
++                let provided_bag = vars
++                    .iter()
++                    .any(|(name, ty)| name == "attributes" && !ty.is_null());
++                let initial_data = if !anonymous {
+                     ComponentData::unknown()
++                } else {
++                    let supplied =
++                        ComponentData::supplied(vars.iter().cloned()).overlay(&attributes);
++                    if provided_bag || incomplete {
++                        // Bags and unmodelled attribute expressions may add
++                        // unknown keys; explicit data still overrides them.
++                        ComponentData::unknown().overlay(&supplied)
++                    } else {
++                        supplied
++                    }
+                 };
+                 // The factory adds default/named slots only when rendering;
+                 // still-open ancestors expose their initial data alone.
+@@ -1084,7 +1099,7 @@ impl Backend {
+                 }
+                 render_data = render_data.overlay(&ComponentData::supplied([(
+                     "__laravel_slots".into(),
+-                    PhpType::parse("array<string,mixed>"),
++                    PhpType::parse("array<array-key,mixed>"),
+                 )]));
+                 Some(ConsumableComponentInput {
+                     span,
+diff --git a/src/blade/component_tags/attributes.rs b/src/blade/component_tags/attributes.rs
+index 2e9f707..68f232d 100644
+--- a/src/blade/component_tags/attributes.rs
++++ b/src/blade/component_tags/attributes.rs
+@@ -37,6 +37,45 @@ pub(crate) struct TagAttributes {
+     /// Whether the tag's `>` was found at all. A quoted value that never
+     /// closes swallows the rest of the text, so the tag is unclosed too.
+     pub(crate) closed: bool,
++    /// Embedded Blade expressions may add keys the HTML lexer cannot enumerate.
++    pub(crate) unresolved_attributes: bool,
++}
++
++/// Skip a Blade echo while respecting PHP strings, comments and nested scopes.
++/// Its expression is emitted by the streaming preprocessor, not as HTML attrs.
++fn attribute_echo_end(bytes: &[u8], start: usize) -> usize {
++    use crate::text_scan::{find_matching_forward_bytes, skip_php_comment, skip_string_forward};
++    let (open, close) = crate::blade::signature::echo_delimiters(bytes, start);
++    let mut at = start + open.len();
++    while at < bytes.len() {
++        if bytes[at..].starts_with(close.as_bytes()) {
++            return at + close.len();
++        }
++        if let Some(end) = skip_php_comment(bytes, at) {
++            at = end;
++            continue;
++        }
++        match bytes[at] {
++            b'\'' | b'"' => {
++                at = skip_string_forward(bytes, at);
++                continue;
++            }
++            open @ (b'(' | b'[' | b'{') => {
++                let close = match open {
++                    b'(' => b')',
++                    b'[' => b']',
++                    _ => b'}',
++                };
++                let Some(end) = find_matching_forward_bytes(bytes, at, open, close) else {
++                    return bytes.len();
++                };
++                at = end + 1;
++                continue;
++            }
++            _ => at += 1,
++        }
++    }
++    bytes.len()
+ }
+ 
+ /// Lex the attribute list of a component tag whose name ends at `start`.
+@@ -80,6 +119,39 @@ pub(crate) fn lex_tag_attributes(text: &str, start: usize) -> TagAttributes {
+             _ => {}
+         }
+ 
++        // Blade expressions at attribute position are not HTML attribute
++        // tokens. In particular, their PHP `=>` / `->` cannot close the tag.
++        // Keep the streaming lowering responsible for their PHP/source map.
++        if text[i..].starts_with("{{--") {
++            i = text[i + 4..]
++                .find("--}}")
++                .map_or(bytes.len(), |end| i + 4 + end + 4);
++            continue;
++        }
++        if crate::blade::signature::is_echo_start(bytes, i) {
++            lexed.unresolved_attributes = true;
++            i = attribute_echo_end(bytes, i);
++            continue;
++        }
++        if bytes[i] == b'@' {
++            let mut after = i + 1;
++            while bytes
++                .get(after)
++                .is_some_and(|ch| ch.is_ascii_alphanumeric() || *ch == b'_')
++            {
++                after += 1;
++            }
++            while bytes.get(after).is_some_and(u8::is_ascii_whitespace) {
++                after += 1;
++            }
++            if bytes.get(after) == Some(&b'(') {
++                lexed.unresolved_attributes = true;
++                i = crate::text_scan::find_matching_forward_bytes(bytes, after, b'(', b')')
++                    .map_or(bytes.len(), |end| end + 1);
++                continue;
++            }
++        }
++
+         // `:$name` passes the variable it names.
+         if bytes[i] == b':'
+             && bytes.get(i + 1) == Some(&b'$')
+diff --git a/src/blade/component_tags/mod.rs b/src/blade/component_tags/mod.rs
+index b6d26ad..96509d8 100644
+--- a/src/blade/component_tags/mod.rs
++++ b/src/blade/component_tags/mod.rs
+@@ -42,7 +42,7 @@ pub(crate) struct ComponentTagCall {
+     ///
+     /// The preprocessor emits exactly one `blade_bound_attr_directive` call
+     /// per bound attribute that is not consumed as a component call's
+-    /// argument, on every HTML tag in the file, in document order — the
++    /// argument, on every Blade/Livewire component tag in the file, in document order — the
+     /// same order this scan counts them in — so the index correlates the
+     /// two without needing to translate byte offsets between the Blade
+     /// source and the virtual PHP. That marker is exclusive to bound
+@@ -249,8 +249,9 @@ pub(crate) fn may_contain_component_tag(content: &str, needles: &[String]) -> bo
+ /// Scan `content` for `<x-…>` occurrences whose tag name (after the `x-`
+ /// prefix) is one of `tag_names`, and collect the attributes each passes.
+ ///
+-/// Every bound attribute on *any* tag in the file is counted — not just a
+-/// matching one — because the preprocessor's `blade_bound_attr_directive`
++/// Every PHP-bound attribute on a component tag is counted — not just a
++/// matching one. Ordinary HTML/Vue/Alpine bindings are client-side, as in
++/// the preprocessor. Its `blade_bound_attr_directive`
+ /// call sequence includes them all; skipping a non-matching tag's bound
+ /// attributes here would desynchronise this scan's count against that
+ /// sequence.
+@@ -299,7 +300,14 @@ pub(crate) fn scan_component_tag_calls(
+             .strip_prefix("x-")
+             .is_some_and(|bare| tag_names.iter().any(|n| n == bare));
+         let consumed = arguments(tag_name).unwrap_or_default();
+-        let (end, mut call) = scan_tag_attributes(&masked, j, &consumed, &mut bound_index);
++        let php_binding = tag_name.starts_with("x-") || tag_name.starts_with("livewire:");
++        let mut client_index = 0;
++        let index = if php_binding {
++            &mut bound_index
++        } else {
++            &mut client_index
++        };
++        let (end, mut call) = scan_tag_attributes(&masked, j, &consumed, index);
+         call.source_start = i;
+         if is_match {
+             results.push(call);
+diff --git a/src/blade/component_tags/tests.rs b/src/blade/component_tags/tests.rs
+index cf4a4f3..27a71f5 100644
+--- a/src/blade/component_tags/tests.rs
++++ b/src/blade/component_tags/tests.rs
+@@ -67,16 +67,14 @@ fn a_bound_attribute_is_indexed_in_document_order() {
+ }
+ 
+ #[test]
+-fn a_non_matching_tags_bound_attribute_still_advances_the_index() {
++fn a_frontend_html_binding_does_not_advance_the_php_index() {
+     let calls = scan_component_tag_calls(
+         r#"<div :class="$active"></div><x-alert :message="$msg" />"#,
+         &["alert".to_string()],
+         &no_arguments,
+     );
+-    // The `<div>` binding is index 0; `alert`'s own binding must
+-    // therefore be index 1, or the caller correlates it against the
+-    // wrong `blade_bound_attr_directive` call.
+-    assert_eq!(calls[0].bound, vec![("message".to_string(), 1)]);
++    // Ordinary HTML bindings are JavaScript, not PHP marker calls.
++    assert_eq!(calls[0].bound, vec![("message".to_string(), 0)]);
+ }
+ 
+ #[test]
+@@ -594,3 +592,33 @@ fn escaped_inert_or_similarly_named_directives_are_not_slot_writes() {
+     let source = r#"<x-card>@@slot('title') @slotExtended('title') {{-- @slot('title') --}} @php $x = "@slot('title')"; @endphp</x-card>"#;
+     assert!(scan_component_tag_slot_sites(source, &["card".into()]).is_empty());
+ }
++
++#[test]
++fn other_component_bindings_still_advance_the_php_index() {
++    let calls = scan_component_tag_calls(
++        r#"<x-other :class="$active" /><x-alert :message="$msg" />"#,
++        &["alert".into()],
++        &no_arguments,
++    );
++    assert_eq!(calls[0].bound, vec![("message".into(), 1)]);
++}
++
++#[test]
++fn attribute_blade_expressions_do_not_invent_html_fields_or_end_at_php_arrows() {
++    let source = r#" @class(['active' => true]) {{ $attributes->merge(['hidden' => '}}']) }} :person="$person" />"#;
++    let parsed = lex_tag_attributes(source, 0);
++    assert!(parsed.closed && parsed.self_closing && parsed.unresolved_attributes);
++    assert_eq!(parsed.end, source.len());
++    assert_eq!(parsed.attributes.len(), 1);
++    assert_eq!(&source[parsed.attributes[0].name.clone()], "person");
++    assert!(parsed.attributes[0].bound);
++}
++
++#[test]
++fn attribute_comments_do_not_invent_fields_or_change_known_keys() {
++    let source = r#" {{-- :person="$fake > $x" --}} :person="$real" />"#;
++    let parsed = lex_tag_attributes(source, 0);
++    assert!(parsed.closed && !parsed.unresolved_attributes);
++    assert_eq!(parsed.attributes.len(), 1);
++    assert_eq!(&source[parsed.attributes[0].name.clone()], "person");
++}
+diff --git a/tests/integration/blade_call_site_inference.rs b/tests/integration/blade_call_site_inference.rs
+index 2139950..f103a12 100644
+--- a/tests/integration/blade_call_site_inference.rs
++++ b/tests/integration/blade_call_site_inference.rs
+@@ -2279,7 +2279,7 @@ mod tests {
+                 "__laravel_slots",
+                 "<x-parent />",
+                 "<x-leaf />",
+-                &["array", "mixed"],
++                &["array"],
+                 &["5"],
+             ),
+             (
+@@ -2329,4 +2329,131 @@ mod tests {
+             );
+         }
+     }
++
++    #[tokio::test]
++    async fn aware_attribute_bags_preserve_uncertainty_and_explicit_priority() {
++        use crate::common::BLADE_COMPONENT_COMPOSER;
++        type Case<'a> = (&'a str, &'a str, &'a str, &'a [&'a str], &'a [&'a str]);
++        let cases: &[Case<'_>] = &[
++            (
++                "person",
++                "<x-parent :attributes=\"new \\Illuminate\\View\\ComponentAttributeBag(['person' => new \\App\\Item()])\" />",
++                "<x-leaf />",
++                &["mixed", "Item"],
++                &[],
++            ),
++            (
++                "person",
++                "<x-parent :attributes=\"new \\Illuminate\\View\\ComponentAttributeBag(['person' => new \\App\\Item()])\" :person=\"23\" />",
++                "<x-leaf />",
++                &["23"],
++                &["mixed", "Item"],
++            ),
++            (
++                "person",
++                "<x-parent :attributes=\"new \\Illuminate\\View\\ComponentAttributeBag()\" :person=\"null\" />",
++                "@props(['person' => 7])\n<x-leaf />",
++                &["null"],
++                &["mixed", "5", "7"],
++            ),
++            (
++                "person",
++                "<x-parent :attributes=\"null\" />",
++                "<x-leaf />",
++                &["5"],
++                &["mixed"],
++            ),
++            (
++                "person",
++                "@php $attributes = new \\Illuminate\\View\\ComponentAttributeBag(['person' => new \\App\\Item()]); @endphp\n<x-parent {{ $attributes }} />",
++                "<x-leaf />",
++                &["mixed", "Item"],
++                &[],
++            ),
++            (
++                "attributesFoo",
++                "@php $attributesFoo = new \\Illuminate\\View\\ComponentAttributeBag(); @endphp\n<x-parent {{ $attributesFoo }} />",
++                "<x-leaf />",
++                &["mixed", "5"],
++                &["true"],
++            ),
++            (
++                "person",
++                "@php $attributes = new \\Illuminate\\View\\ComponentAttributeBag(); @endphp\n<x-parent {{ $attributes->merge(['person' => new \\App\\Item()]) }} />",
++                "<x-leaf />",
++                &["mixed", "Item"],
++                &[],
++            ),
++        ];
++        let bag = "<?php namespace Illuminate\\View; class ComponentAttributeBag { public function __construct(private array $attributes = []) {} public function merge(array $defaults = []): static { return $this; } public function getAttributes(): array { return $this->attributes; } }";
++        for &(key, page, parent, expected_any, absent) in cases {
++            let leaf = format!("@aware(['{key}' => 5])\n{{{{ ${key} }}}}\n");
++            let (backend, _dir) = create_psr4_workspace(
++                BLADE_COMPONENT_COMPOSER,
++                &[
++                    ("app/Item.php", ITEM_CLASS),
++                    ("stubs/Illuminate/View/ComponentAttributeBag.php", bag),
++                    ("resources/views/page.blade.php", page),
++                    ("resources/views/components/parent.blade.php", parent),
++                    ("resources/views/components/leaf.blade.php", &leaf),
++                ],
++            );
++            for (path, text) in [
++                ("resources/views/page.blade.php", page),
++                ("resources/views/components/parent.blade.php", parent),
++                ("resources/views/components/leaf.blade.php", leaf.as_str()),
++            ] {
++                open_document(&backend, &workspace_uri(&backend, path), "blade", text).await;
++            }
++            let hover = hover_type(
++                &backend,
++                &workspace_uri(&backend, "resources/views/components/leaf.blade.php"),
++                1,
++                4,
++            )
++            .await;
++            assert!(
++                expected_any.iter().any(|ty| hover.contains(ty))
++                    && absent.iter().all(|ty| !hover.contains(ty)),
++                "key={key} page={page:?} parent={parent:?} expected_any={expected_any:?} absent={absent:?} got={hover}"
++            );
++        }
++    }
++
++    #[tokio::test]
++    async fn aware_slot_map_does_not_claim_only_string_keys() {
++        let page = "<x-parent><x-slot name=\"1\">Owned</x-slot></x-parent>";
++        let parent = "@include('components.leaf')";
++        let leaf = "@aware(['__laravel_slots'])\n{{ $__laravel_slots }}\n";
++        let (backend, _dir) = create_psr4_workspace(
++            APP_PSR4_COMPOSER,
++            &[
++                ("resources/views/page.blade.php", page),
++                ("resources/views/components/parent.blade.php", parent),
++                ("resources/views/components/leaf.blade.php", leaf),
++            ],
++        );
++        for (path, text) in [
++            ("resources/views/page.blade.php", page),
++            ("resources/views/components/parent.blade.php", parent),
++            ("resources/views/components/leaf.blade.php", leaf),
++        ] {
++            open_document(&backend, &workspace_uri(&backend, path), "blade", text).await;
++        }
++        let hover = hover_type(
++            &backend,
++            &workspace_uri(&backend, "resources/views/components/leaf.blade.php"),
++            1,
++            4,
++        )
++        .await;
++        let normalized = hover
++            .chars()
++            .filter(|ch| !ch.is_whitespace())
++            .collect::<String>();
++        assert!(
++            normalized.contains("array") && !normalized.contains("array<string,mixed>"),
++            "{hover}"
++        );
++    }
+ }

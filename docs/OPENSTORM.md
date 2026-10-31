@@ -3,7 +3,21 @@
 Base: thinkycz/openidea 50212e73972d6f05bf16050cb0ba10102a6c8054 (0.1.21).
 Branch: codex/openstorm-php-laravel. Target: macOS Apple Silicon, local delivery.
 
-Current checkpoint (2026-10-31): signed development **0.1.49**, bundled
+Current checkpoint (2026-10-31): signed development **0.1.53**, bundled engine
+**0.11.1-openstorm.130**, finishes the current tested development checkpoint.
+Full engine18,408+FIFO child/17ignored, actual client24/host5, frontend3057,
+workspace1321/49ignored/0filtered, typecheck/lint/build/fmt/Clippy pass. Native51
+component/slot/bag/frontend-binding cases and native53 discard/reopen, exact
+Unicode definition,8-tab noargs recovery, fixture/default restoration, signatures
+and normal app/server exit are observed. A physical user-controlled Dock app
+switch remains unverified: the user is not at the Mac; automatic persistence was
+observed independently during waiting. No complete69-area or release acceptance
+is claimed. All69 statuses remain67partial/2deferred. Installed21 and prior bundles
+are preserved. Local candidate: `artifacts/batches/0.1.53/OpenStorm.app`.
+The reviewed source is being committed/pushed as explicitly requested; Git and
+`project-discard-0.1.53-delivery.json` record the final ref verification.
+
+Earlier checkpoint (2026-10-31): signed development **0.1.49**, bundled
 PHPantom **0.11.1-openstorm.127**, accepts the narrow inactive-tab diagnostic
 refresh and recursive view-data check. The editor now refreshes saved diagnostic
 state even when the current diagnostic list is empty, clearing old underlines,
@@ -3136,3 +3150,515 @@ changes only regression coverage and this record. All69 areas remain visible at
 67partial/2deferred. Parent-component `@aware` consumable-data inference, broader
 component/slot combinations and the earlier native activation limitation remain
 open. No new push, installation, publication or debugger expansion.
+
+### Parent-component consumable data: FEAT-034 in progress
+
+After accepted local checkpoint2e10faf, the next actual-client regression is
+`laravel_aware_component_data_tracks_explicit_ancestors_and_unsaved_callers`.
+Bundled128 passes the explicit-prop forwarding control, then fails after the
+child changes to `@aware(['person'])` and explicit child forwarding is removed:
+User members disappear. `component-aware-128-client-red.log` records the red
+result. The test also specifies exact mapped navigation, unsaved User→Other,
+restart and closing the caller overlay for the eventual corrected engine. This
+new case is not accepted and has not been promoted into the packaged runtime.
+
+The owned Laravel13.37 framework source provides the runtime contract:
+`CompilesComponents::compileAware` calls `getConsumableComponentData`; that lookup
+checks current rendered component data first, then still-open component-stack
+data from nearest to outermost, using `array_key_exists`. Thus supplied null and
+false remain supplied and do not select the default. Current rendered data can
+win over a nearer still-open tag; blindly walking nearest HTML ancestors first
+would be wrong. Anonymous `@props` defaults are local variables and must not be
+promoted into consumable data. Six direct checks against the actual framework
+trait pass in `component-aware-laravel13-runtime.log`; the owned probe creates
+no environment files, boots no application and renders no fixture.
+
+A separate mutable source copy starts from immutable verified128 at
+`artifacts/phpantom/component-aware-129-work/`. The draft `blade/consumable.rs`
+models presence independently of nullability and separates current-rendered
+from open-tag data. Its initial focused source unit build is running; it is not
+yet connected to inference, source reconstruction, provenance, production-feature
+builds or the app. No engine129 binary, new app version or completed feature is
+claimed. Preserve the immutable source, signed50 and installed21. Remaining work
+includes context propagation through component and view edges, inline-tag and
+caller correlation, missing/default/null handling, semantic refresh/restart,
+class-backed/dynamic cases, focused and full gates, and packaged native checks.
+
+Working129 follow-up: the initial seven model tests passed six cases and exposed
+an unsafe `User|mixed` union in the unknown-data case. The draft now uses the
+shared PHP type simplifier to retain `mixed` as the top type. Caller alternatives
+also retain correlated current/open frames, so two callers that each supply a
+key through different channels do not invent an absent-key/default branch.
+
+The draft is now connected to cached Blade scopes, component and ordinary-view
+edges, transparent cycle propagation, semantic scope comparison and lowering.
+The prologue uses presence-based aware declarations and a virtual boolean marker
+for genuinely optional fallback branches; supplied null does not coalesce. It
+keeps explicit PHPDoc authority. Class-backed, unresolved and dynamic component
+data currently degrades conservatively to unknown rather than asserting missing
+keys or retaining an older parent's concrete type. This is not complete
+class-backed-component acceptance. The first wired release check passes20.04s.
+A 15-case public-hover matrix is compiling/running in session72582, recorded in
+`component-aware-129-source-matrix.log`; its outcome is not yet known. The initial
+model failure log is retained. No patch/provenance/root-resource promotion has
+occurred. An identified performance follow-up is to reuse the selected component
+attribute resolution for context and normal props, and avoid resolving unrelated
+sibling tag attributes when only one descendant/ancestor path is needed.
+
+The first wired source matrix passes all15 scenarios0.07s. Its draft server
+(`62d32b1-dirty`, SHA256
+`d6adf9b1fa8e1ff073d34504014d28ac639ef0b81272bc674b857dcfa722a14a`)
+also passes the actual OpenStorm client case6.76s: inherited User members, exact
+property definition after Unicode, unsaved Other replacement, restart replay,
+closing the caller overlay and all seven disk originals. The checksummed source
+snapshot and binary identity are preserved in
+`component-aware-129-first-wired-draft.json` and its draft patch. This is a
+development server result, not packaged acceptance or a released129 binary.
+
+Follow-up source changes reuse one selected attribute-resolution pass for normal
+props and consumables, filter out unrelated siblings, use sorted lookup metadata,
+and resolve an aware key without cloning every data entry. Class-backed views
+also retain unknown exposure instead of inferring absence from their tag bags.
+Two tuple-adapter omissions were found by the release check and corrected; the
+next release check passes19.65s. The initial failure is retained. The source
+matrix now has17 cases, including cross-channel caller correlation and an
+unresolved-tag error-recovery case; one separate class-backed exposure check
+accepts conservative unknown or the correct Item type, and forbids claiming only
+the default. Nine context-model cases cover nullability, precedence, uncertain
+data, canonical alternatives and masked values. The broader Blade source
+regression build is running in session63105 with
+`component-aware-129-blade-regressions.log`; no outcome is claimed yet. Full
+source/example checks, patch reconstruction/provenance, production-feature server
+build, root/client/host gates, new packaging and native acceptance remain open.
+
+Additional runtime boundary: `component-aware-laravel13-slots-runtime-buffered.log`
+passes five checks using the real Laravel AnonymousComponent data and an owned
+in-memory Htmlable probe. Anonymous initial data contains an attributes bag and
+supplied null, but no automatic componentName. Still-open component data excludes
+completed named/default slots; renderComponent then adds ComponentSlot values and
+`__laravel_slots`, and restores the prior context afterwards. The first probe
+incorrectly assumed slot(name, direct-content) wraps the content in ComponentSlot;
+the retained initial log disproves that. Buffered slots use slot(name,null,attrs)
+plus endSlot, as x-slot compilation does. Direct slot content retains its supplied
+value. No application bootstrap, template fixture rendering or environment-file
+mutation occurred.
+
+This identifies a required follow-up before accepting the aware batch: distinguish
+initial/open-tag data from rendered data in each component occurrence, include
+known default/named-slot metadata only at render time, preserve named-slot owner
+correlation, and keep unmodelled direct/dynamic slot writes conservative. The
+current wired draft has not yet added that slot-metadata boundary. Broader Blade
+regressions remain running in session63105; continue that same handle rather than
+starting another build. The latest working source has no promoted patch,
+provenance or app changes. Root changes remain the new ignored client case,
+this progress record and narrowed evidence/remaining text for FEAT-032/033/034 in
+the existing inventory. All69 feature IDs, full acceptance gates and status counts
+remain unchanged (67partial/2deferred).
+
+### Component-aware context: reconstructed129 findings and130 correction
+
+The earlier running Blade check completed: 611 unit checks passed (1 ignored)
+and 452 integration checks passed. The rendered-slot correction also passed the
+actual OpenStorm client case in7.36s, including an unsaved named slot overriding
+the attribute and closing that overlay restoring the original User type. These
+results precede the stronger attribute-bag checks and do not establish the entire
+batch's acceptance.
+
+The staged-source recipe now accepts an explicit `--pin` in both preparation and
+build scripts. Default and explicit128 reconstruction agree; malformed patch
+checksums are refused, and the active source manifest and bundled128 binary are
+unchanged. Source129 is frozen separately in
+`engine/candidates/0.11.1-openstorm.129-source.json`, with patch129 and series
+`6023af7414e42fcfff19c836ad1621dfe48d8b4b08f74c49b1ccfa9a10303a94`.
+The reconstructed source matched all19 changed working files. Its preserved draft
+server is `artifacts/engines/draft-aware-129-rendered-slots/phpantom_lsp`, SHA256
+`677fdf10e343f9fa9e3e7d1c23c1a31d6d0b7ee9963a7259d134ceeb91e7ea3b`.
+This is an unaccepted development binary, not the active app resource.
+
+Full reconstructed129 source testing failed: 6937 unit checks passed (4 ignored,
+plus the automatic FIFO child), then one analyzer-startup save check timed out.
+The exact failing test passed alone and the complete five-test analyzer group
+passed three subsequent controlled runs without source edits. The cause is still
+unproven; neither those rechecks nor the Blade subset replace the failed full
+gate. Details and original logs remain in
+`artifacts/checks/component-aware-129-pinned-source-gates.json`.
+
+Real Laravel13.37 isolated runtime checks establish that component attribute bags
+can introduce consumable keys, explicit data overrides bag entries, raw Blade
+attribute echoes are rewritten by Laravel's compiler, and numeric named slots
+can produce integer keys. The corrected runtime probe passes four checks;
+its initial incorrect assumption about PHP numeric-key renumbering is preserved.
+No app bootstrap or existing environment-file mutation occurred.
+
+Three stronger actual-client regressions fail against frozen129: unknown bag keys
+incorrectly become absent/default-only; the slot map incorrectly promises only
+string keys; ordinary frontend `:class` bindings shift PHP component bound-value
+correlation after unsaved caller changes. The first bag test attempt had a test
+index error after adding a stub; that is preserved separately and corrected using
+a named source string. The subsequent failure is the actual engine result. Owned
+bag-fixture PHP expressions and stubs pass PHP8.4.23 syntax checks.
+
+Mutable130 corrects those causes: unknown bag/expression data retains uncertainty
+while explicit fields keep priority; slot-map keys admit integers; only component
+bindings advance PHP marker indices. The shared attribute lexer skips Blade
+comments, echo bodies and directive arguments, including PHP arrows, while the
+streaming preprocessor remains responsible for PHP/source mapping. New unit and
+public-hover cases cover bag/null precedence, raw attribute expressions, numeric
+slot keys and binding correlation. All-target Clippy with automatic fixes passes
+with zero warnings; formatting was run afterwards. Host build-script stripping
+is disabled only through the recorded build environment to avoid the inherited
+rust-objcopy/libLLVM warning; no toolchain/global settings were changed.
+
+Source130 is reconstructed from append-only patch130 and candidate source manifest,
+series `56dc0837bb1fd98842e8d2591b8d1fe976ff66fd941fa4d78c88b5e936cf82d0`.
+All six changed working files match reconstruction. Its full unfiltered source
+pipeline is now running; results will be recorded in
+`artifacts/checks/component-aware-130-pinned-source-gates.json`.
+Current root actual-client inventory contains24 cases; the complete current
+corpus has not yet passed130. No new app has been built or natively accepted.
+
+The owned129 Laravel fixture was also corrected before acceptance: its inherited
+lock file described13.24 while installed dependencies were13.37. The new fixture
+now uses the coherent preserved123 exact13.37 manifest/lock; all75 installed
+package versions and source/dist references match, all58 app PHP syntax checks
+pass, and autoload roots/files exist. The older fixture and pre-correction files
+remain preserved. No Composer execution or environment-file copying occurred.
+See `artifacts/checks/component-aware-129-laravel-fixture.json`.
+
+Storage maintenance removed only the remaining28,957 previously inventoried,
+hash/header/hardlink-validated obsolete SDK compiler object groups (3.47GB logical)
+while compilers were idle. Source, apps, engines, tools, fixtures and earlier
+artifacts were preserved. Both development50 and installed21 retained their
+executable hashes and deep/strict signatures afterwards. Receipt:
+`artifacts/checks/component-aware-129-stale-sdk-objects-pruned.json`.
+The full69-area status remains67 partial and2 user-deferred.
+
+130 follow-up checks: all12 plain PHP files lint, the plain PHP runtime assertions
+pass, and all267 Laravel assertions pass against the coherent owned13.37 fixture.
+The expanded root actual-client corpus compiles with no warnings, and workspace
+format checking passes. Bag overlay phases now require the preceding User type
+to disappear (mixed or the new Other type is allowed), so stale User hover cannot
+satisfy either bag phase. Closing the overlay must restore User members.
+
+A fresh native fixture and isolated profile are prepared in
+`artifacts/checks/component-aware-130-native-fixture.json`; all88 non-vendor,
+non-Blade PHP files lint. It copies the coherent129 fixture while excluding every
+`.env*`, project-local settings, Git metadata and node_modules, and adds owned
+aware/card/badge/slot-map examples with distinct User/Other properties. No new
+app is launched, and native acceptance has not started. Fixture preparation and
+passing syntax checks do not establish editor behavior.
+
+The full reconstructed130 source suite now passes in707.42s including compilation:
+18,408 checks plus the separate FIFO child check,17 ignored, no top-level filtering.
+The previously failing analyzer save/startup case passes inside the full five-test
+group, and the new attribute-expression, bag-precedence and numeric-map regressions
+pass. The original129 timeout remains preserved; no analyzer production code or
+deadline was changed. The pipeline continues with all-target Clippy, fmt,
+fingerprint verification and the production-feature recipe build. All3050 frontend
+tests, type checking and lint also pass (version50 frontend, resource128 unchanged).
+Build, actual-client/host and packaged-native acceptance are still pending.
+
+130 production recipe build completes in203.08s. The archived arm64 server reports
+`phpantom_lsp 0.11.1-openstorm.130`, SHA256
+`7be1c87a374be3822eeefd8ca0c667df59baed75b3f5a3e59ad30103b902ba88`.
+Its candidate binary provenance, complete source-gate receipt, licenses and
+compiler/environment record are preserved in
+`artifacts/engines/0.11.1-openstorm.130/`; the active app resource remains128.
+Full static CLI analysis of the coherent Laravel fixture reports exactly the
+three intentional diagnostics at731/731/951: one error and two warnings, with no
+additional file diagnostics. The earlier wording “three errors” describes these
+three diagnostics, not three error-severity findings. The actual24-case client
+corpus and five host edit checks are running against the archived production
+server. The three newly strengthened aware/bag, numeric-slot and frontend-binding
+client regressions have passed; final corpus and native acceptance are pending.
+
+### Development0.1.51 prepared: final SDK and native gates pending
+
+All24 actual OpenStorm client checks pass against the archived production130
+server in189.86s including the client rebuild; all5 host edit checks pass as
+recorded in `component-aware-130-client-host.json`. The shared12-file fixture
+remains byte-for-byte original after both stages. The full client corpus includes
+the three new aware/bag, numeric-slot and frontend/directive correlation cases,
+plus inherited completion/navigation/imports/rename, overlays and restart checks.
+This is actual client/host evidence, not packaged UI acceptance.
+
+Only after those gates passed, the source manifest and app resource were advanced
+to130, checksum verified. Version0.1.51 is set consistently in the application,
+workspace and34 local lock records. The earlier128 source, binary and signed50
+bundle, unaccepted129 drafts and installed21 remain preserved. Root changes are
+uncommitted; no new push, install, migration or publishing occurred.
+
+The complete unfiltered0.1.51 workspace test/fmt/all-target Clippy pipeline is
+running in session49738, with logs and stage results under
+`component-aware-0.1.51-sdk-*`. It includes the two previously approved disposable
+process environment cases; no existing environment-file mutation is authorized.
+The final0.1.51 frontend build is running separately in session10569. The prior
+3050 frontend tests/typecheck/lint cover the unchanged frontend code; the new
+build checks the final versioned inputs. A signed native51 bundle and its UI
+acceptance remain pending. The next step is to finish these same processes,
+package the development app, and exercise the prepared isolated native fixture.
+
+Final0.1.51 SDK gates pass:1321 workspace tests,49 ignored,0 filtered; workspace
+formatting and all-target Clippy with warnings denied pass. Both approved
+process-launch fake environment cases positively pass, and the bundled Tools row
+reports the actual130 executable version. The final frontend build passes too.
+See `component-aware-0.1.51-sdk-gates.json` and workspace summary.
+
+The rebuild reduced free space to about1GB. The SDK orchestrator alone was
+suspended before its next stage while its current workspace tests continued and
+finished normally; no test process or deadline was suspended. Once the Cargo child
+was terminal and compilers were idle, guarded cleanup removed32,222 obsolete
+incremental-style workspace MH_OBJECT groups (37,015 paths), predating frozen48,
+with complete hardlink/inode/size/mtime/header checks and SHA256 event records.
+4,201,763,216 logical bytes were reclaimed; free space rose from1,083,150,336 to
+5,369,999,360 bytes. All apps, source, current/direct compiler objects,
+libraries/archives, engines, tools and fixtures were preserved. The same
+orchestrator was resumed, collected the passing workspace exit, and passed its
+remaining stages. The pause receipt confirms no resume is outstanding.
+Receipts: `component-aware-0.1.51-stale-sdk-objects-pruned.json` and
+`component-aware-0.1.51-sdk-stage-pause.json`. Installed21 and development50 retain
+both their exact executable hashes and deep/strict signatures afterwards.
+
+Development app packaging is now running in session64644 through
+`build-component-aware-0.1.51-app.py`. Its guarded pipeline will copy to a unique
+`artifacts/batches/0.1.51/OpenStorm.app`, verify bundled130/version/identity,
+locally sign it and generate the source/build receipt only after a successful
+build. No51 bundle or native acceptance is claimed until those steps complete.
+Continue this same build handle; the intended isolated native fixture is recorded
+in `component-aware-130-native-fixture.json`. The69-area ledger remains unchanged
+in status.
+
+Development0.1.51 packaging finishes successfully in156.84s. The unique bundle is
+`artifacts/batches/0.1.51/OpenStorm.app`, locally signed and deep/strict verified;
+its build/source receipt is `component-aware-0.1.51-build-receipt.json`. Installed21
+and signed50 remain separate. Native51 acceptance has started, not completed.
+
+Observed native51 passes: healthy first project launch; Go to File discovers the
+aware component; CmdL2:23/CmdB after the emoji maps to exact User.php3:29; empty
+receiver CtrlSpace uses inherited automatic single insertion; explicit save returns
+the exact original and clears its temporary diagnostic. Settings search reveals
+default idle autosave off/focus autosave on. Focus autosave was temporarily disabled
+through Apply only in the isolated profile, then normal CmdQ exited app55762 and
+server56080. No-argument relaunch restores the same project, two tabs and2:30 caret.
+
+In app56115, unsaved Caller User->Other changes the aware badge's completion to
+otherOnly and definition to Other.php3:27, while all7 disk originals remain exact.
+The native Restart phpantom action retains the unsaved caller model. The current
+resource server56139 started later than the same app process and runs with
+`--stdio --no-project-tools`. A further unsaved Other property appears in the native
+lookup; Tab replaces the complete badge identifier with otherLong and definition
+opens the unsaved Other.php3:53. Native Undo/Redo restores/reapplies the caller;
+final undo and explicit saves restore all7 disk originals and User.php3:29 with
+No problems found.
+
+One initial native test expectation was wrong, not an established product defect:
+CtrlSpace automatic insertion from inside an identifier produced
+otherOnlytherOnly. The existing completion tests explicitly preserve suffixes for
+insert/Enter and replace the rest with Tab. The native lookup also says Enter
+inserts/Tab replaces. Native Tab replacement with two candidates passes exactly;
+Undo restored the initial text. Both the observed insertion and corrected
+expectation remain in `component-aware-0.1.51-native-progress.json`. No source
+behavior was changed to override OpenIDEA's inherited completion convention.
+
+Current native state: app56115/server56139 remain intentionally live; User.php3:29
+is active; badge, Caller, Other and User tabs are open; no dirty overlay remains;
+all7 owned fixture originals match. Focus autosave remains temporarily disabled
+only in the owned test profile's `Library/Application Support/cz.thinky.openstorm/
+settings.toml` and must be restored before final acceptance. Continue this exact
+native session. Named-slot/bag/frontend-binding native cases, external-conflict
+cancellation, restored default autosave, final reopen/relaunch and normal process
+cleanup are still pending. Earlier50 window activation/control limitations remain
+recorded; these healthy51 launches alone do not prove their underlying cause fixed.
+
+### Native51 completion and focus-autosave correction for0.1.52
+
+Native51 additionally passes the component edge cases against real Laravel13.37:
+unsaved named person slot -> toHtml() completion and ComponentSlot.php56:21;
+unknown attribute bag -> mixed, explicit User beside Other bag -> User, raw echo
+then -> mixed; frontend :class before component -> fresh Other, @class argument
+then caller undo -> User; raw ->merge/=> expression before explicit data -> fresh
+Other; numeric named slot through an ordinary include -> exact
+array<array-key,mixed> documentation. All7 disk originals were verified before
+cleanup. CmdS follows inherited save-all behavior; its intermediate persisted
+Caller/page changes were observed and all originals subsequently restored through
+native edits/save.
+
+Native51 external-save protection passes: dirty Other caller, externally written
+User+witness -> overwrite confirmation; Cancel preserves both; retry prompts again;
+explicit Don't Save retains the external bytes; native reopening reads User plus
+witness; native cleanup and ShiftTab restore the exact original indentation and
+all7 originals. Receipt: `component-aware-0.1.51-external-conflict.json`.
+
+Focus autosave was restored to true in the owned profile, with idle-save still
+false. Noargs relaunch restores8tabs and Caller6:1 with the73-character/two-line
+selection. One post-quit AX observation reopened the candidate under ordinary HOME;
+the guarded launcher refused before starting another instance. No preferences
+were changed in that unexpected process. Bare CmdQ followed only by12 CLI process
+observations proves all its app/server processes exited; further exit checks avoid
+post-quit CUA reads. The subsequent explicit-profile launch verifies HOME before
+UI inspection. See `component-aware-0.1.51-post-quit-observation.json`.
+
+An actual remaining native failure blocks acceptance of51: User comment plus
+Modified marker did not persist after CmdTab or Finder activation, despite the
+owned profile's autoSave=true. Switching editor tabs persists it, proving the
+setting and existing save path work. A controlled comparison in preserved51 also
+fails with a newly created real Finder Recents window, not just the Desktop; Undo
+plus tab-switch restores all7 originals, the temporary Finder window closes and
+normal bare CmdQ exits all51 processes. Receipts: focus-autosave and
+`native-focus-51-real-window-control.json`. These are observed failures, not a
+passing autosave claim.
+
+The editor subscribed only to DOM window blur. Four regression cases now exercise
+native focus loss without that DOM event, manual-save preservation, automatic
+external-conflict refusal with no prompt/overwrite, and delayed listener cleanup
+after stopping. The initial three tests fail before correction; the existing
+controller now also subscribes to Tauri's current-window onFocusChanged and feeds
+loss into the same guarded auto-save path. Disposal and registration errors are
+handled; native52 must still verify this hypothesis on the actual Mac. No save
+conflict, settings, keymap, layout or engine behavior was bypassed.
+
+Candidate52 uses unchanged engine130 bytes/provenance. All27 focused controller,
+tab-close and document checks pass, as do all3054 frontend tests/typecheck/lint/build.
+Full unfiltered Rust workspace/fmt/Clippy are running in session64504. Engine130's
+previous full source/client/host checks remain tied to its unchanged checksum.
+
+Before the rebuild, while compilers were idle, guarded cleanup reclaimed
+7,455,617,144 logical bytes from5,800 obsolete standalone workspace MH_OBJECT groups
+predating frozen48. Inodes, all hardlinks, sizes/mtime, object headers and SHA256
+were checked and recorded. All current objects, direct app objects, libraries,
+archives, apps, engines, source, fixtures and prior deliveries were preserved.
+Free space rose from2,246,467,584 to9,664,106,496 bytes. Receipt:
+`native-focus-0.1.52-old-workspace-objects-pruned.json`.
+
+The user's latest instruction is to finish this batch and then commit/push. Do not
+begin another roadmap batch first. Native52 still needs positive app-focus
+autosave, guarded conflict behavior under that native event, inherited engine
+smoke checks, restored fixtures/defaults, noarg session recovery, strict signatures
+and final normal process cleanup before committing and verifying the pushed ref.
+
+52 final source gates pass:1321 workspace tests/49ignored/0filtered, fmt/all-target
+Clippy,3054 frontend tests/typecheck/lint/build. The signed52 development bundle
+builds in95.83s and passes deep/strict signing; current controller/regression bytes
+match its build receipt. Installed21 and signed50/51 hashes/signatures are also
+preserved after cache cleanup. Remote origin fetch shows25 local commits ahead,
+0 incoming; no push has yet occurred.
+
+Native focus verification needs a clarified boundary. App-targeted Finder keys,
+AX Raise and a title-bar click still did not persist the52 witness. They have not
+independently established that macOS application activation changed. Opening the
+native Web Inspector immediately saves it through the guarded blur path; its
+console is empty. The preserved51 control's failed attempted switches likewise
+must not be treated as a proven OS-focus defect. Thus the native current-window
+listener has regression coverage, but its actual external-app focus path remains
+unverified. No further speculative patch was stacked on this hypothesis.
+
+The inspector is closed, the previous witness was undone/saved, and a fresh
+unsaved `// actual-focus-switch-witness` is visible in the owned User fixture.
+App52 PID6270 remains live under the verified isolated HOME. A single user action
+has been requested: click the running OpenStorm, then Finder in the Dock, and
+report completion. Keep this prepared UI state while awaiting that real activation;
+do not silently substitute a tab switch or inspector opening for an external-app
+switch. After verification, restore all7 originals/defaults, close the temporary
+Finder window, finish the52 smoke/relaunch/process checks and commit/push as asked.
+
+### Discarded conflicted documents across project replacement: development53
+
+The prepared actual-focus-switch witness subsequently persisted exactly on disk,
+with no automated Save or tab change between preparation and observation. The
+native User tab no longer had a Modified marker. Undo/Save restored all7 originals.
+The user later confirmed they are not at the Mac; therefore no physical Dock
+switch is claimed. Preserve the actual persistence observation and the separate
+unverified activation attribution in `native-focus-0.1.52-native-progress.json`.
+
+Native52 also proves guarded automatic saving: dirty local User comment plus an
+external witness, then the observed webview-blur path -> Autosave paused notices,
+no overwrite prompt and no external write. Native File > Save All then asks before
+overwrite; Cancel retains both versions. Inspector close left the automation
+without editor keyboard focus, so native menus were used; no source fix for that
+tooling/window-control limitation was claimed.
+
+The subsequent native Close Project > Don't Save and recent-project reopen
+exposed a real failure: discarded local text reappeared as Modified, while the
+external file stayed intact. The old server exited correctly. Session storage
+contains only view state, so this was not recovered text in serialized sessions:
+DocumentManager retained its conflicted model by path after the host replaced all
+project documents, then reused that stale model on reopen. The initial regression
+fails with discarded text instead of the external version; its log is retained in
+`project-discard-52-red.log`. After normal52 quit, the owned external witness was
+archived and all7 originals restored; no user environment file was touched.
+
+The correction resets frontend document identity when the host replaces the
+project or LightEdit context. Old models are disposed, cache/meta state cleared
+before close-event callbacks, and late old-project opens are cancelled without
+removing a new project's pending open. A late release cannot remove a fresh model.
+No new settings or close-consent behavior was added. Three regression cases cover
+the native reproduction, overlapping old/new opens, and a close-event subscriber
+acquiring the fresh model. All30 focused controller/document/close checks pass.
+
+The first full53 frontend run passed3056 and failed only its required source-text
+translation catalog for the new Project changed cancellation message. Adding the
+Chinese catalog entry fixes that gate; final full3057/typecheck/lint/build pass.
+Full unfiltered Rust workspace/fmt/all-target Clippy pass. Engine130 is unchanged,
+so its checksummed source/client/host receipts remain applicable rather than
+rebuilding an unchanged engine. Signed53 packaging is running through
+`build-project-discard-0.1.53-app.py`; its returned process handle is authoritative. Its native discard/reopen check and final cleanup
+remain pending before the requested commit and push.
+
+Before53 rebuild, with compilers idle, guarded cleanup reclaimed6,639,908,672
+logical bytes from5,188 obsolete standalone workspace compiler object groups
+predating frozen48, with metadata/header/hardlink/SHA verification. Current objects,
+all app binaries, libraries/archives, source, engines, fixtures, tools and earlier
+deliveries were preserved. Free space rose3,010,215,936->9,663,889,408 bytes; receipt
+`project-discard-0.1.53-old-workspace-objects-pruned.json`.
+
+### Final development0.1.53 checkpoint and requested Git delivery
+
+Signed53 packaging succeeds in96.74s. Executable SHA256:
+`8b816d20c644f65cc3686772fea353c0b35e860e3300b5c3916ad06913969a00`.
+The build receipt records the source snapshot; final controller, document manager,
+regression, locale, engine pin and provenance bytes match that snapshot. The app
+and bundled engine checksum pass strict/deep signing and provenance checks.
+
+The native reproduction now passes in the packaged53 app with default autosave
+on: local User comment + external witness -> tab-switch auto-save pauses without
+writing; Close Project asks about the modified file; explicit Don't Save reaches
+Welcome53 and preserves the external bytes. Reopening from native Recent Projects
+and selecting User loads the external comment as a clean document, with no
+resurrected local text. The original3-line User fixture is restored through native
+save and all7 owned files match exactly. After this project replacement, aware
+badge CmdL2:23/CmdB still resolves after Unicode to exact User.php3:29.
+
+Normal CmdQ exits app54718/server55495. Explicit-profile noargs launch55527
+restores the same project, all8tabs, active clean User.php and caret3:29, with No
+problems found. Final bare CmdQ leaves no owned53 app/server process. The isolated
+profile retains default focus autosave=true, idle-save=false; the temporary Finder
+window is closed. Receipt: `project-discard-0.1.53-native-progress.json`.
+
+A10.022s warm idle sample after project reopen observes app RSS203856->203760KiB,
+CPU4.06->4.36s, and server RSS216080KiB, CPU5.61->5.61s. This excludes WebContent,
+GPU and other processes, uses a warmed fixture/profile and is not a total-memory,
+fresh-startup or parity result. Broader performance gates remain open.
+
+Physical app-switch attribution is explicitly limited. The prepared
+actual-focus-switch witness eventually persisted exactly without any further
+Save/tab action from automation, and native UI showed it clean. No user completion
+reply confirmed a Dock switch; the user said they were not at the Mac. App-targeted
+keys/Raise/clicks cannot establish OS activation on their own. Keep that manual
+case unverified. Guarded automatic persistence, tab/webview blur refusal, native
+manual overwrite Cancel, model lifecycle regressions and clean relaunch/exit have
+separate positive evidence. Inspector/window-control automation limitations remain
+recorded; this checkpoint makes no unsupported claim that their cause is fixed.
+
+Final review against2e10fafe941d1e589ca3b59af6668184aebf2d84 covers reproducible
+source/binary provenance, shared typing, unknown-key conservatism, current-window
+save guards, project identity/late-open cancellation, event subscriber ordering,
+manual-save/conflict boundaries, unchanged debugger scope and preserved defaults.
+The final default and explicit130 source reconstruction agree. All69 IDs and full
+acceptance requirements remain visible. This is a local development checkpoint;
+installed-app migration, publishing a release, updates, notarization and wider
+physical/service matrices remain deferred or unverified as already recorded.
+
+The user's instruction to finish this batch and commit/push is now carried out
+without starting another feature batch first. The final Git commit/remote read-back
+and clean-worktree evidence are stored in the ignored local delivery receipt;
+repository history is authoritative for the pushed source identity.

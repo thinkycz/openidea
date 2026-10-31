@@ -1,23 +1,24 @@
 # Pinned PHPantom engine
 
-The local OpenStorm candidate bundles PHPantom `0.11.1-openstorm.128` for Apple
-Silicon macOS. This is a local rebuild, not an upstream release. Source127
-refreshes view catalogs for template creation/deletion, custom and package roots,
-and closed configuration changes while preserving editor overlays. Its full
-pinned-source suite passes18,387tests/17ignored plus the separate FIFO child;
-all18OpenStorm client and5host cases pass, including cold-config navigation and
-live diagnostic refresh. Examples, Clippy, formatting and source fingerprints
-pass. Signed development 0.1.48 native acceptance passes the narrow view-root,
-package, closed-config and template-event workflows, including unsaved overlays,
-settled restart and quit/relaunch recovery. The signed 47/126 route slice and
-earlier diagnostic source identities remain preserved. Broader view-data and
-native in-flight cancellation acceptance remain open.
-`source.json` pins upstream source,
-its archive checksum, the unchanged 114-patch PHP Workbench series, and OpenStorm
-patches 0115–0127 for resource isolation, Blade and Laravel assistance, and
-source-update recovery. The bundled executable is verified by
-`node scripts/verify-phpantom.mjs`; its provenance and licenses are under
-`src-tauri/resources/phpantom/`.
+The local OpenStorm development candidate uses PHPantom `0.11.1-openstorm.130`
+for Apple Silicon macOS. This is a local rebuild, not an upstream release.
+Source130 adds correlated Blade `@aware` context, rendered-slot metadata,
+conservative attribute-bag handling and correct PHP binding indices around
+frontend bindings and Blade arguments. Full pinned source tests pass18,408 checks
+plus the separate FIFO child (17 ignored); all24 OpenStorm client and5 host
+checks pass. Examples, Clippy, formatting and source fingerprints pass. The component workflows were exercised in signed native0.1.51; native0.1.53
+adds successful project-discard/reopen and exact definition/session checks. The
+physical user-controlled Dock focus case remains unverified; see the limits in
+`docs/OPENSTORM.md`. No full-area or release acceptance is claimed. Signed development0.1.50/engine128 retains
+its accepted narrow supplied-prop and nested component/slot-scope evidence.
+The unaccepted129 source and its failed suite result remain reproducible.
+
+`source.json` pins the upstream source, archive checksum, unchanged114-patch PHP
+Workbench series and OpenStorm patches0115–0130. The bundled executable is
+verified by `node scripts/verify-phpantom.mjs`; its provenance and licenses are
+under `src-tauri/resources/phpantom/`. Source checks and client/host checks do not
+replace packaged native acceptance; broader component and view-data work remains
+open in `docs/OPENSTORM.md`.
 
 From the repository root:
 
@@ -39,6 +40,18 @@ OPENSTORM_TEST_TMPDIR="$(python3 -c 'import os,tempfile; print(os.path.realpath(
 OPENSTORM_ENGINE_VERSION="$(python3 -c 'import json; print(json.load(open("engine/source.json"))["version"])')"
 TMPDIR="$OPENSTORM_TEST_TMPDIR" PHPANTOM_GIT_VERSION="$OPENSTORM_ENGINE_VERSION" cargo test --manifest-path "$OPENSTORM_ENGINE_SOURCE/Cargo.toml" --release --locked -- --test-threads=2
 ```
+
+Both recipe scripts accept `--pin /path/to/source-manifest.json`. This allows a
+staged source candidate to be reconstructed, tested and built while
+`engine/source.json` and the bundled engine still identify the accepted version.
+For example, the archived130 source uses
+`engine/candidates/0.11.1-openstorm.130-source.json`. The earlier129 manifest
+remains reproducible with its failed full-suite result recorded. A source manifest contains
+the upstream archive and complete checksummed patch series; it is distinct from
+a binary candidate's provenance JSON. An explicit pin uses the same integrity
+checks and cache fingerprint as the default. Neither build command replaces the
+bundled executable. Keep source validation separate from app acceptance: a new bundle remains a
+development candidate until its native delivery gates pass.
 
 Preparation downloads the pinned archive, verifies SHA-256, extracts into the
 ignored `artifacts/phpantom/` directory, and applies each verified patch in order.

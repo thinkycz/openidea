@@ -674,6 +674,7 @@ export class DocumentManager {
   readonly byPath = new Map<string, DocModel>();
   readonly byId = new Map<DocId, DocModel>();
   private opening = new Map<string, Promise<DocModel>>();
+  private generation = 0;
   contributionsVersion = 0;
   private disposers: Array<() => void> = [];
 
@@ -725,6 +726,22 @@ export class DocumentManager {
     this.disposers.splice(0).forEach((d) => d());
   }
 
+  /** The host has replaced this project's documents; their ids are no longer usable. */
+  resetProject() {
+    this.generation++;
+    const models = [...this.byId.values()];
+    const ids = new Set(this.byId.keys());
+    this.byPath.clear();
+    this.byId.clear();
+    this.opening.clear();
+    for (const model of models) model.dispose();
+    useDocMeta.setState(
+      (state) => Object.fromEntries(Object.entries(state).filter(([, meta]) => !ids.has(meta.doc))),
+      true,
+    );
+    for (const model of models) _emitEditorEvent({ type: "docClosed", doc: model.doc, path: model.path });
+  }
+
   get(path: string): DocModel | undefined {
     return this.byPath.get(path);
   }
@@ -735,9 +752,15 @@ export class DocumentManager {
     if (existing) return Promise.resolve(existing);
     let p = this.opening.get(path);
     if (!p) {
+      const generation = this.generation;
       p = (async () => {
         await loadLanguageInfos(this.backend);
+        if (generation !== this.generation) throw new IpcError({ kind: "cancelled", message: "Project changed" });
         const info = isVirtualUri(path) ? await this.backend.openVirtual(path) : await this.backend.open(path);
+        if (generation !== this.generation) {
+          void this.backend.close(info.id).catch(() => {});
+          throw new IpcError({ kind: "cancelled", message: "Project changed" });
+        }
         const raced = this.byPath.get(path);
         if (raced) {
           void this.backend.close(info.id);
@@ -748,7 +771,9 @@ export class DocumentManager {
         this.byId.set(model.doc, model);
         _emitEditorEvent({ type: "docOpened", doc: model.doc, path, language: info.language });
         return model;
-      })().finally(() => this.opening.delete(path));
+      })().finally(() => {
+        if (this.opening.get(path) === p) this.opening.delete(path);
+      });
       this.opening.set(path, p);
     }
     return p;
@@ -770,7 +795,7 @@ export class DocumentManager {
       }
       if (model.inUse() || model.hasSaveConflict()) return;
       await model.sync.whenIdle();
-      if (model.inUse()) return;
+      if (model.closed || model.inUse() || this.byPath.get(model.path) !== model) return;
       model.dispose();
       this.byPath.delete(model.path);
       this.byId.delete(model.doc);

@@ -1,0 +1,1635 @@
+diff --git a/docs/CHANGELOG.md b/docs/CHANGELOG.md
+index fd10ae2..ab40083 100644
+--- a/docs/CHANGELOG.md
++++ b/docs/CHANGELOG.md
+@@ -190,6 +190,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
+ 
+ ### Fixed
+ 
++- **Keep anonymous-component parent data available to `@aware`.** Hover, completion and navigation follow supplied ancestor values and rendered named slots, preserve supplied null, and refresh after unsaved caller changes. Dynamic and class-provided data remains conservative where its exposed keys cannot be established. Contributed by @thinkycz.
++
++
+ - **Keep supplied model types in Blade component props.** Required props retain caller types, and defaults fill missing or null values without overriding supplied data. Explicit PHPDoc contracts remain authoritative. Contributed by @thinkycz.
+ 
+ - **Keep Laravel view navigation current when templates are added or removed.** Custom roots, published package views, external view configuration changes, and Blade/plain PHP precedence refresh without restarting. Contributed by @thinkycz.
+diff --git a/examples/laravel/app/Demo.php b/examples/laravel/app/Demo.php
+index b93990b..c4629a3 100644
+--- a/examples/laravel/app/Demo.php
++++ b/examples/laravel/app/Demo.php
+@@ -1614,6 +1614,13 @@ class Demo
+         view('component-props-demo', compact('author'));
+     }
+ 
++    // Try: open component-aware-demo, then the nested aware child. Its author
++    // comes from the rendered parent data, and caption is the parent's slot.
++    public function anonymousComponentAware(BlogAuthor $author): void
++    {
++        view('component-aware-demo', compact('author'));
++    }
++
+     // ── HTTP client sync/async template default ────────────────────────────
+ 
+     public function httpClient(PendingRequest $pending, HttpFactory $factory): void
+diff --git a/examples/laravel/resources/views/component-aware-demo.blade.php b/examples/laravel/resources/views/component-aware-demo.blade.php
+new file mode 100644
+index 0000000..0f0074d
+--- /dev/null
++++ b/examples/laravel/resources/views/component-aware-demo.blade.php
+@@ -0,0 +1,3 @@
++<x-author-aware-parent :author="$author">
++    <x-slot:caption>Author summary</x-slot:caption>
++</x-author-aware-parent>
+diff --git a/examples/laravel/resources/views/components/author-aware-child.blade.php b/examples/laravel/resources/views/components/author-aware-child.blade.php
+new file mode 100644
+index 0000000..5d78f26
+--- /dev/null
++++ b/examples/laravel/resources/views/components/author-aware-child.blade.php
+@@ -0,0 +1,7 @@
++@aware(['author' => null, 'caption' => null])
++@if($author)
++    <p>{{ $author->posts()->count() }}</p>
++@endif
++@if($caption)
++    <p>{{ $caption->toHtml() }}</p>
++@endif
+diff --git a/examples/laravel/resources/views/components/author-aware-parent.blade.php b/examples/laravel/resources/views/components/author-aware-parent.blade.php
+new file mode 100644
+index 0000000..e09d462
+--- /dev/null
++++ b/examples/laravel/resources/views/components/author-aware-parent.blade.php
+@@ -0,0 +1,3 @@
++@props(['author', 'caption' => null])
++{{-- The local caption default is not consumable data. The supplied slot is. --}}
++<x-author-aware-child />
+diff --git a/src/blade/backing_class.rs b/src/blade/backing_class.rs
+index 6313b65..f8ac7cc 100644
+--- a/src/blade/backing_class.rs
++++ b/src/blade/backing_class.rs
+@@ -107,7 +107,8 @@ impl Exposure {
+ impl Backend {
+     /// The variables the backing class of a component view contributes,
+     /// and the class the view's `$this` is bound to.  Empty when no view
+-    /// name resolves to a backing class.
++    /// name resolves to a backing class. The third value records that a
++    /// component class contributes data beyond ordinary view-call arguments.
+     ///
+     /// Only the first name that resolves contributes: a template is one
+     /// component, even when several view roots make it addressable by
+@@ -119,17 +120,17 @@ impl Backend {
+     pub(crate) fn blade_backing_class_vars(
+         &self,
+         view_names: &[String],
+-    ) -> (InjectedVars, Option<String>) {
++    ) -> (InjectedVars, Option<String>, bool) {
+         for view_name in view_names {
+             if let Some(class) = self.livewire_component_class(view_name) {
+                 let fqn = class.fqn().to_string();
+-                return (self.livewire_scope_vars(&class), Some(fqn));
++                return (self.livewire_scope_vars(&class), Some(fqn), true);
+             }
+             if let Some(class) = self.blade_component_class(view_name) {
+-                return (self.component_scope_vars(&class), None);
++                return (self.component_scope_vars(&class), None, true);
+             }
+         }
+-        (Vec::new(), None)
++        (Vec::new(), None, false)
+     }
+ 
+     /// The Blade component class a view name is the view of, over the
+diff --git a/src/blade/call_site_inference.rs b/src/blade/call_site_inference.rs
+index 9ee64a3..cfa4a2b 100644
+--- a/src/blade/call_site_inference.rs
++++ b/src/blade/call_site_inference.rs
+@@ -15,11 +15,13 @@
+ //!
+ //! This is deliberately the lowest-priority source: an in-template
+ //! `@var` annotation shadows an injected one (it sits closer to every
+-//! use site in the backward docblock scan), `@props`/`@aware`, a
++//! use site in the backward docblock scan), `@props` runtime defaults, a
+ //! component's backing class (see `super::backing_class`), and a
+ //! provider's composed data (see `super::shared_vars`) win
+ //! over it per name; globally shared data fills each render site's omissions, and templates that declare a signature are skipped
+-//! entirely. Types are "true for the callers we found": multiple call
++//! entirely for ordinary locals. Component consumable context remains separate
++//! from those locals and propagates through view/component render edges.
++//! Types are "true for the callers we found": multiple call
+ //! sites union per variable, and dynamic view names contribute nothing.
+ 
+ use std::collections::{HashMap, HashSet};
+@@ -28,6 +30,7 @@ use std::sync::Arc;
+ use mago_span::HasSpan;
+ use mago_syntax::cst::*;
+ 
++use super::consumable::{ComponentData, ConsumableContext};
+ use super::view_paths::canonical_path_for_comparison;
+ use crate::Backend;
+ use crate::atom::bytes_to_str;
+@@ -98,6 +101,8 @@ pub(crate) type InjectedVars = Vec<(String, String)>;
+ /// is bound to.
+ #[derive(Debug, Clone, Default, PartialEq, Eq)]
+ pub(crate) struct BladeScope {
++    /// Component data is distinct from template locals and @props defaults.
++    pub consumable: ConsumableContext,
+     /// Highest-priority source first — the prologue declares the first
+     /// entry for a name and skips the rest.
+     pub vars: InjectedVars,
+@@ -145,6 +150,7 @@ struct BladeRenderEnvironment {
+     vars: InferredVars,
+     complete: bool,
+     apply_defaults: bool,
++    consumable: Option<ConsumableContext>,
+ }
+ impl BladeRenderEnvironment {
+     fn new(mut vars: InferredVars, complete: bool) -> Self {
+@@ -153,15 +159,18 @@ impl BladeRenderEnvironment {
+             vars,
+             complete,
+             apply_defaults: true,
++            consumable: Some(ConsumableContext::default()),
+         }
+     }
+     fn declarations(vars: InferredVars) -> Self {
+         let mut value = Self::new(vars, false);
+         value.apply_defaults = false;
++        value.consumable = None;
+         value
+     }
+     fn equivalent(&self, other: &Self) -> bool {
+-        self.complete == other.complete
++        self.consumable == other.consumable
++            && self.complete == other.complete
+             && self.apply_defaults == other.apply_defaults
+             && self.vars.len() == other.vars.len()
+             && self
+@@ -909,7 +918,7 @@ fn push_undeclared(declared: &mut InjectedVars, vars: InjectedVars) {
+ /// so the result does not depend on the order the call sites were visited
+ /// in (the snapshot they come from is built from a `HashMap`, whose
+ /// iteration order varies across runs).
+-fn join_call_site_types(types: Vec<PhpType>) -> PhpType {
++pub(super) fn join_call_site_types(types: Vec<PhpType>) -> PhpType {
+     let mut unique: Vec<PhpType> = Vec::new();
+     for ty in types {
+         if !unique.iter().any(|u| u.equivalent(&ty)) {
+@@ -967,7 +976,175 @@ fn merge_render_site_with_shared_fallback(
+     }
+ }
+ 
++/// A resolved component occurrence, reused for ordinary props and consumables.
++struct ConsumableComponentInput {
++    span: crate::blade::component_tags::TagSpan,
++    initial_data: ComponentData,
++    render_data: ComponentData,
++    vars: InferredVars,
++}
++
++/// Data from still-open tag ancestors, outermost to nearest. Slots are syntax,
++/// not components that push data, and self-closing tags cannot enclose a call.
++fn component_ancestor_data(inputs: &[ConsumableComponentInput], offset: usize) -> ComponentData {
++    let mut data = ComponentData::default();
++    for input in inputs {
++        let span = &input.span;
++        if span.closed && span.span.start < offset && offset < span.span.end {
++            data = data.overlay(&input.initial_data);
++        }
++    }
++    data
++}
++
+ impl Backend {
++    /// Resolve attribute values through the same virtual PHP and shared type
++    /// engine used by ordinary component props, retaining each original tag.
++    fn consumable_component_inputs(
++        &self,
++        uri: &str,
++        content: &str,
++        virtual_php: &str,
++        components: &[(String, crate::blade::preprocessor::ComponentTarget)],
++        points: &[usize],
++        include_self: bool,
++    ) -> Vec<ConsumableComponentInput> {
++        use crate::blade::component_tags::{TagKind, scan_component_tag_calls, tag_spans};
++        let spans: Vec<_> = tag_spans(content)
++            .into_iter()
++            .filter(|span| {
++                span.kind == TagKind::Blade
++                    && span.name != "slot"
++                    && !span.name.starts_with("slot:")
++                    && ((include_self && points.binary_search(&span.span.start).is_ok())
++                        || (span.closed
++                            && points
++                                .get(points.partition_point(|point| *point <= span.span.start))
++                                .is_some_and(|point| *point < span.span.end)))
++            })
++            .collect();
++        let mut names: Vec<_> = spans.iter().map(|span| span.name.clone()).collect();
++        names.sort_unstable();
++        names.dedup();
++        let slots = crate::blade::component_tags::scan_component_tag_slot_sites(content, &names);
++        let occurrences = scan_component_tag_calls(content, &names, &|tag| {
++            component_argument_names(components, tag)
++        })
++        .into_iter()
++        .filter(|call| {
++            spans
++                .binary_search_by_key(&call.source_start, |span| span.span.start)
++                .is_ok()
++        })
++        .collect::<Vec<_>>();
++        let starts: Vec<_> = occurrences.iter().map(|call| call.source_start).collect();
++        let values = self.extract_component_call_site_vars(uri, virtual_php, occurrences);
++        starts
++            .into_iter()
++            .zip(values)
++            .filter_map(|(start, vars)| {
++                let span = spans
++                    .get(
++                        spans
++                            .binary_search_by_key(&start, |span| span.span.start)
++                            .ok()?,
++                    )?
++                    .clone();
++                let resolved = components
++                    .iter()
++                    .find(|(name, _)| name.strip_prefix("x-") == Some(span.name.as_str()));
++                let anonymous = resolved.is_some_and(|(_, target)| {
++                    target.fqn.trim_start_matches('\\') == "Illuminate\\View\\AnonymousComponent"
++                });
++                // Constructor-backed and dynamic data may expose keys beyond the
++                // attribute bag; unknown data cannot assert absence or an old type.
++                let initial_data = if anonymous {
++                    ComponentData::supplied(vars.iter().cloned().chain([(
++                        "attributes".into(),
++                        PhpType::parse("\\Illuminate\\View\\ComponentAttributeBag"),
++                    )]))
++                } else {
++                    ComponentData::unknown()
++                };
++                // The factory adds default/named slots only when rendering;
++                // still-open ancestors expose their initial data alone.
++                let mut render_data = initial_data.overlay(&ComponentData::supplied([(
++                    "slot".into(),
++                    PhpType::parse("\\Illuminate\\View\\ComponentSlot"),
++                )]));
++                for slot in slots.iter().filter(|slot| slot.owner_start == start) {
++                    let supplied = match &slot.name {
++                        Some(name) => ComponentData::supplied([(
++                            name.clone(),
++                            PhpType::parse("\\Illuminate\\View\\ComponentSlot"),
++                        )]),
++                        None => ComponentData::unknown(),
++                    };
++                    render_data = render_data.overlay(&supplied);
++                }
++                render_data = render_data.overlay(&ComponentData::supplied([(
++                    "__laravel_slots".into(),
++                    PhpType::parse("array<string,mixed>"),
++                )]));
++                Some(ConsumableComponentInput {
++                    span,
++                    initial_data,
++                    render_data,
++                    vars,
++                })
++            })
++            .collect()
++    }
++
++    /// View data itself is not component data. Only Blade callers can carry
++    /// a component-render context through a normal view/include edge.
++    fn consumable_context_at_view_call(
++        &self,
++        uri: &str,
++        virtual_php: &str,
++        offset: u32,
++        is_blade: bool,
++    ) -> ConsumableContext {
++        if !is_blade {
++            return ConsumableContext::default();
++        }
++        let scope = self
++            .blade_injected_vars
++            .read()
++            .get(uri)
++            .cloned()
++            .unwrap_or_default();
++        let Some(content) = self.get_file_content_arc(uri) else {
++            return scope
++                .consumable
++                .enter(&ComponentData::unknown(), &ComponentData::default());
++        };
++        let position = self.blade_source_maps.read().get(uri).and_then(|map| {
++            map.try_php_to_blade(crate::text_position::offset_to_position(
++                virtual_php,
++                offset as usize,
++            ))
++        });
++        let Some(position) = position else {
++            return scope
++                .consumable
++                .enter(&ComponentData::unknown(), &ComponentData::default());
++        };
++        let offset = crate::text_position::position_to_offset(&content, position) as usize;
++        let inputs = self.consumable_component_inputs(
++            uri,
++            &content,
++            virtual_php,
++            &scope.components,
++            &[offset],
++            false,
++        );
++        scope.consumable.enter(
++            &component_ancestor_data(&inputs, offset),
++            &ComponentData::default(),
++        )
++    }
++
+     /// Compute the variables to inject into a Blade template's virtual
+     /// PHP: the members of the class backing a component view (see
+     /// [`super::backing_class`]), what the layouts it `@extends` declare
+@@ -1025,7 +1202,8 @@ impl Backend {
+         // The backing class is a *declared* source, so it stands whatever
+         // else the template says; only the names its own signature
+         // declares win over it (the preprocessor applies that).
+-        let (mut declared, this_class) = self.blade_backing_class_vars(&view_names);
++        let (mut declared, this_class, has_backing_class) =
++            self.blade_backing_class_vars(&view_names);
+ 
+         // The layout the template `@extends` is rendered from the same data
+         // the template is, so what it declares the template receives too
+@@ -1039,15 +1217,8 @@ impl Backend {
+ 
+         // A template that declares a signature manages its own contract;
+         // inferring on top would fight the declared types.
+-        if environments.is_none() && crate::blade::signature::has_declared_signature(blade_content)
+-        {
+-            push_undeclared(&mut declared, shared_fallback);
+-            return BladeScope {
+-                vars: declared,
+-                this_class,
+-                components,
+-            };
+-        }
++        let owns_signature = environments.is_none()
++            && crate::blade::signature::has_declared_signature(blade_content);
+ 
+         // Find every file whose symbol map contains a View string key
+         // matching one of this template's names.
+@@ -1091,6 +1262,7 @@ impl Backend {
+             .map(|(name, ty)| (name, PhpType::parse(&ty)))
+             .collect();
+         let mut saw_render_site = false;
++        let mut consumable_sites = Vec::new();
+         for (snapshot_index, (file_uri, snapshot_map)) in snapshot.iter().enumerate() {
+             // A template must not feed itself: a recursive `@include` names
+             // the template the spans it would be read from belong to.
+@@ -1166,6 +1338,13 @@ impl Backend {
+                 continue;
+             };
+             for site in self.extract_call_site_vars(file_uri, &content, &offsets) {
++                let context = self.consumable_context_at_view_call(
++                    file_uri,
++                    &content,
++                    site.name_range.0,
++                    is_blade,
++                );
++                consumable_sites.push(context.clone());
+                 saw_render_site = true;
+                 let vars: InferredVars = site
+                     .vars
+@@ -1173,7 +1352,9 @@ impl Backend {
+                     .map(|var| (var.name, var.ty))
+                     .collect();
+                 if let Some(environments) = environments.as_deref_mut() {
+-                    environments.push(BladeRenderEnvironment::new(vars.clone(), site.complete));
++                    let mut environment = BladeRenderEnvironment::new(vars.clone(), site.complete);
++                    environment.consumable = Some(context);
++                    environments.push(environment);
+                 }
+                 merge_render_site_with_shared_fallback(
+                     &mut merged,
+@@ -1248,12 +1429,38 @@ impl Backend {
+                 let Some(virtual_php) = self.blade_virtual_php_arc(file_uri) else {
+                     continue;
+                 };
+-                for vars in
+-                    self.extract_component_call_site_vars(file_uri, &virtual_php, occurrences)
+-                {
++                let starts: Vec<_> = occurrences.iter().map(|call| call.source_start).collect();
++                let inputs = self.consumable_component_inputs(
++                    file_uri,
++                    content,
++                    &virtual_php,
++                    &caller_components,
++                    &starts,
++                    true,
++                );
++                let inherited = self
++                    .blade_injected_vars
++                    .read()
++                    .get(file_uri)
++                    .map(|scope| scope.consumable.clone())
++                    .unwrap_or_default();
++                for start in starts {
++                    let Ok(index) =
++                        inputs.binary_search_by_key(&start, |input| input.span.span.start)
++                    else {
++                        continue;
++                    };
++                    let input = &inputs[index];
++                    let vars = input.vars.clone();
++                    let ancestors = component_ancestor_data(&inputs, start);
++                    let supplied = &input.render_data;
++                    let context = inherited.enter(&ancestors, supplied);
++                    consumable_sites.push(context.clone());
+                     saw_render_site = true;
+                     if let Some(environments) = environments.as_deref_mut() {
+-                        environments.push(BladeRenderEnvironment::new(vars.clone(), true));
++                        let mut environment = BladeRenderEnvironment::new(vars.clone(), true);
++                        environment.consumable = Some(context);
++                        environments.push(environment);
+                     }
+                     merge_render_site_with_shared_fallback(
+                         &mut merged,
+@@ -1266,15 +1473,33 @@ impl Backend {
+         }
+ 
+         if !saw_render_site {
+-            for (name, ty) in shared_fallback {
+-                merged.entry(name).or_default().push(ty);
++            for (name, ty) in &shared_fallback {
++                merged.entry(name.clone()).or_default().push(ty.clone());
+             }
+         }
++        let mut consumable = ConsumableContext::alternatives(&consumable_sites);
++        if has_backing_class {
++            // A class can expose/filter data beyond its tag's argument bag.
++            // Keep such missing-key/value claims conservative until that
++            // exposure contract is represented in the consumable channel.
++            consumable = consumable.enter(&ComponentData::default(), &ComponentData::unknown());
++        }
++        if owns_signature {
++            push_undeclared(
++                &mut declared,
++                shared_fallback
++                    .iter()
++                    .map(|(name, ty)| (name.clone(), ty.to_string()))
++                    .collect(),
++            );
++            merged.clear();
++        }
+         if merged.is_empty() {
+             return BladeScope {
+                 vars: declared,
+                 this_class,
+                 components,
++                consumable,
+             };
+         }
+ 
+@@ -1298,6 +1523,7 @@ impl Backend {
+             vars,
+             this_class,
+             components,
++            consumable,
+         }
+     }
+ 
+@@ -1918,7 +2144,7 @@ impl Backend {
+             Some(excluded),
+             Some(&mut incoming),
+         );
+-        let (mut fixed, _) = self.blade_backing_class_vars(&names);
++        let (mut fixed, _, _) = self.blade_backing_class_vars(&names);
+         push_undeclared(&mut fixed, self.blade_layout_vars(&content));
+         push_undeclared(&mut fixed, self.blade_composed_vars(&names));
+         let mut fixed: InferredVars = fixed
+@@ -2008,6 +2234,7 @@ impl Backend {
+         }
+         let mut output = BladeRenderEnvironment::new(vars, input.complete);
+         output.apply_defaults = input.apply_defaults;
++        output.consumable = input.consumable.clone();
+         output
+     }
+ 
+@@ -2099,6 +2326,12 @@ impl Backend {
+                 vars,
+                 this_class: seed.template.this_class.clone(),
+                 components: seed.template.components.clone(),
++                consumable: ConsumableContext::alternatives(
++                    &reached[index]
++                        .iter()
++                        .filter_map(|environment| environment.consumable.clone())
++                        .collect::<Vec<_>>(),
++                ),
+             };
+             let Some(update) = self.prepare_blade_scope_update(&seed.uri, &seed.content, scope)
+             else {
+diff --git a/src/blade/component_tags/attributes.rs b/src/blade/component_tags/attributes.rs
+index 0644ef5..2e9f707 100644
+--- a/src/blade/component_tags/attributes.rs
++++ b/src/blade/component_tags/attributes.rs
+@@ -262,7 +262,32 @@ pub(super) fn scan_tag_attributes(
+ /// preprocessing time which specific occurrence it is rendering for, so
+ /// every name any occurrence could pass has to be declared.
+ pub(crate) fn scan_component_tag_slots(content: &str, tag_names: &[String]) -> Vec<String> {
+-    if tag_names.is_empty() || !content.contains("<x-slot") {
++    let mut names = Vec::new();
++    for site in scan_component_tag_slot_sites(content, tag_names) {
++        if let Some(name) = site.name
++            && !names.contains(&name)
++        {
++            names.push(name);
++        }
++    }
++    names
++}
++
++/// One slot write and the component occurrence that receives it.
++#[derive(Debug, Clone, PartialEq, Eq)]
++pub(crate) struct ComponentSlotSite {
++    /// Opening byte offset of the owning component in the original source.
++    pub(crate) owner_start: usize,
++    /// None retains unknown names/values from dynamic or direct slot writes.
++    pub(crate) name: Option<String>,
++}
++
++/// Slot writes of matching component occurrences in original source order.
++pub(crate) fn scan_component_tag_slot_sites(
++    content: &str,
++    tag_names: &[String],
++) -> Vec<ComponentSlotSite> {
++    if tag_names.is_empty() || (!content.contains("<x-slot") && !content.contains("@slot")) {
+         return Vec::new();
+     }
+     let masked = mask_inert_regions(content, true);
+@@ -270,10 +295,25 @@ pub(crate) fn scan_component_tag_slots(content: &str, tag_names: &[String]) -> V
+     // Currently open `<x-…>` component tags, nearest last. `<x-slot…>`
+     // itself is never pushed here: it is not a component boundary, so a
+     // slot cannot receive another slot.
+-    let mut stack: Vec<(&str, bool)> = Vec::new();
+-    let mut names: Vec<String> = Vec::new();
++    let mut stack: Vec<(&str, bool, usize)> = Vec::new();
++    let mut sites = Vec::new();
+     let mut i = 0;
+     while i < bytes.len() {
++        if bytes[i] == b'@'
++            && masked[i..].starts_with("@slot")
++            && (i == 0 || bytes[i - 1] != b'@')
++            && !bytes
++                .get(i + 5)
++                .is_some_and(|ch| ch.is_ascii_alphanumeric() || *ch == b'_')
++            && let Some((_, true, owner_start)) = stack.last()
++        {
++            // Direct @slot arguments may supply arbitrary content or a dynamic
++            // key. Retain that uncertainty rather than calling it absent.
++            sites.push(ComponentSlotSite {
++                owner_start: *owner_start,
++                name: None,
++            });
++        }
+         if bytes[i] != b'<' {
+             i += 1;
+             continue;
+@@ -290,7 +330,7 @@ pub(crate) fn scan_component_tag_slots(content: &str, tag_names: &[String]) -> V
+             };
+             let name = &masked[name_start..j];
+             if !is_slot_tag_name(name)
+-                && let Some(pos) = stack.iter().rposition(|(open, _)| *open == name)
++                && let Some(pos) = stack.iter().rposition(|(open, _, _)| *open == name)
+             {
+                 stack.truncate(pos);
+             }
+@@ -310,19 +350,19 @@ pub(crate) fn scan_component_tag_slots(content: &str, tag_names: &[String]) -> V
+         let tag_name = &masked[name_start..j];
+         let lexed = lex_tag_attributes(&masked, j);
+         if is_slot_tag_name(tag_name) {
+-            if let Some((_, true)) = stack.last()
+-                && let Some(slot_name) = slot_tag_name(&masked, tag_name, &lexed)
+-                && !names.contains(&slot_name)
+-            {
+-                names.push(slot_name);
++            if let Some((_, true, owner_start)) = stack.last() {
++                sites.push(ComponentSlotSite {
++                    owner_start: *owner_start,
++                    name: slot_tag_name(&masked, tag_name, &lexed),
++                });
+             }
+         } else if lexed.closed && !lexed.self_closing {
+             let is_match = tag_names.iter().any(|n| n == tag_name);
+-            stack.push((tag_name, is_match));
++            stack.push((tag_name, is_match, i));
+         }
+         i = lexed.end;
+     }
+-    names
++    sites
+ }
+ 
+ /// Whether an `<x-…>` tag's bare name (after the `x-` prefix) opens a
+diff --git a/src/blade/component_tags/mod.rs b/src/blade/component_tags/mod.rs
+index f213ed6..b6d26ad 100644
+--- a/src/blade/component_tags/mod.rs
++++ b/src/blade/component_tags/mod.rs
+@@ -31,6 +31,8 @@ pub(crate) use spans::*;
+ /// component names.
+ #[derive(Debug, Default, PartialEq)]
+ pub(crate) struct ComponentTagCall {
++    /// Opening byte offset in the original Blade source.
++    pub(crate) source_start: usize,
+     /// Plain (non-bound) attributes, already typed from their literal
+     /// text: `(camelCase name, type)`.
+     pub(crate) literal: Vec<(String, PhpType)>,
+@@ -297,7 +299,8 @@ pub(crate) fn scan_component_tag_calls(
+             .strip_prefix("x-")
+             .is_some_and(|bare| tag_names.iter().any(|n| n == bare));
+         let consumed = arguments(tag_name).unwrap_or_default();
+-        let (end, call) = scan_tag_attributes(&masked, j, &consumed, &mut bound_index);
++        let (end, mut call) = scan_tag_attributes(&masked, j, &consumed, &mut bound_index);
++        call.source_start = i;
+         if is_match {
+             results.push(call);
+         }
+diff --git a/src/blade/component_tags/tests.rs b/src/blade/component_tags/tests.rs
+index c85e4d9..cf4a4f3 100644
+--- a/src/blade/component_tags/tests.rs
++++ b/src/blade/component_tags/tests.rs
+@@ -541,3 +541,56 @@ fn a_named_slot_closed_under_its_own_name_reports_nothing() {
+     assert!(tag_report("<x-card>\n<x-slot:title>\nHi\n</x-slot:title>\n</x-card>\n").is_empty());
+     assert!(tag_report("<x-card>\n<x-slot:title>\nHi\n</x-slot:footer>\n</x-card>\n").is_empty());
+ }
++
++#[test]
++fn slot_sites_keep_same_named_slots_with_their_own_occurrence() {
++    let source = "<p>😀</p><x-card><x-slot:title>First</x-slot></x-card><x-card><x-slot:title>Second</x-slot></x-card>";
++    let sites = scan_component_tag_slot_sites(source, &["card".into()]);
++    assert_eq!(
++        sites,
++        vec![
++            ComponentSlotSite {
++                owner_start: source.find("<x-card>").unwrap(),
++                name: Some("title".into())
++            },
++            ComponentSlotSite {
++                owner_start: source.rfind("<x-card>").unwrap(),
++                name: Some("title".into())
++            },
++        ]
++    );
++}
++
++#[test]
++fn slot_sites_keep_dynamic_and_direct_writes_uncertain_without_losing_owner() {
++    let source = r#"<x-card><x-slot :name="$dynamic">Value</x-slot>@slot('title', $value)<x-inner><x-slot:title>Inner</x-slot></x-inner></x-card>"#;
++    let sites = scan_component_tag_slot_sites(source, &["card".into(), "inner".into()]);
++    assert_eq!(sites.len(), 3);
++    assert_eq!(
++        sites[0],
++        ComponentSlotSite {
++            owner_start: 0,
++            name: None
++        }
++    );
++    assert_eq!(
++        sites[1],
++        ComponentSlotSite {
++            owner_start: 0,
++            name: None
++        }
++    );
++    assert_eq!(
++        sites[2],
++        ComponentSlotSite {
++            owner_start: source.find("<x-inner>").unwrap(),
++            name: Some("title".into())
++        }
++    );
++}
++
++#[test]
++fn escaped_inert_or_similarly_named_directives_are_not_slot_writes() {
++    let source = r#"<x-card>@@slot('title') @slotExtended('title') {{-- @slot('title') --}} @php $x = "@slot('title')"; @endphp</x-card>"#;
++    assert!(scan_component_tag_slot_sites(source, &["card".into()]).is_empty());
++}
+diff --git a/src/blade/consumable.rs b/src/blade/consumable.rs
+new file mode 100644
+index 0000000..a361383
+--- /dev/null
++++ b/src/blade/consumable.rs
+@@ -0,0 +1,344 @@
++//! The two data channels used by Laravel's getConsumableComponentData.
++//!
++//! Rendered component data takes precedence over still-open component tags.
++//! Presence is independent of nullability: a supplied null prevents a default.
++//! Template-local @props defaults never enter either channel.
++
++use std::collections::{BTreeMap, BTreeSet};
++
++use crate::php_type::PhpType;
++
++use super::call_site_inference::join_call_site_types;
++
++#[derive(Debug, Clone, PartialEq, Eq)]
++struct Binding {
++    ty: PhpType,
++    definite: bool,
++}
++
++/// An abstract data array, including whether unreadable keys may exist.
++#[derive(Debug, Clone, PartialEq, Eq)]
++pub(crate) struct ComponentData {
++    bindings: BTreeMap<String, Binding>,
++    complete: bool,
++}
++
++impl Default for ComponentData {
++    fn default() -> Self {
++        Self {
++            bindings: BTreeMap::new(),
++            complete: true,
++        }
++    }
++}
++
++/// A missing key differs from a key whose value happens to include null.
++#[derive(Debug, Clone, PartialEq, Eq)]
++pub(crate) enum ConsumableValue {
++    Absent,
++    Present(PhpType),
++    MaybePresent(PhpType),
++}
++
++impl ComponentData {
++    /// Known keys at one render site. Later duplicate keys win as in PHP.
++    pub(crate) fn supplied(values: impl IntoIterator<Item = (String, PhpType)>) -> Self {
++        Self {
++            bindings: values
++                .into_iter()
++                .map(|(name, ty)| {
++                    (
++                        name,
++                        Binding {
++                            ty: ty.simplified(),
++                            definite: true,
++                        },
++                    )
++                })
++                .collect(),
++            complete: true,
++        }
++    }
++
++    /// A data source whose possible keys or values cannot be read statically.
++    pub(crate) fn unknown() -> Self {
++        Self {
++            complete: false,
++            ..Self::default()
++        }
++    }
++
++    /// Resolve presence without applying a consumer's local default.
++    pub(crate) fn lookup(&self, name: &str) -> ConsumableValue {
++        match self.bindings.get(name) {
++            Some(binding) if binding.definite => ConsumableValue::Present(binding.ty.clone()),
++            Some(binding) => ConsumableValue::MaybePresent(binding.ty.clone()),
++            None if self.complete => ConsumableValue::Absent,
++            None => ConsumableValue::MaybePresent(PhpType::mixed()),
++        }
++    }
++
++    /// Resolve one newer key without rebuilding every unrelated entry.
++    fn lookup_over(&self, older: &Self, name: &str) -> ConsumableValue {
++        match self.lookup(name) {
++            value @ ConsumableValue::Present(_) => value,
++            ConsumableValue::Absent => older.lookup(name),
++            ConsumableValue::MaybePresent(ty) => match older.lookup(name) {
++                ConsumableValue::Absent => ConsumableValue::MaybePresent(ty),
++                ConsumableValue::Present(previous) => {
++                    ConsumableValue::Present(join_call_site_types(vec![previous, ty]).simplified())
++                }
++                ConsumableValue::MaybePresent(previous) => ConsumableValue::MaybePresent(
++                    join_call_site_types(vec![previous, ty]).simplified(),
++                ),
++            },
++        }
++    }
++
++    /// PHP array_merge semantics: newer supplied values override older ones.
++    pub(crate) fn overlay(&self, newer: &Self) -> Self {
++        let keys: BTreeSet<_> = self
++            .bindings
++            .keys()
++            .chain(newer.bindings.keys())
++            .cloned()
++            .collect();
++        let bindings = keys
++            .into_iter()
++            .filter_map(|name| {
++                let binding = match newer.lookup_over(self, &name) {
++                    ConsumableValue::Present(ty) => Binding { ty, definite: true },
++                    ConsumableValue::MaybePresent(ty) => Binding {
++                        ty,
++                        definite: false,
++                    },
++                    ConsumableValue::Absent => return None,
++                };
++                Some((name, binding))
++            })
++            .collect();
++        Self {
++            bindings,
++            complete: self.complete && newer.complete,
++        }
++    }
++}
++
++/// One possible caller's two correlated data channels.
++#[derive(Debug, Clone, Default, PartialEq, Eq)]
++struct ContextFrame {
++    current: ComponentData,
++    open: ComponentData,
++}
++
++/// Context inherited through view rendering, independent of local variables.
++/// Retain caller alternatives: merging the two channels independently would
++/// invent missing-key paths and apply defaults even when every caller supplies
++/// the key in one channel or the other.
++#[derive(Debug, Clone, PartialEq, Eq)]
++pub(crate) struct ConsumableContext {
++    frames: Vec<ContextFrame>,
++}
++
++impl Default for ConsumableContext {
++    fn default() -> Self {
++        Self {
++            frames: vec![ContextFrame::default()],
++        }
++    }
++}
++
++impl ConsumableContext {
++    /// Enter a component rendered inside a template's still-open tag ancestors.
++    pub(crate) fn enter(&self, ancestors: &ComponentData, supplied: &ComponentData) -> Self {
++        Self {
++            frames: self
++                .frames
++                .iter()
++                .map(|frame| ContextFrame {
++                    current: frame.current.overlay(supplied),
++                    open: frame.open.overlay(ancestors),
++                })
++                .collect(),
++        }
++    }
++
++    /// Current rendered data wins over even a nearer still-open component.
++    pub(crate) fn lookup(&self, name: &str) -> ConsumableValue {
++        let mut values = Vec::new();
++        let mut definite = true;
++        for frame in &self.frames {
++            match frame.current.lookup_over(&frame.open, name) {
++                ConsumableValue::Present(ty) => values.push(ty),
++                ConsumableValue::MaybePresent(ty) => {
++                    values.push(ty);
++                    definite = false;
++                }
++                ConsumableValue::Absent => definite = false,
++            }
++        }
++        if values.is_empty() {
++            ConsumableValue::Absent
++        } else {
++            let ty = join_call_site_types(values).simplified();
++            if definite {
++                ConsumableValue::Present(ty)
++            } else {
++                ConsumableValue::MaybePresent(ty)
++            }
++        }
++    }
++
++    /// Canonically ordered distinct caller contexts, without an iteration cap.
++    pub(crate) fn alternatives(sites: &[Self]) -> Self {
++        let mut frames: Vec<_> = sites
++            .iter()
++            .flat_map(|site| site.frames.iter().cloned())
++            .collect();
++        if frames.is_empty() {
++            return Self::default();
++        }
++        // BTreeMap fields and canonical type unions make this key stable across
++        // source/index traversal orders; allocate one key per retained frame.
++        frames.sort_by_cached_key(|frame| format!("{frame:?}"));
++        frames.dedup();
++        Self { frames }
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    fn data(ty: &str) -> ComponentData {
++        ComponentData::supplied([("person".into(), PhpType::parse(ty))])
++    }
++
++    #[test]
++    fn null_false_and_nullable_values_are_present_not_missing() {
++        for ty in ["null", "false", "\\App\\User|null"] {
++            assert_eq!(
++                data(ty).lookup("person"),
++                ConsumableValue::Present(PhpType::parse(ty))
++            );
++        }
++        assert_eq!(
++            ComponentData::default().lookup("person"),
++            ConsumableValue::Absent
++        );
++    }
++
++    #[test]
++    fn nearest_open_tag_wins_until_rendered_data_supplies_the_key() {
++        let context =
++            ConsumableContext::default().enter(&data("\\App\\User"), &ComponentData::default());
++        let context = context.enter(&data("\\App\\Other"), &ComponentData::default());
++        assert_eq!(
++            context.lookup("person"),
++            ConsumableValue::Present(PhpType::parse("\\App\\Other"))
++        );
++        let rendered = context.enter(&ComponentData::default(), &data("null"));
++        assert_eq!(
++            rendered.lookup("person"),
++            ConsumableValue::Present(PhpType::parse("null"))
++        );
++    }
++
++    #[test]
++    fn rendered_parent_overrides_nearer_open_tag_but_child_data_overrides_both() {
++        let parent =
++            ConsumableContext::default().enter(&ComponentData::default(), &data("\\App\\User"));
++        let child = parent.enter(&data("\\App\\Other"), &ComponentData::default());
++        assert_eq!(
++            child.lookup("person"),
++            ConsumableValue::Present(PhpType::parse("\\App\\User"))
++        );
++        let child = parent.enter(&data("\\App\\Other"), &data("false"));
++        assert_eq!(
++            child.lookup("person"),
++            ConsumableValue::Present(PhpType::parse("false"))
++        );
++    }
++
++    #[test]
++    fn optional_caller_key_keeps_absence_distinct_from_null() {
++        let nullable = ConsumableContext::default().enter(&ComponentData::default(), &data("null"));
++        let optional = ConsumableContext::alternatives(&[nullable, ConsumableContext::default()]);
++        assert_eq!(
++            optional.lookup("person"),
++            ConsumableValue::MaybePresent(PhpType::parse("null"))
++        );
++        let fallback = optional.enter(&data("\\App\\User"), &ComponentData::default());
++        let ConsumableValue::Present(ty) = fallback.lookup("person") else {
++            panic!("open fallback supplies every absent key")
++        };
++        assert!(ty.equivalent(&PhpType::parse("\\App\\User|null")), "{ty}");
++    }
++
++    #[test]
++    fn unknown_data_cannot_assert_absence_or_an_older_value() {
++        assert_eq!(
++            ComponentData::unknown().lookup("person"),
++            ConsumableValue::MaybePresent(PhpType::mixed())
++        );
++        assert_eq!(
++            data("\\App\\User")
++                .overlay(&ComponentData::unknown())
++                .lookup("person"),
++            ConsumableValue::Present(PhpType::mixed())
++        );
++        assert_eq!(
++            ComponentData::unknown()
++                .overlay(&data("false"))
++                .lookup("person"),
++            ConsumableValue::Present(PhpType::parse("false"))
++        );
++    }
++
++    #[test]
++    fn alternative_order_and_duplicate_contexts_are_stable() {
++        let a = ConsumableContext::default().enter(&ComponentData::default(), &data("\\App\\User"));
++        let b = ConsumableContext::default().enter(&data("null"), &ComponentData::default());
++        let merged = ConsumableContext::alternatives(&[a.clone(), b.clone()]);
++        assert_eq!(merged, ConsumableContext::alternatives(&[b, a.clone(), a]));
++        let ConsumableValue::Present(ty) = merged.lookup("person") else {
++            panic!("every caller supplies the key in one of the channels")
++        };
++        assert!(ty.equivalent(&PhpType::parse("\\App\\User|null")), "{ty}");
++    }
++
++    #[test]
++    fn mixed_inside_a_supplied_union_does_not_retain_a_concrete_model() {
++        assert_eq!(
++            data("\\App\\User|mixed").lookup("person"),
++            ConsumableValue::Present(PhpType::mixed())
++        );
++    }
++
++    #[test]
++    fn correlated_channels_do_not_reintroduce_a_masked_parent_value() {
++        let a = ConsumableContext::default().enter(&data("\\App\\Masked"), &data("\\App\\User"));
++        let b =
++            ConsumableContext::default().enter(&data("\\App\\Other"), &ComponentData::default());
++        let merged = ConsumableContext::alternatives(&[a, b]);
++        let ConsumableValue::Present(ty) = merged.lookup("person") else {
++            panic!("every caller supplies a value")
++        };
++        assert!(
++            ty.equivalent(&PhpType::parse("\\App\\User|\\App\\Other")),
++            "{ty}"
++        );
++    }
++
++    #[test]
++    fn duplicate_supplied_key_uses_the_last_value() {
++        let values = ComponentData::supplied([
++            ("person".into(), PhpType::parse("null")),
++            ("person".into(), PhpType::parse("false")),
++        ]);
++        assert_eq!(
++            values.lookup("person"),
++            ConsumableValue::Present(PhpType::parse("false"))
++        );
++    }
++}
+diff --git a/src/blade/contract.rs b/src/blade/contract.rs
+index 72ce769..1402757 100644
+--- a/src/blade/contract.rs
++++ b/src/blade/contract.rs
+@@ -213,7 +213,7 @@ impl Backend {
+                 }
+             }
+         }
+-        let (backing, this_class) = self.blade_backing_class_vars(view_names);
++        let (backing, this_class, _) = self.blade_backing_class_vars(view_names);
+         supplied.extend(backing.into_iter().map(|(name, _)| name));
+         if this_class.is_some() {
+             // A Livewire view renders with the component bound, so a
+diff --git a/src/blade/mod.rs b/src/blade/mod.rs
+index 6055a88..f1510c3 100644
+--- a/src/blade/mod.rs
++++ b/src/blade/mod.rs
+@@ -5,6 +5,7 @@ pub(crate) mod blocks;
+ pub(crate) mod call_site_inference;
+ pub(crate) mod component_names;
+ pub(crate) mod component_tags;
++pub(crate) mod consumable;
+ pub(crate) mod contract;
+ pub mod directive_completion;
+ pub mod directives;
+@@ -45,6 +46,7 @@ pub const WRAPPER_FUNCTION: &str = "__blade_template";
+ const MARKER_FUNCTIONS: &[(&str, Option<&str>)] = &[
+     ("blade_directive", None),
+     ("blade_bound_attr_directive", None),
++    ("blade_aware_missing", Some("bool")),
+     ("blade_view_directive", None),
+     ("blade_each_directive", None),
+     ("blade_can_directive", Some("bool")),
+diff --git a/src/blade/preprocessor/mod.rs b/src/blade/preprocessor/mod.rs
+index b6a5c58..e1398d5 100644
+--- a/src/blade/preprocessor/mod.rs
++++ b/src/blade/preprocessor/mod.rs
+@@ -102,7 +102,7 @@ pub fn preprocess(content: &str) -> (String, BladeSourceMap) {
+ /// prologue, following the priority chain in [`super::signature`]: the
+ /// template's own signature docblock wins, then `@props` bindings
+ /// (supplied types with defaults only for missing/null values) and the
+-/// existing `@aware` declaration fallback, then the
++/// presence-based `@aware` consumable-data lookup, then the
+ /// variables Blade injects into a component body, then the externally
+ /// resolved variables the caller passes in (a backing class's members and
+ /// the layouts the template extends ahead of call-site inference, in the
+@@ -141,19 +141,43 @@ pub fn preprocess_with_vars(
+     this_class: Option<&str>,
+     components: Option<&dyn ComponentResolver>,
+     directives: &BladeDirectives,
++) -> (String, BladeSourceMap) {
++    preprocess_with_consumables(
++        content,
++        injected_vars,
++        kind,
++        this_class,
++        components,
++        directives,
++        None,
++    )
++}
++
++pub(crate) fn preprocess_with_consumables(
++    content: &str,
++    injected_vars: &[(String, String)],
++    kind: TemplateKind,
++    this_class: Option<&str>,
++    components: Option<&dyn ComponentResolver>,
++    directives: &BladeDirectives,
++    consumables: Option<&super::consumable::ConsumableContext>,
+ ) -> (String, BladeSourceMap) {
+     let mut virtual_php = String::with_capacity(content.len() + 512);
+     let mut source_map = BladeSourceMap::default();
+ 
+     let (uses_insert_at, mut wrapper_scope_start) = prologue::emit(
+         content,
++        consumables,
+         injected_vars,
+         kind,
+         this_class,
+         &mut virtual_php,
+-        &mut source_map,
+     );
+ 
++    // Generated declarations may span multiple lines; derive every mapped
++    // position from the actual prologue rather than a fixed per-variable height.
++    source_map.prologue_lines = virtual_php.matches('\n').count() as u32;
++
+     // `@use` imports cannot be emitted inline: the template body is wrapped
+     // in `function __blade_template()`, and PHP `use` imports are only valid
+     // at the top level. They are collected here and spliced into the
+diff --git a/src/blade/preprocessor/prologue.rs b/src/blade/preprocessor/prologue.rs
+index acbcddc..19f23b5 100644
+--- a/src/blade/preprocessor/prologue.rs
++++ b/src/blade/preprocessor/prologue.rs
+@@ -1,5 +1,4 @@
+ use crate::blade::TemplateKind;
+-use crate::blade::source_map::BladeSourceMap;
+ 
+ /// The variables Blade puts in a component view's scope on top of the data
+ /// its caller passes: (name without `$`, docblock type, initialiser).
+@@ -65,11 +64,11 @@ fn is_php_variable_name(name: &str) -> bool {
+ /// declarations follow.
+ pub(super) fn emit(
+     content: &str,
++    consumables: Option<&crate::blade::consumable::ConsumableContext>,
+     injected_vars: &[(String, String)],
+     kind: TemplateKind,
+     this_class: Option<&str>,
+     virtual_php: &mut String,
+-    source_map: &mut BladeSourceMap,
+ ) -> (usize, Option<u32>) {
+     let signature = crate::blade::signature::extract(content);
+     // (name without `$`, the PHP that declares it), in priority order.
+@@ -86,8 +85,8 @@ pub(super) fn emit(
+ 
+     // A prop default is a runtime fallback, not a type annotation. Blade
+     // keeps supplied non-null data, and only fills missing/null values.
+-    // `@aware` has a separate consumable-component lookup; retain its
+-    // existing declaration fallback until that data channel is inferred.
++    // `@aware` has a separate presence-based consumable lookup; null is
++    // a supplied value there and must never select its default.
+     // Explicit PHPDoc signatures still take priority in `declare` above.
+     let entries = crate::blade::signature::extract_props(content)
+         .into_iter()
+@@ -100,6 +99,32 @@ pub(super) fn emit(
+                 .map(|entry| (entry, false)),
+         );
+     for (entry, is_prop) in entries {
++        if !is_prop && let Some(context) = consumables {
++            use crate::blade::consumable::ConsumableValue;
++            let name = &entry.name;
++            let fallback = entry.default.as_deref().unwrap_or("null");
++            let decl = match context.lookup(name) {
++                ConsumableValue::Absent => format!("${name} = {fallback};\n"),
++                value @ (ConsumableValue::Present(_) | ConsumableValue::MaybePresent(_)) => {
++                    let (ty, optional) = match value {
++                        ConsumableValue::Present(ty) => (ty, false),
++                        ConsumableValue::MaybePresent(ty) => (ty, true),
++                        ConsumableValue::Absent => unreachable!(),
++                    };
++                    let type_string = ty.to_string();
++                    let type_string = docblock_safe_type(&type_string);
++                    let mut decl = format!("/** @var {type_string} ${name} */\n${name} = null;\n");
++                    if optional {
++                        decl.push_str(&format!(
++                            "if (blade_aware_missing()) {{ ${name} = {fallback}; }}\n"
++                        ));
++                    }
++                    decl
++                }
++            };
++            declare(name, decl);
++            continue;
++        }
+         let supplied = if is_prop {
+             injected_vars.iter().find(|(name, _)| name == &entry.name)
+         } else {
+@@ -194,11 +219,6 @@ pub(super) fn emit(
+         virtual_php.push_str(name);
+     }
+     virtual_php.push_str(";\n");
+-    // Derive the prologue height from what was actually emitted rather
+-    // than assuming a line count per injected variable.  Every Blade
+-    // position is offset by this number, so a type string that carried
+-    // an unexpected line break would shift the whole file.
+-    source_map.prologue_lines = virtual_php.matches('\n').count() as u32;
+ 
+     (uses_insert_at, wrapper_scope_start)
+ }
+diff --git a/src/blade/signature.rs b/src/blade/signature.rs
+index e811047..8a8b4bc 100644
+--- a/src/blade/signature.rs
++++ b/src/blade/signature.rs
+@@ -10,8 +10,8 @@
+ //! 2. the first docblock before any template code — an implicit signature,
+ //!    so a codebase that already carries `@var` blocks needs no edits;
+ //! 3. `@props`, preserving supplied data with defaults for missing/null
+-//!    values, and the existing `@aware` declaration fallback (consumable
+-//!    parent-component data still needs its own inference channel);
++//!    values, and `@aware` resolving presence in the separate current-render
++//!    and still-open component data channels before its missing-key default;
+ //! 4. the variables Blade itself injects into a component body
+ //!    (`$attributes`, `$slot`, `$componentName`);
+ //! 5. the members of the class backing a component view, which Blade
+diff --git a/src/completion/handler/blade_component.rs b/src/completion/handler/blade_component.rs
+index 885c22c..fd565d0 100644
+--- a/src/completion/handler/blade_component.rs
++++ b/src/completion/handler/blade_component.rs
+@@ -301,7 +301,7 @@ impl Backend {
+         // it does not declare: a template whose `@props` covers its whole
+         // body pays for neither lookup.
+         let names = std::slice::from_ref(&view);
+-        let (backing, _) = self.blade_backing_class_vars(names);
++        let (backing, _, _) = self.blade_backing_class_vars(names);
+         let shared = self.blade_provider_vars(names);
+         for name in implicit {
+             // A member of the class backing the view, or a variable a
+diff --git a/src/parser/ast_update.rs b/src/parser/ast_update.rs
+index 846af3e..4cf5e0d 100644
+--- a/src/parser/ast_update.rs
++++ b/src/parser/ast_update.rs
+@@ -704,13 +704,14 @@ impl Backend {
+         // this runs on every keystroke in a template, and nothing the
+         // preprocessor does can write it back.
+         let directives = self.blade_directives.read();
+-        let (virtual_php, source_map) = crate::blade::preprocessor::preprocess_with_vars(
++        let (virtual_php, source_map) = crate::blade::preprocessor::preprocess_with_consumables(
+             content,
+             &injected.vars,
+             crate::blade::template_kind(uri, content),
+             injected.this_class.as_deref(),
+             Some(&components),
+             &directives,
++            Some(&injected.consumable),
+         );
+         BladeLowering {
+             virtual_php: Arc::new(virtual_php),
+diff --git a/tests/integration/blade_call_site_inference.rs b/tests/integration/blade_call_site_inference.rs
+index 0adb1a9..2139950 100644
+--- a/tests/integration/blade_call_site_inference.rs
++++ b/tests/integration/blade_call_site_inference.rs
+@@ -1984,4 +1984,349 @@ mod tests {
+             );
+         }
+     }
++
++    /// The real Laravel data lookup uses array-key presence, not null-coalescing,
++    /// and rendered data precedes the stack of still-open component tags.
++    #[tokio::test]
++    async fn aware_uses_component_data_presence_precedence_and_caller_alternatives() {
++        type AwareCase<'a> = (
++            &'a str,
++            &'a str,
++            &'a str,
++            &'a str,
++            &'a [&'a str],
++            &'a [&'a str],
++        );
++        let cases: &[AwareCase<'_>] = &[
++            (
++                "<x-parent :person=\"new \\App\\Item()\" />",
++                "@props(['person'])\n<x-leaf />",
++                "<div />",
++                "@aware(['person'])",
++                &["Item"],
++                &["mixed", "null"],
++            ),
++            (
++                "<x-parent :person=\"null\" />",
++                "<x-leaf />",
++                "<div />",
++                "@aware(['person' => 5])",
++                &["null"],
++                &["5"],
++            ),
++            (
++                "<x-parent :person=\"false\" />",
++                "<x-leaf />",
++                "<div />",
++                "@aware(['person' => 5])",
++                &["false"],
++                &["5"],
++            ),
++            (
++                "<x-parent />",
++                "@props(['person' => 7])\n<x-leaf />",
++                "<div />",
++                "@aware(['person' => 5])",
++                &["5"],
++                &["7"],
++            ),
++            (
++                "<x-parent />",
++                "<x-leaf />",
++                "<div />",
++                "@aware(['person'])",
++                &["null"],
++                &["mixed"],
++            ),
++            (
++                "<x-parent :person=\"new \\App\\Item()\" />",
++                "<x-leaf :person=\"false\" />",
++                "<div />",
++                "@aware(['person' => 5])",
++                &["false"],
++                &["Item", "5"],
++            ),
++            (
++                "<x-parent person=\"outer\"><x-leaf /></x-parent>",
++                "<div />",
++                "<div />",
++                "@aware(['person'])",
++                &["outer"],
++                &["mixed"],
++            ),
++            (
++                "<x-parent person=\"outer\" />",
++                "<x-middle person=\"near\"><x-leaf /></x-middle>",
++                "<div />",
++                "@aware(['person'])",
++                &["outer"],
++                &["near"],
++            ),
++            (
++                "<x-parent person=\"outer\" />",
++                "<x-middle person=\"near\"><x-leaf :person=\"false\" /></x-middle>",
++                "<div />",
++                "@aware(['person'])",
++                &["false"],
++                &["outer", "near"],
++            ),
++            (
++                "<x-parent person=\"outer\" />",
++                "<x-middle />",
++                "<x-leaf />",
++                "@aware(['person'])",
++                &["outer"],
++                &["mixed"],
++            ),
++            (
++                "<x-parent person=\"outer\" /><x-parent />",
++                "@props(['person' => 7])\n<x-leaf />",
++                "<div />",
++                "@aware(['person' => 5])",
++                &["outer", "5"],
++                &["7"],
++            ),
++            (
++                "<x-parent :person=\"null\" /><x-parent :person=\"false\" />",
++                "<x-leaf />",
++                "<div />",
++                "@aware(['person' => 5])",
++                &["null", "false"],
++                &["5"],
++            ),
++            (
++                "<x-parent person=\"outer\" />",
++                "<x-leaf />",
++                "<div />",
++                "@php /** @var int $person */ @endphp\n@aware(['person'])",
++                &["int"],
++                &["outer"],
++            ),
++            (
++                "@include('components.leaf', ['person' => new \\App\\Item()])",
++                "<div />",
++                "<div />",
++                "@aware(['person' => 5])",
++                &["5"],
++                &["Item"],
++            ),
++            (
++                "<x-parent person=\"outer\" />",
++                "@include('components.leaf')",
++                "<div />",
++                "@aware(['person'])",
++                &["outer"],
++                &["mixed"],
++            ),
++            (
++                "<x-parent person=\"outer\" /><x-parent person=\"stack\"><x-leaf /></x-parent>",
++                "@props(['person'])\n<x-leaf />",
++                "<div />",
++                "@aware(['person' => 5])",
++                &["outer", "stack"],
++                &["5"],
++            ),
++            (
++                "<x-unknown><x-leaf /></x-unknown>",
++                "<div />",
++                "<div />",
++                "@aware(['person' => 5])",
++                &["mixed"],
++                &["Item"],
++            ),
++        ];
++        for &(page, parent, middle, declaration, expected, absent) in cases {
++            let leaf = format!("{declaration}\n{{{{ $person }}}}\n");
++            let (backend, _dir) = create_psr4_workspace(
++                APP_PSR4_COMPOSER,
++                &[
++                    ("app/Item.php", ITEM_CLASS),
++                    ("resources/views/page.blade.php", page),
++                    ("resources/views/components/parent.blade.php", parent),
++                    ("resources/views/components/middle.blade.php", middle),
++                    ("resources/views/components/leaf.blade.php", &leaf),
++                ],
++            );
++            for (path, text) in [
++                ("resources/views/page.blade.php", page),
++                ("resources/views/components/parent.blade.php", parent),
++                ("resources/views/components/middle.blade.php", middle),
++                ("resources/views/components/leaf.blade.php", leaf.as_str()),
++            ] {
++                open_document(&backend, &workspace_uri(&backend, path), "blade", text).await;
++            }
++            let uri = workspace_uri(&backend, "resources/views/components/leaf.blade.php");
++            let hover = hover_type(&backend, &uri, declaration.lines().count() as u32, 4).await;
++            assert!(
++                expected.iter().all(|ty| hover.contains(ty))
++                    && absent.iter().all(|ty| !hover.contains(ty)),
++                "page={page:?} parent={parent:?} middle={middle:?} declaration={declaration:?}: expected={expected:?}, absent={absent:?}, got={hover}"
++            );
++        }
++    }
++
++    #[tokio::test]
++    async fn aware_class_component_data_is_not_proven_absent_from_its_attribute_bag() {
++        use crate::common::{BLADE_COMPONENT_COMPOSER, ILLUMINATE_COMPONENT_STUB};
++        let class = "<?php namespace App\\View\\Components; class ParentCard extends \\Illuminate\\View\\Component { public function __construct(public \\App\\Item $person) {} public function render() { return view('components.parent-card'); } }";
++        let page = "<x-parent-card :person=\"new \\App\\Item()\" />";
++        let parent = "<x-leaf />";
++        let leaf = "@aware(['person' => 5])\n{{ $person }}\n";
++        let (backend, _dir) = create_psr4_workspace(
++            BLADE_COMPONENT_COMPOSER,
++            &[
++                (
++                    "stubs/Illuminate/View/Component.php",
++                    ILLUMINATE_COMPONENT_STUB,
++                ),
++                ("app/Item.php", ITEM_CLASS),
++                ("app/View/Components/ParentCard.php", class),
++                ("resources/views/page.blade.php", page),
++                ("resources/views/components/parent-card.blade.php", parent),
++                ("resources/views/components/leaf.blade.php", leaf),
++            ],
++        );
++        open_document(
++            &backend,
++            &workspace_uri(&backend, "app/View/Components/ParentCard.php"),
++            "php",
++            class,
++        )
++        .await;
++        for (path, text) in [
++            ("resources/views/page.blade.php", page),
++            ("resources/views/components/parent-card.blade.php", parent),
++            ("resources/views/components/leaf.blade.php", leaf),
++        ] {
++            open_document(&backend, &workspace_uri(&backend, path), "blade", text).await;
++        }
++        let hover = hover_type(
++            &backend,
++            &workspace_uri(&backend, "resources/views/components/leaf.blade.php"),
++            1,
++            4,
++        )
++        .await;
++        // Class-backed data is currently conservative. A future exact exposure
++        // model may prove Item; neither result may assert the key is absent.
++        assert!(
++            hover.contains("mixed") || hover.contains("Item"),
++            "class render data must not become only the aware default: {hover}"
++        );
++    }
++
++    #[tokio::test]
++    async fn aware_slots_follow_ownership_and_render_timing() {
++        type Case<'a> = (&'a str, &'a str, &'a str, &'a [&'a str], &'a [&'a str]);
++        let cases: &[Case<'_>] = &[
++            (
++                "person",
++                "<x-parent :person=\"new \\App\\Item()\"><x-slot:person>Named</x-slot></x-parent>",
++                "<x-leaf />",
++                &["ComponentSlot"],
++                &["Item", "5"],
++            ),
++            (
++                "person",
++                "<x-parent person=\"outer\"><x-slot:person>Named</x-slot><x-leaf /></x-parent>",
++                "<div />",
++                &["outer"],
++                &["ComponentSlot", "5"],
++            ),
++            (
++                "person",
++                "<x-parent person=\"outer\"><x-slot:person>Named</x-slot></x-parent><x-parent person=\"other\" />",
++                "<x-leaf />",
++                &["ComponentSlot", "other"],
++                &["outer", "5"],
++            ),
++            (
++                "slot",
++                "<x-parent slot=\"parent-input\" />",
++                "<x-leaf />",
++                &["ComponentSlot"],
++                &["parent-input", "5"],
++            ),
++            (
++                "slot",
++                "<x-parent slot=\"parent-input\">@include('components.leaf')</x-parent>",
++                "<div />",
++                &["parent-input"],
++                &["ComponentSlot", "5"],
++            ),
++            (
++                "attributes",
++                "<x-parent><x-slot:attributes>Named</x-slot></x-parent>",
++                "<x-leaf />",
++                &["ComponentAttributeBag"],
++                &["ComponentSlot", "5"],
++            ),
++            (
++                "attributes",
++                "<x-parent />",
++                "<x-leaf><x-slot:attributes>Named</x-slot></x-leaf>",
++                &["ComponentSlot"],
++                &["ComponentAttributeBag", "5"],
++            ),
++            (
++                "attributes",
++                "@include('components.leaf')",
++                "<div />",
++                &["5"],
++                &["ComponentAttributeBag"],
++            ),
++            (
++                "__laravel_slots",
++                "<x-parent />",
++                "<x-leaf />",
++                &["array", "mixed"],
++                &["5"],
++            ),
++            (
++                "person",
++                "<x-parent person=\"outer\"><x-slot :name=\"$dynamic\">Named</x-slot></x-parent>",
++                "<x-leaf />",
++                &["mixed"],
++                &["outer", "5"],
++            ),
++            (
++                "person",
++                "<x-parent person=\"outer\">@slot('person', $dynamic)</x-parent>",
++                "<x-leaf />",
++                &["mixed"],
++                &["outer", "5"],
++            ),
++        ];
++        for &(key, page, parent, expected, absent) in cases {
++            let leaf = format!("@aware(['{key}' => 5])\n{{{{ ${key} }}}}\n");
++            let (backend, _dir) = create_psr4_workspace(
++                APP_PSR4_COMPOSER,
++                &[
++                    ("app/Item.php", ITEM_CLASS),
++                    ("resources/views/page.blade.php", page),
++                    ("resources/views/components/parent.blade.php", parent),
++                    ("resources/views/components/leaf.blade.php", &leaf),
++                ],
++            );
++            for (path, text) in [
++                ("resources/views/page.blade.php", page),
++                ("resources/views/components/parent.blade.php", parent),
++                ("resources/views/components/leaf.blade.php", leaf.as_str()),
++            ] {
++                open_document(&backend, &workspace_uri(&backend, path), "blade", text).await;
++            }
++            let hover = hover_type(
++                &backend,
++                &workspace_uri(&backend, "resources/views/components/leaf.blade.php"),
++                1,
++                4,
++            )
++            .await;
++            assert!(
++                expected.iter().all(|ty| hover.contains(ty))
++                    && absent.iter().all(|ty| !hover.contains(ty)),
++                "key={key}, page={page:?}, parent={parent:?}, expected={expected:?}, absent={absent:?}, got={hover}"
++            );
++        }
++    }
+ }

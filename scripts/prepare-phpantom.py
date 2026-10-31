@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Acquire the pinned PHP engine and replay its verified local patch series."""
+import argparse
 import hashlib
 import json
 from pathlib import Path
@@ -8,7 +9,10 @@ import tarfile
 import urllib.request
 
 ROOT = Path(__file__).resolve().parent.parent
-PIN = json.loads((ROOT / 'engine/source.json').read_text())
+parser = argparse.ArgumentParser(description=__doc__)
+parser.add_argument('--pin', type=Path, default=ROOT / 'engine/source.json', help='Source manifest; defaults to the active engine pin')
+args = parser.parse_args()
+PIN = json.loads(args.pin.read_text())
 PATCHES = [ROOT / 'engine/patches' / item['file'] for item in PIN['patches']]
 for entry, patch in zip(PIN['patches'], PATCHES):
     if hashlib.sha256(patch.read_bytes()).hexdigest() != entry['sha256']:

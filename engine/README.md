@@ -1,10 +1,12 @@
 # Pinned PHPantom engine
 
-The local OpenStorm candidate bundles PHPantom `0.11.1-openstorm.123` for Apple
-Silicon macOS. This is a local rebuild, not an upstream release. `source.json` pins
-upstream source, its archive checksum, the unchanged 114-patch PHP Workbench series,
-and OpenStorm patches 0115–0123 for resource isolation, Blade and Laravel assistance,
-and source-update recovery. The executable is verified by
+The local OpenStorm candidate currently bundles PHPantom `0.11.1-openstorm.123`
+for Apple Silicon macOS. Source recipe `0.11.1-openstorm.124` adds controller-group
+facade identity and is under validation; it has not replaced that executable.
+These are local rebuilds, not upstream releases. `source.json` pins upstream source,
+its archive checksum, the unchanged 114-patch PHP Workbench series, and OpenStorm
+patches 0115–0124 for resource isolation, Blade and Laravel assistance, and
+source-update recovery. The bundled executable is verified by
 `node scripts/verify-phpantom.mjs`; its provenance and licenses are under
 `src-tauri/resources/phpantom/`.
 

@@ -1,0 +1,425 @@
+--- a/src/completion/laravel_route_controller.rs
++++ b/src/completion/laravel_route_controller.rs
+@@ -25,7 +25,6 @@
+ use mago_syntax::cst::*;
+ 
+ use crate::Backend;
+-use crate::atom::bytes_to_str;
+ use crate::text_position::position_to_offset;
+ use crate::types::{AccessKind, FileContext};
+ 
+@@ -57,6 +56,7 @@
+ pub(crate) fn detect_laravel_route_controller_context(
+     content: &str,
+     position: Position,
++    resolved_names: Option<&crate::names::OwnedResolvedNames>,
+ ) -> Option<LaravelRouteControllerContext> {
+     let cursor_offset = position_to_offset(content, position) as usize;
+     let bytes = content.as_bytes();
+@@ -165,7 +165,7 @@
+     }
+     let before_colons = before_method[..before_method.len() - 2].trim_end();
+ 
+-    // Extract class name — must end with "Route".
++    // Resolve the facade at its source offset; imported aliases keep their identity.
+     let bc_bytes = before_colons.as_bytes();
+     let class_end = bc_bytes.len();
+     let mut class_start = class_end;
+@@ -177,13 +177,17 @@
+         class_start -= 1;
+     }
+     let class_name = &before_colons[class_start..class_end];
+-    let short_name = class_name.rsplit('\\').next().unwrap_or(class_name);
+-    if !short_name.eq_ignore_ascii_case("Route") {
++    let semantic_name = match resolved_names {
++        Some(names) => names.get(class_start as u32)?,
++        None => class_name,
++    };
++    if !crate::symbol_map::extraction::laravel::matches_laravel_facade(semantic_name, "Route") {
+         return None;
+     }
+ 
+     // ── Step 4: Find enclosing controller via AST ───────────────────
+-    let controller = find_enclosing_controller_class(content, cursor_offset as u32)?;
++    let controller =
++        find_enclosing_controller_class(content, cursor_offset as u32, resolved_names)?;
+ 
+     Some(LaravelRouteControllerContext {
+         controller_class: controller,
+@@ -198,14 +202,22 @@
+ ///
+ /// When multiple nested controller groups contain the cursor, the tightest
+ /// (innermost) match wins.
+-fn find_enclosing_controller_class(content: &str, cursor_offset: u32) -> Option<String> {
++fn find_enclosing_controller_class(
++    content: &str,
++    cursor_offset: u32,
++    resolved_names: Option<&crate::names::OwnedResolvedNames>,
++) -> Option<String> {
+     let mut best: Option<(String, u32)> = None; // (controller, range_size)
+ 
+     crate::virtual_members::laravel::walk_all_php_expressions(content, &mut |expr| {
+         if let Expression::Call(Call::Method(mc)) = expr
+             && let ClassLikeMemberSelector::Identifier(ident) = &mc.method
+             && ident.value.eq_ignore_ascii_case(b"group")
+-            && let Some(controller) = find_chain_controller(mc.object)
++            && let Some(controller) =
++                crate::symbol_map::extraction::laravel::laravel_route_find_controller_in_chain(
++                    mc.object,
++                    resolved_names,
++                )
+         {
+             for arg in mc.argument_list.arguments.iter() {
+                 if let Some((start, end)) = closure_body_range(arg.value())
+@@ -223,48 +235,6 @@
+     });
+ 
+     best.map(|(name, _)| name)
+-}
+-
+-/// Walk a method call chain looking for `->controller(X::class)`.
+-fn find_chain_controller(expr: &Expression<'_>) -> Option<String> {
+-    match expr {
+-        Expression::Call(Call::Method(mc)) => {
+-            if let ClassLikeMemberSelector::Identifier(ident) = &mc.method
+-                && ident.value.eq_ignore_ascii_case(b"controller")
+-            {
+-                return extract_class_arg(&mc.argument_list);
+-            }
+-            find_chain_controller(mc.object)
+-        }
+-        Expression::Call(Call::StaticMethod(sc)) => {
+-            if let ClassLikeMemberSelector::Identifier(ident) = &sc.method
+-                && ident.value.eq_ignore_ascii_case(b"controller")
+-            {
+-                return extract_class_arg(&sc.argument_list);
+-            }
+-            None
+-        }
+-        _ => None,
+-    }
+-}
+-
+-/// Extract the class name from the first `X::class` argument.
+-fn extract_class_arg(args: &ArgumentList<'_>) -> Option<String> {
+-    let first_arg = args.arguments.iter().next()?;
+-    if let Expression::Access(Access::ClassConstant(cca)) = first_arg.value() {
+-        let is_class = matches!(
+-            &cca.constant,
+-            ClassLikeConstantSelector::Identifier(ident)
+-                if bytes_to_str(ident.value).eq_ignore_ascii_case("class")
+-        );
+-        if is_class && let Expression::Identifier(id) = cca.class {
+-            let name = bytes_to_str(id.value()).to_string();
+-            if !name.is_empty() {
+-                return Some(name);
+-            }
+-        }
+-    }
+-    None
+ }
+ 
+ /// Return the byte range of a closure body (between braces).
+@@ -294,7 +264,11 @@
+         position: Position,
+         ctx: &FileContext,
+     ) -> Option<CompletionResponse> {
+-        let rc_ctx = detect_laravel_route_controller_context(content, position)?;
++        let rc_ctx = detect_laravel_route_controller_context(
++            content,
++            position,
++            ctx.resolved_names.as_deref(),
++        )?;
+ 
+         let class_loader = self.class_loader(ctx);
+ 
+@@ -363,7 +337,7 @@
+         // so detection should return None for the full context.
+         let line = 1;
+         let col = content.lines().nth(1).unwrap().rfind("cancel')").unwrap() as u32;
+-        let ctx = detect_laravel_route_controller_context(content, Position::new(line, col));
++        let ctx = detect_laravel_route_controller_context(content, Position::new(line, col), None);
+         assert!(
+             ctx.is_none(),
+             "No controller group — should not detect context"
+@@ -382,7 +356,7 @@
+         let line = 2;
+         let line_text = content.lines().nth(2).unwrap();
+         let col = line_text.find("can')").unwrap() as u32 + 3; // after "can"
+-        let ctx = detect_laravel_route_controller_context(content, Position::new(line, col));
++        let ctx = detect_laravel_route_controller_context(content, Position::new(line, col), None);
+         let ctx = ctx.expect("should detect controller group context");
+         assert_eq!(ctx.controller_class, "FooController");
+         assert_eq!(ctx.prefix, "can");
+@@ -399,7 +373,7 @@
+         let line = 2;
+         let line_text = content.lines().nth(2).unwrap();
+         let col = line_text.find("'');").unwrap() as u32 + 1; // inside empty ''
+-        let ctx = detect_laravel_route_controller_context(content, Position::new(line, col));
++        let ctx = detect_laravel_route_controller_context(content, Position::new(line, col), None);
+         let ctx = ctx.expect("should detect empty prefix");
+         assert_eq!(ctx.controller_class, "FooController");
+         assert_eq!(ctx.prefix, "");
+@@ -418,7 +392,7 @@
+         let line = 3;
+         let line_text = content.lines().nth(3).unwrap();
+         let col = line_text.find("idx").unwrap() as u32 + 2;
+-        let ctx = detect_laravel_route_controller_context(content, Position::new(line, col));
++        let ctx = detect_laravel_route_controller_context(content, Position::new(line, col), None);
+         let ctx = ctx.expect("should detect inner controller");
+         assert_eq!(ctx.controller_class, "InnerController");
+     }
+@@ -435,7 +409,7 @@
+         let line = 2;
+         let line_text = content.lines().nth(2).unwrap();
+         let col = line_text.find("path").unwrap() as u32 + 2;
+-        let ctx = detect_laravel_route_controller_context(content, Position::new(line, col));
++        let ctx = detect_laravel_route_controller_context(content, Position::new(line, col), None);
+         assert!(ctx.is_none(), "First arg should not match");
+     }
+ }
+--- a/src/symbol_map/extraction/laravel.rs
++++ b/src/symbol_map/extraction/laravel.rs
+@@ -22,7 +22,7 @@
+ }
+ 
+ /// Whether a semantically resolved class names one Laravel facade.
+-pub(super) fn matches_laravel_facade(class_name: &str, short: &str) -> bool {
++pub(crate) fn matches_laravel_facade(class_name: &str, short: &str) -> bool {
+     matches_laravel_class(class_name, "Illuminate\\Support\\Facades", short)
+ }
+ 
+@@ -1135,7 +1135,7 @@
+ ///
+ /// The `can()` there names an ability, but its second argument is a *route
+ /// parameter* name rather than a model, so no model subject is recorded.
+-pub(super) fn chain_roots_at_route_facade(
++pub(crate) fn chain_roots_at_route_facade(
+     expr: &Expression<'_>,
+     resolved_names: Option<&crate::names::OwnedResolvedNames>,
+ ) -> bool {
+@@ -1750,7 +1750,17 @@
+ /// if found, `None` otherwise.  Handles both instance-method chains
+ /// (`->prefix('…')->controller(X::class)`) and a static entry point
+ /// (`Route::controller(X::class)`).
+-pub(super) fn laravel_route_find_controller_in_chain(expr: &Expression<'_>) -> Option<String> {
++pub(crate) fn laravel_route_find_controller_in_chain(
++    expr: &Expression<'_>,
++    resolved_names: Option<&crate::names::OwnedResolvedNames>,
++) -> Option<String> {
++    if !chain_roots_at_route_facade(expr, resolved_names) {
++        return None;
++    }
++    laravel_route_controller_in_chain(expr)
++}
++
++fn laravel_route_controller_in_chain(expr: &Expression<'_>) -> Option<String> {
+     match expr {
+         Expression::Call(Call::Method(mc)) => {
+             if let ClassLikeMemberSelector::Identifier(ident) = &mc.method
+@@ -1758,7 +1768,7 @@
+             {
+                 return laravel_route_extract_class_arg(&mc.argument_list);
+             }
+-            laravel_route_find_controller_in_chain(mc.object)
++            laravel_route_controller_in_chain(mc.object)
+         }
+         Expression::Call(Call::StaticMethod(sc)) => {
+             if let ClassLikeMemberSelector::Identifier(ident) = &sc.method
+@@ -1799,15 +1809,16 @@
+     controller: &str,
+     content: &str,
+     spans: &mut Vec<SymbolSpan>,
++    resolved_names: Option<&crate::names::OwnedResolvedNames>,
+ ) {
+     match expr {
+         Expression::Closure(closure) => {
+             for stmt in closure.body.statements.iter() {
+-                laravel_route_scan_stmt(stmt, controller, content, spans);
++                laravel_route_scan_stmt(stmt, controller, content, spans, resolved_names);
+             }
+         }
+         Expression::ArrowFunction(af) => {
+-            laravel_route_scan_expr(af.expression, controller, content, spans);
++            laravel_route_scan_expr(af.expression, controller, content, spans, resolved_names);
+         }
+         _ => {}
+     }
+@@ -1819,26 +1830,27 @@
+     controller: &str,
+     content: &str,
+     spans: &mut Vec<SymbolSpan>,
++    resolved_names: Option<&crate::names::OwnedResolvedNames>,
+ ) {
+     match stmt {
+         Statement::Expression(e) => {
+-            laravel_route_scan_expr(e.expression, controller, content, spans);
++            laravel_route_scan_expr(e.expression, controller, content, spans, resolved_names);
+         }
+         Statement::Return(r) => {
+             if let Some(v) = r.value {
+-                laravel_route_scan_expr(v, controller, content, spans);
++                laravel_route_scan_expr(v, controller, content, spans, resolved_names);
+             }
+         }
+         Statement::If(if_stmt) => {
+             crate::parser::for_each_if_branch(if_stmt, |statements| {
+                 for s in statements {
+-                    laravel_route_scan_stmt(s, controller, content, spans);
++                    laravel_route_scan_stmt(s, controller, content, spans, resolved_names);
+                 }
+             });
+         }
+         Statement::Foreach(fe) => {
+             for s in fe.body.statements() {
+-                laravel_route_scan_stmt(s, controller, content, spans);
++                laravel_route_scan_stmt(s, controller, content, spans, resolved_names);
+             }
+         }
+         _ => {}
+@@ -1857,6 +1869,7 @@
+     controller: &str,
+     content: &str,
+     spans: &mut Vec<SymbolSpan>,
++    resolved_names: Option<&crate::names::OwnedResolvedNames>,
+ ) {
+     match expr {
+         // Chained call: Route::patch('cancel', 'cancel')->name('cancel')
+@@ -1864,23 +1877,31 @@
+             if let ClassLikeMemberSelector::Identifier(ident) = &mc.method
+                 && ident.value.eq_ignore_ascii_case(b"group")
+             {
++                if !chain_roots_at_route_facade(mc.object, resolved_names) {
++                    return;
++                }
+                 // Nested group — check for its own controller.
+-                if laravel_route_find_controller_in_chain(mc.object).is_some() {
++                if laravel_route_find_controller_in_chain(mc.object, resolved_names).is_some() {
+                     return; // Own controller; handled separately.
+                 }
+                 // No new controller — inherit the parent's.
+                 for arg in mc.argument_list.arguments.iter() {
+-                    laravel_route_scan_group_body(arg.value(), controller, content, spans);
++                    laravel_route_scan_group_body(
++                        arg.value(),
++                        controller,
++                        content,
++                        spans,
++                        resolved_names,
++                    );
+                 }
+                 return;
+             }
+             // Walk the inner object (chain before ->name() etc.).
+-            laravel_route_scan_expr(mc.object, controller, content, spans);
++            laravel_route_scan_expr(mc.object, controller, content, spans, resolved_names);
+         }
+         // Route::patch('cancel', 'cancel')
+         Expression::Call(Call::StaticMethod(sc)) => {
+-            let subject = expr_to_subject_text(sc.class);
+-            if !strip_fqn_prefix(&subject).eq_ignore_ascii_case("Route") {
++            if !chain_roots_at_route_facade(expr, resolved_names) {
+                 return;
+             }
+             let ClassLikeMemberSelector::Identifier(ident) = &sc.method else {
+--- a/src/symbol_map/extraction/expressions/calls.rs
++++ b/src/symbol_map/extraction/expressions/calls.rs
+@@ -879,8 +879,10 @@
+                 // ->controller(X::class) in the chain and emit MemberAccess
+                 // spans for route method-name strings inside the closure.
+                 if member_name.eq_ignore_ascii_case("group")
+-                    && let Some(controller) =
+-                        laravel_route_find_controller_in_chain(method_call.object)
++                    && let Some(controller) = laravel_route_find_controller_in_chain(
++                        method_call.object,
++                        ctx.resolved_names,
++                    )
+                 {
+                     let first_route_action = ctx.spans.len();
+                     for arg in method_call.argument_list.arguments.iter() {
+@@ -889,6 +891,7 @@
+                             &controller,
+                             ctx.content,
+                             &mut ctx.spans,
++                            ctx.resolved_names,
+                         );
+                     }
+                     // The scanner emits route action method-name references,
+--- a/tests/integration/laravel_route_controller.rs
++++ b/tests/integration/laravel_route_controller.rs
+@@ -267,3 +267,64 @@
+         items.iter().map(|i| &i.label).collect::<Vec<_>>()
+     );
+ }
++
++#[tokio::test]
++async fn controller_group_alias_and_fqn_have_navigation_and_completion() {
++    for (import, facade) in [
++        (
++            "use Illuminate\\Support\\Facades\\Route as Routes;",
++            "Routes",
++        ),
++        (
++            "use Illuminate\\Support\\Facades\\{Route as Routes};",
++            "Routes",
++        ),
++        ("", "\\Illuminate\\Support\\Facades\\Route"),
++    ] {
++        let backend = create_test_backend();
++        let uri = Url::parse("file:///routes.php").unwrap();
++        let text = format!(
++            "<?php\nnamespace App;\n{import}\nclass InvoiceController {{ public function showInvoice() {{}} }}\n{facade}::controller(InvoiceController::class)->group(function () {{\n    {facade}::get('/invoice', 'showInvoice');\n}});\n"
++        );
++        open_php(&backend, &uri, &text).await;
++        let col = text.lines().nth(5).unwrap().find("showInvoice").unwrap() as u32;
++        let target = goto_def(&backend, &uri, 5, col + 2).await;
++        assert!(target.is_some(), "{facade} definition: {target:?}");
++        let items = complete_at(&backend, &uri, &text, 5, col + 2).await;
++        assert!(
++            method_labels(&items)
++                .iter()
++                .any(|name| name == "showInvoice"),
++            "{facade} completion: {items:?}"
++        );
++    }
++}
++
++#[tokio::test]
++async fn controller_group_does_not_borrow_laravel_actions_for_other_classes() {
++    for (import, facade) in [
++        ("use Acme\\Route;", "Route"),
++        ("use Acme\\Route as Routes;", "Routes"),
++        ("", "Route"),
++    ] {
++        let backend = create_test_backend();
++        let uri = Url::parse("file:///routes.php").unwrap();
++        let text = format!(
++            "<?php\nnamespace App;\n{import}\nclass InvoiceController {{ public function showInvoice() {{}} }}\n{facade}::controller(InvoiceController::class)->group(function () {{\n    {facade}::get('/invoice', 'showInvoice');\n}});\n"
++        );
++        open_php(&backend, &uri, &text).await;
++        let col = text.lines().nth(5).unwrap().find("showInvoice").unwrap() as u32;
++        let target = goto_def(&backend, &uri, 5, col + 2).await;
++        assert!(
++            target.is_none(),
++            "non-Laravel {facade} definition: {target:?}"
++        );
++        let items = complete_at(&backend, &uri, &text, 5, col + 2).await;
++        assert!(
++            !method_labels(&items)
++                .iter()
++                .any(|name| name == "showInvoice"),
++            "non-Laravel {facade} completion: {items:?}"
++        );
++    }
++}
+--- a/docs/CHANGELOG.md
++++ b/docs/CHANGELOG.md
+@@ -14,6 +14,8 @@
+ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+ 
+ ## [Unreleased]
++
++- **Laravel controller groups follow imported Route aliases.** Controller action navigation and completion now recognize imported and fully qualified facades without borrowing Laravel actions for unrelated namespaced classes. Contributed by @thinkycz
+ 
+ - **Keep PHP intelligence responsive through circular type dependencies.** Opening framework source and restarting no longer stalls background analysis on cyclic model and mixin resolution. Contributed by @thinkycz.
+ 

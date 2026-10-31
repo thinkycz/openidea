@@ -2135,3 +2135,70 @@ extraction. Next engine patch must resolve facade identity (aliases/FQN/local
 non-Laravel controls) while preserving nested controller groups, then repeat
 source/client and native gates. This next route corpus remains unaccepted;
 0.1.43 history acceptance and the installed optimized app are unchanged.
+
+Route-controller engine correction in progress. The expanded `--navigation`
+disposable fixture adds controller-group actions, optional/named/resource
+parameter keys and cross-file duplicates; every new PHP file was syntax-checked
+and the existing pinned Laravel baseline/autoload checks passed. Native signed
+0.1.43 reproduces the .123 defect: CmdB at openstorm_navigation.php5:53 shows
+Cannot find declaration to go to. No fixture bytes changed and normal quit
+exited the app. Evidence: route-navigation-baseline-043-native-result.json.
+
+A separate working engine tree preserves the verified .123 source. Focused
+source regressions cover alias/grouped-import/FQN action navigation/completion
+and unrelated namespaced facade homonyms. Initial source test build/link is
+running; this is not engine correction or .124 acceptance yet. The correction
+will reuse existing resolved-name/facade identity and controller-chain helpers
+rather than add another resolver. Native .43 remains accepted for history;
+next route-navigation batch remains unaccepted until its gates pass.
+
+The two new engine regressions fail on unchanged .123 as expected: alias
+navigation is absent, and an imported unrelated Acme Route incorrectly gains
+a controller target. `route-controller-124-red.log` records both failures.
+The fix now resolves action receivers at their existing parsed-name offsets,
+validates controller group roots through the shared facade helper, and threads
+those resolved names through nested action scanning. Completion reuses the
+same controller-chain extraction instead of its former duplicate resolver.
+The working tree passes all-target release Clippy with warnings denied and
+formatting after Clippy. The inherited rust-objcopy/libLLVM stripping warning
+remains a tooling warning, not a new source lint failure.
+
+Patch 0124 is recorded with checksum in engine/source.json; source recipe .124
+replays cleanly into `1756b1f920c1-d25f6d9b17b0-verified` and its changed files
+match the working fix. Series SHA-256:
+d25f6d9b17b014e377ee10de68ae06c9c8253855d112ccd68846ed059d8923b7.
+The focused corrected-source test build is running in the existing engine
+compiler cache (`route-controller-124-green.log`); no green/native acceptance
+is inferred yet. The bundled resource/provenance remains .123, and all old
+source trees, binaries and apps are preserved. Full approved synthetic engine
+suite, real client/host gates, new package/native checks and root batch gates
+are still required before promoting this correction.
+
+Corrected-source focused controller corpus is green: nine tests pass, including
+all former canonical cases plus imported/grouped-import/FQN action completion
+and definitions, and unrelated namespace/import homonym refusals. The archived
+candidate .124 executable reports its exact version and has SHA-256
+686a2a6aa2c0e856ea9ff433a4a8a6d242ae893dce6bb26554cc2fd008319b62;
+its recipe, licenses and toolchain are preserved under artifacts/engines.
+The previously failing OpenStorm client case passes, including its previously
+unreached unsaved URI-parameter checks and unchanged disk assertions.
+
+All 15 live client cases then pass with the explicit Laravel12 model, owned
+Laravel13/view fixtures and candidate executable (89.75s). The first broad run
+omitted fixture paths and had seven setup failures; it is preserved as invalid
+broad-acceptance evidence, not a feature regression. The configured final result
+is `route-controller-124-openstorm-client-fixtures.log`. All owned navigation
+fixture files still match their original bytes. The full engine suite is now
+running with the already approved suite-owned synthetic env scope; live host
+checks are also running against the .124 archive. Those gates, packaged native
+before/after verification and final root checks remain open. No promotion or
+installed-app replacement has occurred; .43 remains the accepted history build.
+
+All five live host cases pass against archived .124 (36.48s), including guarded
+checked rename with closed declarations, grouped PHP/Blade route edits,
+resource-first-open navigation and framework-source restart recovery. Every
+owned navigation fixture source is restored after those checks. The engine
+full-suite process remains live in its existing compiler cache; resume that
+process/log rather than restarting it. Packaged .124 native acceptance and the
+final root batch gates remain pending. This is a source/candidate checkpoint,
+not a promoted release or full FEAT-030 acceptance.

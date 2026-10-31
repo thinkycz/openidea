@@ -3,28 +3,34 @@
 Base: thinkycz/openidea 50212e73972d6f05bf16050cb0ba10102a6c8054 (0.1.21).
 Branch: codex/openstorm-php-laravel. Target: macOS Apple Silicon, local delivery.
 
-Current checkpoint (2026-10-31): signed development **0.1.48**, bundled
-PHPantom **0.11.1-openstorm.127**, accepts the view-root/package navigation batch.
-The native app refreshes a previously cached view chooser after closed
-`config/view.php` changes, deletion and restoration, and after custom-root PHP
-template creation/deletion. Published overrides, published-only package views,
-plain PHP templates, Unicode destinations and unsaved provider/config overlays
-were exercised. Settled server restart, normal quit and no-argument project/tab
-recovery passed. The installed optimized 0.1.21 and earlier diagnostic builds
-remain preserved. The accepted 0.1.47 route/history/save-conflict slice remains
-covered by the separate live-client/host regressions.
+Current checkpoint (2026-10-31): signed development **0.1.49**, bundled
+PHPantom **0.11.1-openstorm.127**, accepts the narrow inactive-tab diagnostic
+refresh and recursive view-data check. The editor now refreshes saved diagnostic
+state even when the current diagnostic list is empty, clearing old underlines,
+overview marks and counts after a tab has been inactive. A real EditorView
+regression failed before the fix and passes afterwards. Native testing reproduces
+missing view data, clears it while the leaf is inactive, then reopens the leaf
+with no stale underline/error count; completion, definition, settled restart and
+normal quit/relaunch pass. All fixture originals and temporary setting defaults
+were restored. The installed optimized 0.1.21 and earlier builds are preserved.
 
-Local app: `artifacts/batches/0.1.48/OpenStorm.app`. Native evidence:
-`artifacts/checks/view-navigation-0.1.48-{cold,full}-native-result.json`.
-Checks: 3,049 frontend tests; 1,319 workspace tests; all 18 actual PHPantom client
-and five host scenarios; 18,387 engine tests plus the separate FIFO child.
-Formatting, type checking, lint, Clippy and builds passed. The general workspace
-run retains 43 ignored tests and filters the two separately pending SDK environment
-cases; it is not an unfiltered acceptance claim. Navigation immediately during
-restart required retry after initialization. Native in-flight project-switch
-cancellation and the broader view-data/cycle/component matrix remain open.
-All 69 areas remain visible: 67 partial and two user-deferred. No blanket parity,
-installation, public release, notarization or new push is claimed.
+Local app: `artifacts/batches/0.1.49/OpenStorm.app`. Native evidence:
+`artifacts/checks/view-data-cycles-0.1.49-native-result.json`.
+Checks: **3,050 frontend tests; 1,321 workspace tests with no filters; all 19 live
+PHPantom client and five host scenarios**. The workspace retains 44 ignored tests;
+the separately executed client/host cases establish only their own acceptance.
+Both newly approved disposable environment-file process tests passed. Type
+checking, lint, builds, formatting and Clippy passed. Engine 127 is unchanged and
+retains its prior 18,387-test source gate plus the separate FIFO child.
+
+The 0.1.48 custom-root/package/closed-config view batch and 0.1.47 route/history/
+save-conflict batch remain accepted within their recorded scopes. Remaining
+limits include generic HTML fallback when a Blade PHP type is missing, broader
+component/shadowing matrices and an initial frame-only window-control attempt in
+0.1.49. A fresh comparison process and a subsequent normal no-argument relaunch
+rendered correctly; that initial anomaly remains unexplained and is not erased.
+All 69 areas remain visible: **67 partial and two user-deferred**. No blanket
+parity, installation, public release, notarization or new push is claimed.
 
 ## Contract
 
@@ -2758,3 +2764,178 @@ indentation reproduces the frozen config SHA256 exactly, so configuration values
 are identical. All runtime code/engine inputs match the frozen build; other
 post-build differences are documentation. This is recorded explicitly in the
 checkpoint receipt instead of claiming every source byte stayed identical.
+
+### Next FEAT-032 slice: recursive view-data freshness (in progress)
+
+After accepted 0.1.48 checkpoint a0351d7, add actual-client coverage for implicit
+and explicit two-view cycles, unsaved external type changes, stale member
+retirement, hover, engine restart, removing the only external seed and closing
+the caller overlay. These synthetic cycles test static termination only and are
+never rendered. No engine change or new build is claimed yet. Current signed
+0.1.48 remains the accepted view-root/package delivery.
+
+Recursive view-data checks against bundled 127 pass for both implicit and explicit
+two-view cycles: external User/Other type retirement, completion, hover, mapped
+definition, restart, removal/restoration of the external seed, and closing the
+caller overlay. The expanded diagnostic-publication assertions pass21.26s: the
+actual client receives unknown_variable after seed removal and its clear after
+restoration/closing. Engine source and binary remain unchanged.
+
+Native 0.1.48 cycle fixture (Laravel13.37,88 PHP syntax checks) verifies initial
+userOnly:string and Original.php3:33 definition, unsaved controller Next type
+with otherOnly:int replacing stale suggestions, Tab completion and mapped
+Next.php3:26, both overlays surviving restart74893->76037, and missing-seed
+diagnostics. The source witness confirms all5 originals while both controller
+and leaf are unsaved. Native Enter-insert/Tab-replace and auto-insert-single
+are intentional inherited defaults, not an integration fix. The initial
+duplicate-name action was undone before saving; with auto-insert temporarily
+disabled, the tooltip explicitly confirms the two modes.
+
+Native failure retained: after restoring the external seed, completion returns
+userOnly and Problems clears, but cached editor underline/error count persist.
+No cycle batch acceptance. The root cause is the diagnostics view plugin's
+constructor refreshing only nonempty diagnostic stores: EditorSlot caches lint
+state while unmounted, so an empty list published while inactive never clears
+the remounted state's old marks/count. A real EditorView regression reproduces
+error count1 versus expected0 after remount. The two-line correction always
+schedules current diagnostics for a path, including empty lists; focused tests
+now4pass. Native corrected-build acceptance remains open.
+
+Missing PHP type also exposes generic HTML snippet fallback; this separate
+embedded-context limitation is open, not a no-suggestions native pass. All5
+fixture originals were restored by normal Undo/Save All and read-back before
+normal quit; all app/server generations exited. The owned synthetic profile
+retains autoInsertSingle=false/focus autosave=false only for controlled next
+comparison; restore true defaults after acceptance. Problems layout restored.
+Receipt:view-data-cycles-0.1.48-native-diagnostic-result.json.
+
+Frontend3049/type/lint/build passed before the remount correction; they must be
+rerun on final runtime inputs. Repeated SDK workspace initially failed ENOSPC
+while atomically rebuilding the 2.1GB static archive. Its log is preserved.
+Only the idle regenerable old archive was removed with hash/space receipt; the
+retry compiled successfully and is running workspace/client/host/fmt/Clippy
+gates. Current49 identity/package work must wait for that pipeline to finish.
+
+User approval (2026-10-31, asynchronous reply): OpenStorm's own process-launch
+tests may create/delete only disposable fake .env fixtures containing FROM_FILE,
+OVERRIDDEN and temporary PYTHONPATH values. This covers the two previously
+filtered SDK cases, env_files_system_env_and_redirects and
+python_scripts_import_sibling_packages_and_preserve_env_file_paths. Existing
+environment files remain unchanged. The next final workspace gate will run
+unfiltered; earlier filtered counts remain historical evidence.
+
+Pre49 SDK supplement pipeline33298 finishes terminal0:1,319passed/44ignored/
+2filtered, all19actual-client129.72s/all5host37.96s, fmt and Clippy pass.
+Final49 gates must rerun unfiltered under the newly granted fake env-fixture
+approval. For measured build headroom, only683 obsolete idle compiler rlib/rmeta/
+static cache libraries were pruned, with per-file hashes and guards; changed or
+empty/unrecognized candidates were preserved. All MH_OBJECT groups, actual apps,
+executables, dylibs, sources, engines, fixtures, installed tools and earlier
+deliveries remain untouched. Measured free space8,636,485,632bytes before49.
+Receipt:view-data-cycles-sdk-obsolete-libraries-pruned.json. Root/34workspace
+identities and app manifests are now0.1.49; engine/source pin remains127.
+
+Final49frontend pipeline14786 finishes terminal0:3,050tests/352files, typecheck,
+lint and production frontend build pass. Inherited jsdom performance notice
+and Vite dynamic-import warning remain; no new warning suppression. SDK49
+unfiltered pipeline50763is compiling with the newly approved process cases
+included. Both app manifests and34lock identities agree0.1.49; no engine
+resource/source changes. Native49bundle is not built or accepted yet.
+
+Final49 unfiltered workspace tests pass:1,321passed/44ignored/0filtered. Both
+newly approved process-launch environment cases positively report ok. Only
+suite-owned fake fixtures were authorized; no existing env changes. The19live
+client/five host, finalfmt/Clippy stages of pipeline50763are still running, so
+this workspace result does not yet establish complete final49gates/native.
+
+Final49 live-client suite passes19/19 in129.95s. The following host build fails
+at openidea-server linking with ENOSPC before tests run; pipeline50763 exits101.
+Workspace1321/44ignored/0filtered and live-client results remain valid; no
+source change prompted a repeat. Frozen failure log/receipt retained.
+
+Only idle old incremental-style workspace library compiler MH_OBJECT groups
+predating frozen47 were pruned next:46,863groups/88,606hardlink paths, each
+group header, inode, timestamp, complete hardlink set and SHA256 recorded before
+deletion. The operation stopped at measured6,445,518,848free bytes. Direct app
+objects, all nonincremental/current groups, apps/binaries/dylibs/libraries, engine
+archives/sources/stubs originals, fixtures, installed tools and prior deliveries
+remain intact. This supersedes the earlier action-specific statement that all
+objects were preserved during library-only pruning. Receipt and append-only
+event log:view-data-cycles-sdk-old-incremental-objects-pruned.{json,jsonl}.
+80 copied generated stub-cache JSON files were also pruned only from idle
+PHPantom compiler OUT_DIR; pinned source originals and binary unchanged.
+Next: retry only failed host stage, then fmt/Clippy; package49 after success.
+
+Final49 code gates complete: unfiltered workspace1,321/44ignored/0filtered,
+frontend3,050, all19live-client129.95s, all5host35.01s after isolated link retry,
+fmt and Clippy all-targets-Dwarnings (5m44s) pass. Host retry pipeline47755
+terminal0. The initial host ENOSPC remains retained; no test-source changes
+between attempts. code-gates.json records runtime input hashes. Tauri debug
+packaging starts next, with measured9.7GiB free; no further cache pruning planned.
+
+### Inactive-tab diagnostic refresh: 0.1.49 accepted within the tested scope
+
+The frozen app executable SHA256 is
+`056069eb452cd7db3bb868cbe3a986b0d456798a6020d3b042e65a4b2475e227`.
+Engine 127 and its SHA256 remain unchanged. The Tauri debug app is 330.27 MiB;
+root-only local signing and post-runtime deep/strict verification pass. Installed
+0.1.21 and the archived 0.1.47/48 signatures also verify; installed 21 retains its
+previous executable hash. No installation or push was performed.
+
+The first native attempt (app 77081 / server 77099) exposed only a native frame
+and blank captured main surface. Settings opened and responded. CUA reconnect,
+app-name and identifier attempts did not restore a usable main window; the Mac
+was verified unlocked. An explicit auxiliary launch created a separate owned
+process. The first diagnostic app/server were stopped by exact verified PID with
+SIGTERM after checking all five source originals; this was not a normal-quit
+pass. The fresh comparison process (77596 / 77603) displayed the full editor and
+a real screenshot. `view-data-cycles-0.1.49-first-window-diagnostic.json` retains
+the initial failed-control attempt. Its cause remains open.
+
+In the visible comparison process, unsaved controller removal of the external
+render seed produced the leaf's `unknown_variable` / `unresolved_member_access`
+and an error count of one. Problems confirmed the actual diagnostics. Switching
+to the controller unmounted the leaf. Normal Undo restored its original render
+call; Project Errors positively cleared while the leaf remained inactive. On
+return, the leaf displayed No problems found, with no `$person` underline. Its
+completion showed `userOnly: string`; Cmd+B opened Original.php at 3:33. All five
+disk originals matched throughout the unsaved comparison and after Save All.
+This is the direct corrected comparison for the retained 0.1.48 stale-state
+failure, not acceptance inferred only from passing mocks.
+
+Both temporary profile settings were restored through existing Settings:
+auto-insert-single true and focus autosave true; idle autosave stayed false.
+Problems was hidden again. Normal Cmd+Q stopped app 77596 / server 77603. A fresh
+no-argument launch (78414 / 78424) restored the same Laravel project, all four
+tabs, Original.php 3:33, original sources and No problems found. This normal
+relaunch rendered correctly. Explicit Restart Language Servers replaced 78424
+with 78752; the old process exited, engine 127 initialized, and the recursive leaf
+again showed No problems found and Cmd+B resolved Original.php 3:33. Final normal
+quit stopped app/server, and all owned 49 generations were absent. No UI reads
+were issued after Cmd+Q that might accidentally relaunch a copy.
+
+A quiet development-fixture sample recorded parent RSS 209,376 KiB and engine
+193,680 KiB across 10.025 seconds; cumulative CPU increased 0.25s and 0.01s,
+respectively. This excludes WebContent/GPU and is neither total application RAM
+nor a parity benchmark. The first failed-window attempt logged first IPC 5,359ms;
+that is not first usable UI. The structured idle, build, code-gate and native
+receipts are under `artifacts/checks/view-data-cycles-0.1.49-*`.
+
+The explicit and implicit cycles, current-type completion/hover/definition,
+external-seed removal/restoration, restart, overlay closure, and actual diagnostic
+publication/clear are also covered by the 19-case client run (129.95s); all five
+host cases pass (35.01s on the isolated retry). The unfiltered workspace run is
+1,321 passed / 44 ignored / zero filtered, including both newly approved fake
+process environment cases. Frontend 3,050, type/lint/build, Rust fmt and Clippy
+all-targets with warnings denied pass. Initial ENOSPC host-link failures and
+compiler-cache recovery receipts remain retained; tests were not relabeled as
+passed before their isolated retry succeeded. No original source/stub fixtures
+or actual app/engine executables were pruned. Regenerate the copied compiler
+OUT_DIR stub test caches before any future source-suite run that requires them.
+
+This accepts the narrow FEAT-017/032 freshness correction and tested cycle slice.
+It leaves the first-window anomaly, generic HTML fallback for missing PHP types,
+broader view-data/component/shadowing combinations and the remaining 69-area
+requirements open. New debugger expansion, production signing/notarization,
+public release, update activation, real profile migration and deployment stay
+deferred.

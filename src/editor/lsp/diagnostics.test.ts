@@ -1,7 +1,18 @@
-import { describe, expect, it } from "vitest";
-import { Text } from "@codemirror/state";
+import { describe, expect, it, vi } from "vitest";
+import { EditorState, Text } from "@codemirror/state";
+import { EditorView } from "@codemirror/view";
+import { scrollbarMarks } from "@/editor/api";
+import { lspDoc } from "./lsp";
+import { countsOf, inspectionWidgetExtension } from "./inspectionWidget";
 import type { Diagnostic } from "@/bindings";
-import { diagnosticsFor, setFileDiagnostics, subscribeDiagnostics, toLintDiagnostics } from "./diagnostics";
+import {
+  diagnosticsAt,
+  diagnosticsExtension,
+  diagnosticsFor,
+  setFileDiagnostics,
+  subscribeDiagnostics,
+  toLintDiagnostics,
+} from "./diagnostics";
 
 const d = (
   line: number,
@@ -61,5 +72,43 @@ describe("toLintDiagnostics", () => {
     expect(toLintDiagnostics(doc, [d(0, 2, 2)])[0]).toMatchObject({ from: 2, to: 3 });
     // At a line end the previous character is used.
     expect(toLintDiagnostics(doc, [d(2, 1, 1)])[0]).toMatchObject({ from: doc.length - 1, to: doc.length });
+  });
+});
+
+describe("diagnostics when returning to an inactive tab", () => {
+  it("clears saved underlines, overview marks and counts after the last producer clears while unmounted", async () => {
+    const path = "/p/refresh-on-remount.blade.php";
+    const host = document.body.appendChild(document.createElement("div"));
+    let view: EditorView | undefined;
+    try {
+      setFileDiagnostics(path, "phpantom", [d(0, 3, 10, "error", { code: "unknown_variable" })]);
+      const state = EditorState.create({
+        doc: "{{ $person->userOnly }}",
+        extensions: [
+          lspDoc.of({ doc: 1, path, language: "php", uiMode: "PHP", readOnly: false }),
+          diagnosticsExtension(),
+          inspectionWidgetExtension(),
+        ],
+      });
+      view = new EditorView({ state, parent: host });
+      await vi.waitFor(() => expect(countsOf(view!).error).toBe(1));
+      expect(view.state.facet(scrollbarMarks)).toHaveLength(1);
+      expect(diagnosticsAt(view, 4)).toHaveLength(1);
+      const saved = view.state;
+      view.destroy();
+      view = undefined;
+      // EditorSlot caches the state, but removes its view/subscription on tab switch.
+      setFileDiagnostics(path, "phpantom", []);
+      expect(diagnosticsFor(path)).toEqual([]);
+      view = new EditorView({ state: saved, parent: host });
+      await vi.waitFor(() => expect(countsOf(view!).error).toBe(0));
+      expect(diagnosticsAt(view, 4)).toEqual([]);
+      expect(view.state.facet(scrollbarMarks)).toEqual([]);
+      expect(host.querySelector('[aria-label="No problems found"]')).not.toBeNull();
+    } finally {
+      view?.destroy();
+      host.remove();
+      setFileDiagnostics(path, "phpantom", []);
+    }
   });
 });

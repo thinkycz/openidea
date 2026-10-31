@@ -188,7 +188,9 @@ const diagnosticsSync = ViewPlugin.fromClass(
     constructor(private view: EditorView) {
       const path = view.state.facet(lspDoc)?.path;
       this.unsubscribe = path ? subscribeDiagnostics(path, () => this.schedule()) : () => {};
-      if (path && diagnosticsFor(path).length) this.schedule();
+      // A remounted tab restores its saved lint state. An empty current list
+      // must clear marks/counts left there before the view was unmounted too.
+      if (path) this.schedule();
     }
     schedule() {
       if (this.pending) return;

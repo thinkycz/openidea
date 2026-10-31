@@ -1725,3 +1725,177 @@ async fn laravel_closed_view_config_disk_changes_refresh_navigation() {
     }
     assert!(outcome.is_ok(), "{}", outcome.unwrap_err());
 }
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires the pinned macOS Apple Silicon PHPantom executable"]
+async fn laravel_view_data_cycles_retire_unsaved_external_seeds_through_client() {
+    async fn members(
+        mgr: &LspManager,
+        doc: DocId,
+        text: &str,
+        required: &[&str],
+        forbidden: &[&str],
+    ) -> Result<(), String> {
+        tokio::time::timeout(Duration::from_secs(8), async {
+            let mut last = Vec::new();
+            for _ in 0..80 {
+                match mgr
+                    .completion(
+                        doc,
+                        pos(text, if text.contains("userOnly") { "userOnly" } else { "otherOnly" }),
+                        None,
+                        Default::default(),
+                    )
+                    .await
+                {
+                    Ok(reply) => {
+                        last = reply.items.into_iter().map(|item| item.label).collect();
+                        if required.iter().all(|name| last.iter().any(|label| label == name))
+                            && forbidden.iter().all(|name| last.iter().all(|label| label != name))
+                        {
+                            return Ok(());
+                        }
+                    }
+                    Err(error) if error.kind == ide_core::error::ErrorKind::Cancelled => {}
+                    Err(error) => return Err(error.to_string()),
+                }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+            Err(format!("required {required:?}, forbidden {forbidden:?}; got {last:?}"))
+        })
+        .await
+        .map_err(|_| "cycle completion exceeded eight-second deadline".to_string())?
+    }
+    async fn unknown_variable(
+        events: &Mutex<Vec<IdeEvent>>,
+        path: &std::path::Path,
+        since: usize,
+        expected: bool,
+    ) -> Result<(), String> {
+        for _ in 0..200 {
+            let latest = events.lock()[since..].iter().rev().find_map(|event| match event {
+                IdeEvent::Diagnostics { path: target, items, .. } if target.0 == path => {
+                    Some(items.iter().any(|item| item.code.as_deref() == Some("unknown_variable")))
+                }
+                _ => None,
+            });
+            if latest == Some(expected) {
+                return Ok(());
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        Err(format!("cycle unknown_variable diagnostic did not become {expected} after event {since}"))
+    }
+    // These recursive templates are a static analysis robustness fixture, never rendered.
+    for explicit in [false, true] {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        let data = if explicit { ", ['person' => $person]" } else { "" };
+        let page = format!("@include('partial'{data})\n{{{{ $person->userOnly }}}}\n");
+        let partial = format!("@include('page'{data})\n{{{{ $person->userOnly }}}}\n");
+        let caller = "<?php\nnamespace App;\nclass Controller { public function show(): mixed {\n$person = new User();\nreturn view('page', compact('person'));\n} }\n";
+        let files = [
+            ("composer.json", r#"{"require":{"laravel/framework":"^13.0"},"autoload":{"psr-4":{"App\\":"app/"}}}"#),
+            ("app/User.php", "<?php namespace App; class User { public string $userOnly; }\n"),
+            ("app/Other.php", "<?php namespace App; class Other { public int $otherOnly; }\n"),
+            ("app/Controller.php", caller),
+            ("resources/views/page.blade.php", page.as_str()),
+            ("resources/views/partial.blade.php", partial.as_str()),
+        ];
+        for (name, text) in files {
+            let path = root.join(name);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, text).unwrap();
+        }
+        let mut php = LanguageRegistry::load(None).unwrap().get(&LanguageId::new("php")).unwrap();
+        php.language_servers.retain(|server| server.name == "phpantom");
+        php.language_servers[0].command = std::env::var("OPENSTORM_TEST_PHPANTOM_BIN").expect("engine executable");
+        let events: Arc<Mutex<Vec<IdeEvent>>> = Arc::default();
+        let capture = events.clone();
+        let mgr = LspManager::new(
+            root.clone(),
+            Arc::new(LanguageRegistry::from_configs(vec![php])),
+            Arc::new(move |event| capture.lock().push(event)),
+        );
+        let leaf = DocId::next();
+        let middle = DocId::next();
+        let controller = DocId::next();
+        for (doc, name, text) in [
+            (leaf, "resources/views/partial.blade.php", partial.as_str()),
+            (middle, "resources/views/page.blade.php", page.as_str()),
+            (controller, "app/Controller.php", caller),
+        ] {
+            mgr.did_open(doc, &root.join(name), &LanguageId::new("php"), 1, text);
+        }
+        let outcome: Result<(), String> = async {
+            for (doc, text) in [(leaf, partial.as_str()), (middle, page.as_str())] {
+                members(&mgr, doc, text, &["userOnly"], &["otherOnly"]).await?;
+            }
+            let initial = mgr
+                .completion(leaf, pos(&partial, "userOnly"), None, Default::default())
+                .await
+                .map_err(|error| error.to_string())?;
+            if let Some(member) = initial.items.iter().find(|item| item.label == "userOnly") {
+                eprintln!(
+                    "Cycle explicit={explicit} member insert range {:?}, Tab replace range {:?}",
+                    member.replace_range, member.replace_range_tab
+                );
+            }
+            let changed = caller.replace("new User()", "new Other()");
+            replace(&mgr, controller, 2, caller, &changed);
+            for (doc, text) in [(leaf, partial.as_str()), (middle, page.as_str())] {
+                members(&mgr, doc, text, &["otherOnly"], &["userOnly"]).await?;
+                let hover =
+                    mgr.hover(doc, pos(text, "$person"), Default::default()).await.map_err(|e| e.to_string())?;
+                let value = hover.map(|value| value.contents.value).unwrap_or_default();
+                if !value.contains("Other") || value.contains("App\\User") {
+                    return Err(format!("cycle hover must use current external seed: {value}"));
+                }
+            }
+            let changed_partial = partial.replace("userOnly", "otherOnly");
+            replace(&mgr, leaf, 2, &partial, &changed_partial);
+            members(&mgr, leaf, &changed_partial, &["otherOnly"], &["userOnly"]).await?;
+            let targets = mgr
+                .goto(leaf, pos(&changed_partial, "otherOnly"), GotoKind::Definition)
+                .await
+                .map_err(|error| error.to_string())?;
+            if !targets.iter().any(|target| target.path == root.join("app/Other.php") && target.range.start.line == 0) {
+                return Err(format!("current cycle member must map to Other declaration: {targets:?}"));
+            }
+            replace(&mgr, leaf, 3, &changed_partial, &partial);
+            mgr.restart(mgr.servers()[0].id).await.map_err(|error| error.to_string())?;
+            members(&mgr, leaf, &partial, &["otherOnly"], &["userOnly"]).await?;
+            let removed = changed.replace("return view('page', compact('person'));", "return null;");
+            let before_remove = events.lock().len();
+            replace(&mgr, controller, 3, &changed, &removed);
+            for (doc, text) in [(leaf, partial.as_str()), (middle, page.as_str())] {
+                members(&mgr, doc, text, &[], &["userOnly", "otherOnly"]).await?;
+            }
+            unknown_variable(&events, &root.join("resources/views/partial.blade.php"), before_remove, true).await?;
+            let before_restore = events.lock().len();
+            replace(&mgr, controller, 4, &removed, caller);
+            for (doc, text) in [(leaf, partial.as_str()), (middle, page.as_str())] {
+                members(&mgr, doc, text, &["userOnly"], &["otherOnly"]).await?;
+            }
+            unknown_variable(&events, &root.join("resources/views/partial.blade.php"), before_restore, false).await?;
+            let before_second_remove = events.lock().len();
+            replace(&mgr, controller, 5, caller, &removed);
+            unknown_variable(&events, &root.join("resources/views/partial.blade.php"), before_second_remove, true)
+                .await?;
+            let before_close = events.lock().len();
+            mgr.did_close(controller);
+            for (doc, text) in [(leaf, partial.as_str()), (middle, page.as_str())] {
+                members(&mgr, doc, text, &["userOnly"], &["otherOnly"]).await?;
+            }
+            unknown_variable(&events, &root.join("resources/views/partial.blade.php"), before_close, false).await?;
+            Ok(())
+        }
+        .await;
+        mgr.shutdown_all().await;
+        for (name, text) in files {
+            assert_eq!(std::fs::read_to_string(root.join(name)).unwrap(), text, "disk must remain original: {name}");
+        }
+        assert!(outcome.is_ok(), "explicit={explicit}: {}", outcome.unwrap_err());
+        eprintln!("Cycle explicit={explicit}: completion/hover type retirement, restart and closing overlay passed");
+    }
+}

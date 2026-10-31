@@ -2202,3 +2202,79 @@ full-suite process remains live in its existing compiler cache; resume that
 process/log rather than restarting it. Packaged .124 native acceptance and the
 final root batch gates remain pending. This is a source/candidate checkpoint,
 not a promoted release or full FEAT-030 acceptance.
+
+0.1.44 preparation: all four version sources / 34 workspace lock entries now
+use the unique development version, with no other lock changes. Frontend
+3,044 tests / 352 files, type checking, lint and build pass; inherited lint /
+bundle warnings remain. The final workspace tests/fmt/Clippy/bindings pipeline
+is running with the same two separately pending SDK env cases excluded.
+
+The first full .124 engine source run failed two inherited Composer helper
+assertions after returning valid definitions. Exact same executable controls
+prove a temporary-path setup boundary: with `/var` TMPDIR both strict URI
+comparisons fail; with canonical `/private/var` both pass. The source helpers
+construct expected URIs from the temporary path while backend locations are
+canonical. No production or test source was changed to suppress the failures.
+The obsolete default-path isolated-rerun process group was verified and
+cancelled for that confirmed setup error; terminal exit143 is recorded. The
+full suite was restarted with explicit canonical TMPDIR, .124 version and
+locked release profile; poll the existing canonical-suite process, not the
+failed/or cancelled runs. Reproduction: route-controller-124-path-controls.json.
+The canonical invocation is now documented in engine/README.md. The original
+full gate remains a recorded failure; no passing full-engine result is claimed
+yet for the corrected run.
+
+Build headroom: 524 obsolete regenerable SDK .rlib/.rmeta files (4,209,546,607
+logical bytes) and the obsolete 2,123,932,928-byte native .43 link archive were
+removed after validating their target paths, retained newest-two policy and
+idle SDK compilers. Apps, source, fixtures, engine caches/archives and earlier
+Workbench/evaluation delivery artifacts were excluded. Reclamation was delayed;
+initial free-space readings did not prove recovery. Subsequent filesystem
+reading showed 12GiB available. The purgeable local Time Machine snapshot was
+only inspected and was not deleted. Detailed selection/hash/space receipts:
+route-navigation-0.1.44-sdk-cache-pruned.json and native-link-cache.json.
+
+Final .124 source gates pass with the explicit canonical temporary root:
+18,381 tests passed / 17 ignored, plus the separate FIFO child check. Both
+initially failed path assertions pass in this full rerun. Verified replayed
+source passes all-target release Clippy with warnings denied, fmt and source
+fingerprint re-verification. PHP example lint (12 files), executable assertions,
+Laravel Demo syntax and static analysis all pass; the analyzer returns the
+expected three intentional Demo.php errors at 731/731/951. The full-suite
+compiler-cache executable matches the archived candidate SHA-256 exactly.
+The initial noncanonical-temp gate remains recorded as failed, with direct
+same-binary controls and the corrected full rerun retained.
+
+Final .44 source gates: frontend 3,044 / 352 files, type checking, lint/build,
+workspace 1,318 passed / 40 ignored / two separately pending SDK env cases
+filtered, fmt, all-target Clippy with warnings denied and binding export pass.
+The exact .124 resource and provenance are staged and checksum-verified;
+previous .123 provenance, binary and all apps remain preserved. A second
+regenerable SDK-test static link archive was removed at rest before Tauri's
+resource-triggered replacement to avoid its 2.1GB peak; receipts retain its
+hash and free-space readings. No app/delivery artifact was removed.
+
+Signed arm64 development .44 is preserved at
+`artifacts/batches/0.1.44/OpenStorm.app` (330.27MiB), executable SHA-256
+adfa476a130b6407d798bf48d485a1779faddd0f8587c1abb6228a1dfe063523.
+Actual native CmdB on the imported Routes controller-group action now reaches
+NavigationController.php4:21; .43 reported Cannot find declaration at the same
+fixture position. Settings query CmdZ/CmdShiftZ also passes.
+
+**.44 remains diagnostic / route batch unaccepted.** Native CtrlSpace at5:53,
+inside existing action 's|how', auto-applies its sole method candidate and yields
+'showhow'. Undo restores the original action and disk stays unchanged; CmdS
+clears the temporary modified state. Inspection confirms the quoted-controller
+provider returns plain insertText without a replacement edit, while OpenStorm's
+inherited default intentionally inserts over the prefix (Enter) and reserves
+identifier-suffix replacement for Tab. Fix the provider's quoted-action range
+without changing these editor conventions, and add a commit-result regression:
+label-only completion tests did not establish correct insertion. Parameter,
+duplicate, rename, restart and relaunch native checks remain pending in the
+corrected next candidate. Evidence: route-navigation-0.1.44-native-result.json.
+
+The disposable profile's switch-app autosave true / idle false defaults were
+restored. Normal quit exits app and server; all 12 owned source files remain
+original and strict signature passes. Installed optimized .21 and its signature
+remain unchanged. No publishing, new push or promotion of .44. All 69 ledger
+areas remain visible at 67 partial / two user-deferred.

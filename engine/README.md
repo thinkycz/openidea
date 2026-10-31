@@ -1,9 +1,10 @@
 # Pinned PHPantom engine
 
-The local OpenStorm candidate currently bundles PHPantom `0.11.1-openstorm.123`
-for Apple Silicon macOS. Source recipe `0.11.1-openstorm.124` adds controller-group
-facade identity and is under validation; it has not replaced that executable.
-These are local rebuilds, not upstream releases. `source.json` pins upstream source,
+The local OpenStorm candidate bundles PHPantom `0.11.1-openstorm.124` for Apple
+Silicon macOS. This is a local rebuild, not an upstream release. Source .124
+adds controller-group facade identity and has passed source/client/host gates;
+native .44 confirms alias navigation but quoted-action completion insertion
+blocks batch acceptance. `source.json` pins upstream source,
 its archive checksum, the unchanged 114-patch PHP Workbench series, and OpenStorm
 patches 0115–0124 for resource isolation, Blade and Laravel assistance, and
 source-update recovery. The bundled executable is verified by
@@ -16,6 +17,19 @@ From the repository root:
 python3 scripts/prepare-phpantom.py
 python3 scripts/build-phpantom.py
 node scripts/verify-phpantom.mjs
+```
+
+For the full source regression suite on macOS, use the canonical temporary root.
+The backend returns canonical file URIs; two inherited autoload tests compare
+those URIs with paths constructed directly from the temporary root. A `/var`
+symlink root otherwise differs from the equivalent `/private/var` target. Keep
+this setup explicit rather than changing production navigation to return aliases.
+
+```sh
+OPENSTORM_ENGINE_SOURCE="$(python3 scripts/prepare-phpantom.py)"
+OPENSTORM_TEST_TMPDIR="$(python3 -c 'import os,tempfile; print(os.path.realpath(tempfile.gettempdir()))')"
+OPENSTORM_ENGINE_VERSION="$(python3 -c 'import json; print(json.load(open("engine/source.json"))["version"])')"
+TMPDIR="$OPENSTORM_TEST_TMPDIR" PHPANTOM_GIT_VERSION="$OPENSTORM_ENGINE_VERSION" cargo test --manifest-path "$OPENSTORM_ENGINE_SOURCE/Cargo.toml" --release --locked -- --test-threads=2
 ```
 
 Preparation downloads the pinned archive, verifies SHA-256, extracts into the

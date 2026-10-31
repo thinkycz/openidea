@@ -1,6 +1,6 @@
 # Pinned PHPantom engine
 
-The local OpenStorm candidate bundles PHPantom `0.11.1-openstorm.127` for Apple
+The local OpenStorm candidate bundles PHPantom `0.11.1-openstorm.128` for Apple
 Silicon macOS. This is a local rebuild, not an upstream release. Source127
 refreshes view catalogs for template creation/deletion, custom and package roots,
 and closed configuration changes while preserving editor overlays. Its full
@@ -186,3 +186,14 @@ framework source open. The Laravel analyzer retains exactly its three intentiona
 errors. The signed 0.1.38 native rule-name/restart slice passes; its full unfiltered
 workspace/release gate remains open pending two separately scoped process-env
 tests. Evidence is in docs/OPENSTORM.md; 0.1.36/0.1.37 failures remain preserved.
+
+The `0.11.1-openstorm.128` candidate preserves caller types in required anonymous
+component `@props` and applies defaults only for missing/null values. Explicit
+PHPDoc contracts remain authoritative. The existing `@aware` fallback is retained;
+broader parent-component inference remains unaccepted. Patch128 replays through
+the pinned recipe and its reconstructed source matches the working implementation.
+The full source suite passes 18,388 tests (17 ignored), plus its separate FIFO
+child. All-target Clippy is warning-free; formatting, fingerprint, production
+build, 12 PHP example lints and runtime assertions pass. Updated Laravel13.37
+example analysis reports exactly its three intentional errors. SDK/native50
+acceptance is tracked in `docs/OPENSTORM.md`;127 and prior apps remain preserved.

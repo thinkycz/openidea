@@ -2,8 +2,8 @@
   "repository": "https://github.com/PHPantom-dev/phpantom_lsp",
   "commit": "1756b1f920c1290d4c4fdd4d2c902fad53a75cd3",
   "archive_sha256": "f0a1dc7fa44d309e6d5e8ed65a2075749c1fc177b45820031f58290f1aec5cee",
-  "patches_sha256": "747e151275eaa1404d7ad3b2025d56ef9ffc9af66f51d80292c8bad619855e82",
-  "version": "0.11.1-openstorm.127",
+  "patches_sha256": "2fb9f6bcce2f7e7f84fa647cd3246921c25371a67cb60c5f8302daeba7e3c37c",
+  "version": "0.11.1-openstorm.128",
   "patches": [
     {
       "file": "0001-workspace-tool-policy.patch",
@@ -512,6 +512,10 @@
     {
       "file": "0127-view-catalog-file-events.patch",
       "sha256": "29437fd3b06e8254f24cc5dbe228f1dc445d83ffd1a16baafa0a7b9a407fd300"
+    },
+    {
+      "file": "0128-blade-component-supplied-props.patch",
+      "sha256": "7726cb71219d204b67a564b115c9aa93ff2aba40aabc935a7328458b62f1155b"
     }
   ]
 }

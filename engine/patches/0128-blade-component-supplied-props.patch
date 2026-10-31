@@ -1,0 +1,291 @@
+diff --git a/docs/CHANGELOG.md b/docs/CHANGELOG.md
+index c18f6a9..fd10ae2 100644
+--- a/docs/CHANGELOG.md
++++ b/docs/CHANGELOG.md
+@@ -190,6 +190,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
+ 
+ ### Fixed
+ 
++- **Keep supplied model types in Blade component props.** Required props retain caller types, and defaults fill missing or null values without overriding supplied data. Explicit PHPDoc contracts remain authoritative. Contributed by @thinkycz.
++
+ - **Keep Laravel view navigation current when templates are added or removed.** Custom roots, published package views, external view configuration changes, and Blade/plain PHP precedence refresh without restarting. Contributed by @thinkycz.
+ 
+ 
+diff --git a/examples/laravel/app/Demo.php b/examples/laravel/app/Demo.php
+index f93967c..b93990b 100644
+--- a/examples/laravel/app/Demo.php
++++ b/examples/laravel/app/Demo.php
+@@ -1606,6 +1606,14 @@ class Demo
+         return url($path);                // → string
+     }
+ 
++    // Try: follow this view into <x-author-prop>, then complete $author->
++    // in components/author-prop.blade.php. Its nullable default must keep
++    // the supplied BlogAuthor model and its relationships.
++    public function anonymousComponentProps(BlogAuthor $author): void
++    {
++        view('component-props-demo', compact('author'));
++    }
++
+     // ── HTTP client sync/async template default ────────────────────────────
+ 
+     public function httpClient(PendingRequest $pending, HttpFactory $factory): void
+diff --git a/examples/laravel/resources/views/component-props-demo.blade.php b/examples/laravel/resources/views/component-props-demo.blade.php
+new file mode 100644
+index 0000000..3977e63
+--- /dev/null
++++ b/examples/laravel/resources/views/component-props-demo.blade.php
+@@ -0,0 +1 @@
++<x-author-prop :author="$author" />
+diff --git a/examples/laravel/resources/views/components/author-prop.blade.php b/examples/laravel/resources/views/components/author-prop.blade.php
+new file mode 100644
+index 0000000..4d6f6c5
+--- /dev/null
++++ b/examples/laravel/resources/views/components/author-prop.blade.php
+@@ -0,0 +1,6 @@
++@props(['author' => null])
++{{-- Supplied BlogAuthor survives this default. Try hover, completion and
++     go-to-definition on its typed relationship below. --}}
++@if($author)
++    <p>{{ $author->posts()->count() }}</p>
++@endif
+diff --git a/src/blade/preprocessor/mod.rs b/src/blade/preprocessor/mod.rs
+index 18f5f87..b6a5c58 100644
+--- a/src/blade/preprocessor/mod.rs
++++ b/src/blade/preprocessor/mod.rs
+@@ -100,7 +100,9 @@ pub fn preprocess(content: &str) -> (String, BladeSourceMap) {
+ ///
+ /// Every variable the template does not assign itself is declared in the
+ /// prologue, following the priority chain in [`super::signature`]: the
+-/// template's own signature docblock wins, then `@props`/`@aware`, then the
++/// template's own signature docblock wins, then `@props` bindings
++/// (supplied types with defaults only for missing/null values) and the
++/// existing `@aware` declaration fallback, then the
+ /// variables Blade injects into a component body, then the externally
+ /// resolved variables the caller passes in (a backing class's members and
+ /// the layouts the template extends ahead of call-site inference, in the
+diff --git a/src/blade/preprocessor/prologue.rs b/src/blade/preprocessor/prologue.rs
+index 230693a..acbcddc 100644
+--- a/src/blade/preprocessor/prologue.rs
++++ b/src/blade/preprocessor/prologue.rs
+@@ -84,22 +84,46 @@ pub(super) fn emit(
+         declared.push((name.to_string(), decl));
+     };
+ 
+-    // `@props`/`@aware` entries. A default value types its prop directly
+-    // (the expression is emitted verbatim, so anything the type engine can
+-    // resolve works); an entry without one is a *required* prop, whose
+-    // value the caller supplies, so it is declared `mixed` rather than
+-    // being invented as `null`.
++    // A prop default is a runtime fallback, not a type annotation. Blade
++    // keeps supplied non-null data, and only fills missing/null values.
++    // `@aware` has a separate consumable-component lookup; retain its
++    // existing declaration fallback until that data channel is inferred.
++    // Explicit PHPDoc signatures still take priority in `declare` above.
+     let entries = crate::blade::signature::extract_props(content)
+         .into_iter()
+-        .chain(crate::blade::signature::extract_aware(content))
+-        .flatten();
+-    for entry in entries {
+-        let decl = match &entry.default {
+-            Some(default) => format!("${} = {};\n", entry.name, default),
+-            None => format!(
+-                "/** @var mixed ${name} */\n${name} = null;\n",
+-                name = entry.name
+-            ),
++        .flatten()
++        .map(|entry| (entry, true))
++        .chain(
++            crate::blade::signature::extract_aware(content)
++                .into_iter()
++                .flatten()
++                .map(|entry| (entry, false)),
++        );
++    for (entry, is_prop) in entries {
++        let supplied = if is_prop {
++            injected_vars.iter().find(|(name, _)| name == &entry.name)
++        } else {
++            None
++        };
++        let decl = if let Some((name, type_string)) = supplied {
++            let type_string = docblock_safe_type(type_string);
++            let mut decl = format!("/** @var {type_string} ${name} */\n${name} = null;\n");
++            if let Some(default) = &entry.default
++                && crate::php_type::PhpType::parse(type_string).accepts_null()
++            {
++                // Let the shared PHP forward walker combine the non-null
++                // supplied alternatives with the default's expression type.
++                decl.push_str(&format!("${name} ??= {default};\n"));
++            }
++            decl
++        } else {
++            match &entry.default {
++                Some(default) => format!("${} = {};\n", entry.name, default),
++                None => format!(
++                    "/** @var mixed ${name} */\n${name} = null;\n",
++                    name = entry.name
++                ),
++            }
+         };
+         declare(&entry.name, decl);
+     }
+diff --git a/src/blade/signature.rs b/src/blade/signature.rs
+index 6d28a54..e811047 100644
+--- a/src/blade/signature.rs
++++ b/src/blade/signature.rs
+@@ -2,15 +2,16 @@
+ //! declaration sources that sit below it.
+ //!
+ //! A template declares what it expects the way a function declares
+-//! parameters. The sources form a strict priority chain, matching the
+-//! model Bladestan (the PHPStan extension for Blade) enforces in CI, so
+-//! one set of annotations drives both the editor and the analyser:
++//! parameters. Explicit PHPDoc annotations remain the contract; prop
++//! defaults instead follow Blade runtime null-coalescing semantics. The
++//! declaration sources below share that contract with all editor features:
+ //!
+ //! 1. an explicit `@bladestan-signature` docblock — the canonical contract;
+ //! 2. the first docblock before any template code — an implicit signature,
+ //!    so a codebase that already carries `@var` blocks needs no edits;
+-//! 3. `@props` / `@aware`, which type a component *body* from each entry's
+-//!    default value;
++//! 3. `@props`, preserving supplied data with defaults for missing/null
++//!    values, and the existing `@aware` declaration fallback (consumable
++//!    parent-component data still needs its own inference channel);
+ //! 4. the variables Blade itself injects into a component body
+ //!    (`$attributes`, `$slot`, `$componentName`);
+ //! 5. the members of the class backing a component view, which Blade
+diff --git a/tests/integration/blade_backing_class.rs b/tests/integration/blade_backing_class.rs
+index 024b3ea..4dad669 100644
+--- a/tests/integration/blade_backing_class.rs
++++ b/tests/integration/blade_backing_class.rs
+@@ -121,10 +121,9 @@ mod tests {
+         }
+     }
+ 
+-    /// The template's own `@props` default wins over the class member of
+-    /// the same name: the template is closer to the body than the class.
++    /// Public class data is already supplied when Blade applies prop defaults.
+     #[tokio::test]
+-    async fn a_props_entry_wins_over_the_class_member() {
++    async fn a_props_default_preserves_non_null_class_data() {
+         let (backend, _dir) =
+             component_workspace("@props(['label' => 0])\n{{ $label }}\n{{ $order }}\n");
+         let uri =
+@@ -132,8 +131,8 @@ mod tests {
+ 
+         let hover = markup_hover_at(&backend, &uri, 1, 7).await;
+         assert!(
+-            !hover.contains("string"),
+-            "the @props default should type $label, not the class property: {hover}"
++            hover.contains("string") && !hover.contains('0'),
++            "a non-null class property must survive the @props default: {hover}"
+         );
+         // The names @props leaves out still come from the class.
+         let order = markup_hover_at(&backend, &uri, 2, 7).await;
+diff --git a/tests/integration/blade_call_site_inference.rs b/tests/integration/blade_call_site_inference.rs
+index e0116d6..0adb1a9 100644
+--- a/tests/integration/blade_call_site_inference.rs
++++ b/tests/integration/blade_call_site_inference.rs
+@@ -738,10 +738,9 @@ mod tests {
+         );
+     }
+ 
+-    /// `@props` wins over the call-site-inferred type for the same name,
+-    /// per the declaration priority chain.
++    /// Laravel fills supplied non-null attributes before applying prop defaults.
+     #[tokio::test]
+-    async fn props_default_wins_over_component_tag_inference() {
++    async fn supplied_component_attribute_wins_over_props_default() {
+         let (backend, _dir) = create_psr4_workspace(
+             APP_PSR4_COMPOSER,
+             &[
+@@ -779,16 +778,84 @@ mod tests {
+         )
+         .await;
+ 
+-        // `@props` types `$type` from its default `1`; the page's literal
+-        // `"danger"` string attribute must not override it.
++        // compileProps uses null-coalescing: a supplied string survives.
+         let hover = hover_type(&backend, &component_uri, 1, 4).await;
+         assert!(
+-            hover.contains('1') && !hover.contains("danger"),
+-            "@props default should win over the tag's literal attribute, got: {}",
++            hover.contains("danger") && !hover.contains('1'),
++            "supplied attribute should survive the prop default, got: {}",
+             hover
+         );
+     }
+ 
++    /// Required props keep supplied models, defaults only fill missing/null
++    /// values, and an explicit PHPDoc contract remains authoritative.
++    #[tokio::test]
++    async fn component_props_preserve_supplied_types_and_null_fallbacks() {
++        let cases: &[(&str, &str, &[&str], &[&str])] = &[
++            (
++                "<x-alert :type=\"new \\App\\Item()\" />",
++                "@props(['type'])",
++                &["Item"],
++                &["mixed"],
++            ),
++            (
++                "<x-alert :type=\"new \\App\\Item()\" />",
++                "@props(['type' => null])",
++                &["Item"],
++                &["mixed", "null"],
++            ),
++            ("<x-alert />", "@props(['type' => 1])", &["1"], &["danger"]),
++            (
++                "<x-alert :type=\"null\" />",
++                "@props(['type' => 1])",
++                &["1"],
++                &["null"],
++            ),
++            (
++                "<x-alert type=\"danger\" />",
++                "@php /** @var int $type */ @endphp\n@props(['type' => null])",
++                &["int"],
++                &["danger"],
++            ),
++            (
++                "@php /** @var \\App\\Item|null $maybe */ @endphp\n<x-alert :type=\"$maybe\" />",
++                "@props(['type' => 1])",
++                &["Item", "1"],
++                &["null"],
++            ),
++            ("<x-alert />", "@props(['type'])", &["mixed"], &["null"]),
++            (
++                "<x-alert :type=\"false\" />",
++                "@props(['type' => 'fallback'])",
++                &["false"],
++                &["fallback"],
++            ),
++        ];
++        for &(page, declaration, expected, absent) in cases {
++            let component = format!("{declaration}\n{{{{ $type }}}}\n");
++            let (backend, _dir) = create_psr4_workspace(
++                APP_PSR4_COMPOSER,
++                &[
++                    ("app/Item.php", ITEM_CLASS),
++                    ("resources/views/page.blade.php", page),
++                    ("resources/views/components/alert.blade.php", &component),
++                ],
++            );
++            let page_uri = workspace_uri(&backend, "resources/views/page.blade.php");
++            let component_uri =
++                workspace_uri(&backend, "resources/views/components/alert.blade.php");
++            open_document(&backend, &page_uri, "blade", page).await;
++            open_document(&backend, &component_uri, "blade", &component).await;
++            let line = declaration.lines().count() as u32;
++            let hover = hover_type(&backend, &component_uri, line, 4).await;
++            assert!(
++                expected.iter().all(|ty| hover.contains(ty))
++                    && absent.iter().all(|ty| !hover.contains(ty)),
++                "page {page:?}, declaration {declaration:?}: expected {expected:?}, not {absent:?}, got {hover}"
++            );
++        }
++    }
++
+     /// `Blade::anonymousComponentNamespace('components', 'webshop')` makes
+     /// `<x-webshop::brand.boxes>` address the plain view
+     /// `components.brand.boxes`, so its attributes have to reach that

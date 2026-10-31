@@ -2939,3 +2939,133 @@ broader view-data/component/shadowing combinations and the remaining 69-area
 requirements open. New debugger expansion, production signing/notarization,
 public release, update activation, real profile migration and deployment stay
 deferred.
+
+### Batch 0.1.50: component prop inference (in progress)
+
+This continues FEAT-032/033 after accepted checkpoint `76efd3e`. Required
+anonymous-component `@props` bindings now preserve supplied model types. Prop
+defaults fill missing or null values; supplied non-null values and explicit
+PHPDoc contracts keep their types. The inherited `@aware` fallback is preserved;
+parent-component consumable-data inference remains open. All 69 ledger rows
+retain their prior partial/deferred status pending their full requirements.
+
+**Reproduction and correction.** Engine127 receives the supplied User model in
+a bare component, then loses its members when required `@props` is added.
+`component-props-127-client-control.log` records that failure. Independent source
+regressions also show `mixed` replacing the required model, and default `1`
+overriding supplied `type="danger"`. Laravel13.37's `compileProps` uses supplied
+values before null-coalescing defaults, confirming those inherited expectations
+were wrong. The fix uses the existing PHP type representation and forward walker.
+
+The development client probe passes completion, hover, mapped definition after a
+same-line Unicode prefix, parent-variable isolation, unsaved caller changes,
+nullable defaults, restart and closing the caller overlay (6.81s). All six disk
+originals remain unchanged. The expanded Blade source run passes 365 tests,
+including an eight-case model/default/null/false/PHPDoc matrix. Final client and
+packaged acceptance against the production-feature rebuild are still required.
+
+**Reproducible engine128.** Patch
+`0128-blade-component-supplied-props.patch` has SHA-256
+`7726cb71219d204b67a564b115c9aa93ff2aba40aabc935a7328458b62f1155b`.
+The series identity is
+`2fb9f6bcce2f7e7f84fa647cd3246921c25371a67cb60c5f8302daeba7e3c37c`.
+After all-target Clippy fix/check and formatting, `prepare-phpantom.py` replayed
+the patch into an independent verified tree matching the working source.
+The preserved127 source still matches all 2,456 recorded files.
+
+The reconstructed full source suite passes 18,388 tests, with 17 ignored and zero
+filtered, plus the separate FIFO child. All-target Clippy reports no warnings;
+formatting, source fingerprint and locked production-feature rebuild pass.
+The archived executable SHA-256 is
+`2f9a6249aa9105981be6bc57a7c8eb1778c74e0e3703c7d2f5bba6c725a4b3d8`.
+Its provenance, licenses, build and validation receipts are under
+`artifacts/engines/0.11.1-openstorm.128/`. The 12 plain PHP lints and runtime
+assertions pass. Updated Laravel13.37 example analysis reports exactly its three
+intentional errors at 731/731/951. Local50 resources now contain this engine.
+Source gate and example evidence: `component-props-128-pinned-*` and
+`component-props-128-examples-result.json`.
+
+**OpenStorm gates.** Final50 frontend checks pass all 3,050 tests, type checking,
+lint and build. The unfiltered workspace passes 1,321 tests, with 45 ignored and
+zero filtered; both newly approved disposable environment-file process cases
+positively pass. Existing environment files and profiles remain unchanged.
+Rust formatting passes. Root Clippy and the 20 client / five host cases are still
+running before packaging and native acceptance. The initial frontend run is
+retained as49 baseline evidence: Python metadata preparation initially failed
+before any mutation, was corrected, then final50 frontend checks passed.
+
+**Native fixture.** `component-props-native-fixture.json` records an owned
+Laravel13.37 copy with 61 PHP syntax checks, valid App PSR-4 mapping, no copied
+environment files, two model types, an unsaved caller and component scope probes.
+No fixture has been rendered. Native50 completion, definitions, restart,
+reopen/relaunch and process cleanup remain pending. The signed49 app and
+installed optimized21 app remain preserved; the earlier49 first-window anomaly
+is still an open limitation, not a claimed fix.
+
+**Build headroom.** SDK compilation left about1.9GiB free. Only the owned Python
+coordinator was paused while its current Cargo child finished normally. With
+compiler processes idle, 58,421 old pre-frozen47 incremental library MH_OBJECT
+inode groups (63,988 hardlink paths; 7,268,999,456 logical bytes) were pruned with
+per-inode metadata/header/SHA checks and append-only receipts. No source,
+fixture, app, executable, dylib, library/archive, installed tool or prior delivery
+was removed. Free space reached 9,664,192,512 bytes; the coordinator resumed and
+no SDK stage failed. Deep/strict signatures of47/48/49 and installed21 still
+verify, and installed21 plus engine127/128 checksums are unchanged. Evidence:
+`component-props-sdk-old-incremental-objects-*`,
+`component-props-0.1.50-sdk-stage-pause.json` and
+`component-props-preserved-apps-after-cache-prune.json`.
+
+Final50 code gates are complete:20actual-client cases pass (136.07s), and all
+five host edit cases pass (35.21s), with shared fixture originals restored.
+The component regression was strengthened to require the exact User property
+selection after a same-line Unicode prefix; its focused rerun passes (6.82s),
+followed by another formatting and full workspace/all-target Clippy pass.
+The pre-packaging summary and runtime input hashes are recorded in
+`component-props-0.1.50-code-gates.json`. Packaging and native acceptance remain
+pending; no blanket feature-area promotion or public release is claimed.
+
+**Packaged50 native evidence and open gate.** The arm64 development app is
+`artifacts/batches/0.1.50/OpenStorm.app`, built in169.27s (328.82MiB) and locally
+signed with deep/strict verification. Launch Services opened the owned fixture
+with isolated backend settings. Required props offer `userOnly: string` and
+Command-B reaches `Original.php`3:33 after the same-line emoji prefix. Unsaved
+caller changes offer `otherOnly: int`; editor-focused Tab replaces the existing
+member, and native undo/redo works. A nullable prop default preserves the model
+and Command-B reaches `Next.php`3:26. Native restart retires39025 and starts39757,
+retaining both unsaved overlays and their current inference.
+
+Native Save All displays **File changed on disk** with Overwrite/Cancel. Cancel
+preserves the external caller marker and unsaved Next buffer; the non-conflicting
+component saves separately. Closing the dirty caller shows **Unsaved Changes**;
+Don't Save closes its overlay, and fresh completion returns the disk Original
+model's `userOnly: string`. Native undo/save restores the component. Only the
+owned external marker is then removed from the closed caller. All five fixture
+files match their originals exactly. Both temporary profile preferences are
+restored to true (focus autosave and automatic single-result insertion).
+
+Normal Command-Q exits app39016/server39757. A no-argument Launch Services
+relaunch restores the project, three tabs and `Original.php`3:33. Default single
+completion inserts `userOnly` into an empty member access; Save All and navigation
+retain the original bytes and target. Focus autosave also persists a native
+trailing-comment witness when Settings opens, without an explicit Save. That
+owned witness is removed, all originals are verified, and another native
+Command-Q exits app40455/server40466.
+
+The last confirmation run is **not accepted**: app40934/server40945 initialize
+and open the project, but CUA reports only a blank gray native frame. Raise and
+activation attempts do not restore control, and a coordinate attempt reports
+`noWindowsAvailable`; the Mac console is unlocked. First IPC is636ms, which is
+not usable-UI proof. Earlier Settings closure also lost CUA control and required
+stopping only owned38192/38568 with SIGTERM; that is not a normal-quit pass.
+The source already clamps saved caret positions, so no speculative restore fix
+was applied. A user observation of the actual window has been requested to
+separate an app-rendering failure from native automation/window-state failure.
+The last owned app/server remain running for that observation. Healthy idle
+metrics and final cleanup are pending; no blanket startup/native gate pass or
+feature-area promotion is claimed. The67partial/2deferred ledger is unchanged.
+
+Evidence is consolidated in `component-props-0.1.50-native-result.json`, with
+separate conflict, autosave, Settings-close and launch receipts. The props fix,
+all code gates and the signed candidate are reviewable; final native acceptance
+remains partial. No public publishing, new push, migration, update-feed activation,
+notarization or debugger expansion was performed.

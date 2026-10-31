@@ -1899,3 +1899,110 @@ async fn laravel_view_data_cycles_retire_unsaved_external_seeds_through_client()
         eprintln!("Cycle explicit={explicit}: completion/hover type retirement, restart and closing overlay passed");
     }
 }
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires the pinned macOS Apple Silicon PHPantom executable"]
+async fn laravel_component_props_preserve_supplied_models_and_scope_through_client() {
+    async fn members(
+        mgr: &LspManager,
+        doc: DocId,
+        text: &str,
+        needle: &str,
+        yes: &[&str],
+        no: &[&str],
+    ) -> Result<(), String> {
+        tokio::time::timeout(Duration::from_secs(8), async {
+            let mut last = Vec::new();
+            for _ in 0..80 {
+                match mgr.completion(doc, pos(text, needle), None, Default::default()).await {
+                    Ok(reply) => {
+                        last = reply.items.into_iter().map(|item| item.label).collect();
+                        if yes.iter().all(|name| last.iter().any(|item| item == name))
+                            && no.iter().all(|name| last.iter().all(|item| item != name))
+                        {
+                            return Ok(());
+                        }
+                    }
+                    Err(error) if error.kind == ide_core::error::ErrorKind::Cancelled => {}
+                    Err(error) => return Err(error.to_string()),
+                }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+            Err(format!("at {needle}: required {yes:?}, forbidden {no:?}; got {last:?}"))
+        })
+        .await
+        .map_err(|_| "component scope query exceeded eight-second deadline".to_string())?
+    }
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().canonicalize().unwrap();
+    let caller = "<?php\nnamespace App;\nclass Caller { public function show(): mixed {\n$person = new User();\n$leaked = new Other();\nreturn view('page', compact('person', 'leaked'));\n} }\n";
+    let page = "<x-card :person=\"$person\" />\n";
+    let component = "@props(['person'])\n<p>😀</p>{{ $person->userOnly }}\n{{ $leaked->otherOnly }}\n";
+    let bare = component.replace("@props(['person'])\n", "");
+    let files = [
+        ("composer.json", r#"{"require":{"laravel/framework":"^13.0"},"autoload":{"psr-4":{"App\\":"app/"}}}"#),
+        ("app/User.php", "<?php namespace App; class User { public string $userOnly; }\n"),
+        ("app/Other.php", "<?php namespace App; class Other { public int $otherOnly; }\n"),
+        ("app/Caller.php", caller),
+        ("resources/views/page.blade.php", page),
+        ("resources/views/components/card.blade.php", component),
+    ];
+    for (name, text) in files {
+        let path = root.join(name);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, text).unwrap();
+    }
+    let mut php = LanguageRegistry::load(None).unwrap().get(&LanguageId::new("php")).unwrap();
+    php.language_servers.retain(|server| server.name == "phpantom");
+    php.language_servers[0].command = std::env::var("OPENSTORM_TEST_PHPANTOM_BIN").expect("engine executable");
+    let mgr = LspManager::new(root.clone(), Arc::new(LanguageRegistry::from_configs(vec![php])), Arc::new(|_| {}));
+    let leaf = DocId::next();
+    let middle = DocId::next();
+    let controller = DocId::next();
+    for (doc, path, text) in [
+        (leaf, "resources/views/components/card.blade.php", bare.as_str()),
+        (middle, "resources/views/page.blade.php", page),
+        (controller, "app/Caller.php", caller),
+    ] {
+        mgr.did_open(doc, &root.join(path), &LanguageId::new("php"), 1, text);
+    }
+    let outcome: Result<(), String> = async {
+        members(&mgr, leaf, &bare, "userOnly", &["userOnly"], &["otherOnly"]).await?;
+        eprintln!("Control: bare component receives supplied User model");
+        replace(&mgr, leaf, 2, &bare, component);
+        members(&mgr, leaf, component, "userOnly", &["userOnly"], &["otherOnly"]).await?;
+        eprintln!("Required component prop receives supplied User model");
+        let hover = mgr.hover(leaf, pos(component, "$person"), Default::default()).await.map_err(|e| e.to_string())?;
+        let value = hover.map(|reply| reply.contents.value).unwrap_or_default();
+        if !value.contains("User") || value.contains("Other") {
+            return Err(format!("required prop hover must retain User: {value}"));
+        }
+        let targets =
+            mgr.goto(leaf, pos(component, "userOnly"), GotoKind::Definition).await.map_err(|e| e.to_string())?;
+        let declaration = pos(files[1].1, "userOnly");
+        if !targets.iter().any(|target| target.path == root.join("app/User.php") && target.range.start == declaration) {
+            return Err(format!("required prop member must map to User property at {declaration:?}: {targets:?}"));
+        }
+        members(&mgr, leaf, component, "otherOnly", &[], &["userOnly", "otherOnly"]).await?;
+        eprintln!("Component does not inherit unbound parent variable");
+        let changed = caller.replace("new User()", "new Other()");
+        replace(&mgr, controller, 2, caller, &changed);
+        members(&mgr, leaf, component, "userOnly", &["otherOnly"], &["userOnly"]).await?;
+        eprintln!("Unsaved caller updates required component prop to Other");
+        let nullable = component.replace("@props(['person'])", "@props(['person' => null])");
+        replace(&mgr, leaf, 3, component, &nullable);
+        members(&mgr, leaf, &nullable, "userOnly", &["otherOnly"], &["userOnly"]).await?;
+        eprintln!("Nullable prop default preserves the supplied model");
+        mgr.restart(mgr.servers()[0].id).await.map_err(|error| error.to_string())?;
+        members(&mgr, leaf, &nullable, "userOnly", &["otherOnly"], &["userOnly"]).await?;
+        mgr.did_close(controller);
+        members(&mgr, leaf, &nullable, "userOnly", &["userOnly"], &["otherOnly"]).await?;
+        Ok(())
+    }
+    .await;
+    mgr.shutdown_all().await;
+    for (name, text) in files {
+        assert_eq!(std::fs::read_to_string(root.join(name)).unwrap(), text, "disk original: {name}");
+    }
+    assert!(outcome.is_ok(), "{}", outcome.unwrap_err());
+}

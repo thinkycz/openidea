@@ -79,6 +79,22 @@ const BUILT_AT_RUNTIME = new Set<string>([]);
 
 /** Text that stays as written in every locale: names, code, formats, shortcuts. */
 const UNTRANSLATED = new Set<string>([
+  // Product names
+  "Prettier",
+  // Go environment variables and placeholder values
+  "CGO",
+  "GOPROXY",
+  "GOPRIVATE",
+  "GOFLAGS",
+  "GONOPROXY",
+  "GONOSUMDB",
+  "GOSUMDB",
+  "GOMODCACHE",
+  "GOTOOLCHAIN",
+  "GOWORK",
+  "go1.22",
+  "integration debug",
+  "loopvar,rangefunc",
   // SSH and run-target placeholders
   "SSH",
   "example.com",
@@ -114,6 +130,7 @@ const UNTRANSLATED = new Set<string>([
   "Greenplum",
   "Java",
   "java-debug (Java)",
+  "kotlin-debug-adapter (Kotlin)",
   "js-debug (Node.js / TypeScript)",
   "JSON",
   "lldb-dap (C, C++, Swift)",
@@ -128,6 +145,7 @@ const UNTRANSLATED = new Set<string>([
   "Spring Boot",
   "PostgreSQL",
   "Pyright",
+  "pytest",
   "Rust",
   "Rustfmt",
   "SingleStore",
@@ -195,7 +213,9 @@ const UNTRANSLATED = new Set<string>([
   "PascalCase",
   "pyproject.toml, .git",
   "ruff server",
+  "run pytest",
   "snake_case",
+  "tests",
   '{ "section": { "key": "value" } }',
   // Identifiers that only look like text: icon names, error codes, categories, console output
   "app",

@@ -11,6 +11,7 @@
     "--bg-app": "#14171c",
     "--bg-elev": "#1b2027",
     "--bg-popup": "#1f252e",
+    "--bg-floating-toolbar": "#1f252e",
     "--bg-hover": "#262c33",
     "--bg-selected": "#22484b",
     "--bg-selected-strong": "#285a5d",
@@ -63,6 +64,9 @@
     "--gutter-modified": "#469e98",
     "--gutter-added": "#549159",
     "--gutter-deleted": "#75869d",
+    "--diff-modified": "#2f4f63",
+    "--diff-inserted": "#294436",
+    "--diff-deleted": "#43494f",
 
     // Shadows and window controls
     "--shadow-popup": "0 6px 20px rgba(0, 0, 0, 0.45)",

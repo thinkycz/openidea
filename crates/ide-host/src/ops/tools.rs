@@ -11,6 +11,7 @@ use std::path::PathBuf;
 
 /// The installer, reporting the executables chosen in the window's settings.
 fn tools(host: &Host, window: &str) -> IdeResult<Tools> {
+    host.require_trust(window)?;
     let data = host.data_dir.clone();
     let (settings, root) = match host.project(window) {
         Ok(project) => (project.settings.effective(), project.root.clone()),
@@ -99,11 +100,11 @@ pub fn jdk_download_vendors(_host: &Host, _window: &str) -> Vec<JdkVendor> {
 /// Java versions `vendor` publishes; cancellable with `cancel_request(request)`.
 pub async fn jdk_download_releases(
     host: &Host,
-    window: &str,
+    _window: &str,
     vendor: String,
     request: RequestId,
 ) -> IdeResult<JdkReleases> {
-    let tools = tools(host, window)?;
+    let tools = Tools::new(&host.data_dir);
     let cancel = host.begin_request(request);
     let result = tokio::task::spawn_blocking(move || tools.jdk_releases(&vendor, &cancel)).await.map_err(join_err);
     host.end_request(request);
@@ -122,14 +123,14 @@ pub fn jdk_download_location(host: &Host, _window: &str) -> IdeResult<ide_core::
 #[allow(clippy::too_many_arguments)]
 pub async fn jdk_download(
     host: &Host,
-    window: &str,
+    _window: &str,
     vendor: String,
     version: u32,
     location: Option<PathBuf>,
     request: RequestId,
     on_event: Channel<InstallEvent>,
 ) -> IdeResult<Sdk> {
-    let tools = tools(host, window)?;
+    let tools = Tools::new(&host.data_dir);
     let location = location.filter(|p| !p.as_os_str().is_empty());
     let cancel = host.begin_request(request);
     let result = tokio::task::spawn_blocking(move || {

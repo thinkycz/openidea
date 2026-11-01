@@ -24,7 +24,10 @@ let dispose: () => void;
 
 beforeEach(() => {
   setContext("projectOpen", true);
-  useProject.setState({ project: { root: "/test", name: "test", settings: {}, isGit: false }, opening: false });
+  useProject.setState({
+    project: { root: "/test", name: "test", settings: {} as never, isGit: false, trusted: true },
+    opening: false,
+  });
   notes = [];
   provideNotificationService({ notify: (n) => void notes.push(n) });
   vi.clearAllMocks();

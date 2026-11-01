@@ -3,7 +3,56 @@
 Base: thinkycz/openidea 50212e73972d6f05bf16050cb0ba10102a6c8054 (0.1.21).
 Branch: codex/openstorm-php-laravel. Target: macOS Apple Silicon, local delivery.
 
-Current checkpoint (2026-10-31): signed development **0.1.53**, bundled engine
+Source integration (2026-11-01, verified source checkpoint): integrates all 240 new
+commits from `l0ng-ai/openidea:main` at `041e7210` into
+`codex/openstorm-php-laravel`, based on pushed OpenStorm `82d1313a`.
+The 38 conflicted paths combine upstream cancellation/incomplete rename results,
+interactive code actions, project/workspace trust, native window handling,
+custom-document closing, and focus disk refresh with OpenStorm's guarded PHP
+edits, revision-bound overwrite confirmation, serialized Save All decisions,
+reviewed undo/redo, project-model reset, branding, and disabled updater.
+PHPantom remains `0.11.1-openstorm.130`; no engine source or binary changes.
+Upstream features are inherited code, not new 69-area acceptance claims or
+independent debugger expansion. Existing signed bundles and installed app are
+preserved; the merged source has not been packaged or tested in the native UI.
+Integration regressions reproduced and fixed: lazy language loading could cache
+an old project model after replacement; delayed old-server shutdown publication
+could wake a newer restart as unavailable. The corresponding deterministic red
+checks fail before the fixes and pass afterwards. The request-documentation live
+control passes all three restart cycles after the shutdown-publication fix.
+PHP checked rename now accepts upstream request cancellation and preserves
+incomplete-result metadata; its cancellation regression prevents an unchecked
+fallback. The host regression checks PHP Optimize Imports through the new interactive
+action executor with a guarded plan. Non-cancellation Save All failures still allow the
+remaining files to save, while cancelled overwrite decisions stop the operation.
+Development session identifiers use the OpenStorm namespace too.
+Properties saving preserves upstream ASCII escape spelling without bypassing
+revision-bound overwrite confirmation; all35 document cases pass, including a
+new stale-confirmation/escape-preservation regression.
+
+Observed source gates: **5,321 frontend tests; 1,738 Rust workspace tests,
+60 ignored, zero filtered; actual PHPantom client24/host5; browser64 passed,
+one existing Search Everywhere file-opening case skipped**. Type checking,
+frontend lint, Knip, frontend build, repository formatting, Rust formatting and
+all-target workspace Clippy with warnings denied pass. Bindings were regenerated
+by the workspace export test and checked by the frontend afterwards. Frontend
+lint/build retain inherited nonfatal warnings; the native debug binary link
+reports a large unwind-table warning. Cargo Nextest/Cargo Deny are not installed
+and were not run; cross-platform/musl CI and a new packaged native UI pass are
+not claimed. Whole-area ledger statuses remain67partial/2deferred.
+
+Evidence: `artifacts/checks/upstream-2026-11-01-receipt.json`,
+`upstream-2026-11-01-client-host-final.json`, `*-workspace-final3.log`,
+`*-clippy-final3.log`, `*-frontend-final.log`, `*-e2e.log`, and deterministic
+`*-restart-red/green.log` / `*-lazy-project-red/green.log`. Git history and the
+source receipt record the final merge/push ref. No environment file was changed
+in the source diff; only previously approved suite-owned fake test files were
+used during checks. Obsolete standalone compiler objects were pruned with
+frozen metadata, inode/hardlink/header/hash checks while owned build schedulers
+were paused and compiler jobs quiescent; all schedulers resumed. Applications,
+archives, engines, source, fixtures, and evaluation deliveries were preserved.
+
+Packaged checkpoint (2026-10-31): signed development **0.1.53**, bundled engine
 **0.11.1-openstorm.130**, finishes the current tested development checkpoint.
 Full engine18,408+FIFO child/17ignored, actual client24/host5, frontend3057,
 workspace1321/49ignored/0filtered, typecheck/lint/build/fmt/Clippy pass. Native51
@@ -14,8 +63,8 @@ switch remains unverified: the user is not at the Mac; automatic persistence was
 observed independently during waiting. No complete69-area or release acceptance
 is claimed. All69 statuses remain67partial/2deferred. Installed21 and prior bundles
 are preserved. Local candidate: `artifacts/batches/0.1.53/OpenStorm.app`.
-The reviewed source is being committed/pushed as explicitly requested; Git and
-`project-discard-0.1.53-delivery.json` record the final ref verification.
+The packaged checkpoint source was committed/pushed as `82d1313a`;
+`project-discard-0.1.53-delivery.json` records its final ref verification.
 
 Earlier checkpoint (2026-10-31): signed development **0.1.49**, bundled
 PHPantom **0.11.1-openstorm.127**, accepts the narrow inactive-tab diagnostic

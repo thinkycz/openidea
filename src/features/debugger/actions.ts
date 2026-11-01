@@ -4,7 +4,9 @@ import { call, commands, isCancelled, isTauri, nextRequestId, type RunConfig, ty
 import { downloadJdkActions } from "@/platform/jdk";
 import { useProject } from "@/platform/project";
 import { activeEditor } from "@/editor/api";
+import type { EditorView } from "@codemirror/view";
 import { maybeEditorService, notifications, showStatusInfo, toolWindowService } from "@/workbench/contributions";
+import { classFileBreakpointReason } from "@/platform/classFiles";
 import { canPlaceBreakpoint } from "./breakpoints/languages";
 import {
   removeAllBreakpoints,
@@ -30,6 +32,7 @@ import {
   sessionSupports,
   showExecutionPoint,
   startSession,
+  startPreparedSession,
   stopSession,
   useDebug,
   type DebugSession,
@@ -37,6 +40,7 @@ import {
 import { focusedDebugView } from "./ui/focusedView";
 import { browseFocusedConsoleHistory } from "./ui/expressionHistory";
 import { expressionAt, valueHint } from "./editor/valueTooltip";
+import { mouseEvaluateTarget } from "./editor/quickEvaluate";
 import { showHint } from "@/editor/lsp/hint";
 import { pausedLineTargets, startInlineSmartStep } from "./editor/smartStep";
 import {
@@ -74,10 +78,18 @@ function pausedTarget(): { s: DebugSession; thread: number } | null {
   return thread == null ? null : { s, thread };
 }
 
+function breakpointPathAllowed(path: string): boolean {
+  const reason = classFileBreakpointReason(path);
+  if (!reason) return true;
+  showStatusInfo(tx(reason));
+  return false;
+}
+
 /** Run to Cursor at `line` (0-based) of `path` in the paused session. */
 export function runToLine(path: string, line: number) {
   const t = pausedTarget();
-  if (t) void report("Run to Cursor failed", call(commands.debugRunTo(t.s.id, t.thread, path, line, false)));
+  if (t && breakpointPathAllowed(path))
+    void report("Run to Cursor failed", call(commands.debugRunTo(t.s.id, t.thread, path, line, false)));
 }
 
 function notSupported(what: string, s: DebugSession) {
@@ -147,28 +159,29 @@ function cursor(): { path: string; line: number; selection: string } | null {
 }
 
 /** Evaluate's initial text, as in IDEA: the selection, else the expression at the caret. */
-function evaluateSeed(): string {
-  const ed = activeEditor();
-  if (!ed) return "";
-  const { state } = ed.view;
+function evaluateSeed(view: EditorView | undefined = activeEditor()?.view, pos?: number): string {
+  if (!view) return "";
+  const { state } = view;
   const sel = state.selection.main;
-  if (!sel.empty) return state.sliceDoc(sel.from, sel.to);
-  return expressionAt(ed.view, sel.head)?.text ?? "";
+  if (!sel.empty && (pos == null || (sel.from <= pos && pos <= sel.to))) return state.sliceDoc(sel.from, sel.to);
+  return expressionAt(view, pos ?? sel.head)?.text ?? "";
 }
 
-async function quickEvaluate() {
-  const view = activeEditor()?.view;
+async function quickEvaluate(arg?: unknown) {
+  const target = mouseEvaluateTarget(arg);
+  const view = target?.view ?? activeEditor()?.view;
   if (!view) return;
   const sel = view.state.selection.main;
-  const expression = evaluateSeed().trim();
+  const pos = target?.pos ?? sel.from;
+  const expression = evaluateSeed(view, target?.pos).trim();
   if (!expression) return showHint(view, "Nothing to evaluate at the caret");
   const session = activeSession();
   try {
     const value = await evaluate(expression, "hover", session);
     if (!session) return;
-    showHint(view, () => valueHint(expression, value, session.id), { pos: sel.from, timeout: 60_000 });
+    showHint(view, () => valueHint(expression, value, session.id), { pos, timeout: 60_000 });
   } catch (e) {
-    showHint(view, e instanceof Error ? e.message : String(e), { pos: sel.from, tone: "error" });
+    showHint(view, e instanceof Error ? e.message : String(e), { pos, tone: "error" });
   }
 }
 
@@ -211,17 +224,39 @@ async function startRemote(config: RunConfig, root: string) {
     }
     const launch = await javaAttachConfig({ name: config.name, module: t.module, hostName, port }, root);
     // A listen relay accepts one debugger: rerunning listens again through the configuration.
-    await startSession(launch, { rerunnable: t.mode === "attach" });
+    await startSession(launch, { runConfig: config, rerunnable: t.mode === "attach" });
     return;
   }
   const launch = remoteAttachConfig(config, root);
-  if (launch) await startSession(launch);
+  if (launch) await startSession(launch, { runConfig: config });
+}
+
+/** Preparation belongs to a session from the moment the action begins. */
+async function startJavaConfig(config: RunConfig, root: string, origin: RunConfig) {
+  await startPreparedSession(origin, async (signal, report) => {
+    const request = nextRequestId();
+    const cancel = () => {
+      void commands.cancelRequest(request).catch(() => undefined);
+    };
+    signal.addEventListener("abort", cancel, { once: true });
+    try {
+      await maybeEditorService()
+        ?.saveAll()
+        .catch(() => undefined);
+      signal.throwIfAborted();
+      return await javaLaunchConfig(config, root, { request, signal, report });
+    } finally {
+      signal.removeEventListener("abort", cancel);
+    }
+  });
 }
 
 async function startConfig(arg: unknown) {
   const root = useProject.getState().project?.root;
   if (!root) return;
-  let config: RunConfig | null = isRunConfig(arg) ? arg : null;
+  const origin = arg && typeof arg === "object" && "origin" in arg && isRunConfig(arg.origin) ? arg.origin : null;
+  const input = arg && typeof arg === "object" && "config" in arg ? arg.config : arg;
+  let config: RunConfig | null = isRunConfig(input) ? input : null;
   if (!config) {
     if (!isTauri()) {
       notifications().notify({ group: "run", level: "warning", title: "Debugging needs the desktop app" });
@@ -253,10 +288,7 @@ async function startConfig(arg: unknown) {
     return;
   }
   if (isJavaDebuggable(config)) {
-    await maybeEditorService()
-      ?.saveAll()
-      .catch(() => undefined);
-    await startSession(await javaLaunchConfig(config, root));
+    await startJavaConfig(config, root, origin ?? config);
     return;
   }
   const launch = launchConfigFor(config, root);
@@ -272,7 +304,7 @@ async function startConfig(arg: unknown) {
   await maybeEditorService()
     ?.saveAll()
     .catch(() => undefined);
-  await startSession(launch);
+  await startSession(launch, { runConfig: origin ?? config });
 }
 
 export function registerDebugActions(): () => void {
@@ -312,7 +344,11 @@ export function registerDebugActions(): () => void {
             const root = useProject.getState().project?.root;
             if (!root || !isJavaAttachTarget(arg)) return;
             const launch = await javaAttachConfig(arg, root);
-            await startSession(launch, { process: (arg.process ?? null) as RunId | null, rerunnable: false });
+            await startSession(launch, {
+              process: (arg.process ?? null) as RunId | null,
+              runConfig: arg.runConfig,
+              rerunnable: false,
+            });
           })(),
         ),
     },
@@ -335,7 +371,13 @@ export function registerDebugActions(): () => void {
       icon: "refresh",
       keywords: ["hotswap", "hot swap", "hot code replace"],
       when: "debugCanHotSwap",
-      run: () => reloadChangedClasses(),
+      run: ({ arg }) =>
+        reloadChangedClasses(
+          true,
+          typeof arg === "object" && arg !== null && "configId" in arg && typeof arg.configId === "string"
+            ? arg.configId
+            : undefined,
+        ),
     },
     {
       id: "debug.rerun",
@@ -366,10 +408,10 @@ export function registerDebugActions(): () => void {
       title: "Pause Program",
       category: "Debug",
       icon: "pause",
-      when: "debugSessionActive && !debugSessionPaused",
+      when: "debugSessionRunning",
       run: async () => {
         const s = activeSession();
-        if (!s || !isLive(s)) return;
+        if (!s || s.status !== "running") return;
         let thread = s.selectedThread ?? s.threads[0]?.id;
         if (thread == null) {
           const threads = await call(commands.debugThreads(s.id)).catch(() => []);
@@ -488,7 +530,7 @@ export function registerDebugActions(): () => void {
       run: () => {
         const t = pausedTarget();
         const c = cursor();
-        if (t && c)
+        if (t && c && breakpointPathAllowed(c.path))
           void report("Run to Cursor failed", call(commands.debugRunTo(t.s.id, t.thread, c.path, c.line, false)));
       },
     },
@@ -502,7 +544,7 @@ export function registerDebugActions(): () => void {
       run: () => {
         const t = pausedTarget();
         const c = cursor();
-        if (t && c)
+        if (t && c && breakpointPathAllowed(c.path))
           void report("Force Run to Cursor failed", call(commands.debugRunTo(t.s.id, t.thread, c.path, c.line, true)));
       },
     },
@@ -513,7 +555,7 @@ export function registerDebugActions(): () => void {
       icon: "breakpoint",
       run: () => {
         const c = cursor();
-        if (!c) return;
+        if (!c || !breakpointPathAllowed(c.path)) return;
         const exists = useBreakpoints.getState().byFile[c.path]?.some((b) => b.line === c.line);
         const language = activeEditor()?.ctx.language ?? "";
         if (!exists && !canPlaceBreakpoint(language)) {
@@ -538,7 +580,8 @@ export function registerDebugActions(): () => void {
       description: "A line breakpoint that is removed after it is hit",
       run: () => {
         const c = cursor();
-        if (c && canPlaceBreakpoint(activeEditor()?.ctx.language ?? "")) toggleTemporaryBreakpoint(c.path, c.line);
+        if (c && breakpointPathAllowed(c.path) && canPlaceBreakpoint(activeEditor()?.ctx.language ?? "", c.path))
+          toggleTemporaryBreakpoint(c.path, c.line);
       },
     },
     {
@@ -549,7 +592,7 @@ export function registerDebugActions(): () => void {
       run: () => {
         const ed = activeEditor();
         const c = cursor();
-        if (!ed || !c) return;
+        if (!ed || !c || !breakpointPathAllowed(c.path)) return;
         const existing = specialAt(c.path).find((b) => b.kind === "method" && b.line === c.line);
         const method = methodAt(ed.ctx.language, ed.view.state.doc.toString(), c.line);
         if (!existing && !method) {
@@ -572,7 +615,7 @@ export function registerDebugActions(): () => void {
       run: () => {
         const ed = activeEditor();
         const c = cursor();
-        if (!ed || !c) return;
+        if (!ed || !c || !breakpointPathAllowed(c.path)) return;
         const existing = specialAt(c.path).find((b) => b.kind === "field" && b.line === c.line);
         const field = fieldAt(ed.ctx.language, ed.view.state.doc.toString(), c.line);
         if (!existing && !field) {
@@ -637,8 +680,8 @@ export function registerDebugActions(): () => void {
       id: "debug.quickEvaluate",
       title: "Quick Evaluate Expression",
       category: "Debug",
-      when: "debugSessionActive && textEditorActive",
-      run: () => quickEvaluate(),
+      when: "debugSessionPaused && textEditorActive",
+      run: ({ arg }) => quickEvaluate(arg),
     },
     {
       id: "debug.showToolWindow",

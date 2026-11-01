@@ -661,7 +661,9 @@ pub fn workspace_edit(conv: &Conv, e: lsp::WorkspaceEdit) -> WorkspaceEdit {
             }
         }
     }
-    WorkspaceEdit { files, ..Default::default() }
+    let mut edit = WorkspaceEdit { files, ..Default::default() };
+    edit.deduplicate();
+    edit
 }
 
 /// Adds the changes of `extra`, another server's edit for the same request, to
@@ -710,6 +712,14 @@ pub fn goto_response(conv: &Conv, r: lsp::GotoDefinitionResponse) -> Vec<Locatio
 }
 
 pub fn dedup_locations(v: &mut Vec<Location>) {
+    let mut canonical = std::collections::HashMap::new();
+    for location in v.iter_mut().filter(|l| l.uri.is_none()) {
+        let path =
+            canonical.entry(location.path.clone()).or_insert_with(|| dunce::canonicalize(&location.path).ok()).clone();
+        if let Some(path) = path {
+            location.path = path.into();
+        }
+    }
     let mut seen = std::collections::HashSet::new();
     v.retain(|l| seen.insert(l.clone()));
 }
@@ -1180,6 +1190,40 @@ mod tests {
     }
 
     #[test]
+    fn jdtls_completion_defaults_preserve_prefix_range_and_edit_text() {
+        // JDT.LS 1.63: request after `System.out.` or `System.out.Print`.
+        for end in [19, 24] {
+            let (_, items) = parse_completion_response(json!({
+                "isIncomplete": false,
+                "itemDefaults": {
+                    "editRange": {
+                        "insert": {"start": {"line":2,"character":19}, "end": {"line":2,"character":end}},
+                        "replace": {"start": {"line":2,"character":19}, "end": {"line":2,"character":end}}
+                    },
+                    "insertTextFormat": 2,
+                    "data": {"completionKinds": [2, 6]}
+                },
+                "items": [{
+                    "label": "print",
+                    "labelDetails": {"detail": "(Object obj)", "description": "void"},
+                    "kind": 2,
+                    "detail": "PrintStream.print(Object obj) : void",
+                    "filterText": "print(Object obj) : void",
+                    "insertText": "print",
+                    "textEditText": "print(${0});",
+                    "data": {"pid": "0", "rid": "0"}
+                }]
+            }));
+            let item = completion_item(&Conv::utf16(), Path::new("/Main.java"), items[0].clone(), ServerId(1));
+            assert_eq!(item.replace_range, Some(Range::new(p(2, 19), p(2, end))));
+            assert_eq!(item.replace_range_tab, None);
+            assert_eq!(item.filter_text.as_deref(), Some("print(Object obj) : void"));
+            assert_eq!(item.insert_text, "print(${0});");
+            assert!(item.is_snippet);
+        }
+    }
+
+    #[test]
     fn hover_normalisation() {
         let conv = Conv::utf16();
         let h: lsp::Hover = serde_json::from_value(json!({
@@ -1372,5 +1416,26 @@ mod tests {
         let web = document_link(&conv, here, link(Some("https://example.com/#top"))).unwrap();
         assert_eq!((web.path, web.url.as_deref(), web.fragment), (None, Some("https://example.com/#top"), None));
         assert!(document_link(&conv, here, link(None)).is_none());
+    }
+}
+
+#[cfg(all(test, unix))]
+mod alias_tests {
+    use super::*;
+
+    #[test]
+    fn references_to_a_file_and_its_symlink_are_one_location() {
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("main.cpp");
+        let alias = dir.path().join("alias.cpp");
+        std::fs::write(&real, "add()").unwrap();
+        std::os::unix::fs::symlink(&real, &alias).unwrap();
+        let mut locations: Vec<Location> = [real.clone(), alias]
+            .into_iter()
+            .map(|p| Location { path: p.into(), range: Range::new(Pos::new(0, 0), Pos::new(0, 3)), uri: None })
+            .collect();
+        dedup_locations(&mut locations);
+        assert_eq!(locations.len(), 1);
+        assert_eq!(locations[0].path.as_ref(), dunce::canonicalize(real).unwrap());
     }
 }

@@ -4,7 +4,7 @@ import { onEditorEvent } from "@/editor/api";
 import type { DocumentInfo } from "@/platform/ipc";
 import { createMemoryBackend } from "./backend";
 import { EditorController, useTabs } from "./controller";
-import { DocumentManager, useDocMeta } from "./model/document";
+import { DocModel, DocumentManager, useDocMeta } from "./model/document";
 import { initialTabsState } from "./model/tabs";
 
 let controller: EditorController | undefined;
@@ -92,6 +92,34 @@ it("lets a close-event subscriber acquire the new project's model instead of a d
     expect(manager.get("/p/a.txt")).toBe(fresh);
   } finally {
     off();
+    manager.resetProject();
+    manager.stop();
+  }
+});
+
+it("rejects a previous project's model after lazy language loading finishes", async () => {
+  const backend = createMemoryBackend({ "/p/a.txt": "external\n" });
+  const manager = new DocumentManager(backend, { settings: () => null, notify: () => {} });
+  let finish!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    finish = resolve;
+  });
+  const load = vi.spyOn(DocModel.prototype, "loadLanguage").mockImplementationOnce(() => gate);
+  try {
+    const old = manager.acquire("/p/a.txt");
+    await vi.waitFor(() => expect(load).toHaveBeenCalledOnce());
+    const oldId = useDocMeta.getState()["/p/a.txt"]!.doc;
+    await backend.close(oldId);
+    manager.resetProject();
+    const fresh = await manager.acquire("/p/a.txt");
+    finish();
+    await expect(old).rejects.toMatchObject({ kind: "cancelled" });
+    expect(manager.get("/p/a.txt")).toBe(fresh);
+    expect(useDocMeta.getState()["/p/a.txt"]!.doc).toBe(fresh.doc);
+    expect(fresh.closed).toBe(false);
+  } finally {
+    finish();
+    load.mockRestore();
     manager.resetProject();
     manager.stop();
   }

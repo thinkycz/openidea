@@ -1,8 +1,8 @@
 /**
- * Go to declaration / implementation / type declaration (⌘B, ⌥⌘B, ⇧⌘B and
- * ⌘-click with a link underline while ⌘ is held), the multiple-targets
- * chooser, and document highlights (occurrences of the symbol at the caret,
- * plus the sticky find.highlightUsages variant).
+ * Go to declaration / implementation / type declaration (⌘B, ⌥⌘B, ⇧⌘B,
+ * ⌘-click with a link underline while ⌘ is held, and a plain middle-button
+ * click), the multiple-targets chooser, and document highlights (occurrences
+ * of the symbol at the caret, plus the sticky find.highlightUsages variant).
  */
 import { EditorSelection, Prec, StateEffect, StateField, type Extension, type Text } from "@codemirror/state";
 import {
@@ -46,16 +46,16 @@ import {
   localHighlights,
   type DeclarationTarget,
 } from "./syntaxFallback";
-import { showHint } from "./hint";
+import { showHint, showPendingHint } from "./hint";
 import { caretAnchor, openPopup, type ListPopupItem } from "./popupStore";
 import { identifierAt, readManyFileLines } from "./files";
 import { documentLinks, followReference, knownLinks, linkReference, referenceAt, textReference } from "./links";
 import { featureBackoff } from "./availability";
-import { requestHover } from "./hover";
+import { requestHover, showPhpConstructDocumentation } from "./hover";
 import { declarationSummary, renderCode } from "./markdown";
 import { editorPrefs } from "@/platform/editorSettings";
 import { isVirtualUri, virtualContainer } from "@/platform/virtualDocs";
-import { shortcutLabel } from "@/platform/keymap";
+import { dispatchMouseShortcut, shortcutLabel } from "@/platform/keymap";
 import { isNavigationGesture, onNavigationModifier } from "@/platform/navigationModifier";
 import { create } from "zustand";
 import { tx } from "@/platform/i18n";
@@ -157,6 +157,7 @@ export async function gotoTargets(view: EditorView, kind: GotoKind, at?: number)
   if (kind === "definition" || kind === "declaration") {
     const own = contributedAt<ContributedDefinition>(view.state, CONTRIBUTED_DEFINITION, offset);
     if (own?.(view, offset)) return;
+    if (showPhpConstructDocumentation(view, offset)) return;
   }
   const doc = docOf(view);
   if (!doc) return;
@@ -166,7 +167,12 @@ export async function gotoTargets(view: EditorView, kind: GotoKind, at?: number)
   const declaration = kind === "definition" || kind === "declaration";
   let serverDown = false;
   try {
-    locs = dedupeLocations(await gotoAfterEdits(view, () => lspRequest(() => commands.lspGoto(doc.doc, pos, kind))));
+    const done = showPendingHint(view, tx`Finding navigation target…`);
+    try {
+      locs = dedupeLocations(await gotoAfterEdits(view, () => lspRequest(() => commands.lspGoto(doc.doc, pos, kind))));
+    } finally {
+      done();
+    }
   } catch (e) {
     if (isCancelled(e) || !declaration) {
       reportLspError(view, e, true);
@@ -483,7 +489,21 @@ const linkPlugin = ViewPlugin.fromClass(
         this.show(false);
       },
       mousedown(e, view) {
-        if (e.button !== 0 || !isNavigationGesture(e)) return false;
+        if (e.button !== 0 && e.button !== 1) return false;
+        if (
+          dispatchMouseShortcut(e, () => {
+            const pos = view.posAtCoords({ x: e.clientX, y: e.clientY }, false);
+            if (pos == null) return false;
+            view.dispatch({ selection: EditorSelection.cursor(pos), effects: setLink.of(null) });
+            view.focus();
+            return true;
+          })
+        ) {
+          e.preventDefault();
+          return true;
+        }
+        // IDEA parity: middle button navigates on a plain click, without the modifier.
+        if (e.button === 1 ? e.metaKey || e.ctrlKey || e.altKey || e.shiftKey : !isNavigationGesture(e)) return false;
         const pos = view.posAtCoords({ x: e.clientX, y: e.clientY }, false);
         if (pos == null) return false;
         e.preventDefault();

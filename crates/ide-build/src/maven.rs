@@ -401,6 +401,9 @@ struct Inherited {
     managed: Vec<RawDep>,
     plugins: Vec<RawPlugin>,
     managed_plugins: Vec<RawPlugin>,
+    /// `<id>`, `activeByDefault`: profiles of the POM and its ancestors —
+    /// Maven lets a child enable a parent's profiles with `-P`.
+    profiles: Vec<(String, bool)>,
 }
 
 fn merge_by<T: Clone>(base: &mut Vec<T>, own: &[T], key: impl Fn(&T) -> String) {
@@ -523,6 +526,11 @@ impl Resolver {
             merge_by(&mut ctx.deps, &p.deps, RawDep::key);
             merge_plugins(&mut ctx.plugins, &p.plugins);
         }
+        merge_by(
+            &mut ctx.profiles,
+            &pom.profiles.iter().map(|p| (p.id.clone(), p.active_by_default)).collect::<Vec<_>>(),
+            |(id, _)| id.clone(),
+        );
         // Managed dependencies: own entries win; imported BOMs fill the gaps.
         let props = self.properties_for(&pom, &ctx, &dir);
         let mut imported: Vec<RawDep> = Vec::new();
@@ -591,6 +599,72 @@ impl Resolver {
         }
         props
     }
+}
+
+/// Files and source/resource trees consumed by a launch build. Unresolved custom
+/// roots disable reuse rather than silently omitting an input.
+pub(crate) fn launch_inputs(
+    root: &Path,
+    projects: &[&MavenProject],
+    local_repo: Option<PathBuf>,
+) -> Option<Vec<PathBuf>> {
+    fn roots(el: &Element, parent: &str, dir: &Path, out: &mut Vec<PathBuf>) -> Option<()> {
+        let input =
+            matches!(el.name.as_str(), "sourceDirectory" | "testSourceDirectory" | "sourceDir" | "testSourceDir")
+                || (matches!(parent, "sources" | "sourceDirs" | "testSources" | "testSourceDirs")
+                    && matches!(el.name.as_str(), "source" | "sourceDir" | "testSourceDir"))
+                || (matches!(parent, "resource" | "testResource" | "source" | "testSource") && el.name == "directory")
+                || (parent == "filters" && el.name == "filter");
+        // Profile activation may depend on the presence of an otherwise unrelated file.
+        let activation = parent == "file" && matches!(el.name.as_str(), "exists" | "missing");
+        if input || activation {
+            // Other properties can be overridden by -D, profiles or settings.
+            // Without Maven's effective roots, conservatively disable reuse for them.
+            let value = el
+                .text
+                .trim()
+                .replace("${project.basedir}", &dir.to_string_lossy())
+                .replace("${basedir}", &dir.to_string_lossy());
+            if value.contains("${") {
+                return None;
+            }
+            if !value.is_empty() {
+                out.push(dir.join(value));
+            }
+        }
+        for child in &el.children {
+            roots(child, &el.name, dir, out)?;
+        }
+        Some(())
+    }
+    let mut resolver = Resolver::new(local_repo.or_else(default_local_repo));
+    let mut out = Vec::new();
+    for project in projects {
+        let dir = root.join(&project.dir);
+        // Include all conventional language/resource roots, including nonstandard files under src.
+        out.push(dir.join("src"));
+        let pom = root.join(&project.pom);
+        resolver.context(&pom, 0);
+        let mut path = pom;
+        let mut seen = HashSet::new();
+        loop {
+            let canonical = dunce::canonicalize(&path).ok()?;
+            if !seen.insert(canonical) || seen.len() > MAX_PARENT_DEPTH {
+                return None;
+            }
+            out.push(path.clone());
+            let text = std::fs::read_to_string(&path).ok()?;
+            roots(&xml::parse(&text)?, "", &dir, &mut out)?;
+            let raw = resolver.pom(&path)?;
+            let Some(parent) = raw.parent else { break };
+            path = resolver.parent_path(path.parent()?, &parent)?;
+        }
+    }
+    // Also track imported BOMs read while resolving inheritance.
+    out.extend(resolver.poms.into_keys());
+    out.sort();
+    out.dedup();
+    Some(out)
 }
 
 // ---------------------------------------------------------------- plugins
@@ -935,9 +1009,10 @@ pub(crate) fn load_with_repo(root: &Path, local_repo: Option<PathBuf>) -> MavenM
             .or_else(|| pom.compiler_release.as_deref().map(i))
             .and_then(|v| java_version(&v));
 
-        for p in &pom.profiles {
-            if !model.profiles.iter().any(|x| x.id == p.id) {
-                model.profiles.push(MavenProfile { id: p.id.clone(), active_by_default: p.active_by_default });
+        // The project can activate the profiles of its own POM and its ancestors'.
+        for (id, active) in &ctx.profiles {
+            if !model.profiles.iter().any(|x| x.id == *id) {
+                model.profiles.push(MavenProfile { id: id.clone(), active_by_default: *active });
             }
         }
         let artifact_id = i(&pom.artifact_id);
@@ -954,7 +1029,7 @@ pub(crate) fn load_with_repo(root: &Path, local_repo: Option<PathBuf>) -> MavenM
             aggregated,
             plugins,
             dependencies,
-            profiles: pom.profiles.iter().map(|p| p.id.clone()).collect(),
+            profiles: ctx.profiles.iter().map(|(id, _)| id.clone()).collect(),
             java_version: jv,
             command: wrapper(root, &dir),
             options: Vec::new(),
@@ -965,6 +1040,67 @@ pub(crate) fn load_with_repo(root: &Path, local_repo: Option<PathBuf>) -> MavenM
         }
     }
     model
+}
+
+/// Shared linkage decision for every Maven consumer, including modules outside a reactor directory.
+#[derive(Default)]
+pub struct UnlinkedProjects {
+    poms: std::collections::BTreeSet<String>,
+}
+
+impl UnlinkedProjects {
+    pub fn load(root: &Path, settings: &ide_core::settings::MavenSettings) -> Self {
+        if settings.unlinked_projects.is_empty() {
+            return Self::default();
+        }
+        Self::from_model(&load(root), settings)
+    }
+
+    pub fn from_model(model: &MavenModel, settings: &ide_core::settings::MavenSettings) -> Self {
+        let mut result = Self::default();
+        let mut pending = settings.unlinked_projects.clone();
+        while let Some(pom) = pending.pop() {
+            let pom = normalized_pom(&pom);
+            if !result.poms.insert(pom.clone()) {
+                continue;
+            }
+            if let Some(project) = model.projects.iter().find(|p| normalized_pom(&p.pom) == pom) {
+                pending.extend(project.modules.iter().cloned());
+            }
+        }
+        result
+    }
+
+    pub fn contains(&self, pom: &str) -> bool {
+        self.poms.contains(&normalized_pom(pom))
+    }
+
+    pub fn poms(&self) -> impl Iterator<Item = &str> {
+        self.poms.iter().map(String::as_str)
+    }
+
+    pub fn filter(&self, model: &mut MavenModel) {
+        model.projects.retain(|p| !self.contains(&p.pom));
+        for project in &mut model.projects {
+            project.modules.retain(|p| !self.contains(p));
+        }
+        model.profiles.retain(|p| model.projects.iter().any(|project| project.profiles.contains(&p.id)));
+    }
+}
+
+fn normalized_pom(pom: &str) -> String {
+    let pom = pom.replace('\\', "/");
+    let mut parts = Vec::new();
+    for part in pom.split('/') {
+        match part {
+            "" | "." => {}
+            ".." if parts.last().is_some_and(|p| *p != "..") => {
+                parts.pop();
+            }
+            part => parts.push(part),
+        }
+    }
+    parts.join("/")
 }
 
 /// Every POM of the model (for change detection).
@@ -1219,7 +1355,39 @@ mod tests {
         let profiles: Vec<(&str, bool)> = model.profiles.iter().map(|p| (p.id.as_str(), p.active_by_default)).collect();
         assert_eq!(profiles, [("dev", true), ("extra", false)]);
         assert_eq!(parent.profiles, ["dev", "extra"]);
+        assert_eq!(core.profiles, ["dev", "extra"], "a module inherits its parent's profiles");
         assert!(model.projects.iter().all(|p| p.command == if cfg!(windows) { "mvn.cmd" } else { "mvn" }));
+    }
+
+    #[test]
+    fn profiles_of_a_parent_pom_are_inherited() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        write(
+            root,
+            "pom.xml",
+            r#"<project><groupId>demo</groupId><artifactId>parent</artifactId><version>1.0</version>
+              <packaging>pom</packaging><modules><module>child</module></modules>
+              <profiles>
+                <profile><id>jdk8</id></profile>
+                <profile><id>jdk21</id><activation><activeByDefault>true</activeByDefault></activation></profile>
+              </profiles>
+            </project>"#,
+        );
+        write(
+            root,
+            "child/pom.xml",
+            r#"<project><parent><groupId>demo</groupId><artifactId>parent</artifactId><version>1.0</version></parent>
+              <artifactId>child</artifactId>
+              <profiles><profile><id>own</id></profile></profiles>
+            </project>"#,
+        );
+        let model = load_with_repo(root, None);
+        let child = &model.projects[1];
+        // `-Pjdk8` on the module activates the parent's profile, so it is listed.
+        assert_eq!(child.profiles, ["jdk8", "jdk21", "own"]);
+        let profiles: Vec<(&str, bool)> = model.profiles.iter().map(|p| (p.id.as_str(), p.active_by_default)).collect();
+        assert_eq!(profiles, [("jdk8", false), ("jdk21", true), ("own", false)]);
     }
 
     #[test]
@@ -1457,5 +1625,47 @@ mod tests {
             );
             assert_eq!((d.group_id.as_str(), d.version.as_deref()), ("g", Some("1")), "{line}");
         }
+    }
+}
+
+#[cfg(test)]
+mod linkage_tests {
+    use super::*;
+    use ide_core::settings::MavenSettings;
+
+    #[test]
+    fn excludes_reactor_modules_and_profiles_but_keeps_other_roots() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        for (name, body) in [
+            (
+                "a",
+                "<modules><module>child</module><module>../shared</module></modules><profiles><profile><id>only-a</id></profile></profiles>",
+            ),
+            ("a/child", ""),
+            ("shared", ""),
+            ("b", ""),
+        ] {
+            std::fs::create_dir_all(root.join(name)).unwrap();
+            std::fs::write(
+                root.join(name).join("pom.xml"),
+                format!("<project><artifactId>{name}</artifactId>{body}</project>"),
+            )
+            .unwrap();
+        }
+        let original = load_with_repo(root, None);
+        let settings = MavenSettings { unlinked_projects: vec!["./a/pom.xml".into()], ..Default::default() };
+        let unlinked = UnlinkedProjects::from_model(&original, &settings);
+        assert!(unlinked.contains("a/child/pom.xml"));
+        assert!(unlinked.contains("shared/pom.xml"));
+        assert!(unlinked.contains("a/../shared/pom.xml"));
+        assert!(!unlinked.contains("b/pom.xml"));
+        let mut model = original.clone();
+        unlinked.filter(&mut model);
+        assert_eq!(model.projects.iter().map(|p| p.pom.as_str()).collect::<Vec<_>>(), ["b/pom.xml"]);
+        assert!(model.profiles.is_empty());
+        let mut restored = original.clone();
+        UnlinkedProjects::from_model(&original, &MavenSettings::default()).filter(&mut restored);
+        assert_eq!(restored, original);
     }
 }

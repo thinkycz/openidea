@@ -7,15 +7,19 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEve
 import clsx from "clsx";
 import type { AgentCommand, AgentConfigOption, AgentImage } from "@/bindings";
 import { call, commands, isTauri } from "@/platform/ipc";
+import { nativeDropPoint } from "@/platform/nativeDrop";
+import { invokeLocal } from "@/platform/tauriCore";
 import { useTx } from "@/platform/i18n";
 import { basename } from "@/platform/project";
 import { notifications, OWNS_FILE_DROP } from "@/workbench/contributions";
-import { Icon, IconButton, fileIconName } from "@/ui";
+import { Icon, IconButton, Popup, fileIconName } from "@/ui";
 import {
   IMAGE_EXTENSIONS,
   MAX_IMAGE_BYTES,
   applyCompletion,
   atEdgeLine,
+  isPathQuery,
+  resolveTyped,
   completionAt,
   imageFromDataUrl,
   matchCommands,
@@ -27,13 +31,15 @@ import {
   type FileRef,
 } from "./composerModel";
 import { composerDraft, updateComposer, useAgents } from "./store";
+import { ImagePreview, imageSrc } from "./ImagePreview";
+import { useCompletionAnchor } from "./useCompletionAnchor";
 import styles from "./Composer.module.css";
 import { isImeKey } from "@/platform/ime";
 
 const MAX_PROMPT_HEIGHT = 280;
 const MAX_ITEMS = 12;
 
-type Item = { kind: "file"; path: string; rel: string } | { kind: "command"; command: AgentCommand };
+type Item = { kind: "file"; path: string; rel: string; dir?: boolean } | { kind: "command"; command: AgentCommand };
 
 export interface ComposerProps {
   /** Store key of the draft. */
@@ -66,6 +72,7 @@ export function Composer(props: ComposerProps) {
   const draft = useAgents((s) => s.composers.get(id));
   const text = draft?.text ?? "";
   const images = draft?.images ?? [];
+  const [preview, setPreview] = useState<AgentImage | null>(null);
   const ref = useRef<HTMLTextAreaElement>(null);
   const boxRef = useRef<HTMLDivElement>(null);
   const imageInput = useRef<HTMLInputElement>(null);
@@ -99,8 +106,30 @@ export function Composer(props: ComposerProps) {
   useEffect(() => {
     if (completion?.kind !== "file") return;
     let alive = true;
+    const query = completion.query;
     const timer = setTimeout(() => {
-      call(commands.findFiles(completion.query, MAX_ITEMS))
+      if (isPathQuery(query)) {
+        // Outside the index: list the directory typed so far.
+        const typed = /(^|\/)\.\.?$/.test(query) ? `${query}/` : query;
+        const dirPart = typed.slice(0, typed.lastIndexOf("/") + 1);
+        const last = typed.slice(dirPart.length);
+        call(commands.pathCompletions(`${typed.startsWith("/") ? "" : root}/_`, typed))
+          .then((found) => {
+            if (!alive) return;
+            setFiles(
+              found
+                .filter((f) => f.name.toLowerCase().startsWith(last.toLowerCase()))
+                .slice(0, MAX_ITEMS)
+                .map((f) => {
+                  const rel = `${dirPart}${f.name}`;
+                  return { kind: "file", rel, dir: f.dir, path: resolveTyped(root, rel) };
+                }),
+            );
+          })
+          .catch(() => alive && setFiles([]));
+        return;
+      }
+      call(commands.findFiles(query, MAX_ITEMS))
         .then((found) => {
           if (!alive) return;
           setFiles(
@@ -127,13 +156,14 @@ export function Composer(props: ComposerProps) {
       .map((command) => ({ kind: "command", command }));
   }, [completion, files, props.commands]);
   const open = !!completion && items.length > 0;
+  const completionAnchor = useCompletionAnchor(ref, open ? completion.to : null, text);
 
-  const setText = (value: string, caret?: number) => {
+  const setText = (value: string, caret?: number, restoreSelection = true) => {
     updateComposer(id, { text: value });
     const c = caret ?? value.length;
     setCompletion(completionAt(value, c));
     setActive(0);
-    if (caret !== undefined) {
+    if (caret !== undefined && restoreSelection) {
       requestAnimationFrame(() => {
         ref.current?.focus();
         ref.current?.setSelectionRange(caret, caret);
@@ -143,6 +173,12 @@ export function Composer(props: ComposerProps) {
 
   const accept = (item: Item | undefined) => {
     if (!item || !completion) return;
+    if (item.kind === "file" && item.dir) {
+      // Descend: keep completing inside the folder.
+      const insert = `${mentionOf(item.rel)}/`;
+      setText(text.slice(0, completion.from) + insert + text.slice(completion.to), completion.from + insert.length);
+      return;
+    }
     if (item.kind === "file") {
       const mention = mentionOf(item.rel);
       const next = applyCompletion(text, completion, mention);
@@ -187,13 +223,12 @@ export function Composer(props: ComposerProps) {
           const p = event.payload;
           if (p.type !== "drop" || !p.paths.length) return;
           const box = boxRef.current?.getBoundingClientRect();
-          const ratio = window.devicePixelRatio || 1;
-          const [x, y] = [p.position.x / ratio, p.position.y / ratio];
+          const { x, y } = nativeDropPoint(p.position);
           if (!box || x < box.left || x > box.right || y < box.top || y > box.bottom) return;
           const refs: FileRef[] = [];
           for (const path of p.paths) {
             if (IMAGE_EXTENSIONS.test(path)) {
-              void call(commands.fsReadImage(path)).then((url) => {
+              void invokeLocal<string>("fs_read_image", { path }).then((url) => {
                 const image = imageFromDataUrl(url, basename(path));
                 if (image) addImages([image]);
               });
@@ -281,42 +316,57 @@ export function Composer(props: ComposerProps) {
       {...OWNS_FILE_DROP}
       onClick={() => ref.current?.focus()}
     >
-      {open && (
-        <div className={styles.popup} role="listbox" aria-label={tx(completion.kind === "file" ? "Files" : "Commands")}>
-          {items.map((item, i) => (
-            <div
-              key={item.kind === "file" ? item.path : item.command.name}
-              role="option"
-              aria-selected={i === active}
-              className={clsx(styles.item, i === active && styles.active)}
-              onMouseEnter={() => setActive(i)}
-              onMouseDown={(e) => {
-                e.preventDefault();
-                accept(item);
-              }}
-            >
-              {item.kind === "file" ? (
-                <>
-                  <Icon name={fileIconName(basename(item.rel))} size={16} />
-                  <span className={styles.itemName}>{basename(item.rel)}</span>
-                  <span className={styles.itemDetail}>{item.rel}</span>
-                </>
-              ) : (
-                <>
-                  <span className={styles.itemName}>/{item.command.name}</span>
-                  {item.command.hint && <span className={styles.itemHint}>{item.command.hint}</span>}
-                  <span className={styles.itemDetail}>{item.command.description}</span>
-                </>
-              )}
-            </div>
-          ))}
-        </div>
+      {open && completionAnchor && (
+        <Popup
+          open
+          anchor={completionAnchor}
+          placement="bottom-start"
+          autoFocus={false}
+          restoreFocus={false}
+          closeOnOutsideClick={false}
+          onClose={() => setCompletion(null)}
+          className={styles.popup}
+          role="listbox"
+          aria-label={tx(completion.kind === "file" ? "Files" : "Commands")}
+        >
+          <div className={styles.items}>
+            {items.map((item, i) => (
+              <div
+                key={item.kind === "file" ? item.path : item.command.name}
+                role="option"
+                aria-selected={i === active}
+                className={clsx(styles.item, i === active && styles.active)}
+                onMouseEnter={() => setActive(i)}
+                onMouseDown={(e) => {
+                  e.preventDefault();
+                  accept(item);
+                }}
+              >
+                {item.kind === "file" ? (
+                  <>
+                    <Icon name={item.dir ? "folder" : fileIconName(basename(item.rel))} size={16} />
+                    <span className={styles.itemName}>{basename(item.rel)}</span>
+                    <span className={styles.itemDetail}>{item.rel}</span>
+                  </>
+                ) : (
+                  <>
+                    <span className={styles.itemName}>/{item.command.name}</span>
+                    {item.command.hint && <span className={styles.itemHint}>{item.command.hint}</span>}
+                    <span className={styles.itemDetail}>{item.command.description}</span>
+                  </>
+                )}
+              </div>
+            ))}
+          </div>
+        </Popup>
       )}
       {images.length > 0 && (
         <div className={styles.images} onClick={(e) => e.stopPropagation()}>
           {images.map((img, i) => (
             <span key={i} className={styles.image} title={img.name ?? undefined}>
-              <img src={`data:${img.mimeType};base64,${img.data}`} alt={img.name ?? tx("Image")} />
+              <button type="button" className={styles.previewImage} onClick={() => setPreview(img)}>
+                <img src={imageSrc(img)} alt={img.name ?? tx("Image")} />
+              </button>
               <button
                 type="button"
                 className={styles.removeImage}
@@ -327,6 +377,7 @@ export function Composer(props: ComposerProps) {
               </button>
             </span>
           ))}
+          <ImagePreview image={preview} onClose={() => setPreview(null)} />
         </div>
       )}
       <textarea
@@ -339,7 +390,7 @@ export function Composer(props: ComposerProps) {
         value={text}
         aria-label={tx("Message")}
         placeholder={tx(props.placeholder)}
-        onChange={(e) => setText(e.target.value, undefined)}
+        onChange={(e) => setText(e.target.value, e.target.selectionStart, false)}
         onSelect={(e) => setCompletion(completionAt(e.currentTarget.value, e.currentTarget.selectionStart))}
         onBlur={() => setCompletion(null)}
         onKeyDown={onKeyDown}
@@ -352,30 +403,37 @@ export function Composer(props: ComposerProps) {
         }}
       />
       <div className={styles.bar} onClick={(e) => e.stopPropagation()}>
-        {props.toolbar}
-        <span className={styles.spacer} />
-        <IconButton
-          icon="file"
-          title="Reference a File (@)"
-          size="small"
-          onClick={() => {
-            const glue = text && !/\s$/.test(text) ? " " : "";
-            setText(`${text}${glue}@`, text.length + glue.length + 1);
-          }}
-        />
-        <IconButton icon="file-image" title="Attach Image…" size="small" onClick={() => imageInput.current?.click()} />
-        <input
-          ref={imageInput}
-          type="file"
-          accept="image/png,image/jpeg,image/gif,image/webp"
-          multiple
-          hidden
-          onChange={(e) => {
-            readImageFiles(e.target.files ?? []);
-            e.target.value = "";
-          }}
-        />
-        {props.actions}
+        <div className={styles.toolbar}>{props.toolbar}</div>
+        <div className={styles.actions}>
+          <IconButton
+            icon="file"
+            title="Reference a File (@)"
+            size="small"
+            onClick={() => {
+              const glue = text && !/\s$/.test(text) ? " " : "";
+              setText(`${text}${glue}@`, text.length + glue.length + 1);
+            }}
+          />
+          <IconButton
+            icon="file-image"
+            title="Attach Image…"
+            size="small"
+            onClick={() => imageInput.current?.click()}
+          />
+          <input
+            ref={imageInput}
+            type="file"
+            accept="image/png,image/jpeg,image/gif,image/webp"
+            multiple
+            hidden
+            onChange={(e) => {
+              readImageFiles(e.target.files ?? []);
+              e.target.value = "";
+            }}
+          />
+          <span className={styles.spacer} />
+          {props.actions}
+        </div>
       </div>
     </div>
   );

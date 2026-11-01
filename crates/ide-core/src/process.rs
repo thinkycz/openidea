@@ -218,9 +218,128 @@ pub fn executable_names(name: &str, windows: bool, pathext: Option<&str>) -> Vec
     exts.iter().map(|e| format!("{name}{}", e.to_ascii_lowercase())).collect()
 }
 
+/// First `search` directory holding `name` (see [`executable_names`]).
+pub fn find_executable_in(
+    name: &str,
+    search: &OsStr,
+    windows: bool,
+    pathext: Option<&str>,
+) -> Option<std::path::PathBuf> {
+    let names = executable_names(name, windows, pathext);
+    std::env::split_paths(search)
+        .filter(|d| !d.as_os_str().is_empty())
+        .find_map(|dir| names.iter().map(|n| dir.join(n)).find(|p| p.is_file()))
+}
+
+/// [`find_executable_in`] for this platform (`PATHEXT` from the environment).
+pub fn find_executable(name: &str, search: &OsStr) -> Option<std::path::PathBuf> {
+    let pathext = host_var_os("PATHEXT");
+    find_executable_in(name, search, cfg!(windows), pathext.as_deref().and_then(|p| p.to_str()))
+}
+
+/// The user's own `PATH` entries on Windows (`HKCU\Environment`), the part of the
+/// merged `PATH` a process may not inherit — an IDE started before the variable was
+/// edited, or as a different user, sees only the machine entries. `%VAR%` references
+/// (`REG_EXPAND_SZ`) are expanded against the current environment. `None` elsewhere:
+/// there a login shell already supplies the user's whole `PATH`.
+#[cfg(windows)]
+pub fn user_path() -> Option<OsString> {
+    use windows_sys::Win32::Foundation::ERROR_SUCCESS;
+    use windows_sys::Win32::System::Registry::{
+        HKEY, HKEY_CURRENT_USER, KEY_READ, RRF_RT_REG_EXPAND_SZ, RRF_RT_REG_SZ, RegCloseKey, RegGetValueW,
+        RegOpenKeyExW,
+    };
+
+    fn wide(s: &str) -> Vec<u16> {
+        s.encode_utf16().chain(std::iter::once(0)).collect()
+    }
+
+    unsafe {
+        let mut key: HKEY = std::ptr::null_mut();
+        if RegOpenKeyExW(HKEY_CURRENT_USER, wide("Environment").as_ptr(), 0, KEY_READ, &mut key) != ERROR_SUCCESS {
+            return None;
+        }
+        let read = || {
+            // Only `Path`; `REG_EXPAND_SZ` is accepted so `%USERPROFILE%\…` entries expand.
+            let mut kind = 0u32;
+            let mut len = 0u32;
+            let name = wide("Path");
+            let status = RegGetValueW(
+                key,
+                std::ptr::null(),
+                name.as_ptr(),
+                RRF_RT_REG_SZ | RRF_RT_REG_EXPAND_SZ,
+                &mut kind,
+                std::ptr::null_mut(),
+                &mut len,
+            );
+            if status != ERROR_SUCCESS || len == 0 {
+                return None;
+            }
+            let mut buf = vec![0u16; (len as usize).div_ceil(2)];
+            let status = RegGetValueW(
+                key,
+                std::ptr::null(),
+                name.as_ptr(),
+                RRF_RT_REG_SZ | RRF_RT_REG_EXPAND_SZ,
+                &mut kind,
+                buf.as_mut_ptr() as *mut _,
+                &mut len,
+            );
+            if status != ERROR_SUCCESS {
+                return None;
+            }
+            let text = String::from_utf16_lossy(&buf);
+            Some(text.trim_end_matches('\0').to_owned())
+        };
+        let value = read();
+        RegCloseKey(key);
+        value.filter(|v| !v.trim().is_empty()).map(OsString::from)
+    }
+}
+
+/// The user's own `PATH` entries; `None` outside Windows (see the Windows impl).
+#[cfg(not(windows))]
+pub fn user_path() -> Option<OsString> {
+    None
+}
+
+/// `path` followed by the [`user_path`] entries it lacks.
+pub fn with_user_path(path: &OsStr) -> OsString {
+    user_path().map_or_else(|| path.to_owned(), |user| append_path_entries(path, &user))
+}
+
+fn append_path_entries(path: &OsStr, extra: &OsStr) -> OsString {
+    let mut dirs: Vec<std::path::PathBuf> = std::env::split_paths(path).filter(|d| !d.as_os_str().is_empty()).collect();
+    for dir in std::env::split_paths(extra).filter(|d| !d.as_os_str().is_empty()) {
+        if !dirs.contains(&dir) {
+            dirs.push(dir);
+        }
+    }
+    std::env::join_paths(dirs).unwrap_or_else(|_| path.to_owned())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn user_path_reads_the_current_users_path() {
+        // This host has a user `Path` only when the test account set one; either way the call
+        // must not fail, and a present value is a non-empty `;`-joined list of directories.
+        if let Some(path) = user_path() {
+            let dirs: Vec<_> = std::env::split_paths(&path).collect();
+            assert!(!dirs.is_empty(), "user PATH should hold at least one directory");
+        }
+    }
+
+    #[test]
+    fn append_path_entries_keeps_the_order_and_adds_what_is_missing() {
+        let join = |dirs: &[&str]| std::env::join_paths(dirs).unwrap();
+        assert_eq!(append_path_entries(&join(&["a", "b"]), &join(&["b", "c"])), join(&["a", "b", "c"]));
+        assert_eq!(append_path_entries(OsStr::new(""), &join(&["c"])), join(&["c"]));
+    }
 
     #[test]
     fn shell_env_adds_only_what_the_process_lacks_and_the_overlay_wins() {
@@ -362,5 +481,24 @@ mod tests {
         cmd.env("PATH", "/custom");
         prepare(&mut cmd);
         assert_eq!(cmd.get_envs().find(|(k, _)| *k == "PATH").and_then(|(_, v)| v), Some(OsStr::new("/custom")));
+    }
+
+    #[test]
+    fn find_executable_finds_bare_names_on_the_given_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = dir.path().join("a");
+        let b = dir.path().join("b");
+        std::fs::create_dir_all(&a).unwrap();
+        std::fs::create_dir_all(&b).unwrap();
+        std::fs::write(a.join("agent"), "#!/bin/sh\n").unwrap();
+        std::fs::write(b.join("agent.cmd"), "@echo off\n").unwrap();
+        let search = std::env::join_paths([&a, &b]).unwrap();
+        if cfg!(windows) {
+            // The `.cmd` shim wins over a POSIX script `Command` can't start.
+            assert_eq!(find_executable("agent", &search), Some(b.join("agent.cmd")));
+        } else {
+            assert_eq!(find_executable("agent", &search), Some(a.join("agent")));
+        }
+        assert_eq!(find_executable("nope", &search), None);
     }
 }

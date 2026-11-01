@@ -31,6 +31,7 @@ import {
   type PaneLayout,
   type TerminalTab,
 } from "./store";
+import { pasteTerminalClipboard } from "./paste";
 import { TerminalFindBar } from "./FindBar";
 import styles from "./Terminal.module.css";
 
@@ -47,6 +48,7 @@ function tabTooltip(tab: TerminalTab, sessions: Parameters<typeof tabTitle>[1]):
 function TerminalPane({ sessionKey, autofocus }: { sessionKey: string; autofocus: boolean }) {
   const ref = useRef<HTMLDivElement>(null);
   const status = useTerminals((s) => s.sessions[sessionKey]?.status);
+  const follow = useTerminals((s) => s.sessions[sessionKey]?.follow ?? true);
 
   useLayoutEffect(() => {
     const el = ref.current;
@@ -67,7 +69,17 @@ function TerminalPane({ sessionKey, autofocus }: { sessionKey: string; autofocus
         if (e.target === e.currentTarget) getSession(sessionKey)?.focus();
       }}
       onContextMenu={(e) => paneMenu(e, sessionKey)}
-    />
+    >
+      <div className={styles.paneActions} role="toolbar" aria-label="Terminal actions">
+        <IconButton
+          icon="arrow-down"
+          iconSize={14}
+          title="Scroll to End"
+          pressed={follow}
+          onClick={() => getSession(sessionKey)?.setFollow(!follow)}
+        />
+      </div>
+    </div>
   );
 }
 
@@ -75,6 +87,9 @@ function paneMenu(e: MouseEvent, key: string) {
   e.preventDefault();
   const session = getSession(key);
   if (!session) return;
+  // Right-clicking focuses the terminal, like IDEA; otherwise the menu closing
+  // restores focus to whatever was focused before it, often the editor.
+  session.focus();
   const exited = session.state.status === "exited" || session.state.status === "error";
   const mac = usePlatform.getState().os === "macos";
   const items: MenuItem[] = [
@@ -88,12 +103,7 @@ function paneMenu(e: MouseEvent, key: string) {
     {
       label: "Paste",
       shortcut: mac ? "⌘V" : "Ctrl+Shift+V",
-      run: () => {
-        void navigator.clipboard
-          ?.readText()
-          .then((t) => t && session.paste(t))
-          .catch(() => undefined);
-      },
+      run: () => void pasteTerminalClipboard((text) => session.paste(text)),
     },
     { label: "Select All", run: () => session.term.selectAll() },
     { kind: "separator" },

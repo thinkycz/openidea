@@ -18,9 +18,11 @@ const lspPrepareRenameDetails = vi.fn(async () => {
   return result.status === "ok" && result.data !== null ? ok({ range: result.data, placeholder: null }) : result;
 });
 let onApply: (() => void) | null = null;
-const lspApplyCodeAction = vi.fn(async () => {
+// applyCodeAction resolves the picked action, then executes it (interactive command support).
+const lspResolveCodeAction = vi.fn(async (_doc: number, action: CodeAction) => ok(action));
+const lspExecuteCodeAction = vi.fn(async () => {
   onApply?.();
-  return ok(null);
+  return ok([]);
 });
 const lspCodeActions = vi.fn(async () => ok([]));
 const cancelRequest = vi.fn(async () => undefined);
@@ -36,7 +38,8 @@ vi.mock("@/platform/ipc", async (orig) => {
       lspCodeActionQuery,
       lspPrepareRename,
       lspPrepareRenameDetails,
-      lspApplyCodeAction,
+      lspResolveCodeAction,
+      lspExecuteCodeAction,
       lspCodeActions,
       cancelRequest,
       languages,
@@ -190,7 +193,7 @@ describe("Refactor This", () => {
     const items = (useLspPopup.getState().popup as { items: { label: string; run: () => void }[] }).items;
     items.find((i) => i.label === "Inline…")!.run();
     await new Promise((r) => setTimeout(r, 0));
-    expect(lspApplyCodeAction).toHaveBeenCalledOnce();
+    expect(lspExecuteCodeAction).toHaveBeenCalledOnce();
     items.find((i) => i.label === "Rename…")!.run();
     expect(rename).toHaveBeenCalledWith(v);
     items.find((i) => i.label === "Safe Delete…")!.run();
@@ -245,7 +248,7 @@ describe("Refactor menu actions", () => {
   it("apply the single matching action, or offer a choice", async () => {
     query = answer([action("Move to a new file", "refactor.move.newFile")]);
     await runRefactoring(editor(), "move");
-    expect(lspApplyCodeAction).toHaveBeenCalledOnce();
+    expect(lspExecuteCodeAction).toHaveBeenCalledOnce();
     expect(lspCodeActionQuery.mock.calls[0]![3]).toEqual(["refactor.move"]);
 
     closePopup();

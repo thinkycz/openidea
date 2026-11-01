@@ -105,8 +105,8 @@ async fn composer_intelligence_builtins_unsaved_changes_and_restart() {
     assert!(helper.iter().any(|d| d.path == root.join("helpers.php")));
     let refs = mgr.references(doc, pos(main, "total(2"), true, true, Default::default()).await.unwrap();
     assert!(refs.locations.len() >= 2);
-    let renamed = mgr.rename(doc, pos(main, "total(2"), "subtotal".into()).await.unwrap();
-    assert_eq!(renamed.files.len(), 2, "rename must include declaration and caller");
+    let renamed = mgr.rename(doc, pos(main, "total(2"), "subtotal".into(), Default::default()).await.unwrap();
+    assert_eq!(renamed.edit.files.len(), 2, "rename must include declaration and caller");
     let builtin = mgr.goto(doc, pos(main, "DateTime"), GotoKind::Definition).await.unwrap();
     let uri = builtin.iter().find_map(|d| d.uri.as_ref()).expect("builtin URI");
     let virtual_doc = mgr.virtual_document(uri).await.unwrap();
@@ -134,13 +134,13 @@ async fn composer_intelligence_builtins_unsaved_changes_and_restart() {
     assert!(list.items.iter().any(|i| i.label.starts_with("discount")), "unsaved member completion");
     assert_eq!(std::fs::read_to_string(root.join("src/Invoice.php")).unwrap(), invoice);
     assert!(
-        mgr.rename(doc, pos(&unsaved, "total(2"), "discount".into()).await.is_err(),
+        mgr.rename(doc, pos(&unsaved, "total(2"), "discount".into(), Default::default()).await.is_err(),
         "rename collision with an unsaved method must be refused"
     );
     let full = unsaved.replace("$invoice->disc", "$invoice->discount();");
     replace(&mgr, doc, 4, &unsaved, &full);
-    let unsaved_rename = mgr.rename(doc, pos(&full, "discount();"), "rebate".into()).await.unwrap();
-    assert_eq!(unsaved_rename.files.len(), 2, "rename includes the unsaved declaration and caller");
+    let unsaved_rename = mgr.rename(doc, pos(&full, "discount();"), "rebate".into(), Default::default()).await.unwrap();
+    assert_eq!(unsaved_rename.edit.files.len(), 2, "rename includes the unsaved declaration and caller");
     assert_eq!(std::fs::read_to_string(root.join("src/Invoice.php")).unwrap(), invoice);
     let broken = main.replace("$invoice->total(2, 5.0);", "$invoice->missingMethod();");
     replace(&mgr, doc, 5, &full, &broken);
@@ -488,8 +488,11 @@ async fn laravel_config_and_translation_navigation_completion_and_unsaved_source
     let json_refs = mgr.references(json_doc, Pos::new(0, 4), false, true, Default::default()).await.unwrap();
     assert!(json_refs.locations.iter().any(|l| l.path.ends_with("main.php")));
     assert!(json_refs.locations.iter().any(|l| l.path.ends_with("app/other.php")));
-    let checked = mgr.rename(doc, pos(main, "openstorm_scope_probe"), "openstorm_scope_changed".into()).await.unwrap();
-    assert_eq!(checked.files.len(), 2, "checked PHP rename still works with a shared JSON overlay");
+    let checked = mgr
+        .rename(doc, pos(main, "openstorm_scope_probe"), "openstorm_scope_changed".into(), Default::default())
+        .await
+        .unwrap();
+    assert_eq!(checked.edit.files.len(), 2, "checked PHP rename still works with a shared JSON overlay");
     for (needle, expected) in [("retries'", "billing.php"), ("welcome'", "messages.php"), ("Hello invoice", "en.json")]
     {
         let refs = mgr.references(doc, pos(main, needle), true, true, Default::default()).await.unwrap();

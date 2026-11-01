@@ -7,9 +7,9 @@ import { jvmParser } from "./jvm";
 import { pytestParser } from "./pytest";
 import type { TestEvent, TestOutputParser } from "./types";
 
-export type { TestEvent, TestOutputParser, TestLocation, TestStatus } from "./types";
+export type { TestEvent, TestOutputParser, TestStatus } from "./types";
 export { parseDuration } from "./types";
-export { TestResults, nodeStatus, type TestNode, type TestCounts } from "./results";
+export { TestResults, nodeStatus, type TestNode } from "./results";
 export { cargoParser, goParser, jsParser, jvmParser, pytestParser };
 
 /** Runs several parsers side by side (unknown tool: e.g. `make test`). */
@@ -55,6 +55,15 @@ export function frameworkFor(config: Pick<RunConfig, "kind" | "command" | "args"
  * chose a verbosity already.
  */
 export function withTestReporting<T extends Pick<RunConfig, "kind" | "command" | "args">>(config: T): T {
+  if (frameworkFor(config) === "go" && config.args[0] === "test") {
+    const boundary = config.args.findIndex((a) => a === "-args" || a === "--");
+    const tool = boundary < 0 ? config.args : config.args.slice(0, boundary);
+    const args = tool.filter((a) => a !== "-json" && !a.startsWith("-json="));
+    return {
+      ...config,
+      args: ["test", "-json", ...args.slice(1), ...(boundary < 0 ? [] : config.args.slice(boundary))],
+    };
+  }
   if (frameworkFor(config) !== "pytest") return config;
   const cmd = [config.command, ...config.args];
   const pytestAt = cmd.findIndex((a) => /(^|[/\\])pytest(\.exe)?$/.test(a));

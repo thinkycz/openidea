@@ -113,6 +113,7 @@ describe("modified tab close protection", () => {
         }),
     );
     controller.closeTab(pane, tab);
+    await vi.waitFor(() => expect(ask).toHaveBeenCalledOnce());
     controller.slotFor(tab)!.dispatchLocal({ changes: { from: 0, insert: "new " } });
     answer({ button: "discard", checked: false });
     await settle();

@@ -35,11 +35,14 @@ beforeEach(() => {
   mock.highlights.mockResolvedValue(ok([]));
   mock.rename.mockResolvedValue(
     ok({
-      files: [
-        { kind: "edit", path: context.path, edits: [{ range, new_text: "details" }] },
-        { kind: "edit", path: "/p/caller.php", edits: [{ range, new_text: "openstorm.billing.details" }] },
-      ],
-      guard: null,
+      edit: {
+        files: [
+          { kind: "edit", path: context.path, edits: [{ range, new_text: "details" }] },
+          { kind: "edit", path: "/p/caller.php", edits: [{ range, new_text: "openstorm.billing.details" }] },
+        ],
+        guard: null,
+      },
+      incomplete: null,
     }),
   );
   view = new EditorView({
@@ -67,7 +70,12 @@ it("uses a different semantic placeholder in the existing dialog without inserti
   expect(view.state.doc.toString()).toBe(text);
   popup.onSubmit("openstorm.billing.details");
   await vi.waitFor(() =>
-    expect(mock.rename).toHaveBeenCalledWith(7, { line: 0, col: from + 2 }, "openstorm.billing.details"),
+    expect(mock.rename).toHaveBeenCalledWith(
+      expect.any(Number),
+      7,
+      { line: 0, col: from + 2 },
+      "openstorm.billing.details",
+    ),
   );
   await vi.waitFor(() => expect(useLspPopup.getState().popup?.kind).toBe("preview"));
   expect(view.state.doc.toString()).toBe(text);
@@ -87,7 +95,9 @@ it.each([null, "invoice"])("retains normal in-place rename when the placeholder 
   expect(popup.initial).toBe("updated");
   expect(view.state.doc.toString()).toBe(text);
   popup.onSubmit("updated");
-  await vi.waitFor(() => expect(mock.rename).toHaveBeenCalledWith(7, { line: 0, col: from + 2 }, "updated"));
+  await vi.waitFor(() =>
+    expect(mock.rename).toHaveBeenCalledWith(expect.any(Number), 7, { line: 0, col: from + 2 }, "updated"),
+  );
   await vi.waitFor(() => expect(useLspPopup.getState().popup?.kind).toBe("preview"));
 });
 
@@ -144,11 +154,14 @@ it("drops a completed rename plan after the source changes while the request is 
   view.dispatch({ changes: { from, to: from + 7, insert: "another" } });
   resolve(
     ok({
-      files: [
-        { kind: "edit", path: context.path, edits: [{ range, new_text: "details" }] },
-        { kind: "edit", path: "/p/caller.php", edits: [{ range, new_text: "openstorm.billing.details" }] },
-      ],
-      guard: null,
+      edit: {
+        files: [
+          { kind: "edit", path: context.path, edits: [{ range, new_text: "details" }] },
+          { kind: "edit", path: "/p/caller.php", edits: [{ range, new_text: "openstorm.billing.details" }] },
+        ],
+        guard: null,
+      },
+      incomplete: null,
     }),
   );
   await new Promise((done) => setTimeout(done, 0));

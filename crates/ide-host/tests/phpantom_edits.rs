@@ -33,6 +33,7 @@ async fn checked_rename_refreshes_a_closed_declaration_after_commit() {
         owner: |w| w,
         runtime: tokio::runtime::Handle::current(),
     });
+    host.trust.decide(&root, true, false).unwrap();
     let project = host.open_project("main", &root).unwrap();
     project.lsp.set_config_hook(Box::new(move |cfg, _| {
         if cfg.name == "phpantom" {
@@ -43,7 +44,17 @@ async fn checked_rename_refreshes_a_closed_declaration_after_commit() {
     assert_eq!(doc.language, LanguageId::new("php"));
     // The definition remains a disk file throughout, rather than an editor overlay.
     assert!(project.documents.by_path(&declaration).is_none());
-    let edit = ide_host::ops::lsp::lsp_rename(&host, "main", doc.id, Pos::new(3, 26), "subtotal".into()).await.unwrap();
+    let edit = ide_host::ops::lsp::lsp_rename(
+        &host,
+        "main",
+        ide_core::RequestId::next(),
+        doc.id,
+        Pos::new(3, 26),
+        "subtotal".into(),
+    )
+    .await
+    .unwrap()
+    .edit;
     assert_eq!(edit.files.len(), 2);
     ide_host::ops::lsp::apply_workspace_edit(&host, "main", edit).await.unwrap();
     assert!(std::fs::read_to_string(&declaration).unwrap().contains("function subtotal()"));
@@ -54,6 +65,32 @@ async fn checked_rename_refreshes_a_closed_declaration_after_commit() {
         "closed-file declaration must refresh without restarting: {definitions:?}"
     );
     assert!(project.documents.by_path(&declaration).is_none());
+    // Upstream's interactive action executor must retain OpenStorm's guarded application path.
+    let current = project.documents.snapshot(doc.id).unwrap().text;
+    let with_unused = current.replacen("use Demo\\Invoice;\n", "use Demo\\Invoice;\nuse Demo\\Unused;\n", 1);
+    assert_ne!(current, with_unused);
+    project.documents.replace_all(doc.id, &with_unused).unwrap();
+    let actions = ide_host::ops::lsp::lsp_code_actions(
+        &host,
+        "main",
+        doc.id,
+        ide_core::Range::new(Pos::new(0, 0), Pos::new(0, 0)),
+        vec!["source.organizeImports".into()],
+    )
+    .await
+    .unwrap();
+    let action = actions
+        .into_iter()
+        .find(|action| action.edit.as_ref().is_some_and(|edit| edit.guard.is_some()))
+        .expect("guarded PHP Optimize Imports action");
+    ide_host::ops::lsp::lsp_execute_code_action(&host, "main", ide_core::RequestId::next(), doc.id, action, vec![])
+        .await
+        .unwrap();
+    let optimized = project.documents.snapshot(doc.id).unwrap();
+    assert!(!optimized.text.contains("Demo\\Unused"));
+    assert!(optimized.text.contains("use Demo\\Invoice;"));
+    assert!(!optimized.dirty);
+    assert_eq!(std::fs::read_to_string(&main).unwrap(), optimized.text);
     project.lsp.shutdown_all().await;
     host.close_project("main");
 }
@@ -90,6 +127,7 @@ async fn json_translation_first_open_starts_phpantom_and_finds_php_callers() {
         owner: |w| w,
         runtime: tokio::runtime::Handle::current(),
     });
+    host.trust.decide(&root, true, false).unwrap();
     let project = host.open_project("main", &root).unwrap();
     project.lsp.set_config_hook(Box::new(move |cfg, _| {
         if cfg.name == "phpantom" {
@@ -141,6 +179,7 @@ async fn environment_first_open_starts_phpantom_and_finds_php_callers() {
         owner: |w| w,
         runtime: tokio::runtime::Handle::current(),
     });
+    host.trust.decide(&root, true, false).unwrap();
     let project = host.open_project("main", &root).unwrap();
     project.lsp.set_config_hook(Box::new(move |cfg, _| {
         if cfg.name == "phpantom" {
@@ -181,6 +220,7 @@ async fn framework_source_restart_keeps_host_widening_and_hover_responsive() {
         owner: |w| w,
         runtime: tokio::runtime::Handle::current(),
     });
+    host.trust.decide(&root, true, false).unwrap();
     let project = host.open_project("main", &root).unwrap();
     project.lsp.set_config_hook(Box::new(move |cfg, _| {
         if cfg.name == "phpantom" {
@@ -295,6 +335,7 @@ async fn grouped_route_checked_rename_keeps_php_blade_callers_and_group_prefix()
         owner: |w| w,
         runtime: tokio::runtime::Handle::current(),
     });
+    host.trust.decide(&root, true, false).unwrap();
     let project = host.open_project("main", &root).unwrap();
     project.lsp.set_config_hook(Box::new(move |cfg, _| {
         if cfg.name == "phpantom" {
@@ -327,7 +368,7 @@ async fn grouped_route_checked_rename_keeps_php_blade_callers_and_group_prefix()
                 return Err(format!("missing route caller {}: {refs:?}", names[index]));
             }
         }
-        let collision = ide_host::ops::lsp::lsp_rename(&host, "main", doc.id, position, "openstorm.billing.list".into()).await;
+        let collision = ide_host::ops::lsp::lsp_rename(&host, "main", ide_core::RequestId::next(), doc.id, position, "openstorm.billing.list".into()).await;
         if !matches!(&collision, Err(error) if error.message.contains("Another route already uses the new name")) {
             return Err(format!("route collision was not evaluated: {collision:?}"));
         }
@@ -337,7 +378,7 @@ async fn grouped_route_checked_rename_keeps_php_blade_callers_and_group_prefix()
             ("route('openstorm.billing.invoice'", "other.invoice", "Keep the route group prefix"),
         ] {
             let mut p = at(needle); p.col += 10;
-            let result = ide_host::ops::lsp::lsp_rename(&host, "main", doc.id, p, destination.into()).await;
+            let result = ide_host::ops::lsp::lsp_rename(&host, "main", ide_core::RequestId::next(), doc.id, p, destination.into()).await;
             if !matches!(&result, Err(error) if error.message.contains(reason)) {
                 return Err(format!("expected semantic refusal {reason:?}: {result:?}"));
             }
@@ -345,9 +386,9 @@ async fn grouped_route_checked_rename_keeps_php_blade_callers_and_group_prefix()
         let blade = project.documents.open(&originals[3].0).unwrap();
         let unsaved_blade = format!("{}<a>{{{{ route('openstorm.billing.invoice', ['invoice' => 9]) }}}}</a>\n", originals[3].1.replace("=> 7", "=> 9"));
         project.documents.replace_all(blade.id, &unsaved_blade).unwrap();
-        let edit = ide_host::ops::lsp::lsp_rename(&host, "main", doc.id, position, "openstorm.billing.details".into())
+        let edit = ide_host::ops::lsp::lsp_rename(&host, "main", ide_core::RequestId::next(), doc.id, position, "openstorm.billing.details".into())
             .await
-            .map_err(|e| format!("checked rename: {e:?}"))?;
+            .map_err(|e| format!("checked rename: {e:?}"))?.edit;
         if edit.guard.is_none() || edit.files.len() != 4 {
             return Err(format!("expected guarded four-file route plan: {edit:?}"));
         }
@@ -365,7 +406,7 @@ async fn grouped_route_checked_rename_keeps_php_blade_callers_and_group_prefix()
         }
         if project.documents.snapshot(blade.id).unwrap().text != unsaved_blade { return Err("stale plan changed an unsaved Blade overlay".into()); }
         std::fs::write(&originals[2].0, &originals[2].1).unwrap();
-        let edit = ide_host::ops::lsp::lsp_rename(&host, "main", doc.id, position, "openstorm.billing.details".into()).await.map_err(|e| format!("fresh checked rename: {e:?}"))?;
+        let edit = ide_host::ops::lsp::lsp_rename(&host, "main", ide_core::RequestId::next(), doc.id, position, "openstorm.billing.details".into()).await.map_err(|e| format!("fresh checked rename: {e:?}"))?.edit;
         if edit.guard.is_none() || edit.files.len() != 4 || !edit.files.iter().all(|file| matches!(file, ide_core::FileEdit::Edit { path, .. } if originals.iter().any(|(owned, _)| owned == path))) { return Err("fresh route plan has unexpected targets".into()); }
         ide_host::ops::lsp::apply_workspace_edit(&host, "main", edit).await.map_err(|e| format!("apply: {e:?}"))?;
         let expected = text.replace("route('openstorm.billing.invoice'", "route('openstorm.billing.details'");

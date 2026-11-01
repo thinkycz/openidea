@@ -28,6 +28,8 @@ Automatic updates are disabled until an OpenStorm release feed is configured.
   <a href="#benchmark">Benchmark</a>
   &nbsp;·&nbsp;
   <a href="#build">Build</a>
+  &nbsp;·&nbsp;
+  <a href="https://discord.gg/2Zy4yn7gP">Discord</a>
 </p>
 
 https://github.com/user-attachments/assets/234dd54c-1255-4b3a-b35c-533d78d737c0
@@ -66,6 +68,15 @@ pnpm tauri dev
 ```
 
 Rust 1.96, Node 22, pnpm 11 and the [Tauri prerequisites](https://v2.tauri.app/start/prerequisites/).
+
+Native notebook execution tests are opt-in and need two distinct Python environments
+with `ipykernel` installed:
+
+```sh
+OPENIDEA_TEST_PYTHON=/first/env/bin/python \
+OPENIDEA_TEST_PYTHON_SECOND=/second/env/bin/python \
+cargo test -p ide-notebook --test kernel_runtime -- --ignored --test-threads=1
+```
 
 ## License
 

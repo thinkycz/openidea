@@ -98,12 +98,12 @@ impl LspManager {
         t: &Target,
         pos: Pos,
         new_name: String,
+        cancel: &CancellationToken,
     ) -> IdeResult<WorkspaceEdit> {
-        let cancel = CancellationToken::new();
         let word =
             crate::scope::search_word(snap, pos).ok_or_else(|| IdeError::invalid("No PHP symbol at the caret"))?;
         let candidates = self
-            .candidates(t, word, &cancel)
+            .candidates(t, word, cancel)
             .await
             .ok_or_else(|| IdeError::unavailable("Project rename scope is unavailable"))?;
         if candidates.limit_hit {
@@ -112,7 +112,7 @@ impl LspManager {
             ));
         }
         let paths = candidates.files;
-        let opened = self.open_transient(t, paths.clone(), &cancel).await;
+        let opened = self.open_transient(t, paths.clone(), cancel).await;
         let overlays = self.php_sources(snap, t)?;
         let mut sources = overlays.clone();
         sources.extend(opened.sources.clone());
@@ -131,7 +131,7 @@ impl LspManager {
                 t,
                 RenameCheckedParams { rename, expected_sources: sources.clone() },
                 &overlays,
-                &cancel,
+                cancel,
             )
             .await?;
         let edit = result.map(|e| convert::workspace_edit(&self.conv(t.enc()), e)).unwrap_or_default();

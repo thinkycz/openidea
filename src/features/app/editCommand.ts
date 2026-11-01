@@ -1,4 +1,5 @@
 import { reviewedRedo as redo, reviewedUndo as undo } from "@/editor/core/cm/reviewedHistory";
+import { maybeEditorService } from "@/workbench/contributions";
 import { EditorView } from "@codemirror/view";
 
 /**
@@ -11,6 +12,12 @@ export function editCommand(command: "undo" | "redo" | "cut" | "copy" | "paste" 
   return () => {
     if (command === "undo" || command === "redo") {
       const focused = document.activeElement;
+      if (
+        focused instanceof Element &&
+        focused.closest("[data-editor-area], [data-pane-id]") &&
+        maybeEditorService()?.documentHistory?.(command)
+      )
+        return;
       const view = focused instanceof HTMLElement ? EditorView.findFromDOM(focused) : null;
       if (view) {
         (command === "undo" ? undo : redo)(view);

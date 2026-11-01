@@ -3,7 +3,7 @@
  * project has that build system, like IDEA. The model is re-read when build
  * files change; running goals / tasks goes through the run feature's actions.
  */
-import { registerActions } from "@/platform/actions";
+import { executeAction, registerActions } from "@/platform/actions";
 import { setContext } from "@/platform/context";
 import { onIdeEvent, type BuildModel, type BuildTool } from "@/platform/ipc";
 import { useProject } from "@/platform/project";
@@ -21,6 +21,8 @@ import { buildToolsRunAnything } from "./runAnything";
 import { expandableKeys, gradleChildren, gradleRoots, mavenChildren, mavenRoots } from "./model";
 import {
   ANALYZER_KIND,
+  addProjects,
+  unlinkProjects,
   cancelSync,
   loadModel,
   openAnalyzer,
@@ -110,7 +112,7 @@ function apply(model: BuildModel | null, registered: Partial<Record<BuildTool, (
   for (const tool of ["maven", "gradle"] as const) {
     const info = tool === "maven" ? model?.maven : model?.gradle;
     const key = `${tool}:${root}`;
-    if (info && info.syncedAt == null && !synced.has(key)) {
+    if (info && (tool !== "maven" || model?.maven?.projects.length) && info.syncedAt == null && !synced.has(key)) {
       synced.add(key);
       void syncTool(tool);
     }
@@ -152,7 +154,7 @@ export function activate(): () => void {
       if (s.model !== prev.model || s.root !== prev.root) apply(s.root ? s.model : null, registered);
     }),
     useProject.subscribe((s, prev) => {
-      if (s.project?.root === prev.project?.root) return;
+      if (s.project?.root === prev.project?.root && s.project?.trusted === prev.project?.trusted) return;
       resetBuild();
       if (s.project) void loadModel();
     }),
@@ -165,6 +167,22 @@ export function activate(): () => void {
       if (e.key === "languages" || e.key.startsWith("languages.java")) scheduleLoad();
     }),
     registerActions([
+      {
+        id: "maven.addProjects",
+        title: "Add Maven Projects",
+        category: "Maven",
+        icon: "plus",
+        when: "projectOpen",
+        run: () => addProjects(),
+      },
+      {
+        id: "maven.unlinkProjects",
+        title: "Unlink Maven Projects",
+        category: "Maven",
+        hidden: true,
+        when: MAVEN_WHEN,
+        run: ({ arg }) => unlinkProjects(analyzerPom(arg)),
+      },
       {
         id: "maven.reload",
         title: "Reload All Maven Projects",
@@ -242,6 +260,16 @@ export function activate(): () => void {
         hidden: true,
         when: MAVEN_WHEN,
         run: () => setExpanded("maven", new Set()),
+      },
+      {
+        id: "maven.settings",
+        title: "Maven Settings…",
+        description: "Opens Settings › Build, Execution, Deployment › Maven",
+        category: "Maven",
+        icon: "settings",
+        when: MAVEN_WHEN,
+        keywords: ["maven home", "mvn", "settings", "preferences"],
+        run: () => void executeAction("file.settings", "build.maven"),
       },
       {
         id: "gradle.reload",

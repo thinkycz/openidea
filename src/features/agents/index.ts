@@ -9,6 +9,7 @@ import { executeAction } from "@/platform/actions";
 import { lazyComponent } from "@/ui";
 import { isVirtualUri } from "@/platform/virtualDocs";
 import {
+  registerEditorDropHandler,
   registerEditorKind,
   registerMenuGroup,
   registerSettingsPage,
@@ -17,10 +18,11 @@ import {
   toolWindowService,
 } from "@/workbench/contributions";
 import { AgentsStatus } from "./AgentsStatus";
-import { HOME_KIND, REGISTRY_PAGE, SESSION_KIND, TOOL_WINDOW } from "./model";
+import { HOME_KIND, REGISTRY_PAGE, SESSION_KIND, TASK_DRAG, TOOL_WINDOW } from "./model";
 import { sendPaths, sendSelection } from "./references";
 import { focusedSession } from "./sessionFocus";
 import { connect, disconnect, openHome, useAgents } from "./store";
+import { taskActions } from "./taskActions";
 
 /** Settings › Tools › Agents (also used by the Settings window). */
 export function activateSettingsPages(): () => void {
@@ -43,7 +45,7 @@ export function activate(): () => void {
   const disposers = [
     activateSettingsPages(),
     useProject.subscribe((s, prev) => {
-      if (s.project?.root !== prev.project?.root) sync(s.project?.root);
+      if (s.project?.root !== prev.project?.root || s.project?.trusted !== prev.project?.trusted) sync(s.project?.root);
     }),
     registerToolWindow({
       id: TOOL_WINDOW,
@@ -52,9 +54,12 @@ export function activate(): () => void {
       anchor: "right",
       order: 0.5,
       component: lazyComponent(() => import("./AgentsView").then((m) => m.AgentsView)),
+      headerContent: lazyComponent(() => import("./AgentsView").then((m) => m.AgentsLocationActions)),
       headerActions: lazyComponent(() => import("./AgentsView").then((m) => m.AgentsHeaderActions)),
       useBadge: () => {
-        const n = useAgents((s) => [...s.tasks.values()].filter((t) => t.status === "needsInput").length);
+        const n = useAgents(
+          (s) => [...s.tasks.values()].filter((t) => t.status === "needsInput" || s.unread.has(t.id)).length,
+        );
         return n || null;
       },
     }),
@@ -76,6 +81,11 @@ export function activate(): () => void {
       icon: () => "toolwindow-agents",
       restorable: true,
     }),
+    // An explicit editor drop sets the placement for subsequent sessions too.
+    registerEditorDropHandler({
+      accepts: (type) => type === TASK_DRAG,
+      drop: ({ payload }) => void executeAction("agents.openTaskInEditor", payload),
+    }),
     registerStatusItem({ id: "agents.status", align: "right", priority: 3, title: "Agents", component: AgentsStatus }),
     registerMenuGroup({
       id: "agents.send",
@@ -87,6 +97,7 @@ export function activate(): () => void {
           : [],
     }),
     registerActions([
+      ...taskActions,
       {
         id: "agents.findInConversation",
         title: "Find in Conversation",

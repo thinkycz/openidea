@@ -1,3 +1,5 @@
+mod output;
+
 use crate::Host;
 use crate::rpc::Dispatcher;
 use ide_core::{DebugSessionId, IdeResult};
@@ -6,6 +8,7 @@ use std::path::PathBuf;
 
 /// Starts a session owned by this window: its events (and those of child sessions) go here only.
 pub async fn debug_start(host: &Host, window: &str, config: LaunchConfig) -> IdeResult<DebugSessionId> {
+    host.require_trust(window)?;
     let mut config = match_java_debug_encoding(config, cfg!(windows));
     if config.adapter == "debugpy"
         && config.request == "launch"
@@ -14,17 +17,70 @@ pub async fn debug_start(host: &Host, window: &str, config: LaunchConfig) -> Ide
         super::python::prepare_debug(&mut config, &super::python::paths(&project))?;
     }
     let label = window;
-    let owner = SessionOwner::new(host.owner_window(label), host.window_sink(label));
+    let (sink, flush_output) = output::coalescing_sink(host.window_sink(label));
+    let owner = SessionOwner::new(host.owner_window(label), sink);
     let settings = match host.project(label) {
         Ok(project) => project.settings.effective(),
         Err(_) => host.global_settings.effective(),
     };
+    if config.adapter == "delve" && config.request == "launch" {
+        let root = host.project(window).map(|p| p.root.clone()).unwrap_or_default();
+        let settings = settings.clone();
+        config = host
+            .blocking(move || {
+                ide_sdk::go::debug_environment(&root, &settings, &mut config.env);
+                ide_sdk::go::apply_to_debug(
+                    &mut config.env,
+                    &mut config.extra_json,
+                    &settings.languages.go.build_tags,
+                )?;
+                Ok(config)
+            })
+            .await?;
+    }
+    if config.adapter == ide_dap::kotlin::ADAPTER {
+        let data_dir = host.data_dir.clone();
+        let runtime_root = config.cwd.clone().map(PathBuf::from).unwrap_or_default();
+        let runtime_settings = settings.clone();
+        let runtime = host
+            .blocking(move || {
+                if let Some(jdk) = ide_sdk::apply::jdtls_jdk(&runtime_root, &runtime_settings)
+                    .map_err(ide_core::IdeError::unavailable)?
+                {
+                    if jdk.major >= 11 {
+                        return Ok(jdk);
+                    }
+                    return Err(ide_core::IdeError::unavailable(
+                        "Kotlin debugger needs JDK 11 or newer. Choose a newer language server JDK in Settings.",
+                    ));
+                }
+                let jdks = ide_sdk::java::jdtls_jdks(11, &data_dir);
+                ide_sdk::java::jdtls_runtime(&jdks, 11).cloned().ok_or_else(|| {
+                    ide_core::IdeError::unavailable(
+                        "Kotlin debugger needs JDK 11 or newer. Download or choose a language server JDK in Settings.",
+                    )
+                })
+            })
+            .await?;
+        let mut extra: serde_json::Value = config
+            .extra_json
+            .as_deref()
+            .map(serde_json::from_str)
+            .transpose()
+            .map_err(|e| ide_core::IdeError::invalid(e.to_string()))?
+            .unwrap_or_else(|| serde_json::json!({}));
+        extra["__adapterJavaHome"] = serde_json::json!(runtime.home);
+        config.extra_json = Some(extra.to_string());
+    }
     let root = config.cwd.clone().map(PathBuf::from).unwrap_or_default();
     let custom = |command: &str| {
         let path = ide_sdk::apply::tool_command(&root, &settings, command)?;
         Some(path.to_string_lossy().into_owned())
     };
-    host.debugger.start_with(config, owner, custom).await
+    host.require_trust(window)?;
+    let result = host.debugger.start_with(config, owner, custom).await;
+    flush_output();
+    result
 }
 
 /// A JVM launched by java-debug writes what java-debug decodes its output as
@@ -253,11 +309,12 @@ pub async fn debug_attachable_processes(_host: &Host, _window: &str) -> IdeResul
 /// JVM to connect to `host:port`; returns the loopback port java-debug attaches to.
 pub async fn debug_listen_for_jvm(
     host: &Host,
-    _window: &str,
+    window: &str,
     request: ide_core::RequestId,
     jvm_host: String,
     port: u16,
 ) -> IdeResult<u16> {
+    host.require_trust(window)?;
     let token = host.begin_request(request);
     let result = jdwp::listen_for_jvm(&jvm_host, port, token).await;
     host.end_request(request);

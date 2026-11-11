@@ -443,6 +443,59 @@ native-progress,app-build,build-receipt,app-readback}.json; both context receipt
 and artifacts/batches/0.1.59/{build-receipt,retention}.json. Final commit/remote
 read-back and clean-worktree evidence go in the ignored delivery receipt.
 
+Slice61 — first grouped-route declaration after restart (2026-11-11,
+accepted regression/native slice with unchanged development0.1.59): the old46
+record describes a first Cmd+B miss after rename, server restart and file switch;
+47 only accepted settled navigation. The new actual-client regression sends
+its first intelligence request without hover, completion or readiness polling:
+first cold lookup,3unsaved grouped-route renames, first lookup after each of
+3restarts, exact Unicode declaration ranges and a genuine unknown-route control.
+All7expected targets resolve at5:69; the unknown route returns none. Disk sources
+remain original. The scenario passes in15.16s with pinned130. Create its disposable
+root using scripts/create-openstorm-route-fixture.py --navigation from the pinned
+Laravel13.37 baseline; set OPENSTORM_TEST_ENGINE_LARAVEL_ROOT to the receipt's
+project and OPENSTORM_TEST_PHPANTOM_BIN to the packaged resource executable.
+The ignore annotation states this fixture prerequisite. Both native/client
+copies have95non-vendor/non-Blade PHP files syntax-checked with PHP8.4.23 -n.
+
+Native unchanged0.1.59 first user Cmd+B reaches the grouped route5:69. Existing
+ShiftF6 prepares the semantic name; the reviewed3occurrence/2file rename to
+nav.billing.receipt persists exactly and both changed PHP files lint. After
+Restart while the declaration is active, switching to the caller and the first
+Cmd+B reaches renamed5:69. Two more first lookups are issued in the same input
+batch as Restart: caller-active, then declaration-active with a caller switch.
+Both show Finding navigation target and resolve to renamed5:69 without another
+navigation attempt. Native background LSP activity is allowed; the separate
+actual-client case supplies the strict no-warmup assertion. Old engines10650,
+12562 and12639 exit, replaced by12562,12639 and12881 under app10333. Shared
+native Edit Undo after all3restarts restores both targets byte-for-byte; first
+original-route navigation succeeds. All12witnesses/Composer metadata are original.
+Normal quit exits every generation. No-argument relaunch13781 restores the same
+project, two clean tabs and original route5:69. The first caller Cmd+B succeeds;
+final quit exits app13781 and resource engine13792. Both12-file fixture sets and
+Composer lock/autoload metadata remain unchanged; no environment files exist.
+
+Full source gates pass:5333frontend tests, typecheck, lint, knip, format and
+production build; Rust1740passed/65ignored/0filtered in1231.79s; Rust formatting,
+post-binding typecheck and all-target Clippy322.18s. The new ignored case was
+explicitly executed separately. Runtime/build source hashes, executable/engine
+checksums and post-runtime strict/deep signature still match the existing0.1.59
+build receipt. Differences are the new regression and acceptance documents.
+No new runtime bundle is necessary. Only latest0.1.59 remains; cargo clean removes
+21176files/16.4GiB after all gates. Installed optimized21 stays byte-identical.
+
+The old125/46miss does not reproduce in this current bounded sequence. This
+result does not establish its historical cause or general instant readiness,
+fresh startup performance or parity. Physical Dock-switch autosave and wider
+route/framework/project/performance matrices remain open. All69statuses remain
+67partial/2user-deferred. Next slice: exercise pending declaration lookups against
+source/caret/project changes and assess navigation cancellation from a reproduced
+case before implementation. Evidence: slice61-first-lookup-client.log;
+slice61-{focused,laravel-fixture,native-fixture,native-renamed,native-restarts,
+native-progress,frontend,sdk-gates,workspace-totals,app-readback,retention}.json;
+post-binding and compiler-clean logs. Final commit/remote/clean-worktree source
+reconciliation is recorded in the ignored delivery receipt.
+
 Source integration (2026-11-01, verified source checkpoint): integrates all 240 new
 commits from `l0ng-ai/openidea:main` at `041e7210` into
 `codex/openstorm-php-laravel`, based on pushed OpenStorm `82d1313a`.

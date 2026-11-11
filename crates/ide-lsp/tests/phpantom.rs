@@ -2651,3 +2651,72 @@ async fn laravel_queries_select_composer_context_for_each_open_document() {
         assert_eq!(std::fs::read_to_string(path).unwrap(), source, "navigation queries must not write source");
     }
 }
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires OPENSTORM_TEST_ENGINE_LARAVEL_ROOT with the navigation fixture"]
+async fn laravel_route_definition_first_request_after_open_rename_and_restart() {
+    let root = PathBuf::from(std::env::var_os("OPENSTORM_TEST_ENGINE_LARAVEL_ROOT").expect("navigation fixture"))
+        .canonicalize()
+        .unwrap();
+    let route_path = root.join("routes/openstorm_navigation.php");
+    let caller_path = root.join("app/OpenStormFixtures/NavigationConsumer.php");
+    let route_original = std::fs::read_to_string(&route_path).unwrap();
+    let caller_original = std::fs::read_to_string(&caller_path).unwrap();
+    let mut routes = route_original.clone();
+    let mut caller = caller_original.clone();
+    let mut php = LanguageRegistry::load(None).unwrap().get(&LanguageId::new("php")).unwrap();
+    php.language_servers.retain(|s| s.name == "phpantom");
+    php.language_servers[0].command = std::env::var("OPENSTORM_TEST_PHPANTOM_BIN").expect("engine executable");
+    let mgr = LspManager::new(root.clone(), Arc::new(LanguageRegistry::from_configs(vec![php])), Arc::new(|_| {}));
+    let route_doc = DocId::next();
+    let caller_doc = DocId::next();
+    mgr.did_open(route_doc, &route_path, &LanguageId::new("php"), 1, &routes);
+    mgr.did_open(caller_doc, &caller_path, &LanguageId::new("php"), 1, &caller);
+    let mut leaf = "show";
+    let mut version = 1;
+    // No hover, completion, readiness poll or successful lookup warms any first
+    // request. Every assertion calls the same public client path as Cmd+B.
+    for phase in ["open", "receipt", "dispatch", "delivered"] {
+        if phase != "open" {
+            version += 1;
+            let next_routes = routes.replace(&format!("->name('{leaf}')"), &format!("->name('{phase}')"));
+            let next_caller = caller.replace(&format!("nav.billing.{leaf}"), &format!("nav.billing.{phase}"));
+            assert_ne!(next_routes, routes);
+            assert_ne!(next_caller, caller);
+            replace(&mgr, route_doc, version, &routes, &next_routes);
+            replace(&mgr, caller_doc, version, &caller, &next_caller);
+            routes = next_routes;
+            caller = next_caller;
+            leaf = phase;
+        }
+        let at = pos(&caller, &format!("nav.billing.{leaf}"));
+        let declaration = pos(&routes, &format!("'{leaf}');"));
+        let expected = Pos::new(declaration.line, declaration.col + 1);
+        let start = std::time::Instant::now();
+        let found = mgr.goto(caller_doc, Pos::new(at.line, at.col + 2), GotoKind::Definition).await.unwrap();
+        assert!(found.iter().any(|l| l.path == route_path && l.range.start == expected), "{phase}: {found:?}");
+        eprintln!("first route lookup {phase}: {:?}, target {expected:?}", start.elapsed());
+        if phase != "open" {
+            let server = mgr.servers()[0].id;
+            let old_pid = mgr.servers()[0].pid.unwrap();
+            mgr.restart(server).await.unwrap();
+            let start = std::time::Instant::now();
+            let found = mgr.goto(caller_doc, Pos::new(at.line, at.col + 2), GotoKind::Definition).await.unwrap();
+            assert!(
+                found.iter().any(|l| l.path == route_path && l.range.start == expected),
+                "first renamed route lookup after {phase} restart: {found:?}"
+            );
+            assert_ne!(mgr.servers()[0].pid.unwrap(), old_pid);
+            eprintln!("first route lookup after {phase} restart: {:?}, target {expected:?}", start.elapsed());
+        }
+        assert_eq!(std::fs::read_to_string(&route_path).unwrap(), route_original);
+        assert_eq!(std::fs::read_to_string(&caller_path).unwrap(), caller_original);
+    }
+    let missing = caller.replace("nav.billing.delivered", "nav.billing.missing");
+    replace(&mgr, caller_doc, version + 1, &caller, &missing);
+    assert!(
+        mgr.goto(caller_doc, pos(&missing, "nav.billing.missing"), GotoKind::Definition).await.unwrap().is_empty(),
+        "a genuinely unknown route must not reuse an earlier target"
+    );
+    mgr.shutdown_all().await;
+}

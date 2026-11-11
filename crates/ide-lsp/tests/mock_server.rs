@@ -3028,12 +3028,16 @@ async fn laravel_queries_require_capabilities_and_preserve_incomplete_duplicates
     assert!(result.routes[0].from_vendor);
     assert_eq!(result.routes[0].parameters.as_ref().unwrap(), &["invoice"]);
     assert_eq!(result.locations.len(), 2, "duplicate registrations must remain visible");
-    assert_eq!(state.requested("phpWorkbench/routes"), vec![json!({"name":null,"limit":10})]);
+    assert_eq!(state.requested("phpWorkbench/routes"), vec![json!({"uri":uri_of(&path),"name":null,"limit":10})]);
     state.respond("phpWorkbench/views", json!({"views":["invoices.show"],"locations":[loc],"incomplete":true}));
     let result = h.mgr.laravel_views(doc, Some("invoices.show".into()), 10, Default::default()).await.unwrap();
     assert!(result.incomplete);
     assert_eq!(result.views, vec!["invoices.show"]);
     assert_eq!(result.locations.len(), 1);
+    assert_eq!(
+        state.requested("phpWorkbench/views"),
+        vec![json!({"uri":uri_of(&path),"name":"invoices.show","limit":10})]
+    );
     assert!(h.mgr.laravel_routes(doc, None, 0, Default::default()).await.is_err());
     assert!(h.mgr.laravel_views(doc, None, 5001, Default::default()).await.is_err());
     assert_eq!(state.requested("phpWorkbench/routes").len(), 1);

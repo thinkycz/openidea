@@ -2564,3 +2564,90 @@ async fn composer_target_changes_refresh_navigation_and_completion_without_resta
     mgr.shutdown_all().await;
     assert_eq!(std::fs::read_to_string(&main).unwrap(), source);
 }
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires the pinned macOS Apple Silicon PHPantom executable"]
+async fn laravel_queries_select_composer_context_for_each_open_document() {
+    let bin = std::env::var_os("OPENSTORM_TEST_PHPANTOM_BIN").map(PathBuf::from).unwrap_or_else(|| {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../src-tauri/resources/phpantom/phpantom_lsp")
+    });
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().canonicalize().unwrap();
+    let child = root.join("tools/child-🐘");
+    let mut originals = Vec::new();
+    for (base, owner) in [(&root, "outer"), (&child, "inner")] {
+        std::fs::create_dir_all(base.join("app")).unwrap();
+        let files = [
+            ("composer.json", serde_json::json!({"name":format!("fixture/{owner}"),"require":{"php":"^8.3","laravel/framework":"^13.0"},"autoload":{"psr-4":{"App\\":"app/"}}}).to_string()),
+            ("routes/web.php", format!("<?php\nuse Illuminate\\Support\\Facades\\Route;\nRoute::get('/{owner}/shared', static fn() => '{owner}')->name('shared.show');\nRoute::get('/{owner}/only', static fn() => '{owner}')->name('{owner}.only');\n")),
+            ("resources/views/shared.blade.php", format!("<p>{owner} shared view</p>\n")),
+            (&format!("resources/views/{owner}-only.blade.php"), format!("<p>{owner} only view</p>\n")),
+        ];
+        for (relative, source) in files {
+            let path = base.join(relative);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, &source).unwrap();
+            originals.push((path, source));
+        }
+    }
+    let mut php = LanguageRegistry::load(None).unwrap().get(&LanguageId::new("php")).unwrap();
+    php.language_servers.retain(|s| s.name == "phpantom");
+    php.language_servers[0].command = bin.to_string_lossy().into_owned();
+    let mgr =
+        LspManager::new(root.clone(), Arc::new(LanguageRegistry::from_configs(vec![php])), Arc::new(|_: IdeEvent| {}));
+    let mut docs = Vec::new();
+    for base in [&root, &child] {
+        let path = base.join("routes/web.php");
+        let source = std::fs::read_to_string(&path).unwrap();
+        let doc = DocId::next();
+        mgr.did_open(doc, &path, &LanguageId::new("php"), 1, &source);
+        docs.push(doc);
+    }
+    // Both contexts must be active before custom queries; the engine must not
+    // guess an owner from the only open document while this test is starting.
+    for doc in &docs {
+        mgr.hover(*doc, Pos::new(0, 0), Default::default()).await.unwrap();
+    }
+    assert_eq!(mgr.servers().len(), 1, "default outermost root markers share one workspace server");
+    let pid = mgr.servers()[0].pid.expect("running bundled engine");
+    for (doc, base, owner, other) in
+        [(docs[0], &root, "outer", "inner"), (docs[1], &child, "inner", "outer"), (docs[0], &root, "outer", "inner")]
+    {
+        let routes = mgr.laravel_routes(doc, None, 2000, Default::default()).await.unwrap();
+        assert!(routes.routes.iter().any(|r| r.name == format!("{owner}.only")));
+        assert!(!routes.routes.iter().any(|r| r.name == format!("{other}.only")));
+        assert!(routes.routes.iter().any(|r| r.name == "shared.show" && r.uri == format!("{owner}/shared")));
+        let target = mgr.laravel_routes(doc, Some("shared.show".into()), 2000, Default::default()).await.unwrap();
+        assert_eq!(target.locations.len(), 1);
+        assert_eq!(target.locations[0].path, base.join("routes/web.php"));
+        let views = mgr.laravel_views(doc, None, 2000, Default::default()).await.unwrap();
+        assert!(views.views.contains(&format!("{owner}-only")));
+        assert!(!views.views.contains(&format!("{other}-only")));
+        let view = mgr.laravel_views(doc, Some("shared".into()), 2000, Default::default()).await.unwrap();
+        assert_eq!(view.locations.len(), 1);
+        assert_eq!(view.locations[0].path, base.join("resources/views/shared.blade.php"));
+        assert_eq!(mgr.servers()[0].pid, Some(pid));
+        eprintln!(
+            "{owner}: same serverPID{pid}, context-specific route/view names and shared-name destinations verified"
+        );
+    }
+    let inner_routes = child.join("routes/web.php");
+    let original = std::fs::read_to_string(&inner_routes).unwrap();
+    let unsaved = format!(
+        "{original}/* café 🐘 */ Route::get('/inner/unsaved', static fn() => 'inner')->name('inner.unsaved');\n"
+    );
+    replace(&mgr, docs[1], 2, &original, &unsaved);
+    let inner = mgr.laravel_routes(docs[1], None, 2000, Default::default()).await.unwrap();
+    assert!(inner.routes.iter().any(|r| r.name == "inner.unsaved"));
+    let outer = mgr.laravel_routes(docs[0], None, 2000, Default::default()).await.unwrap();
+    assert!(!outer.routes.iter().any(|r| r.name == "inner.unsaved"));
+    let changed = mgr.laravel_routes(docs[1], Some("inner.unsaved".into()), 2000, Default::default()).await.unwrap();
+    assert_eq!(changed.locations.len(), 1);
+    assert_eq!(changed.locations[0].path, inner_routes);
+    assert_eq!(changed.locations[0].range.start, pos(&unsaved, "inner.unsaved"));
+    eprintln!("unsaved inner route stays isolated and its Unicode destination is precise; disk original retained");
+    mgr.shutdown_all().await;
+    for (path, source) in originals {
+        assert_eq!(std::fs::read_to_string(path).unwrap(), source, "navigation queries must not write source");
+    }
+}

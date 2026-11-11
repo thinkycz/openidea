@@ -378,6 +378,71 @@ app-readback}.json`, both `slice59-*-suspend.json` receipts and
 `artifacts/batches/0.1.58/{build-receipt,retention}.json`. Final commit/remote
 read-back and source reconciliation are recorded in the ignored delivery receipt.
 
+Slice60 — select the Composer document for Laravel navigation (2026-11-11,
+accepted local development0.1.59): the typed route/view adapter omits the source URI supported by
+PHPantom's project router. Default outermost root markers share one server across
+a parent Composer project and a nested independent project. With both documents
+open, the real-client red case fails with Select a Composer project document.
+The protocol regression independently confirms the missing URI field. This is a
+separate context-selection defect, not evidence explaining the old46 first
+declaration-lookup miss; that readiness claim remains unclosed.
+
+Both requests now include the checked source snapshot's typed URI. Capability
+checks, source-revision validation, cancellation, limits and incomplete results
+remain intact. Two focused protocol cases pass, including unsupported-server
+refusal and duplicate/incomplete preservation. The actual engine case passes
+in3.44s in one process through outer/inner/outer: independent names and same-name
+route/view destinations stay with the selected document. An unsaved inner route
+is excluded from outer results and resolves precisely after a Unicode comment;
+all disk originals remain unchanged. The nested folder contains a Unicode name.
+
+Development0.1.59 keeps PHPantom130 unchanged. All5333 frontend tests,
+typecheck, lint, knip, format and production build pass. The existing0.1.58
+packaged app independently reproduces both Routes and Views failures with the
+outer and nested caller tabs open in one window/server. Both choosers report
+Select a Composer project document; normal quit exits app47200 and engine47568.
+The full Rust gate initially exposed an accidental cmake version replacement in
+the app-version bump; restored the original locked0.1.58 dependency/checksum
+and verified that only35 local package versions change. The failed receipt is
+retained. The corrected full workspace passes1740tests/64ignored/0filtered
+in1149.76s; formatting, post-binding typecheck and Clippy306.84s pass. The new
+ignored actual-client scenario was explicitly run, not counted as a regular
+workspace pass. Exact generated plain-PHP route sources, including the unsaved
+Unicode variant, pass PHP8.4.23 -n syntax checks. The development binary emits
+the existing large-unwind-table linker warning; no failed source gate remains.
+
+The signed arm64 development app packages in209.52s. Its verified receipt and
+strict/deep signature precede removal of obsolete0.1.58, the duplicate bundle,
+and23477 compiler files/19.5GiB. Only archived0.1.59 remains; installed optimized
+0.1.21 is byte-identical. Source and previous evaluation evidence are retained.
+
+Native outer -> inner -> outer acceptance uses two simultaneous Laravel13.37
+Composer roots in one workbench workspace, with both caller tabs open. Existing
+Navigate menu actions show only the selected project's unique route/view names.
+The identical logical route name opens the owning routes/openstorm_scope.php
+at3:69; the nested label includes tools/child-🐘. Identical view names open the
+owning resources/views/openstorm-shared.blade.php at1:1, with distinctive OUTER
+or INNER witness text. Both paths return correctly to the outer context. One
+resource engine8428 remains under app8416, with one initialization and no restart.
+Normal quit exits both. No-argument relaunch8824 restores the same workspace,
+all6 clean tabs and outer Blade1:1. After explicitly visiting both recovered
+callers, the inner route still opens inner3:69; a view query from recovered inner
+Blade opens inner1:1. One resource engine8833 runs; final normal quit exits both.
+Both16-file original sets, lockfiles and Composer autoload-file metadata remain
+byte-identical. Post-runtime strict/deep signature, executable/engine/source hashes,
+installed21 preservation, single latest archive and absent compiler output pass.
+Final source reconciliation allows only acceptance-document differences.
+
+No settings, menus, shortcuts, autosave or debugger behavior changes. Physical
+Dock-switch autosave, the old46 declaration-readiness claim and broader context/
+framework/performance matrices remain open. All69 statuses stay67partial/
+2user-deferred. Evidence: artifacts/checks/slice60-{query-uri-red,query-uri-green,
+multi-project-client-red,multi-project-client-final}.log; slice60-{focused,
+client-syntax,frontend,sdk-gates,workspace-totals,native-red,native-process,
+native-progress,app-build,build-receipt,app-readback}.json; both context receipts;
+and artifacts/batches/0.1.59/{build-receipt,retention}.json. Final commit/remote
+read-back and clean-worktree evidence go in the ignored delivery receipt.
+
 Source integration (2026-11-01, verified source checkpoint): integrates all 240 new
 commits from `l0ng-ai/openidea:main` at `041e7210` into
 `codex/openstorm-php-laravel`, based on pushed OpenStorm `82d1313a`.

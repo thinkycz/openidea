@@ -251,6 +251,7 @@ impl LspManager {
 
 #[derive(Serialize)]
 struct LaravelQuery {
+    uri: lsp::Uri,
     name: Option<String>,
     limit: usize,
 }
@@ -303,7 +304,9 @@ impl LspManager {
             "Views" => "phpWorkbench/views",
             _ => unreachable!(),
         };
-        let reply = self.call(&target, method, LaravelQuery { name, limit }, Some(cancel), LONG_TIMEOUT).await?;
+        let reply = self
+            .call(&target, method, LaravelQuery { uri: snap.uri.clone(), name, limit }, Some(cancel), LONG_TIMEOUT)
+            .await?;
         if target.server.running_gen(target.run.generation).is_none()
             || self.php_sources(&self.snapshot(doc)?, &target)? != before
         {

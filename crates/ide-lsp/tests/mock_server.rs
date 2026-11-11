@@ -3463,3 +3463,162 @@ async fn php_builtin_target_race_refuses_mixed_document() {
     assert!(current.description.unwrap().contains("8.3"));
     assert!(current.text.contains("target8.3"));
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn navigation_rejects_changed_open_sources_but_keeps_fresh_and_unrelated_documents() {
+    let mut failures = Vec::new();
+    for (kind, method) in [
+        (GotoKind::Definition, "textDocument/definition"),
+        (GotoKind::Declaration, "textDocument/declaration"),
+        (GotoKind::Implementation, "textDocument/implementation"),
+        (GotoKind::TypeDefinition, "textDocument/typeDefinition"),
+    ] {
+        for mutation in ["source", "dependency", "close", "open", "stable", "unrelated"] {
+            let mut caps = incremental_caps();
+            caps["declarationProvider"] = json!(true);
+            caps["implementationProvider"] = json!(true);
+            caps["typeDefinitionProvider"] = json!(true);
+            let h = harness(&[("mock", caps)]);
+            let (doc, _) = h.open("caller.mk", "use target\n");
+            let (dependency, path) = h.open("dependency.mk", "😀 target\n");
+            h.wait_status("mock", ServerStatus::Ready).await;
+            let state = h.launcher.state("mock");
+            let gate = Arc::new(Gate::default());
+            let held = gate.clone();
+            let uri = uri_of(&path);
+            *state.responder.lock() = Some(Arc::new(move |_, m, _| {
+                if m != method {
+                    return None;
+                }
+                held.hold();
+                Some(json!([{"uri":uri,"range":{"start":{"line":0,"character":3},"end":{"line":0,"character":9}}}]))
+            }));
+            let mgr = h.mgr.clone();
+            let pending = tokio::spawn(async move { mgr.goto(doc, Pos::new(0, 4), kind).await });
+            eventually(|| gate.entered()).await;
+            match mutation {
+                "source" => h.mgr.did_change(doc, 2, &[change(rng(0, 0, 0, 0), "// changed\n")], &|| {
+                    "// changed\nuse target\n".into()
+                }),
+                "dependency" => {
+                    h.mgr.did_change(dependency, 2, &[change(rng(0, 0, 0, 0), "\n")], &|| "\n😀 target\n".into())
+                }
+                "close" => h.mgr.did_close(dependency),
+                "open" => {
+                    h.open("extra.mk", "other declaration\n");
+                }
+                "unrelated" => h.mgr.did_open(
+                    DocId::next(),
+                    &h.root.join("notes.txt"),
+                    &LanguageId::new("plain"),
+                    1,
+                    "unrelated\n",
+                ),
+                "stable" => {}
+                _ => unreachable!(),
+            }
+            gate.open();
+            let result = pending.await.unwrap();
+            if matches!(mutation, "stable" | "unrelated") {
+                let found = result.unwrap();
+                assert_eq!(found.len(), 1);
+                assert_eq!(found[0].path, path);
+                assert_eq!(found[0].range.start, Pos::new(0, 3));
+            } else if !matches!(result, Err(ref e) if e.kind == ide_core::error::ErrorKind::Cancelled) {
+                failures.push(format!("{kind:?}/{mutation}: {result:?}"));
+            }
+            h.mgr.shutdown_all().await;
+        }
+    }
+    assert!(failures.is_empty(), "navigation published raced sources: {failures:#?}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn navigation_rejects_a_successful_reply_from_a_stopping_server() {
+    let h = harness(&[("mock", incremental_caps())]);
+    let (doc, path) = h.open("caller.mk", "target\n");
+    h.wait_status("mock", ServerStatus::Ready).await;
+    let state = h.launcher.state("mock");
+    let gate = Arc::new(Gate::default());
+    let held = gate.clone();
+    let uri = uri_of(&path);
+    *state.responder.lock() = Some(Arc::new(move |_, method, _| {
+        if method != "textDocument/definition" {
+            return None;
+        }
+        held.hold();
+        Some(json!([{"uri":uri,"range":{"start":{"line":0,"character":0},"end":{"line":0,"character":6}}}]))
+    }));
+    let mgr = h.mgr.clone();
+    let pending = tokio::spawn(async move { mgr.goto(doc, Pos::new(0, 1), GotoKind::Definition).await });
+    eventually(|| gate.entered()).await;
+    let (started_tx, started_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    *state.shutdown_pause.lock() = Some((started_tx, release_rx));
+    let mgr = h.mgr.clone();
+    let server = mgr.servers()[0].id;
+    let restart = tokio::spawn(async move { mgr.restart(server).await });
+    eventually(|| started_rx.try_recv().is_ok()).await;
+    gate.open();
+    let result = pending.await.unwrap();
+    release_tx.send(()).unwrap();
+    restart.await.unwrap().unwrap();
+    let fresh = h.mgr.goto(doc, Pos::new(0, 1), GotoKind::Definition).await.unwrap();
+    assert_eq!(fresh.len(), 1);
+    h.mgr.shutdown_all().await;
+    assert!(
+        matches!(result, Err(ref e) if e.kind == ide_core::error::ErrorKind::Cancelled),
+        "old server reply: {result:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn navigation_bulk_implementations_refuse_mixed_source_revisions() {
+    let mut caps = incremental_caps();
+    caps["implementationProvider"] = json!(true);
+    let h = harness(&[("mock", caps)]);
+    let (doc, _) = h.open("caller.mk", "target\ntarget\n");
+    let (dependency, path) = h.open("dependency.mk", "target\n");
+    h.wait_status("mock", ServerStatus::Ready).await;
+    let state = h.launcher.state("mock");
+    let gate = Arc::new(Gate::default());
+    let held = gate.clone();
+    let uri = uri_of(&path);
+    *state.responder.lock() = Some(Arc::new(move |_, method, params| {
+        if method != "textDocument/implementation" {
+            return None;
+        }
+        if params["position"]["line"] == 1 {
+            held.hold();
+        }
+        Some(json!([{"uri":uri,"range":{"start":{"line":0,"character":0},"end":{"line":0,"character":6}}}]))
+    }));
+    let mgr = h.mgr.clone();
+    let pending =
+        tokio::spawn(
+            async move { mgr.implementations(doc, &[Pos::new(0, 1), Pos::new(1, 1)], Default::default()).await },
+        );
+    eventually(|| gate.entered()).await;
+    h.mgr.did_change(dependency, 2, &[change(rng(0, 0, 0, 0), "\n")], &|| "\ntarget\n".into());
+    gate.open();
+    let result = pending.await.unwrap();
+    h.mgr.shutdown_all().await;
+    assert!(matches!(result, Err(ref e) if e.kind == ide_core::error::ErrorKind::Cancelled), "mixed batch: {result:?}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn navigation_supports_servers_without_open_close_synchronization() {
+    let h = harness(&[("mock", json!({"definitionProvider":true}))]);
+    let (doc, path) = h.open("caller.mk", "target\n");
+    h.wait_status("mock", ServerStatus::Ready).await;
+    let state = h.launcher.state("mock");
+    state.respond(
+        "textDocument/definition",
+        json!([{"uri":uri_of(&path),"range":{"start":{"line":0,"character":0},"end":{"line":0,"character":6}}}]),
+    );
+    assert!(state.notified("textDocument/didOpen").is_empty());
+    let found = h.mgr.goto(doc, Pos::new(0, 1), GotoKind::Definition).await.unwrap();
+    assert_eq!(found.len(), 1);
+    assert_eq!(found[0].path, path);
+    h.mgr.shutdown_all().await;
+}

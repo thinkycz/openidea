@@ -570,6 +570,79 @@ slice62-fixed-{caret,escape}-{suspend,resume-proof,wire}.json; both fixture rece
 and artifacts/batches/0.1.60/{build-receipt,retention}.json. Final source/commit/remote/
 clean-worktree reconciliation is stored in the ignored delivery receipt.
 
+Slice63 — reject stale backend navigation inputs (2026-11-11, accepted local
+signed development0.1.61): the shared LSP manager
+now snapshots open-buffer inputs attached to each serving generation. Definition,
+declaration, implementation and type-definition responses recheck buffer identity,
+version, language, immutable text and attachment membership before conversion and
+again before returning locations. Stopped generations and newly opened/closed
+relevant buffers invalidate the request. Bulk implementation requests also refuse
+the entire mixed-revision batch. Cancellation is quiet and prevents a stale reply
+from activating syntax fallback. Only metadata and text Arc references are copied;
+this does not hash or clone whole buffers or infer a dependency graph.
+
+Protocol red:16changed-input cases across4navigation kinds, a successful reply
+from a stopping server and a mixed implementation batch are incorrectly accepted
+(3failed/1passed). The correction passes all4new tests and all89mock-server tests.
+Stable sources, unrelated documents without this server and servers that do not
+send open/close synchronization notifications retain successful navigation.
+
+Native baseline0.1.60 reproduces with the unchanged resource engine130 behind a
+transparent owned-fixture transport relay. Its real nonempty definition reply for
+route5:69 is computed before a right-pane newline edit; dependency version0->1 is
+forwarded before the unchanged response is released at2.694491s. The unchanged
+caller is refocused at6:20 before delivery. The old app activates blank target5:1;
+fresh Cmd+B correctly resolves6:69. Native Edit > Undo and File > Save All restore
+all12original witnesses; CmdQ exits app46197/relay46440/engine46444. Automated
+CmdZ did not restore the edit in this run and a quick-definition popup was
+visible afterward; its cause and shortcut Undo acceptance are not claimed. No environment files are present. The relay supplies no semantic
+result and makes no production engine/default/profile changes.
+
+Full frontend5346/typecheck/lint/knip/format/build and post-binding typecheck
+pass. Unfiltered Rust1744passed/65ignored/0filtered in1198.19s, fmt1.38s and
+workspace/all-target Clippy with warnings denied318.91s pass. Signed arm64
+packaging succeeds in218.13s. The known large-unwind-table development linker
+warning and Java8 toolchain warnings remain; neither is claimed fixed. Engine130
+and its provenance/source recipe are unchanged.
+
+Corrected native0.1.61 under app8149/relay8183/resource engine8185: initial fresh
+Cmd+B opens5:69. The relay holds PHPantom's actual nonempty old definition result;
+a right-pane edit moves the declaration to6:69. Dependency version0->1 is sent
+while the response is held; the left caller's original text/caret6:20 is restored
+and AX-confirmed before an explicit release marker. The unchanged response is
+released at5.869739s, after that timestamp and before10s timeout, without watchdog
+recovery. The app stays at caller6:20 with no late target/error/hint. Fresh Cmd+B
+then opens the correct6:69. This distinguishes the backend correction from the
+preceding slice's active-view guard. The relay does not invent semantic results.
+
+Native Edit > Undo and File > Save All restore the source; fresh Cmd+B resolves
+5:69. Native Restart replaces relay8183/engine8185 with8199/8200 under the same
+app; the old pair exits and fresh navigation still resolves5:69. Normal CmdQ
+exits the app and replacement pair. Explicit-profile no-argument relaunch8213
+restores the same project,2panes/3clean tab instances and active target5:69.
+Recovered caller6:20 Cmd+B resolves5:69; final normal quit exits app8213 and
+relay8222/resource engine8223. Physical Dock-switch autosave remains unverified.
+
+Post-runtime strict/deep signature, executable/engine/build-source hashes and
+installed optimized21 integrity pass. Both12-original-file fixtures, Composer
+lock/autoload metadata and all95non-vendor/non-Blade PHP syntax checks per copy
+pass; no environment files exist. Packaging prunes obsolete0.1.60 and the duplicate
+SDK bundle, then removes23455compiler files/19.5GiB. Only archived0.1.61 remains;
+compiler output is absent. Sources, tools, engine provenance, earlier evaluation
+source/evidence and installed profiles remain preserved. Only final acceptance
+documents differ from the built source snapshot.
+
+Closed disk files, configuration epochs, the final IPC-to-activation interval
+and broader native language/server matrices remain open. All69area statuses stay
+67partial/2user-deferred; debugger scope is unchanged. Evidence:
+slice63-navigation-{red,green}.log; slice63-no-sync-control.log;
+slice63-mock-server-final.log; slice63-{focused,frontend,sdk-gates,workspace-totals,
+app-build,build-receipt,red-native-progress,native-progress,app-readback}.json;
+slice63-fixed-refocus-proof.json; both fixture receipts and relay event logs;
+and artifacts/batches/0.1.61/{build-receipt,retention}.json. Final exact commit,
+remote ref, clean-worktree and documentation-only source reconciliation are
+stored in the ignored slice63-delivery.json receipt.
+
 Source integration (2026-11-01, verified source checkpoint): integrates all 240 new
 commits from `l0ng-ai/openidea:main` at `041e7210` into
 `codex/openstorm-php-laravel`, based on pushed OpenStorm `82d1313a`.

@@ -138,6 +138,15 @@ struct DocSnap {
     servers: Vec<Arc<Server>>,
 }
 
+/// Open-buffer inputs admitted for one navigation request/server generation.
+struct NavigationSource {
+    doc: DocId,
+    version: i32,
+    uri: lsp::Uri,
+    language: LanguageId,
+    text: Arc<DocText>,
+}
+
 impl DocSnap {
     fn ident(&self) -> Value {
         json!({ "uri": self.uri })
@@ -1202,19 +1211,74 @@ impl LspManager {
     ) -> IdeResult<Vec<Vec<Location>>> {
         let (method, cap, feature) = goto_method(GotoKind::Implementation);
         let (snap, targets) = self.doc_targets(doc, feature, |c| c.has(cap)).await?;
+        let sources = targets
+            .iter()
+            .filter(|t| positions.iter().any(|pos| snap.asks(t, *pos)))
+            .map(|t| Ok((t, self.navigation_sources(&snap, t)?)))
+            .collect::<IdeResult<Vec<_>>>()?;
         let requests = positions.iter().copied().map(|pos| {
             let (snap, targets, cancel) = (&snap, &targets, &cancel);
             async move { self.goto_in(snap, targets, method, pos, Some(cancel)).await }
         });
         let results: Vec<IdeResult<Vec<Location>>> =
             futures::stream::iter(requests).buffered(IMPLEMENTATION_CONCURRENCY).collect().await;
-        if cancel.is_cancelled() {
+        if cancel.is_cancelled() || sources.iter().any(|(t, before)| !self.navigation_current(t, before)) {
             return Err(IdeError::cancelled());
         }
         if !results.is_empty() && results.iter().all(Result::is_err) {
             return Err(results.into_iter().find_map(Result::err).expect("all failed"));
         }
         Ok(results.into_iter().map(Result::unwrap_or_default).collect())
+    }
+
+    fn navigation_sources(&self, snap: &DocSnap, target: &Target) -> IdeResult<Vec<NavigationSource>> {
+        if target.server.running_gen(target.run.generation).is_none() {
+            return Err(IdeError::cancelled());
+        }
+        let sources: Vec<_> = self
+            .docs
+            .lock()
+            .iter()
+            .filter(|(_, d)| Self::navigation_attached(d, target))
+            .map(|(doc, d)| NavigationSource {
+                doc: *doc,
+                version: d.version,
+                uri: d.uri.clone(),
+                language: d.language.clone(),
+                text: d.text.clone(),
+            })
+            .collect();
+        if !sources.iter().any(|d| {
+            d.uri == snap.uri
+                && d.version == snap.version
+                && d.language == snap.language
+                && Arc::ptr_eq(&d.text, &snap.text)
+        }) {
+            return Err(IdeError::cancelled());
+        }
+        Ok(sources)
+    }
+
+    fn navigation_attached(doc: &DocState, target: &Target) -> bool {
+        doc.servers.iter().any(|a| a.server.id == target.server.id && a.opened_gen == Some(target.run.generation))
+    }
+
+    fn navigation_current(&self, target: &Target, sources: &[NavigationSource]) -> bool {
+        if target.server.running_gen(target.run.generation).is_none() {
+            return false;
+        }
+        let docs = self.docs.lock();
+        docs.values().filter(|d| Self::navigation_attached(d, target)).count() == sources.len()
+            && sources.iter().all(|source| {
+                docs.get(&source.doc).is_some_and(|d| {
+                    d.version == source.version
+                        && d.uri == source.uri
+                        && d.language == source.language
+                        && Arc::ptr_eq(&d.text, &source.text)
+                        && Self::navigation_attached(d, target)
+                })
+            })
+            && target.server.running_gen(target.run.generation).is_some()
     }
 
     async fn goto_in(
@@ -1227,7 +1291,8 @@ impl LspManager {
     ) -> IdeResult<Vec<Location>> {
         let mut out = Outcome::new();
         for t in targets.iter().filter(|t| snap.asks(t, pos)) {
-            match self
+            let sources = self.navigation_sources(snap, t)?;
+            let response = self
                 .call::<_, Option<lsp::GotoDefinitionResponse>>(
                     t,
                     method,
@@ -1235,10 +1300,16 @@ impl LspManager {
                     cancel,
                     DEFAULT_TIMEOUT,
                 )
-                .await
-            {
+                .await;
+            if !self.navigation_current(t, &sources) {
+                return Err(IdeError::cancelled());
+            }
+            match response {
                 Ok(Some(r)) => {
                     let locs = convert::goto_response(&self.conv(t.enc()), r);
+                    if !self.navigation_current(t, &sources) {
+                        return Err(IdeError::cancelled());
+                    }
                     self.note_virtual(&t.server, locs.iter().map(|l| l.uri.as_deref()));
                     if !locs.is_empty() {
                         return Ok(locs);

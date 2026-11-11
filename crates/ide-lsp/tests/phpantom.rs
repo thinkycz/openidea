@@ -2472,3 +2472,95 @@ async fn php_builtin_target_refreshes_after_composer_change_and_restart() {
     assert!(after.description.as_deref().unwrap().contains("8.3"), "stale builtin target: {:?}", after.description);
     mgr.shutdown_all().await;
 }
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires the pinned macOS Apple Silicon PHPantom executable"]
+async fn composer_target_changes_refresh_navigation_and_completion_without_restart() {
+    let bin = std::env::var_os("OPENSTORM_TEST_PHPANTOM_BIN").map(PathBuf::from).unwrap_or_else(|| {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../src-tauri/resources/phpantom/phpantom_lsp")
+    });
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().canonicalize().unwrap();
+    std::fs::create_dir(root.join("src")).unwrap();
+    let composer = root.join("composer.json");
+    let manifest = |version: &str| {
+        serde_json::json!({"require":{"php":"^8.2"},"config":{"platform":{"php":version}},"autoload":{"psr-4":{"TargetFixture\\":"src/"}}}).to_string()
+    };
+    std::fs::write(&composer, manifest("8.3.0")).unwrap();
+    let declaration =
+        "<?php\nnamespace TargetFixture;\nclass Service { public function diskOnly(): int { return 1; } }\n";
+    let unsaved = declaration.replace("{ public", "{ /* café 🐘 */ public").replace("diskOnly", "dirtyOnly");
+    let path = root.join("src/Service.php");
+    std::fs::write(&path, declaration).unwrap();
+    let source = "<?php\nnew \\DateTime();\narray_filter([], static fn($v) => true);\n$service = new \\TargetFixture\\Service();\n$service->dirtyOnly();\n";
+    let main = root.join("main.php");
+    std::fs::write(&main, source).unwrap();
+    let mut php = LanguageRegistry::load(None).unwrap().get(&LanguageId::new("php")).unwrap();
+    php.language_servers.retain(|s| s.name == "phpantom");
+    php.language_servers[0].command = bin.to_string_lossy().into_owned();
+    let mgr =
+        LspManager::new(root.clone(), Arc::new(LanguageRegistry::from_configs(vec![php])), Arc::new(|_: IdeEvent| {}));
+    let doc = DocId::next();
+    let dependency = DocId::next();
+    mgr.did_open(doc, &main, &LanguageId::new("php"), 1, source);
+    mgr.did_open(dependency, &path, &LanguageId::new("php"), 1, declaration);
+    replace(&mgr, dependency, 2, declaration, &unsaved);
+    let mut prior_uri: Option<String> = None;
+    let mut process = None;
+    for (index, target) in ["8.3", "8.4", "8.3"].into_iter().enumerate() {
+        if index > 0 {
+            std::fs::write(&composer, manifest(&format!("{target}.0"))).unwrap();
+            mgr.php_files_changed(&[], std::slice::from_ref(&composer), &[]);
+        }
+        let mut current = None;
+        let mut last = String::new();
+        for _ in 0..100 {
+            // A Composer rebuild retires builtin identities. Navigate from the live
+            // source rather than repeatedly polling the retired project_context URI.
+            match mgr.goto(doc, pos(source, "DateTime()"), GotoKind::Definition).await {
+                Ok(locations) => {
+                    if let Some(uri) = locations.iter().find_map(|l| l.uri.as_ref()) {
+                        match mgr.virtual_document(uri).await {
+                            Ok(value) if value.description.as_deref().is_some_and(|d| d.contains(target)) => {
+                                current = Some(uri.clone());
+                                break;
+                            }
+                            Ok(value) => last = format!("target {:?}", value.description),
+                            Err(e) => last = format!("builtin {:?}: {e}", e.kind),
+                        }
+                    } else {
+                        last = "no builtin location".into();
+                    }
+                }
+                Err(e) => last = format!("definition {:?}: {e}", e.kind),
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        let uri = current.unwrap_or_else(|| panic!("live target {target} did not settle: {last}"));
+        let pid = mgr.servers()[0].pid.expect("running bundled engine");
+        assert_eq!(*process.get_or_insert(pid), pid, "Composer changes must not restart the server process");
+        if let Some(old) = prior_uri {
+            assert_ne!(uri, old, "new project context must receive a fresh builtin identity");
+            let error = mgr.virtual_document(&old).await.unwrap_err();
+            assert!(
+                matches!(error.kind, ide_core::error::ErrorKind::Cancelled | ide_core::error::ErrorKind::OutOfSync),
+                "retired builtin must be refused: {error}"
+            );
+        }
+        let at = pos(source, "array_filter");
+        let completions = settled_completion(&mgr, doc, Pos::new(at.line, at.col + 8)).await;
+        let has = |name: &str| completions.items.iter().any(|item| item.label.split('(').next() == Some(name));
+        assert!(has("array_filter"), "positive completion control at PHP{target}");
+        assert_eq!(has("array_find"), target == "8.4", "version-filtered completion must track PHP{target}");
+        let definitions = mgr.goto(doc, pos(source, "dirtyOnly"), GotoKind::Definition).await.unwrap();
+        assert!(
+            definitions.iter().any(|l| l.path == path && l.range.start == pos(&unsaved, "dirtyOnly")),
+            "unsaved Unicode dependency must survive PHP{target}: {definitions:?}"
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), declaration);
+        eprintln!("live PHP{target}: pid{pid}, builtin{uri}, versioned completion and unsaved dependency verified");
+        prior_uri = Some(uri);
+    }
+    mgr.shutdown_all().await;
+    assert_eq!(std::fs::read_to_string(&main).unwrap(), source);
+}

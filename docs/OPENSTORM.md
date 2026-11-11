@@ -241,12 +241,13 @@ Post-runtime deep/strict signature, executable and engine checksums pass; every
 build source hash matches before this documentation-only closeout. Only the latest
 archive remains, and compiler output is absent.
 
-A separate live Composer8.3->8.4 notification experiment fails: the running engine
-keeps reporting8.3 until restart. Preserve this for the next engine slice rather
-than claiming live target reconfiguration works. Engine130 is unchanged. Wider
-version/extension/framework gates, physical Dock-switch autosave and broader
-platform/service/performance acceptance remain open. Whole-area statuses remain
-67partial/2user-deferred.
+The separate live Composer8.3->8.4 old-URI polling experiment times out. Its
+initial interpretation as requiring restart is corrected by Slice58 below:
+Composer changes already rebuild the engine's project context, retiring the old
+builtin URI. A cancellation from that URI is not evidence of an unapplied target.
+Engine130 is unchanged. Wider version/extension/framework gates, physical
+Dock-switch autosave and broader platform/service/performance acceptance remain
+open. Whole-area statuses remain67partial/2user-deferred.
 
 Evidence: `artifacts/checks/slice57-{focused,host-builtin,frontend,sdk-gates,
 workspace-totals,app-build,build-receipt,native-progress,target-fixture}.json`,
@@ -254,6 +255,62 @@ matching red/green logs, `slice57-sdk-first-artifact-failed.json`,
 `slice57-target-live-failed.log`, `slice57-fixture-changes.jsonl` and
 `artifacts/batches/0.1.57/{build-receipt,retention}.json`. Final commit/remote
 read-back and source reconciliation are recorded in the ignored delivery receipt.
+
+Slice58 — live Composer PHP targets (2026-11-11, verified):
+corrects Slice57's overbroad restart requirement. Direct protocol observation of
+unchanged PHPantom130 shows Composer platform8.3->8.4 is applied immediately and
+navigation returns a new builtin project_context. The previous polling test kept
+asking the retired URI and swallowed cancellation, then mislabelled its timeout.
+No engine or application runtime change is needed for the observed live workflow.
+
+A new actual-client regression navigates from live source for every applied target,
+checks one unchanged server PID through8.3->8.4->8.3, refuses retired builtin URIs,
+and verifies version-filtered array_find completion with array_filter as a positive
+control. Its valid PHP fixture retains an unsaved dependency with a Unicode comment;
+precise declaration navigation and unchanged dependency disk bytes survive both
+context rebuilds. The focused regression passes in3.84s, contexts1->3->5.
+
+Native checks reuse the signed0.1.57 app whose runtime sources and engine remain
+unchanged. A fresh isolated HOME/Composer fixture passes PHP syntax/runtime checks;
+no environment files or project commands run. Existing Ctrl+Space at main.php3:9
+shows3 candidates under8.3 and5 under8.4, adding array_find/array_find_key. Actual
+file-watcher delivery and Cmd+B open readonly DateTime contexts1/3/5 with8.3/8.4/8.3
+labels, all in serverPID14393, without server restart. Old context tabs retain
+historical snapshots; fresh navigation opens the current target's identity.
+
+Down3 visibly selects array_find; Tab replaces the function name and Save All
+persists exactly the expected edit while preserving its arguments. The resulting
+file passes PHP8.4.23 syntax/runtime. Native Edit Undo/Redo and File Save All persist
+original/completed/original bytes. An initial keyboard Undo attempt left a
+Definition popup and did not change the source; menu actions establish acceptance,
+without claiming that automation focus/shortcut limitation is repaired. Completion
+screenshots expose all rows; accessibility exposes only the first popup item.
+After downgrading, the8.4-only rows disappear and fresh navigation shows8.3.
+
+Normal Quit stops app/server; no-argument relaunch restores clean main.php2:8 and
+Cmd+B opens readonly8.3 again. Final normal Quit stops app/server. Both original
+fixture files are byte-identical. Builtin-tab recovery and physical Dock-switch
+autosave remain unverified as before. All5,330 frontend tests/type checking/lint/
+Knip/formatting/build pass. The unfiltered Rust workspace passes1,740 tests/63ignored/
+0filtered, including doctests, in1,164.39s; the new ignored real-engine case was run
+explicitly above. Rust formatting, post-bindings frontend type checking and
+all-target Clippy with warnings denied (306.79s) pass.
+
+Post-runtime deep/strict signature, executable/engine checksums and installed0.1.21
+read-back pass. Only the new ignored integration test and two acceptance documents
+differ from the0.1.57 build receipt; all runtime sources still match that signed
+app. Reusing it avoids generating an identical runtime for test/documentation
+changes. Cargo cleanup removes21,176 compiler files (16.4GiB reported), leaving no
+compiler output and only the latest0.1.57 app archive. All69 IDs remain visible at
+67partial/2user-deferred. Final commit/remote read-back and source reconciliation
+are recorded in the ignored delivery receipt.
+
+Evidence: `artifacts/checks/slice58-client-live-target.log`,
+`slice58-{client-regression,client-fixture-syntax,frontend,sdk-gates,workspace-totals,
+app-readback,compiler-cleanup,target-fixture,native-progress,completion-applied,
+completion-undo,completion-redo,wire-probe}.json`, `slice58-fixture-changes.jsonl`
+and matching logs. The direct wire probe additionally confirms retired-URI
+cancellation (-32801) and a clean process exit after the client closes stdin.
 
 Source integration (2026-11-01, verified source checkpoint): integrates all 240 new
 commits from `l0ng-ai/openidea:main` at `041e7210` into

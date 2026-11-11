@@ -496,6 +496,80 @@ native-progress,frontend,sdk-gates,workspace-totals,app-readback,retention}.json
 post-binding and compiler-clean logs. Final commit/remote/clean-worktree source
 reconciliation is recorded in the ignored delivery receipt.
 
+Slice62 — own delayed declaration navigation (2026-11-11, accepted local
+signed development0.1.60):10public stale-result regressions fail before the
+correction: source/caret/document/project/active-editor changes, closed view,
+Escape, superseding lookup, old errors and prepared chooser activation. They
+expose a result lifetime that outlives the existing source/selection-bound progress
+hint. A separate early-Escape red case exposes the progress timer appearing after
+cancellation. The final68related checks pass, including delayed preview-file reads
+and positive fresh/second-row activation. Full frontend5346, typecheck, lint, knip,
+format/build and post-binding typecheck pass. An initial full run failed one
+unchanged Java template-context assertion; all17isolated cases and two subsequent
+full runs pass, including the final callback-release source. Its cause remains
+unclaimed and the failed receipt/log are retained. The first focused typecheck
+exposed an inferred empty-argument spy tuple; its explicit signature is corrected.
+
+Per-view ownership now captures immutable document text, selection, backend doc/
+path, project/opening state and active editor. Sync admission, bounded empty-result
+retries, errors, web/file and syntax fallback acquisition, preview reads and
+prepared rows/pin actions recheck ownership. Escape in the source editor disposes
+its progress timer and refuses the later result. The listener is removed and the
+progress callback released after completion; the weak ownership token survives for
+chooser callbacks. Existing contribution interfaces, shortcuts, settings, layout,
+autosave, debugger and server protocol remain unchanged. This is client-side
+result cancellation; the server request still completes within its existing bound.
+
+Native baseline0.1.59 reproduces the focus jump: an owned paused server admits
+Cmd+B at caller6:20; Left moves it to6:19 and clears progress; explicit resume
+still switches to old route5:69. App76862/server77056 quit normally and all12
+witnesses remain original. Total14.193s process pause includes pre-request time;
+actual successful late navigation is observed, not a timeout result.
+
+New signed arm64 package225.95s, unchanged PHPantom130. Rust1740passed/65ignored/
+0filtered in1238.08s, fmt1.41s and all-target Clippy324.99s pass. The known large-
+unwind-table development linker warning remains. Strict/deep signature and source/
+engine receipts precede pruning obsolete0.1.59, the duplicate bundle and21499
+compiler files/18.6GiB. Only archived0.1.60 remains; installed optimized21 is
+byte-identical. Engine provenance/source recipe and earlier evaluation sources/
+receipts stay preserved.
+
+Corrected native0.1.60 / one resource engine40417 under app40379: fresh Cmd+B
+opens route5:69. During the identical owned pause, Cmd+B shows progress and Left
+moves6:20 ->6:19. A trace witness records valid nonempty definition request29 reply
+for route5:69 at5.604832s, after the AX-confirmed change and before10s timeout;
+no definition cancellation RPC was sent. The editor stays at caller6:19 without
+late target or error; fresh Cmd+B then opens5:69. A second pause shows progress,
+Escape clears it without moving6:20, and valid request49 reply arrives at5.709874s.
+The editor remains at caller6:20; another fresh Cmd+B succeeds. Both helpers resume
+explicitly, not through watchdog recovery. The trace timestamp bounds the prior
+AX event from above while ps still shows the owned server stopped; the valid reply
+arrives afterward. Protocol locations use UTF16, including Unicode before target
+column68. Only the disposable synthetic project is traced; extracted witnesses
+retain URI/range/timing rather than source bodies.
+
+Current RoutesConsumer8:59 opens the standard2target chooser with source previews.
+Down/Enter selects /openstorm/b, opens routes/openstorm_refactor.php9:72 and proves
+fresh row activation still works after normal picker closure. The same engine and
+one initialization span all cases. Normal quit exits both. No-argument relaunch
+40958 restores the same project/all4clean tabs/refactor9:72; recovered caller6:20
+fresh Cmd+B opens5:69. Final quit exits app40958 and resource engine40968.
+Both12-file fixtures/Composer lock/autoload metadata stay byte-identical and all95
+non-vendor/non-Blade PHP files per copy lint with PHP8.4.23 -n. No environment files
+exist. Post-runtime strict/deep signature, executable/engine/source hashes, single
+latest archive and absent compiler output pass. Only final acceptance documents
+differ from the built source snapshot.
+
+Physical Dock-switch autosave, broader dependency/configuration/server-generation
+freshness, contributed-definition/web fallback native matrices and server-side
+cancellation/performance remain open. All69statuses stay67partial/2user-deferred.
+Evidence: slice62-navigation-{expanded-red,final}.log; slice62-early-escape-red.log;
+slice62-{focused,frontend,frontend-attempt1,frontend-attempt2,sdk-gates,
+workspace-totals,app-build,build-receipt,native-red,native-progress,app-readback}.json;
+slice62-fixed-{caret,escape}-{suspend,resume-proof,wire}.json; both fixture receipts;
+and artifacts/batches/0.1.60/{build-receipt,retention}.json. Final source/commit/remote/
+clean-worktree reconciliation is stored in the ignored delivery receipt.
+
 Source integration (2026-11-01, verified source checkpoint): integrates all 240 new
 commits from `l0ng-ai/openidea:main` at `041e7210` into
 `codex/openstorm-php-laravel`, based on pushed OpenStorm `82d1313a`.

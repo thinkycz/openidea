@@ -129,10 +129,12 @@ export function chooserTitle(kind: GotoKind, name: string | null, count: number,
 }
 
 /** Pin button of the targets chooser: the targets as a Find tool window tab (code-insight). */
-export function pinToFind(symbol: string, locations: readonly Location[]) {
+export function pinToFind(symbol: string, locations: readonly Location[], wanted: () => boolean = () => true) {
   return {
     label: "Open in Find Tool Window",
-    run: () => void executeAction("find.showUsageResults", { symbol, locations }),
+    run: () => {
+      if (wanted()) void executeAction("find.showUsageResults", { symbol, locations });
+    },
   };
 }
 
@@ -144,15 +146,71 @@ const editedAt = new WeakMap<EditorView, number>();
  * version meanwhile (kotlin-language-server: nothing for ~300 ms after typing).
  * An empty answer right after an edit is asked again a few times.
  */
-async function gotoAfterEdits(view: EditorView, request: () => Promise<DeclarationTarget[]>) {
-  for (let attempt = 0; ; attempt++) {
+async function gotoAfterEdits(view: EditorView, request: () => Promise<DeclarationTarget[]>, wanted: () => boolean) {
+  for (let attempt = 0; wanted(); attempt++) {
     const locs = await request();
-    if (locs.length || attempt >= 3 || performance.now() - (editedAt.get(view) ?? -Infinity) > 1500) return locs;
+    if (!wanted() || locs.length || attempt >= 3 || performance.now() - (editedAt.get(view) ?? -Infinity) > 1500)
+      return locs;
     await new Promise((r) => setTimeout(r, 250));
+  }
+  return [];
+}
+
+// Ownership survives the response so prepared chooser callbacks are checked too.
+const navigationRequests = new WeakMap<EditorView, object>();
+
+export async function gotoTargets(view: EditorView, kind: GotoKind, at?: number) {
+  const request = { dismiss: () => {} };
+  navigationRequests.set(view, request);
+  const { doc: source, selection } = view.state;
+  const context = docOf(view);
+  const project = useProject.getState().project;
+  const active = activeEditor()?.view ?? null;
+  const wanted = () => {
+    const current = docOf(view);
+    return (
+      view.dom.isConnected &&
+      navigationRequests.get(view) === request &&
+      view.state.doc === source &&
+      view.state.selection.eq(selection) &&
+      current?.doc === context?.doc &&
+      current?.path === context?.path &&
+      useProject.getState().project === project &&
+      !useProject.getState().opening &&
+      (activeEditor()?.view ?? null) === active
+    );
+  };
+  const escape = (event: KeyboardEvent) => {
+    if (event.key !== "Escape" || navigationRequests.get(view) !== request) return;
+    navigationRequests.delete(view);
+    request.dismiss();
+  };
+  view.dom.addEventListener("keydown", escape, true);
+  try {
+    await gotoTargetsIn(view, kind, at, wanted, request);
+  } finally {
+    view.dom.removeEventListener("keydown", escape, true);
+    request.dismiss = () => {};
   }
 }
 
-export async function gotoTargets(view: EditorView, kind: GotoKind, at?: number) {
+async function guardedLocationItems(locs: readonly DeclarationTarget[], wanted: () => boolean) {
+  return (await locationItems(locs)).map((item) => ({
+    ...item,
+    run: () => {
+      if (wanted()) return item.run();
+    },
+  }));
+}
+
+async function gotoTargetsIn(
+  view: EditorView,
+  kind: GotoKind,
+  at: number | undefined,
+  wanted: () => boolean,
+  feedback: { dismiss: () => void },
+) {
+  if (!wanted()) return;
   const offset = at ?? view.state.selection.main.head;
   if (kind === "definition" || kind === "declaration") {
     const own = contributedAt<ContributedDefinition>(view.state, CONTRIBUTED_DEFINITION, offset);
@@ -168,21 +226,30 @@ export async function gotoTargets(view: EditorView, kind: GotoKind, at?: number)
   let serverDown = false;
   try {
     const done = showPendingHint(view, tx`Finding navigation target…`);
+    feedback.dismiss = done;
     try {
-      locs = dedupeLocations(await gotoAfterEdits(view, () => lspRequest(() => commands.lspGoto(doc.doc, pos, kind))));
+      locs = dedupeLocations(
+        await gotoAfterEdits(view, () => lspRequest(() => commands.lspGoto(doc.doc, pos, kind), wanted), wanted),
+      );
     } finally {
       done();
     }
   } catch (e) {
+    if (!wanted()) return;
     if (isCancelled(e) || !declaration) {
       reportLspError(view, e, true);
       return;
     }
     // Web references and links need no server.
-    if ((await gotoWebReference(view, doc, pos, offset)) || (await followReferenceAt(view, doc, offset))) return;
+    if (
+      (await gotoWebReference(view, doc, pos, offset, wanted)) ||
+      (await followReferenceAt(view, doc, offset, wanted))
+    )
+      return;
     serverDown = isUnavailable(e);
     // Dumb mode: the server is not ready / failing — answer from the syntax tree.
-    const fb = await gotoFallback(view, doc, pos);
+    const fb = await gotoFallback(view, doc, pos, wanted);
+    if (!wanted()) return;
     if (!fb) {
       reportLspError(view, e, true);
       return;
@@ -190,20 +257,22 @@ export async function gotoTargets(view: EditorView, kind: GotoKind, at?: number)
     locs = fb;
     fromSyntax = true;
   }
+  if (!wanted()) return;
   if (!locs.length) {
     // The server has no definition here: a link (`href`, `#include`, Markdown) or a file path.
     if (
       declaration &&
       !fromSyntax &&
-      ((await gotoWebReference(view, doc, pos, offset)) || (await followReferenceAt(view, doc, offset)))
+      ((await gotoWebReference(view, doc, pos, offset, wanted)) || (await followReferenceAt(view, doc, offset, wanted)))
     )
       return;
+    if (!wanted()) return;
     showHint(view, serverDown ? `${NOT_FOUND[kind]}: no language server is running for this file` : NOT_FOUND[kind]);
     return;
   }
   // IDEA: ⌘B on a declaration shows its usages.
   if (kind === "definition" && isSelfTarget(locs, doc.path, pos)) {
-    if (!(await executeAction("find.showUsages"))) showHint(view, "No usages found");
+    if (!(await executeAction("find.showUsages")) && wanted()) showHint(view, "No usages found");
     return;
   }
   if (locs.length === 1) {
@@ -216,14 +285,16 @@ export async function gotoTargets(view: EditorView, kind: GotoKind, at?: number)
       }, 150);
     return;
   }
+  const items = await guardedLocationItems(locs, wanted);
+  if (!wanted()) return;
   const word = view.state.wordAt(offset);
   const name = word ? view.state.sliceDoc(word.from, word.to) : null;
   openPopup({
     kind: "list",
     anchor: caretAnchor(view, offset),
     title: chooserTitle(kind, name, locs.length, fromSyntax),
-    items: await locationItems(locs),
-    pin: pinToFind(name ?? "", locs),
+    items,
+    pin: pinToFind(name ?? "", locs, wanted),
   });
 }
 
@@ -236,48 +307,73 @@ const WEB_SIGIL: Record<WebReferenceKind, string> = { class: ".", id: "#", ancho
  * `var(--x)` to its declarations (no language server resolves these); false
  * when there is no such reference at `pos`.
  */
-async function gotoWebReference(view: EditorView, doc: EditorDocContext, pos: Pos, offset: number): Promise<boolean> {
+async function gotoWebReference(
+  view: EditorView,
+  doc: EditorDocContext,
+  pos: Pos,
+  offset: number,
+  wanted: () => boolean,
+): Promise<boolean> {
+  if (!wanted()) return true;
   if (!WEB_LANGUAGES.has(doc.language) || doc.virtual) return false;
   let found;
   try {
     await whenSynced(view);
-    found = await lspRequest(() => commands.webGoto(doc.doc, pos));
+    found = await lspRequest(() => commands.webGoto(doc.doc, pos), wanted);
   } catch (e) {
+    if (!wanted()) return true;
     console.debug("[web] goto", e);
     return false;
   }
+  if (!wanted()) return true;
   if (!found) return false;
   const { reference, targets } = found;
   const label = `${WEB_SIGIL[reference.kind]}${reference.name}`;
   if (!targets.length) showHint(view, `Cannot find declaration of '${label}'`);
   else if (targets.length === 1) await navigateTo(targets[0]!);
-  else
+  else {
+    const items = await guardedLocationItems(targets, wanted);
+    if (!wanted()) return true;
     openPopup({
       kind: "list",
       anchor: caretAnchor(view, offset),
       title: tx`Choose Declaration of '${label}' (${targets.length} found)`,
-      items: await locationItems(targets),
-      pin: pinToFind(label, targets),
+      items,
+      pin: pinToFind(label, targets, wanted),
     });
+  }
   return true;
 }
 
 /** Follows the link, URL or file path at `offset`; false when there is none. */
-async function followReferenceAt(view: EditorView, doc: EditorDocContext, offset: number): Promise<boolean> {
+async function followReferenceAt(
+  view: EditorView,
+  doc: EditorDocContext,
+  offset: number,
+  wanted: () => boolean,
+): Promise<boolean> {
+  if (!wanted()) return true;
   const ref = await referenceAt(view, doc, offset);
+  if (!wanted()) return true;
   if (!ref) return false;
   try {
     await followReference(ref);
   } catch (e) {
-    showHint(view, e instanceof Error ? e.message : String(e), { tone: "error" });
+    if (wanted()) showHint(view, e instanceof Error ? e.message : String(e), { tone: "error" });
   }
   return true;
 }
 
 /** Declaration targets from the structure service; null when it cannot answer for this file. */
-async function gotoFallback(view: EditorView, doc: EditorDocContext, pos: Pos): Promise<DeclarationTarget[] | null> {
+async function gotoFallback(
+  view: EditorView,
+  doc: EditorDocContext,
+  pos: Pos,
+  wanted: () => boolean = () => true,
+): Promise<DeclarationTarget[] | null> {
   try {
     await whenSynced(view);
+    if (!wanted()) return null;
     const text = view.state.doc;
     const fb = await declarationFallback(doc, text, pos);
     return fb.kind === "unsupported" ? null : fb.targets;

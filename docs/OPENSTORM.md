@@ -140,6 +140,58 @@ native controlled failures used request timeouts. Physical Dock-switch autosave
 and broader area/platform/service/performance requirements remain open. Whole-area
 statuses stay67partial/2user-deferred; this accepts the bounded recovery slice.
 
+Slice56 — browse another Laravel name without closing (2026-11-11, verified):
+Back now returns from route/view targets to a fresh name list in the same chooser.
+It is available for ready, empty, failed and still-loading target queries. It
+cancels the previous target request; late responses cannot replace the new list.
+Existing incomplete warnings persist. The dialog uses its established extra-button
+role and platform order; no settings or global keybindings change. Default Enter
+remains Show Targets/Open/Retry; Tab/Enter can activate Back explicitly.
+
+Three UI regressions fail before Back exists and pass after: fresh route names,
+return after failure, and pending view-target cancellation/late-result rejection.
+All12 chooser tests and all5,328 frontend tests pass, plus type checking, lint,
+Knip, formatting and asset build. The unfiltered Rust workspace passes1,738 tests/
+60ignored/0filtered in1,202.11s; Rust formatting and all-target Clippy with warnings
+denied (323.02s) pass. Bindings remain unchanged. Engine130 is unchanged. The
+signed arm64 development app0.1.56 builds in223.47s. Packaging keeps only this
+archive and removes its duplicate SDK bundle plus21,499 compiler files (18.6GiB).
+
+Native checks use a fresh pinned Laravel13.37 copy:88 non-Blade PHP files linted,
+Composer metadata verified, environment files excluded. The exact bundled engine
+runs under the disposable HOME with `--stdio --no-project-tools`; no framework
+boot runs. Native menu route browsing shows Back alongside Open/Cancel. From the
+nav.duplicate targets, Back returns to names without opening a file. Adding a
+syntactically checked external fixture route while targets are open, then Back,
+finds openstorm.back.fresh and its URI: the names are re-queried. Tab twice focuses
+Back; Enter returns to names. Pausing only the owned engine -> target Loading ->
+Back -> names Loading -> explicit resume returns names; the late target result
+does not replace them.
+
+Removing the owned openstorm-stock view while names are open yields no targets
+and disabled Open. Back returns to fresh names that exclude the removed file.
+Restoring its exact bytes and reopening finds it again. A second owned-engine
+pause produces a real30s view target timeout; Back clears the error, requests
+names and succeeds after explicit resume. Enter then shows the restored target,
+and a second Enter opens resources/views/openstorm-stock.blade.php1:1. Both
+pause helpers finish explicitly before their60s safety watchdogs.
+
+All12 originals match exact bytes, Composer metadata is unchanged and the extra
+route is removed. Native Quit exits app/server. No-argument relaunch restores2
+tabs and the selected Blade caret1:1; fresh admin.users.index lookup resolves
+routes/web.php28:16 and Back returns to names. Final Quit leaves no owned process.
+Post-runtime signature/executable/source hashes match the build receipt before
+this documentation closeout. Installed0.1.21's prior hash is unchanged, and no
+compiler output remains.
+
+Evidence: `artifacts/checks/slice56-laravel-back-{red,green}.log`,
+`slice56-{frontend,sdk-gates,workspace-totals,app-build,build-receipt,
+laravel-fixture,native-progress}.json`, `slice56-fixture-changes.jsonl`, both
+`slice56-*-suspend.json` receipts and `artifacts/batches/0.1.56/{build-receipt,
+retention}.json`. This accepts the bounded Back workflow. Physical Dock-switch
+autosave and wider69-area/platform/service/performance gates remain open;
+whole-area statuses stay67partial/2user-deferred.
+
 Source integration (2026-11-01, verified source checkpoint): integrates all 240 new
 commits from `l0ng-ai/openidea:main` at `041e7210` into
 `codex/openstorm-php-laravel`, based on pushed OpenStorm `82d1313a`.

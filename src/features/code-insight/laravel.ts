@@ -120,6 +120,16 @@ async function query(name: string | null) {
   }
 }
 
+/** Refresh names in this chooser, cancelling any target lookup still in flight. */
+export async function backLaravelNavigation() {
+  if (!context || useLaravelNavigation.getState().phase !== "locations") return;
+  if (useProject.getState().project !== context.project) {
+    closeLaravelNavigation();
+    return;
+  }
+  await query(null);
+}
+
 /** Explicitly retry the failed list/target query; never fall back to a different name. */
 export async function retryLaravelNavigation() {
   const state = useLaravelNavigation.getState();

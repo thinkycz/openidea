@@ -1,6 +1,12 @@
 import { useState } from "react";
 import { Dialog, Input, List, T, listNavigate } from "@/ui";
-import { closeLaravelNavigation, retryLaravelNavigation, selectLaravelItem, useLaravelNavigation } from "./laravel";
+import {
+  backLaravelNavigation,
+  closeLaravelNavigation,
+  retryLaravelNavigation,
+  selectLaravelItem,
+  useLaravelNavigation,
+} from "./laravel";
 import styles from "./LaravelNavigation.module.css";
 
 export function LaravelNavigation() {
@@ -32,6 +38,7 @@ function LaravelNavigationDialog() {
               disabled: loading || !visible[current],
               onClick: pick,
             },
+        ...(phase === "locations" ? [{ label: "Back", onClick: () => void backLaravelNavigation() }] : []),
         { label: "Cancel", role: "cancel" },
       ]}
     >

@@ -196,3 +196,61 @@ it("allows an explicit retry when indexing cancels the current lookup", async ()
   fireEvent.click(screen.getByRole("button", { name: "Retry" }));
   await waitFor(() => expect(screen.getByRole("option")).toHaveTextContent("invoices.show"));
 });
+
+it("returns from route targets to a fresh name list without opening a file", async () => {
+  await openLaravelNavigation("routes");
+  await selectLaravelItem(useLaravelNavigation.getState().items[0]!);
+  render(<LaravelNavigation />);
+  mock.routes.mockResolvedValueOnce({
+    status: "ok",
+    data: {
+      routes: [{ name: "invoice.index", uri: "invoices", parameters: [], fromVendor: false }],
+      locations: [],
+      incomplete: false,
+    },
+  });
+  fireEvent.click(screen.getByRole("button", { name: "Back" }));
+  await waitFor(() => expect(screen.getByRole("option")).toHaveTextContent("invoice.index"));
+  expect(mock.routes.mock.calls[2]).toEqual([expect.any(Number), 7, null, 2000]);
+  expect(useLaravelNavigation.getState().selectedName).toBeNull();
+  expect(screen.getByText(/Results are incomplete/)).toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "Back" })).not.toBeInTheDocument();
+  expect(mock.open).not.toHaveBeenCalled();
+});
+
+it("Back cancels a pending view target lookup and ignores its late result", async () => {
+  await openLaravelNavigation("views");
+  let resolve!: (value: unknown) => void;
+  mock.views.mockImplementationOnce(
+    () =>
+      new Promise((done) => {
+        resolve = done;
+      }),
+  );
+  const targetLookup = selectLaravelItem(useLaravelNavigation.getState().items[0]!);
+  render(<LaravelNavigation />);
+  mock.views.mockResolvedValueOnce({ status: "ok", data: { views: ["dashboard"], locations: [], incomplete: false } });
+  fireEvent.click(screen.getByRole("button", { name: "Back" }));
+  await waitFor(() => expect(screen.getByRole("option")).toHaveTextContent("dashboard"));
+  expect(mock.cancel).toHaveBeenCalledWith(mock.views.mock.calls[1]![0]);
+  await act(async () => {
+    resolve({ status: "ok", data: { views: [], locations: [loc(99)], incomplete: true } });
+    await targetLookup;
+  });
+  expect(useLaravelNavigation.getState().phase).toBe("names");
+  expect(useLaravelNavigation.getState().incomplete).toBe(false);
+  expect(screen.getByRole("option")).toHaveTextContent("dashboard");
+  expect(mock.open).not.toHaveBeenCalled();
+});
+
+it("returns to route names after selected-name lookup fails", async () => {
+  await openLaravelNavigation("routes");
+  mock.routes.mockResolvedValueOnce({ status: "error", error: { kind: "unavailable", message: "Server unavailable" } });
+  await selectLaravelItem(useLaravelNavigation.getState().items[0]!);
+  render(<LaravelNavigation />);
+  expect(screen.getByRole("button", { name: "Retry" })).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Back" }));
+  await waitFor(() => expect(screen.getByRole("option")).toHaveTextContent("invoice.show"));
+  expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Show Targets" })).toBeEnabled();
+});

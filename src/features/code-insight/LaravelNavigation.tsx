@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { Dialog, Input, List, T, listNavigate } from "@/ui";
-import { closeLaravelNavigation, selectLaravelItem, useLaravelNavigation } from "./laravel";
+import { closeLaravelNavigation, retryLaravelNavigation, selectLaravelItem, useLaravelNavigation } from "./laravel";
 import styles from "./LaravelNavigation.module.css";
 
 export function LaravelNavigation() {
@@ -24,12 +24,14 @@ function LaravelNavigationDialog() {
       width={640}
       onClose={closeLaravelNavigation}
       buttons={[
-        {
-          label: phase === "names" ? "Show Targets" : "Open",
-          role: "default",
-          disabled: loading || !visible[current],
-          onClick: pick,
-        },
+        error
+          ? { label: "Retry", role: "default", disabled: loading, onClick: () => void retryLaravelNavigation() }
+          : {
+              label: phase === "names" ? "Show Targets" : "Open",
+              role: "default",
+              disabled: loading || !visible[current],
+              onClick: pick,
+            },
         { label: "Cancel", role: "cancel" },
       ]}
     >

@@ -127,3 +127,72 @@ it("opens the clicked duplicate target while another row is active", async () =>
   fireEvent.click(screen.getAllByRole("option")[1]!);
   await waitFor(() => expect(mock.open).toHaveBeenCalledWith("/p/routes/web.php", 8, 0));
 });
+
+it("retries a failed route list without closing the chooser", async () => {
+  mock.routes.mockResolvedValueOnce({
+    status: "error",
+    error: { kind: "unavailable", message: "PHP server is restarting" },
+  });
+  await openLaravelNavigation("routes");
+  render(<LaravelNavigation />);
+  expect(screen.getByRole("alert")).toHaveTextContent("PHP server is restarting");
+  fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+  await waitFor(() => expect(screen.getByRole("option")).toHaveTextContent("invoice.show"));
+  expect(mock.routes).toHaveBeenCalledTimes(2);
+  expect(mock.routes.mock.calls[1]).toEqual([expect.any(Number), 7, null, 2000]);
+  expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+});
+
+it("retries the selected name after target lookup fails and preserves incomplete results", async () => {
+  await openLaravelNavigation("routes");
+  mock.routes.mockResolvedValueOnce({
+    status: "error",
+    error: { kind: "unavailable", message: "PHP server is restarting" },
+  });
+  await selectLaravelItem(useLaravelNavigation.getState().items[0]!);
+  render(<LaravelNavigation />);
+  fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+  await waitFor(() => expect(screen.getAllByRole("option")).toHaveLength(2));
+  expect(mock.routes.mock.calls[2]).toEqual([expect.any(Number), 7, "invoice.show", 2000]);
+  expect(screen.getByText(/Results are incomplete/)).toBeInTheDocument();
+  fireEvent.click(screen.getAllByRole("option")[1]!);
+  await waitFor(() => expect(mock.open).toHaveBeenCalledWith("/p/routes/web.php", 8, 0));
+});
+
+it("cancels a pending view retry on project replacement and ignores its late response", async () => {
+  mock.views.mockResolvedValueOnce({
+    status: "error",
+    error: { kind: "unavailable", message: "PHP server is restarting" },
+  });
+  await openLaravelNavigation("views");
+  let resolve!: (value: unknown) => void;
+  mock.views.mockImplementationOnce(
+    () =>
+      new Promise((done) => {
+        resolve = done;
+      }),
+  );
+  render(<LaravelNavigation />);
+  fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+  expect(mock.views).toHaveBeenCalledTimes(2);
+  expect(screen.getByRole("button", { name: "Show Targets" })).toBeDisabled();
+  act(() => useProject.setState({ project: null }));
+  expect(mock.cancel).toHaveBeenCalledOnce();
+  await act(async () => resolve({ status: "ok", data: { views: ["stale"], locations: [], incomplete: false } }));
+  expect(useLaravelNavigation.getState().kind).toBeNull();
+  expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  expect(mock.open).not.toHaveBeenCalled();
+});
+
+it("allows an explicit retry when indexing cancels the current lookup", async () => {
+  mock.views.mockResolvedValueOnce({
+    status: "error",
+    error: { kind: "cancelled", message: "Request cancelled" },
+  });
+  await openLaravelNavigation("views");
+  expect(useLaravelNavigation.getState().loading).toBe(false);
+  render(<LaravelNavigation />);
+  expect(screen.getByRole("alert")).toHaveTextContent("Cancelled");
+  fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+  await waitFor(() => expect(screen.getByRole("option")).toHaveTextContent("invoices.show"));
+});

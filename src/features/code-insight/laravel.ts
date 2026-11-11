@@ -70,7 +70,13 @@ async function query(name: string | null) {
   if (pending !== null) void commands.cancelRequest(pending).catch(() => {});
   const request = nextRequestId();
   pending = request;
-  useLaravelNavigation.setState({ loading: true, error: null });
+  useLaravelNavigation.setState({
+    loading: true,
+    error: null,
+    items: [],
+    phase: name === null ? "names" : "locations",
+    selectedName: name,
+  });
   try {
     const result = await lspRequest<LaravelRoutes | LaravelViews>(() =>
       kind === "routes"
@@ -104,11 +110,25 @@ async function query(name: string | null) {
       loading: false,
     });
   } catch (error) {
-    if (run !== generation || isCancelled(error)) return;
-    useLaravelNavigation.setState({ loading: false, error: error instanceof Error ? error.message : String(error) });
+    if (run !== generation) return;
+    useLaravelNavigation.setState({
+      loading: false,
+      error: isCancelled(error) ? tx("Cancelled") : error instanceof Error ? error.message : String(error),
+    });
   } finally {
     if (pending === request) pending = null;
   }
+}
+
+/** Explicitly retry the failed list/target query; never fall back to a different name. */
+export async function retryLaravelNavigation() {
+  const state = useLaravelNavigation.getState();
+  if (!context || !state.kind || !state.error || state.loading) return;
+  if (useProject.getState().project !== context.project) {
+    closeLaravelNavigation();
+    return;
+  }
+  await query(state.selectedName);
 }
 
 export async function selectLaravelItem(item: LaravelNavigationItem) {

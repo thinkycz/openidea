@@ -93,6 +93,53 @@ service and performance cases remain open. Whole-area statuses stay67partial/
 2user-deferred. Laravel navigation continues in a separate bounded slice after
 this slice's commit/push; no whole-area acceptance is inferred from this smoke.
 
+Slice55 — recover Laravel navigation queries (2026-11-11, verified): failed
+route/view list and target lookups now offer an explicit Retry default action.
+Query start records the selected logical name/phase and clears previous selectable
+rows; retry preserves that name and the incomplete-result warning. A current
+indexing cancellation now shows Cancelled/Retry instead of leaving Loading stuck.
+Closed/superseded queries remain discarded, and project replacement cancels a
+pending retry. No automatic polling, project execution or new settings were added.
+
+The two missing-Retry UI tests fail first, then pass. A separate cancellation
+regression fails with Loading stuck, then passes. All9 chooser tests and all5,325
+frontend tests pass, plus type checking, lint, Knip, formatting and asset build.
+The unfiltered Rust workspace passes1,738 tests/60ignored/0filtered in1,225.75s;
+Rust formatting and all-target Clippy with warnings denied (313.67s) pass.
+Bindings remain unchanged. Engine130 is unchanged. The signed arm64 development
+app0.1.55 builds in211.35s; only this archived app remains. Packaging removes
+the duplicate SDK bundle and21,499 compiler files (18.6GiB).
+
+Native acceptance uses the pinned Laravel13.37 fixture: source/autoload metadata
+verified,88 non-Blade PHP files linted, environment files excluded, application
+never booted. The exact packaged engine runs with `--stdio --no-project-tools`
+under a disposable HOME/worktree-specific identity. Controlled SIGSTOP pauses of
+only this owned engine produce real30s request timeout errors; Retry succeeds
+without closing the chooser for all4 paths: route list, named-route targets,
+view list and named-view target. Enter activates the Retry default. The selected
+nav.duplicate survives failure, exposes both targets, and clicking the second
+opens routes/openstorm_navigation_duplicate.php4:80. The selected openstorm-stock
+survives failure and opens resources/views/openstorm-stock.blade.php1:1.
+
+A fifth real timeout followed by Retry -> Loading -> Cancel closes the pending
+query. After engine recovery, a fresh route chooser succeeds without a late error.
+Every pause helper finishes:3 explicit resumes and2 automatic60s safety resumes;
+the latter happened before the later explicit resume calls. Normal Quit exits
+app/server. No-argument relaunch restores3 tabs, the selected caller and caret1:1;
+fresh route lookup succeeds. Final Quit leaves no owned processes. All12 owned
+fixture originals and Composer metadata remain exact. Post-runtime signature and
+executable/source hashes match the build receipt before documentation closeout;
+installed0.1.21's previous executable hash is unchanged. No compiler output remains.
+
+Evidence: `artifacts/checks/slice55-laravel-{retry,cancellation}-{red,green}.log`,
+`slice55-{frontend,sdk-gates,workspace-totals,app-build,build-receipt,
+laravel-fixture,native-progress}.json`, per-case `slice55-*-suspend.json`, and
+`artifacts/batches/0.1.55/{build-receipt,retention}.json`. Current-indexing
+cancellation and project replacement during Retry have source regressions;
+native controlled failures used request timeouts. Physical Dock-switch autosave
+and broader area/platform/service/performance requirements remain open. Whole-area
+statuses stay67partial/2user-deferred; this accepts the bounded recovery slice.
+
 Source integration (2026-11-01, verified source checkpoint): integrates all 240 new
 commits from `l0ng-ai/openidea:main` at `041e7210` into
 `codex/openstorm-php-laravel`, based on pushed OpenStorm `82d1313a`.

@@ -3,6 +3,48 @@
 Base: thinkycz/openidea 50212e73972d6f05bf16050cb0ba10102a6c8054 (0.1.21).
 Branch: codex/openstorm-php-laravel. Target: macOS Apple Silicon, local delivery.
 
+Resumed delivery cadence (2026-11-11): finish one independently verifiable slice,
+update this record, commit, push, verify the remote ref and clean worktree, then
+start the next slice. Reuse unchanged acceptance evidence; retain every unrun
+native/platform case and whole-area status. Do not combine unrelated feature
+work into a large unpushed batch.
+
+Build retention slice (2026-11-11, verified local cleanup): user now requires
+small committed/pushed slices and only the latest generated build. Run
+`python3 scripts/prune-openstorm-builds.py` to review, then add `--apply` after
+each successful package. It retains the numerically newest version in
+`artifacts/batches`, checks every bundle identity/version before deleting any,
+refuses symlinked archive paths, and removes only obsolete `.app` directories.
+Receipts beside bundles remain. Four Python regressions cover numeric ordering,
+actual deletion with receipt/latest preservation, foreign identities, symlinks,
+and empty inventories. These pass; a second dry run reports no obsolete bundles.
+
+Local cleanup removed 31 older archived apps (0.1.22–0.1.52), leaving
+0.1.53. Also removed two duplicate 0.1.22 candidates, the pre-conflict app copy,
+superseded archived engine executables, and the disposable PHPantom compiler
+cache (6,240,402,992 logical bytes in those additional paths). Sources, patches,
+licenses, provenance, regression receipts, fixtures, engine130 and the original
+released114 evaluation baseline remain. Installed OpenStorm was untouched.
+Evidence: `artifacts/checks/build-retention-{dry-run,applied,extra}.json`.
+No native feature acceptance is claimed by cleanup.
+
+Native slice54 remains pending: frontend gates passed; the prior workspace run
+exited101 after its external Cargo target directory disappeared during linking.
+The old external Rust toolchain and temporary launcher environment are now also
+absent. This is an infrastructure failure, not a passing Rust/native check.
+Restore a repository-local toolchain/build location before rerunning; do not
+reuse the interrupted receipt as acceptance.
+
+Slice54 — merged-source native package (in progress): version0.1.54 with unchanged
+PHPantom130. Scope: build and locally sign an Apple Silicon development bundle;
+use a new disposable profile and plain PHP/Composer fixture to check startup,
+read-only builtin navigation, project/session reopening, and normal app/server
+quit. Keep only the latest generated bundle; preserve the installed app and receipts. Exit evidence must name
+the source/build, runtime identifier/profile, persisted fixture state, signature,
+and owned process cleanup. Physical Dock-switch autosave and wider native
+acceptance remain separate open cases until directly observed. Commit/push only
+after this slice's recorded checks finish; Laravel work follows in another slice.
+
 Source integration (2026-11-01, verified source checkpoint): integrates all 240 new
 commits from `l0ng-ai/openidea:main` at `041e7210` into
 `codex/openstorm-php-laravel`, based on pushed OpenStorm `82d1313a`.

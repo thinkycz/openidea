@@ -55,8 +55,10 @@ export function virtualContainer(uri: string): string {
 
 const cache = new Map<string, Promise<VirtualDocument>>();
 
-/** Contents of a virtual document (cached; failures are retried on the next call). */
+/** Contents of a virtual document; PHP builtins revalidate, other library sources cache. */
 export function virtualDocument(uri: string): Promise<VirtualDocument> {
+  // PHP profiles can change without changing the engine's builtin URI.
+  if (/^phpantom-stub(?:-fn)?:/.test(uri)) return call(commands.lspVirtualDocument(uri));
   let p = cache.get(uri);
   if (!p) {
     p = call(commands.lspVirtualDocument(uri));

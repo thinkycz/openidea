@@ -1,6 +1,12 @@
-import { describe, expect, it } from "vitest";
-import { isVirtualUri, virtualContainer, virtualName, virtualParent } from "./virtualDocs";
+import { describe, expect, it, vi } from "vitest";
+import { virtualDocument, isVirtualUri, virtualContainer, virtualName, virtualParent } from "./virtualDocs";
 import { basename, dirname, relativeDir, relativePath } from "./project";
+
+const requestVirtual = vi.hoisted(() => vi.fn());
+vi.mock("./ipc", async (original) => {
+  const actual = await original<typeof import("./ipc")>();
+  return { ...actual, commands: { ...actual.commands, lspVirtualDocument: requestVirtual } };
+});
 
 const JDT =
   "jdt://contents/spring-boot-4.1.1.jar/org.springframework.boot/SpringApplication.class?=demo/%5C/m2%5C/spring-boot-4.1.1.jar%3Corg.springframework.boot%28SpringApplication.class";
@@ -28,4 +34,28 @@ describe("virtual document URIs", () => {
     expect(relativeDir("/p", JDT)).toBe("spring-boot-4.1.1.jar › org.springframework.boot");
     expect(relativePath("/p", "/p/src/A.java")).toBe("src/A.java");
   });
+});
+
+it("re-fetches PHP builtins so a changed target is not hidden by the frontend cache", async () => {
+  const uri = "phpantom-stub://DateTime?project_context=57";
+  const doc = { uri, title: "DateTime.php", text: "<?php class DateTime {}", languageId: "php", decompiled: false };
+  requestVirtual.mockResolvedValueOnce({ status: "ok", data: { ...doc, description: "PHP 8.2" } });
+  requestVirtual.mockResolvedValueOnce({ status: "ok", data: { ...doc, description: "PHP 8.3" } });
+  expect((await virtualDocument(uri)).description).toBe("PHP 8.2");
+  expect((await virtualDocument(uri)).description).toBe("PHP 8.3");
+});
+
+it("keeps caching immutable library documents", async () => {
+  requestVirtual.mockClear();
+  const doc = {
+    uri: "jdt://contents/immutable-test.jar/C.class",
+    title: "C.java",
+    text: "class C {}",
+    languageId: "java",
+    decompiled: true,
+  };
+  requestVirtual.mockResolvedValue({ status: "ok", data: doc });
+  expect(await virtualDocument(doc.uri)).toEqual(doc);
+  expect(await virtualDocument(doc.uri)).toEqual(doc);
+  expect(requestVirtual).toHaveBeenCalledOnce();
 });

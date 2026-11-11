@@ -84,9 +84,15 @@ pub async fn lsp_implementations(
 }
 
 /// Contents of a read-only language-server document, including JDT library
-/// classes and disk class files. Cached per project.
+/// classes and disk class files. PHP builtins revalidate on each open.
 pub async fn lsp_virtual_document(host: &Host, window: &str, uri: String) -> IdeResult<VirtualDocument> {
-    host.project(window)?.lsp.virtual_document(&uri).await
+    let project = host.project(window)?;
+    let vd = project.lsp.virtual_document(&uri).await?;
+    if uri.starts_with("phpantom-stub:") || uri.starts_with("phpantom-stub-fn:") {
+        let text = vd.text.clone();
+        super::doc::blocking(move || project.documents.refresh_virtual(&uri, &text)).await?;
+    }
+    Ok(vd)
 }
 
 /// Opens compiled classes through JDT, with project source taking priority on disk.

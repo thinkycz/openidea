@@ -2293,9 +2293,13 @@ impl LspManager {
 
     /// Contents of a virtual document, from the server that owns `uri`:
     /// `workspace/textDocumentContent` (LSP 3.18) when the server serves the
-    /// scheme, jdtls' `java/classFileContents` for `jdt:` URIs. Cached.
+    /// scheme, jdtls' `java/classFileContents` for `jdt:` URIs. PHP builtins revalidate.
     pub async fn virtual_document(&self, uri: &str) -> IdeResult<VirtualDocument> {
-        if let Some(d) = self.virtual_docs.lock().get(uri) {
+        // PHP builtin identities survive profile changes and process restarts.
+        // Keep their latest snapshot for position conversion, but revalidate on open.
+        if !virtual_doc::is_php_builtin(uri)
+            && let Some(d) = self.virtual_docs.lock().get(uri)
+        {
             return Ok(d.clone());
         }
         let scheme = virtual_doc::scheme(uri).to_owned();
@@ -2311,6 +2315,16 @@ impl LspManager {
             let php_builtin = virtual_doc::is_php_builtin(uri)
                 && languages.iter().any(|l| l.as_str() == "php")
                 && t.caps().raw.pointer("/experimental/phpWorkbenchBuiltins").and_then(Value::as_bool) == Some(true);
+            let php_target = if php_builtin
+                && t.caps().raw.pointer("/experimental/phpWorkbenchActiveTarget").and_then(Value::as_bool) == Some(true)
+            {
+                Some(
+                    self.call::<_, Value>(t, "phpWorkbench/activeTarget", json!({ "uri": uri }), None, LONG_TIMEOUT)
+                        .await?,
+                )
+            } else {
+                None
+            };
             let result: IdeResult<Option<String>> = if serves_scheme && !class_file {
                 self.call::<_, Option<Value>>(
                     t,
@@ -2353,11 +2367,27 @@ impl LspManager {
                 detected
             };
             let description = if php_builtin {
-                let target = self
-                    .call::<_, Value>(t, "phpWorkbench/activeTarget", json!({ "uri": uri }), None, LONG_TIMEOUT)
-                    .await
-                    .ok();
-                Some(virtual_doc::php_description(target.as_ref()))
+                let after = if php_target.is_some() {
+                    Some(
+                        self.call::<_, Value>(
+                            t,
+                            "phpWorkbench/activeTarget",
+                            json!({ "uri": uri }),
+                            None,
+                            LONG_TIMEOUT,
+                        )
+                        .await?,
+                    )
+                } else {
+                    None
+                };
+                if after != php_target || t.server.running_gen(t.run.generation).is_none() {
+                    return Err(IdeError::new(
+                        ErrorKind::OutOfSync,
+                        "PHP target changed while loading the builtin document; reopen it",
+                    ));
+                }
+                Some(virtual_doc::php_description(php_target.as_ref()))
             } else {
                 virtual_doc::description(uri)
             };

@@ -2807,7 +2807,8 @@ async fn phpantom_builtins_keep_identity_and_target_context() {
     assert_eq!(vd.description.as_deref(), Some("PHP 8.3 built-in declarations (PHPantom)"));
     assert_eq!(s.requested("phpWorkbench/activeTarget")[0], json!({"uri": uri}));
     assert_eq!(h.mgr.virtual_document(uri).await.unwrap(), vd);
-    assert_eq!(s.requested("phpWorkbench/builtin").len(), 2);
+    // PHP target configuration can change while the URI stays identical.
+    assert_eq!(s.requested("phpWorkbench/builtin").len(), 3);
     let vdoc = DocId::next();
     h.mgr.did_open_virtual(vdoc, uri, &vd.language_id, 0, &vd.text);
     eventually(|| s.docs.lock().contains_key(uri)).await;
@@ -3429,4 +3430,32 @@ async fn checked_php_rename_honors_upstream_request_cancellation_without_retryin
     assert_eq!(result.unwrap_err().kind, ide_core::error::ErrorKind::Cancelled);
     assert_eq!(s.requested("phpWorkbench/renameChecked").len(), 1);
     assert!(s.requested("textDocument/rename").is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn php_builtin_target_race_refuses_mixed_document() {
+    let mut caps = incremental_caps();
+    caps["experimental"] = json!({"phpWorkbenchBuiltins": true, "phpWorkbenchActiveTarget": true});
+    let h = harness_for("php", "php", &[("phpantom", caps)], &[]);
+    h.open("main.php", "<?php new DateTime();\n");
+    h.wait_status("phpantom", ServerStatus::Ready).await;
+    let s = h.launcher.state("phpantom");
+    let uri = "phpantom-stub://DateTime";
+    let reads = Arc::new(AtomicUsize::new(0));
+    let count = reads.clone();
+    *s.responder.lock() = Some(Arc::new(move |_, method, _| match method {
+        "phpWorkbench/activeTarget" => {
+            Some(json!({"php_version": if count.fetch_add(1, Ordering::SeqCst) == 0 { "8.2" } else { "8.3" }}))
+        }
+        "phpWorkbench/builtin" => Some(json!({"uri": uri, "content": "<?php // target8.2\nclass DateTime {}"})),
+        _ => None,
+    }));
+    let error = h.mgr.virtual_document(uri).await.unwrap_err();
+    assert_eq!(error.kind, ide_core::error::ErrorKind::OutOfSync);
+    *s.responder.lock() = None;
+    s.respond("phpWorkbench/activeTarget", json!({"php_version": "8.3"}));
+    s.respond("phpWorkbench/builtin", json!({"uri": uri, "content": "<?php // target8.3\nclass DateTime {}"}));
+    let current = h.mgr.virtual_document(uri).await.unwrap();
+    assert!(current.description.unwrap().contains("8.3"));
+    assert!(current.text.contains("target8.3"));
 }

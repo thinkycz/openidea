@@ -425,6 +425,9 @@ impl Documents {
     /// never touches the disk and cannot be edited or saved.
     pub fn open_virtual(&self, uri: &str, language: LanguageId, text: &str) -> IdeResult<DocumentInfo> {
         let key = PathBuf::from(uri);
+        if uri.starts_with("phpantom-stub:") || uri.starts_with("phpantom-stub-fn:") {
+            self.refresh_virtual(uri, text)?;
+        }
         if let Some(info) = self.reopen(&key) {
             return Ok(info);
         }
@@ -468,6 +471,42 @@ impl Documents {
             o.opened(&info);
         }
         Ok(info)
+    }
+
+    /// Refresh server-derived readonly contents without edits, saves or extra references.
+    pub fn refresh_virtual(&self, uri: &str, text: &str) -> IdeResult<()> {
+        let existing = {
+            let reg = self.registry.lock();
+            Self::lookup(&reg, Path::new(uri)).and_then(|id| reg.docs.get(&id).map(|entry| (id, entry.slot.clone())))
+        };
+        let Some((id, slot)) = existing else { return Ok(()) };
+        let mut st = slot.lock();
+        if st.closed {
+            return Ok(());
+        }
+        if st.uri.as_deref() != Some(uri) || !st.read_only || st.dirty {
+            return Err(IdeError::invalid("Only a clean readonly virtual document can be refreshed"));
+        }
+        let set = st.doc.diff(text);
+        if set.changes.is_empty() {
+            return Ok(());
+        }
+        let base_version = st.doc.version();
+        st.doc.apply_detailed(base_version, &set)?;
+        // A new server snapshot is a close/open, never a user didChange on a stub.
+        let info = Self::info(id, &st);
+        for observer in self.observers() {
+            observer.closed(id, &st.path);
+            observer.opened(&info);
+        }
+        self.sink.emit(IdeEvent::DocPatched {
+            doc: id,
+            base_version,
+            version: st.doc.version(),
+            changes: set.changes,
+            history: None,
+        });
+        Ok(())
     }
 
     fn reopen(&self, path: &Path) -> Option<DocumentInfo> {

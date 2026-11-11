@@ -192,6 +192,69 @@ retention}.json`. This accepts the bounded Back workflow. Physical Dock-switch
 autosave and wider69-area/platform/service/performance gates remain open;
 whole-area statuses stay67partial/2user-deferred.
 
+Slice57 — PHP builtin freshness (2026-11-11, verified): fixes stale builtin
+contents/context after a PHP target change and server restart. The real-client red
+case independently witnesses a newly applied PHP8.3 target with an uncached class,
+while reopening the original builtin URI still returns8.2. Frontend URI caching
+and readonly document reuse independently reproduce stale data too.
+
+PHP builtin opens now fetch fresh contents/context, check advertised target support
+and refuse a changed target or server generation during loading. Other immutable
+library caching remains intact. The host refreshes already-open, clean readonly
+buffers through the existing document-patch channel before returning new metadata.
+Refresh adds no references, dirty state, user edit or disk write. Observers receive
+close/open snapshots rather than user didChange notifications. No settings,
+shortcuts, appearance, save-conflict or debugger behavior changes.
+
+The three original regressions fail before the fixes and pass afterwards; the
+mixed-target regression refuses a raced result and permits the next stable one.
+The actual pinned-engine client restart test passes, and the actual-host case
+passes in6.83s with fresh PHP8.3 metadata and full replacement text in the existing
+readonly/clean document. All5,330 frontend tests/type checking/lint/Knip/formatting/
+build pass. The sequential unfiltered Rust workspace passes1,740 tests/62ignored/
+0filtered, including doctests, in350.58s; Rust formatting, post-bindings frontend
+type checking and all-target workspace Clippy with warnings denied (314.99s) pass.
+The first workspace attempt passed regular tests but failed an ide-http doctest
+with a missing rustls artifact while a separate host build reused its target.
+Its failed receipt is retained separately; the successful rerun is sequential.
+
+Signed arm64 development app0.1.57 builds in208.70s with unchanged PHPantom130.
+The sole generated archive is `artifacts/batches/0.1.57/OpenStorm.app`; packaging
+prunes0.1.56, removes the duplicate SDK bundle and cleans27,493 compiler files
+(23.3GiB reported by Cargo). Installed0.1.21's preceding executable hash remains
+unchanged. No app installation, publishing or notarization occurs.
+
+Native checks use a disposable HOME, restricted PATH and syntactically checked
+plain-PHP/Composer fixture; no environment files or project tools run. Existing
+Go to File and Cmd+L/Cmd+B open DateTime with a PHP8.2 readonly banner. External
+fixture Composer platform8.3 plus the existing server Restart action replaces
+PID12263 with12272. Navigating from the same main.php caret2:8 reuses the exact
+`phpantom-stub://DateTime?project_context=1` URI and existing tab, now labelled
+PHP8.3. Focused typing x and Save All leave the observed2,048 stub characters
+unchanged and the view clean; main.php's original disk bytes are unchanged.
+
+Normal native Quit stops app/server. A no-argument launch restores main.php at2:8;
+explicit Cmd+B opens readable readonly PHP8.3 declarations again. The builtin tab
+itself is not restored, retaining the existing recovery limitation. Final native
+Quit stops app/server again. Both fixture originals are restored byte-for-byte.
+Post-runtime deep/strict signature, executable and engine checksums pass; every
+build source hash matches before this documentation-only closeout. Only the latest
+archive remains, and compiler output is absent.
+
+A separate live Composer8.3->8.4 notification experiment fails: the running engine
+keeps reporting8.3 until restart. Preserve this for the next engine slice rather
+than claiming live target reconfiguration works. Engine130 is unchanged. Wider
+version/extension/framework gates, physical Dock-switch autosave and broader
+platform/service/performance acceptance remain open. Whole-area statuses remain
+67partial/2user-deferred.
+
+Evidence: `artifacts/checks/slice57-{focused,host-builtin,frontend,sdk-gates,
+workspace-totals,app-build,build-receipt,native-progress,target-fixture}.json`,
+matching red/green logs, `slice57-sdk-first-artifact-failed.json`,
+`slice57-target-live-failed.log`, `slice57-fixture-changes.jsonl` and
+`artifacts/batches/0.1.57/{build-receipt,retention}.json`. Final commit/remote
+read-back and source reconciliation are recorded in the ignored delivery receipt.
+
 Source integration (2026-11-01, verified source checkpoint): integrates all 240 new
 commits from `l0ng-ai/openidea:main` at `041e7210` into
 `codex/openstorm-php-laravel`, based on pushed OpenStorm `82d1313a`.

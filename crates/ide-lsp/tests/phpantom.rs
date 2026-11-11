@@ -2426,3 +2426,49 @@ async fn laravel_component_binding_correlation_ignores_frontend_bindings_and_bla
     }
     assert!(outcome.is_ok(), "{}", outcome.unwrap_err());
 }
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires the pinned macOS Apple Silicon PHPantom executable"]
+async fn php_builtin_target_refreshes_after_composer_change_and_restart() {
+    let bin = std::env::var_os("OPENSTORM_TEST_PHPANTOM_BIN").map(PathBuf::from).unwrap_or_else(|| {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../src-tauri/resources/phpantom/phpantom_lsp")
+    });
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().canonicalize().unwrap();
+    let composer = root.join("composer.json");
+    std::fs::write(&composer, r#"{"require":{"php":"^8.2"}}"#).unwrap();
+    let source = "<?php\nnew \\DateTime();\nnew \\DateTimeImmutable();\n";
+    let path = root.join("main.php");
+    std::fs::write(&path, source).unwrap();
+    let mut php = LanguageRegistry::load(None).unwrap().get(&LanguageId::new("php")).unwrap();
+    php.language_servers.retain(|s| s.name == "phpantom");
+    php.language_servers[0].command = bin.to_string_lossy().into_owned();
+    let mgr =
+        LspManager::new(root.clone(), Arc::new(LanguageRegistry::from_configs(vec![php])), Arc::new(|_: IdeEvent| {}));
+    let doc = DocId::next();
+    mgr.did_open(doc, &path, &LanguageId::new("php"), 1, source);
+    for _ in 0..120 {
+        if mgr.servers().iter().any(|s| matches!(s.status, ServerStatus::Ready | ServerStatus::Busy)) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    let locations = mgr.goto(doc, pos(source, "DateTime()"), GotoKind::Definition).await.unwrap();
+    let uri = locations.iter().find_map(|l| l.uri.clone()).expect("DateTime builtin URI");
+    let before = mgr.virtual_document(&uri).await.unwrap();
+    assert!(before.description.as_deref().unwrap().contains("8.2"), "{:?}", before.description);
+    std::fs::write(&composer, r#"{"require":{"php":"^8.2"},"config":{"platform":{"php":"8.3.0"}}}"#).unwrap();
+    let server = mgr.servers()[0].id;
+    mgr.restart(server).await.unwrap();
+    // An uncached class independently witnesses that the new engine applied 8.3.
+    let fresh = mgr.goto(doc, pos(source, "DateTimeImmutable()"), GotoKind::Definition).await.unwrap();
+    let fresh_uri = fresh.iter().find_map(|l| l.uri.as_ref()).unwrap();
+    let applied = mgr.virtual_document(fresh_uri).await.unwrap();
+    assert!(applied.description.as_deref().unwrap().contains("8.3"), "{:?}", applied.description);
+    let definitions = mgr.goto(doc, pos(source, "DateTime()"), GotoKind::Definition).await.unwrap();
+    let current_uri = definitions.iter().find_map(|l| l.uri.as_ref()).unwrap();
+    assert_eq!(current_uri, &uri, "exercise a reused builtin identity");
+    let after = mgr.virtual_document(current_uri).await.unwrap();
+    assert!(after.description.as_deref().unwrap().contains("8.3"), "stale builtin target: {:?}", after.description);
+    mgr.shutdown_all().await;
+}

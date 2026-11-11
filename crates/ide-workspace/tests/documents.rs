@@ -1132,3 +1132,23 @@ fn properties_preserve_escape_spelling_only_after_revision_bound_confirmation() 
     assert_eq!(fs::read_to_string(&path).unwrap(), r"value=\u4f60!");
     assert!(!f.docs.snapshot(doc.id).unwrap().dirty);
 }
+
+#[test]
+fn reopening_php_builtin_refreshes_readonly_content_without_user_edits() {
+    let f = fixture();
+    let uri = "phpantom-stub://DateTime?project_context=1";
+    let first = f.docs.open_virtual(uri, LanguageId::new("php"), "<?php // target8.2\nclass DateTime {}\n").unwrap();
+    let next = f.docs.open_virtual(uri, LanguageId::new("php"), "<?php // target8.3\nclass DateTime {}\n").unwrap();
+    assert_eq!(next.id, first.id);
+    assert_eq!(next.text, "<?php // target8.3\nclass DateTime {}\n");
+    assert_eq!(next.version, first.version + 1);
+    assert!(next.read_only && !next.dirty);
+    assert_eq!(f.docs.edit(next.id, next.version, change(0, 0, "x")).unwrap_err().kind, ErrorKind::PermissionDenied);
+    assert!(
+        f.events
+            .lock()
+            .iter()
+            .any(|e| matches!(e, IdeEvent::DocPatched { doc, base_version: 0, version: 1, .. } if *doc == next.id))
+    );
+    assert!(!f.events.lock().iter().any(|e| matches!(e, IdeEvent::DocDirty { dirty: true, .. })));
+}

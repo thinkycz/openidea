@@ -463,3 +463,51 @@ async fn grouped_route_checked_rename_keeps_php_blade_callers_and_group_prefix()
     }
     assert!(outcome.is_ok(), "{}", outcome.unwrap_err());
 }
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires the pinned macOS Apple Silicon PHPantom executable"]
+async fn builtin_reopen_refreshes_existing_host_document_after_target_restart() {
+    let bin = std::env::var_os("OPENSTORM_TEST_PHPANTOM_BIN").map(PathBuf::from).unwrap_or_else(|| {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../src-tauri/resources/phpantom/phpantom_lsp")
+    });
+    let tmp = tempfile::tempdir().unwrap();
+    let root = dunce::canonicalize(tmp.path()).unwrap();
+    let composer = root.join("composer.json");
+    std::fs::write(&composer, r#"{"require":{"php":"^8.2"}}"#).unwrap();
+    let main = root.join("main.php");
+    std::fs::write(&main, "<?php\nnew \\DateTime();\n").unwrap();
+    let host = Host::new(HostConfig {
+        project_environment: false,
+        config_dir: tmp.path().join("config"),
+        data_dir: tmp.path().join("data"),
+        languages: Arc::new(ide_language::LanguageRegistry::load(None).unwrap()),
+        syntax: Arc::default(),
+        sink_for: Box::new(|_| Arc::new(|_| {})),
+        owner: |w| w,
+        runtime: tokio::runtime::Handle::current(),
+    });
+    host.trust.decide(&root, true, false).unwrap();
+    let project = host.open_project("main", &root).unwrap();
+    project.lsp.set_config_hook(Box::new(move |cfg, _| {
+        if cfg.name == "phpantom" {
+            cfg.command = bin.to_string_lossy().into_owned();
+        }
+    }));
+    let doc = project.documents.open(&main).unwrap();
+    let definitions = project.lsp.goto(doc.id, Pos::new(1, 7), ide_lsp::types::GotoKind::Definition).await.unwrap();
+    let uri = definitions.iter().find_map(|d| d.uri.clone()).unwrap();
+    let before = ide_host::ops::lsp::lsp_virtual_document(&host, "main", uri.clone()).await.unwrap();
+    assert!(before.description.as_deref().unwrap().contains("8.2"));
+    // Seed an older server-derived snapshot to exercise replacement of its text too.
+    let opened = project.documents.open_virtual(&uri, LanguageId::new("php"), "<?php // old stub snapshot\n").unwrap();
+    std::fs::write(&composer, r#"{"require":{"php":"^8.2"},"config":{"platform":{"php":"8.3.0"}}}"#).unwrap();
+    project.lsp.restart(project.lsp.servers()[0].id).await.unwrap();
+    let after = ide_host::ops::lsp::lsp_virtual_document(&host, "main", uri).await.unwrap();
+    let refreshed = project.documents.snapshot(opened.id).unwrap();
+    project.lsp.shutdown_all().await;
+    host.close_project("main");
+    assert!(after.description.as_deref().unwrap().contains("8.3"));
+    assert_eq!(refreshed.text, after.text);
+    assert!(refreshed.read_only && !refreshed.dirty);
+    assert_eq!(refreshed.version, opened.version + 1);
+}

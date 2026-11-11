@@ -2,7 +2,14 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import type { ProjectInfo } from "@/bindings";
 
-const mock = vi.hoisted(() => ({ routes: vi.fn(), views: vi.fn(), cancel: vi.fn(), open: vi.fn(), hint: vi.fn() }));
+const mock = vi.hoisted(() => ({
+  routes: vi.fn(),
+  views: vi.fn(),
+  cancel: vi.fn(),
+  open: vi.fn(),
+  hint: vi.fn(),
+  caret: vi.fn(),
+}));
 vi.mock("@/platform/ipc", async (orig) => {
   const actual = await orig<typeof import("@/platform/ipc")>();
   return {
@@ -18,7 +25,7 @@ vi.mock("@/platform/ipc", async (orig) => {
 });
 vi.mock("./ipc", async (orig) => ({
   ...(await orig<typeof import("./ipc")>()),
-  caretContext: () => ({ doc: 7, path: "/p/main.php", line: 0, col: 0, word: null, view: null }),
+  caretContext: mock.caret,
   openLocation: mock.open,
   hint: mock.hint,
 }));
@@ -41,6 +48,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   mock.cancel.mockResolvedValue(undefined);
   mock.open.mockResolvedValue(undefined);
+  mock.caret.mockReturnValue({ doc: 7, path: "/p/main.php", line: 0, col: 0, word: null, view: null });
   useProject.setState({
     project: { root: "/p", name: "p", isGit: false, settings: {} } as ProjectInfo,
     opening: false,
@@ -253,4 +261,54 @@ it("returns to route names after selected-name lookup fails", async () => {
   await waitFor(() => expect(screen.getByRole("option")).toHaveTextContent("invoice.show"));
   expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   expect(screen.getByRole("button", { name: "Show Targets" })).toBeEnabled();
+});
+
+it("ignores a queued target activation after Back replaced its result list", async () => {
+  await openLaravelNavigation("routes");
+  await selectLaravelItem(useLaravelNavigation.getState().items[0]!);
+  const oldTarget = useLaravelNavigation.getState().items[1]!;
+  render(<LaravelNavigation />);
+  fireEvent.click(screen.getByRole("button", { name: "Back" }));
+  await waitFor(() => expect(useLaravelNavigation.getState().phase).toBe("names"));
+  await selectLaravelItem(oldTarget);
+  expect(mock.open).not.toHaveBeenCalled();
+  expect(screen.getByRole("dialog")).toBeInTheDocument();
+  expect(useLaravelNavigation.getState().phase).toBe("names");
+});
+
+it("refuses a former project's target without dismissing the current views chooser", async () => {
+  await openLaravelNavigation("routes");
+  await selectLaravelItem(useLaravelNavigation.getState().items[0]!);
+  const oldTarget = useLaravelNavigation.getState().items[0]!;
+  act(() => useProject.setState({ project: { root: "/q", name: "q", isGit: false, settings: {} } as ProjectInfo }));
+  mock.caret.mockReturnValue({ doc: 8, path: "/q/main.php", line: 0, col: 0, word: null, view: null });
+  await openLaravelNavigation("views");
+  const current = useLaravelNavigation.getState().items;
+  await selectLaravelItem(oldTarget);
+  expect(mock.open).not.toHaveBeenCalled();
+  expect(useLaravelNavigation.getState().kind).toBe("views");
+  expect(useLaravelNavigation.getState().items).toBe(current);
+  expect(mock.views).toHaveBeenCalledWith(expect.any(Number), 8, null, 2000);
+});
+
+it("ignores stale name activations and accepts only the new chooser's results", async () => {
+  await openLaravelNavigation("routes");
+  const oldName = useLaravelNavigation.getState().items[0]!;
+  await openLaravelNavigation("views");
+  const currentName = useLaravelNavigation.getState().items[0]!;
+  const calls = mock.views.mock.calls.length;
+  await selectLaravelItem(oldName);
+  expect(mock.views).toHaveBeenCalledTimes(calls);
+  expect(useLaravelNavigation.getState().phase).toBe("names");
+  mock.views.mockResolvedValueOnce({
+    status: "ok",
+    data: {
+      views: [],
+      locations: [{ ...loc(4), path: "/p/resources/views/invoices/show.blade.php" }],
+      incomplete: false,
+    },
+  });
+  await selectLaravelItem(currentName);
+  await selectLaravelItem(useLaravelNavigation.getState().items[0]!);
+  expect(mock.open).toHaveBeenCalledWith("/p/resources/views/invoices/show.blade.php", 4, 0);
 });

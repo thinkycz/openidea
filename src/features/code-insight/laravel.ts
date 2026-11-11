@@ -142,11 +142,14 @@ export async function retryLaravelNavigation() {
 }
 
 export async function selectLaravelItem(item: LaravelNavigationItem) {
-  if (!context || useLaravelNavigation.getState().loading) return;
+  const state = useLaravelNavigation.getState();
+  if (!context || state.loading) return;
   if (useProject.getState().project !== context.project) {
     closeLaravelNavigation();
     return;
   }
+  // A queued activation must not reuse rows from a replaced query or project.
+  if (!state.items.includes(item)) return;
   if (!item.location) {
     await query(item.name);
     return;

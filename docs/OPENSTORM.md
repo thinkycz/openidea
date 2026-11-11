@@ -312,6 +312,72 @@ completion-undo,completion-redo,wire-probe}.json`, `slice58-fixture-changes.json
 and matching logs. The direct wire probe additionally confirms retired-URI
 cancellation (-32801) and a clean process exit after the client closes stdin.
 
+Slice59 — stale Laravel navigation selections (2026-11-11, verified): protects
+queued row callbacks after Back, chooser replacement or project replacement. Three
+regressions reproduce the old handler opening `/p/routes/web.php` after project
+`/q` is active, opening a former target after Back, and using an old route name
+in a current views query. Late-response generation checks do not protect these
+separate selection callbacks.
+
+Selection now requires an item from the current result snapshot, after existing
+loading/project checks. Stale names/targets leave the current chooser intact;
+fresh selections retain duplicate handling, Back/reselection and normal opening.
+All15 chooser checks pass; the3 new cases fail before the correction for the
+unintended open/query. All5,333 frontend tests/type checking/lint/Knip/formatting/
+build pass. The unfiltered Rust workspace passes1,740 tests/63ignored/0filtered,
+including doctests, in1,177.68s. Rust formatting, post-bindings frontend type
+checking and all-target Clippy with warnings denied (306.47s) pass.
+
+Signed arm64 development0.1.58 builds in208.99s with unchanged PHPantom130.
+The sole generated archive is `artifacts/batches/0.1.58/OpenStorm.app`; packaging
+prunes0.1.57, removes its duplicate SDK bundle and cleans21,499 compiler files
+(18.6GiB reported by Cargo). No app installation or publishing occurs. Post-runtime
+deep/strict signature, executable/engine checksums and installed0.1.21 read-back
+pass. Every source hash matches the build receipt before this documentation-only
+closeout; compiler output is absent.
+
+Native fixtures are independent pinned Laravel13.37 copies with15 original witness
+files each,97 non-vendor/non-Blade PHP files syntax-checked per project, verified
+Composer mappings/lock/helper metadata and no environment files. Recent-project
+entries/trust were prepared through the baseline57 native UI in a disposable HOME;
+acceptance runs the new58 package. Don't ask again remains unchecked. The bundled
+engine runs from this app's Resources with --stdio --no-project-tools; no framework
+or package commands run.
+
+Project A initially shows only its unique route under openstorm.switch. Pausing
+only owned engine41304 -> native Routes shows Loading/disabled Show Targets ->
+File > Open Recent B > This Window closes the chooser and opens B without old A
+tabs/results. The paused old engine exits; its60s watchdog never fires. Fresh B
+query shows only openstorm.switch.b.only; Enter/Enter opens B's route file3:61.
+Then pausing owned engine41813 during B's selected view-target lookup shows
+Loading/disabled Open. Replacing B with A closes that chooser, restores A's caller
+and retires B's paused engine, again before the watchdog. Fresh A views show only
+openstorm-switch-a-only. Show Targets > Back > refilter > Enter/Enter opens A's
+view1:1 with its distinctive witness. These native cases prove pending-operation
+cancellation/process retirement and fresh selection. Successful late replies and
+queued stale-row callbacks are covered by frontend regressions, not claimed
+observed from a retired native process.
+
+A warmed10.020s two-process sample after B route navigation observes native app
+RSS217888KiB at both ends and CPU time6.57->6.87s; engine RSS214016KiB at both ends
+and CPU time3.59->3.59s. This excludes WebContent/GPU/other processes and is not total
+memory, fresh-startup or parity evidence. Wider performance gates remain open.
+
+Normal Quit stops app/server. No-argument relaunch restores A's2 clean tabs with
+its Blade witness selected at1:1 and No problems found. Fresh Routes from that
+recovered Blade tab finds only A's witness and opens A's route3:61. Final normal
+Quit stops app/server; no paused helper/engine remains. All30 witness originals
+and both Composer metadata sets are byte-identical. Physical Dock-switch autosave,
+broader route/view-data/project/configuration/cancellation matrices and other
+69-area gates remain open; statuses stay67partial/2user-deferred.
+
+Evidence: `artifacts/checks/slice59-stale-row-{red,green}.log`,
+`slice59-{stale-row,frontend,sdk-gates,workspace-totals,app-build,build-receipt,
+project-a,project-b,profile-preparation,native-progress,warm-idle-sample,
+app-readback}.json`, both `slice59-*-suspend.json` receipts and
+`artifacts/batches/0.1.58/{build-receipt,retention}.json`. Final commit/remote
+read-back and source reconciliation are recorded in the ignored delivery receipt.
+
 Source integration (2026-11-01, verified source checkpoint): integrates all 240 new
 commits from `l0ng-ai/openidea:main` at `041e7210` into
 `codex/openstorm-php-laravel`, based on pushed OpenStorm `82d1313a`.

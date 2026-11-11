@@ -26,24 +26,72 @@ cache (6,240,402,992 logical bytes in those additional paths). Sources, patches,
 licenses, provenance, regression receipts, fixtures, engine130 and the original
 released114 evaluation baseline remain. Installed OpenStorm was untouched.
 Evidence: `artifacts/checks/build-retention-{dry-run,applied,extra}.json`.
-No native feature acceptance is claimed by cleanup.
+A follow-up inventory removed15 obsolete Mach-O engine probe executables
+(1,745,474,640 logical bytes), after checking executable headers, inactive
+process paths and frozen metadata; SHA-256 records are in
+`artifacts/checks/build-retention-old-probes.json`. Their source snapshots and
+baseline evidence remain. No native feature acceptance is claimed by cleanup.
 
-Native slice54 remains pending: frontend gates passed; the prior workspace run
+Native slice54 infrastructure recovery: frontend gates passed; the prior workspace run
 exited101 after its external Cargo target directory disappeared during linking.
 The old external Rust toolchain and temporary launcher environment are now also
 absent. This is an infrastructure failure, not a passing Rust/native check.
-Restore a repository-local toolchain/build location before rerunning; do not
-reuse the interrupted receipt as acceptance.
+Restored Rust1.99.1 (including rustfmt/Clippy) and pnpm11.28.9 under ignored
+`artifacts/toolchains`, without changing global configuration. The rerun uses
+only `artifacts/build` with incremental compilation disabled. The cold workspace
+run passes1,738 tests/60ignored/0filtered in1,354.11s; Rust formatting passes.
+All-target Clippy with warnings denied passes in358.25s. The interrupted receipt is not acceptance.
+`artifacts/checks/slice54-workspace-totals.json` records the totals; the
+post-bindings frontend type check and all8 packaging/retention tests also pass.
+The temporary fixture also expired; it has been recreated under
+a fresh `/private/tmp/openstorm-slice54-*` directory with PHP syntax/runtime
+and PSR-4 mapping validated. It is outside the repository ancestor ignore rules
+respected by PHPantom workspace walkers.
 
-Slice54 — merged-source native package (in progress): version0.1.54 with unchanged
-PHPantom130. Scope: build and locally sign an Apple Silicon development bundle;
-use a new disposable profile and plain PHP/Composer fixture to check startup,
-read-only builtin navigation, project/session reopening, and normal app/server
-quit. Keep only the latest generated bundle; preserve the installed app and receipts. Exit evidence must name
-the source/build, runtime identifier/profile, persisted fixture state, signature,
-and owned process cleanup. Physical Dock-switch autosave and wider native
-acceptance remain separate open cases until directly observed. Commit/push only
-after this slice's recorded checks finish; Laravel work follows in another slice.
+Slice54 — merged-source native package (2026-11-11, verified): OpenStorm0.1.54
+with unchanged PHPantom130, built/signed in253.16s. The canonical local bundle is
+`artifacts/batches/0.1.54/OpenStorm.app` (arm64, ad hoc, not notarized). The new
+`python3 scripts/package-openstorm.py` recipe validates identity/architecture,
+signs and records engine/source provenance, then prunes older app archives and
+cleans the owned `artifacts/build` output. It refuses symlinked archive/build
+roots, nonnumeric versions, existing receipts and shared/evaluation targets.
+All8 packaging/retention tests pass. Packaging removed21,499 compiler files
+(18.6GiB reported by Cargo); only the latest archived app remains. No app was
+installed or published. Installed0.1.21's executable still matches its preceding
+receipt (`048064d8…9fa16`).
+
+Native observations used an explicit disposable HOME and runtime identifier
+`cz.thinky.openstorm.dev.w8f8a5ceba98300ce`; shell environment import was disabled.
+The fixture passed PHP syntax/runtime and Composer PSR-4 mapping checks. Search
+Everywhere and the existing menus/layout opened main.php; the bundled engine
+ran from this exact app's Resources with `--stdio --no-project-tools`.
+Declaration navigation opened a readable `phpantom-stub://DateTimeImmutable`
+document labelled Library source (read-only); typing x left its text unchanged.
+Cmd+B on total resolved to src/Invoice.php line6. Native Basic completion
+restored the method name after deletion; Cmd+S persisted exactly the original
+caller with no diagnostics. Paste automation was unreliable, so exact partial
+prefix ranking is not accepted by this smoke test.
+
+Native server Restart replaced PID54421 with54795; the old PID exited and Cmd+B
+worked afterwards. A real dirty local conflict.txt plus an external disk witness
+caused Cmd+S to ask before overwrite. Cancel retained both versions and an
+Autosave paused notice. Close Project > Don't Save discarded only local text,
+preserved external bytes and stopped the server. Reopening restored3 clean file
+tabs with the external contents; the discarded edit did not return. The builtin
+stub tab was not restored and is recorded as a recovery limitation. All4 fixture
+originals were restored. Native Quit stopped app/server processes; no-argument
+relaunch restored the project,3 file tabs and main.php caret5:16, with PHPantom
+Running. Final native Quit again left no owned app/server processes. Deep/strict
+signature verification and executable hash still passed after runtime. Every
+source hash matched the build receipt before this documentation-only closeout.
+
+Evidence: `artifacts/checks/slice54-{frontend,sdk-gates,workspace-totals,
+app-build,build-receipt,native-progress,installed-readback}.json`, the matching
+logs, and `artifacts/batches/0.1.54/{build-receipt,retention}.json`. Physical
+user-controlled Dock-switch autosave remains unverified; broader platform,
+service and performance cases remain open. Whole-area statuses stay67partial/
+2user-deferred. Laravel navigation continues in a separate bounded slice after
+this slice's commit/push; no whole-area acceptance is inferred from this smoke.
 
 Source integration (2026-11-01, verified source checkpoint): integrates all 240 new
 commits from `l0ng-ai/openidea:main` at `041e7210` into
@@ -55,8 +103,9 @@ edits, revision-bound overwrite confirmation, serialized Save All decisions,
 reviewed undo/redo, project-model reset, branding, and disabled updater.
 PHPantom remains `0.11.1-openstorm.130`; no engine source or binary changes.
 Upstream features are inherited code, not new 69-area acceptance claims or
-independent debugger expansion. Existing signed bundles and installed app are
-preserved; the merged source has not been packaged or tested in the native UI.
+independent debugger expansion. At that source checkpoint, existing bundles
+and the installed app were preserved and merged native checks had not run.
+Slice54 above supplies the later native smoke and latest-only archive policy.
 Integration regressions reproduced and fixed: lazy language loading could cache
 an old project model after replacement; delayed old-server shutdown publication
 could wake a newer restart as unavailable. The corresponding deterministic red

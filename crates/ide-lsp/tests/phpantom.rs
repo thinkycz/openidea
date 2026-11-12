@@ -3290,3 +3290,123 @@ async fn laravel_key_aliases_named_arguments_and_shadowing_follow_unsaved_source
     }
     result.unwrap();
 }
+
+/// Related-model pivot methods refresh without changing the consumer document.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires OPENSTORM_TEST_PIVOT_ROOT from create-openstorm-pivot-fixture.py"]
+async fn laravel_pivot_accessors_follow_unsaved_dependency_methods_without_caller_edits() {
+    let root = PathBuf::from(std::env::var_os("OPENSTORM_TEST_PIVOT_ROOT").expect("owned pivot fixture"))
+        .canonicalize()
+        .unwrap();
+    let bin = std::env::var_os("OPENSTORM_TEST_PHPANTOM_BIN").map(PathBuf::from).unwrap_or_else(|| {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../src-tauri/resources/phpantom/phpantom_lsp")
+    });
+    let mut php = LanguageRegistry::load(None).unwrap().get(&LanguageId::new("php")).unwrap();
+    php.language_servers.retain(|s| s.name == "phpantom");
+    php.language_servers[0].command = bin.to_string_lossy().into_owned();
+    let mgr = LspManager::new(root.clone(), Arc::new(LanguageRegistry::from_configs(vec![php])), Arc::new(|_| {}));
+    let path = root.join("app/OpenStormFixtures/PivotConsumer.php");
+    let pivot = root.join("app/Models/RecipeIngredient.php");
+    let demo = root.join("app/Demo.php");
+    let source = std::fs::read_to_string(&path).unwrap();
+    let original = std::fs::read_to_string(&pivot).unwrap();
+    let demo_source = std::fs::read_to_string(&demo).unwrap();
+    let overlay = original.replace("getQuantityLabel(): string { return ''; }", "quantityInGrams(): int { return 1; }");
+    assert_ne!(original, overlay);
+    let candidates = [
+        path.clone(),
+        pivot.clone(),
+        demo.clone(),
+        root.join("app/Models/Bakery.php"),
+        root.join("app/Models/BakeryRecipe.php"),
+    ];
+    mgr.set_candidates_hook(Box::new(move |_, _| ide_lsp::CandidateFiles {
+        files: candidates.to_vec(),
+        limit_hit: false,
+    }));
+    let doc = DocId::next();
+    let dependency = DocId::next();
+    // Keep this document/version unchanged for every phase: editing it would
+    // mask missing dependency invalidation in the relation/member caches.
+    mgr.did_open(doc, &path, &LanguageId::new("php"), 1, &source);
+    let flows = ["$bakery->masterRecipe->first()->pivot->", "$bakery->seasonalRecipes->first()->ingredient->"];
+    let method_at = |text: &str, flow: &str, method: &str| {
+        let point = pos(text, &format!("{flow}{method}()"));
+        Pos::new(point.line, point.col + flow.encode_utf16().count() as u32)
+    };
+    let result: Result<(), String> = async {
+        for phase in ["disk", "overlay", "undo", "redo", "restart", "close"] {
+            match phase {
+                "overlay" => mgr.did_open(dependency, &pivot, &LanguageId::new("php"), 1, &overlay),
+                "undo" => replace(&mgr, dependency, 2, &overlay, &original),
+                "redo" => replace(&mgr, dependency, 3, &original, &overlay),
+                "restart" => mgr.restart(mgr.servers()[0].id).await.map_err(|e| e.to_string())?,
+                "close" => mgr.did_close(dependency),
+                _ => {}
+            }
+            let changed = matches!(phase, "overlay" | "redo" | "restart");
+            let active = if changed { "quantityInGrams" } else { "getQuantityLabel" };
+            let inactive = if changed { "getQuantityLabel" } else { "quantityInGrams" };
+            let return_type = if changed { "int" } else { "string" };
+            let declaration = pos(if changed { &overlay } else { &original }, active);
+            for flow in flows {
+                for method in ["getQuantityLabel", "quantityInGrams"] {
+                    let at = method_at(&source, flow, method);
+                    // Hover retries ContentModified while transient reference
+                    // documents close. Check settled dependency semantics here;
+                    // immediate goto currently maps that state to an empty result.
+                    let hover = mgr.hover(doc, at, Default::default()).await.map_err(|e| e.to_string())?;
+                    let targets = mgr.goto(doc, at, GotoKind::Definition).await.map_err(|e| e.to_string())?;
+                    if method == active {
+                        if targets.len() != 1 || targets[0].path.to_path_buf() != pivot || targets[0].range.start != declaration {
+                            return Err(format!("{phase}/{flow}{method}: wrong current pivot declaration {targets:?}"));
+                        }
+                        let hover = hover.ok_or_else(|| format!("{phase}/{flow}: missing current pivot hover"))?;
+                        if !hover.contents.value.contains("class RecipeIngredient")
+                            || !hover.contents.value.contains(&format!("public function {active}(): {return_type};"))
+                            || hover.range != Some(Range::new(at, Pos::new(at.line, at.col + method.len() as u32)))
+                        {
+                            return Err(format!("{phase}/{flow}: stale pivot type or wrong UTF16 range: {hover:?}"));
+                        }
+                    } else if !targets.is_empty() || hover.is_some() {
+                        return Err(format!("{phase}/{flow}{method}: inactive method still resolves: {targets:?}, {hover:?}"));
+                    }
+                }
+                // Empty-prefix completion also exercises an already warmed
+                // candidate list, without a didChange on the caller.
+                let list = settled_completion(&mgr, doc, method_at(&source, flow, "getQuantityLabel")).await;
+                let has = |name: &str| list.items.iter().any(|i| i.label.split('(').next() == Some(name));
+                if !has(active) || has(inactive) {
+                    return Err(format!("{phase}/{flow}: pivot candidates must contain {active}, excluding {inactive}"));
+                }
+            }
+            let refs = mgr.references(doc, method_at(&source, flows[0], active), false, true, Default::default()).await.map_err(|e| e.to_string())?;
+            let actual = refs.locations.iter().map(|l| (l.path.to_path_buf(), l.range.start.line, l.range.start.col, l.range.end.line, l.range.end.col)).collect::<std::collections::BTreeSet<_>>();
+            let mut expected = std::collections::BTreeSet::new();
+            for flow in flows {
+                let at = method_at(&source, flow, active);
+                expected.insert((path.clone(), at.line, at.col, at.line, at.col + active.len() as u32));
+                if !changed {
+                    let at = method_at(&demo_source, flow, active);
+                    expected.insert((demo.clone(), at.line, at.col, at.line, at.col + active.len() as u32));
+                }
+            }
+            if actual != expected || refs.locations.len() != expected.len() || refs.incomplete.is_some() {
+                return Err(format!("{phase}: exact pivot usages differ: {refs:?}; expected {expected:?}"));
+            }
+            if std::fs::read_to_string(&pivot).map_err(|e| e.to_string())? != original
+                || std::fs::read_to_string(&path).map_err(|e| e.to_string())? != source
+                || std::fs::read_to_string(&demo).map_err(|e| e.to_string())? != demo_source
+            {
+                return Err(format!("{phase}: a fixture file was written to disk"));
+            }
+            eprintln!("{phase}: pivot/ingredient exact declaration, typed hover/UTF16 range, current completion and usages; caller version remains1");
+        }
+        Ok(())
+    }.await;
+    mgr.shutdown_all().await;
+    assert_eq!(std::fs::read_to_string(&pivot).unwrap(), original);
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), source);
+    assert_eq!(std::fs::read_to_string(&demo).unwrap(), demo_source);
+    result.unwrap();
+}

@@ -1373,6 +1373,63 @@ Dock-switch autosave remain open. All69 areas stay67partial/2user-deferred.
 No blanket parity, install, publication, notarization, updater activation,
 migration or debugger expansion occurs.
 
+Slice73 — settled Eloquent pivot dependency regression (2026-11-12).
+This is a source-only test/fixture/evidence slice on unchanged signed0.1.67 and
+engine133, after committed/pushed72 at8167bd31. The new disposable factory
+records five owned originals/91 non-Blade PHP files, validates115 pinned baseline
+files and hashes four pivot/model/Demo sources. Composer13.37 framework/lock and
+autoload helpers stay pinned. No environment files or framework boot are used.
+Default pivot and renamed ingredient accessors resolve to RecipeIngredient.
+
+The new actual-client regression keeps the consumer text/version1 unchanged
+through disk/unsaved dependency method replacement/undo/redo/restart/close.
+After typed hover confirms semantic readiness, both accessors retain exact
+method declarations, string/int hovers and UTF16 ranges after emoji, current
+completion candidates with removed methods absent, and exact usages (four for
+the original getter including two pinned Demo sites, two for its replacement).
+All dependency/consumer/Demo bytes remain unchanged. Focused1passed/33filtered
+and full34client/6host with no ignored/filtered cases pass. This establishes
+settled dependency freshness; flow-specific pivot provenance/columns, method vs
+property precision and unknown morph matrices remain open. Unresolved methods
+can still have lexical references; no empty-reference or checked-rename claim.
+
+The first run exposes a separate immediate-navigation gap. Disk/overlay pass,
+but goto immediately after reference-scope files close and dependency undo
+returns no declaration. A framed proxy repeat and isolated protocol replay
+reproduce it; plain protocol undo/redo without these transient files passes.
+PHPantom server.rs run_position_request converts ContentModified to null for
+non-hover operations. Hover preserves the error; OpenStorm retries it and then
+receives the correct restored method. The regression now awaits this typed
+readiness before goto; it does not accept the first immediate navigation or
+claim a product fix. Red logs/wire and narrowed cause remain in the ignored
+slice73-navigation-transient-failure receipt and FEAT-066 remaining gate.
+
+Full unfiltered Rust workspace1748passed/71ignored/0filtered, fmt and all-target
+Clippy with warnings denied pass. Frontend5357tests/487files, type/lint/Knip/
+format/build, post-binding checks and8packaging/retention regressions pass.
+The stopped initial pipeline and successful settled pipeline have separate
+receipts. FEAT-035's obsolete pending process-env clause is corrected using
+already-passing unfiltered evidence; broader validation/auth acceptance stays
+partial. FEAT-028/066 gain only the bounded settled-source evidence above.
+
+Native automation is unavailable: mcp__cua_repl was removed and the advertised
+replacement official computer-use skill directory is empty after bounded
+filesystem discovery. No undocumented UI alternative or app launch is used.
+This new pivot corpus has no native acceptance. Physical Dock-switch autosave
+also remains unobserved. All69 areas remain67partial/2user-deferred; broader
+roadmap and the immediate-navigation correction remain active work.
+
+No app/engine rebuild is needed for these test-only changes. Retained app67
+SHA119f7e35...9b2141 and engine133 SHA8ed6ce0a...a568c52, runtime source snapshot,
+strict/deep signature and installed app preservation are read back separately.
+Guarded cargo clean removes19,220files/15.5GiB after all gates; compiler roots
+are empty/absent and only artifacts/batches/0.1.67/OpenStorm.app is archived.
+Sources, patches, provenance, licenses, evaluation receipts, PHP Workbench and
+installed profiles remain. Final source/fixture/process/cache and exact Git
+remote/clean-worktree reconciliation are in ignored slice73 final-readback and
+delivery receipts. No publishing, updater activation, notarization, migration,
+installation or debugger expansion occurs.
+
 Source integration (2026-11-01, verified source checkpoint): integrates all 240 new
 commits from `l0ng-ai/openidea:main` at `041e7210` into
 `codex/openstorm-php-laravel`, based on pushed OpenStorm `82d1313a`.

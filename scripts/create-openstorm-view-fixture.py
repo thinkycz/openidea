@@ -15,13 +15,15 @@ parser.add_argument('--baseline', type=Path, required=True,
                     help='Disposable pinned engine example with Laravel 13.37.0 already installed')
 parser.add_argument('--php', type=Path, required=True, help='Explicit PHP 8.4+ CLI used only for syntax checks')
 parser.add_argument('--label', default='view', help='Short label for the new temporary fixture')
+parser.add_argument('--pin', type=Path, default=ROOT / 'engine/source.json',
+                    help='Engine source manifest used to validate the baseline')
 parser.add_argument('--nested-includes', action='store_true',
                     help='Render the data through an intermediate page and included partial')
 args = parser.parse_args()
 if not re.fullmatch(r'[A-Za-z0-9._-]+', args.label):
     parser.error('Label must contain only letters, digits, periods, underscores or hyphens')
 baseline = args.baseline.resolve()
-pin = json.loads((ROOT / 'engine/source.json').read_text())
+pin = json.loads(args.pin.read_text())
 source = ROOT / 'artifacts/phpantom' / f"{pin['commit'][:12]}-{pin['patches_sha256'][:12]}-verified"
 if not (source / 'openstorm-source.json').is_file():
     parser.error('Acquire the pinned engine source with scripts/prepare-phpantom.py first')
@@ -83,6 +85,8 @@ for path in php_files:
 assert not list(project.glob('.env*'))
 receipt = {
     'project': str(project), 'profile': str(profile), 'framework': '13.37.0',
+    'source_pin': str(args.pin.resolve()),
+    'source_pin_sha256': hashlib.sha256(args.pin.read_bytes()).hexdigest(),
     'baseline': str(baseline), 'engine_source': str(source),
     'composer_lock_sha256': hashlib.sha256((project / 'composer.lock').read_bytes()).hexdigest(),
     'composer_autoload_files_sha256': hashlib.sha256((project / 'vendor/composer/autoload_files.php').read_bytes()).hexdigest(),

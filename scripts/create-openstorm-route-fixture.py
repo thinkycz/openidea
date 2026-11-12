@@ -11,11 +11,13 @@ parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--baseline', required=True, type=Path)
 parser.add_argument('--php', required=True, type=Path)
 parser.add_argument('--label', default='route-refactoring')
+parser.add_argument('--pin', type=Path, default=ROOT / 'engine/source.json')
 parser.add_argument('--navigation', action='store_true', help='Add controller-group, parameter and duplicate navigation cases')
 args = parser.parse_args()
 receipt = json.loads(subprocess.check_output([
     'python3', str(ROOT / 'scripts/create-openstorm-view-fixture.py'),
     '--baseline', str(args.baseline), '--php', str(args.php), '--label', args.label,
+    '--pin', str(args.pin.resolve()),
 ], text=True))
 project = Path(receipt['project'])
 files = {

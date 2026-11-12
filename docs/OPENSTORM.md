@@ -643,6 +643,100 @@ and artifacts/batches/0.1.61/{build-receipt,retention}.json. Final exact commit,
 remote ref, clean-worktree and documentation-only source reconciliation are
 stored in the ignored slice63-delivery.json receipt.
 
+Slice64 — migration-derived model declaration origins (accepted local slice,
+2026-11-12). Native0.1.61/engine130 reproduces
+missing Cmd+B navigation on email while bool/string/nullable TIMESTAMP hover,
+Basic completion is_a -> is_active and later index(email) metadata pass. The real
+client regression reproduces all3missing column destinations. Normal quit exits
+both baseline processes and all7owned fixture files remain exact.
+
+Pinned PHPantom0.11.1-openstorm.131 retains migration declaration spans using
+shared resolved property metadata, including inherited table selection. Accepted
+unsaved migration publications update inference; watched/config reloads preserve
+overlays and close restores disk. Native properties and explicit PHPDoc retain
+precedence. Parser-recorded PHPDoc offsets select the declaring class's comment,
+including repeated text in neighboring classes, attributes and line comments.
+Focused16engine cases cover these paths, Unicode, later changes/renames and
+incomplete-heredoc recovery. Headless Laravel resource discovery now loads the
+same schema after Blueprint macros: its added regression fails before the fix,
+and final example analysis returns exactly3intentional diagnostics instead of
+the2extra unknown-field errors exposed by the new migration demo.
+
+Reconstructed source: artifacts/phpantom/1756b1f920c1-99c3dccc6a70-verified;
+engine/source.json and candidate131 agree. Final optimized executable SHA256:
+a8b71f6169cd3138636fd694c7a7bf76e9229528141bcde823fdac5cfb96d08d.
+Full engine18416ordinary tests plus1automatic FIFO child pass;17ignored and
+0ordinary filtered. All-target Clippy/fmt/fingerprint/build, plain PHP12-file
+syntax/runtime, Laravel87-file syntax/267runtime assertions and exact3-error
+analysis pass. Final29actual-client and6actual-host cases pass; all12navigation
+and7schema fixture originals and Composer metadata remain exact. Frontend5346,
+typecheck/lint/knip/format/build; unfiltered Rust1744/66ignored/0filtered;
+workspace fmt/all-target Clippy; post-binding typecheck and8packaging/retention
+regressions pass. Source/cache/fixture receipts are in artifacts/checks/slice64-*.
+Earlier prototype/pre-headless receipts are superseded for final acceptance.
+
+The owned compiler wrapper now handles normalized Rust toolchain names; earlier
+engine test strip-loader warnings remain in logs. Its final build/Clippy pass.
+The existing debug-app linker unwind-table size warning is also present in61;
+no performance parity claim follows. Completed engine compiler output is cleaned:
+14666files/6.7GiB reported by Cargo. Signed arm64 development0.1.62 packages in215.63s and is the sole generated app
+archive at artifacts/batches/0.1.62/OpenStorm.app. Its receipt/signature succeed
+before61 is pruned; the duplicate bundle and26283compiler files/22.4GiB are
+removed. After native/read-back acceptance, obsolete130 and pre-headless131
+executables are removed with header/path/SHA/inactive-process checks, reclaiming
+113732368bytes. All provenance, sources, licenses and evaluation114 remain;
+installed21's executable still matches048064d8…9fa16. Both compiler roots are
+absent. Receipts: slice64-app-build/readback, obsolete-engine-cleanup and
+artifacts/batches/0.1.62. No install, publication, notarization or migration occurs.
+
+Native62/resource131 acceptance: the first saved email Cmd+B opens the defining
+literal at migration9:45 after an emoji. Documentation Edit Source reaches bool
+is_active11:30 and nullable TIMESTAMP email_verified_at10:32. F1 retains the
+expected PHP/SQL types and nullability; a later index(email) does not replace
+VARCHAR metadata. CtrlSpace completes is_a -> is_active at8:27, and explicit Save
+restores the exact consumer bytes. With the owned project's autosave disabled,
+both migration and caller are changed only in buffers: contact_email plus an
+inserted Unicode comment resolves to10:45, retains VARCHAR/non-null hover, and
+all7disk originals stay exact. Restart Language Servers is discoverable in Find
+Action; old server91840 exits, new92213 replays both overlays, and the first Cmd+B
+again reaches10:45. Native Edit-menu Undo restores the original migration and
+Redo reapplies the overlay. Close Project asks about2unsaved files; Don't Save
+reaches Welcome62 with all originals intact. Removing only the owned autosave
+override while closed restores focus autosave=true, idle-save=false and external
+sync=true, observed in Settings without writing changes. Recent-project reopen
+loads clean buffers; a fresh valid email lookup returns9:45.
+
+Automation limits remain explicit. App-targeted CmdZ did not edit and coincided
+with No definition found; native Edit-menu Undo/Redo pass. One batched CmdL after
+reopen failed to open the chooser, so location text temporarily edited the owned
+consumer. Its exact source was restored through native paste/File Save All;
+then the visible status-bar chooser and Cmd+B passed. These shortcut paths and
+the physical Dock-switch autosave case remain unverified, with no asserted cause
+or fix. A state read after normal quit observed a new real-HOME/untrusted app
+instance; original app91803/server92232 had exited. The replacement was declined
+and closed without trusting the project. Its intervening state makes the first
+controlled noarg attempt (Welcome) unsuitable as auto-recovery evidence. Repeating
+without an app-specific AX read after quit succeeds: controlled noarg93328
+restores the owned project, both clean tabs, migration9:45 and caller6:18. The
+first fresh Cmd+B reaches9:45. Final native Quit exits app93328/server93337; no
+owned app/server remains. Only this clean repeat establishes auto-recovery.
+
+A10.138s warm sample after reopen observes app RSS235104KiB stable, cumulative
+CPU15.99->16.26s; server RSS204848KiB stable and CPU4.03s unchanged. It excludes
+WebContent/GPU/other processes and is not fresh-startup, total-memory, large-file,
+cancellation or parity acceptance. The final read-back verifies deep/strict
+signature, executable/engine and every packaged source hash before documentation
+closeout; both native fixtures'7originals, Composer metadata and PHP syntax pass.
+The new schema fixture recipe excludes environment files, validates pinned
+Laravel13.37 source/autoload/syntax and runs no database/framework command.
+Route/view recipes accept an explicit pin while preserving their active default.
+
+All69statuses remain67partial/2user-deferred. FEAT-036 still needs broader
+assistance and raw SQL/schema-dump, dynamic/macro, database-specific, ambiguous
+and performance acceptance. No debugger functionality is added. Final Git
+history and the ignored slice64-delivery.json identify the pushed source; final
+acceptance-document edits are reconciled separately from the built runtime.
+
 Source integration (2026-11-01, verified source checkpoint): integrates all 240 new
 commits from `l0ng-ai/openidea:main` at `041e7210` into
 `codex/openstorm-php-laravel`, based on pushed OpenStorm `82d1313a`.

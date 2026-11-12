@@ -2720,3 +2720,104 @@ async fn laravel_route_definition_first_request_after_open_rename_and_restart() 
     );
     mgr.shutdown_all().await;
 }
+
+/// Migration columns must keep their declaration site through the real client;
+/// an index that mentions a column must not replace the column's source.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires OPENSTORM_TEST_SCHEMA_ROOT created by create-openstorm-schema-fixture.py"]
+async fn laravel_migration_fields_preserve_types_completion_and_declaration_origin() {
+    let root = PathBuf::from(std::env::var_os("OPENSTORM_TEST_SCHEMA_ROOT").expect("owned schema fixture"))
+        .canonicalize()
+        .unwrap();
+    let bin = std::env::var_os("OPENSTORM_TEST_PHPANTOM_BIN").map(PathBuf::from).unwrap_or_else(|| {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../src-tauri/resources/phpantom/phpantom_lsp")
+    });
+    let mut php = LanguageRegistry::load(None).unwrap().get(&LanguageId::new("php")).unwrap();
+    php.language_servers.retain(|s| s.name == "phpantom");
+    php.language_servers[0].command = bin.to_string_lossy().into_owned();
+    let mgr = LspManager::new(root.clone(), Arc::new(LanguageRegistry::from_configs(vec![php])), Arc::new(|_| {}));
+    let path = root.join("app/OpenStormFixtures/SchemaConsumer.php");
+    let source = std::fs::read_to_string(&path).unwrap();
+    let migration_path = root.join("database/migrations/2026_01_01_000001_create_openstorm_schema_records.php");
+    let migration = std::fs::read_to_string(&migration_path).unwrap();
+    let doc = DocId::next();
+    mgr.did_open(doc, &path, &LanguageId::new("php"), 1, &source);
+    let mut failures = Vec::new();
+    for (name, sql_type, nullable) in
+        [("email", "VARCHAR", "no"), ("email_verified_at", "TIMESTAMP", "yes"), ("is_active", "BOOLEAN", "no")]
+    {
+        let at = pos(&source, &format!("{name};"));
+        let hover = mgr.hover(doc, at, Default::default()).await.unwrap().unwrap();
+        assert!(hover.contents.value.contains("source: database column"), "{name}: {}", hover.contents.value);
+        assert!(hover.contents.value.contains(&format!("type: `{sql_type}`")), "{name}: {}", hover.contents.value);
+        assert!(hover.contents.value.contains(&format!("nullable: `{nullable}`")), "{name}: {}", hover.contents.value);
+        let list = settled_completion(&mgr, doc, at).await;
+        for expected in ["email", "email_verified_at", "is_active"] {
+            assert!(list.items.iter().any(|i| i.label == expected), "missing schema column {expected}");
+        }
+        assert!(!list.items.iter().any(|i| i.label == "openstorm_email_index"));
+        let definitions = mgr.goto(doc, at, GotoKind::Definition).await.unwrap();
+        let expected = pos(&migration, name);
+        if !definitions.iter().any(|l| l.path == migration_path && l.range.start == expected) {
+            failures.push(format!("{name}: expected migration {expected:?}, got {definitions:?}"));
+        }
+    }
+    let migration_doc = DocId::next();
+    let changed_migration =
+        migration.replace("<?php\n", "<?php\n// 😀 unsaved\n").replace("'email'", "'contact_email'");
+    mgr.did_open(migration_doc, &migration_path, &LanguageId::new("php"), 1, &changed_migration);
+    let changed_consumer = source.replace("$record->email;", "$record->contact_email;");
+    replace(&mgr, doc, 2, &source, &changed_consumer);
+    let at = pos(&changed_consumer, "contact_email;");
+    let expected = pos(&changed_migration, "contact_email");
+    let targets = mgr.goto(doc, at, GotoKind::Definition).await.unwrap();
+    assert!(
+        targets.iter().any(|l| l.path == migration_path && l.range.start == expected),
+        "unsaved migration: {targets:?}"
+    );
+    let hover = mgr.hover(doc, at, Default::default()).await.unwrap().unwrap();
+    assert!(hover.contents.value.contains("type: `VARCHAR`"));
+    let list = settled_completion(&mgr, doc, at).await;
+    assert!(list.items.iter().any(|i| i.label == "contact_email"));
+    assert!(!list.items.iter().any(|i| i.label == "email"));
+    assert_eq!(std::fs::read_to_string(&migration_path).unwrap(), migration);
+    let server = mgr.servers()[0].id;
+    mgr.restart(server).await.unwrap();
+    let targets = mgr.goto(doc, at, GotoKind::Definition).await.unwrap();
+    assert!(
+        targets.iter().any(|l| l.path == migration_path && l.range.start == expected),
+        "restarted unsaved migration: {targets:?}"
+    );
+    mgr.did_close(migration_doc);
+    replace(&mgr, doc, 3, &changed_consumer, &source);
+    let targets = mgr.goto(doc, pos(&source, "email;"), GotoKind::Definition).await.unwrap();
+    assert!(
+        targets.iter().any(|l| l.path == migration_path && l.range.start == pos(&migration, "email")),
+        "closed overlay: {targets:?}"
+    );
+    let model_path = root.join("app/OpenStormFixtures/SchemaRecord.php");
+    let original_model = std::fs::read_to_string(&model_path).unwrap();
+    let model_overlay = "<?php\nnamespace App\\OpenStormFixtures;\nuse Illuminate\\Database\\Eloquent\\Model;\n/** @property string $email */\nclass DecoySchemaRecord extends Model {}\n/** @property string $email */\nfinal class SchemaRecord extends Model { protected $table = 'openstorm_schema_records'; }\n";
+    let model_doc = DocId::next();
+    mgr.did_open(model_doc, &model_path, &LanguageId::new("php"), 1, model_overlay);
+    let targets = mgr.goto(doc, pos(&source, "email;"), GotoKind::Definition).await.unwrap();
+    let offset = model_overlay.rfind("$email").unwrap() + 1;
+    let prefix = &model_overlay[..offset];
+    let expected = Pos::new(
+        prefix.bytes().filter(|b| *b == b'\n').count() as u32,
+        prefix.rsplit('\n').next().unwrap().encode_utf16().count() as u32,
+    );
+    if !targets.iter().any(|l| l.path == model_path && l.range.start == expected) {
+        failures.push(format!(
+            "PHPDoc must use the actual declaring class, not its neighbor: expected {expected:?}, got {targets:?}"
+        ));
+    }
+    mgr.did_close(model_doc);
+    let targets = mgr.goto(doc, pos(&source, "email;"), GotoKind::Definition).await.unwrap();
+    assert!(targets.iter().any(|l| l.path == migration_path && l.range.start == pos(&migration, "email")));
+    assert_eq!(std::fs::read_to_string(&model_path).unwrap(), original_model);
+    mgr.shutdown_all().await;
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), source);
+    assert_eq!(std::fs::read_to_string(&migration_path).unwrap(), migration);
+    assert!(failures.is_empty(), "migration declaration origins: {failures:#?}");
+}

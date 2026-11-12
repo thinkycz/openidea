@@ -1,0 +1,1164 @@
+--- a/docs/CHANGELOG.md
++++ b/docs/CHANGELOG.md
+@@ -14,6 +14,8 @@
+ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+ 
+ ## [Unreleased]
++
++- **Navigate model columns to migrations.** Go to Definition on a migration-derived Eloquent property opens its defining Blueprint call. Explicit PHPDoc properties link to the declaring class's comment, and headless checks use the same migration schema as the editor. Contributed by @thinkycz.
+ 
+ - **Complete quoted controller actions without duplicated suffixes.** Selecting a method inside an existing route action replaces the complete name while preserving quotes and surrounding Unicode text. Contributed by @thinkycz.
+ 
+--- a/examples/laravel/app/Demo.php
++++ b/examples/laravel/app/Demo.php
+@@ -1639,6 +1639,12 @@
+         $factory->async()->get('https://example.com');     // → PromiseInterface
+         $pending->async()->get('https://example.com');     // → PromiseInterface
+     }
++    public function migrationColumnSource(\App\Models\MigrationContact $contact): void
++    {
++        // Cmd+B opens the column's migration declaration, rather than a later index.
++        $contact->email;
++        $contact->verified_at;
++    }
+ }
+ 
+ // PHP Workbench: Laravel: Go to Route lists statically named routes and opens
+--- /dev/null
++++ b/examples/laravel/app/Models/MigrationContact.php
+@@ -0,0 +1,8 @@
++<?php
++namespace App\Models;
++
++use Illuminate\Database\Eloquent\Model;
++
++class MigrationContact extends Model
++{
++}
+--- /dev/null
++++ b/examples/laravel/database/migrations/2026_01_01_000001_create_migration_contacts.php
+@@ -0,0 +1,18 @@
++<?php
++use Illuminate\Database\Migrations\Migration;
++use Illuminate\Database\Schema\Blueprint;
++use Illuminate\Support\Facades\Schema;
++
++return new class extends Migration {
++    public function up(): void
++    {
++        Schema::create('migration_contacts', static function (Blueprint $table): void {
++            $table->id();
++            $table->string('email');
++            $table->timestamp('verified_at')->nullable();
++            $table->index('email');
++        });
++    }
++
++    public function down(): void { Schema::dropIfExists('migration_contacts'); }
++};
+--- a/src/analyse/project.rs
++++ b/src/analyse/project.rs
+@@ -137,5 +137,40 @@
+     // FQN index the vendor entries are missing.
+     backend.build_laravel_command_index();
+     backend.build_laravel_macro_index(&providers);
++    if let Some(root) = backend.workspace_root().read().clone() {
++        backend.reload_laravel_schema_index(&root);
++    }
+     backend.load_laravel_pivot_sources();
+ }
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn headless_laravel_discovery_loads_migration_columns() {
++        let directory = tempfile::tempdir().unwrap();
++        let root = directory.path().canonicalize().unwrap();
++        std::fs::create_dir(root.join("config")).unwrap();
++        std::fs::create_dir_all(root.join("database/migrations")).unwrap();
++        std::fs::write(
++            root.join("config/database.php"),
++            "<?php return ['default' => 'mysql'];",
++        )
++        .unwrap();
++        std::fs::write(root.join("database/migrations/2026_01_01_create_contacts.php"),
++            "<?php use Illuminate\\Support\\Facades\\Schema; use Illuminate\\Database\\Schema\\Blueprint; return new class { public function up(): void { Schema::create('contacts', function (Blueprint $table) { $table->string('email'); }); } };").unwrap();
++        let backend = Backend::new_test_with_workspace(root, Vec::new());
++        backend.resolved_class_cache.write().set_laravel(true);
++        discover_laravel_resources(&backend);
++        assert!(
++            backend
++                .resolved_class_cache
++                .read()
++                .schema_index()
++                .table("mysql", "contacts")
++                .is_some(),
++            "headless diagnostics must use the same migration index as editor intelligence"
++        );
++    }
++}
+--- a/src/backend/documents.rs
++++ b/src/backend/documents.rs
+@@ -29,6 +29,7 @@
+             return true;
+         }
+         self.update_ast(uri, text);
++        self.update_laravel_migration_overlay(uri, text);
+         self.diag
+             .documents
+             .lock()
+--- a/src/backend/laravel/schema.rs
++++ b/src/backend/laravel/schema.rs
+@@ -2,6 +2,8 @@
+ //! or updated one migration at a time.
+ 
+ use std::path::PathBuf;
++use std::sync::Arc;
++use tower_lsp::lsp_types::Url;
+ 
+ use tower_lsp::lsp_types::FileChangeType;
+ 
+@@ -14,7 +16,7 @@
+         }
+ 
+         let laravel_config = self.config().laravel;
+-        let index = if laravel_config.schema.enabled() || laravel_config.migrations.enabled() {
++        let mut index = if laravel_config.schema.enabled() || laravel_config.migrations.enabled() {
+             let bp_macros = self.laravel_macros.read().blueprint_macro_closures();
+             match crate::virtual_members::laravel::database_schema::load_schema_index(
+                 root,
+@@ -31,10 +33,62 @@
+             crate::virtual_members::laravel::database_schema::SchemaIndex::default()
+         };
+ 
++        if laravel_config.migrations.enabled() {
++            let sources: Vec<_> = self
++                .open_files
++                .read()
++                .iter()
++                .filter_map(|(uri, text)| {
++                    let path = Url::parse(uri).ok()?.to_file_path().ok()?;
++                    crate::virtual_members::laravel::database_schema::is_migration_php_file(
++                        root,
++                        &laravel_config.migrations,
++                        &path,
++                    )
++                    .then(|| (path, text.clone()))
++                })
++                .collect();
++            for (path, text) in sources {
++                index.update_migration_source(&path, text);
++            }
++        }
++
+         self.resolved_class_cache
+             .write()
+             .set_schema_index(index.clone());
+         *self.schema_index.write() = index;
++        self.clear_resolved_class_cache();
++        self.member_completion_cache.lock().clear();
++    }
++
++    /// Reconcile the accepted editor source before its parse is marked current.
++    pub(crate) fn update_laravel_migration_overlay(&self, uri: &str, text: &Arc<String>) {
++        if !uri.ends_with(".php") || !self.resolved_class_cache.read().is_laravel() {
++            return;
++        }
++        let Some(root) = self.workspace.workspace_root.read().clone() else {
++            return;
++        };
++        let config = self.config().laravel.migrations;
++        if !config.enabled() {
++            return;
++        }
++        let Some(path) = Url::parse(uri).ok().and_then(|uri| uri.to_file_path().ok()) else {
++            return;
++        };
++        if !crate::virtual_members::laravel::database_schema::is_migration_php_file(
++            &root, &config, &path,
++        ) {
++            return;
++        }
++        let mut index = self.schema_index.write();
++        if index.migration_source_matches(&path, text) {
++            return;
++        }
++        index.update_migration_source(&path, text.clone());
++        self.resolved_class_cache
++            .write()
++            .set_schema_index(index.clone());
+         self.clear_resolved_class_cache();
+         self.member_completion_cache.lock().clear();
+     }
+@@ -47,7 +101,13 @@
+         let mut index = self.schema_index.write();
+         let mut any_changed = false;
+         for (path, change_type) in changes {
+-            if *change_type == FileChangeType::DELETED {
++            let overlay = Url::from_file_path(path)
++                .ok()
++                .and_then(|uri| self.open_files.read().get(uri.as_str()).cloned());
++            if let Some(text) = overlay {
++                index.update_migration_source(path, text);
++                any_changed = true;
++            } else if *change_type == FileChangeType::DELETED {
+                 if index.remove_migration_file(path) {
+                     any_changed = true;
+                 }
+--- a/src/backend/semantic_snapshot.rs
++++ b/src/backend/semantic_snapshot.rs
+@@ -175,6 +175,7 @@
+             // explicitly opened file. Closing must discard its overlay even
+             // for external, excluded and standalone PHP documents.
+             self.update_ast(uri, &content);
++            self.update_laravel_migration_overlay(uri, &Arc::new(content));
+             if self.workspace_index_path(uri).is_none() {
+                 // Keep the restored declaration metadata for resolution, but
+                 // release per-file maps for sources outside workspace indexing.
+--- a/src/blade/call_site_inference.rs
++++ b/src/blade/call_site_inference.rs
+@@ -2083,6 +2083,7 @@
+         let already_parsed = self.diag.documents.lock().parsed(uri, revision.as_ref());
+         if !already_parsed {
+             self.update_ast(uri, text);
++            self.update_laravel_migration_overlay(uri, text);
+         }
+         let committed = self
+             .diag
+--- a/src/definition/member/mod.rs
++++ b/src/definition/member/mod.rs
+@@ -423,6 +423,39 @@
+                 continue;
+             }
+ 
++            if access_hint == MemberAccessHint::PropertyAccess
++                && !Self::has_docblock_virtual_member(&declaring_class, &effective_name).1
++                && declaring_class
++                    .get_property(&effective_name)
++                    .is_none_or(|property| {
++                        matches!(property.source, Some(PropertySource::DatabaseColumn { .. }))
++                    })
++                && extends_eloquent_model(lookup_class, &class_loader)
++                && let Some(definition) =
++                    crate::virtual_members::laravel::model_schema_column_definition(
++                        lookup_class,
++                        &class_loader,
++                        Some(&self.resolved_class_cache),
++                        &effective_name,
++                    )
++                && let Ok(target) = Url::from_file_path(definition.path.as_ref())
++                && let Some(current) = self.get_file_content_arc(target.as_str())
++                && current.as_str() == definition.source.as_str()
++            {
++                let start =
++                    crate::text_position::offset_to_position(&current, definition.start as usize);
++                let end =
++                    crate::text_position::offset_to_position(&current, definition.end as usize);
++                if let Some(bits) = successful.as_mut() {
++                    bits[candidate_index] = true;
++                }
++                locations.push(Location {
++                    uri: target,
++                    range: Range { start, end },
++                });
++                continue;
++            }
++
+             // ── where{Property} method → column entry fallback ───────────────
+             // `whereFlour()`, `whereKitchenId()` etc. are virtual methods
+             // synthesised from column names.  They have no real method
+@@ -656,12 +689,29 @@
+     ) -> Option<Location> {
+         let (class_uri, class_content) =
+             self.find_class_file_content(declaring_fqn, uri, content)?;
+-        let member_position = Self::find_member_position(
+-            &class_content,
+-            search_name,
+-            member_kind,
+-            declaring_class.member_name_offset(search_name, member_kind.as_str()),
+-        )?;
++        let name_offset = declaring_class.member_name_offset(search_name, member_kind.as_str());
++        let member_position = if member_kind == MemberKind::Property
++            && name_offset.is_none_or(|offset| offset == 0)
++            && Self::has_docblock_virtual_member(declaring_class, search_name).1
++            && let Some(start) = declaring_class
++                .doc_members
++                .as_ref()
++                .and_then(|members| members.source_offset)
++        {
++            let docblock = declaring_class.class_docblock.as_deref()?;
++            let start = start as usize;
++            // Never search another class or a literal that repeats the tag text.
++            if class_content.get(start..start.checked_add(docblock.len())?) != Some(docblock) {
++                return None;
++            }
++            let body = docblock.strip_prefix("/**").unwrap_or(docblock);
++            let position = Self::find_member_position(body, search_name, member_kind, None)?;
++            let offset =
++                start + docblock.len() - body.len() + position_to_offset(body, position) as usize;
++            crate::text_position::offset_to_position(&class_content, offset)
++        } else {
++            Self::find_member_position(&class_content, search_name, member_kind, name_offset)?
++        };
+         let parsed_uri = crate::util::declaration_uri(&class_uri)?;
+         Some(point_location(parsed_uri, member_position))
+     }
+--- a/src/parser/ast_update.rs
++++ b/src/parser/ast_update.rs
+@@ -2755,6 +2755,7 @@
+             Arc::new(DocblockMembers {
+                 methods,
+                 properties,
++                source_offset: doc.source_offset,
+             })
+         })
+     }
+--- a/src/parser/classes.rs
++++ b/src/parser/classes.rs
+@@ -148,7 +148,8 @@
+     let Some(ctx) = doc_ctx else {
+         return ClassDocblockInfo::default();
+     };
+-    let Some(doc_text) = docblock::get_docblock_text_for_node(ctx.trivias, ctx.content, node)
++    let Some((doc_text, source_offset)) =
++        crate::symbol_map::docblock::get_docblock_text_with_offset(ctx.trivias, ctx.content, node)
+     else {
+         return ClassDocblockInfo::default();
+     };
+@@ -175,6 +176,10 @@
+         .map(|(name, args)| (atom(&name), args))
+         .collect();
+ 
++    let mut doc_members = DocblockMembers::from_info(&info);
++    if let Some(members) = doc_members.as_mut() {
++        Arc::make_mut(members).source_offset = Some(source_offset);
++    }
+     ClassDocblockInfo {
+         deprecation_message: docblock::extract_deprecation_message_from_info(&info),
+         template_params,
+@@ -206,7 +211,7 @@
+         links: docblock::extract_link_urls_from_info(&info),
+         see_refs: docblock::extract_see_references_from_info(&info),
+         raw_docblock: Some(doc_text.to_string()),
+-        doc_members: DocblockMembers::from_info(&info),
++        doc_members,
+     }
+ }
+ 
+--- a/src/types/mod.rs
++++ b/src/types/mod.rs
+@@ -1945,6 +1945,8 @@
+     /// `(name, declared type)`.  The name carries no `$` prefix, and the
+     /// type is `None` for an untyped `@property $name`.
+     pub properties: Vec<(Atom, Option<PhpType>)>,
++    /// Byte offset of this exact comment in its declaring source, when parsed.
++    pub source_offset: Option<u32>,
+ }
+ 
+ impl DocblockMembers {
+@@ -1971,6 +1973,7 @@
+         Some(Arc::new(Self {
+             methods: methods.into_iter().map(Arc::new).collect(),
+             properties,
++            source_offset: None,
+         }))
+     }
+ }
+--- a/src/virtual_members/laravel/database_schema.rs
++++ b/src/virtual_members/laravel/database_schema.rs
+@@ -1,6 +1,7 @@
+ use std::borrow::Cow;
+ use std::collections::HashMap;
+ use std::path::{Path, PathBuf};
++use std::sync::Arc;
+ 
+ use mago_allocator::LocalArena;
+ use mago_database::file::FileId;
+@@ -26,6 +27,7 @@
+     blueprint_macros: HashMap<String, String>,
+     base_tables: HashMap<(String, String), SchemaTable>,
+     cached_plan: MigrationPlan,
++    migration_source: Option<(Arc<PathBuf>, Arc<String>)>,
+ }
+ 
+ impl PartialEq for SchemaIndex {
+@@ -53,6 +55,28 @@
+     pub generated_expression: Option<String>,
+     pub generated_mode: Option<String>,
+     pub php_type: PhpType,
++    /// Exact declaration site, absent for schema dumps or computed sources.
++    pub(crate) definition: Option<MigrationColumnDefinition>,
++}
++
++/// A migration declaration and the exact text from which its offsets were parsed.
++#[derive(Debug, Clone, PartialEq, Eq)]
++pub(crate) struct MigrationColumnDefinition {
++    /// Migration file that supplied this column.
++    pub path: Arc<PathBuf>,
++    /// Shared parsed source, used to refuse stale positions.
++    pub source: Arc<String>,
++    /// UTF-8 start offset of the declaring literal or implicit Blueprint method.
++    pub start: u32,
++    /// UTF-8 end offset of the declaration.
++    pub end: u32,
++}
++
++impl SchemaColumn {
++    fn with_definition(mut self, definition: Option<MigrationColumnDefinition>) -> Self {
++        self.definition = definition;
++        self
++    }
+ }
+ 
+ #[derive(Debug, Clone, Default, PartialEq, Eq)]
+@@ -64,7 +88,7 @@
+ struct MigrationFile {
+     path: PathBuf,
+     basename: String,
+-    content: String,
++    content: Arc<String>,
+ }
+ 
+ impl SchemaIndex {
+@@ -77,6 +101,7 @@
+             blueprint_macros: HashMap::new(),
+             base_tables: HashMap::new(),
+             cached_plan: MigrationPlan::default(),
++            migration_source: None,
+         };
+         for table in tables {
+             index.insert_table(table);
+@@ -175,6 +200,19 @@
+     }
+ 
+     pub fn update_migration_file(&mut self, path: &Path, content: String) {
++        self.update_migration_source(path, Arc::new(content));
++    }
++
++    /// Whether the cached plan already uses this exact source.
++    pub(crate) fn migration_source_matches(&self, path: &Path, content: &str) -> bool {
++        self.cached_plan
++            .files
++            .iter()
++            .any(|file| file.path == path && file.content.as_str() == content)
++    }
++
++    /// Publish an accepted migration source without copying its shared text.
++    pub(crate) fn update_migration_source(&mut self, path: &Path, content: Arc<String>) {
+         let mut found = false;
+         for file in &mut self.cached_plan.files {
+             if file.path == path {
+@@ -209,7 +247,7 @@
+         self.tables = self.base_tables.clone();
+         let plan = std::mem::take(&mut self.cached_plan);
+         for file in &plan.files {
+-            apply_migration_file(self, &file.content);
++            apply_migration_file(self, file);
+         }
+         self.cached_plan = plan;
+     }
+@@ -276,13 +314,19 @@
+         self.rebuild_column_lookup();
+     }
+ 
+-    fn rename_column(&mut self, old_name: &str, new_name: &str) {
++    fn rename_column(
++        &mut self,
++        old_name: &str,
++        new_name: &str,
++        definition: Option<MigrationColumnDefinition>,
++    ) {
+         if let Some(index) = self
+             .column_lookup
+             .get(&old_name.to_ascii_lowercase())
+             .copied()
+         {
+             self.columns[index].name = new_name.to_string();
++            self.columns[index].definition = definition;
+             self.rebuild_column_lookup();
+         }
+     }
+@@ -312,6 +356,7 @@
+         blueprint_macros: blueprint_macros.clone(),
+         base_tables: HashMap::new(),
+         cached_plan: MigrationPlan::default(),
++        migration_source: None,
+     };
+ 
+     if config.schema.enabled() {
+@@ -424,7 +469,7 @@
+         .into_iter()
+         .map(|path| {
+             let basename = migration_basename(&path);
+-            let content = std::fs::read_to_string(&path)?;
++            let content = Arc::new(std::fs::read_to_string(&path)?);
+             Ok(MigrationFile {
+                 path,
+                 basename,
+@@ -437,7 +482,7 @@
+ 
+ fn apply_migration_plan(index: &mut SchemaIndex, plan: &MigrationPlan) {
+     for file in &plan.files {
+-        apply_migration_file(index, &file.content);
++        apply_migration_file(index, file);
+     }
+ }
+ 
+@@ -869,6 +914,7 @@
+                 generated_expression,
+                 generated_mode,
+                 php_type,
++                definition: None,
+             }
+         })
+         .collect();
+@@ -1083,13 +1129,26 @@
+         || base == "year"
+ }
+ 
+-fn apply_migration_file(index: &mut SchemaIndex, content: &str) {
++fn apply_migration_file(index: &mut SchemaIndex, file: &MigrationFile) {
++    let content = file.content.as_str();
+     let arena = LocalArena::new();
+     let file_id = FileId::new(b"migration.php");
+-    let program = mago_syntax::parser::parse_file_content(&arena, file_id, content.as_bytes());
++    // Editor buffers can contain incomplete heredocs and other malformed syntax.
++    let Some(program) = crate::util::catch_panic_unwind_safe(
++        "migration parse",
++        file.path.to_str().unwrap_or("<migration>"),
++        None,
++        || mago_syntax::parser::parse_file_content(&arena, file_id, content.as_bytes()),
++    ) else {
++        return;
++    };
++    let previous = index
++        .migration_source
++        .replace((Arc::new(file.path.clone()), file.content.clone()));
+     for stmt in program.statements.iter() {
+         apply_migration_stmt(index, stmt, content, None);
+     }
++    index.migration_source = previous;
+ }
+ 
+ fn apply_migration_stmt(
+@@ -1434,7 +1493,40 @@
+         expand_blueprint_macro(index, connection, table_name, &closure_text);
+         return;
+     }
+-    apply_blueprint_statement(index, connection, table_name, method, args, chain);
++    let definition = index.migration_source.as_ref().and_then(|(path, source)| {
++        let argument = root
++            .argument_list
++            .arguments
++            .iter()
++            .nth(usize::from(matches!(method, "renameColumn" | "addColumn")));
++        let (start, end) = match argument.map(|arg| arg.value()) {
++            Some(Expression::Literal(literal::Literal::String(value))) => {
++                (value.span.start.offset + 1, value.span.end.offset - 1)
++            }
++            None => (
++                root.method.span().start.offset,
++                root.method.span().end.offset,
++            ),
++            _ => return None,
++        };
++        Some(MigrationColumnDefinition {
++            path: path.clone(),
++            source: source.clone(),
++            start,
++            end,
++        })
++    });
++    apply_blueprint_statement(
++        index,
++        connection,
++        table_name,
++        BlueprintStatement {
++            method,
++            args,
++            chain,
++            definition,
++        },
++    );
+ }
+ 
+ fn expand_blueprint_macro(
+@@ -1456,10 +1548,12 @@
+             };
+             if let Some(Expression::Closure(closure)) = assign_rhs {
+                 let saved = std::mem::take(&mut index.blueprint_macros);
++                let source = index.migration_source.take();
+                 for body_stmt in closure.body.statements.iter() {
+                     process_blueprint_stmt(index, connection, table_name, body_stmt, &synthetic);
+                 }
+                 index.blueprint_macros = saved;
++                index.migration_source = source;
+                 return;
+             }
+         }
+@@ -1504,14 +1598,25 @@
+     content.get(start..end)
+ }
+ 
++struct BlueprintStatement<'a> {
++    method: &'a str,
++    args: &'a str,
++    chain: &'a str,
++    definition: Option<MigrationColumnDefinition>,
++}
++
+ fn apply_blueprint_statement(
+     index: &mut SchemaIndex,
+     connection: &str,
+     table_name: &str,
+-    method: &str,
+-    args: &str,
+-    chain: &str,
++    statement: BlueprintStatement<'_>,
+ ) {
++    let BlueprintStatement {
++        method,
++        args,
++        chain,
++        definition,
++    } = statement;
+     let nullable = chain_contains_nullable(chain);
+     match method {
+         "dropColumn" | "removeColumn" => {
+@@ -1524,7 +1629,7 @@
+             let strings = string_args(args);
+             if strings.len() >= 2 {
+                 let table = index.get_or_create_table(connection, table_name);
+-                table.rename_column(&strings[0], &strings[1]);
++                table.rename_column(&strings[0], &strings[1], definition.clone());
+             }
+         }
+         "rename" => {
+@@ -1534,8 +1639,14 @@
+         }
+         "timestamps" | "timestampsTz" | "nullableTimestamps" | "nullableTimestampsTz" => {
+             let table = index.get_or_create_table(connection, table_name);
+-            table.set_column(migration_column("created_at", "TIMESTAMP", true));
+-            table.set_column(migration_column("updated_at", "TIMESTAMP", true));
++            table.set_column(
++                (migration_column("created_at", "TIMESTAMP", true))
++                    .with_definition(definition.clone()),
++            );
++            table.set_column(
++                (migration_column("updated_at", "TIMESTAMP", true))
++                    .with_definition(definition.clone()),
++            );
+         }
+         "dropTimestamps" | "dropTimestampsTz" => {
+             let table = index.get_or_create_table(connection, table_name);
+@@ -1545,7 +1656,9 @@
+         "softDeletes" | "softDeletesTz" | "softDeletesDatetime" => {
+             let column = first_string_arg(args).unwrap_or_else(|| "deleted_at".to_string());
+             let table = index.get_or_create_table(connection, table_name);
+-            table.set_column(migration_column(&column, "TIMESTAMP", true));
++            table.set_column(
++                (migration_column(&column, "TIMESTAMP", true)).with_definition(definition.clone()),
++            );
+         }
+         "dropSoftDeletes" | "dropSoftDeletesTz" => {
+             let column = first_string_arg(args).unwrap_or_else(|| "deleted_at".to_string());
+@@ -1554,12 +1667,10 @@
+         }
+         "rememberToken" => {
+             let table = index.get_or_create_table(connection, table_name);
+-            table.set_column(migration_column_with_chain(
+-                "remember_token",
+-                "VARCHAR",
+-                nullable,
+-                chain,
+-            ))
++            table.set_column(
++                (migration_column_with_chain("remember_token", "VARCHAR", nullable, chain))
++                    .with_definition(definition.clone()),
++            )
+         }
+         "dropRememberToken" => {
+             let table = index.get_or_create_table(connection, table_name);
+@@ -1569,28 +1680,28 @@
+             if let Some(prefix) = first_string_arg(args) {
+                 let nullable = nullable || method == "nullableMorphs";
+                 let table = index.get_or_create_table(connection, table_name);
+-                table.set_column(migration_column(
+-                    &format!("{prefix}_type"),
+-                    "VARCHAR",
+-                    nullable,
+-                ));
+-                table.set_column(migration_column(
+-                    &format!("{prefix}_id"),
+-                    "BIGINT",
+-                    nullable,
+-                ));
++                table.set_column(
++                    (migration_column(&format!("{prefix}_type"), "VARCHAR", nullable))
++                        .with_definition(definition.clone()),
++                );
++                table.set_column(
++                    (migration_column(&format!("{prefix}_id"), "BIGINT", nullable))
++                        .with_definition(definition.clone()),
++                );
+             }
+         }
+         "uuidMorphs" | "nullableUuidMorphs" => {
+             if let Some(prefix) = first_string_arg(args) {
+                 let nullable = nullable || method == "nullableUuidMorphs";
+                 let table = index.get_or_create_table(connection, table_name);
+-                table.set_column(migration_column(
+-                    &format!("{prefix}_type"),
+-                    "VARCHAR",
+-                    nullable,
+-                ));
+-                table.set_column(migration_column(&format!("{prefix}_id"), "UUID", nullable));
++                table.set_column(
++                    (migration_column(&format!("{prefix}_type"), "VARCHAR", nullable))
++                        .with_definition(definition.clone()),
++                );
++                table.set_column(
++                    (migration_column(&format!("{prefix}_id"), "UUID", nullable))
++                        .with_definition(definition.clone()),
++                );
+             }
+         }
+         "dropMorphs" => {
+@@ -1607,12 +1718,10 @@
+                 // column: `addColumn()` accepts any grammar type name.
+                 let database_type = migration_database_type(&strings[0]).unwrap_or("TEXT");
+                 let table = index.get_or_create_table(connection, table_name);
+-                table.set_column(migration_column_with_chain(
+-                    &strings[1],
+-                    database_type,
+-                    nullable,
+-                    chain,
+-                ));
++                table.set_column(
++                    (migration_column_with_chain(&strings[1], database_type, nullable, chain))
++                        .with_definition(definition.clone()),
++                );
+             }
+         }
+         _ => {
+@@ -1620,12 +1729,10 @@
+                 migration_column_from_blueprint_method(method, args)
+             {
+                 let table = index.get_or_create_table(connection, table_name);
+-                table.set_column(migration_column_with_chain(
+-                    &column,
+-                    database_type,
+-                    nullable,
+-                    chain,
+-                ));
++                table.set_column(
++                    (migration_column_with_chain(&column, database_type, nullable, chain))
++                        .with_definition(definition.clone()),
++                );
+             }
+         }
+     }
+@@ -1719,6 +1826,7 @@
+         generated_expression,
+         generated_mode,
+         php_type: database_type_to_php_type(database_type, nullable),
++        definition: None,
+     }
+ }
+ 
+--- a/src/virtual_members/laravel/mod.rs
++++ b/src/virtual_members/laravel/mod.rs
+@@ -969,6 +969,29 @@
+     Some((connection, table))
+ }
+ 
++/// Find the parsed migration declaration for a model schema column.
++pub(crate) fn model_schema_column_definition(
++    class: &ClassInfo,
++    class_loader: &dyn Fn(&str) -> Option<Arc<ClassInfo>>,
++    cache: Option<&ResolvedClassCache>,
++    column: &str,
++) -> Option<database_schema::MigrationColumnDefinition> {
++    let effective =
++        crate::virtual_members::resolve_class_fully_maybe_cached(class, class_loader, cache);
++    let Some(PropertySource::DatabaseColumn { column: source, .. }) =
++        &effective.get_property(column)?.source
++    else {
++        return None;
++    };
++    cache?
++        .read()
++        .schema_index()
++        .table(&source.connection, &source.table)?
++        .column(&source.column)?
++        .definition
++        .clone()
++}
++
+ fn model_schema_table(
+     class: &ClassInfo,
+     cache: Option<&ResolvedClassCache>,
+--- a/tests/integration/laravel_migration_columns.rs
++++ b/tests/integration/laravel_migration_columns.rs
+@@ -377,3 +377,359 @@
+         "slug was added by the alter migration: {slug}"
+     );
+ }
++
++#[tokio::test]
++async fn column_definitions_link_to_migrations_not_later_indexes() {
++    use crate::common::{definition_locations, goto_definition_at};
++    let source = migration(&CREATE_USERS.replace(
++        "$table->string('email')",
++        "$tag = '😀'; $table->string('email')",
++    ));
++    let (backend, dir, uri) = workspace(
++        &[("2024_01_01_000000_create_users_table.php", source.clone())],
++        USER_CONSUMER,
++    )
++    .await;
++    for name in ["email", "email_verified_at", "is_active"] {
++        let cursor = position_of(USER_CONSUMER, &format!("{name};"));
++        let targets = definition_locations(
++            goto_definition_at(&backend, &uri, cursor.line, cursor.character).await,
++        );
++        assert_eq!(targets.len(), 1, "{name}: {targets:?}");
++        assert_eq!(
++            targets[0].uri.to_file_path().unwrap(),
++            dir.path()
++                .join("database/migrations/2024_01_01_000000_create_users_table.php")
++        );
++        let expected = position_of(&source, &format!("'{name}'"));
++        assert_eq!(targets[0].range.start.line, expected.line);
++        assert_eq!(targets[0].range.start.character, expected.character + 1);
++    }
++}
++
++#[tokio::test]
++async fn changed_column_and_renamed_column_use_the_latest_declaration() {
++    use crate::common::{definition_locations, goto_definition_at};
++    let alter = migration(
++        "Schema::table('users', function (Blueprint $table) { $table->string('email')->nullable()->change(); $table->renameColumn('name', 'display_name'); });",
++    );
++    let consumer = USER_CONSUMER.replace("$user->is_active;", "$user->display_name;");
++    let (backend, dir, uri) = workspace(
++        &[
++            (
++                "2024_01_01_000000_create_users_table.php",
++                migration(CREATE_USERS),
++            ),
++            ("2024_01_02_000000_alter_users.php", alter.clone()),
++        ],
++        &consumer,
++    )
++    .await;
++    for name in ["email", "display_name"] {
++        let cursor = position_of(&consumer, &format!("{name};"));
++        let targets = definition_locations(
++            goto_definition_at(&backend, &uri, cursor.line, cursor.character).await,
++        );
++        assert_eq!(targets.len(), 1, "{name}: {targets:?}");
++        assert_eq!(
++            targets[0].uri.to_file_path().unwrap(),
++            dir.path()
++                .join("database/migrations/2024_01_02_000000_alter_users.php")
++        );
++        let expected = position_of(&alter, &format!("'{name}'"));
++        assert_eq!(targets[0].range.start.character, expected.character + 1);
++    }
++}
++
++#[tokio::test]
++async fn unsaved_migration_columns_update_navigation_and_close_restores_disk() {
++    use crate::common::{definition_locations, goto_definition_at, open_php};
++    use tower_lsp::{LanguageServer, lsp_types::*};
++    let original = migration(CREATE_USERS);
++    let name = "2024_01_01_000000_create_users_table.php";
++    let (backend, dir, uri) = workspace(&[(name, original.clone())], USER_CONSUMER).await;
++    let migration_uri =
++        Url::from_file_path(dir.path().join("database/migrations").join(name)).unwrap();
++    let changed = original
++        .replace("<?php\n", "<?php\n// 😀 unsaved\n")
++        .replace("'email'", "'contact_email'");
++    open_php(&backend, &migration_uri, &changed).await;
++    let consumer = USER_CONSUMER.replace("$user->email;", "$user->contact_email;");
++    backend
++        .did_change(DidChangeTextDocumentParams {
++            text_document: VersionedTextDocumentIdentifier {
++                uri: uri.clone(),
++                version: 2,
++            },
++            content_changes: vec![TextDocumentContentChangeEvent {
++                range: None,
++                range_length: None,
++                text: consumer.clone(),
++            }],
++        })
++        .await;
++    let cursor = position_of(&consumer, "contact_email;");
++    let targets = definition_locations(
++        goto_definition_at(&backend, &uri, cursor.line, cursor.character).await,
++    );
++    assert_eq!(
++        targets.len(),
++        1,
++        "unsaved column must navigate: {targets:?}"
++    );
++    let expected = position_of(&changed, "'contact_email'");
++    assert_eq!(
++        targets[0].range.start,
++        Position::new(expected.line, expected.character + 1)
++    );
++    let docs = hover_member(&backend, &uri, &consumer, "$user->contact_email;").await;
++    assert!(docs.contains("type: `VARCHAR`"), "{docs}");
++    assert_eq!(
++        std::fs::read_to_string(migration_uri.to_file_path().unwrap()).unwrap(),
++        original
++    );
++    backend
++        .did_change_watched_files(DidChangeWatchedFilesParams {
++            changes: vec![FileEvent {
++                uri: migration_uri.clone(),
++                typ: FileChangeType::CHANGED,
++            }],
++        })
++        .await;
++    let watched = definition_locations(
++        goto_definition_at(&backend, &uri, cursor.line, cursor.character).await,
++    );
++    assert_eq!(
++        watched.len(),
++        1,
++        "watch must retain the unsaved column: {watched:?}"
++    );
++    assert_eq!(watched[0].range.start, targets[0].range.start);
++    backend
++        .did_change_configuration(DidChangeConfigurationParams {
++            settings: serde_json::json!({}),
++        })
++        .await;
++    let configured = definition_locations(
++        goto_definition_at(&backend, &uri, cursor.line, cursor.character).await,
++    );
++    assert_eq!(
++        configured.len(),
++        1,
++        "config reload must retain overlay: {configured:?}"
++    );
++    assert_eq!(configured[0].range.start, targets[0].range.start);
++
++    for (version, text) in [
++        (2, "<?php\n$broken = <<<UNFINISHED\n".to_string()),
++        (3, changed.clone()),
++    ] {
++        backend
++            .did_change(DidChangeTextDocumentParams {
++                text_document: VersionedTextDocumentIdentifier {
++                    uri: migration_uri.clone(),
++                    version,
++                },
++                content_changes: vec![TextDocumentContentChangeEvent {
++                    range: None,
++                    range_length: None,
++                    text,
++                }],
++            })
++            .await;
++        let current = definition_locations(
++            goto_definition_at(&backend, &uri, cursor.line, cursor.character).await,
++        );
++        if version == 2 {
++            assert!(
++                current.is_empty(),
++                "partial source must not retain stale migration offsets: {current:?}"
++            );
++        } else {
++            assert_eq!(current.len(), 1);
++            assert_eq!(current[0].range.start, targets[0].range.start);
++        }
++    }
++    backend
++        .did_close(DidCloseTextDocumentParams {
++            text_document: TextDocumentIdentifier { uri: migration_uri },
++        })
++        .await;
++    backend
++        .did_change(DidChangeTextDocumentParams {
++            text_document: VersionedTextDocumentIdentifier {
++                uri: uri.clone(),
++                version: 3,
++            },
++            content_changes: vec![TextDocumentContentChangeEvent {
++                range: None,
++                range_length: None,
++                text: USER_CONSUMER.into(),
++            }],
++        })
++        .await;
++    let cursor = position_of(USER_CONSUMER, "email;");
++    let targets = definition_locations(
++        goto_definition_at(&backend, &uri, cursor.line, cursor.character).await,
++    );
++    assert_eq!(targets.len(), 1);
++    let expected = position_of(&original, "'email'");
++    assert_eq!(
++        targets[0].range.start,
++        Position::new(expected.line, expected.character + 1)
++    );
++}
++
++#[tokio::test]
++async fn schema_columns_do_not_override_declared_or_documented_properties() {
++    use crate::common::{definition_locations, goto_definition_at, open_php};
++    for declaration in [
++        "class User extends Model { public string $email; }",
++        "/** @property string $email */\nclass User extends Model {}",
++        "/** @property bool $email */\nclass User extends Model { public string $email; }",
++    ] {
++        let (backend, dir, uri) = workspace(
++            &[(
++                "2024_01_01_000000_create_users_table.php",
++                migration(CREATE_USERS),
++            )],
++            USER_CONSUMER,
++        )
++        .await;
++        let model_uri = Url::from_file_path(dir.path().join("app/Models/User.php")).unwrap();
++        open_php(
++            &backend,
++            &model_uri,
++            &USER_MODEL_PHP.replace("class User extends Model {}", declaration),
++        )
++        .await;
++        let cursor = position_of(USER_CONSUMER, "email;");
++        let targets = definition_locations(
++            goto_definition_at(&backend, &uri, cursor.line, cursor.character).await,
++        );
++        assert!(
++            targets.iter().any(|target| target.uri == model_uri),
++            "own declaration {declaration} must win: {targets:?}"
++        );
++        assert!(
++            !targets
++                .iter()
++                .any(|target| target.uri.path().contains("/migrations/"))
++        );
++        if declaration.contains("public string $email") {
++            let model = USER_MODEL_PHP.replace("class User extends Model {}", declaration);
++            assert_eq!(targets[0].range.start, position_of(&model, "email; }"));
++        }
++    }
++}
++
++#[tokio::test]
++async fn same_named_columns_keep_their_model_table_origins() {
++    use crate::common::{definition_locations, goto_definition_at};
++    let post = migration(
++        "Schema::create('posts', function (Blueprint $table) { $table->string('email'); });",
++    );
++    let consumer = USER_CONSUMER.replace(
++        "$user->email;",
++        "$user->email;\n        $post = new \\App\\Models\\Post(); $post->email;",
++    );
++    let (backend, _dir, uri) = workspace(
++        &[
++            (
++                "2024_01_01_000000_create_users_table.php",
++                migration(CREATE_USERS),
++            ),
++            ("2024_01_02_000000_create_posts_table.php", post),
++        ],
++        &consumer,
++    )
++    .await;
++    for (access, file) in [
++        ("$user->email", "create_users_table.php"),
++        ("$post->email", "create_posts_table.php"),
++    ] {
++        let cursor = position_of(&consumer, access);
++        let targets = definition_locations(
++            goto_definition_at(&backend, &uri, cursor.line, cursor.character + 7).await,
++        );
++        assert_eq!(targets.len(), 1, "{access}: {targets:?}");
++        assert!(
++            targets[0].uri.path().ends_with(file),
++            "{access}: {targets:?}"
++        );
++    }
++}
++
++#[tokio::test]
++async fn migration_origin_uses_inherited_model_table_instead_of_default_name() {
++    use crate::common::{definition_locations, goto_definition_at, open_php};
++    let posts = migration(
++        "Schema::create('posts', function (Blueprint $table) { $table->string('email'); });",
++    );
++    let (backend, dir, uri) = workspace(
++        &[
++            (
++                "2024_01_01_000000_create_users_table.php",
++                migration(CREATE_USERS),
++            ),
++            ("2024_01_02_000000_create_posts_table.php", posts),
++        ],
++        USER_CONSUMER,
++    )
++    .await;
++    let base_uri = Url::from_file_path(dir.path().join("app/Models/BaseUser.php")).unwrap();
++    open_php(&backend, &base_uri, "<?php namespace App\\Models; class BaseUser extends \\Illuminate\\Database\\Eloquent\\Model { protected $table = 'posts'; }").await;
++    let user_uri = Url::from_file_path(dir.path().join("app/Models/User.php")).unwrap();
++    open_php(
++        &backend,
++        &user_uri,
++        &USER_MODEL_PHP.replace("extends Model", "extends BaseUser"),
++    )
++    .await;
++    let cursor = position_of(USER_CONSUMER, "email;");
++    let targets = definition_locations(
++        goto_definition_at(&backend, &uri, cursor.line, cursor.character).await,
++    );
++    assert_eq!(targets.len(), 1, "inherited model table: {targets:?}");
++    assert!(
++        targets[0].uri.path().ends_with("create_posts_table.php"),
++        "inherited posts table must win: {targets:?}"
++    );
++}
++
++#[tokio::test]
++async fn model_phpdoc_origins_are_scoped_to_the_declaring_class() {
++    use crate::common::{definition_locations, goto_definition_at, open_php};
++    let prefix = "<?php\nnamespace App\\Models;\nuse Illuminate\\Database\\Eloquent\\Model;\n/** @property string $email */\nclass Decoy extends Model {}\n";
++    let comment = "/** @property string $email */\n";
++    let expected = tower_lsp::lsp_types::Position::new(
++        prefix.bytes().filter(|byte| *byte == b'\n').count() as u32,
++        comment[..comment.find("$email").unwrap() + 1]
++            .encode_utf16()
++            .count() as u32,
++    );
++    for between in [
++        "",
++        "#[Marker('/** @property string $email */')]\n",
++        "// /** @property string $email */\n",
++    ] {
++        let (backend, dir, uri) = workspace(
++            &[(
++                "2024_01_01_000000_create_users_table.php",
++                migration(CREATE_USERS),
++            )],
++            USER_CONSUMER,
++        )
++        .await;
++        let source = format!("{prefix}{comment}{between}class User extends Model {{}}\n");
++        let model = Url::from_file_path(dir.path().join("app/Models/User.php")).unwrap();
++        open_php(&backend, &model, &source).await;
++        let cursor = position_of(USER_CONSUMER, "email;");
++        let targets = definition_locations(
++            goto_definition_at(&backend, &uri, cursor.line, cursor.character).await,
++        );
++        assert_eq!(targets.len(), 1, "{between}: {targets:?}");
++        assert_eq!(targets[0].uri, model);
++        assert_eq!(targets[0].range.start, expected, "{between}");
++    }
++}

@@ -733,7 +733,8 @@
       "status": "partial",
       "acceptance_gate": "100 mapped commands; contextual conflicts; multi-stroke and double Shift",
       "openstorm_evidence": [
-        "0.1.39 native Settings > Keymap action search lists Restart Language Servers; selecting it enables Add Keyboard Shortcut. Cancel leaves the default keymap intact. Eight source action regressions protect registration/enablement/disposal and current-project recovery boundaries; wider shortcut parity remains partial."
+        "0.1.39 native Settings > Keymap action search lists Restart Language Servers; selecting it enables Add Keyboard Shortcut. Cancel leaves the default keymap intact. Eight source action regressions protect registration/enablement/disposal and current-project recovery boundaries; wider shortcut parity remains partial.",
+        "Slice65 native0.1.62: existing shortcut recorder measures requested tool super+z -> Meta+Y, super+y -> Meta+Z, super+l -> Meta+L. Meta+Y is Quick Definition, explaining the prior No definition found result without a product remap. Received Command-Z/Shift-Command-Z undo/redo a real text witness; CmdL reaches2:3, including single/two-tab project reopen and inactive-tab activation. Settings cancelled without binding changes; disposable originals, signature/runtime hashes, normal quit and latest-only retention pass. Historical missed CmdL cause and physical Dock-switch remain unverified; full100-command/conflict/chord acceptance stays partial. See docs/OPENSTORM.md and slice65 receipts."
       ],
       "remaining": "Reassess current OpenStorm implementation against this full gate; Workbench acceptance does not transfer."
     },

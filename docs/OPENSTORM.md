@@ -737,6 +737,41 @@ and performance acceptance. No debugger functionality is added. Final Git
 history and the ignored slice64-delivery.json identify the pushed source; final
 acceptance-document edits are reconciled separately from the built runtime.
 
+Slice65 — native shortcut input audit (accepted evidence slice, 2026-11-12).
+The preceding slice64 is verified progress: committed/pushed51969c83, signed62
+and bundled131 retained. This slice reuses that exact app/executable and source;
+no application/engine code or keymap binding changes are justified.
+The existing Settings > Keymap > Find Actions by Shortcut recorder uses the
+same strokeOf normalization as keyboard dispatch. In this current automation
+session, requested super+z records as Meta+Y, super+y as Meta+Z, and super+l
+(with the recorder focused) as Meta+L. The effective IntelliJ keymap binds
+Meta+Y to Quick Definition, explaining the prior No definition found result.
+This proves the received Z/Y input mismatch; it does not identify or change the
+physical OS keyboard layout. Settings is cancelled without editing bindings.
+
+A synthetic text-file witness verifies the actual editor path: after pasting
+an extra line, tool super+y (recorded Meta+Z) restores the original3lines;
+super+shift+y redoes the witness. CmdL opens Go to Line:Column and selecting2:3
+moves the caret exactly. Explicit Don't Save discards the witness on Close
+Project and all original bytes remain exact. CmdL also opens after a single-tab
+Recent-project reopen; a second clean reopen restores2tabs with OtherProbe
+active, and batch activating the previously inactive ShortcutProbe then CmdL
+opens the chooser at its preserved2:3. No location text is entered before the
+chooser is observed. The earlier missed CmdL invocation is not reproduced and
+its cause stays unproven; the physical Dock-switch autosave case remains open.
+These checks do not establish the full100-command/conflict/chord keymap gate.
+
+The final project closes cleanly. Only the owned fixture's temporary autosave
+override is removed, while closed. Native Quit exits app94190 without an
+app-specific post-quit AX read; no app/server remains. Both fixture originals,
+post-runtime deep/strict signature, executable/engine checksum, runtime source
+hashes, installed21 executable integrity, sole62 archive and absent compiler roots are
+rechecked. No environment file, server, rebuild, installer or migration is
+created. Previous source/regression gates remain applicable to unchanged code;
+only acceptance documentation/ledger change. Receipts: slice65-native-progress,
+app-readback and delivery in artifacts/checks. All69areas remain67partial and
+2user-deferred. Next independent implementation remains in the Laravel roadmap.
+
 Source integration (2026-11-01, verified source checkpoint): integrates all 240 new
 commits from `l0ng-ai/openidea:main` at `041e7210` into
 `codex/openstorm-php-laravel`, based on pushed OpenStorm `82d1313a`.

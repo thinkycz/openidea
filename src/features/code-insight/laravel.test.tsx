@@ -312,3 +312,74 @@ it("ignores stale name activations and accepts only the new chooser's results", 
   await selectLaravelItem(useLaravelNavigation.getState().items[0]!);
   expect(mock.open).toHaveBeenCalledWith("/p/resources/views/invoices/show.blade.php", 4, 0);
 });
+
+it.each(["routes", "views"] as const)(
+  "retires displayed %s targets after an observed file change and retries the same name",
+  async (kind) => {
+    if (kind === "views")
+      mock.views.mockImplementation((_request, _doc, name) =>
+        ok(
+          name === null
+            ? { views: ["invoices.show"], locations: [], incomplete: true }
+            : { views: [], locations: [loc(2)], incomplete: false },
+        ),
+      );
+    await openLaravelNavigation(kind);
+    const name = useLaravelNavigation.getState().items[0]!.name;
+    await selectLaravelItem(useLaravelNavigation.getState().items[0]!);
+    const stale = useLaravelNavigation.getState().items[0]!;
+    render(<LaravelNavigation />);
+    const { emitLocalIdeEvent } = await import("@/platform/ipc");
+    act(() => emitLocalIdeEvent({ type: "fsChanged", created: [], modified: ["/p/routes/web.php"], removed: [] }));
+    expect(screen.queryAllByRole("option")).toHaveLength(0);
+    expect(screen.getByRole("alert")).toHaveTextContent("Project files changed");
+    expect(useLaravelNavigation.getState().selectedName).toBe(name);
+    expect(screen.getByText(/Results are incomplete/)).toBeInTheDocument();
+    await selectLaravelItem(stale);
+    expect(mock.open).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    await waitFor(() => expect(screen.getAllByRole("option").length).toBeGreaterThan(0));
+    expect((kind === "routes" ? mock.routes : mock.views).mock.calls.at(-1)).toEqual([
+      expect.any(Number),
+      7,
+      name,
+      2000,
+    ]);
+    await selectLaravelItem(useLaravelNavigation.getState().items[0]!);
+    expect(mock.open).toHaveBeenCalledWith("/p/routes/web.php", 2, 0);
+  },
+);
+
+it("retires pending names after a file creation and ignores their late response", async () => {
+  let resolve!: (value: unknown) => void;
+  mock.views.mockImplementationOnce(
+    () =>
+      new Promise((done) => {
+        resolve = done;
+      }),
+  );
+  const pending = openLaravelNavigation("views");
+  const { emitLocalIdeEvent } = await import("@/platform/ipc");
+  emitLocalIdeEvent({ type: "fsChanged", created: ["/p/resources/views/new.blade.php"], modified: [], removed: [] });
+  expect(mock.cancel).toHaveBeenCalledOnce();
+  resolve({ status: "ok", data: { views: ["stale"], locations: [], incomplete: false } });
+  await pending;
+  expect(useLaravelNavigation.getState().items).toEqual([]);
+  expect(useLaravelNavigation.getState().loading).toBe(false);
+  expect(useLaravelNavigation.getState().error).toContain("Project files changed");
+  render(<LaravelNavigation />);
+  fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+  await waitFor(() => expect(screen.getByRole("option")).toHaveTextContent("invoices.show"));
+});
+
+it("does not retire results for empty file batches or after disposing its event subscriptions", async () => {
+  await openLaravelNavigation("routes");
+  const items = useLaravelNavigation.getState().items;
+  const { emitLocalIdeEvent } = await import("@/platform/ipc");
+  emitLocalIdeEvent({ type: "fsChanged", created: [], modified: [], removed: [] });
+  expect(useLaravelNavigation.getState().items).toBe(items);
+  expect(useLaravelNavigation.getState().error).toBeNull();
+  uninstall();
+  emitLocalIdeEvent({ type: "fsChanged", created: [], modified: [], removed: ["/p/routes/web.php"] });
+  expect(useLaravelNavigation.getState().items).toBe(items);
+});

@@ -861,6 +861,81 @@ in artifacts/checks, plus real relay events and before-fixture-isolation failure
 All69areas remain67partial/2user-deferred. Physical Dock-switch autosave and the
 broader semantic/configuration/standing-result/platform gates remain open.
 
+Slice67 — retire displayed Laravel results on observed file changes
+(verified, 2026-11-12). Slice66 is verified progress, committed/pusheda5184e1a.
+Signed63 still retains an already displayed route5:69 row after a closed-file
+shift and actual modification notification; Open activates blank5:1 although
+the declaration is now6:69. A displayed closed view1:1 likewise remains after
+its actual deletion notification; Open creates Cannot open file / os error2.
+Both baseline cases are directly reproduced, all12owned originals restored
+while closed, and app/server processes exit normally. No relay, engine changes,
+project commands, environment files or profile overrides are needed.
+
+Three red UI regressions expose displayed route/view rows and pending name
+replies surviving a nonempty file event. Candidate64 subscribes to the existing
+window-scoped fsChanged stream, clears selectable rows, cancels/retires pending
+queries and offers explicit Retry. It preserves the chosen logical name/phase
+and incomplete warning. Empty file batches and closed choosers remain inert;
+the disposer removes both project/file subscriptions. All19chooser tests pass,
+including queued old-row refusal and fresh retry activation. The initial full
+frontend run reports5349pass/1failure: the new UI message lacks a required zh
+catalog entry. That entry is added before final frontend rerun; the original
+failure is retained in slice67-before-locale-frontend receipts/logs. Final5350
+frontend tests/487files, typecheck/lint/Knip/format/build and8packaging-retention
+regressions pass. Unfiltered workspace1748/66ignored/0filtered, Rust formatting,
+all-target Clippy with warnings denied and post-binding TypeScript pass. The
+known debug-linker unwind-table warning matches prior builds. Signed64 native/retention checks pass below; Git identity and exact remote
+read-back are recorded in slice67-delivery and repository history. Inherited29actual-client/
+6host and source-engine131 gates apply to byte-identical Rust runtime/engine.
+No acceptance is inferred for unsaved edits without filesystem events, server/
+configuration epochs, event-delivery gaps or the final activation interval.
+All69areas remain67partial/2user-deferred; physical Dock-switch autosave remains
+unverified. Evidence: slice67-displayed-{red,green}.log and slice67-native-red.
+
+Slice67 — signed development0.1.64 acceptance: package/signature/provenance pass
+in215.88s with unchanged engine131. Under an explicit disposable HOME/system-only
+PATH, only the PHP caller is open when the already displayed closed route5:69
+changes on disk. The actual watch event clears the old row/Open, presents
+Project files changed / Retry and leaves the caller active. Enter retries the
+same selected name, yielding6:69; a second Enter opens the actual shifted
+Unicode declaration6:69. The already displayed closed view1:1 is removed; its
+actual deletion event likewise clears the row. Retry while absent shows no
+matches/disabled Open and never creates a missing-file tab. Restoring only the
+owned view emits a verified create event, invalidates the empty target state,
+and explicit Retry/Open reaches exact original Unicode content1:1.
+
+A further displayed view-name list is invalidated by creating the owned
+openstorm-slice67-new.blade.php. Retry lists the new name; selecting it returns
+its correct1:1 target. Cancel retains the caller without opening a new tab.
+All4expected modification/deletion/creation notifications are verified in the
+actual app trace. Close Project reaches Welcome and stops engine85680. The
+shifted route is restored and only the exact extra view is removed while closed;
+all12original files match. Recent Projects restores3clean tabs, and fresh route
+navigation opens original5:69 using bundled server86063 with
+--stdio --no-project-tools. Normal Quit exits app85653 and that server.
+Explicit-profile noargs relaunch86078 recovers the same3clean tabs and route
+caret5:69; a fresh view query from the focused recovered PHP editor opens1:1.
+Final native Quit exits server86088/app86078; all5owned PIDs are absent.
+
+Post-runtime deep/strict signature, executable/engine hashes and all build-source
+hashes pass before this docs/ledger-only closeout. Both red/fixed12-file original
+sets, Composer lock/autoload hashes and97PHP syntax checks each pass; no env
+files exist, no project settings override is introduced and the extra test view
+is absent. Installed21 remains unchanged. Only archived64 remains; packaging
+removed the duplicate bundle, prior63 app and21,499compiler files (Cargo18.6GiB).
+Both root and engine compiler caches are absent. The final full source gates
+are5350frontend/487files,1748Rust/66ignored/0filtered, fmt, all-target Clippy,
+post-binding typecheck, lint/Knip/format/build and8packaging/retention checks.
+Inherited29client/6host and engine-source131 evidence remains explicitly reused
+for unchanged Rust runtime/engine; these were not rerun as new engine checks.
+Receipts: slice67-{frontend,sdk-gates,workspace-totals,inherited-engine-gates,
+app-build,build-receipt,native-progress,app-readback,delivery} in artifacts/checks,
+plus baseline/native trace and before-locale failure logs. All69areas remain
+67partial/2user-deferred. Unsaved changes without file events, server/configuration
+epochs, delivery gaps, the final activation interval and physical Dock-switch
+autosave remain open. Local ad hoc development delivery only; no installation,
+notarization, publishing, migration or debugger expansion.
+
 Source integration (2026-11-01, verified source checkpoint): integrates all 240 new
 commits from `l0ng-ai/openidea:main` at `041e7210` into
 `codex/openstorm-php-laravel`, based on pushed OpenStorm `82d1313a`.

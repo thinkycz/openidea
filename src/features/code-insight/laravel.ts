@@ -2,7 +2,7 @@
 import { create } from "zustand";
 import { tx } from "@/platform/i18n";
 import type { Location, ProjectInfo, LaravelRoutes, LaravelViews } from "@/bindings";
-import { commands, nextRequestId, isCancelled } from "@/platform/ipc";
+import { commands, nextRequestId, isCancelled, onIdeEvent } from "@/platform/ipc";
 import { useProject, relativePath } from "@/platform/project";
 import { caretContext, hint, lspRequest, openLocation, reportError } from "./ipc";
 
@@ -44,9 +44,26 @@ export function closeLaravelNavigation() {
 }
 
 export function installLaravelNavigationEvents() {
-  return useProject.subscribe((state, previous) => {
+  const offProject = useProject.subscribe((state, previous) => {
     if (state.project !== previous.project || state.opening) closeLaravelNavigation();
   });
+  const offFiles = onIdeEvent("fsChanged", ({ created, modified, removed }) => {
+    if (!context || (!created.length && !modified.length && !removed.length)) return;
+    // Retire both displayed rows and pending replies. Keep the chosen logical
+    // name and incomplete warning for an explicit retry against current files.
+    generation++;
+    if (pending !== null) void commands.cancelRequest(pending).catch(() => {});
+    pending = null;
+    useLaravelNavigation.setState({
+      items: [],
+      loading: false,
+      error: tx("Project files changed. Retry to refresh Laravel results."),
+    });
+  });
+  return () => {
+    offProject();
+    offFiles();
+  };
 }
 
 export async function openLaravelNavigation(kind: LaravelNavigationKind) {

@@ -1502,6 +1502,67 @@ deferred. Ignored slice74 focused/final-pipeline/final-readback/retention/delive
 receipts retain the test, signature, source, cleanup and exact remote Git proof;
 repository history identifies the delivered source commit.
 
+Slice75 — checked PHP replies retain project revisions; signed0.1.69
+source/build checkpoint (2026-11-12). Native tooling remains unavailable after
+recheck (official skill folder empty; no desktop-control tool). A pending async
+request asks the user to restore it; no reply or elapsed-time approval is assumed.
+Independent first-milestone work continues. Host reviewed-edit guards already
+rehash disk/settings/document revisions before exposing/applying edits; no
+newly discovered overwrite bypass or host failure is claimed.
+
+Unchanged68 public-client red checks reproduce stale rename/import replies after
+observed disk or settings changes, stale import replies after caller edits, and
+a checked rename rebased onto changes during candidate discovery. Stable and
+unrelated plain-document controls pass. Two extended tests fail for those exact
+reasons before the correction. PHP adapters now capture the existing shared
+project/source/server snapshot before discovery, retain it through checked-rename
+retries, and reject a late Optimize Imports reply or cancellation before exposing
+its action. Exact overlay receipts, witnessed targets, Host apply guards, preview,
+undo/save-conflict behavior and wire shapes remain. No new settings interface,
+execution action or debugger code is added.
+
+Two focused mock regressions pass11scenarios, including rejection before issuing
+a newly rebased rename RPC. A new actual-engine regression holds a genuine
+nonempty PHPantom response in a test-only Python -I stdio relay, changes disk/
+settings inputs, then releases the response. All four rename/import cases refuse
+the stale response and preserve exact fixture bytes. The two PHP sources pass
+CLI syntax checks, and Composer helper metadata is explicit. No environment
+files, framework boot or Composer action are involved. Focused1/34filtered passes
+14.19s; the complete35real-client/6host suites pass with no ignored/filtered cases.
+The relay/control files belong to temporary test projects; Python is not a new
+product runtime dependency. The existing134 pivot corpus is reused unchanged.
+
+Full unfiltered workspace1753passed/72ignored/0filtered, fmt/all-target Clippy
+with warnings denied, frontend5357tests/487files, type/lint/Knip/format/build,
+post-binding checks and8packaging/retention tests pass. Engine134 canonical/
+resource/source recipe are unchanged, with SHA256:
+134fce32ad219cef9fd1effd7c2e7554fc4d011a88366f7f01bab73d370f5e0f.
+Its prior full18421ordinary/17ignored/0filtered plus FIFO-child source proof is
+reused by checksum and source reconstruction; no new engine rebuild or full
+source-suite run is claimed.
+
+Version0.1.69 updates only35workspace lock entries, preserving every external
+lock entry. Local arm64 packaging takes213.56s; app executable SHA256:
+15d23d0f30e834acd4118a456f8f7b2e8a2b997da25b6c9538fc44bc781894dd.
+Strict/deep ad-hoc signature, compiled-source/build-receipt hashes, embedded/
+canonical/resource engine, fixture/syntax/Composer metadata, installed-app
+preservation and absence of owned app/engine/relay processes are read back.
+This proves source/client/build integrity, not new native UI operation, install,
+relaunch or app-quit acceptance. The installed optimized app/profiles are untouched.
+
+Latest-only packaging verifies69 before pruning68 and the duplicate bundle.
+Cargo clean removes23,585workspace compiler files/24.8GiB; workspace, engine and
+root target compiler directories are empty/absent. The engine compiler cache
+stays absent throughout this batch. Only artifacts/batches/0.1.69/OpenStorm.app
+remains as an app archive. Earlier receipts/source/patches/licenses/provenance,
+PHP Workbench and evaluation114 remain. Native69 PHP shortcut/modal/refactor/
+recovery/quit checks, physical Dock-switch autosave and broader project/profile/
+formatting/rename matrices remain open. All69 areas stay67partial/2user-deferred.
+Publishing, updater activation, notarization, real-profile migration and debugger
+expansion remain deferred. Ignored slice75 red/extended-red/focused/final-pipeline/
+final-readback/delivery receipts retain exact evidence; repository history and
+remote read-back identify the delivered source. The full roadmap remains active.
+
 Source integration (2026-11-01, verified source checkpoint): integrates all 240 new
 commits from `l0ng-ai/openidea:main` at `041e7210` into
 `codex/openstorm-php-laravel`, based on pushed OpenStorm `82d1313a`.

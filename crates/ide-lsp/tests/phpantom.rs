@@ -3409,3 +3409,115 @@ async fn laravel_pivot_accessors_follow_unsaved_dependency_methods_without_calle
     assert_eq!(std::fs::read_to_string(&demo).unwrap(), demo_source);
     result.unwrap();
 }
+
+/// Delay a genuine successful engine response until project inputs have changed.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires pinned PHPantom, Python3 and the owned PHP syntax-check CLI"]
+async fn reviewed_php_actions_refuse_real_engine_replies_after_project_changes() {
+    let bin = std::env::var_os("OPENSTORM_TEST_PHPANTOM_BIN")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../src-tauri/resources/phpantom/phpantom_lsp")
+        })
+        .canonicalize()
+        .unwrap();
+    let php_cli = std::env::var_os("OPENSTORM_TEST_PHP_BIN").map(PathBuf::from).unwrap_or_else(|| {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../artifacts/toolchains/php-8.4.23-static/php")
+    });
+    for operation in ["rename", "imports"] {
+        for mutation in ["disk", "settings"] {
+            let tmp = tempfile::tempdir().unwrap();
+            let root = tmp.path().canonicalize().unwrap();
+            let source = "<?php\nuse DateTime as Unused;\ntotal();\n";
+            let helper_source = "<?php function total(): int { return 1; }\n";
+            let path = root.join("main.php");
+            let helper = root.join("helpers.php");
+            std::fs::write(&path, source).unwrap();
+            std::fs::write(&helper, helper_source).unwrap();
+            std::fs::write(
+                root.join("composer.json"),
+                r#"{"require":{"php":"^8.2"},"autoload":{"files":["helpers.php"]}}"#,
+            )
+            .unwrap();
+            for file in [&path, &helper] {
+                let lint = std::process::Command::new(&php_cli).args(["-n", "-l"]).arg(file).output().unwrap();
+                assert!(lint.status.success(), "{}", String::from_utf8_lossy(&lint.stderr));
+            }
+            let proxy = root.join("held-reply.py");
+            std::fs::write(&proxy, include_str!("fixtures/phpantom-held-reply.py")).unwrap();
+            let ready = root.join("reply.json");
+            let release = root.join("release");
+            let method =
+                if operation == "rename" { "phpWorkbench/renameChecked" } else { "phpWorkbench/optimizeImports" };
+            let mut php = LanguageRegistry::load(None).unwrap().get(&LanguageId::new("php")).unwrap();
+            php.language_servers.retain(|s| s.name == "phpantom");
+            let cfg = &mut php.language_servers[0];
+            let engine_args = std::mem::take(&mut cfg.args);
+            cfg.command = std::env::var("OPENSTORM_TEST_PYTHON").unwrap_or_else(|_| "python3".into());
+            cfg.args = vec![
+                "-I".into(),
+                proxy.to_string_lossy().into_owned(),
+                bin.to_string_lossy().into_owned(),
+                method.into(),
+                ready.to_string_lossy().into_owned(),
+                release.to_string_lossy().into_owned(),
+            ];
+            cfg.args.extend(engine_args);
+            let mgr =
+                LspManager::new(root.clone(), Arc::new(LanguageRegistry::from_configs(vec![php])), Arc::new(|_| {}));
+            let files = vec![path.clone(), helper.clone()];
+            mgr.set_candidates_hook(Box::new(move |_, _| ide_lsp::CandidateFiles {
+                files: files.clone(),
+                limit_hit: false,
+            }));
+            let doc = DocId::next();
+            mgr.did_open(doc, &path, &LanguageId::new("php"), 1, source);
+            let result: Result<(), String> = async {
+                mgr.hover(doc, Pos::new(2,1), Default::default()).await.map_err(|e| e.to_string())?
+                    .ok_or_else(|| "real helper hover did not initialize".to_owned())?;
+                let client = mgr.clone();
+                let pending = tokio::spawn(async move {
+                    if operation == "rename" {
+                        client.rename(doc, Pos::new(2,1), "subtotal".into(), Default::default()).await.map(|r| r.edit.files.len())
+                    } else {
+                        client.code_action_query(doc, Range::new(Pos::new(0,0), Pos::new(3,0)), vec!["source.organizeImports".into()], Default::default()).await.map(|r| r.actions.len())
+                    }
+                });
+                for _ in 0..750 {
+                    if ready.exists() || pending.is_finished() { break; }
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+                let captured = std::fs::read_to_string(&ready).map_err(|e| e.to_string());
+                let changed_helper = "<?php // external revision\nfunction total(): int { return 1; }\n";
+                if captured.is_ok() {
+                    if mutation == "disk" {
+                        std::fs::write(&helper, changed_helper).map_err(|e| e.to_string())?;
+                        mgr.php_files_changed(&[], std::slice::from_ref(&helper), &[]);
+                    } else {
+                        mgr.set_config_hook(Box::new(|cfg, _| cfg.settings = Some(serde_json::json!({"profileFixture":true}))));
+                        mgr.reconfigure().await;
+                    }
+                }
+                std::fs::write(&release, "release").map_err(|e| e.to_string())?;
+                let reply = pending.await.map_err(|e| e.to_string())?;
+                let captured: serde_json::Value = serde_json::from_str(&captured.map_err(|e| format!("{operation}/{mutation}: no held successful engine reply ({e}); client {reply:?}"))?).map_err(|e| e.to_string())?;
+                let edit = if operation == "rename" { &captured["result"] } else { &captured["result"]["edit"] };
+                let nonempty = edit["changes"].as_object().is_some_and(|files| files.values().any(|v| v.as_array().is_some_and(|edits| !edits.is_empty())))
+                    || edit["documentChanges"].as_array().is_some_and(|edits| !edits.is_empty());
+                if !nonempty { return Err(format!("{operation}/{mutation}: engine did not produce a real edit: {captured}")); }
+                if !matches!(reply, Err(ref e) if e.kind == ide_core::error::ErrorKind::Cancelled) {
+                    return Err(format!("{operation}/{mutation}: stale genuine engine result escaped: {reply:?}"));
+                }
+                if std::fs::read_to_string(&path).map_err(|e| e.to_string())? != source
+                    || std::fs::read_to_string(&helper).map_err(|e| e.to_string())? != if mutation=="disk" { changed_helper } else { helper_source } {
+                    return Err("query changed fixture bytes".into());
+                }
+                eprintln!("{operation}/{mutation}: genuine nonempty engine reply held, project changed, client refused; fixture bytes preserved");
+                Ok(())
+            }.await;
+            let _ = std::fs::write(&release, "release");
+            mgr.shutdown_all().await;
+            result.unwrap();
+        }
+    }
+}

@@ -103,6 +103,7 @@ impl LspManager {
         new_name: String,
         cancel: &CancellationToken,
     ) -> IdeResult<WorkspaceEdit> {
+        let before = self.navigation_sources(snap, t)?;
         let word =
             crate::scope::search_word(snap, pos).ok_or_else(|| IdeError::invalid("No PHP symbol at the caret"))?;
         let candidates = self
@@ -134,6 +135,7 @@ impl LspManager {
                 t,
                 RenameCheckedParams { rename, expected_sources: sources.clone() },
                 &overlays,
+                &before,
                 cancel,
             )
             .await?;
@@ -158,6 +160,7 @@ impl LspManager {
         t: &Target,
         params: RenameCheckedParams,
         overlays: &[ExpectedSource],
+        before: &NavigationSnapshot,
         cancel: &CancellationToken,
     ) -> IdeResult<Option<lsp::WorkspaceEdit>> {
         let method = "phpWorkbench/renameChecked";
@@ -176,6 +179,7 @@ impl LspManager {
             !cancel.is_cancelled()
                 && t.server.running_gen(t.run.generation).is_some()
                 && attached
+                && self.navigation_current(t, before)
                 && self.php_sources(snap, t).is_ok_and(|sources| sources == overlays)
         };
         loop {
@@ -214,6 +218,7 @@ impl LspManager {
         t: &Target,
         cancel: Option<&CancellationToken>,
     ) -> IdeResult<CodeAction> {
+        let before = self.navigation_sources(snap, t)?;
         let source = self
             .php_sources(snap, t)?
             .into_iter()
@@ -228,6 +233,9 @@ impl LspManager {
                 LONG_TIMEOUT,
             )
             .await?;
+        if cancel.is_some_and(|token| token.is_cancelled()) || !self.navigation_current(t, &before) {
+            return Err(IdeError::cancelled());
+        }
         if result.source != source {
             return Err(IdeError::invalid("PHP Optimize Imports returned a mismatched source receipt"));
         }

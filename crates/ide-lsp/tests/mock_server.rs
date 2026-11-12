@@ -3890,3 +3890,143 @@ async fn navigation_retry_stops_on_settings_reconfiguration_restart_and_explicit
         assert_eq!(state.requested("textDocument/implementation").len(), 1, "{mutation}");
     }
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn php_reviewed_replies_reject_project_changes_without_rejecting_unrelated_documents() {
+    let mut failures = Vec::new();
+    for operation in ["rename", "imports"] {
+        for mutation in ["disk", "settings", "source", "stable", "unrelated"] {
+            let mut caps = incremental_caps();
+            caps["experimental"] = json!({"phpWorkbenchRenameChecked":true,"phpWorkbenchOptimizeImports":true});
+            let h = harness_for("php", "php", &[("phpantom", caps)], &[]);
+            let original = "<?php use Z\\Unused;\ntotal();\n";
+            let (doc, path) = h.open("main.php", original);
+            let helper = h.root.join("helper.php");
+            let helper_source = "<?php function total() {}\n";
+            std::fs::write(&helper, helper_source).unwrap();
+            let candidates = vec![path.clone(), helper.clone()];
+            h.mgr.set_candidates_hook(Box::new(move |_, _| ide_lsp::CandidateFiles {
+                files: candidates.clone(),
+                limit_hit: false,
+            }));
+            h.wait_status("phpantom", ServerStatus::Ready).await;
+            let state = h.launcher.state("phpantom");
+            let gate = Arc::new(Gate::default());
+            let held = gate.clone();
+            let uri = uri_of(&path);
+            let helper_uri = uri_of(&helper);
+            let method =
+                if operation == "rename" { "phpWorkbench/renameChecked" } else { "phpWorkbench/optimizeImports" };
+            *state.responder.lock() = Some(Arc::new(move |_, requested, params| {
+                if requested != method {
+                    return None;
+                }
+                held.hold();
+                Some(if operation == "rename" {
+                    json!({"changes": {
+                        uri.clone():[{"range":php_range(1,0,1,5),"newText":"subtotal"}],
+                        helper_uri.clone():[{"range":php_range(0,15,0,20),"newText":"subtotal"}]
+                    }})
+                } else {
+                    json!({"source":params["expectedSource"],"edit":{"changes":{
+                        uri.clone():[{"range":php_range(0,6,0,19),"newText":""}]
+                    }}})
+                })
+            }));
+            let mgr = h.mgr.clone();
+            let pending = tokio::spawn(async move {
+                if operation == "rename" {
+                    mgr.rename(doc, Pos::new(1, 1), "subtotal".into(), Default::default())
+                        .await
+                        .map(|r| r.edit.files.len())
+                } else {
+                    mgr.code_action_query(
+                        doc,
+                        rng(0, 0, 2, 0),
+                        vec!["source.organizeImports".into()],
+                        Default::default(),
+                    )
+                    .await
+                    .map(|r| r.actions.len())
+                }
+            });
+            eventually(|| gate.entered()).await;
+            match mutation {
+                "disk" => {
+                    std::fs::write(&helper, "<?php // external revision\nfunction total() {}\n").unwrap();
+                    h.mgr.php_files_changed(&[], std::slice::from_ref(&helper), &[]);
+                }
+                "settings" => {
+                    h.mgr.set_config_hook(Box::new(|cfg, _| cfg.settings = Some(json!({"phpTargetFixture":"8.4"}))));
+                    h.mgr.reconfigure().await;
+                }
+                "source" => h.mgr.did_change(doc, 2, &[change(rng(0, 0, 0, 0), "\n")], &|| format!("\n{original}")),
+                "unrelated" => h.mgr.did_open(
+                    DocId::next(),
+                    &h.root.join("notes.txt"),
+                    &LanguageId::new("plain"),
+                    1,
+                    "unrelated\n",
+                ),
+                "stable" => {}
+                _ => unreachable!(),
+            }
+            gate.open();
+            let result = pending.await.unwrap();
+            if operation == "rename" {
+                eventually(|| {
+                    state.notified("textDocument/didClose").iter().any(|p| p["textDocument"]["uri"] == uri_of(&helper))
+                })
+                .await;
+            }
+            h.mgr.shutdown_all().await;
+            if matches!(mutation, "stable" | "unrelated") {
+                if result.as_ref().ok().copied() != Some(if operation == "rename" { 2 } else { 1 }) {
+                    failures.push(format!("{operation}/{mutation}: fresh reply rejected {result:?}"));
+                }
+            } else if !matches!(result, Err(ref e) if e.kind == ide_core::error::ErrorKind::Cancelled) {
+                failures.push(format!("{operation}/{mutation}: stale reviewed reply escaped {result:?}"));
+            }
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), original, "query must never apply its edit");
+            assert_eq!(
+                std::fs::read_to_string(&helper).unwrap(),
+                if mutation == "disk" { "<?php // external revision\nfunction total() {}\n" } else { helper_source }
+            );
+        }
+    }
+    assert!(failures.is_empty(), "reviewed request freshness: {failures:#?}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn php_reviewed_rename_does_not_rebase_project_changes_during_candidate_discovery() {
+    let h = harness_for("php", "php", &[("phpantom", checked_php_caps())], &[]);
+    let original = "<?php total();\n";
+    let (doc, path) = h.open("main.php", original);
+    let helper = h.root.join("helper.php");
+    std::fs::write(&helper, "<?php function total() {}\n").unwrap();
+    h.wait_status("phpantom", ServerStatus::Ready).await;
+    let state = h.launcher.state("phpantom");
+    state.respond(
+        "phpWorkbench/renameChecked",
+        json!({"changes":{uri_of(&path):[{"range":php_range(0,6,0,11),"newText":"subtotal"}]}}),
+    );
+    let weak = Arc::downgrade(&h.mgr);
+    let changed = helper.clone();
+    let source = path.clone();
+    h.mgr.set_candidates_hook(Box::new(move |_, _| {
+        std::fs::write(&changed, "<?php // external revision\nfunction total() {}\n").unwrap();
+        weak.upgrade().unwrap().php_files_changed(&[], std::slice::from_ref(&changed), &[]);
+        ide_lsp::CandidateFiles { files: vec![source.clone(), changed.clone()], limit_hit: false }
+    }));
+    let result = h.mgr.rename(doc, Pos::new(0, 7), "subtotal".into(), Default::default()).await;
+    eventually(|| state.notified("textDocument/didClose").iter().any(|p| p["textDocument"]["uri"] == uri_of(&helper)))
+        .await;
+    h.mgr.shutdown_all().await;
+    assert_eq!(std::fs::read_to_string(path).unwrap(), original);
+    assert_eq!(std::fs::read_to_string(helper).unwrap(), "<?php // external revision\nfunction total() {}\n");
+    assert!(
+        matches!(result, Err(ref e) if e.kind == ide_core::error::ErrorKind::Cancelled),
+        "candidate discovery must not rebase onto changed project input: {result:?}"
+    );
+    assert!(state.requested("phpWorkbench/renameChecked").is_empty(), "reject before issuing a newly rebased RPC");
+}

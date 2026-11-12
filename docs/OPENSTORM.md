@@ -1286,6 +1286,93 @@ physical Dock-switch autosave remain open. All69 areas stay67partial/
 2user-deferred; no blanket parity, install, publication, notarization, updater
 activation, migration or debugger expansion occurs.
 
+Slice72 — verify aliased config and translation key navigation
+(verified, 2026-11-12). Slice71 is committed/pushed7ed096da. This acceptance
+slice adds a disposable corpus and actual-client regression for inherited
+PHPantom behavior; no runtime code, engine, application version or bundle changes.
+The existing signed0.1.67 / engine133 supplies native evidence. All packaged runtime
+source hashes remain unchanged; the integration test and acceptance documents
+are explicit non-runtime differences from its build receipt. The new fixture
+factory is test infrastructure outside the packaged application.
+
+The factory reuses the pinned installed Laravel13.37 baseline, validates its115
+source files, Composer lock/helper/PSR4 metadata, and excludes environment files.
+Each copy has11 owned originals and96 non-Blade PHP files. Its cases exercise
+aliased config/__ /trans helpers, Config/Lang facade aliases, named key arguments,
+two PHP locales and a JSON key, plus locally declared functions/default/replacement
+values that must not become Laravel keys. No framework boot or project command
+is run. Reproduce with scripts/create-openstorm-key-navigation-fixture.py
+--baseline artifacts/checks/engine-laravel13-37-133/project
+--php artifacts/toolchains/php-8.4.23-static/php --label key-navigation;
+pass the returned project as OPENSTORM_TEST_KEY_ROOT to the ignored test
+laravel_key_aliases_named_arguments_and_shadowing_follow_unsaved_sources.
+
+Direct133 protocol replies pass nine definition/isolation cases and five exact
+UTF16 completion replacements, including after an emoji. The probe initially
+assumes only lists of definitions and CompletionList objects; legal single
+Location and CompletionItem[] replies fail its validation. Both harness unions
+are corrected; retained raw replies validate without a product correction.
+The new Rust test initially compares IpcPath/PathBuf tuples and fails compilation.
+Returned paths now use the existing to_path_buf API. Raw failed SDK receipt/log,
+checksum/path mapping and stopped first pipeline remain in slice72-ipc-path-build-
+failure and the before-ipc-path-fix files. A draft raw text_edit field was also
+corrected to typed replace_range/insert_text before compilation. These are test/
+probe corrections; no product regression or product fix is claimed.
+
+The corrected workspace no-run build passes, and the focused actual-client case
+passes1/32filtered. All six disk/overlay/undo/redo/restart/close phases check exact
+config/translation/JSON destinations and usages, locale separation, negative call
+identities and full-key UTF16 completion edits. Disk originals stay exact.
+Final unfiltered workspace passes1,748 tests/70ignored/0filtered in451.47s;
+formatting and all-target Clippy with warnings denied (317.82s) pass. Extra native
+dependency rebuilds are observed; differing TMPDIR spelling may contribute, but
+exact cause is unproven. Final33 actual-client/6 actual-host cases pass using exact
+executables emitted by that workspace build. All5,357 frontend tests/487files,
+typecheck/lint/Knip/format/build, post-binding gates and8 packaging regressions
+pass. Engine133's source-suite/build acceptance is inherited unchanged from
+slice70 and its current checksum is verified, not a new full-engine run.
+
+Native67 named-key alias CmdB after an emoji opens config3:6. AltF7 finds exactly
+three real usages: helper/facade aliases in KeyConsumer and helper alias in KeyOther.
+Aliased message(key) offers both PHP locales; Return opens Czech3:6. JSON alias
+goto opens cs.json1:3. The default string and locally declared config control each
+show Cannot find declaration, without a wrong target. Changing only the live
+config limit->attempts makes aliased named-key CtrlSpace insert the exact full key
+without extra quotes; CmdB opens unsaved3:6. Smart paste indents the closing bracket,
+still valid PHP and never saved. PHPantom restarts29169->31337 and first fresh
+alias goto retains the overlay. RestartAll also reports the missing optional JSON
+language server; no installation is attempted and no all-server restart pass is
+claimed. The caller shows two warnings alongside two intentional missing-key
+controls and spelling notices; individual diagnostics/full diagnostic acceptance
+are not established by this narrow observation.
+
+Guarded config TabClose / Don't Save restores original limit3:6 via facade alias.
+ProjectClose separately discards the live caller. All11 originals stay exact;
+only the exact owned autosave override is removed while closed. Default reopen
+restores five clean tabs and fresh facade navigation. Normal Quit exits app/server.
+Noarg controlled-profile relaunch restores project/tabs/config3:6; first fresh
+translation lookup keeps both locales, and Down/Enter opens English3:6. Final Quit
+leaves all six owned app/server generations absent. No post-quit getter is used.
+
+Post-runtime deep/strict signature, app/engine/runtime-source hashes, installed21
+and both11-original/96-PHP syntax/Composer fixture copies pass. Final client stages
+also preserve every current and inherited fixture original. App executable remains
+119f7e35...9b2141; engine remains8ed6ce0a...a568c52. No replacement bundle is built.
+Only artifacts/batches/0.1.67/OpenStorm.app remains. After all gates, guarded cargo
+clean removes19,220 compiler files/15.5GiB; both compiler roots are empty/absent.
+Prior sources/patches/receipts/licenses/evaluation114, PHP Workbench and installed
+profiles remain. The ignored slice72 final-readback/delivery records provide final
+source/fixture/cache reconciliation, exact commit/remote and clean-worktree proof.
+
+This accepts only the recorded alias/named-key corpus. Native PHP/JSON key
+navigation and locale choice are observed; unsaved locale/JSON undo/redo have
+new actual-client evidence, not a newly repeated native pass. Optional JSON
+language-server installation/general JSON assistance, broad helper/locale/project/
+configuration/privacy/AI-exclusion/performance/platform matrices and physical
+Dock-switch autosave remain open. All69 areas stay67partial/2user-deferred.
+No blanket parity, install, publication, notarization, updater activation,
+migration or debugger expansion occurs.
+
 Source integration (2026-11-01, verified source checkpoint): integrates all 240 new
 commits from `l0ng-ai/openidea:main` at `041e7210` into
 `codex/openstorm-php-laravel`, based on pushed OpenStorm `82d1313a`.

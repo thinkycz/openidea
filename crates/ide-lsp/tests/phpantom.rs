@@ -3094,3 +3094,199 @@ async fn laravel_facades_follow_unsaved_service_rebinding() {
     assert_eq!(std::fs::read_to_string(&provider_path).unwrap(), original);
     result.unwrap();
 }
+
+/// Canonical Laravel key identities survive aliases, named arguments and overlays.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires OPENSTORM_TEST_KEY_ROOT from create-openstorm-key-navigation-fixture.py"]
+async fn laravel_key_aliases_named_arguments_and_shadowing_follow_unsaved_sources() {
+    let root = PathBuf::from(std::env::var_os("OPENSTORM_TEST_KEY_ROOT").expect("owned key-navigation fixture"))
+        .canonicalize()
+        .unwrap();
+    let bin = std::env::var_os("OPENSTORM_TEST_PHPANTOM_BIN").map(PathBuf::from).unwrap_or_else(|| {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../src-tauri/resources/phpantom/phpantom_lsp")
+    });
+    let mut php = LanguageRegistry::load(None).unwrap().get(&LanguageId::new("php")).unwrap();
+    php.language_servers.retain(|s| s.name == "phpantom");
+    php.language_servers[0].command = bin.to_string_lossy().into_owned();
+    let mgr = LspManager::new(root.clone(), Arc::new(LanguageRegistry::from_configs(vec![php])), Arc::new(|_| {}));
+    let consumer = root.join("app/OpenStormFixtures/KeyConsumer.php");
+    let local = root.join("app/OpenStormFixtures/LocalKeyConsumer.php");
+    let other = root.join("app/OpenStormFixtures/KeyOther.php");
+    let config = root.join("config/openstorm_keys.php");
+    let en = root.join("lang/en/openstorm.php");
+    let cs = root.join("lang/cs/openstorm.php");
+    let json = root.join("lang/cs.json");
+    let candidates = [consumer.clone(), local.clone(), other.clone(), config.clone(), en.clone(), cs.clone()];
+    mgr.set_candidates_hook(Box::new(move |_, _| ide_lsp::CandidateFiles {
+        files: candidates.to_vec(),
+        limit_hit: false,
+    }));
+    let source = std::fs::read_to_string(&consumer).unwrap();
+    let local_source = std::fs::read_to_string(&local).unwrap();
+    let other_source = std::fs::read_to_string(&other).unwrap();
+    let originals =
+        [config.clone(), cs.clone(), json.clone()].map(|p| (p.clone(), std::fs::read_to_string(p).unwrap()));
+    let changed = [
+        originals[0].1.replace("'limit'", "'attempts'"),
+        originals[1].1.replace("'title'", "'heading'"),
+        originals[2].1.replace("OpenStorm greeting", "OpenStorm salute"),
+    ];
+    let caller_changed = source
+        .replace("key: 'openstorm_keys.limit'", "key: 'openstorm_keys.attempts'")
+        .replace("message(key: 'openstorm.title')", "message(key: 'openstorm.heading')")
+        .replace("message('OpenStorm greeting')", "message('OpenStorm salute')");
+    let doc = DocId::next();
+    let local_doc = DocId::next();
+    let dependencies = [DocId::next(), DocId::next(), DocId::next()];
+    mgr.did_open(doc, &consumer, &LanguageId::new("php"), 1, &source);
+    mgr.did_open(local_doc, &local, &LanguageId::new("php"), 1, &local_source);
+    let key_at = |text: &str, fragment: &str, key: &str| {
+        let start = pos(text, fragment);
+        let prefix = &fragment[..fragment.find(key).unwrap()];
+        Pos::new(start.line, start.col + prefix.encode_utf16().count() as u32)
+    };
+    let result: Result<(), String> = async {
+        let mut version = 1;
+        let mut previous = source.clone();
+        for phase in ["disk", "overlay", "undo", "redo", "restart", "close"] {
+            let rebound = matches!(phase, "overlay" | "redo" | "restart");
+            match phase {
+                "overlay" => {
+                    for i in 0..3 {
+                        mgr.did_open(
+                            dependencies[i],
+                            &originals[i].0,
+                            &LanguageId::new(if i == 2 { "json" } else { "php" }),
+                            1,
+                            &changed[i],
+                        );
+                    }
+                }
+                "undo" | "redo" => {
+                    for i in 0..3 {
+                        let (old, new) = if phase == "undo" {
+                            (&changed[i], &originals[i].1)
+                        } else {
+                            (&originals[i].1, &changed[i])
+                        };
+                        replace(&mgr, dependencies[i], if phase == "undo" { 2 } else { 3 }, old, new);
+                    }
+                }
+                "restart" => mgr.restart(mgr.servers()[0].id).await.map_err(|e| e.to_string())?,
+                "close" => {
+                    for dependency in dependencies {
+                        mgr.did_close(dependency);
+                    }
+                }
+                _ => {}
+            }
+            let current = if rebound { &caller_changed } else { &source };
+            version += 1;
+            replace(&mgr, doc, version, &previous, current);
+            previous = current.clone();
+            let config_key = if rebound { "openstorm_keys.attempts" } else { "openstorm_keys.limit" };
+            let translation_key = if rebound { "openstorm.heading" } else { "openstorm.title" };
+            let json_key = if rebound { "OpenStorm salute" } else { "OpenStorm greeting" };
+            let config_text = if rebound { &changed[0] } else { &originals[0].1 };
+            let cs_text = if rebound { &changed[1] } else { &originals[1].1 };
+            let json_text = if rebound { &changed[2] } else { &originals[2].1 };
+            let en_text = std::fs::read_to_string(&en).map_err(|e| e.to_string())?;
+            let cases = [
+                (format!("setting(default: 0, key: '{config_key}')"), config_key, vec![(config.clone(), pos(config_text, if rebound { "attempts'" } else { "limit'" }))]),
+                (format!("Settings::get(default: 0, key: '{config_key}')"), config_key, vec![(config.clone(), pos(config_text, if rebound { "attempts'" } else { "limit'" }))]),
+                (format!("message(key: '{translation_key}')"), translation_key,
+                    if rebound { vec![(cs.clone(), pos(cs_text, "heading'"))] }
+                    else { vec![(cs.clone(), pos(cs_text, "title'")), (en.clone(), pos(&en_text, "title'"))] }),
+                ("Labels::get(key: 'openstorm.title')".into(), "openstorm.title",
+                    if rebound { vec![(en.clone(), pos(&en_text, "title'"))] }
+                    else { vec![(cs.clone(), pos(cs_text, "title'")), (en.clone(), pos(&en_text, "title'"))] }),
+                (format!("message('{json_key}')"), json_key, vec![(json.clone(), pos(json_text, json_key))]),
+                ("setting(default: 'openstorm_keys.limit', key: 'openstorm_keys.missing')".into(), "openstorm_keys.limit", vec![]),
+                ("message(key: 'openstorm.missing', replace: ['name' => 'openstorm.title'])".into(), "openstorm.title", vec![]),
+            ];
+            for (fragment, key, mut expected) in cases {
+                let at = key_at(current, &fragment, key);
+                let targets = mgr.goto(doc, at, GotoKind::Definition).await.map_err(|e| e.to_string())?;
+                let mut actual = targets.iter().map(|t| (t.path.to_path_buf(), t.range.start)).collect::<Vec<_>>();
+                let sort = |v: &mut Vec<(PathBuf, Pos)>| v.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.line.cmp(&b.1.line)).then(a.1.col.cmp(&b.1.col)));
+                sort(&mut actual);
+                sort(&mut expected);
+                if actual != expected {
+                    return Err(format!("{phase}/{fragment}: exact destinations {actual:?}, expected {expected:?}"));
+                }
+            }
+            for (fragment, key) in [("config('openstorm_keys.limit')", "openstorm_keys.limit"), ("__('openstorm.title')", "openstorm.title")] {
+                let targets = mgr.goto(local_doc, key_at(&local_source, fragment, key), GotoKind::Definition).await.map_err(|e| e.to_string())?;
+                if !targets.is_empty() {
+                    return Err(format!("{phase}: local function must not become a framework key: {targets:?}"));
+                }
+            }
+            let config_fragment = format!("setting(default: 0, key: '{config_key}')");
+            let message_fragment = format!("message(key: '{translation_key}')");
+            let json_fragment = format!("message('{json_key}')");
+            let reference_cases = [
+                (key_at(current, &config_fragment, config_key), {
+                    let mut expected = vec![
+                        (consumer.clone(), key_at(current, &config_fragment, config_key)),
+                        (consumer.clone(), key_at(current, &format!("Settings::get(default: 0, key: '{config_key}')"), config_key)),
+                    ];
+                    if !rebound { expected.push((other.clone(), key_at(&other_source, "setting('openstorm_keys.limit')", config_key))); }
+                    expected
+                }),
+                (key_at(current, &message_fragment, translation_key), {
+                    let mut expected = vec![(consumer.clone(), key_at(current, &message_fragment, translation_key))];
+                    if !rebound {
+                        expected.push((consumer.clone(), key_at(current, "Labels::get(key: 'openstorm.title')", translation_key)));
+                        expected.push((other.clone(), key_at(&other_source, "translate('openstorm.title')", translation_key)));
+                    }
+                    expected
+                }),
+                (key_at(current, &json_fragment, json_key), vec![(consumer.clone(), key_at(current, &json_fragment, json_key))]),
+            ];
+            for (at, mut expected) in reference_cases {
+                let refs = mgr.references(doc, at, false, true, Default::default()).await.map_err(|e| e.to_string())?;
+                let mut actual = refs.locations.iter().map(|t| (t.path.to_path_buf(), t.range.start)).collect::<Vec<_>>();
+                let sort = |v: &mut Vec<(PathBuf, Pos)>| v.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.line.cmp(&b.1.line)).then(a.1.col.cmp(&b.1.col)));
+                sort(&mut actual); sort(&mut expected);
+                if actual != expected || refs.incomplete.is_some() {
+                    return Err(format!("{phase}: key usages must retain aliases and exclude local/non-key strings: {refs:?}; expected {expected:?}"));
+                }
+            }
+            let completion_fragment = format!("setting(default: 0, key: '{config_key}')");
+            let partial = current.replace(&completion_fragment, "setting(default: 0, key: 'openstorm_keys.')");
+            version += 1;
+            replace(&mgr, doc, version, current, &partial);
+            let start = key_at(&partial, "setting(default: 0, key: 'openstorm_keys.')", "openstorm_keys.");
+            let at = Pos::new(start.line, start.col + "openstorm_keys.".len() as u32);
+            let list = settled_completion(&mgr, doc, at).await;
+            let found = list.items.iter().find(|i| i.label == config_key).ok_or_else(|| format!("{phase}: alias/named-key completion missing {config_key}"))?;
+            let range = found.replace_range.ok_or_else(|| format!("{phase}: completion must replace the full key"))?;
+            if range.start != start || range.end != at || found.insert_text != config_key
+                || found.replace_range_tab.is_some_and(|tab| tab != range)
+                || found.is_snippet || !found.additional_edits.is_empty()
+            {
+                return Err(format!("{phase}: wrong completion UTF16 replacement: {found:?}"));
+            }
+            let stale = if rebound { "openstorm_keys.limit" } else { "openstorm_keys.attempts" };
+            if list.items.iter().any(|i| i.label == stale) {
+                return Err(format!("{phase}: stale config completion {stale}"));
+            }
+            version += 1;
+            replace(&mgr, doc, version, &partial, current);
+            for (path, original) in &originals {
+                if std::fs::read_to_string(path).map_err(|e| e.to_string())? != *original {
+                    return Err(format!("{phase}: dependency was written to disk: {path:?}"));
+                }
+            }
+            eprintln!("{phase}: aliased/named config, dual-locale/PHP/JSON keys, exact usages/UTF16 completion and negative identities pass");
+        }
+        Ok(())
+    }.await;
+    mgr.shutdown_all().await;
+    assert_eq!(std::fs::read_to_string(&consumer).unwrap(), source);
+    assert_eq!(std::fs::read_to_string(&local).unwrap(), local_source);
+    for (path, original) in originals {
+        assert_eq!(std::fs::read_to_string(path).unwrap(), original);
+    }
+    result.unwrap();
+}

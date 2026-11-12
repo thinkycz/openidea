@@ -2909,3 +2909,102 @@ async fn laravel_container_keys_follow_unsaved_provider_bindings_and_restart() {
     assert_eq!(std::fs::read_to_string(&provider_path).unwrap(), original);
     result.unwrap();
 }
+
+/// Registration order, not the provider class hierarchy, chooses a shared key.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires OPENSTORM_TEST_CONTAINER_ORDER_ROOT from create-openstorm-container-fixture.py --reverse-providers"]
+async fn laravel_container_navigation_follows_unsaved_registration_order() {
+    let root = PathBuf::from(std::env::var_os("OPENSTORM_TEST_CONTAINER_ORDER_ROOT").expect("owned order fixture"))
+        .canonicalize()
+        .unwrap();
+    let bin = std::env::var_os("OPENSTORM_TEST_PHPANTOM_BIN").map(PathBuf::from).unwrap_or_else(|| {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../src-tauri/resources/phpantom/phpantom_lsp")
+    });
+    let mut php = LanguageRegistry::load(None).unwrap().get(&LanguageId::new("php")).unwrap();
+    php.language_servers.retain(|s| s.name == "phpantom");
+    php.language_servers[0].command = bin.to_string_lossy().into_owned();
+    let mgr = LspManager::new(root.clone(), Arc::new(LanguageRegistry::from_configs(vec![php])), Arc::new(|_| {}));
+    let path = root.join("app/OpenStormFixtures/ContainerConsumer.php");
+    let source = std::fs::read_to_string(&path).unwrap();
+    let bootstrap_path = root.join("bootstrap/providers.php");
+    let bootstrap = std::fs::read_to_string(&bootstrap_path).unwrap();
+    let base_registration = "    App\\OpenStormFixtures\\BaseContainerProvider::class,\n";
+    let child_registration = "    App\\OpenStormFixtures\\ContainerProvider::class,\n";
+    let forward = bootstrap.replace(
+        &format!("{child_registration}{base_registration}"),
+        &format!("{base_registration}{child_registration}"),
+    );
+    assert_ne!(bootstrap, forward, "fixture must register the parent last");
+    let base_path = root.join("app/OpenStormFixtures/BaseContainerProvider.php");
+    let base_source = std::fs::read_to_string(&base_path).unwrap();
+    let child_path = root.join("app/OpenStormFixtures/ContainerProvider.php");
+    let child_source = std::fs::read_to_string(&child_path).unwrap();
+    let doc = DocId::next();
+    let configuration = DocId::next();
+    mgr.did_open(doc, &path, &LanguageId::new("php"), 1, &source);
+    let result: Result<(), String> = async {
+        for phase in ["parent-last", "unsaved-child-last", "restart-child-last", "close-parent-last"] {
+            if phase == "unsaved-child-last" {
+                mgr.did_open(configuration, &bootstrap_path, &LanguageId::new("php"), 1, &forward);
+            } else if phase == "restart-child-last" {
+                mgr.restart(mgr.servers()[0].id).await.map_err(|e| e.to_string())?;
+            } else if phase == "close-parent-last" {
+                mgr.did_close(configuration);
+            }
+            let child_last = matches!(phase, "unsaved-child-last" | "restart-child-last");
+            let concrete = if child_last { "ContainerService" } else { "OldContainerService" };
+            let class_path = root.join(format!("app/OpenStormFixtures/{concrete}.php"));
+            let class_source = std::fs::read_to_string(&class_path).map_err(|e| e.to_string())?;
+            for key in ["openstorm.container", "openstorm.alias"] {
+                let (registration_path, registration_pos) = if key == "openstorm.alias" {
+                    (child_path.clone(), pos(&child_source, "openstorm.alias"))
+                } else if child_last {
+                    (child_path.clone(), pos(&child_source, "static::$abstract,"))
+                } else {
+                    (base_path.clone(), pos(&base_source, "static::$abstract,"))
+                };
+                let targets =
+                    mgr.goto(doc, pos(&source, key), GotoKind::Definition).await.map_err(|e| e.to_string())?;
+                let actual: Vec<_> = targets.iter().map(|l| (l.path.to_path_buf(), l.range.start)).collect();
+                let expected = [
+                    (registration_path, registration_pos),
+                    (class_path.clone(), pos(&class_source, &format!("class {concrete}"))),
+                ];
+                if actual != expected {
+                    return Err(format!("{phase}/{key}: expected {expected:?}, got {actual:?}"));
+                }
+                let hover = mgr
+                    .hover(doc, pos(&source, key), Default::default())
+                    .await
+                    .map_err(|e| e.to_string())?
+                    .ok_or_else(|| format!("{phase}/{key}: missing hover"))?;
+                if !hover.contents.value.contains(&format!("App\\OpenStormFixtures\\{concrete}")) {
+                    return Err(format!("{phase}/{key}: wrong hover {}", hover.contents.value));
+                }
+                eprintln!("{phase}/{key}: exact targets {actual:?}");
+            }
+            let at = pos(&source, "deliver();");
+            let targets = mgr.goto(doc, at, GotoKind::Definition).await.map_err(|e| e.to_string())?;
+            if targets.len() != 1
+                || targets[0].path != class_path
+                || targets[0].range.start != pos(&class_source, "deliver")
+            {
+                return Err(format!("{phase}: method target must follow registration order: {targets:?}"));
+            }
+            let list = settled_completion(&mgr, doc, at).await;
+            let has_parent_method = list.items.iter().any(|i| i.label.starts_with("oldOnly"));
+            if !list.items.iter().any(|i| i.label.starts_with("deliver")) || has_parent_method == child_last {
+                return Err(format!("{phase}: deliver and oldOnly completion must follow the actual resolved service"));
+            }
+            if std::fs::read_to_string(&bootstrap_path).map_err(|e| e.to_string())? != bootstrap {
+                return Err(format!("{phase}: unsaved provider configuration was persisted"));
+            }
+        }
+        Ok(())
+    }
+    .await;
+    mgr.shutdown_all().await;
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), source);
+    assert_eq!(std::fs::read_to_string(&bootstrap_path).unwrap(), bootstrap);
+    result.unwrap();
+}

@@ -1,20 +1,20 @@
 # Pinned PHPantom engine
 
-The local OpenStorm development candidate uses PHPantom `0.11.1-openstorm.130`
+The local OpenStorm development candidate uses PHPantom `0.11.1-openstorm.132`
 for Apple Silicon macOS. This is a local rebuild, not an upstream release.
-Source130 adds correlated Blade `@aware` context, rendered-slot metadata,
-conservative attribute-bag handling and correct PHP binding indices around
-frontend bindings and Blade arguments. Full pinned source tests pass18,408 checks
-plus the separate FIFO child (17 ignored); all24 OpenStorm client and5 host
-checks pass. Examples, Clippy, formatting and source fingerprints pass. The component workflows were exercised in signed native0.1.51; native0.1.53
-adds successful project-discard/reopen and exact definition/session checks. The
-physical user-controlled Dock focus case remains unverified; see the limits in
-`docs/OPENSTORM.md`. No full-area or release acceptance is claimed. Signed development0.1.50/engine128 retains
-its accepted narrow supplied-prop and nested component/slot-scope evidence.
-The unaccepted129 source and its failed suite result remain reproducible.
+Source131 adds migration-derived declaration origins;132 follows registration
+order for container bindings and aliases within a provider group. Full pinned
+source tests pass18,418 checks plus the separate FIFO child (17 ignored).
+Examples, Clippy, formatting, source fingerprints and the optimized build pass.
+Current OpenStorm client/host and packaged native acceptance are tracked in
+`docs/OPENSTORM.md`; source checks alone do not establish native acceptance.
+Earlier component, recovery and shortcut evidence remains there. The physical
+user-controlled Dock focus case remains unverified, and no full-area or release
+acceptance is claimed. The unaccepted129 source and its failed suite result
+remain reproducible.
 
 `source.json` pins the upstream source, archive checksum, unchanged114-patch PHP
-Workbench series and OpenStorm patches0115–0130. The bundled executable is
+Workbench series and OpenStorm patches0115–0132. The bundled executable is
 verified by `node scripts/verify-phpantom.mjs`; its provenance and licenses are
 under `src-tauri/resources/phpantom/`. Source checks and client/host checks do not
 replace packaged native acceptance; broader component and view-data work remains
@@ -210,3 +210,16 @@ child. All-target Clippy is warning-free; formatting, fingerprint, production
 build, 12 PHP example lints and runtime assertions pass. Updated Laravel13.37
 example analysis reports exactly its three intentional errors. SDK/native50
 acceptance is tracked in `docs/OPENSTORM.md`;127 and prior apps remain preserved.
+
+Patch0132 makes providers within the same registration group follow their list
+order, including parent/child providers and aliases. Application registrations
+retain precedence over framework/package defaults. The pinned Laravel example
+checks both orders through `Application::register` without booting the app.
+Create the reverse-order client fixture with
+`scripts/create-openstorm-container-fixture.py --reverse-providers` and the
+installed132 Laravel13.37 baseline; set `OPENSTORM_TEST_CONTAINER_ORDER_ROOT` to
+the returned project. The ignored actual-client regression covers exact key and
+alias targets, hover, method completion/navigation, unsaved provider-list changes,
+restart and closing the overlay. Contextual/environment-dependent registration
+and broader facade snapshots remain outside this slice. Source, checksum and
+packaged native acceptance are recorded in `docs/OPENSTORM.md`.

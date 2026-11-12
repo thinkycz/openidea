@@ -1037,6 +1037,97 @@ in docs/OPENSTORM.md and artifacts/checks/slice68-*; exact pushed source identit
 and clean-worktree proof are in slice68-delivery. No publication, installation,
 notarization, migration or debugger expansion occurs.
 
+Slice69 — respect provider registration order for container navigation
+(verified, 2026-11-12). Slice68 is committed/pushed at c9b8d7ae. PHPantom132
+now follows list order within a provider registration group, including parent/
+child providers and aliases. Framework/package defaults still yield to application
+registrations. Inheritance continues to supply static property/constant context;
+it no longer overrides the application's explicit registration order.
+
+The disposable reverse-order fixture registers the child first and parent last.
+Laravel13.37's real Application::register/getProvider API resolves both key and
+alias to OldContainerService; reversing the list resolves ContainerService.
+The constructor-free harness runs only the two owned providers, without application
+boot, Composer/Artisan or environment files. Installed13.37 and the official
+[Laravel12.0 Application source](https://raw.githubusercontent.com/laravel/framework/v12.0.0/src/Illuminate/Foundation/Application.php)
+use exact-class getProvider lookup; no full Laravel12 runtime acceptance follows.
+Engine131's protocol and signed64 instead choose the child/current service.
+Native CmdB reproduces the wrong child5:46; all11 originals remain unchanged and
+both baseline processes exit. A corrected engine integration assertion also fails
+with TracingClient instead of its later parent. The first unqualified exact filter
+selects zero tests and is preflight only. A redundant focused-profile compilation
+is stopped only after the compiled executable supplies the actual red proof.
+
+Patch0132 reconstructs immutable source1756b1f920c1-9f555f29806c-verified,
+matching all seven working files after Clippy --fix and formatting. Five precedence
+integration cases and two binding/alias order controls pass. The full pinned suite
+passes18,418 ordinary tests plus its separate FIFO child,17ignored/0ordinary
+filtered. All-target Clippy/fmt/fingerprint/optimized build pass. Plain PHP passes
+12 lints/runtime assertions; the Laravel13.37 copy matches115 pinned source files,
+passes87 lints/269 assertions, and analysis retains exactly the three intentional
+diagnostics at731/731/951 with unchanged identifiers. Active/candidate132 source
+pins agree. Archived/resource executable SHA256:
+`e9cc3ec39e475ff1a6a7362dc4d4a9a0b984966d4a5c37a5eaac4ec33459ea84`.
+Its licenses, upstream/archive/patch checksums and toolchain receipt are preserved.
+
+OpenStorm's final unfiltered workspace passes1,748 tests/68ignored/0filtered;
+Rust formatting and all-target Clippy with warnings denied pass. All5,350 frontend
+tests/487 files, typecheck/lint/Knip/format/build, post-binding checks and all8
+packaging/retention regressions pass. The first workspace run fails only the
+unchanged checked-rename mock's29..30s elapsed assertion, measured after
+shutdown_all; its actual elapsed value was not reported. The unchanged executable
+then passes five isolated repeats and three complete93-case mock runs. The final
+unfiltered warm rerun passes. The original failure/receipts remain; exact cause is
+unproven, with no weakened assertion or claimed production retry fix. The existing
+large-unwind-table development linker warning also remains.
+
+All31 real-client and6 actual-host cases pass against final132. The new order
+case checks exact ordered key/alias targets and UTF16, key hover, resolved method
+goto/completion, unsaved bootstrap order, restart, close-to-disk restoration and
+unchanged originals. Its focused run also passes1/30filtered, separately from the
+full31-case run. Fresh fixtures are acquired from the final132 Laravel baseline;
+final direct-protocol checks agree in all three disk/overlay/close phases.
+
+Signed arm64 development0.1.65 packages in213.06s. Native CmdB opens the later
+parent registration7:31, alias concrete OldContainerService3:1 and resolved
+method3:90. An unsaved provider-list reorder changes the chooser to child5/current
+class3; Enter opens child5:46 after an emoji. Explicit Restart replaces the server,
+exits the old PID and retains the overlay; alias Down/Enter opens Current3:1.
+Tab Close asks Unsaved Changes; Don't Save restores parent/Old targets and F1
+documentation. Native Edit-menu Undo and Redo also update dependent F1 from Old/
+Base to Current/Child. Smart paste indents the closing bracket; it stays valid PHP
+and is never written to disk. No shortcut-Z/Y claim supersedes slice65's audit.
+
+Project Close asks before discarding the second order overlay. All11 originals
+stay exact; only the owned autosave override is removed while closed. Native
+Recent-project reopen restores six clean tabs, including the original provider
+list; fresh main-key navigation opens Base7:31. Normal Quit exits app/server.
+Controlled-profile no-argument relaunch restores the same six tabs and caret7:31;
+its first alias lookup returns child6/Old3 and opens exact6:47. Final normal Quit
+leaves all six owned app/server generations absent. No post-quit app getter is used.
+
+Post-runtime deep/strict signature, app/engine hashes and every source hash match
+the build receipt before documentation closeout. App executable SHA256:
+`62e81224bedf7325a1f021cd67ecfe870e18eae3252ad53f8ff8f45510937077`.
+Both final fixture copies retain all11 originals, Composer lock/helper/PSR4 metadata,
+96 non-Blade PHP lints each, and no environment file or project override.
+Installed21 still matches its protected048064d8...9fa16 executable. Only
+`artifacts/batches/0.1.65/OpenStorm.app` remains. Packaging prunes64/its duplicate
+bundle and21,499 compiler files/18.6GiB; the completed engine cache was already
+cleaned (10,122files/2.5GiB). Guarded cleanup removes only the obsolete131 raw
+executable (55,972,752 logical bytes). Sources, patches, receipts, licenses,
+evaluation114, PHP Workbench and installed profiles remain; both compiler roots
+are empty/absent. No install, publishing, updater activation or migration occurs.
+
+Evidence: artifacts/checks/slice69-* logs/receipts, the pinned132 recipe/candidate
+provenance, and artifacts/batches/0.1.65/{build-receipt,retention}.json. The ignored
+slice69-delivery receipt and Git history record final commit/remote read-back and
+clean-worktree evidence. This accepts static provider-order navigation for the
+recorded corpus. Contextual/environment-dependent bindings, broader framework/
+provider/facade snapshots, physical Dock-switch autosave, and wider platform/
+performance gates remain open. All69 areas remain67partial/2user-deferred;
+no debugger expansion or blanket parity acceptance is claimed.
+
 Source integration (2026-11-01, verified source checkpoint): integrates all 240 new
 commits from `l0ng-ai/openidea:main` at `041e7210` into
 `codex/openstorm-php-laravel`, based on pushed OpenStorm `82d1313a`.

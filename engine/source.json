@@ -2,8 +2,8 @@
   "repository": "https://github.com/PHPantom-dev/phpantom_lsp",
   "commit": "1756b1f920c1290d4c4fdd4d2c902fad53a75cd3",
   "archive_sha256": "f0a1dc7fa44d309e6d5e8ed65a2075749c1fc177b45820031f58290f1aec5cee",
-  "patches_sha256": "99c3dccc6a70c6085ecb495ffc59540ae6cee4757045454687f25573949bac29",
-  "version": "0.11.1-openstorm.131",
+  "patches_sha256": "9f555f29806cfb205396dc665c189eb8f5f217ea2a81c305b7d3bd49b3860153",
+  "version": "0.11.1-openstorm.132",
   "patches": [
     {
       "file": "0001-workspace-tool-policy.patch",
@@ -528,6 +528,10 @@
     {
       "file": "0131-migration-column-origins.patch",
       "sha256": "295f8455ee1d4fc8ec95410acc16fde1a9aa581c775bf331e449edbb864e7344"
+    },
+    {
+      "file": "0132-container-provider-registration-order.patch",
+      "sha256": "49adb1f3cdc2e8dd83a7d571713c55f8cf7976e9d6f473e63da3482275932e9e"
     }
   ]
 }

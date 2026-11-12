@@ -1,0 +1,379 @@
+--- a/docs/CHANGELOG.md
++++ b/docs/CHANGELOG.md
+@@ -14,6 +14,8 @@
+ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+ 
+ ## [Unreleased]
++
++- **Resolve container services in registration order.** The last provider registered within a group decides a binding, including parent and child providers. Framework and package defaults still yield to application registrations. Contributed by @thinkycz.
+ 
+ - **Navigate model columns to migrations.** Go to Definition on a migration-derived Eloquent property opens its defining Blueprint call. Explicit PHPDoc properties link to the declaring class's comment, and headless checks use the same migration schema as the editor. Contributed by @thinkycz.
+ 
+--- a/examples/laravel/app/Demo.php
++++ b/examples/laravel/app/Demo.php
+@@ -1453,9 +1453,9 @@
+         // A key a project's own provider registers resolves the same way.
+         // DemoServiceProvider writes neither key as a literal: both are built
+         // from `static::$abstract`, declared on the base provider it extends.
+-        // That base provider binds `pastry.oven` to PlainOven, and
+-        // DemoServiceProvider replaces it, so the key resolves to the
+-        // replacement rather than the default it swapped out.
++        // That base provider binds `pastry.oven` to PlainOven. This project's
++        // provider list registers DemoServiceProvider later, so its binding
++        // replaces the default. Reversing the list would restore PlainOven.
+         app('pastry.oven')->bake('croissant');                  // → BakeryService
+         app('pastry.oven.supplier')->supply(12);                // → CroissantSupplier
+ 
+--- a/examples/laravel/app/Providers/DemoServiceProvider.php
++++ b/examples/laravel/app/Providers/DemoServiceProvider.php
+@@ -51,10 +51,9 @@
+         // this concrete provider class, which is where the parent chain is
+         // known, so `app('pastry.oven')` resolves to BakeryService.
+         //
+-        // The provider this one extends binds the same key to PlainOven.  Two
+-        // providers binding one key is how an implementation gets swapped out,
+-        // and PHPantom follows the container: the registration that replaces
+-        // the other is the one the key resolves to.
++        // The base provider binds the same key to PlainOven. It is registered
++        // first in bootstrap/providers.php, so this later registration replaces
++        // it. Inheritance itself does not choose which binding wins.
+         $this->app->singleton(static::$abstract, fn () => new BakeryService());
+ 
+         // `alias()` takes its arguments the other way round from `bind()`:
+--- a/examples/laravel/assertions.php
++++ b/examples/laravel/assertions.php
+@@ -1885,6 +1885,28 @@
+     }
+ })();
+ 
++// Container registrations are applied in order, even across inheritance.
++foreach ([
++    [
++        [App\Providers\BaseDemoServiceProvider::class, App\Providers\DemoServiceProvider::class],
++        App\Support\BakeryService::class,
++    ],
++    [
++        [App\Providers\DemoServiceProvider::class, App\Providers\BaseDemoServiceProvider::class],
++        App\Support\PlainOven::class,
++    ],
++] as [$providers, $expected]) {
++    $application = new class extends \Illuminate\Foundation\Application {
++        // Keep the real registration API without booting an application.
++        public function __construct() {}
++    };
++    foreach ($providers as $provider) {
++        $application->register($provider);
++    }
++    check('Last registered provider resolves pastry.oven to ' . $expected,
++        get_class($application->make('pastry.oven')) === $expected);
++}
++
+ // ─── Summary ────────────────────────────────────────────────────────────────
+ 
+ echo "\n";
+--- a/src/backend/laravel/provider_resources.rs
++++ b/src/backend/laravel/provider_resources.rs
+@@ -84,7 +84,6 @@
+             .unwrap_or_default();
+ 
+         let identity = std::sync::Arc::new(crate::virtual_members::laravel::ProviderIdentity {
+-            ancestors: self.provider_ancestors(fqn),
+             fqn: fqn.to_string(),
+             origin,
+         });
+@@ -316,29 +315,6 @@
+             .any(|fqn| self.resolve_class_uri(fqn).as_deref() == Some(uri))
+     }
+ 
+-    /// The provider classes `fqn` extends, nearest first.
+-    ///
+-    /// Subclassing a provider and re-binding one of its keys is how a
+-    /// replacement is written, and the two providers can be registered in
+-    /// either order, so the subclass has to be recognizable as the later
+-    /// registration regardless of which one is scanned first.
+-    fn provider_ancestors(&self, fqn: &str) -> Vec<String> {
+-        let mut ancestors: Vec<String> = Vec::new();
+-        let mut current = self.find_or_load_class(fqn);
+-        while let Some(class) = current {
+-            let Some(parent) = class.parent_class.as_ref() else {
+-                break;
+-            };
+-            let parent = parent.trim_start_matches('\\').to_string();
+-            if ancestors.contains(&parent) {
+-                break;
+-            }
+-            current = self.find_or_load_class(&parent);
+-            ancestors.push(parent);
+-        }
+-        ancestors
+-    }
+-
+     /// The constants and static-property defaults a provider's own source
+     /// folds `self::` and `static::` against.
+     ///
+--- a/src/virtual_members/laravel/provider_resources.rs
++++ b/src/virtual_members/laravel/provider_resources.rs
+@@ -1,4 +1,3 @@
+-use std::cmp::Ordering;
+ use std::collections::HashMap;
+ use std::collections::hash_map::Entry;
+ use std::ops::ControlFlow;
+@@ -75,27 +74,16 @@
+ pub(crate) struct ProviderIdentity {
+     /// The provider class's FQN.
+     pub fqn: String,
+-    /// The provider classes it extends.  Subclassing a provider and re-binding
+-    /// one of its keys is how a replacement is written, so the parent must not
+-    /// win the key back merely by being scanned later.
+-    pub ancestors: Vec<String>,
++    /// The registration group Laravel applies this provider in.
+     pub origin: ProviderOrigin,
+ }
+ 
+ impl ProviderIdentity {
+-    /// Whether a binding this provider made survives one `other` makes for the
+-    /// same key.
+-    ///
+-    /// Providers are scanned in registration order and each registration
+-    /// replaces the one before it, so the tie goes to `other` unless this
+-    /// provider is registered later (a higher [`ProviderOrigin`]) or extends
+-    /// it.
++    /// Whether an earlier scan belongs to a later registration group.
++    /// Within a group the incoming provider is registered later, regardless
++    /// of inheritance, so it replaces the earlier binding or alias.
+     fn outranks(&self, other: &ProviderIdentity) -> bool {
+-        match self.origin.cmp(&other.origin) {
+-            Ordering::Greater => true,
+-            Ordering::Less => false,
+-            Ordering::Equal => self.ancestors.iter().any(|parent| parent == &other.fqn),
+-        }
++        self.origin > other.origin
+     }
+ }
+ 
+@@ -2468,14 +2456,8 @@
+         assert!(resources.bindings.is_empty());
+     }
+ 
+-    /// Scan a provider under the registration origin and parent chain that
+-    /// decide the keys it shares with another provider.
+-    fn scan_as(
+-        content: &str,
+-        fqn: &str,
+-        ancestors: &[&str],
+-        origin: ProviderOrigin,
+-    ) -> ProviderResources {
++    /// Scan a provider under the origin used to merge its registrations.
++    fn scan_as(content: &str, fqn: &str, origin: ProviderOrigin) -> ProviderResources {
+         extract_provider_resources(
+             content,
+             Path::new("/ws/src/Provider.php"),
+@@ -2483,7 +2465,6 @@
+             ClassContext::default(),
+             Arc::new(ProviderIdentity {
+                 fqn: fqn.to_string(),
+-                ancestors: ancestors.iter().map(|a| a.to_string()).collect(),
+                 origin,
+             }),
+         )
+@@ -2515,7 +2496,6 @@
+             scan_as(
+                 FRAMEWORK_TRANSLATION_PROVIDER,
+                 "Illuminate\\Translation\\TranslationServiceProvider",
+-                &[],
+                 ProviderOrigin::Framework,
+             )
+         };
+@@ -2523,7 +2503,6 @@
+             scan_as(
+                 APP_TRANSLATION_PROVIDER,
+                 "Acme\\Translation\\TranslationServiceProvider",
+-                &["Illuminate\\Translation\\TranslationServiceProvider"],
+                 ProviderOrigin::Application,
+             )
+         };
+@@ -2549,45 +2528,70 @@
+     }
+ 
+     #[test]
+-    fn a_subclass_provider_beats_the_parent_it_extends() {
+-        let parent = "<?php\n\
+-            namespace Acme;\n\
+-            class ServiceProvider {\n\
+-                public function register(): void {\n\
+-                    $this->app->singleton('acme.client', fn () => new Client());\n\
+-                }\n\
+-            }\n";
+-        let child = "<?php\n\
+-            namespace App\\Providers;\n\
+-            class AcmeServiceProvider extends \\Acme\\ServiceProvider {\n\
+-                public function register(): void {\n\
+-                    $this->app->singleton('acme.client', fn () => new TracingClient());\n\
+-                }\n\
+-            }\n";
+-
+-        // Both are registered the same way, and the subclass is scanned first,
+-        // so only its parent chain marks it as the later registration.
+-        let mut resources = ProviderResources::default();
+-        resources.merge(scan_as(
+-            child,
++    fn inherited_providers_follow_registration_order() {
++        let parent = scan_as(
++            "<?php namespace Acme; class ServiceProvider { public function register(): void { $this->app->singleton('acme.client', fn () => new Client()); } }",
++            "Acme\\ServiceProvider",
++            ProviderOrigin::Application,
++        );
++        let child = scan_as(
++            "<?php namespace App\\Providers; class AcmeServiceProvider extends \\Acme\\ServiceProvider { public function register(): void { $this->app->singleton('acme.client', fn () => new TracingClient()); } }",
+             "App\\Providers\\AcmeServiceProvider",
+-            &["Acme\\ServiceProvider"],
+             ProviderOrigin::Application,
+-        ));
+-        resources.merge(scan_as(
+-            parent,
++        );
++        for (first, second, expected) in [
++            (
++                parent.clone(),
++                child.clone(),
++                "App\\Providers\\TracingClient",
++            ),
++            (child, parent, "Acme\\Client"),
++        ] {
++            let mut resources = ProviderResources::default();
++            resources.merge(first);
++            resources.merge(second);
++            assert_eq!(
++                resources
++                    .bindings
++                    .get("acme.client")
++                    .map(|b| b.class.as_str()),
++                Some(expected)
++            );
++        }
++    }
++
++    #[test]
++    fn inherited_aliases_follow_registration_order() {
++        let parent = scan_as(
++            "<?php namespace Acme; class ServiceProvider { public function register(): void { $this->app->singleton('parent.target', fn () => new Client()); $this->app->alias('parent.target', 'shared.alias'); } }",
+             "Acme\\ServiceProvider",
+-            &[],
+             ProviderOrigin::Application,
+-        ));
+-
+-        assert_eq!(
+-            resources
+-                .bindings
+-                .get("acme.client")
+-                .map(|b| b.class.as_str()),
+-            Some("App\\Providers\\TracingClient")
+-        );
++        );
++        let child = scan_as(
++            "<?php namespace App\\Providers; class AcmeServiceProvider extends \\Acme\\ServiceProvider { public function register(): void { $this->app->singleton('child.target', fn () => new TracingClient()); $this->app->alias('child.target', 'shared.alias'); } }",
++            "App\\Providers\\AcmeServiceProvider",
++            ProviderOrigin::Application,
++        );
++        for (first, second, expected) in [
++            (
++                parent.clone(),
++                child.clone(),
++                "App\\Providers\\TracingClient",
++            ),
++            (child, parent, "Acme\\Client"),
++        ] {
++            let mut resources = ProviderResources::default();
++            resources.merge(first);
++            resources.merge(second);
++            resources.resolve_aliases();
++            assert_eq!(
++                resources
++                    .bindings
++                    .get("shared.alias")
++                    .map(|b| b.class.as_str()),
++                Some(expected)
++            );
++        }
+     }
+ 
+     #[test]
+@@ -2613,13 +2617,11 @@
+         resources.merge(scan_as(
+             first,
+             "A\\ServiceProvider",
+-            &[],
+             ProviderOrigin::Application,
+         ));
+         resources.merge(scan_as(
+             second,
+             "B\\ServiceProvider",
+-            &[],
+             ProviderOrigin::Application,
+         ));
+ 
+@@ -2636,7 +2638,6 @@
+         let resources = scan_as(
+             APP_TRANSLATION_PROVIDER,
+             "Acme\\Translation\\TranslationServiceProvider",
+-            &["Illuminate\\Translation\\TranslationServiceProvider"],
+             ProviderOrigin::Application,
+         );
+         assert!(resources.custom_translation_loader);
+--- a/tests/integration/laravel_binding_precedence.rs
++++ b/tests/integration/laravel_binding_precedence.rs
+@@ -1,12 +1,7 @@
+-//! Tests that a container key two service providers bind resolves to the class
+-//! the container would actually hold.
+-//!
+-//! Swapping an implementation out is written by re-binding the key from an
+-//! application provider, usually one that subclasses the provider it replaces.
+-//! Both providers are scanned, so the key needs the same precedence the
+-//! container applies: the framework's default loses to the application's
+-//! registration, and a provider loses to one that extends it, regardless of
+-//! which of them is scanned first.
++//! Container bindings follow Laravel's registration groups and list order.
++//! Framework defaults yield to the application's registration. Within the
++//! application list the last provider wins, including when a parent is
++//! registered after its subclass.
+ 
+ use crate::common::{APP_HELPERS_PHP, consumer_class, create_psr4_workspace};
+ use tower_lsp::LanguageServer;
+@@ -257,17 +252,30 @@
+     );
+ }
+ 
+-/// Two providers the application registers itself, so only the `extends`
+-/// relationship between them says which one the container ends up with.
+-#[tokio::test]
+-async fn a_subclass_provider_replaces_its_parents_binding() {
++/// Within one registration group Laravel keeps the last binding, including
++/// when that provider is an earlier provider's parent class.
++#[tokio::test]
++async fn a_later_parent_provider_replaces_earlier_subclass_binding() {
+     let text = hover_over_x(
+         SUBCLASS_BEFORE_PARENT,
+         &consumer_class("app('acme.client')"),
+     )
+     .await;
+     assert!(
++        text.contains("Client") && !text.contains("TracingClient"),
++        "expected the later parent provider's binding to win, got: {text}"
++    );
++}
++
++#[tokio::test]
++async fn a_later_subclass_provider_replaces_earlier_parent_binding() {
++    let text = hover_over_x(
++        "<?php\nreturn [\n    App\\Providers\\ClientServiceProvider::class,\n    App\\Providers\\TracingClientServiceProvider::class,\n];\n",
++        &consumer_class("app('acme.client')"),
++    )
++    .await;
++    assert!(
+         text.contains("TracingClient"),
+-        "expected the subclass provider's binding to win, got: {text}"
+-    );
+-}
++        "expected the later subclass binding, got: {text}"
++    );
++}

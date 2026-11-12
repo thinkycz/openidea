@@ -11,6 +11,8 @@ parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--baseline', required=True, type=Path)
 parser.add_argument('--php', required=True, type=Path)
 parser.add_argument('--label', default='container-navigation')
+parser.add_argument('--reverse-providers', action='store_true',
+                    help='Register the base provider after its subclass to exercise last-registration precedence')
 args = parser.parse_args()
 receipt = json.loads(subprocess.check_output([
     'python3', str(ROOT / 'scripts/create-openstorm-view-fixture.py'),
@@ -39,7 +41,7 @@ class ContainerProvider extends BaseContainerProvider {
 """,
     'app/OpenStormFixtures/OldContainerService.php': """<?php
 namespace App\\OpenStormFixtures;
-class OldContainerService { public function oldOnly(): int { return 1; } }
+class OldContainerService { public function oldOnly(): int { return 1; } public function deliver(): string { return 'old'; } }
 """,
     'app/OpenStormFixtures/ContainerService.php': """<?php
 namespace App\\OpenStormFixtures;
@@ -61,7 +63,10 @@ $alias->deliver();
 providers = project / 'bootstrap/providers.php'
 original = providers.read_text()
 assert original.rstrip().endswith('];')
-updated = original.rstrip()[:-2] + '    App\\OpenStormFixtures\\BaseContainerProvider::class,\n    App\\OpenStormFixtures\\ContainerProvider::class,\n];\n'
+provider_order = ['App\\OpenStormFixtures\\BaseContainerProvider', 'App\\OpenStormFixtures\\ContainerProvider']
+if args.reverse_providers:
+    provider_order.reverse()
+updated = original.rstrip()[:-2] + ''.join(f'    {name}::class,\n' for name in provider_order) + '];\n'
 files['bootstrap/providers.php'] = updated
 for name, text in files.items():
     path = project / name
@@ -76,6 +81,7 @@ receipt['baseline_syntax'] = receipt['syntax']
 php_count = sum(1 for path in project.rglob('*.php')
                 if 'vendor' not in path.relative_to(project).parts and not path.name.endswith('.blade.php'))
 receipt['syntax'] = f'{php_count} non-Blade PHP files linted across the baseline and container additions'
+receipt['provider_order'] = provider_order
 receipt['scenario'] = 'static container key and alias registration/class targets; inherited provider replacement; Unicode, unsaved rebinding and restart'
 receipt['container_files_sha256'] = {n: hashlib.sha256((project / n).read_bytes()).hexdigest() for n in files}
 print(json.dumps(receipt, indent=2))

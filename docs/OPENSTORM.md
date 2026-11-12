@@ -1128,6 +1128,91 @@ provider/facade snapshots, physical Dock-switch autosave, and wider platform/
 performance gates remain open. All69 areas remain67partial/2user-deferred;
 no debugger expansion or blanket parity acceptance is claimed.
 
+Slice70 — refresh facade members after provider rebinding
+(verified, 2026-11-12). Slice69 is committed/pushed6fac1a7a. OpenStorm0.1.66
+bundles PHPantom133. Static key-backed and alias-backed facade hover/completion
+now follow unsaved provider rebinding, undo/redo, restart and close-to-disk
+restoration. Existing layout, actions, keymaps and save-conflict guards remain.
+
+The optional --facades disposable fixture exposes string/int and replacement-only
+alternateOnly() transitions. Warm132 navigates to Alternate3:51 after rebinding,
+but fresh hover stays string. Signed65 native and the new actual-client case
+reproduce that mismatch; all14 disk originals remain exact. Opening identical
+facade source stays stale; forcing a disposable facade-class rebuild changes to
+int, then closing the provider incorrectly retains int. The public source test
+fails1/9906filtered and client fails1/31filtered. An initial same-return probe
+misses the bug; a fixture placement mistake is caught before fixture creation.
+These failed/control receipts remain alongside final acceptance.
+
+Patch0133 uses the existing shared class-cache invalidation when merged provider
+bindings change. The first correction fixes hover but fails replacement-only
+completion. Shared invalidation now also retires member candidates. Candidate
+publication captures the existing resolution generation and holds its read lease
+through insertion, preventing an older build from restoring retired candidates.
+A unit regression covers populated retirement, delayed old publication refusal
+and current publication. Redundant schema/project-router clears are removed.
+No second resolver, settings interface or framework execution is introduced.
+
+Immutable source1756b1f920c1-10ebf8c90c90-verified reconstructs all nine working
+files after Clippy --fix/fmt. Full pinned engine suite passes18,420 ordinary tests
+plus separate FIFO child,17ignored/0ordinaryfiltered; all-target Clippy, formatting,
+fingerprint and optimized build pass. Plain PHP passes12 lints/runtime assertions.
+Laravel13.37 matches115 pinned example files, passes87 lints/270 assertions and
+retains exactly the three intentional diagnostics at731/731/951 with unchanged
+identifiers. Active/candidate source pins agree; binary/source provenance,
+licenses and patch checksums are retained. Engine SHA256:
+`8ed6ce0a823eb5b8b50d9b03a8ae02edf14a863b01ffcf5bfe9813d52a568c52`.
+
+Final OpenStorm workspace passes1,748/69ignored/0filtered, fmt and all-target
+Clippy with warnings denied. All32 actual-client and6 actual-host cases pass,
+including the new six-phase facade regression. Final compiler-artifact metadata
+selects the exact client/host binaries without another Cargo feature profile.
+Frontend5,350 tests/487 files, typecheck/lint/Knip/format/build and post-binding
+checks pass; all8 packaging/retention tests pass. A documentation-only formatting
+failure is retained and corrected, then formatting/build rerun. Only35 local
+workspace package versions change; external iana-time-zone0.1.65 remains unchanged.
+Inherited nonfatal build/linker warnings are not new acceptance claims.
+
+Signed arm64 development0.1.66 packages in215.04s. Native warm F1 direct facade
+is string; unsaved provider rebind changes it to int. Screenshot inspection shows
+alternateOnly() bool and deliver() int in completion; Down/Tab inserts exactly
+AliasContainerFacade::alternateOnly(), without duplicate parentheses. F1 shows
+bool and CmdB opens Alternate3:96. AX omits some popup rows, so visual selection
+supplies this evidence. A middle-token Enter/insert warmup leaves a suffix;
+Edit Undo restores original text. Existing popup Enter-inserts/Tab-replaces
+behavior is preserved. Transient incomplete-input diagnostics clear afterwards.
+
+Native Edit-menu Undo restores Current/string; Redo restores Alternate/int.
+Explicit Restart exits55920, starts bundled56717 and replays unsaved provider
+state; fresh alias F1 is int and CmdB opens Alternate3:51. Guarded provider Tab
+Close / Don't Save restores string/Current3:42. Project Close separately prompts
+before discarding the modified caller. Only the exact owned autosave override is
+removed while closed. Recent-project reopen with defaults restores three clean
+tabs and fresh alias string. Normal Quit exits all processes. Controlled-profile
+no-argument relaunch restores project/tabs/caret4:26, fresh alias string and
+Current3:42 navigation. Final normal Quit leaves all six app/server generations
+absent; no post-quit getter relaunches the app.
+
+Final deep/strict signature, app/engine/source hashes match the build receipt.
+App executable SHA256:
+`9dc9372e0261c3815c638c02476468545e693509843960ef9ec95804f2856571`.
+Both final fixtures retain all14 originals, Composer lock/helper/PSR4 metadata,
+99 non-Blade PHP lints each and no environment files/project overrides.
+Protected installed21 remains unchanged. Only
+`artifacts/batches/0.1.66/OpenStorm.app` remains. Packaging prunes65/duplicate
+bundle and24,415 compiler files/24.8GiB; engine cargo clean removes6,959files/2.0GiB.
+Guarded post-acceptance cleanup removes only superseded132 raw executable
+(55,979,312 logical bytes). Sources, patches, receipts, licenses, evaluation114,
+PHP Workbench and installed profiles remain. Both compiler roots are empty/absent.
+
+Evidence: artifacts/checks/slice70-* and artifacts/batches/0.1.66 receipts; the
+ignored slice70-delivery record supplies exact commit/remote/clean-worktree
+read-back. This accepts the bounded static facade corpus only. Contextual/env
+bindings, broader provider/facade patterns and snapshot/performance matrices,
+and physical Dock-switch autosave remain open. All69 areas remain67partial/
+2user-deferred. No installation, publication, notarization, updater activation,
+migration or debugger expansion occurs.
+
 Source integration (2026-11-01, verified source checkpoint): integrates all 240 new
 commits from `l0ng-ai/openidea:main` at `041e7210` into
 `codex/openstorm-php-laravel`, based on pushed OpenStorm `82d1313a`.

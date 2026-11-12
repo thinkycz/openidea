@@ -1,0 +1,320 @@
+--- a/docs/CHANGELOG.md
++++ b/docs/CHANGELOG.md
+@@ -14,6 +14,8 @@
+ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+ 
+ ## [Unreleased]
++
++- **Refresh facade members when a service binding changes.** Hover, completion and static method types follow the current provider binding, including unsaved edits and undo. Contributed by @thinkycz.
+ 
+ - **Resolve container services in registration order.** The last provider registered within a group decides a binding, including parent and child providers. Framework and package defaults still yield to application registrations. Contributed by @thinkycz.
+ 
+--- a/examples/laravel/app/Demo.php
++++ b/examples/laravel/app/Demo.php
+@@ -1491,6 +1491,11 @@
+         // resolves it to rather than from anything the facade writes.
+         PastryOven::bake('brioche');                            // → string
+         PastryOven::heatedTo('warm')->bake('baguette');         // → string
++
++        // Warm completion or hover, then bind pastry.oven to PlainOven in
++        // DemoServiceProvider without saving. heatedTo disappears and bake
++        // navigates to PlainOven. Undo restores the BakeryService members;
++        // restarting the language server preserves the edited binding.
+     }
+ 
+ 
+--- a/examples/laravel/assertions.php
++++ b/examples/laravel/assertions.php
+@@ -1446,6 +1446,13 @@
+     'a facade whose accessor is a container binding key forwards to the bound instance',
+     \App\Facades\PastryOven::bake('brioche') === 'a fresh brioche'
+ );
++// A fresh facade root forwards the current service's public methods.
++\App\Facades\PastryOven::swap(new \App\Support\PlainOven());
++check(
++    'a rebound facade forwards to the replacement service and its method set',
++    \App\Facades\PastryOven::bake('brioche') === 'a plain brioche'
++        && !method_exists(\App\Facades\PastryOven::getFacadeRoot(), 'heatedTo')
++);
+ \Illuminate\Support\Facades\Facade::clearResolvedInstances();
+ 
+ // ─── Component class members reaching the view ──────────────────────────────
+--- a/src/backend/laravel/provider_resources.rs
++++ b/src/backend/laravel/provider_resources.rs
+@@ -149,10 +149,11 @@
+         if bindings_changed {
+             self.laravel_aliases.invalidate();
+             self.clear_not_found_caches();
+-            // A binding is followed without a class lookup naming the
+-            // provider that registered it, so a cached receiver resolution
+-            // records no dependency on the alias table.
+-            self.clear_resolved_member_files();
++            // Facade virtual members capture the concrete service's methods,
++            // but neither their class dependency graph nor cached receivers
++            // name the provider's alias table. Retire both caches, including
++            // pending class publications from the previous binding snapshot.
++            self.clear_resolved_class_cache();
+         }
+ 
+         // Which directives exist decides what the preprocessor lowers rather
+--- a/src/backend/laravel/schema.rs
++++ b/src/backend/laravel/schema.rs
+@@ -58,7 +58,6 @@
+             .set_schema_index(index.clone());
+         *self.schema_index.write() = index;
+         self.clear_resolved_class_cache();
+-        self.member_completion_cache.lock().clear();
+     }
+ 
+     /// Reconcile the accepted editor source before its parse is marked current.
+@@ -90,7 +89,6 @@
+             .write()
+             .set_schema_index(index.clone());
+         self.clear_resolved_class_cache();
+-        self.member_completion_cache.lock().clear();
+     }
+ 
+     pub(crate) fn update_laravel_migrations(&self, changes: &[(PathBuf, FileChangeType)]) {
+@@ -128,7 +126,6 @@
+                 .write()
+                 .set_schema_index(index.clone());
+             self.clear_resolved_class_cache();
+-            self.member_completion_cache.lock().clear();
+         }
+     }
+ }
+--- a/src/completion/handler/member_access.rs
++++ b/src/completion/handler/member_access.rs
+@@ -44,6 +44,9 @@
+         completion_context: Option<&CompletionContext>,
+         repaired: bool,
+     ) -> Option<CompletionResponse> {
++        let cache_generation = (!repaired).then(|| {
++            crate::virtual_members::cache::resolution_generation(&self.resolved_class_cache)
++        });
+         let recovery_cache = repaired.then(crate::virtual_members::new_resolved_class_cache);
+         let resolved_cache = recovery_cache
+             .as_ref()
+@@ -177,15 +180,8 @@
+                 },
+             )
+             .inspect(|items| {
+-                if !repaired && !items.is_empty() {
+-                    let mut cache = self.member_completion_cache.lock();
+-                    // Simple size limit: evict everything if the cache gets too big.
+-                    // This is crude but effective at preventing memory leaks
+-                    // in long-running sessions.
+-                    if cache.len() > 200 {
+-                        cache.clear();
+-                    }
+-                    cache.insert(cache_key.clone(), items.clone());
++                if let Some(generation) = cache_generation.filter(|_| !items.is_empty()) {
++                    self.cache_member_completion_if_current(generation, &cache_key, items);
+                 }
+             })
+         });
+@@ -235,6 +231,25 @@
+             }
+             _ => None,
+         }
++    }
++
++    fn cache_member_completion_if_current(
++        &self,
++        generation: u64,
++        key: &str,
++        items: &[CompletionItem],
++    ) {
++        // Keep the publication lease through insertion: a registry change
++        // must not be followed by an older build restoring its candidate list.
++        let resolved = self.resolved_class_cache.read();
++        if resolved.generation() != generation {
++            return;
++        }
++        let mut cache = self.member_completion_cache.lock();
++        if cache.len() > 200 {
++            cache.clear();
++        }
++        cache.insert(key.to_owned(), items.to_vec());
+     }
+ 
+     fn member_completion_cache_key(
+@@ -642,3 +657,40 @@
+         None
+     }
+ }
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn retired_member_completion_build_cannot_restore_old_candidates() {
++        let backend = Backend::new_test();
++        let generation = backend.resolved_class_cache.read().generation();
++        let old = vec![CompletionItem {
++            label: "oldMethod".into(),
++            ..Default::default()
++        }];
++        backend.cache_member_completion_if_current(generation, "facade", &old);
++        assert_eq!(
++            backend.member_completion_cache.lock()["facade"][0].label,
++            "oldMethod"
++        );
++
++        backend.clear_resolved_class_cache();
++        assert!(backend.member_completion_cache.lock().is_empty());
++        // Finish a candidate build that started before the registry changed.
++        backend.cache_member_completion_if_current(generation, "facade", &old);
++        assert!(backend.member_completion_cache.lock().is_empty());
++
++        let current = backend.resolved_class_cache.read().generation();
++        let fresh = vec![CompletionItem {
++            label: "newMethod".into(),
++            ..Default::default()
++        }];
++        backend.cache_member_completion_if_current(current, "facade", &fresh);
++        assert_eq!(
++            backend.member_completion_cache.lock()["facade"][0].label,
++            "newMethod"
++        );
++    }
++}
+--- a/src/project_router.rs
++++ b/src/project_router.rs
+@@ -656,7 +656,6 @@
+                 || !changed.constants.is_empty()
+             {
+                 backend.clear_resolved_class_cache();
+-                backend.clear_completion_cache();
+                 backend.member_ref_counts.invalidate_locations_all();
+                 backend.typed_receiver_view_spans_cache.write().clear();
+             }
+--- a/src/resolution.rs
++++ b/src/resolution.rs
+@@ -394,6 +394,7 @@
+     pub(crate) fn clear_resolved_class_cache(&self) {
+         self.resolved_class_cache.write().clear();
+         self.clear_resolved_member_files();
++        self.clear_completion_cache();
+     }
+ 
+     /// Build without publication locks: a class lookup can wait for another
+--- a/tests/integration/laravel_provider_refresh.rs
++++ b/tests/integration/laravel_provider_refresh.rs
+@@ -351,3 +351,115 @@
+         "expected the newly written provider's binding to resolve, got: {text}"
+     );
+ }
++
++#[tokio::test]
++async fn provider_rebinding_refreshes_cached_facade_methods() {
++    use crate::common::{complete_labels_at_opened, open_document, position_after};
++
++    let composer = r#"{"require":{"laravel/framework":"^12.0"},"autoload":{"psr-4":{"App\\":"src/","Illuminate\\":"vendor/illuminate/"}}}"#;
++    let provider = "<?php namespace App; class Provider { public function register(): void { $this->app->singleton('service', CurrentService::class); $this->app->alias('service', 'service.alias'); } }";
++    let replacement = provider.replace("CurrentService::class", "AlternateService::class");
++    let consumer = "<?php\nnamespace App;\n$label = '😀'; ServiceFacade::deliver();\nAliasFacade::deliver();\n";
++    let (backend, dir) = create_psr4_workspace(
++        composer,
++        &[
++            (
++                "bootstrap/providers.php",
++                "<?php return [App\\Provider::class];",
++            ),
++            (
++                "vendor/illuminate/Foundation/Application.php",
++                "<?php namespace Illuminate\\Foundation; class Application { public function registerCoreContainerAliases() {} }",
++            ),
++            (
++                "vendor/illuminate/Support/Facades/Facade.php",
++                "<?php namespace Illuminate\\Support\\Facades; abstract class Facade {}",
++            ),
++            ("src/Provider.php", provider),
++            (
++                "src/CurrentService.php",
++                "<?php namespace App; class CurrentService { public function deliver(): string { return ''; } }",
++            ),
++            (
++                "src/AlternateService.php",
++                "<?php namespace App; class AlternateService { public function deliver(): int { return 2; } public function alternateOnly(): bool { return true; } }",
++            ),
++            (
++                "src/ServiceFacade.php",
++                "<?php namespace App; class ServiceFacade extends \\Illuminate\\Support\\Facades\\Facade { protected static function getFacadeAccessor(): string { return 'service'; } }",
++            ),
++            (
++                "src/AliasFacade.php",
++                "<?php namespace App; class AliasFacade extends \\Illuminate\\Support\\Facades\\Facade { protected static function getFacadeAccessor(): string { return 'service.alias'; } }",
++            ),
++            ("src/Consumer.php", consumer),
++        ],
++    );
++    backend.initialized(InitializedParams {}).await;
++    let uri = Url::from_file_path(dir.path().join("src/Consumer.php")).unwrap();
++    let provider_uri = Url::from_file_path(dir.path().join("src/Provider.php")).unwrap();
++    open_document(&backend, &uri, "php", consumer).await;
++    for (version, changed) in [(0, false), (1, true), (2, false), (3, true), (4, false)] {
++        match version {
++            0 => {}
++            1 => open_document(&backend, &provider_uri, "php", &replacement).await,
++            4 => {
++                backend
++                    .did_close(DidCloseTextDocumentParams {
++                        text_document: TextDocumentIdentifier {
++                            uri: provider_uri.clone(),
++                        },
++                    })
++                    .await
++            }
++            _ => {
++                backend
++                    .did_change(DidChangeTextDocumentParams {
++                        text_document: VersionedTextDocumentIdentifier {
++                            uri: provider_uri.clone(),
++                            version,
++                        },
++                        content_changes: vec![TextDocumentContentChangeEvent {
++                            range: None,
++                            range_length: None,
++                            text: if changed {
++                                replacement.clone()
++                            } else {
++                                provider.to_string()
++                            },
++                        }],
++                    })
++                    .await
++            }
++        }
++        for facade in ["ServiceFacade", "AliasFacade"] {
++            let pos = position_after(consumer, &format!("{facade}::"));
++            let hover = backend
++                .handle_hover(uri.as_str(), consumer, pos)
++                .expect("facade method hover");
++            let HoverContents::Markup(markup) = hover.contents else {
++                panic!("expected markup")
++            };
++            let expected = if changed { "int" } else { "string" };
++            assert!(
++                markup.value.contains(&format!("deliver(): {expected}")),
++                "version{version}/{facade}: stale facade hover {}",
++                markup.value
++            );
++            assert_eq!(hover.range.unwrap().start, pos, "UTF16 after emoji");
++            let labels = complete_labels_at_opened(&backend, &uri, pos.line, pos.character).await;
++            assert!(labels.iter().any(|label| label.starts_with("deliver")));
++            assert_eq!(
++                labels
++                    .iter()
++                    .any(|label| label.starts_with("alternateOnly")),
++                changed,
++                "version{version}/{facade}: {labels:?}"
++            );
++        }
++    }
++    assert_eq!(
++        std::fs::read_to_string(dir.path().join("src/Provider.php")).unwrap(),
++        provider
++    );
++}

@@ -2,7 +2,7 @@
   "name": "openstorm",
   "private": true,
   "description": "A PHP and Laravel IDE built on OpenIDEA",
-  "version": "0.1.65",
+  "version": "0.1.66",
   "license": "Apache-2.0",
   "type": "module",
   "scripts": {

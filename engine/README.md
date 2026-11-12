@@ -1,10 +1,12 @@
 # Pinned PHPantom engine
 
-The local OpenStorm development candidate uses PHPantom `0.11.1-openstorm.132`
+The local OpenStorm development candidate uses PHPantom `0.11.1-openstorm.133`
 for Apple Silicon macOS. This is a local rebuild, not an upstream release.
 Source131 adds migration-derived declaration origins;132 follows registration
-order for container bindings and aliases within a provider group. Full pinned
-source tests pass18,418 checks plus the separate FIFO child (17 ignored).
+order for container bindings and aliases within a provider group. Source133
+retires derived facade members and completion candidates after binding changes,
+including publication by older calculations. Full pinned
+source tests pass18,420 checks plus the separate FIFO child (17 ignored).
 Examples, Clippy, formatting, source fingerprints and the optimized build pass.
 Current OpenStorm client/host and packaged native acceptance are tracked in
 `docs/OPENSTORM.md`; source checks alone do not establish native acceptance.
@@ -14,7 +16,7 @@ acceptance is claimed. The unaccepted129 source and its failed suite result
 remain reproducible.
 
 `source.json` pins the upstream source, archive checksum, unchanged114-patch PHP
-Workbench series and OpenStorm patches0115–0132. The bundled executable is
+Workbench series and OpenStorm patches0115–0133. The bundled executable is
 verified by `node scripts/verify-phpantom.mjs`; its provenance and licenses are
 under `src-tauri/resources/phpantom/`. Source checks and client/host checks do not
 replace packaged native acceptance; broader component and view-data work remains
@@ -223,3 +225,11 @@ alias targets, hover, method completion/navigation, unsaved provider-list change
 restart and closing the overlay. Contextual/environment-dependent registration
 and broader facade snapshots remain outside this slice. Source, checksum and
 packaged native acceptance are recorded in `docs/OPENSTORM.md`.
+
+Patch0133 refreshes cached facade signatures and member candidates after a
+provider binding changes. The completion cache rejects publication by an older
+resolution generation. Use `--facades` with the container fixture generator and
+set `OPENSTORM_TEST_FACADE_ROOT` to its project for the actual-client case. It
+checks key/alias-backed facade hover, UTF16, method destinations and a method
+present only on the replacement through unsaved edits, undo/redo, restart and close. Framework/source
+and native acceptance remain distinct in `docs/OPENSTORM.md`.

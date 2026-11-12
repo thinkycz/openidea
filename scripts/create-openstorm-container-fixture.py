@@ -13,6 +13,8 @@ parser.add_argument('--php', required=True, type=Path)
 parser.add_argument('--label', default='container-navigation')
 parser.add_argument('--reverse-providers', action='store_true',
                     help='Register the base provider after its subclass to exercise last-registration precedence')
+parser.add_argument('--facades', action='store_true',
+                    help='Add facades for the container key and its alias, with a static-call consumer')
 args = parser.parse_args()
 receipt = json.loads(subprocess.check_output([
     'python3', str(ROOT / 'scripts/create-openstorm-view-fixture.py'),
@@ -59,6 +61,24 @@ $service->deliver();
 $alias->deliver();
 """,
 }
+if args.facades:
+    files['app/OpenStormFixtures/AlternateContainerService.php'] = """<?php
+namespace App\\OpenStormFixtures;
+class AlternateContainerService { public function deliver(): int { return 2; } public function alternateOnly(): bool { return true; } }
+"""
+    for name, accessor in [('ContainerFacade', 'openstorm.container'), ('AliasContainerFacade', 'openstorm.alias')]:
+        files[f'app/OpenStormFixtures/{name}.php'] = f"""<?php
+namespace App\\OpenStormFixtures;
+use Illuminate\\Support\\Facades\\Facade;
+class {name} extends Facade {{
+    protected static function getFacadeAccessor(): string {{ return '{accessor}'; }}
+}}
+"""
+    files['app/OpenStormFixtures/FacadeConsumer.php'] = """<?php
+namespace App\\OpenStormFixtures;
+$label = '😀'; ContainerFacade::deliver();
+AliasContainerFacade::deliver();
+"""
 # Change only the new fixture's provider inventory, preserving baseline entries.
 providers = project / 'bootstrap/providers.php'
 original = providers.read_text()
@@ -83,5 +103,7 @@ php_count = sum(1 for path in project.rglob('*.php')
 receipt['syntax'] = f'{php_count} non-Blade PHP files linted across the baseline and container additions'
 receipt['provider_order'] = provider_order
 receipt['scenario'] = 'static container key and alias registration/class targets; inherited provider replacement; Unicode, unsaved rebinding and restart'
+if args.facades:
+    receipt['scenario'] += '; facade static methods through both key and alias accessors'
 receipt['container_files_sha256'] = {n: hashlib.sha256((project / n).read_bytes()).hexdigest() for n in files}
 print(json.dumps(receipt, indent=2))

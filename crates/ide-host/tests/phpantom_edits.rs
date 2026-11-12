@@ -471,18 +471,33 @@ async fn builtin_reopen_refreshes_existing_host_document_after_target_restart() 
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../src-tauri/resources/phpantom/phpantom_lsp")
     });
     let tmp = tempfile::tempdir().unwrap();
-    let root = dunce::canonicalize(tmp.path()).unwrap();
+    // Host scratch/index writes must remain outside the watched source tree.
+    let project_root = tmp.path().join("project");
+    std::fs::create_dir(&project_root).unwrap();
+    let root = dunce::canonicalize(&project_root).unwrap();
     let composer = root.join("composer.json");
     std::fs::write(&composer, r#"{"require":{"php":"^8.2"}}"#).unwrap();
     let main = root.join("main.php");
     std::fs::write(&main, "<?php\nnew \\DateTime();\n").unwrap();
+    let filesystem_events = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let observer = filesystem_events.clone();
     let host = Host::new(HostConfig {
         project_environment: false,
         config_dir: tmp.path().join("config"),
         data_dir: tmp.path().join("data"),
         languages: Arc::new(ide_language::LanguageRegistry::load(None).unwrap()),
         syntax: Arc::default(),
-        sink_for: Box::new(|_| Arc::new(|_| {})),
+        sink_for: Box::new(move |_| {
+            let observer = observer.clone();
+            Arc::new(move |event| {
+                if let ide_core::IdeEvent::FsChanged { created, modified, removed } = event {
+                    observer
+                        .lock()
+                        .unwrap()
+                        .push(format!("created={created:?} modified={modified:?} removed={removed:?}"));
+                }
+            })
+        }),
         owner: |w| w,
         runtime: tokio::runtime::Handle::current(),
     });
@@ -494,7 +509,18 @@ async fn builtin_reopen_refreshes_existing_host_document_after_target_restart() 
         }
     }));
     let doc = project.documents.open(&main).unwrap();
-    let definitions = project.lsp.goto(doc.id, Pos::new(1, 7), ide_lsp::types::GotoKind::Definition).await.unwrap();
+    let definition_result = project.lsp.goto(doc.id, Pos::new(1, 7), ide_lsp::types::GotoKind::Definition).await;
+    let definitions = match definition_result {
+        Ok(value) => value,
+        Err(error) => {
+            project.lsp.shutdown_all().await;
+            host.close_project("main");
+            panic!(
+                "first builtin lookup failed: {error:?}; filesystem events: {:?}",
+                filesystem_events.lock().unwrap()
+            );
+        }
+    };
     let uri = definitions.iter().find_map(|d| d.uri.clone()).unwrap();
     let before = ide_host::ops::lsp::lsp_virtual_document(&host, "main", uri.clone()).await.unwrap();
     assert!(before.description.as_deref().unwrap().contains("8.2"));

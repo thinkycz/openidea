@@ -3622,3 +3622,134 @@ async fn navigation_supports_servers_without_open_close_synchronization() {
     assert_eq!(found[0].path, path);
     h.mgr.shutdown_all().await;
 }
+
+/// Closed Laravel dependencies are not present in the open-buffer source list.
+#[tokio::test(flavor = "multi_thread")]
+async fn laravel_queries_refuse_observed_closed_file_changes() {
+    let mut failures = Vec::new();
+    for method in ["phpWorkbench/routes", "phpWorkbench/views"] {
+        for operation in ["create", "modify", "remove"] {
+            let mut caps = incremental_caps();
+            caps["experimental"] =
+                json!({"phpWorkbenchRoutes":true,"phpWorkbenchViews":true,"phpWorkbenchRenameChecked":true});
+            let h = harness_for("php", "php", &[("phpantom", caps)], &[]);
+            let (doc, _) = h.open("main.php", "<?php\n");
+            let dependency = h.root.join("closed.php");
+            if operation != "create" {
+                std::fs::write(&dependency, "<?php // original\n").unwrap();
+            }
+            h.wait_status("phpantom", ServerStatus::Ready).await;
+            let mgr = Arc::downgrade(&h.mgr);
+            let target = dependency.clone();
+            h.launcher.state("phpantom").responder.lock().replace(Arc::new(move |_, request, _| {
+                if request != method { return None; }
+                let mgr = mgr.upgrade().unwrap();
+                match operation {
+                    "create" => { std::fs::write(&target, "<?php // created\n").unwrap(); mgr.php_files_changed(std::slice::from_ref(&target), &[], &[]); }
+                    "modify" => { std::fs::write(&target, "<?php\n// shifted\n").unwrap(); mgr.php_files_changed(&[], std::slice::from_ref(&target), &[]); }
+                    "remove" => { std::fs::remove_file(&target).unwrap(); mgr.php_files_changed(&[], &[], std::slice::from_ref(&target)); }
+                    _ => unreachable!(),
+                }
+                Some(json!({"routes":[],"views":[],"locations":[{"uri":uri_of(&target),"range":php_range(0,0,0,1)}],"incomplete":true}))
+            }));
+            let kind = if method.ends_with("routes") {
+                h.mgr
+                    .laravel_routes(doc, (operation != "create").then(|| "invoice.show".into()), 10, Default::default())
+                    .await
+                    .err()
+                    .map(|e| e.kind)
+            } else {
+                h.mgr
+                    .laravel_views(doc, (operation != "create").then(|| "invoices.show".into()), 10, Default::default())
+                    .await
+                    .err()
+                    .map(|e| e.kind)
+            };
+            if kind != Some(ide_core::error::ErrorKind::OutOfSync) {
+                failures.push(format!("{method} after {operation}: {kind:?}"));
+            }
+            h.mgr.shutdown_all().await;
+        }
+    }
+    assert!(failures.is_empty(), "stale Laravel replies escaped: {failures:?}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn laravel_query_empty_file_batch_keeps_fresh_incomplete_duplicate_targets() {
+    let mut caps = incremental_caps();
+    caps["experimental"] = json!({"phpWorkbenchRoutes":true,"phpWorkbenchRenameChecked":true});
+    let h = harness_for("php", "php", &[("phpantom", caps)], &[]);
+    let (doc, path) = h.open("main.php", "<?php\n");
+    h.wait_status("phpantom", ServerStatus::Ready).await;
+    let mgr = Arc::downgrade(&h.mgr);
+    h.launcher.state("phpantom").responder.lock().replace(Arc::new(move |_, method, _| {
+        if method != "phpWorkbench/routes" {
+            return None;
+        }
+        mgr.upgrade().unwrap().php_files_changed(&[], &[], &[]);
+        let loc = json!({"uri":uri_of(&path),"range":php_range(0,0,0,1)});
+        Some(json!({"routes":[],"locations":[loc.clone(),loc],"incomplete":true}))
+    }));
+    let result = h.mgr.laravel_routes(doc, Some("invoice.show".into()), 10, Default::default()).await.unwrap();
+    assert!(result.incomplete);
+    assert_eq!(result.locations.len(), 2);
+    h.mgr.shutdown_all().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn navigation_refuses_an_observed_closed_dependency_change() {
+    let mut caps = incremental_caps();
+    caps["definitionProvider"] = json!(true);
+    caps["experimental"] = json!({"phpWorkbenchRenameChecked":true});
+    let h = harness_for("php", "php", &[("phpantom", caps)], &[]);
+    let (doc, _) = h.open("main.php", "<?php\n");
+    let target = h.root.join("closed.php");
+    std::fs::write(&target, "<?php // original\n").unwrap();
+    h.wait_status("phpantom", ServerStatus::Ready).await;
+    let mgr = Arc::downgrade(&h.mgr);
+    h.launcher.state("phpantom").responder.lock().replace(Arc::new(move |_, method, _| {
+        if method != "textDocument/definition" {
+            return None;
+        }
+        std::fs::write(&target, "<?php\n// shifted\n").unwrap();
+        mgr.upgrade().unwrap().php_files_changed(&[], std::slice::from_ref(&target), &[]);
+        Some(json!({"uri":uri_of(&target),"range":php_range(0,0,0,1)}))
+    }));
+    let result = h.mgr.goto(doc, Pos::new(0, 0), GotoKind::Definition).await;
+    h.mgr.shutdown_all().await;
+    assert_eq!(result.unwrap_err().kind, ide_core::error::ErrorKind::Cancelled);
+}
+
+/// UTF-8 target conversion may read a closed file after the RPC has completed.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn laravel_queries_recheck_project_changes_after_target_conversion() {
+    use std::io::Write;
+    for method in ["phpWorkbench/routes", "phpWorkbench/views"] {
+        let mut caps = incremental_caps();
+        caps["positionEncoding"] = json!("utf-8");
+        caps["experimental"] = json!({"phpWorkbenchRoutes":true,"phpWorkbenchViews":true});
+        let h = harness_for("php", "php", &[("phpantom", caps)], &[]);
+        let (doc, _) = h.open("main.php", "<?php\n");
+        let target = h.root.join("conversion.php");
+        assert!(std::process::Command::new("mkfifo").arg(&target).status().unwrap().success());
+        h.wait_status("phpantom", ServerStatus::Ready).await;
+        h.launcher.state("phpantom").respond(method, json!({"routes":[],"views":[],"locations":[{"uri":uri_of(&target),"range":php_range(0,4,0,5)}],"incomplete":false}));
+        let manager = h.mgr.clone();
+        let writer = std::thread::spawn(move || {
+            // Opening the writer rendezvous with Conv's actual disk read, so
+            // the notification occurs after the response's first guard.
+            let mut stream = std::fs::OpenOptions::new().write(true).open(&target).unwrap();
+            manager.php_files_changed(&[], std::slice::from_ref(&target), &[]);
+            stream.write_all("😀x\n".as_bytes()).unwrap();
+        });
+        let kind = if method.ends_with("routes") {
+            h.mgr.laravel_routes(doc, Some("invoice.show".into()), 10, Default::default()).await.err().map(|e| e.kind)
+        } else {
+            h.mgr.laravel_views(doc, Some("invoices.show".into()), 10, Default::default()).await.err().map(|e| e.kind)
+        };
+        writer.join().unwrap();
+        h.mgr.shutdown_all().await;
+        assert_eq!(kind, Some(ide_core::error::ErrorKind::OutOfSync), "{method} returned a converted stale target");
+    }
+}

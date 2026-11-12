@@ -50,7 +50,7 @@ use serde_json::{Value, json};
 use server::{Conn, Running, Server};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Weak};
 use std::time::Duration;
 use text::{DocText, Encoding};
@@ -147,6 +147,12 @@ struct NavigationSource {
     text: Arc<DocText>,
 }
 
+/// Inputs for one server generation, including observed closed-file changes.
+struct NavigationSnapshot {
+    sources: Vec<NavigationSource>,
+    files_revision: u64,
+}
+
 impl DocSnap {
     fn ident(&self) -> Value {
         json!({ "uri": self.uri })
@@ -178,6 +184,7 @@ pub struct LspManager {
     runtime: tokio::runtime::Handle,
     servers: Mutex<Vec<Arc<Server>>>,
     docs: Mutex<HashMap<DocId, DocState>>,
+    project_files_revision: AtomicU64,
     apply_edit_hook: RwLock<Option<ApplyEditHook>>,
     applied_edits: tokio::sync::broadcast::Sender<(ide_core::ServerId, WorkspaceEdit)>,
     config_hook: RwLock<Option<ConfigHook>>,
@@ -312,6 +319,7 @@ impl LspManager {
             runtime: runtime_handle(),
             servers: Mutex::new(Vec::new()),
             docs: Mutex::new(HashMap::new()),
+            project_files_revision: AtomicU64::new(0),
             apply_edit_hook: RwLock::new(None),
             applied_edits: tokio::sync::broadcast::channel(64).0,
             config_hook: RwLock::new(None),
@@ -1231,10 +1239,11 @@ impl LspManager {
         Ok(results.into_iter().map(Result::unwrap_or_default).collect())
     }
 
-    fn navigation_sources(&self, snap: &DocSnap, target: &Target) -> IdeResult<Vec<NavigationSource>> {
+    fn navigation_sources(&self, snap: &DocSnap, target: &Target) -> IdeResult<NavigationSnapshot> {
         if target.server.running_gen(target.run.generation).is_none() {
             return Err(IdeError::cancelled());
         }
+        let files_revision = self.project_files_revision.load(Ordering::Acquire);
         let sources: Vec<_> = self
             .docs
             .lock()
@@ -1256,17 +1265,20 @@ impl LspManager {
         }) {
             return Err(IdeError::cancelled());
         }
-        Ok(sources)
+        Ok(NavigationSnapshot { sources, files_revision })
     }
 
     fn navigation_attached(doc: &DocState, target: &Target) -> bool {
         doc.servers.iter().any(|a| a.server.id == target.server.id && a.opened_gen == Some(target.run.generation))
     }
 
-    fn navigation_current(&self, target: &Target, sources: &[NavigationSource]) -> bool {
-        if target.server.running_gen(target.run.generation).is_none() {
+    fn navigation_current(&self, target: &Target, snapshot: &NavigationSnapshot) -> bool {
+        if self.project_files_revision.load(Ordering::Acquire) != snapshot.files_revision
+            || target.server.running_gen(target.run.generation).is_none()
+        {
             return false;
         }
+        let sources = &snapshot.sources;
         let docs = self.docs.lock();
         docs.values().filter(|d| Self::navigation_attached(d, target)).count() == sources.len()
             && sources.iter().all(|source| {
@@ -1279,6 +1291,7 @@ impl LspManager {
                 })
             })
             && target.server.running_gen(target.run.generation).is_some()
+            && self.project_files_revision.load(Ordering::Acquire) == snapshot.files_revision
     }
 
     async fn goto_in(

@@ -772,6 +772,95 @@ only acceptance documentation/ledger change. Receipts: slice65-native-progress,
 app-readback and delivery in artifacts/checks. All69areas remain67partial and
 2user-deferred. Next independent implementation remains in the Laravel roadmap.
 
+Slice66 — reject pending Laravel replies after observed closed-file changes
+(verified, 2026-11-12). Slice65 is verified progress, committed/pushed1d219fc5;
+this next independent Laravel slice retains the physical focus-check limitation.
+Two public-protocol red regressions expose6route/view cases (closed dependency
+creation/modification/removal) plus standard definition navigation accepting old
+targets. A fresh incomplete/duplicate reply with an empty file batch remains a
+positive control. Native signed62 with a transparent relay to exact engine131
+reproduces both failures: after a real route response is captured, a closed
+route declaration shifts and the actual client watch notification arrives;
+unchanged reply bytes then return after0.359449s. The old5:69 row opens blank5:1,
+although the declaration is now6:69. A closed view is deleted after capture;
+its deletion notification precedes release after0.363141s, but62still offers the
+old1:1 target and opens Cannot open file / os error2. Relay response hashes match
+before/after release and both dependencies were closed when mutated. The12owned
+originals, project override and all app/proxy/engine processes are restored or
+closed after the baseline. Evidence: slice66-native-red and relay/events.jsonl.
+
+Candidate63 adds an observed project-file revision to the existing shared
+navigation snapshot. Nonempty watcher/explicit file batches advance it before
+server notification; empty batches do not. Standard navigation now retires old
+closed-dependency replies too. Typed Laravel route/view queries reuse the same
+buffer identity/language/version, server generation and file revision checks,
+preserving OutOfSync reporting and validating again after target conversion.
+The conversion regression rendezvous with actual UTF8 disk lookup via an owned
+FIFO and changes the revision after the first response guard, for both methods.
+All93protocol tests pass. No engine change, new action/settings surface, project
+command execution or environment file is required. Frontend5346/487files, typecheck/lint/Knip/format/build, all93protocol,
+29real-client and6host tests pass. Final unfiltered workspace1748/66ignored/
+0filtered, Rust formatting and all-target Clippy with warnings denied pass.
+Signed63 native checks and retention pass as recorded below; Git delivery is
+recorded in the ignored slice66-delivery receipt and repository history.
+The guarantee starts when a file change is observed by the client: event-delivery
+gaps, results already displayed before a later change, configuration epochs and
+the final IPC-to-activation interval remain open. All69areas stay visible and no
+whole-area/parity claim follows.
+
+Slice66 host-fixture investigation: final29client cases pass. A runner preflight
+incorrectly required an unused Laravel-query error string in the host test
+binary; the current workspace Cargo fingerprint identifies that binary instead.
+No host test had started at that preflight failure. Resumed host tests pass5/6;
+the first builtin lookup returns Cancelled. An instrumented isolated run confirms
+a data/scratches creation event inside the watched source root during that
+request. This test used the temporary root itself as the project and placed
+private config/data below it, unlike the other host fixtures. The fixture now
+puts source in a project subdirectory with sibling config/data, retaining the
+first-request assertion and event-path diagnostics. Production source guards are
+unchanged by this correction. The isolated first-request check now passes, and all6real-engine host tests
+pass with no retries/sleeps weakening the guard. The29client results remain
+valid against byte-identical runtime sources. Final workspace/fmt/Clippy are
+rerunning after the test-fixture correction; earlier failures remain in receipts.
+
+Slice66 — signed development0.1.63 acceptance: packaging/signing succeeds in
+216.31s with unchanged pinned engine131. The transparent relay captures actual
+nonempty replies and releases identical bytes only after the actual client
+watch notification. The shifted closed route's old5:69 reply is refused after
+0.341258s, showing OutOfSync text, no selectable target and Retry; the caller
+stays open. Retry opens the new declaration6:69. The deleted closed view's old
+1:1 reply is likewise refused after0.717806s; Retry while absent offers no match
+and disabled Open, without creating a missing-file error tab. Restoring only the
+owned view produces a verified create notification; fresh lookup opens its
+original Unicode content at1:1. Both relay phases verify the dependency was
+closed, response hashes match, and neither uses the watchdog release.
+
+Close Project reaches Welcome. All12originals are restored while closed and
+only the exact owned relay override is removed. Native Recent Projects reopens
+all3clean tabs with the app's Resources/phpantom executable, system-only PATH
+and --stdio --no-project-tools. Fresh route5:69 and view1:1 navigation pass.
+Native Quit exits app21988/proxy22026/engine22028/bundled-engine22044. The proxy
+has no final exit log event, but OS process read-back confirms both proxy/child
+absent. Explicit-profile noargs relaunch22429 recovers the same project,3clean
+tabs and view1:1. A fresh route query from the focused PHP editor opens5:69;
+the initial chooser from recovered tab-header focus exposes a disabled action,
+which becomes available after explicitly focusing the editor. This is an
+observed focus prerequisite, not a newly fixed action-discovery claim. Final
+native Quit exits app22429/server22437; all6owned PIDs are absent.
+
+Post-runtime deep/strict signature, executable/engine hashes and every build
+source hash pass before this docs/ledger-only closeout. Both red/fixed12-file
+original sets, Composer lock/autoload hashes and97PHP syntax checks each pass;
+no environment files exist in either fixture. Installed21 remains byte-identical.
+Only archived0.1.63 remains; packaging removed the duplicate app, prior62 archive
+and26,283compiler files (Cargo22.5GiB). Root and engine compiler caches are absent.
+Engine source gates from64 remain applicable to byte-identical131; no engine
+rebuild is claimed. Receipts: slice66-{frontend,sdk-gates,workspace-totals,
+client-host,focused,app-build,build-receipt,native-progress,app-readback,delivery}
+in artifacts/checks, plus real relay events and before-fixture-isolation failures.
+All69areas remain67partial/2user-deferred. Physical Dock-switch autosave and the
+broader semantic/configuration/standing-result/platform gates remain open.
+
 Source integration (2026-11-01, verified source checkpoint): integrates all 240 new
 commits from `l0ng-ai/openidea:main` at `041e7210` into
 `codex/openstorm-php-laravel`, based on pushed OpenStorm `82d1313a`.

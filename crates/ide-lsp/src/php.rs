@@ -55,6 +55,9 @@ impl LspManager {
         if changes.is_empty() {
             return;
         }
+        // Closed dependencies are absent from open-buffer snapshots. Retire
+        // pending navigation before notifying servers of the observed changes.
+        self.project_files_revision.fetch_add(1, Ordering::AcqRel);
         let params = lsp::DidChangeWatchedFilesParams { changes };
         for server in self.servers.lock().iter() {
             let Some(run) = server.running() else { continue };
@@ -286,7 +289,7 @@ impl LspManager {
         limit: usize,
         cancel: &CancellationToken,
         feature: &str,
-    ) -> IdeResult<(R, Target)> {
+    ) -> IdeResult<(R, Target, NavigationSnapshot)> {
         if !(1..=5000).contains(&limit) {
             return Err(IdeError::invalid("Laravel query limit must be between 1 and 5000"));
         }
@@ -298,7 +301,7 @@ impl LspManager {
             return Err(IdeError::unavailable("Open a PHP source file to browse Laravel routes and views"));
         }
         let target = targets.into_iter().next().expect("doc_targets requires a target");
-        let before = self.php_sources(&snap, &target)?;
+        let before = self.navigation_sources(&snap, &target)?;
         let method = match feature {
             "Routes" => "phpWorkbench/routes",
             "Views" => "phpWorkbench/views",
@@ -307,12 +310,19 @@ impl LspManager {
         let reply = self
             .call(&target, method, LaravelQuery { uri: snap.uri.clone(), name, limit }, Some(cancel), LONG_TIMEOUT)
             .await?;
-        if target.server.running_gen(target.run.generation).is_none()
-            || self.php_sources(&self.snapshot(doc)?, &target)? != before
-        {
-            return Err(IdeError::new(ErrorKind::OutOfSync, "PHP sources or server changed during Laravel lookup"));
+        self.laravel_query_current(&target, &before)?;
+        Ok((reply, target, before))
+    }
+
+    fn laravel_query_current(&self, target: &Target, before: &NavigationSnapshot) -> IdeResult<()> {
+        if self.navigation_current(target, before) {
+            Ok(())
+        } else {
+            Err(IdeError::new(
+                ErrorKind::OutOfSync,
+                "PHP sources, project files or server changed during Laravel lookup",
+            ))
         }
-        Ok((reply, target))
     }
 
     /// Static index only: never executes PHP, Composer, or Artisan.
@@ -323,9 +333,10 @@ impl LspManager {
         limit: usize,
         cancel: CancellationToken,
     ) -> IdeResult<LaravelRoutes> {
-        let (reply, target): (RouteReply, _) = self.laravel_query(doc, name, limit, &cancel, "Routes").await?;
+        let (reply, target, before): (RouteReply, _, _) =
+            self.laravel_query(doc, name, limit, &cancel, "Routes").await?;
         let conv = self.conv(target.enc());
-        Ok(LaravelRoutes {
+        let result = LaravelRoutes {
             routes: reply
                 .routes
                 .into_iter()
@@ -338,7 +349,9 @@ impl LspManager {
                 .collect(),
             locations: reply.locations.iter().filter_map(|l| conv.location(l)).collect(),
             incomplete: reply.incomplete,
-        })
+        };
+        self.laravel_query_current(&target, &before)?;
+        Ok(result)
     }
 
     /// Dotted template names and their current targets from PHPantom's static index.
@@ -349,13 +362,15 @@ impl LspManager {
         limit: usize,
         cancel: CancellationToken,
     ) -> IdeResult<LaravelViews> {
-        let (reply, target): (ViewReply, _) = self.laravel_query(doc, name, limit, &cancel, "Views").await?;
+        let (reply, target, before): (ViewReply, _, _) = self.laravel_query(doc, name, limit, &cancel, "Views").await?;
         let conv = self.conv(target.enc());
-        Ok(LaravelViews {
+        let result = LaravelViews {
             views: reply.views,
             locations: reply.locations.iter().filter_map(|l| conv.location(l)).collect(),
             incomplete: reply.incomplete,
-        })
+        };
+        self.laravel_query_current(&target, &before)?;
+        Ok(result)
     }
 }
 

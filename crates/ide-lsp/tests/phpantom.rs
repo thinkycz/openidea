@@ -3352,11 +3352,10 @@ async fn laravel_pivot_accessors_follow_unsaved_dependency_methods_without_calle
             for flow in flows {
                 for method in ["getQuantityLabel", "quantityInGrams"] {
                     let at = method_at(&source, flow, method);
-                    // Hover retries ContentModified while transient reference
-                    // documents close. Check settled dependency semantics here;
-                    // immediate goto currently maps that state to an empty result.
-                    let hover = mgr.hover(doc, at, Default::default()).await.map_err(|e| e.to_string())?;
+                    // Navigation must itself wait for pending dependency publication;
+                    // no hover or caller edit may hide a false empty definition.
                     let targets = mgr.goto(doc, at, GotoKind::Definition).await.map_err(|e| e.to_string())?;
+                    let hover = mgr.hover(doc, at, Default::default()).await.map_err(|e| e.to_string())?;
                     if method == active {
                         if targets.len() != 1 || targets[0].path.to_path_buf() != pivot || targets[0].range.start != declaration {
                             return Err(format!("{phase}/{flow}{method}: wrong current pivot declaration {targets:?}"));

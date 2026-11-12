@@ -1,0 +1,150 @@
+--- a/src/server.rs
++++ b/src/server.rs
+@@ -142,9 +142,9 @@
+         .unwrap_or(Ok(None));
+         match result {
+             Err(error) if error.code == tower_lsp::jsonrpc::ErrorCode::ServerError(-32801) => {
+-                // Hover clients can retry a stale semantic capture. Returning
+-                // null here would incorrectly say the symbol has no docs.
+-                if name == "hover" {
++                // Retrying clients must distinguish an unfinished semantic
++                // publication from an authoritative empty navigation result.
++                if matches!(name, "hover" | "goto_definition" | "goto_type_definition") {
+                     Err(error)
+                 } else {
+                     Ok(None)
+@@ -406,12 +406,9 @@
+             self.progress_end(tok, Some("Done".to_string())).await;
+         }
+ 
+-        match result {
+-            Err(error) if error.code == tower_lsp::jsonrpc::ErrorCode::ServerError(-32801) => {
+-                Ok(None)
+-            }
+-            result => result,
+-        }
++        // Preserve ContentModified so clients can retry the original request;
++        // an in-progress publication does not establish an empty implementor set.
++        result
+     }
+ 
+     async fn goto_type_definition(
+@@ -1543,13 +1540,17 @@
+         backend: &Backend,
+         interface_uri: &str,
+     ) -> Option<GotoImplementationResponse> {
++        implementation_result(backend, interface_uri).await.unwrap()
++    }
++    async fn implementation_result(
++        backend: &Backend,
++        interface_uri: &str,
++    ) -> Result<Option<GotoImplementationResponse>> {
+         let params = serde_json::from_value(json!({
+             "textDocument": {"uri": interface_uri}, "position": {"line": 1, "character": 12}
+         }))
+         .unwrap();
+-        LanguageServer::goto_implementation(backend, params)
+-            .await
+-            .unwrap()
++        LanguageServer::goto_implementation(backend, params).await
+     }
+ 
+     fn implementation_uris(result: Option<GotoImplementationResponse>) -> Vec<Url> {
+@@ -1687,7 +1688,7 @@
+             }),
+         ));
+         let worker = Arc::clone(&backend);
+-        let request = tokio::spawn(async move { implementation(&worker, interface).await });
++        let request = tokio::spawn(async move { implementation_result(&worker, interface).await });
+         tokio::task::spawn_blocking(move || {
+             started_rx.recv_timeout(Duration::from_secs(5)).unwrap()
+         })
+@@ -1704,9 +1705,10 @@
+             .await
+             .unwrap()
+             .unwrap();
+-        assert!(
+-            stale.is_none(),
+-            "the result computed before didChange must be discarded"
++        assert_eq!(
++            stale.unwrap_err().code,
++            tower_lsp::jsonrpc::ErrorCode::ServerError(-32801),
++            "the result computed before didChange must be retriable, never empty"
+         );
+         assert!(implementation(&backend, interface).await.is_none());
+     }
+@@ -1749,7 +1751,13 @@
+         backend.mark_workspace_indexed();
+         assert!(implementation(&backend, interface).await.is_some());
+         let publication = backend.begin_semantic_publication();
+-        assert!(implementation(&backend, interface).await.is_none());
++        assert_eq!(
++            implementation_result(&backend, interface)
++                .await
++                .unwrap_err()
++                .code,
++            tower_lsp::jsonrpc::ErrorCode::ServerError(-32801)
++        );
+         drop(publication);
+         assert!(implementation(&backend, interface).await.is_some());
+     }
+@@ -1897,4 +1905,59 @@
+             text(&undo)
+         );
+     }
++    #[tokio::test]
++    async fn navigation_preserves_content_modified_until_semantic_publication_finishes() {
++        let backend = Backend::new_test();
++        install(&backend, DEP, OLD);
++        install(&backend, MAIN, CALLER);
++        backend.mark_workspace_indexed();
++        let params = || {
++            serde_json::from_value(json!({
++                "textDocument": {"uri": MAIN}, "position": {"line":2,"character":11}
++            }))
++            .unwrap()
++        };
++        assert!(
++            LanguageServer::goto_definition(&backend, params())
++                .await
++                .unwrap()
++                .is_some()
++        );
++        let publication = backend.begin_semantic_publication();
++        assert_eq!(
++            LanguageServer::goto_definition(&backend, params())
++                .await
++                .unwrap_err()
++                .code,
++            tower_lsp::jsonrpc::ErrorCode::ServerError(-32801)
++        );
++        let type_params = serde_json::from_value(json!({
++            "textDocument": {"uri": MAIN}, "position": {"line":2,"character":1}
++        }))
++        .unwrap();
++        assert_eq!(
++            LanguageServer::goto_type_definition(&backend, type_params)
++                .await
++                .unwrap_err()
++                .code,
++            tower_lsp::jsonrpc::ErrorCode::ServerError(-32801)
++        );
++        drop(publication);
++        assert!(
++            LanguageServer::goto_definition(&backend, params())
++                .await
++                .unwrap()
++                .is_some()
++        );
++        let missing = serde_json::from_value(json!({
++            "textDocument": {"uri": MAIN}, "position": {"line":0,"character":0}
++        }))
++        .unwrap();
++        assert!(
++            LanguageServer::goto_definition(&backend, missing)
++                .await
++                .unwrap()
++                .is_none()
++        );
++    }
+ }

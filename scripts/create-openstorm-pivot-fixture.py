@@ -10,11 +10,14 @@ ROOT = Path(__file__).resolve().parent.parent
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--baseline', required=True, type=Path)
 parser.add_argument('--php', required=True, type=Path)
+parser.add_argument('--pin', type=Path, default=ROOT / 'engine/source.json',
+                    help='Engine source manifest used to validate the baseline')
 parser.add_argument('--label', default='pivot-navigation')
 args = parser.parse_args()
 receipt = json.loads(subprocess.check_output([
     'python3', str(ROOT / 'scripts/create-openstorm-view-fixture.py'),
-    '--baseline', str(args.baseline), '--php', str(args.php), '--label', args.label,
+    '--baseline', str(args.baseline), '--php', str(args.php), '--pin', str(args.pin),
+    '--label', args.label,
 ], text=True))
 project = Path(receipt['project'])
 models = ['app/Models/Bakery.php', 'app/Models/BakeryRecipe.php',

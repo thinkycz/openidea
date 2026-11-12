@@ -1,17 +1,17 @@
 {
-  "version": "0.11.1-openstorm.133",
+  "version": "0.11.1-openstorm.134",
   "platform": "aarch64-apple-darwin",
-  "sha256": "8ed6ce0a823eb5b8b50d9b03a8ae02edf14a863b01ffcf5bfe9813d52a568c52",
-  "source_artifact": "artifacts/engines/0.11.1-openstorm.133/phpantom_lsp",
+  "sha256": "134fce32ad219cef9fd1effd7c2e7554fc4d011a88366f7f01bab73d370f5e0f",
+  "source_artifact": "artifacts/engines/0.11.1-openstorm.134/phpantom_lsp",
   "source_recipe": "scripts/prepare-phpantom.py and scripts/build-phpantom.py",
-  "source_tree": "artifacts/phpantom/1756b1f920c1-10ebf8c90c90-verified",
+  "source_tree": "artifacts/phpantom/1756b1f920c1-d855886507bd-verified",
   "base_openidea_revision": "50212e73972d6f05bf16050cb0ba10102a6c8054",
   "upstream_repository": "https://github.com/PHPantom-dev/phpantom_lsp",
   "upstream_commit": "1756b1f920c1290d4c4fdd4d2c902fad53a75cd3",
   "source_archive_sha256": "f0a1dc7fa44d309e6d5e8ed65a2075749c1fc177b45820031f58290f1aec5cee",
-  "patches_sha256": "10ebf8c90c9066ad196d7db8147a650d120b44646e8dace5950a572c69e51c6d",
-  "patch_count": 133,
-  "openstorm_source_recipe": "engine/source.json; scripts/prepare-phpantom.py; scripts/build-phpantom.py",
+  "patches_sha256": "d855886507bd1cc81049fa4fee5c7c158ee9702bb9d3b5fd9194be85c448930c",
+  "patch_count": 134,
+  "openstorm_source_recipe": "engine/candidates/0.11.1-openstorm.134-source.json; scripts/prepare-phpantom.py; scripts/build-phpantom.py",
   "distribution": "local OpenStorm rebuild; not an upstream PHPantom release",
   "previous_released_engine": {
     "version": "0.11.1-workbench.114",
@@ -20,8 +20,8 @@
   },
   "source_build_artifact": "artifacts/phpantom-build/release/phpantom_lsp",
   "previous_local_candidate": {
-    "version": "0.11.1-openstorm.132",
-    "sha256": "e9cc3ec39e475ff1a6a7362dc4d4a9a0b984966d4a5c37a5eaac4ec33459ea84",
-    "provenance": "engine/candidates/0.11.1-openstorm.132.json"
+    "version": "0.11.1-openstorm.133",
+    "sha256": "8ed6ce0a823eb5b8b50d9b03a8ae02edf14a863b01ffcf5bfe9813d52a568c52",
+    "provenance": "engine/candidates/0.11.1-openstorm.133.json"
   }
 }

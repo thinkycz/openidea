@@ -1430,6 +1430,78 @@ remote/clean-worktree reconciliation are in ignored slice73 final-readback and
 delivery receipts. No publishing, updater activation, notarization, migration,
 installation or debugger expansion occurs.
 
+Slice74 — immediate navigation refresh corrected; signed0.1.68 source/build
+checkpoint (2026-11-12). PHPantom134 preserves ContentModified for definition,
+type-definition and the separate implementation/progress path. OpenStorm retries
+that explicit protocol error for all four navigation kinds using the original
+UTF16 position, source receipt and one10second deadline. Genuine empty replies
+and unrelated errors do not retry. Caller/dependency/open/close/observed-disk
+changes, settings reconfiguration, cancellation and server replacement retire
+the request. Settings-only updates invalidate navigation before asynchronous
+reconfiguration even when the server process is retained.
+
+The unchanged runtime first fails both new client checks (one attempt), with
+no fixture/compile failure. After the correction, three focused mocks cover
+retry success/capability advertisement, deadline/changed-input/null/error bounds,
+and settings/restart/cancellation. One initial green test inspected an enqueued
+configuration notification before delivery; using the existing eventually helper
+corrects that harness assumption without changing the behavior assertions.
+The retained red/green/notification receipts distinguish this from the product
+failure. Full unfiltered workspace1751passed/71ignored/0filtered, fmt and
+all-target Clippy with warnings denied pass.
+
+The pivot regression now navigates before hover again. Without changing the
+consumer/version1, disk/unsaved dependency replacement/undo/redo/restart/close
+all pass exact default-pivot/renamed-ingredient declaration, string/int hover,
+UTF16 range, current completion and exact usages. Focused1/33filtered and the
+full34actual-client/6host suites (no ignored/filtered cases) pass. The factory
+forwards an explicit --pin for candidate verification. Its fresh five-original/
+91PHP corpus preserves four pivot source hashes,115pinned baseline files and
+Composer13.37 lock/PSR4/helper metadata, with no environment files/framework boot.
+This supersedes73's settled-only workaround and closes the reproduced immediate
+null at the source/client boundary; it does not establish native shortcut
+acceptance or flow-specific pivot provenance/columns/unknown-morph completeness.
+
+Append-only patch134/source recipe reconstructs immutable source d855886507bd.
+The first scratch formatting attempt inferred parent OpenStorm rules and was
+intentionally stopped; its immutable c172 source/pin/patch/stop receipt remains.
+The focused150line patch instead uses pinned PHPantom rustfmt.toml. Full source
+18421ordinary/17ignored/0filtered plus the separate FIFO child, Clippy, formatting,
+source fingerprint and normal optimized build pass. Twelve plain and87Laravel
+PHP syntax checks, explicit example assertions and analyzer output exactly
+matching the three intentional diagnostics at731/731/951 pass. Active source,
+resource and provenance134 agree; executable SHA256:
+134fce32ad219cef9fd1effd7c2e7554fc4d011a88366f7f01bab73d370f5e0f.
+
+Frontend5357tests/487files, type/lint/Knip/format/build, post-binding checks and
+eight packaging/retention regressions pass. Version0.1.68 updates only35workspace
+lock versions, preserving external dependencies. Local arm64 packaging takes
+212.64s; application executable SHA256:
+7969cbe12afff1a52f99717ab993e514c0db5a9ddf8fb4b262c23ad210fc7023.
+Strict/deep ad-hoc signing, embedded/canonical/resource engine hashes, source
+snapshot, fixture originals/syntax/Composer, installed-app preservation and no
+remaining owned app/engine processes are read back. This is pre-launch integrity
+and source/client acceptance; the new app was not natively operated or installed.
+
+Latest-only packaging verifies68 before deleting67 and the duplicate bundle.
+Cargo clean removes23,585workspace compiler files/24.8GiB and6,959engine compiler
+files/2.0GiB; both owned compiler roots and target are empty/absent. After readback,
+the exact obsolete standalone133 executable (55,978,800bytes, known SHA) is
+removed with an inventory receipt. Only artifacts/batches/0.1.68/OpenStorm.app
+remains as an app archive. Earlier receipts/source/patches/provenance/licenses,
+PHP Workbench, evaluation114 and the installed optimized app/profiles remain.
+
+Native UI acceptance remains unavailable: official computer-use skill files are
+missing, old tools were removed, and a read-only provider search found no
+applicable desktop-control capability. No connection/permission/install change
+or undocumented UI alternative is used. App68 native pivot/shortcut/restart/
+recovery checks and physical Dock-switch autosave remain open. All69 areas stay
+67partial/2user-deferred; the full roadmap remains active. Publishing, updater
+activation, notarization, real-profile migration and debugger expansion remain
+deferred. Ignored slice74 focused/final-pipeline/final-readback/retention/delivery
+receipts retain the test, signature, source, cleanup and exact remote Git proof;
+repository history identifies the delivered source commit.
+
 Source integration (2026-11-01, verified source checkpoint): integrates all 240 new
 commits from `l0ng-ai/openidea:main` at `041e7210` into
 `codex/openstorm-php-laravel`, based on pushed OpenStorm `82d1313a`.

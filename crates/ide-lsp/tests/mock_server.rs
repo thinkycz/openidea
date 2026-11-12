@@ -3753,3 +3753,140 @@ async fn laravel_queries_recheck_project_changes_after_target_conversion() {
         assert_eq!(kind, Some(ide_core::error::ErrorKind::OutOfSync), "{method} returned a converted stale target");
     }
 }
+
+#[tokio::test]
+async fn navigation_retries_content_modified_without_rebasing_or_retrying_empty_results() {
+    for (kind, method) in [
+        (GotoKind::Definition, "textDocument/definition"),
+        (GotoKind::Declaration, "textDocument/declaration"),
+        (GotoKind::TypeDefinition, "textDocument/typeDefinition"),
+        (GotoKind::Implementation, "textDocument/implementation"),
+    ] {
+        let mut caps = incremental_caps();
+        for key in ["declarationProvider", "typeDefinitionProvider", "implementationProvider"] {
+            caps[key] = json!(true);
+        }
+        let h = harness(&[("mock", caps)]);
+        let (doc, path) = h.open("caller.mk", "😀 target\n");
+        let state = h.launcher.state("mock");
+        let uri = uri_of(&path);
+        state.respond(method, json!({"uri":uri,"range":php_range(0,3,0,9)}));
+        *state.fault.lock() = Some(Arc::new(move |s, m| {
+            (m == method && s.requested(m).len() == 1)
+                .then(|| (ide_jsonrpc::codes::CONTENT_MODIFIED, "publishing".into()))
+        }));
+        let result = h.mgr.goto(doc, Pos::new(0, 4), kind).await;
+        h.mgr.shutdown_all().await;
+        let found = result.unwrap();
+        assert_eq!(found.len(), 1, "{method}");
+        assert_eq!(found[0].range.start, Pos::new(0, 3));
+        let requests = state.requested(method);
+        assert_eq!(requests.len(), 2, "{method}");
+        assert_eq!(requests[0], requests[1], "retry must keep the original UTF16 request");
+        let initialize = &state.requested("initialize")[0];
+        assert!(
+            initialize["capabilities"]["general"]["staleRequestSupport"]["retryOnContentModified"]
+                .as_array()
+                .unwrap()
+                .contains(&json!(method))
+        );
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn navigation_retry_is_bounded_and_refuses_changed_sources_and_other_results() {
+    for mode in ["busy", "caller", "dependency", "closed", "opened", "disk", "empty", "server error"] {
+        let h = harness(&[("mock", incremental_caps())]);
+        let (doc, _) = h.open("caller.mk", "target\n");
+        let (dependency, path) = h.open("dependency.mk", "target\n");
+        let state = h.launcher.state("mock");
+        state.respond("textDocument/definition", Value::Null);
+        let weak = Arc::downgrade(&h.mgr);
+        *state.fault.lock() = Some(Arc::new(move |_, method| {
+            if method != "textDocument/definition" {
+                return None;
+            }
+            let mgr = weak.upgrade().unwrap();
+            match mode {
+                "caller" | "dependency" => mgr.did_change(
+                    if mode == "caller" { doc } else { dependency },
+                    2,
+                    &[change(rng(0, 0, 0, 0), "// revised\n")],
+                    &|| "// revised\ntarget\n".into(),
+                ),
+                "closed" => mgr.did_close(dependency),
+                "opened" => mgr.did_open(
+                    DocId::next(),
+                    &path.with_file_name("extra.mk"),
+                    &LanguageId::new("mock"),
+                    1,
+                    "extra\n",
+                ),
+                "disk" => mgr.php_files_changed(&[], std::slice::from_ref(&path), &[]),
+                _ => {}
+            }
+            (mode != "empty").then(|| {
+                (
+                    if mode == "server error" { -32603 } else { ide_jsonrpc::codes::CONTENT_MODIFIED },
+                    "publishing".into(),
+                )
+            })
+        }));
+        let start = tokio::time::Instant::now();
+        let result = h.mgr.goto(doc, Pos::new(0, 1), GotoKind::Definition).await;
+        let attempts = state.requested("textDocument/definition").len();
+        h.mgr.shutdown_all().await;
+        if mode == "empty" {
+            assert!(result.unwrap().is_empty());
+        } else {
+            assert!(result.is_err(), "{mode}");
+        }
+        if mode == "busy" {
+            assert!((2..=200).contains(&attempts), "bounded retry: {attempts}");
+            assert!(start.elapsed() >= Duration::from_secs(9) && start.elapsed() <= Duration::from_secs(10));
+        } else {
+            assert_eq!(attempts, 1, "{mode}");
+        }
+    }
+}
+
+#[tokio::test]
+async fn navigation_retry_stops_on_settings_reconfiguration_restart_and_explicit_cancel() {
+    for mutation in ["settings", "restart", "cancel"] {
+        let mut caps = incremental_caps();
+        caps["implementationProvider"] = json!(true);
+        let h = harness(&[("mock", caps)]);
+        let (doc, _) = h.open("caller.mk", "target\n");
+        h.wait_status("mock", ServerStatus::Ready).await;
+        let state = h.launcher.state("mock");
+        let attempted = Arc::new(tokio::sync::Notify::new());
+        let notify = attempted.clone();
+        *state.fault.lock() = Some(Arc::new(move |_, method| {
+            if method != "textDocument/implementation" {
+                return None;
+            }
+            notify.notify_one();
+            Some((ide_jsonrpc::codes::CONTENT_MODIFIED, "publishing".into()))
+        }));
+        let cancel = ide_core::CancellationToken::new();
+        let token = cancel.clone();
+        let mgr = h.mgr.clone();
+        let pending = tokio::spawn(async move { mgr.implementations(doc, &[Pos::new(0, 1)], token).await });
+        attempted.notified().await;
+        match mutation {
+            "settings" => {
+                h.mgr.set_config_hook(Box::new(|cfg, _| cfg.settings = Some(json!({"navigationFixture":true}))));
+                h.mgr.reconfigure().await;
+                assert_eq!(state.requested("initialize").len(), 1, "settings-only change must keep the process");
+                eventually(|| !state.notified("workspace/didChangeConfiguration").is_empty()).await;
+            }
+            "restart" => h.mgr.restart(h.mgr.servers()[0].id).await.unwrap(),
+            "cancel" => cancel.cancel(),
+            _ => unreachable!(),
+        }
+        let result = pending.await.unwrap();
+        h.mgr.shutdown_all().await;
+        assert_eq!(result.unwrap_err().kind, ide_core::error::ErrorKind::Cancelled, "{mutation}");
+        assert_eq!(state.requested("textDocument/implementation").len(), 1, "{mutation}");
+    }
+}

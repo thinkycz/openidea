@@ -1,12 +1,14 @@
 # Pinned PHPantom engine
 
-The local OpenStorm development candidate uses PHPantom `0.11.1-openstorm.133`
+The local OpenStorm development candidate uses PHPantom `0.11.1-openstorm.134`
 for Apple Silicon macOS. This is a local rebuild, not an upstream release.
 Source131 adds migration-derived declaration origins;132 follows registration
 order for container bindings and aliases within a provider group. Source133
 retires derived facade members and completion candidates after binding changes,
-including publication by older calculations. Full pinned
-source tests pass18,420 checks plus the separate FIFO child (17 ignored).
+including publication by older calculations. Source134 preserves retriable stale
+errors for definition/type-definition and implementation while a semantic
+publication is pending. Full pinned
+source tests pass18,421 checks plus the separate FIFO child (17 ignored).
 Examples, Clippy, formatting, source fingerprints and the optimized build pass.
 Current OpenStorm client/host and packaged native acceptance are tracked in
 `docs/OPENSTORM.md`; source checks alone do not establish native acceptance.
@@ -16,7 +18,7 @@ acceptance is claimed. The unaccepted129 source and its failed suite result
 remain reproducible.
 
 `source.json` pins the upstream source, archive checksum, unchanged114-patch PHP
-Workbench series and OpenStorm patches0115–0133. The bundled executable is
+Workbench series and OpenStorm patches0115–0134. The bundled executable is
 verified by `node scripts/verify-phpantom.mjs`; its provenance and licenses are
 under `src-tauri/resources/phpantom/`. Source checks and client/host checks do not
 replace packaged native acceptance; broader component and view-data work remains
@@ -233,3 +235,14 @@ set `OPENSTORM_TEST_FACADE_ROOT` to its project for the actual-client case. It
 checks key/alias-backed facade hover, UTF16, method destinations and a method
 present only on the replacement through unsaved edits, undo/redo, restart and close. Framework/source
 and native acceptance remain distinct in `docs/OPENSTORM.md`.
+
+Patch0134 preserves ContentModified instead of returning an empty declaration
+while semantic publication is pending. OpenStorm retries these explicit replies
+for definition/declaration/type-definition/implementation within one unchanged
+deadline and source receipt. Typing, open/close, observed disk changes, settings
+reconfiguration, restart and cancellation retire the request; genuine empty
+results and unrelated errors are not retried. The pivot client fixture accepts
+`--pin` for candidate source verification. Its regression navigates before hover
+through dependency-only edit/undo/redo/restart/close with an unchanged consumer.
+Source/client/build evidence and the unavailable native UI gate remain separate
+in `docs/OPENSTORM.md`.

@@ -1294,6 +1294,53 @@ impl LspManager {
             && self.project_files_revision.load(Ordering::Acquire) == snapshot.files_revision
     }
 
+    /// A semantic publication is not evidence that a declaration is absent.
+    /// Keep the original source receipt and deadline across explicit stale replies.
+    async fn current_navigation(
+        &self,
+        snap: &DocSnap,
+        target: &Target,
+        method: &str,
+        pos: Pos,
+        sources: &NavigationSnapshot,
+        cancel: Option<&CancellationToken>,
+    ) -> IdeResult<Option<lsp::GotoDefinitionResponse>> {
+        let params = snap.pos_params(target, pos);
+        let cancel = cancel.cloned().unwrap_or_default();
+        let deadline = tokio::time::Instant::now() + DEFAULT_TIMEOUT;
+        let current = || !cancel.is_cancelled() && self.navigation_current(target, sources);
+        loop {
+            if !current() {
+                return Err(IdeError::cancelled());
+            }
+            let response = tokio::time::timeout_at(
+                deadline,
+                target.run.peer.request::<_, Option<lsp::GotoDefinitionResponse>>(
+                    method,
+                    &params,
+                    Some(cancel.clone()),
+                ),
+            )
+            .await
+            .unwrap_or(Err(RpcError::Timeout));
+            if !current() {
+                return Err(IdeError::cancelled());
+            }
+            match response {
+                Err(RpcError::Server { code, .. }) if code == ide_jsonrpc::codes::CONTENT_MODIFIED => {
+                    if tokio::time::Instant::now() + Duration::from_millis(50) >= deadline {
+                        return Err(IdeError::cancelled());
+                    }
+                    tokio::select! {
+                        () = cancel.cancelled() => return Err(IdeError::cancelled()),
+                        () = tokio::time::sleep(Duration::from_millis(50)) => {}
+                    }
+                }
+                result => return result.map_err(|e| rpc_err(&target.server.name, method, e)),
+            }
+        }
+    }
+
     async fn goto_in(
         &self,
         snap: &DocSnap,
@@ -1305,15 +1352,7 @@ impl LspManager {
         let mut out = Outcome::new();
         for t in targets.iter().filter(|t| snap.asks(t, pos)) {
             let sources = self.navigation_sources(snap, t)?;
-            let response = self
-                .call::<_, Option<lsp::GotoDefinitionResponse>>(
-                    t,
-                    method,
-                    snap.pos_params(t, pos),
-                    cancel,
-                    DEFAULT_TIMEOUT,
-                )
-                .await;
+            let response = self.current_navigation(snap, t, method, pos, &sources, cancel).await;
             if !self.navigation_current(t, &sources) {
                 return Err(IdeError::cancelled());
             }
@@ -2535,6 +2574,9 @@ impl LspManager {
     }
 
     pub async fn reconfigure(&self) {
+        // Settings-only notifications retain the server generation; retire
+        // navigation receipts before any asynchronous reconfiguration work.
+        self.project_files_revision.fetch_add(1, Ordering::AcqRel);
         if !self.execution_allowed.load(Ordering::Acquire) {
             let servers = self.servers.lock().clone();
             join_all(servers.iter().map(|s| self.stop_instance(s, true))).await;

@@ -43,26 +43,33 @@ export function closeLaravelNavigation() {
   useLaravelNavigation.setState(initial);
 }
 
+/** Retire displayed rows and pending replies without losing the chosen logical name. */
+function invalidateLaravelNavigation(message: string) {
+  if (!context) return;
+  generation++;
+  if (pending !== null) void commands.cancelRequest(pending).catch(() => {});
+  pending = null;
+  useLaravelNavigation.setState({ items: [], loading: false, error: message });
+}
+
 export function installLaravelNavigationEvents() {
   const offProject = useProject.subscribe((state, previous) => {
     if (state.project !== previous.project || state.opening) closeLaravelNavigation();
   });
   const offFiles = onIdeEvent("fsChanged", ({ created, modified, removed }) => {
-    if (!context || (!created.length && !modified.length && !removed.length)) return;
-    // Retire both displayed rows and pending replies. Keep the chosen logical
-    // name and incomplete warning for an explicit retry against current files.
-    generation++;
-    if (pending !== null) void commands.cancelRequest(pending).catch(() => {});
-    pending = null;
-    useLaravelNavigation.setState({
-      items: [],
-      loading: false,
-      error: tx("Project files changed. Retry to refresh Laravel results."),
-    });
+    if (!created.length && !modified.length && !removed.length) return;
+    invalidateLaravelNavigation(tx("Project files changed. Retry to refresh Laravel results."));
+  });
+  const offServer = onIdeEvent("languageServer", ({ name, status }) => {
+    // Initial startup and ordinary request/indexing progress must not cancel
+    // the query that started the server. Restart emits stopped before starting.
+    if (name !== "phpantom" || status === "starting" || status === "ready" || status === "busy") return;
+    invalidateLaravelNavigation(tx("PHP server is unavailable or restarting. Retry to refresh Laravel results."));
   });
   return () => {
     offProject();
     offFiles();
+    offServer();
   };
 }
 

@@ -1213,6 +1213,79 @@ and physical Dock-switch autosave remain open. All69 areas remain67partial/
 2user-deferred. No installation, publication, notarization, updater activation,
 migration or debugger expansion occurs.
 
+Slice71 — retire Laravel chooser results when PHPantom becomes unavailable
+(verified, 2026-11-12). Slice70 is committed/pushed819e7024. OpenStorm0.1.67
+keeps the accepted engine133. Route/view choosers now retire displayed rows and
+pending replies after PHPantom stops, crashes, is missing or is misconfigured.
+The selected logical name and incomplete warning remain for explicit Retry.
+Initial starting and ordinary busy/ready events do not cancel queries; other
+server names and disposed subscriptions are ignored. Restart's existing stopped
+event supplies the boundary before startup. File-change retirement reuses the
+same generation/cancellation helper. No automatic requery, new settings, engine
+resolver, keymap/layout change or project command execution is introduced.
+
+Six source regressions fail first: route/view targets remain selectable after
+stop and four unavailable statuses leave pending requests uncancelled. All26
+chooser tests pass after the correction, including startup/progress, unrelated
+server and disposal controls. Signed66 native reproduces the gap: bakeries.show
+keeps routes/web.php34:47 and enabled Open after owned server58344 receives
+SIGTERM and automatically restarts as58514. No Retry notice appears. Baseline
+app/server exit and all14 originals remain exact. Failed and passing logs remain.
+
+The first full frontend run finds the new notice's missing Chinese translation
+(1failed/5356passed). Adding the translation yields all5,357 tests/487files,
+typecheck/lint/Knip/format/build passing. Final unfiltered Rust workspace passes
+1,748 tests/69ignored/0filtered in1,244.42s; fmt and all-target Clippy with warnings
+denied (334.14s) pass. All32 actual-client and6 actual-host cases pass against
+unchanged133, with originals preserved. Exact final workspace compiler-artifact
+metadata selects those binaries without a second Cargo feature-profile build.
+Post-binding frontend gates and all8 packaging/retention tests pass. The source133
+engine suite/examples/optimized-build gates are inherited from accepted slice70,
+with current resource/canonical checksum verification; no new engine build or
+fresh full-engine test claim is made. Existing nonfatal linker warning remains.
+
+Signed arm64 development0.1.67 packages in218.54s. First PHP startup and the
+initial route list work with a fresh disposable profile. Native route selection
+shows bakeries.show -> routes/web.php34:47. SIGTERM of only its owned resource
+server25659 retires the target/Open and shows unavailable/restarting Retry.
+Auto-replacement25962 runs the bundled executable with --stdio --no-project-tools.
+The notice remains after replacement until Return explicitly retries the same
+name; a second Return opens the correct declaration at34:47.
+
+Native Views selects openstorm-stock -> resources/views/openstorm-stock.blade.php1:1.
+Find Action invokes Restart Language Servers while the chooser remains open.
+After the asynchronous stop event, its target/Open retire and Retry appears with
+the name preserved. Old25962 exits and bundled25992 starts. Mouse Retry and target
+selection open the exact Blade file1:1, No problems. No file edit or save occurs.
+Escape cancels a fresh chooser. Project Close reaches Welcome67 and exits all
+three server generations. Recent-project reopen restores three clean tabs and
+Blade1:1; a fresh route list works without old errors, and Escape leaves the
+editor intact. Normal Quit exits app/server. Controlled-profile no-argument
+relaunch restores the same project/tabs/caret. Its first fresh view list, selected
+name lookup and Return navigation succeed at1:1. Final normal Quit leaves all
+seven owned app/server generations absent; no post-quit getter relaunches it.
+
+Post-runtime deep/strict signature, source/executable/engine hashes and all14
+originals in both final fixture copies pass. Each copy lints99 non-Blade PHP files
+and retains Composer lock/helper/PSR4 metadata, without environment files or
+project overrides. App executable SHA256:
+`119f7e35cbff6db2a1f3717dfbce63fdad6524cb27aeb3bd9429a6c8869b2141`.
+Engine SHA256 remains8ed6ce0a...a568c52. Installed21 remains unchanged at048064d8...9fa16.
+Only `artifacts/batches/0.1.67/OpenStorm.app` remains; packaging removes66,
+the duplicate SDK bundle and21,499 compiler files/18.6GiB. Both compiler roots
+are empty/absent. Prior sources, patches, receipts, licenses, evaluation114,
+PHP Workbench and installed profiles remain.
+
+Evidence: artifacts/checks/slice71-* and artifacts/batches/0.1.67 receipts.
+The ignored slice71-delivery record supplies exact commit/remote and clean-worktree
+read-back. Native acceptance covers settled displayed results after an owned
+crash/automatic replacement and explicit restart. Late pending reply races are
+source-regression evidence, not newly reproduced natively. Broader route/view
+forms, immediate readiness/configuration/performance/platform matrices and
+physical Dock-switch autosave remain open. All69 areas stay67partial/
+2user-deferred; no blanket parity, install, publication, notarization, updater
+activation, migration or debugger expansion occurs.
+
 Source integration (2026-11-01, verified source checkpoint): integrates all 240 new
 commits from `l0ng-ai/openidea:main` at `041e7210` into
 `codex/openstorm-php-laravel`, based on pushed OpenStorm `82d1313a`.

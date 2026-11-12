@@ -383,3 +383,106 @@ it("does not retire results for empty file batches or after disposing its event 
   emitLocalIdeEvent({ type: "fsChanged", created: [], modified: [], removed: ["/p/routes/web.php"] });
   expect(useLaravelNavigation.getState().items).toBe(items);
 });
+
+it.each(["routes", "views"] as const)(
+  "retires displayed %s targets when PHPantom stops and explicitly retries the same name",
+  async (kind) => {
+    if (kind === "views")
+      mock.views.mockImplementation((_request, _doc, name) =>
+        ok(
+          name === null
+            ? { views: ["invoices.show"], locations: [], incomplete: true }
+            : { views: [], locations: [loc(2)], incomplete: false },
+        ),
+      );
+    await openLaravelNavigation(kind);
+    await selectLaravelItem(useLaravelNavigation.getState().items[0]!);
+    const stale = useLaravelNavigation.getState().items[0]!;
+    const name = stale.name;
+    render(<LaravelNavigation />);
+    const { emitLocalIdeEvent } = await import("@/platform/ipc");
+    act(() =>
+      emitLocalIdeEvent({ type: "languageServer", server: 31, name: "phpantom", status: "stopped", message: null }),
+    );
+    expect(screen.queryAllByRole("option")).toHaveLength(0);
+    expect(screen.getByRole("alert")).toHaveTextContent("PHP server");
+    expect(screen.getByText(/Results are incomplete/)).toBeInTheDocument();
+    expect(useLaravelNavigation.getState().selectedName).toBe(name);
+    await selectLaravelItem(stale);
+    expect(mock.open).not.toHaveBeenCalled();
+    act(() =>
+      emitLocalIdeEvent({ type: "languageServer", server: 31, name: "phpantom", status: "ready", message: null }),
+    );
+    expect(screen.getByRole("button", { name: "Retry" })).toBeEnabled();
+    expect(screen.queryAllByRole("option")).toHaveLength(0);
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    await waitFor(() => expect(screen.getAllByRole("option").length).toBeGreaterThan(0));
+    expect((kind === "routes" ? mock.routes : mock.views).mock.calls.at(-1)).toEqual([
+      expect.any(Number),
+      7,
+      name,
+      2000,
+    ]);
+    await selectLaravelItem(useLaravelNavigation.getState().items[0]!);
+    expect(mock.open).toHaveBeenCalledWith("/p/routes/web.php", 2, 0);
+  },
+);
+
+it.each(["stopped", "crashed", "missing", "misconfigured"] as const)(
+  "cancels a pending Laravel lookup after PHPantom becomes %s and ignores its late reply",
+  async (status) => {
+    let resolve!: (value: unknown) => void;
+    mock.routes.mockImplementationOnce(
+      () =>
+        new Promise((done) => {
+          resolve = done;
+        }),
+    );
+    const pending = openLaravelNavigation("routes");
+    const { emitLocalIdeEvent } = await import("@/platform/ipc");
+    emitLocalIdeEvent({ type: "languageServer", server: 31, name: "phpantom", status, message: null });
+    expect(mock.cancel).toHaveBeenCalledWith(mock.routes.mock.calls[0]![0]);
+    resolve({
+      status: "ok",
+      data: {
+        routes: [{ name: "stale", uri: "stale", parameters: [], fromVendor: false }],
+        locations: [],
+        incomplete: false,
+      },
+    });
+    await pending;
+    expect(useLaravelNavigation.getState().items).toEqual([]);
+    expect(useLaravelNavigation.getState().loading).toBe(false);
+    expect(useLaravelNavigation.getState().error).toContain("PHP server");
+  },
+);
+
+it("allows initial PHPantom startup and ordinary progress, and ignores other servers or disposed listeners", async () => {
+  const { emitLocalIdeEvent } = await import("@/platform/ipc");
+  let resolve!: (value: unknown) => void;
+  mock.views.mockImplementationOnce(
+    () =>
+      new Promise((done) => {
+        resolve = done;
+      }),
+  );
+  const pending = openLaravelNavigation("views");
+  for (const status of ["starting", "busy", "ready"] as const)
+    emitLocalIdeEvent({ type: "languageServer", server: 31, name: "phpantom", status, message: null });
+  expect(mock.cancel).not.toHaveBeenCalled();
+  expect(useLaravelNavigation.getState().loading).toBe(true);
+  resolve({ status: "ok", data: { views: ["invoices.show"], locations: [], incomplete: false } });
+  await pending;
+  const items = useLaravelNavigation.getState().items;
+  emitLocalIdeEvent({
+    type: "languageServer",
+    server: 42,
+    name: "typescript-language-server",
+    status: "crashed",
+    message: null,
+  });
+  expect(useLaravelNavigation.getState().items).toBe(items);
+  uninstall();
+  emitLocalIdeEvent({ type: "languageServer", server: 31, name: "phpantom", status: "stopped", message: null });
+  expect(useLaravelNavigation.getState().items).toBe(items);
+});

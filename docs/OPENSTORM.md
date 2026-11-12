@@ -936,6 +936,107 @@ epochs, delivery gaps, the final activation interval and physical Dock-switch
 autosave remain open. Local ad hoc development delivery only; no installation,
 notarization, publishing, migration or debugger expansion.
 
+Slice68 — container-key registration and concrete-class navigation
+(verified, 2026-11-12). Slice67 is verified progress, committed/pushedc56e057c.
+This acceptance slice reassesses inherited Laravel container intelligence through
+OpenStorm, rather than importing Workbench acceptance. A reusable owned fixture
+adds a base provider, later registered replacement, inherited static binding key,
+container alias, current/old/alternate services and Unicode PHP caller. It copies
+only the verified Laravel13.37 baseline, excludes env files recursively, checks
+PSR-4/helper/lock identity and lints each added PHP source. No Composer/Artisan or
+application bootstrap is executed.
+
+The direct engine131 protocol preflight returns both provider and concrete-class
+targets for the key and alias, with correct UTF16 registration position after
+an emoji. An unsaved provider overlay adds a line and changes the concrete class;
+both destinations and key hover follow it, and closing restores disk binding.
+These direct results are preflight, not actual-client/native acceptance. A new
+ignored actual-client regression checks exact ordered provider/class targets,
+key hover, resolved method goto/completion, unsaved original disk preservation,
+restart with the provider overlay and close-to-disk restoration. Those gates
+were pending at preflight; final evidence follows below. A frontend launcher was
+invoked before its generated runner existed; no frontend test began at that
+preflight error. It was launched after runner creation, with its own live job.
+
+Reproduce with scripts/create-openstorm-container-fixture.py --help, using the
+pinned installed baseline and explicit PHP CLI. Set OPENSTORM_TEST_CONTAINER_ROOT
+to the returned project path and optionally OPENSTORM_TEST_PHPANTOM_BIN to the
+packaged Resources/phpantom/phpantom_lsp; run cargo test -p ide-lsp --test phpantom
+--locked laravel_container_keys_follow_unsaved_provider_bindings_and_restart
+-- --ignored --exact --nocapture. The ordinary workspace gate intentionally
+ignores this separately configured engine case; it must also run explicitly.
+
+Runtime source/engine are unchanged, so signed64 is reused; no new app/version
+or binary parity claim. The native fixture alone temporarily sets files.autoSave
+false to exercise unsaved cross-file provider changes, with exact removal while
+closed before default-profile recovery. All69areas remain67partial/2deferred;
+contextual/env-dependent bindings, other provider-order forms and the broader
+whole-area gate remain open. Physical Dock-switch autosave stays unverified.
+
+Slice68 source-gate correction: the initial workspace compilation fails in the
+new regression because tuple equality does not apply IpcPath/PathBuf cross-type
+comparison recursively. The actual target paths are normalized to PathBuf before
+the exact ordered path/position comparison; no assertion is dropped and no
+runtime code changes. The failed17-minute cold build/log is preserved in
+slice68-before-path-normalization receipts. The corrected full workspace/fmt/
+Clippy rerun uses the warmed target; frontend5350/typecheck/lint/Knip/format/build
+already pass and are unchanged by this Rust-test-only correction.
+
+Slice68 native checkpoint: unchanged signed64's actual CmdB chooser exposes
+both provider registration and concrete class. Enter reaches key registration
+5:46 after an emoji; Down/Enter reaches ContainerService3:1. The alias reaches
+its own registration6:47. Native paste creates an unsaved provider overlay with
+one extra line and AlternateContainerService; caller alias targets provider7/
+alternate class3, and Enter opens7:47. The main key likewise offers provider6/
+alternate class3, and selecting the second opens3:1. Consumer deliver() CmdB
+opens AlternateContainerService3:51. All11disk originals remain unchanged.
+Restart replaces server88864 with90726 and the old PID exits; the unsaved key
+still targets alternate class3 and Enter reaches shifted registration6:46.
+CmdW asks Unsaved Changes; Don't Save discards only provider. Immediate caller
+key targets restore original provider5/ContainerService3 with no disk writes.
+
+Close Project stops90726; the exact fixture-only autosave override is removed
+while closed. Recent Projects restores3clean tabs. F1 at key3:36 shows
+ContainerService and Registered in ContainerProvider; fresh CmdB/Enter opens
+original5:46. An initial editor click moved the caret to7:1 and F1 there had no
+documentation, so only the explicitly positioned key lookup is accepted.
+Native Quit exits app88685/server91575. Explicit-profile noargs relaunch91700
+restores4clean tabs and original provider5:46. Fresh alias query offers original
+provider6/current class3; Enter reaches6:47. Final Quit exits91700/server91713.
+All6owned PIDs are absent. No discarded overlay returns. Receipts:
+slice68-native-progress, launch records and actual wire trace. Full Rust/explicit client regression and final integrity/retention now pass
+as recorded below; Git identity is in slice68-delivery and repository history.
+
+Slice68 final acceptance: the new actual-client test explicitly passes all4
+phases (disk, unsaved provider, restart, close), asserting exactly the ordered
+provider/class paths and UTF16 positions for both key and alias, current concrete
+key hover, resolved method goto/completion, no superseded parent method and no
+disk writes. It passes1case/29filtered in7.62s; this is not a new30-case full
+client run. Prior29client/6host/engine-source131 gates are reused for unchanged
+runtime/engine. Final workspace passes1748/67ignored/0filtered; the new engine
+case is the additional ignored test and is separately executed above. Frontend
+5350/487files, typecheck/lint/Knip/format/build, post-binding typecheck, Rust fmt,
+all-target Clippy with warnings denied and8packaging/retention tests pass.
+The failed initial compile and launcher preflight remain explicitly recorded.
+
+Post-runtime deep/strict signature, executable/engine hashes and runtime source
+hashes match the existing64 build receipt. Only regression/tracking sources
+differ from that build; the new fixture recipe does not ship in the app. Both
+11-file original sets,96PHP syntax checks each, Composer lock/helper hashes and
+current PSR-4 mapping pass. No environment file exists and no project override
+remains. Native6owned PIDs and the explicit-client engine are absent. Installed21
+is unchanged. No app/version is generated; latest-only retention dry-run keeps64
+and finds no obsolete archive. After all gates finish, guarded cargo clean removes
+19,220files (Cargo15.5GiB); root and engine compiler caches are absent. This is
+acceptance of inherited container navigation, not newly implemented inference or
+whole FEAT-029 acceptance. Contextual/env-dependent bindings, other provider
+ordering, broader facade snapshots, physical Dock-switch autosave and the wider
+69-area/platform/performance gates remain open. All69statuses stay67partial/
+2user-deferred. Source/test recipe, failed/passing logs and receipts are retained
+in docs/OPENSTORM.md and artifacts/checks/slice68-*; exact pushed source identity
+and clean-worktree proof are in slice68-delivery. No publication, installation,
+notarization, migration or debugger expansion occurs.
+
 Source integration (2026-11-01, verified source checkpoint): integrates all 240 new
 commits from `l0ng-ai/openidea:main` at `041e7210` into
 `codex/openstorm-php-laravel`, based on pushed OpenStorm `82d1313a`.

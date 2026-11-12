@@ -2821,3 +2821,91 @@ async fn laravel_migration_fields_preserve_types_completion_and_declaration_orig
     assert_eq!(std::fs::read_to_string(&migration_path).unwrap(), migration);
     assert!(failures.is_empty(), "migration declaration origins: {failures:#?}");
 }
+
+/// Container keys expose both their current provider registration and concrete
+/// class, rather than silently navigating to a superseded parent binding.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires OPENSTORM_TEST_CONTAINER_ROOT created by create-openstorm-container-fixture.py"]
+async fn laravel_container_keys_follow_unsaved_provider_bindings_and_restart() {
+    let root = PathBuf::from(std::env::var_os("OPENSTORM_TEST_CONTAINER_ROOT").expect("owned container fixture"))
+        .canonicalize()
+        .unwrap();
+    let bin = std::env::var_os("OPENSTORM_TEST_PHPANTOM_BIN").map(PathBuf::from).unwrap_or_else(|| {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../src-tauri/resources/phpantom/phpantom_lsp")
+    });
+    let mut php = LanguageRegistry::load(None).unwrap().get(&LanguageId::new("php")).unwrap();
+    php.language_servers.retain(|s| s.name == "phpantom");
+    php.language_servers[0].command = bin.to_string_lossy().into_owned();
+    let mgr = LspManager::new(root.clone(), Arc::new(LanguageRegistry::from_configs(vec![php])), Arc::new(|_| {}));
+    let path = root.join("app/OpenStormFixtures/ContainerConsumer.php");
+    let source = std::fs::read_to_string(&path).unwrap();
+    let provider_path = root.join("app/OpenStormFixtures/ContainerProvider.php");
+    let original = std::fs::read_to_string(&provider_path).unwrap();
+    let overlay = original
+        .replace("        $label", "\n        $label")
+        .replace("ContainerService::class", "AlternateContainerService::class");
+    let doc = DocId::next();
+    mgr.did_open(doc, &path, &LanguageId::new("php"), 1, &source);
+    let provider = DocId::next();
+    let result: Result<(), String> = async {
+        for phase in ["disk", "overlay", "restart", "close"] {
+            if phase == "overlay" {
+                mgr.did_open(provider, &provider_path, &LanguageId::new("php"), 1, &overlay);
+            } else if phase == "restart" {
+                mgr.restart(mgr.servers()[0].id).await.map_err(|e| e.to_string())?;
+            } else if phase == "close" {
+                mgr.did_close(provider);
+            }
+            let changed = matches!(phase, "overlay" | "restart");
+            let provider_text = if changed { &overlay } else { &original };
+            let concrete = if changed { "AlternateContainerService" } else { "ContainerService" };
+            let class_path = root.join(format!("app/OpenStormFixtures/{concrete}.php"));
+            let class_text = std::fs::read_to_string(&class_path).map_err(|e| e.to_string())?;
+            for (key, marker) in [("openstorm.container", "static::$abstract,"), ("openstorm.alias", "openstorm.alias")]
+            {
+                let at = pos(&source, key);
+                let targets = mgr.goto(doc, at, GotoKind::Definition).await.map_err(|e| e.to_string())?;
+                let expected = [
+                    (provider_path.clone(), pos(provider_text, marker)),
+                    (class_path.clone(), pos(&class_text, &format!("class {concrete}"))),
+                ];
+                let actual: Vec<_> = targets.iter().map(|l| (l.path.to_path_buf(), l.range.start)).collect();
+                if actual != expected {
+                    return Err(format!("{phase}/{key}: expected {expected:?}, got {actual:?}"));
+                }
+                let hover = mgr
+                    .hover(doc, at, Default::default())
+                    .await
+                    .map_err(|e| e.to_string())?
+                    .ok_or_else(|| format!("{phase}/{key}: no container hover"))?;
+                if !hover.contents.value.contains(&format!("App\\OpenStormFixtures\\{concrete}")) {
+                    return Err(format!("{phase}/{key}: wrong binding hover {}", hover.contents.value));
+                }
+                eprintln!("{phase}/{key}: exact provider and {concrete} targets {actual:?}");
+            }
+            let method_at = pos(&source, "deliver();");
+            let methods = mgr.goto(doc, method_at, GotoKind::Definition).await.map_err(|e| e.to_string())?;
+            if methods.len() != 1
+                || methods[0].path != class_path
+                || methods[0].range.start != pos(&class_text, "deliver")
+            {
+                return Err(format!("{phase}: wrong resolved service method {methods:?}"));
+            }
+            let list = settled_completion(&mgr, doc, method_at).await;
+            if !list.items.iter().any(|i| i.label.starts_with("deliver"))
+                || list.items.iter().any(|i| i.label.starts_with("oldOnly"))
+            {
+                return Err(format!("{phase}: completion must follow the replacement, not its parent binding"));
+            }
+            if std::fs::read_to_string(&provider_path).map_err(|e| e.to_string())? != original {
+                return Err(format!("{phase}: lookup wrote the unsaved provider to disk"));
+            }
+        }
+        Ok(())
+    }
+    .await;
+    mgr.shutdown_all().await;
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), source);
+    assert_eq!(std::fs::read_to_string(&provider_path).unwrap(), original);
+    result.unwrap();
+}

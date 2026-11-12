@@ -1563,6 +1563,34 @@ expansion remain deferred. Ignored slice75 red/extended-red/focused/final-pipeli
 final-readback/delivery receipts retain exact evidence; repository history and
 remote read-back identify the delivered source. The full roadmap remains active.
 
+Continuation audit — native acceptance blocked (2026-11-12).
+The previous goal turn is progress:75 is committed/pushed0cb9ccb7 with its bounded
+source/client/build gates accepted. Current branch/worktree, exact remote ref,
+sole signed69 executable hash and empty compiler roots are refreshed; no source
+or build regression is found and no rebuild is needed.
+
+The same external native-control prerequisite remains unavailable across73/74/75
+and this audit: the official computer-use skill directory is empty and the
+current tool inventory contains no desktop-control capability. The earlier
+provider search did not supply one; the user's restoration question has no
+reply, so no restoration or approval is inferred. The current source fixes are
+finished; their next required acceptance depends on that capability. Starting
+another dependent Laravel batch would skip the explicit native-first gate.
+This audit is documentation only, not a newly delivered feature or UI pass.
+
+Keep the full69-area objective and67partial/2user-deferred ledger unchanged.
+Mark the goal blocked rather than complete or paused until official Computer Use
+and its readable instructions are restored. Then resume against the sole signed
+0.1.69 app using isolated fixtures: native pivot/ingredient navigation with
+unsaved dependencies and references; checked rename/import previews under changed
+inputs; cancellation/undo/conflicts; server restart; project reopen/noargrelaunch;
+normal app/server quit and signature/source read-back. Physical Dock-switch
+autosave remains unobserved and must be recorded separately. Installed app,
+profiles, Workbench/evaluation, provenance and earlier receipts remain protected.
+No further feature build, cleanup mutation or publication is necessary for this
+blocked checkpoint. Its ignored continuation audit/delivery receipt records the
+exact Git state; the full roadmap has not been redefined around completed work.
+
 Source integration (2026-11-01, verified source checkpoint): integrates all 240 new
 commits from `l0ng-ai/openidea:main` at `041e7210` into
 `codex/openstorm-php-laravel`, based on pushed OpenStorm `82d1313a`.

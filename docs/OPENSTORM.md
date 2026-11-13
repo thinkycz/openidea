@@ -1707,6 +1707,76 @@ performance/platform matrices remain unverified or partial. All69 statuses remai
 final-readback,workspace-totals,focused}.json`, client/host/wire logs and app
 build/retention receipts.
 
+Slice78 — external content-root Laravel JSON navigation (verified
+source/client/build slice, 2026-11-13). Slice77 was committed/pushed as62c3998e.
+Translation JSON from explicitly configured Project Structure roots now reaches
+the existing Routes/Views chooser. Effective settings are used; extra-root
+whitespace matches the host, literal primary-path spaces are preserved, and
+workspace mode ignores the single-project content-root setting. Normalized root
+set changes close the chooser, cancel pending requests and discard late replies/
+queued selections; equivalent sets and unrelated settings preserve rows. No new
+menus, shortcuts, layout, settings interface or engine change is introduced.
+
+Backend JSON admission uses the current containing root and nearest Composer
+manifest, retaining layout/Laravel/provider/capability/ParentDir checks. Material
+root-vector changes advance the semantic revision; exact no-ops preserve it.
+The original revision is retained across server readiness and through RPC.
+Removed-root JSON cannot issue Laravel queries, forward implicit change/save
+text or replay on restart. Local buffer text remains available after explicit
+root restoration/restart. PHP, explicit JSON providers and dotenv retain their
+existing behavior; no wider environment-value/privacy acceptance is claimed.
+
+Red/green:4frontend failures initially reproduced external entry and row/pending
+retirement;2more cases reproduced host whitespace mismatch. All51focused
+chooser cases now pass. The unchanged71 backend red build succeeded but4valid
+external queries failed and2held route/view replies incorrectly survived root
+changes; no-op controls passed. Both corrected focused mocks pass (102others
+filtered), including root removal, notification/restart-replay exclusion and
+restoration. The actual client owns12files/two independent Composer roots, opens
+only JSON, interleaves exact shared/exclusive names and stable distinct PIDs,
+then verifies removal, an unsaved overlay, restart refusal, re-add/restart,
+primary-process isolation and unchanged disk originals. Focused1case/37filtered
+passes in9.70s; the complete38client/6host suites pass with0ignored/0filtered.
+
+Full current gates pass:5382frontend tests/487files, typecheck/lint/Knip/format/
+build,1759workspace tests/75ignored/0filtered, Rust fmt, all-target Clippy with
+warnings denied, post-binding frontend and8packaging/retention tests. The initial
+frontend typecheck caught a test fixture's string autoSave value and it was
+corrected to boolean. Frontend-only fixes progressed during the unchanged Rust
+run; the original package freeze correctly refused those two file differences.
+A guarded component reconciliation proves all Rust/other source hashes remain
+unchanged, reconstructs the earlier test fixture, and binds current frontend
+hashes to fresh complete gates before the standard packaging recipe. Initial
+and reconciled receipts remain separate; no failed gate is relabelled as a pass.
+Engine134 source/binary are unchanged; prior18421ordinary/17ignored plus FIFOchild
+proof is reused by checksum/source recipe with no engine rebuild. Unchanged77
+wire-fixture integrity is inherited, not new external-root evidence.
+
+One unchanged rainbow-bracket test failed under full-suite load (5381others
+passed), then6isolated and the full5382rerun passed without rainbow-source edits.
+A controlled clock/public-API probe reproduces the exact old(0-only result:
+ensureSyntaxTree returns46 characters while the old state snapshot remains2;
+publishing an empty state update exposes46 and all8expected marks. Production
+already reacts to tree publication. The helper reliability repair remains a
+separate small test-only slice; initial failure/repro logs are preserved and
+broad editor/performance acceptance remains partial.
+
+Signed arm64 development app0.1.72 is at
+`artifacts/batches/0.1.72/OpenStorm.app`; executable SHA-256
+`7ae4407a694ba7e85571b171c04755602c468c1394e5f41de0164ba9c170117e`.
+Strict/deep signature, source snapshot, embedded134 checksum, source recipe,
+Composer/autoload, originals, installed-app hash and process read-back pass.
+Only72 remains after pruning71/duplicate bundle and cargo-cleaning23455files/
+19.5GiB; both compiler roots are absent/empty. Sources, provenance, licenses,
+receipts and earlier evaluation remain. No app launch, installation, publishing,
+notarization, updater activation or migration occurred. Native/physical Dock
+checks are explicitly skipped by the user. Broader live root/Composer-boundary,
+alias/workspace/profile/privacy/performance/platform and activation-gap cases
+remain partial. All69 areas stay67partial/2user-deferred. Evidence:
+`artifacts/checks/slice78-{final-pipeline,source-reconciliation,final-readback,
+workspace-totals,focused}.json`, initial/current frontend and client/host logs,
+`slice78-rainbow-snapshot.json`, and app build/retention receipts.
+
 Source integration (2026-11-01, verified source checkpoint): integrates all 240 new
 commits from `l0ng-ai/openidea:main` at `041e7210` into
 `codex/openstorm-php-laravel`, based on pushed OpenStorm `82d1313a`.

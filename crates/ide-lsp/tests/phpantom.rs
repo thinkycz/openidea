@@ -3680,3 +3680,114 @@ async fn laravel_translation_json_selects_nested_composer_context_without_php_ed
     }
     result.unwrap();
 }
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires the pinned PHPantom executable"]
+async fn laravel_translation_json_uses_configured_content_roots_and_recovers_after_removal() {
+    let bin = std::env::var_os("OPENSTORM_TEST_PHPANTOM_BIN").map(PathBuf::from).unwrap_or_else(|| {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../src-tauri/resources/phpantom/phpantom_lsp")
+    });
+    let tmp = tempfile::tempdir().unwrap();
+    let parent = tmp.path().canonicalize().unwrap();
+    let root = parent.join("project");
+    std::fs::create_dir(&root).unwrap();
+    let child = parent.join("linked-🐘");
+    let mut originals = Vec::new();
+    for (base, owner) in [(&root, "outer"), (&child, "inner")] {
+        std::fs::create_dir_all(base.join("app")).unwrap();
+        let files = vec![
+            ("composer.json".into(), serde_json::json!({"name":format!("fixture/{owner}"),"require":{"php":"^8.3","laravel/framework":"^13.0"},"autoload":{"psr-4":{"App\\":"app/"}}}).to_string()),
+            ("routes/web.php".into(), format!("<?php\nuse Illuminate\\Support\\Facades\\Route;\nRoute::get('/{owner}/shared', static fn() => '{owner}')->name('shared.show');\nRoute::get('/{owner}/only', static fn() => '{owner}')->name('{owner}.only');\n")),
+            ("resources/views/shared.blade.php".into(), format!("<p>{owner} shared</p>\n")),
+            (format!("resources/views/{owner}-only.blade.php"), format!("<p>{owner}</p>\n")),
+            ("lang/en.json".into(), "{\"Hello\":\"Sample\"}\n".into()),
+            ("resources/lang/en.json".into(), "{\"Hello\":\"Sample\"}\n".into()),
+        ];
+        for (relative, source) in files {
+            let path = base.join(relative);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, &source).unwrap();
+            originals.push((path, source));
+        }
+    }
+    let mut php = LanguageRegistry::load(None).unwrap().get(&LanguageId::new("php")).unwrap();
+    php.language_servers.retain(|s| s.name == "phpantom");
+    php.language_servers[0].command = bin.to_string_lossy().into_owned();
+    let mgr = LspManager::new(root.clone(), Arc::new(LanguageRegistry::from_configs(vec![php])), Arc::new(|_| {}));
+    mgr.set_content_roots(vec![child.clone()]);
+    let result: Result<(), String> = async {
+        let mut docs = Vec::new();
+        for (base, owner, other) in [(&root,"outer","inner"), (&child,"inner","outer")] {
+            for relative in ["lang/en.json", "resources/lang/en.json"] {
+                let path = base.join(relative);
+                let text = std::fs::read_to_string(&path).unwrap();
+                serde_json::from_str::<serde_json::Value>(&text).unwrap();
+                let doc = DocId::next();
+                mgr.did_open(doc, &path, &LanguageId::new("json"), 1, &text);
+                docs.push((doc,base,owner,other));
+            }
+        }
+        let mut pids = std::collections::HashMap::new();
+        for index in [0,2,1,3,0] {
+            let (doc,base,owner,other)=docs[index];
+            let routes=mgr.laravel_routes(doc,None,2000,Default::default()).await.map_err(|e|e.to_string())?;
+            if !routes.routes.iter().any(|r|r.name==format!("{owner}.only"))
+                || routes.routes.iter().any(|r|r.name==format!("{other}.only"))
+                || !routes.routes.iter().any(|r|r.name=="shared.show" && r.uri==format!("{owner}/shared")) {
+                return Err(format!("{owner}: route context leaked {routes:?}"));
+            }
+            let target=mgr.laravel_routes(doc,Some("shared.show".into()),2000,Default::default()).await.map_err(|e|e.to_string())?;
+            let route_path=base.join("routes/web.php");
+            let route_source=std::fs::read_to_string(&route_path).unwrap();
+            if target.locations.len()!=1 || target.locations[0].path.to_path_buf()!=route_path
+                || target.locations[0].range.start!=pos(&route_source,"shared.show") {
+                return Err(format!("{owner}: shared route resolved to another project {target:?}"));
+            }
+            let views=mgr.laravel_views(doc,None,2000,Default::default()).await.map_err(|e|e.to_string())?;
+            if !views.views.contains(&format!("{owner}-only")) || views.views.contains(&format!("{other}-only")) {
+                return Err(format!("{owner}: view context leaked {views:?}"));
+            }
+            let target=mgr.laravel_views(doc,Some("shared".into()),2000,Default::default()).await.map_err(|e|e.to_string())?;
+            if target.locations.len()!=1 || target.locations[0].path.to_path_buf()!=base.join("resources/views/shared.blade.php") || target.locations[0].range.start!=Pos::new(0,0) {
+                return Err(format!("{owner}: shared view resolved to another project {target:?}"));
+            }
+            if mgr.servers().len()!=2 { return Err("expected independent primary/content-root servers".into()); }
+            let server=mgr.servers().into_iter().find(|s|s.root==*base).ok_or("content-root server missing")?;
+            let current=server.pid.ok_or("content-root PID missing")?;
+            if pids.insert(base.clone(),current).is_some_and(|previous|previous!=current) { return Err("context selection restarted an independent root".into()); }
+            if mgr.completion(doc,Pos::new(0,3),None,Default::default()).await.is_ok()
+                || mgr.rename(doc,Pos::new(0,3),"Changed".into(),Default::default()).await.is_ok()
+                || mgr.format(doc,None,ide_lsp::types::FormatOptions{tab_size:2,insert_spaces:true,on_save:false}).await.is_ok() { return Err("PHP-only operation enabled for nested JSON".into()); }
+            eprintln!("{owner}: both shared-name destinations and exclusive names resolve in selected content root on PID{current}; PHP-only operations excluded");
+        }
+        if pids.len()!=2 || pids[&root]==pids[&child] { return Err("independent roots did not use distinct processes".into()); }
+        let external_id=mgr.servers().into_iter().find(|s|s.root==child).ok_or("external server missing")?.id;
+        mgr.set_content_roots(vec![]);
+        if mgr.laravel_routes(docs[2].0,None,2000,Default::default()).await.is_ok()
+            || mgr.laravel_views(docs[3].0,None,2000,Default::default()).await.is_ok() { return Err("removed content root still admitted JSON navigation".into()); }
+        let json_path=child.join("lang/en.json");
+        let original=std::fs::read_to_string(&json_path).unwrap();
+        replace(&mgr,docs[2].0,2,&original,"{\"Hello\":\"Changed overlay\"}\n");
+        mgr.restart(external_id).await.map_err(|e|e.to_string())?;
+        if mgr.laravel_views(docs[2].0,None,2000,Default::default()).await.is_ok() { return Err("restart readmitted removed-root JSON".into()); }
+        mgr.set_content_roots(vec![child.clone()]);
+        mgr.restart(external_id).await.map_err(|e|e.to_string())?;
+        for index in [2,0] {
+            let (doc,base,owner,_)=docs[index];
+            let target=mgr.laravel_views(doc,Some("shared".into()),2000,Default::default()).await.map_err(|e|e.to_string())?;
+            if target.locations.len()!=1 || target.locations[0].path.to_path_buf()!=base.join("resources/views/shared.blade.php") { return Err(format!("{owner}: restart lost Composer owner")); }
+        }
+        if mgr.servers().into_iter().find(|s|s.root==root).and_then(|s|s.pid)!=Some(pids[&root]) { return Err("external-root recovery disturbed the primary server".into()); }
+        for (doc,_,_,_) in docs { mgr.did_close(doc); }
+        Ok(())
+    }.await;
+    mgr.shutdown_all().await;
+    for (path, source) in originals {
+        assert_eq!(
+            std::fs::read_to_string(path).unwrap(),
+            source,
+            "static context navigation must not write fixture files"
+        );
+    }
+    result.unwrap();
+}

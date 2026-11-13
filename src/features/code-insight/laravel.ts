@@ -4,6 +4,7 @@ import { tx } from "@/platform/i18n";
 import type { Location, ProjectInfo, LaravelRoutes, LaravelViews } from "@/bindings";
 import { commands, nextRequestId, isCancelled, onIdeEvent } from "@/platform/ipc";
 import { useProject, relativePath } from "@/platform/project";
+import { validateProjectStructure } from "@/platform/languageSettings";
 import { caretContext, hint, lspRequest, openLocation, reportError } from "./ipc";
 
 export type LaravelNavigationKind = "routes" | "views";
@@ -54,7 +55,13 @@ function invalidateLaravelNavigation(message: string) {
 
 export function installLaravelNavigationEvents() {
   const offProject = useProject.subscribe((state, previous) => {
-    if (state.project !== previous.project || state.opening) closeLaravelNavigation();
+    const roots = (value: typeof state) => (value.project ? navigationRoots(value.project, value.settings) : []);
+    if (
+      state.project !== previous.project ||
+      state.opening ||
+      JSON.stringify(roots(state)) !== JSON.stringify(roots(previous))
+    )
+      closeLaravelNavigation();
   });
   const offFiles = onIdeEvent("fsChanged", ({ created, modified, removed }) => {
     if (!created.length && !modified.length && !removed.length) return;
@@ -76,8 +83,8 @@ export function installLaravelNavigationEvents() {
 export async function openLaravelNavigation(kind: LaravelNavigationKind) {
   closeLaravelNavigation();
   const caret = caretContext();
-  const project = useProject.getState().project;
-  if (!caret || !project || !isNavigationSource(caret.path, project.root)) {
+  const { project, settings } = useProject.getState();
+  if (!caret || !project || !isNavigationSource(caret.path, navigationRoots(project, settings))) {
     hint(tx("Open a PHP source or Laravel translation JSON file to browse routes and views"));
     return;
   }
@@ -86,16 +93,22 @@ export async function openLaravelNavigation(kind: LaravelNavigationKind) {
   await query(null);
 }
 
-function isNavigationSource(path: string, root: string) {
+function navigationRoots(project: ProjectInfo, settings: ProjectInfo["settings"] | null) {
+  const extra = project.workspace
+    ? []
+    : validateProjectStructure((settings ?? project.settings).projectStructure).contentRoots.map((root) => root.trim());
+  return [...new Set([project.root, ...extra].map((root) => root.replaceAll("\\", "/").replace(/\/+$/, "")))].sort();
+}
+
+function isNavigationSource(path: string, roots: string[]) {
   const file = path.replaceAll("\\", "/");
   if (file.toLowerCase().endsWith(".php")) return true;
-  const prefix = root.replaceAll("\\", "/").replace(/\/+$/, "") + "/";
-  if (!file.startsWith(prefix)) return false;
-  const relative = file.slice(prefix.length);
-  // This is an entry-point candidate; the backend validates the nearest
-  // Composer root, Laravel dependency and exact translation-directory layout.
+  // Candidate only: the backend validates the current root, Composer manifest,
+  // Laravel dependency and exact translation-directory layout.
   return (
-    !relative.split("/").some((part) => part === "." || part === "..") && /(?:^|\/)lang\/[^/]+\.json$/.test(relative)
+    !file.split("/").some((part) => part === "." || part === "..") &&
+    /(?:^|\/)lang\/[^/]+\.json$/.test(file) &&
+    roots.some((root) => file.startsWith(root + "/"))
   );
 }
 

@@ -303,6 +303,7 @@ impl LspManager {
         }
         let capability = format!("/experimental/phpWorkbench{feature}");
         let snap = self.snapshot(doc)?;
+        let files_revision = self.project_files_revision.load(std::sync::atomic::Ordering::Acquire);
         // Static project queries may use the existing safe JSON translation
         // bridge. Keep generic PHP operations excluded in doc_targets.
         let servers: Vec<_> = snap
@@ -310,7 +311,9 @@ impl LspManager {
             .iter()
             .filter(|server| {
                 snap.language.as_str() == "php"
-                    || (snap.language.as_str() == "json" && self.php_resource_bridge(&snap.language, server))
+                    || (snap.language.as_str() == "json"
+                        && snap.path.starts_with(self.project_root_for(&snap.path))
+                        && self.php_resource_bridge(&snap.language, server))
             })
             .cloned()
             .collect();
@@ -327,6 +330,9 @@ impl LspManager {
             .find(|target| self.php_resource_supported(&snap.language, &target.server, &target.caps()))
             .ok_or_else(|| unsupported(&snap.servers, feature))?;
         let before = self.navigation_sources(&snap, &target)?;
+        if before.files_revision != files_revision {
+            return Err(IdeError::new(ErrorKind::OutOfSync, "Project roots or files changed during Laravel lookup"));
+        }
         let method = match feature {
             "Routes" => "phpWorkbench/routes",
             "Views" => "phpWorkbench/views",
@@ -425,9 +431,10 @@ impl LspManager {
                     // The workspace server may own several Composer projects.
                     // Validate this resource against its nearest manifest, not
                     // the outermost server root or an enclosing Laravel app.
+                    let boundary = self.project_root_for(path);
                     path.ancestors()
                         .skip(1)
-                        .take_while(|ancestor| ancestor.starts_with(&self.project_root))
+                        .take_while(|ancestor| ancestor.starts_with(&boundary))
                         .find(|ancestor| ancestor.join("composer.json").is_file())?
                         .to_path_buf()
                 } else {
@@ -466,7 +473,10 @@ impl LspManager {
             "dotenv" => "/experimental/phpWorkbenchEnvironmentResources",
             _ => "/experimental/phpWorkbenchJsonTranslations",
         };
-        !self.php_resource_bridge(language, server)
-            || caps.raw.pointer(capability).and_then(Value::as_bool) == Some(true)
+        let bridge = self.php_resource_bridge(language, server);
+        if bridge && language.as_str() == "json" && !server.root.starts_with(self.project_root_for(&server.root)) {
+            return false;
+        }
+        !bridge || caps.raw.pointer(capability).and_then(Value::as_bool) == Some(true)
     }
 }

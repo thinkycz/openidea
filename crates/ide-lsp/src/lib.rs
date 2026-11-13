@@ -339,7 +339,11 @@ impl LspManager {
     // ---- server lookup & lifecycle ----
 
     pub fn set_content_roots(&self, roots: Vec<PathBuf>) {
-        *self.content_roots.write() = roots;
+        let mut current = self.content_roots.write();
+        if *current != roots {
+            self.project_files_revision.fetch_add(1, Ordering::AcqRel);
+            *current = roots;
+        }
     }
 
     fn project_root_for(&self, path: &Path) -> PathBuf {
@@ -861,6 +865,9 @@ impl LspManager {
                 (a.opened_gen == Some(run.generation)).then_some(())?;
                 let (sync, enc) = {
                     let caps = run.caps.read();
+                    if !self.php_resource_supported(&d.language, &a.server, &caps) {
+                        return None;
+                    }
                     (caps.sync, caps.encoding)
                 };
                 (sync != SyncKind::None).then(|| (a.server.clone(), run, sync, enc))
@@ -924,6 +931,9 @@ impl LspManager {
         for a in &d.servers {
             let Some(run) = a.server.running() else { continue };
             if a.opened_gen != Some(run.generation) {
+                continue;
+            }
+            if !self.php_resource_supported(&d.language, &a.server, &run.caps.read()) {
                 continue;
             }
             let Some(include_text) = run.caps.read().save else { continue };

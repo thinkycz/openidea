@@ -52,6 +52,7 @@ beforeEach(() => {
   useProject.setState({
     project: { root: "/p", name: "p", isGit: false, settings: {} } as ProjectInfo,
     opening: false,
+    settings: null,
   });
   uninstall = installLaravelNavigationEvents();
   mock.routes.mockImplementation((_request, _doc, name) =>
@@ -546,3 +547,104 @@ it.each(["/p-other/lang/en.json", "/p/../other/lang/en.json"])(
     expect(useLaravelNavigation.getState().kind).toBeNull();
   },
 );
+
+it.each(["routes", "views"] as const)("opens %s from an explicitly configured external content root", async (kind) => {
+  useProject.setState({ settings: { projectStructure: { contentRoots: ["/linked"] } } as ProjectInfo["settings"] });
+  mock.caret.mockReturnValue({
+    doc: 7,
+    path: "/linked/tools/app/lang/en.json",
+    line: 0,
+    col: 0,
+    word: null,
+    view: null,
+  });
+  await openLaravelNavigation(kind);
+  expect(kind === "routes" ? mock.routes : mock.views).toHaveBeenCalledWith(expect.any(Number), 7, null, 2000);
+  expect(mock.hint).not.toHaveBeenCalled();
+});
+
+it("retires displayed rows and ignores queued activation when content roots change", async () => {
+  await openLaravelNavigation("routes");
+  const item = useLaravelNavigation.getState().items[0]!;
+  useProject.setState({ settings: { projectStructure: { contentRoots: ["/linked"] } } as ProjectInfo["settings"] });
+  expect(useLaravelNavigation.getState().kind).toBeNull();
+  await selectLaravelItem(item);
+  expect(mock.routes).toHaveBeenCalledTimes(1);
+  expect(mock.open).not.toHaveBeenCalled();
+});
+
+it("cancels a pending chooser and discards its reply after content-root removal", async () => {
+  useProject.setState({ settings: { projectStructure: { contentRoots: ["/linked"] } } as ProjectInfo["settings"] });
+  let resolve!: (value: unknown) => void;
+  mock.routes.mockImplementation(
+    () =>
+      new Promise((done) => {
+        resolve = done;
+      }),
+  );
+  const pending = openLaravelNavigation("routes");
+  useProject.setState({ settings: { projectStructure: { contentRoots: [] } } as ProjectInfo["settings"] });
+  expect(mock.cancel).toHaveBeenCalledTimes(1);
+  resolve({
+    status: "ok",
+    data: {
+      routes: [{ name: "stale", uri: "stale", parameters: [], fromVendor: false }],
+      locations: [],
+      incomplete: false,
+    },
+  });
+  await pending;
+  expect(useLaravelNavigation.getState().kind).toBeNull();
+  expect(useLaravelNavigation.getState().items).toEqual([]);
+});
+
+it("keeps rows for unrelated settings and equivalent content-root sets", async () => {
+  useProject.setState({ settings: { projectStructure: { contentRoots: ["/b", "/a"] } } as ProjectInfo["settings"] });
+  await openLaravelNavigation("routes");
+  const items = useLaravelNavigation.getState().items;
+  useProject.setState({
+    settings: {
+      projectStructure: { contentRoots: ["/a", "/b", "/a"] },
+      files: { autoSave: false },
+    } as ProjectInfo["settings"],
+  });
+  expect(useLaravelNavigation.getState().items).toBe(items);
+  expect(useLaravelNavigation.getState().kind).toBe("routes");
+});
+
+it.each(["/linked-other/lang/en.json", "/linked/../outside/lang/en.json"])(
+  "refuses external-root boundary candidate %s",
+  async (path) => {
+    useProject.setState({ settings: { projectStructure: { contentRoots: ["/linked"] } } as ProjectInfo["settings"] });
+    mock.caret.mockReturnValue({ doc: 7, path, line: 0, col: 0, word: null, view: null });
+    await openLaravelNavigation("routes");
+    expect(mock.routes).not.toHaveBeenCalled();
+    expect(mock.hint).toHaveBeenCalled();
+  },
+);
+
+it("ignores project content-root settings in workspace mode", async () => {
+  const project = useProject.getState().project!;
+  useProject.setState({
+    project: { ...project, workspace: { version: 1, name: "workspace", projects: ["/p"] } },
+    settings: { projectStructure: { contentRoots: ["/linked"] } } as ProjectInfo["settings"],
+  });
+  mock.caret.mockReturnValue({ doc: 7, path: "/linked/lang/en.json", line: 0, col: 0, word: null, view: null });
+  await openLaravelNavigation("routes");
+  expect(mock.routes).not.toHaveBeenCalled();
+});
+
+it.each(["routes", "views"] as const)("trims configured root whitespace for %s like the host", async (kind) => {
+  useProject.setState({ settings: { projectStructure: { contentRoots: [" /linked/ "] } } as ProjectInfo["settings"] });
+  mock.caret.mockReturnValue({ doc: 7, path: "/linked/lang/en.json", line: 0, col: 0, word: null, view: null });
+  await openLaravelNavigation(kind);
+  expect(kind === "routes" ? mock.routes : mock.views).toHaveBeenCalledWith(expect.any(Number), 7, null, 2000);
+});
+
+it("preserves literal trailing spaces in the primary project path", async () => {
+  const project = useProject.getState().project!;
+  useProject.setState({ project: { ...project, root: "/primary space " } });
+  mock.caret.mockReturnValue({ doc: 7, path: "/primary space /lang/en.json", line: 0, col: 0, word: null, view: null });
+  await openLaravelNavigation("routes");
+  expect(mock.routes).toHaveBeenCalledWith(expect.any(Number), 7, null, 2000);
+});

@@ -4232,3 +4232,130 @@ async fn laravel_nested_json_bridge_respects_composer_and_project_boundaries() {
         assert!(state.requested("phpWorkbench/views").is_empty(), "{mode}");
     }
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn laravel_content_root_json_admission_removal_and_recovery() {
+    let mut caps = incremental_caps();
+    caps["experimental"] =
+        json!({"phpWorkbenchJsonTranslations":true,"phpWorkbenchRoutes":true,"phpWorkbenchViews":true});
+    caps["textDocumentSync"]["save"] = json!({"includeText":true});
+    let h = harness_for("php", "php", &[("phpantom", caps)], &[]);
+    let external = tempfile::tempdir().unwrap();
+    let root = external.path().canonicalize().unwrap();
+    std::fs::write(root.join("composer.json"), r#"{"require":{"laravel/framework":"13.*"}}"#).unwrap();
+    h.mgr.set_content_roots(vec![root.clone()]);
+    let state = h.launcher.state("phpantom");
+    let route = root.join("routes/web.php");
+    let view = root.join("resources/views/shared.blade.php");
+    state.respond(
+        "phpWorkbench/routes",
+        json!({"routes":[],"locations":[{"uri":uri_of(&route),"range":php_range(0,0,0,0)}],"incomplete":false}),
+    );
+    state.respond(
+        "phpWorkbench/views",
+        json!({"views":[],"locations":[{"uri":uri_of(&view),"range":php_range(0,0,0,0)}],"incomplete":false}),
+    );
+    let mut docs = Vec::new();
+    let mut failures = Vec::new();
+    for relative in ["lang/en.json", "resources/lang/en.json"] {
+        let doc = DocId::next();
+        h.mgr.did_open(doc, &root.join(relative), &LanguageId::new("json"), 1, "{}");
+        docs.push(doc);
+        match h.mgr.laravel_routes(doc, Some("shared.show".into()), 10, Default::default()).await {
+            Ok(reply) => assert_eq!(reply.locations[0].path, route),
+            Err(e) => failures.push(format!("{relative}/routes: {e}")),
+        }
+        match h.mgr.laravel_views(doc, Some("shared".into()), 10, Default::default()).await {
+            Ok(reply) => assert_eq!(reply.locations[0].path, view),
+            Err(e) => failures.push(format!("{relative}/views: {e}")),
+        }
+    }
+    if failures.is_empty() {
+        assert_eq!(h.mgr.servers().len(), 1);
+        assert_eq!(h.mgr.servers()[0].root, root);
+        let id = h.mgr.servers()[0].id;
+        let opens = state.notified("textDocument/didOpen").len();
+        let changes = state.notified("textDocument/didChange").len();
+        let saves = state.notified("textDocument/didSave").len();
+        h.mgr.set_content_roots(vec![]);
+        assert!(h.mgr.laravel_routes(docs[0], None, 10, Default::default()).await.is_err());
+        assert!(h.mgr.laravel_views(docs[1], None, 10, Default::default()).await.is_err());
+        assert_eq!(state.requested("phpWorkbench/routes").len(), 2);
+        assert_eq!(state.requested("phpWorkbench/views").len(), 2);
+        h.mgr.did_change(docs[0], 2, &[change(rng(0, 0, 0, 0), " ")], &|| " {}".into());
+        h.mgr.did_save(docs[0], " {}");
+        let _: Value = state.peer().request("workspace/configuration", json!({"items":[]}), None).await.unwrap();
+        assert_eq!(
+            state.notified("textDocument/didChange").len(),
+            changes,
+            "removed root must not share implicit JSON updates"
+        );
+        assert_eq!(
+            state.notified("textDocument/didSave").len(),
+            saves,
+            "removed root must not share implicit JSON saves"
+        );
+        h.mgr.restart(id).await.unwrap();
+        h.wait_status("phpantom", ServerStatus::Ready).await;
+        assert!(h.mgr.laravel_views(docs[0], None, 10, Default::default()).await.is_err());
+        let _: Value = state.peer().request("workspace/configuration", json!({"items":[]}), None).await.unwrap();
+        assert_eq!(state.notified("textDocument/didOpen").len(), opens, "restart must not replay removed-root JSON");
+        h.mgr.set_content_roots(vec![root.clone()]);
+        h.mgr.restart(id).await.unwrap();
+        h.wait_status("phpantom", ServerStatus::Ready).await;
+        h.mgr.laravel_views(docs[0], Some("shared".into()), 10, Default::default()).await.unwrap();
+        assert!(state.notified("textDocument/didOpen").iter().any(|p| p["textDocument"]["text"] == " {}"));
+        assert!(h.mgr.completion(docs[0], Pos::new(0, 1), None, Default::default()).await.is_err());
+    }
+    h.mgr.shutdown_all().await;
+    assert!(failures.is_empty(), "configured root JSON: {failures:#?}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn laravel_content_root_changes_retire_held_replies_but_noops_do_not() {
+    let mut failures = Vec::new();
+    for operation in ["routes", "views"] {
+        for changed in [false, true] {
+            let mut caps = incremental_caps();
+            caps["experimental"] = json!({"phpWorkbenchRoutes":true,"phpWorkbenchViews":true});
+            let h = harness_for("php", "php", &[("phpantom", caps)], &[]);
+            let (doc, _) = h.open("main.php", "<?php\n");
+            h.wait_status("phpantom", ServerStatus::Ready).await;
+            let gate = Arc::new(Gate::default());
+            let held = gate.clone();
+            let method = if operation == "routes" { "phpWorkbench/routes" } else { "phpWorkbench/views" };
+            h.launcher.state("phpantom").responder.lock().replace(Arc::new(move |_, m, _| {
+                if m != method {
+                    return None;
+                }
+                held.hold();
+                Some(if m.ends_with("routes") {
+                    json!({"routes":[],"locations":[],"incomplete":false})
+                } else {
+                    json!({"views":[],"locations":[],"incomplete":false})
+                })
+            }));
+            let mgr = h.mgr.clone();
+            let pending = tokio::spawn(async move {
+                if operation == "routes" {
+                    mgr.laravel_routes(doc, None, 10, Default::default()).await.map(|_| ())
+                } else {
+                    mgr.laravel_views(doc, None, 10, Default::default()).await.map(|_| ())
+                }
+            });
+            eventually(|| gate.entered()).await;
+            h.mgr.set_content_roots(if changed { vec![h.root.join("linked")] } else { vec![] });
+            gate.open();
+            let result = pending.await.unwrap();
+            h.mgr.shutdown_all().await;
+            if changed {
+                if !matches!(result,Err(ref e) if e.kind==ide_core::error::ErrorKind::OutOfSync) {
+                    failures.push(format!("{operation}: root change accepted old reply {result:?}"));
+                }
+            } else if result.is_err() {
+                failures.push(format!("{operation}: unchanged roots cancelled current reply {result:?}"));
+            }
+        }
+    }
+    assert!(failures.is_empty(), "content-root receipts: {failures:#?}");
+}

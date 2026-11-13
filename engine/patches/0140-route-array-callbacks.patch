@@ -1,0 +1,228 @@
+--- a/src/symbol_map/extraction/laravel.rs
++++ b/src/symbol_map/extraction/laravel.rs
+@@ -2026,8 +2026,49 @@
+         Expression::Call(Call::StaticMethod(_)) => {
+             laravel_route_scan_action(expr, controller, content, spans, resolved_names);
+         }
++        Expression::Array(array) => {
++            for element in array.elements.iter() {
++                laravel_route_scan_array_element(
++                    element,
++                    controller,
++                    content,
++                    spans,
++                    resolved_names,
++                );
++            }
++        }
++        Expression::LegacyArray(array) => {
++            for element in array.elements.iter() {
++                laravel_route_scan_array_element(
++                    element,
++                    controller,
++                    content,
++                    spans,
++                    resolved_names,
++                );
++            }
++        }
++        Expression::Parenthesized(paren) => {
++            laravel_route_scan_expr(paren.expression, controller, content, spans, resolved_names);
++        }
+         _ => {}
+     }
++}
++
++fn laravel_route_scan_array_element(
++    element: &ArrayElement<'_>,
++    controller: &str,
++    content: &str,
++    spans: &mut Vec<SymbolSpan>,
++    resolved_names: Option<&crate::names::OwnedResolvedNames>,
++) {
++    let value = match element {
++        ArrayElement::KeyValue(element) => element.value,
++        ArrayElement::Value(element) => element.value,
++        ArrayElement::Variadic(element) => element.value,
++        ArrayElement::Missing(_) => return,
++    };
++    laravel_route_scan_expr(value, controller, content, spans, resolved_names);
+ }
+ 
+ fn laravel_route_scan_action(
+--- a/tests/integration/laravel_route_controller.rs
++++ b/tests/integration/laravel_route_controller.rs
+@@ -862,3 +862,104 @@
+         "missing inherited arrow completion: {items:?}"
+     );
+ }
++
++#[tokio::test]
++async fn returned_route_arrays_preserve_main_and_nested_controller_owners() {
++    use crate::common::position_after;
++    for template in [
++        "[ACTION]",
++        "array(ACTION)",
++        "['invoice' => ACTION]",
++        "[...[ACTION]]",
++        "([ACTION])",
++    ] {
++        let backend = create_test_backend();
++        let uri = Url::parse("file:///array-route-group.php").unwrap();
++        let body=template.replace("ACTION", "Routes::get('/😀/main', 'showInvoice'), Routes::controller(Inner::class)->group(fn () => [Routes::get('/nested', 'showInvoice')])");
++        let text = format!(
++            "<?php\nuse Illuminate\\Support\\Facades\\Route as Routes;\nclass Outer {{public function showInvoice(): string {{return 'outer';}}}}\nclass Inner {{public function showInvoice(): bool {{return true;}}}}\nRoutes::controller(Outer::class)->group(fn () => {body});\n"
++        );
++        open_php(&backend, &uri, &text).await;
++        for (needle, owner, ty) in [
++            ("'/😀/main', 'showIn", "Outer", "string"),
++            ("'/nested', 'showIn", "Inner", "bool"),
++        ] {
++            let at = position_after(&text, needle);
++            let expected = position_after(&text, &format!("class {owner} {{public function "));
++            let target = goto_def(&backend, &uri, at.line, at.character).await;
++            assert!(
++                matches!(target,Some(GotoDefinitionResponse::Scalar(ref l)) if l.uri==uri && l.range.start==expected),
++                "array owner {template}/{owner}: {target:?}"
++            );
++            let hover = backend
++                .hover(HoverParams {
++                    text_document_position_params: TextDocumentPositionParams {
++                        text_document: TextDocumentIdentifier { uri: uri.clone() },
++                        position: at,
++                    },
++                    work_done_progress_params: Default::default(),
++                })
++                .await
++                .unwrap()
++                .expect("array action hover");
++            assert!(
++                matches!(hover.contents,HoverContents::Markup(ref m) if m.value.contains(&format!("showInvoice(): {ty}"))),
++                "array hover {hover:?}"
++            );
++            let items = complete_at(&backend, &uri, &text, at.line, at.character).await;
++            assert!(
++                items
++                    .iter()
++                    .any(|i| i.insert_text.as_deref() == Some("showInvoice")
++                        && i.detail.as_deref().is_some_and(|d| d.contains(ty))),
++                "array completion {items:?}"
++            );
++        }
++    }
++}
++
++#[tokio::test]
++async fn ordinary_group_closures_follow_returned_array_registrations_without_entering_delayed_callbacks()
++ {
++    use crate::common::position_after;
++    let backend = create_test_backend();
++    let uri = Url::parse("file:///closure-array-route.php").unwrap();
++    let text = "<?php\nuse Illuminate\\Support\\Facades\\Route as Routes;\nclass Outer {public function showInvoice(): string {return 'outer';}}\nRoutes::controller(Outer::class)->group(function () {return [Routes::get('/eager', 'showInvoice'), fn () => Routes::get('/delayed', 'showInvoice'), function () {Routes::get('/closure', 'showInvoice');}, Routes::controller($unknown)->group(fn () => [Routes::get('/unknown', 'showInvoice')])];});\n";
++    open_php(&backend, &uri, text).await;
++    let at = position_after(text, "'/eager', 'showIn");
++    assert!(
++        goto_def(&backend, &uri, at.line, at.character)
++            .await
++            .is_some(),
++        "eager registration missing"
++    );
++    for needle in [
++        "'/delayed', 'showIn",
++        "'/closure', 'showIn",
++        "'/unknown', 'showIn",
++    ] {
++        let at = position_after(text, needle);
++        assert!(
++            goto_def(&backend, &uri, at.line, at.character)
++                .await
++                .is_none(),
++            "array traversal crossed callback/unknown boundary {needle}"
++        );
++    }
++}
++
++#[tokio::test]
++async fn parenthesized_route_group_expressions_keep_controller_navigation() {
++    use crate::common::position_after;
++    let backend = create_test_backend();
++    let uri = Url::parse("file:///parenthesized-route-group.php").unwrap();
++    let text = "<?php\nuse Illuminate\\Support\\Facades\\Route as Routes;\nclass Outer {public function showInvoice(): string {return 'outer';}}\nRoutes::controller(Outer::class)->group(fn () => (Routes::middleware('auth')->get('/😀', 'showInvoice')));\n";
++    open_php(&backend, &uri, text).await;
++    let at = position_after(text, "'showIn");
++    let expected = position_after(text, "public function ");
++    let target = goto_def(&backend, &uri, at.line, at.character).await;
++    assert!(
++        matches!(target,Some(GotoDefinitionResponse::Scalar(ref l)) if l.uri==uri && l.range.start==expected),
++        "parenthesized route target {target:?}"
++    );
++}
+--- a/docs/CHANGELOG.md
++++ b/docs/CHANGELOG.md
+@@ -14,6 +14,8 @@
+ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+ 
+ ## [Unreleased]
++
++- **Navigate controller actions returned in route-group arrays.** Definition, hover, references and rename follow short or legacy arrays, nested controller groups and parenthesized registrations. Contributed by @thinkycz.
+ 
+ - **Complete controller actions inside arrow-function route groups.** Suggestions follow the innermost controller, including nested groups, without borrowing an outer controller for unknown bindings. Contributed by @thinkycz.
+ 
+--- a/examples/laravel/app/Demo.php
++++ b/examples/laravel/app/Demo.php
+@@ -1693,6 +1693,22 @@
+             Route::prefix('inherited')->group(fn () => Route::get('/arrow-inherited', 'index')));
+     }
+ 
++    public function arrayControllerGroups(): void
++    {
++        // Try: navigate index (View) and show (JsonResponse) in an array callback.
++        Route::controller(BakeryController::class)->group(fn () => [
++            Route::get('/array-bakeries', 'index'),
++            Route::match(['get'], '/array-bakeries/{bakery}', 'show'),
++        ]);
++        Route::controller(BakeryController::class)->group(function (): array {
++            return array(
++                Route::controller('App\Http\Controllers\AlternateBakeryController')->group(fn () =>
++                    array(Route::get('/array-preview', 'index'))),
++                Route::prefix('inherited')->group(fn () => [Route::get('/array-inherited', 'index')]),
++            );
++        });
++    }
++
+ }
+ 
+ // PHP Workbench: Laravel: Go to Route lists statically named routes and opens
+--- a/examples/laravel/assertions.php
++++ b/examples/laravel/assertions.php
+@@ -1985,6 +1985,30 @@
+     check('Controller-free nested arrow group inherits its parent', ($routes['arrow.inherited'] ?? null) === $main . '@index');
+ })();
+ 
++// Array values execute their route registrations while the group stack is active.
++(function (): void {
++    $router = new \Illuminate\Routing\Router(new \Illuminate\Events\Dispatcher());
++    $main = \App\Http\Controllers\BakeryController::class;
++    $alternate = \App\Http\Controllers\AlternateBakeryController::class;
++    $router->controller($main)->group(fn () => [
++        $router->get('/array', 'index')->name('array.index'),
++        $router->match(['get'], '/array/{bakery}', 'show')->name('array.show'),
++    ]);
++    $router->controller($main)->group(function () use ($router, $alternate): array {
++        return array(
++            $router->controller($alternate)->group(fn () => array($router->get('/array-preview', 'index')->name('array.inner'))),
++            $router->prefix('inherited')->group(fn () => [$router->get('/array-inherited', 'index')->name('array.inherited')]),
++        );
++    });
++    $routes = [];
++    foreach ($router->getRoutes() as $route) { $routes[$route->getName()] = $route->getActionName(); }
++    check('Array controller callbacks register four routes', count($routes) === 4);
++    check('Short array index keeps its grouped controller', ($routes['array.index'] ?? null) === $main . '@index');
++    check('Short array match keeps its grouped controller', ($routes['array.show'] ?? null) === $main . '@show');
++    check('Nested legacy array selects its own controller', ($routes['array.inner'] ?? null) === $alternate . '@index');
++    check('Array callback without a new controller inherits the parent', ($routes['array.inherited'] ?? null) === $main . '@index');
++})();
++
+ // ─── Summary ────────────────────────────────────────────────────────────────
+ 
+ echo "\n";

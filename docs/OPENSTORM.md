@@ -1646,6 +1646,67 @@ All69 areas remain visible:67partial/2user-deferred. Evidence:
 `artifacts/checks/slice76-{final-pipeline,final-readback,workspace-totals}.json`,
 focused/client/host logs and the app's build/retention receipts.
 
+Slice77 — nested Composer translation JSON navigation (verified
+source/client/build slice, 2026-11-13). Slice76 was committed/pushed as a7c9f623.
+Translation JSON now selects its nearest Composer project inside the primary
+project instead of borrowing the outer workspace manifest. Default root markers
+still retain one PHPantom workspace server. Identical route/view names resolve
+to the selected app, and owner-only names remain isolated. Existing menus,
+shortcuts, layout and hint are reused; no settings or engine change is needed.
+External content roots remain a separate follow-up; native checks are explicitly
+skipped by the user.
+
+The frontend admits nested lang/*.json candidates only within the primary
+project boundary and rejects dot traversal. The backend remains authoritative
+for the nearest Composer manifest, exact lang/resources-lang layout, Laravel
+dependency, selected PHPantom and safe-resource/navigation capabilities. A
+nearer non-Laravel, malformed or oversized manifest cannot borrow an enclosing
+Laravel project. ParentDir sources are refused before lookup. Ordinary PHP,
+dotenv and generic PHP-only operation dispatch are unchanged.
+
+Red/green evidence:4 nested rendered cases first failed, then all40 focused
+chooser cases passed. The unchanged70 mock build passed, but all8 nested
+route/view queries failed with Unavailable;7 original boundary controls passed.
+After the correction both focused mocks pass (100others filtered), covering
+Laravel/non-Laravel outer roots and8 boundary controls. Review added the
+ParentDir guard; an initial full compile was intentionally SIGINT-stopped before
+acceptance to include it. Partial initial-freeze receipts remain separate from
+the completed revised gates, with the compiler cache reused.
+
+Actual-client regression owns12files/two Composer projects and opens only JSON.
+Five interleaved outer/inner queries across both layouts verify exact shared-name
+destinations, exclusive names, one stable PID, PHP-only operation exclusions,
+restart recovery and unchanged originals before temporary-fixture cleanup.
+Focused1case/36filtered passes in6.96s; the complete37client/6host suites pass
+with0ignored/0filtered. Independent unchanged134 probes pass24 outer/inner/outer
+JSON-only queries plus8 nested-app queries beneath a plain-PHP outer manifest;
+all24 probe originals remain unchanged and both engine processes exit0. Route
+PHP syntax and fixture JSON/Composer PSR-4 setup are validated without framework
+boot or Composer/Artisan execution.
+
+Full gates pass:5371frontend tests/487files, typecheck/lint/Knip/format/build,
+1757workspace tests/74ignored/0filtered, Rust fmt, all-target Clippy with warnings
+denied, post-binding frontend checks and8packaging/retention tests. Ignored
+workspace cases are not silently accepted; affected real-engine suites are
+reported separately. Engine134 source and binary are unchanged; its earlier
+18421ordinary/17ignored plus FIFOchild proof is reused by checksum/source recipe,
+with no engine rebuild.
+
+Signed arm64 development app0.1.71 is at
+`artifacts/batches/0.1.71/OpenStorm.app`; executable SHA-256
+`3a151796210e1f2e94cfee8c8a13943194b0b40bc519cf713557c0b73e9a5f1f`.
+Strict/deep signature, source snapshot, embedded134 checksum, source recipe,
+Composer/autoload, all probe/acceptance originals, installed-app hash and process
+read-back pass. Sole71 remains after pruning70/duplicate bundle and cargo-cleaning
+23457files/19.5GiB; both compiler roots are absent/empty. Receipts, source,
+provenance, licenses and earlier evaluation material remain. No app was launched,
+installed or published. Native/physical Dock autosave, configured external roots,
+live Composer-boundary changes and broader project/configuration/privacy/
+performance/platform matrices remain unverified or partial. All69 statuses remain
+67partial/2user-deferred. Evidence: `artifacts/checks/slice77-{final-pipeline,
+final-readback,workspace-totals,focused}.json`, client/host/wire logs and app
+build/retention receipts.
+
 Source integration (2026-11-01, verified source checkpoint): integrates all 240 new
 commits from `l0ng-ai/openidea:main` at `041e7210` into
 `codex/openstorm-php-laravel`, based on pushed OpenStorm `82d1313a`.

@@ -492,6 +492,10 @@ it.each([
   ["views", "/p/lang/cs.json"],
   ["routes", "/p/resources/lang/en.json"],
   ["views", "/p/resources/lang/en.json"],
+  ["routes", "/p/tools/child-🐘/lang/en.json"],
+  ["views", "/p/tools/child-🐘/lang/en.json"],
+  ["routes", "/p/tools/child-🐘/resources/lang/en.json"],
+  ["views", "/p/tools/child-🐘/resources/lang/en.json"],
 ] as const)("opens %s targets from Laravel translation JSON %s", async (kind, path) => {
   mock.caret.mockReturnValue({ doc: 7, path, line: 0, col: 3, word: null, view: null });
   mock.views.mockImplementation((_request, _doc, name) =>
@@ -527,6 +531,17 @@ it.each(["/p/composer.json", "/p/config/options.json", "/p/lang/nested/en.json",
     mock.caret.mockReturnValue({ doc: 7, path, line: 0, col: 0, word: null, view: null });
     await openLaravelNavigation("routes");
     expect(mock.routes).not.toHaveBeenCalled();
+    expect(mock.hint).toHaveBeenCalled();
+    expect(useLaravelNavigation.getState().kind).toBeNull();
+  },
+);
+
+it.each(["/p-other/lang/en.json", "/p/../other/lang/en.json"])(
+  "keeps nested JSON navigation inside the project boundary %s",
+  async (path) => {
+    mock.caret.mockReturnValue({ doc: 7, path, line: 0, col: 0, word: null, view: null });
+    await openLaravelNavigation("views");
+    expect(mock.views).not.toHaveBeenCalled();
     expect(mock.hint).toHaveBeenCalled();
     expect(useLaravelNavigation.getState().kind).toBeNull();
   },

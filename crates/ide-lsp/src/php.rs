@@ -413,12 +413,26 @@ impl LspManager {
         if !json && !dotenv {
             return Vec::new();
         }
+        if json && path.components().any(|part| part == std::path::Component::ParentDir) {
+            return Vec::new();
+        }
         let php = LanguageId::new("php");
         self.language_servers(&php)
             .into_iter()
             .filter(|cfg| cfg.name == "phpantom")
             .filter_map(|cfg| {
-                let root = launch::find_root(&self.project_root, path, &cfg.root_markers)?;
+                let root = if json {
+                    // The workspace server may own several Composer projects.
+                    // Validate this resource against its nearest manifest, not
+                    // the outermost server root or an enclosing Laravel app.
+                    path.ancestors()
+                        .skip(1)
+                        .take_while(|ancestor| ancestor.starts_with(&self.project_root))
+                        .find(|ancestor| ancestor.join("composer.json").is_file())?
+                        .to_path_buf()
+                } else {
+                    launch::find_root(&self.project_root, path, &cfg.root_markers)?
+                };
                 let relative = path.strip_prefix(&root).ok()?;
                 if json && !matches!(relative.parent()?.to_str()?, "lang" | "resources/lang")
                     || dotenv && relative.components().count() != 1

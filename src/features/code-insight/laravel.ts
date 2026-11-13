@@ -90,7 +90,13 @@ function isNavigationSource(path: string, root: string) {
   const file = path.replaceAll("\\", "/");
   if (file.toLowerCase().endsWith(".php")) return true;
   const prefix = root.replaceAll("\\", "/").replace(/\/+$/, "") + "/";
-  return file.startsWith(prefix) && /^(?:resources\/)?lang\/[^/]+\.json$/.test(file.slice(prefix.length));
+  if (!file.startsWith(prefix)) return false;
+  const relative = file.slice(prefix.length);
+  // This is an entry-point candidate; the backend validates the nearest
+  // Composer root, Laravel dependency and exact translation-directory layout.
+  return (
+    !relative.split("/").some((part) => part === "." || part === "..") && /(?:^|\/)lang\/[^/]+\.json$/.test(relative)
+  );
 }
 
 async function query(name: string | null) {

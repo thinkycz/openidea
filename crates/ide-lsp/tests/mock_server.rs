@@ -4130,3 +4130,105 @@ async fn laravel_json_navigation_rejects_missing_resource_capabilities_and_unrel
         }
     }
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn laravel_nested_json_bridge_uses_the_nearest_composer_project() {
+    let mut failures = Vec::new();
+    for outer_laravel in [false, true] {
+        let mut caps = incremental_caps();
+        caps["experimental"] =
+            json!({"phpWorkbenchJsonTranslations":true,"phpWorkbenchRoutes":true,"phpWorkbenchViews":true});
+        let h = harness_for("php", "php", &[("phpantom", caps)], &[]);
+        std::fs::write(
+            h.root.join("composer.json"),
+            if outer_laravel { r#"{"require":{"laravel/framework":"13.*"}}"# } else { r#"{"require":{"php":"^8.3"}}"# },
+        )
+        .unwrap();
+        let child = h.root.join("tools/child-🐘");
+        std::fs::create_dir_all(&child).unwrap();
+        std::fs::write(child.join("composer.json"), r#"{"require":{"laravel/framework":"13.*"}}"#).unwrap();
+        let state = h.launcher.state("phpantom");
+        let route = child.join("routes/web.php");
+        let view = child.join("resources/views/shared.blade.php");
+        state.respond(
+            "phpWorkbench/routes",
+            json!({"routes":[],"locations":[{"uri":uri_of(&route),"range":php_range(2,0,2,4)}],"incomplete":false}),
+        );
+        state.respond(
+            "phpWorkbench/views",
+            json!({"views":[],"locations":[{"uri":uri_of(&view),"range":php_range(0,0,0,0)}],"incomplete":false}),
+        );
+        for relative in ["lang/en.json", "resources/lang/en.json"] {
+            let path = child.join(relative);
+            let doc = DocId::next();
+            h.mgr.did_open(doc, &path, &LanguageId::new("json"), 1, "{}");
+            match h.mgr.laravel_routes(doc, Some("shared.show".into()), 10, Default::default()).await {
+                Ok(reply) => assert_eq!(reply.locations[0].path, route),
+                Err(e) => failures.push(format!("outerLaravel={outer_laravel}/{relative}/routes: {e}")),
+            }
+            match h.mgr.laravel_views(doc, Some("shared".into()), 10, Default::default()).await {
+                Ok(reply) => assert_eq!(reply.locations[0].path, view),
+                Err(e) => failures.push(format!("outerLaravel={outer_laravel}/{relative}/views: {e}")),
+            }
+            assert!(h.mgr.completion(doc, Pos::new(0, 1), None, Default::default()).await.is_err());
+            assert!(h.mgr.rename(doc, Pos::new(0, 1), "Changed".into(), Default::default()).await.is_err());
+        }
+        h.mgr.shutdown_all().await;
+        if !h.mgr.servers().is_empty() {
+            assert_eq!(h.mgr.servers().len(), 1);
+            assert_eq!(h.mgr.servers()[0].root, h.root, "Composer context does not split the outer workspace server");
+        }
+        if failures.is_empty() {
+            assert_eq!(state.requested("phpWorkbench/routes").len(), 2);
+            assert_eq!(state.requested("phpWorkbench/views").len(), 2);
+        }
+        assert!(state.requested("textDocument/completion").is_empty());
+        assert!(state.requested("textDocument/rename").is_empty());
+    }
+    assert!(failures.is_empty(), "nested Laravel JSON bridge: {failures:#?}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn laravel_nested_json_bridge_respects_composer_and_project_boundaries() {
+    for mode in
+        ["non-laravel", "malformed", "oversized", "no-composer", "wrong-layout", "outside", "traversal", "wrong-server"]
+    {
+        let mut caps = incremental_caps();
+        caps["experimental"] =
+            json!({"phpWorkbenchJsonTranslations":true,"phpWorkbenchRoutes":true,"phpWorkbenchViews":true});
+        let server = if mode == "wrong-server" { "phpactor" } else { "phpantom" };
+        let h = harness_for("php", "php", &[(server, caps)], &[]);
+        std::fs::write(h.root.join("composer.json"), r#"{"require":{"laravel/framework":"13.*"}}"#).unwrap();
+        let external = tempfile::tempdir().unwrap();
+        let child = if mode == "outside" {
+            external.path().to_path_buf()
+        } else if mode == "traversal" {
+            let outside = external.path().canonicalize().unwrap();
+            assert_eq!(h.root.parent(), outside.parent());
+            h.root.join("..").join(outside.file_name().unwrap())
+        } else {
+            h.root.join("tools/child")
+        };
+        std::fs::create_dir_all(&child).unwrap();
+        let composer = match mode {
+            "non-laravel" => r#"{"require":{"php":"^8.3"}}"#.to_string(),
+            "malformed" => "{".into(),
+            "oversized" => " ".repeat(1_048_577),
+            _ => r#"{"require":{"laravel/framework":"13.*"}}"#.into(),
+        };
+        if mode != "no-composer" {
+            std::fs::write(child.join("composer.json"), composer).unwrap();
+        }
+        let doc = DocId::next();
+        let path = child.join(if mode == "wrong-layout" { "docs/lang/en.json" } else { "lang/en.json" });
+        h.mgr.did_open(doc, &path, &LanguageId::new("json"), 1, "{}");
+        assert!(h.mgr.laravel_routes(doc, None, 10, Default::default()).await.is_err(), "{mode}");
+        assert!(h.mgr.laravel_views(doc, None, 10, Default::default()).await.is_err(), "{mode}");
+        h.mgr.shutdown_all().await;
+        assert!(h.mgr.servers().is_empty(), "{mode}: must not attach or start a PHP server");
+        let state = h.launcher.state(server);
+        assert!(state.notified("textDocument/didOpen").is_empty(), "{mode}");
+        assert!(state.requested("phpWorkbench/routes").is_empty(), "{mode}");
+        assert!(state.requested("phpWorkbench/views").is_empty(), "{mode}");
+    }
+}

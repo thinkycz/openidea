@@ -302,13 +302,30 @@ impl LspManager {
             return Err(IdeError::invalid("Laravel query limit must be between 1 and 5000"));
         }
         let capability = format!("/experimental/phpWorkbench{feature}");
-        let (snap, targets) = self
-            .doc_targets(doc, feature, |caps| caps.raw.pointer(&capability).and_then(Value::as_bool) == Some(true))
-            .await?;
-        if snap.language.as_str() != "php" {
-            return Err(IdeError::unavailable("Open a PHP source file to browse Laravel routes and views"));
+        let snap = self.snapshot(doc)?;
+        // Static project queries may use the existing safe JSON translation
+        // bridge. Keep generic PHP operations excluded in doc_targets.
+        let servers: Vec<_> = snap
+            .servers
+            .iter()
+            .filter(|server| {
+                snap.language.as_str() == "php"
+                    || (snap.language.as_str() == "json" && self.php_resource_bridge(&snap.language, server))
+            })
+            .cloned()
+            .collect();
+        if servers.is_empty() {
+            return Err(IdeError::unavailable(
+                "Open a PHP source or Laravel translation JSON file to browse routes and views",
+            ));
         }
-        let target = targets.into_iter().next().expect("doc_targets requires a target");
+        let targets = self
+            .ready_targets(&servers, |caps| caps.raw.pointer(&capability).and_then(Value::as_bool) == Some(true))
+            .await;
+        let target = targets
+            .into_iter()
+            .find(|target| self.php_resource_supported(&snap.language, &target.server, &target.caps()))
+            .ok_or_else(|| unsupported(&snap.servers, feature))?;
         let before = self.navigation_sources(&snap, &target)?;
         let method = match feature {
             "Routes" => "phpWorkbench/routes",
@@ -384,8 +401,8 @@ impl LspManager {
 
 impl LspManager {
     /// Share standard Laravel data overlays with the selected PHPantom instance.
-    /// Their implicit bridge supports references only and requires an advertised
-    /// safe-resource capability before sending any non-PHP document content.
+    /// Their implicit bridge supports references and explicit static Laravel
+    /// navigation, requiring a safe-resource capability before sharing content.
     pub(crate) fn php_resource_servers(&self, language: &LanguageId, path: &Path) -> Vec<Arc<Server>> {
         use std::io::Read;
         let json = language.as_str() == "json"

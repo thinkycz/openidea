@@ -77,13 +77,20 @@ export async function openLaravelNavigation(kind: LaravelNavigationKind) {
   closeLaravelNavigation();
   const caret = caretContext();
   const project = useProject.getState().project;
-  if (!caret || !project || !caret.path.toLowerCase().endsWith(".php")) {
-    hint(tx("Open a PHP source file to browse Laravel routes and views"));
+  if (!caret || !project || !isNavigationSource(caret.path, project.root)) {
+    hint(tx("Open a PHP source or Laravel translation JSON file to browse routes and views"));
     return;
   }
   context = { doc: caret.doc, project };
   useLaravelNavigation.setState({ kind });
   await query(null);
+}
+
+function isNavigationSource(path: string, root: string) {
+  const file = path.replaceAll("\\", "/");
+  if (file.toLowerCase().endsWith(".php")) return true;
+  const prefix = root.replaceAll("\\", "/").replace(/\/+$/, "") + "/";
+  return file.startsWith(prefix) && /^(?:resources\/)?lang\/[^/]+\.json$/.test(file.slice(prefix.length));
 }
 
 async function query(name: string | null) {

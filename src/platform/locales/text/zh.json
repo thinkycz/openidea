@@ -5462,7 +5462,7 @@
   "No static matches found": "未找到静态匹配项",
   "(unknown URI)": "（未知 URI）",
   "(package)": "（依赖包）",
-  "Open a PHP source file to browse Laravel routes and views": "打开 PHP 源文件以浏览 Laravel 路由和视图",
+  "Open a PHP source or Laravel translation JSON file to browse routes and views": "打开 PHP 源文件或 Laravel 翻译 JSON 文件以浏览路由和视图",
   "Project files changed. Retry to refresh Laravel results.": "项目文件已更改。请重试以刷新 Laravel 结果。",
   "PHP server is unavailable or restarting. Retry to refresh Laravel results.": "PHP 服务器不可用或正在重启。请重试以刷新 Laravel 结果。"
 }

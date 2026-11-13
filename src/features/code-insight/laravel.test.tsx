@@ -486,3 +486,48 @@ it("allows initial PHPantom startup and ordinary progress, and ignores other ser
   emitLocalIdeEvent({ type: "languageServer", server: 31, name: "phpantom", status: "stopped", message: null });
   expect(useLaravelNavigation.getState().items).toBe(items);
 });
+
+it.each([
+  ["routes", "/p/lang/cs.json"],
+  ["views", "/p/lang/cs.json"],
+  ["routes", "/p/resources/lang/en.json"],
+  ["views", "/p/resources/lang/en.json"],
+] as const)("opens %s targets from Laravel translation JSON %s", async (kind, path) => {
+  mock.caret.mockReturnValue({ doc: 7, path, line: 0, col: 3, word: null, view: null });
+  mock.views.mockImplementation((_request, _doc, name) =>
+    ok(
+      name === null
+        ? { views: ["invoices.show"], locations: [], incomplete: false }
+        : {
+            views: [],
+            locations: [{ ...loc(0), path: "/p/resources/views/invoices/show.blade.php" }],
+            incomplete: false,
+          },
+    ),
+  );
+  await openLaravelNavigation(kind);
+  expect(kind === "routes" ? mock.routes : mock.views).toHaveBeenCalledWith(expect.any(Number), 7, null, 2000);
+  expect(mock.hint).not.toHaveBeenCalled();
+  render(<LaravelNavigation />);
+  fireEvent.click(screen.getByRole("button", { name: "Show Targets" }));
+  await waitFor(() => expect(useLaravelNavigation.getState().phase).toBe("locations"));
+  fireEvent.click(screen.getByRole("button", { name: "Open" }));
+  await waitFor(() =>
+    expect(mock.open).toHaveBeenCalledWith(
+      kind === "routes" ? "/p/routes/web.php" : "/p/resources/views/invoices/show.blade.php",
+      kind === "routes" ? 2 : 0,
+      0,
+    ),
+  );
+});
+
+it.each(["/p/composer.json", "/p/config/options.json", "/p/lang/nested/en.json", "/other/lang/en.json"])(
+  "does not treat unrelated JSON %s as a Laravel navigation source",
+  async (path) => {
+    mock.caret.mockReturnValue({ doc: 7, path, line: 0, col: 0, word: null, view: null });
+    await openLaravelNavigation("routes");
+    expect(mock.routes).not.toHaveBeenCalled();
+    expect(mock.hint).toHaveBeenCalled();
+    expect(useLaravelNavigation.getState().kind).toBeNull();
+  },
+);

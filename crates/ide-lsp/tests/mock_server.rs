@@ -4030,3 +4030,103 @@ async fn php_reviewed_rename_does_not_rebase_project_changes_during_candidate_di
     );
     assert!(state.requested("phpWorkbench/renameChecked").is_empty(), "reject before issuing a newly rebased RPC");
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn laravel_json_navigation_uses_only_the_safe_static_bridge() {
+    let mut caps = incremental_caps();
+    caps["experimental"] =
+        json!({"phpWorkbenchJsonTranslations":true,"phpWorkbenchRoutes":true,"phpWorkbenchViews":true});
+    let h = harness_for("php", "php", &[("phpantom", caps)], &[]);
+    std::fs::write(h.root.join("composer.json"), r#"{"require":{"laravel/framework":"13.*"}}"#).unwrap();
+    let state = h.launcher.state("phpantom");
+    let route = h.root.join("routes/web.php");
+    let view = h.root.join("resources/views/invoice.blade.php");
+    state.respond("phpWorkbench/routes", json!({"routes":[{"name":"invoice.show","uri":"invoices/{invoice}","parameters":["invoice"],"from_vendor":false}],"locations":[{"uri":uri_of(&route),"range":php_range(2,0,2,4)}],"incomplete":true}));
+    state.respond(
+        "phpWorkbench/views",
+        json!({"views":["invoice"],"locations":[{"uri":uri_of(&view),"range":php_range(0,0,0,0)}],"incomplete":false}),
+    );
+    let mut failures = Vec::new();
+    for relative in ["lang/en.json", "resources/lang/en.json"] {
+        let path = h.root.join(relative);
+        let doc = DocId::next();
+        h.mgr.did_open(doc, &path, &LanguageId::new("json"), 1, r#"{"Hello":"Greeting"}"#);
+        for name in [None, Some("invoice.show".into())] {
+            match h.mgr.laravel_routes(doc, name, 10, Default::default()).await {
+                Ok(reply) => {
+                    assert!(reply.incomplete);
+                    assert_eq!(reply.routes[0].name, "invoice.show");
+                    assert_eq!(reply.locations[0].path, route);
+                }
+                Err(e) => failures.push(format!("{relative}/routes: {e}")),
+            }
+        }
+        for name in [None, Some("invoice".into())] {
+            match h.mgr.laravel_views(doc, name, 10, Default::default()).await {
+                Ok(reply) => {
+                    assert_eq!(reply.views, ["invoice"]);
+                    assert_eq!(reply.locations[0].path, view);
+                }
+                Err(e) => failures.push(format!("{relative}/views: {e}")),
+            }
+        }
+        assert!(h.mgr.completion(doc, Pos::new(0, 3), None, Default::default()).await.is_err());
+        assert!(h.mgr.rename(doc, Pos::new(0, 3), "Changed".into(), Default::default()).await.is_err());
+        assert!(
+            h.mgr.format(doc, None, FormatOptions { tab_size: 2, insert_spaces: true, on_save: false }).await.is_err()
+        );
+    }
+    h.mgr.shutdown_all().await;
+    assert!(failures.is_empty(), "static Laravel browse from translation JSON: {failures:#?}");
+    assert_eq!(state.requested("phpWorkbench/routes").len(), 4);
+    assert_eq!(state.requested("phpWorkbench/views").len(), 4);
+    for method in ["phpWorkbench/routes", "phpWorkbench/views"] {
+        for request in state.requested(method) {
+            assert_eq!(request.as_object().unwrap().len(), 3);
+            assert!(request.get("uri").is_some());
+        }
+    }
+    for method in ["textDocument/completion", "textDocument/rename", "textDocument/formatting"] {
+        assert!(state.requested(method).is_empty());
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn laravel_json_navigation_rejects_missing_resource_capabilities_and_unrelated_sources() {
+    for mode in ["unsafe", "ordinary", "non-laravel", "explicit-json"] {
+        let mut caps = incremental_caps();
+        caps["experimental"] =
+            json!({"phpWorkbenchJsonTranslations":mode!="unsafe","phpWorkbenchRoutes":true,"phpWorkbenchViews":true});
+        let h = if mode == "explicit-json" {
+            harness_for("json", "json", &[("phpantom", caps)], &[])
+        } else {
+            harness_for("php", "php", &[("phpantom", caps)], &[])
+        };
+        std::fs::write(
+            h.root.join("composer.json"),
+            if mode == "non-laravel" {
+                r#"{"require":{"php":"^8.2"}}"#
+            } else {
+                r#"{"require":{"laravel/framework":"13.*"}}"#
+            },
+        )
+        .unwrap();
+        let doc = DocId::next();
+        h.mgr.did_open(
+            doc,
+            &h.root.join(if mode == "ordinary" { "config/settings.json" } else { "lang/en.json" }),
+            &LanguageId::new("json"),
+            1,
+            r#"{"Example":"value"}"#,
+        );
+        assert!(h.mgr.laravel_routes(doc, None, 10, Default::default()).await.is_err(), "{mode}");
+        assert!(h.mgr.laravel_views(doc, None, 10, Default::default()).await.is_err(), "{mode}");
+        let state = h.launcher.state("phpantom");
+        h.mgr.shutdown_all().await;
+        assert!(state.requested("phpWorkbench/routes").is_empty(), "{mode}");
+        assert!(state.requested("phpWorkbench/views").is_empty(), "{mode}");
+        if mode == "unsafe" {
+            assert!(state.notified("textDocument/didOpen").is_empty());
+        }
+    }
+}

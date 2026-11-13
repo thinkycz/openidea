@@ -3521,3 +3521,66 @@ async fn reviewed_php_actions_refuse_real_engine_replies_after_project_changes()
         }
     }
 }
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires OPENSTORM_TEST_KEY_ROOT and the pinned PHPantom executable"]
+async fn laravel_routes_and_views_browse_from_translation_json_without_a_php_editor() {
+    let root = PathBuf::from(std::env::var_os("OPENSTORM_TEST_KEY_ROOT").expect("owned Laravel key fixture"))
+        .canonicalize()
+        .unwrap();
+    let bin = std::env::var_os("OPENSTORM_TEST_PHPANTOM_BIN").map(PathBuf::from).unwrap_or_else(|| {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../src-tauri/resources/phpantom/phpantom_lsp")
+    });
+    let mut php = LanguageRegistry::load(None).unwrap().get(&LanguageId::new("php")).unwrap();
+    php.language_servers.retain(|s| s.name == "phpantom");
+    php.language_servers[0].command = bin.to_string_lossy().into_owned();
+    let mgr = LspManager::new(root.clone(), Arc::new(LanguageRegistry::from_configs(vec![php])), Arc::new(|_| {}));
+    let route_path = root.join("routes/web.php");
+    let route_source = std::fs::read_to_string(&route_path).unwrap();
+    let json_path = root.join("lang/cs.json");
+    let json_source = std::fs::read_to_string(&json_path).unwrap();
+    let view_path = root.join("resources/views/openstorm-stock.blade.php");
+    let view_source = std::fs::read_to_string(&view_path).unwrap();
+    serde_json::from_str::<serde_json::Value>(&json_source).unwrap();
+    let mut documents = Vec::new();
+    let result: Result<(), String> = async {
+        for (relative, source) in [("lang/cs.json", json_source.as_str()), ("resources/lang/openstorm-navigation.json", "{\"Navigation control\":\"Sample\"}\n")] {
+            let path = root.join(relative);
+            if relative.starts_with("resources/") && path.exists() { return Err("owned virtual JSON path already exists".into()); }
+            let doc = DocId::next();
+            mgr.did_open(doc, &path, &LanguageId::new("json"), 1, source);
+            documents.push(doc);
+            let routes = mgr.laravel_routes(doc, None, 2000, Default::default()).await.map_err(|e| e.to_string())?;
+            if !routes.routes.iter().any(|r| r.name=="bakeries.index") { return Err(format!("{relative}: real route list missing bakeries.index")); }
+            let targets = mgr.laravel_routes(doc, Some("bakeries.index".into()), 2000, Default::default()).await.map_err(|e| e.to_string())?;
+            if targets.locations.len()!=1 || targets.locations[0].path.to_path_buf()!=route_path || targets.locations[0].range.start!=pos(&route_source,"bakeries.index") {
+                return Err(format!("{relative}: wrong route registration {targets:?}"));
+            }
+            let views = mgr.laravel_views(doc,None,2000,Default::default()).await.map_err(|e| e.to_string())?;
+            if !views.views.iter().any(|v|v=="openstorm-stock") { return Err(format!("{relative}: real view list missing fixture")); }
+            let targets=mgr.laravel_views(doc,Some("openstorm-stock".into()),2000,Default::default()).await.map_err(|e|e.to_string())?;
+            if targets.locations.len()!=1 || targets.locations[0].path.to_path_buf()!=view_path || targets.locations[0].range.start!=Pos::new(0,0) {
+                return Err(format!("{relative}: wrong Blade target {targets:?}"));
+            }
+            let bounded=mgr.laravel_views(doc,None,1,Default::default()).await.map_err(|e|e.to_string())?;
+            if bounded.views.len()!=1 || !bounded.incomplete { return Err("JSON-context browse lost bounded/incomplete information".into()); }
+            if mgr.completion(doc,Pos::new(0,3),None,Default::default()).await.is_ok()
+                || mgr.rename(doc,Pos::new(0,3),"Changed".into(),Default::default()).await.is_ok()
+                || mgr.format(doc,None,ide_lsp::types::FormatOptions{tab_size:2,insert_spaces:true,on_save:false}).await.is_ok() {
+                return Err("static navigation accidentally enabled PHP-only resource operations".into());
+            }
+            eprintln!("{relative}: JSON-first names, exact route13:68/Blade1:1 targets, incomplete limit and PHP-operation exclusions passed");
+        }
+        mgr.restart(mgr.servers()[0].id).await.map_err(|e| e.to_string())?;
+        let target=mgr.laravel_views(documents[0],Some("openstorm-stock".into()),2000,Default::default()).await.map_err(|e|e.to_string())?;
+        if target.locations.len()!=1 || target.locations[0].path.to_path_buf()!=view_path { return Err("JSON-context browse did not recover after server restart".into()); }
+        for doc in &documents { mgr.did_close(*doc); }
+        if std::fs::read_to_string(&route_path).map_err(|e|e.to_string())?!=route_source
+            || std::fs::read_to_string(&json_path).map_err(|e|e.to_string())?!=json_source
+            || std::fs::read_to_string(&view_path).map_err(|e|e.to_string())?!=view_source
+            || root.join("resources/lang/openstorm-navigation.json").exists() { return Err("static browsing wrote a fixture file".into()); }
+        Ok(())
+    }.await;
+    mgr.shutdown_all().await;
+    result.unwrap();
+}

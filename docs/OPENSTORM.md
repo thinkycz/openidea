@@ -9,6 +9,12 @@ start the next slice. Reuse unchanged acceptance evidence; retain every unrun
 native/platform case and whole-area status. Do not combine unrelated feature
 work into a large unpushed batch.
 
+Current delivery direction (2026-11-13): the user explicitly skips native checks
+for now and resumes Laravel navigation. Finish each small source/client/build
+slice, commit and push it, and retain only the latest generated app. Native UI
+cases remain deferred/unverified; earlier native-first blocking checkpoints are
+historical and no longer prevent independent implementation.
+
 Build retention slice (2026-11-11, verified local cleanup): user now requires
 small committed/pushed slices and only the latest generated build. Run
 `python3 scripts/prune-openstorm-builds.py` to review, then add `--apply` after
@@ -1590,6 +1596,55 @@ profiles, Workbench/evaluation, provenance and earlier receipts remain protected
 No further feature build, cleanup mutation or publication is necessary for this
 blocked checkpoint. Its ignored continuation audit/delivery receipt records the
 exact Git state; the full roadmap has not been redefined around completed work.
+
+Slice76 — Laravel route/view browsing from translation JSON (verified
+source/client/build slice, 2026-11-13). The user explicitly skips native checks
+for now. This supersedes the earlier native-first blocker; native evidence
+remains deferred/unverified. The full69-area scope and debugger/publication/
+migration boundaries remain unchanged.
+
+The existing Laravel Routes/Views chooser now accepts the current project's
+`lang/*.json` and `resources/lang/*.json` through PHPantom's implicit translation
+bridge. Both navigation and safe JSON-resource capabilities are required.
+Ordinary JSON, non-Laravel projects, explicitly configured JSON providers and
+engines without the resource capability remain excluded. Generic PHP completion,
+rename and formatting dispatch stays restricted. Existing menus, shortcuts and
+chooser layout are reused; no settings or engine change is introduced.
+
+Red/green evidence:4 rendered frontend cases first failed the PHP-only entry
+restriction, then all34 focused chooser cases passed. The unchanged69 backend
+failed all8 valid JSON queries with Unavailable while its safety-negative test
+passed. After the correction, both focused mocks pass (98others filtered).
+The actual-client regression starts without a PHP editor and verifies both
+translation layouts, exact route13:68/Blade1:1 targets, names, bounded/incomplete
+results, PHP-operation exclusions, restart recovery and unchanged disk bytes.
+It passes alone (1case/35filtered,8.11s) and in the complete36client suite.
+A direct unchanged134 JSON-first wire probe independently passed19route/23view
+names and selected targets, normal engine exit and no project execution.
+
+Full gates pass:5365frontend tests/487files, typecheck/lint/Knip/format/build,
+1755workspace tests/73ignored/0filtered, Rust fmt and all-target Clippy with
+warnings denied, all36actual-client and6host cases with0ignored/0filtered,
+post-binding frontend checks, and8packaging/retention tests. The ignored
+workspace cases were not silently promoted; the affected pinned-engine suites
+are reported separately. Engine134 source/binary remain unchanged; its earlier
+18421ordinary/17ignored plus FIFOchild source proof is reused by checksum and
+source recipe, with no engine rebuild.
+
+Signed arm64 development app0.1.70 is at
+`artifacts/batches/0.1.70/OpenStorm.app`; executable SHA-256
+`3b6e999b8d3b4c30d1eae2d30d2ff8d69e5fe52735f05ad060cbd45c7de97347`.
+Strict/deep signature, source snapshot, embedded134 checksum, source recipe,
+Composer/autoload, fixture originals, installed-app hash and process read-back
+pass. Only app70 remains:69 and the duplicate bundle were removed, then23585
+compiler files/24.8GiB were cargo-cleaned; both compiler roots are absent/empty.
+Receipts and source/provenance/licenses/evaluation material remain. No app was
+launched, installed or published. Native UI and physical Dock autosave remain
+unverified under the user's skip; broader nested Composer roots, multi-project,
+configuration, privacy, performance and platform matrices remain partial.
+All69 areas remain visible:67partial/2user-deferred. Evidence:
+`artifacts/checks/slice76-{final-pipeline,final-readback,workspace-totals}.json`,
+focused/client/host logs and the app's build/retention receipts.
 
 Source integration (2026-11-01, verified source checkpoint): integrates all 240 new
 commits from `l0ng-ai/openidea:main` at `041e7210` into

@@ -1,0 +1,131 @@
+--- a/src/virtual_members/laravel/route_names.rs
++++ b/src/virtual_members/laravel/route_names.rs
+@@ -1175,15 +1175,48 @@
+     };
+ 
+     let lower = method.to_ascii_lowercase();
+-    let uri_arg = if URI_FIRST_ARG_METHODS.contains(&lower.as_slice()) {
+-        args.arguments.iter().next()
++    let uri_index = if URI_FIRST_ARG_METHODS.contains(&lower.as_slice()) {
++        Some(0)
+     } else if lower == b"match" {
+-        args.arguments.iter().nth(1)
++        Some(1)
+     } else {
+         None
+     };
+-    if let Some(arg) = uri_arg {
+-        return const_string(arg.value(), content, scope);
++    if let Some(index) = uri_index {
++        let mut positional_uri = None;
++        let mut named_uri = None;
++        let mut position = 0;
++        let mut named_seen = false;
++        for argument in args.arguments.iter() {
++            match argument {
++                Argument::Positional(p) => {
++                    // Unpacking can supply a hidden URI or collide with an
++                    // explicit one. Positional-after-named is invalid PHP.
++                    if p.ellipsis.is_some() || named_seen {
++                        return None;
++                    }
++                    if position == index {
++                        positional_uri = Some(p.value);
++                    }
++                    position += 1;
++                }
++                Argument::Named(n) => {
++                    named_seen = true;
++                    if bytes_to_str(n.name.value) == "uri" {
++                        if named_uri.is_some() {
++                            return None;
++                        }
++                        named_uri = Some(n.value);
++                    }
++                }
++            }
++        }
++        let uri = match (positional_uri, named_uri) {
++            (Some(uri), None) | (None, Some(uri)) => uri,
++            // Missing URI and duplicate positional/named bindings are unknown.
++            _ => return None,
++        };
++        return const_string(uri, content, scope);
+     }
+ 
+     // Not a registration link — keep descending the chain.
+--- a/tests/integration/workbench_routes.rs
++++ b/tests/integration/workbench_routes.rs
+@@ -203,3 +203,72 @@
+             .is_empty()
+     );
+ }
++
++#[tokio::test]
++async fn workbench_routes_named_uri_arguments_preserve_metadata_and_group_prefix() {
++    for registration in [
++        "Routes::match(action: 'show', methods: ['get'], uri: '/😀/{invoice}/{tab?}')",
++        "Routes::match(['get'], action: 'show', uri: '/😀/{invoice}/{tab?}')",
++        "Routes::get(action: 'show', uri: '/😀/{invoice}/{tab?}')",
++        "Routes::get('/😀/{invoice}/{tab?}', action: 'show')",
++        "Routes::middleware('auth')->post(action: 'show', uri: '/😀/{invoice}/{tab?}')",
++        "Routes::view(view: 'invoices.show', uri: '/😀/{invoice}/{tab?}')",
++        "Routes::redirect(destination: '/other/{wrong}', uri: '/😀/{invoice}/{tab?}')",
++        "Routes::permanentRedirect(destination: '/other/{wrong}', uri: '/😀/{invoice}/{tab?}')",
++    ] {
++        let backend = create_test_backend();
++        let uri = Url::parse("file:///app/routes/web.php").unwrap();
++        let source = format!(
++            "<?php\nuse Illuminate\\Support\\Facades\\Route as Routes;\nRoutes::prefix('billing')->group(function () {{ {registration}->name('invoice'); }});\n"
++        );
++        open_php(&backend, &uri, &source).await;
++        backend.update_ast(uri.as_str(), &source);
++        let reply = backend
++            .workbench_routes(RouteQuery::default())
++            .await
++            .unwrap();
++        let entry = reply
++            .routes
++            .iter()
++            .find(|r| r.name == "invoice")
++            .expect("named route retained");
++        assert_eq!(entry.uri, "billing/😀/{invoice}/{tab?}", "{registration}");
++        assert_eq!(
++            entry.parameters.as_deref(),
++            Some(["invoice".to_string(), "tab".to_string()].as_slice()),
++            "{registration}"
++        );
++    }
++}
++
++#[tokio::test]
++async fn workbench_routes_ambiguous_or_missing_named_uri_does_not_use_action() {
++    for registration in [
++        "Route::get(action: 'fake/{wrong}')",
++        "Route::match(methods: ['get'], action: 'fake/{wrong}')",
++        "Route::get(...$args, uri: '/fake/{wrong}')",
++        "Route::match(['get'], ...$args, uri: '/fake/{wrong}')",
++        "Route::get(uri: '/first/{wrong}', uri: '/second/{wrong}', action: 'show')",
++        "Route::get('/first/{wrong}', uri: '/second/{wrong}', action: 'show')",
++    ] {
++        let backend = create_test_backend();
++        let uri = Url::parse("file:///app/routes/web.php").unwrap();
++        let source = format!("<?php\n{registration}->name('unknown');\n");
++        open_php(&backend, &uri, &source).await;
++        backend.update_ast(uri.as_str(), &source);
++        let reply = backend
++            .workbench_routes(RouteQuery::default())
++            .await
++            .unwrap();
++        if let Some(entry) = reply.routes.iter().find(|r| r.name == "unknown") {
++            assert_eq!(
++                entry.uri, "",
++                "ambiguous URI must remain unknown: {registration}"
++            );
++            assert!(
++                entry.parameters.as_ref().is_none_or(|p| p.is_empty()),
++                "{registration}"
++            );
++        }
++    }
++}

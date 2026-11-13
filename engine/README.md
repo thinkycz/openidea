@@ -1,6 +1,6 @@
 # Pinned PHPantom engine
 
-The local OpenStorm development candidate uses PHPantom `0.11.1-openstorm.135`
+The local OpenStorm development candidate uses PHPantom `0.11.1-openstorm.136`
 for Apple Silicon macOS. This is a local rebuild, not an upstream release.
 Source131 adds migration-derived declaration origins;132 follows registration
 order for container bindings and aliases within a provider group. Source133
@@ -8,7 +8,9 @@ retires derived facade members and completion candidates after binding changes,
 including publication by older calculations. Source134 preserves retriable stale
 errors for definition/type-definition and implementation while a semantic
 publication is pending. Source135 adds positional/named Route::match controller
-action intelligence. Full pinned source tests pass18,424 checks plus the separate FIFO child (17 ignored).
+action intelligence. Source136 selects route URI arguments by their PHP binding
+identity, retaining unknown metadata for ambiguous arguments. Full pinned source
+tests pass18,426 checks plus the separate FIFO child (17 ignored).
 Examples, Clippy, formatting, source fingerprints and the optimized build pass.
 Current OpenStorm client/host and packaged native acceptance are tracked in
 `docs/OPENSTORM.md`; source checks alone do not establish native acceptance.
@@ -259,3 +261,15 @@ pass. The real OpenStorm client verifies exact targets/refactor edits, completio
 ranges and dependency-only unsaved/restart/close freshness. Remaining broader
 route forms, named-URI metadata and native acceptance are tracked separately in
 docs/OPENSTORM.md; development wiring alone does not establish final delivery.
+
+Patch0136 selects URI metadata from an explicit named uri or its correct
+positional slot for supported get/match/view/redirect registration methods,
+including mixed layouts. Unpacking, duplicate bindings, missing URI and invalid
+positional-after-named arguments retain unknown metadata. Public route discovery
+regressions preserve prefixes/Unicode/optional parameters and negative guards.
+Fresh18426ordinary source tests/17ignored plusFIFOchild, releaseClippy/fmt/
+fingerprint/build and plain/Laravel examples/exact analyzer control pass. Actual
+OpenStorm client baseline135 red and136 green verify typed list/registration
+navigation and parameter completion through URI-only unsaved changes/restart
+and restoration, preserving the caller and all3owned disk originals. Full SDK/
+client/build acceptance and native limitations remain tracked in docs/OPENSTORM.md.

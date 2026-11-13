@@ -3993,3 +3993,106 @@ async fn laravel_match_actions_follow_aliases_nested_owners_and_unsaved_controll
     }
     result.unwrap();
 }
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires pinned PHPantom and owned PHP syntax-check executable"]
+async fn laravel_named_route_uri_metadata_follows_unsaved_arguments() {
+    let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let bin = std::env::var_os("OPENSTORM_TEST_PHPANTOM_BIN")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| repo.join("src-tauri/resources/phpantom/phpantom_lsp"));
+    let php_bin = std::env::var_os("OPENSTORM_TEST_PHP_BIN")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| repo.join("artifacts/toolchains/php-8.4.23-static/php"));
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().canonicalize().unwrap();
+    let routes = "<?php\nuse Illuminate\\Support\\Facades\\Route as Routes;\nRoutes::prefix('billing')->name('billing.')->group(function () {\n Routes::match(action: 'show', methods: ['get'], uri: '/😀/{invoice}/{tab?}')->name('matched');\n Routes::get(action: 'show', uri: '/😀/{invoice}/{tab?}')->name('get');\n Routes::view(view: 'invoices.show', uri: '/😀/{invoice}/{tab?}')->name('view');\n Routes::redirect(destination: '/other/{wrong}', uri: '/😀/{invoice}/{tab?}')->name('redirect');\n Routes::match(['get'], action: 'show', uri: '/😀/{invoice}/{tab?}')->name('mixed');\n});\n";
+    let caller = "<?php\n// café 😀\nroute('billing.matched', ['']);\n";
+    let composer = r#"{"require":{"php":"^8.3","laravel/framework":"^13.0"},"autoload":{"psr-4":{"App\\":"app/"}}}"#;
+    let files = [("composer.json", composer), ("routes/web.php", routes), ("app/Caller.php", caller)];
+    for (name, text) in files {
+        let path = root.join(name);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, text).unwrap();
+        if name.ends_with(".php") {
+            let output = std::process::Command::new(&php_bin).args(["-n", "-l"]).arg(&path).output().unwrap();
+            assert!(
+                output.status.success(),
+                "invalid owned fixture {name}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+    }
+    let manifest: serde_json::Value = serde_json::from_str(composer).unwrap();
+    assert_eq!(manifest["autoload"]["psr-4"]["App\\"], "app/");
+    let mut php = LanguageRegistry::load(None).unwrap().get(&LanguageId::new("php")).unwrap();
+    php.language_servers.retain(|s| s.name == "phpantom");
+    php.language_servers[0].command = bin.to_string_lossy().into_owned();
+    let mgr = LspManager::new(root.clone(), Arc::new(LanguageRegistry::from_configs(vec![php])), Arc::new(|_| {}));
+    let route_doc = DocId::next();
+    let caller_doc = DocId::next();
+    mgr.did_open(route_doc, &root.join("routes/web.php"), &LanguageId::new("php"), 1, routes);
+    mgr.did_open(caller_doc, &root.join("app/Caller.php"), &LanguageId::new("php"), 1, caller);
+    let result: Result<(), String> = async {
+        let unsaved = routes.replace("{invoice}", "{receipt}");
+        for phase in 0..3 {
+            if phase == 1 {
+                replace(&mgr, route_doc, 2, routes, &unsaved);
+            }
+            if phase == 2 {
+                mgr.restart(mgr.servers()[0].id).await.map_err(|e| e.to_string())?;
+            }
+            let key = if phase == 0 { "invoice" } else { "receipt" };
+            let expected_uri = format!("billing/😀/{{{key}}}/{{tab?}}");
+            let reply =
+                mgr.laravel_routes(route_doc, None, 2000, Default::default()).await.map_err(|e| e.to_string())?;
+            if reply.incomplete {
+                return Err(format!("owned route metadata incomplete: {reply:?}"));
+            }
+            for suffix in ["matched", "get", "view", "redirect", "mixed"] {
+                let name = format!("billing.{suffix}");
+                let entry =
+                    reply.routes.iter().find(|r| r.name == name).ok_or_else(|| format!("missing {name}: {reply:?}"))?;
+                if entry.uri != expected_uri
+                    || entry.parameters.as_ref().is_none_or(|p| p != &[key.to_string(), "tab".into()])
+                {
+                    return Err(format!("phase{phase} named URI/action confused: {entry:?}"));
+                }
+            }
+            let target = mgr
+                .laravel_routes(route_doc, Some("billing.matched".into()), 2000, Default::default())
+                .await
+                .map_err(|e| e.to_string())?;
+            let source = if phase == 0 { routes } else { &unsaved };
+            if target.locations.len() != 1
+                || target.locations[0].path != root.join("routes/web.php")
+                || target.locations[0].range.start != pos(source, "matched'")
+            {
+                return Err(format!("named route registration target wrong: {target:?}"));
+            }
+            let list = settled_completion(&mgr, caller_doc, pos(caller, "']);")).await;
+            let labels: Vec<_> = list.items.iter().map(|i| i.label.as_str()).collect();
+            let stale = if phase == 0 { "receipt" } else { "invoice" };
+            if !labels.contains(&key)
+                || !labels.contains(&"tab")
+                || labels.contains(&stale)
+                || labels.contains(&"wrong")
+            {
+                return Err(format!("phase{phase} named URI parameter completion wrong: {labels:?}"));
+            }
+        }
+        replace(&mgr, route_doc, 3, &unsaved, routes);
+        let restored =
+            mgr.laravel_routes(route_doc, None, 2000, Default::default()).await.map_err(|e| e.to_string())?;
+        if !restored.routes.iter().any(|r| r.name == "billing.matched" && r.uri == "billing/😀/{invoice}/{tab?}") {
+            return Err(format!("restored route metadata stale: {restored:?}"));
+        }
+        Ok(())
+    }
+    .await;
+    mgr.shutdown_all().await;
+    for (name, text) in files {
+        assert_eq!(std::fs::read_to_string(root.join(name)).unwrap(), text);
+    }
+    result.unwrap();
+}

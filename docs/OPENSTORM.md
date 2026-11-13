@@ -1880,6 +1880,75 @@ scoped success, full frontend/SDK/client-host logs, final pipeline/readback,
 workspace totals, obsolete-engine cleanup, and73build/retention receipts. Git
 identity and remote read-back are recorded separately after commit/push.
 
+Slice81 — named route URI metadata (verified local slice, 2026-11-13). Slice80 is committed/pushed as5f150daff0924f84946352c6d85e28aaf3ab1d12.
+A fresh135 wire probe on3owned syntax-checked Composer/PSR-4 files reproduces an
+empty URI/parameters for reordered match arguments and false URI show for get;
+the positional control keeps control/{invoice}. The unchanged scanner fails2new
+public source cases while5controls pass: missing URI becomes fake/{wrong}, and
+named match loses its URI. The scanner selected raw ordinal arguments.
+
+Append-only0136patch selects explicit named uri or the correct positional slot,
+refusing unpacking, duplicate/missing bindings and positional-after-named
+ambiguity. Group/middleware traversal and const-string evaluation remain intact.
+All7focused source cases pass, including8positive layouts and6negative forms.
+Immutable source136 reconstructs at90209cda9222d386a3bcbdaa8600a9abbf69f2f20d2b309f64ee72c949474de4.
+Fresh full source18426ordinary/17ignored/0filtered plus the separateFIFOchild,
+release all-target Clippy/fmt/fingerprint/build and plain/Laravel syntax/runtime
+assertions pass. The analyzer retains exactly the3intentional control diagnostics.
+Engine SHA256 is26087d3f889a8a57c6b3bbd1a0710ca00677a401a8eb337e964df1b847a85df2.
+Development source pin, resource and provenance select136; archived app73 is
+unchanged until successful74packaging.
+
+The actual OpenStorm client reproduces empty URI/None parameters on135, then
+passes on136: exact grouped/aliased named/mixed get/match/view/redirect metadata,
+registration target and optional parameter completion. URI-only unsaved edits
+update metadata/completion with the caller unchanged, survive restart, and
+restore the initial URI; all3owned disk originals remain exact. These are public
+client paths, not capability flags or mocks. No generated edit is applied.
+
+Fresh frontend5383tests/487files, typecheck/lint/Knip/format/build and8retention
+checks pass. The initial SDK compile catches a new test-only bool/Option mismatch
+in the route-query incomplete assertion; the correct boolean check preserves the
+same requirement. The next full workspace run hits1inherited paused-clock mock
+failure (closed mode records0requests instead of1;103other mock cases pass).
+The unchanged test subsequently passes3isolated and2full104-case runs. A10ms
+blocking-prepare diagnostic also passes; despite its historical filename ending
+red, it is NOT red proof. The startup/virtual-clock hypothesis is unproven. The
+diagnostic is removed and mock source restored exactly to HEAD. No production
+fix, timeout increase, weakened assertion, filter or automatic retry is claimed.
+The final fresh full workspace passes1759/77ignored/0filtered, including104/104
+unchanged mock cases; fmt and all-target Clippy with warnings denied pass.
+Initial failure logs and slice81-mock-investigation.json remain preserved as an
+unresolved limitation. Final40actual-client/6host tests pass with no ignored or
+filtered cases. Post-bindings typecheck/lint/Knip/format/build also pass.
+
+Signed arm64 development0.1.74 is the sole generated archive at
+artifacts/batches/0.1.74/OpenStorm.app. Executable SHA256:
+2886202c1a16e1999eb901b0586d06f7db270d87ddecada15a3a3fe27b46f38c.
+Strict/deep signature, source snapshot, embedded/resource/canonical136 hashes,
+reconstructed source recipe, protected installed21 hash and exact fixture/Composer
+source/autoload bytes pass read-back. The91PHP pivot corpus files lint; prior
+JSON probe integrity is explicitly reused, not reported as a fresh136 wire run.
+No owned app/server process remains. App74 is not launched or installed.
+
+After successful signature/receipt, packaging prunes app73, removes the duplicate
+bundle and clears23455workspace compiler files/19.5GiB. Final cleanup clears6959
+engine compiler files/2.0GiB and removes the inactive exact135canonical executable
+56200240bytes. Both compiler roots are absent/empty. Sources, patches, provenance,
+licenses, historical receipts, evaluation114 and PHP Workbench are preserved.
+The installed app remains unchanged. Evidence: artifacts/checks/slice81 engine
+red/green/full gates, source summary/freeze, examples/analyzer,135red/136green
+actual client, full frontend/SDK/client-host/post-bindings logs, workspace totals,
+mock investigation, final pipeline/read-back and obsolete-engine cleanup;74build/
+retention receipts. Git identity/remote read-back follow commit/push separately.
+
+Native checks remain explicitly user-skipped; physical Dock-switch attribution
+is unobserved. All69statuses stay67partial/2user-deferred. Broader fluent/dynamic
+route forms, live Composer/project/root/workspace/configuration/performance/
+platform coverage remain partial. No debugger expansion, installation, migration,
+publishing, updater activation or notarization occurred. This slice accepts the
+recorded named URI metadata/client workflows, not complete route/framework parity.
+
 Source integration (2026-11-01, verified source checkpoint): integrates all 240 new
 commits from `l0ng-ai/openidea:main` at `041e7210` into
 `codex/openstorm-php-laravel`, based on pushed OpenStorm `82d1313a`.

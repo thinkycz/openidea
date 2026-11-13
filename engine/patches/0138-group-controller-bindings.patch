@@ -1,0 +1,482 @@
+--- a/src/completion/laravel_route_controller.rs
++++ b/src/completion/laravel_route_controller.rs
+@@ -303,14 +303,14 @@
+     cursor_offset: u32,
+     resolved_names: Option<&crate::names::OwnedResolvedNames>,
+ ) -> Option<String> {
+-    let mut best: Option<(String, u32)> = None; // (controller, range_size)
++    let mut best: Option<(Option<String>, u32)> = None; // (controller, range_size)
+ 
+     crate::virtual_members::laravel::walk_all_php_expressions(content, &mut |expr| {
+         if let Expression::Call(Call::Method(mc)) = expr
+             && let ClassLikeMemberSelector::Identifier(ident) = &mc.method
+             && ident.value.eq_ignore_ascii_case(b"group")
+             && let Some(controller) =
+-                crate::symbol_map::extraction::laravel::laravel_route_find_controller_in_chain(
++                crate::symbol_map::extraction::laravel::laravel_route_group_controller_binding(
+                     mc.object,
+                     resolved_names,
+                 )
+@@ -330,7 +330,7 @@
+         ControlFlow::Continue(())
+     });
+ 
+-    best.map(|(name, _)| name)
++    best.and_then(|(name, _)| name)
+ }
+ 
+ /// Return the byte range of a closure body (between braces).
+--- a/src/completion/array_callable.rs
++++ b/src/completion/array_callable.rs
+@@ -333,6 +333,10 @@
+     ctx: &FileContext,
+ ) -> Option<String> {
+     let clean = name.trim_start_matches('\\');
++    // Absolute names never consult lexical imports or the current namespace.
++    if name.starts_with('\\') {
++        return Some(name.to_string());
++    }
+     if let Some(fqn) = ctx.use_map.get(clean) {
+         return Some(fqn.clone());
+     }
+--- a/src/symbol_map/extraction/laravel.rs
++++ b/src/symbol_map/extraction/laravel.rs
+@@ -1805,7 +1805,8 @@
+ }
+ 
+ /// Only known RouteRegistrar attributes preserve the enclosing controller.
+-/// Controller/namespace overrides and user macros need separate owner analysis.
++/// A per-registration controller attribute does not replace the router group
++/// controller. Namespace changes and user macros need separate analysis.
+ fn route_controller_registrar_chain(
+     expr: &Expression<'_>,
+     resolved_names: Option<&crate::names::OwnedResolvedNames>,
+@@ -1816,6 +1817,7 @@
+     const MODIFIERS: &[&[u8]] = &[
+         b"as",
+         b"can",
++        b"controller",
+         b"domain",
+         b"metadata",
+         b"middleware",
+@@ -1858,51 +1860,68 @@
+     expr: &Expression<'_>,
+     resolved_names: Option<&crate::names::OwnedResolvedNames>,
+ ) -> Option<String> {
++    laravel_route_group_controller_binding(expr, resolved_names).flatten()
++}
++
++/// Preserve an explicit unknown binding so it cannot inherit a different owner.
++pub(crate) fn laravel_route_group_controller_binding(
++    expr: &Expression<'_>,
++    resolved_names: Option<&crate::names::OwnedResolvedNames>,
++) -> Option<Option<String>> {
+     if !chain_roots_at_route_facade(expr, resolved_names) {
+         return None;
+     }
+-    laravel_route_controller_in_chain(expr)
+-}
+-
+-fn laravel_route_controller_in_chain(expr: &Expression<'_>) -> Option<String> {
+-    match expr {
+-        Expression::Call(Call::Method(mc)) => {
+-            if let ClassLikeMemberSelector::Identifier(ident) = &mc.method
+-                && ident.value.eq_ignore_ascii_case(b"controller")
+-            {
+-                return laravel_route_extract_class_arg(&mc.argument_list);
++    let mut current = expr;
++    for _ in 0..crate::symbol_map::laravel_resources::FACADE_CHAIN_DEPTH {
++        let (method, arguments, receiver) = match current {
++            Expression::Call(Call::Method(call)) => {
++                (&call.method, &call.argument_list, Some(call.object))
+             }
+-            laravel_route_controller_in_chain(mc.object)
+-        }
+-        Expression::Call(Call::StaticMethod(sc)) => {
+-            if let ClassLikeMemberSelector::Identifier(ident) = &sc.method
+-                && ident.value.eq_ignore_ascii_case(b"controller")
+-            {
+-                return laravel_route_extract_class_arg(&sc.argument_list);
+-            }
+-            None
+-        }
+-        _ => None,
+-    }
+-}
+-
+-/// Extract the class name from the first argument when it is a `X::class`
+-/// constant access.  Returns the source text of `X` (e.g.
+-/// `"WorkItemResourceController"` or `"App\\Http\\Controllers\\Foo"`).
++            Expression::Call(Call::StaticMethod(call)) => (&call.method, &call.argument_list, None),
++            _ => return None,
++        };
++        if let ClassLikeMemberSelector::Identifier(method) = method
++            && method.value.eq_ignore_ascii_case(b"controller")
++        {
++            return Some(laravel_route_extract_class_arg(arguments));
++        }
++        current = receiver?;
++    }
++    None
++}
++
++/// Read a controller attribute's positional class reference or runtime string.
++/// Runtime strings are absolute names, unaffected by lexical imports.
+ pub(super) fn laravel_route_extract_class_arg(args: &ArgumentList<'_>) -> Option<String> {
+-    let first_arg = args.arguments.iter().next()?;
+-    if let Expression::Access(Access::ClassConstant(cca)) = first_arg.value() {
+-        let is_class = matches!(
+-            &cca.constant,
+-            ClassLikeConstantSelector::Identifier(ident)
+-                if bytes_to_str(ident.value).eq_ignore_ascii_case("class")
+-        );
++    let Argument::Positional(first) = args.arguments.iter().next()? else {
++        return None;
++    };
++    if first.ellipsis.is_some() {
++        return None;
++    }
++    let value = first.value;
++    if let Expression::Access(Access::ClassConstant(class)) = value {
++        let is_class = matches!(&class.constant, ClassLikeConstantSelector::Identifier(name) if name.value.eq_ignore_ascii_case(b"class"));
+         if is_class {
+-            let name = expr_to_subject_text(cca.class);
++            let name = expr_to_subject_text(class.class);
+             if !name.is_empty() {
+                 return Some(name);
+             }
+         }
++    }
++    if let Expression::Literal(literal::Literal::String(string)) = value {
++        let name = string.value.and_then(literal_bytes_to_str)?;
++        if name.contains("::") || !super::expressions::valid_literal_callable_target(name) {
++            return None;
++        }
++        let name = name.strip_prefix('\\').unwrap_or(name);
++        if ["self", "parent", "static"]
++            .iter()
++            .any(|keyword| name.eq_ignore_ascii_case(keyword))
++        {
++            return None;
++        }
++        return Some(format!("\\{name}"));
+     }
+     None
+ }
+@@ -1985,8 +2004,8 @@
+                     return;
+                 }
+                 // Nested group — check for its own controller.
+-                if laravel_route_find_controller_in_chain(mc.object, resolved_names).is_some() {
+-                    return; // Own controller; handled separately.
++                if laravel_route_group_controller_binding(mc.object, resolved_names).is_some() {
++                    return; // Explicit binding; known owners are handled separately.
+                 }
+                 // No new controller — inherit the parent's.
+                 for arg in mc.argument_list.arguments.iter() {
+--- a/tests/integration/laravel_route_controller.rs
++++ b/tests/integration/laravel_route_controller.rs
+@@ -554,7 +554,7 @@
+ }
+ 
+ #[tokio::test]
+-async fn fluent_route_controller_actions_refuse_unknown_receivers_and_owner_overrides() {
++async fn fluent_route_controller_actions_refuse_unknown_receivers_and_unmodeled_owners() {
+     use crate::common::position_after;
+     for call in [
+         "Fake::middleware('auth')->get('/x', 'showInvoice')",
+@@ -563,7 +563,6 @@
+         "Routes::middleware('auth')->get('showInvoice', 'other')",
+         "Routes::middleware('auth')->get(...$args, action: 'showInvoice')",
+         "Routes::middleware('auth')->get(action: 'showInvoice', action: 'showInvoice', uri: '/x')",
+-        "Routes::controller(Inner::class)->get('/x', 'showInvoice')",
+         "Routes::namespace('Other')->get('/x', 'showInvoice')",
+         "Routes::middleware('auth')->get('/x', 'other', action: 'showInvoice')",
+         "Routes::middleware('auth')->get(uri: '/x', 'showInvoice')",
+@@ -589,3 +588,174 @@
+         );
+     }
+ }
++
++#[tokio::test]
++async fn controller_groups_resolve_runtime_class_strings_and_lexical_class_constants() {
++    use crate::common::position_after;
++    for class in [
++        "Inner::class",
++        "Alias::class",
++        "Relative\\Inner::class",
++        "\\Demo\\Inner::class",
++        "'Demo\\Inner'",
++        "'\\Demo\\Inner'",
++    ] {
++        for nested in [false, true] {
++            let backend = create_test_backend();
++            let uri = Url::parse("file:///group-controller-binding.php").unwrap();
++            let group = format!(
++                "Routes::controller({class})->group(function () {{ Routes::get('/😀', 'showInvoice'); }});"
++            );
++            let body = if nested {
++                format!("Routes::controller(Outer::class)->group(function () {{ {group} }});")
++            } else {
++                group
++            };
++            let text = format!(
++                "<?php\nnamespace Demo;\nuse Illuminate\\Support\\Facades\\Route as Routes; use Demo\\Inner as Alias; use Demo as Relative;\nclass Outer {{ public function showInvoice(): string {{return 'outer';}} }}\nclass Inner {{ public function showInvoice(): bool {{return true;}} }}\n{body}\n"
++            );
++            open_php(&backend, &uri, &text).await;
++            let at = position_after(&text, "'showIn");
++            let expected = position_after(&text, "class Inner { public function ");
++            let target = goto_def(&backend, &uri, at.line, at.character).await;
++            assert!(
++                matches!(target,Some(GotoDefinitionResponse::Scalar(ref l)) if l.uri==uri && l.range.start==expected),
++                "group {class} nested={nested}: {target:?}"
++            );
++            let items = complete_at(&backend, &uri, &text, at.line, at.character).await;
++            assert!(
++                method_labels(&items).iter().any(|m| m == "showInvoice"),
++                "group completion {class}: {items:?}"
++            );
++            let hover = backend
++                .hover(HoverParams {
++                    text_document_position_params: TextDocumentPositionParams {
++                        text_document: TextDocumentIdentifier { uri: uri.clone() },
++                        position: at,
++                    },
++                    work_done_progress_params: Default::default(),
++                })
++                .await
++                .unwrap()
++                .unwrap();
++            assert!(
++                matches!(hover.contents, HoverContents::Markup(ref m) if m.value.contains("showInvoice(): bool")),
++                "group type {class}: {hover:?}"
++            );
++        }
++    }
++}
++
++#[tokio::test]
++async fn per_registration_controller_attributes_keep_the_enclosing_group_owner() {
++    use crate::common::position_after;
++    for binding in [
++        "Inner::class",
++        "$picked",
++        "null",
++        "controller: Inner::class",
++    ] {
++        let backend = create_test_backend();
++        let uri = Url::parse("file:///group-leaf-attribute.php").unwrap();
++        let text = format!(
++            "<?php\nuse Illuminate\\Support\\Facades\\Route as Routes;\nclass Outer {{ public function showInvoice(): string {{return 'outer';}} }}\nclass Inner {{ public function showInvoice(): bool {{return true;}} }}\nRoutes::controller(Outer::class)->group(function () {{ Routes::controller({binding})->get('/😀', 'showInvoice'); }});\n"
++        );
++        open_php(&backend, &uri, &text).await;
++        let at = position_after(&text, "'showIn");
++        let expected = position_after(&text, "class Outer { public function ");
++        let target = goto_def(&backend, &uri, at.line, at.character).await;
++        assert!(
++            matches!(target,Some(GotoDefinitionResponse::Scalar(ref l)) if l.uri==uri && l.range.start==expected),
++            "leaf attribute must retain outer {binding}: {target:?}"
++        );
++        let items = complete_at(&backend, &uri, &text, at.line, at.character).await;
++        assert!(
++            method_labels(&items).iter().any(|m| m == "showInvoice"),
++            "leaf completion {binding}: {items:?}"
++        );
++    }
++}
++
++#[tokio::test]
++async fn unknown_group_controllers_and_runtime_alias_strings_never_borrow_outer() {
++    use crate::common::position_after;
++    for binding in [
++        "$picked",
++        "...$picked",
++        "controller: Inner::class",
++        "'Alias'",
++        "''",
++        "'self'",
++        "'Demo\\Inner::showInvoice'",
++        "'Demo\\\\\\\\Inner'",
++    ] {
++        let backend = create_test_backend();
++        let uri = Url::parse("file:///group-controller-unknown.php").unwrap();
++        let text = format!(
++            "<?php\nnamespace Demo;\nuse Illuminate\\Support\\Facades\\Route as Routes; use Demo\\Inner as Alias;\nclass Outer {{ public function showInvoice() {{}} }}\nclass Inner {{ public function showInvoice() {{}} }}\nRoutes::controller(Outer::class)->group(function () {{ Routes::controller({binding})->group(function () {{ Routes::get('/x', 'showInvoice'); }}); }});\n"
++        );
++        open_php(&backend, &uri, &text).await;
++        let at = position_after(&text, "'showIn");
++        assert!(
++            goto_def(&backend, &uri, at.line, at.character)
++                .await
++                .is_none(),
++            "unknown group borrowed outer {binding}"
++        );
++        let items = complete_at(&backend, &uri, &text, at.line, at.character).await;
++        assert!(
++            !method_labels(&items).iter().any(|m| m == "showInvoice"),
++            "unknown group completion {binding}: {items:?}"
++        );
++    }
++}
++
++#[tokio::test]
++async fn string_controller_group_actions_are_references_not_executed_calls() {
++    use crate::common::position_after;
++    let backend = create_test_backend();
++    let uri = Url::parse("file:///group-controller-hierarchy.php").unwrap();
++    let text = "<?php\nuse Illuminate\\Support\\Facades\\Route as Routes;\nclass Inner { public function showInvoice(): void {} }\nfunction invokeKnownController(Inner $controller): void { $controller->showInvoice(); }\nfunction registerRoutes(): void { Routes::controller('Inner')->group(function () { Routes::get('/invoice', 'showInvoice'); }); }\n";
++    open_php(&backend, &uri, text).await;
++    let at = position_after(text, "public function ");
++    let items = backend
++        .prepare_call_hierarchy(CallHierarchyPrepareParams {
++            text_document_position_params: TextDocumentPositionParams {
++                text_document: TextDocumentIdentifier { uri: uri.clone() },
++                position: at,
++            },
++            work_done_progress_params: Default::default(),
++        })
++        .await
++        .unwrap()
++        .unwrap();
++    assert_eq!(items.len(), 1);
++    let callers = backend
++        .incoming_calls(CallHierarchyIncomingCallsParams {
++            item: items.into_iter().next().unwrap(),
++            work_done_progress_params: Default::default(),
++            partial_result_params: Default::default(),
++        })
++        .await
++        .unwrap()
++        .unwrap_or_default();
++    assert_eq!(callers.len(), 1, "registration not invocation: {callers:?}");
++    assert_eq!(callers[0].from.name, "invokeKnownController");
++}
++
++#[tokio::test]
++async fn ungrouped_controller_attributes_do_not_invent_method_string_handlers() {
++    use crate::common::position_after;
++    let backend = create_test_backend();
++    let uri = Url::parse("file:///ungrouped-controller-attribute.php").unwrap();
++    let text = "<?php\nuse Illuminate\\Support\\Facades\\Route as Routes;\nclass Inner { public function showInvoice(): bool { return true; } }\nRoutes::controller(Inner::class)->get('/invalid', 'showInvoice');\n";
++    open_php(&backend, &uri, text).await;
++    let at = position_after(text, "'showIn");
++    assert!(
++        goto_def(&backend, &uri, at.line, at.character)
++            .await
++            .is_none()
++    );
++    let items = complete_at(&backend, &uri, text, at.line, at.character).await;
++    assert!(!method_labels(&items).iter().any(|m| m == "showInvoice"));
++}
+--- a/src/symbol_map/extraction/expressions/calls.rs
++++ b/src/symbol_map/extraction/expressions/calls.rs
+@@ -37,7 +37,7 @@
+ 
+ /// Accept only names PHP declarations can spell, with one optional root slash.
+ /// Do not normalize malformed runtime strings into existing symbols.
+-pub(super) fn valid_literal_callable_target(target: &str) -> bool {
++pub(in crate::symbol_map::extraction) fn valid_literal_callable_target(target: &str) -> bool {
+     fn identifier(name: &str) -> bool {
+         let mut bytes = name.bytes();
+         let Some(first) = bytes.next() else {
+--- a/src/symbol_map/extraction/expressions/mod.rs
++++ b/src/symbol_map/extraction/expressions/mod.rs
+@@ -13,6 +13,7 @@
+ 
+ use anonymous_class::*;
+ use assignment::*;
++pub(super) use calls::valid_literal_callable_target;
+ use calls::*;
+ use closures::*;
+ use constructs::*;
+--- a/docs/CHANGELOG.md
++++ b/docs/CHANGELOG.md
+@@ -14,6 +14,8 @@
+ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+ 
+ ## [Unreleased]
++
++- **Resolve Laravel controller-group bindings.** Navigation, completion and refactoring follow runtime class strings and enclosing group ownership. Unknown nested controllers remain unresolved. Contributed by @thinkycz.
+ 
+ - **Follow fluent Laravel controller actions.** Navigation, completion and references work through registrar modifiers inside controller groups. Contributed by @thinkycz.
+ 
+--- a/examples/laravel/app/Demo.php
++++ b/examples/laravel/app/Demo.php
+@@ -1660,6 +1660,24 @@
+         });
+     }
+ 
++
++    public function controllerGroupBindings(): void
++    {
++        // Try: navigate index through a runtime class-string group binding.
++        Route::controller('App\Http\Controllers\BakeryController')->group(function (): void {
++            Route::get('/string-bakeries', 'index');
++        });
++        Route::controller(BakeryController::class)->group(function (): void {
++            // A leaf attribute keeps the enclosing group's BakeryController.
++            Route::controller(\App\Http\Controllers\AlternateBakeryController::class)
++                ->get('/leaf-controller-attribute', 'index');
++            // A nested group changes the owner to AlternateBakeryController.
++            Route::controller('App\Http\Controllers\AlternateBakeryController')->group(function (): void {
++                Route::get('/string-preview', 'index');
++            });
++        });
++    }
++
+ }
+ 
+ // PHP Workbench: Laravel: Go to Route lists statically named routes and opens
+--- a/examples/laravel/assertions.php
++++ b/examples/laravel/assertions.php
+@@ -1938,6 +1938,34 @@
+         in_array('auth', ($routes['fluent.index'] ?? null)?->middleware() ?? [], true));
+ })();
+ 
++
++// The group stack supplies controllers; a leaf registrar attribute does not.
++(function (): void {
++    $router = new \Illuminate\Routing\Router(new \Illuminate\Events\Dispatcher());
++    $main = \App\Http\Controllers\BakeryController::class;
++    $alternate = \App\Http\Controllers\AlternateBakeryController::class;
++    $router->controller('App\Http\Controllers\BakeryController')->group(function () use ($router): void {
++        $router->get('/string-bakeries', 'index')->name('binding.string');
++    });
++    $router->controller($main)->group(function () use ($router, $alternate): void {
++        $router->controller($alternate)->get('/leaf-controller', 'index')->name('binding.leaf');
++        $router->controller('App\Http\Controllers\AlternateBakeryController')->group(function () use ($router): void {
++            $router->get('/nested-string', 'index')->name('binding.nested');
++        });
++    });
++    $router->controller('MissingEarlierController')->controller($alternate)->group(function () use ($router): void {
++        $router->get('/last-group', 'index')->name('binding.last');
++    });
++    $routes = [];
++    foreach ($router->getRoutes() as $route) { $routes[$route->getName()] = $route; }
++    check('Controller binding examples register four handlers', count($routes) === 4);
++    check('Runtime class-string group selects its controller', ($routes['binding.string'] ?? null)?->getActionName() === $main . '@index');
++    check('A leaf attribute retains the enclosing controller', ($routes['binding.leaf'] ?? null)?->getActionName() === $main . '@index');
++    check('A nested string group replaces the enclosing controller', ($routes['binding.nested'] ?? null)?->getActionName() === $alternate . '@index');
++    check('The final group controller replaces an earlier invalid name', ($routes['binding.last'] ?? null)?->getActionName() === $alternate . '@index');
++    check('Alternate controller implements its JSON return type', (new \App\Http\Controllers\AlternateBakeryController())->index()->getData(true) === ['preview' => true]);
++})();
++
+ // ─── Summary ────────────────────────────────────────────────────────────────
+ 
+ echo "\n";
+--- /dev/null
++++ b/examples/laravel/app/Http/Controllers/AlternateBakeryController.php
+@@ -0,0 +1,13 @@
++<?php
++
++namespace App\Http\Controllers;
++
++use Illuminate\Http\JsonResponse;
++
++class AlternateBakeryController
++{
++    public function index(): JsonResponse
++    {
++        return new JsonResponse(['preview' => true]);
++    }
++}

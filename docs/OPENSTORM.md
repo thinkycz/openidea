@@ -2036,6 +2036,82 @@ No installation, migration, publishing, updater activation, notarization or new
 debugger functionality is introduced. This is the recorded controller-group slice;
 the full route/framework and69-area roadmap remain active.
 
+Slice83 — Laravel controller-group bindings (2026-11-13).
+Slice82 is committed and pushed as e2c78190971f1095b65901263dc56a1cab1c47b2.
+PHPantom138 now resolves runtime class-string controller groups, preserves the
+parent group owner for controller attributes on individual routes, and refuses
+to borrow that parent when an explicit nested controller binding is unknown.
+Class constants retain lexical import resolution. Runtime strings preserve an
+absolute-name marker through the existing completion resolver, preventing import
+aliases from capturing them. Class-name validation is shared with the existing
+literal-callable validator; this adds no settings, type engine or implicit tasks.
+
+Real Laravel13.37 execution disproved the first inline-owner hypothesis: an
+ungrouped controller()->get() with a bare method string is invalid, and inside
+a group the individual route retains the group controller. A nested controller
+**group** changes the owner. The rejected prototype's18 passing source tests
+proved its own incorrect model. Its source, fixture and logs are preserved under
+rejected-inline names, its owned SDK process tree was explicitly stopped with
+exit143, and it was never frozen, promoted or bundled. A separate namespace-alias
+class-constant control already works on137; the probe expectation was wrong.
+No speculative fix or new acceptance is claimed for that control.
+
+The corrected137 baseline wire probe exposes missing string-group targets,
+incorrect parent borrowing and missing leaf-attribute navigation. The actual
+client also fails on valid leaf navigation after passing its prior controls.
+Corrected source tests first pass16/fail3; an additional invalid-ungrouped guard
+brings the final focused suite to20 passing cases. Pre-freeze Clippy fix/format
+leaves all six Rust source hashes unchanged. Append-only0138 includes the fix,
+regressions, changelog, working Demo and AlternateBakeryController. The immutable
+patch-series SHA256 is
+96a59cdcde362330145693212ca550c97da0da0240765240f0ef298a06856eb6.
+Full source18433ordinary/17ignored/0filtered plus the separate FIFO child pass;
+release all-target Clippy, fmt, fingerprint and normal optimized build pass.
+Engine138 SHA256:
+d3df1d4a107c8daed6c9efa68d48bcea26130c6a2f6f47aba685bb3b83d52be3.
+
+A separate Laravel13.37 fixture preserves five137 baseline source/Composer
+hashes, copies no environment files and matches three new immutable source files.
+All12 plain-PHP and88 Laravel syntax checks, plain assertions and281 Laravel
+runtime assertions pass. The analyzer retains exactly three intentional
+fixture diagnostics. Nine fresh protocol queries verify exact declarations,
+whole-atom completion edits and hover owner/types across string groups, leaf
+inheritance and nested string groups, with all four observed files unchanged.
+
+The actual client validates10 owner-isolated reference/checked-rename targets
+across three files, UTF16 completion replacement/resolve, unsaved group rebinding,
+unknown-binding barriers and first string-group queries after controller-only
+unsaved changes, restart and overlay close. Disk declaration and hover restore;
+all five scenario originals remain exact. All40client/6host tests pass without
+ignored or filtered cases. Fresh5383frontend tests across487files,1759ordinary
+workspace tests/77ignored/0filtered, fmt, warnings-denied all-target Clippy and
+post-binding frontend gates pass. Ordinary workspace resources were137 before
+promotion; actual client/host runs explicitly select the tested138 executable.
+Historical slice81 mock intermittency remains unproven; current104mock cases pass
+without changing their source or claiming a fix. Eight retention tests pass.
+
+Signed arm64 development0.1.76 is the sole generated archive at
+artifacts/batches/0.1.76/OpenStorm.app. Executable SHA256:
+04c94104319adb099eb240f11fedb626c09adbe33c417e07c77f7df11444b936.
+Strict/deep signature, compiled source snapshot, embedded/resource/canonical138
+checksums, reconstructible source recipe, unchanged installed21 executable,
+fixture/Composer hashes and no owned app/server process all pass. Final docs and
+ledger edits are non-runtime differences. After signature/receipt, packaging
+removes app75 and the duplicate76 bundle, clears21500workspace compiler files/
+18.6GiB and6959engine compiler files/2.0GiB, then removes only the exact inactive137
+canonical executable56184288bytes. Compiler roots are absent/empty. Sources,
+patches, licenses, provenance, receipts, released114 and PHP Workbench remain.
+
+Evidence: artifacts/checks/slice83 red/green/prefreeze/freeze/full gates,
+rejected-prototype/runtime disproof, qualified control, examples/analyzer/wire,
+SDK/frontend/client-host/postbinding, pipeline/readback and obsolete-engine
+cleanup;76build/retention receipts. Git delivery evidence is recorded separately
+after commit/push. Native checks are explicitly user-skipped; app76 is not launched
+or installed. All69areas remain67partial/2user-deferred. Namespace-changing
+registrars, custom macros, dynamic bindings, broader lifecycle/configuration/
+performance/platform matrices and physical Dock-switch autosave remain partial.
+No migration, publishing, updater activation, notarization or debugger expansion.
+
 Source integration (2026-11-01, verified source checkpoint): integrates all 240 new
 commits from `l0ng-ai/openidea:main` at `041e7210` into
 `codex/openstorm-php-laravel`, based on pushed OpenStorm `82d1313a`.

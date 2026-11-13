@@ -1,0 +1,633 @@
+--- a/src/symbol_map/extraction/laravel.rs
++++ b/src/symbol_map/extraction/laravel.rs
+@@ -1193,15 +1193,22 @@
+             chain_roots_at_route_facade_inner(call.object, depth - 1, resolved_names)
+         }
+         Expression::Call(Call::StaticMethod(call)) => {
+-            if let Some(names) = resolved_names {
+-                names
+-                    .get(call.class.span().start.offset)
+-                    .is_some_and(|name| matches_laravel_facade(name, "Route"))
+-            } else {
+-                matches_laravel_facade(strip_fqn_prefix(&expr_to_subject_text(call.class)), "Route")
+-            }
++            route_facade_class(call.class, resolved_names)
+         }
+         _ => false,
++    }
++}
++
++fn route_facade_class(
++    class: &Expression<'_>,
++    resolved_names: Option<&crate::names::OwnedResolvedNames>,
++) -> bool {
++    if let Some(names) = resolved_names {
++        names
++            .get(class.span().start.offset)
++            .is_some_and(|name| matches_laravel_facade(name, "Route"))
++    } else {
++        matches_laravel_facade(strip_fqn_prefix(&expr_to_subject_text(class)), "Route")
+     }
+ }
+ 
+@@ -1850,17 +1857,132 @@
+     false
+ }
+ 
+-/// Walk a fluent method chain backwards looking for `->controller(X::class)`.
+-///
+-/// Returns the class name (as written in source, e.g. `"WorkItemController"`)
+-/// if found, `None` otherwise.  Handles both instance-method chains
+-/// (`->prefix('…')->controller(X::class)`) and a static entry point
+-/// (`Route::controller(X::class)`).
+-pub(crate) fn laravel_route_find_controller_in_chain(
+-    expr: &Expression<'_>,
++/// One decoded framework group call. An unknown binding blocks parent borrowing.
++pub(crate) struct LaravelRouteGroup<'a> {
++    pub controller: Option<Option<String>>,
++    pub callback: Option<&'a Expression<'a>>,
++    pub arguments: &'a ArgumentList<'a>,
++}
++
++pub(crate) fn laravel_route_controller_group<'a>(
++    call: &'a Call<'a>,
+     resolved_names: Option<&crate::names::OwnedResolvedNames>,
+-) -> Option<String> {
+-    laravel_route_group_controller_binding(expr, resolved_names).flatten()
++) -> Option<LaravelRouteGroup<'a>> {
++    let (selector, arguments, receiver) = match call {
++        Call::Method(call) => (&call.method, &call.argument_list, Some(call.object)),
++        Call::StaticMethod(call) => (&call.method, &call.argument_list, None),
++        _ => return None,
++    };
++    let is_group = match selector {
++        ClassLikeMemberSelector::Identifier(name) => name.value.eq_ignore_ascii_case(b"group"),
++        ClassLikeMemberSelector::Expression(selector) => {
++            matches!(crate::parser::unwrap_parens(selector.expression), Expression::Literal(literal::Literal::String(s)) if s.value.and_then(literal_bytes_to_str).is_some_and(|name| name.eq_ignore_ascii_case("group")))
++        }
++        _ => false,
++    };
++    if !is_group
++        || receiver.is_some_and(|receiver| !chain_roots_at_route_facade(receiver, resolved_names))
++    {
++        return None;
++    }
++    if let Call::StaticMethod(call) = call
++        && !route_facade_class(call.class, resolved_names)
++    {
++        return None;
++    }
++    let names: &[&str] = if receiver.is_some() {
++        &["callback"]
++    } else {
++        &["attributes", "routes"]
++    };
++    let Some(values) = route_group_arguments(arguments, names) else {
++        return Some(LaravelRouteGroup {
++            controller: Some(None),
++            callback: None,
++            arguments,
++        });
++    };
++    let (controller, callback) = if let Some(receiver) = receiver {
++        (
++            laravel_route_group_controller_binding(receiver, resolved_names),
++            values[0],
++        )
++    } else {
++        (laravel_route_attribute_controller(values[0]?), values[1])
++    };
++    Some(LaravelRouteGroup {
++        controller,
++        callback,
++        arguments,
++    })
++}
++
++fn route_group_arguments<'a>(
++    args: &'a ArgumentList<'a>,
++    names: &[&str],
++) -> Option<[Option<&'a Expression<'a>>; 2]> {
++    let mut values = [None; 2];
++    let mut named_seen = false;
++    for (index, argument) in args.arguments.iter().enumerate() {
++        let (slot, value) = match argument {
++            Argument::Positional(argument) => {
++                if argument.ellipsis.is_some() || named_seen {
++                    return None;
++                }
++                (index, argument.value)
++            }
++            Argument::Named(argument) => {
++                named_seen = true;
++                (
++                    names
++                        .iter()
++                        .position(|name| *name == bytes_to_str(argument.name.value))?,
++                    argument.value,
++                )
++            }
++        };
++        if slot >= names.len() || values[slot].replace(value).is_some() {
++            return None;
++        }
++    }
++    values[..names.len()]
++        .iter()
++        .all(Option::is_some)
++        .then_some(values)
++}
++
++fn laravel_route_attribute_controller(expr: &Expression<'_>) -> Option<Option<String>> {
++    let elements = match crate::parser::unwrap_parens(expr) {
++        Expression::Array(array) => &array.elements,
++        Expression::LegacyArray(array) => &array.elements,
++        _ => return Some(None),
++    };
++    let mut controller = None;
++    for element in elements.iter() {
++        let ArrayElement::KeyValue(element) = element else {
++            return Some(None);
++        };
++        let Expression::Literal(literal::Literal::String(key)) = element.key else {
++            return Some(None);
++        };
++        let Some(key) = key.value.and_then(literal_bytes_to_str) else {
++            return Some(None);
++        };
++        match key {
++            "controller" => controller = Some(laravel_route_controller_value(element.value)),
++            "prefix"
++            | "middleware"
++            | "as"
++            | "domain"
++            | "where"
++            | "scope_bindings"
++            | "excluded_middleware"
++            | "missing"
++            | "metadata" => {}
++            _ => return Some(None),
++        }
++    }
++    controller
+ }
+ 
+ /// Preserve an explicit unknown binding so it cannot inherit a different owner.
+@@ -1899,7 +2021,10 @@
+     if first.ellipsis.is_some() {
+         return None;
+     }
+-    let value = first.value;
++    laravel_route_controller_value(first.value)
++}
++
++fn laravel_route_controller_value(value: &Expression<'_>) -> Option<String> {
+     if let Expression::Access(Access::ClassConstant(class)) = value {
+         let is_class = matches!(&class.constant, ClassLikeConstantSelector::Identifier(name) if name.value.eq_ignore_ascii_case(b"class"));
+         if is_class {
+@@ -1934,6 +2059,24 @@
+     spans: &mut Vec<SymbolSpan>,
+     resolved_names: Option<&crate::names::OwnedResolvedNames>,
+ ) {
++    let expr = crate::parser::unwrap_parens(expr);
++    let callbacks = match expr {
++        Expression::Array(array) => Some(&array.elements),
++        Expression::LegacyArray(array) => Some(&array.elements),
++        _ => None,
++    };
++    if let Some(callbacks) = callbacks {
++        for callback in callbacks.iter() {
++            let value = match callback {
++                ArrayElement::KeyValue(element) => element.value,
++                ArrayElement::Value(element) => element.value,
++                ArrayElement::Variadic(element) => element.value,
++                ArrayElement::Missing(_) => continue,
++            };
++            laravel_route_scan_group_body(value, controller, content, spans, resolved_names);
++        }
++        return;
++    }
+     match expr {
+         Expression::Closure(closure) => {
+             for stmt in closure.body.statements.iter() {
+@@ -1994,31 +2137,18 @@
+     spans: &mut Vec<SymbolSpan>,
+     resolved_names: Option<&crate::names::OwnedResolvedNames>,
+ ) {
++    if let Expression::Call(call) = expr
++        && let Some(group) = laravel_route_controller_group(call, resolved_names)
++    {
++        if group.controller.is_none()
++            && let Some(callback) = group.callback
++        {
++            laravel_route_scan_group_body(callback, controller, content, spans, resolved_names);
++        }
++        return;
++    }
+     match expr {
+-        // Chained call: Route::patch('cancel', 'cancel')->name('cancel')
+         Expression::Call(Call::Method(mc)) => {
+-            if let ClassLikeMemberSelector::Identifier(ident) = &mc.method
+-                && ident.value.eq_ignore_ascii_case(b"group")
+-            {
+-                if !chain_roots_at_route_facade(mc.object, resolved_names) {
+-                    return;
+-                }
+-                // Nested group — check for its own controller.
+-                if laravel_route_group_controller_binding(mc.object, resolved_names).is_some() {
+-                    return; // Explicit binding; known owners are handled separately.
+-                }
+-                // No new controller — inherit the parent's.
+-                for arg in mc.argument_list.arguments.iter() {
+-                    laravel_route_scan_group_body(
+-                        arg.value(),
+-                        controller,
+-                        content,
+-                        spans,
+-                        resolved_names,
+-                    );
+-                }
+-                return;
+-            }
+             // Walk the inner object (chain before ->name() etc.).
+             laravel_route_scan_expr(mc.object, controller, content, spans, resolved_names);
+             laravel_route_scan_action(expr, controller, content, spans, resolved_names);
+--- a/src/symbol_map/extraction/expressions/calls.rs
++++ b/src/symbol_map/extraction/expressions/calls.rs
+@@ -359,6 +359,22 @@
+     scope_start: u32,
+     visit_receiver: bool,
+ ) {
++    if let Some(group) = laravel_route_controller_group(call, ctx.resolved_names)
++        && let Some(Some(controller)) = group.controller
++        && let Some(callback) = group.callback
++    {
++        let start = ctx.spans.len();
++        laravel_route_scan_group_body(
++            callback,
++            &controller,
++            ctx.content,
++            &mut ctx.spans,
++            ctx.resolved_names,
++        );
++        // Route registrations refer to methods without invoking them.
++        ctx.non_invoked_callable_spans
++            .extend(ctx.spans[start..].iter().map(|span| (span.start, span.end)));
++    }
+     let (callee, arguments, kind) = match call {
+         Call::Function(call) => {
+             let expr = crate::parser::unwrap_parens(call.function);
+@@ -875,35 +891,6 @@
+                         is_nullsafe: false,
+                     },
+                 });
+-                // Laravel: if this is a ->group() call, check for
+-                // ->controller(X::class) in the chain and emit MemberAccess
+-                // spans for route method-name strings inside the closure.
+-                if member_name.eq_ignore_ascii_case("group")
+-                    && let Some(controller) = laravel_route_find_controller_in_chain(
+-                        method_call.object,
+-                        ctx.resolved_names,
+-                    )
+-                {
+-                    let first_route_action = ctx.spans.len();
+-                    for arg in method_call.argument_list.arguments.iter() {
+-                        laravel_route_scan_group_body(
+-                            arg.value(),
+-                            &controller,
+-                            ctx.content,
+-                            &mut ctx.spans,
+-                            ctx.resolved_names,
+-                        );
+-                    }
+-                    // The scanner emits route action method-name references,
+-                    // not controller invocations during route registration.
+-                    // Ordinary calls extracted from the closure below retain
+-                    // their own known edges and source ranges.
+-                    ctx.non_invoked_callable_spans.extend(
+-                        ctx.spans[first_route_action..]
+-                            .iter()
+-                            .map(|span| (span.start, span.end)),
+-                    );
+-                }
+             }
+             extract_from_arguments(&method_call.argument_list.arguments, ctx, scope_start);
+         }
+--- a/src/completion/laravel_route_controller.rs
++++ b/src/completion/laravel_route_controller.rs
+@@ -307,24 +307,22 @@
+     let mut best: Option<(Option<String>, u32)> = None; // (controller, range_size)
+ 
+     crate::virtual_members::laravel::walk_all_php_expressions(content, &mut |expr| {
+-        if let Expression::Call(Call::Method(mc)) = expr
+-            && let ClassLikeMemberSelector::Identifier(ident) = &mc.method
+-            && ident.value.eq_ignore_ascii_case(b"group")
+-            && let Some(controller) =
+-                crate::symbol_map::extraction::laravel::laravel_route_group_controller_binding(
+-                    mc.object,
++        if let Expression::Call(call) = expr
++            && let Some(group) =
++                crate::symbol_map::extraction::laravel::laravel_route_controller_group(
++                    call,
+                     resolved_names,
+                 )
++            && let Some(controller) = group.controller
+         {
+-            for arg in mc.argument_list.arguments.iter() {
+-                if let Some((start, end)) = closure_body_range(arg.value())
+-                    && cursor_offset >= start
+-                    && cursor_offset <= end
+-                {
+-                    let range_size = end - start;
+-                    if best.as_ref().is_none_or(|(_, sz)| range_size < *sz) {
+-                        best = Some((controller.clone(), range_size));
+-                    }
++            let span = group
++                .callback
++                .map(HasSpan::span)
++                .unwrap_or_else(|| group.arguments.span());
++            if cursor_offset >= span.start.offset && cursor_offset <= span.end.offset {
++                let range_size = span.end.offset - span.start.offset;
++                if best.as_ref().is_none_or(|(_, size)| range_size < *size) {
++                    best = Some((controller, range_size));
+                 }
+             }
+         }
+@@ -332,21 +330,6 @@
+     });
+ 
+     best.and_then(|(name, _)| name)
+-}
+-
+-/// Return the byte range of a closure body or arrow-function expression.
+-fn closure_body_range(expr: &Expression<'_>) -> Option<(u32, u32)> {
+-    match expr {
+-        Expression::Closure(c) => Some((
+-            c.body.left_brace.start.offset,
+-            c.body.right_brace.end.offset,
+-        )),
+-        Expression::ArrowFunction(arrow) => {
+-            let span = arrow.expression.span();
+-            Some((span.start.offset, span.end.offset))
+-        }
+-        _ => None,
+-    }
+ }
+ 
+ // ─── Completion ─────────────────────────────────────────────────────────────
+--- a/tests/integration/laravel_route_controller.rs
++++ b/tests/integration/laravel_route_controller.rs
+@@ -963,3 +963,187 @@
+         "parenthesized route target {target:?}"
+     );
+ }
++
++#[tokio::test]
++async fn static_controller_group_attributes_share_definition_hover_and_completion() {
++    use crate::common::position_after;
++    for binding in ["Inner::class", "'Demo\\Inner'"] {
++        for attrs in [
++            format!("['controller' => {binding}]"),
++            format!("array('prefix' => 'invoices', 'controller' => {binding})"),
++        ] {
++            for named in [false, true] {
++                let backend = create_test_backend();
++                let uri = Url::parse("file:///attribute-group.php").unwrap();
++                let callback = "fn () => Routes::get('/😀/invoice', 'showInvoice')";
++                let group = if named {
++                    format!("Routes::group(routes: {callback}, attributes: {attrs})")
++                } else {
++                    format!("Routes::group({attrs}, {callback})")
++                };
++                let text = format!(
++                    "<?php\nnamespace Demo;\nuse Illuminate\\Support\\Facades\\Route as Routes;\nclass Outer {{public function showInvoice(): string {{return 'outer';}}}}\nclass Inner {{public function showInvoice(): bool {{return true;}}}}\nRoutes::controller(Outer::class)->group(function () {{ {group}; }});\n"
++                );
++                open_php(&backend, &uri, &text).await;
++                let at = position_after(&text, "'showIn");
++                let target = goto_def(&backend, &uri, at.line, at.character).await;
++                let expected = position_after(&text, "class Inner {public function ");
++                assert!(
++                    matches!(target,Some(GotoDefinitionResponse::Scalar(ref l)) if l.uri==uri && l.range.start==expected),
++                    "attribute target {named}/{attrs}: {target:?}"
++                );
++                let hover = backend
++                    .hover(HoverParams {
++                        text_document_position_params: TextDocumentPositionParams {
++                            text_document: TextDocumentIdentifier { uri: uri.clone() },
++                            position: at,
++                        },
++                        work_done_progress_params: Default::default(),
++                    })
++                    .await
++                    .unwrap()
++                    .expect("attribute hover");
++                assert!(
++                    matches!(hover.contents,HoverContents::Markup(ref m) if m.value.contains("showInvoice(): bool")),
++                    "attribute hover {hover:?}"
++                );
++                let items = complete_at(&backend, &uri, &text, at.line, at.character).await;
++                assert!(
++                    items
++                        .iter()
++                        .any(|i| i.insert_text.as_deref() == Some("showInvoice")
++                            && i.detail.as_deref().is_some_and(|d| d.contains("bool"))),
++                    "attribute completion {items:?}"
++                );
++            }
++        }
++    }
++}
++
++#[tokio::test]
++async fn controller_free_static_groups_inherit_through_callback_lists() {
++    use crate::common::position_after;
++    let backend = create_test_backend();
++    let uri = Url::parse("file:///attribute-group-inherit.php").unwrap();
++    let text = "<?php\nuse Illuminate\\Support\\Facades\\Route as Routes;\nclass Outer {public function showInvoice(): string {return 'outer';}}\nRoutes::controller(Outer::class)->group(function () {Routes::group(['prefix'=>'invoice'], [fn () => Routes::get('/one', 'showInvoice'), function () {Routes::get('/two', 'showInvoice');}]);});\n";
++    open_php(&backend, &uri, text).await;
++    for needle in ["'/one', 'showIn", "'/two', 'showIn"] {
++        let at = position_after(text, needle);
++        assert!(
++            goto_def(&backend, &uri, at.line, at.character)
++                .await
++                .is_some(),
++            "inherited list {needle}"
++        );
++        let items = complete_at(&backend, &uri, text, at.line, at.character).await;
++        assert!(
++            method_labels(&items).iter().any(|s| s == "showInvoice"),
++            "inherited list completion {items:?}"
++        );
++    }
++}
++
++#[tokio::test]
++async fn unknown_attribute_bindings_never_borrow_a_parent_controller() {
++    use crate::common::position_after;
++    for attrs in [
++        "$attributes",
++        "['controller'=>$picked]",
++        "['controller'=>null]",
++        "['controller'=>Inner::class,...$extra]",
++        "[$key=>Inner::class]",
++        "['namespace'=>'Other','controller'=>Inner::class]",
++    ] {
++        let backend = create_test_backend();
++        let uri = Url::parse("file:///attribute-group-unknown.php").unwrap();
++        let text = format!(
++            "<?php\nuse Illuminate\\Support\\Facades\\Route as Routes;\nclass Outer {{public function showInvoice() {{}}}}\nclass Inner {{public function showInvoice() {{}}}}\nRoutes::controller(Outer::class)->group(function () {{Routes::group({attrs}, fn () => Routes::get('/x', 'showInvoice'));}});\n"
++        );
++        open_php(&backend, &uri, &text).await;
++        let at = position_after(&text, "'showIn");
++        assert!(
++            goto_def(&backend, &uri, at.line, at.character)
++                .await
++                .is_none(),
++            "unknown attribute target {attrs}"
++        );
++        let items = complete_at(&backend, &uri, &text, at.line, at.character).await;
++        assert!(
++            !method_labels(&items).iter().any(|m| m == "showInvoice"),
++            "unknown attributes borrowed parent {attrs}: {items:?}"
++        );
++    }
++}
++
++#[tokio::test]
++async fn group_parameter_collisions_and_unpacking_block_inherited_controller_context() {
++    use crate::common::position_after;
++    for args in [
++        "['controller'=>Inner::class], attributes: [], routes: CALLBACK",
++        "...$args, routes: CALLBACK",
++        "attributes: [], unknown: CALLBACK",
++        "[], CALLBACK, 'extra'",
++    ] {
++        let backend = create_test_backend();
++        let uri = Url::parse("file:///attribute-group-arguments.php").unwrap();
++        let call = args.replace("CALLBACK", "fn () => Routes::get('/x', 'showInvoice')");
++        let text = format!(
++            "<?php\nuse Illuminate\\Support\\Facades\\Route as Routes;\nclass Outer {{public function showInvoice() {{}}}}\nclass Inner {{public function showInvoice() {{}}}}\nRoutes::controller(Outer::class)->group(function () {{Routes::group({call});}});\n"
++        );
++        open_php(&backend, &uri, &text).await;
++        let at = position_after(&text, "'showIn");
++        assert!(
++            goto_def(&backend, &uri, at.line, at.character)
++                .await
++                .is_none()
++        );
++        let items = complete_at(&backend, &uri, &text, at.line, at.character).await;
++        assert!(
++            !method_labels(&items).iter().any(|m| m == "showInvoice"),
++            "invalid group borrowed parent {args}: {items:?}"
++        );
++    }
++}
++
++#[tokio::test]
++async fn literal_attribute_groups_choose_the_last_controller_and_are_not_invocations() {
++    use crate::common::position_after;
++    let backend = create_test_backend();
++    let uri = Url::parse("file:///attribute-group-hierarchy.php").unwrap();
++    let text = "<?php\nuse Illuminate\\Support\\Facades\\Route as Routes;\nclass Outer {public function showInvoice(): string {return 'outer';}}\nclass Inner {public function showInvoice(): bool {return true;}}\nfunction invokeController(Inner $controller): void {$controller->showInvoice();}\nfunction registerRoutes(): void {Routes::{'group'}(['controller'=>Outer::class,'controller'=>Inner::class], [fn () => Routes::get('/invoice', 'showInvoice')]);}\n";
++    open_php(&backend, &uri, text).await;
++    let at = position_after(text, "'/invoice', 'showIn");
++    let target = goto_def(&backend, &uri, at.line, at.character).await;
++    let declaration = position_after(text, "class Inner {public function ");
++    assert!(
++        matches!(target,Some(GotoDefinitionResponse::Scalar(ref l)) if l.uri==uri && l.range.start==declaration),
++        "literal attribute target {target:?}"
++    );
++    let items = backend
++        .prepare_call_hierarchy(CallHierarchyPrepareParams {
++            text_document_position_params: TextDocumentPositionParams {
++                text_document: TextDocumentIdentifier { uri: uri.clone() },
++                position: declaration,
++            },
++            work_done_progress_params: Default::default(),
++        })
++        .await
++        .unwrap()
++        .unwrap();
++    assert_eq!(items.len(), 1);
++    let callers = backend
++        .incoming_calls(CallHierarchyIncomingCallsParams {
++            item: items.into_iter().next().unwrap(),
++            work_done_progress_params: Default::default(),
++            partial_result_params: Default::default(),
++        })
++        .await
++        .unwrap()
++        .unwrap_or_default();
++    assert_eq!(
++        callers.len(),
++        1,
++        "registration is not invocation: {callers:?}"
++    );
++    assert_eq!(callers[0].from.name, "invokeController");
++}
+--- a/docs/CHANGELOG.md
++++ b/docs/CHANGELOG.md
+@@ -14,6 +14,8 @@
+ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+ 
+ ## [Unreleased]
++
++- **Follow controllers configured in route-group attributes.** Navigation, completion and refactoring use the nearest static or fluent group binding, including named arguments and callback lists. Unknown bindings stay unresolved. Contributed by @thinkycz.
+ 
+ - **Navigate controller actions returned in route-group arrays.** Definition, hover, references and rename follow short or legacy arrays, nested controller groups and parenthesized registrations. Contributed by @thinkycz.
+ 
+--- a/examples/laravel/app/Demo.php
++++ b/examples/laravel/app/Demo.php
+@@ -1709,6 +1709,19 @@
+         });
+     }
+ 
++    public function attributeControllerGroups(): void
++    {
++        // Try: navigate/complete index in a named attribute group (View).
++        Route::group(routes: [fn () => Route::get('/attrs-direct', 'index')], attributes: ['controller' => BakeryController::class]);
++        Route::controller(BakeryController::class)->group(function (): void {
++            // A static group changes the controller to the JSON endpoint.
++            Route::group(['controller' => \App\Http\Controllers\AlternateBakeryController::class], fn () => Route::get('/attrs-preview', 'index'));
++            // Callback lists without a new controller inherit the outer owner.
++            Route::group(['prefix' => 'attrs'], [fn () => Route::get('/attrs-inherited', 'index')]);
++        });
++        Route::{'group'}(['controller' => BakeryController::class], fn () => Route::get('/attrs-literal', 'index'));
++    }
++
+ }
+ 
+ // PHP Workbench: Laravel: Go to Route lists statically named routes and opens
+--- a/examples/laravel/assertions.php
++++ b/examples/laravel/assertions.php
+@@ -2009,6 +2009,30 @@
+     check('Array callback without a new controller inherits the parent', ($routes['array.inherited'] ?? null) === $main . '@index');
+ })();
+ 
++// Router attributes and callback bindings also apply through static facade groups.
++(function (): void {
++    $router = new \Illuminate\Routing\Router(new \Illuminate\Events\Dispatcher());
++    $main = \App\Http\Controllers\BakeryController::class;
++    $inner = \App\Http\Controllers\AlternateBakeryController::class;
++    $router->group(['controller' => $main], fn () => $router->get('/attrs-direct', 'index')->name('attrs.direct'));
++    $router->controller($main)->group(function () use ($router, $inner): void {
++        $router->group(['controller' => $inner], fn () => $router->get('/attrs-inner', 'index')->name('attrs.inner'));
++        $router->group(['prefix' => 'inherited'], fn () => $router->get('/attrs-inherited', 'index')->name('attrs.inherited'));
++    });
++    $router->group(routes: [fn () => $router->get('/attrs-list', 'index')->name('attrs.list')], attributes: ['controller' => $main]);
++    $router->group(['controller' => $main, 'controller' => $inner], fn () => $router->get('/attrs-last', 'index')->name('attrs.last'));
++    $router->{'group'}(['controller' => $main], fn () => $router->get('/attrs-literal', 'index')->name('attrs.literal'));
++    $routes = [];
++    foreach ($router->getRoutes() as $route) { $routes[$route->getName()] = $route->getActionName(); }
++    check('Attribute controller groups register six routes', count($routes) === 6);
++    foreach (['direct', 'inherited', 'list', 'literal'] as $name) {
++        check('Attribute group ' . $name . ' uses the main controller', ($routes['attrs.' . $name] ?? null) === $main . '@index');
++    }
++    foreach (['inner', 'last'] as $name) {
++        check('Attribute group ' . $name . ' uses the inner controller', ($routes['attrs.' . $name] ?? null) === $inner . '@index');
++    }
++})();
++
+ // ─── Summary ────────────────────────────────────────────────────────────────
+ 
+ echo "\n";

@@ -1,0 +1,946 @@
+--- a/src/symbol_map/extraction/laravel.rs
++++ b/src/symbol_map/extraction/laravel.rs
+@@ -1857,9 +1857,22 @@
+     false
+ }
+ 
++#[derive(Clone)]
++pub(crate) struct RouteControllerRef {
++    pub subject: String,
++    pub runtime: Option<String>,
++    pub rooted: bool,
++}
++#[derive(Clone)]
++pub(crate) struct RouteNamespaceRef {
++    pub value: String,
++    pub rooted: bool,
++}
++
+ /// One decoded framework group call. An unknown binding blocks parent borrowing.
+ pub(crate) struct LaravelRouteGroup<'a> {
+-    pub controller: Option<Option<String>>,
++    pub controller: Option<Option<RouteControllerRef>>,
++    pub namespace: Option<Option<RouteNamespaceRef>>,
+     pub callback: Option<&'a Expression<'a>>,
+     pub arguments: &'a ArgumentList<'a>,
+ }
+@@ -1898,20 +1911,25 @@
+     let Some(values) = route_group_arguments(arguments, names) else {
+         return Some(LaravelRouteGroup {
+             controller: Some(None),
++            namespace: Some(None),
+             callback: None,
+             arguments,
+         });
+     };
+-    let (controller, callback) = if let Some(receiver) = receiver {
++    let (controller, namespace, callback) = if let Some(receiver) = receiver {
+         (
+             laravel_route_group_controller_binding(receiver, resolved_names),
++            laravel_route_group_namespace_binding(receiver),
+             values[0],
+         )
+     } else {
+-        (laravel_route_attribute_controller(values[0]?), values[1])
++        let (controller, namespace) =
++            laravel_route_attribute_controller(values[0]?, resolved_names);
++        (controller, namespace, values[1])
+     };
+     Some(LaravelRouteGroup {
+         controller,
++        namespace,
+         callback,
+         arguments,
+     })
+@@ -1951,25 +1969,34 @@
+         .then_some(values)
+ }
+ 
+-fn laravel_route_attribute_controller(expr: &Expression<'_>) -> Option<Option<String>> {
++type AttributeBindings = (
++    Option<Option<RouteControllerRef>>,
++    Option<Option<RouteNamespaceRef>>,
++);
++fn laravel_route_attribute_controller(
++    expr: &Expression<'_>,
++    names: Option<&crate::names::OwnedResolvedNames>,
++) -> AttributeBindings {
+     let elements = match crate::parser::unwrap_parens(expr) {
+-        Expression::Array(array) => &array.elements,
+-        Expression::LegacyArray(array) => &array.elements,
+-        _ => return Some(None),
++        Expression::Array(a) => &a.elements,
++        Expression::LegacyArray(a) => &a.elements,
++        _ => return (Some(None), Some(None)),
+     };
+     let mut controller = None;
++    let mut namespace = None;
+     for element in elements.iter() {
+-        let ArrayElement::KeyValue(element) = element else {
+-            return Some(None);
++        let ArrayElement::KeyValue(e) = element else {
++            return (Some(None), Some(None));
+         };
+-        let Expression::Literal(literal::Literal::String(key)) = element.key else {
+-            return Some(None);
++        let Expression::Literal(literal::Literal::String(key)) = e.key else {
++            return (Some(None), Some(None));
+         };
+         let Some(key) = key.value.and_then(literal_bytes_to_str) else {
+-            return Some(None);
++            return (Some(None), Some(None));
+         };
+         match key {
+-            "controller" => controller = Some(laravel_route_controller_value(element.value)),
++            "controller" => controller = Some(laravel_route_controller_value(e.value, names)),
++            "namespace" => namespace = laravel_route_namespace_value(e.value),
+             "prefix"
+             | "middleware"
+             | "as"
+@@ -1979,17 +2006,64 @@
+             | "excluded_middleware"
+             | "missing"
+             | "metadata" => {}
+-            _ => return Some(None),
+-        }
+-    }
+-    controller
++            _ => return (Some(None), Some(None)),
++        }
++    }
++    (controller, namespace)
++}
++fn laravel_route_namespace_value(expr: &Expression<'_>) -> Option<Option<RouteNamespaceRef>> {
++    let expr = crate::parser::unwrap_parens(expr);
++    if matches!(expr, Expression::Literal(literal::Literal::Null(_))) {
++        return None;
++    }
++    let Expression::Literal(literal::Literal::String(value)) = expr else {
++        return Some(None);
++    };
++    let Some(raw) = value.value.and_then(literal_bytes_to_str) else {
++        return Some(None);
++    };
++    let value = raw.trim_matches('\\');
++    if !value.is_empty()
++        && (value.contains("::") || !super::expressions::valid_literal_callable_target(value))
++    {
++        return Some(None);
++    }
++    Some(Some(RouteNamespaceRef {
++        value: value.to_owned(),
++        rooted: raw.starts_with('\\'),
++    }))
++}
++fn laravel_route_group_namespace_binding(
++    expr: &Expression<'_>,
++) -> Option<Option<RouteNamespaceRef>> {
++    let mut current = expr;
++    for _ in 0..crate::symbol_map::laravel_resources::FACADE_CHAIN_DEPTH {
++        let (method, args, receiver) = match current {
++            Expression::Call(Call::Method(c)) => (&c.method, &c.argument_list, Some(c.object)),
++            Expression::Call(Call::StaticMethod(c)) => (&c.method, &c.argument_list, None),
++            _ => return None,
++        };
++        if let ClassLikeMemberSelector::Identifier(name) = method
++            && name.value.eq_ignore_ascii_case(b"namespace")
++        {
++            let Some(Argument::Positional(first)) = args.arguments.iter().next() else {
++                return Some(None);
++            };
++            if first.ellipsis.is_some() {
++                return Some(None);
++            };
++            return laravel_route_namespace_value(first.value);
++        }
++        current = receiver?;
++    }
++    Some(None)
+ }
+ 
+ /// Preserve an explicit unknown binding so it cannot inherit a different owner.
+ pub(crate) fn laravel_route_group_controller_binding(
+     expr: &Expression<'_>,
+     resolved_names: Option<&crate::names::OwnedResolvedNames>,
+-) -> Option<Option<String>> {
++) -> Option<Option<RouteControllerRef>> {
+     if !chain_roots_at_route_facade(expr, resolved_names) {
+         return None;
+     }
+@@ -2005,7 +2079,7 @@
+         if let ClassLikeMemberSelector::Identifier(method) = method
+             && method.value.eq_ignore_ascii_case(b"controller")
+         {
+-            return Some(laravel_route_extract_class_arg(arguments));
++            return Some(laravel_route_extract_class_arg(arguments, resolved_names));
+         }
+         current = receiver?;
+     }
+@@ -2013,24 +2087,41 @@
+ }
+ 
+ /// Read a controller attribute's positional class reference or runtime string.
+-/// Runtime strings are absolute names, unaffected by lexical imports.
+-pub(super) fn laravel_route_extract_class_arg(args: &ArgumentList<'_>) -> Option<String> {
++/// Runtime strings ignore lexical imports; group namespaces may prefix unrooted names.
++fn laravel_route_extract_class_arg(
++    args: &ArgumentList<'_>,
++    names: Option<&crate::names::OwnedResolvedNames>,
++) -> Option<RouteControllerRef> {
+     let Argument::Positional(first) = args.arguments.iter().next()? else {
+         return None;
+     };
+     if first.ellipsis.is_some() {
+         return None;
+     }
+-    laravel_route_controller_value(first.value)
+-}
+-
+-fn laravel_route_controller_value(value: &Expression<'_>) -> Option<String> {
++    laravel_route_controller_value(first.value, names)
++}
++
++fn laravel_route_controller_value(
++    value: &Expression<'_>,
++    names: Option<&crate::names::OwnedResolvedNames>,
++) -> Option<RouteControllerRef> {
+     if let Expression::Access(Access::ClassConstant(class)) = value {
+         let is_class = matches!(&class.constant, ClassLikeConstantSelector::Identifier(name) if name.value.eq_ignore_ascii_case(b"class"));
+         if is_class {
+             let name = expr_to_subject_text(class.class);
+             if !name.is_empty() {
+-                return Some(name);
++                let runtime = names
++                    .and_then(|names| names.get(class.class.span().start.offset))
++                    .map(|name| name.trim_start_matches('\\').to_owned())
++                    .or_else(|| {
++                        name.starts_with('\\')
++                            .then(|| name.trim_start_matches('\\').to_owned())
++                    });
++                return Some(RouteControllerRef {
++                    subject: name,
++                    runtime,
++                    rooted: false,
++                });
+             }
+         }
+     }
+@@ -2039,6 +2130,7 @@
+         if name.contains("::") || !super::expressions::valid_literal_callable_target(name) {
+             return None;
+         }
++        let rooted = name.starts_with('\\');
+         let name = name.strip_prefix('\\').unwrap_or(name);
+         if ["self", "parent", "static"]
+             .iter()
+@@ -2046,7 +2138,11 @@
+         {
+             return None;
+         }
+-        return Some(format!("\\{name}"));
++        return Some(RouteControllerRef {
++            subject: format!("\\{name}"),
++            runtime: Some(name.to_owned()),
++            rooted,
++        });
+     }
+     None
+ }
+@@ -2138,13 +2234,8 @@
+     resolved_names: Option<&crate::names::OwnedResolvedNames>,
+ ) {
+     if let Expression::Call(call) = expr
+-        && let Some(group) = laravel_route_controller_group(call, resolved_names)
++        && laravel_route_controller_group(call, resolved_names).is_some()
+     {
+-        if group.controller.is_none()
+-            && let Some(callback) = group.callback
+-        {
+-            laravel_route_scan_group_body(callback, controller, content, spans, resolved_names);
+-        }
+         return;
+     }
+     match expr {
+--- /dev/null
++++ b/src/symbol_map/extraction/laravel_route_context.rs
+@@ -0,0 +1,326 @@
++//! Laravel registration context, folded once from already parsed callback scopes.
++use super::laravel::{
++    LaravelRouteGroup, RouteControllerRef, RouteNamespaceRef, laravel_route_controller_group,
++    laravel_route_scan_group_body,
++};
++use super::{OwnedResolvedNames, SymbolSpan};
++use mago_span::HasSpan;
++use mago_syntax::cst::*;
++use mago_syntax::walker::Walker;
++use std::collections::HashSet;
++
++#[derive(Clone)]
++struct Binding {
++    controller: Option<Option<RouteControllerRef>>,
++    namespace: Option<Option<RouteNamespaceRef>>,
++    invalid: bool,
++}
++impl Binding {
++    fn from_group(group: &LaravelRouteGroup<'_>) -> Self {
++        Self {
++            controller: group.controller.clone(),
++            namespace: group.namespace.clone(),
++            invalid: group.callback.is_none(),
++        }
++    }
++}
++struct Pending {
++    start: u32,
++    end: u32,
++    binding: Option<Binding>,
++}
++#[derive(Default)]
++struct Collected {
++    groups: Vec<Pending>,
++    scopes: Vec<(u32, u32)>,
++}
++struct Collector<'a> {
++    names: Option<&'a OwnedResolvedNames>,
++}
++
++fn callbacks(expr: &Expression<'_>, visit: &mut impl FnMut(&Expression<'_>)) {
++    let expr = crate::parser::unwrap_parens(expr);
++    let elements = match expr {
++        Expression::Array(a) => Some(&a.elements),
++        Expression::LegacyArray(a) => Some(&a.elements),
++        _ => None,
++    };
++    if let Some(elements) = elements {
++        for element in elements.iter() {
++            let value = match element {
++                ArrayElement::KeyValue(e) => e.value,
++                ArrayElement::Value(e) => e.value,
++                ArrayElement::Variadic(e) => e.value,
++                ArrayElement::Missing(_) => continue,
++            };
++            callbacks(value, visit);
++        }
++    } else if matches!(expr, Expression::Closure(_) | Expression::ArrowFunction(_)) {
++        visit(expr);
++    }
++}
++fn callback_range(expr: &Expression<'_>) -> (u32, u32) {
++    match expr {
++        Expression::Closure(c) => (
++            c.body.left_brace.start.offset,
++            c.body.right_brace.end.offset,
++        ),
++        _ => {
++            let span = expr.span();
++            (span.start.offset, span.end.offset)
++        }
++    }
++}
++impl<'ast, 'arena> Walker<'ast, 'arena, Collected> for Collector<'_> {
++    fn walk_in_expression(&self, node: &'ast Expression<'arena>, out: &mut Collected) {
++        let Expression::Call(call) = node else { return };
++        let Some(group) = laravel_route_controller_group(call, self.names) else {
++            return;
++        };
++        let binding = Binding::from_group(&group);
++        if let Some(callback) = group.callback {
++            callbacks(callback, &mut |expr| {
++                let (start, end) = callback_range(expr);
++                out.groups.push(Pending {
++                    start,
++                    end,
++                    binding: Some(binding.clone()),
++                });
++            });
++        } else {
++            let span = group.arguments.span();
++            out.groups.push(Pending {
++                start: span.start.offset,
++                end: span.end.offset,
++                binding: Some(binding),
++            });
++        }
++    }
++    fn walk_in_closure(&self, node: &'ast Closure<'arena>, out: &mut Collected) {
++        out.scopes.push((
++            node.body.left_brace.start.offset,
++            node.body.right_brace.end.offset,
++        ));
++    }
++    fn walk_in_arrow_function(&self, node: &'ast ArrowFunction<'arena>, out: &mut Collected) {
++        let span = node.span();
++        out.scopes.push((span.start.offset, span.end.offset));
++    }
++    fn walk_in_function(&self, node: &'ast Function<'arena>, out: &mut Collected) {
++        out.scopes.push((
++            node.body.left_brace.start.offset,
++            node.body.right_brace.end.offset,
++        ));
++    }
++    fn walk_in_method(&self, node: &'ast Method<'arena>, out: &mut Collected) {
++        if let MethodBody::Concrete(body) = &node.body {
++            out.scopes
++                .push((body.left_brace.start.offset, body.right_brace.end.offset));
++        }
++    }
++}
++
++#[derive(Clone)]
++struct Frame {
++    controller: Option<RouteControllerRef>,
++    namespace: Result<Option<String>, ()>,
++    invalid: bool,
++}
++impl Default for Frame {
++    fn default() -> Self {
++        Self {
++            controller: None,
++            namespace: Ok(None),
++            invalid: false,
++        }
++    }
++}
++impl Frame {
++    fn apply(&mut self, binding: Option<&Binding>) {
++        let Some(binding) = binding else {
++            self.controller = None;
++            self.namespace = match &self.namespace {
++                Ok(None) => Ok(None),
++                Ok(Some(ns)) if ns.is_empty() => Ok(None),
++                _ => Err(()),
++            };
++            return;
++        };
++        self.invalid |= binding.invalid;
++        if let Some(controller) = &binding.controller {
++            self.controller = controller.clone();
++        }
++        if let Some(namespace) = &binding.namespace {
++            self.namespace = match namespace {
++                None => Err(()),
++                Some(ns) if ns.rooted => Ok(Some(ns.value.clone())),
++                Some(ns) => match &self.namespace {
++                    Ok(Some(old)) => Ok(Some(format!(
++                        "{}\\{}",
++                        old.trim_matches('\\'),
++                        ns.value.trim_matches('\\')
++                    ))),
++                    Ok(None) => Ok(Some(ns.value.clone())),
++                    Err(()) => Err(()),
++                },
++            };
++        }
++    }
++    fn owner(&self) -> Option<String> {
++        if self.invalid {
++            return None;
++        }
++        let controller = self.controller.as_ref()?;
++        let namespace = self.namespace.as_ref().ok()?;
++        let Some(namespace) = namespace else {
++            return Some(controller.subject.clone());
++        };
++        if namespace.is_empty() || controller.rooted {
++            return Some(controller.subject.clone());
++        }
++        let runtime = controller.runtime.as_deref()?;
++        let name = if runtime.starts_with(namespace) {
++            runtime.to_owned()
++        } else {
++            format!("{namespace}\\{runtime}")
++        };
++        if name.contains("::") || !super::expressions::valid_literal_callable_target(&name) {
++            return None;
++        }
++        Some(format!("\\{}", name.trim_start_matches('\\')))
++    }
++}
++struct Region {
++    start: u32,
++    end: u32,
++    parent: Option<usize>,
++    owner: Option<String>,
++}
++#[derive(Default)]
++pub(crate) struct RouteGroupContexts {
++    regions: Vec<Region>,
++}
++impl RouteGroupContexts {
++    pub(crate) fn collect(
++        program: &Program<'_>,
++        content: &str,
++        names: Option<&OwnedResolvedNames>,
++    ) -> Self {
++        if !content
++            .as_bytes()
++            .windows(5)
++            .any(|s| s.eq_ignore_ascii_case(b"group"))
++        {
++            return Self::default();
++        }
++        let mut collected = Collected::default();
++        Collector { names }.walk_program(program, &mut collected);
++        if collected.groups.is_empty() {
++            return Self::default();
++        }
++        let invoked: HashSet<_> = collected.groups.iter().map(|r| (r.start, r.end)).collect();
++        collected.groups.extend(
++            collected
++                .scopes
++                .into_iter()
++                .filter(|range| !invoked.contains(range))
++                .map(|(start, end)| Pending {
++                    start,
++                    end,
++                    binding: None,
++                }),
++        );
++        collected
++            .groups
++            .sort_by_key(|r| (r.start, std::cmp::Reverse(r.end)));
++        let mut regions: Vec<Region> = Vec::with_capacity(collected.groups.len());
++        let mut frames: Vec<Frame> = Vec::with_capacity(collected.groups.len());
++        let mut stack: Vec<usize> = Vec::new();
++        for pending in collected.groups {
++            while stack
++                .last()
++                .is_some_and(|p| regions[*p].end <= pending.start)
++            {
++                stack.pop();
++            }
++            let parent = stack.last().copied();
++            let mut frame = parent.map_or_else(Frame::default, |p| frames[p].clone());
++            frame.apply(pending.binding.as_ref());
++            let index = regions.len();
++            regions.push(Region {
++                start: pending.start,
++                end: pending.end,
++                parent,
++                owner: frame.owner(),
++            });
++            frames.push(frame);
++            stack.push(index);
++        }
++        Self { regions }
++    }
++    pub(crate) fn owner_at(&self, offset: u32) -> Option<&str> {
++        let mut index = self
++            .regions
++            .partition_point(|r| r.start <= offset)
++            .checked_sub(1)?;
++        loop {
++            let region = &self.regions[index];
++            if offset < region.end {
++                return region.owner.as_deref();
++            }
++            index = region.parent?;
++        }
++    }
++}
++
++struct Emitter<'a> {
++    content: &'a str,
++    names: Option<&'a OwnedResolvedNames>,
++    contexts: &'a RouteGroupContexts,
++}
++impl<'ast, 'arena> Walker<'ast, 'arena, (Vec<SymbolSpan>, Vec<(u32, u32)>)> for Emitter<'_> {
++    fn walk_in_expression(
++        &self,
++        node: &'ast Expression<'arena>,
++        out: &mut (Vec<SymbolSpan>, Vec<(u32, u32)>),
++    ) {
++        let Expression::Call(call) = node else { return };
++        let Some(group) = laravel_route_controller_group(call, self.names) else {
++            return;
++        };
++        let Some(callback) = group.callback else {
++            return;
++        };
++        callbacks(callback, &mut |expr| {
++            let (start, _) = callback_range(expr);
++            let Some(controller) = self.contexts.owner_at(start) else {
++                return;
++            };
++            let first = out.0.len();
++            laravel_route_scan_group_body(expr, controller, self.content, &mut out.0, self.names);
++            out.1
++                .extend(out.0[first..].iter().map(|s| (s.start, s.end)));
++        });
++    }
++}
++pub(super) fn emit(
++    program: &Program<'_>,
++    content: &str,
++    names: Option<&OwnedResolvedNames>,
++    spans: &mut Vec<SymbolSpan>,
++    non_invoked: &mut Vec<(u32, u32)>,
++) {
++    let contexts = RouteGroupContexts::collect(program, content, names);
++    if contexts.regions.is_empty() {
++        return;
++    }
++    let mut out = (Vec::new(), Vec::new());
++    Emitter {
++        content,
++        names,
++        contexts: &contexts,
++    }
++    .walk_program(program, &mut out);
++    spans.extend(out.0);
++    non_invoked.extend(out.1);
++}
+--- a/src/symbol_map/extraction/mod.rs
++++ b/src/symbol_map/extraction/mod.rs
+@@ -164,6 +164,7 @@
+ mod expressions;
+ mod keywords;
+ pub(crate) mod laravel;
++pub(crate) mod laravel_route_context;
+ mod phpunit;
+ mod statements;
+ mod subject_text;
+@@ -280,6 +281,14 @@
+     for stmt in program.statements.iter() {
+         extract_from_statement(stmt, &mut ctx, 0);
+     }
++
++    laravel_route_context::emit(
++        program,
++        content,
++        resolved_names,
++        &mut ctx.spans,
++        &mut ctx.non_invoked_callable_spans,
++    );
+ 
+     // ── Sweep all docblock trivia for floating references ───────────
+     // Docblocks attached to classes, functions, methods, properties, and
+--- a/src/symbol_map/extraction/expressions/calls.rs
++++ b/src/symbol_map/extraction/expressions/calls.rs
+@@ -359,22 +359,6 @@
+     scope_start: u32,
+     visit_receiver: bool,
+ ) {
+-    if let Some(group) = laravel_route_controller_group(call, ctx.resolved_names)
+-        && let Some(Some(controller)) = group.controller
+-        && let Some(callback) = group.callback
+-    {
+-        let start = ctx.spans.len();
+-        laravel_route_scan_group_body(
+-            callback,
+-            &controller,
+-            ctx.content,
+-            &mut ctx.spans,
+-            ctx.resolved_names,
+-        );
+-        // Route registrations refer to methods without invoking them.
+-        ctx.non_invoked_callable_spans
+-            .extend(ctx.spans[start..].iter().map(|span| (span.start, span.end)));
+-    }
+     let (callee, arguments, kind) = match call {
+         Call::Function(call) => {
+             let expr = crate::parser::unwrap_parens(call.function);
+--- a/src/completion/laravel_route_controller.rs
++++ b/src/completion/laravel_route_controller.rs
+@@ -22,7 +22,6 @@
+ 
+ use tower_lsp::lsp_types::*;
+ 
+-use mago_span::HasSpan;
+ use mago_syntax::cst::*;
+ 
+ use crate::Backend;
+@@ -304,32 +303,15 @@
+     cursor_offset: u32,
+     resolved_names: Option<&crate::names::OwnedResolvedNames>,
+ ) -> Option<String> {
+-    let mut best: Option<(Option<String>, u32)> = None; // (controller, range_size)
+-
+-    crate::virtual_members::laravel::walk_all_php_expressions(content, &mut |expr| {
+-        if let Expression::Call(call) = expr
+-            && let Some(group) =
+-                crate::symbol_map::extraction::laravel::laravel_route_controller_group(
+-                    call,
+-                    resolved_names,
+-                )
+-            && let Some(controller) = group.controller
+-        {
+-            let span = group
+-                .callback
+-                .map(HasSpan::span)
+-                .unwrap_or_else(|| group.arguments.span());
+-            if cursor_offset >= span.start.offset && cursor_offset <= span.end.offset {
+-                let range_size = span.end.offset - span.start.offset;
+-                if best.as_ref().is_none_or(|(_, size)| range_size < *size) {
+-                    best = Some((controller, range_size));
+-                }
+-            }
+-        }
+-        ControlFlow::Continue(())
+-    });
+-
+-    best.and_then(|(name, _)| name)
++    crate::parser::with_parsed_program(content, "laravel_route_controller_context", |program, _| {
++        crate::symbol_map::extraction::laravel_route_context::RouteGroupContexts::collect(
++            program,
++            content,
++            resolved_names,
++        )
++        .owner_at(cursor_offset)
++        .map(str::to_owned)
++    })
+ }
+ 
+ // ─── Completion ─────────────────────────────────────────────────────────────
+--- a/tests/integration/laravel_route_controller.rs
++++ b/tests/integration/laravel_route_controller.rs
+@@ -1147,3 +1147,190 @@
+     );
+     assert_eq!(callers[0].from.name, "invokeController");
+ }
++
++async fn assert_namespaced_route_owner(text: &str, needle: &str, declaration: &str, ty: &str) {
++    use crate::common::position_after;
++    let backend = create_test_backend();
++    let uri = Url::parse("file:///namespace-route-owner.php").unwrap();
++    open_php(&backend, &uri, text).await;
++    let at = position_after(text, needle);
++    let expected = position_after(text, declaration);
++    let target = goto_def(&backend, &uri, at.line, at.character).await;
++    assert!(
++        matches!(target,Some(GotoDefinitionResponse::Scalar(ref l)) if l.uri==uri && l.range.start==expected),
++        "namespace target {needle}: {target:?}"
++    );
++    let hover = backend
++        .hover(HoverParams {
++            text_document_position_params: TextDocumentPositionParams {
++                text_document: TextDocumentIdentifier { uri: uri.clone() },
++                position: at,
++            },
++            work_done_progress_params: Default::default(),
++        })
++        .await
++        .unwrap()
++        .expect("namespace hover");
++    assert!(
++        matches!(hover.contents,HoverContents::Markup(ref m) if m.value.contains(&format!("showInvoice(): {ty}"))),
++        "namespace hover {hover:?}"
++    );
++    let items = complete_at(&backend, &uri, text, at.line, at.character).await;
++    assert!(
++        items
++            .iter()
++            .any(|i| i.insert_text.as_deref() == Some("showInvoice")
++                && i.detail.as_deref().is_some_and(|d| d.contains(ty))),
++        "namespace completion {items:?}"
++    );
++}
++
++#[tokio::test]
++async fn literal_group_namespaces_resolve_runtime_relative_controllers() {
++    for group in [
++        "Routes::namespace('Demo')->controller('Inner')->group(fn () => ACTION)",
++        "Routes::group(['namespace'=>'Demo','controller'=>'Inner'], fn () => ACTION)",
++        "Routes::group(routes: [fn () => ACTION], attributes: array('namespace'=>'Demo','controller'=>'Inner'))",
++    ] {
++        let call = group.replace("ACTION", "Routes::get('/😀/direct', 'showInvoice')");
++        let text = format!(
++            "<?php\nnamespace Demo; use Illuminate\\Support\\Facades\\Route as Routes;\nclass Inner {{public function showInvoice(): bool {{return true;}}}}\n{call};\n"
++        );
++        assert_namespaced_route_owner(&text, "'showIn", "public function ", "bool").await;
++    }
++}
++
++#[tokio::test]
++async fn parent_namespaces_merge_with_relative_static_and_fluent_children() {
++    for group in [
++        "Routes::namespace('Demo')->group(fn () => Routes::namespace('Nested')->controller('Inner')->group(fn () => ACTION))",
++        "Routes::group(['namespace'=>'Demo'], fn () => Routes::group(['namespace'=>'Nested','controller'=>'Inner'], fn () => ACTION))",
++    ] {
++        let call = group.replace("ACTION", "Routes::get('/nested', 'showInvoice')");
++        let text = format!(
++            "<?php\nnamespace Demo\\Nested {{class Inner {{public function showInvoice(): bool {{return true;}}}}}}\nnamespace {{use Illuminate\\Support\\Facades\\Route as Routes; {call};}}\n"
++        );
++        assert_namespaced_route_owner(&text, "'showIn", "public function ", "bool").await;
++    }
++}
++
++#[tokio::test]
++async fn rooted_namespaces_reset_parents_and_rooted_controller_strings_bypass_them() {
++    for group in [
++        "Routes::namespace('Missing')->group(fn () => Routes::namespace('\\Demo')->controller('Inner')->group(fn () => ACTION))",
++        "Routes::namespace('Missing')->controller('\\Demo\\Inner')->group(fn () => ACTION)",
++    ] {
++        let call = group.replace("ACTION", "Routes::get('/rooted', 'showInvoice')");
++        let text = format!(
++            "<?php\nnamespace Demo {{class Inner {{public function showInvoice(): bool {{return true;}}}}}}\nnamespace {{use Illuminate\\Support\\Facades\\Route as Routes; {call};}}\n"
++        );
++        assert_namespaced_route_owner(&text, "'showIn", "public function ", "bool").await;
++    }
++}
++
++#[tokio::test]
++async fn class_constants_use_lexical_fqns_before_runtime_namespace_prefixing() {
++    use crate::common::position_after;
++    let prefix = "<?php\nnamespace Demo; use Illuminate\\Support\\Facades\\Route as Routes; use Demo\\Inner as Target;\nclass Inner {public function showInvoice(): bool {return true;}}\n";
++    let text = format!(
++        "{prefix}Routes::namespace('Demo')->controller(Target::class)->group(fn () => Routes::get('/control', 'showInvoice'));\n"
++    );
++    assert_namespaced_route_owner(&text, "'showIn", "public function ", "bool").await;
++    for controller in ["Target::class", "\\Demo\\Inner::class"] {
++        let backend = create_test_backend();
++        let uri = Url::parse("file:///mangled-namespace.php").unwrap();
++        let text = format!(
++            "{prefix}Routes::namespace('Other')->controller({controller})->group(fn () => Routes::get('/mangled', 'showInvoice'));\n"
++        );
++        open_php(&backend, &uri, &text).await;
++        let at = position_after(&text, "'showIn");
++        assert!(
++            goto_def(&backend, &uri, at.line, at.character)
++                .await
++                .is_none(),
++            "class constant incorrectly bypassed runtime namespace {controller}"
++        );
++        let items = complete_at(&backend, &uri, &text, at.line, at.character).await;
++        assert!(
++            !method_labels(&items).iter().any(|m| m == "showInvoice"),
++            "mangled namespace completion {items:?}"
++        );
++    }
++}
++
++#[tokio::test]
++async fn unknown_group_namespaces_do_not_borrow_known_parent_controllers() {
++    use crate::common::position_after;
++    for group in [
++        "Routes::namespace($picked)->group(fn () => ACTION)",
++        "Routes::group(['namespace'=>$picked], fn () => ACTION)",
++    ] {
++        let backend = create_test_backend();
++        let uri = Url::parse("file:///unknown-route-namespace.php").unwrap();
++        let call = group.replace("ACTION", "Routes::get('/unknown', 'showInvoice')");
++        let text = format!(
++            "<?php\nuse Illuminate\\Support\\Facades\\Route as Routes;\nclass Outer {{public function showInvoice(): string {{return 'outer';}}}}\nRoutes::controller(Outer::class)->group(fn () => {call});\n"
++        );
++        open_php(&backend, &uri, &text).await;
++        let at = position_after(&text, "'showIn");
++        assert!(
++            goto_def(&backend, &uri, at.line, at.character)
++                .await
++                .is_none(),
++            "unknown namespace definition borrowed parent"
++        );
++        let hover = backend
++            .hover(HoverParams {
++                text_document_position_params: TextDocumentPositionParams {
++                    text_document: TextDocumentIdentifier { uri: uri.clone() },
++                    position: at,
++                },
++                work_done_progress_params: Default::default(),
++            })
++            .await
++            .unwrap();
++        assert!(hover.is_none(), "unknown namespace hover {hover:?}");
++        let items = complete_at(&backend, &uri, &text, at.line, at.character).await;
++        assert!(
++            !method_labels(&items).iter().any(|m| m == "showInvoice"),
++            "unknown namespace completion {items:?}"
++        );
++    }
++}
++
++#[tokio::test]
++async fn namespace_only_children_rebind_inherited_relative_controller_names() {
++    let text = "<?php\nnamespace Demo {class Inner {public function showInvoice(): string {return 'outer';}}}\nnamespace Demo\\Nested {class Inner {public function showInvoice(): bool {return true;}}}\nnamespace {use Illuminate\\Support\\Facades\\Route as Routes; Routes::namespace('Demo')->controller('Inner')->group(fn () => [Routes::get('/outer', 'showInvoice'), Routes::namespace('Nested')->group(fn () => Routes::get('/inner', 'showInvoice'))]);}\n";
++    assert_namespaced_route_owner(
++        text,
++        "'/outer', 'showIn",
++        "class Inner {public function ",
++        "string",
++    )
++    .await;
++    assert_namespaced_route_owner(text,"'/inner', 'showIn","class Inner {public function showInvoice(): string {return 'outer';}}}\nnamespace Demo\\Nested {class Inner {public function ","bool").await;
++}
++
++#[tokio::test]
++async fn deferred_functions_do_not_inherit_registration_time_namespaces() {
++    use crate::common::position_after;
++    let text = "<?php\nnamespace Demo; use Illuminate\\Support\\Facades\\Route as Routes;\nclass Inner {public function showInvoice(): bool {return true;}}\nRoutes::namespace('Demo')->controller('Inner')->group(function () {Routes::get('/control', 'showInvoice'); $later=fn () => Routes::controller('Inner')->group(fn () => Routes::get('/deferred', 'showInvoice')); function registerLater() {Routes::controller('Inner')->group(fn () => Routes::get('/named', 'showInvoice'));}});\n";
++    assert_namespaced_route_owner(text, "'/control', 'showIn", "public function ", "bool").await;
++    let backend = create_test_backend();
++    let uri = Url::parse("file:///deferred-route-namespace.php").unwrap();
++    open_php(&backend, &uri, text).await;
++    for needle in ["'/deferred', 'showIn", "'/named', 'showIn"] {
++        let at = position_after(text, needle);
++        assert!(
++            goto_def(&backend, &uri, at.line, at.character)
++                .await
++                .is_none(),
++            "deferred function borrowed namespace {needle}"
++        );
++        let items = complete_at(&backend, &uri, text, at.line, at.character).await;
++        assert!(
++            !method_labels(&items).iter().any(|m| m == "showInvoice"),
++            "deferred namespace completion {items:?}"
++        );
++    }
++}
+--- a/docs/CHANGELOG.md
++++ b/docs/CHANGELOG.md
+@@ -14,6 +14,8 @@
+ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+ 
+ ## [Unreleased]
++
++- **Respect namespace attributes in Laravel controller groups.** Static and fluent groups share inherited and rooted namespace handling for navigation, completion and refactoring. Unknown namespaces and deferred callables do not borrow an enclosing controller. Contributed by @thinkycz.
+ 
+ - **Follow controllers configured in route-group attributes.** Navigation, completion and refactoring use the nearest static or fluent group binding, including named arguments and callback lists. Unknown bindings stay unresolved. Contributed by @thinkycz.
+ 
+--- a/examples/laravel/app/Demo.php
++++ b/examples/laravel/app/Demo.php
+@@ -1722,6 +1722,17 @@
+         Route::{'group'}(['controller' => BakeryController::class], fn () => Route::get('/attrs-literal', 'index'));
+     }
+ 
++    public function namespacedControllerGroups(): void
++    {
++        // Try: navigate/complete index in each namespace-aware group (View).
++        Route::group(['namespace' => 'App\\Http\\Controllers', 'controller' => 'BakeryController'], fn () => Route::get('/ns-attrs', 'index'));
++        Route::namespace('App\\Http\\Controllers')->group(fn () => Route::controller('BakeryController')->group(fn () => Route::get('/ns-inherited', 'index')));
++        Route::namespace('App\\Http')->group(fn () => Route::namespace('Controllers')->controller('BakeryController')->group(fn () => Route::get('/ns-relative', 'index')));
++        Route::namespace('Unrelated')->group(fn () => Route::namespace('\\App\\Http\\Controllers')->controller('BakeryController')->group(fn () => Route::get('/ns-reset', 'index')));
++        Route::namespace('App\\Http\\Controllers')->controller(BakeryController::class)->group(fn () => Route::get('/ns-constant', 'index'));
++        Route::namespace('Other')->controller('\\App\\Http\\Controllers\\BakeryController')->group(fn () => Route::get('/ns-rooted', 'index'));
++    }
++
+ }
+ 
+ // PHP Workbench: Laravel: Go to Route lists statically named routes and opens
+--- a/examples/laravel/assertions.php
++++ b/examples/laravel/assertions.php
+@@ -2033,6 +2033,25 @@
+     }
+ })();
+ 
++// Namespace attributes are checked against the actual Laravel router.
++(function (): void {
++$r = new Illuminate\Routing\Router(new Illuminate\Events\Dispatcher());
++$full = App\Http\Controllers\BakeryController::class;
++$r->group(['namespace'=>'App\Http\Controllers','controller'=>'BakeryController'], fn () => $r->get('/attr', 'index')->name('attr'));
++$r->namespace('App\Http\Controllers')->group(fn () => $r->controller('BakeryController')->group(fn () => $r->get('/inherit', 'index')->name('inherit')));
++$r->namespace('App\Http')->group(fn () => $r->namespace('Controllers')->controller('BakeryController')->group(fn () => $r->get('/relative', 'index')->name('relative')));
++$r->namespace('Unrelated')->group(fn () => $r->namespace('\App\Http\Controllers')->controller('BakeryController')->group(fn () => $r->get('/reset', 'index')->name('reset')));
++$r->namespace('App\Http\Controllers')->controller($full)->group(fn () => $r->get('/constant', 'index')->name('constant'));
++$r->namespace('Other')->controller(chr(92) . $full)->group(fn () => $r->get('/rooted', 'index')->name('rooted'));
++$r->namespace('Other')->controller($full)->group(fn () => $r->get('/mangled', 'index')->name('mangled'));
++$actual = [];
++foreach ($r->getRoutes() as $route) { $actual[$route->getName()]=$route->getActionName(); }
++check("Namespace groups register seven routes", count($actual) === 7);
++foreach (['attr','inherit','relative','reset','constant'] as $name) { check('Namespace group ' . $name . ' resolves the controller', $actual[$name] === $full . '@index'); }
++check('Rooted controller bypasses a namespace prefix', $actual['rooted'] === chr(92) . $full . '@index');
++check('Class constant runtime name still receives a mismatched namespace prefix', $actual['mangled'] === 'Other' . chr(92) . $full . '@index');
++})();
++
+ // ─── Summary ────────────────────────────────────────────────────────────────
+ 
+ echo "\n";

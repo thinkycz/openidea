@@ -3808,15 +3808,18 @@ async fn laravel_match_actions_follow_aliases_nested_owners_and_unsaved_controll
         "<?php\nnamespace App;\nclass InvoiceController { public function showInvoice(): string { return 'ok'; } }\n";
     let inner =
         "<?php\nnamespace App;\nclass InnerController { public function showInvoice(): bool { return true; } }\n";
-    let routes = "<?php\nuse Illuminate\\Support\\Facades\\Route as Routes;\nuse App\\InvoiceController as Main;\nuse App\\InnerController as Inner;\nRoutes::controller(Main::class)->group(function () {\n Routes::get('/standard', 'showInvoice')->name('standard');\n Routes::match(['get', 'post'], '/😀/showInvoice/{id}', 'showInvoice')->name('matched');\n Routes::match(action: 'showInvoice', methods: ['post'], uri: '/named')->name('named');\n Routes::middleware('auth')->get('/fluent', 'showInvoice')->name('fluent-get');\n Routes::prefix('billing')->middleware('auth')->match(['get', 'post'], '/😀/fluent/{id}', 'showInvoice')->name('fluent-matched');\n Routes::name('billing.')->withoutMiddleware('guest')->match(action: 'showInvoice', methods: ['get'], uri: '/named')->name('fluent-named');\n Routes::controller(Inner::class)->get('/leaf-controller', 'showInvoice')->name('leaf-controller');\n Routes::controller('App\\InnerController')->group(function () { Routes::get('/string-inner', 'showInvoice')->name('string-inner'); });\n Routes::controller('App\\InnerController')->group(static fn () => Routes::get('/😀/arrow-inner', 'showInvoice')->name('arrow-inner'));\n Routes::prefix('array')->group(fn () => [Routes::get('/😀/array-first', 'showInvoice')->name('array-first'), Routes::match(['get'], '/array-second', 'showInvoice')->name('array-second')]);\n Routes::controller('App\\InnerController')->group(fn () => array(Routes::get('/array-inner', 'showInvoice')->name('array-inner')));\n Routes::group(['prefix'=>'attrs'], fn () => Routes::get('/😀/attrs-inherited', 'showInvoice')->name('attrs-inherited'));\n Routes::group(['controller'=>Inner::class], fn () => Routes::get('/attrs-inner', 'showInvoice')->name('attrs-inner'));\n Routes::controller(Inner::class)->group(function () {\n  Routes::middleware('auth')->match(['get'], '/nested', 'showInvoice')->name('nested');\n });\n});\nRoutes::controller('App\\InvoiceController')->group(function () { Routes::get('/😀/string/{id}', 'showInvoice')->name('string-main'); });\nRoutes::controller('App\\InvoiceController')->group(fn () => Routes::middleware('auth')->get('/😀/arrow-main', 'showInvoice')->name('arrow-main'));\nRoutes::group(routes: [fn () => Routes::get('/😀/attrs-direct', 'showInvoice')->name('attrs-direct')], attributes: ['controller'=>'App\\InvoiceController']);\n";
+    let routes = "<?php\nuse Illuminate\\Support\\Facades\\Route as Routes;\nuse App\\InvoiceController as Main;\nuse App\\InnerController as Inner;\nRoutes::controller(Main::class)->group(function () {\n Routes::get('/standard', 'showInvoice')->name('standard');\n Routes::match(['get', 'post'], '/😀/showInvoice/{id}', 'showInvoice')->name('matched');\n Routes::match(action: 'showInvoice', methods: ['post'], uri: '/named')->name('named');\n Routes::middleware('auth')->get('/fluent', 'showInvoice')->name('fluent-get');\n Routes::prefix('billing')->middleware('auth')->match(['get', 'post'], '/😀/fluent/{id}', 'showInvoice')->name('fluent-matched');\n Routes::name('billing.')->withoutMiddleware('guest')->match(action: 'showInvoice', methods: ['get'], uri: '/named')->name('fluent-named');\n Routes::controller(Inner::class)->get('/leaf-controller', 'showInvoice')->name('leaf-controller');\n Routes::controller('App\\InnerController')->group(function () { Routes::get('/string-inner', 'showInvoice')->name('string-inner'); });\n Routes::controller('App\\InnerController')->group(static fn () => Routes::get('/😀/arrow-inner', 'showInvoice')->name('arrow-inner'));\n Routes::prefix('array')->group(fn () => [Routes::get('/😀/array-first', 'showInvoice')->name('array-first'), Routes::match(['get'], '/array-second', 'showInvoice')->name('array-second')]);\n Routes::controller('App\\InnerController')->group(fn () => array(Routes::get('/array-inner', 'showInvoice')->name('array-inner')));\n Routes::group(['prefix'=>'attrs'], fn () => Routes::get('/😀/attrs-inherited', 'showInvoice')->name('attrs-inherited'));\n Routes::group(['controller'=>Inner::class], fn () => Routes::get('/attrs-inner', 'showInvoice')->name('attrs-inner'));\n Routes::controller(Inner::class)->group(function () {\n  Routes::middleware('auth')->match(['get'], '/nested', 'showInvoice')->name('nested');\n });\n});\nRoutes::controller('App\\InvoiceController')->group(function () { Routes::get('/😀/string/{id}', 'showInvoice')->name('string-main'); });\nRoutes::controller('App\\InvoiceController')->group(fn () => Routes::middleware('auth')->get('/😀/arrow-main', 'showInvoice')->name('arrow-main'));\nRoutes::group(routes: [fn () => Routes::get('/😀/attrs-direct', 'showInvoice')->name('attrs-direct')], attributes: ['controller'=>'App\\InvoiceController']);\nRoutes::namespace('App')->controller('InvoiceController')->group(fn () => Routes::get('/😀/ns-direct', 'showInvoice')->name('ns-direct'));\nRoutes::group(['namespace'=>'App','controller'=>'InvoiceController'], fn () => Routes::get('/ns-attrs', 'showInvoice')->name('ns-attrs'));\nRoutes::namespace('App')->controller('InvoiceController')->group(fn () => Routes::namespace('Other')->group(fn () => Routes::get('/ns-alt', 'showInvoice')->name('ns-alt')));\n";
     let caller = "<?php\nuse App\\InvoiceController as Main;\n(new Main())->showInvoice();\n";
     let composer = r#"{"require":{"php":"^8.3","laravel/framework":"^13.0"},"autoload":{"psr-4":{"App\\":"app/"}}}"#;
+    let alternate =
+        "<?php\nnamespace App\\Other;\nclass InvoiceController {public function showInvoice(): bool {return true;}}\n";
     let files = [
         ("composer.json", composer),
         ("app/InvoiceController.php", controller),
         ("app/InnerController.php", inner),
         ("routes/web.php", routes),
         ("app/Caller.php", caller),
+        ("app/Other/InvoiceController.php", alternate),
     ];
     for (name, text) in files {
         let path = root.join(name);
@@ -3841,10 +3844,16 @@ async fn laravel_match_actions_follow_aliases_nested_owners_and_unsaved_controll
     let mgr = LspManager::new(root.clone(), Arc::new(LanguageRegistry::from_configs(vec![php])), Arc::new(|_| {}));
     let candidate_root = root.clone();
     mgr.set_candidates_hook(Box::new(move |_, _| ide_lsp::CandidateFiles {
-        files: ["routes/web.php", "app/InvoiceController.php", "app/InnerController.php", "app/Caller.php"]
-            .iter()
-            .map(|name| candidate_root.join(name))
-            .collect(),
+        files: [
+            "routes/web.php",
+            "app/InvoiceController.php",
+            "app/InnerController.php",
+            "app/Caller.php",
+            "app/Other/InvoiceController.php",
+        ]
+        .iter()
+        .map(|name| candidate_root.join(name))
+        .collect(),
         limit_hit: false,
     }));
     let route_doc = DocId::next();
@@ -3860,6 +3869,7 @@ async fn laravel_match_actions_follow_aliases_nested_owners_and_unsaved_controll
     let result: Result<(), String> = async {
         let main_path = root.join("app/InvoiceController.php");
         let inner_path = root.join("app/InnerController.php");
+        let alternate_path = root.join("app/Other/InvoiceController.php");
         let route_path = root.join("routes/web.php");
         let caller_path = root.join("app/Caller.php");
         let positions = [
@@ -3876,6 +3886,8 @@ async fn laravel_match_actions_follow_aliases_nested_owners_and_unsaved_controll
             pos(routes, "showInvoice')->name('array-second')"),
             pos(routes, "showInvoice')->name('attrs-inherited')"),
             pos(routes, "showInvoice')->name('attrs-direct')"),
+            pos(routes, "showInvoice')->name('ns-direct')"),
+            pos(routes, "showInvoice')->name('ns-attrs')"),
         ];
         let inner_positions = [
             pos(routes, "showInvoice')->name('nested')"),
@@ -3888,6 +3900,7 @@ async fn laravel_match_actions_follow_aliases_nested_owners_and_unsaved_controll
             .iter()
             .map(|at| (*at, &main_path, controller, "string"))
             .chain(inner_positions.iter().map(|at| (*at, &inner_path, inner, "bool")))
+            .chain(std::iter::once((pos(routes, "showInvoice')->name('ns-alt')"), &alternate_path, alternate, "bool")))
         {
             let targets = mgr.goto(route_doc, at, GotoKind::Definition).await.map_err(|e| e.to_string())?;
             if targets.len() != 1
@@ -3922,11 +3935,11 @@ async fn laravel_match_actions_follow_aliases_nested_owners_and_unsaved_controll
         expected.sort();
         if actual != expected || refs.incomplete.is_some() {
             return Err(format!(
-                "method references must include only declaration/thirteen main actions/caller: {refs:?}"
+                "method references must include only declaration/fifteen main actions/caller: {refs:?}"
             ));
         }
         let rename = mgr
-            .rename(route_doc, positions[12], "displayInvoice".into(), Default::default())
+            .rename(route_doc, positions[14], "displayInvoice".into(), Default::default())
             .await
             .map_err(|e| e.to_string())?;
         if rename.incomplete.is_some() {
@@ -3957,6 +3970,7 @@ async fn laravel_match_actions_follow_aliases_nested_owners_and_unsaved_controll
             (8, "arrow-main"),
             (10, "array-first"),
             (12, "attrs-direct"),
+            (14, "ns-attrs"),
         ] {
             let edited = routes
                 .replace(&format!("showInvoice')->name('{name}')"), &format!("showInvoiceExtra')->name('{name}')"));
@@ -3982,7 +3996,7 @@ async fn laravel_match_actions_follow_aliases_nested_owners_and_unsaved_controll
 
         let rebound =
             routes.replace("controller('App\\InvoiceController')->group", "controller('App\\InnerController')->group");
-        replace(&mgr, route_doc, 14, routes, &rebound);
+        replace(&mgr, route_doc, 16, routes, &rebound);
         let rebound_at = pos(&rebound, "showInvoice')->name('arrow-main')");
         let target = mgr.goto(route_doc, rebound_at, GotoKind::Definition).await.map_err(|e| e.to_string())?;
         if target.len() != 1
@@ -3999,11 +4013,11 @@ async fn laravel_match_actions_follow_aliases_nested_owners_and_unsaved_controll
         if !hover.contents.value.contains("showInvoice(): bool") {
             return Err(format!("rebound type stale: {hover:?}"));
         }
-        replace(&mgr, route_doc, 15, &rebound, routes);
+        replace(&mgr, route_doc, 17, &rebound, routes);
 
         let attrs_rebound =
             routes.replace("['controller'=>'App\\InvoiceController']", "['controller'=>'App\\InnerController']");
-        replace(&mgr, route_doc, 16, routes, &attrs_rebound);
+        replace(&mgr, route_doc, 18, routes, &attrs_rebound);
         let attrs_at = pos(&attrs_rebound, "showInvoice')->name('attrs-direct')");
         let target = mgr.goto(route_doc, attrs_at, GotoKind::Definition).await.map_err(|e| e.to_string())?;
         let hover = mgr
@@ -4018,11 +4032,32 @@ async fn laravel_match_actions_follow_aliases_nested_owners_and_unsaved_controll
         {
             return Err(format!("attribute group rebind stale: {target:?} {hover:?}"));
         }
-        replace(&mgr, route_doc, 17, &attrs_rebound, routes);
+        replace(&mgr, route_doc, 19, &attrs_rebound, routes);
+
+        let namespace_rebound = routes.replace(
+            "['namespace'=>'App','controller'=>'InvoiceController']",
+            "['namespace'=>'App\\Other','controller'=>'InvoiceController']",
+        );
+        replace(&mgr, route_doc, 20, routes, &namespace_rebound);
+        let at = pos(&namespace_rebound, "showInvoice')->name('ns-attrs')");
+        let target = mgr.goto(route_doc, at, GotoKind::Definition).await.map_err(|e| e.to_string())?;
+        let hover = mgr
+            .hover(route_doc, at, Default::default())
+            .await
+            .map_err(|e| e.to_string())?
+            .ok_or("namespace rebind hover")?;
+        if target.len() != 1
+            || target[0].path.to_path_buf() != alternate_path
+            || target[0].range.start != pos(alternate, "showInvoice")
+            || !hover.contents.value.contains("showInvoice(): bool")
+        {
+            return Err(format!("namespace-only rebind stale: {target:?} {hover:?}"));
+        }
+        replace(&mgr, route_doc, 21, &namespace_rebound, routes);
         let unknown = routes
             .replace("controller('App\\InnerController')->group", "controller($selected)->group")
             .replace("['controller'=>Inner::class]", "['controller'=>$selected]");
-        replace(&mgr, route_doc, 18, routes, &unknown);
+        replace(&mgr, route_doc, 22, routes, &unknown);
         for name in ["attrs-inner", "array-inner", "arrow-inner", "string-inner"] {
             let at = pos(&unknown, &format!("showInvoice')->name('{name}')"));
             let target = mgr.goto(route_doc, at, GotoKind::Definition).await.map_err(|e| e.to_string())?;
@@ -4038,7 +4073,24 @@ async fn laravel_match_actions_follow_aliases_nested_owners_and_unsaved_controll
                 ));
             }
         }
-        replace(&mgr, route_doc, 19, &unknown, routes);
+        replace(&mgr, route_doc, 23, &unknown, routes);
+
+        let unknown_namespace = routes.replace(
+            "['namespace'=>'App','controller'=>'InvoiceController']",
+            "['namespace'=>$selected,'controller'=>'InvoiceController']",
+        );
+        replace(&mgr, route_doc, 24, routes, &unknown_namespace);
+        let at = pos(&unknown_namespace, "showInvoice')->name('ns-attrs')");
+        let target = mgr.goto(route_doc, at, GotoKind::Definition).await.map_err(|e| e.to_string())?;
+        let hover = mgr.hover(route_doc, at, Default::default()).await.map_err(|e| e.to_string())?;
+        let items = mgr
+            .completion(route_doc, Pos::new(at.line, at.col + 2), None, Default::default())
+            .await
+            .map_err(|e| e.to_string())?;
+        if !target.is_empty() || hover.is_some() || items.items.iter().any(|i| i.insert_text == "showInvoice") {
+            return Err("unknown namespace reused known owner".into());
+        }
+        replace(&mgr, route_doc, 25, &unknown_namespace, routes);
         let unsaved = controller
             .replace("<?php\n", "<?php\n// 😀 unsaved\n")
             .replace(": string", ": int")
@@ -4048,7 +4100,16 @@ async fn laravel_match_actions_follow_aliases_nested_owners_and_unsaved_controll
             if phase == 1 {
                 mgr.restart(mgr.servers()[0].id).await.map_err(|e| e.to_string())?;
             }
-            for at in [positions[12], positions[9], positions[8], positions[7], positions[4], positions[1]] {
+            for at in [
+                positions[14],
+                positions[13],
+                positions[12],
+                positions[9],
+                positions[8],
+                positions[7],
+                positions[4],
+                positions[1],
+            ] {
                 let target = mgr.goto(route_doc, at, GotoKind::Definition).await.map_err(|e| e.to_string())?;
                 if target.len() != 1 || target[0].range.start != pos(&unsaved, "showInvoice") {
                     return Err(format!("unsaved match declaration not current phase{phase}: {target:?}"));
@@ -4076,7 +4137,16 @@ async fn laravel_match_actions_follow_aliases_nested_owners_and_unsaved_controll
             }
         }
         mgr.did_close(ctrl_doc);
-        for at in [positions[12], positions[9], positions[8], positions[7], positions[4], positions[1]] {
+        for at in [
+            positions[14],
+            positions[13],
+            positions[12],
+            positions[9],
+            positions[8],
+            positions[7],
+            positions[4],
+            positions[1],
+        ] {
             let restored = mgr.goto(route_doc, at, GotoKind::Definition).await.map_err(|e| e.to_string())?;
             if restored.len() != 1 || restored[0].range.start != pos(controller, "showInvoice") {
                 return Err(format!("closing overlay did not restore declaration: {restored:?}"));

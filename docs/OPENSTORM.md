@@ -1949,6 +1949,93 @@ platform coverage remain partial. No debugger expansion, installation, migration
 publishing, updater activation or notarization occurred. This slice accepts the
 recorded named URI metadata/client workflows, not complete route/framework parity.
 
+Slice82 — fluent controller-group route actions (verified local slice,
+2026-11-13). Slice81 is committed/pushed as
+451391bcdb6e10ecd5052dc7cf5ab6fc0a559f95. A fresh136 wire probe proves ordinary
+get action definition/completion/hover while middleware()->match() returns null
+for all3. The actual OpenStorm client passes its3static controls, then reproduces
+an empty fluent get definition at zero-based8:45. Neither red run is a UI claim.
+
+Append-only0137patch shares AST action binding and member-span extraction across
+static and fluent registrations. Known owner-preserving RouteRegistrar modifiers
+retain the group controller; unknown macros/receivers, already-registered route
+receivers, controller/namespace overrides and ambiguous bindings stay unresolved.
+Positional/named collisions, duplicates, unpacking and positional-after-named
+arguments are refused. Completion keeps the ordinary static fast path and the
+same whole-identifier UTF16 replacement edit. No settings/UI/debugger/execution
+interface is added. Pinned Laravel13.37 registrar source supplies these semantics.
+
+Initial unchanged source passes14cases and fails the new fluent definition.
+After the correction, stronger hover and2additional ambiguity contexts, all15
+controller-module cases pass (5positive layouts/11negative contexts in2new matrix
+cases). Pre-freeze all-target Clippy-fix then fmt leave the tested Rust hashes
+unchanged. All work-source bytes match the immutable reconstruction except the
+expected base136 vs137 acquisition receipt. The patch includes a short changelog,
+working Laravel Demo and5runtime registrar assertions. Source137 reconstructs at
+92e5ca4c2b8a9f492a6a72fed252c3e59bc7872aec8a40b1430286922d92b7e5.
+
+Fresh full engine18428ordinary/17ignored/0filtered plus the separateFIFOchild,
+release all-target Clippy/fmt/fingerprint/build pass. Plain/Laravel syntax/runtime
+checks and275Laravel assertions pass in a separate137fixture;5baseline133
+source/Composer hashes remain unchanged and no environment files are copied.
+Updated Demo analysis retains exactly the3intentional diagnostics, with their
+original positions unchanged. Direct LSP on both new example actions verifies
+exact controller declarations, whole-atom completion edits and readable hover
+through6queries; all3observed example files remain exact. Engine SHA256:
+dc185ceace579952f09e4bdaa4411a706b72ad9f5e093536c0b5f5d95e576d2f.
+
+The actual client extends its existing alias/nested-controller scenario: exact
+main/inner targets and string/bool hover,8references and8checked-rename edits
+across3files excluding inner-owner methods and URI occurrences of the same name. Static
+and fluent completion each replace the full suffix behind Unicode and survive
+resolve. Dependency-only unsaved return/declaration edits keep the route buffer
+unchanged and remain current after restart; closing the controller overlay
+restores disk declaration navigation. Queries do not apply edits; all5owned disk
+originals remain exact. The first137focused run passes; the test is then tightened
+so fluent navigation is FIRST after unsaved edits, restart and close. That final
+case passes1/39filtered in6.78s on the newly emitted binary. The full40actual-
+client/6host suite passes with no ignored or filtered cases on that same final
+source; earlier weaker-order evidence is preserved separately.
+
+Fresh frontend5383tests/487files, typecheck/lint/Knip/format/build and8retention
+checks pass. Initial workspace1759/77ignored/0filtered, fmt/Clippy pass before the
+fluent-first test order; final full workspace1759/77ignored/0filtered and fmt/
+Clippy pass after it, using promoted137resources. The earlier receipt explicitly
+labels136as its ordinary-test resource and137as its delivery target. Both current
+104-case mock suites pass with original source; slice81's isolated inherited
+failure remains historical/unexplained, with no new fix claim. Post-bindings
+typecheck/lint/Knip/format/build also pass. Source/resource/provenance select137.
+
+Signed arm64 development0.1.75 is the sole generated archive at
+artifacts/batches/0.1.75/OpenStorm.app. Executable SHA256:
+d67992121cf70907b292a5053121c0d555e9a200c6a8804e56f058f6ab1b2ac9.
+Strict/deep signature, compiled source snapshot, embedded/resource/canonical137
+hashes, source reconstruction, protected installed21 hash and fixture/Composer
+bytes all pass read-back. The91PHP pivot corpus files lint; prior JSON probe
+integrity is explicitly reused, not presented as a fresh137 wire run. The new
+137example source hashes match the immutable recipe and133baseline originals;
+all6new example replies and3observed originals remain verified. No owned app/
+server process remains. App75 is not launched or installed.
+
+After successful signature/receipt, packaging prunes app74, removes the duplicate75
+bundle, clears21499workspace compiler files/18.6GiB, and clears6959engine compiler
+files/2.0GiB. The inactive exact136canonical executable55976752bytes is removed;
+both compiler roots are absent/empty. Sources, patches, licenses, provenance,
+receipts, evaluation114 and PHP Workbench are preserved. Installed21 is unchanged.
+Evidence: artifacts/checks/slice82 source red/green/prefreeze/freeze/reconciliation/
+full gates, examples/analyzer, baseline/final-fluent-first actual clients, example
+wire probe, SDK/frontend/client-host/postbindings logs, workspace totals, final
+pipeline/read-back and obsolete-engine cleanup;75build/retention receipts. Git
+commit/remote/clean-worktree evidence is recorded after delivery separately.
+
+Native checks remain explicitly user-skipped. All69statuses stay67partial/
+2user-deferred. Direct inline controller owners, namespace changes, custom macros,
+broader unfinished/dynamic route forms, project/configuration/workspace/profile/
+performance/platform matrices and physical Dock-switch attribution remain partial.
+No installation, migration, publishing, updater activation, notarization or new
+debugger functionality is introduced. This is the recorded controller-group slice;
+the full route/framework and69-area roadmap remain active.
+
 Source integration (2026-11-01, verified source checkpoint): integrates all 240 new
 commits from `l0ng-ai/openidea:main` at `041e7210` into
 `codex/openstorm-php-laravel`, based on pushed OpenStorm `82d1313a`.

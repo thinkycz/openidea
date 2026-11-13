@@ -2,8 +2,8 @@
   "repository": "https://github.com/PHPantom-dev/phpantom_lsp",
   "commit": "1756b1f920c1290d4c4fdd4d2c902fad53a75cd3",
   "archive_sha256": "f0a1dc7fa44d309e6d5e8ed65a2075749c1fc177b45820031f58290f1aec5cee",
-  "patches_sha256": "90209cda9222d386a3bcbdaa8600a9abbf69f2f20d2b309f64ee72c949474de4",
-  "version": "0.11.1-openstorm.136",
+  "patches_sha256": "92e5ca4c2b8a9f492a6a72fed252c3e59bc7872aec8a40b1430286922d92b7e5",
+  "version": "0.11.1-openstorm.137",
   "patches": [
     {
       "file": "0001-workspace-tool-policy.patch",
@@ -548,6 +548,10 @@
     {
       "file": "0136-named-route-uri-arguments.patch",
       "sha256": "9653a1235ff5d52db8669865a6cee3d78d50265af96867037ddc0b57d1e7ed93"
+    },
+    {
+      "file": "0137-fluent-route-controller-actions.patch",
+      "sha256": "d606472e4df03b6dfc3f9f6b2085b0e988f051452c2657aaa2cd997f5770e495"
     }
   ]
 }

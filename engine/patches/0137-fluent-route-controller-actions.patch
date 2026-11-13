@@ -1,0 +1,398 @@
+--- a/src/completion/laravel_route_controller.rs
++++ b/src/completion/laravel_route_controller.rs
+@@ -181,7 +181,13 @@
+     // Before method name, expect `::`
+     let before_method = before_paren[..method_start].trim_end();
+     if !before_method.ends_with("::") {
+-        return None;
++        return detect_ast_route_controller_context(
++            content,
++            cursor_offset,
++            quote_pos,
++            prefix,
++            resolved_names,
++        );
+     }
+     let before_colons = before_method[..before_method.len() - 2].trim_end();
+ 
+--- a/src/symbol_map/extraction/laravel.rs
++++ b/src/symbol_map/extraction/laravel.rs
+@@ -1750,10 +1750,17 @@
+     expr: &Expression<'a>,
+     resolved_names: Option<&crate::names::OwnedResolvedNames>,
+ ) -> Option<&'a Expression<'a>> {
+-    let Expression::Call(Call::StaticMethod(call)) = expr else {
+-        return None;
+-    };
+-    let ClassLikeMemberSelector::Identifier(method) = &call.method else {
++    let (method, arguments) = match expr {
++        Expression::Call(Call::StaticMethod(call)) => (&call.method, &call.argument_list),
++        Expression::Call(Call::Method(call)) => {
++            if !route_controller_registrar_chain(call.object, resolved_names) {
++                return None;
++            }
++            (&call.method, &call.argument_list)
++        }
++        _ => return None,
++    };
++    let ClassLikeMemberSelector::Identifier(method) = method else {
+         return None;
+     };
+     let name = bytes_to_str(method.value).to_ascii_lowercase();
+@@ -1767,31 +1774,78 @@
+     if !chain_roots_at_route_facade(expr, resolved_names) {
+         return None;
+     }
+-    let mut action = None;
+-    let mut named = false;
+-    for argument in call.argument_list.arguments.iter() {
++    let mut positional_action = None;
++    let mut named_action = None;
++    let mut named_seen = false;
++    for (position, argument) in arguments.arguments.iter().enumerate() {
+         match argument {
+-            Argument::Positional(p) if p.ellipsis.is_some() => return None,
++            Argument::Positional(p) => {
++                if p.ellipsis.is_some() || named_seen {
++                    return None;
++                }
++                if position == index {
++                    positional_action = Some(p.value);
++                }
++            }
+             Argument::Named(n) => {
+-                named = true;
++                named_seen = true;
+                 if bytes_to_str(n.name.value) == "action" {
+-                    if action.is_some() {
++                    if named_action.is_some() {
+                         return None;
+                     }
+-                    action = Some(n.value);
++                    named_action = Some(n.value);
+                 }
+             }
+-            _ => {}
+-        }
+-    }
+-    if named {
+-        return action;
+-    }
+-    call.argument_list
+-        .arguments
+-        .iter()
+-        .nth(index)
+-        .map(|argument| argument.value())
++        }
++    }
++    match (positional_action, named_action) {
++        (Some(action), None) | (None, Some(action)) => Some(action),
++        _ => None,
++    }
++}
++
++/// Only known RouteRegistrar attributes preserve the enclosing controller.
++/// Controller/namespace overrides and user macros need separate owner analysis.
++fn route_controller_registrar_chain(
++    expr: &Expression<'_>,
++    resolved_names: Option<&crate::names::OwnedResolvedNames>,
++) -> bool {
++    if !chain_roots_at_route_facade(expr, resolved_names) {
++        return false;
++    }
++    const MODIFIERS: &[&[u8]] = &[
++        b"as",
++        b"can",
++        b"domain",
++        b"metadata",
++        b"middleware",
++        b"missing",
++        b"name",
++        b"prefix",
++        b"scopeBindings",
++        b"where",
++        b"withoutMiddleware",
++        b"withoutScopedBindings",
++    ];
++    let mut current = expr;
++    for _ in 0..crate::symbol_map::laravel_resources::FACADE_CHAIN_DEPTH {
++        let (method, receiver) = match current {
++            Expression::Call(Call::Method(call)) => (&call.method, Some(call.object)),
++            Expression::Call(Call::StaticMethod(call)) => (&call.method, None),
++            _ => return false,
++        };
++        let ClassLikeMemberSelector::Identifier(method) = method else {
++            return false;
++        };
++        if !MODIFIERS.contains(&method.value) {
++            return false;
++        }
++        match receiver {
++            Some(receiver) => current = receiver,
++            None => return true,
++        }
++    }
++    false
+ }
+ 
+ /// Walk a fluent method chain backwards looking for `->controller(X::class)`.
+@@ -1948,54 +2002,64 @@
+             }
+             // Walk the inner object (chain before ->name() etc.).
+             laravel_route_scan_expr(mc.object, controller, content, spans, resolved_names);
+-        }
+-        // Route::patch('cancel', 'cancel')
++            laravel_route_scan_action(expr, controller, content, spans, resolved_names);
++        }
+         Expression::Call(Call::StaticMethod(_)) => {
+-            let Some(action) = laravel_route_action_argument(expr, resolved_names) else {
+-                return;
+-            };
+-            let Expression::Literal(literal::Literal::String(s)) = action else {
+-                return;
+-            };
+-
+-            let inner_start = s.span.start.offset + 1;
+-            let inner_end = s.span.end.offset - 1;
+-            if inner_start >= inner_end || inner_end as usize > content.len() {
+-                return;
+-            }
+-            let method_name = s
+-                .value
+-                .and_then(literal_bytes_to_str)
+-                .unwrap_or(&content[inner_start as usize..inner_end as usize]);
+-            // Must look like a valid PHP method name.
+-            if method_name.is_empty()
+-                || !method_name
+-                    .chars()
+-                    .all(|c| c.is_ascii_alphanumeric() || c == '_')
+-                || method_name
+-                    .chars()
+-                    .next()
+-                    .is_some_and(|c| c.is_ascii_digit())
+-            {
+-                return;
+-            }
+-
+-            spans.push(SymbolSpan {
+-                start: inner_start,
+-                end: inner_end,
+-                kind: SymbolKind::MemberAccess {
+-                    subject_text: SubjectText::owned(controller.to_string()),
+-                    member_name: crate::atom::atom(method_name),
+-                    is_static: true,
+-                    is_method_call: true,
+-                    docblock_ref: DocblockMemberRef::No,
+-                    is_array_callable: false,
+-                    is_nullsafe: false,
+-                },
+-            });
++            laravel_route_scan_action(expr, controller, content, spans, resolved_names);
+         }
+         _ => {}
+     }
++}
++
++fn laravel_route_scan_action(
++    expr: &Expression<'_>,
++    controller: &str,
++    content: &str,
++    spans: &mut Vec<SymbolSpan>,
++    resolved_names: Option<&crate::names::OwnedResolvedNames>,
++) {
++    let Some(action) = laravel_route_action_argument(expr, resolved_names) else {
++        return;
++    };
++    let Expression::Literal(literal::Literal::String(s)) = action else {
++        return;
++    };
++
++    let inner_start = s.span.start.offset + 1;
++    let inner_end = s.span.end.offset - 1;
++    if inner_start >= inner_end || inner_end as usize > content.len() {
++        return;
++    }
++    let method_name = s
++        .value
++        .and_then(literal_bytes_to_str)
++        .unwrap_or(&content[inner_start as usize..inner_end as usize]);
++    // Must look like a valid PHP method name.
++    if method_name.is_empty()
++        || !method_name
++            .chars()
++            .all(|c| c.is_ascii_alphanumeric() || c == '_')
++        || method_name
++            .chars()
++            .next()
++            .is_some_and(|c| c.is_ascii_digit())
++    {
++        return;
++    }
++
++    spans.push(SymbolSpan {
++        start: inner_start,
++        end: inner_end,
++        kind: SymbolKind::MemberAccess {
++            subject_text: SubjectText::owned(controller.to_string()),
++            member_name: crate::atom::atom(method_name),
++            is_static: true,
++            is_method_call: true,
++            docblock_ref: DocblockMemberRef::No,
++            is_array_callable: false,
++            is_nullsafe: false,
++        },
++    });
+ }
+ 
+ #[cfg(test)]
+--- a/tests/integration/laravel_route_controller.rs
++++ b/tests/integration/laravel_route_controller.rs
+@@ -507,3 +507,85 @@
+         .unwrap();
+     assert_eq!(refs.len(), 2, "inner declaration/action only: {refs:?}");
+ }
++
++#[tokio::test]
++async fn fluent_route_controller_actions_follow_supported_registrar_chains() {
++    use crate::common::position_after;
++    for call in [
++        "Routes::middleware('auth')->get('/😀/{id}', 'showInvoice')",
++        "Routes::prefix('billing')->middleware(['auth'])->match(['get', 'post'], '/😀/{id}', 'showInvoice')",
++        "Routes::domain('example.test')->where(['id' => '[0-9]+'])->post(action: 'showInvoice', uri: '/😀/{id}')",
++        "Routes::name('billing.')->withoutMiddleware('guest')->match(action: 'showInvoice', methods: ['get'], uri: '/😀/{id}')",
++        "Routes::scopeBindings()->get('/😀/{id}', 'showInvoice')",
++    ] {
++        let backend = create_test_backend();
++        let uri = Url::parse("file:///route-fluent.php").unwrap();
++        let text = format!(
++            "<?php\nuse Illuminate\\Support\\Facades\\Route as Routes;\nclass Ctrl {{ public function showInvoice(): string {{ return 'ok'; }} }}\nRoutes::controller(Ctrl::class)->group(function () {{\n {call}->name('invoice');\n}});\n"
++        );
++        open_php(&backend, &uri, &text).await;
++        let at = position_after(&text, "'showIn");
++        let target = goto_def(&backend, &uri, at.line, at.character).await;
++        let expected = position_after(&text, "function ");
++        assert!(
++            matches!(target,Some(GotoDefinitionResponse::Scalar(ref l)) if l.uri==uri && l.range.start==expected),
++            "fluent action target {call}: {target:?}"
++        );
++        let items = complete_at(&backend, &uri, &text, at.line, at.character).await;
++        assert!(
++            method_labels(&items).iter().any(|m| m == "showInvoice"),
++            "fluent candidate {call}: {items:?}"
++        );
++        let hover = backend
++            .hover(HoverParams {
++                text_document_position_params: TextDocumentPositionParams {
++                    text_document: TextDocumentIdentifier { uri: uri.clone() },
++                    position: at,
++                },
++                work_done_progress_params: Default::default(),
++            })
++            .await;
++        let hover = hover.unwrap().expect("fluent action hover");
++        assert!(
++            matches!(hover.contents, HoverContents::Markup(ref m) if m.value.contains("showInvoice(): string")),
++            "fluent hover {call}: {hover:?}"
++        );
++    }
++}
++
++#[tokio::test]
++async fn fluent_route_controller_actions_refuse_unknown_receivers_and_owner_overrides() {
++    use crate::common::position_after;
++    for call in [
++        "Fake::middleware('auth')->get('/x', 'showInvoice')",
++        "Routes::customRegistrar()->get('/x', 'showInvoice')",
++        "Routes::get('/first', 'other')->get('/x', 'showInvoice')",
++        "Routes::middleware('auth')->get('showInvoice', 'other')",
++        "Routes::middleware('auth')->get(...$args, action: 'showInvoice')",
++        "Routes::middleware('auth')->get(action: 'showInvoice', action: 'showInvoice', uri: '/x')",
++        "Routes::controller(Inner::class)->get('/x', 'showInvoice')",
++        "Routes::namespace('Other')->get('/x', 'showInvoice')",
++        "Routes::middleware('auth')->get('/x', 'other', action: 'showInvoice')",
++        "Routes::middleware('auth')->get(uri: '/x', 'showInvoice')",
++        "$registrar->get('/x', 'showInvoice')",
++    ] {
++        let backend = create_test_backend();
++        let uri = Url::parse("file:///route-fluent-negative.php").unwrap();
++        let text = format!(
++            "<?php\nuse Illuminate\\Support\\Facades\\Route as Routes;\nuse Acme\\Route as Fake;\nclass Ctrl {{ public function showInvoice() {{}} }}\nclass Inner {{ public function showInvoice() {{}} }}\nRoutes::controller(Ctrl::class)->group(function () {{ {call}; }});\n"
++        );
++        open_php(&backend, &uri, &text).await;
++        let at = position_after(&text, "'showIn");
++        assert!(
++            goto_def(&backend, &uri, at.line, at.character)
++                .await
++                .is_none(),
++            "unsupported fluent target {call}"
++        );
++        let items = complete_at(&backend, &uri, &text, at.line, at.character).await;
++        assert!(
++            !method_labels(&items).iter().any(|m| m == "showInvoice"),
++            "unsupported fluent completion {call}: {items:?}"
++        );
++    }
++}
+--- a/docs/CHANGELOG.md
++++ b/docs/CHANGELOG.md
+@@ -14,6 +14,8 @@
+ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+ 
+ ## [Unreleased]
++
++- **Follow fluent Laravel controller actions.** Navigation, completion and references work through registrar modifiers inside controller groups. Contributed by @thinkycz.
+ 
+ - **Refresh facade members when a service binding changes.** Hover, completion and static method types follow the current provider binding, including unsaved edits and undo. Contributed by @thinkycz.
+ 
+--- a/examples/laravel/app/Demo.php
++++ b/examples/laravel/app/Demo.php
+@@ -1650,6 +1650,16 @@
+         $contact->email;
+         $contact->verified_at;
+     }
++
++    public function fluentControllerRoutes(): void
++    {
++        Route::controller(BakeryController::class)->group(function (): void {
++            // Try: navigate or complete these actions through registrar modifiers.
++            Route::middleware('auth')->get('/fluent-bakeries', 'index');
++            Route::prefix('admin')->match(['get', 'post'], '/fluent-bakeries/{bakery}', 'show');
++        });
++    }
++
+ }
+ 
+ // PHP Workbench: Laravel: Go to Route lists statically named routes and opens
+--- a/examples/laravel/assertions.php
++++ b/examples/laravel/assertions.php
+@@ -1914,6 +1914,30 @@
+         get_class($application->make('pastry.oven')) === $expected);
+ }
+ 
++
++// Registrar modifiers preserve the controller inherited from a group.
++(function (): void {
++    $router = new \Illuminate\Routing\Router(new \Illuminate\Events\Dispatcher());
++    $controller = \App\Http\Controllers\BakeryController::class;
++    $router->controller($controller)->group(function () use ($router): void {
++        $router->middleware('auth')->get('/fluent-bakeries', 'index')->name('fluent.index');
++        $router->prefix('admin')->match(['get', 'post'], '/fluent-bakeries/{bakery}', 'show')->name('fluent.show');
++    });
++    $routes = [];
++    foreach ($router->getRoutes() as $route) {
++        $routes[$route->getName()] = $route;
++    }
++    check('Fluent controller group registers both routes', count($routes) === 2);
++    check('Middleware registrar keeps the grouped controller',
++        ($routes['fluent.index'] ?? null)?->getActionName() === $controller . '@index');
++    check('Prefix match registrar keeps the grouped controller',
++        ($routes['fluent.show'] ?? null)?->getActionName() === $controller . '@show');
++    check('Fluent match keeps its prefix and parameter',
++        ($routes['fluent.show'] ?? null)?->uri() === 'admin/fluent-bakeries/{bakery}');
++    check('Fluent get keeps its middleware',
++        in_array('auth', ($routes['fluent.index'] ?? null)?->middleware() ?? [], true));
++})();
++
+ // ─── Summary ────────────────────────────────────────────────────────────────
+ 
+ echo "\n";

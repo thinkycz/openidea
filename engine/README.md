@@ -1,6 +1,6 @@
 # Pinned PHPantom engine
 
-The local OpenStorm development candidate uses PHPantom `0.11.1-openstorm.136`
+The local OpenStorm development candidate uses PHPantom `0.11.1-openstorm.137`
 for Apple Silicon macOS. This is a local rebuild, not an upstream release.
 Source131 adds migration-derived declaration origins;132 follows registration
 order for container bindings and aliases within a provider group. Source133
@@ -10,7 +10,7 @@ errors for definition/type-definition and implementation while a semantic
 publication is pending. Source135 adds positional/named Route::match controller
 action intelligence. Source136 selects route URI arguments by their PHP binding
 identity, retaining unknown metadata for ambiguous arguments. Full pinned source
-tests pass18,426 checks plus the separate FIFO child (17 ignored).
+tests pass18,428 checks plus the separate FIFO child (17 ignored).
 Examples, Clippy, formatting, source fingerprints and the optimized build pass.
 Current OpenStorm client/host and packaged native acceptance are tracked in
 `docs/OPENSTORM.md`; source checks alone do not establish native acceptance.
@@ -273,3 +273,14 @@ OpenStorm client baseline135 red and136 green verify typed list/registration
 navigation and parameter completion through URI-only unsaved changes/restart
 and restoration, preserving the caller and all3owned disk originals. Full SDK/
 client/build acceptance and native limitations remain tracked in docs/OPENSTORM.md.
+
+Patch0137 follows known owner-preserving RouteRegistrar modifiers for controller
+actions inside groups. The shared AST action selector/extractor covers fluent
+HTTP registrations and uses the existing completion replacement edit. Unknown
+macros/receivers, owner-changing controller/namespace chains and ambiguous action
+bindings stay unresolved. Inline controller registrations need separate owner
+analysis. Fresh18428ordinary source tests/17ignored plusFIFOchild, releaseClippy/
+fmt/fingerprint/build, updated examples/275Laravel runtime assertions and exact3
+intentional analyzer diagnostics pass. Source and actual-client red/green,
+example LSP definitions/completion edits/hover and final OpenStorm acceptance are
+tracked in docs/OPENSTORM.md. Native checks remain explicitly user-skipped.

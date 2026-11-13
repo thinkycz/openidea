@@ -3808,7 +3808,7 @@ async fn laravel_match_actions_follow_aliases_nested_owners_and_unsaved_controll
         "<?php\nnamespace App;\nclass InvoiceController { public function showInvoice(): string { return 'ok'; } }\n";
     let inner =
         "<?php\nnamespace App;\nclass InnerController { public function showInvoice(): bool { return true; } }\n";
-    let routes = "<?php\nuse Illuminate\\Support\\Facades\\Route as Routes;\nuse App\\InvoiceController as Main;\nuse App\\InnerController as Inner;\nRoutes::controller(Main::class)->group(function () {\n Routes::get('/standard', 'showInvoice')->name('standard');\n Routes::match(['get', 'post'], '/😀/showInvoice/{id}', 'showInvoice')->name('matched');\n Routes::match(action: 'showInvoice', methods: ['post'], uri: '/named')->name('named');\n Routes::controller(Inner::class)->group(function () {\n  Routes::match(['get'], '/nested', 'showInvoice')->name('nested');\n });\n});\n";
+    let routes = "<?php\nuse Illuminate\\Support\\Facades\\Route as Routes;\nuse App\\InvoiceController as Main;\nuse App\\InnerController as Inner;\nRoutes::controller(Main::class)->group(function () {\n Routes::get('/standard', 'showInvoice')->name('standard');\n Routes::match(['get', 'post'], '/😀/showInvoice/{id}', 'showInvoice')->name('matched');\n Routes::match(action: 'showInvoice', methods: ['post'], uri: '/named')->name('named');\n Routes::middleware('auth')->get('/fluent', 'showInvoice')->name('fluent-get');\n Routes::prefix('billing')->middleware('auth')->match(['get', 'post'], '/😀/fluent/{id}', 'showInvoice')->name('fluent-matched');\n Routes::name('billing.')->withoutMiddleware('guest')->match(action: 'showInvoice', methods: ['get'], uri: '/named')->name('fluent-named');\n Routes::controller(Inner::class)->group(function () {\n  Routes::middleware('auth')->match(['get'], '/nested', 'showInvoice')->name('nested');\n });\n});\n";
     let caller = "<?php\nuse App\\InvoiceController as Main;\n(new Main())->showInvoice();\n";
     let composer = r#"{"require":{"php":"^8.3","laravel/framework":"^13.0"},"autoload":{"psr-4":{"App\\":"app/"}}}"#;
     let files = [
@@ -3866,6 +3866,9 @@ async fn laravel_match_actions_follow_aliases_nested_owners_and_unsaved_controll
             pos(routes, "showInvoice')->name('standard')"),
             pos(routes, "showInvoice')->name('matched')"),
             pos(routes, "showInvoice', methods:"),
+            pos(routes, "showInvoice')->name('fluent-get')"),
+            pos(routes, "showInvoice')->name('fluent-matched')"),
+            pos(routes, "showInvoice', methods: ['get'], uri: '/named')->name('fluent-named')"),
         ];
         for (at, expected_path, expected_source, ty) in positions
             .iter()
@@ -3891,7 +3894,7 @@ async fn laravel_match_actions_follow_aliases_nested_owners_and_unsaved_controll
             }
         }
         let refs =
-            mgr.references(route_doc, positions[1], true, true, Default::default()).await.map_err(|e| e.to_string())?;
+            mgr.references(route_doc, positions[4], true, true, Default::default()).await.map_err(|e| e.to_string())?;
         let mut actual: Vec<_> =
             refs.locations.iter().map(|l| (l.path.to_path_buf(), l.range.start.line, l.range.start.col)).collect();
         actual.sort();
@@ -3902,10 +3905,10 @@ async fn laravel_match_actions_follow_aliases_nested_owners_and_unsaved_controll
         }
         expected.sort();
         if actual != expected || refs.incomplete.is_some() {
-            return Err(format!("method references must include only declaration/three actions/caller: {refs:?}"));
+            return Err(format!("method references must include only declaration/six actions/caller: {refs:?}"));
         }
         let rename = mgr
-            .rename(route_doc, positions[1], "displayInvoice".into(), Default::default())
+            .rename(route_doc, positions[4], "displayInvoice".into(), Default::default())
             .await
             .map_err(|e| e.to_string())?;
         if rename.incomplete.is_some() {
@@ -3929,22 +3932,28 @@ async fn laravel_match_actions_follow_aliases_nested_owners_and_unsaved_controll
         if edits != expected {
             return Err(format!("checked rename crossed owner/URI boundary: {rename:?}"));
         }
-        let edited = routes.replace("showInvoice')->name('matched')", "showInvoiceExtra')->name('matched')");
-        replace(&mgr, route_doc, 2, routes, &edited);
-        let start = pos(&edited, "showInvoiceExtra')->name");
-        let at = Pos::new(start.line, start.col + 2);
-        let list = mgr.completion(route_doc, at, None, Default::default()).await.map_err(|e| e.to_string())?;
-        let item =
-            list.items.into_iter().find(|i| i.insert_text == "showInvoice").ok_or("missing match method completion")?;
-        let range = Range::new(start, Pos::new(start.line, start.col + "showInvoiceExtra".len() as u32));
-        if item.replace_range != Some(range) || item.is_snippet || !item.additional_edits.is_empty() {
-            return Err(format!("match completion lost whole UTF16 atom: {item:?}"));
+        for (version, name) in [(2, "matched"), (4, "fluent-matched")] {
+            let edited = routes
+                .replace(&format!("showInvoice')->name('{name}')"), &format!("showInvoiceExtra')->name('{name}')"));
+            replace(&mgr, route_doc, version, routes, &edited);
+            let start = pos(&edited, "showInvoiceExtra')->name");
+            let at = Pos::new(start.line, start.col + 2);
+            let list = mgr.completion(route_doc, at, None, Default::default()).await.map_err(|e| e.to_string())?;
+            let item = list
+                .items
+                .into_iter()
+                .find(|i| i.insert_text == "showInvoice")
+                .ok_or("missing match method completion")?;
+            let range = Range::new(start, Pos::new(start.line, start.col + "showInvoiceExtra".len() as u32));
+            if item.replace_range != Some(range) || item.is_snippet || !item.additional_edits.is_empty() {
+                return Err(format!("match completion lost whole UTF16 atom: {item:?}"));
+            }
+            let resolved = mgr.resolve_completion(route_doc, item).await.map_err(|e| e.to_string())?;
+            if resolved.replace_range != Some(range) {
+                return Err("resolved completion lost replacement edit".into());
+            }
+            replace(&mgr, route_doc, version + 1, &edited, routes);
         }
-        let resolved = mgr.resolve_completion(route_doc, item).await.map_err(|e| e.to_string())?;
-        if resolved.replace_range != Some(range) {
-            return Err("resolved completion lost replacement edit".into());
-        }
-        replace(&mgr, route_doc, 3, &edited, routes);
         let unsaved = controller
             .replace("<?php\n", "<?php\n// 😀 unsaved\n")
             .replace(": string", ": int")
@@ -3954,35 +3963,39 @@ async fn laravel_match_actions_follow_aliases_nested_owners_and_unsaved_controll
             if phase == 1 {
                 mgr.restart(mgr.servers()[0].id).await.map_err(|e| e.to_string())?;
             }
-            let target = mgr.goto(route_doc, positions[1], GotoKind::Definition).await.map_err(|e| e.to_string())?;
-            if target.len() != 1 || target[0].range.start != pos(&unsaved, "showInvoice") {
-                return Err(format!("unsaved match declaration not current phase{phase}: {target:?}"));
-            }
-            let hover = mgr
-                .hover(route_doc, positions[1], Default::default())
-                .await
-                .map_err(|e| e.to_string())?
-                .ok_or("missing unsaved hover")?;
-            if !hover.contents.value.contains("showInvoice(): int") {
-                return Err(format!("unsaved method type stale: {hover:?}"));
-            }
-            let completions = mgr
-                .completion(route_doc, Pos::new(positions[1].line, positions[1].col + 2), None, Default::default())
-                .await
-                .map_err(|e| e.to_string())?;
-            let method = completions
-                .items
-                .iter()
-                .find(|i| i.insert_text == "showInvoice")
-                .ok_or("missing unsaved controller completion")?;
-            if method.detail.as_deref() != Some("int") {
-                return Err(format!("unsaved controller completion stale phase{phase}: {method:?}"));
+            for at in [positions[4], positions[1]] {
+                let target = mgr.goto(route_doc, at, GotoKind::Definition).await.map_err(|e| e.to_string())?;
+                if target.len() != 1 || target[0].range.start != pos(&unsaved, "showInvoice") {
+                    return Err(format!("unsaved match declaration not current phase{phase}: {target:?}"));
+                }
+                let hover = mgr
+                    .hover(route_doc, at, Default::default())
+                    .await
+                    .map_err(|e| e.to_string())?
+                    .ok_or("missing unsaved hover")?;
+                if !hover.contents.value.contains("showInvoice(): int") {
+                    return Err(format!("unsaved method type stale: {hover:?}"));
+                }
+                let completions = mgr
+                    .completion(route_doc, Pos::new(at.line, at.col + 2), None, Default::default())
+                    .await
+                    .map_err(|e| e.to_string())?;
+                let method = completions
+                    .items
+                    .iter()
+                    .find(|i| i.insert_text == "showInvoice")
+                    .ok_or("missing unsaved controller completion")?;
+                if method.detail.as_deref() != Some("int") {
+                    return Err(format!("unsaved controller completion stale phase{phase}: {method:?}"));
+                }
             }
         }
         mgr.did_close(ctrl_doc);
-        let restored = mgr.goto(route_doc, positions[1], GotoKind::Definition).await.map_err(|e| e.to_string())?;
-        if restored.len() != 1 || restored[0].range.start != pos(controller, "showInvoice") {
-            return Err(format!("closing overlay did not restore declaration: {restored:?}"));
+        for at in [positions[4], positions[1]] {
+            let restored = mgr.goto(route_doc, at, GotoKind::Definition).await.map_err(|e| e.to_string())?;
+            if restored.len() != 1 || restored[0].range.start != pos(controller, "showInvoice") {
+                return Err(format!("closing overlay did not restore declaration: {restored:?}"));
+            }
         }
         Ok(())
     }

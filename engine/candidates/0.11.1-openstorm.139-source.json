@@ -1,0 +1,565 @@
+{
+  "repository": "https://github.com/PHPantom-dev/phpantom_lsp",
+  "commit": "1756b1f920c1290d4c4fdd4d2c902fad53a75cd3",
+  "archive_sha256": "f0a1dc7fa44d309e6d5e8ed65a2075749c1fc177b45820031f58290f1aec5cee",
+  "patches_sha256": "a14308f87486ddd8f8489a6905e006af69d777b109de7b77b638a4edb007eeb3",
+  "version": "0.11.1-openstorm.139",
+  "patches": [
+    {
+      "file": "0001-workspace-tool-policy.patch",
+      "sha256": "5a89aec4223c7d48da149dd824a35d36963477d906aa12d1f903dc1e7d0c34ae"
+    },
+    {
+      "file": "0002-type-aware-argument-ranking.patch",
+      "sha256": "68bff2cd219efd3fcf2fdf1c864b65685de0a8190f9a8707ba9b8c21283c3f74"
+    },
+    {
+      "file": "0003-named-argument-signature.patch",
+      "sha256": "59092ef824549ada2d92499b172af94685bb5a33ba9e85378d3694ac0b35f823"
+    },
+    {
+      "file": "0004-expected-value-ranking.patch",
+      "sha256": "387c4d405b5a0182af211c3f9c5d862da67c52267e336259616b39003de6f23a"
+    },
+    {
+      "file": "0005-builtin-introduction-versions.patch",
+      "sha256": "4032db9801cd5fdf212e43c0b5987fa9b5d9073035d3b504fffa73d417ead4fb"
+    },
+    {
+      "file": "0006-workbench-route-index.patch",
+      "sha256": "b3f644f542cc95170678b46168c2149377157d3782010b0ac01ddc105c70304d"
+    },
+    {
+      "file": "0007-union-member-definitions.patch",
+      "sha256": "84035d4651a6a1927d2505cafb699c9726c3246a15dd08f3a14ed0bdb6c6ccd8"
+    },
+    {
+      "file": "0008-open-buffer-class-ownership.patch",
+      "sha256": "9841fb7ce46ed54fa71e75c041113f02f646ab039a64074e9cbcd71f8b2b0983"
+    },
+    {
+      "file": "0009-laravel-view-discovery.patch",
+      "sha256": "45b1047659005d73d94475396c33c2ed97db922072bfd89e4d56a6cf3f23490a"
+    },
+    {
+      "file": "0010-blade-diagnostic-source-ranges.patch",
+      "sha256": "7cbc3e3a5cccfe0cd51b6e2a93d8a24df3471616efbd10126d75ccd0b36fa955"
+    },
+    {
+      "file": "0011-type-hierarchy-declaration-ranges.patch",
+      "sha256": "6b6121e3a7e67dfbf16f7b42b975dabacecaa182c5a65f6a0a8127c406194271"
+    },
+    {
+      "file": "0012-builtin-declaration-documents.patch",
+      "sha256": "44f7da2153d517e289eaa57280b08a8faccb2860017ca9924c6e58926440fbc5"
+    },
+    {
+      "file": "0013-parameter-name-affinity.patch",
+      "sha256": "e3aaece2f837da641ce05369002018fd03acdcc1b20008bce3f45a83b9d1f15e"
+    },
+    {
+      "file": "0014-read-only-code-action-resolution.patch",
+      "sha256": "c52fd78413c7a9e65695e5b5d696343e13eb0b2fed7091ae2be622f7dc264077"
+    },
+    {
+      "file": "0015-versioned-diagnostic-snapshots.patch",
+      "sha256": "7bcba63ed451c122375c0f39f1f241ad0b744b47ecf64aacaa978b71820761d9"
+    },
+    {
+      "file": "0016-current-open-semantic-sources.patch",
+      "sha256": "d44af13e959184df4bddd4327b496ece9a1c2dc1cf1c19564d41e6ac8412f798"
+    },
+    {
+      "file": "0017-explicit-variable-ranking.patch",
+      "sha256": "4ce2849b035235fabfce7e54c0eb3fbe8f3ff97d5746edb040ff50b1c2ff5190"
+    },
+    {
+      "file": "0018-expected-expression-constraints.patch",
+      "sha256": "4e3af1788fbb865d8a0dd57cb20b036f91a3658411977dfc9a48fdf0a13122bc"
+    },
+    {
+      "file": "0019-class-introduction-versions.patch",
+      "sha256": "505085febd8c0652669a4219403dbbee2018165c387c0d3cc55956878db698de"
+    },
+    {
+      "file": "0020-extension-profiles.patch",
+      "sha256": "bb05f313308457b31d82dc83211c375bc28cdba4f9a654512ffdbfb5a7609adf"
+    },
+    {
+      "file": "0021-active-language-target.patch",
+      "sha256": "ae0a9f8ee5a4490644e225c85277f9a55e18ed319a15203f4b801d08a8fec655"
+    },
+    {
+      "file": "0022-stub-method-targets.patch",
+      "sha256": "ac80c592539159aba1161c4bc216cf28c5a18a46f71b79904ad84847f6946f67"
+    },
+    {
+      "file": "0023-keyword-php-target.patch",
+      "sha256": "3a16690952fcff61a85815ed30b775eba714e5306ab6b05ce916155e73217876"
+    },
+    {
+      "file": "0024-native-type-target.patch",
+      "sha256": "1acf60b4060a4a4ef19ec4092f2d06d2f4ff0ac7df5983a0e509a3407a68c54a"
+    },
+    {
+      "file": "0025-laravel-route-declarations.patch",
+      "sha256": "ff65c65b5e41eadb821129255ce9c1642bee8c132a1e07fdfab4efa387e936b4"
+    },
+    {
+      "file": "0026-laravel-route-rename.patch",
+      "sha256": "23989b123ddecf790536ecbb87280f8436a8f3d4bfdfc0e53f5b9be339d67f5c"
+    },
+    {
+      "file": "0027-laravel-route-identity.patch",
+      "sha256": "17abad52f8274d97186498579367d6b8c84bc53b22c3351f17fa122f5c0956fe"
+    },
+    {
+      "file": "0028-laravel-route-completion.patch",
+      "sha256": "35545c453d28e428159f5c987320c9072fddaef9e0bca43bd0f26ebdffb723d8"
+    },
+    {
+      "file": "0029-diagnostic-runs.patch",
+      "sha256": "627829ef69e303dce914826d7859a3e712d01976eb2643f17b38a1a7dd506100"
+    },
+    {
+      "file": "0030-unsaved-diagnostics.patch",
+      "sha256": "9b054dc4b03a49896007484e80b893f04c3ab8f8d187d596d714d02784bce971"
+    },
+    {
+      "file": "0031-discarded-sources.patch",
+      "sha256": "3b84cc435f8b140b7c32d98159d7cb9610e8418e52bd7678d58dcaea65f3d8c2"
+    },
+    {
+      "file": "0032-live-config-epochs.patch",
+      "sha256": "e4d41aecd9d46c847f1ffb5cb07a5b367f8f37cea4ce2ca81f823130d46c1b93"
+    },
+    {
+      "file": "0033-magic-property-policy.patch",
+      "sha256": "c70dcc1cc50bd440cb85056962ad0c9ae79f18a0bb6093176423e203ace6f29c"
+    },
+    {
+      "file": "0034-client-filter-epochs.patch",
+      "sha256": "12faf5c1b652f95d9af53c44faeb261395240d845538ec0ffa4a2f26687762d6"
+    },
+    {
+      "file": "0035-disk-semantic-publication.patch",
+      "sha256": "365d0ff75decb156d93217298c73961494b680fe6585ac62878c29def84d6d0a"
+    },
+    {
+      "file": "0036-background-index-ownership.patch",
+      "sha256": "6b0efb0a841e2e290cc29a73d6c2ed184ace3fbf3820bcc0dce670b9ff2e7c50"
+    },
+    {
+      "file": "0037-workspace-semantic-admission.patch",
+      "sha256": "ed3250a0a508f2fb1c594756b38859e3ce664e33ce7adea9f0d1ebdb2aa22a0e"
+    },
+    {
+      "file": "0038-dnf-type-target.patch",
+      "sha256": "4f53d7fcaf8b767fb57d1b4f1b49d870c8e8fe6fbae1a0de1929c4e10f7040cf"
+    },
+    {
+      "file": "0039-source-owned-analyzer-startup.patch",
+      "sha256": "790e2a96dd125fd0b92e56443bb4f726ecdb63d90e04e0981010ec663390c64b"
+    },
+    {
+      "file": "0040-incomplete-method-definition.patch",
+      "sha256": "5bd9931fc6550b6b706bb86955b053af2f46427af17643d9a70962d5690e89e3"
+    },
+    {
+      "file": "0041-dynamic-selector-variables.patch",
+      "sha256": "3be88ffb1da9357b6bc3cc0b75a882a2d1f67c0e178afb04a750e1907fefabc8"
+    },
+    {
+      "file": "0042-eloquent-scope-casts.patch",
+      "sha256": "e48b0a07eeaa4aa24a8bb90bdc7cf26024e97fd00d912df21c74dc1d4d42e874"
+    },
+    {
+      "file": "0043-eloquent-scope-body.patch",
+      "sha256": "949515118c64733a668b42999b8747b93e094c39bb2a865268b80be1157f0dbc"
+    },
+    {
+      "file": "0044-laravel-key-identity.patch",
+      "sha256": "f797384876632d8d1dd4e06fff3515e150c0c541b7d58ec8915f24041849e832"
+    },
+    {
+      "file": "0045-php-documentation.patch",
+      "sha256": "a242c922449ebcaad1afe5633f107487bbdf2e11e19bbd140f2422b165213dd5"
+    },
+    {
+      "file": "0046-php-method-generation.patch",
+      "sha256": "25de5455ad356e3d924cac2037f1457b9e9484af3b4862c5fe734ae93e103f33"
+    },
+    {
+      "file": "0047-php-extraction-options.patch",
+      "sha256": "160eb21ac28ad69f5a1f80b567cb40bc3d8245fd569e5f195246e196d3f59a1f"
+    },
+    {
+      "file": "0048-signature-utf16.patch",
+      "sha256": "510c55a224c54921e85a904ba91143cb04c1668fd2d517c8f3efedd33b157722"
+    },
+    {
+      "file": "0049-signature-overloads.patch",
+      "sha256": "95d165e5e78c235067c414b67f996f423274a1bf01077e5214796a15b5d36e8c"
+    },
+    {
+      "file": "0050-composer-directory-references.patch",
+      "sha256": "1cdc636729f647aaae4c3fe8a58713fc3441233eaf2978221f60c0c14b37b492"
+    },
+    {
+      "file": "0051-composer-project-isolation.patch",
+      "sha256": "747a233873635a8fcc98145655907687032081f3fd8ef2ba938457dbbb03fe47"
+    },
+    {
+      "file": "0052-nested-composer-projects.patch",
+      "sha256": "a0a3f2c4f4157f9cab7648ae6379d78dfc32e9d737990cbc8b8a2c045f3b04b5"
+    },
+    {
+      "file": "0053-signature-documentation-types.patch",
+      "sha256": "89672ac498df0fb98513739735f6d75694211aee84ea647681a79f77395c3792"
+    },
+    {
+      "file": "0054-completion-utf16-prefix-recovery.patch",
+      "sha256": "77ea388f86545247cd867149abce42121e2fe5ee5c09682efe9ff7ca8ce6eebd"
+    },
+    {
+      "file": "0055-unresolved-member-reference-identity.patch",
+      "sha256": "85badc5073c40728e8e02cd9c320daf54a805f74fb1130b05cf8e7be882ac068"
+    },
+    {
+      "file": "0056-rename-destination-collisions.patch",
+      "sha256": "9b5f24c98daa98a7e4c19af6ff3fad04762880b39cf5823c5924cdf7b0280adc"
+    },
+    {
+      "file": "0057-private-member-reference-identity.patch",
+      "sha256": "916530fc034a808d5069634e53291a959eefa191207efa8c07dd1f67f7ab8e47"
+    },
+    {
+      "file": "0058-class-rename-alias-collisions.patch",
+      "sha256": "dd4a764187ed44ee89888ba0959b42b41375818cabd9846f4f67c967e303f3c9"
+    },
+    {
+      "file": "0059-checked-rename-source-provenance.patch",
+      "sha256": "1f385c034407434bbd2a3b68050b5791097575b0a9d80f1f273cfee49cf45882"
+    },
+    {
+      "file": "0060-rename-alias-identities.patch",
+      "sha256": "d5641f9b77213b02be20d873800991eeb991c55cdd32ae95c3587345f00adc48"
+    },
+    {
+      "file": "0061-contextual-completion-recovery.patch",
+      "sha256": "ebba4751190d5c521fe408b333107b0fb21652aa5c645eca0c65df428b72580b"
+    },
+    {
+      "file": "0062-local-formatting-edits.patch",
+      "sha256": "87b776546176d85804d71aa2ff28d211c5959eb1f0770d4d8becd44f7f499ca7"
+    },
+    {
+      "file": "0063-multihunk-formatting.patch",
+      "sha256": "95b6beb163ddb79364bd642f01db59691dda33c433afe2f45c5fc1aa4a652dda"
+    },
+    {
+      "file": "0064-builtin-constant-target.patch",
+      "sha256": "409a0ff100d0fafed8bcb8879004fb828f2b764c9d6924d4b3e91373b1eda237"
+    },
+    {
+      "file": "0065-global-constant-target.patch",
+      "sha256": "a56e26b0a39a7ab6949e011c00444a6f63785e642a3d927b321ef0c16b3f0705"
+    },
+    {
+      "file": "0066-property-function-target.patch",
+      "sha256": "153f892b973d45846b70fde73b15bdc9f4efe34cf18f26410468f593d6501691"
+    },
+    {
+      "file": "0067-callable-ownership.patch",
+      "sha256": "08feedf00f4289b048ed76f681eee450a1f1b6942e58362cec9a89499828304e"
+    },
+    {
+      "file": "0068-structural-search.patch",
+      "sha256": "e39f5dd673c77531d415c6da60a22df92eeab80a9bf8de1569ddd1e562175f48"
+    },
+    {
+      "file": "0069-structural-replacements.patch",
+      "sha256": "b098b882b875c5c452b6df911d52e2c51f4d0d04441961d15e75145bc107f63e"
+    },
+    {
+      "file": "0070-readonly-class-accessors.patch",
+      "sha256": "56089f5a41a98adfbde9462c2ac75f6edfbcc36a4fc807109ca2b04f47797208"
+    },
+    {
+      "file": "0071-accessor-placement.patch",
+      "sha256": "79775f9f4897652eee72b079e5d608919942467d61329ae596806cc065d915e0"
+    },
+    {
+      "file": "0072-constructor-generation.patch",
+      "sha256": "84ab7fcbe3f6e235e69e3a63872ce99107969f78b811166967724740da6b3d43"
+    },
+    {
+      "file": "0073-inherited-generation.patch",
+      "sha256": "06b0cdb3547bd90a9279370a40431d7110a6354355b4d371f5606453c41a9956"
+    },
+    {
+      "file": "0074-generation-layout.patch",
+      "sha256": "e65435b6ed14de9d2a67ccb50a0804abf49962f5d0a0f1878f25719827713f13"
+    },
+    {
+      "file": "0075-accessor-name-collisions.patch",
+      "sha256": "905d96355a821fb6a04d33b83fecf549027914a1bd54cf232b2fee32c6032571"
+    },
+    {
+      "file": "0076-constructor-doc-types.patch",
+      "sha256": "656b6330c7514fc67ed33addd35039cd951f1542b9ccee9ccc9773c791b4cd38"
+    },
+    {
+      "file": "0077-semantic-throws.patch",
+      "sha256": "685bd2909d9efe0c36f71f512c6fa347c6dffeddb9a03696651849036a79f119"
+    },
+    {
+      "file": "0078-anonymous-generation.patch",
+      "sha256": "48a6e15b5b35984b0c8c7329686c0a3e94bf9c44703ee613661b87bd998d0cea"
+    },
+    {
+      "file": "0079-promoted-property-accessors.patch",
+      "sha256": "90097cd6b96416da450e5bb08c75e39a4e693c8fd1c553a29082688531bd2d36"
+    },
+    {
+      "file": "0080-accessor-doc-spelling.patch",
+      "sha256": "e6c840efaccca7d8c88c68e8004318da8836b9438e8821adb9030586dbe0cad6"
+    },
+    {
+      "file": "0081-trait-constructor-hierarchy.patch",
+      "sha256": "f5ab2b3e1c9416046846be2e7932d311aa0f9f72e7b8053b09b2527bbceffd5b"
+    },
+    {
+      "file": "0082-selected-php-runtime.patch",
+      "sha256": "1759f2bb8fbdc0c933edfe3fd4ee040274463acd0cf58893dc84b6f0c67aa948"
+    },
+    {
+      "file": "0083-readable-hover-tables.patch",
+      "sha256": "c4b1ada9eaf5c1db91780274c4e4d7807a2e7c58a3c129bc9fba6c15b26ed1bc"
+    },
+    {
+      "file": "0084-formatter-runtime-and-installed-refresh.patch",
+      "sha256": "b5be8224c55b3f8e39dfeb9f8cc4a62e46a76b30b4155736e962273f1f6ca4c0"
+    },
+    {
+      "file": "0085-framework-target-freshness.patch",
+      "sha256": "80bb915ad81261bcaedc76c20268711f1cb4f45647638f5afe27ed92385e237f"
+    },
+    {
+      "file": "0086-global-target-supervisor.patch",
+      "sha256": "8f93c5ab8c95961194084d208810e5b848bcdf483aa646e788835906cf379260"
+    },
+    {
+      "file": "0087-anonymous-hierarchy-and-blade-inference.patch",
+      "sha256": "f563915906babf722b77da77d4869dec4a76623f150c20d109df91d76e05bf34"
+    },
+    {
+      "file": "0088-declaration-call-ownership.patch",
+      "sha256": "35eab582138d6252d77b73c0cb256a9b28312c2ca3bc28a65413f096a64fd05f"
+    },
+    {
+      "file": "0089-hierarchy-source-identity.patch",
+      "sha256": "5f49c71043a03684c19168ed75515e1c602005d21ddf26ae0e8244fa2c97da10"
+    },
+    {
+      "file": "0090-immediate-object-invocation.patch",
+      "sha256": "01696c84d10b5b8a73a81b43d4393b0ce4c8c5154b52e3f5a01ee32cb0bab93c"
+    },
+    {
+      "file": "0091-literal-method-selectors.patch",
+      "sha256": "250424ecd50cf04844b6d01bcd686d53b595acfdc4a737220ec59f14fc035ecd"
+    },
+    {
+      "file": "0092-literal-callable-hierarchy.patch",
+      "sha256": "de8e4e73d64709dd26ecf6f99da235295156bcbebd50323455c918203e6d8a45"
+    },
+    {
+      "file": "0093-builtin-callable-identity.patch",
+      "sha256": "2e363e38a69887e673c48e27ff7cbab920a3eccb09acef354f97bacfa84bab9c"
+    },
+    {
+      "file": "0094-type-keyword-hierarchy.patch",
+      "sha256": "08f6958bda384d36d0897aa61e422a1a95e684c7122d68a611e7d048dfd3659b"
+    },
+    {
+      "file": "0095-array-callable-hierarchy.patch",
+      "sha256": "91a953cfcec8f532d984c879221c9aaf711aed257ac07e17b53e3e0e36e15a00"
+    },
+    {
+      "file": "0096-named-argument-structural-search.patch",
+      "sha256": "8e208f61ecccb6c6b3a4da841edcfb9e044c6f809fd6d153944dc7a0ee986170"
+    },
+    {
+      "file": "0097-named-hierarchy-source-receipts.patch",
+      "sha256": "50fea05dea2e64a48453a2fc35ef235ae419ab556d4c4fe165d834035f2bc482"
+    },
+    {
+      "file": "0098-stored-callable-value-hierarchy.patch",
+      "sha256": "cea50b4d4e27f878cc5bc2d4e86947e7927098b821496e6c2b22b77b4b3c20de"
+    },
+    {
+      "file": "0099-hierarchy-analysis-status.patch",
+      "sha256": "6190bfd256a15bbd1bc72c0deb1f3330c84d2664588b02bb83942a8586d5e8ba"
+    },
+    {
+      "file": "0100-blade-view-data-freshness.patch",
+      "sha256": "e80927a7f9f6751b9b4fbf46c6d03df3a6e51f36cb0f8621edd44efb698a6348"
+    },
+    {
+      "file": "0101-laravel-sole-proxy.patch",
+      "sha256": "df1eb3ab8683eec1574a6b6b2e8d5bdabb5886f7128edf88c9478fe4bd97cf54"
+    },
+    {
+      "file": "0102-laravel-storage-source-context.patch",
+      "sha256": "f64695383e9fa5a5a8b6c68597d1ebbfd54e066496da4b65d91d94ff65c5811e"
+    },
+    {
+      "file": "0103-native-return-contracts.patch",
+      "sha256": "cfda636af840e2fefddb3f3b33d5cb9f79a6aa891b1b990b26c3567478cc7af8"
+    },
+    {
+      "file": "0104-checked-imports-and-index-readiness.patch",
+      "sha256": "808a92c5409ad67ee2467b7a66e67aeda66e4e85480830653319f497debee745"
+    },
+    {
+      "file": "0105-visible-incomplete-index-warning.patch",
+      "sha256": "42f8d68effad59c0da9b8037fe376d8743213e0c3c89d58714ae30e16d141689"
+    },
+    {
+      "file": "0106-hierarchy-alternative-coverage.patch",
+      "sha256": "171754f18c76ef8c33c3ca2a88229cbc8a6a67478a83013db2fd7c135f291dbf"
+    },
+    {
+      "file": "0107-safe-scanner-and-implementation-freshness.patch",
+      "sha256": "9936aebea803f172b573a5d5e866876adc8c77cc8f1b7d815d48a6d752cd8239"
+    },
+    {
+      "file": "0108-named-route-parameter-completion.patch",
+      "sha256": "ed214ea6bd00d14e09b27c321cb0d7062c7bfa459571224ab91b4536a1af4f70"
+    },
+    {
+      "file": "0109-utf16-array-key-completion.patch",
+      "sha256": "873e79f1c996d968924c6c8b1b2fd70594983476246a3af53ce6fb86fec54075"
+    },
+    {
+      "file": "0110-array-key-midword-completion.patch",
+      "sha256": "6478ebc15e970ae5a99af0147d01f3c3fd68170f4eaeb16bbbd6a34173df902f"
+    },
+    {
+      "file": "0111-composer-escaped-autoload-paths.patch",
+      "sha256": "d2aec6a58039f38e7332ce568bb3187fe46b39ec68d349ca4518f1cf1a889384"
+    },
+    {
+      "file": "0112-composer-psr0-quoted-lists.patch",
+      "sha256": "03584ec7056884c33c7e0c7a1a52132423b7eab6c548b923e0e72de85e3b7724"
+    },
+    {
+      "file": "0113-composer-require-comments.patch",
+      "sha256": "c060fe734590f209fe984e5dbc16990750f7dee8ffcb648f73a3f80d6256a2e7"
+    },
+    {
+      "file": "0114-require-scan-prefilter.patch",
+      "sha256": "07722a1d3cf64c61299f91bf72f8363e201417aee0e3145079157ab097ba2f0f"
+    },
+    {
+      "file": "0115-json-translation-source-isolation.patch",
+      "sha256": "cbdb45c3a499e1e76ade03dfa91f5717f25fc0d59e6fff45f24ba3cb5555dd84"
+    },
+    {
+      "file": "0116-environment-resource-navigation.patch",
+      "sha256": "9ce24a48a25b68ad2b85d1a082ca23cfa393154627e005523dfcea54bbd87805"
+    },
+    {
+      "file": "0117-environment-key-destinations.patch",
+      "sha256": "758a20df65c35f15ebe19856349e2920b265aad754d4aa85b2c9181d9aeb6fd1"
+    },
+    {
+      "file": "0118-unfinished-blade-echo-cursors.patch",
+      "sha256": "f141b2f7ee781633b5b6cb65924c430affe281e50b64018183ec9f6ffe5ba07b"
+    },
+    {
+      "file": "0119-blade-input-refresh-recovery.patch",
+      "sha256": "5051acccae5b7add85f26c0e7267a69990002f037e3183093f1c84da3f0dc105"
+    },
+    {
+      "file": "0120-request-field-rule-hover.patch",
+      "sha256": "dca0c87f41a7bd4064d498f1aa3f8ab90b28ccc8561d096099a2ffed3328122e"
+    },
+    {
+      "file": "0121-hover-content-modified.patch",
+      "sha256": "459c811a785d6058c9943b77c6d64cc680cd21d57577c3843801dcd067bd194a"
+    },
+    {
+      "file": "0122-laravel-validation-rule-names.patch",
+      "sha256": "ff571197bca88d4319e0dc8e0cee2c78f4a988e84bf7c7bc918eb62e8978d1f4"
+    },
+    {
+      "file": "0123-class-resolution-wait-cycles.patch",
+      "sha256": "28f21d9e0e10ba0b63e5b5601e21e14f2e4f09eec7b97a79148747a5fe13019d"
+    },
+    {
+      "file": "0124-route-controller-facade-identity.patch",
+      "sha256": "0276e82ee615c8c1b4995846a01f1feb629016824a7589e5d186a72293ca3b8b"
+    },
+    {
+      "file": "0125-route-controller-completion-range.patch",
+      "sha256": "48e4381bff2a56c4ad6b87dde22bf4111292523b7726305d7fc12db11bed5a16"
+    },
+    {
+      "file": "0126-route-diagnostic-publication.patch",
+      "sha256": "7af10cad10621dd6e7bb64d7d37c43dec89e3cc532b775873cff07f580b24e37"
+    },
+    {
+      "file": "0127-view-catalog-file-events.patch",
+      "sha256": "29437fd3b06e8254f24cc5dbe228f1dc445d83ffd1a16baafa0a7b9a407fd300"
+    },
+    {
+      "file": "0128-blade-component-supplied-props.patch",
+      "sha256": "7726cb71219d204b67a564b115c9aa93ff2aba40aabc935a7328458b62f1155b"
+    },
+    {
+      "file": "0129-blade-consumable-context.patch",
+      "sha256": "85edb4473c522baaebb973eb6162367c9ef45b8c4a5b9bee2405e407bd11545e"
+    },
+    {
+      "file": "0130-blade-component-attribute-context.patch",
+      "sha256": "1f6a8f1c8e9b0792ff252f9d38e91755947032e642957595551ee0cf6515ecb4"
+    },
+    {
+      "file": "0131-migration-column-origins.patch",
+      "sha256": "295f8455ee1d4fc8ec95410acc16fde1a9aa581c775bf331e449edbb864e7344"
+    },
+    {
+      "file": "0132-container-provider-registration-order.patch",
+      "sha256": "49adb1f3cdc2e8dd83a7d571713c55f8cf7976e9d6f473e63da3482275932e9e"
+    },
+    {
+      "file": "0133-facade-binding-snapshots.patch",
+      "sha256": "beba5737867924e2ef72f8695697b4b40c555f1d8ab3fc1ce4a60daba3e72d6d"
+    },
+    {
+      "file": "0134-navigation-content-modified.patch",
+      "sha256": "f99d434967ae9f0938a7c3256d433f07ea08c77fc3808f6eed17711f14699e15"
+    },
+    {
+      "file": "0135-route-match-controller-actions.patch",
+      "sha256": "64b70cecc4f6bbf91d3856534ec1db6ae5abebd86691a74443960bcc8cf42f21"
+    },
+    {
+      "file": "0136-named-route-uri-arguments.patch",
+      "sha256": "9653a1235ff5d52db8669865a6cee3d78d50265af96867037ddc0b57d1e7ed93"
+    },
+    {
+      "file": "0137-fluent-route-controller-actions.patch",
+      "sha256": "d606472e4df03b6dfc3f9f6b2085b0e988f051452c2657aaa2cd997f5770e495"
+    },
+    {
+      "file": "0138-group-controller-bindings.patch",
+      "sha256": "04273c73fa2bfc91c1f63a2afc7c5c2b306cfb17083680a146e55c7fb46645a8"
+    },
+    {
+      "file": "0139-arrow-controller-groups.patch",
+      "sha256": "a843d9efaf9b39cb1a72328473850ab270f4472a0c1817881b0bda98a65f9b70"
+    }
+  ]
+}

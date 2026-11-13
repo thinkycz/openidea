@@ -1,0 +1,207 @@
+--- a/src/completion/laravel_route_controller.rs
++++ b/src/completion/laravel_route_controller.rs
+@@ -22,6 +22,7 @@
+ 
+ use tower_lsp::lsp_types::*;
+ 
++use mago_span::HasSpan;
+ use mago_syntax::cst::*;
+ 
+ use crate::Backend;
+@@ -333,15 +334,18 @@
+     best.and_then(|(name, _)| name)
+ }
+ 
+-/// Return the byte range of a closure body (between braces).
++/// Return the byte range of a closure body or arrow-function expression.
+ fn closure_body_range(expr: &Expression<'_>) -> Option<(u32, u32)> {
+-    if let Expression::Closure(c) = expr {
+-        Some((
++    match expr {
++        Expression::Closure(c) => Some((
+             c.body.left_brace.start.offset,
+             c.body.right_brace.end.offset,
+-        ))
+-    } else {
+-        None
++        )),
++        Expression::ArrowFunction(arrow) => {
++            let span = arrow.expression.span();
++            Some((span.start.offset, span.end.offset))
++        }
++        _ => None,
+     }
+ }
+ 
+--- a/tests/integration/laravel_route_controller.rs
++++ b/tests/integration/laravel_route_controller.rs
+@@ -759,3 +759,106 @@
+     let items = complete_at(&backend, &uri, text, at.line, at.character).await;
+     assert!(!method_labels(&items).iter().any(|m| m == "showInvoice"));
+ }
++
++#[tokio::test]
++async fn arrow_controller_groups_complete_the_same_owner_as_definitions() {
++    use crate::common::position_after;
++    for class in ["Inner::class", "'Demo\\Inner'"] {
++        for callback in ["fn () =>", "static fn (): mixed =>"] {
++            for nested in [false, true] {
++                let backend = create_test_backend();
++                let uri = Url::parse("file:///arrow-controller.php").unwrap();
++                let group = format!(
++                    "Routes::controller({class})->group({callback} Routes::middleware('auth')->get('/😀', 'showInvoice')); "
++                );
++                let body = if nested {
++                    format!("Routes::controller(Outer::class)->group(function () {{ {group} }});")
++                } else {
++                    group
++                };
++                let text = format!(
++                    "<?php\nnamespace Demo;\nuse Illuminate\\Support\\Facades\\Route as Routes;\nclass Outer {{ public function showInvoice(): string {{return 'outer';}} }}\nclass Inner {{ public function showInvoice(): bool {{return true;}} }}\n{body}\n"
++                );
++                open_php(&backend, &uri, &text).await;
++                let at = position_after(&text, "'showIn");
++                let expected = position_after(&text, "class Inner { public function ");
++                let target = goto_def(&backend, &uri, at.line, at.character).await;
++                assert!(
++                    matches!(target,Some(GotoDefinitionResponse::Scalar(ref l)) if l.uri==uri && l.range.start==expected),
++                    "arrow definition {class}/{callback}/{nested}: {target:?}"
++                );
++                let items = complete_at(&backend, &uri, &text, at.line, at.character).await;
++                let item = items
++                    .iter()
++                    .find(|i| i.insert_text.as_deref() == Some("showInvoice"))
++                    .unwrap_or_else(|| {
++                        panic!("missing arrow completion {class}/{callback}/{nested}: {items:?}")
++                    });
++                assert!(
++                    item.detail.as_deref().is_some_and(|s| s.contains("bool")),
++                    "wrong arrow owner: {item:?}"
++                );
++                let hover = backend
++                    .hover(HoverParams {
++                        text_document_position_params: TextDocumentPositionParams {
++                            text_document: TextDocumentIdentifier { uri: uri.clone() },
++                            position: at,
++                        },
++                        work_done_progress_params: Default::default(),
++                    })
++                    .await
++                    .unwrap()
++                    .expect("arrow hover");
++                assert!(
++                    matches!(hover.contents,HoverContents::Markup(ref m) if m.value.contains("showInvoice(): bool")),
++                    "arrow hover {hover:?}"
++                );
++            }
++        }
++    }
++}
++
++#[tokio::test]
++async fn unknown_arrow_controller_groups_do_not_complete_the_outer_owner() {
++    use crate::common::position_after;
++    for binding in ["$picked", "...$picked", "controller: Inner::class"] {
++        let backend = create_test_backend();
++        let uri = Url::parse("file:///unknown-arrow-controller.php").unwrap();
++        let text = format!(
++            "<?php\nuse Illuminate\\Support\\Facades\\Route as Routes;\nclass Outer {{public function showInvoice(): string {{return 'outer';}}}}\nclass Inner {{public function showInvoice(): bool {{return true;}}}}\nRoutes::controller(Outer::class)->group(function () {{ Routes::controller({binding})->group(fn () => Routes::get('/x', 'showInvoice')); }});\n"
++        );
++        open_php(&backend, &uri, &text).await;
++        let at = position_after(&text, "'showIn");
++        assert!(
++            goto_def(&backend, &uri, at.line, at.character)
++                .await
++                .is_none(),
++            "unknown arrow target {binding}"
++        );
++        let items = complete_at(&backend, &uri, &text, at.line, at.character).await;
++        assert!(
++            !method_labels(&items).iter().any(|m| m == "showInvoice"),
++            "unknown arrow borrowed parent {binding}: {items:?}"
++        );
++    }
++}
++
++#[tokio::test]
++async fn arrow_groups_without_a_controller_inherit_the_enclosing_owner() {
++    use crate::common::position_after;
++    let backend = create_test_backend();
++    let uri = Url::parse("file:///inherited-arrow-controller.php").unwrap();
++    let text = "<?php\nuse Illuminate\\Support\\Facades\\Route as Routes;\nclass Outer {public function showInvoice(): string {return 'outer';}}\nRoutes::controller(Outer::class)->group(fn () => Routes::prefix('invoices')->group(fn () => Routes::get('/x', 'showInvoice')));\n";
++    open_php(&backend, &uri, text).await;
++    let at = position_after(text, "'showIn");
++    assert!(
++        goto_def(&backend, &uri, at.line, at.character)
++            .await
++            .is_some()
++    );
++    let items = complete_at(&backend, &uri, text, at.line, at.character).await;
++    assert!(
++        method_labels(&items).iter().any(|m| m == "showInvoice"),
++        "missing inherited arrow completion: {items:?}"
++    );
++}
+--- a/docs/CHANGELOG.md
++++ b/docs/CHANGELOG.md
+@@ -14,6 +14,8 @@
+ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+ 
+ ## [Unreleased]
++
++- **Complete controller actions inside arrow-function route groups.** Suggestions follow the innermost controller, including nested groups, without borrowing an outer controller for unknown bindings. Contributed by @thinkycz.
+ 
+ - **Resolve Laravel controller-group bindings.** Navigation, completion and refactoring follow runtime class strings and enclosing group ownership. Unknown nested controllers remain unresolved. Contributed by @thinkycz.
+ 
+--- a/examples/laravel/app/Demo.php
++++ b/examples/laravel/app/Demo.php
+@@ -1678,6 +1678,21 @@
+         });
+     }
+ 
++    public function arrowControllerGroups(): void
++    {
++        // Try: complete index inside an arrow callback; it returns View.
++        Route::controller(BakeryController::class)->group(fn () =>
++            Route::middleware('auth')->get('/arrow-bakeries', 'index'));
++        Route::controller(BakeryController::class)->group(function (): void {
++            // The nested controller's index returns JsonResponse.
++            Route::controller('App\Http\Controllers\AlternateBakeryController')->group(static fn () =>
++                Route::get('/arrow-preview', 'index'));
++        });
++        // A controller-free inner arrow group inherits BakeryController.
++        Route::controller(BakeryController::class)->group(fn () =>
++            Route::prefix('inherited')->group(fn () => Route::get('/arrow-inherited', 'index')));
++    }
++
+ }
+ 
+ // PHP Workbench: Laravel: Go to Route lists statically named routes and opens
+--- a/examples/laravel/assertions.php
++++ b/examples/laravel/assertions.php
+@@ -1966,6 +1966,25 @@
+     check('Alternate controller implements its JSON return type', (new \App\Http\Controllers\AlternateBakeryController())->index()->getData(true) === ['preview' => true]);
+ })();
+ 
++// Arrow callbacks retain the same group stack as ordinary closures.
++(function (): void {
++    $router = new \Illuminate\Routing\Router(new \Illuminate\Events\Dispatcher());
++    $main = \App\Http\Controllers\BakeryController::class;
++    $alternate = \App\Http\Controllers\AlternateBakeryController::class;
++    $router->controller($main)->group(fn () => $router->get('/arrow', 'index')->name('arrow.main'));
++    $router->controller($main)->group(function () use ($router, $alternate): void {
++        $router->controller($alternate)->group(static fn () => $router->get('/arrow-preview', 'index')->name('arrow.inner'));
++    });
++    $router->controller($main)->group(fn () => $router->prefix('inherited')->group(fn () =>
++        $router->get('/arrow-inherited', 'index')->name('arrow.inherited')));
++    $routes = [];
++    foreach ($router->getRoutes() as $route) { $routes[$route->getName()] = $route->getActionName(); }
++    check('Arrow controller groups register three routes', count($routes) === 3);
++    check('Top-level arrow group selects its controller', ($routes['arrow.main'] ?? null) === $main . '@index');
++    check('Nested arrow group selects its own controller', ($routes['arrow.inner'] ?? null) === $alternate . '@index');
++    check('Controller-free nested arrow group inherits its parent', ($routes['arrow.inherited'] ?? null) === $main . '@index');
++})();
++
+ // ─── Summary ────────────────────────────────────────────────────────────────
+ 
+ echo "\n";

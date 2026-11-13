@@ -2112,6 +2112,73 @@ registrars, custom macros, dynamic bindings, broader lifecycle/configuration/
 performance/platform matrices and physical Dock-switch autosave remain partial.
 No migration, publishing, updater activation, notarization or debugger expansion.
 
+Slice84 — Laravel arrow-function controller groups (2026-11-13).
+Slice83 is committed and pushed as d2d6073aa1021cbdf5a75fa354655e6744467c73.
+Controller-action completion now recognizes arrow callback expression spans when
+selecting the innermost route group. Direct, nested, static and typed arrow
+callbacks select the same controller as definition and hover. Controller-free
+inner groups inherit their parent; explicit unknown bindings prevent completion
+from borrowing an outer controller. Symbol extraction already handles these
+route-call expressions, so this fixes the completion boundary without adding a
+parallel resolver, settings, implicit framework execution or debugger behavior.
+
+Baseline138 protocol evidence shows missing direct-arrow completion and wrong
+Outer completion for known and unknown nested arrow bindings, while definition
+and hover are already correct. The first probe expected missing nested completion;
+its raw12replies and assertion failure are preserved, with a separate offline
+classification of the actual wrong-owner result. All20existing focused source
+cases pass before the change; the three new cases fail, then all23pass after the
+fix and pre-freeze release Clippy/format. Formatting changes only the new tests.
+The actual client also reproduces missing method completion on138 after its
+navigation/reference/checked-rename controls, then passes on139.
+
+Append-only0139 includes the fix, regressions, changelog and working Laravel
+examples. The immutable patch-series SHA256 is
+a14308f87486ddd8f8489a6905e006af69d777b109de7b77b638a4edb007eeb3.
+Full source18436ordinary/17ignored/0filtered plus the separate FIFO child pass;
+release all-target Clippy, fmt, source fingerprint and normal optimized build pass.
+Engine139 SHA256:
+0addf1fd8ccf55bf5d244cf8256e664baeb0ce9679359b2d218437f5f51035ca.
+The separate Laravel13.37 fixture preserves six138baseline source/Composer
+hashes, matches two new immutable source files and copies no environment files.
+All12plain-PHP/88Laravel syntax checks, plain assertions and285Laravel runtime
+assertions pass, including four new arrow-group registrations/owner checks.
+Analyzer139 retains exactly the prior three intentional diagnostics. Nine fresh
+example protocol queries validate exact definitions, whole-atom completion edits
+and hover owner/types; all four observed files remain unchanged.
+
+The actual client retains closure/static/fluent/string controls and adds direct
+and nested arrows. It verifies11owner-isolated reference/checked-rename targets
+across three files, Unicode completion replacement/resolve, unsaved group rebinding,
+unknown-arrow barriers and first-arrow queries after controller-only unsaved
+changes, restart and overlay close. Disk declaration/hover restore and all five
+scenario originals remain exact. All40client/6host tests pass with none ignored
+or filtered. Fresh5383frontend tests/487files,1759ordinary workspace/77ignored/
+0filtered, fmt, warnings-denied all-target Clippy and post-binding frontend gates
+pass. The ordinary workspace uses138before promotion; actual client/host runs
+explicitly select139. Eight unchanged packaging/retention regressions from83are
+reused with exact script/test hashes; this slice's actual cleanup is verified fresh.
+
+Signed arm64 development0.1.77 is the sole generated archive at
+artifacts/batches/0.1.77/OpenStorm.app. Executable SHA256:
+71dd03183b24a6ad52884b43b6f2a01088beb12cfef3475207b79ecb76fbe132.
+Strict/deep signature, source snapshot, embedded/resource/canonical139checksums,
+reconstructible source recipe, unchanged installed21 executable, fixture/Composer
+hashes and no owned app/server process all pass. Final docs/ledger edits are
+non-runtime differences. App76is removed only after77signature/receipt; the
+duplicate bundle, both compiler roots and exact inactive138canonical executable
+are removed. Sources, patches, licenses, provenance, receipts, released114 and
+PHP Workbench remain. App77is not launched or installed; native checks stay skipped.
+
+Evidence: artifacts/checks/slice84 baseline wire/classification/runtime, source
+red/green/prefreeze/freeze/full gates, examples/analyzer/wire, SDK/frontend/client-
+host/postbinding, retention reuse, pipeline/readback and obsolete-engine cleanup;
+77build/retention receipts. Git delivery evidence follows commit/push separately.
+All69statuses remain67partial/2user-deferred. Broader callback forms, route
+namespace/macros/dynamic bindings and lifecycle/configuration/performance/platform
+matrices remain partial, as does physical Dock-switch autosave. No migration,
+publishing, updater activation, notarization or debugger expansion.
+
 Source integration (2026-11-01, verified source checkpoint): integrates all 240 new
 commits from `l0ng-ai/openidea:main` at `041e7210` into
 `codex/openstorm-php-laravel`, based on pushed OpenStorm `82d1313a`.

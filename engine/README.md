@@ -1,14 +1,14 @@
 # Pinned PHPantom engine
 
-The local OpenStorm development candidate uses PHPantom `0.11.1-openstorm.134`
+The local OpenStorm development candidate uses PHPantom `0.11.1-openstorm.135`
 for Apple Silicon macOS. This is a local rebuild, not an upstream release.
 Source131 adds migration-derived declaration origins;132 follows registration
 order for container bindings and aliases within a provider group. Source133
 retires derived facade members and completion candidates after binding changes,
 including publication by older calculations. Source134 preserves retriable stale
 errors for definition/type-definition and implementation while a semantic
-publication is pending. Full pinned
-source tests pass18,421 checks plus the separate FIFO child (17 ignored).
+publication is pending. Source135 adds positional/named Route::match controller
+action intelligence. Full pinned source tests pass18,424 checks plus the separate FIFO child (17 ignored).
 Examples, Clippy, formatting, source fingerprints and the optimized build pass.
 Current OpenStorm client/host and packaged native acceptance are tracked in
 `docs/OPENSTORM.md`; source checks alone do not establish native acceptance.
@@ -246,3 +246,16 @@ results and unrelated errors are not retried. The pivot client fixture accepts
 through dependency-only edit/undo/redo/restart/close with an unchanged consumer.
 Source/client/build evidence and the unavailable native UI gate remain separate
 in `docs/OPENSTORM.md`.
+
+Patch0135 recognizes controller-group Route::match action strings by their third
+positional argument or explicit named action. Shared facade/argument identity
+keeps URI strings and foreign receivers separate and refuses unpacked/duplicate
+ambiguity. Completion retains the existing second-argument fast path, reuses the
+whole-identifier UTF16 edit, and adds AST selection for other supported layouts.
+Focused source cases cover positional/named forms, nested owner hover/references
+and invalid contexts. Full source18424ordinary/17ignored plus FIFOchild, fmt,
+all-target release Clippy, source fingerprint, build and example/analyzer controls
+pass. The real OpenStorm client verifies exact targets/refactor edits, completion
+ranges and dependency-only unsaved/restart/close freshness. Remaining broader
+route forms, named-URI metadata and native acceptance are tracked separately in
+docs/OPENSTORM.md; development wiring alone does not establish final delivery.

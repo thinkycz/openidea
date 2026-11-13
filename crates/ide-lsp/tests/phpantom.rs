@@ -3791,3 +3791,205 @@ async fn laravel_translation_json_uses_configured_content_roots_and_recovers_aft
     }
     result.unwrap();
 }
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires pinned PHPantom and owned PHP syntax-check executable"]
+async fn laravel_match_actions_follow_aliases_nested_owners_and_unsaved_controllers() {
+    let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let bin = std::env::var_os("OPENSTORM_TEST_PHPANTOM_BIN")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| repo.join("src-tauri/resources/phpantom/phpantom_lsp"));
+    let php_bin = std::env::var_os("OPENSTORM_TEST_PHP_BIN")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| repo.join("artifacts/toolchains/php-8.4.23-static/php"));
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().canonicalize().unwrap();
+    let controller =
+        "<?php\nnamespace App;\nclass InvoiceController { public function showInvoice(): string { return 'ok'; } }\n";
+    let inner =
+        "<?php\nnamespace App;\nclass InnerController { public function showInvoice(): bool { return true; } }\n";
+    let routes = "<?php\nuse Illuminate\\Support\\Facades\\Route as Routes;\nuse App\\InvoiceController as Main;\nuse App\\InnerController as Inner;\nRoutes::controller(Main::class)->group(function () {\n Routes::get('/standard', 'showInvoice')->name('standard');\n Routes::match(['get', 'post'], '/😀/showInvoice/{id}', 'showInvoice')->name('matched');\n Routes::match(action: 'showInvoice', methods: ['post'], uri: '/named')->name('named');\n Routes::controller(Inner::class)->group(function () {\n  Routes::match(['get'], '/nested', 'showInvoice')->name('nested');\n });\n});\n";
+    let caller = "<?php\nuse App\\InvoiceController as Main;\n(new Main())->showInvoice();\n";
+    let composer = r#"{"require":{"php":"^8.3","laravel/framework":"^13.0"},"autoload":{"psr-4":{"App\\":"app/"}}}"#;
+    let files = [
+        ("composer.json", composer),
+        ("app/InvoiceController.php", controller),
+        ("app/InnerController.php", inner),
+        ("routes/web.php", routes),
+        ("app/Caller.php", caller),
+    ];
+    for (name, text) in files {
+        let path = root.join(name);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, text).unwrap();
+        if name.ends_with(".php") {
+            let output =
+                std::process::Command::new(&php_bin).args(["-n", "-l"]).arg(&path).output().expect("owned PHP linter");
+            assert!(
+                output.status.success(),
+                "invalid owned fixture {name}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+    }
+    let manifest: serde_json::Value = serde_json::from_str(composer).unwrap();
+    assert_eq!(manifest["autoload"]["psr-4"]["App\\"], "app/");
+    assert!(root.join("app").is_dir());
+    let mut php = LanguageRegistry::load(None).unwrap().get(&LanguageId::new("php")).unwrap();
+    php.language_servers.retain(|s| s.name == "phpantom");
+    php.language_servers[0].command = bin.to_string_lossy().into_owned();
+    let mgr = LspManager::new(root.clone(), Arc::new(LanguageRegistry::from_configs(vec![php])), Arc::new(|_| {}));
+    let candidate_root = root.clone();
+    mgr.set_candidates_hook(Box::new(move |_, _| ide_lsp::CandidateFiles {
+        files: ["routes/web.php", "app/InvoiceController.php", "app/InnerController.php", "app/Caller.php"]
+            .iter()
+            .map(|name| candidate_root.join(name))
+            .collect(),
+        limit_hit: false,
+    }));
+    let route_doc = DocId::next();
+    let ctrl_doc = DocId::next();
+    let caller_doc = DocId::next();
+    for (doc, name, text) in [
+        (route_doc, "routes/web.php", routes),
+        (ctrl_doc, "app/InvoiceController.php", controller),
+        (caller_doc, "app/Caller.php", caller),
+    ] {
+        mgr.did_open(doc, &root.join(name), &LanguageId::new("php"), 1, text);
+    }
+    let result: Result<(), String> = async {
+        let main_path = root.join("app/InvoiceController.php");
+        let inner_path = root.join("app/InnerController.php");
+        let route_path = root.join("routes/web.php");
+        let caller_path = root.join("app/Caller.php");
+        let positions = [
+            pos(routes, "showInvoice')->name('standard')"),
+            pos(routes, "showInvoice')->name('matched')"),
+            pos(routes, "showInvoice', methods:"),
+        ];
+        for (at, expected_path, expected_source, ty) in positions
+            .iter()
+            .map(|at| (*at, &main_path, controller, "string"))
+            .chain(std::iter::once((pos(routes, "showInvoice')->name('nested')"), &inner_path, inner, "bool")))
+        {
+            let targets = mgr.goto(route_doc, at, GotoKind::Definition).await.map_err(|e| e.to_string())?;
+            if targets.len() != 1
+                || targets[0].path.to_path_buf() != *expected_path
+                || targets[0].range.start != pos(expected_source, "showInvoice")
+            {
+                return Err(format!(
+                    "route action owner/range wrong at {at:?}, expected {expected_path:?}: {targets:?}"
+                ));
+            }
+            let hover = mgr
+                .hover(route_doc, at, Default::default())
+                .await
+                .map_err(|e| e.to_string())?
+                .ok_or("missing method hover")?;
+            if !hover.contents.value.contains(&format!("showInvoice(): {ty}")) {
+                return Err(format!("wrong route action type: {hover:?}"));
+            }
+        }
+        let refs =
+            mgr.references(route_doc, positions[1], true, true, Default::default()).await.map_err(|e| e.to_string())?;
+        let mut actual: Vec<_> =
+            refs.locations.iter().map(|l| (l.path.to_path_buf(), l.range.start.line, l.range.start.col)).collect();
+        actual.sort();
+        let mut expected: Vec<_> = positions.iter().map(|p| (route_path.clone(), p.line, p.col)).collect();
+        for (path, text) in [(&main_path, controller), (&caller_path, caller)] {
+            let p = pos(text, "showInvoice");
+            expected.push((path.clone(), p.line, p.col));
+        }
+        expected.sort();
+        if actual != expected || refs.incomplete.is_some() {
+            return Err(format!("method references must include only declaration/three actions/caller: {refs:?}"));
+        }
+        let rename = mgr
+            .rename(route_doc, positions[1], "displayInvoice".into(), Default::default())
+            .await
+            .map_err(|e| e.to_string())?;
+        if rename.incomplete.is_some() {
+            return Err(format!("owned method rename unexpectedly incomplete: {rename:?}"));
+        }
+        let mut edits = Vec::new();
+        for file in &rename.edit.files {
+            match file {
+                ide_core::FileEdit::Edit { path, edits: items } => {
+                    for e in items {
+                        if e.new_text != "displayInvoice" {
+                            return Err(format!("unexpected rename text: {e:?}"));
+                        }
+                        edits.push((path.to_path_buf(), e.range.start.line, e.range.start.col));
+                    }
+                }
+                other => return Err(format!("unexpected resource operation {other:?}")),
+            }
+        }
+        edits.sort();
+        if edits != expected {
+            return Err(format!("checked rename crossed owner/URI boundary: {rename:?}"));
+        }
+        let edited = routes.replace("showInvoice')->name('matched')", "showInvoiceExtra')->name('matched')");
+        replace(&mgr, route_doc, 2, routes, &edited);
+        let start = pos(&edited, "showInvoiceExtra')->name");
+        let at = Pos::new(start.line, start.col + 2);
+        let list = mgr.completion(route_doc, at, None, Default::default()).await.map_err(|e| e.to_string())?;
+        let item =
+            list.items.into_iter().find(|i| i.insert_text == "showInvoice").ok_or("missing match method completion")?;
+        let range = Range::new(start, Pos::new(start.line, start.col + "showInvoiceExtra".len() as u32));
+        if item.replace_range != Some(range) || item.is_snippet || !item.additional_edits.is_empty() {
+            return Err(format!("match completion lost whole UTF16 atom: {item:?}"));
+        }
+        let resolved = mgr.resolve_completion(route_doc, item).await.map_err(|e| e.to_string())?;
+        if resolved.replace_range != Some(range) {
+            return Err("resolved completion lost replacement edit".into());
+        }
+        replace(&mgr, route_doc, 3, &edited, routes);
+        let unsaved = controller
+            .replace("<?php\n", "<?php\n// 😀 unsaved\n")
+            .replace(": string", ": int")
+            .replace("return 'ok'", "return 7");
+        replace(&mgr, ctrl_doc, 2, controller, &unsaved);
+        for phase in 0..2 {
+            if phase == 1 {
+                mgr.restart(mgr.servers()[0].id).await.map_err(|e| e.to_string())?;
+            }
+            let target = mgr.goto(route_doc, positions[1], GotoKind::Definition).await.map_err(|e| e.to_string())?;
+            if target.len() != 1 || target[0].range.start != pos(&unsaved, "showInvoice") {
+                return Err(format!("unsaved match declaration not current phase{phase}: {target:?}"));
+            }
+            let hover = mgr
+                .hover(route_doc, positions[1], Default::default())
+                .await
+                .map_err(|e| e.to_string())?
+                .ok_or("missing unsaved hover")?;
+            if !hover.contents.value.contains("showInvoice(): int") {
+                return Err(format!("unsaved method type stale: {hover:?}"));
+            }
+            let completions = mgr
+                .completion(route_doc, Pos::new(positions[1].line, positions[1].col + 2), None, Default::default())
+                .await
+                .map_err(|e| e.to_string())?;
+            let method = completions
+                .items
+                .iter()
+                .find(|i| i.insert_text == "showInvoice")
+                .ok_or("missing unsaved controller completion")?;
+            if method.detail.as_deref() != Some("int") {
+                return Err(format!("unsaved controller completion stale phase{phase}: {method:?}"));
+            }
+        }
+        mgr.did_close(ctrl_doc);
+        let restored = mgr.goto(route_doc, positions[1], GotoKind::Definition).await.map_err(|e| e.to_string())?;
+        if restored.len() != 1 || restored[0].range.start != pos(controller, "showInvoice") {
+            return Err(format!("closing overlay did not restore declaration: {restored:?}"));
+        }
+        Ok(())
+    }
+    .await;
+    mgr.shutdown_all().await;
+    for (name, text) in files {
+        assert_eq!(std::fs::read_to_string(root.join(name)).unwrap(), text, "queries must not write fixture files");
+    }
+    result.unwrap();
+}

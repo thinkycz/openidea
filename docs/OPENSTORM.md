@@ -1813,6 +1813,73 @@ Evidence: `artifacts/checks/slice79-{red,focused}.log`, fullfrontend gate receip
 `slice79-final-readback.json` and source snapshot; earlier app72 provenance and
 slice78 integration evidence remain intact.
 
+Slice80 — Route::match controller actions (verified local slice, 2026-11-13). Slice79 is committed/pushed as
+ea9fa779. A released134 wire probe on an owned syntax-checked Composer/PSR-4
+fixture proves ordinary get action definition, completion and hover while the
+match third-argument action returns null for all three. New source regressions
+fail on the positive definition and retain passing negative controls. The actual
+OpenStorm client likewise fails at the match action on human line7 after its
+ordinary aliased get definition/hover controls pass.
+
+Append-only patch0135 adds a shared facade-checked selector for third positional
+match or explicit named action arguments, refusing unpacked/duplicate ambiguity.
+Extraction uses action identity; completion retains the standard second-argument
+path and supplies an AST fallback with the same whole-identifier UTF16 edit.
+All13 controller-module cases pass, including positional/named forms, nested
+owner hover/references, alias/insertion controls and six negative contexts. An
+intermediate repeat of12 cases preceded the final strengthened13-case run; it
+is not counted as additional coverage. Verified immutable source135 reconstructs
+at patch-series SHA47a55847e3c168886a9a44bd5059c629ac5796b68278aae549afdccffe5602b7.
+
+Fresh full engine gates pass18424 ordinary tests/17ignored/0filtered plus the
+separate FIFO child, release all-target Clippy, fmt, fingerprint and build.
+Plain/Laravel example syntax/runtime assertions pass; the pinned Laravel analyzer
+returns exactly the same3 intentional diagnostics as its control. Candidate135
+SHA256 is49dcf1a463348391d3796580b6c661bb0469fd8d2516fe700ddc7eae5b30a5fd.
+The active source pin, bundled resource and provenance now select this candidate.
+
+The actual-client regression passes exact owner/range/hover for get, match,
+reordered named action and nested groups;5 references and5 checked-rename edits
+across3 files exclude nested-owner methods and identical URI literals. Completion
+replaces the full atom behind an emoji and survives resolve. Dependency-only
+unsaved return-type/declaration edits are fresh before/after restart; closing the
+overlay restores disk declaration navigation. Queries never apply edits and all
+5 fixture originals remain exact. The first candidate harness omitted the host's
+candidate-scope callback and correctly received a rename refusal; supplying the
+same exact project scope fixes the harness without weakening production guards.
+
+Fresh frontend5383tests/487files, typecheck/lint/Knip/format/build and full
+Rust workspace1759passed/76ignored/0filtered, fmt and all-target Clippy with
+warnings denied pass. All39actual-client and6host tests pass with no ignored or
+filtered cases; post-bindings typecheck/lint/Knip/format/build and8retention
+checks pass. The source snapshot matches the final build; queries preserve all
+owned fixtures, Composer source pins/autoload metadata and disk bytes. The91PHP
+pivot corpus files lint, and earlier JSON probe integrity is explicitly reused,
+not presented as a fresh135 wire run.
+
+Signed arm64 development0.1.73 is the sole generated archive at
+artifacts/batches/0.1.73/OpenStorm.app. Executable SHA256:
+4454650b79dfc0c22be8d2a955270d270708d6ae50a78d0fcd3d8238e4461285.
+Strict/deep signature, embedded/resource/canonical135 checksums, reproducible
+source recipe and protected installed21 hash all pass. No owned app/server
+process remains. Packaging prunes app72 after successful signature/receipt
+verification, deletes its duplicate bundle and clears23455workspace compiler
+files/19.5GiB; final cleanup removes6959engine compiler files/2.0GiB and the exact
+superseded134 canonical executable55978800bytes. Both compiler roots are absent
+or empty. Sources, licenses, provenance, receipts, evaluation114 and PHP Workbench
+remain preserved. The installed app is unchanged;73 was not launched.
+
+Native checks are explicitly skipped by the user, including physical Dock-switch
+autosave attribution. Broader fluent/incomplete route forms and reordered named
+argument URI metadata remain partial; this slice claims controller-action
+intelligence only, not every match route form. All69 statuses remain67partial/
+2user-deferred. Debugger expansion, installation, migration, publishing, updates
+and notarization remain deferred. Evidence: artifacts/checks/slice80 source red,
+13-case focused and full engine gates, examples/analyzer, actual-client red and
+scoped success, full frontend/SDK/client-host logs, final pipeline/readback,
+workspace totals, obsolete-engine cleanup, and73build/retention receipts. Git
+identity and remote read-back are recorded separately after commit/push.
+
 Source integration (2026-11-01, verified source checkpoint): integrates all 240 new
 commits from `l0ng-ai/openidea:main` at `041e7210` into
 `codex/openstorm-php-laravel`, based on pushed OpenStorm `82d1313a`.

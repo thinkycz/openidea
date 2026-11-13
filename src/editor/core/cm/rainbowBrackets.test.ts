@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { EditorState, type Extension } from "@codemirror/state";
 import { EditorView } from "@codemirror/view";
 import { ensureSyntaxTree } from "@codemirror/language";
@@ -13,8 +13,10 @@ const cStyle = EditorState.languageData.of(() => [
 
 /** `char@depth` of every coloured bracket (`!` for unmatched). */
 function marks(doc: string, ext: Extension = [], from = 0, to = doc.length, scanner = new BracketScanner()) {
-  const state = EditorState.create({ doc, extensions: ext });
+  let state = EditorState.create({ doc, extensions: ext });
   ensureSyntaxTree(state, doc.length, 5000);
+  // Publish the parser context into the immutable state read by the scanner.
+  state = state.update({}).state;
   return scanner.marks(state, from, to).map((m) => `${doc[m.from]}${m.depth < 0 ? "!" : m.depth}`);
 }
 
@@ -50,6 +52,19 @@ describe("rainbow brackets", () => {
   it("skips strings, comments and regexps with the syntax tree", async () => {
     const doc = 'f("(", /[(]/, `{`) // )\n/* ] */ g([1, {a: 2}])';
     expect(marks(doc, await javascript())).toEqual(["(0", ")0", "(0", "[1", "{2", "}2", "]1", ")0"]);
+  });
+
+  it("publishes the completed tree when initial parsing yields", async () => {
+    const language = await javascript();
+    const doc = 'f("(", /[(]/, `{`) // )\n/* ] */ g([1, {a: 2}])';
+    // Exhaust only the initial parse budget. Later calls use the real clock,
+    // so ensureSyntaxTree can finish without timing-dependent sleeps.
+    const clock = vi.spyOn(Date, "now").mockReturnValueOnce(0).mockReturnValueOnce(100);
+    try {
+      expect(marks(doc, language)).toEqual(["(0", ")0", "(0", "[1", "{2", "}2", "]1", ")0"]);
+    } finally {
+      clock.mockRestore();
+    }
   });
 
   it("knows the depth at a viewport far into the document and after edits", () => {

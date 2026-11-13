@@ -1777,6 +1777,42 @@ remain partial. All69 areas stay67partial/2user-deferred. Evidence:
 workspace-totals,focused}.json`, initial/current frontend and client/host logs,
 `slice78-rainbow-snapshot.json`, and app build/retention receipts.
 
+Slice79 — parser-test state publication (verified test-only slice,
+2026-11-13). Slice78 was committed/pushed as aaf0844b. Its inherited rainbow
+helper reliability gap is corrected without changing the production scanner or
+parser plugin. ensureSyntaxTree may complete the mutable parser context while
+the immutable state still exposes its initial partial tree. The test helper now
+publishes an empty EditorState update before reading bracket marks, matching
+the state-publication boundary already observed by the production plugin.
+
+The new public-behavior regression awaits language loading first, overrides only
+the two initial Date.now calls to exhaust initial parsing, then restores the
+real clock in finally. The unchanged helper deterministically fails1case while
+6controls pass, returning only(0 instead of all8expected marks. After publication,
+all7focused tests pass. No sleeps, retries, timeout increases, relaxed assertions
+or private parser-state mutation are introduced. The slice78 controlled probe
+and failure logs remain historical evidence; this closes that specific helper
+gap, not every possible parser timing or syntax-highlighting case.
+
+Fresh full gates pass5383frontend tests/487files, typecheck/lint/Knip/format/build
+and final docs formatting. Source hashes prove all product/Rust files match the
+signed72 receipt and slice78 compiled-source/client fingerprints. Thus1759Rust
+workspace/75ignored/0filtered, fmt/Clippy,38actual-client/6host and unchanged134
+engine source proof are explicitly reused, not claimed as fresh runs. Current
+app/embedded/resource/canonical engine hashes, strict/deep signature, installed21
+hash, sole72 archive and empty/absent compiler roots pass read-back. Only the
+test file and acceptance documents differ from the packaged source snapshot.
+
+No app/engine build, version bump, launch, installation, publication, migration
+or native acceptance occurred. Signed0.1.72 remains the only generated archive;
+its executable is unchanged at7ae4407a...c170117e. Native checks remain explicitly
+skipped by the user, and all69 areas retain67partial/2user-deferred status.
+Broader Laravel live-root/Composer-boundary, workspace/profile and native/
+performance acceptance remain open; continue those in small committed slices.
+Evidence: `artifacts/checks/slice79-{red,focused}.log`, fullfrontend gate receipts,
+`slice79-final-readback.json` and source snapshot; earlier app72 provenance and
+slice78 integration evidence remain intact.
+
 Source integration (2026-11-01, verified source checkpoint): integrates all 240 new
 commits from `l0ng-ai/openidea:main` at `041e7210` into
 `codex/openstorm-php-laravel`, based on pushed OpenStorm `82d1313a`.

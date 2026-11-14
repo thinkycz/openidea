@@ -3983,11 +3983,16 @@ async fn laravel_match_actions_follow_aliases_nested_owners_and_unsaved_controll
             (route_path.clone(), pos(routes, "Main::class")),
             (caller_path.clone(), pos(caller, "App\\InvoiceController as Main")),
             (caller_path.clone(), pos(caller, "Main()")),
+            (route_path.clone(), pos(routes, "App\\InvoiceController')->group(function")),
+            (route_path.clone(), pos(routes, "App\\InvoiceController')->group(fn")),
+            (route_path.clone(), pos(routes, "App\\InvoiceController']);")),
+            (route_path.clone(), pos(routes, "InvoiceController')->group(fn () => Routes::get('/😀/ns-direct'")),
+            (route_path.clone(), pos(routes, "InvoiceController'], fn () => Routes::get('/ns-attrs'")),
         ]);
         actual_classes.sort_by_key(|(p, at)| (p.clone(), at.line, at.col));
         expected_classes.sort_by_key(|(p, at)| (p.clone(), at.line, at.col));
         if actual_classes != expected_classes || class_refs.incomplete.is_some() {
-            return Err(format!("runtime class references must include exactly eleven sites: {class_refs:?}"));
+            return Err(format!("runtime class references must include exactly sixteen sites: {class_refs:?}"));
         }
         for (doc, at, replacement) in [
             (route_doc, class_positions[0], "ReceiptController"),
@@ -4419,6 +4424,228 @@ async fn laravel_named_route_uri_metadata_follows_unsaved_arguments() {
     mgr.shutdown_all().await;
     for (name, text) in files {
         assert_eq!(std::fs::read_to_string(root.join(name)).unwrap(), text);
+    }
+    result.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires the bundled PHPantom executable and owned PHP fixture linter"]
+async fn laravel_controller_binding_navigation_preserves_multiple_and_unknown_targets() {
+    let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let bin = std::env::var_os("OPENSTORM_TEST_PHPANTOM_BIN")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| repo.join("src-tauri/resources/phpantom/phpantom_lsp"));
+    let php_bin = std::env::var_os("OPENSTORM_TEST_PHP_BIN")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| repo.join("artifacts/toolchains/php-8.4.23-static/php"));
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().canonicalize().unwrap();
+    let main = "<?php\nnamespace App;\n/** Disk main class. */\nclass InvoiceController {public function showInvoice(): bool {return true;}}\n";
+    let other = "<?php\nnamespace App\\Other;\n/** Disk alternate class. */\nclass InvoiceController {public function showInvoice(): string {return 'other';}}\n";
+    let routes = "<?php\nnamespace Harness;\nuse Illuminate\\Support\\Facades\\Route as Routes;\nuse App\\Other\\InvoiceController as InvoiceController;\nRoutes::namespace('App')->controller('InvoiceController')->group(function () {\n Routes::get('/😀/main','showInvoice');\n Routes::namespace('Other')->group(fn () => Routes::get('/other','showInvoice'));\n Routes::namespace($selected)->group(fn () => Routes::get('/unknown','showInvoice'));\n});\nRoutes::controller('App\\InvoiceController')->group(fn () => Routes::get('/direct','showInvoice'));\n";
+    let composer = r#"{"require":{"php":"^8.3","laravel/framework":"^13.0"},"autoload":{"psr-4":{"App\\":"app/"}}}"#;
+    let files = [
+        ("composer.json", composer),
+        ("app/InvoiceController.php", main),
+        ("app/Other/InvoiceController.php", other),
+        ("routes/web.php", routes),
+    ];
+    for (name, text) in files {
+        let path = root.join(name);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, text).unwrap();
+        if name.ends_with(".php") {
+            let output = std::process::Command::new(&php_bin).args(["-n", "-l"]).arg(&path).output().unwrap();
+            assert!(
+                output.status.success(),
+                "invalid owned fixture {name}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+    }
+    let manifest: serde_json::Value = serde_json::from_str(composer).unwrap();
+    assert_eq!(manifest["autoload"]["psr-4"]["App\\"], "app/");
+    let mut php = LanguageRegistry::load(None).unwrap().get(&LanguageId::new("php")).unwrap();
+    php.language_servers.retain(|s| s.name == "phpantom");
+    php.language_servers[0].command = bin.to_string_lossy().into_owned();
+    let mgr = LspManager::new(root.clone(), Arc::new(LanguageRegistry::from_configs(vec![php])), Arc::new(|_| {}));
+    let candidate_root = root.clone();
+    mgr.set_candidates_hook(Box::new(move |_, _| ide_lsp::CandidateFiles {
+        files: ["routes/web.php", "app/InvoiceController.php", "app/Other/InvoiceController.php"]
+            .iter()
+            .map(|p| candidate_root.join(p))
+            .collect(),
+        limit_hit: false,
+    }));
+    let route_doc = DocId::next();
+    let main_doc = DocId::next();
+    let other_doc = DocId::next();
+    for (doc, name, text) in [
+        (route_doc, "routes/web.php", routes),
+        (main_doc, "app/InvoiceController.php", main),
+        (other_doc, "app/Other/InvoiceController.php", other),
+    ] {
+        mgr.did_open(doc, &root.join(name), &LanguageId::new("php"), 1, text);
+    }
+    let result: Result<(), String> = async {
+        let main_path = root.join("app/InvoiceController.php");
+        let other_path = root.join("app/Other/InvoiceController.php");
+        let route_path = root.join("routes/web.php");
+        let binding = pos(routes, "InvoiceController')->group(function");
+        let method = pos(routes, "showInvoice');");
+        let control = mgr.goto(route_doc, method, GotoKind::Definition).await.map_err(|e| e.to_string())?;
+        if control.len() != 1
+            || control[0].path.to_path_buf() != main_path
+            || control[0].range.start != pos(main, "showInvoice")
+        {
+            return Err(format!("group method control failed before binding lookup: {control:?}"));
+        }
+        let targets = mgr.goto(route_doc, binding, GotoKind::Definition).await.map_err(|e| e.to_string())?;
+        let mut actual: Vec<_> =
+            targets.iter().map(|t| (t.path.to_path_buf(), t.range.start.line, t.range.start.col)).collect();
+        actual.sort();
+        let mut expected = vec![
+            (main_path.clone(), pos(main, "class InvoiceController").line, pos(main, "class InvoiceController").col),
+            (other_path.clone(), pos(other, "class InvoiceController").line, pos(other, "class InvoiceController").col),
+        ];
+        expected.sort();
+        if actual != expected {
+            return Err(format!("runtime group binding must retain two targets after method control: {targets:?}"));
+        }
+        let hover = mgr
+            .hover(route_doc, binding, Default::default())
+            .await
+            .map_err(|e| e.to_string())?
+            .ok_or("missing binding hover")?;
+        for needle in ["namespace App;", "namespace App\\Other;", "unresolved"] {
+            if !hover.contents.value.contains(needle) {
+                return Err(format!("binding lost target/unknown information {needle}: {hover:?}"));
+            }
+        }
+        let type_targets = mgr.goto(route_doc, binding, GotoKind::TypeDefinition).await.map_err(|e| e.to_string())?;
+        if type_targets.len() != 2
+            || !type_targets.iter().any(|t| {
+                t.path.to_path_buf() == main_path && t.range.start.line == pos(main, "class InvoiceController").line
+            })
+            || !type_targets.iter().any(|t| {
+                t.path.to_path_buf() == other_path && t.range.start.line == pos(other, "class InvoiceController").line
+            })
+        {
+            return Err(format!("group binding type navigation lost a class: {type_targets:?}"));
+        }
+        let refs =
+            mgr.references(route_doc, binding, true, true, Default::default()).await.map_err(|e| e.to_string())?;
+        let mut actual_refs: Vec<_> =
+            refs.locations.iter().map(|l| (l.path.to_path_buf(), l.range.start.line, l.range.start.col)).collect();
+        actual_refs.sort();
+        let mut expected_refs = vec![
+            (main_path.clone(), pos(main, "InvoiceController")),
+            (other_path.clone(), pos(other, "InvoiceController")),
+            (route_path.clone(), pos(routes, "App\\Other\\InvoiceController as")),
+            (route_path.clone(), binding),
+            (route_path.clone(), pos(routes, "App\\InvoiceController')->group")),
+        ]
+        .into_iter()
+        .map(|(p, at)| (p, at.line, at.col))
+        .collect::<Vec<_>>();
+        expected_refs.sort();
+        if actual_refs != expected_refs {
+            return Err(format!("binding class reference union must have five unique sites: {refs:?}"));
+        }
+        for (doc, at, name) in [
+            (route_doc, binding, "ReceiptController"),
+            (main_doc, pos(main, "InvoiceController"), "ReceiptController"),
+            (other_doc, pos(other, "InvoiceController"), "ReceiptController"),
+            (main_doc, pos(main, "InvoiceController"), "App\\Billing\\ReceiptController"),
+            (main_doc, pos(main, "App;"), "Billing"),
+        ] {
+            match mgr.rename(doc, at, name.into(), Default::default()).await {
+                Err(e) if e.to_string().to_lowercase().contains("runtime controller") => {}
+                other => return Err(format!("binding class edits must refuse partial rewrites: {other:?}")),
+            }
+        }
+        let only_other = routes
+            .replace(" Routes::get('/😀/main','showInvoice');\n", "")
+            .replace(" Routes::namespace($selected)->group(fn () => Routes::get('/unknown','showInvoice'));\n", "");
+        replace(&mgr, route_doc, 2, routes, &only_other);
+        let at = pos(&only_other, "InvoiceController')->group(function");
+        let targets = mgr.goto(route_doc, at, GotoKind::Definition).await.map_err(|e| e.to_string())?;
+        let hover =
+            mgr.hover(route_doc, at, Default::default()).await.map_err(|e| e.to_string())?.ok_or("only-child hover")?;
+        if targets.len() != 1
+            || targets[0].path.to_path_buf() != other_path
+            || targets[0].range.start != pos(other, "class InvoiceController")
+            || hover.contents.value.contains("unresolved")
+            || hover.contents.value.contains("namespace App;")
+        {
+            return Err(format!("unused parent/unknown binding targets were not retired: {targets:?} {hover:?}"));
+        }
+        let type_targets = mgr.goto(route_doc, at, GotoKind::TypeDefinition).await.map_err(|e| e.to_string())?;
+        if type_targets.len() != 1
+            || type_targets[0].path.to_path_buf() != other_path
+            || type_targets[0].range.start.line != pos(other, "class InvoiceController").line
+        {
+            return Err(format!("retired parent remained in type targets: {type_targets:?}"));
+        }
+        let refs = mgr
+            .references(main_doc, pos(main, "InvoiceController"), true, true, Default::default())
+            .await
+            .map_err(|e| e.to_string())?;
+        if refs.locations.len() != 2
+            || refs.locations.iter().any(|l| l.path.to_path_buf() == route_path && l.range.start == at)
+        {
+            return Err(format!("retired parent target still indexed as class reference: {refs:?}"));
+        }
+        replace(&mgr, route_doc, 3, &only_other, routes);
+        let unsaved = main
+            .replace("<?php\n", "<?php\n// 😀 unsaved class\n")
+            .replace("Disk main class.", "Unsaved group controller documentation.")
+            .replace(": bool", ": int")
+            .replace("return true", "return 7");
+        replace(&mgr, main_doc, 2, main, &unsaved);
+        for phase in 0..2 {
+            if phase == 1 {
+                mgr.restart(mgr.servers()[0].id).await.map_err(|e| e.to_string())?;
+            }
+            let targets = mgr.goto(route_doc, binding, GotoKind::Definition).await.map_err(|e| e.to_string())?;
+            let hover = mgr
+                .hover(route_doc, binding, Default::default())
+                .await
+                .map_err(|e| e.to_string())?
+                .ok_or("unsaved group hover")?;
+            if targets.len() != 2
+                || !targets.iter().any(|t| {
+                    t.path.to_path_buf() == main_path && t.range.start == pos(&unsaved, "class InvoiceController")
+                })
+                || !hover.contents.value.contains("Unsaved group controller documentation.")
+                || !hover.contents.value.contains("Disk alternate class.")
+                || !hover.contents.value.contains("unresolved")
+            {
+                return Err(format!("group binding dependency/restart phase{phase} stale: {targets:?} {hover:?}"));
+            }
+        }
+        mgr.did_close(main_doc);
+        let targets = mgr.goto(route_doc, binding, GotoKind::Definition).await.map_err(|e| e.to_string())?;
+        let hover = mgr
+            .hover(route_doc, binding, Default::default())
+            .await
+            .map_err(|e| e.to_string())?
+            .ok_or("restored group hover")?;
+        if targets.len() != 2
+            || !targets
+                .iter()
+                .any(|t| t.path.to_path_buf() == main_path && t.range.start == pos(main, "class InvoiceController"))
+            || !hover.contents.value.contains("Disk main class.")
+            || hover.contents.value.contains("Unsaved group controller documentation.")
+        {
+            return Err(format!("group binding overlay close did not restore disk: {targets:?} {hover:?}"));
+        }
+        Ok(())
+    }
+    .await;
+    mgr.shutdown_all().await;
+    for (name, text) in files {
+        assert_eq!(std::fs::read_to_string(root.join(name)).unwrap(), text, "queries must preserve all four originals");
     }
     result.unwrap();
 }

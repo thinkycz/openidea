@@ -2617,6 +2617,106 @@ acceptance remains open. No release publishing, updater activation, migration,
 notarization or deployment is performed. The next small dependent slice should inventory
 group-controller class bindings before adding safe runtime rewrites.
 
+Slice91 — group-controller class binding navigation (2026-11-14). Slice90 is committed
+and pushed as 252ba81d8f3487e1715bca384fd655279f2f60cd. The previous goal turn made
+progress: source/client/build acceptance, cleanup and remote readback were completed;
+the new turn began with a clean worktree. Native checks remain user-skipped.
+
+Literal group controller bindings now navigate to every class selected by their
+registered route namespaces. Definition, type definition, class hover, references and
+document highlights use the existing class resolver and reference index. A binding can
+select more than one class. Its actual registration uses determine the targets; removing
+the parent use does not invent an unused parent-class target. Deferred callable barriers
+and last attribute wins retain their existing semantics. A distinct symbol kind stores
+decoded runtime spelling, known class targets and unresolved-context information without
+treating these strings as PHP import spellings, constructor calls or semantic
+class-color tokens. Ordinary files do not pay for additional route-argument decoding
+when there are no literal bindings.
+
+Unsupported class and namespace edits refuse partial rewrites. This includes every known
+target of a shared binding and matching class names under an unresolved namespace.
+Candidate-only short-name keys let the guard find unknown-only bindings without counting
+guessed class references. Namespace moves conservatively refuse bindings with unknown
+contexts. Runtime namespace/quote-aware class rewriting, class-name completion, broader
+action forms and execution-derived bindings remain pending. Unknown target information
+is retained in hover and the internal binding model; no new standard
+navigation/reference metadata channel is claimed.
+
+Engine145 protocol evidence contains 18 definition/hover queries: supported group class
+positions lack targets, method navigation works, and foreign/unknown controls do not
+invent class targets. The first source run passes all 54 prior cases and fails seven new
+regressions. An additional constructor-call control, type-navigation/highlight
+assertions and unknown-only rename checks are added. Initial compilation identified five
+exhaustive symbol dispatches, then a new-test URI ownership error; these are corrected.
+A subsequent 61-pass/one-failure run exposes a test expectation that omitted the
+existing alternate-class PHP import. The corrected final focused run passes all 62
+cases. Failed logs and fixture-helper preparation errors remain available; they do not
+establish product acceptance. The first actual-client green run also exposed a misplaced
+assertion: it expected two type targets after the test had removed the parent use. Five
+direct wire queries prove both initial type targets; the corrected client checks two
+before the edit and only the child afterwards. No engine type-navigation defect is
+claimed from that test-phase error.
+
+Patch0146 covers 20 source/test/changelog/example files. Immutable series SHA-256:
+8b89dc627aa39175c18864505ea4fca782dd86198cae82ee7b3821e8fbb85d6b. All 18,475 ordinary
+source tests pass (17 ignored, none filtered), plus the separate FIFO child. Release
+all-target Clippy with warnings denied, formatting, source reconstruction and the normal
+optimized build pass. Engine146 SHA-256:
+b6c37641084449ef90cc55f5143df8e4efeaf24ca34331f0fe11d06a17007f2d.
+
+The disposable Laravel13.37 fixture preserves six baseline hashes and Composer/autoload
+files, copies no environment files, and matches three changed immutable examples. A
+shared group string selects the main BakeryController and a new Archive controller.
+Twelve plain-PHP and 90 Laravel syntax checks, plain assertions and 320 Laravel runtime
+assertions pass. Four new assertions verify actual router namespace selection and the
+Archive method's return. Analyzer output remains exactly the three intentional
+diagnostics. Fresh protocol evidence covers 18 retained explicit-action queries, eight
+completion guards, 18 synthetic binding/negative/control queries and three new
+real-Laravel definition/type/hover queries; all observed originals remain exact.
+
+The same actual OpenStorm client binary fails on145 after a successful method control
+and passes on146. A PHP-namespaced route file with a conflicting import alias produces
+two class/type targets, both class hovers and an unresolved-context warning. References
+contain exactly five unique class sites, including the real PHP import. Five checked
+class/move/namespace edit entry points refuse partial rewrites. Unsaved removal of
+parent and unknown registrations leaves only the child class, clears the warning and
+retires the parent reference. Restoring routes and changing only controller
+documentation/declaration offsets is observed by the first binding query, including
+after server restart; closing the overlay restores disk content. All four originals
+remain unchanged. The retained explicit-action scenario now expects 16 main-class
+references, including five newly indexed group bindings; it still excludes the binding
+used only under a child namespace. Existing method reference/rename/completion controls
+remain intact.
+
+All 41 actual client and six host tests pass with no ignored or filtered cases. Fresh
+frontend checks pass 5,383 tests across 487 files. The full workspace passes 1,759
+ordinary tests, 78 ignored, none filtered, across 122 suites; formatting,
+warnings-denied all-target Clippy and post-binding frontend checks pass. The ordinary
+workspace uses145 before promotion; actual client/host select146. No new
+performance/parity result or native UI acceptance is inferred from source, mocks,
+capability flags or client tests.
+
+Signed arm64 development0.1.84 is the sole archived app at
+artifacts/batches/0.1.84/OpenStorm.app. Executable SHA-256:
+c150fda403e1e901d121e5895791d7d77c0b9f31642a1ff984caae81d3577bee. Strict/deep signing
+and canonical/resource/embedded146engine checksums agree. App83, duplicate84bundle, both
+compiler roots and the inactive superseded145 executable are removed after verification.
+Sources, licenses, provenance, receipts,114evaluation and PHP Workbench remain.
+Installed21 is unchanged; no owned app/server process remains. Runtime files match the
+compiled snapshot; only final progress/ledger documents differ from its receipt. Normal
+commit hooks and exact remote ref/clean-worktree readback are recorded in the ignored
+slice91delivery receipt.
+
+Evidence: artifacts/checks/slice91
+baseline/source/red/green/freeze/example/analyzer/protocol/client-host/pipeline/readback
+receipts and app84 build/retention receipts. App84 was not launched or installed by this
+task. All69areas remain visible:67partial/2user-deferred. Native/physical focus, broader
+project/configuration/lifecycle, performance and platform acceptance remain open. No
+release publishing, updater activation, notarization, migration, deployment or debugger
+expansion is performed. The next dependent slice should add quoting-aware
+runtime-controller class edits for proven unambiguous bindings while refusing shared or
+unresolved transformations.
+
 Source integration (2026-11-01, verified source checkpoint): integrates all 240 new
 commits from `l0ng-ai/openidea:main` at `041e7210` into
 `codex/openstorm-php-laravel`, based on pushed OpenStorm `82d1313a`.

@@ -1,0 +1,934 @@
+--- a/src/symbol_map/mod.rs
++++ b/src/symbol_map/mod.rs
+@@ -284,6 +284,16 @@
+         /// the invalid-class-kind diagnostic to validate that the
+         /// referenced class's kind matches the position.
+         context: ClassRefContext,
++    },
++    /// A Laravel controller binding shared by one or more route namespaces.
++    /// These are runtime class identities, not PHP import spellings.
++    RuntimeControllerBinding {
++        /// Decoded runtime spelling, used to guard edits when namespaces are unknown.
++        runtime_name: Atom,
++        /// Distinct fully qualified controller names used by known registrations.
++        targets: Box<[Atom]>,
++        /// At least one registration has an unresolved runtime namespace.
++        incomplete: bool,
+     },
+     /// Class/interface/trait/enum name at its *declaration* site
+     /// (`class Foo`, `interface Bar`, etc.).  Go-to-definition returns
+--- a/src/symbol_map/extraction/laravel.rs
++++ b/src/symbol_map/extraction/laravel.rs
+@@ -1862,6 +1862,8 @@
+     pub subject: String,
+     pub runtime: Option<String>,
+     pub rooted: bool,
++    /// Source bytes inside a literal binding's quotes, if this is a group value.
++    pub literal_span: Option<(u32, u32)>,
+ }
+ #[derive(Clone)]
+ pub(crate) struct RouteNamespaceRef {
+@@ -2121,13 +2123,16 @@
+                     subject: name,
+                     runtime,
+                     rooted: false,
++                    literal_span: None,
+                 });
+             }
+         }
+     }
+     if let Expression::Literal(literal::Literal::String(string)) = value {
+         let name = string.value.and_then(literal_bytes_to_str)?;
+-        return laravel_runtime_controller_ref(name);
++        let mut controller = laravel_runtime_controller_ref(name)?;
++        controller.literal_span = Some((string.span.start.offset + 1, string.span.end.offset - 1));
++        return Some(controller);
+     }
+     None
+ }
+@@ -2389,6 +2394,7 @@
+         subject: format!("\\{name}"),
+         runtime: Some(name.to_owned()),
+         rooted,
++        literal_span: None,
+     })
+ }
+ 
+--- a/src/symbol_map/extraction/laravel_route_context.rs
++++ b/src/symbol_map/extraction/laravel_route_context.rs
+@@ -7,7 +7,7 @@
+ use mago_span::HasSpan;
+ use mago_syntax::cst::*;
+ use mago_syntax::walker::Walker;
+-use std::collections::HashSet;
++use std::collections::{BTreeMap, HashSet};
+ 
+ #[derive(Clone)]
+ struct Binding {
+@@ -205,12 +205,18 @@
+     end: u32,
+     parent: Option<usize>,
+     owner: Option<String>,
++    binding_span: Option<(u32, u32)>,
+     namespace: Result<Option<String>, ()>,
+     invalid: bool,
++}
++struct BindingSite {
++    fallback_owner: Option<String>,
++    runtime_name: crate::atom::Atom,
+ }
+ #[derive(Default)]
+ pub(crate) struct RouteGroupContexts {
+     regions: Vec<Region>,
++    bindings: BTreeMap<(u32, u32), BindingSite>,
+ }
+ impl RouteGroupContexts {
+     pub(crate) fn collect(
+@@ -248,6 +254,7 @@
+         let mut regions: Vec<Region> = Vec::with_capacity(collected.groups.len());
+         let mut frames: Vec<Frame> = Vec::with_capacity(collected.groups.len());
+         let mut stack: Vec<usize> = Vec::new();
++        let mut bindings = BTreeMap::new();
+         for pending in collected.groups {
+             while stack
+                 .last()
+@@ -258,19 +265,35 @@
+             let parent = stack.last().copied();
+             let mut frame = parent.map_or_else(Frame::default, |p| frames[p].clone());
+             frame.apply(pending.binding.as_ref());
++            let binding_span = frame.controller.as_ref().and_then(|c| c.literal_span);
++            if let Some(controller) = pending
++                .binding
++                .as_ref()
++                .and_then(|b| b.controller.as_ref())
++                .and_then(|c| c.as_ref())
++                && let Some(span) = controller.literal_span
++            {
++                bindings.entry(span).or_insert_with(|| BindingSite {
++                    fallback_owner: frame.owner(),
++                    runtime_name: crate::atom::atom(
++                        controller.runtime.as_deref().unwrap_or(&controller.subject),
++                    ),
++                });
++            }
+             let index = regions.len();
+             regions.push(Region {
+                 start: pending.start,
+                 end: pending.end,
+                 parent,
+                 owner: frame.owner(),
++                binding_span,
+                 namespace: frame.namespace.clone(),
+                 invalid: frame.invalid,
+             });
+             frames.push(frame);
+             stack.push(index);
+         }
+-        Self { regions }
++        Self { regions, bindings }
+     }
+     fn region_at(&self, offset: u32) -> Option<&Region> {
+         let mut index = self
+@@ -300,17 +323,59 @@
+     }
+ }
+ 
++#[derive(Default)]
++struct BindingUses {
++    targets: Vec<crate::atom::Atom>,
++    incomplete: bool,
++    used: bool,
++}
++impl BindingUses {
++    fn record(&mut self, owner: Option<&str>) {
++        self.used = true;
++        if let Some(owner) = owner {
++            let name = owner.trim_start_matches('\\');
++            if !self
++                .targets
++                .iter()
++                .any(|target| target.eq_ignore_ascii_case(name))
++            {
++                self.targets.push(crate::atom::atom(name));
++            }
++        } else {
++            self.incomplete = true;
++        }
++    }
++}
++type Emitted = (
++    Vec<SymbolSpan>,
++    Vec<(u32, u32)>,
++    BTreeMap<(u32, u32), BindingUses>,
++);
++
+ struct Emitter<'a> {
+     content: &'a str,
+     names: Option<&'a OwnedResolvedNames>,
+     contexts: &'a RouteGroupContexts,
+ }
+-impl<'ast, 'arena> Walker<'ast, 'arena, (Vec<SymbolSpan>, Vec<(u32, u32)>)> for Emitter<'_> {
+-    fn walk_in_expression(
+-        &self,
+-        node: &'ast Expression<'arena>,
+-        out: &mut (Vec<SymbolSpan>, Vec<(u32, u32)>),
+-    ) {
++impl<'ast, 'arena> Walker<'ast, 'arena, Emitted> for Emitter<'_> {
++    fn walk_in_expression(&self, node: &'ast Expression<'arena>, out: &mut Emitted) {
++        if !self.contexts.bindings.is_empty()
++            && let Some(Expression::Literal(literal::Literal::String(action))) =
++                super::laravel::laravel_route_action_argument(node, self.names)
++            && let Some(method) = action.value.and_then(super::literal_bytes_to_str)
++            && !method.is_empty()
++            && method
++                .chars()
++                .all(|c| c.is_ascii_alphanumeric() || c == '_')
++            && !method.starts_with(|c: char| c.is_ascii_digit())
++            && let Some(region) = self.contexts.region_at(action.span.start.offset)
++            && let Some(span) = region.binding_span
++        {
++            out.2
++                .entry(span)
++                .or_default()
++                .record(region.owner.as_deref());
++        }
+         if let Some(action) =
+             super::laravel::laravel_explicit_route_action(node, self.names, self.content)
+             && let Some(controller) = self
+@@ -372,13 +437,28 @@
+     {
+         return;
+     }
+-    let mut out = (Vec::new(), Vec::new());
++    let mut out = (Vec::new(), Vec::new(), BTreeMap::<_, BindingUses>::new());
+     Emitter {
+         content,
+         names,
+         contexts: &contexts,
+     }
+     .walk_program(program, &mut out);
++    for (span, site) in contexts.bindings {
++        let mut uses = out.2.remove(&span).unwrap_or_default();
++        if !uses.used {
++            uses.record(site.fallback_owner.as_deref());
++        }
++        out.0.push(SymbolSpan {
++            start: span.0,
++            end: span.1,
++            kind: crate::symbol_map::SymbolKind::RuntimeControllerBinding {
++                runtime_name: site.runtime_name,
++                targets: uses.targets.into_boxed_slice(),
++                incomplete: uses.incomplete,
++            },
++        });
++    }
+     spans.extend(out.0);
+     non_invoked.extend(out.1);
+ }
+--- a/src/definition/resolve.rs
++++ b/src/definition/resolve.rs
+@@ -407,6 +407,16 @@
+                 .resolve_self_static_parent(uri, content, position, *ssp_kind)
+                 .map(|loc| vec![loc]),
+ 
++            SymbolKind::RuntimeControllerBinding { targets, .. } => {
++                let locations: Vec<_> = targets
++                    .iter()
++                    .filter_map(|name| {
++                        self.resolve_class_reference(uri, content, name, true, cursor_offset)
++                    })
++                    .collect();
++                (!locations.is_empty()).then_some(locations)
++            }
++
+             SymbolKind::ClassReference { name, is_fqn, .. } => self
+                 .resolve_class_reference(uri, content, name, *is_fqn, cursor_offset)
+                 .map(|loc| vec![loc]),
+--- a/src/definition/type_definition.rs
++++ b/src/definition/type_definition.rs
+@@ -135,6 +135,10 @@
+                     .unwrap_or_default(),
+             },
+ 
++            SymbolKind::RuntimeControllerBinding { targets, .. } => targets
++                .iter()
++                .map(|name| PhpType::named(atom(&format!("\\{name}"))))
++                .collect(),
+             SymbolKind::ClassReference { name, is_fqn, .. } => {
+                 // Preserve the source token's absolute-name provenance; the
+                 // symbol map stores its root separately from the name text.
+--- a/src/hover/mod.rs
++++ b/src/hover/mod.rs
+@@ -432,6 +432,33 @@
+                 }
+             }
+ 
++            SymbolKind::RuntimeControllerBinding {
++                targets,
++                incomplete,
++                ..
++            } => {
++                let mut parts = Vec::new();
++                if *incomplete {
++                    parts.push(
++                        "Some route contexts have an unresolved controller namespace.".to_owned(),
++                    );
++                }
++                for target in targets {
++                    let name = format!("\\{target}");
++                    if let Some(hover) = self.hover_class_reference(
++                        &name,
++                        uri,
++                        content,
++                        &class_loader,
++                        cursor_offset,
++                    ) && let HoverContents::Markup(markup) = hover.contents
++                    {
++                        parts.push(markup.value);
++                    }
++                }
++                (!parts.is_empty()).then(|| make_hover(parts.join("\n\n---\n\n")))
++            }
++
+             SymbolKind::ClassReference { name, .. } => {
+                 // Check whether this class reference is in a `new ClassName` context.
+                 // If so, show the __construct method hover instead of the class hover.
+--- a/src/highlight/mod.rs
++++ b/src/highlight/mod.rs
+@@ -58,6 +58,16 @@
+                     self.highlight_variable(symbol_map, content, name, span.start)
+                 }
+             }
++            SymbolKind::RuntimeControllerBinding { targets, .. } => {
++                let ctx = self.file_context(uri);
++                let mut hits: Vec<_> = targets
++                    .iter()
++                    .flat_map(|name| self.highlight_class(symbol_map, content, name, &ctx))
++                    .collect();
++                hits.sort_by(cmp_highlight_range);
++                hits.dedup_by(|a, b| a.range == b.range);
++                hits
++            }
+             SymbolKind::ClassReference { name, is_fqn, .. } => {
+                 let ctx = self.file_context(uri);
+                 let fqn = if *is_fqn {
+@@ -220,6 +230,16 @@
+ 
+         for span in &symbol_map.spans {
+             let fqn = match &span.kind {
++                SymbolKind::RuntimeControllerBinding { targets, .. } => {
++                    if targets
++                        .iter()
++                        .any(|name| name.eq_ignore_ascii_case(target_fqn))
++                    {
++                        target_fqn.to_owned()
++                    } else {
++                        continue;
++                    }
++                }
+                 SymbolKind::ClassReference { name, is_fqn, .. } => {
+                     if *is_fqn {
+                         name.to_string()
+--- a/src/reference_index.rs
++++ b/src/reference_index.rs
+@@ -763,6 +763,25 @@
+         namespaces: &OnceCell<Vec<NamespaceSpan>>,
+     ) -> Vec<(ReferenceIndexKey, bool)> {
+         match &span.kind {
++            SymbolKind::RuntimeControllerBinding {
++                targets,
++                runtime_name,
++                incomplete,
++            } => {
++                let mut keys: Vec<_> = targets
++                    .iter()
++                    .flat_map(|name| class_keys(name, name))
++                    .collect();
++                if *incomplete {
++                    keys.push((
++                        ReferenceIndexKey::class_owned(normalize_symbol_name(short_name(
++                            runtime_name,
++                        ))),
++                        false,
++                    ));
++                }
++                keys
++            }
+             SymbolKind::ClassReference {
+                 name,
+                 is_fqn,
+--- a/src/references/classes.rs
++++ b/src/references/classes.rs
+@@ -51,6 +51,9 @@
+                 // reach the full matching loop, because the textual span name
+                 // is the alias.
+                 let has_potential_match = symbol_map.spans.iter().any(|span| match &span.kind {
++                    SymbolKind::RuntimeControllerBinding { targets, .. } => targets
++                        .iter()
++                        .any(|name| strip_fqn_prefix(name).eq_ignore_ascii_case(target)),
+                     SymbolKind::ClassReference { name, .. } => {
+                         if crate::util::short_name(name).eq_ignore_ascii_case(target_short) {
+                             true
+@@ -74,6 +77,9 @@
+                 // Content is loaded only once a true FQN match needs a position.
+                 for span in &symbol_map.spans {
+                     let matched = match &span.kind {
++                        SymbolKind::RuntimeControllerBinding { targets, .. } => targets
++                            .iter()
++                            .any(|name| strip_fqn_prefix(name).eq_ignore_ascii_case(target)),
+                         SymbolKind::ClassReference { name, is_fqn, .. } => {
+                             let resolved = fqn_resolver.fqn(name, *is_fqn, span.start);
+                             class_names_match(strip_fqn_prefix(&resolved), target, target_short)
+--- a/src/references/dispatch.rs
++++ b/src/references/dispatch.rs
+@@ -263,6 +263,14 @@
+                 }
+                 self.find_variable_references(uri, content, name, span_start, include_declaration)
+             }
++            SymbolKind::RuntimeControllerBinding { targets, .. } => {
++                let mut locations: Vec<_> = targets
++                    .iter()
++                    .flat_map(|name| self.find_class_references(name, include_declaration))
++                    .collect();
++                super::sort_locations_for_references(&mut locations);
++                locations
++            }
+             SymbolKind::ClassReference { name, is_fqn, .. } => {
+                 let ctx = self.file_context(uri);
+                 let fqn = if *is_fqn {
+--- a/src/rename/mod.rs
++++ b/src/rename/mod.rs
+@@ -72,11 +72,31 @@
+     pub(super) fn reject_runtime_controller_class_rename(&self, fqn: &str) -> Result<(), String> {
+         let target = crate::util::strip_fqn_prefix(fqn);
+         let keys = crate::references::class_candidate_keys(target, crate::util::short_name(target));
+-        if self.user_file_symbol_maps_for_reference_keys(&keys).iter().any(|(_, map)| {
+-            map.spans.iter().any(|span| matches!(&span.kind,
+-                crate::symbol_map::SymbolKind::ClassReference { name, context: crate::symbol_map::ClassRefContext::RuntimeControllerString, .. }
+-                if crate::util::strip_fqn_prefix(name).eq_ignore_ascii_case(target)))
+-        }) {
++        if self
++            .user_file_symbol_maps_for_reference_keys(&keys)
++            .iter()
++            .any(|(_, map)| {
++                map.spans.iter().any(|span| match &span.kind {
++                    crate::symbol_map::SymbolKind::ClassReference {
++                        name,
++                        context: crate::symbol_map::ClassRefContext::RuntimeControllerString,
++                        ..
++                    } => crate::util::strip_fqn_prefix(name).eq_ignore_ascii_case(target),
++                    crate::symbol_map::SymbolKind::RuntimeControllerBinding {
++                        targets,
++                        runtime_name,
++                        incomplete,
++                    } => {
++                        targets.iter().any(|name| {
++                            crate::util::strip_fqn_prefix(name).eq_ignore_ascii_case(target)
++                        }) || (*incomplete
++                            && crate::util::short_name(runtime_name)
++                                .eq_ignore_ascii_case(crate::util::short_name(target)))
++                    }
++                    _ => false,
++                })
++            })
++        {
+             return Err("Class edits involving runtime controller strings require a quoting-aware rewrite; no edits were produced.".into());
+         }
+         Ok(())
+--- a/src/rename/prepare.rs
++++ b/src/rename/prepare.rs
+@@ -104,7 +104,7 @@
+             SymbolKind::ClassReference {
+                 context: crate::symbol_map::ClassRefContext::RuntimeControllerString,
+                 ..
+-            }
++            } | SymbolKind::RuntimeControllerBinding { .. }
+         ) {
+             return None;
+         }
+@@ -226,7 +226,7 @@
+             SymbolKind::ClassReference {
+                 context: crate::symbol_map::ClassRefContext::RuntimeControllerString,
+                 ..
+-            }
++            } | SymbolKind::RuntimeControllerBinding { .. }
+         ) {
+             return Err("Class edits involving runtime controller strings require a quoting-aware rewrite; no edits were produced.".into());
+         }
+@@ -522,7 +522,9 @@
+             SymbolKind::ConstantReference { name, .. } => Some((name.to_string(), range)),
+             SymbolKind::NamespaceDeclaration { name } => Some((name.to_string(), range)),
+             SymbolKind::LaravelMacroString { name } => Some((name.clone(), range)),
+-            SymbolKind::SelfStaticParent { .. } => None,
++            SymbolKind::SelfStaticParent { .. } | SymbolKind::RuntimeControllerBinding { .. } => {
++                None
++            }
+             SymbolKind::LaravelStringKey { .. }
+             | SymbolKind::CommandOwnParam { .. }
+             | SymbolKind::Keyword
+--- a/src/rename/validate.rs
++++ b/src/rename/validate.rs
+@@ -252,7 +252,8 @@
+         SymbolKind::MemberAccess { member_name, .. } => Some(member_name.as_str()),
+         SymbolKind::LaravelMacroString { name } => Some(name),
+         SymbolKind::LaravelStringKey { key, .. } => Some(key),
+-        SymbolKind::SelfStaticParent(_)
++        SymbolKind::RuntimeControllerBinding { .. }
++        | SymbolKind::SelfStaticParent(_)
+         | SymbolKind::CommandOwnParam { .. }
+         | SymbolKind::Keyword
+         | SymbolKind::CastType
+--- a/src/rename/namespace/mod.rs
++++ b/src/rename/namespace/mod.rs
+@@ -354,6 +354,18 @@
+         let moved_use_maps = OnceCell::new();
+ 
+         for span in &symbol_map.spans {
++            if let SymbolKind::RuntimeControllerBinding {
++                targets,
++                incomplete,
++                ..
++            } = &span.kind
++                && (*incomplete
++                    || targets.iter().any(|name| {
++                        moved_name(strip_fqn_prefix(name), old_prefix, new_prefix).is_some()
++                    }))
++            {
++                return Err("Namespace edits involving runtime controller strings require a quoting-aware rewrite; no edits were produced.".into());
++            }
+             let SymbolKind::ClassReference {
+                 name,
+                 is_fqn,
+--- a/src/semantic_tokens.rs
++++ b/src/semantic_tokens.rs
+@@ -471,7 +471,8 @@
+                     (TT_COMMENT, 0)
+                 }
+ 
+-                SymbolKind::LaravelStringKey { .. }
++                SymbolKind::RuntimeControllerBinding { .. }
++                | SymbolKind::LaravelStringKey { .. }
+                 | SymbolKind::LaravelMacroString { .. }
+                 | SymbolKind::CommandOwnParam { .. } => {
+                     continue;
+--- a/tests/integration/laravel_route_controller.rs
++++ b/tests/integration/laravel_route_controller.rs
+@@ -1796,3 +1796,351 @@
+         "container IDs may be runtime controller targets: {diags:?}"
+     );
+ }
++
++#[tokio::test]
++async fn group_controller_class_strings_follow_runtime_namespaces_and_literal_escapes() {
++    for (call, needle) in [
++        (
++            "Routes::controller('App\\InvoiceController')->group(fn () => Routes::get('/direct', 'showInvoice'));",
++            "controller('Ap",
++        ),
++        (
++            "Routes::namespace('App')->controller('InvoiceController')->group(fn () => Routes::get('/short', 'showInvoice'));",
++            "controller('In",
++        ),
++        (
++            "Routes::group(routes:fn () => Routes::get('/attrs', 'showInvoice'), attributes:['namespace'=>'App', 'controller'=>'InvoiceController']);",
++            "'controller'=>'In",
++        ),
++        (
++            "Routes::controller(\"App\\\\Inv\\x6ficeController\")->group(fn () => Routes::get('/encoded', 'showInvoice'));",
++            "controller(\"Ap",
++        ),
++        (
++            "Routes::namespace($selected)->controller('\\App\\InvoiceController')->group(fn () => Routes::get('/rooted', 'showInvoice'));",
++            "controller('\\Ap",
++        ),
++    ] {
++        assert_runtime_action_class(
++            &runtime_action_class_fixture(call),
++            needle,
++            "namespace App {",
++        )
++        .await;
++    }
++}
++
++#[tokio::test]
++async fn one_controller_binding_navigates_to_every_registered_namespace_target() {
++    use crate::common::position_after;
++    let text = runtime_action_class_fixture(
++        "Routes::namespace('App')->controller('InvoiceController')->group(function () { Routes::get('/main', 'showInvoice'); Routes::namespace('Other')->group(fn () => Routes::get('/other', 'showInvoice')); });",
++    );
++    let backend = create_test_backend();
++    let uri = Url::parse("file:///multiple-runtime-controllers.php").unwrap();
++    open_php(&backend, &uri, &text).await;
++    let at = position_after(&text, "controller('In");
++    let result = goto_def(&backend, &uri, at.line, at.character).await;
++    let Some(GotoDefinitionResponse::Array(locations)) = result else {
++        panic!("binding must retain both targets: {result:?}")
++    };
++    let mut actual: Vec<_> = locations
++        .iter()
++        .map(|l| {
++            assert_eq!(l.uri, uri);
++            l.range.start
++        })
++        .collect();
++    actual.sort_by_key(|p| (p.line, p.character));
++    let mut expected = vec![
++        position_after(&text, "namespace App {"),
++        position_after(&text, "namespace App\\Other {"),
++    ];
++    expected.sort_by_key(|p| (p.line, p.character));
++    assert_eq!(actual, expected);
++    let hover = backend
++        .hover(HoverParams {
++            text_document_position_params: TextDocumentPositionParams {
++                text_document: TextDocumentIdentifier { uri: uri.clone() },
++                position: at,
++            },
++            work_done_progress_params: Default::default(),
++        })
++        .await
++        .unwrap()
++        .expect("multiple controller hover");
++    assert!(
++        matches!(hover.contents,HoverContents::Markup(ref m) if m.value.contains("namespace App;") && m.value.contains("namespace App\\Other;")),
++        "{hover:?}"
++    );
++    let types = backend
++        .goto_type_definition(tower_lsp::lsp_types::request::GotoTypeDefinitionParams {
++            text_document_position_params: TextDocumentPositionParams {
++                text_document: TextDocumentIdentifier { uri: uri.clone() },
++                position: at,
++            },
++            work_done_progress_params: Default::default(),
++            partial_result_params: Default::default(),
++        })
++        .await
++        .unwrap();
++    let Some(GotoDefinitionResponse::Array(types)) = types else {
++        panic!("binding type targets: {types:?}")
++    };
++    let mut lines: Vec<_> = types
++        .iter()
++        .map(|l| {
++            assert_eq!(l.uri, uri);
++            l.range.start.line
++        })
++        .collect();
++    lines.sort();
++    assert_eq!(lines, vec![1, 2]);
++    let highlights = backend
++        .handle_document_highlight(uri.as_str(), &text, at)
++        .unwrap();
++    assert_eq!(
++        highlights.len(),
++        4,
++        "highlight the two declarations, alias import and one shared binding: {highlights:?}"
++    );
++}
++
++#[tokio::test]
++async fn group_binding_preserves_unknown_namespace_information_without_borrowing_an_owner() {
++    use crate::common::position_after;
++    let text = runtime_action_class_fixture(
++        "Routes::namespace('App')->controller('InvoiceController')->group(function () {Routes::get('/known','showInvoice');Routes::namespace($selected)->group(fn () => Routes::get('/unknown','showInvoice'));});",
++    );
++    let backend = create_test_backend();
++    let uri = Url::parse("file:///partial-runtime-controller.php").unwrap();
++    open_php(&backend, &uri, &text).await;
++    let at = position_after(&text, "controller('In");
++    let hover = backend
++        .hover(HoverParams {
++            text_document_position_params: TextDocumentPositionParams {
++                text_document: TextDocumentIdentifier { uri: uri.clone() },
++                position: at,
++            },
++            work_done_progress_params: Default::default(),
++        })
++        .await
++        .unwrap()
++        .expect("partial binding hover");
++    assert!(
++        matches!(hover.contents,HoverContents::Markup(ref m) if m.value.contains("namespace App;") && m.value.contains("unresolved")),
++        "unknown context must remain visible: {hover:?}"
++    );
++    let unknown = position_after(&text, "'/unknown','sh");
++    assert!(
++        goto_def(&backend, &uri, unknown.line, unknown.character)
++            .await
++            .is_none()
++    );
++}
++
++#[tokio::test]
++async fn deferred_namespace_scopes_do_not_change_a_group_binding_target() {
++    let call = "Routes::namespace('App')->controller('InvoiceController')->group(function () {Routes::get('/main','showInvoice');$later=fn () => Routes::namespace('Other')->group(fn () => Routes::get('/later','showInvoice'));});";
++    // The deferred group still has its own namespace context, but it cannot inherit
++    // the outer controller binding across the uninvoked callable boundary.
++    assert_runtime_action_class(
++        &runtime_action_class_fixture(call),
++        "controller('In",
++        "namespace App {",
++    )
++    .await;
++}
++
++#[tokio::test]
++async fn group_binding_reference_ranges_are_indexed_once_for_each_possible_class() {
++    use crate::common::position_after;
++    let calls = "/* direct */Routes::controller('App\\InvoiceController')->group(fn () => Routes::get('/direct','showInvoice'));/* attrs */Routes::group(['controller'=>'App\\InvoiceController'],fn () => Routes::get('/attrs','showInvoice'));/* shared */Routes::namespace('App')->controller('InvoiceController')->group(function () {Routes::get('/main','showInvoice');Routes::namespace('Other')->group(fn () => Routes::get('/other','showInvoice'));});";
++    let text = runtime_action_class_fixture(calls);
++    let backend = create_test_backend();
++    let uri = Url::parse("file:///runtime-binding-references.php").unwrap();
++    open_php(&backend, &uri, &text).await;
++    for (declaration, needles) in [
++        (
++            "namespace App {class ",
++            vec![
++                "namespace App {class ",
++                "/* direct */Routes::controller('",
++                "/* attrs */Routes::group(['controller'=>'",
++                "/* shared */Routes::namespace('App')->controller('",
++            ],
++        ),
++        (
++            "namespace App\\Other {class ",
++            vec![
++                "namespace App\\Other {class ",
++                "as Routes;use ",
++                "/* shared */Routes::namespace('App')->controller('",
++            ],
++        ),
++    ] {
++        let at = position_after(&text, declaration);
++        let refs = backend
++            .references(ReferenceParams {
++                text_document_position: TextDocumentPositionParams {
++                    text_document: TextDocumentIdentifier { uri: uri.clone() },
++                    position: at,
++                },
++                context: ReferenceContext {
++                    include_declaration: true,
++                },
++                work_done_progress_params: Default::default(),
++                partial_result_params: Default::default(),
++            })
++            .await
++            .unwrap()
++            .unwrap();
++        let mut actual: Vec<_> = refs
++            .iter()
++            .map(|l| {
++                assert_eq!(l.uri, uri);
++                l.range.start
++            })
++            .collect();
++        actual.sort_by_key(|p| (p.line, p.character));
++        let mut expected: Vec<_> = needles.iter().map(|n| position_after(&text, n)).collect();
++        expected.sort_by_key(|p| (p.line, p.character));
++        assert_eq!(
++            actual, expected,
++            "binding references include class imports and exclude method tokens"
++        );
++    }
++}
++
++#[tokio::test]
++async fn group_binding_class_and_namespace_edits_refuse_partial_rewrites() {
++    use crate::common::position_after;
++    let text = runtime_action_class_fixture(
++        "Routes::namespace('App')->controller('InvoiceController')->group(function () {Routes::get('/main','showInvoice');Routes::namespace('Other')->group(fn () => Routes::get('/other','showInvoice'));});",
++    );
++    for (needle, new_name) in [
++        ("controller('In", "Renamed"),
++        ("namespace App {class ", "Renamed"),
++        ("namespace App\\Other {class ", "Renamed"),
++        ("namespace App {class ", "Moved\\Renamed"),
++        ("namespace Ap", "Billing"),
++    ] {
++        let backend = create_test_backend();
++        let uri = Url::parse("file:///runtime-binding-rename.php").unwrap();
++        open_php(&backend, &uri, &text).await;
++        let at = position_after(&text, needle);
++        let result = backend
++            .rename(RenameParams {
++                text_document_position: TextDocumentPositionParams {
++                    text_document: TextDocumentIdentifier { uri },
++                    position: at,
++                },
++                new_name: new_name.into(),
++                work_done_progress_params: Default::default(),
++            })
++            .await;
++        assert!(
++            result
++                .as_ref()
++                .is_err_and(|e| e.message.to_lowercase().contains("runtime controller")),
++            "{needle}: {result:?}"
++        );
++    }
++    let unknown = runtime_action_class_fixture(
++        "Routes::namespace($selected)->controller('InvoiceController')->group(fn () => Routes::get('/unknown','showInvoice')); ",
++    );
++    for (needle, new_name) in [
++        ("namespace App {class ", "Renamed"),
++        ("namespace App\\Other {class ", "Renamed"),
++        ("namespace Ap", "Billing"),
++    ] {
++        let backend = create_test_backend();
++        let uri = Url::parse("file:///unknown-binding-rename.php").unwrap();
++        open_php(&backend, &uri, &unknown).await;
++        let at = position_after(&unknown, needle);
++        let result = backend
++            .rename(RenameParams {
++                text_document_position: TextDocumentPositionParams {
++                    text_document: TextDocumentIdentifier { uri },
++                    position: at,
++                },
++                new_name: new_name.into(),
++                work_done_progress_params: Default::default(),
++            })
++            .await;
++        assert!(
++            result
++                .as_ref()
++                .is_err_and(|e| e.message.to_lowercase().contains("runtime controller")),
++            "unknown namespace must not permit partial edits: {result:?}"
++        );
++    }
++}
++
++#[tokio::test]
++async fn group_controller_binding_uses_the_last_attribute_and_ignores_foreign_calls() {
++    use crate::common::position_after;
++    let text = runtime_action_class_fixture(
++        "class Foreign {public static function group($a,$b) {}} Foreign::group(['controller'=>'App\\InvoiceController'],fn () => null); Routes::group(['controller'=>'App\\Other\\InvoiceController','controller'=>'App\\InvoiceController'],fn () => Routes::get('/last','showInvoice')); ",
++    );
++    assert_runtime_action_class(
++        &text,
++        "'App\\Other\\InvoiceController','controller'=>'Ap",
++        "namespace App {",
++    )
++    .await;
++    let backend = create_test_backend();
++    let uri = Url::parse("file:///ignored-controller-bindings.php").unwrap();
++    open_php(&backend, &uri, &text).await;
++    for needle in [
++        "Foreign::group(['controller'=>'Ap",
++        "Routes::group(['controller'=>'App\\Ot",
++    ] {
++        let at = position_after(&text, needle);
++        assert!(
++            goto_def(&backend, &uri, at.line, at.character)
++                .await
++                .is_none(),
++            "inactive/foreign binding: {needle}"
++        );
++    }
++}
++
++#[tokio::test]
++async fn group_controller_bindings_are_not_constructor_invocations() {
++    use crate::common::position_after;
++    let text = runtime_action_class_fixture(
++        "Routes::namespace('App')->controller('InvoiceController')->group(fn () => Routes::get('/only','showInvoice')); function instantiateController() {new \\App\\InvoiceController();}",
++    );
++    let backend = create_test_backend();
++    let uri = Url::parse("file:///controller-binding-callers.php").unwrap();
++    open_php(&backend, &uri, &text).await;
++    let ctor = position_after(&text, "public function ");
++    let item = backend
++        .prepare_call_hierarchy(CallHierarchyPrepareParams {
++            text_document_position_params: TextDocumentPositionParams {
++                text_document: TextDocumentIdentifier { uri },
++                position: ctor,
++            },
++            work_done_progress_params: Default::default(),
++        })
++        .await
++        .unwrap()
++        .unwrap()
++        .remove(0);
++    let callers = backend
++        .incoming_calls(CallHierarchyIncomingCallsParams {
++            item,
++            work_done_progress_params: Default::default(),
++            partial_result_params: Default::default(),
++        })
++        .await
++        .unwrap()
++        .unwrap_or_default();
++    assert_eq!(
++        callers.len(),
++        1,
++        "controller bindings must not construct classes: {callers:?}"
++    );
++    assert_eq!(callers[0].from.name, "instantiateController");
++}
+--- a/docs/CHANGELOG.md
++++ b/docs/CHANGELOG.md
+@@ -14,6 +14,8 @@
+ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+ 
+ ## [Unreleased]
++
++- **Navigate controller group bindings.** Go to Definition and hover on a Laravel group controller string include the classes selected by its route namespaces. Find References includes these bindings, unresolved contexts stay visible, and unsupported class edits are refused. Contributed by @thinkycz.
+ 
+ - **Navigate runtime controller class strings.** Laravel `Controller@method` class parts support definition, hover and references using group namespaces independently of PHP imports. These runtime references do not count as constructor calls or unknown-class diagnostics. Class and namespace edits involving them refuse partial rewrites until a dedicated quoting-aware plan exists. Contributed by @thinkycz.
+ 
+--- a/examples/laravel/app/Demo.php
++++ b/examples/laravel/app/Demo.php
+@@ -1757,6 +1757,15 @@
+         });
+     }
+ 
++    public function controllerBindingTargets(): void
++    {
++        // Try: navigate BakeryController here; both controller classes are targets.
++        Route::namespace('App\Http\Controllers')->controller('BakeryController')->group(function (): void {
++            Route::get('/binding-main', 'index');
++            Route::namespace('Archive')->group(fn () => Route::get('/binding-archive', 'index'));
++        });
++    }
++
+ }
+ 
+ // PHP Workbench: Laravel: Go to Route lists statically named routes and opens
+--- a/examples/laravel/assertions.php
++++ b/examples/laravel/assertions.php
+@@ -2077,6 +2077,21 @@
+ check('Bare action completion witness returns its documented string', $completionWitness->BakeryControllerMistake() === 'Bare route action retained.');
+ check('Qualified action completion witness returns its documented string', $completionWitness->AppMistake() === 'Qualified class guard witness.');
+ 
++// One controller string can select different classes under child namespaces.
++(function (): void {
++    $router = new \Illuminate\Routing\Router(new \Illuminate\Events\Dispatcher());
++    $router->namespace('App\Http\Controllers')->controller('BakeryController')->group(function () use ($router): void {
++        $router->get('/binding-main', 'index')->name('binding.main');
++        $router->namespace('Archive')->group(fn () => $router->get('/binding-archive', 'index')->name('binding.archive'));
++    });
++    $actual = [];
++    foreach ($router->getRoutes() as $route) { $actual[$route->getName()] = $route->getActionName(); }
++    check('A shared controller binding registers two namespace targets', count($actual) === 2);
++    check('The parent namespace selects the main class', $actual['binding.main'] === \App\Http\Controllers\BakeryController::class . '@index');
++    check('The child namespace selects the archive class', $actual['binding.archive'] === \App\Http\Controllers\Archive\BakeryController::class . '@index');
++    check('The archive class implements its documented return type', (new \App\Http\Controllers\Archive\BakeryController())->index() === 'Archive preview.');
++})();
++
+ // ─── Summary ────────────────────────────────────────────────────────────────
+ 
+ echo "\n";
+--- /dev/null
++++ b/examples/laravel/app/Http/Controllers/Archive/BakeryController.php
+@@ -0,0 +1,11 @@
++<?php
++
++namespace App\Http\Controllers\Archive;
++
++class BakeryController
++{
++    public function index(): string
++    {
++        return 'Archive preview.';
++    }
++}

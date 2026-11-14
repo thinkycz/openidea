@@ -38,6 +38,49 @@ struct OptimizeImportsResult {
     edit: Option<lsp::WorkspaceEdit>,
 }
 
+/// Preserve source receipts across ordered RenameFile + text edits. Never
+/// treat a newly named destination as an independently witnessed disk file.
+fn validate_checked_targets(edit: &WorkspaceEdit, sources: &[ExpectedSource]) -> IdeResult<()> {
+    use ide_core::FileEdit;
+    let witnessed = |path: &std::path::Path| sources.iter().any(|s| s.uri == crate::uri::path_to_uri(path));
+    let mut renamed = std::collections::HashMap::<PathBuf, PathBuf>::new();
+    let mut origins = HashSet::new();
+    let mut saw_text = false;
+    for file in &edit.files {
+        let source = match file {
+            FileEdit::Rename { from, to } => {
+                if saw_text
+                    || from == to
+                    || origins.contains(&**from)
+                    || renamed.contains_key(&**to)
+                    || renamed.contains_key(&**from)
+                    || origins.contains(&**to)
+                    || from.parent() != to.parent()
+                    || from.extension().is_none_or(|e| !e.eq_ignore_ascii_case("php"))
+                    || to.extension().is_none_or(|e| !e.eq_ignore_ascii_case("php"))
+                {
+                    return Err(IdeError::invalid("Checked PHP rename returned an unsupported file move"));
+                }
+                renamed.insert(to.to_path_buf(), from.to_path_buf());
+                origins.insert(from.to_path_buf());
+                &**from
+            }
+            FileEdit::Edit { path, .. } => {
+                saw_text = true;
+                if origins.contains(&**path) {
+                    return Err(IdeError::invalid("Checked PHP rename edited an obsolete source path"));
+                }
+                renamed.get(&**path).map_or(&**path, |p| p.as_path())
+            }
+            _ => return Err(IdeError::invalid("Checked PHP rename returned an unsupported file operation")),
+        };
+        if !witnessed(source) {
+            return Err(IdeError::invalid("Checked PHP rename returned an unwitnessed target"));
+        }
+    }
+    Ok(())
+}
+
 impl LspManager {
     /// PHPantom's static source index needs explicit disk-change notifications,
     /// including files closed after a checked rename query. This does not boot PHP.
@@ -140,14 +183,13 @@ impl LspManager {
             )
             .await?;
         let edit = result.map(|e| convert::workspace_edit(&self.conv(t.enc()), e)).unwrap_or_default();
-        // The engine must not return an edit to an unwitnessed disk file.
-        for file in &edit.files {
-            let ide_core::FileEdit::Edit { path, .. } = file else {
-                return Err(IdeError::invalid("Checked PHP rename returned an unsupported file operation"));
-            };
-            if !sources.iter().any(|s| s.uri == crate::uri::path_to_uri(path)) {
-                return Err(IdeError::invalid("Checked PHP rename returned an unwitnessed target"));
-            }
+        // Renamed text targets are witnessed by their original source URI.
+        // The host still validates disk identities, roots, absence and revisions.
+        validate_checked_targets(&edit, &sources)?;
+        if t.enc() != crate::text::Encoding::Utf16
+            && edit.files.iter().any(|f| matches!(f, ide_core::FileEdit::Rename { .. }))
+        {
+            return Err(IdeError::invalid("Checked PHP file renames require UTF-16 server positions"));
         }
         Ok(edit)
     }
@@ -478,5 +520,46 @@ impl LspManager {
             return false;
         }
         !bridge || caps.raw.pointer(capability).and_then(Value::as_bool) == Some(true)
+    }
+}
+
+#[cfg(test)]
+mod checked_move_tests {
+    use super::*;
+    use ide_core::FileEdit;
+    fn source(path: &str) -> ExpectedSource {
+        ExpectedSource::new(&crate::uri::path_to_uri(std::path::Path::new(path)), 1, "<?php")
+    }
+    fn rename(from: &str, to: &str) -> FileEdit {
+        FileEdit::Rename { from: PathBuf::from(from).into(), to: PathBuf::from(to).into() }
+    }
+    fn edit(path: &str) -> FileEdit {
+        FileEdit::Edit { path: PathBuf::from(path).into(), edits: vec![] }
+    }
+    #[test]
+    fn checked_file_move_uses_original_source_receipts() {
+        let plan = WorkspaceEdit {
+            files: vec![rename("/p/Old.php", "/p/New.php"), edit("/p/New.php"), edit("/p/caller.php")],
+            ..Default::default()
+        };
+        let receipts = vec![source("/p/Old.php"), source("/p/caller.php")];
+        validate_checked_targets(&plan, &receipts).unwrap();
+        assert!(validate_checked_targets(&plan, &receipts[1..]).is_err());
+        assert!(validate_checked_targets(&plan, &receipts[..1]).is_err());
+    }
+    #[test]
+    fn checked_file_move_refuses_ambiguous_and_unwitnessed_operations() {
+        let receipts = vec![source("/p/Old.php"), source("/p/Other.php")];
+        for files in [
+            vec![rename("/p/Absent.php", "/p/New.php")],
+            vec![rename("/p/Old.php", "/p/New.php"), edit("/p/Old.php")],
+            vec![edit("/p/Old.php"), rename("/p/Old.php", "/p/New.php")],
+            vec![rename("/p/Old.php", "/p/New.php"), rename("/p/New.php", "/p/Next.php")],
+            vec![rename("/p/Old.php", "/p/New.php"), rename("/p/Other.php", "/p/New.php")],
+            vec![rename("/p/Old.php", "/outside/New.php")],
+            vec![FileEdit::Delete { path: PathBuf::from("/p/Old.php").into(), recursive: false }],
+        ] {
+            assert!(validate_checked_targets(&WorkspaceEdit { files, ..Default::default() }, &receipts).is_err());
+        }
     }
 }

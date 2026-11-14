@@ -3611,6 +3611,8 @@ export type IdeEvent =
 { type: "fsChanged"; created: IpcPath[]; modified: IpcPath[]; removed: IpcPath[] } | 
 /**  Excluded or ignored folders whose contents changed; they stay out of `FsChanged`. */
 { type: "excludedDirsChanged"; dirs: IpcPath[] } | 
+/**  A reviewed transaction moved an open file while retaining its document id. */
+{ type: "docMoved"; doc: DocId; from: IpcPath; to: IpcPath } | 
 /**
  *  The backend changed a document (reload from disk, formatting, refactoring).
  *  The UI applies `changes` on top of `base_version`, yielding `version`.

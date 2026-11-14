@@ -297,7 +297,10 @@ export class DocSync {
       p = p.map(this.buffer);
       this.buffer = buffer;
     }
-    if (p.empty) return;
+    if (p.empty) {
+      if (patch.history) this.host.applyRemote(p, patch.history);
+      return;
+    }
     this.localText = p.apply(this.localText);
     if (patch.history) this.host.applyRemote(p, patch.history);
     else this.host.applyRemote(p);

@@ -1,6 +1,6 @@
 //! Revision witnesses for reviewed semantic changes, captured off the UI thread.
 use crate::Project;
-use ide_core::{FileEdit, IdeError, IdeResult, WorkspaceEdit, WorkspaceEditGuard};
+use ide_core::{IdeError, IdeResult, WorkspaceEdit, WorkspaceEditGuard};
 use std::path::{Path, PathBuf};
 
 fn relevant(path: &Path) -> bool {
@@ -75,13 +75,8 @@ impl Project {
         mut guard: WorkspaceEditGuard,
         edit: &WorkspaceEdit,
     ) -> IdeResult<WorkspaceEditGuard> {
-        let mut targets = Vec::new();
-        for file in &edit.files {
-            let FileEdit::Edit { path, .. } = file else {
-                return Err(IdeError::invalid("Unsupported reviewed file operation"));
-            };
-            targets.push(dunce::canonicalize(path)?);
-        }
+        let targets: Vec<_> =
+            ide_workspace::Documents::reviewed_edit_targets(edit)?.into_iter().map(|(source, _)| source).collect();
         guard.disk_revisions.retain(|(path, _)| targets.iter().any(|target| **path == *target));
         guard.engine_generations = self.lsp.edit_generations();
         Ok(guard)
@@ -111,25 +106,15 @@ impl Project {
         for root in crate::project::content_roots(&settings, &self.root) {
             roots.push(dunce::canonicalize(root)?);
         }
-        for file in &edit.files {
-            let FileEdit::Edit { path, .. } = file else {
-                return Err(IdeError::invalid("Unsupported reviewed file operation"));
-            };
-            let canonical = dunce::canonicalize(path)?;
-            if !roots.iter().any(|root| canonical.starts_with(root)) {
+        for (source, target) in ide_workspace::Documents::reviewed_edit_targets(edit)? {
+            if !roots.iter().any(|root| source.starts_with(root)) || !roots.iter().any(|root| target.starts_with(root))
+            {
                 return Err(IdeError::invalid("An edit target is outside this project's editable roots"));
             }
         }
-        self.documents.apply_guarded_edits(edit, &self.cache_dir.join("edit-recovery"))?;
-        let changed: Vec<_> = edit
-            .files
-            .iter()
-            .filter_map(|f| match f {
-                FileEdit::Edit { path, .. } => Some(path.to_path_buf()),
-                _ => None,
-            })
-            .collect();
-        self.lsp.php_files_changed(&[], &changed, &[]);
+        let changes = self.documents.apply_guarded_edits(edit, &self.cache_dir.join("edit-recovery"))?;
+        self.lsp.php_files_changed(&changes.created, &changes.modified, &changes.removed);
+
         Ok(())
     }
 }
@@ -138,6 +123,7 @@ impl Project {
 mod tests {
     use super::*;
     use crate::{Host, HostConfig};
+    use ide_core::FileEdit;
     use std::sync::Arc;
     #[tokio::test(flavor = "multi_thread")]
     async fn project_plan_rejects_disk_config_overlay_and_outside_root_changes() {

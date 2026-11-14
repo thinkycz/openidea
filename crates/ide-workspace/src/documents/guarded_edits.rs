@@ -1,6 +1,6 @@
-//! Reviewed text edits: validate every target before the first mutation.
+//! Reviewed text edits and PHP file renames: validate every target before the first mutation.
 use super::*;
-use ide_core::{FileEdit, WorkspaceEdit};
+use ide_core::WorkspaceEdit;
 use std::collections::HashSet;
 
 fn stale() -> IdeError {
@@ -35,6 +35,7 @@ struct Side {
 }
 #[derive(Clone)]
 struct HistoryFile {
+    before_path: PathBuf,
     path: PathBuf,
     before: Side,
     after: Side,
@@ -53,6 +54,7 @@ pub(super) struct ReviewedHistory {
 }
 
 struct Staged {
+    source: PathBuf,
     path: PathBuf,
     original: Vec<u8>,
     replacement: Vec<u8>,
@@ -61,7 +63,54 @@ struct Staged {
     dirty: bool,
 }
 
+/// Files changed by one reviewed apply/undo/redo operation.
+#[derive(Debug, Default)]
+pub struct ReviewedChanges {
+    pub created: Vec<PathBuf>,
+    pub modified: Vec<PathBuf>,
+    pub removed: Vec<PathBuf>,
+}
+impl ReviewedChanges {
+    fn staged(files: &[Staged]) -> Self {
+        let mut changed = Self::default();
+        for file in files {
+            if file.source == file.path {
+                changed.modified.push(file.path.clone());
+            } else {
+                changed.created.push(file.path.clone());
+                changed.removed.push(file.source.clone());
+            }
+        }
+        changed
+    }
+}
+
 impl Documents {
+    fn validate_move_mode(&self, source: &Path, path: &Path, text: &str) -> IdeResult<()> {
+        if source == path {
+            return Ok(());
+        }
+        let language = (self.detect_language)(source, text.lines().next());
+        let target_language = (self.detect_language)(path, text.lines().next());
+        let defaults = self.file_defaults();
+        let editorconfig = |p: &Path| defaults.editorconfig.then(|| self.editorconfig.resolve(p)).flatten();
+        if language != target_language
+            || (self.detect_ui_mode)(source, &language) != (self.detect_ui_mode)(path, &target_language)
+            || editorconfig(source) != editorconfig(path)
+            || defaults.native_to_ascii_for(source) != defaults.native_to_ascii_for(path)
+        {
+            return Err(IdeError::invalid(
+                "Reviewed renames cannot change file type or filename-specific editor settings",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Pre-move sources and final targets used to seal and validate a reviewed plan.
+    pub fn reviewed_edit_targets(edit: &WorkspaceEdit) -> IdeResult<Vec<(PathBuf, PathBuf)>> {
+        Ok(reviewed_targets::targets(edit)?.into_iter().map(|t| (t.source, t.path)).collect())
+    }
+
     /// Identity of all open overlays, including unsaved dependencies. Saving
     /// the same text does not invalidate a preview; editing/opening/closing does.
     pub fn edit_revision(&self) -> IdeResult<String> {
@@ -74,10 +123,10 @@ impl Documents {
 
     /// Apply a host-validated text plan. Disk originals are retained before
     /// writes; rollback never overwrites a subsequent external modification.
-    pub fn apply_guarded_edits(&self, edit: &WorkspaceEdit, recovery_root: &Path) -> IdeResult<()> {
+    pub fn apply_guarded_edits(&self, edit: &WorkspaceEdit, recovery_root: &Path) -> IdeResult<ReviewedChanges> {
         let guard = edit.guard.as_ref().ok_or_else(|| IdeError::invalid("Missing edit revision"))?;
         let mut history = self.reviewed_history.lock();
-        let registry = self.registry.lock();
+        let mut registry = self.registry.lock();
         let mut slots: Vec<_> = registry.docs.iter().map(|(id, entry)| (*id, entry.slot.clone())).collect();
         slots.sort_by_key(|(id, _)| id.0);
         let mut states: Vec<_> = slots.iter().map(|(id, slot)| (*id, slot.lock())).collect();
@@ -91,18 +140,20 @@ impl Documents {
         let mut history_files = Vec::new();
         let mut history_bytes = 0usize;
         let mut staged_bytes = 0u64;
-        for file in &edit.files {
-            let FileEdit::Edit { path, edits } = file else {
-                return Err(IdeError::invalid("This reviewed plan supports text edits only"));
-            };
-            let path = dunce::canonicalize(path)?;
+        for target in reviewed_targets::targets(edit)? {
+            let source = target.source;
+            let path = target.path;
+            let edits = &target.edits;
+            if source != path && Self::lookup(&registry, &path).is_some() {
+                return Err(IdeError::invalid("A rename destination is already open in the editor"));
+            }
             if !seen.insert(path.clone()) {
                 return Err(IdeError::invalid("The edit plan contains duplicate or aliased targets"));
             }
             if path.file_name().is_some_and(|n| n.to_string_lossy().starts_with(".env")) {
                 return Err(IdeError::invalid("Environment files cannot be refactoring targets"));
             }
-            let metadata = std::fs::metadata(&path)?;
+            let metadata = std::fs::metadata(&source)?;
             #[cfg(unix)]
             {
                 use std::os::unix::fs::MetadataExt;
@@ -115,21 +166,21 @@ impl Documents {
                 return Err(IdeError::unavailable("The edit plan exceeds the safe staging size limit"));
             }
             if metadata.permissions().readonly() {
-                return Err(read_only_error(&path));
+                return Err(read_only_error(&source));
             }
-            let original = std::fs::read(&path)?;
+            let original = std::fs::read(&source)?;
             if !guard
                 .disk_revisions
                 .iter()
-                .any(|(target, expected)| **target == path && *expected == blake3::hash(&original).to_hex().as_str())
+                .any(|(target, expected)| **target == source && *expected == blake3::hash(&original).to_hex().as_str())
             {
                 return Err(stale());
             }
-            let open = Self::lookup(&registry, &path);
+            let open = Self::lookup(&registry, &source);
             let (mut proposal, encoding, bom) = if let Some(id) = open {
                 let st = &states.iter().find(|(key, _)| *key == id).ok_or_else(stale)?.1;
                 if st.read_only || st.binary || st.uri.is_some() || st.closed {
-                    return Err(read_only_error(&path));
+                    return Err(read_only_error(&source));
                 }
                 if blake3::hash(&original).to_hex().as_str() != st.disk_revision {
                     return Err(IdeError::new(
@@ -141,7 +192,7 @@ impl Documents {
                 proposal.set_line_ending(st.doc.line_ending());
                 (proposal, st.encoding.clone(), st.has_bom)
             } else {
-                let loaded = ide_vfs::load_text(&path)?;
+                let loaded = ide_vfs::load_text(&source)?;
                 if loaded.binary
                     || loaded.too_large
                     || loaded.disk_revision != blake3::hash(&original).to_hex().as_str()
@@ -152,10 +203,11 @@ impl Documents {
             };
             // Document's generic LSP mapping clamps positions; reviewed plans
             // must instead reject invalid lines, columns and split surrogates.
-            let source = proposal.text();
+            let source_text = proposal.text();
+            self.validate_move_mode(&source, &path, &source_text)?;
             let before_dirty = open.is_some_and(|id| states.iter().any(|(key, st)| *key == id && st.dirty));
-            let before = Side { disk: original.clone(), text: source.clone(), dirty: before_dirty };
-            let lines: Vec<_> = source.split('\n').collect();
+            let before = Side { disk: original.clone(), text: source_text.clone(), dirty: before_dirty };
+            let lines: Vec<_> = source_text.split('\n').collect();
             let mut ranges = Vec::new();
             for e in edits {
                 for pos in [e.range.start, e.range.end] {
@@ -179,6 +231,7 @@ impl Documents {
             }
             proposal.apply_edits_detailed(edits)?;
             history_files.push(HistoryFile {
+                before_path: source.clone(),
                 path: path.clone(),
                 before,
                 after: Side {
@@ -200,6 +253,7 @@ impl Documents {
                 return Err(IdeError::unavailable("The edit plan exceeds the safe history size limit"));
             }
             staged.push(Staged {
+                source,
                 path,
                 original,
                 replacement: ide_vfs::encode(&proposal.text_for_save(), &encoding, bom)?,
@@ -209,7 +263,7 @@ impl Documents {
             });
         }
         if staged.is_empty() {
-            return Ok(());
+            return Ok(ReviewedChanges::default());
         }
         let group = format!(
             "{}-{}",
@@ -218,6 +272,7 @@ impl Documents {
         );
         self.commit_reviewed(
             &staged,
+            &mut registry,
             &mut states,
             recovery_root,
             ide_core::event::ReviewedEditHistory {
@@ -242,7 +297,15 @@ impl Documents {
             history.entries.remove(0);
         }
         history.cursor = history.entries.len();
-        Ok(())
+        let changes = ReviewedChanges::staged(&staged);
+        if !changes.created.is_empty() || !changes.removed.is_empty() {
+            self.sink.emit(IdeEvent::FsChanged {
+                created: changes.created.iter().cloned().map(Into::into).collect(),
+                modified: changes.modified.iter().cloned().map(Into::into).collect(),
+                removed: changes.removed.iter().cloned().map(Into::into).collect(),
+            });
+        }
+        Ok(changes)
     }
 
     pub fn reviewed_edit_paths(&self, group: &str, redo: bool) -> IdeResult<Vec<PathBuf>> {
@@ -252,19 +315,19 @@ impl Documents {
             .and_then(|i| history.entries.get(i))
             .filter(|e| e.group == group)
             .ok_or_else(|| IdeError::invalid("This reviewed edit is no longer next in project history"))?;
-        Ok(entry.files.iter().map(|f| f.path.clone()).collect())
+        Ok(entry.files.iter().flat_map(|f| [f.before_path.clone(), f.path.clone()]).collect())
     }
 
     /// Undo/redo exactly one reviewed transaction. Validate every disk and open
     /// overlay before writing. Never merge history into subsequent user edits.
-    pub fn restore_reviewed_edit(&self, group: &str, redo: bool, recovery_root: &Path) -> IdeResult<Vec<PathBuf>> {
+    pub fn restore_reviewed_edit(&self, group: &str, redo: bool, recovery_root: &Path) -> IdeResult<ReviewedChanges> {
         let mut history = self.reviewed_history.lock();
         let index = if redo { Some(history.cursor) } else { history.cursor.checked_sub(1) };
         let entry = index
             .and_then(|i| history.entries.get(i))
             .filter(|e| e.group == group)
             .ok_or_else(|| IdeError::invalid("This reviewed edit is no longer next in project history"))?;
-        let registry = self.registry.lock();
+        let mut registry = self.registry.lock();
         let mut slots: Vec<_> = registry.docs.iter().map(|(id, entry)| (*id, entry.slot.clone())).collect();
         slots.sort_by_key(|(id, _)| id.0);
         let mut states: Vec<_> = slots.iter().map(|(id, slot)| (*id, slot.lock())).collect();
@@ -273,13 +336,24 @@ impl Documents {
         let mut identities = HashSet::new();
         for file in &entry.files {
             let (expected, target) = if redo { (&file.before, &file.after) } else { (&file.after, &file.before) };
-            if dunce::canonicalize(&file.path)? != file.path || std::fs::read(&file.path)? != expected.disk {
+            let (source, path) = if redo { (&file.before_path, &file.path) } else { (&file.path, &file.before_path) };
+            self.validate_move_mode(source, path, &expected.text)?;
+            if source != path {
+                if reviewed_targets::destination(path)? != *path {
+                    return Err(stale());
+                }
+                reviewed_targets::absent(path)?;
+                if Self::lookup(&registry, path).is_some() {
+                    return Err(stale());
+                }
+            }
+            if dunce::canonicalize(source)? != *source || std::fs::read(source)? != expected.disk {
                 return Err(IdeError::new(
                     ErrorKind::OutOfSync,
                     "A refactoring target changed on disk. Undo/redo was cancelled without changes.",
                 ));
             }
-            let metadata = std::fs::metadata(&file.path)?;
+            let metadata = std::fs::metadata(source)?;
             #[cfg(unix)]
             {
                 use std::os::unix::fs::MetadataExt;
@@ -290,9 +364,9 @@ impl Documents {
                 }
             }
             if metadata.permissions().readonly() {
-                return Err(read_only_error(&file.path));
+                return Err(read_only_error(source));
             }
-            let open = Self::lookup(&registry, &file.path);
+            let open = Self::lookup(&registry, source);
             if let Some(id) = open {
                 let st = &states.iter().find(|(key, _)| *key == id).ok_or_else(stale)?.1;
                 if st.closed
@@ -317,7 +391,8 @@ impl Documents {
                 )));
             }
             staged.push(Staged {
-                path: file.path.clone(),
+                source: source.clone(),
+                path: path.clone(),
                 original: expected.disk.clone(),
                 replacement: target.disk.clone(),
                 text: target.text.clone(),
@@ -327,6 +402,7 @@ impl Documents {
         }
         self.commit_reviewed(
             &staged,
+            &mut registry,
             &mut states,
             recovery_root,
             ide_core::event::ReviewedEditHistory {
@@ -343,12 +419,21 @@ impl Documents {
         } else {
             history.cursor -= 1;
         }
-        Ok(staged.into_iter().map(|f| f.path).collect())
+        let changes = ReviewedChanges::staged(&staged);
+        if !changes.created.is_empty() || !changes.removed.is_empty() {
+            self.sink.emit(IdeEvent::FsChanged {
+                created: changes.created.iter().cloned().map(Into::into).collect(),
+                modified: changes.modified.iter().cloned().map(Into::into).collect(),
+                removed: changes.removed.iter().cloned().map(Into::into).collect(),
+            });
+        }
+        Ok(changes)
     }
 
     fn commit_reviewed(
         &self,
         staged: &[Staged],
+        registry: &mut Registry,
         states: &mut [(DocId, parking_lot::MutexGuard<'_, DocState>)],
         recovery_root: &Path,
         history: ide_core::event::ReviewedEditHistory,
@@ -360,7 +445,7 @@ impl Documents {
         );
         let recovery = recovery_root.join(receipt);
         std::fs::create_dir_all(&recovery)?;
-        let manifest: Vec<_> = staged.iter().enumerate().map(|(i, file)| (i, &file.path)).collect();
+        let manifest: Vec<_> = staged.iter().enumerate().map(|(i, file)| (i, &file.source, &file.path)).collect();
         std::fs::write(
             recovery.join("manifest.json"),
             serde_json::to_vec_pretty(&manifest).map_err(|e| IdeError::internal(e.to_string()))?,
@@ -369,17 +454,41 @@ impl Documents {
             std::fs::write(recovery.join(format!("{i}.original")), &file.original)?;
         }
         for (i, file) in staged.iter().enumerate() {
+            let mut touched = false;
             let write = (|| -> IdeResult<()> {
-                if std::fs::read(&file.path)? != file.original {
+                if std::fs::symlink_metadata(&file.source)?.file_type().is_symlink()
+                    || dunce::canonicalize(&file.source)? != file.source
+                    || std::fs::read(&file.source)? != file.original
+                {
                     return Err(stale());
                 }
-                ide_vfs::write_atomic_strict(&file.path, &file.replacement)?;
+                if file.source != file.path {
+                    ide_vfs::rename_exclusive(&file.source, &file.path)?;
+                    touched = true;
+                    if std::fs::read(&file.path)? != file.original {
+                        return Err(stale());
+                    }
+                }
+                if file.replacement != file.original {
+                    touched = true;
+                    ide_vfs::write_atomic_strict(&file.path, &file.replacement)?;
+                }
                 Ok(())
             })();
             if let Err(error) = write {
-                for previous in staged[..i].iter().rev() {
-                    if std::fs::read(&previous.path).is_ok_and(|b| b == previous.replacement) {
-                        let _ = ide_vfs::write_atomic_strict(&previous.path, &previous.original);
+                for (index, previous) in staged[..=i].iter().enumerate().rev() {
+                    if index == i && !touched {
+                        continue;
+                    }
+                    if let Ok(bytes) = std::fs::read(&previous.path) {
+                        if previous.replacement != previous.original && bytes == previous.replacement {
+                            let _ = ide_vfs::write_atomic_strict(&previous.path, &previous.original);
+                        }
+                        if previous.source != previous.path
+                            && std::fs::read(&previous.path).is_ok_and(|b| b == previous.original)
+                        {
+                            let _ = ide_vfs::rename_exclusive(&previous.path, &previous.source);
+                        }
                     }
                 }
                 return Err(IdeError::new(
@@ -391,6 +500,28 @@ impl Documents {
         for file in staged {
             if let Some(id) = file.open {
                 let st = &mut states.iter_mut().find(|(key, _)| *key == id).ok_or_else(stale)?.1;
+                if file.source != file.path {
+                    let from = st.path.clone();
+                    if st.observed {
+                        for observer in self.observers() {
+                            observer.closed(id, &from);
+                        }
+                    }
+                    let old_keys = std::mem::take(&mut registry.docs.get_mut(&id).ok_or_else(stale)?.keys);
+                    for key in old_keys {
+                        registry.by_key.remove(&key);
+                    }
+                    registry.by_key.insert(file.path.clone(), id);
+                    registry.docs.get_mut(&id).ok_or_else(stale)?.keys = vec![file.path.clone()];
+                    st.path = file.path.clone();
+                    if st.observed {
+                        let info = Self::info(id, st);
+                        for observer in self.observers() {
+                            observer.opened(&info);
+                        }
+                    }
+                    self.sink.emit(IdeEvent::DocMoved { doc: id, from: from.into(), to: file.path.clone().into() });
+                }
                 let set = st.doc.diff(&file.text);
                 let base_version = st.doc.version();
                 let (applied, edits) = st.doc.apply_detailed(base_version, &set)?;
@@ -417,5 +548,68 @@ impl Documents {
             tracing::warn!("Edit succeeded; recovery copies retained at {}: {error}", recovery.display());
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reviewed_move_commit_rolls_back_prior_writes_without_touching_a_late_destination() {
+        for destination_bytes in [b"external".as_slice(), b"New".as_slice()] {
+            let tmp = tempfile::tempdir().unwrap();
+            let first = tmp.path().join("first.php");
+            let first_destination = tmp.path().join("first-moved.php");
+            let source = tmp.path().join("source.php");
+            let destination = tmp.path().join("destination.php");
+            std::fs::write(&first, b"Old").unwrap();
+            std::fs::write(&source, b"Old").unwrap();
+            // The destination appeared after staging, including a coincidental match
+            // with this plan's replacement. Rollback must never claim that file.
+            std::fs::write(&destination, destination_bytes).unwrap();
+            let staged = vec![
+                Staged {
+                    source: first.clone(),
+                    path: first_destination.clone(),
+                    original: b"Old".to_vec(),
+                    replacement: b"New".to_vec(),
+                    text: "New".into(),
+                    open: None,
+                    dirty: false,
+                },
+                Staged {
+                    source: source.clone(),
+                    path: destination.clone(),
+                    original: b"Old".to_vec(),
+                    replacement: b"New".to_vec(),
+                    text: "New".into(),
+                    open: None,
+                    dirty: false,
+                },
+            ];
+            let docs = Documents::new(Arc::new(|_| {}), Box::new(|_, _| LanguageId::plain_text()));
+            let recovery = tmp.path().join("recovery");
+            let error = docs
+                .commit_reviewed(
+                    &staged,
+                    &mut docs.registry.lock(),
+                    &mut [],
+                    &recovery,
+                    ide_core::event::ReviewedEditHistory {
+                        group: "late".into(),
+                        action: ide_core::event::ReviewedEditAction::Apply,
+                    },
+                )
+                .unwrap_err();
+            assert!(error.message.contains("recovery manifest"));
+            assert_eq!(std::fs::read(&first).unwrap(), b"Old");
+            assert!(!first_destination.exists());
+            assert_eq!(std::fs::read(&source).unwrap(), b"Old");
+            assert_eq!(std::fs::read(&destination).unwrap(), destination_bytes);
+            let receipt = std::fs::read_dir(&recovery).unwrap().next().unwrap().unwrap().path();
+            assert_eq!(std::fs::read(receipt.join("0.original")).unwrap(), b"Old");
+            assert!(receipt.join("manifest.json").exists());
+        }
     }
 }

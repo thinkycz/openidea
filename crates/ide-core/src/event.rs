@@ -45,6 +45,12 @@ pub enum IdeEvent {
     ExcludedDirsChanged {
         dirs: Vec<crate::IpcPath>,
     },
+    /// A reviewed transaction moved an open file while retaining its document id.
+    DocMoved {
+        doc: DocId,
+        from: crate::IpcPath,
+        to: crate::IpcPath,
+    },
     /// The backend changed a document (reload from disk, formatting, refactoring).
     /// The UI applies `changes` on top of `base_version`, yielding `version`.
     DocPatched {

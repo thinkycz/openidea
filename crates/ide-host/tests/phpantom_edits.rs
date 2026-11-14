@@ -537,3 +537,136 @@ async fn builtin_reopen_refreshes_existing_host_document_after_target_restart() 
     assert!(refreshed.read_only && !refreshed.dirty);
     assert_eq!(refreshed.version, opened.version + 1);
 }
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires the pinned macOS Apple Silicon PHPantom executable"]
+async fn checked_class_rename_moves_open_psr4_file_and_shared_history() {
+    let bin = std::env::var_os("OPENSTORM_TEST_PHPANTOM_BIN").map(PathBuf::from).unwrap_or_else(|| {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../src-tauri/resources/phpantom/phpantom_lsp")
+    });
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("project");
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    let root = dunce::canonicalize(root).unwrap();
+    std::fs::write(root.join("composer.json"), r#"{"autoload":{"psr-4":{"Demo\\":"src/"}}}"#).unwrap();
+    let old = root.join("src/Invoice.php");
+    let new = root.join("src/Receipt.php");
+    let main = root.join("main.php");
+    let original = "<?php namespace Demo; class Invoice {}\n";
+    let caller = "<?php\nuse Demo\\Invoice;\n$invoice = new Invoice();\n";
+    std::fs::write(&old, original).unwrap();
+    std::fs::write(&main, caller).unwrap();
+    let events = Arc::new(std::sync::Mutex::new(Vec::<ide_core::IdeEvent>::new()));
+    let observer = events.clone();
+    let host = Host::new(HostConfig {
+        project_environment: false,
+        config_dir: tmp.path().join("config"),
+        data_dir: tmp.path().join("data"),
+        languages: Arc::new(ide_language::LanguageRegistry::load(None).unwrap()),
+        syntax: Arc::default(),
+        sink_for: Box::new(move |_| {
+            let events = observer.clone();
+            Arc::new(move |event| events.lock().unwrap().push(event))
+        }),
+        owner: |w| w,
+        runtime: tokio::runtime::Handle::current(),
+    });
+    host.trust.decide(&root, true, false).unwrap();
+    let project = host.open_project("main", &root).unwrap();
+    project.lsp.set_config_hook(Box::new(move |cfg, _| {
+        if cfg.name == "phpantom" {
+            cfg.command = bin.to_string_lossy().into_owned();
+        }
+    }));
+    let result: Result<(), String> = async {
+        let class = project.documents.open(&old).map_err(|e| format!("open class: {e:?}"))?;
+        let doc = project.documents.open(&main).map_err(|e| format!("open caller: {e:?}"))?;
+        let unsaved = format!("{original}// Unsaved class documentation.\n");
+        project.documents.replace_all(class.id, &unsaved).unwrap();
+        let plan = ide_host::ops::lsp::lsp_rename(
+            &host,
+            "main",
+            ide_core::RequestId::next(),
+            doc.id,
+            Pos::new(2, 17),
+            "Receipt".into(),
+        )
+        .await
+        .map_err(|e| format!("rename: {e:?}"))?
+        .edit;
+        if !plan.files.iter().any(|f| matches!(f,ide_core::FileEdit::Rename{from,to} if **from==old && **to==new)) {
+            return Err(format!("missing PSR-4 move: {plan:?}"));
+        }
+        // A file created after preview must never be overwritten, even with matching text.
+        std::fs::write(&new, original).unwrap();
+        if ide_host::ops::lsp::apply_workspace_edit(&host, "main", plan.clone()).await.is_ok() {
+            return Err("occupied destination accepted".into());
+        }
+        if std::fs::read_to_string(&main).unwrap() != caller || std::fs::read_to_string(&old).unwrap() != original {
+            return Err("failed plan changed another file".into());
+        }
+        std::fs::remove_file(&new).unwrap();
+        ide_host::ops::lsp::apply_workspace_edit(&host, "main", plan).await.map_err(|e| format!("apply: {e:?}"))?;
+        if old.exists()
+            || project.documents.by_path(&old).is_some()
+            || project.documents.by_path(&new) != Some(class.id)
+        {
+            return Err("open class identity did not move".into());
+        }
+        let snapshot = project.documents.snapshot(class.id).unwrap();
+        if *snapshot.path != new
+            || !snapshot.text.contains("class Receipt")
+            || !snapshot.text.contains("Unsaved class documentation")
+            || snapshot.dirty
+        {
+            return Err(format!("wrong moved overlay: {snapshot:?}"));
+        }
+        if std::fs::read_to_string(&new).unwrap() != snapshot.text
+            || !std::fs::read_to_string(&main).unwrap().contains("new Receipt()")
+        {
+            return Err("disk edits missing".into());
+        }
+        let group = events
+            .lock()
+            .unwrap()
+            .iter()
+            .rev()
+            .find_map(|e| match e {
+                ide_core::IdeEvent::DocPatched { history: Some(h), .. } => Some(h.group.clone()),
+                _ => None,
+            })
+            .ok_or("missing history")?;
+        for (redo, target, name) in [(false, &old, "Invoice"), (true, &new, "Receipt")] {
+            ide_host::ops::lsp::restore_reviewed_edit(&host, "main", group.clone(), redo)
+                .await
+                .map_err(|e| format!("restore {redo}: {e:?}"))?;
+            let snapshot = project.documents.snapshot(class.id).unwrap();
+            if *snapshot.path != *target
+                || snapshot.dirty == redo
+                || !snapshot.text.contains("Unsaved class documentation")
+            {
+                return Err(format!("bad restored overlay {redo}: {snapshot:?}"));
+            }
+            let defs = project
+                .lsp
+                .goto(doc.id, Pos::new(2, 17), ide_lsp::types::GotoKind::Definition)
+                .await
+                .map_err(|e| format!("definition after {name}: {e:?}"))?;
+            if !defs.iter().any(|d| d.path == *target) {
+                return Err(format!("stale definition after {name}: {defs:?}"));
+            }
+        }
+        std::fs::write(&old, "external file\n").unwrap();
+        if ide_host::ops::lsp::restore_reviewed_edit(&host, "main", group, false).await.is_ok()
+            || std::fs::read_to_string(&old).unwrap() != "external file\n"
+            || !new.exists()
+        {
+            return Err("undo overwrote an occupied source".into());
+        }
+        Ok(())
+    }
+    .await;
+    project.lsp.shutdown_all().await;
+    host.close_project("main");
+    result.unwrap();
+}

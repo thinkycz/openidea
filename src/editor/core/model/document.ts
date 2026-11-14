@@ -198,7 +198,10 @@ export function saveCleanupChanges(
 export class DocModel {
   readonly doc: DocId;
   /** File path, or the URI of a virtual (read-only, language-server provided) document. */
-  readonly path: string;
+  private _path: string;
+  get path(): string {
+    return this._path;
+  }
   readonly virtual: boolean;
   readonly sync: DocSync;
   readonly slots = new Set<EditorSlot>();
@@ -236,7 +239,7 @@ export class DocModel {
     info: DocumentInfo,
   ) {
     this.doc = info.id;
-    this.path = info.path;
+    this._path = info.path;
     this.virtual = !!info.uri;
     this.info = languageInfo(info.language);
     this.editorconfig = info.editorconfig ?? null;
@@ -283,6 +286,26 @@ export class DocModel {
       },
       manager.scheduler,
     );
+    this.scheduleRefresh(0);
+  }
+
+  /** Preserve buffers, slots and undo history when a reviewed rename changes the path. */
+  relocate(path: string) {
+    const from = this.path;
+    this._path = path;
+    this.changeCounter++;
+    useDocMeta.setState((s) => {
+      const next = { ...s };
+      delete next[from];
+      return next;
+    }, true);
+    useOutline.setState((s) => {
+      const next = { ...s };
+      delete next[from];
+      return next;
+    }, true);
+    this.setMeta({ path });
+    for (const slot of this.slots) slot.syncContributions(true);
     this.scheduleRefresh(0);
   }
 
@@ -675,6 +698,7 @@ export class DocModel {
 }
 
 export interface ManagerHost {
+  moved?(from: string, to: string): void;
   settings(): Settings | null | undefined;
   notify(n: { level: "info" | "warning" | "error"; title: string; body?: string }): void;
 }
@@ -683,6 +707,8 @@ export class DocumentManager {
   readonly byPath = new Map<string, DocModel>();
   readonly byId = new Map<DocId, DocModel>();
   private opening = new Map<string, Promise<DocModel>>();
+  private pendingModels = new Map<DocId, DocModel>();
+  private movedPaths = new Map<DocId, string>();
   private generation = 0;
   contributionsVersion = 0;
   private disposers: Array<() => void> = [];
@@ -709,10 +735,39 @@ export class DocumentManager {
 
   start() {
     this.disposers.push(
-      this.backend.onPatched((e) => this.byId.get(e.doc)?.sync.remote(e)),
-      this.backend.onLanguage?.((e) => this.byId.get(e.doc)?.setLanguage(e.language, e.uiMode)) ?? (() => {}),
+      this.backend.onMoved?.(({ doc, from, to }) => {
+        const model = this.byId.get(doc) ?? this.pendingModels.get(doc);
+        if (model && model.path !== from) return;
+        if (this.byPath.has(to) && this.byPath.get(to) !== model) {
+          this.notify({
+            level: "error",
+            title: "Cannot update renamed document",
+            body: "The destination is already open.",
+          });
+          return;
+        }
+        const pending = this.opening.get(from);
+        if (pending) {
+          this.opening.delete(from);
+          this.opening.set(to, pending);
+        }
+        if (model) {
+          model.relocate(to);
+          if (this.byId.has(doc)) {
+            this.byPath.delete(from);
+            this.byPath.set(to, model);
+            _emitEditorEvent({ type: "docClosed", doc, path: from });
+            _emitEditorEvent({ type: "docOpened", doc, path: to, language: model.getMeta().language });
+          }
+        } else this.movedPaths.set(doc, to);
+        this.host.moved?.(from, to);
+      }) ?? (() => {}),
+      this.backend.onPatched((e) => (this.byId.get(e.doc) ?? this.pendingModels.get(e.doc))?.sync.remote(e)),
+      this.backend.onLanguage?.((e) =>
+        (this.byId.get(e.doc) ?? this.pendingModels.get(e.doc))?.setLanguage(e.language, e.uiMode),
+      ) ?? (() => {}),
       this.backend.onDirty((e) => {
-        const m = this.byId.get(e.doc);
+        const m = this.byId.get(e.doc) ?? this.pendingModels.get(e.doc);
         if (m && m.getMeta().dirty !== e.dirty) {
           m.setMeta({ dirty: e.dirty });
           if (!e.dirty) m.modified.clear();
@@ -743,6 +798,8 @@ export class DocumentManager {
     this.byPath.clear();
     this.byId.clear();
     this.opening.clear();
+    this.pendingModels.clear();
+    this.movedPaths.clear();
     for (const model of models) model.dispose();
     useDocMeta.setState(
       (state) => Object.fromEntries(Object.entries(state).filter(([, meta]) => !ids.has(meta.doc))),
@@ -755,6 +812,11 @@ export class DocumentManager {
     return this.byPath.get(path);
   }
 
+  /** Wait only for an existing open; never reopen a removed path. */
+  async settledModel(path: string): Promise<DocModel | undefined> {
+    return this.byPath.get(path) ?? this.opening.get(path);
+  }
+
   /** Opens (or returns the already open) document model for `path`. */
   acquire(path: string): Promise<DocModel> {
     const existing = this.byPath.get(path);
@@ -765,19 +827,29 @@ export class DocumentManager {
       p = (async () => {
         await loadLanguageInfos(this.backend);
         if (generation !== this.generation) throw new IpcError({ kind: "cancelled", message: "Project changed" });
-        const info = isVirtualUri(path) ? await this.backend.openVirtual(path) : await this.backend.open(path);
+        let info = isVirtualUri(path) ? await this.backend.openVirtual(path) : await this.backend.open(path);
+        // A move can precede this open reply. Its paired edit may also already
+        // have arrived, so adopt one current backend snapshot before building the model.
+        if (this.movedPaths.has(info.id)) info = await this.backend.snapshot(info.id);
         if (generation !== this.generation) {
           void this.backend.close(info.id).catch(() => {});
           throw new IpcError({ kind: "cancelled", message: "Project changed" });
         }
-        const raced = this.byPath.get(path);
+        const finalPath = this.movedPaths.get(info.id) ?? info.path;
+        this.movedPaths.delete(info.id);
+        const raced = this.byId.get(info.id) ?? this.byPath.get(finalPath);
         if (raced) {
           void this.backend.close(info.id);
           return raced;
         }
-        const model = new DocModel(this, info);
+        const model = new DocModel(this, { ...info, path: finalPath });
+        this.pendingModels.set(model.doc, model);
         // The first slot must include the lazy mode, not briefly render plain text.
-        await model.loadLanguage();
+        try {
+          await model.loadLanguage();
+        } finally {
+          if (this.pendingModels.get(model.doc) === model) this.pendingModels.delete(model.doc);
+        }
         if (generation !== this.generation) {
           model.dispose();
           useDocMeta.setState(
@@ -787,12 +859,12 @@ export class DocumentManager {
           void this.backend.close(model.doc).catch(() => {});
           throw new IpcError({ kind: "cancelled", message: "Project changed" });
         }
-        this.byPath.set(path, model);
+        this.byPath.set(model.path, model);
         this.byId.set(model.doc, model);
-        _emitEditorEvent({ type: "docOpened", doc: model.doc, path, language: info.language });
+        _emitEditorEvent({ type: "docOpened", doc: model.doc, path: model.path, language: info.language });
         return model;
       })().finally(() => {
-        if (this.opening.get(path) === p) this.opening.delete(path);
+        for (const [key, value] of this.opening) if (value === p) this.opening.delete(key);
       });
       this.opening.set(path, p);
     }

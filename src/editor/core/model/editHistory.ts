@@ -52,6 +52,10 @@ export class EditHistory {
     this.index = 0;
   }
 
+  movePath(from: string, to: string) {
+    this.entries = this.entries.map((e) => (e.path === from ? { ...e, path: to } : e));
+  }
+
   /** Drops the places of a deleted file. */
   removePath(path: string) {
     const before = this.entries.length;

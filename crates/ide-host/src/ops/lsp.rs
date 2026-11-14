@@ -381,14 +381,25 @@ pub async fn lsp_restart(host: &Host, window: &str, server: ServerId) -> IdeResu
 pub async fn apply_workspace_edit(host: &Host, window: &str, edit: WorkspaceEdit) -> IdeResult<()> {
     let project = host.project(window)?;
     // Multi-file refactorings leave a Local History point to go back to.
-    let paths: Vec<&std::path::Path> = edit
-        .files
-        .iter()
-        .filter_map(|f| match f {
-            ide_core::FileEdit::Edit { path, .. } => Some(&**path),
-            _ => None,
-        })
-        .collect();
+    let reviewed_sources = if edit.guard.is_some() {
+        ide_workspace::Documents::reviewed_edit_targets(&edit)?
+            .into_iter()
+            .map(|(source, _)| source)
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
+    let paths: Vec<&std::path::Path> = if edit.guard.is_some() {
+        reviewed_sources.iter().map(|p| p.as_path()).collect()
+    } else {
+        edit.files
+            .iter()
+            .filter_map(|f| match f {
+                ide_core::FileEdit::Edit { path, .. } => Some(&**path),
+                _ => None,
+            })
+            .collect()
+    };
     if edit.files.len() > 1 {
         project.record_before_refactoring(&paths, "Apply changes");
     }
@@ -420,7 +431,7 @@ pub async fn restore_reviewed_edit(host: &Host, window: &str, group: String, red
         }
         let changed =
             project.documents.restore_reviewed_edit(&group, redo, &project.cache_dir.join("edit-recovery"))?;
-        project.lsp.php_files_changed(&[], &changed, &[]);
+        project.lsp.php_files_changed(&changed.created, &changed.modified, &changed.removed);
         Ok(())
     })
     .await

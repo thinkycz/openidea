@@ -88,6 +88,13 @@ export class NavigationHistory {
     return this.current;
   }
 
+  /** Keep back/forward locations attached to a reviewed file rename. */
+  movePath(from: string, to: string) {
+    if (!this.entries.some((e) => e.path === from)) return;
+    this.entries = this.entries.map((e) => (e.path === from ? { ...e, path: to } : e));
+    this.emit();
+  }
+
   /** Drops entries of a deleted file. */
   removePath(path: string) {
     const before = this.entries.length;

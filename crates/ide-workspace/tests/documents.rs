@@ -1152,3 +1152,226 @@ fn reopening_php_builtin_refreshes_readonly_content_without_user_edits() {
     );
     assert!(!f.events.lock().iter().any(|e| matches!(e, IdeEvent::DocDirty { dirty: true, .. })));
 }
+
+fn reviewed_rename_plan(
+    docs: &Documents,
+    from: &Path,
+    to: &Path,
+    mut edits: Vec<ide_core::FileEdit>,
+) -> ide_core::WorkspaceEdit {
+    let mut files = vec![ide_core::FileEdit::Rename { from: from.into(), to: to.into() }];
+    files.append(&mut edits);
+    let mut plan = ide_core::WorkspaceEdit {
+        files,
+        guard: Some(ide_core::WorkspaceEditGuard {
+            documents_revision: docs.edit_revision().unwrap(),
+            ..Default::default()
+        }),
+    };
+    let mut sources = vec![from.to_path_buf()];
+    for file in &plan.files {
+        if let ide_core::FileEdit::Edit { path, .. } = file {
+            let path = if **path == *to { from } else { path.as_ref() };
+            if !sources.iter().any(|p| p == path) {
+                sources.push(path.to_path_buf());
+            }
+        }
+    }
+    plan.guard.as_mut().unwrap().disk_revisions = sources
+        .into_iter()
+        .map(|path| {
+            let digest = blake3::hash(&fs::read(&path).unwrap()).to_hex().to_string();
+            (path.into(), digest)
+        })
+        .collect();
+    plan
+}
+
+#[test]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn reviewed_rename_preserves_open_identity_unsaved_text_and_shared_undo_redo() {
+    let f = fixture();
+    let old = f.root.join("Invoice.php");
+    let new = f.root.join("Receipt.php");
+    let caller = f.root.join("caller.php");
+    fs::write(&old, "Foo disk").unwrap();
+    fs::write(&caller, "Foo caller").unwrap();
+    let doc = f.docs.open(&old).unwrap();
+    f.docs.replace_all(doc.id, "Foo local").unwrap();
+    let call = f.docs.open(&caller).unwrap();
+    f.events.lock().clear();
+    let plan = reviewed_rename_plan(
+        &f.docs,
+        &old,
+        &new,
+        vec![replace_name(&new, 0, 3, "Bar"), replace_name(&caller, 0, 3, "Bar")],
+    );
+    let recovery = f.root.join("recovery");
+    f.docs.apply_guarded_edits(&plan, &recovery).unwrap();
+    assert!(!old.exists());
+    assert_eq!(fs::read_to_string(&new).unwrap(), "Bar local");
+    assert_eq!(fs::read_to_string(&caller).unwrap(), "Bar caller");
+    assert_eq!(f.docs.by_path(&new), Some(doc.id));
+    assert_eq!(f.docs.by_path(&old), None);
+    let info = f.docs.snapshot(doc.id).unwrap();
+    assert_eq!(*info.path, new);
+    assert_eq!(info.text, "Bar local");
+    assert!(!info.dirty);
+    {
+        let events = f.events.lock();
+        let moved = events.iter().position(|e| matches!(e, IdeEvent::DocMoved {doc: id, from, to} if *id == doc.id && **from == old && **to == new)).unwrap();
+        let patched =
+            events.iter().position(|e| matches!(e, IdeEvent::DocPatched {doc: id, ..} if *id == doc.id)).unwrap();
+        let removed = events
+            .iter()
+            .position(|e| matches!(e, IdeEvent::FsChanged {removed, ..} if removed.iter().any(|p| **p == old)))
+            .unwrap();
+        assert!(moved < patched && patched < removed);
+    }
+    let group = f
+        .events
+        .lock()
+        .iter()
+        .find_map(|e| match e {
+            IdeEvent::DocPatched { history: Some(h), .. } => Some(h.group.clone()),
+            _ => None,
+        })
+        .unwrap();
+    f.docs.restore_reviewed_edit(&group, false, &recovery).unwrap();
+    assert!(!new.exists());
+    assert_eq!(fs::read_to_string(&old).unwrap(), "Foo disk");
+    let info = f.docs.snapshot(doc.id).unwrap();
+    assert_eq!(*info.path, old);
+    assert_eq!(info.text, "Foo local");
+    assert!(info.dirty);
+    assert_eq!(f.docs.snapshot(call.id).unwrap().text, "Foo caller");
+    f.docs.restore_reviewed_edit(&group, true, &recovery).unwrap();
+    assert!(!old.exists());
+    assert_eq!(fs::read_to_string(&new).unwrap(), "Bar local");
+    assert_eq!(f.docs.by_path(&new), Some(doc.id));
+    fs::write(&new, "external").unwrap();
+    assert!(f.docs.restore_reviewed_edit(&group, false, &recovery).is_err());
+    assert!(!old.exists());
+    assert_eq!(fs::read_to_string(&new).unwrap(), "external");
+    assert_eq!(fs::read_to_string(&caller).unwrap(), "Bar caller");
+}
+
+#[test]
+fn reviewed_rename_refuses_destinations_and_changed_sources_before_other_writes() {
+    for conflict in ["destination", "source", "overlay"] {
+        let f = fixture();
+        let old = f.root.join("old.php");
+        let new = f.root.join("new.php");
+        let other = f.root.join("other.php");
+        fs::write(&old, "Old").unwrap();
+        fs::write(&other, "Old").unwrap();
+        let doc = f.docs.open(&old).unwrap();
+        let plan = reviewed_rename_plan(
+            &f.docs,
+            &old,
+            &new,
+            vec![replace_name(&new, 0, 3, "New"), replace_name(&other, 0, 3, "New")],
+        );
+        match conflict {
+            "destination" => fs::write(&new, "external").unwrap(),
+            "source" => fs::write(&old, "external").unwrap(),
+            _ => {
+                f.docs.replace_all(doc.id, "unsaved").unwrap();
+            }
+        }
+        assert!(f.docs.apply_guarded_edits(&plan, &f.root.join("recovery")).is_err(), "{conflict}");
+        assert_eq!(fs::read_to_string(&other).unwrap(), "Old");
+        assert_eq!(fs::read_to_string(&old).unwrap(), if conflict == "source" { "external" } else { "Old" });
+        if conflict == "destination" {
+            assert_eq!(fs::read_to_string(new).unwrap(), "external");
+        } else {
+            assert!(!new.exists());
+        }
+    }
+}
+
+#[test]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn reviewed_rename_without_text_changes_has_undo_and_keeps_bom_and_crlf() {
+    let f = fixture();
+    let old = f.root.join("old.php");
+    let new = f.root.join("new.php");
+    let bytes = b"\xef\xbb\xbf<?php\r\n// unchanged\r\n";
+    fs::write(&old, bytes).unwrap();
+    let doc = f.docs.open(&old).unwrap();
+    f.events.lock().clear();
+    let plan = reviewed_rename_plan(&f.docs, &old, &new, vec![]);
+    let recovery = f.root.join("recovery");
+    f.docs.apply_guarded_edits(&plan, &recovery).unwrap();
+    assert_eq!(fs::read(&new).unwrap(), bytes);
+    let group = f
+        .events
+        .lock()
+        .iter()
+        .find_map(|e| match e {
+            IdeEvent::DocPatched { history: Some(h), .. } => Some(h.group.clone()),
+            _ => None,
+        })
+        .expect("move-only operations need a shared history token");
+    assert_eq!(f.docs.by_path(&new), Some(doc.id));
+    f.docs.restore_reviewed_edit(&group, false, &recovery).unwrap();
+    assert_eq!(fs::read(old).unwrap(), bytes);
+    assert!(!new.exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn reviewed_rename_refuses_symlink_and_occupied_overlay_targets() {
+    use std::os::unix::fs::symlink;
+    let f = fixture();
+    let old = f.root.join("old.php");
+    let alias = f.root.join("alias.php");
+    let new = f.root.join("new.php");
+    fs::write(&old, "Old").unwrap();
+    symlink(&old, &alias).unwrap();
+    let plan = reviewed_rename_plan(&f.docs, &alias, &new, vec![replace_name(&new, 0, 3, "New")]);
+    assert!(f.docs.apply_guarded_edits(&plan, &f.root.join("recovery")).is_err());
+    assert_eq!(fs::read_to_string(&old).unwrap(), "Old");
+    assert!(alias.is_symlink());
+    assert!(!new.exists());
+    fs::write(&new, "buffer").unwrap();
+    let overlay = f.docs.open(&new).unwrap();
+    fs::remove_file(&new).unwrap();
+    let plan = reviewed_rename_plan(&f.docs, &old, &new, vec![replace_name(&new, 0, 3, "New")]);
+    assert!(f.docs.apply_guarded_edits(&plan, &f.root.join("recovery")).is_err());
+    assert_eq!(f.docs.snapshot(overlay.id).unwrap().text, "buffer");
+    assert_eq!(fs::read_to_string(old).unwrap(), "Old");
+}
+
+#[test]
+fn reviewed_rename_refuses_ambiguous_operations_and_filename_settings() {
+    for mode in ["directory", "non_php", "duplicate", "chain", "text_first", "old_text", "settings"] {
+        let f = fixture();
+        let old = f.root.join("Old.php");
+        let mut new = f.root.join("New.php");
+        fs::write(&old, "Old").unwrap();
+        let doc = f.docs.open(&old).unwrap();
+        if mode == "directory" {
+            fs::create_dir(f.root.join("other")).unwrap();
+            new = f.root.join("other/New.php");
+        }
+        if mode == "non_php" {
+            new = f.root.join("New.txt");
+        }
+        let mut plan = reviewed_rename_plan(&f.docs, &old, &new, vec![]);
+        match mode {
+            "duplicate" => plan.files.push(plan.files[0].clone()),
+            "chain" => plan
+                .files
+                .push(ide_core::FileEdit::Rename { from: new.clone().into(), to: f.root.join("Third.php").into() }),
+            "text_first" => plan.files.insert(0, replace_name(&old, 0, 3, "New")),
+            "old_text" => plan.files.push(replace_name(&old, 0, 3, "New")),
+            "settings" => fs::write(f.root.join(".editorconfig"), "root = true\n[New.php]\nindent_size = 7\n").unwrap(),
+            _ => {}
+        }
+        assert!(f.docs.apply_guarded_edits(&plan, &f.root.join("recovery")).is_err(), "{mode}");
+        assert_eq!(fs::read_to_string(&old).unwrap(), "Old", "{mode}");
+        assert!(!new.exists(), "{mode}");
+        assert_eq!(f.docs.snapshot(doc.id).unwrap().text, "Old");
+    }
+}

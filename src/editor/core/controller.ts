@@ -233,8 +233,39 @@ export class EditorController implements SlotHost {
       {
         settings: () => useProject.getState().settings ?? useProject.getState().project?.settings,
         notify: (n) => notifications().notify(n),
+        moved: (from, to) => this.moveDocument(from, to),
       },
       scheduler,
+    );
+  }
+
+  private moveDocument(from: string, to: string) {
+    const input = (value: EditorInput): EditorInput =>
+      value.kind === "file" && value.path === from ? { ...value, ...fileInput(to) } : value;
+    const restored = this.restoredViews.get(from);
+    if (restored) {
+      this.restoredViews.delete(from);
+      this.restoredViews.set(to, restored);
+    }
+    const stamp = this.lastActive.get(fileKey(from));
+    if (stamp !== undefined) {
+      this.lastActive.delete(fileKey(from));
+      this.lastActive.set(fileKey(to), stamp);
+    }
+    this.nav.movePath(from, to);
+    this.edits.movePath(from, to);
+    useTabs.setState(
+      (s) => ({
+        ...s,
+        panes: Object.fromEntries(
+          Object.entries(s.panes).map(([id, p]) => [
+            id,
+            { ...p, tabs: p.tabs.map((t) => ({ ...t, input: input(t.input) })) },
+          ]),
+        ),
+        closed: s.closed.map((t) => ({ ...t, input: input(t.input) })),
+      }),
+      true,
     );
   }
 
@@ -1482,12 +1513,23 @@ export class EditorController implements SlotHost {
       // removal runs. Recheck then; external deletion never discards edits.
       void this.removeGuarded((s) => closeKey(s, input.key), {
         protect: (tab) =>
-          inputDirty(tab.input, kinds) === true || !!(tab.input.path && useDocMeta.getState()[tab.input.path]?.dirty),
+          tab.input.key !== input.key ||
+          inputDirty(tab.input, kinds) === true ||
+          !!(tab.input.path && useDocMeta.getState()[tab.input.path]?.dirty),
+        beforeRemove: async () => {
+          const model = input.path ? await this.manager.settledModel(input.path) : undefined;
+          if (!model) return true;
+          // The watcher can publish removal before a reviewed move finishes.
+          // Snapshot waits for the backend transaction and prevents closing its tab.
+          const current = await this.manager.backend.snapshot(model.doc);
+          return current.path === input.path && !current.dirty;
+        },
+      }).then((removed) => {
+        if (removed && input.path) {
+          this.nav.removePath(input.path);
+          this.edits.removePath(input.path);
+        }
       });
-      if (input.path) {
-        this.nav.removePath(input.path);
-        this.edits.removePath(input.path);
-      }
     }
   }
 

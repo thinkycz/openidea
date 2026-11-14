@@ -36,6 +36,12 @@ export interface DocPatchedEvent {
   history?: ReviewedEditHistory | null;
 }
 
+export interface DocMovedEvent {
+  doc: DocId;
+  from: string;
+  to: string;
+}
+
 export interface DocBackend {
   restoreReviewed?(group: string, redo: boolean): Promise<void>;
   open(path: string): Promise<DocumentInfo>;
@@ -57,6 +63,7 @@ export interface DocBackend {
   languages(): Promise<LanguageInfo[]>;
   /** The `DocumentInfo.uiMode` a file would open with, without opening it (previews). */
   uiModeOf?(path: string): Promise<string | null>;
+  onMoved?(handler: (e: DocMovedEvent) => void): () => void;
   onPatched(handler: (e: DocPatchedEvent) => void): () => void;
   onDirty(handler: (e: { doc: DocId; dirty: boolean }) => void): () => void;
   /** Files changed on disk (used to refresh nothing but closed-file state). */
@@ -87,6 +94,7 @@ export const ipcBackend: DocBackend = {
   selectionRanges: (doc, offset) => call(commands.docSelectionRanges(doc, offset)),
   languages: () => commands.languages(),
   uiModeOf: (path) => call(commands.docUiMode(path)),
+  onMoved: (h) => onIdeEvent("docMoved", h),
   onPatched: (h) => onIdeEvent("docPatched", (e) => h(e)),
   onDirty: (h) => onIdeEvent("docDirty", (e) => h(e)),
   onFsChanged: (h) => onIdeEvent("fsChanged", (e) => h(e)),
@@ -328,6 +336,8 @@ function lineIndex(text: string) {
 }
 
 export interface MemoryBackend extends DocBackend {
+  /** Test/dev hook: preserve an open document while changing its disk path. */
+  move(doc: DocId, to: string): void;
   /** Test/dev hook: apply a backend-originated change and emit `docPatched`. */
   patch(doc: DocId, changes: TextChange[], history?: ReviewedEditHistory): void;
   /** Seed file contents before opening. */
@@ -340,6 +350,7 @@ export interface MemoryBackend extends DocBackend {
 export function createMemoryBackend(files: Record<string, string> = {}): MemoryBackend {
   const docs = new Map<DocId, MemDoc>();
   const byPath = new Map<string, DocId>();
+  const moved = new Set<(e: DocMovedEvent) => void>();
   const patched = new Set<(e: DocPatchedEvent) => void>();
   const dirtyHandlers = new Set<(e: { doc: DocId; dirty: boolean }) => void>();
   let nextId = 1;
@@ -387,6 +398,23 @@ export function createMemoryBackend(files: Record<string, string> = {}): MemoryB
       : Promise.resolve().then(v);
 
   const backend: MemoryBackend = {
+    onMoved(h) {
+      moved.add(h);
+      return () => moved.delete(h);
+    },
+    move(doc, to) {
+      const d = get(doc);
+      if (byPath.has(to) || store.has(to)) throw new Error("Rename destination exists");
+      const from = d.path;
+      if (store.has(from)) {
+        store.set(to, store.get(from)!);
+        store.delete(from);
+      }
+      byPath.delete(from);
+      byPath.set(to, doc);
+      d.path = to;
+      moved.forEach((h) => h({ doc, from, to }));
+    },
     files: store,
     docs,
     latency: 0,

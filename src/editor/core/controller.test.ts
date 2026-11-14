@@ -257,3 +257,76 @@ describe("EditorController", () => {
     useProject.setState({ project: null, settings: null });
   });
 });
+
+describe("reviewed file moves", () => {
+  it("retargets tabs, split buffers, metadata and navigation without saving or reopening", async () => {
+    const backend = createMemoryBackend({ "/p/Invoice.php": "<?php class Invoice {}\n" });
+    const save = vi.spyOn(backend, "save");
+    ctrl = new EditorController(backend);
+    ctrl.start();
+    await ctrl.openFile("/p/Invoice.php", { focus: false });
+    const slot = ctrl.activeSlot!;
+    slot.dispatchLocal({ selection: { anchor: 12 } });
+    const model = slot.model;
+    const before = useTabs.getState();
+    ctrl.edits.record({ path: model.path, line: 2, col: 1 });
+    ctrl.nav.update({ path: model.path, line: 2, col: 1 });
+    ctrl.nav.update({ path: "/p/other.php", line: 8, col: 0 });
+    backend.move(model.doc, "/p/Receipt.php");
+    const after = useTabs.getState();
+    expect(ctrl.activeSlot).toBe(slot);
+    expect(model.path).toBe("/p/Receipt.php");
+    expect(ctrl.manager.get("/p/Invoice.php")).toBeUndefined();
+    expect(ctrl.manager.get("/p/Receipt.php")).toBe(model);
+    expect(useDocMeta.getState()["/p/Invoice.php"]).toBeUndefined();
+    expect(useDocMeta.getState()["/p/Receipt.php"]?.doc).toBe(model.doc);
+    expect(after.layout).toBe(before.layout);
+    expect(after.activePane).toBe(before.activePane);
+    const oldTab = before.panes[before.activePane]!.tabs[0]!;
+    const newTab = after.panes[after.activePane]!.tabs[0]!;
+    expect(newTab).toEqual({ ...oldTab, input: { kind: "file", key: "file:/p/Receipt.php", path: "/p/Receipt.php" } });
+    expect(slot.currentState().selection.main.head).toBe(12);
+    expect(ctrl.nav.back()?.path).toBe("/p/Receipt.php");
+    expect(ctrl.edits.back(null)?.path).toBe("/p/Receipt.php");
+    expect(save).not.toHaveBeenCalled();
+    expect(await ctrl.manager.acquire("/p/Receipt.php")).toBe(model);
+    expect(backend.docs.size).toBe(1);
+    backend.move(model.doc, "/p/Invoice.php");
+    expect(ctrl.activeSlot).toBe(slot);
+    expect(ctrl.manager.get("/p/Invoice.php")).toBe(model);
+    expect(slot.currentState().selection.main.head).toBe(12);
+  });
+});
+
+it("keeps a reviewed move when the filesystem removal arrives before the document move", async () => {
+  const backend = createMemoryBackend({ "/p/Invoice.php": "<?php\n" });
+  let removed!: (e: { removed: string[] }) => void;
+  backend.onFsChanged = (h) => {
+    removed = h;
+    return () => {};
+  };
+  ctrl = new EditorController(backend);
+  ctrl.start();
+  await ctrl.openFile("/p/Invoice.php", { focus: false });
+  const slot = ctrl.activeSlot!;
+  const snapshot = backend.snapshot.bind(backend);
+  let release!: () => void;
+  const barrier = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  backend.snapshot = vi.fn(async (doc) => {
+    await barrier;
+    return snapshot(doc);
+  });
+  removed({ removed: ["/p/Invoice.php"] });
+  await vi.waitFor(() => expect(backend.snapshot).toHaveBeenCalled());
+  backend.move(slot.model.doc, "/p/Receipt.php");
+  release();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  expect(ctrl.activeSlot).toBe(slot);
+  expect(openFilePaths(useTabs.getState())).toEqual(["/p/Receipt.php"]);
+  // Ordinary external deletion still closes a clean tab after validation.
+  backend.files.delete("/p/Receipt.php");
+  removed({ removed: ["/p/Receipt.php"] });
+  await vi.waitFor(() => expect(openFilePaths(useTabs.getState())).toEqual([]));
+});

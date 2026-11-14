@@ -281,3 +281,76 @@ describe("reviewed refactoring history across document slots", () => {
     manager.stop();
   });
 });
+
+describe("reviewed move-only history", () => {
+  it("keeps one document and shared undo tokens in both splits when no text changes", async () => {
+    const { manager, backend } = setup({ "/p/Invoice.php": "<?php\n" });
+    const model = await manager.acquire("/p/Invoice.php");
+    const left = new EditorSlot(model, "left", host);
+    const right = new EditorSlot(model, "right", host);
+    left.dispatchLocal({ selection: { anchor: 4 } });
+    backend.restoreReviewed = vi.fn(async (_group, redo) => {
+      backend.move(model.doc, redo ? "/p/Receipt.php" : "/p/Invoice.php");
+      backend.patch(model.doc, [], { group: "move", action: redo ? "redo" : "undo" });
+    });
+    backend.move(model.doc, "/p/Receipt.php");
+    backend.patch(model.doc, [], { group: "move", action: "apply" });
+    const { reviewedUndo, reviewedRedo } = await import("../cm/reviewedHistory");
+    const target = (slot: EditorSlot) => ({
+      get state() {
+        return slot.currentState();
+      },
+      dispatch(tr: import("@codemirror/state").Transaction) {
+        slot.state = tr.state;
+      },
+    });
+    expect(reviewedUndo(target(right))).toBe(true);
+    await settle();
+    expect(backend.restoreReviewed).toHaveBeenCalledExactlyOnceWith("move", false);
+    expect(model.path).toBe("/p/Invoice.php");
+    expect(left.currentState().selection.main.head).toBe(4);
+    expect(reviewedRedo(target(left))).toBe(true);
+    await settle();
+    expect(backend.restoreReviewed).toHaveBeenLastCalledWith("move", true);
+    expect(model.path).toBe("/p/Receipt.php");
+    for (const slot of [left, right]) expect(slot.currentState().doc.toString()).toBe("<?php\n");
+    expect(manager.byId.size).toBe(1);
+    manager.stop();
+  });
+});
+
+describe("reviewed move during document acquisition", () => {
+  it("retargets an in-flight open and shares it with an acquire of the new path", async () => {
+    const { manager, backend } = setup({ "/p/Invoice.php": "<?php\n" });
+    let release!: () => void;
+    let opened!: () => void;
+    const barrier = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const ready = new Promise<void>((resolve) => {
+      opened = resolve;
+    });
+    const open = backend.open.bind(backend);
+    backend.open = async (path) => {
+      const info = await open(path);
+      opened();
+      await barrier;
+      return info;
+    };
+    const pending = manager.acquire("/p/Invoice.php");
+    await ready;
+    const doc = [...backend.docs.keys()][0]!;
+    backend.move(doc, "/p/Receipt.php");
+    backend.patch(doc, [{ from: 6, to: 6, insert: "// Renamed while opening.\n" }]);
+    const retargeted = manager.acquire("/p/Receipt.php");
+    expect(retargeted).toBe(pending);
+    release();
+    const model = await pending;
+    expect(model.path).toBe("/p/Receipt.php");
+    expect(manager.get("/p/Receipt.php")).toBe(model);
+    expect(manager.get("/p/Invoice.php")).toBeUndefined();
+    expect(backend.docs.get(doc)?.refs).toBe(1);
+    expect(model.sync.localText.toString()).toBe("<?php\n// Renamed while opening.\n");
+    manager.stop();
+  });
+});

@@ -1,6 +1,8 @@
 mod guarded_edits;
+mod reviewed_targets;
 use crate::editorconfig::{EditorConfig, EditorConfigProps};
 use crate::file_defaults::FileDefaults;
+pub use guarded_edits::ReviewedChanges;
 use ide_core::error::ErrorKind;
 use ide_core::event::NotifyLevel;
 use ide_core::{ChangeSet, DocId, IdeError, IdeEvent, IdeResult, LanguageId, SharedSink, TextEdit};

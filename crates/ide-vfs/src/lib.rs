@@ -1,5 +1,7 @@
 //! File system access for the IDE. The UI never touches the disk directly.
 
+mod exclusive_rename;
+pub use exclusive_rename::rename_exclusive;
 mod archive;
 mod bytes;
 mod compare;

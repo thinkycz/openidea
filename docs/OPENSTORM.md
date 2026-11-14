@@ -2717,6 +2717,72 @@ expansion is performed. The next dependent slice should add quoting-aware
 runtime-controller class edits for proven unambiguous bindings while refusing shared or
 unresolved transformations.
 
+Slice92 — guarded PHP file rename prerequisite (2026-11-14, source/client/build verified).
+Slice91 is committed/pushed as65c621161fbbd9d3555f43e724aa81d07ba92de4.
+Before adding quoting-aware controller rewrites, inspection found that existing PHPantom
+PSR-4 class renames produced RenameFile operations rejected by both the reviewed host
+path and checked client adapter. This prerequisite now accepts ordered same-directory
+PHP moves plus text edits against the new name, retaining witnesses for the original
+source. Editable roots, project/buffer/disk/engine revisions, destination absence,
+read-only files, symlinks, physical aliases, overlaps and staging/history limits are
+checked before mutation. macOS/Linux use atomic no-clobber rename; a destination that
+appears during commit cannot be overwritten. Failure rolls back owned earlier changes
+and retains original bytes plus a source/destination recovery manifest.
+
+Open documents retain their DocId, unsaved text and save-conflict baseline. LSP/syntax
+observers close/reopen at the new path; shared undo/redo restores disk names/bytes and
+the original unsaved overlays. Tabs/splits, caret, session paths, metadata, back/forward
+and edit history follow DocMoved without reopening or autosaving the file. Empty text
+patches retain the shared undo token for move-only plans. In-flight opens adopt the
+current backend snapshot and share the renamed pending acquisition. An early watcher
+removal waits for the committed document path and cannot close the moved tab; normal
+clean external deletion still closes its tab. Local History snapshots pre-move sources.
+
+Evidence: initial document red run2pass/2fail proves the previous text-only refusal;
+all5 new document regressions now pass, plus rollback/no-clobber and2 adapter unit
+regressions. Cases include unsaved dependencies, Unicode coordinates inherited from
+strict edits, BOM/CRLF, undo/redo/external changes, symlinks/open destinations, colliding
+or out-of-order operations, changed filename settings, and a late destination whose
+bytes coincide with the proposal. Frontend regressions cover identity/caret/metadata,
+move-only history in both splits, acquisition with a paired patch, and watcher ordering.
+The first actual host test exposes the additional checked-adapter resource refusal;
+that and the intermediate path-ownership compile error are corrected and retained in
+attempt logs. A later settings preflight deadlocked by reentering the document registry;
+two over60s tests and a sampled stack prove the cause. It now uses the already captured
+file defaults, and the affected tests plus final workspace rerun pass. Full actual
+PHPantom client41/host7 pass unfiltered, including checked
+PSR-4 Invoice.php→Receipt.php, unsaved class text, collision refusal, fresh definitions
+after shared undo/redo, and occupied-original undo refusal. Earlier live Laravel route,
+view, schema, container, facade/key and controller scenarios remain in this client run.
+
+Final frontend5387/487files, type checking, lint, Knip, formatting and asset build
+pass. Rust workspace1768/79ignored/0filtered across122suites, rustfmt and
+all-target Clippy with warnings denied pass. All8 packaging/retention regressions pass.
+Engine146 binary/source/146patch-series identity is unchanged: complete cached-source
+and binary checks pass; prior slice91 full-engine18475/17ignored plus FIFO child1 proof
+is reused by exact checksum, not reported as a new engine run. No engine rebuild or
+new canonical engine executable is created.
+
+Signed arm64 development app0.1.85: artifacts/batches/0.1.85/OpenStorm.app,
+executable SHA-256 5abe41dfe2c8d3080502cc16668fd5440a0dbe8a8ab675b029ed654e13ffe316.
+Only this archived app remains after signature/source receipts; app84, the duplicate
+SDK bundle and compiler output (22.1GiB reported by Cargo) are removed.
+Canonical/resource/bundled engine146 SHA
+b6c37641084449ef90cc55f5143df8e4efeaf24ca34331f0fe11d06a17007f2d remains exact.
+Installed21, Workbench/evaluation114, source snapshots, licenses and receipts are
+preserved. No app is installed or launched; native UI checks remain explicitly
+user-skipped. Linux move code is untested and other platforms refuse this operation.
+Occupied/case-only destinations, create/delete, directory moves, ambiguous chains,
+filename-dependent mode/settings changes and non-UTF16 checked-server file moves
+remain refused. Native/platform/performance and full69 acceptance stay partial:
+67partial/2user-deferred. The next dependent slice adds quoting-aware runtime-controller
+class edits through this guarded infrastructure, refusing ambiguous/unresolved bindings.
+
+Evidence: artifacts/checks/slice92-* source, adapter/host red, final workspace/frontend,
+client-host, source-reuse, pipeline/readback receipts; app85 build/retention receipts.
+Commit/push follows this verified closeout; no public release, updater activation,
+notarization, migration, deployment or debugger expansion.
+
 Source integration (2026-11-01, verified source checkpoint): integrates all 240 new
 commits from `l0ng-ai/openidea:main` at `041e7210` into
 `codex/openstorm-php-laravel`, based on pushed OpenStorm `82d1313a`.

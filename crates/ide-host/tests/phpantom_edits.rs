@@ -670,3 +670,222 @@ async fn checked_class_rename_moves_open_psr4_file_and_shared_history() {
     host.close_project("main");
     result.unwrap();
 }
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires the pinned macOS Apple Silicon PHPantom executable"]
+async fn checked_controller_class_rename_keeps_runtime_quotes_aliases_and_file_history() {
+    fn at(text: &str, needle: &str) -> Pos {
+        let offset = text.find(needle).unwrap() + needle.len();
+        let prefix = &text[..offset];
+        Pos::new(
+            prefix.bytes().filter(|b| *b == b'\n').count() as u32,
+            prefix.rsplit('\n').next().unwrap().encode_utf16().count() as u32,
+        )
+    }
+    let bin = std::env::var_os("OPENSTORM_TEST_PHPANTOM_BIN").map(PathBuf::from).unwrap_or_else(|| {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../src-tauri/resources/phpantom/phpantom_lsp")
+    });
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("project");
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::create_dir(root.join("routes")).unwrap();
+    let root = dunce::canonicalize(root).unwrap();
+    std::fs::write(
+        root.join("composer.json"),
+        r#"{"require":{"laravel/framework":"^13.37"},"autoload":{"psr-4":{"App\\":"src/"}}}"#,
+    )
+    .unwrap();
+    let old = root.join("src/InvoiceController.php");
+    let new = root.join("src/ReceiptController.php");
+    let route_path = root.join("routes/web.php");
+    let class =
+        "<?php\nnamespace App;\nclass InvoiceController { public function show(): string { return 'invoice'; } }\n";
+    let route = r#"<?php
+use Illuminate\Support\Facades\Route;
+use App\InvoiceController;
+use App\OtherController as ReceiptController;
+$invoice = new InvoiceController();
+$other = new ReceiptController();
+Route::namespace('App')->controller('InvoiceController')->group(fn () => Route::get('/bound', 'show'));
+Route::get('/😀/direct', "App\\Inv\x6ficeController@show");
+"#;
+    std::fs::write(&old, class).unwrap();
+    std::fs::write(&route_path, route).unwrap();
+    std::fs::write(root.join("src/OtherController.php"), "<?php namespace App; class OtherController {}\n").unwrap();
+    let events = Arc::new(std::sync::Mutex::new(Vec::<ide_core::IdeEvent>::new()));
+    let listener = events.clone();
+    let host = Host::new(HostConfig {
+        project_environment: false,
+        config_dir: tmp.path().join("config"),
+        data_dir: tmp.path().join("data"),
+        languages: Arc::new(ide_language::LanguageRegistry::load(None).unwrap()),
+        syntax: Arc::default(),
+        sink_for: Box::new(move |_| {
+            let events = listener.clone();
+            Arc::new(move |e| events.lock().unwrap().push(e))
+        }),
+        owner: |w| w,
+        runtime: tokio::runtime::Handle::current(),
+    });
+    host.trust.decide(&root, true, false).unwrap();
+    let project = host.open_project("main", &root).unwrap();
+    project.lsp.set_config_hook(Box::new(move |cfg, _| {
+        if cfg.name == "phpantom" {
+            cfg.command = bin.to_string_lossy().into_owned();
+        }
+    }));
+    let result: Result<(), String> = async {
+        let class_doc = project.documents.open(&old).unwrap();
+        let route_doc = project.documents.open(&route_path).unwrap();
+        let unsaved_class = format!("{class}// Unsaved controller documentation.\n");
+        let unsaved_route = format!(
+            "{route}Route::namespace('App')->group(fn () => Route::get('/unsaved', 'InvoiceController@show'));\n"
+        );
+        project.documents.replace_all(class_doc.id, &unsaved_class).unwrap();
+        project.documents.replace_all(route_doc.id, &unsaved_route).unwrap();
+        let control = project
+            .lsp
+            .goto(route_doc.id, at(&unsaved_route, "controller('In"), ide_lsp::types::GotoKind::Definition)
+            .await
+            .map_err(|e| format!("binding control: {e:?}"))?;
+        if control.len() != 1 || control[0].path.to_path_buf() != old {
+            return Err(format!("binding navigation control failed: {control:?}"));
+        }
+        let plan = ide_host::ops::lsp::lsp_rename(
+            &host,
+            "main",
+            ide_core::RequestId::next(),
+            class_doc.id,
+            at(class, "class In"),
+            "ReceiptController".into(),
+        )
+        .await
+        .map_err(|e| format!("runtime checked rename: {e:?}"))?
+        .edit;
+        if !plan.files.iter().any(|f| matches!(f,ide_core::FileEdit::Rename{from,to} if **from==old && **to==new)) {
+            return Err(format!("missing controller file move: {plan:?}"));
+        }
+        // A stale disk dependency is refused before moving or writing any target.
+        std::fs::write(&route_path, format!("{route}// External route change.\n")).unwrap();
+        if ide_host::ops::lsp::apply_workspace_edit(&host, "main", plan.clone()).await.is_ok()
+            || new.exists()
+            || std::fs::read_to_string(&old).unwrap() != class
+        {
+            return Err("stale dependency was accepted or partially applied".into());
+        }
+        std::fs::write(&route_path, route).unwrap();
+        let plan = ide_host::ops::lsp::lsp_rename(
+            &host,
+            "main",
+            ide_core::RequestId::next(),
+            class_doc.id,
+            at(class, "class In"),
+            "ReceiptController".into(),
+        )
+        .await
+        .map_err(|e| format!("fresh runtime checked rename: {e:?}"))?
+        .edit;
+        ide_host::ops::lsp::apply_workspace_edit(&host, "main", plan)
+            .await
+            .map_err(|e| format!("runtime apply: {e:?}"))?;
+        let changed = project.documents.snapshot(route_doc.id).unwrap();
+        for expected in [
+            "use App\\ReceiptController as ReceiptControllerAlias;",
+            "new ReceiptControllerAlias();",
+            "new ReceiptController();",
+            "controller('ReceiptController')",
+            r#""App\\ReceiptController@show""#,
+            "'/unsaved', 'ReceiptController@show'",
+        ] {
+            if !changed.text.contains(expected) {
+                return Err(format!("missing correct literal/alias {expected:?}: {}", changed.text));
+            }
+        }
+        if old.exists()
+            || project.documents.by_path(&new) != Some(class_doc.id)
+            || changed.dirty
+            || std::fs::read_to_string(&route_path).unwrap() != changed.text
+        {
+            return Err("runtime commit did not move/persist both overlays".into());
+        }
+        // Verify the committed PHP quoting and PSR-4 path with the real Laravel router.
+        // This is an explicit test action; editor refactoring stays entirely static.
+        let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let laravel = std::env::var_os("OPENSTORM_TEST_ENGINE_LARAVEL_ROOT")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| repo.join("artifacts/checks/engine-laravel13-37-147/project"));
+        let php = repo.join("artifacts/toolchains/php-8.4.23-static/php");
+        let script = r#"$loader = require $argv[2] . '/vendor/autoload.php';
+$loader->addPsr4('App\\', $argv[1] . '/src', true);
+$router = new \Illuminate\Routing\Router(new \Illuminate\Events\Dispatcher());
+\Illuminate\Support\Facades\Route::swap($router);
+require $argv[1] . '/routes/web.php';
+$routes = $router->getRoutes();
+if (count($routes) !== 3) { throw new \RuntimeException('Expected three renamed routes'); }
+foreach ($routes as $route) {
+    if ($route->getActionName() !== 'App\\ReceiptController@show'
+        || get_class($route->getController()) !== 'App\\ReceiptController'
+        || $route->getController()->show() !== 'invoice') {
+        throw new \RuntimeException('A renamed runtime controller failed');
+    }
+}
+echo '3 renamed controller routes executed';"#;
+        let runtime = std::process::Command::new(&php)
+            .args(["-n", "-r", script])
+            .arg(&root)
+            .arg(&laravel)
+            .output()
+            .map_err(|e| format!("explicit PHP verification: {e}"))?;
+        if !runtime.status.success() || runtime.stdout != b"3 renamed controller routes executed" {
+            return Err(format!(
+                "committed controller runtime verification failed: {}",
+                String::from_utf8_lossy(&runtime.stderr)
+            ));
+        }
+        let group = events
+            .lock()
+            .unwrap()
+            .iter()
+            .rev()
+            .find_map(|e| match e {
+                ide_core::IdeEvent::DocPatched { history: Some(h), .. } => Some(h.group.clone()),
+                _ => None,
+            })
+            .ok_or("missing runtime history")?;
+        for redo in [false, true] {
+            ide_host::ops::lsp::restore_reviewed_edit(&host, "main", group.clone(), redo)
+                .await
+                .map_err(|e| format!("runtime history {redo}: {e:?}"))?;
+            let current = project.documents.snapshot(route_doc.id).unwrap();
+            let expected = if redo { &new } else { &old };
+            let needle = if redo { r#"'/😀/direct', "App\\Re"# } else { r#"'/😀/direct', "App\\Inv\x6f"# };
+            let definitions = project
+                .lsp
+                .goto(route_doc.id, at(&current.text, needle), ide_lsp::types::GotoKind::Definition)
+                .await
+                .map_err(|e| format!("runtime definition {redo}: {e:?}"))?;
+            if definitions.len() != 1 || definitions[0].path.to_path_buf() != *expected {
+                return Err(format!("stale runtime definition after history {redo}: {definitions:?}"));
+            }
+            if !redo
+                && (current.text != unsaved_route
+                    || !current.dirty
+                    || project.documents.snapshot(class_doc.id).unwrap().text != unsaved_class
+                    || std::fs::read_to_string(&old).unwrap() != class)
+            {
+                return Err("runtime undo lost original unsaved overlays or disk bytes".into());
+            }
+        }
+        std::fs::write(&new, "<?php // External controller change.\n").unwrap();
+        if ide_host::ops::lsp::restore_reviewed_edit(&host, "main", group, false).await.is_ok()
+            || std::fs::read_to_string(&route_path).unwrap() != changed.text
+        {
+            return Err("runtime history overwrote an external change or partially restored callers".into());
+        }
+        Ok(())
+    }
+    .await;
+    project.lsp.shutdown_all().await;
+    host.close_project("main");
+    result.unwrap();
+}

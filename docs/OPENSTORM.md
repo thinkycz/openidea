@@ -2783,6 +2783,61 @@ client-host, source-reuse, pipeline/readback receipts; app85 build/retention rec
 Commit/push follows this verified closeout; no public release, updater activation,
 notarization, migration, deployment or debugger expansion.
 
+Slice93 — quoting-aware Laravel runtime controller class rename (2026-11-14,
+source/client/build verified). Slice92 is committed/pushed as
+34e6d4e5c8095cb9aa141a935c0ae3192c57cf22. Starting from an ordinary PHP class
+or type reference now updates complete, single-target runtime controller action
+and group-controller strings through the same checked edit/file-move plan.
+The PHPantom147 adapter retains quote spelling and method suffixes, decodes PHP
+escapes for identity checks, then encodes the replacement for its quote context.
+PHP import alias collisions stay independent of runtime controller names.
+No-op short/full names do not normalize literal escapes. Source fingerprints are
+validated once per file; shared or incomplete bindings refuse the entire plan.
+Namespace moves and rename started from a runtime literal remain guarded.
+
+Red/green evidence: engine146 refuses the new real-host case with the expected
+quoting-aware rewrite error; the identical final SDK executable with147 passes.
+The actual host edits unsaved class/routes, refuses stale external text, moves
+the PSR-4 file, preserves aliases/emoji ranges, executes all3 renamed routes using
+Laravel's Router/Facade and Composer loader, and checks fresh definitions through
+shared undo/redo. Later external controller edits refuse undo without partial
+caller restoration. All41 real client and8 real host cases pass unfiltered;
+prior shared/unknown binding refusal, literal-start and namespace negatives remain.
+
+Pinned147 source reconstruction, checksums, full18477 ordinary engine tests
+(17ignored/0filtered), separate FIFO child1, final64 focused cases, fmt and
+all-target Clippy pass. Real Laravel13.37 fixture passes324 runtime assertions,
+12plain/91Laravel non-Blade syntax checks and exactly the same3 intentional
+analyzer diagnostics. Source snapshot1756b1f920c1-09f0daddc592-verified,
+patch0147 and both candidate manifests retain the acquisition/build recipe.
+Canonical/resource/app engine SHA-256 is
+ffa8a646ef7fce982e2e515f90aa84fb89a57710557c2e8fa5fe7e93ec8496d2.
+
+Desktop gates:5387 frontend tests/487files, typecheck/lint/Knip/format/build,
+workspace1768passed/80ignored/0filtered across122suites,
+workspace fmt/all-target Clippy with warnings denied, binding export/readback and
+8packaging/retention tests pass. Initial desktop run failed the mock retry timer
+assertion. Focused and full104mock reruns passed; its old interval included
+blocking candidate setup and server teardown. The test now measures first checked
+request to response before shutdown, preserving the29–30second assertion and
+attempt bound. No production retry limit changed; final full gates pass.
+Initial actual client run passed40/41 but the view-data cycle test received no
+Other member completion once after a caller overlay change. The identical client
+executable passed unchanged focused147/146/147 repetitions and the full rerun.
+No source/test weakening was made; original cause remains unestablished and
+the failed receipt is retained as an intermittent semantic-readiness limitation.
+
+Signed arm64 development OpenStorm0.1.86 is the sole archived app. Strict/deep
+signature, source and engine receipts pass; installed0.1.21 is unchanged. App85,
+duplicate SDK app, obsolete canonical146 executable and owned compiler output
+were removed only after verified replacement; source snapshots, provenance,
+licenses, build receipts and Workbench114 baseline remain. Native UI is explicitly
+user-skipped: no app launch, installation or new native acceptance. All69 areas
+remain visible:67partial/2user-deferred. Literal-started class renames, namespace
+moves, broader platform/performance and full route-form acceptance remain open.
+Evidence: artifacts/checks/slice93-* and artifacts/batches/0.1.86/build-receipt.json.
+Commit/push follows verified closeout; no publishing or debugger expansion.
+
 Source integration (2026-11-01, verified source checkpoint): integrates all 240 new
 commits from `l0ng-ai/openidea:main` at `041e7210` into
 `codex/openstorm-php-laravel`, based on pushed OpenStorm `82d1313a`.

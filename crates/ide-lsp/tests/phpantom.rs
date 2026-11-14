@@ -3996,13 +3996,20 @@ async fn laravel_match_actions_follow_aliases_nested_owners_and_unsaved_controll
         }
         for (doc, at, replacement) in [
             (route_doc, class_positions[0], "ReceiptController"),
-            (ctrl_doc, pos(controller, "InvoiceController"), "ReceiptController"),
             (ctrl_doc, pos(controller, "InvoiceController"), "App\\Billing\\ReceiptController"),
         ] {
             match mgr.rename(doc, at, replacement.into(), Default::default()).await {
                 Err(e) if e.to_string().to_lowercase().contains("runtime controller") => {}
                 other => return Err(format!("runtime class edits must refuse a partial rewrite: {other:?}")),
             }
+        }
+        let class_plan = mgr.rename(ctrl_doc, pos(controller, "InvoiceController"), "ReceiptController".into(), Default::default()).await.map_err(|e|format!("safe runtime class rename: {e}"))?;
+        if !class_plan.edit.files.iter().any(|f|matches!(f,ide_core::FileEdit::Rename{from,to} if **from==main_path && **to==root.join("app/ReceiptController.php"))) {
+            return Err(format!("safe runtime class plan must retain PSR4 file move: {class_plan:?}"));
+        }
+        let runtime_edits=class_plan.edit.files.iter().find_map(|f|match f{ide_core::FileEdit::Edit{path,edits} if **path==route_path=>Some(edits),_=>None}).ok_or("safe runtime class plan omitted route references")?;
+        if !runtime_edits.iter().any(|e|e.new_text==r"App\\ReceiptController") || runtime_edits.iter().any(|e|e.new_text.contains("showInvoice")) {
+            return Err(format!("runtime class plan must quote class interiors without rewriting method suffixes: {runtime_edits:?}"));
         }
         let refs = mgr
             .references(route_doc, positions[20], true, true, Default::default())

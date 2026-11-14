@@ -1,0 +1,565 @@
+--- a/src/rename/mod.rs
++++ b/src/rename/mod.rs
+@@ -36,6 +36,7 @@
+ mod namespace;
+ mod prepare;
+ mod route;
++mod runtime_controller;
+ mod validate;
+ 
+ mod tests;
+@@ -65,40 +66,3 @@
+         }
+     }
+ }
+-
+-impl crate::Backend {
+-    /// Runtime route strings must never reach the PHP import rewriter. Their
+-    /// namespaces and escapes need a dedicated, all-target rewrite plan.
+-    pub(super) fn reject_runtime_controller_class_rename(&self, fqn: &str) -> Result<(), String> {
+-        let target = crate::util::strip_fqn_prefix(fqn);
+-        let keys = crate::references::class_candidate_keys(target, crate::util::short_name(target));
+-        if self
+-            .user_file_symbol_maps_for_reference_keys(&keys)
+-            .iter()
+-            .any(|(_, map)| {
+-                map.spans.iter().any(|span| match &span.kind {
+-                    crate::symbol_map::SymbolKind::ClassReference {
+-                        name,
+-                        context: crate::symbol_map::ClassRefContext::RuntimeControllerString,
+-                        ..
+-                    } => crate::util::strip_fqn_prefix(name).eq_ignore_ascii_case(target),
+-                    crate::symbol_map::SymbolKind::RuntimeControllerBinding {
+-                        targets,
+-                        runtime_name,
+-                        incomplete,
+-                    } => {
+-                        targets.iter().any(|name| {
+-                            crate::util::strip_fqn_prefix(name).eq_ignore_ascii_case(target)
+-                        }) || (*incomplete
+-                            && crate::util::short_name(runtime_name)
+-                                .eq_ignore_ascii_case(crate::util::short_name(target)))
+-                    }
+-                    _ => false,
+-                })
+-            })
+-        {
+-            return Err("Class edits involving runtime controller strings require a quoting-aware rewrite; no edits were produced.".into());
+-        }
+-        Ok(())
+-    }
+-}
+--- a/src/rename/class/mod.rs
++++ b/src/rename/class/mod.rs
+@@ -178,6 +178,9 @@
+     ) -> RenameOutcome {
+         let old_fqn_normalized = strip_fqn_prefix(old_fqn);
+         let old_short_name = crate::util::short_name(old_fqn_normalized);
++        if old_short_name == new_short_name {
++            return Ok(None);
++        }
+ 
+         let new_fqn = if let Some(ns_sep) = old_fqn_normalized.rfind('\\') {
+             format!("{}\\{}", &old_fqn_normalized[..ns_sep], new_short_name)
+@@ -189,6 +192,7 @@
+             return Err(conflict);
+         }
+ 
++        let runtime_sites = self.runtime_controller_sites(old_fqn_normalized)?;
+         let locations_by_file = group_locations_by_file(locations);
+ 
+         let mut changes: HashMap<Url, Vec<TextEdit>> = HashMap::new();
+@@ -198,8 +202,20 @@
+             let Some(target_uri) = blocks.first().map(|file| file.target_uri.clone()) else {
+                 continue;
+             };
+-            let mut file_edits: Vec<TextEdit> = Vec::new();
+-            for (file, block_locations) in locations_by_block(&blocks, file_locations) {
++            let runtime: Vec<_> = runtime_sites
++                .iter()
++                .filter(|site| site.uri == *file_uri_str)
++                .collect();
++            let ordinary: Vec<_> = file_locations
++                .iter()
++                .copied()
++                .filter(|loc| !runtime.iter().any(|site| site.range == loc.range))
++                .collect();
++            let mut file_edits: Vec<TextEdit> = runtime
++                .iter()
++                .map(|site| site.edit(new_short_name))
++                .collect();
++            for (file, block_locations) in locations_by_block(&blocks, &ordinary) {
+                 // A rename adds no import, so there is no alias for one either.
+                 let rewrite = file.reference_rewrite(
+                     old_fqn_normalized,
+@@ -276,9 +292,14 @@
+ 
+         let class_name_changed = old_short_name != new_short_name;
+         let namespace_changed = old_ns != new_ns;
+-
+         if !class_name_changed && !namespace_changed {
+             return Ok(None);
++        }
++        if !self.runtime_controller_sites(old_fqn)?.is_empty() {
++            if namespace_changed {
++                return Err("Namespace moves involving runtime controller strings are not supported; no edits were produced.".into());
++            }
++            return self.build_class_rename_edit(old_fqn, new_short_name, locations);
+         }
+ 
+         // The destination has to be free before anything is emitted.
+--- a/src/rename/validate.rs
++++ b/src/rename/validate.rs
+@@ -107,7 +107,7 @@
+             .is_none_or(|map| map.matches_source(content))
+     }
+ 
+-    /// Snapshot only AST method-literal roles. Ordinary files keep their raw
++    /// Snapshot AST method and runtime-class literal roles. Ordinary files keep their raw
+     /// identifier validation path and pay no whole-source fingerprint hash.
+     pub(super) fn rename_literal_method_context(
+         &self,
+@@ -115,7 +115,12 @@
+         content: &str,
+     ) -> Option<LiteralMethodContext> {
+         let map = self.symbol_maps.read().get(uri).cloned()?;
+-        if map.literal_method_selectors.is_empty() {
++        if map.literal_method_selectors.is_empty()
++            && !map
++                .spans
++                .iter()
++                .any(|span| super::runtime_controller::is_runtime_class(&span.kind))
++        {
+             return None;
+         }
+         let source_matches = map.matches_source_fingerprint(content);
+@@ -185,6 +190,23 @@
+                 .entry(uri)
+                 .or_insert_with(|| self.rename_literal_method_context(uri, content));
+             if let Some(context) = literal.as_ref() {
++                if matches!(
++                    kind,
++                    SymbolKind::ClassReference { .. } | SymbolKind::ClassDeclaration { .. }
++                ) {
++                    let start = position_to_byte_offset(content, location.range.start) as u32;
++                    let end = position_to_byte_offset(content, location.range.end) as u32;
++                    if let Some(span) = context.map.span_covering_exactly(start, end)
++                        && super::runtime_controller::is_runtime_class(&span.kind)
++                    {
++                        if !context.source_matches
++                            || super::runtime_controller::runtime_spelling(content, span).is_none()
++                        {
++                            return false;
++                        }
++                        continue;
++                    }
++                }
+                 let wanted = match &expected {
+                     Expected::Exact(name) => *name,
+                     _ => "",
+--- a/src/rename/prepare.rs
++++ b/src/rename/prepare.rs
+@@ -228,7 +228,7 @@
+                 ..
+             } | SymbolKind::RuntimeControllerBinding { .. }
+         ) {
+-            return Err("Class edits involving runtime controller strings require a quoting-aware rewrite; no edits were produced.".into());
++            return Err("Rename runtime controller classes from their PHP declaration or a type reference; starting inside the string is not supported.".into());
+         }
+ 
+         // Every edit below is derived, directly or through find-references,
+--- /dev/null
++++ b/src/rename/runtime_controller.rs
+@@ -0,0 +1,179 @@
++//! Quoting-aware short-name edits for statically proven runtime controller strings.
++use crate::Backend;
++use crate::symbol_map::{ClassRefContext, SymbolKind, SymbolSpan};
++use crate::text_position::offset_to_position;
++use crate::util::{short_name, strip_fqn_prefix};
++use tower_lsp::lsp_types::{Range, TextEdit};
++
++/// One source-verified runtime class spelling and its unchanged quote style.
++pub(super) struct RuntimeControllerSite {
++    /// The reference file containing the literal.
++    pub uri: String,
++    /// Only the class interior, excluding quotes and the method suffix.
++    pub range: Range,
++    spelling: String,
++    quote: char,
++}
++
++impl RuntimeControllerSite {
++    /// Encode a renamed short class name without applying PHP import aliases.
++    pub(super) fn edit(&self, new_short_name: &str) -> TextEdit {
++        let prefix = self
++            .spelling
++            .rfind('\\')
++            .map_or("", |i| &self.spelling[..=i]);
++        let mut encoded = String::with_capacity(
++            prefix
++                .len()
++                .saturating_mul(2)
++                .saturating_add(new_short_name.len()),
++        );
++        for ch in prefix.chars().chain(new_short_name.chars()) {
++            if ch == '\\' || ch == self.quote || (self.quote == '"' && ch == '$') {
++                encoded.push('\\');
++            }
++            encoded.push(ch);
++        }
++        TextEdit {
++            range: self.range,
++            new_text: encoded,
++        }
++    }
++}
++
++/// Whether this symbol uses Laravel runtime class spelling rather than PHP imports.
++pub(super) fn is_runtime_class(kind: &SymbolKind) -> bool {
++    matches!(
++        kind,
++        SymbolKind::ClassReference {
++            context: ClassRefContext::RuntimeControllerString,
++            ..
++        } | SymbolKind::RuntimeControllerBinding { .. }
++    )
++}
++
++/// The AST's full source fingerprint must be checked by the caller. Decode only
++/// the class interior; quotes and an explicit @method suffix stay outside edits.
++pub(super) fn runtime_spelling(content: &str, span: &SymbolSpan) -> Option<(String, char)> {
++    let (identity, runtime_name) = match &span.kind {
++        SymbolKind::ClassReference {
++            name,
++            context: ClassRefContext::RuntimeControllerString,
++            ..
++        } => (name.as_str(), None),
++        SymbolKind::RuntimeControllerBinding {
++            runtime_name,
++            targets,
++            incomplete: false,
++        } if targets.len() == 1 => (targets[0].as_str(), Some(runtime_name.as_str())),
++        _ => return None,
++    };
++    let start = span.start as usize;
++    let end = span.end as usize;
++    let quote = *content.as_bytes().get(start.checked_sub(1)?)? as char;
++    if !matches!(quote, '\'' | '"')
++        || !matches!(
++            content.as_bytes().get(end),
++            Some(b'@') | Some(b'\'') | Some(b'"')
++        )
++    {
++        return None;
++    }
++    if content.as_bytes().get(end) != Some(&b'@')
++        && content.as_bytes().get(end).copied() != Some(quote as u8)
++    {
++        return None;
++    }
++    let raw = content.get(start..end)?;
++    let literal = format!("{quote}{raw}{quote}");
++    let decoded = crate::text_scan::decode_php_string_literal(&literal)?.into_owned();
++    let body = strip_fqn_prefix(&decoded);
++    let target = strip_fqn_prefix(identity);
++    let qualified_suffix = target.len().checked_sub(body.len()).is_some_and(|start| {
++        start > 0
++            && target.as_bytes().get(start - 1) == Some(&b'\\')
++            && target
++                .get(start..)
++                .is_some_and(|suffix| suffix.eq_ignore_ascii_case(body))
++    });
++    if !short_name(body).eq_ignore_ascii_case(short_name(target))
++        || (decoded.starts_with('\\') && !body.eq_ignore_ascii_case(target))
++        || (!body.eq_ignore_ascii_case(target) && !qualified_suffix)
++        || runtime_name.is_some_and(|name| !strip_fqn_prefix(name).eq_ignore_ascii_case(body))
++    {
++        return None;
++    }
++    Some((decoded, quote))
++}
++
++impl Backend {
++    /// Validate the entire affected runtime reference set before producing any edit.
++    /// A shared/unknown binding cannot be safely changed for just one class.
++    pub(super) fn runtime_controller_sites(
++        &self,
++        fqn: &str,
++    ) -> Result<Vec<RuntimeControllerSite>, String> {
++        let target = strip_fqn_prefix(fqn);
++        let keys = crate::references::class_candidate_keys(target, short_name(target));
++        let mut sites = Vec::new();
++        for (uri, map) in self.user_file_symbol_maps_for_reference_keys(&keys) {
++            let mut content = None;
++            let mut source_verified = false;
++            for span in &map.spans {
++                let affected = match &span.kind {
++                    SymbolKind::ClassReference {
++                        name,
++                        context: ClassRefContext::RuntimeControllerString,
++                        ..
++                    } => strip_fqn_prefix(name).eq_ignore_ascii_case(target),
++                    SymbolKind::RuntimeControllerBinding {
++                        runtime_name,
++                        targets,
++                        incomplete,
++                    } => {
++                        targets
++                            .iter()
++                            .any(|name| strip_fqn_prefix(name).eq_ignore_ascii_case(target))
++                            || (*incomplete
++                                && short_name(runtime_name)
++                                    .eq_ignore_ascii_case(short_name(target)))
++                    }
++                    _ => false,
++                };
++                if !affected {
++                    continue;
++                }
++                let content = content
++                    .get_or_insert_with(|| self.reference_file_content_arc(&uri))
++                    .as_deref()
++                    .ok_or(
++                        "Could not read a runtime controller reference; no edits were produced.",
++                    )?;
++                if !source_verified {
++                    if !map.matches_source_fingerprint(content) {
++                        return Err(
++                            "A runtime controller source changed; request a new rename.".into()
++                        );
++                    }
++                    source_verified = true;
++                }
++                let (spelling,quote)=runtime_spelling(content,span).ok_or("A runtime controller binding is ambiguous, unresolved or cannot be safely quoted; no edits were produced.")?;
++                sites.push(RuntimeControllerSite {
++                    uri: uri.to_string(),
++                    range: Range::new(
++                        offset_to_position(content, span.start as usize),
++                        offset_to_position(content, span.end as usize),
++                    ),
++                    spelling,
++                    quote,
++                });
++            }
++        }
++        Ok(sites)
++    }
++
++    /// Refuse an unsafe runtime reference anywhere in the affected class set.
++    pub(super) fn reject_runtime_controller_class_rename(&self, fqn: &str) -> Result<(), String> {
++        self.runtime_controller_sites(fqn).map(|_| ())
++    }
++}
+--- a/tests/integration/laravel_route_controller.rs
++++ b/tests/integration/laravel_route_controller.rs
+@@ -1724,14 +1724,13 @@
+ }
+ 
+ #[tokio::test]
+-async fn runtime_action_classes_refuse_unimplemented_class_rewrites_from_all_entry_points() {
++async fn runtime_action_literal_entry_points_and_namespace_moves_remain_refused() {
+     use crate::common::position_after;
+     let text = runtime_action_class_fixture(
+         "Routes::get('/known', 'App\\InvoiceController@showInvoice');",
+     );
+     for (needle, new_name) in [
+         ("'/known', 'Ap", "Renamed"),
+-        ("namespace App {class ", "Renamed"),
+         ("namespace App {class ", "Moved\\Renamed"),
+     ] {
+         let backend = create_test_backend();
+@@ -2144,3 +2143,124 @@
+     );
+     assert_eq!(callers[0].from.name, "instantiateController");
+ }
++
++#[tokio::test]
++async fn class_declaration_rename_updates_unambiguous_runtime_controller_literals() {
++    use crate::common::{apply_edits, position_after};
++    for (call, expected) in [
++        (
++            r#"Routes::get('/direct', 'App\InvoiceController@showInvoice');"#,
++            r#"Routes::get('/direct', 'App\\ReceiptController@showInvoice');"#,
++        ),
++        (
++            r#"Routes::namespace('App')->group(fn () => Routes::get('/short', 'InvoiceController@showInvoice'));"#,
++            r#"Routes::namespace('App')->group(fn () => Routes::get('/short', 'ReceiptController@showInvoice'));"#,
++        ),
++        (
++            r#"Routes::get('/escaped', "App\\Inv\x6ficeController@showInvoice");"#,
++            r#"Routes::get('/escaped', "App\\ReceiptController@showInvoice");"#,
++        ),
++        (
++            r#"Routes::get('/unicode', "\u{41}pp\\InvoiceController@showInvoice");"#,
++            r#"Routes::get('/unicode', "App\\ReceiptController@showInvoice");"#,
++        ),
++        (
++            r#"Routes::get('/octal', "\101pp\\InvoiceController@showInvoice");"#,
++            r#"Routes::get('/octal', "App\\ReceiptController@showInvoice");"#,
++        ),
++        (
++            r#"Routes::namespace($selected)->controller('\App\InvoiceController')->group(fn () => Routes::get('/rooted', 'showInvoice'));"#,
++            r#"Routes::namespace($selected)->controller('\\App\\ReceiptController')->group(fn () => Routes::get('/rooted', 'showInvoice'));"#,
++        ),
++        (
++            r#"Routes::namespace('App')->controller('InvoiceController')->group(fn () => Routes::get('/bound', 'showInvoice'));"#,
++            r#"Routes::namespace('App')->controller('ReceiptController')->group(fn () => Routes::get('/bound', 'showInvoice'));"#,
++        ),
++        (
++            r#"Routes::group(['namespace'=>'App','controller'=>'InvoiceController'],fn () => Routes::get('/attrs','showInvoice'));"#,
++            r#"Routes::group(['namespace'=>'App','controller'=>'ReceiptController'],fn () => Routes::get('/attrs','showInvoice'));"#,
++        ),
++    ] {
++        let text = runtime_action_class_fixture(call);
++        let backend = create_test_backend();
++        let uri = Url::parse("file:///runtime-class-rename.php").unwrap();
++        open_php(&backend, &uri, &text).await;
++        let at = position_after(&text, "namespace App {class ");
++        for unchanged_name in ["App\\InvoiceController", "InvoiceController"] {
++            let unchanged = backend
++                .rename(RenameParams {
++                    text_document_position: TextDocumentPositionParams {
++                        text_document: TextDocumentIdentifier { uri: uri.clone() },
++                        position: at,
++                    },
++                    new_name: unchanged_name.into(),
++                    work_done_progress_params: Default::default(),
++                })
++                .await
++                .unwrap();
++            assert!(
++                unchanged.is_none(),
++                "An unchanged class identity must not normalize literal escapes."
++            );
++        }
++        let plan = backend
++            .rename(RenameParams {
++                text_document_position: TextDocumentPositionParams {
++                    text_document: TextDocumentIdentifier { uri: uri.clone() },
++                    position: at,
++                },
++                new_name: "ReceiptController".into(),
++                work_done_progress_params: Default::default(),
++            })
++            .await
++            .unwrap()
++            .expect("safe runtime class rename");
++        let changes = plan.changes.expect("same-file class rename");
++        assert_eq!(changes.len(), 1);
++        let edits = changes.get(&uri).unwrap();
++        assert_eq!(
++            edits.len(),
++            2,
++            "declaration plus literal, no lexical alias rewrite: {edits:?}"
++        );
++        let updated = apply_edits(&text, edits);
++        let expected = runtime_action_class_fixture(expected).replacen(
++            "namespace App {class InvoiceController",
++            "namespace App {class ReceiptController",
++            1,
++        );
++        assert_eq!(updated, expected, "{call}");
++    }
++}
++
++#[tokio::test]
++async fn class_runtime_rename_refuses_shared_and_unknown_bindings_even_with_safe_sites() {
++    use crate::common::position_after;
++    for binding in [
++        "Routes::namespace('App')->controller('InvoiceController')->group(function () {Routes::get('/main','showInvoice');Routes::namespace('Other')->group(fn () => Routes::get('/other','showInvoice'));});",
++        "Routes::namespace($selected)->controller('InvoiceController')->group(fn () => Routes::get('/unknown','showInvoice'));",
++    ] {
++        let text = runtime_action_class_fixture(&format!(
++            "Routes::get('/safe','App\\InvoiceController@showInvoice');{binding}"
++        ));
++        let backend = create_test_backend();
++        let uri = Url::parse("file:///runtime-rename-all-targets.php").unwrap();
++        open_php(&backend, &uri, &text).await;
++        let result = backend
++            .rename(RenameParams {
++                text_document_position: TextDocumentPositionParams {
++                    text_document: TextDocumentIdentifier { uri },
++                    position: position_after(&text, "namespace App {class "),
++                },
++                new_name: "ReceiptController".into(),
++                work_done_progress_params: Default::default(),
++            })
++            .await;
++        assert!(
++            result
++                .as_ref()
++                .is_err_and(|e| e.message.to_lowercase().contains("runtime controller")),
++            "all-target refusal must retain the safe site's old spelling too: {result:?}"
++        );
++    }
++}
+--- a/docs/CHANGELOG.md
++++ b/docs/CHANGELOG.md
+@@ -207,6 +207,8 @@
+ 
+ 
+ ### Added
++
++- **Rename controller classes used in route strings.** A class rename started from PHP updates proven literal route actions and controller bindings with the proper quoting, preserving method suffixes and ignoring lexical import aliases. Shared or unresolved bindings and namespace moves remain refused. Contributed by @thinkycz.
+ 
+ - **Overloaded parameter hints.** Signature help shows the available callable forms and selects a compatible form while typing, with each form’s parameter descriptions and return type. Contributed by @thinkycz.
+ 
+--- a/examples/laravel/app/Demo.php
++++ b/examples/laravel/app/Demo.php
+@@ -1766,6 +1766,13 @@
+         });
+     }
+ 
++    public function controllerClassRenamePreview(): void
++    {
++        // Try: rename the PHP class declaration; these runtime strings follow it.
++        Route::namespace('App\Http\Controllers')->controller('RenamePreviewController')->group(fn () => Route::get('/rename-bound', 'index'));
++        Route::get('/rename-direct', "App\\Http\\Controllers\\RenamePreviewController@index");
++    }
++
+ }
+ 
+ // PHP Workbench: Laravel: Go to Route lists statically named routes and opens
+--- a/examples/laravel/assertions.php
++++ b/examples/laravel/assertions.php
+@@ -2092,6 +2092,26 @@
+     check('The archive class implements its documented return type', (new \App\Http\Controllers\Archive\BakeryController())->index() === 'Archive preview.');
+ })();
+ 
++// Runtime controller strings keep their PHP value independently of import aliases.
++(function (): void {
++    $previous = \Illuminate\Support\Facades\Route::getFacadeRoot();
++    $router = new \Illuminate\Routing\Router(new \Illuminate\Events\Dispatcher());
++    \Illuminate\Support\Facades\Route::swap($router);
++    try {
++        \Illuminate\Support\Facades\Route::namespace('App\Http\Controllers')->controller('RenamePreviewController')->group(fn () => \Illuminate\Support\Facades\Route::get('/rename-bound', 'index')->name('rename.bound'));
++        \Illuminate\Support\Facades\Route::get('/rename-direct', "App\\Http\\Controllers\\RenamePreviewController@index")->name('rename.direct');
++        $actual = [];
++        foreach ($router->getRoutes() as $route) { $actual[$route->getName()] = $route->getActionName(); }
++        check('The controller rename preview registers two routes', count($actual) === 2);
++        check('A bound controller string selects its namespace-qualified PHP class', $actual['rename.bound'] === \App\Http\Controllers\RenamePreviewController::class . '@index');
++        check('A double-quoted explicit action has the same runtime class and method', $actual['rename.direct'] === $actual['rename.bound']);
++        check('The controller rename preview class is autoloadable', (new \App\Http\Controllers\RenamePreviewController())->index() === 'Rename preview.');
++    } finally {
++        if ($previous !== null) { \Illuminate\Support\Facades\Route::swap($previous); }
++        else { \Illuminate\Support\Facades\Route::clearResolvedInstance('router'); }
++    }
++})();
++
+ // ─── Summary ────────────────────────────────────────────────────────────────
+ 
+ echo "\n";
+--- /dev/null
++++ b/examples/laravel/app/Http/Controllers/RenamePreviewController.php
+@@ -0,0 +1,11 @@
++<?php
++
++namespace App\Http\Controllers;
++
++class RenamePreviewController
++{
++    public function index(): string
++    {
++        return 'Rename preview.';
++    }
++}

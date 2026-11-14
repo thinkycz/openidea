@@ -3277,11 +3277,14 @@ async fn checked_php_rename_retry_is_bounded_and_rejects_changed_inputs_or_other
                 json!({"changes": {uri_of(&path): [{"range":php_range(0,6,0,11),"newText":"subtotal"}]}})
             },
         );
+        let first_request = Arc::new(Mutex::new(None));
+        let request_started = first_request.clone();
         let weak = Arc::downgrade(&h.mgr);
         *s.fault.lock() = Some(Arc::new(move |_, method| {
             if method != "phpWorkbench/renameChecked" {
                 return None;
             }
+            request_started.lock().get_or_insert_with(tokio::time::Instant::now);
             let mgr = weak.upgrade().unwrap();
             if matches!(mode, "typed" | "typed success") {
                 mgr.did_change(
@@ -3313,9 +3316,10 @@ async fn checked_php_rename_retry_is_bounded_and_rejects_changed_inputs_or_other
                 "not ready".into(),
             ))
         }));
-        let start = tokio::time::Instant::now();
         let result = h.mgr.rename(doc, Pos::new(0, 7), "subtotal".into(), Default::default()).await;
         let attempts = s.requested("phpWorkbench/renameChecked").len();
+        // Candidate discovery uses spawn_blocking; measure only checked requests, before teardown.
+        let retry_elapsed = first_request.lock().expect("checked request started").elapsed();
         h.mgr.shutdown_all().await;
         if mode == "empty" {
             assert!(result.unwrap().edit.files.is_empty());
@@ -3324,7 +3328,10 @@ async fn checked_php_rename_retry_is_bounded_and_rejects_changed_inputs_or_other
         }
         if mode == "busy" {
             assert!((2..=600).contains(&attempts), "bounded checked-rename retry: {attempts}");
-            assert!(start.elapsed() >= Duration::from_secs(29) && start.elapsed() <= Duration::from_secs(30));
+            assert!(
+                (Duration::from_secs(29)..=Duration::from_secs(30)).contains(&retry_elapsed),
+                "checked-request retry elapsed {retry_elapsed:?}, attempts {attempts}"
+            );
         } else {
             assert_eq!(attempts, 1, "{mode}");
         }

@@ -1,6 +1,6 @@
 # Pinned PHPantom engine
 
-The local OpenStorm development candidate uses PHPantom `0.11.1-openstorm.146`
+The local OpenStorm development candidate uses PHPantom `0.11.1-openstorm.147`
 for Apple Silicon macOS. This is a local rebuild, not an upstream release.
 Source131 adds migration-derived declaration origins;132 follows registration
 order for container bindings and aliases within a provider group. Source133
@@ -30,8 +30,12 @@ controller actions, independently of PHP imports. Class/namespace edits involvin
 these references refuse partial rewrites until quoting-aware plans exist.
 Source146 tracks group controller literals across route namespaces for multiple
 class/type targets, hover and references, preserving unresolved contexts and
-guarding unsupported class/namespace rewrites. Full pinned source
-tests pass18,475 checks plus the separate FIFO child (17 ignored).
+guarding unsupported class/namespace rewrites.
+Source147 adds quoting-aware class renames from PHP declarations and type references:
+proven runtime action/group strings keep their quotes and method suffixes, without
+borrowing PHP import aliases. Shared/unknown bindings, namespace moves and string-started
+renames remain refused; unchanged class identities produce no edits. Full pinned source
+tests pass18,477 checks plus the separate FIFO child (17 ignored).
 Examples, Clippy, formatting, source fingerprints and the optimized build pass.
 Current OpenStorm client/host and packaged native acceptance are tracked in
 `docs/OPENSTORM.md`; source checks alone do not establish native acceptance.
@@ -41,7 +45,7 @@ acceptance is claimed. The unaccepted129 source and its failed suite result
 remain reproducible.
 
 `source.json` pins the upstream source, archive checksum, unchanged114-patch PHP
-Workbench series and OpenStorm patches0115–0146. The bundled executable is
+Workbench series and OpenStorm patches0115–0147. The bundled executable is
 verified by `node scripts/verify-phpantom.mjs`; its provenance and licenses are
 under `src-tauri/resources/phpantom/`. Source checks and client/host checks do not
 replace packaged native acceptance; broader component and view-data work remains

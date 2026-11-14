@@ -2460,6 +2460,83 @@ user-deferred. Broader callback/root/project/Composer/configuration/performance/
 platform cases and the physical Dock-switch case remain open. No migration,
 publishing, updater activation, notarization or debugger expansion.
 
+Slice89 — guard class positions in Laravel string actions (2026-11-14).
+Slice 88 was committed and pushed as a70f2667a691096cfb1f3f219ed4ba175bbb784d.
+Before @ in an explicit Controller@method action, completion no longer offers
+methods from the enclosing controller group. The guard selects the registered
+action literal through the existing route argument AST helper, and checks its
+decoded bytes. Short and qualified class prefixes, named arguments, and hex/octal
+separator escapes are covered. Cheap prefix validation remains first. No text
+look-ahead parser, parallel type resolver or implicit framework execution is
+introduced. Ordinary bare actions and method suffixes retain completion. An @ in
+the URI does not classify a different argument as an explicit action. Dedicated
+class-name completion/navigation/rename and broader incomplete-source, dynamic,
+action-array and invokable workflows remain independently unaccepted.
+
+Six engine 143 protocol queries show wrong parent-method items in four class
+positions while method/bare controls work. In-memory application of their edit
+ranges replaces class bytes and preserves @showInvoice, proving the harmful edit
+without changing fixture disk bytes. The initial source run passes all 44 prior
+cases and fails all four new regressions. All 48 pass after the guard. Release
+Clippy/fmt pass without warnings before the two Rust source hashes bind the
+freeze. Actual client class-position assertions follow 28 successful definition/
+hover owner controls, so an empty startup result cannot masquerade as a guard
+pass. A unique diagnostic tag verifies the test executable includes that final
+ordering. No new performance measurement or parity claim is made.
+
+Patch 0144 covers six source/test/changelog/example files. Immutable series
+SHA-256: 9d0a8b6e7ac96b06e7fa193ce7d8f2b8a6220ff8e30fc2f974536bddea500ff3.
+The full source suite passes 18,461 ordinary tests (17 ignored, none filtered),
+plus the separate FIFO child. Release all-target Clippy, formatting, source
+reconstruction and the normal optimized build pass.
+Engine 144 SHA-256: dd0324a33cec7785dcc2f820261caa0524a6321c83dd69c145839b9efad2d73e.
+The disposable Laravel 13.37 fixture preserves six engine 143 baseline source/
+Composer hashes and matches three changed immutable example files, including a
+new completion-witness controller. No environment files are copied. All 12
+plain-PHP and 89 Laravel syntax checks, plain assertions and 316 Laravel runtime
+assertions pass. Standalone PHP verifies hex/octal separator decoding. The
+analyzer retains exactly three intentional diagnostics.
+
+The same actual OpenStorm client binary fails on 143 then passes on 144. Four
+empty/typed class-position queries refuse group method items, while all 28
+method-owner rows and 23 exact reference/checked-rename targets across three
+files pass. Both references and rename originate from the new explicit action.
+Existing whole-method completion/resolve, namespace-only unsaved rebinding,
+unknown namespace refusal, first-query controller dependency changes, restart,
+and close-to-disk restoration pass with all six scenario originals exact.
+All 40 client and 6 host tests pass without ignored or filtered cases. Fresh
+5,383 frontend checks across 487 files, 1,759 ordinary workspace tests (77 ignored,
+none filtered), formatting and warnings-denied all-target Clippy pass, followed
+by post-binding frontend gates. The ordinary workspace uses engine 143 before
+promotion; actual client/host select 144. Historical mock timing intermittency
+remains unproven and is not claimed fixed. Retention checks are reused by source
+hash; actual app 82 cleanup is verified fresh.
+
+Fresh protocol evidence includes 18 retained explicit-action example queries,
+eight new real-Laravel guard/method/bare controls (five observed originals), and
+six synthetic guard queries covering encoded/named forms (four originals). All
+originals remain unchanged; positive controls verify exact definitions, hover and
+whole-method edit ranges. Native UI checks remain explicitly user-skipped.
+
+Signed arm64 development version 0.1.82 is the sole app archive at
+artifacts/batches/0.1.82/OpenStorm.app. Executable SHA-256: 409f8356ec4de9f72e66ad385cbeda32cf930e87b155cc35a1b302d58752e661.
+Strict/deep signature and canonical/resource/embedded engine 144 checksums agree.
+App 81, the duplicate app 82 bundle, both compiler roots and the superseded
+inactive engine 143 executable were removed after verification. Sources, licenses,
+provenance, receipts, released engine 114, evaluation artifacts and PHP Workbench
+remain. Installed app 21 is unchanged; no owned app/server process remains.
+Runtime files match the compiled snapshot; only final progress and feature-ledger
+documents differ from the package source receipt. Normal hooks preserve accepted
+file hashes; the ignored slice 89 delivery receipt records commit/remote identity.
+
+Evidence: artifacts/checks/slice89 baseline/edit-proof/red/green, prefreeze/freeze,
+source/example/analyzer/protocol/client-host/pipeline/readback receipts and app 82
+build/retention receipts. App 82 was not launched or installed. All 69 areas remain
+visible: 67 partial and 2 user-deferred. Broader class-part, lifecycle, project/
+Composer/configuration/performance/platform and physical Dock-switch acceptance
+remain open. No migration, publishing, updater activation, notarization or debugger
+expansion is added.
+
 Source integration (2026-11-01, verified source checkpoint): integrates all 240 new
 commits from `l0ng-ai/openidea:main` at `041e7210` into
 `codex/openstorm-php-laravel`, based on pushed OpenStorm `82d1313a`.

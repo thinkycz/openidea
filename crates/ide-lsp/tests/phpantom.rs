@@ -3806,9 +3806,8 @@ async fn laravel_match_actions_follow_aliases_nested_owners_and_unsaved_controll
     let root = tmp.path().canonicalize().unwrap();
     let controller =
         "<?php\nnamespace App;\nclass InvoiceController { public function showInvoice(): string { return 'ok'; } }\n";
-    let inner =
-        "<?php\nnamespace App;\nclass InnerController { public function showInvoice(): bool { return true; } }\n";
-    let routes = "<?php\nuse Illuminate\\Support\\Facades\\Route as Routes;\nuse App\\InvoiceController as Main;\nuse App\\InnerController as Inner;\nRoutes::controller(Main::class)->group(function () {\n Routes::get('/standard', 'showInvoice')->name('standard');\n Routes::match(['get', 'post'], '/😀/showInvoice/{id}', 'showInvoice')->name('matched');\n Routes::match(action: 'showInvoice', methods: ['post'], uri: '/named')->name('named');\n Routes::middleware('auth')->get('/fluent', 'showInvoice')->name('fluent-get');\n Routes::prefix('billing')->middleware('auth')->match(['get', 'post'], '/😀/fluent/{id}', 'showInvoice')->name('fluent-matched');\n Routes::name('billing.')->withoutMiddleware('guest')->match(action: 'showInvoice', methods: ['get'], uri: '/named')->name('fluent-named');\n Routes::controller(Inner::class)->get('/leaf-controller', 'showInvoice')->name('leaf-controller');\n Routes::controller('App\\InnerController')->group(function () { Routes::get('/string-inner', 'showInvoice')->name('string-inner'); });\n Routes::controller('App\\InnerController')->group(static fn () => Routes::get('/😀/arrow-inner', 'showInvoice')->name('arrow-inner'));\n Routes::prefix('array')->group(fn () => [Routes::get('/😀/array-first', 'showInvoice')->name('array-first'), Routes::match(['get'], '/array-second', 'showInvoice')->name('array-second')]);\n Routes::controller('App\\InnerController')->group(fn () => array(Routes::get('/array-inner', 'showInvoice')->name('array-inner')));\n Routes::group(['prefix'=>'attrs'], fn () => Routes::get('/😀/attrs-inherited', 'showInvoice')->name('attrs-inherited'));\n Routes::group(['controller'=>Inner::class], fn () => Routes::get('/attrs-inner', 'showInvoice')->name('attrs-inner'));\n Routes::controller(Inner::class)->group(function () {\n  Routes::middleware('auth')->match(['get'], '/nested', 'showInvoice')->name('nested');\n });\n});\nRoutes::controller('App\\InvoiceController')->group(function () { Routes::get('/😀/string/{id}', 'showInvoice')->name('string-main'); });\nRoutes::controller('App\\InvoiceController')->group(fn () => Routes::middleware('auth')->get('/😀/arrow-main', 'showInvoice')->name('arrow-main'));\nRoutes::group(routes: [fn () => Routes::get('/😀/attrs-direct', 'showInvoice')->name('attrs-direct')], attributes: ['controller'=>'App\\InvoiceController']);\nRoutes::namespace('App')->controller('InvoiceController')->group(fn () => Routes::get('/😀/ns-direct', 'showInvoice')->name('ns-direct'));\nRoutes::group(['namespace'=>'App','controller'=>'InvoiceController'], fn () => Routes::get('/ns-attrs', 'showInvoice')->name('ns-attrs'));\nRoutes::namespace('App')->controller('InvoiceController')->group(fn () => Routes::namespace('Other')->group(fn () => Routes::get('/ns-alt', 'showInvoice')->name('ns-alt')));\nRoutes::get('/😀/explicit/showInvoice', 'App\\InvoiceController@showInvoice')->name('explicit-direct');\nRoutes::namespace('App')->group(fn () => Routes::get('/explicit-relative', 'InvoiceController@showInvoice')->name('explicit-relative'));\nRoutes::controller(Inner::class)->group(fn () => Routes::get('/explicit-override', 'App\\InvoiceController@showInvoice')->name('explicit-override'));\nRoutes::controller($selected)->group(fn () => Routes::get('/explicit-unknown-controller', 'App\\InvoiceController@showInvoice')->name('explicit-unknown-controller'));\nRoutes::namespace($picked)->group(fn () => Routes::get('/explicit-rooted', '\\App\\InvoiceController@showInvoice')->name('explicit-rooted'));\nRoutes::namespace('App\\Other')->group(fn () => Routes::get('/explicit-alt', 'InvoiceController@showInvoice')->name('explicit-alt'));\n";
+    let inner = "<?php\nnamespace App;\nclass InnerController { public function showInvoice(): bool { return true; } public function InvoiceControllerMistake(): bool {return true;} public function AppMistake(): bool {return true;} }\n";
+    let routes = "<?php\nuse Illuminate\\Support\\Facades\\Route as Routes;\nuse App\\InvoiceController as Main;\nuse App\\InnerController as Inner;\nRoutes::controller(Main::class)->group(function () {\n Routes::get('/standard', 'showInvoice')->name('standard');\n Routes::match(['get', 'post'], '/😀/showInvoice/{id}', 'showInvoice')->name('matched');\n Routes::match(action: 'showInvoice', methods: ['post'], uri: '/named')->name('named');\n Routes::middleware('auth')->get('/fluent', 'showInvoice')->name('fluent-get');\n Routes::prefix('billing')->middleware('auth')->match(['get', 'post'], '/😀/fluent/{id}', 'showInvoice')->name('fluent-matched');\n Routes::name('billing.')->withoutMiddleware('guest')->match(action: 'showInvoice', methods: ['get'], uri: '/named')->name('fluent-named');\n Routes::controller(Inner::class)->get('/leaf-controller', 'showInvoice')->name('leaf-controller');\n Routes::controller('App\\InnerController')->group(function () { Routes::get('/string-inner', 'showInvoice')->name('string-inner'); });\n Routes::controller('App\\InnerController')->group(static fn () => Routes::get('/😀/arrow-inner', 'showInvoice')->name('arrow-inner'));\n Routes::prefix('array')->group(fn () => [Routes::get('/😀/array-first', 'showInvoice')->name('array-first'), Routes::match(['get'], '/array-second', 'showInvoice')->name('array-second')]);\n Routes::controller('App\\InnerController')->group(fn () => array(Routes::get('/array-inner', 'showInvoice')->name('array-inner')));\n Routes::group(['prefix'=>'attrs'], fn () => Routes::get('/😀/attrs-inherited', 'showInvoice')->name('attrs-inherited'));\n Routes::group(['controller'=>Inner::class], fn () => Routes::get('/attrs-inner', 'showInvoice')->name('attrs-inner'));\n Routes::controller(Inner::class)->group(function () {\n  Routes::middleware('auth')->match(['get'], '/nested', 'showInvoice')->name('nested');\n });\n});\nRoutes::controller('App\\InvoiceController')->group(function () { Routes::get('/😀/string/{id}', 'showInvoice')->name('string-main'); });\nRoutes::controller('App\\InvoiceController')->group(fn () => Routes::middleware('auth')->get('/😀/arrow-main', 'showInvoice')->name('arrow-main'));\nRoutes::group(routes: [fn () => Routes::get('/😀/attrs-direct', 'showInvoice')->name('attrs-direct')], attributes: ['controller'=>'App\\InvoiceController']);\nRoutes::namespace('App')->controller('InvoiceController')->group(fn () => Routes::get('/😀/ns-direct', 'showInvoice')->name('ns-direct'));\nRoutes::group(['namespace'=>'App','controller'=>'InvoiceController'], fn () => Routes::get('/ns-attrs', 'showInvoice')->name('ns-attrs'));\nRoutes::namespace('App')->controller('InvoiceController')->group(fn () => Routes::namespace('Other')->group(fn () => Routes::get('/ns-alt', 'showInvoice')->name('ns-alt')));\nRoutes::get('/😀/explicit/showInvoice', 'App\\InvoiceController@showInvoice')->name('explicit-direct');\nRoutes::namespace('App')->group(fn () => Routes::get('/explicit-relative', 'InvoiceController@showInvoice')->name('explicit-relative'));\nRoutes::controller(Inner::class)->group(fn () => Routes::get('/explicit-override', 'App\\InvoiceController@showInvoice')->name('explicit-override'));\nRoutes::controller($selected)->group(fn () => Routes::get('/explicit-unknown-controller', 'App\\InvoiceController@showInvoice')->name('explicit-unknown-controller'));\nRoutes::namespace($picked)->group(fn () => Routes::get('/explicit-rooted', '\\App\\InvoiceController@showInvoice')->name('explicit-rooted'));\nRoutes::namespace('App\\Other')->group(fn () => Routes::get('/explicit-alt', 'InvoiceController@showInvoice')->name('explicit-alt'));\nRoutes::namespace('App')->controller(Inner::class)->group(fn () => Routes::get('/😀/class-prefix', 'InvoiceController@showInvoice')->name('class-prefix'));\n";
     let caller = "<?php\nuse App\\InvoiceController as Main;\n(new Main())->showInvoice();\n";
     let composer = r#"{"require":{"php":"^8.3","laravel/framework":"^13.0"},"autoload":{"psr-4":{"App\\":"app/"}}}"#;
     let alternate =
@@ -3872,6 +3871,7 @@ async fn laravel_match_actions_follow_aliases_nested_owners_and_unsaved_controll
         let alternate_path = root.join("app/Other/InvoiceController.php");
         let route_path = root.join("routes/web.php");
         let caller_path = root.join("app/Caller.php");
+
         let positions = [
             pos(routes, "showInvoice')->name('standard')"),
             pos(routes, "showInvoice')->name('matched')"),
@@ -3893,6 +3893,7 @@ async fn laravel_match_actions_follow_aliases_nested_owners_and_unsaved_controll
             pos(routes, "showInvoice')->name('explicit-override')"),
             pos(routes, "showInvoice')->name('explicit-unknown-controller')"),
             pos(routes, "showInvoice')->name('explicit-rooted')"),
+            pos(routes, "showInvoice')->name('class-prefix')"),
         ];
         let inner_positions = [
             pos(routes, "showInvoice')->name('nested')"),
@@ -3929,8 +3930,27 @@ async fn laravel_match_actions_follow_aliases_nested_owners_and_unsaved_controll
                 return Err(format!("wrong route action type: {hover:?}"));
             }
         }
+        for needle in [
+            "InvoiceController@showInvoice')->name('class-prefix')",
+            "App\\InvoiceController@showInvoice')->name('explicit-override')",
+        ] {
+            let start = pos(routes, needle);
+            for offset in [0, 2] {
+                let list = mgr
+                    .completion(route_doc, Pos::new(start.line, start.col + offset), None, Default::default())
+                    .await
+                    .map_err(|e| e.to_string())?;
+                if list.items.iter().any(|i| {
+                    matches!(i.insert_text.as_str(), "InvoiceControllerMistake" | "AppMistake" | "showInvoice")
+                }) {
+                    return Err(format!(
+                        "class position offered group method after ownership controls at {start:?}+{offset}: {list:?}"
+                    ));
+                }
+            }
+        }
         let refs = mgr
-            .references(route_doc, positions[12], true, true, Default::default())
+            .references(route_doc, positions[20], true, true, Default::default())
             .await
             .map_err(|e| e.to_string())?;
         let mut actual: Vec<_> =
@@ -3943,12 +3963,10 @@ async fn laravel_match_actions_follow_aliases_nested_owners_and_unsaved_controll
         }
         expected.sort();
         if actual != expected || refs.incomplete.is_some() {
-            return Err(format!(
-                "method references must include only declaration/twenty main actions/caller: {refs:?}"
-            ));
+            return Err(format!("method references must include only declaration/21 main actions/caller: {refs:?}"));
         }
         let rename = mgr
-            .rename(route_doc, positions[16], "displayInvoice".into(), Default::default())
+            .rename(route_doc, positions[20], "displayInvoice".into(), Default::default())
             .await
             .map_err(|e| e.to_string())?;
         if rename.incomplete.is_some() {
@@ -4142,6 +4160,7 @@ async fn laravel_match_actions_follow_aliases_nested_owners_and_unsaved_controll
                 mgr.restart(mgr.servers()[0].id).await.map_err(|e| e.to_string())?;
             }
             for at in [
+                positions[20],
                 positions[16],
                 positions[19],
                 positions[15],
@@ -4182,6 +4201,7 @@ async fn laravel_match_actions_follow_aliases_nested_owners_and_unsaved_controll
         }
         mgr.did_close(ctrl_doc);
         for at in [
+            positions[20],
             positions[16],
             positions[19],
             positions[15],

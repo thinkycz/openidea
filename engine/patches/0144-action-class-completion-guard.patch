@@ -1,0 +1,208 @@
+--- a/src/completion/laravel_route_controller.rs
++++ b/src/completion/laravel_route_controller.rs
+@@ -104,6 +104,10 @@
+         return None;
+     }
+ 
++    if !is_bare_route_action_literal(content, quote_pos, resolved_names) {
++        return None;
++    }
++
+     // ── Step 2: Before the quote, expect comma (2nd argument) ───────
+     let before_quote = content[..quote_pos].trim_end();
+     if !before_quote.ends_with(',') {
+@@ -269,6 +273,31 @@
+         prefix,
+         controller,
+     ))
++}
++
++/// Method-name completion may only replace a whole bare action literal.
++/// Inspect the registered argument, including decoded escapes, so class names
++/// before a runtime `@` never fall through to the enclosing group's methods.
++fn is_bare_route_action_literal(
++    content: &str,
++    quote_pos: usize,
++    resolved_names: Option<&crate::names::OwnedResolvedNames>,
++) -> bool {
++    let mut bare = false;
++    crate::virtual_members::laravel::walk_all_php_expressions(content, &mut |expr| {
++        if let Some(Expression::Literal(literal::Literal::String(value))) =
++            crate::symbol_map::extraction::laravel::laravel_route_action_argument(
++                expr,
++                resolved_names,
++            )
++            && value.span.start.offset as usize == quote_pos
++        {
++            bare = value.value.is_some_and(|bytes| !bytes.contains(&b'@'));
++            return ControlFlow::Break(());
++        }
++        ControlFlow::Continue(())
++    });
++    bare
+ }
+ 
+ fn detect_explicit_route_action_context(
+--- a/tests/integration/laravel_route_controller.rs
++++ b/tests/integration/laravel_route_controller.rs
+@@ -1473,3 +1473,94 @@
+     assert_eq!(edit.range, Range::new(start, start));
+     assert_eq!(edit.new_text, "showInvoice");
+ }
++
++async fn assert_action_class_part_keeps_group_methods_out(action: &str, needle: &str, named: bool) {
++    use crate::common::position_after;
++    let call = if named {
++        format!("Routes::match(action: {action}, methods: ['get'], uri: '/😀/named')")
++    } else {
++        format!("Routes::get('/😀/class', {action})")
++    };
++    let text = format!(
++        "<?php\nnamespace Demo; use Illuminate\\Support\\Facades\\Route as Routes; class Outer {{public function InvoiceControllerMistake(): string {{return 'wrong';}} public function DemoMistake(): string {{return 'wrong';}}}} class InvoiceController {{public function showInvoice(): bool {{return true;}}}} Routes::namespace('Demo')->controller(Outer::class)->group(fn () => {call});"
++    );
++    let backend = create_test_backend();
++    let uri = Url::parse("file:///action-class-part.php").unwrap();
++    open_php(&backend, &uri, &text).await;
++    let at = position_after(&text, needle);
++    let items = complete_at(&backend, &uri, &text, at.line, at.character).await;
++    assert!(
++        !items.iter().any(|i| matches!(
++            i.insert_text.as_deref(),
++            Some("InvoiceControllerMistake" | "DemoMistake" | "showInvoice")
++        )),
++        "group method offered in class position: {action}, {needle}, {items:?}"
++    );
++}
++
++#[tokio::test]
++async fn explicit_action_short_class_prefix_never_uses_group_method_completion() {
++    for needle in [
++        "'/😀/class', '",
++        "'/😀/class', 'In",
++        "'/😀/class', 'InvoiceController",
++    ] {
++        assert_action_class_part_keeps_group_methods_out(
++            "'InvoiceController@showInvoice'",
++            needle,
++            false,
++        )
++        .await;
++    }
++}
++
++#[tokio::test]
++async fn explicit_action_qualified_class_prefix_never_uses_group_method_completion() {
++    for needle in ["'/😀/class', '", "'/😀/class', 'De"] {
++        assert_action_class_part_keeps_group_methods_out(
++            "'Demo\\InvoiceController@showInvoice'",
++            needle,
++            false,
++        )
++        .await;
++    }
++}
++
++#[tokio::test]
++async fn explicit_action_encoded_separator_also_blocks_class_prefix_method_edits() {
++    assert_action_class_part_keeps_group_methods_out(
++        "\"Demo\\\\InvoiceController\\x40showInvoice\"",
++        "'/😀/class', \"De",
++        false,
++    )
++    .await;
++    assert_action_class_part_keeps_group_methods_out(
++        "\"Demo\\\\InvoiceController\\100showInvoice\"",
++        "'/😀/class', \"De",
++        false,
++    )
++    .await;
++}
++
++#[tokio::test]
++async fn named_explicit_class_prefix_is_guarded_but_bare_action_with_uri_at_sign_still_completes() {
++    use crate::common::position_after;
++    assert_action_class_part_keeps_group_methods_out(
++        "'InvoiceController@showInvoice'",
++        "action: 'In",
++        true,
++    )
++    .await;
++    let text = "<?php\nuse Illuminate\\Support\\Facades\\Route as Routes; class Outer {public function InvoiceControllerMistake(): string {return 'right';}} Routes::controller(Outer::class)->group(fn () => Routes::get('/😀/InvoiceController@showInvoice', 'InvoiceControllerMistake'));";
++    let backend = create_test_backend();
++    let uri = Url::parse("file:///bare-action-uri-at.php").unwrap();
++    open_php(&backend, &uri, text).await;
++    let at = position_after(text, "', 'In");
++    let items = complete_at(&backend, &uri, text, at.line, at.character).await;
++    assert!(
++        items
++            .iter()
++            .any(|i| i.insert_text.as_deref() == Some("InvoiceControllerMistake")),
++        "URI must not classify the action: {items:?}"
++    );
++}
+--- a/docs/CHANGELOG.md
++++ b/docs/CHANGELOG.md
+@@ -14,6 +14,8 @@
+ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+ 
+ ## [Unreleased]
++
++- **Keep method suggestions out of controller class names.** Completion before `@` in a Laravel string action no longer offers methods from an enclosing controller group. Bare action and method-suffix completion remain available. Contributed by @thinkycz.
+ 
+ - **Navigate and complete string controller actions.** Laravel `Controller@method` route handlers now support method navigation, hover, references and checked rename, including namespace groups. Completion edits only the method suffix. Contributed by @thinkycz.
+ 
+--- a/examples/laravel/app/Demo.php
++++ b/examples/laravel/app/Demo.php
+@@ -1744,6 +1744,19 @@
+         Route::prefix('billing')->match(action: 'App\Http\Controllers\BakeryController@index', methods: ['get'], uri: '/explicit-match');
+     }
+ 
++    public function guardedActionClassCompletion(): void
++    {
++        Route::namespace('App\Http\Controllers')->controller(\App\Http\Controllers\ActionCompletionController::class)->group(function (): void {
++            // Before @: Bakery/App must not offer this group's similarly named methods.
++            Route::get('/guarded-short', 'BakeryController@index');
++            Route::get('/guarded-qualified', 'App\Http\Controllers\BakeryController@index');
++            // After @: index still completes against BakeryController.
++            Route::get('/guarded-method', 'BakeryController@index');
++            // The @ in a URI must not suppress a genuinely bare method action.
++            Route::get('/BakeryController@index/guarded-bare', 'BakeryControllerMistake');
++        });
++    }
++
+ }
+ 
+ // PHP Workbench: Laravel: Go to Route lists statically named routes and opens
+--- a/examples/laravel/assertions.php
++++ b/examples/laravel/assertions.php
+@@ -2072,6 +2072,11 @@
+ foreach ($actual as $name=>$action) {check('Explicit controller action ' . $name, $action === (in_array($name,['rooted','unknown-namespace-rooted']) ? chr(92) : '') . $full . '@index');}
+ })();
+ 
++// Methods used as completion guard witnesses stay ordinary callable methods.
++$completionWitness = new \App\Http\Controllers\ActionCompletionController();
++check('Bare action completion witness returns its documented string', $completionWitness->BakeryControllerMistake() === 'Bare route action retained.');
++check('Qualified action completion witness returns its documented string', $completionWitness->AppMistake() === 'Qualified class guard witness.');
++
+ // ─── Summary ────────────────────────────────────────────────────────────────
+ 
+ echo "\n";
+--- /dev/null
++++ b/examples/laravel/app/Http/Controllers/ActionCompletionController.php
+@@ -0,0 +1,16 @@
++<?php
++
++namespace App\Http\Controllers;
++
++class ActionCompletionController
++{
++    public function BakeryControllerMistake(): string
++    {
++        return 'Bare route action retained.';
++    }
++
++    public function AppMistake(): string
++    {
++        return 'Qualified class guard witness.';
++    }
++}

@@ -81,18 +81,118 @@ fn validate_checked_targets(edit: &WorkspaceEdit, sources: &[ExpectedSource]) ->
     Ok(())
 }
 
+/// An owned write's disk witness. Absence is distinct from any regular file.
+#[cfg(unix)]
+#[derive(PartialEq, Eq)]
+pub(super) struct ReviewedDiskState {
+    metadata: Option<ReviewedDiskMetadata>,
+    sha256: [u8; 32],
+}
+
+#[cfg(unix)]
+#[derive(PartialEq, Eq)]
+struct ReviewedDiskMetadata {
+    device: u64,
+    inode: u64,
+    mode: u32,
+    len: u64,
+    modified: (i64, i64),
+    changed: (i64, i64),
+}
+
+#[cfg(unix)]
+impl ReviewedDiskMetadata {
+    fn new(metadata: &std::fs::Metadata) -> Self {
+        use std::os::unix::fs::MetadataExt;
+        Self {
+            device: metadata.dev(),
+            inode: metadata.ino(),
+            mode: metadata.mode(),
+            len: metadata.len(),
+            modified: (metadata.mtime(), metadata.mtime_nsec()),
+            changed: (metadata.ctime(), metadata.ctime_nsec()),
+        }
+    }
+}
+
+/// Refuse uncertain, symlinked, changing or large inputs instead of hiding a notification.
+#[cfg(unix)]
+fn reviewed_disk_state(path: &Path) -> Option<ReviewedDiskState> {
+    use std::io::Read;
+    const LIMIT: u64 = 1 << 20;
+    let metadata = match std::fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Some(ReviewedDiskState { metadata: None, sha256: [0; 32] });
+        }
+        Err(_) => return None,
+    };
+    if !metadata.is_file() || metadata.len() > LIMIT {
+        return None;
+    }
+    let stamp = ReviewedDiskMetadata::new(&metadata);
+    let mut file = std::fs::File::open(path).ok()?;
+    if ReviewedDiskMetadata::new(&file.metadata().ok()?) != stamp {
+        return None;
+    }
+    let mut bytes = Vec::with_capacity(metadata.len() as usize);
+    (&mut file).take(LIMIT + 1).read_to_end(&mut bytes).ok()?;
+    if bytes.len() as u64 != stamp.len
+        || ReviewedDiskMetadata::new(&file.metadata().ok()?) != stamp
+        || ReviewedDiskMetadata::new(&std::fs::symlink_metadata(path).ok()?) != stamp
+    {
+        return None;
+    }
+    Some(ReviewedDiskState { metadata: Some(stamp), sha256: Sha256::digest(&bytes).into() })
+}
+
 impl LspManager {
+    /// Publish a committed reviewed edit and witness its disk state for watcher echoes.
+    /// Only identical bounded regular files (or identical absence) are coalesced.
+    pub fn php_reviewed_files_changed(&self, created: &[PathBuf], modified: &[PathBuf], removed: &[PathBuf]) {
+        self.php_files_changed_in(created, modified, removed, true);
+    }
+
     /// PHPantom's static source index needs explicit disk-change notifications,
     /// including files closed after a checked rename query. This does not boot PHP.
     pub fn php_files_changed(&self, created: &[PathBuf], modified: &[PathBuf], removed: &[PathBuf]) {
+        self.php_files_changed_in(created, modified, removed, false);
+    }
+
+    fn php_files_changed_in(&self, created: &[PathBuf], modified: &[PathBuf], removed: &[PathBuf], reviewed: bool) {
+        // Serialize the decision and publication with reviewed writes. A watcher
+        // reading an earlier state cannot retire navigation after that write returns.
+        #[cfg(unix)]
+        let mut receipts = self.reviewed_php_files.lock();
+        #[cfg(not(unix))]
+        let _ = reviewed;
         let changes: Vec<lsp::FileEvent> = [
             (created, lsp::FileChangeType::CREATED),
             (modified, lsp::FileChangeType::CHANGED),
             (removed, lsp::FileChangeType::DELETED),
         ]
         .into_iter()
-        .flat_map(|(paths, typ)| {
-            paths.iter().map(move |path| lsp::FileEvent { uri: crate::uri::path_to_uri(path), typ })
+        .flat_map(|(paths, typ)| paths.iter().map(move |path| (path, typ)))
+        .filter_map(|(path, typ)| {
+            #[cfg(unix)]
+            if reviewed {
+                if let Some(state) = reviewed_disk_state(path)
+                    .filter(|state| state.metadata.is_none() == (typ == lsp::FileChangeType::DELETED))
+                {
+                    if receipts.len() >= 4096 && !receipts.contains_key(path) {
+                        receipts.clear();
+                    }
+                    receipts.insert(path.clone(), state);
+                } else {
+                    receipts.remove(path);
+                }
+            } else if let Some(expected) = receipts.get(path) {
+                if reviewed_disk_state(path).as_ref() == Some(expected) {
+                    return None;
+                }
+                receipts.remove(path);
+            }
+            Some(lsp::FileEvent { uri: crate::uri::path_to_uri(path), typ })
         })
         .collect();
         if changes.is_empty() {
@@ -113,6 +213,8 @@ impl LspManager {
                 tracing::debug!("{}: file-change notification: {error}", server.name);
             }
         }
+        #[cfg(unix)]
+        drop(receipts);
     }
 
     fn php_sources(&self, snap: &DocSnap, t: &Target) -> IdeResult<Vec<ExpectedSource>> {

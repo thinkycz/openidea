@@ -674,6 +674,18 @@ async fn checked_class_rename_moves_open_psr4_file_and_shared_history() {
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires the pinned macOS Apple Silicon PHPantom executable"]
 async fn checked_controller_class_rename_keeps_runtime_quotes_aliases_and_file_history() {
+    check_controller_class_rename_entry(None).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires the pinned macOS Apple Silicon PHPantom executable"]
+async fn checked_runtime_literal_rename_starters_use_the_guarded_class_plan() {
+    for needle in ["controller('In", r#""App\\Inv\x6ficeCon"#] {
+        check_controller_class_rename_entry(Some(needle)).await;
+    }
+}
+
+async fn check_controller_class_rename_entry(literal: Option<&str>) {
     fn at(text: &str, needle: &str) -> Pos {
         let offset = text.find(needle).unwrap() + needle.len();
         let prefix = &text[..offset];
@@ -735,6 +747,18 @@ Route::get('/😀/direct', "App\\Inv\x6ficeController@show");
         }
     }));
     let result: Result<(), String> = async {
+        if let Some(needle) = literal {
+            let first_route = project.documents.open(&route_path).unwrap();
+            let first = project
+                .lsp
+                .prepare_rename_details(first_route.id, at(route, needle))
+                .await
+                .map_err(|e| format!("first runtime literal prepare with closed declaration: {e:?}"))?
+                .ok_or("runtime literal Rename was not offered for a closed declaration")?;
+            if first.placeholder.as_deref() != Some("App\\InvoiceController") {
+                return Err(format!("first runtime literal placeholder differs from closed declaration: {first:?}"));
+            }
+        }
         let class_doc = project.documents.open(&old).unwrap();
         let route_doc = project.documents.open(&route_path).unwrap();
         let unsaved_class = format!("{class}// Unsaved controller documentation.\n");
@@ -751,12 +775,43 @@ Route::get('/😀/direct', "App\\Inv\x6ficeController@show");
         if control.len() != 1 || control[0].path.to_path_buf() != old {
             return Err(format!("binding navigation control failed: {control:?}"));
         }
+        let (rename_doc, rename_at) = if let Some(needle) = literal {
+            (route_doc.id, at(&unsaved_route, needle))
+        } else {
+            (class_doc.id, at(class, "class In"))
+        };
+        if literal.is_some() {
+            let prepared = project
+                .lsp
+                .prepare_rename_details(rename_doc, rename_at)
+                .await
+                .map_err(|e| format!("runtime literal prepare: {e:?}"))?
+                .ok_or("runtime literal Rename was not offered")?;
+            if prepared.placeholder.as_deref() != Some("App\\InvoiceController")
+                || prepared.range.start.line != rename_at.line
+                || prepared.range.end.line != rename_at.line
+            {
+                return Err(format!("runtime literal prepare selected the wrong class: {prepared:?}"));
+            }
+            let line = unsaved_route.lines().nth(rename_at.line as usize).unwrap();
+            let raw = String::from_utf16(
+                &line
+                    .encode_utf16()
+                    .skip(prepared.range.start.col as usize)
+                    .take((prepared.range.end.col - prepared.range.start.col) as usize)
+                    .collect::<Vec<_>>(),
+            )
+            .unwrap();
+            if raw.contains(['@', '\'', '"']) || !raw.ends_with("Controller") {
+                return Err(format!("runtime literal prepare includes quotes or method: {raw}"));
+            }
+        }
         let plan = ide_host::ops::lsp::lsp_rename(
             &host,
             "main",
             ide_core::RequestId::next(),
-            class_doc.id,
-            at(class, "class In"),
+            rename_doc,
+            rename_at,
             "ReceiptController".into(),
         )
         .await
@@ -778,8 +833,8 @@ Route::get('/😀/direct', "App\\Inv\x6ficeController@show");
             &host,
             "main",
             ide_core::RequestId::next(),
-            class_doc.id,
-            at(class, "class In"),
+            rename_doc,
+            rename_at,
             "ReceiptController".into(),
         )
         .await
@@ -859,11 +914,18 @@ echo '3 renamed controller routes executed';"#;
             let current = project.documents.snapshot(route_doc.id).unwrap();
             let expected = if redo { &new } else { &old };
             let needle = if redo { r#"'/😀/direct', "App\\Re"# } else { r#"'/😀/direct', "App\\Inv\x6f"# };
+            let before_events = events.lock().unwrap().len();
+            let before_documents = project.documents.edit_revision().unwrap();
+            let before_generations = project.lsp.edit_generations();
+            let lookup_started = std::time::Instant::now();
             let definitions = project
                 .lsp
                 .goto(route_doc.id, at(&current.text, needle), ide_lsp::types::GotoKind::Definition)
                 .await
-                .map_err(|e| format!("runtime definition {redo}: {e:?}"))?;
+                .map_err(|e| {
+                    let fs_events = events.lock().unwrap()[before_events..].iter().filter(|event| matches!(event, ide_core::IdeEvent::FsChanged { .. })).cloned().collect::<Vec<_>>();
+                    format!("runtime definition {redo}, entry {literal:?}: {e:?}; lookup {:?}; documents unchanged {}; generations unchanged {}; file events {fs_events:?}", lookup_started.elapsed(), project.documents.edit_revision().unwrap()==before_documents, project.lsp.edit_generations()==before_generations)
+                })?;
             if definitions.len() != 1 || definitions[0].path.to_path_buf() != *expected {
                 return Err(format!("stale runtime definition after history {redo}: {definitions:?}"));
             }

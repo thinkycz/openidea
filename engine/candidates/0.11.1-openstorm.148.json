@@ -1,0 +1,27 @@
+{
+  "version": "0.11.1-openstorm.148",
+  "platform": "aarch64-apple-darwin",
+  "sha256": "72afb5f0a524cf377fe1e6cc25c17f9600b4bf39196dde2e8ec48da74ff98fe7",
+  "source_artifact": "artifacts/engines/0.11.1-openstorm.148/phpantom_lsp",
+  "source_recipe": "scripts/prepare-phpantom.py and scripts/build-phpantom.py",
+  "source_tree": "artifacts/phpantom/1756b1f920c1-ab10450de990-verified",
+  "base_openidea_revision": "50212e73972d6f05bf16050cb0ba10102a6c8054",
+  "upstream_repository": "https://github.com/PHPantom-dev/phpantom_lsp",
+  "upstream_commit": "1756b1f920c1290d4c4fdd4d2c902fad53a75cd3",
+  "source_archive_sha256": "f0a1dc7fa44d309e6d5e8ed65a2075749c1fc177b45820031f58290f1aec5cee",
+  "patches_sha256": "ab10450de9901b5dbbaeaed42d5a677eb87f05388b3402ebc0f185799b2ae4f3",
+  "patch_count": 148,
+  "openstorm_source_recipe": "engine/candidates/0.11.1-openstorm.148-source.json; scripts/prepare-phpantom.py; scripts/build-phpantom.py",
+  "distribution": "local OpenStorm rebuild; not an upstream PHPantom release",
+  "previous_released_engine": {
+    "version": "0.11.1-workbench.114",
+    "sha256": "c520616efb8128814033112e1987574cc429062abc6d063e2d3128b4e69ba436",
+    "provenance": "engine/releases/0.11.1-workbench.114.json"
+  },
+  "source_build_artifact": "artifacts/phpantom-build/release/phpantom_lsp",
+  "previous_local_candidate": {
+    "version": "0.11.1-openstorm.147",
+    "sha256": "ffa8a646ef7fce982e2e515f90aa84fb89a57710557c2e8fa5fe7e93ec8496d2",
+    "provenance": "engine/candidates/0.11.1-openstorm.147.json"
+  }
+}

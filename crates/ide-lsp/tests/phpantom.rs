@@ -3995,7 +3995,7 @@ async fn laravel_match_actions_follow_aliases_nested_owners_and_unsaved_controll
             return Err(format!("runtime class references must include exactly sixteen sites: {class_refs:?}"));
         }
         for (doc, at, replacement) in [
-            (route_doc, class_positions[0], "ReceiptController"),
+            (route_doc, class_positions[0], "App\\Billing\\ReceiptController"),
             (ctrl_doc, pos(controller, "InvoiceController"), "App\\Billing\\ReceiptController"),
         ] {
             match mgr.rename(doc, at, replacement.into(), Default::default()).await {
@@ -4010,6 +4010,16 @@ async fn laravel_match_actions_follow_aliases_nested_owners_and_unsaved_controll
         let runtime_edits=class_plan.edit.files.iter().find_map(|f|match f{ide_core::FileEdit::Edit{path,edits} if **path==route_path=>Some(edits),_=>None}).ok_or("safe runtime class plan omitted route references")?;
         if !runtime_edits.iter().any(|e|e.new_text==r"App\\ReceiptController") || runtime_edits.iter().any(|e|e.new_text.contains("showInvoice")) {
             return Err(format!("runtime class plan must quote class interiors without rewriting method suffixes: {runtime_edits:?}"));
+        }
+        for at in [class_positions[0], pos(routes, "App\\InvoiceController')->group(fn")] {
+            let prepared = mgr.prepare_rename_details(route_doc, at).await.map_err(|e|format!("runtime literal prepare: {e}"))?.ok_or("runtime class Rename was not offered")?;
+            if prepared.placeholder.as_deref() != Some("App\\InvoiceController") {
+                return Err(format!("runtime literal placeholder must name the declaration: {prepared:?}"));
+            }
+            let literal_plan = mgr.rename(route_doc, at, "ReceiptController".into(), Default::default()).await.map_err(|e|format!("runtime literal checked rename: {e}"))?;
+            if literal_plan.edit.files.len()!=class_plan.edit.files.len() || literal_plan.edit.files.iter().any(|file| !class_plan.edit.files.contains(file)) {
+                return Err(format!("runtime literal Rename must use declaration edit/file plan: {literal_plan:?}"));
+            }
         }
         let refs = mgr
             .references(route_doc, positions[20], true, true, Default::default())

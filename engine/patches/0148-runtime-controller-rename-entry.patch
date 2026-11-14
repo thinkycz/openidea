@@ -1,0 +1,309 @@
+--- a/src/rename/class/mod.rs
++++ b/src/rename/class/mod.rs
+@@ -36,6 +36,31 @@
+ impl Backend {
+     /// Plan a class move without requiring an LSP cursor position.
+     pub(crate) fn plan_class_move(&self, old_fqn: &str, new_fqn: &str) -> RenameOutcome {
++        let old_fqn = strip_fqn_prefix(old_fqn);
++        let (definition_uri, content, position) = self.class_rename_declaration_site(old_fqn)?;
++        let locations = self
++            .find_references_for_rename(&definition_uri, &content, position, true)
++            .ok_or_else(|| format!("Could not find references to `{old_fqn}`."))?;
++        self.reject_runtime_controller_class_rename(old_fqn)?;
++        if !self.rename_locations_verified(
++            &SymbolKind::ClassDeclaration {
++                name: crate::util::short_name(old_fqn).into(),
++            },
++            None,
++            &locations,
++        ) {
++            return Err(format!(
++                "The workspace changed while `{old_fqn}` was being indexed; retry the move."
++            ));
++        }
++        self.build_class_move_edit(old_fqn, new_fqn, &locations)
++    }
++
++    /// Locate the same source-verified user declaration for cursor and headless class renames.
++    pub(super) fn class_rename_declaration_site(
++        &self,
++        old_fqn: &str,
++    ) -> Result<(String, String, Position), String> {
+         let old_fqn = strip_fqn_prefix(old_fqn);
+         let definition_uri = self
+             .symbols
+@@ -73,17 +98,11 @@
+             old_fqn,
+         )
+         .ok_or_else(|| format!("Could not locate the declaration of `{old_fqn}`."))?;
++        if !symbol_map.matches_source_fingerprint(&content) {
++            return Err("The class declaration changed; request a new rename.".into());
++        }
+         let position = offset_to_position(&content, span.start as usize);
+-        let locations = self
+-            .find_references_for_rename(&definition_uri, &content, position, true)
+-            .ok_or_else(|| format!("Could not find references to `{old_fqn}`."))?;
+-        self.reject_runtime_controller_class_rename(old_fqn)?;
+-        if !self.rename_locations_verified(&span.kind, None, &locations) {
+-            return Err(format!(
+-                "The workspace changed while `{old_fqn}` was being indexed; retry the move."
+-            ));
+-        }
+-        self.build_class_move_edit(old_fqn, new_fqn, &locations)
++        Ok((definition_uri, content, position))
+     }
+ 
+     /// Resolve the fully-qualified class name for a class rename.
+--- a/src/rename/prepare.rs
++++ b/src/rename/prepare.rs
+@@ -99,14 +99,22 @@
+ 
+         let span = self.lookup_symbol_at_position(uri, content, position)?;
+ 
+-        if matches!(
+-            &span.kind,
+-            SymbolKind::ClassReference {
+-                context: crate::symbol_map::ClassRefContext::RuntimeControllerString,
+-                ..
+-            } | SymbolKind::RuntimeControllerBinding { .. }
+-        ) {
+-            return None;
++        if super::runtime_controller::is_runtime_class(&span.kind) {
++            let (definition_uri, definition, at) = self
++                .runtime_controller_rename_declaration(uri, content, &span)
++                .ok()?;
++            let PrepareRenameResponse::RangeWithPlaceholder { placeholder, .. } =
++                self.handle_prepare_rename(&definition_uri, &definition, at)?
++            else {
++                return None;
++            };
++            return Some(PrepareRenameResponse::RangeWithPlaceholder {
++                range: Range::new(
++                    offset_to_position(content, span.start as usize),
++                    offset_to_position(content, span.end as usize),
++                ),
++                placeholder,
++            });
+         }
+ 
+         // The range below is built from this span's byte offsets, and the
+@@ -221,14 +229,10 @@
+             return Ok(None);
+         };
+ 
+-        if matches!(
+-            &span.kind,
+-            SymbolKind::ClassReference {
+-                context: crate::symbol_map::ClassRefContext::RuntimeControllerString,
+-                ..
+-            } | SymbolKind::RuntimeControllerBinding { .. }
+-        ) {
+-            return Err("Rename runtime controller classes from their PHP declaration or a type reference; starting inside the string is not supported.".into());
++        if super::runtime_controller::is_runtime_class(&span.kind) {
++            let (definition_uri, definition, at) =
++                self.runtime_controller_rename_declaration(uri, content, &span)?;
++            return self.handle_rename(&definition_uri, &definition, at, new_name);
+         }
+ 
+         // Every edit below is derived, directly or through find-references,
+--- a/src/rename/runtime_controller.rs
++++ b/src/rename/runtime_controller.rs
+@@ -107,6 +107,40 @@
+ }
+ 
+ impl Backend {
++    /// Resolve a verified literal entry to the ordinary PHP declaration rename path.
++    pub(super) fn runtime_controller_rename_declaration(
++        &self,
++        uri: &str,
++        content: &str,
++        span: &SymbolSpan,
++    ) -> Result<(String, String, tower_lsp::lsp_types::Position), String> {
++        let invalid = "The runtime controller binding is stale, ambiguous or unresolved; no edits were produced.";
++        let map = self.symbol_maps.read().get(uri).cloned().ok_or(invalid)?;
++        if !map.matches_source_fingerprint(content) {
++            return Err(invalid.into());
++        }
++        let source_span = map
++            .spans
++            .iter()
++            .find(|site| {
++                site.start == span.start && site.end == span.end && is_runtime_class(&site.kind)
++            })
++            .ok_or(invalid)?;
++        runtime_spelling(content, source_span).ok_or(invalid)?;
++        let target = match &source_span.kind {
++            SymbolKind::ClassReference { name, .. } => name.as_str(),
++            SymbolKind::RuntimeControllerBinding {
++                targets,
++                incomplete: false,
++                ..
++            } if targets.len() == 1 => targets[0].as_str(),
++            _ => return Err(invalid.into()),
++        };
++        self.runtime_controller_sites(target)?;
++        self.class_rename_declaration_site(target)
++            .map_err(|reason| format!("Runtime controller class cannot be renamed: {reason}"))
++    }
++
+     /// Validate the entire affected runtime reference set before producing any edit.
+     /// A shared/unknown binding cannot be safely changed for just one class.
+     pub(super) fn runtime_controller_sites(
+--- a/tests/integration/laravel_route_controller.rs
++++ b/tests/integration/laravel_route_controller.rs
+@@ -1724,13 +1724,13 @@
+ }
+ 
+ #[tokio::test]
+-async fn runtime_action_literal_entry_points_and_namespace_moves_remain_refused() {
++async fn runtime_action_namespace_moves_remain_refused() {
+     use crate::common::position_after;
+     let text = runtime_action_class_fixture(
+         "Routes::get('/known', 'App\\InvoiceController@showInvoice');",
+     );
+     for (needle, new_name) in [
+-        ("'/known', 'Ap", "Renamed"),
++        ("'/known', 'Ap", "Moved\\Renamed"),
+         ("namespace App {class ", "Moved\\Renamed"),
+     ] {
+         let backend = create_test_backend();
+@@ -2264,3 +2264,116 @@
+         );
+     }
+ }
++
++#[tokio::test]
++async fn runtime_controller_class_rename_entry_matches_declaration_plan() {
++    use crate::common::position_after;
++    for call in [
++        r#"Routes::get('/direct', 'App\InvoiceController@showInvoice');"#,
++        r#"Routes::namespace('App')->group(fn () => Routes::get('/short', 'InvoiceController@showInvoice'));"#,
++        r#"Routes::get('/escaped', "App\\Inv\x6ficeController@showInvoice");"#,
++        r#"Routes::get('/unicode', "\u{41}pp\\InvoiceController@showInvoice");"#,
++        r#"Routes::get('/octal', "\101pp\\InvoiceController@showInvoice");"#,
++        r#"Routes::namespace($selected)->controller('\App\InvoiceController')->group(fn () => Routes::get('/rooted', 'showInvoice'));"#,
++        r#"Routes::namespace('App')->controller('InvoiceController')->group(fn () => Routes::get('/bound', 'showInvoice'));"#,
++        r#"Routes::group(['namespace'=>'App','controller'=>'InvoiceController'],fn () => Routes::get('/attrs','showInvoice'));"#,
++    ] {
++        let text = runtime_action_class_fixture(call);
++        let backend = create_test_backend();
++        let uri = Url::parse("file:///runtime-rename-entry.php").unwrap();
++        open_php(&backend, &uri, &text).await;
++        let at = position_after(&text, &call[..call.rfind("Controller").unwrap() + 3]);
++        let prepared = backend
++            .prepare_rename(TextDocumentPositionParams {
++                text_document: TextDocumentIdentifier { uri: uri.clone() },
++                position: at,
++            })
++            .await
++            .unwrap()
++            .expect("single-target runtime class must offer Rename");
++        let PrepareRenameResponse::RangeWithPlaceholder { range, placeholder } = prepared else {
++            panic!("rename placeholder")
++        };
++        assert_eq!(placeholder, "App\\InvoiceController");
++        let raw = text
++            .lines()
++            .nth(range.start.line as usize)
++            .unwrap()
++            .chars()
++            .skip(range.start.character as usize)
++            .take((range.end.character - range.start.character) as usize)
++            .collect::<String>();
++        assert!(
++            !raw.contains('@') && !raw.contains('\'') && !raw.contains('"'),
++            "class range excludes quotes and method: {raw}"
++        );
++        for new_name in [
++            "ReceiptController",
++            "App\\ReceiptController",
++            "InvoiceController",
++            "App\\InvoiceController",
++        ] {
++            let mut plans = Vec::new();
++            for position in [at, position_after(&text, "namespace App {class ")] {
++                plans.push(
++                    backend
++                        .rename(RenameParams {
++                            text_document_position: TextDocumentPositionParams {
++                                text_document: TextDocumentIdentifier { uri: uri.clone() },
++                                position,
++                            },
++                            new_name: new_name.into(),
++                            work_done_progress_params: Default::default(),
++                        })
++                        .await
++                        .unwrap(),
++                );
++            }
++            assert_eq!(
++                plans[0], plans[1],
++                "runtime entry must reuse declaration plan: {call}, {new_name}"
++            );
++        }
++    }
++}
++
++#[tokio::test]
++async fn runtime_controller_rename_entry_rejects_ambiguous_unknown_and_missing_declarations() {
++    use crate::common::position_after;
++    for call in [
++        r#"Routes::get('/safe','App\InvoiceController@showInvoice');Routes::namespace('App')->controller('InvoiceController')->group(function () {Routes::get('/main','showInvoice');Routes::namespace('Other')->group(fn () => Routes::get('/other','showInvoice'));});"#,
++        r#"Routes::get('/safe','App\InvoiceController@showInvoice');Routes::namespace($selected)->controller('InvoiceController')->group(fn () => Routes::get('/unknown','showInvoice'));"#,
++        r#"Routes::get('/missing','App\MissingController@showInvoice');"#,
++    ] {
++        let text = runtime_action_class_fixture(call);
++        let backend = create_test_backend();
++        let uri = Url::parse("file:///runtime-rename-entry-negative.php").unwrap();
++        open_php(&backend, &uri, &text).await;
++        let at = position_after(&text, &call[..call.find("Controller").unwrap() + 3]);
++        assert!(
++            backend
++                .prepare_rename(TextDocumentPositionParams {
++                    text_document: TextDocumentIdentifier { uri: uri.clone() },
++                    position: at
++                })
++                .await
++                .unwrap()
++                .is_none(),
++            "unsafe class must not offer Rename: {call}"
++        );
++        let result = backend
++            .rename(RenameParams {
++                text_document_position: TextDocumentPositionParams {
++                    text_document: TextDocumentIdentifier { uri: uri.clone() },
++                    position: at,
++                },
++                new_name: "ReceiptController".into(),
++                work_done_progress_params: Default::default(),
++            })
++            .await;
++        assert!(
++            matches!(result,Err(ref error) if error.message.to_lowercase().contains("runtime controller")),
++            "unsafe runtime entry must not produce any edits: {result:?}"
++        );
++    }
++}
+--- a/docs/CHANGELOG.md
++++ b/docs/CHANGELOG.md
+@@ -207,6 +207,8 @@
+ 
+ 
+ ### Added
++
++- **Rename controllers directly from Laravel runtime strings.** Rename inside a statically resolved controller action or group binding to preview the same class edits as starting from its PHP declaration. Shared, unresolved and installed-package targets remain protected. Contributed by @thinkycz
+ 
+ - **Rename controller classes used in route strings.** A class rename started from PHP updates proven literal route actions and controller bindings with the proper quoting, preserving method suffixes and ignoring lexical import aliases. Shared or unresolved bindings and namespace moves remain refused. Contributed by @thinkycz.
+ 
+--- a/examples/laravel/app/Demo.php
++++ b/examples/laravel/app/Demo.php
+@@ -1768,7 +1768,8 @@
+ 
+     public function controllerClassRenamePreview(): void
+     {
+-        // Try: rename the PHP class declaration; these runtime strings follow it.
++        // Try: Rename inside either controller class string, or its PHP declaration.
++        // The class-only preview includes the declaration and both runtime strings.
+         Route::namespace('App\Http\Controllers')->controller('RenamePreviewController')->group(fn () => Route::get('/rename-bound', 'index'));
+         Route::get('/rename-direct', "App\\Http\\Controllers\\RenamePreviewController@index");
+     }

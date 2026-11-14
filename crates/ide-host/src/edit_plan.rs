@@ -113,7 +113,7 @@ impl Project {
             }
         }
         let changes = self.documents.apply_guarded_edits(edit, &self.cache_dir.join("edit-recovery"))?;
-        self.lsp.php_files_changed(&changes.created, &changes.modified, &changes.removed);
+        self.lsp.php_reviewed_files_changed(&changes.created, &changes.modified, &changes.removed);
 
         Ok(())
     }

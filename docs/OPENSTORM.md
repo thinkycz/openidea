@@ -2838,6 +2838,87 @@ moves, broader platform/performance and full route-form acceptance remain open.
 Evidence: artifacts/checks/slice93-* and artifacts/batches/0.1.86/build-receipt.json.
 Commit/push follows verified closeout; no publishing or debugger expansion.
 
+Slice94 — Rename from Laravel runtime controller class strings (2026-11-14,
+source/client/build verified). Slice93 is committed/pushed as
+1dac954b57ff0bb6a1916b0068167919649d143a. Rename is now offered inside complete
+single-target action and group-controller class strings. Its source selection
+excludes quotes and the method suffix; the placeholder names the actual PHP class.
+The entry resolves a verified declaration and delegates to the ordinary class
+rename planner, keeping import alias handling, PSR-4 moves, checked source receipts,
+reviewed apply and shared history consistent with declaration-started renames.
+The same source-verified declaration lookup protects headless class moves.
+Shared/incomplete bindings, stale maps, absent/vendor declarations and namespace
+moves stay guarded; no new UI or execution action is introduced.
+
+Red/green evidence:64prior source tests pass and the new entry parity case fails
+against147 (Rename not offered);66focused pass with148. Eight quoting/escape/group
+contexts compare exact plans against the declaration, including full/short new
+names and no-op preservation. Negative safe-site plus shared/unknown binding and
+missing-declaration cases offer no Rename and produce no edit. Runtime namespace
+moves remain negative from either entry point.
+
+The new real host case starts with only the routes file open and asks for Rename
+before any definition/hover request, leaving the declaration closed on disk.
+It then covers group-binding and encoded explicit-action starters, prepared
+class-only ranges, unsaved controller/routes, stale external-file refusal, PSR-4
+move, aliases, all3 renamed routes executed through real Laravel and Composer,
+fresh definitions through shared undo/redo, and external controller history refusal.
+Each preflight/final comparison uses one SDK executable:147 refuses and148 passes.
+An initial148 host redo lookup returned Cancelled; four instrumented repetitions
+passed unchanged assertions. The final host suite reproduced it with a decisive
+trace:1.6ms lookup, unchanged document revisions/server generations, and a delayed
+created event for the atomically replaced routes file. Explicit reviewed-change
+notification followed by its watcher echo duplicated a disk-change publication
+and retired a fresh request.
+A deterministic mocked pending reply reproduces that duplicate invalidation.
+Reviewed apply/undo/redo now register bounded disk witnesses; the watcher suppresses
+only echoes matching operation/presence plus identity, mode, times, length and
+SHA-256, or an exact expected absence.
+Registration/filtering/publication share a lock. Up to4096witnesses/1MiB regular
+files on Unix are retained; uncertain, symlinked, larger or changed states keep
+normal notifications. Two further deterministic red cases prove an already
+removed/recreated path must not be registered as an unchanged owned result. With operation/presence matching,
+external same-byte replacement and recreated files still
+invalidate; file watching, conflict checks and history observers remain active.
+All105mock tests pass, including11new echo/real-change scenarios and notification
+counts. No retry or arbitrary sleep was added to history lookup assertions.
+Full desktop/host gates were rerun after this editor integration fix; earlier
+failed and instrumented receipts remain. Final source148 itself is unchanged.
+All41 real client and9 real host cases pass unfiltered; the actual client also
+compares declaration/literal file edits for explicit and group entry points.
+The first-request closed-declaration host addition was compiled after initial SDK
+preflight emission; its separate no-run build and binary marker/source hashes
+are recorded so the initial executable is not mistaken for that stronger check.
+
+Pinned148 source reconstruction and full18479 ordinary tests (17ignored/0filtered),
+separate FIFO child1,66frozen focused cases, fmt and all-target Clippy pass.
+Clippy-fix/fmt before freezing left Rust source hashes unchanged. Immutable source
+1756b1f920c1-ab10450de990-verified, patch0148 and source/binary
+candidate manifests retain acquisition/provenance. Canonical/resource/app SHA-256:
+72afb5f0a524cf377fe1e6cc25c17f9600b4bf39196dde2e8ec48da74ff98fe7.
+Plain12/Laravel91 non-Blade syntax files,324 real Laravel13.37 runtime assertions,
+and exactly the same3 intentional analyzer diagnostics pass; composer/autoload
+metadata and previous fixture originals are unchanged. The Demo example now points
+to Rename inside either runtime string; no new runtime type claim is added.
+
+Desktop gates:5387 frontend tests/487files, typecheck/lint/Knip/format/build,
+workspace1769passed/81ignored/0filtered across122suites,
+workspace fmt/all-target Clippy with warnings denied,105mock checks, binding export/readback and
+8packaging/retention tests pass. Historical slice93's one empty view-cycle completion
+remains an unexplained intermittent readiness limitation; no broader semantic or
+performance acceptance is inferred from this rename slice.
+
+Signed arm64 development OpenStorm0.1.87 is the sole archived app. Strict/deep
+signature, engine/source receipts, unchanged installed0.1.21 and process cleanup
+pass. App86, duplicate SDK app, obsolete canonical147 executable and owned compiler
+outputs were removed after verified replacement. Sources, patches, provenance,
+licenses, receipts, fixtures and Workbench114 baseline remain. Native UI is explicitly
+user-skipped: no launch/install/native acceptance. All69 areas remain visible:
+67partial/2user-deferred. Namespace transformations, broader route forms, platform
+and performance cases remain partial. Evidence: artifacts/checks/slice94-* and
+artifacts/batches/0.1.87/build-receipt.json. Commit/push follows verified closeout;
+no publishing, migration, updater activation or debugger expansion.
+
 Source integration (2026-11-01, verified source checkpoint): integrates all 240 new
 commits from `l0ng-ai/openidea:main` at `041e7210` into
 `codex/openstorm-php-laravel`, based on pushed OpenStorm `82d1313a`.

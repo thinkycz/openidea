@@ -4366,3 +4366,96 @@ async fn laravel_content_root_changes_retire_held_replies_but_noops_do_not() {
     }
     assert!(failures.is_empty(), "content-root receipts: {failures:#?}");
 }
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn reviewed_php_watcher_echo_preserves_navigation_but_external_changes_retire_it() {
+    for mutation in [
+        "duplicate created",
+        "owned removed but present",
+        "owned modified but absent",
+        "external changed",
+        "external replacement",
+        "removed",
+        "unowned",
+        "symlink",
+        "large",
+        "missing duplicate",
+        "missing recreated",
+    ] {
+        let h = harness_for("php", "php", &[("phpantom", checked_php_caps())], &[]);
+        let (doc, path) = h.open("caller.php", "<?php total();\n");
+        let tracked = h.root.join("Tracked.php");
+        let original = "<?php function total() {}\n";
+        if mutation == "symlink" {
+            let target = h.root.join("Target.php");
+            std::fs::write(&target, original).unwrap();
+            std::os::unix::fs::symlink(target, &tracked).unwrap();
+        } else if mutation == "large" {
+            std::fs::write(&tracked, "x".repeat((1 << 20) + 1)).unwrap();
+        } else if !mutation.starts_with("missing") && mutation != "owned modified but absent" {
+            std::fs::write(&tracked, original).unwrap();
+        }
+        h.wait_status("phpantom", ServerStatus::Ready).await;
+        if mutation != "unowned" {
+            if mutation.starts_with("missing") || mutation == "owned removed but present" {
+                h.mgr.php_reviewed_files_changed(&[], &[], std::slice::from_ref(&tracked));
+            } else {
+                h.mgr.php_reviewed_files_changed(&[], std::slice::from_ref(&tracked), &[]);
+            }
+        }
+        let state = h.launcher.state("phpantom");
+        let gate = Arc::new(Gate::default());
+        let held = gate.clone();
+        let uri = uri_of(&path);
+        *state.responder.lock() = Some(Arc::new(move |_, method, _| {
+            if method != "textDocument/definition" {
+                return None;
+            }
+            held.hold();
+            Some(json!([{"uri":uri,"range":php_range(0,6,0,11)}]))
+        }));
+        let mgr = h.mgr.clone();
+        let pending = tokio::spawn(async move { mgr.goto(doc, Pos::new(0, 7), GotoKind::Definition).await });
+        eventually(|| gate.entered()).await;
+        match mutation {
+            "external changed" => {
+                std::fs::write(&tracked, original.replace("total", "other")).unwrap();
+            }
+            "external replacement" => {
+                let replacement = h.root.join("Replacement.php");
+                std::fs::write(&replacement, original).unwrap();
+                std::fs::rename(replacement, &tracked).unwrap();
+            }
+            "removed" => std::fs::remove_file(&tracked).unwrap(),
+            "missing recreated" => std::fs::write(&tracked, original).unwrap(),
+            _ => {}
+        }
+        if matches!(mutation, "removed" | "missing duplicate" | "owned modified but absent") {
+            h.mgr.php_files_changed(&[], &[], std::slice::from_ref(&tracked));
+        } else {
+            h.mgr.php_files_changed(std::slice::from_ref(&tracked), &[], &[]);
+        }
+        gate.open();
+        let result = pending.await.unwrap();
+        h.mgr.shutdown_all().await;
+        let expected_notifications =
+            if matches!(mutation, "duplicate created" | "missing duplicate" | "unowned") { 1 } else { 2 };
+        assert_eq!(
+            state.notified("workspace/didChangeWatchedFiles").len(),
+            expected_notifications,
+            "every real change must still reach the server: {mutation}"
+        );
+        if matches!(mutation, "duplicate created" | "missing duplicate") {
+            assert!(
+                matches!(&result,Ok(locations) if locations.len()==1 && locations[0].path==path),
+                "reviewed write echo must not retire unchanged navigation: {mutation}: {result:?}"
+            );
+        } else {
+            assert!(
+                matches!(result,Err(ref error) if error.kind==ide_core::error::ErrorKind::Cancelled),
+                "real/unwitnessed/unbounded changes must retire the reply: {mutation}: {result:?}"
+            );
+        }
+    }
+}

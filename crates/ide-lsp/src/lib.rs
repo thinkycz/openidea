@@ -185,6 +185,8 @@ pub struct LspManager {
     servers: Mutex<Vec<Arc<Server>>>,
     docs: Mutex<HashMap<DocId, DocState>>,
     project_files_revision: AtomicU64,
+    #[cfg(unix)]
+    reviewed_php_files: Mutex<HashMap<PathBuf, php::ReviewedDiskState>>,
     apply_edit_hook: RwLock<Option<ApplyEditHook>>,
     applied_edits: tokio::sync::broadcast::Sender<(ide_core::ServerId, WorkspaceEdit)>,
     config_hook: RwLock<Option<ConfigHook>>,
@@ -320,6 +322,8 @@ impl LspManager {
             servers: Mutex::new(Vec::new()),
             docs: Mutex::new(HashMap::new()),
             project_files_revision: AtomicU64::new(0),
+            #[cfg(unix)]
+            reviewed_php_files: Mutex::new(HashMap::new()),
             apply_edit_hook: RwLock::new(None),
             applied_edits: tokio::sync::broadcast::channel(64).0,
             config_hook: RwLock::new(None),

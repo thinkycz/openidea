@@ -431,7 +431,7 @@ pub async fn restore_reviewed_edit(host: &Host, window: &str, group: String, red
         }
         let changed =
             project.documents.restore_reviewed_edit(&group, redo, &project.cache_dir.join("edit-recovery"))?;
-        project.lsp.php_files_changed(&changed.created, &changed.modified, &changed.removed);
+        project.lsp.php_reviewed_files_changed(&changed.created, &changed.modified, &changed.removed);
         Ok(())
     })
     .await

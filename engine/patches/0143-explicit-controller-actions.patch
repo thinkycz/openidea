@@ -1,0 +1,554 @@
+--- a/src/symbol_map/extraction/laravel.rs
++++ b/src/symbol_map/extraction/laravel.rs
+@@ -2127,22 +2127,7 @@
+     }
+     if let Expression::Literal(literal::Literal::String(string)) = value {
+         let name = string.value.and_then(literal_bytes_to_str)?;
+-        if name.contains("::") || !super::expressions::valid_literal_callable_target(name) {
+-            return None;
+-        }
+-        let rooted = name.starts_with('\\');
+-        let name = name.strip_prefix('\\').unwrap_or(name);
+-        if ["self", "parent", "static"]
+-            .iter()
+-            .any(|keyword| name.eq_ignore_ascii_case(keyword))
+-        {
+-            return None;
+-        }
+-        return Some(RouteControllerRef {
+-            subject: format!("\\{name}"),
+-            runtime: Some(name.to_owned()),
+-            rooted,
+-        });
++        return laravel_runtime_controller_ref(name);
+     }
+     None
+ }
+@@ -2328,19 +2313,99 @@
+         return;
+     }
+ 
+-    spans.push(SymbolSpan {
+-        start: inner_start,
+-        end: inner_end,
++    spans.push(laravel_route_method_span(
++        controller,
++        method_name,
++        inner_start,
++        inner_end,
++    ));
++}
++
++/// A literal controller action with an editable, unescaped method suffix.
++pub(crate) struct ExplicitRouteAction<'a> {
++    /// Runtime controller spelling before namespace qualification.
++    pub controller: RouteControllerRef,
++    /// Method spelling shared by runtime lookup and source edits.
++    pub method: &'a str,
++    /// Source byte offset of the method suffix.
++    pub start: u32,
++    /// Exclusive source byte offset before the closing quote.
++    pub end: u32,
++}
++
++/// Decode a registered literal action without treating URI strings as handlers.
++pub(crate) fn laravel_explicit_route_action<'a>(
++    expr: &Expression<'_>,
++    names: Option<&crate::names::OwnedResolvedNames>,
++    content: &'a str,
++) -> Option<ExplicitRouteAction<'a>> {
++    let Expression::Literal(literal::Literal::String(value)) =
++        laravel_route_action_argument(expr, names)?
++    else {
++        return None;
++    };
++    let decoded = value.value.and_then(literal_bytes_to_str)?;
++    let (class, decoded_method) = decoded.rsplit_once('@')?;
++    let controller = laravel_runtime_controller_ref(class)?;
++    let end = value.span.end.offset.checked_sub(1)?;
++    let raw = content.get(value.span.start.offset as usize + 1..end as usize)?;
++    let (_, method) = raw.rsplit_once('@')?;
++    // Refuse escaped method spellings: an edit must cover exactly the runtime name.
++    if method != decoded_method
++        || !method
++            .chars()
++            .all(|c| c.is_ascii_alphanumeric() || c == '_')
++        || method.chars().next().is_some_and(|c| c.is_ascii_digit())
++    {
++        return None;
++    }
++    Some(ExplicitRouteAction {
++        controller,
++        method,
++        start: end - method.len() as u32,
++        end,
++    })
++}
++
++fn laravel_runtime_controller_ref(name: &str) -> Option<RouteControllerRef> {
++    if name.contains("::") || !super::expressions::valid_literal_callable_target(name) {
++        return None;
++    }
++    let rooted = name.starts_with('\\');
++    let name = name.strip_prefix('\\').unwrap_or(name);
++    if ["self", "parent", "static"]
++        .iter()
++        .any(|keyword| name.eq_ignore_ascii_case(keyword))
++    {
++        return None;
++    }
++    Some(RouteControllerRef {
++        subject: format!("\\{name}"),
++        runtime: Some(name.to_owned()),
++        rooted,
++    })
++}
++
++/// Record a method reference without marking route registration as execution.
++pub(super) fn laravel_route_method_span(
++    controller: &str,
++    method: &str,
++    start: u32,
++    end: u32,
++) -> SymbolSpan {
++    SymbolSpan {
++        start,
++        end,
+         kind: SymbolKind::MemberAccess {
+-            subject_text: SubjectText::owned(controller.to_string()),
+-            member_name: crate::atom::atom(method_name),
++            subject_text: SubjectText::owned(controller.to_owned()),
++            member_name: crate::atom::atom(method),
+             is_static: true,
+             is_method_call: true,
+             docblock_ref: DocblockMemberRef::No,
+             is_array_callable: false,
+             is_nullsafe: false,
+         },
+-    });
++    }
+ }
+ 
+ #[cfg(test)]
+--- a/src/symbol_map/extraction/laravel_route_context.rs
++++ b/src/symbol_map/extraction/laravel_route_context.rs
+@@ -167,34 +167,46 @@
+         }
+     }
+     fn owner(&self) -> Option<String> {
+-        if self.invalid {
+-            return None;
+-        }
+-        let controller = self.controller.as_ref()?;
+-        let namespace = self.namespace.as_ref().ok()?;
+-        let Some(namespace) = namespace else {
+-            return Some(controller.subject.clone());
+-        };
+-        if namespace.is_empty() || controller.rooted {
+-            return Some(controller.subject.clone());
+-        }
+-        let runtime = controller.runtime.as_deref()?;
+-        let name = if runtime.starts_with(namespace) {
+-            runtime.to_owned()
+-        } else {
+-            format!("{namespace}\\{runtime}")
+-        };
+-        if name.contains("::") || !super::expressions::valid_literal_callable_target(&name) {
+-            return None;
+-        }
+-        Some(format!("\\{}", name.trim_start_matches('\\')))
+-    }
+-}
++        qualify_route_controller(self.controller.as_ref()?, &self.namespace, self.invalid)
++    }
++}
++fn qualify_route_controller(
++    controller: &RouteControllerRef,
++    namespace: &Result<Option<String>, ()>,
++    invalid: bool,
++) -> Option<String> {
++    if invalid {
++        return None;
++    }
++    if controller.rooted {
++        return Some(controller.subject.clone());
++    }
++    let namespace = namespace.as_ref().ok()?;
++    let Some(namespace) = namespace else {
++        return Some(controller.subject.clone());
++    };
++    if namespace.is_empty() {
++        return Some(controller.subject.clone());
++    }
++    let runtime = controller.runtime.as_deref()?;
++    let name = if runtime.starts_with(namespace) {
++        runtime.to_owned()
++    } else {
++        format!("{namespace}\\{runtime}")
++    };
++    if name.contains("::") || !super::expressions::valid_literal_callable_target(&name) {
++        return None;
++    }
++    Some(format!("\\{}", name.trim_start_matches('\\')))
++}
++
+ struct Region {
+     start: u32,
+     end: u32,
+     parent: Option<usize>,
+     owner: Option<String>,
++    namespace: Result<Option<String>, ()>,
++    invalid: bool,
+ }
+ #[derive(Default)]
+ pub(crate) struct RouteGroupContexts {
+@@ -252,13 +264,15 @@
+                 end: pending.end,
+                 parent,
+                 owner: frame.owner(),
++                namespace: frame.namespace.clone(),
++                invalid: frame.invalid,
+             });
+             frames.push(frame);
+             stack.push(index);
+         }
+         Self { regions }
+     }
+-    pub(crate) fn owner_at(&self, offset: u32) -> Option<&str> {
++    fn region_at(&self, offset: u32) -> Option<&Region> {
+         let mut index = self
+             .regions
+             .partition_point(|r| r.start <= offset)
+@@ -266,10 +280,23 @@
+         loop {
+             let region = &self.regions[index];
+             if offset < region.end {
+-                return region.owner.as_deref();
++                return Some(region);
+             }
+             index = region.parent?;
+         }
++    }
++    pub(crate) fn owner_at(&self, offset: u32) -> Option<&str> {
++        self.region_at(offset)?.owner.as_deref()
++    }
++    pub(crate) fn explicit_owner_at(
++        &self,
++        offset: u32,
++        controller: &RouteControllerRef,
++    ) -> Option<String> {
++        self.region_at(offset).map_or_else(
++            || qualify_route_controller(controller, &Ok(None), false),
++            |region| qualify_route_controller(controller, &region.namespace, region.invalid),
++        )
+     }
+ }
+ 
+@@ -284,6 +311,21 @@
+         node: &'ast Expression<'arena>,
+         out: &mut (Vec<SymbolSpan>, Vec<(u32, u32)>),
+     ) {
++        if let Some(action) =
++            super::laravel::laravel_explicit_route_action(node, self.names, self.content)
++            && !action.method.is_empty()
++            && let Some(controller) = self
++                .contexts
++                .explicit_owner_at(action.start, &action.controller)
++        {
++            out.0.push(super::laravel::laravel_route_method_span(
++                &controller,
++                action.method,
++                action.start,
++                action.end,
++            ));
++            out.1.push((action.start, action.end));
++        }
+         let Expression::Call(call) = node else { return };
+         let Some(group) = laravel_route_controller_group(call, self.names) else {
+             return;
+@@ -311,7 +353,13 @@
+     non_invoked: &mut Vec<(u32, u32)>,
+ ) {
+     let contexts = RouteGroupContexts::collect(program, content, names);
+-    if contexts.regions.is_empty() {
++    if contexts.regions.is_empty()
++        && (!content.contains('@')
++            || !content
++                .as_bytes()
++                .windows(5)
++                .any(|s| s.eq_ignore_ascii_case(b"route")))
++    {
+         return;
+     }
+     let mut out = (Vec::new(), Vec::new());
+--- a/src/completion/laravel_route_controller.rs
++++ b/src/completion/laravel_route_controller.rs
+@@ -92,6 +92,10 @@
+     let quote_pos = quote_pos?;
+     let prefix = content[quote_pos + 1..cursor_offset].to_string();
+ 
++    if prefix.contains('@') {
++        return detect_explicit_route_action_context(content, cursor_offset, resolved_names);
++    }
++
+     // Validate prefix is identifier-like (or empty).
+     if !prefix
+         .chars()
+@@ -267,6 +271,52 @@
+     ))
+ }
+ 
++fn detect_explicit_route_action_context(
++    content: &str,
++    cursor_offset: usize,
++    resolved_names: Option<&crate::names::OwnedResolvedNames>,
++) -> Option<LaravelRouteControllerContext> {
++    let mut action = None;
++    crate::virtual_members::laravel::walk_all_php_expressions(content, &mut |expr| {
++        if let Some(candidate) =
++            crate::symbol_map::extraction::laravel::laravel_explicit_route_action(
++                expr,
++                resolved_names,
++                content,
++            )
++            && cursor_offset >= candidate.start as usize
++            && cursor_offset <= candidate.end as usize
++        {
++            action = Some(candidate);
++            return ControlFlow::Break(());
++        }
++        ControlFlow::Continue(())
++    });
++    let action = action?;
++    let controller = crate::parser::with_parsed_program(
++        content,
++        "laravel_explicit_action_context",
++        |program, _| {
++            crate::symbol_map::extraction::laravel_route_context::RouteGroupContexts::collect(
++                program,
++                content,
++                resolved_names,
++            )
++            .explicit_owner_at(action.start, &action.controller)
++        },
++    )?;
++    Some(LaravelRouteControllerContext {
++        controller_class: controller,
++        prefix: content
++            .get(action.start as usize..cursor_offset)?
++            .to_owned(),
++        replace_range: Range::new(
++            offset_to_position(content, action.start as usize),
++            offset_to_position(content, action.end as usize),
++        ),
++    })
++}
++
+ fn route_controller_context(
+     content: &str,
+     cursor_offset: usize,
+--- a/tests/integration/laravel_route_controller.rs
++++ b/tests/integration/laravel_route_controller.rs
+@@ -1334,3 +1334,142 @@
+         );
+     }
+ }
++
++#[tokio::test]
++async fn explicit_action_strings_use_runtime_classes_and_real_route_arguments() {
++    for call in [
++        "Routes::get('/direct', 'Demo\\Inner@showInvoice')",
++        "Routes::match(['get'], '/😀/matched', 'Demo\\Inner@showInvoice')",
++        "Routes::middleware('auth')->match(action: 'Demo\\Inner@showInvoice', uri: '/named', methods: ['post'])",
++    ] {
++        let text = format!(
++            "<?php\nnamespace Demo; use Illuminate\\Support\\Facades\\Route as Routes; use Other as Demo; class Inner {{public function showInvoice(): bool {{return true;}}}} {call};"
++        );
++        assert_namespaced_route_owner(&text, "@showIn", "public function ", "bool").await;
++    }
++}
++
++#[tokio::test]
++async fn explicit_actions_inherit_relative_rooted_and_static_group_namespaces() {
++    for group in [
++        "Routes::namespace('Demo')->group(fn () => ACTION)",
++        "Routes::group(['namespace'=>'Demo'], fn () => ACTION)",
++        "Routes::namespace('Missing')->group(fn () => Routes::namespace('\\Demo')->group(fn () => ACTION))",
++        "Routes::namespace('D')->group(fn () => Routes::namespace('emo')->group(fn () => ROOTED))",
++    ] {
++        let call = group
++            .replace("ACTION", "Routes::get('/relative', 'Inner@showInvoice')")
++            .replace(
++                "ROOTED",
++                "Routes::get('/rooted', '\\Demo\\Inner@showInvoice')",
++            );
++        let text = format!(
++            "<?php\nnamespace Demo; use Illuminate\\Support\\Facades\\Route as Routes; class Inner {{public function showInvoice(): bool {{return true;}}}} {call};"
++        );
++        assert_namespaced_route_owner(&text, "@showIn", "public function ", "bool").await;
++    }
++}
++
++#[tokio::test]
++async fn explicit_actions_ignore_group_controllers_and_do_not_duplicate_namespace_prefixes() {
++    for group in [
++        "Routes::controller(Other::class)->group(fn () => ACTION)",
++        "Routes::controller($selected)->group(fn () => ACTION)",
++        "Routes::namespace('Demo')->controller(Other::class)->group(fn () => ACTION)",
++    ] {
++        let call = group.replace(
++            "ACTION",
++            "Routes::get('/override', 'Demo\\Inner@showInvoice')",
++        );
++        let text = format!(
++            "<?php\nnamespace Demo; use Illuminate\\Support\\Facades\\Route as Routes; class Other {{public function showInvoice(): string {{return 'wrong';}}}} class Inner {{public function showInvoice(): bool {{return true;}}}} {call};"
++        );
++        assert_namespaced_route_owner(&text, "@showIn", "class Inner {public function ", "bool")
++            .await;
++    }
++}
++
++#[tokio::test]
++async fn rooted_action_strings_are_independent_of_dynamic_group_namespaces() {
++    let text = "<?php\nnamespace Demo; use Illuminate\\Support\\Facades\\Route as Routes; class Inner {public function showInvoice(): bool {return true;}} Routes::namespace($selected)->group(fn () => Routes::get('/safe', '\\Demo\\Inner@showInvoice'));";
++    assert_namespaced_route_owner(text, "@showIn", "public function ", "bool").await;
++    let bare = "<?php\nnamespace Demo; use Illuminate\\Support\\Facades\\Route as Routes; class Inner {public function showInvoice(): bool {return true;}} Routes::namespace($selected)->controller('\\Demo\\Inner')->group(fn () => Routes::get('/safe', 'showInvoice'));";
++    assert_namespaced_route_owner(bare, "'showIn", "public function ", "bool").await;
++}
++
++#[tokio::test]
++async fn explicit_action_strings_refuse_unknown_scopes_ambiguous_arguments_and_non_routes() {
++    use crate::common::position_after;
++    for call in [
++        "Routes::namespace($selected)->group(fn () => Routes::get('/unknown', 'Inner@showInvoice'))",
++        "Routes::namespace('Demo')->group(function () {$later=fn () => Routes::get('/deferred', 'Inner@showInvoice');})",
++        "Other::get('/foreign', 'Demo\\Inner@showInvoice')",
++        "Routes::get('Demo\\Inner@showInvoice', fn () => null)",
++        "Routes::get('/dynamic', 'Demo\\Inner@showInvoice' . $suffix)",
++        "Routes::match(uri: '/ambiguous', methods:['get'], action:'Demo\\Inner@showInvoice', action:fn () => null)",
++    ] {
++        let text = format!(
++            "<?php\nnamespace Demo; use Illuminate\\Support\\Facades\\Route as Routes; class Inner {{public function showInvoice(): bool {{return true;}}}} {call};"
++        );
++        let backend = create_test_backend();
++        let uri = Url::parse("file:///unsupported-controller-action.php").unwrap();
++        open_php(&backend, &uri, &text).await;
++        let at = position_after(&text, "@showIn");
++        assert!(
++            goto_def(&backend, &uri, at.line, at.character)
++                .await
++                .is_none(),
++            "unsupported action definition {call}"
++        );
++        let items = complete_at(&backend, &uri, &text, at.line, at.character).await;
++        assert!(
++            !method_labels(&items).iter().any(|m| m == "showInvoice"),
++            "unsupported action completion {call}: {items:?}"
++        );
++    }
++}
++
++#[tokio::test]
++async fn explicit_action_completion_replaces_only_the_method_after_utf16_uri_text() {
++    use crate::common::position_after;
++    let text = "<?php\nuse Illuminate\\Support\\Facades\\Route as Routes; class Inner {public function showInvoice(): bool {return true;}} Routes::get('/😀/Inner@showInvoice', 'Inner@showInvoiceExtra');";
++    let backend = create_test_backend();
++    let uri = Url::parse("file:///action-string-range.php").unwrap();
++    open_php(&backend, &uri, text).await;
++    let start = position_after(text, "', 'Inner@");
++    let at = Position::new(start.line, start.character + 2);
++    let items = complete_at(&backend, &uri, text, at.line, at.character).await;
++    let item = items
++        .iter()
++        .find(|i| i.insert_text.as_deref() == Some("showInvoice"))
++        .expect("explicit action completion");
++    let Some(CompletionTextEdit::Edit(edit)) = &item.text_edit else {
++        panic!("explicit action must supply an exact edit: {item:?}")
++    };
++    assert_eq!(
++        edit.range,
++        Range::new(
++            start,
++            Position::new(
++                start.line,
++                start.character + "showInvoiceExtra".len() as u32
++            )
++        )
++    );
++    assert_eq!(edit.new_text, "showInvoice");
++    let empty = text.replace("showInvoiceExtra", "");
++    let backend = create_test_backend();
++    let uri = Url::parse("file:///empty-action-method.php").unwrap();
++    open_php(&backend, &uri, &empty).await;
++    let start = position_after(&empty, "', 'Inner@");
++    let items = complete_at(&backend, &uri, &empty, start.line, start.character).await;
++    let item = items
++        .iter()
++        .find(|i| i.insert_text.as_deref() == Some("showInvoice"))
++        .expect("empty explicit method completion");
++    let Some(CompletionTextEdit::Edit(edit)) = &item.text_edit else {
++        panic!("empty explicit action edit: {item:?}")
++    };
++    assert_eq!(edit.range, Range::new(start, start));
++    assert_eq!(edit.new_text, "showInvoice");
++}
+--- a/docs/CHANGELOG.md
++++ b/docs/CHANGELOG.md
+@@ -14,6 +14,8 @@
+ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+ 
+ ## [Unreleased]
++
++- **Navigate and complete string controller actions.** Laravel `Controller@method` route handlers now support method navigation, hover, references and checked rename, including namespace groups. Completion edits only the method suffix. Contributed by @thinkycz.
+ 
+ - **Respect namespace attributes in Laravel controller groups.** Static and fluent groups share inherited and rooted namespace handling for navigation, completion and refactoring. Unknown namespaces and deferred callables do not borrow an enclosing controller. Contributed by @thinkycz.
+ 
+--- a/examples/laravel/app/Demo.php
++++ b/examples/laravel/app/Demo.php
+@@ -1733,6 +1733,17 @@
+         Route::namespace('Other')->controller('\\App\\Http\\Controllers\\BakeryController')->group(fn () => Route::get('/ns-rooted', 'index'));
+     }
+ 
++    public function explicitControllerActions(): void
++    {
++        // Try: navigate/complete index after @ without changing the class spelling.
++        Route::get('/explicit-direct', 'App\Http\Controllers\BakeryController@index');
++        Route::namespace('App\Http\Controllers')->group(fn () => Route::get('/explicit-relative', 'BakeryController@index'));
++        Route::namespace('Other')->group(fn () => Route::get('/explicit-rooted', '\App\Http\Controllers\BakeryController@index'));
++        Route::controller(\App\Http\Controllers\AlternateBakeryController::class)->group(fn () => Route::get('/explicit-override', 'App\Http\Controllers\BakeryController@index'));
++        Route::namespace('App\Http\Controllers')->group(fn () => Route::get('/explicit-prefixed', 'App\Http\Controllers\BakeryController@index'));
++        Route::prefix('billing')->match(action: 'App\Http\Controllers\BakeryController@index', methods: ['get'], uri: '/explicit-match');
++    }
++
+ }
+ 
+ // PHP Workbench: Laravel: Go to Route lists statically named routes and opens
+--- a/examples/laravel/assertions.php
++++ b/examples/laravel/assertions.php
+@@ -2052,6 +2052,26 @@
+ check('Class constant runtime name still receives a mismatched namespace prefix', $actual['mangled'] === 'Other' . chr(92) . $full . '@index');
+ })();
+ 
++// Explicit action strings are checked against Laravel runtime namespace rules.
++(function (): void {
++$r = new Illuminate\Routing\Router(new Illuminate\Events\Dispatcher());
++$full = App\Http\Controllers\BakeryController::class;
++$r->get('/direct', $full . '@index')->name('direct');
++$r->namespace('App\Http\Controllers')->group(fn () => $r->get('/relative', 'BakeryController@index')->name('relative'));
++$r->namespace('Missing')->group(fn () => $r->namespace('\App\Http\Controllers')->group(fn () => $r->get('/reset', 'BakeryController@index')->name('reset')));
++$r->namespace('App\Http\Controllers')->group(fn () => $r->get('/matching', $full . '@index')->name('matching'));
++$r->namespace('Other')->group(fn () => $r->get('/rooted', chr(92) . $full . '@index')->name('rooted'));
++$r->controller(App\Http\Controllers\AlternateBakeryController::class)->group(fn () => $r->get('/override', $full . '@index')->name('override'));
++$selected = 'UnknownController';
++$r->controller($selected)->group(fn () => $r->get('/unknown-controller', $full . '@index')->name('unknown-controller'));
++$namespace = 'Unrelated';
++$r->namespace($namespace)->group(fn () => $r->get('/unknown-namespace-rooted', chr(92) . $full . '@index')->name('unknown-namespace-rooted'));
++$actual=[];
++foreach ($r->getRoutes() as $route) {$actual[$route->getName()]=$route->getActionName();}
++check("Explicit action groups register eight routes", count($actual) === 8);
++foreach ($actual as $name=>$action) {check('Explicit controller action ' . $name, $action === (in_array($name,['rooted','unknown-namespace-rooted']) ? chr(92) : '') . $full . '@index');}
++})();
++
+ // ─── Summary ────────────────────────────────────────────────────────────────
+ 
+ echo "\n";

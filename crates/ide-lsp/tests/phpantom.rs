@@ -3949,6 +3949,56 @@ async fn laravel_match_actions_follow_aliases_nested_owners_and_unsaved_controll
                 }
             }
         }
+        let class_positions = [
+            pos(routes, "App\\InvoiceController@showInvoice')->name('explicit-direct')"),
+            pos(routes, "InvoiceController@showInvoice')->name('explicit-relative')"),
+            pos(routes, "App\\InvoiceController@showInvoice')->name('explicit-override')"),
+            pos(routes, "App\\InvoiceController@showInvoice')->name('explicit-unknown-controller')"),
+            pos(routes, "\\App\\InvoiceController@showInvoice')->name('explicit-rooted')"),
+            pos(routes, "InvoiceController@showInvoice')->name('class-prefix')"),
+        ];
+        for at in class_positions {
+            let targets = mgr.goto(route_doc, at, GotoKind::Definition).await.map_err(|e| e.to_string())?;
+            let hover = mgr.hover(route_doc, at, Default::default()).await.map_err(|e| e.to_string())?;
+            if targets.len() != 1
+                || targets[0].path.to_path_buf() != main_path
+                || targets[0].range.start != pos(controller, "class InvoiceController")
+                || !hover.is_some_and(|h| {
+                    h.contents.value.contains("namespace App;") && h.contents.value.contains("class InvoiceController")
+                })
+            {
+                return Err(format!("runtime controller class navigation wrong at {at:?}: {targets:?}"));
+            }
+        }
+        let class_refs = mgr
+            .references(route_doc, class_positions[0], true, true, Default::default())
+            .await
+            .map_err(|e| e.to_string())?;
+        let mut actual_classes: Vec<_> =
+            class_refs.locations.iter().map(|l| (l.path.to_path_buf(), l.range.start)).collect();
+        let mut expected_classes: Vec<_> = class_positions.iter().map(|p| (route_path.clone(), *p)).collect();
+        expected_classes.extend([
+            (main_path.clone(), pos(controller, "InvoiceController")),
+            (route_path.clone(), pos(routes, "App\\InvoiceController as Main")),
+            (route_path.clone(), pos(routes, "Main::class")),
+            (caller_path.clone(), pos(caller, "App\\InvoiceController as Main")),
+            (caller_path.clone(), pos(caller, "Main()")),
+        ]);
+        actual_classes.sort_by_key(|(p, at)| (p.clone(), at.line, at.col));
+        expected_classes.sort_by_key(|(p, at)| (p.clone(), at.line, at.col));
+        if actual_classes != expected_classes || class_refs.incomplete.is_some() {
+            return Err(format!("runtime class references must include exactly eleven sites: {class_refs:?}"));
+        }
+        for (doc, at, replacement) in [
+            (route_doc, class_positions[0], "ReceiptController"),
+            (ctrl_doc, pos(controller, "InvoiceController"), "ReceiptController"),
+            (ctrl_doc, pos(controller, "InvoiceController"), "App\\Billing\\ReceiptController"),
+        ] {
+            match mgr.rename(doc, at, replacement.into(), Default::default()).await {
+                Err(e) if e.to_string().to_lowercase().contains("runtime controller") => {}
+                other => return Err(format!("runtime class edits must refuse a partial rewrite: {other:?}")),
+            }
+        }
         let refs = mgr
             .references(route_doc, positions[20], true, true, Default::default())
             .await
@@ -4137,6 +4187,14 @@ async fn laravel_match_actions_follow_aliases_nested_owners_and_unsaved_controll
         {
             return Err(format!("explicit action namespace rebind stale: {targets:?} {hover:?}"));
         }
+        let class_at = pos(&explicit_rebound, "InvoiceController@showInvoice')->name('explicit-relative')");
+        let targets = mgr.goto(route_doc, class_at, GotoKind::Definition).await.map_err(|e| e.to_string())?;
+        if targets.len() != 1
+            || targets[0].path.to_path_buf() != alternate_path
+            || targets[0].range.start != pos(alternate, "class InvoiceController")
+        {
+            return Err(format!("runtime class namespace rebind stale: {targets:?}"));
+        }
         replace(&mgr, route_doc, 31, &explicit_rebound, routes);
         let explicit_unknown = routes.replace("namespace('App')->group", "namespace($picked)->group");
         replace(&mgr, route_doc, 32, routes, &explicit_unknown);
@@ -4151,6 +4209,7 @@ async fn laravel_match_actions_follow_aliases_nested_owners_and_unsaved_controll
         }
         replace(&mgr, route_doc, 33, &explicit_unknown, routes);
         let unsaved = controller
+            .replace("class InvoiceController", "/** Unsaved runtime class witness. */\nclass InvoiceController")
             .replace("<?php\n", "<?php\n// 😀 unsaved\n")
             .replace(": string", ": int")
             .replace("return 'ok'", "return 7");
@@ -4158,6 +4217,17 @@ async fn laravel_match_actions_follow_aliases_nested_owners_and_unsaved_controll
         for phase in 0..2 {
             if phase == 1 {
                 mgr.restart(mgr.servers()[0].id).await.map_err(|e| e.to_string())?;
+            }
+            for at in class_positions {
+                let targets = mgr.goto(route_doc, at, GotoKind::Definition).await.map_err(|e| e.to_string())?;
+                let hover = mgr.hover(route_doc, at, Default::default()).await.map_err(|e| e.to_string())?;
+                if targets.len() != 1
+                    || targets[0].path.to_path_buf() != main_path
+                    || targets[0].range.start != pos(&unsaved, "class InvoiceController")
+                    || !hover.is_some_and(|h| h.contents.value.contains("Unsaved runtime class witness."))
+                {
+                    return Err(format!("unsaved runtime class/restart phase{phase} stale: {targets:?}"));
+                }
             }
             for at in [
                 positions[20],
@@ -4200,6 +4270,19 @@ async fn laravel_match_actions_follow_aliases_nested_owners_and_unsaved_controll
             }
         }
         mgr.did_close(ctrl_doc);
+        for at in class_positions {
+            let targets = mgr.goto(route_doc, at, GotoKind::Definition).await.map_err(|e| e.to_string())?;
+            let hover = mgr.hover(route_doc, at, Default::default()).await.map_err(|e| e.to_string())?;
+            if !hover.is_some_and(|h| {
+                h.contents.value.contains("namespace App;")
+                    && !h.contents.value.contains("Unsaved runtime class witness.")
+            }) || targets.len() != 1
+                || targets[0].range.start != pos(controller, "class InvoiceController")
+            {
+                return Err(format!("closing overlay did not restore runtime class: {targets:?}"));
+            }
+        }
+
         for at in [
             positions[20],
             positions[16],

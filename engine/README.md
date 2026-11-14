@@ -1,6 +1,6 @@
 # Pinned PHPantom engine
 
-The local OpenStorm development candidate uses PHPantom `0.11.1-openstorm.144`
+The local OpenStorm development candidate uses PHPantom `0.11.1-openstorm.145`
 for Apple Silicon macOS. This is a local rebuild, not an upstream release.
 Source131 adds migration-derived declaration origins;132 follows registration
 order for container bindings and aliases within a provider group. Source133
@@ -24,8 +24,11 @@ qualification and deferred-callable barriers.
 Source143 adds explicit Controller@method action references, method completion
 and namespace-aware qualification while preserving the class string.
 Source144 prevents group-method completion in the class part before @, using
-registered literal identity and decoded separator bytes. Full pinned source
-tests pass18,461 checks plus the separate FIFO child (17 ignored).
+registered literal identity and decoded separator bytes.
+Source145 adds class-part definition, hover and references for explicit runtime
+controller actions, independently of PHP imports. Class/namespace edits involving
+these references refuse partial rewrites until quoting-aware plans exist. Full pinned source
+tests pass18,467 checks plus the separate FIFO child (17 ignored).
 Examples, Clippy, formatting, source fingerprints and the optimized build pass.
 Current OpenStorm client/host and packaged native acceptance are tracked in
 `docs/OPENSTORM.md`; source checks alone do not establish native acceptance.
@@ -35,7 +38,7 @@ acceptance is claimed. The unaccepted129 source and its failed suite result
 remain reproducible.
 
 `source.json` pins the upstream source, archive checksum, unchanged114-patch PHP
-Workbench series and OpenStorm patches0115–0144. The bundled executable is
+Workbench series and OpenStorm patches0115–0145. The bundled executable is
 verified by `node scripts/verify-phpantom.mjs`; its provenance and licenses are
 under `src-tauri/resources/phpantom/`. Source checks and client/host checks do not
 replace packaged native acceptance; broader component and view-data work remains

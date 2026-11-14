@@ -2537,6 +2537,86 @@ Composer/configuration/performance/platform and physical Dock-switch acceptance
 remain open. No migration, publishing, updater activation, notarization or debugger
 expansion is added.
 
+Slice90 — runtime controller class navigation (2026-11-14). Slice89 is committed and
+pushed as ff6a60f6946e97fcc75ac808b49bdd8bb8f56133. Explicit Controller@method action
+class parts now support definition, hover and class references through the shared class
+resolver and reference index. The route context supplies runtime namespace qualification
+independently of PHP imports. Short, full, rooted, named, encoded class-name and
+empty-method cases are covered; rooted names remain independent of an unknown group
+namespace. Unknown unrooted names do not borrow an enclosing controller. A distinct unit
+reference context keeps these mentions out of constructor calls and unknown-class
+diagnostics (runtime strings may name container services).
+
+Class and namespace edits involving recognized runtime-action class references
+explicitly refuse partial rewrites, including checked rename from ordinary class
+declarations and moves. The ordinary PHP import rewriter cannot preserve their runtime
+namespace and quoting rules. This is a read-only class-navigation slice; method checked
+rename remains supported. Standalone group-controller class-string bindings, ambiguity
+under multiple leaf namespaces, quoting-aware class rewrites, class-name completion,
+invokable and additional action forms remain pending. No parallel typer, implicit
+framework execution, new settings or debugger scope.
+
+A valid PSR-4 five-file protocol baseline with engine 144 reproduces twelve absent class
+navigation/hover results, with unknown negatives and positive method controls. The first
+source run passes all 48 prior cases and the service-ID control; five new regressions
+fail. After the implementation, 52 pass and two navigation assertions fail: they
+expected the identifier instead of the existing resolver's class-keyword location.
+Corrected assertions preserve that convention. A subsequent hover assertion expected a
+method list instead of the inherited class header/documentation; it is corrected, and
+the client freshness check uses changed class documentation. All 54 focused tests pass.
+The intermediate failed runs and a local preparation assertion failure remain recorded.
+An escaped-display misreading prompted an explicit PSR-4 assertion and fresh baseline
+rerun; both original and rerun prefixes are valid. No autoload defect is claimed. A
+local delivery-helper quoting error is corrected before resource promotion; it is not a
+product failure.
+
+Patch 0145 covers 11 source/test/changelog files, frozen after release Clippy/fmt.
+Immutable patch-series SHA-256:
+7926ffe6a755184ea6efad55b369789e9565f7b37860a75543458d18447e2c22. Full source passes
+18,467 ordinary tests (17 ignored, none filtered), plus the separate FIFO child.
+Warnings-denied all-target release Clippy, formatting, reconstruction and normal
+optimized build pass. Engine 145 SHA-256:
+ee95c9eb27e4f5b47846b4bb274c75ebac40aa4e55b865ea30f4c36d6746ffe4. The unchanged
+disposable Laravel 13.37 examples retain six baseline and three immutable example
+hashes, valid PSR-4/Composer autoload, no copied environment files, 12 plain-PHP and 89
+Laravel PHP syntax checks, plain assertions and 316 Laravel runtime assertions. Analyzer
+output remains exactly the three intentional diagnostics. Fresh protocol checks cover 18
+retained method queries, 8 completion guards and 16 class-navigation/unknown/method
+queries, preserving every observed file.
+
+The same actual OpenStorm client binary fails on 144 and passes on 145. Six main class
+positions navigate/hover correctly, with exactly 11 class reference sites. Three checked
+class-rename entry points refuse partial edits. Existing 28 method owner rows, 23
+reference/checked-method-rename targets across three files and four class-completion
+guards remain correct. Namespace-only unsaved rebinding changes the class target. Six
+class queries run first after controller-only unsaved edits, including after server
+restart, and see the shifted declaration and changed class documentation; closing the
+overlay restores disk declarations. All six originals stay exact. All 40 client and 6
+host checks pass unfiltered. Fresh frontend tests (5,383 across 487 files) and workspace
+tests (1,759 passed, 77 ignored, none filtered), formatting, warnings-denied all-target
+Clippy and post-binding frontend checks pass. Historical mock timing intermittency is
+not claimed fixed; the ordinary workspace uses 144 before promotion, while the actual
+client/host select 145. No native acceptance is inferred from these checks.
+
+Signed arm64 development 0.1.83 is the sole archived app:
+artifacts/batches/0.1.83/OpenStorm.app. Executable SHA-256:
+4ef8354d36c64f6cf21fa3ee41c2162063bf4692f913f4361a977e8aa6227fb5. Strict/deep signature
+and canonical/resource/embedded engine 145 checksums agree. App 82, duplicate 83 bundle,
+both compiler roots and the inactive superseded 144 executable are removed after
+verification. Sources, licenses, provenance, receipts, 114 evaluation and PHP Workbench
+remain. Installed 21 is unchanged; no owned app/server process remains. Runtime sources
+match the compiled receipt; only final progress/ledger documents differ. Normal commit
+hooks and remote ref readback are recorded by the ignored slice 90 delivery receipt.
+
+Evidence: artifacts/checks/slice90 baseline/source/red/green/freeze/example/
+analyzer/protocol/client-host/pipeline/readback receipts and app 83 build/retention
+receipts. Native checks remain explicitly user-skipped; app 83 was not launched or
+installed by this task. All 69 areas remain visible: 67 partial and 2 user-deferred.
+Broader project/configuration, lifecycle, physical Dock-focus, performance and platform
+acceptance remains open. No release publishing, updater activation, migration,
+notarization or deployment is performed. The next small dependent slice should inventory
+group-controller class bindings before adding safe runtime rewrites.
+
 Source integration (2026-11-01, verified source checkpoint): integrates all 240 new
 commits from `l0ng-ai/openidea:main` at `041e7210` into
 `codex/openstorm-php-laravel`, based on pushed OpenStorm `82d1313a`.

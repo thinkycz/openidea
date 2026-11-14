@@ -1,0 +1,494 @@
+--- a/src/symbol_map/mod.rs
++++ b/src/symbol_map/mod.rs
+@@ -90,6 +90,9 @@
+     /// Context not determined or not relevant for diagnostics.
+     #[default]
+     Other,
++    /// A runtime Laravel controller class string, independent of PHP imports.
++    /// Navigation is supported; edits require a separate quoting-aware rewrite.
++    RuntimeControllerString,
+     /// After `new` keyword — only concrete (non-abstract) classes and enums.
+     New,
+     /// After `extends` in a class declaration.
+--- a/src/symbol_map/extraction/laravel.rs
++++ b/src/symbol_map/extraction/laravel.rs
+@@ -2325,6 +2325,10 @@
+ pub(crate) struct ExplicitRouteAction<'a> {
+     /// Runtime controller spelling before namespace qualification.
+     pub controller: RouteControllerRef,
++    /// First source byte of the class part inside its quotes.
++    pub class_start: u32,
++    /// Exclusive source byte of the class part, before the raw @ separator.
++    pub class_end: u32,
+     /// Method spelling shared by runtime lookup and source edits.
+     pub method: &'a str,
+     /// Source byte offset of the method suffix.
+@@ -2361,6 +2365,8 @@
+     }
+     Some(ExplicitRouteAction {
+         controller,
++        class_start: value.span.start.offset + 1,
++        class_end: end - method.len() as u32 - 1,
+         method,
+         start: end - method.len() as u32,
+         end,
+--- a/src/symbol_map/extraction/laravel_route_context.rs
++++ b/src/symbol_map/extraction/laravel_route_context.rs
+@@ -313,18 +313,28 @@
+     ) {
+         if let Some(action) =
+             super::laravel::laravel_explicit_route_action(node, self.names, self.content)
+-            && !action.method.is_empty()
+             && let Some(controller) = self
+                 .contexts
+                 .explicit_owner_at(action.start, &action.controller)
+         {
+-            out.0.push(super::laravel::laravel_route_method_span(
+-                &controller,
+-                action.method,
+-                action.start,
+-                action.end,
+-            ));
+-            out.1.push((action.start, action.end));
++            out.0.push(SymbolSpan {
++                start: action.class_start,
++                end: action.class_end,
++                kind: crate::symbol_map::SymbolKind::ClassReference {
++                    name: crate::atom::atom(controller.trim_start_matches('\\')),
++                    is_fqn: true,
++                    context: crate::symbol_map::ClassRefContext::RuntimeControllerString,
++                },
++            });
++            if !action.method.is_empty() {
++                out.0.push(super::laravel::laravel_route_method_span(
++                    &controller,
++                    action.method,
++                    action.start,
++                    action.end,
++                ));
++                out.1.push((action.start, action.end));
++            }
+         }
+         let Expression::Call(call) = node else { return };
+         let Some(group) = laravel_route_controller_group(call, self.names) else {
+--- a/src/diagnostics/unknown_classes.rs
++++ b/src/diagnostics/unknown_classes.rs
+@@ -116,7 +116,10 @@
+             // addition to FQSENs, so a target that resolves to nothing is
+             // not an error.  PHPUnit coverage metadata shares the emitter
+             // but carries `CoversTarget`, so `@covers` is still checked.
+-            if ref_context == ClassRefContext::DocblockSee {
++            if matches!(
++                ref_context,
++                ClassRefContext::DocblockSee | ClassRefContext::RuntimeControllerString
++            ) {
+                 continue;
+             }
+ 
+--- a/src/diagnostics/invalid_class_kind.rs
++++ b/src/diagnostics/invalid_class_kind.rs
+@@ -90,6 +90,7 @@
+             if matches!(
+                 ref_ctx,
+                 ClassRefContext::Other
++                    | ClassRefContext::RuntimeControllerString
+                     | ClassRefContext::Attribute
+                     | ClassRefContext::CoversTarget
+                     | ClassRefContext::DocblockSee
+@@ -359,6 +360,7 @@
+         // operator's operand: `value-of<Suit>` reads an enum, and the other
+         // readings of that position are not classes at all.
+         ClassRefContext::Other
++        | ClassRefContext::RuntimeControllerString
+         | ClassRefContext::UseImport
+         | ClassRefContext::Attribute
+         | ClassRefContext::CoversTarget
+--- a/src/rename/mod.rs
++++ b/src/rename/mod.rs
+@@ -65,3 +65,20 @@
+         }
+     }
+ }
++
++impl crate::Backend {
++    /// Runtime route strings must never reach the PHP import rewriter. Their
++    /// namespaces and escapes need a dedicated, all-target rewrite plan.
++    pub(super) fn reject_runtime_controller_class_rename(&self, fqn: &str) -> Result<(), String> {
++        let target = crate::util::strip_fqn_prefix(fqn);
++        let keys = crate::references::class_candidate_keys(target, crate::util::short_name(target));
++        if self.user_file_symbol_maps_for_reference_keys(&keys).iter().any(|(_, map)| {
++            map.spans.iter().any(|span| matches!(&span.kind,
++                crate::symbol_map::SymbolKind::ClassReference { name, context: crate::symbol_map::ClassRefContext::RuntimeControllerString, .. }
++                if crate::util::strip_fqn_prefix(name).eq_ignore_ascii_case(target)))
++        }) {
++            return Err("Class edits involving runtime controller strings require a quoting-aware rewrite; no edits were produced.".into());
++        }
++        Ok(())
++    }
++}
+--- a/src/rename/prepare.rs
++++ b/src/rename/prepare.rs
+@@ -99,6 +99,16 @@
+ 
+         let span = self.lookup_symbol_at_position(uri, content, position)?;
+ 
++        if matches!(
++            &span.kind,
++            SymbolKind::ClassReference {
++                context: crate::symbol_map::ClassRefContext::RuntimeControllerString,
++                ..
++            }
++        ) {
++            return None;
++        }
++
+         // The range below is built from this span's byte offsets, and the
+         // editor shows it as the text about to be replaced.  A map that
+         // predates the buffer would put it over unrelated code.
+@@ -211,6 +221,16 @@
+             return Ok(None);
+         };
+ 
++        if matches!(
++            &span.kind,
++            SymbolKind::ClassReference {
++                context: crate::symbol_map::ClassRefContext::RuntimeControllerString,
++                ..
++            }
++        ) {
++            return Err("Class edits involving runtime controller strings require a quoting-aware rewrite; no edits were produced.".into());
++        }
++
+         // Every edit below is derived, directly or through find-references,
+         // from this span.  If the map it came from predates the buffer the
+         // whole response is nonsense, so drop it rather than rename the
+@@ -279,6 +299,10 @@
+ 
+         if locations.is_empty() {
+             return Ok(None);
++        }
++
++        if let Some(fqn) = &class_rename_fqn {
++            self.reject_runtime_controller_class_rename(fqn)?;
+         }
+ 
+         // A scope or an accessor is also used under a name the model derives
+--- a/src/rename/class/mod.rs
++++ b/src/rename/class/mod.rs
+@@ -77,6 +77,7 @@
+         let locations = self
+             .find_references_for_rename(&definition_uri, &content, position, true)
+             .ok_or_else(|| format!("Could not find references to `{old_fqn}`."))?;
++        self.reject_runtime_controller_class_rename(old_fqn)?;
+         if !self.rename_locations_verified(&span.kind, None, &locations) {
+             return Err(format!(
+                 "The workspace changed while `{old_fqn}` was being indexed; retry the move."
+--- a/src/rename/namespace/mod.rs
++++ b/src/rename/namespace/mod.rs
+@@ -169,7 +169,7 @@
+                 old_prefix,
+                 new_prefix,
+                 &mut file_edits,
+-            ) {
++            )? {
+                 return Ok(None);
+             }
+ 
+@@ -335,16 +335,16 @@
+         old_prefix: &str,
+         new_prefix: &str,
+         edits: &mut Vec<TextEdit>,
+-    ) -> bool {
++    ) -> Result<bool, String> {
+         let symbol_map = match self.symbol_maps.read().get(file_uri) {
+             Some(sm) => sm.clone(),
+             // No map means no offsets to mistrust: this file's namespace
+             // and use-statement edits come from scanning `content`.
+-            None => return true,
++            None => return Ok(true),
+         };
+ 
+         if !symbol_map.matches_source(content) {
+-            return false;
++            return Ok(false);
+         }
+ 
+         // The file's own imports and namespace, plus what they will read
+@@ -379,6 +379,10 @@
+                 continue;
+             };
+ 
++            if *ref_context == ClassRefContext::RuntimeControllerString {
++                return Err("Namespace edits involving runtime controller strings require a quoting-aware rewrite; no edits were produced.".into());
++            }
++
+             let source = content
+                 .get(span.start as usize..span.end as usize)
+                 .unwrap_or("");
+@@ -387,7 +391,7 @@
+             // moving the token, so re-read the span and require it to
+             // spell the name the map recorded.
+             if !source_spells_reference(source, name) {
+-                return false;
++                return Ok(false);
+             }
+ 
+             // A group-use member (`use App\Old\{Foo, Bar};`) records the
+@@ -437,7 +441,7 @@
+             });
+         }
+ 
+-        true
++        Ok(true)
+     }
+ }
+ 
+--- a/tests/integration/laravel_route_controller.rs
++++ b/tests/integration/laravel_route_controller.rs
+@@ -1564,3 +1564,235 @@
+         "URI must not classify the action: {items:?}"
+     );
+ }
++
++async fn assert_runtime_action_class(text: &str, needle: &str, declaration: &str) {
++    use crate::common::position_after;
++    let backend = create_test_backend();
++    let uri = Url::parse("file:///runtime-action-class.php").unwrap();
++    open_php(&backend, &uri, text).await;
++    let at = position_after(text, needle);
++    let expected = position_after(text, declaration);
++    let target = goto_def(&backend, &uri, at.line, at.character).await;
++    assert!(
++        matches!(target,Some(GotoDefinitionResponse::Scalar(ref l)) if l.uri==uri && l.range.start==expected),
++        "runtime class target {needle}: {target:?}"
++    );
++    let hover = backend
++        .hover(HoverParams {
++            text_document_position_params: TextDocumentPositionParams {
++                text_document: TextDocumentIdentifier { uri: uri.clone() },
++                position: at,
++            },
++            work_done_progress_params: Default::default(),
++        })
++        .await
++        .unwrap()
++        .expect("runtime class hover");
++    assert!(
++        matches!(hover.contents,HoverContents::Markup(ref m) if m.value.contains("class InvoiceController") && m.value.contains("namespace App;")),
++        "runtime class hover {hover:?}"
++    );
++}
++fn runtime_action_class_fixture(calls: &str) -> String {
++    format!(
++        "<?php\nnamespace App {{class InvoiceController {{public function __construct() {{}} public function showInvoice(): bool {{return true;}}}}}}\nnamespace App\\Other {{class InvoiceController {{public function showInvoice(): string {{return 'wrong';}}}}}}\nnamespace {{use Illuminate\\Support\\Facades\\Route as Routes;use App\\Other\\InvoiceController as InvoiceController; {calls}}}\n"
++    )
++}
++
++#[tokio::test]
++async fn action_class_definition_and_hover_use_runtime_namespace_not_php_aliases() {
++    for (call, needle) in [
++        (
++            "Routes::namespace('App')->group(fn () => Routes::get('/short', 'InvoiceController@showInvoice'));",
++            "'/short', 'In",
++        ),
++        (
++            "Routes::namespace('App')->group(fn () => Routes::get('/full', 'App\\InvoiceController@showInvoice'));",
++            "'/full', 'Ap",
++        ),
++        (
++            "Routes::get('/encoded', \"App\\\\Inv\\x6ficeController@showInvoice\");",
++            "'/encoded', \"Ap",
++        ),
++        (
++            "Routes::namespace('App')->group(fn () => Routes::match(action:'InvoiceController@showInvoice', uri:'/named', methods:['get']));",
++            "action:'In",
++        ),
++    ] {
++        assert_runtime_action_class(
++            &runtime_action_class_fixture(call),
++            needle,
++            "namespace App {",
++        )
++        .await;
++    }
++}
++
++#[tokio::test]
++async fn action_class_navigation_accepts_rooted_unknown_namespace_and_empty_method() {
++    for (call, needle) in [
++        (
++            "Routes::namespace($selected)->group(fn () => Routes::get('/rooted', '\\App\\InvoiceController@showInvoice'));",
++            "'/rooted', '\\Ap",
++        ),
++        (
++            "Routes::namespace('App')->group(fn () => Routes::get('/empty', 'InvoiceController@'));",
++            "'/empty', 'In",
++        ),
++    ] {
++        assert_runtime_action_class(
++            &runtime_action_class_fixture(call),
++            needle,
++            "namespace App {",
++        )
++        .await;
++    }
++}
++
++#[tokio::test]
++async fn action_class_references_are_class_ranges_and_not_constructor_calls() {
++    use crate::common::position_after;
++    let calls = "Routes::get('/direct', 'App\\InvoiceController@showInvoice'); Routes::namespace('App')->group(fn () => Routes::get('/short', 'InvoiceController@showInvoice')); Routes::namespace($selected)->group(fn () => Routes::get('/rooted', '\\App\\InvoiceController@showInvoice')); function instantiateController() {new \\App\\InvoiceController();}";
++    let text = runtime_action_class_fixture(calls);
++    let backend = create_test_backend();
++    let uri = Url::parse("file:///runtime-class-references.php").unwrap();
++    open_php(&backend, &uri, &text).await;
++    let at = position_after(&text, "namespace App {class ");
++    let refs = backend
++        .references(ReferenceParams {
++            text_document_position: TextDocumentPositionParams {
++                text_document: TextDocumentIdentifier { uri: uri.clone() },
++                position: at,
++            },
++            context: ReferenceContext {
++                include_declaration: true,
++            },
++            work_done_progress_params: Default::default(),
++            partial_result_params: Default::default(),
++        })
++        .await
++        .unwrap()
++        .unwrap();
++    let mut actual: Vec<_> = refs
++        .iter()
++        .map(|l| {
++            assert_eq!(l.uri, uri);
++            l.range.start
++        })
++        .collect();
++    actual.sort_by_key(|p| (p.line, p.character));
++    let mut expected: Vec<_> = [
++        "namespace App {class ",
++        "'/direct', '",
++        "'/short', '",
++        "'/rooted', '",
++        "new ",
++    ]
++    .iter()
++    .map(|n| position_after(&text, n))
++    .collect();
++    expected.sort_by_key(|p| (p.line, p.character));
++    assert_eq!(actual, expected, "all class references, no method suffixes");
++    let ctor = position_after(&text, "public function ");
++    let item = backend
++        .prepare_call_hierarchy(CallHierarchyPrepareParams {
++            text_document_position_params: TextDocumentPositionParams {
++                text_document: TextDocumentIdentifier { uri: uri.clone() },
++                position: ctor,
++            },
++            work_done_progress_params: Default::default(),
++        })
++        .await
++        .unwrap()
++        .unwrap()
++        .remove(0);
++    let callers = backend
++        .incoming_calls(CallHierarchyIncomingCallsParams {
++            item,
++            work_done_progress_params: Default::default(),
++            partial_result_params: Default::default(),
++        })
++        .await
++        .unwrap()
++        .unwrap_or_default();
++    assert_eq!(
++        callers.len(),
++        1,
++        "runtime strings must not instantiate controllers: {callers:?}"
++    );
++    assert_eq!(callers[0].from.name, "instantiateController");
++}
++
++#[tokio::test]
++async fn runtime_action_classes_refuse_unimplemented_class_rewrites_from_all_entry_points() {
++    use crate::common::position_after;
++    let text = runtime_action_class_fixture(
++        "Routes::get('/known', 'App\\InvoiceController@showInvoice');",
++    );
++    for (needle, new_name) in [
++        ("'/known', 'Ap", "Renamed"),
++        ("namespace App {class ", "Renamed"),
++        ("namespace App {class ", "Moved\\Renamed"),
++    ] {
++        let backend = create_test_backend();
++        let uri = Url::parse("file:///runtime-class-readonly.php").unwrap();
++        open_php(&backend, &uri, &text).await;
++        let at = position_after(&text, needle);
++        let result = backend
++            .rename(RenameParams {
++                text_document_position: TextDocumentPositionParams {
++                    text_document: TextDocumentIdentifier { uri },
++                    position: at,
++                },
++                new_name: new_name.into(),
++                work_done_progress_params: Default::default(),
++            })
++            .await;
++        assert!(
++            matches!(result,Err(ref e) if e.message.to_lowercase().contains("runtime controller")),
++            "unsupported runtime class rewrite must return a reason, no edit: {needle}, {result:?}"
++        );
++    }
++}
++
++#[tokio::test]
++async fn namespaces_with_runtime_action_class_references_refuse_partial_namespace_edits() {
++    use crate::common::position_after;
++    let text = runtime_action_class_fixture(
++        "Routes::get('/known', 'App\\InvoiceController@showInvoice');",
++    );
++    let backend = create_test_backend();
++    let uri = Url::parse("file:///runtime-class-namespace.php").unwrap();
++    open_php(&backend, &uri, &text).await;
++    let at = position_after(&text, "namespace A");
++    let result = backend
++        .rename(RenameParams {
++            text_document_position: TextDocumentPositionParams {
++                text_document: TextDocumentIdentifier { uri },
++                position: at,
++            },
++            new_name: "Billing".into(),
++            work_done_progress_params: Default::default(),
++        })
++        .await;
++    assert!(
++        matches!(result,Err(ref e) if e.message.to_lowercase().contains("runtime controller")),
++        "namespace edit must be refused rather than half-renaming runtime strings: {result:?}"
++    );
++}
++
++#[test]
++fn runtime_controller_service_ids_do_not_create_unknown_class_errors() {
++    use crate::common::collect_diagnostics_with;
++    let backend = create_test_backend();
++    let text = "<?php use Illuminate\\Support\\Facades\\Route; Route::get('/service', 'ServiceId@showInvoice');";
++    let diags = collect_diagnostics_with(
++        &backend,
++        text,
++        phpantom_lsp::Backend::collect_unknown_class_diagnostics,
++    );
++    assert!(
++        diags.is_empty(),
++        "container IDs may be runtime controller targets: {diags:?}"
++    );
++}
+--- a/docs/CHANGELOG.md
++++ b/docs/CHANGELOG.md
+@@ -14,6 +14,8 @@
+ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+ 
+ ## [Unreleased]
++
++- **Navigate runtime controller class strings.** Laravel `Controller@method` class parts support definition, hover and references using group namespaces independently of PHP imports. These runtime references do not count as constructor calls or unknown-class diagnostics. Class and namespace edits involving them refuse partial rewrites until a dedicated quoting-aware plan exists. Contributed by @thinkycz.
+ 
+ - **Keep method suggestions out of controller class names.** Completion before `@` in a Laravel string action no longer offers methods from an enclosing controller group. Bare action and method-suffix completion remain available. Contributed by @thinkycz.
+ 

@@ -1,5 +1,7 @@
 import { reviewedRedo as redo, reviewedUndo as undo } from "@/editor/core/cm/reviewedHistory";
-import { maybeEditorService } from "@/workbench/contributions";
+import { readClipboardPlainText } from "@/platform/clipboard";
+import { selectReadingPane } from "@/ui";
+import { maybeEditorService, runUndoHandlers } from "@/workbench/contributions";
 import { EditorView } from "@codemirror/view";
 
 /**
@@ -23,9 +25,11 @@ export function editCommand(command: "undo" | "redo" | "cut" | "copy" | "paste" 
         (command === "undo" ? undo : redo)(view);
         return;
       }
+      if (focused instanceof Element && runUndoHandlers(command, focused)) return;
     }
-    if (command === "paste" && navigator.clipboard?.readText) {
-      void navigator.clipboard.readText().then((text) => document.execCommand("insertText", false, text));
+    if (command === "selectAll" && selectReadingPane(document.activeElement)) return;
+    if (command === "paste") {
+      void readClipboardPlainText().then((text) => document.execCommand("insertText", false, text));
       return;
     }
     document.execCommand(command);

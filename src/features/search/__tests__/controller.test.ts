@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import type { FileMatches, SearchQuery } from "@/platform/ipc";
 import { SeController, type SeDeps, type SeSnapshot } from "../everywhere/controller";
+import { buildRows } from "../everywhere/model";
 
 function deferred<T>() {
   let resolve!: (v: T) => void;
@@ -80,6 +81,81 @@ describe("SeController", () => {
     c.run({ query: "sym", tab: "symbols", includeNonProject: false, extra: {} });
     c.run({ query: "sym2", tab: "symbols", includeNonProject: false, extra: {} });
     expect(deps.cancel).toHaveBeenCalled();
+  });
+
+  it("lists directories with the files, by score, files first on a tie", async () => {
+    const { c, last } = setup({
+      findFiles: async () => [
+        { ...fm("src/util.ts"), score: 5 },
+        { ...fm("lib/utils/a.ts"), score: 2 },
+      ],
+      findDirs: async () => [
+        { path: "/p/src/utils", relPath: "src/utils/", score: 5, indices: [4, 5, 6, 7] },
+        { path: "/p/lib/utils", relPath: "lib/utils/", score: 3, indices: [] },
+      ],
+    });
+    c.run({ query: "util", tab: "files", includeNonProject: false, extra: {} });
+    await flush();
+    const items = last().sections.get("files")!.items;
+    expect(items.map((i) => i.key)).toEqual([
+      "f:/p/src/util.ts",
+      "d:/p/src/utils",
+      "d:/p/lib/utils",
+      "f:/p/lib/utils/a.ts",
+    ]);
+    expect(items[1]).toMatchObject({
+      kind: "file",
+      folder: true,
+      name: "utils",
+      dir: "src",
+      nameIndices: [0, 1, 2, 3],
+    });
+
+    // A `File.kt:42` query asks for a file.
+    c.run({ query: "util:3", tab: "files", includeNonProject: false, extra: {} });
+    await flush();
+    expect(
+      last()
+        .sections.get("files")!
+        .items.every((i) => !("folder" in i) || !i.folder),
+    ).toBe(true);
+  });
+
+  it("lists scratch files with the indexed files, ranked by name", async () => {
+    const outsideFiles = vi.fn(async () => [
+      { path: "/data/scratches/scratch_3.md", relPath: "Scratches/scratch_3.md" },
+      { path: "/data/scratches/notes.txt", relPath: "Scratches/notes.txt" },
+    ]);
+    const { c, last } = setup({
+      findFiles: async () => [{ ...fm("tests/test_scratch_dir.py"), score: (1 << 20) + 50 }],
+      outsideFiles,
+      inFileSet: (set, path) => path.startsWith("/p/") && (set === "all" || set === "test"),
+    });
+    c.run({ query: "scratch_3", tab: "files", includeNonProject: false, extra: {} });
+    await flush();
+    expect(last().sections.get("files")!.items[0]).toMatchObject({
+      key: "f:/data/scratches/scratch_3.md",
+      name: "scratch_3.md",
+      dir: "Scratches",
+      nameIndices: [0, 1, 2, 3, 4, 5, 6, 7, 8],
+    });
+
+    c.run({ query: "scratch", tab: "files", includeNonProject: false, extra: {} });
+    await flush();
+    expect(
+      last()
+        .sections.get("files")!
+        .items.map((i) => i.key),
+    ).toEqual(["f:/data/scratches/scratch_3.md", "f:/p/tests/test_scratch_dir.py"]);
+
+    // Production / test file sets are project scopes.
+    c.run({ query: "scratch", tab: "files", includeNonProject: false, fileSet: "test", extra: {} });
+    await flush();
+    expect(
+      last()
+        .sections.get("files")!
+        .items.map((i) => i.key),
+    ).not.toContain("f:/data/scratches/scratch_3.md");
   });
 
   it("parses File.kt:42 and opens files at the line", async () => {
@@ -193,5 +269,31 @@ describe("SeController", () => {
     c.run({ query: "needle", tab: "text", includeNonProject: false, fileSet: "test", extra: {} });
     await flush();
     expect(searchText.mock.calls.at(-1)![1].scope).toEqual({ kind: "fileSet", set: "test" });
+  });
+});
+
+describe("Endpoints in the All tab", () => {
+  it("answers a request path with the controller method that serves it", async () => {
+    const routes = [
+      {
+        method: "POST",
+        url: "/deeplink/menu/search",
+        controller: "DeepLinkController",
+        methodName: "searchMenus",
+        path: "/p/tg-tenant-server/src/main/java/DeepLinkController.java",
+        rel: "tg-tenant-server/src/main/java/DeepLinkController.java",
+        line: 45,
+        col: 4,
+      },
+    ];
+    const { c, last } = setup({ root: () => "/p", routes: async () => routes });
+    c.run({ query: "/tg-tenant/deeplink/menu/search", tab: "all", includeNonProject: false, extra: {} });
+    await flush();
+    const section = last().sections.get("endpoints");
+    expect(section?.items).toHaveLength(1);
+    expect(section?.items[0]).toMatchObject({ kind: "symbol", container: "DeepLinkController.searchMenus", line: 45 });
+    // The All tab mixes its sections into one list; an endpoint has to be in it.
+    const rows = buildRows(last().sections, { headers: false, mix: "/tg-tenant/deeplink/menu/search" });
+    expect(rows.map((r) => (r.kind === "symbol" ? r.container : r.kind))).toContain("DeepLinkController.searchMenus");
   });
 });

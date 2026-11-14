@@ -30,6 +30,7 @@ impl Fixture {
         let host = Host::new(HostConfig {
             config_dir: base.join("config"),
             data_dir: base.join("data"),
+            local_data_dir: base.join("data"),
             languages: Arc::new(ide_language::LanguageRegistry::load(None).unwrap()),
             syntax: Arc::default(),
             sink_for: Box::new(move |_| {
@@ -175,8 +176,11 @@ async fn binary_and_virtual_documents_are_skipped() {
     std::fs::write(&path, b"\0\0binary payload").unwrap();
     let binary = f.open(&path).await;
     assert!(binary.read_only);
-    let virtual_doc =
-        f.project.documents.open_virtual("test://virtual", ide_core::LanguageId::plain_text(), "virtual").unwrap();
+    let virtual_doc = f
+        .project
+        .documents
+        .open_virtual("test://virtual", ide_core::LanguageId::plain_text(), "virtual", "utf-8", false, false)
+        .unwrap();
     std::fs::write(&path, "now ordinary text").unwrap();
     f.events.lock().clear();
     f.sync().await;

@@ -15,6 +15,75 @@ slice, commit and push it, and retain only the latest generated app. Native UI
 cases remain deferred/unverified; earlier native-first blocking checkpoints are
 historical and no longer prevent independent implementation.
 
+Upstream merge (2026-11-14, verified local delivery):
+merge `l0ng-ai/openidea` through `a46f187428ff7dea57990403d4146000cef1d0fa`
+from merge base `041e7210`:1,643 upstream commits,4,149 changed paths and63
+resolved conflicts. OpenStorm0.1.88 preserves PHPantom148, guarded PHP edits,
+source freshness, reviewed undo, revision-bound save-conflict consent, separate
+application data, branding/attribution and disabled automatic updates. Project
+`.openidea` compatibility remains. Minimum packaged macOS follows upstream:13.0.
+The upstream-only nightly helper preserves its input artifact policy; OpenStorm's
+local configuration keeps updater artifacts/endpoints disabled.
+
+Integration corrections retain both upstream and fork behavior: generic/agent
+workspace edits reject reviewed-guard bypass and preflight all versions and disk
+fingerprints; both watcher notification paths preserve owned PHP write echoes.
+PHP navigation remains authoritative over unrelated bare-name index matches;
+C# metadata URIs normalize before deserialization. Repeated progress begins share
+one task, while a new operation retires its predecessor and cancellation handle.
+Reviewed edits survive detached editor attachments and moves during acquisition.
+Document read/catalog/mode loading overlap, preserving upstream's50ms test budget.
+PHP detection/guard capture/sealing use the blocking pool; the unchanged2s async
+watchdog covers six request paths for both PHP and plain text. Whole-tree Git
+stashes retain Git's internal magic pathspecs; selected paths stay literal.
+Synthetic install-test keys cannot collide with real installer tests.
+
+Upstream's Laravel LSP requires explicit opt-in through existing Language Servers
+settings. PHPantom and the Intelephense/Phpactor alternatives retain their order.
+PHPStan-on-save is default-off behind an existing PHP-page toggle; no checker
+command is planned without opt-in. Dynamic server settings remain editable despite
+the new default entry; arguments alone do not enable it, invalid values do not
+write, and reset/reload restore the default. Both text catalogs and native Laravel
+menu labels are retained. No new framework execution is enabled by default.
+
+Source verification passes: Rust workspace4,710 tests/164ignored; all-target
+Clippy with warnings denied; generated bindings; frontend type checking, lint,
+formatting and Knip; frontend11,883 tests/6skipped across921 files; production
+bundle plus Safari16 syntax/startup-API checks; Rust formatting. Lint retains9
+incoming warnings; bundle chunk warnings remain. Eight packaging/retention Python
+regressions pass. A CLI stale-socket test failed once with AddrInUse, then passed50
+full CLI repetition runs and subsequent workspace runs; its cause is unconfirmed.
+The panic-record test now captures its named worker without parallel-test overwrite.
+Database tunnel tests mock the typed command and check arguments through real IPC
+result unwrapping, avoiding native invocation/unhandled rejections in jsdom.
+
+The user approved importing the exact upstream `.github/tool-versions.env` pins
+and the new index/web tests' own synthetic environment fixtures. The pin file is
+byte-identical to the approved commit and is the only changed environment file;
+personal environment files are untouched. Native UI acceptance remains explicitly
+user-skipped; inherited capabilities are not newly accepted roadmap areas. The
+ledger remains67 partial/2 user-deferred. The unfinished slice95 source is preserved
+separately and is not part of this merge release. Real PHPantom scenarios pass9 host/edit and41 client tests; fixture originals
+remain unchanged, and the completed suite leaves no engine process. The Apple
+Silicon development bundle is `artifacts/batches/0.1.88/OpenStorm.app`, identifier
+`cz.thinky.openstorm`, ad-hoc signed and strict/deep signature verified. Its engine
+checksum matches provenance. Executable SHA-256:
+`2c3844de9063fa74b6256e7a108414f58a34accf5195e1434b9de5ba6b923efb`.
+Only0.1.88 remains archived: the inactive0.1.87 app was pruned after verification,
+and Cargo cleaned23,710 files/26.3GiB from the owned build target. The earlier
+inactive PHPantom compiler cache cleanup removed4,025 files/about1.2GiB.
+Sources, fixtures, receipts, engine148, evaluation114 and Workbench are preserved.
+The app was not launched/installed/notarized; native checks remain user-skipped.
+Commit/push identity is recorded by branch history and the remote-ref receipt.
+
+Evidence: `artifacts/checks/upstream-a46f1874-gates.json`,
+`upstream-a46f1874-workspace-totals.json`, the stage/failed-attempt logs,
+`upstream-a46f1874-package-tests.log`, `upstream-a46f1874-client-host.json` and
+`upstream-a46f1874-cli-reproduction.log`, `upstream-a46f1874-package.log`,
+`artifacts/batches/0.1.88/{build-receipt,retention}.json` and the final source binding
+receipt. Whitespace warnings are limited to four byte-identical upstream fixture/patch
+files; the classification receipt records them.
+
 Build retention slice (2026-11-11, verified local cleanup): user now requires
 small committed/pushed slices and only the latest generated build. Run
 `python3 scripts/prune-openstorm-builds.py` to review, then add `--apply` after

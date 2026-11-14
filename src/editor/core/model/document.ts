@@ -36,6 +36,7 @@ import {
   loadSupport,
   loadedSupport,
   commentTokens,
+  uiModeForPath,
 } from "../cm/languages";
 import { foldEffect } from "@codemirror/language";
 import { backendFolds, setBackendFolds } from "../cm/folding";
@@ -63,6 +64,8 @@ import type { EditorSlot } from "./slot";
 import { t, tx } from "@/platform/i18n";
 import { IpcError, isCancelled } from "@/platform/ipc";
 import { ask } from "@/workbench/messages";
+import { logError } from "@/platform/errorLog";
+import { WorkspaceHistory } from "./workspaceHistory";
 
 export type Banner = "binary" | "tooLarge" | "readOnly" | "library" | null;
 
@@ -71,6 +74,9 @@ export interface DocAttachmentTarget {
   /** Applies changes that are already in the model (another view / the backend). */
   applyExternal(changes: ChangeSet, annotations: Annotation<unknown>[]): void;
   applyReviewed?(changes: ChangeSet, history: ReviewedEditHistory, primary: boolean): void;
+  /** Secondary views that share the text tab's undo history hand it over as tabs open/close. */
+  historyState?(): EditorState | null;
+  adoptHistory?(state: EditorState): void;
 }
 
 export interface DocMeta {
@@ -79,9 +85,12 @@ export interface DocMeta {
   language: string;
   uiMode: string | null;
   encoding: string;
+  hasBom: boolean;
   lineEnding: LineEnding;
   readOnly: boolean;
   dirty: boolean;
+  /** "Reload with Encoding" can re-decode this document's source bytes. */
+  canReloadEncoding: boolean;
   banner: Banner;
   indent: { tabSize: number; insertSpaces: boolean };
 }
@@ -257,10 +266,12 @@ export class DocModel {
       language: info.language,
       uiMode: uiMode ?? this.desc?.name ?? null,
       encoding: info.encoding,
+      hasBom: info.hasBom,
       lineEnding: info.lineEnding,
       // Library sources (External Libraries) open read-only, like IDEA's.
       readOnly: info.readOnly || (!this.virtual && isLibraryPath(info.path)),
       dirty: info.dirty,
+      canReloadEncoding: info.canReloadEncoding,
       banner: bannerFor(info),
       indent: { tabSize: 4, insertSpaces: true },
     };
@@ -275,14 +286,30 @@ export class DocModel {
         snapshot: () => manager.backend.snapshot(this.doc),
       },
       {
-        applyRemote: (cs, history) => this.applyRemote(cs, history),
-        onDiscarded: () =>
+        applyRemote: (cs, grouped, history) => this.applyRemote(cs, grouped, history),
+        onLocalCommitted: (baseVersion, version, changes) => {
+          const eventChanges: Array<{ from: number; to: number; insert: string }> = [];
+          changes.iterChanges((from, to, _fromB, _toB, inserted) => {
+            eventChanges.push({ from, to, insert: inserted.toString() });
+          });
+          _emitEditorEvent({
+            type: "docChanged",
+            doc: this.doc,
+            path: this.path,
+            baseVersion,
+            version,
+            changes: eventChanges,
+          });
+        },
+        onDiscarded: (reason) => {
+          logError(`document ${this.path}: unsaved edits replaced by the file's content`, reason);
           manager.notify({
             level: "warning",
             title: "Editor resynchronised",
             body: tx`Some unsaved edits to ${this.path} could not be applied and were replaced by the file's current content.`,
-          }),
-        onError: (e) => console.warn(`document ${this.path}: sync error`, e),
+          });
+        },
+        onError: (e) => logError(`document ${this.path}: sync error`, e),
       },
       manager.scheduler,
     );
@@ -340,6 +367,8 @@ export class DocModel {
   }
 
   removeSlot(slot: EditorSlot) {
+    if (this.slots.size === 1)
+      for (const attachment of this.attachments) attachment.adoptHistory?.(slot.currentState());
     this.slots.delete(slot);
     if (this.lastFocused === slot) this.lastFocused = null;
     if (!this.inUse()) this.manager.release(this);
@@ -390,16 +419,16 @@ export class DocModel {
     });
   }
 
-  private applyRemote(cs: ChangeSet, history?: ReviewedEditHistory | null) {
+  private applyRemote(cs: ChangeSet, grouped = false, history?: ReviewedEditHistory | null) {
     this.modified.map(cs);
     this.changeCounter++;
     const primary = this.primarySlot();
     for (const s of this.slots) {
       if (history) s.applyReviewed(cs, history, true);
-      else s.applyExternal(cs, [remoteChange.of(true), Transaction.addToHistory.of(s === primary)]);
+      else s.applyExternal(cs, [remoteChange.of(true), Transaction.addToHistory.of(!grouped && s === primary)]);
     }
     // Without a tab, the first attached view keeps backend edits (Replace in Files…) undoable.
-    let first = !primary;
+    let first = !grouped && !primary;
     for (const a of this.attachments) {
       if (history && a.applyReviewed) a.applyReviewed(cs, history, true);
       else a.applyExternal(cs, [remoteChange.of(true), Transaction.addToHistory.of(first && !history)]);
@@ -440,7 +469,7 @@ export class DocModel {
 
   /** Per-file indentation chosen from the status bar; wins over settings until the file is closed. */
   indentOverride: { tabSize: number; insertSpaces: boolean } | null = null;
-  /** Indentation detected in the file's text at open time. */
+  /** Indentation detected in the file's text at open time and after Reformat Code. */
   detectedIndent: { insertSpaces: boolean; size?: number } | null = null;
   /** Last tree-sitter highlighting, for slots opened before the next refresh. */
   private highlights: { counter: number; value: SyntaxHighlights } | null = null;
@@ -451,6 +480,30 @@ export class DocModel {
 
   effectiveIndent() {
     return this.indentOverride ?? effectiveIndent(this.settings(), this.info, this.editorconfig, this.detectedIndent);
+  }
+
+  /**
+   * Indentation explicit reformat requests use (`formatIndentFacet`): the Code Style
+   * (EditorConfig included) without the file's detected indents, as in IDEA, where
+   * detection only affects editing. Otherwise a file indented differently from the
+   * Code Style reformats to its own indent and other files to the Code Style's.
+   * An indent chosen for this file in the status bar still applies.
+   */
+  formatIndent() {
+    return this.indentOverride ?? effectiveIndent(this.settings(), this.info, this.editorconfig, null);
+  }
+
+  /**
+   * Detects the indents again after Reformat Code rewrote them: tabs written by
+   * the formatter then render at the Code Style tab size and new lines indent
+   * like them, instead of following the indents detected at open time.
+   */
+  redetectIndent() {
+    const detected = detectIndent(this.sync.localText.sliceString(0, 200_000));
+    const current = this.detectedIndent;
+    if (detected?.insertSpaces === current?.insertSpaces && detected?.size === current?.size) return;
+    this.detectedIndent = detected;
+    this.applySettings();
   }
 
   /** Soft wraps toggled for this file (wins over settings until the file is closed). */
@@ -466,6 +519,18 @@ export class DocModel {
     this.applySettings();
   }
 
+  /** Rendered doc comments toggled for this file (wins over settings until the file is closed). */
+  renderedDocsOverride: boolean | null = null;
+
+  renderedDocsOn(): boolean {
+    return this.renderedDocsOverride ?? prefsOf(this.settings()).appearance.renderDocComments;
+  }
+
+  toggleRenderedDocs() {
+    this.renderedDocsOverride = !this.renderedDocsOn();
+    this.applySettings();
+  }
+
   setIndent(indent: { tabSize: number; insertSpaces: boolean }) {
     this.indentOverride = indent;
     this.applySettings();
@@ -477,7 +542,7 @@ export class DocModel {
     const indent = this.effectiveIndent();
     this.setMeta({ indent: { tabSize: indent.tabSize, insertSpaces: indent.insertSpaces } });
     const effects = [
-      compartments.indent.reconfigure(indentExtension(indent)),
+      compartments.indent.reconfigure(indentExtension(indent, this.formatIndent())),
       compartments.wrap.reconfigure(wrapExtension(editor, this.path, this.softWrapOverride)),
       compartments.sticky.reconfigure(stickyExtension(editor)),
       compartments.font.reconfigure(fontExtension(editor)),
@@ -494,6 +559,7 @@ export class DocModel {
           info: this.info,
           readOnly: this.meta.readOnly,
           wrapOverride: this.softWrapOverride,
+          renderedDocsOverride: this.renderedDocsOverride,
         }),
       ),
     ];
@@ -529,6 +595,7 @@ export class DocModel {
             info: this.info,
             readOnly,
             wrapOverride: this.softWrapOverride,
+            renderedDocsOverride: this.renderedDocsOverride,
           }),
         ),
       ]);
@@ -557,8 +624,8 @@ export class DocModel {
     const [folds, outline, highlights] = await Promise.allSettled([
       backend.folding(this.doc),
       backend.outline(this.doc),
-      // Without a CodeMirror mode, colours come from the grammar's tree-sitter query.
-      this.desc ? null : backend.highlights(this.doc),
+      // Kotlin's stream mode lacks declaration categories; the grammar supplements it.
+      !this.desc || this.meta.language === "kotlin" ? backend.highlights(this.doc) : null,
     ]);
     if (this.closed) return;
     if (counter !== this.changeCounter) {
@@ -615,10 +682,9 @@ export class DocModel {
 
   // --- saving -----------------------------------------------------------------
 
-  save(reason: "explicit" | "auto"): Promise<void> {
+  save(reason: "explicit" | "auto" | "exact"): Promise<void> {
     const run = async () => {
-      if (this.closed || this.meta.readOnly) return;
-      if (reason === "auto" && !this.meta.dirty) return;
+      if (this.closed || this.meta.readOnly || !this.meta.dirty) return;
       const slot = this.primarySlot();
       if (reason === "explicit") {
         for (const p of _saveParticipants()) {
@@ -630,7 +696,7 @@ export class DocModel {
         }
       }
       const files: FileSettings | undefined = this.manager.settings()?.files;
-      if (slot && !this.closed) {
+      if (slot && !this.closed && reason !== "exact") {
         const state = slot.currentState();
         const protectLines = new Set<number>();
         // Like IDEA's "keep trailing spaces on caret line": never strip under a visible caret.
@@ -704,6 +770,12 @@ export interface ManagerHost {
 }
 
 export class DocumentManager {
+  readonly workspaceHistory = new WorkspaceHistory(
+    async () => {
+      await Promise.all([...this.byPath.values()].map((m) => m.sync.whenIdle()));
+    },
+    (n) => this.notify(n),
+  );
   readonly byPath = new Map<string, DocModel>();
   readonly byId = new Map<DocId, DocModel>();
   private opening = new Map<string, Promise<DocModel>>();
@@ -735,6 +807,7 @@ export class DocumentManager {
 
   start() {
     this.disposers.push(
+      this.workspaceHistory.start(),
       this.backend.onMoved?.(({ doc, from, to }) => {
         const model = this.byId.get(doc) ?? this.pendingModels.get(doc);
         if (model && model.path !== from) return;
@@ -825,9 +898,17 @@ export class DocumentManager {
     if (!p) {
       const generation = this.generation;
       p = (async () => {
-        await loadLanguageInfos(this.backend);
-        if (generation !== this.generation) throw new IpcError({ kind: "cancelled", message: "Project changed" });
-        let info = isVirtualUri(path) ? await this.backend.openVirtual(path) : await this.backend.open(path);
+        const catalog = loadLanguageInfos(this.backend);
+        void catalog
+          .then(() => {
+            const desc = findLanguageDescription(uiModeForPath(path) ?? null, path);
+            if (desc) return loadSupport(desc);
+          })
+          .catch(() => {});
+        let [info] = await Promise.all([
+          isVirtualUri(path) ? this.backend.openVirtual(path) : this.backend.open(path),
+          catalog,
+        ]);
         // A move can precede this open reply. Its paired edit may also already
         // have arrived, so adopt one current backend snapshot before building the model.
         if (this.movedPaths.has(info.id)) info = await this.backend.snapshot(info.id);
@@ -914,7 +995,7 @@ export class DocumentManager {
     for (const m of this.byPath.values()) m.applySettings();
   }
 
-  /** Saves every document; failures are notified, and an explicit Save All also rejects with them. */
+  /** Saves dirty documents; failures are notified, and an explicit Save All also rejects with them. */
   async saveAll(reason: "explicit" | "auto") {
     // Serialize overwrite decisions; cancellation stops this Save All immediately.
     const errors: unknown[] = [];

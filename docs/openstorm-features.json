@@ -1001,10 +1001,34 @@
   ],
   "source_sha256": "1099a56789f19e555b26336df06f3aa756b52ec9e3f08d17a09ab10195c133fa",
   "upstream_sync": {
-    "commit": "200ed6a52835e9d66923a2b4f5ad53f420afd24c",
-    "commits_since_base": 69,
-    "source_version": "0.1.23",
-    "native_acceptance": "0.1.23 conflict/rename/import native checks and corrected 0.1.24 saved-session/task-cleanup/restart/quit passed on disposable fixture"
+    "commit": "a46f187428ff7dea57990403d4146000cef1d0fa",
+    "merge_base": "041e72106bde0124c6447e515b9bfd798bdd79ca",
+    "commits_since_base": 1643,
+    "source_version": "0.1.44",
+    "openstorm_version": "0.1.88",
+    "state": "merged and verified locally; branch history and remote ref record commit/push",
+    "native_acceptance": "Explicitly user-skipped; inherited upstream features are not newly accepted OpenStorm areas",
+    "evidence": "docs/OPENSTORM.md: upstream merge 2026-11-14",
+    "validation": {
+      "rust_passed": 4710,
+      "rust_ignored": 164,
+      "frontend_passed": 11883,
+      "frontend_skipped": 6,
+      "phpantom_host_passed": 9,
+      "phpantom_client_passed": 41,
+      "native": "user-skipped"
+    },
+    "local_delivery": {
+      "bundle": "artifacts/batches/0.1.88/OpenStorm.app",
+      "profile": "development",
+      "architecture": "arm64",
+      "signature": "ad-hoc; strict/deep verified",
+      "executable_sha256": "2c3844de9063fa74b6256e7a108414f58a34accf5195e1434b9de5ba6b923efb",
+      "latest_only": true,
+      "compiler_cache": "owned artifacts/build cleaned; 23710 files/26.3GiB",
+      "installed": false,
+      "notarized": false
+    }
   },
   "laravel_navigation_batch": {
     "version": "0.1.25",

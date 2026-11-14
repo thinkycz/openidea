@@ -13,6 +13,7 @@ import {
   onIdeEvent,
   type DocId,
   type ReviewedEditHistory,
+  type DocumentEncoding,
   type DocumentInfo,
   type FoldRange,
   type LanguageInfo_Serialize,
@@ -22,6 +23,7 @@ import {
   type SyntaxHighlights,
   type TextChange,
 } from "@/platform/ipc";
+import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 
 import { EditorState } from "@codemirror/state";
 import { customRegions } from "./cm/regions";
@@ -29,6 +31,7 @@ import { customRegions } from "./cm/regions";
 export type LanguageInfo = LanguageInfo_Serialize;
 
 export interface DocPatchedEvent {
+  workspaceEdit?: boolean;
   doc: DocId;
   baseVersion: number;
   version: number;
@@ -53,8 +56,10 @@ export interface DocBackend {
   syncFromDisk?(): Promise<void>;
   snapshot(doc: DocId): Promise<DocumentInfo>;
   setLineEnding(doc: DocId, lineEnding: LineEnding): Promise<void>;
-  /** "Reload with Encoding" (`reload`) or "Convert to Encoding"; resolves to the new encoding. */
-  setEncoding(doc: DocId, encoding: string, reload: boolean): Promise<string>;
+  /** "Reload with Encoding" (`reload`) or "Convert to Encoding"; resolves to the new encoding and BOM state. */
+  setEncoding(doc: DocId, encoding: string, reload: boolean): Promise<DocumentEncoding>;
+  /** Adds or removes the BOM on a UTF-8 document; the change is written on save. */
+  setBom(doc: DocId, hasBom: boolean): Promise<DocumentEncoding>;
   outline(doc: DocId): Promise<OutlineItem[]>;
   folding(doc: DocId): Promise<FoldRange[]>;
   /** Tree-sitter highlighting, for languages without a CodeMirror mode. */
@@ -68,6 +73,11 @@ export interface DocBackend {
   onDirty(handler: (e: { doc: DocId; dirty: boolean }) => void): () => void;
   /** Files changed on disk (used to refresh nothing but closed-file state). */
   onFsChanged?(handler: (e: { removed: string[] }) => void): () => void;
+  /**
+   * Every OpenIDEA window lost focus to another application. Also seen while focus is in a frame
+   * (a plugin's web view), which hides the window's own `blur`.
+   */
+  onApplicationDeactivated?(handler: () => void): () => void;
   /**
    * An open document's language changed (Settings › File Types, Override File
    * Type), or its own mode (`DocumentInfo.uiMode`).
@@ -88,6 +98,7 @@ export const ipcBackend: DocBackend = {
   snapshot: (doc) => call(commands.docSnapshot(doc)),
   setLineEnding: async (doc, le) => void (await call(commands.docSetLineEnding(doc, le))),
   setEncoding: (doc, encoding, reload) => call(commands.docSetEncoding(doc, encoding, reload)),
+  setBom: (doc, hasBom) => call(commands.docSetBom(doc, hasBom)),
   outline: (doc) => call(commands.docOutline(doc)),
   folding: (doc) => call(commands.docFolding(doc)),
   highlights: (doc) => call(commands.docHighlights(doc)),
@@ -98,6 +109,11 @@ export const ipcBackend: DocBackend = {
   onPatched: (h) => onIdeEvent("docPatched", (e) => h(e)),
   onDirty: (h) => onIdeEvent("docDirty", (e) => h(e)),
   onFsChanged: (h) => onIdeEvent("fsChanged", (e) => h(e)),
+  onApplicationDeactivated: (h) => {
+    if (!isTauri()) return () => {};
+    const listener = getCurrentWebviewWindow().listen("ide://application-deactivated", () => h());
+    return () => void listener.then((unlisten) => unlisten());
+  },
   onLanguage: (h) => onIdeEvent("docLanguage", (e) => h(e)),
 };
 
@@ -109,9 +125,11 @@ interface MemDoc {
   path: string;
   text: string;
   saved: string;
+  savedBom: boolean;
   version: number;
   refs: number;
   lineEnding: LineEnding;
+  hasBom: boolean;
   readOnly: boolean;
   language: string;
   uiMode?: string;
@@ -119,7 +137,11 @@ interface MemDoc {
 }
 
 const EXT_LANG: Record<string, string> = {
+  http: "http",
+  rest: "http",
   ts: "typescript",
+  mts: "typescript",
+  cts: "typescript",
   tsx: "typescriptreact",
   js: "javascript",
   jsx: "javascriptreact",
@@ -127,11 +149,15 @@ const EXT_LANG: Record<string, string> = {
   kt: "kotlin",
   kts: "kotlin",
   java: "java",
+  cs: "csharp",
   py: "python",
   gd: "gdscript",
   go: "go",
   json: "json",
   md: "markdown",
+  adoc: "asciidoc",
+  asciidoc: "asciidoc",
+  rst: "restructuredtext",
   css: "css",
   html: "html",
   yml: "yaml",
@@ -153,7 +179,7 @@ const MEM_LANGUAGES: LanguageInfo[] = [
   {
     id: "typescript",
     name: "TypeScript",
-    extensions: ["ts"],
+    extensions: ["ts", "mts", "cts"],
     uiMode: "TypeScript",
     lineComment: "//",
     blockComment: ["/*", "*/"],
@@ -230,6 +256,24 @@ const MEM_LANGUAGES: LanguageInfo[] = [
     lineComment: null,
     blockComment: null,
     indent: { tabSize: 2, insertSpaces: true },
+  },
+  {
+    id: "asciidoc",
+    name: "AsciiDoc",
+    extensions: ["adoc", "asciidoc"],
+    uiMode: "AsciiDoc",
+    lineComment: "//",
+    blockComment: null,
+    indent: { tabSize: 2, insertSpaces: true },
+  },
+  {
+    id: "restructuredtext",
+    name: "reStructuredText",
+    extensions: ["rst"],
+    uiMode: "reStructuredText",
+    lineComment: "..",
+    blockComment: null,
+    indent: { tabSize: 3, insertSpaces: true },
   },
   {
     id: "markdown",
@@ -339,7 +383,7 @@ export interface MemoryBackend extends DocBackend {
   /** Test/dev hook: preserve an open document while changing its disk path. */
   move(doc: DocId, to: string): void;
   /** Test/dev hook: apply a backend-originated change and emit `docPatched`. */
-  patch(doc: DocId, changes: TextChange[], history?: ReviewedEditHistory): void;
+  patch(doc: DocId, changes: TextChange[], workspaceEdit?: boolean, history?: ReviewedEditHistory): void;
   /** Seed file contents before opening. */
   files: Map<string, string>;
   docs: Map<DocId, MemDoc>;
@@ -355,6 +399,7 @@ export function createMemoryBackend(files: Record<string, string> = {}): MemoryB
   const dirtyHandlers = new Set<(e: { doc: DocId; dirty: boolean }) => void>();
   let nextId = 1;
   const store = new Map(Object.entries(files));
+  const savedBoms = new Map<string, boolean>();
 
   const info = (d: MemDoc): DocumentInfo => ({
     id: d.id,
@@ -363,25 +408,35 @@ export function createMemoryBackend(files: Record<string, string> = {}): MemoryB
     version: d.version,
     language: d.language,
     encoding: "UTF-8",
+    hasBom: d.hasBom,
     lineEnding: d.lineEnding,
     readOnly: d.readOnly,
-    dirty: d.text !== d.saved,
+    dirty: d.text !== d.saved || d.hasBom !== d.savedBom,
+    canReloadEncoding: !d.uri,
     ...(d.uri ? { uri: d.uri } : {}),
     ...(d.uiMode ? { uiMode: d.uiMode } : {}),
   });
-  // An Angular project's templates (an `angular.json` above them), like the backend's `framework-ui-modes`.
-  const uiModeOf = (path: string) =>
-    path.endsWith(".html") &&
-    [...store.keys()].some((f) => f.endsWith("/angular.json") && path.startsWith(f.slice(0, -"angular.json".length)))
-      ? "Angular Template"
-      : null;
+  // Framework modes mirror the backend's `framework-ui-modes` definitions.
+  const uiModeOf = (path: string) => {
+    const angular = [...store.keys()].some((f) => {
+      const root = f.endsWith("/angular.json")
+        ? f.slice(0, -"angular.json".length)
+        : f.includes("/node_modules/@angular/core/")
+          ? f.slice(0, f.indexOf("/node_modules/@angular/core/") + 1)
+          : null;
+      return root !== null && path.startsWith(root);
+    });
+    if (!angular) return null;
+    if (path.endsWith(".html")) return "Angular Template";
+    return /\.(?:ts|mts|cts)$/.test(path) ? "Angular TypeScript" : null;
+  };
   const get = (doc: DocId) => {
     const d = docs.get(doc);
     if (!d) throw new IpcError({ kind: "notFound", message: `document ${doc} is not open` });
     return d;
   };
   const setDirty = (d: MemDoc, before: boolean) => {
-    const now = d.text !== d.saved;
+    const now = d.text !== d.saved || d.hasBom !== d.savedBom;
     if (now !== before) dirtyHandlers.forEach((h) => h({ doc: d.id, dirty: now }));
   };
   const delay = <T>(v: () => T): Promise<T> =>
@@ -426,15 +481,18 @@ export function createMemoryBackend(files: Record<string, string> = {}): MemoryB
         return info(d);
       }
       const text = store.get(path) ?? sampleFor(path);
+      const hasBom = savedBoms.get(path) ?? false;
       const ext = path.slice(path.lastIndexOf(".") + 1).toLowerCase();
       const d: MemDoc = {
         id: nextId++,
         path,
         text,
         saved: text,
+        savedBom: hasBom,
         version: 0,
         refs: 1,
         lineEnding: "lf",
+        hasBom,
         readOnly: false,
         language: EXT_LANG[ext] ?? "plaintext",
       };
@@ -460,9 +518,11 @@ export function createMemoryBackend(files: Record<string, string> = {}): MemoryB
         path: uri,
         text,
         saved: text,
+        savedBom: false,
         version: 0,
         refs: 1,
         lineEnding: "lf",
+        hasBom: false,
         readOnly: true,
         language: ext === "class" ? "java" : (EXT_LANG[ext] ?? "plaintext"),
         uri,
@@ -483,7 +543,7 @@ export function createMemoryBackend(files: Record<string, string> = {}): MemoryB
         if (d.readOnly) throw new IpcError({ kind: "permissionDenied", message: "read-only" });
         if (baseVersion !== d.version)
           throw new IpcError({ kind: "outOfSync", message: `base ${baseVersion}, document at ${d.version}` });
-        const before = d.text !== d.saved;
+        const before = d.text !== d.saved || d.hasBom !== d.savedBom;
         d.text = applyChanges(d.text, changes);
         d.version++;
         setDirty(d, before);
@@ -492,13 +552,15 @@ export function createMemoryBackend(files: Record<string, string> = {}): MemoryB
     },
     async save(doc, overwriteRevision = null) {
       const d = get(doc);
-      if (d.text === d.saved) return null;
+      if (d.text === d.saved && d.hasBom === d.savedBom) return null;
       const disk = store.get(d.path);
       const revision = JSON.stringify([d.path, disk ?? null]);
       if (disk !== d.saved && overwriteRevision !== revision) return revision;
-      const before = d.text !== d.saved;
+      const before = d.text !== d.saved || d.hasBom !== d.savedBom;
       d.saved = d.text;
+      d.savedBom = d.hasBom;
       store.set(d.path, d.text);
+      savedBoms.set(d.path, d.hasBom);
       setDirty(d, before);
       return null;
     },
@@ -508,8 +570,16 @@ export function createMemoryBackend(files: Record<string, string> = {}): MemoryB
     async setLineEnding(doc, le) {
       get(doc).lineEnding = le;
     },
-    async setEncoding(_doc, encoding) {
-      return encoding;
+    async setEncoding(doc, encoding) {
+      return { encoding, hasBom: get(doc).hasBom };
+    },
+    async setBom(doc, hasBom) {
+      const d = get(doc);
+      if (d.readOnly) throw new IpcError({ kind: "permissionDenied", message: "read-only" });
+      const before = d.text !== d.saved || d.hasBom !== d.savedBom;
+      d.hasBom = hasBom;
+      setDirty(d, before);
+      return { encoding: "utf-8", hasBom: d.hasBom };
     },
     async outline(doc) {
       // Brace-based outline good enough for the dev shell.
@@ -609,13 +679,13 @@ export function createMemoryBackend(files: Record<string, string> = {}): MemoryB
       dirtyHandlers.add(h);
       return () => dirtyHandlers.delete(h);
     },
-    patch(doc, changes, history) {
+    patch(doc, changes, workspaceEdit = false, history) {
       const d = get(doc);
       const before = d.text !== d.saved;
       const baseVersion = d.version;
       d.text = applyChanges(d.text, changes);
       d.version++;
-      const e = { doc, baseVersion, version: d.version, changes, ...(history ? { history } : {}) };
+      const e = { doc, baseVersion, version: d.version, changes, workspaceEdit, ...(history ? { history } : {}) };
       patched.forEach((h) => h(e));
       setDirty(d, before);
     },

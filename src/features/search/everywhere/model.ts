@@ -8,9 +8,10 @@ import type { SettingsSearchEntry } from "@/workbench/contributions";
 import { tx } from "@/platform/i18n";
 import { basename, isTypeKind, relDir, symbolDisplayName } from "../common/open";
 import { byScore, matchText } from "../common/rank";
+import { wordMatch } from "@/ui";
 
 export type SeTab = "all" | "classes" | "files" | "symbols" | "actions" | "text";
-export type SectionId = "recent" | "recentActions" | "classes" | "files" | "symbols" | "actions" | "text";
+export type SectionId = "recent" | "recentActions" | "classes" | "files" | "symbols" | "endpoints" | "actions" | "text";
 
 export const TABS: ReadonlyArray<{ id: SeTab; label: string }> = [
   { id: "all", label: "All" },
@@ -27,6 +28,7 @@ export const SECTION_ORDER: readonly SectionId[] = [
   "classes",
   "files",
   "symbols",
+  "endpoints",
   "actions",
   "text",
 ];
@@ -37,6 +39,7 @@ export const SECTION_TITLES: Record<SectionId, string> = {
   classes: "Classes",
   files: "Files",
   symbols: "Symbols",
+  endpoints: "Endpoints",
   actions: "Actions",
   text: "Text",
 };
@@ -55,7 +58,7 @@ export function sectionsFor(tab: SeTab, emptyQuery: boolean): SectionId[] {
         return [];
     }
   }
-  return tab === "all" ? ["classes", "files", "symbols", "actions", "text"] : [tab];
+  return tab === "all" ? ["classes", "files", "symbols", "endpoints", "actions", "text"] : [tab];
 }
 
 export const ALL_TAB_LIMIT = 6;
@@ -74,6 +77,8 @@ export interface FileItem {
   nameIndices: number[];
   line: number | null;
   col: number | null;
+  /** A directory: choosing it selects it in the Project view. */
+  folder?: boolean;
 }
 
 export interface SymbolItem {
@@ -90,6 +95,8 @@ export interface SymbolItem {
   indices: number[];
   /** From the language server rather than the index. */
   lsp?: boolean;
+  /** Pre-computed relevance (endpoints: the request path matched `n` segments up). */
+  score?: number;
 }
 
 export interface ActionItem {
@@ -163,6 +170,57 @@ export function fileItem(
     line,
     col,
   };
+}
+
+/** File outside the project index (a scratch file); `relPath` is shown under its root label. */
+export interface OutsideFile {
+  path: string;
+  relPath: string;
+}
+
+// The project index's file scores (`ide-index` matching.rs): a name match ranks in a tier
+// above path-only matches, with exact / exact-stem / prefix boosts.
+const NAME_TIER = 1 << 20;
+
+function nameBoost(name: string, q: string): number {
+  const n = name.toLowerCase();
+  if (n === q) return 4000;
+  const dot = n.indexOf(".");
+  if (dot >= 0 && n.slice(0, dot) === q) return 3000;
+  return n.startsWith(q) ? 600 : 0;
+}
+
+/** Files outside the index matching a Files query by name (or by path for `dir/name`), scored like the index's. */
+export function matchOutsideFiles(files: readonly OutsideFile[], query: string): FileMatch[] {
+  const q = query
+    .trim()
+    .replace(/\\/g, "/")
+    .replace(/^\.?\/+/, "")
+    .replace(/\s+/g, "")
+    .toLowerCase();
+  if (!q) return [];
+  const byPath = q.includes("/");
+  const out: FileMatch[] = [];
+  for (const f of files) {
+    const name = basename(f.relPath);
+    const nameStart = f.relPath.length - name.length;
+    const m = byPath ? wordMatch(f.relPath, q) : wordMatch(name, q);
+    if (!m) continue;
+    const boost = nameBoost(name, byPath ? q.slice(q.lastIndexOf("/") + 1) : q);
+    out.push({
+      path: f.path,
+      relPath: f.relPath,
+      score: (byPath ? 0 : NAME_TIER) + boost,
+      indices: byPath ? m : m.map((i) => i + nameStart),
+    });
+  }
+  return out;
+}
+
+/** A directory match (`relPath` ends in `/`), listed with the files as IDEA's Go to File does. */
+export function folderItem(m: Pick<FileMatch, "path" | "relPath" | "indices">): FileItem {
+  const rel = m.relPath.replace(/\/$/, "");
+  return { ...fileItem({ ...m, relPath: rel }), key: `d:${m.path}`, folder: true };
 }
 
 export function symbolItem(m: SymbolMatch): SymbolItem {
@@ -257,7 +315,7 @@ export function matchActions(
     if (!enabled && opts.includeDisabled === false) continue;
     let score: number;
     let indices: number[] = [];
-    const translated = tx(a.title);
+    const translated = shown(a, a.title);
     const title = matchText(translated, q, { wordAligned: true });
     // The English title still matches; its indices don't apply to the translated text.
     const english = title || translated === a.title ? undefined : matchText(a.title, q, { wordAligned: true });
@@ -283,7 +341,7 @@ export function matchActions(
       key: `a:${a.id}`,
       id: a.id,
       title: translated,
-      category: a.category ? tx(a.category) : a.category,
+      category: a.category && tx(a.category),
       icon: a.icon,
       enabled,
       indices,
@@ -331,13 +389,18 @@ export function mergeActionResults(actions: readonly ActionItem[], settings: rea
   return byScore<ActionItem | SettingItem>([...actions, ...settings]);
 }
 
+/** An action's title in the UI language; a plugin's stays as written. */
+function shown(a: Action, text: string): string {
+  return a.verbatim ? text : tx(text);
+}
+
 export function actionItem(a: Action, enabled: boolean): ActionItem {
   return {
     kind: "action",
     key: `a:${a.id}`,
     id: a.id,
-    title: tx(a.title),
-    category: a.category ? tx(a.category) : a.category,
+    title: shown(a, a.title),
+    category: a.category && tx(a.category),
     icon: a.icon,
     enabled,
     indices: [],
@@ -376,7 +439,7 @@ export function textItems(path: string, rel: string, matches: readonly LineMatch
 // Rows
 
 /** Sections the All tab mixes into one relevance-ordered list. */
-const MIXED: readonly SectionId[] = ["classes", "files", "symbols", "actions", "text"];
+const MIXED: readonly SectionId[] = ["classes", "files", "symbols", "endpoints", "actions", "text"];
 
 /**
  * Weight of a text hit: a literal substring in a line ranks below name
@@ -391,6 +454,7 @@ export function itemWeight(item: SeItem, query: string): number {
     case "file":
       return name(item.name) ?? (name(item.rel) ?? 0) - 200;
     case "symbol":
+      if (item.score !== undefined) return item.score;
       return name(item.name) ?? (item.container ? name(`${item.container}.${item.name}`) : undefined) ?? 0;
     case "action":
     case "setting":

@@ -23,13 +23,19 @@ Automatic updates are disabled until an OpenStorm release feed is configured.
 </p>
 
 <p align="center">
+  English · <a href="README.zh-CN.md">简体中文</a>
+</p>
+
+<p align="center">
   <a href="https://github.com/l0ng-ai/openidea/releases/latest"><b>Download</b></a>
+  &nbsp;·&nbsp;
+  <a href="https://openidea.sh">Docs</a>
   &nbsp;·&nbsp;
   <a href="#benchmark">Benchmark</a>
   &nbsp;·&nbsp;
-  <a href="#build">Build</a>
+  <a href="#plugins">Plugins</a>
   &nbsp;·&nbsp;
-  <a href="https://discord.gg/2Zy4yn7gP">Discord</a>
+  <a href="#community">Community</a>
 </p>
 
 https://github.com/user-attachments/assets/234dd54c-1255-4b3a-b35c-533d78d737c0
@@ -60,23 +66,24 @@ IDEA analyses Python more deeply, so "ready" doesn't mean the same work on
 both sides. Both are measured from the outside, the same way: see
 [`perf/compare`](perf/compare) to run it on your machine and projects.
 
-## Build
+## Plugins
 
-```sh
-pnpm install
-pnpm tauri dev
-```
+Plugins add actions, completion, quick fixes, tool windows, custom editors,
+themes, file icons and languages. They run as sandboxed WebAssembly components;
+themes, icon themes and languages need no code at all.
 
-Rust 1.96, Node 22, pnpm 11 and the [Tauri prerequisites](https://v2.tauri.app/start/prerequisites/).
+Install them from Settings › Plugins, or start your own with
+`openidea-plugin new` — see [Writing OpenIDEA plugins](https://openidea.sh/en/plugins) and
+the [official plugins](plugins/official). The plugin API is still a preview.
 
-Native notebook execution tests are opt-in and need two distinct Python environments
-with `ipykernel` installed:
+## Community
 
-```sh
-OPENIDEA_TEST_PYTHON=/first/env/bin/python \
-OPENIDEA_TEST_PYTHON_SECOND=/second/env/bin/python \
-cargo test -p ide-notebook --test kernel_runtime -- --ignored --test-threads=1
-```
+- [Discord](https://discord.gg/2Zy4yn7gP) — questions, feedback and release news.
+- WeChat group — scan to join:
+
+  <img src=".github/assets/wechat-group.png" alt="WeChat group QR code" width="200">
+
+- Contributing: see [CONTRIBUTING.md](CONTRIBUTING.md) and the [contributor docs](https://openidea.sh/en/contribute/setup).
 
 ## License
 

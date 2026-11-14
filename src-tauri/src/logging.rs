@@ -1,6 +1,6 @@
 //! Logging: stdout (as before) plus a daily-rotated file in the app log dir
 //! (`~/Library/Logs/<identifier>` on macOS, `<local data>/<identifier>/logs`
-//! elsewhere — the same place as Tauri's `app_log_dir`).
+//! elsewhere — the same place as Tauri's `app_log_dir` — or under `OPENIDEA_LOG_DIR`).
 
 use std::fmt::Write as _;
 use std::io::Write as _;
@@ -20,11 +20,7 @@ static LOG_DIR: OnceLock<PathBuf> = OnceLock::new();
 static GUARD: OnceLock<WorkerGuard> = OnceLock::new();
 
 pub fn log_dir_for(identifier: &str) -> Option<PathBuf> {
-    if cfg!(target_os = "macos") {
-        dirs::home_dir().map(|h| h.join("Library/Logs").join(identifier))
-    } else {
-        dirs::data_local_dir().map(|d| d.join(identifier).join("logs"))
-    }
+    ide_host::data_dirs::log_dir(identifier).map_err(|error| eprintln!("{error}")).ok()
 }
 
 fn filter() -> EnvFilter {
@@ -117,7 +113,11 @@ mod tests {
         let record = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
         let sink = record.clone();
         let default = std::panic::take_hook();
-        std::panic::set_hook(Box::new(move |info| *sink.lock().unwrap() = panic_record(info)));
+        std::panic::set_hook(Box::new(move |info| {
+            if std::thread::current().name() == Some("worker") {
+                *sink.lock().unwrap() = panic_record(info);
+            }
+        }));
         let _ = std::thread::Builder::new().name("worker".into()).spawn(|| panic!("boom")).unwrap().join();
         std::panic::set_hook(default);
         let record = record.lock().unwrap().clone();

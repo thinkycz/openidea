@@ -6,7 +6,7 @@ import { executeAction } from "@/platform/actions";
 import { call, commands } from "@/platform/ipc";
 import { useTx, useTxTemplate } from "@/platform/i18n";
 import { basename, useProject } from "@/platform/project";
-import { Icon, Select, T, type SelectOption } from "@/ui";
+import { Chip, Select, T, type SelectOption } from "@/ui";
 import { defaultTaskProject } from "./project";
 import { maybeEditorService, type EditorInput } from "@/workbench/contributions";
 import { Composer } from "./Composer";
@@ -15,7 +15,18 @@ import { canSend, emptyDraft } from "./composerModel";
 import { ConfigPickers } from "./ConfigPickers";
 import { providerIcon } from "./model";
 import { ADD_AGENT, providerOptions as agentOptions } from "./providerOptions";
-import { HOME, NO_COMMANDS, refreshProviders, startTask, updateDraft, useAgentCommands, useAgents } from "./store";
+import {
+  HOME,
+  NO_COMMANDS,
+  draftConfig,
+  refreshProviders,
+  setDraftOption,
+  startTask,
+  updateDraft,
+  useAgentCommands,
+  useAgents,
+} from "./store";
+import { useAgentSettings } from "./agentSettings";
 import styles from "./Home.module.css";
 
 export function HomeEditor({ docked = false }: { docked?: boolean; input?: EditorInput }) {
@@ -31,6 +42,8 @@ export function HomeEditor({ docked = false }: { docked?: boolean; input?: Edito
   );
   const members = project?.workspace?.projects ?? [];
   const root = members.includes(selected ?? "") ? selected! : (members[0] ?? project?.root ?? "");
+  // A window without a project yet has no fact to show: the where row stays empty until it does.
+  const projectLabel = members.length ? basename(root) : project?.name;
   const [repoState, setRepoState] = useState<{
     root: string;
     branches: Branch[];
@@ -45,6 +58,7 @@ export function HomeEditor({ docked = false }: { docked?: boolean; input?: Edito
   // Agents installed in Settings (its own window) show up when this one is back in front.
   useEffect(() => {
     const refresh = () => void refreshProviders();
+    refresh();
     window.addEventListener("focus", refresh);
     return () => window.removeEventListener("focus", refresh);
   }, []);
@@ -66,7 +80,7 @@ export function HomeEditor({ docked = false }: { docked?: boolean; input?: Edito
   }, [root, project?.workspace]);
 
   const provider = providers.find((p) => p.id === draft.provider) ?? providers[0];
-  const probe = useProbe(provider?.installed ? provider.id : null);
+  const probe = useProbe(provider?.installed ? provider.id : null, provider?.command);
   const agentCommands = useAgentCommands(provider?.id, null, provider?.commands ?? NO_COMMANDS);
   const providerOptions: SelectOption[] = agentOptions(providers, tx, providerIcon);
   // Without git under the project there are no worktrees: force the local checkout.
@@ -84,7 +98,8 @@ export function HomeEditor({ docked = false }: { docked?: boolean; input?: Edito
       .catch((e: unknown) => setError(e instanceof Error ? e.message : String(e)))
       .finally(() => setStarting(false));
   };
-  const setOption = (id: string, value: string) => updateDraft({ config: { ...draft.config, [id]: value } });
+  const defaults = useAgentSettings().defaults;
+  const config = draftConfig(provider, draft, (provider && defaults[provider.id]) || {});
 
   return (
     <div className={clsx(styles.home, docked && styles.docked)}>
@@ -94,18 +109,93 @@ export function HomeEditor({ docked = false }: { docked?: boolean; input?: Edito
             <T>What should the agent do?</T>
           </h1>
         )}
+        {/* Above the box, like the running session's state line. */}
+        <div className={styles.where}>
+          {members.length > 1 ? (
+            <Select
+              variant="chip"
+              aria-label={tx("Project")}
+              className={styles.projectPicker}
+              value={root}
+              options={members.map((path) => ({
+                value: path,
+                label: basename(path),
+                detail: path,
+                icon: "folder",
+              }))}
+              onChange={(path) => {
+                setSelected(path);
+                updateDraft({ base: null });
+              }}
+            />
+          ) : projectLabel ? (
+            <Chip icon="folder" title={root} className={styles.projectChip}>
+              {projectLabel}
+            </Chip>
+          ) : null}
+          {isGit && (
+            <Select
+              variant="chip"
+              aria-label="Isolation"
+              className={styles.isolation}
+              value={isolation}
+              options={[
+                { value: "worktree", label: tx("New worktree"), icon: "branch", detail: tx("away from your changes") },
+                {
+                  value: "local",
+                  label: tx("Local checkout"),
+                  icon: "folder",
+                  detail: tx("edits your files directly"),
+                },
+              ]}
+              onChange={(isolation) => updateDraft({ isolation, isolationChosen: true })}
+            />
+          )}
+          {/* A folder that isn't a repository has no branch: the one Git found below it isn't where the agent runs. */}
+          {isolation === "local" && isGit && current && (
+            <>
+              {!docked && (
+                <span className={styles.note}>
+                  <T>on</T>
+                </span>
+              )}
+              <Chip icon="branch" title={current} className={styles.branch}>
+                {current}
+              </Chip>
+            </>
+          )}
+          {isolation === "worktree" && branches.length > 0 && (
+            <>
+              {!docked && (
+                <span className={styles.note}>
+                  <T>from</T>
+                </span>
+              )}
+              <Select
+                variant="chip"
+                aria-label="Base branch"
+                className={styles.basePicker}
+                value={base}
+                options={branches.map((b) => ({ value: b.name, label: b.name, icon: "branch" }))}
+                onChange={(b) => updateDraft({ base: b === current ? null : b })}
+              />
+            </>
+          )}
+        </div>
         <Composer
           id={HOME}
           autoFocus
           placeholder={
-            docked ? "Describe a task…" : "Describe a task for the agent. @ references a file, / runs a command"
+            docked
+              ? "Describe a task…"
+              : "Describe a task for the agent. @ references a file or folder, / runs a command"
           }
           root={root}
           projectRoot={root}
           commands={agentCommands}
           history={history}
-          config={provider?.config ?? []}
-          onConfig={setOption}
+          config={config}
+          onConfig={setDraftOption}
           onSubmit={start}
           disabled={!canStart}
           toolbar={
@@ -119,7 +209,7 @@ export function HomeEditor({ docked = false }: { docked?: boolean; input?: Edito
                   id === ADD_AGENT ? void executeAction("agents.addAgent") : updateDraft({ provider: id, config: {} })
                 }
               />
-              <ConfigPickers config={provider?.config ?? []} values={draft.config} onChange={setOption} />
+              <ConfigPickers config={config} onChange={setDraftOption} />
             </>
           }
           actions={
@@ -131,73 +221,6 @@ export function HomeEditor({ docked = false }: { docked?: boolean; input?: Edito
             />
           }
         />
-        <div className={styles.where}>
-          {members.length > 1 ? (
-            <Select
-              variant="ghost"
-              aria-label={tx("Project")}
-              className={styles.projectPicker}
-              value={root}
-              options={members.map((path) => ({ value: path, label: basename(path), detail: path }))}
-              onChange={(path) => {
-                setSelected(path);
-                updateDraft({ base: null });
-              }}
-            />
-          ) : (
-            <span className={styles.project} title={root}>
-              {members.length ? basename(root) : project?.name}
-            </span>
-          )}
-          {isGit && (
-            <Select
-              variant="ghost"
-              aria-label="Isolation"
-              className={styles.isolation}
-              value={isolation}
-              options={[
-                { value: "worktree", label: tx("New worktree"), icon: "branch", detail: tx("away from your changes") },
-                {
-                  value: "local",
-                  label: tx("Local checkout"),
-                  icon: "folder",
-                  detail: tx("edits your files directly"),
-                },
-              ]}
-              onChange={(isolation) => updateDraft({ isolation })}
-            />
-          )}
-          {isolation === "local" && current && (
-            <>
-              {!docked && (
-                <span className={styles.note}>
-                  <T>on</T>
-                </span>
-              )}
-              <span className={styles.branch} title={current}>
-                <Icon name="branch" size={14} />
-                <span className={styles.branchName}>{current}</span>
-              </span>
-            </>
-          )}
-          {isolation === "worktree" && branches.length > 0 && (
-            <>
-              {!docked && (
-                <span className={styles.note}>
-                  <T>from</T>
-                </span>
-              )}
-              <Select
-                variant="ghost"
-                aria-label="Base branch"
-                className={styles.basePicker}
-                value={base}
-                options={branches.map((b) => ({ value: b.name, label: b.name }))}
-                onChange={(b) => updateDraft({ base: b === current ? null : b })}
-              />
-            </>
-          )}
-        </div>
         {probe && (!docked || probe.error) && (
           <p className={probe.error ? styles.warning : styles.note}>
             {probe.error
@@ -224,7 +247,7 @@ export function HomeEditor({ docked = false }: { docked?: boolean; input?: Edito
 }
 
 /** What the agent reports about itself when it starts (no session is opened), once per agent. */
-function useProbe(provider: string | null): AgentProbe | null {
+function useProbe(provider: string | null, command?: string): AgentProbe | null {
   const [probe, setProbe] = useState<AgentProbe | null>(null);
   useEffect(() => {
     if (!provider) return;
@@ -235,6 +258,6 @@ function useProbe(provider: string | null): AgentProbe | null {
     return () => {
       live = false;
     };
-  }, [provider]);
+  }, [provider, command]);
   return probe?.provider === provider ? probe : null;
 }

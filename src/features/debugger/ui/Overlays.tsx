@@ -1,5 +1,14 @@
 /** Debugger popovers and dialogs: breakpoint properties, View Breakpoints, Evaluate, config chooser. */
-import { useEffect, useId, useMemo, useRef, useState, type KeyboardEvent, type MutableRefObject } from "react";
+import {
+  Fragment,
+  useEffect,
+  useId,
+  useMemo,
+  useRef,
+  useState,
+  type KeyboardEvent,
+  type MutableRefObject,
+} from "react";
 import { basename, relativePath, useProject } from "@/platform/project";
 import { executeAction, getAction } from "@/platform/actions";
 import { call, commands, type AttachableProcess, type RunConfig, type Variable } from "@/platform/ipc";
@@ -13,7 +22,8 @@ import {
   updateBreakpoint,
   useBreakpoints,
 } from "../breakpoints/store";
-import { activeSession, addWatch, evaluate, isLive, startSession, useDebug } from "../state";
+import { activeSession, addWatch, evaluate, isLive, startSession, useDebug, resumeExecution } from "../state";
+import { AmbiguousClassError, rememberImport } from "../classImports";
 import {
   addMethodBreakpoint,
   removeAllSpecial,
@@ -25,12 +35,15 @@ import {
 import { attachConfig, attachDetail, attachRows, type AttachRow } from "../attach";
 import {
   exceptionGroups,
+  filterHint,
   refreshExceptionFilters,
   setExceptionFilter,
   useExceptionBreakpoints,
 } from "../breakpoints/exceptions";
+import { EventBreakpointsSection } from "../js/EventBreakpointsSection";
 import { closeBreakpointPopover, useOverlays } from "./popoverStore";
 import { VariablesView, type VarRoot } from "./VariablesView";
+import { useExpressionCompletion } from "./ExpressionCompletion";
 import { pushHistory, readHistory } from "./expressionHistory";
 import styles from "./Overlays.module.css";
 import { isImeKey } from "@/platform/ime";
@@ -500,6 +513,7 @@ function BreakpointsDialog() {
             }}
           />
           <ExceptionBreakpoints open={open} />
+          <EventBreakpointsSection />
         </div>
         <div className={styles.bpDetail}>
           {current?.type === "line" ? (
@@ -540,13 +554,18 @@ function ExceptionBreakpoints({ open }: { open: boolean }) {
           >
             {groups.length > 1 && <div className={styles.exceptionAdapter}>{g.adapter}</div>}
             {g.filters.map((f) => (
-              <span key={f.filter} title={f.description ?? undefined} className={styles.exceptionRow}>
-                <Checkbox
-                  checked={f.enabled}
-                  onChange={(on) => setExceptionFilter(g.adapter, f.filter, on)}
-                  label={f.label}
-                />
-              </span>
+              <Fragment key={f.filter}>
+                <span title={f.description ?? undefined} className={styles.exceptionRow}>
+                  <Checkbox
+                    checked={f.enabled}
+                    onChange={(on) => setExceptionFilter(g.adapter, f.filter, on)}
+                    label={f.label}
+                  />
+                </span>
+                {filterHint(g.adapter, f.filter) && (
+                  <div className={styles.exceptionHint}>{tx(filterHint(g.adapter, f.filter)!)}</div>
+                )}
+              </Fragment>
             ))}
           </div>
         ))
@@ -688,6 +707,7 @@ function EvaluateDialog() {
 function EvaluateDialogInner({ initial }: { initial: string }) {
   const [expression, setExpression] = useState(initial);
   const [result, setResult] = useState<VarRoot | null>(null);
+  const [ambiguous, setAmbiguous] = useState<AmbiguousClassError | null>(null);
   const [history, setHistory] = useState(() => readHistory("evaluate"));
   const [historyMenu, setHistoryMenu] = useState(false);
   const historyPos = useRef(-1);
@@ -697,21 +717,26 @@ function EvaluateDialogInner({ initial }: { initial: string }) {
   const paused = session?.status === "paused";
   const close = () => useOverlays.setState({ evaluate: null });
   const lines = Math.min(10, expression.split("\n").length);
+  const completion = useExpressionCompletion(field, expression, setExpression, session);
   const run = async () => {
     const e = expression.trim();
     if (!e) return;
     pushHistory("evaluate", e);
     setHistory(readHistory("evaluate"));
     historyPos.current = -1;
+    setAmbiguous(null);
     try {
-      const v: Variable = await evaluate(e, "repl", session ?? null);
+      const v: Variable = await evaluate(e, session?.adapter === "gdb" ? "watch" : "repl", session ?? null);
       setResult({ key: `eval:${e}:${Date.now()}`, kind: "eval", name: e, variable: v, error: null });
     } catch (err) {
       setResult({ key: `eval:${e}:${Date.now()}`, kind: "eval", name: e, variable: null, error: errorText(err) });
+      if (err instanceof AmbiguousClassError) setAmbiguous(err);
     }
   };
+  const className = ambiguous?.className ?? "";
   const recall = (text: string) => {
     setExpression(text);
+    setAmbiguous(null);
     requestAnimationFrame(() => {
       const el = field.current;
       if (!el) return;
@@ -720,7 +745,7 @@ function EvaluateDialogInner({ initial }: { initial: string }) {
     });
   };
   const onKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
-    if (isImeKey(e.nativeEvent)) return;
+    if (isImeKey(e.nativeEvent) || completion.onKeyDown(e)) return;
     const el = e.currentTarget;
     if (e.key === "Enter" && e.shiftKey && (e.metaKey || e.ctrlKey)) {
       e.preventDefault();
@@ -746,6 +771,7 @@ function EvaluateDialogInner({ initial }: { initial: string }) {
       onClose={close}
       title="Evaluate"
       width={620}
+      resizable="both"
       aria-label="Evaluate expression"
       footerStart={
         <Button
@@ -777,9 +803,12 @@ function EvaluateDialogInner({ initial }: { initial: string }) {
               value={expression}
               onChange={(e) => {
                 setExpression(e.target.value);
+                setAmbiguous(null);
                 historyPos.current = -1;
+                completion.onInput();
               }}
               onKeyDown={onKeyDown}
+              onBlur={completion.close}
               onFocus={(e) => e.currentTarget.select()}
               spellCheck={false}
               autoComplete="off"
@@ -787,6 +816,7 @@ function EvaluateDialogInner({ initial }: { initial: string }) {
               aria-label={tx("Expression")}
               placeholder={paused ? "Expression to evaluate in the selected frame" : "Pause the program to evaluate"}
             />
+            {completion.popup}
             <span ref={historyButton}>
               <IconButton
                 icon="history"
@@ -808,6 +838,24 @@ function EvaluateDialogInner({ initial }: { initial: string }) {
               .map((h) => ({ label: h.replace(/\s+/g, " "), verbatim: true, run: () => recall(h) }))}
           />
         </div>
+        {ambiguous && (
+          <div className={styles.evalImport} role="group" aria-label={tx("Class to import")}>
+            <span className={styles.label}>{tx`Choose the class to import for ${className}:`}</span>
+            {ambiguous.candidates.map((c) => (
+              <Button
+                key={c}
+                variant="ghost"
+                size="small"
+                onClick={() => {
+                  if (session) rememberImport(session.id, c);
+                  void run();
+                }}
+              >
+                {c}
+              </Button>
+            ))}
+          </div>
+        )}
         <div className={styles.evalResult}>
           {result ? (
             <VariablesView roots={[result]} session={session?.id ?? null} aria-label="Evaluation result" />
@@ -978,7 +1026,9 @@ function SmartStepChooser() {
   const pick = (targetId: number) => {
     if (!state) return;
     close();
-    void call(commands.debugStepInTarget(state.session, state.thread, targetId)).catch((e) =>
+    void resumeExecution(state.session, () =>
+      call(commands.debugStepInTarget(state.session, state.thread, targetId)),
+    ).catch((e) =>
       notifications().notify({ group: "run", level: "error", title: "Smart Step Into failed", body: errorText(e) }),
     );
   };

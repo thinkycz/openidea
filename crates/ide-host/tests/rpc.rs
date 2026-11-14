@@ -56,6 +56,7 @@ async fn serves_projects_files_documents_search_and_runs() {
     let host = Arc::new(Host::new(HostConfig {
         config_dir: base.join("config"),
         data_dir: base.join("data"),
+        local_data_dir: base.join("data"),
         languages: Arc::new(ide_language::LanguageRegistry::load(None).unwrap()),
         syntax: Arc::default(),
         sink_for: Box::new(move |w| rpc::event_sink(sink_peer.clone(), Some(w.to_owned()))),
@@ -87,9 +88,49 @@ async fn serves_projects_files_documents_search_and_runs() {
     }
     let call = Invoke { window: "unknown".into(), cmd: "coverage_collect".into(), args: json!({}) };
     assert!(peer.request::<_, Value>("invoke", call, None).await.is_err());
+    // Manual workspace edits remain available in Restricted Mode, like doc/fs
+    // editing. They do not ask a language server to execute project commands.
+    let manual = project.join("src/manual.txt");
+    std::fs::write(&manual, "old").unwrap();
+    let edit = json!({ "files": [{ "kind": "edit", "path": manual, "edits": [{
+        "range": { "start": { "line": 0, "col": 0 }, "end": { "line": 0, "col": 3 } },
+        "new_text": "new"
+    }] }] });
+    let edit = invoke(&peer, "prepare_workspace_edit", json!({ "edit": edit })).await.unwrap();
+    assert_eq!(edit["preconditions"].as_array().unwrap().len(), 1);
+    invoke(&peer, "apply_workspace_edit", json!({ "edit": edit })).await.unwrap();
+    until("workspace edit history", || {
+        client.events.lock().iter().any(|event| matches!(event.event, ide_core::IdeEvent::WorkspaceEditApplied { .. }))
+    })
+    .await;
+    let undo_id = client
+        .events
+        .lock()
+        .iter()
+        .find_map(|event| match &event.event {
+            ide_core::IdeEvent::WorkspaceEditApplied { id, .. } => Some(*id),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(std::fs::read_to_string(&manual).unwrap(), "new");
+    invoke(&peer, "undo_workspace_edit", json!({ "id": undo_id })).await.unwrap();
+    assert_eq!(std::fs::read_to_string(&manual).unwrap(), "old");
+    invoke(&peer, "redo_workspace_edit", json!({ "id": undo_id })).await.unwrap();
+    assert_eq!(std::fs::read_to_string(&manual).unwrap(), "new");
+    assert_eq!(invoke(&peer, "project_current", json!({})).await.unwrap()["trusted"], false);
+    for command in ["lsp_execute_command", "lsp_apply_code_action"] {
+        let error = invoke(&peer, command, json!({})).await.unwrap_err();
+        assert!(error.message.contains("Restricted Mode"), "{command}: {error:?}");
+    }
     invoke(&peer, "project_trust_set", json!({"path": project, "trusted": true, "folder": false})).await.unwrap();
     let current = invoke(&peer, "project_current", json!({})).await.unwrap();
     assert_eq!(current["name"], "demo");
+
+    // The built-in web server runs where the project is; the client forwards its port.
+    let root = std::path::PathBuf::from(opened["root"].as_str().unwrap());
+    let url = invoke(&peer, "web_url", json!({ "path": root.join("src/main.py") })).await.unwrap();
+    let url = url.as_str().unwrap();
+    assert!(url.starts_with("http://127.0.0.1:") && url.ends_with("/demo/src/main.py"), "{url}");
 
     let entries = invoke(&peer, "fs_read_dir", json!({ "path": project })).await.unwrap();
     assert!(entries.as_array().unwrap().iter().any(|e| e["name"] == "src"), "{entries}");
@@ -183,10 +224,19 @@ async fn serves_projects_files_documents_search_and_runs() {
     invoke(&peer, "vcs_init", json!({ "dir": project })).await.unwrap();
     until("git repository", || project.join(".git").is_dir()).await;
 
+    // A Docker run configuration's environment comes from the host its command runs on.
+    let env =
+        invoke(&peer, "docker_run_env", json!({ "endpoint": { "kind": "socket", "path": "/run/user/1/docker.sock" } }))
+            .await
+            .unwrap();
+    assert_eq!(env["DOCKER_HOST"], "unix:///run/user/1/docker.sock");
+
     // Real project-host ignore writes travel through the remote command dispatcher.
     assert!(Dispatcher::standard().commands().contains(&"vcs_add_to_ignore"));
     let ignore_root = dunce::canonicalize(&project).unwrap();
-    for (name, destination) in [("shared.tmp", "gitignore"), ("private.tmp", "localExclude")] {
+    // Not `.tmp`: a machine's global excludes file (often `*.tmp`) already
+    // ignores those, so the backend never writes the entry anywhere.
+    for (name, destination) in [("shared.ignore-me", "gitignore"), ("private.ignore-me", "localExclude")] {
         let path = ignore_root.join(name);
         std::fs::write(&path, "temporary").unwrap();
         invoke(&peer, "vcs_add_to_ignore", json!({ "paths": [path], "destination": destination })).await.unwrap();
@@ -195,9 +245,9 @@ async fn serves_projects_files_documents_search_and_runs() {
         assert_eq!(entry["ignored"], true);
         assert_eq!(entry["excluded"], false);
     }
-    assert!(std::fs::read_to_string(project.join(".gitignore")).unwrap().contains("/shared.tmp"));
-    assert!(std::fs::read_to_string(project.join(".git/info/exclude")).unwrap().contains("/private.tmp"));
-    let outside = tmp.path().join("outside.tmp");
+    assert!(std::fs::read_to_string(project.join(".gitignore")).unwrap().contains("/shared.ignore-me"));
+    assert!(std::fs::read_to_string(project.join(".git/info/exclude")).unwrap().contains("/private.ignore-me"));
+    let outside = tmp.path().join("outside.ignore-me");
     std::fs::write(&outside, "keep").unwrap();
     assert!(
         invoke(&peer, "vcs_add_to_ignore", json!({ "paths": [outside], "destination": "gitignore" })).await.is_err()
@@ -261,6 +311,7 @@ async fn local_deployment_runs_on_the_project_host() {
     let host = Arc::new(Host::new(HostConfig {
         config_dir: tmp.path().join("config"),
         data_dir: tmp.path().join("data"),
+        local_data_dir: tmp.path().join("data"),
         languages: Arc::new(ide_language::LanguageRegistry::load(None).unwrap()),
         syntax: Arc::default(),
         sink_for: Box::new(move |w| rpc::event_sink(sink_slot.clone(), Some(w.to_owned()))),
@@ -285,6 +336,42 @@ async fn local_deployment_runs_on_the_project_host() {
         "remote_delete",
         "remote_mkdir",
         "remote_rename",
+        "remote_download_into",
+        "db_sources",
+        "db_save_sources",
+        "db_set_password",
+        "db_test",
+        "db_test_tunnel",
+        "db_set_ssh_secret",
+        "db_trust_ssh_host",
+        "db_connected",
+        "db_connect",
+        "db_set_manual_commit",
+        "db_finish_transaction",
+        "db_disconnect",
+        "db_databases",
+        "db_schemas",
+        "db_tables",
+        "db_table_details",
+        "db_ddl",
+        "db_schema_objects",
+        "db_object_ddl",
+        "db_explain",
+        "db_history",
+        "db_remove_history",
+        "db_completion",
+        "db_statements",
+        "db_execute",
+        "db_table_page",
+        "db_apply_edits",
+        "db_console_path",
+        "ssh_test",
+        "ssh_set_secret",
+        "ssh_password_saved",
+        "ssh_needs_secret",
+        "ssh_trust_host",
+        "ssh_connected",
+        "ssh_disconnect",
     ] {
         assert!(dispatcher.commands().contains(&cmd), "missing host command {cmd}");
     }
@@ -293,6 +380,12 @@ async fn local_deployment_runs_on_the_project_host() {
     tokio::spawn(rpc::serve(host, dispatcher, slot, sr, sw));
     let (cr, cw) = tokio::io::split(client_io);
     let peer = Peer::connect(cr, cw, Arc::new(Client::default()));
+    // A remote window's host-key and password remedies reach the server's SSH manager,
+    // the one its deployment / database connections failed in.
+    let trust = invoke(&peer, "ssh_trust_host", json!({"id": "nothing-pending"})).await.unwrap_err();
+    assert!(trust.message.contains("no host key to trust"), "{trust:?}");
+    invoke(&peer, "ssh_set_secret", json!({"id": "deploy", "secret": "pw", "save": false})).await.unwrap();
+    assert_eq!(invoke(&peer, "ssh_connected", json!({})).await.unwrap(), json!([]));
     invoke(&peer, "project_trust_set", json!({"path": project, "trusted": true, "folder": false})).await.unwrap();
     invoke(&peer, "open_project", json!({"path": project})).await.unwrap();
     let deployment = json!({"servers": [{"id":"local", "kind":"local", "rootPath":target}], "defaultServer":"local"});
@@ -328,6 +421,7 @@ async fn properties_conversion_through_remote_dispatch_without_a_remote_host() {
     let host = Arc::new(Host::new(HostConfig {
         config_dir: tmp.path().join("config"),
         data_dir: tmp.path().join("data"),
+        local_data_dir: tmp.path().join("data"),
         languages: Arc::new(ide_language::LanguageRegistry::load(None).unwrap()),
         syntax: Arc::default(),
         sink_for: Box::new(|_| Arc::new(ide_core::NullSink)),
@@ -374,4 +468,144 @@ async fn properties_conversion_through_remote_dispatch_without_a_remote_host() {
     assert_eq!(reloaded["dirty"], false);
     invoke(&peer, "close_project", json!({})).await.unwrap();
     peer.kill();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_desktop_routes_exactly_what_a_server_of_this_build_answers() {
+    let tmp = tempfile::tempdir().unwrap();
+    let base = tmp.path().join("server");
+    let peer_slot = Arc::new(OnceLock::new());
+    let host = Arc::new(Host::new(HostConfig {
+        config_dir: base.join("config"),
+        data_dir: base.join("data"),
+        local_data_dir: base.join("data"),
+        languages: Arc::new(ide_language::LanguageRegistry::load(None).unwrap()),
+        syntax: Arc::default(),
+        sink_for: Box::new(|_| Arc::new(ide_core::NullSink)),
+        owner: |w| w,
+        runtime: tokio::runtime::Handle::current(),
+        project_environment: false,
+    }));
+    // As `openidea-server` assembles its commands.
+    let plugins = ide_host::plugins::remote_host::RemotePlugins::start(&base.join("data"), &host, peer_slot).unwrap();
+    let mut dispatcher = Dispatcher::standard();
+    plugins.register(&mut dispatcher);
+    dispatcher.add(ide_host::plugins::remote::SYNC_COMMAND, |_| async { Ok(()) });
+    assert_eq!(rpc::client_commands(), dispatcher.commands());
+    assert!(rpc::client_commands().contains(&"term_spawn"));
+    plugins.host().shutdown();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn renames_a_branch_with_the_clients_argument_names() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("repo");
+    std::fs::create_dir(&root).unwrap();
+    let git = |args: &[&str]| {
+        let out = std::process::Command::new("git").args(args).current_dir(&root).output().unwrap();
+        assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+        String::from_utf8(out.stdout).unwrap()
+    };
+    git(&["init", "-q", "-b", "main"]);
+    std::fs::write(root.join("a.txt"), "a\n").unwrap();
+    git(&["add", "."]);
+    git(&["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "init"]);
+    git(&["branch", "feature"]);
+    let peer_slot = Arc::new(OnceLock::new());
+    let host = Arc::new(Host::new(HostConfig {
+        config_dir: tmp.path().join("config"),
+        data_dir: tmp.path().join("data"),
+        local_data_dir: tmp.path().join("data"),
+        languages: Arc::new(ide_language::LanguageRegistry::load(None).unwrap()),
+        syntax: Arc::default(),
+        sink_for: Box::new(|_| Arc::new(ide_core::NullSink)),
+        owner: |w| w,
+        runtime: tokio::runtime::Handle::current(),
+        project_environment: false,
+    }));
+    let (client_io, server_io) = tokio::io::duplex(1 << 20);
+    let (sr, sw) = tokio::io::split(server_io);
+    tokio::spawn(rpc::serve(host, Dispatcher::standard(), peer_slot, sr, sw));
+    let (cr, cw) = tokio::io::split(client_io);
+    let peer = Peer::connect(cr, cw, Arc::new(Client::default()));
+    invoke(&peer, "open_project", json!({"path": root})).await.unwrap();
+    invoke(&peer, "project_trust_set", json!({"path": root, "trusted": true, "folder": false})).await.unwrap();
+    // The argument names the desktop client sends (`vcsRenameBranch` in src/bindings.ts).
+    invoke(
+        &peer,
+        "vcs_rename_branch",
+        json!({"repo": null, "from": "feature", "to": "renamed", "unsetUpstream": false}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        git(&["branch", "--format=%(refname:short)", "--list"]).lines().collect::<Vec<_>>(),
+        ["main", "renamed"]
+    );
+    invoke(&peer, "close_project", json!({})).await.unwrap();
+    peer.kill();
+}
+
+/// A handler reads its arguments by the names the desktop client sends: `src/bindings.ts`
+/// passes them in camelCase, and a name the client never sends reads as `null` (an
+/// `Option` silently `None`, anything else an "invalid type: null" error).
+#[test]
+fn handlers_read_the_argument_names_the_client_sends() {
+    use std::collections::{BTreeSet, HashMap};
+    use std::path::Path;
+    let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let bindings = std::fs::read_to_string(repo.join("src/bindings.ts")).unwrap();
+    let mut sent = HashMap::<&str, BTreeSet<&str>>::new();
+    for part in bindings.split("__TAURI_INVOKE(\"").skip(1) {
+        let (command, rest) = part.split_once('"').unwrap();
+        let args = rest.strip_prefix(", {").and_then(|r| r.split_once('}')).map_or("", |(args, _)| args);
+        let names = args.split(',').map(|a| a.split(':').next().unwrap().trim()).filter(|a| !a.is_empty());
+        sent.insert(command, names.collect());
+    }
+    fn sources(dir: &Path, out: &mut Vec<std::path::PathBuf>) {
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                sources(&path, out);
+            } else if path.extension().is_some_and(|e| e == "rs") {
+                out.push(path);
+            }
+        }
+    }
+    let mut files = Vec::new();
+    sources(&repo.join("crates/ide-host/src"), &mut files);
+    let mut checked = 0;
+    let mut wrong = Vec::new();
+    for file in files {
+        let src = std::fs::read_to_string(&file).unwrap();
+        // `.add("name", …)`, also with the name on the next line.
+        let starts: Vec<usize> = src
+            .match_indices(".add(")
+            .map(|(i, m)| i + m.len())
+            .filter_map(|i| src[i..].trim_start().strip_prefix('"').map(|rest| src.len() - rest.len()))
+            .collect();
+        for (n, &start) in starts.iter().enumerate() {
+            let body = &src[start..starts.get(n + 1).copied().unwrap_or(src.len())];
+            let (command, body) = body.split_once('"').unwrap();
+            let Some(sent) = sent.get(command) else { continue };
+            checked += 1;
+            for reader in ["c.arg", "c.sender", "c.channel"] {
+                for (at, _) in body.match_indices(reader) {
+                    let rest = &body[at + reader.len()..];
+                    let rest = match rest.strip_prefix("::<") {
+                        Some(generic) => &generic[generic.find(">(").unwrap() + 1..],
+                        None => rest,
+                    };
+                    let Some(name) = rest.strip_prefix("(\"").and_then(|r| r.split_once('"')).map(|(n, _)| n) else {
+                        continue;
+                    };
+                    if !sent.contains(name) {
+                        wrong.push(format!("{command} reads `{name}`; the client sends {sent:?}"));
+                    }
+                }
+            }
+        }
+    }
+    assert!(checked > 400, "found only {checked} handlers with client bindings");
+    assert!(wrong.is_empty(), "{wrong:#?}");
 }

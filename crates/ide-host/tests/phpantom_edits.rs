@@ -27,6 +27,7 @@ async fn checked_rename_refreshes_a_closed_declaration_after_commit() {
         project_environment: false,
         config_dir: tmp.path().join("config"),
         data_dir: tmp.path().join("data"),
+        local_data_dir: tmp.path().join("local-data"),
         languages: Arc::new(ide_language::LanguageRegistry::load(None).unwrap()),
         syntax: Arc::default(),
         sink_for: Box::new(|_| Arc::new(|_| {})),
@@ -121,6 +122,7 @@ async fn json_translation_first_open_starts_phpantom_and_finds_php_callers() {
         project_environment: false,
         config_dir: tmp.path().join("config"),
         data_dir: tmp.path().join("data"),
+        local_data_dir: tmp.path().join("local-data"),
         languages: Arc::new(ide_language::LanguageRegistry::load(None).unwrap()),
         syntax: Arc::default(),
         sink_for: Box::new(|_| Arc::new(|_| {})),
@@ -136,10 +138,19 @@ async fn json_translation_first_open_starts_phpantom_and_finds_php_callers() {
     }));
     let doc = project.documents.open(&root.join("lang/en.json")).unwrap();
     assert_eq!(doc.language, LanguageId::new("json"));
-    let refs =
-        ide_host::ops::lsp::lsp_references(&host, "main", ide_core::RequestId::next(), doc.id, position, false, true)
-            .await
-            .unwrap();
+    let refs = ide_host::ops::lsp::lsp_references(
+        &host,
+        "main",
+        ide_core::RequestId::next(),
+        doc.id,
+        position,
+        false,
+        true,
+        true,
+        ide_host::ops::Channel::new(|_| {}),
+    )
+    .await
+    .unwrap();
     assert!(refs.locations.iter().any(|l| l.path.ends_with("first.php")), "{refs:?}");
     assert!(refs.locations.iter().any(|l| l.path.ends_with("app/second.php")), "{refs:?}");
     assert!(project.documents.by_path(&root.join("first.php")).is_none());
@@ -173,6 +184,7 @@ async fn environment_first_open_starts_phpantom_and_finds_php_callers() {
         project_environment: false,
         config_dir: tmp.path().join("config"),
         data_dir: tmp.path().join("data"),
+        local_data_dir: tmp.path().join("local-data"),
         languages: Arc::new(ide_language::LanguageRegistry::load(None).unwrap()),
         syntax: Arc::default(),
         sink_for: Box::new(|_| Arc::new(|_| {})),
@@ -188,10 +200,19 @@ async fn environment_first_open_starts_phpantom_and_finds_php_callers() {
     }));
     let doc = project.documents.open(&root.join(".env")).unwrap();
     assert_eq!(doc.language, LanguageId::new("dotenv"));
-    let refs =
-        ide_host::ops::lsp::lsp_references(&host, "main", ide_core::RequestId::next(), doc.id, position, false, true)
-            .await
-            .unwrap();
+    let refs = ide_host::ops::lsp::lsp_references(
+        &host,
+        "main",
+        ide_core::RequestId::next(),
+        doc.id,
+        position,
+        false,
+        true,
+        true,
+        ide_host::ops::Channel::new(|_| {}),
+    )
+    .await
+    .unwrap();
     assert!(refs.locations.iter().any(|l| l.path.ends_with("first.php")), "{refs:?}");
     assert!(refs.locations.iter().any(|l| l.path.ends_with("app/second.php")), "{refs:?}");
     assert!(project.documents.by_path(&root.join("first.php")).is_none());
@@ -214,6 +235,7 @@ async fn framework_source_restart_keeps_host_widening_and_hover_responsive() {
         project_environment: false,
         config_dir: tmp.path().join("config"),
         data_dir: tmp.path().join("data"),
+        local_data_dir: tmp.path().join("local-data"),
         languages: Arc::new(ide_language::LanguageRegistry::load(None).unwrap()),
         syntax: Arc::default(),
         sink_for: Box::new(|_| Arc::new(|_| {})),
@@ -324,6 +346,7 @@ async fn grouped_route_checked_rename_keeps_php_blade_callers_and_group_prefix()
         project_environment: false,
         config_dir: tmp.path().join("config"),
         data_dir: tmp.path().join("data"),
+        local_data_dir: tmp.path().join("local-data"),
         languages: Arc::new(ide_language::LanguageRegistry::load(None).unwrap()),
         syntax: Arc::default(),
         sink_for: Box::new(move |_| {
@@ -485,12 +508,13 @@ async fn builtin_reopen_refreshes_existing_host_document_after_target_restart() 
         project_environment: false,
         config_dir: tmp.path().join("config"),
         data_dir: tmp.path().join("data"),
+        local_data_dir: tmp.path().join("local-data"),
         languages: Arc::new(ide_language::LanguageRegistry::load(None).unwrap()),
         syntax: Arc::default(),
         sink_for: Box::new(move |_| {
             let observer = observer.clone();
             Arc::new(move |event| {
-                if let ide_core::IdeEvent::FsChanged { created, modified, removed } = event {
+                if let ide_core::IdeEvent::FsChanged { created, modified, removed, .. } = event {
                     observer
                         .lock()
                         .unwrap()
@@ -525,7 +549,10 @@ async fn builtin_reopen_refreshes_existing_host_document_after_target_restart() 
     let before = ide_host::ops::lsp::lsp_virtual_document(&host, "main", uri.clone()).await.unwrap();
     assert!(before.description.as_deref().unwrap().contains("8.2"));
     // Seed an older server-derived snapshot to exercise replacement of its text too.
-    let opened = project.documents.open_virtual(&uri, LanguageId::new("php"), "<?php // old stub snapshot\n").unwrap();
+    let opened = project
+        .documents
+        .open_virtual(&uri, LanguageId::new("php"), "<?php // old stub snapshot\n", "utf-8", false, false)
+        .unwrap();
     std::fs::write(&composer, r#"{"require":{"php":"^8.2"},"config":{"platform":{"php":"8.3.0"}}}"#).unwrap();
     project.lsp.restart(project.lsp.servers()[0].id).await.unwrap();
     let after = ide_host::ops::lsp::lsp_virtual_document(&host, "main", uri).await.unwrap();
@@ -562,6 +589,7 @@ async fn checked_class_rename_moves_open_psr4_file_and_shared_history() {
         project_environment: false,
         config_dir: tmp.path().join("config"),
         data_dir: tmp.path().join("data"),
+        local_data_dir: tmp.path().join("local-data"),
         languages: Arc::new(ide_language::LanguageRegistry::load(None).unwrap()),
         syntax: Arc::default(),
         sink_for: Box::new(move |_| {
@@ -730,6 +758,7 @@ Route::get('/😀/direct', "App\\Inv\x6ficeController@show");
         project_environment: false,
         config_dir: tmp.path().join("config"),
         data_dir: tmp.path().join("data"),
+        local_data_dir: tmp.path().join("local-data"),
         languages: Arc::new(ide_language::LanguageRegistry::load(None).unwrap()),
         syntax: Arc::default(),
         sink_for: Box::new(move |_| {

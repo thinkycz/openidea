@@ -42,7 +42,7 @@ impl Project {
         let mut hash = blake3::Hasher::new();
         hash.update(&serde_json::to_vec(&settings).map_err(|e| IdeError::internal(e.to_string()))?);
         let mut roots = vec![self.root.clone()];
-        roots.extend(crate::project::content_roots(&settings, &self.root));
+        roots.extend(crate::project::content_roots(&settings, &self.root, &self.build_cache_dir()));
         roots.sort();
         roots.dedup();
         let mut files = Vec::new();
@@ -103,7 +103,7 @@ impl Project {
         }
         let settings = self.settings.effective();
         let mut roots = vec![dunce::canonicalize(&self.root)?];
-        for root in crate::project::content_roots(&settings, &self.root) {
+        for root in crate::project::content_roots(&settings, &self.root, &self.build_cache_dir()) {
             roots.push(dunce::canonicalize(root)?);
         }
         for (source, target) in ide_workspace::Documents::reviewed_edit_targets(edit)? {
@@ -137,6 +137,7 @@ mod tests {
             project_environment: false,
             config_dir: tmp.path().join("config"),
             data_dir: tmp.path().join("data"),
+            local_data_dir: tmp.path().join("local-data"),
             languages: Arc::new(ide_language::LanguageRegistry::load(None).unwrap()),
             syntax: Arc::default(),
             sink_for: Box::new(|_| Arc::new(|_| {})),
@@ -157,7 +158,8 @@ mod tests {
         let outside = tmp.path().join("outside.php");
         std::fs::write(&outside, "<?php").unwrap();
         let plan = WorkspaceEdit {
-            files: vec![FileEdit::Edit { path: outside.clone().into(), edits: vec![] }],
+            preconditions: Vec::new(),
+            files: vec![FileEdit::Edit { path: outside.clone().into(), edits: vec![], version: None }],
             guard: Some(project.edit_guard().unwrap()),
         };
         assert!(project.apply_reviewed_edit(&plan).unwrap_err().message.contains("outside"));

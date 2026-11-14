@@ -3,8 +3,14 @@ import { EditorState } from "@codemirror/state";
 import { EditorView, GutterMarker, gutter, lineNumbers } from "@codemirror/view";
 import { breakpointGutter, lookOf } from "../editor/breakpointGutter";
 import { executionPoint } from "../editor/execution";
-import { breakpointsOf, loadBreakpoints, toggleBreakpoint, updateBreakpoint } from "../breakpoints/store";
-import { adoptSession, useExecutionPoint, useDebug, handleDebugEvent } from "../state";
+import {
+  breakpointsOf,
+  loadBreakpoints,
+  toggleBreakpoint,
+  updateBreakpoint,
+  useBreakpoints,
+} from "../breakpoints/store";
+import { adoptSession, useExecutionPoint, useDebug, handleDebugEvent, type DebugSession } from "../state";
 import { getContext } from "@/platform/context";
 import styles from "../editor/editor.module.css";
 
@@ -53,6 +59,38 @@ describe("breakpoint gutter", () => {
   });
 });
 
+describe("breakpoint gutter redraws", () => {
+  it("follows a session starting and ending, not every update of a running one", async () => {
+    localStorage.clear();
+    loadBreakpoints("/proj");
+    useDebug.setState({ sessions: {} });
+    const view = makeView("a\nb");
+    toggleBreakpoint(ctx.path, 0);
+    const id = breakpointsOf(ctx.path)[0]!.id;
+    useBreakpoints.setState({ status: { [id]: { verified: true, message: null, line: 0 } } });
+    await flush();
+    expect(view.dom.querySelector(`.${styles.verified}`)).toBeNull();
+
+    const session = { id: 9, status: "running" } as DebugSession;
+    useDebug.setState({ sessions: { 9: session } });
+    await flush();
+    expect(view.dom.querySelector(`.${styles.verified}`)).not.toBeNull();
+
+    const reads = vi.spyOn(useBreakpoints, "getState");
+    useDebug.setState({ sessions: { 9: { ...session, status: "paused" } } });
+    useBreakpoints.setState({
+      status: { [id]: useBreakpoints.getState().status[id]!, other: { verified: true, message: null, line: 3 } },
+    });
+    reads.mockClear();
+    await flush();
+    expect(reads).not.toHaveBeenCalled();
+
+    useDebug.setState({ sessions: { 9: { ...session, status: "terminated" } } });
+    await flush();
+    expect(view.dom.querySelector(`.${styles.verified}`)).toBeNull();
+  });
+});
+
 describe("output class gutter", () => {
   it("disables ordinary, temporary and logging breakpoints and explains why", () => {
     loadBreakpoints("/proj");
@@ -86,6 +124,8 @@ describe("breakpoint look", () => {
     expect(lookOf(b, { verified: true } as never, false, true)).toBe("verified");
     expect(lookOf(b, { verified: false } as never, false, true)).toBe("unverified");
     expect(lookOf({ ...b, enabled: false }, { verified: true } as never, false, true)).toBe("disabled");
+    expect(lookOf(b, { verified: true } as never, true, true)).toBe("muted");
+    expect(lookOf({ ...b, enabled: false }, undefined, true, false)).toBe("disabled");
   });
 });
 
@@ -151,6 +191,17 @@ describe("breakpoint gutter clicks", () => {
     expect(breakpointsOf(ctx.path)[0]).toMatchObject({ line: 0, temporary: true });
   });
 
+  it("adds nothing on a blank line but still removes a breakpoint there", () => {
+    localStorage.clear();
+    loadBreakpoints("/proj");
+    const view = makeView("\na");
+    for (const init of [{}, { altKey: true }, { shiftKey: true }]) click(view, init);
+    expect(breakpointsOf(ctx.path)).toHaveLength(0);
+    toggleBreakpoint(ctx.path, 0);
+    click(view, {});
+    expect(breakpointsOf(ctx.path)).toHaveLength(0);
+  });
+
   it("middle-click enables / disables an existing breakpoint", () => {
     localStorage.clear();
     loadBreakpoints("/proj");
@@ -166,6 +217,60 @@ describe("breakpoint gutter clicks", () => {
 });
 
 describe("execution point", () => {
+  it("keeps the execution line synchronized if inline rendering throws", async () => {
+    useExecutionPoint.setState({ path: null, values: {} });
+    const errors: unknown[] = [];
+    const view = new EditorView({
+      state: EditorState.create({
+        doc: "x\nx\nx",
+        extensions: [executionPoint(ctx), EditorView.exceptionSink.of((e) => errors.push(e))],
+      }),
+      parent: document.body,
+    });
+    views.push(view);
+    const values: Record<string, string> = Object.defineProperty({}, "x", {
+      enumerable: true,
+      get() {
+        throw new Error("inline rendering failed");
+      },
+    });
+    useExecutionPoint.setState({ path: ctx.path, line: 0, top: true, values });
+    await flush();
+    expect(errors).toHaveLength(1);
+    useExecutionPoint.setState({ line: 2, values: {} });
+    await flush();
+    expect(view.dom.querySelectorAll(".cm-line")[2]!.className).toContain(styles.execLine);
+    useExecutionPoint.setState({ path: null });
+    await flush();
+    expect(view.dom.querySelector(`.${styles.execLine}`)).toBeNull();
+  });
+
+  it("keeps refreshing the execution line around Object.prototype names", async () => {
+    useExecutionPoint.setState({ path: null, values: {} });
+    const view = makeView("String text = Integer.toString(40);\nint count = 40;\ncount++;\ncount++;");
+    useExecutionPoint.setState({ path: ctx.path, line: 1, top: true, values: { text: "40" } });
+    await flush();
+    useExecutionPoint.setState({ line: 3, values: { text: "40", count: "42" } });
+    await flush();
+    expect(view.dom.querySelector(`.${styles.execLine}`)?.textContent).toContain("count++");
+    useExecutionPoint.setState({ path: null, values: {} });
+    await flush();
+    expect(view.dom.querySelector(`.${styles.execLine}`)).toBeNull();
+  });
+
+  it.each([2, null])("refreshes a cached editor state when remounted at %s", async (line) => {
+    useExecutionPoint.setState({ path: ctx.path, line: 0, top: true, values: {} });
+    const view = makeView("first\nsecond\nthird");
+    const state = view.state;
+    view.destroy();
+    views.splice(views.indexOf(view), 1);
+    useExecutionPoint.setState({ path: line == null ? null : ctx.path, line: line ?? 0, values: {} });
+    const restored = new EditorView({ state, parent: document.body });
+    views.push(restored);
+    await flush();
+    expect(restored.dom.querySelector(`.${styles.execLine}`)?.textContent ?? null).toBe(line == null ? null : "third");
+  });
+
   it("highlights the suspended line and shows inline values", async () => {
     const view = makeView("x = 1\ny = x + 1\nprint(y)");
     useExecutionPoint.setState({ path: ctx.path, line: 1, top: true, values: { x: "1", y: "2" } });

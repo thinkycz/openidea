@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { EditorState, Text } from "@codemirror/state";
 import { EditorView } from "@codemirror/view";
-import { scrollbarMarks } from "@/editor/api";
+import { scrollbarMarks, viewShown, type EditorDocContext } from "@/editor/api";
 import { lspDoc } from "./lsp";
 import { countsOf, inspectionWidgetExtension } from "./inspectionWidget";
 import type { Diagnostic } from "@/bindings";
@@ -9,10 +9,12 @@ import {
   diagnosticsAt,
   diagnosticsExtension,
   diagnosticsFor,
+  installDiagnosticsEvents,
   setFileDiagnostics,
   subscribeDiagnostics,
   toLintDiagnostics,
 } from "./diagnostics";
+import { emitLocalIdeEvent } from "@/platform/ipc";
 
 const d = (
   line: number,
@@ -30,6 +32,20 @@ const d = (
 });
 
 describe("editor diagnostics store", () => {
+  it("identifies fresh backend publications, including empty replacements, separately from local inspections", () => {
+    const stop = installDiagnosticsEvents();
+    const listener = vi.fn();
+    const off = subscribeDiagnostics("/p/paste.java", listener);
+    const items = [d(0, 0, 4)];
+    setFileDiagnostics("/p/paste.java", "local", items);
+    expect(listener).toHaveBeenLastCalledWith(undefined);
+    emitLocalIdeEvent({ type: "diagnostics", path: "/p/paste.java", source: "jdtls", items });
+    expect(listener).toHaveBeenLastCalledWith({ source: "jdtls", items });
+    emitLocalIdeEvent({ type: "diagnostics", path: "/p/paste.java", source: "other-server", items: [] });
+    expect(listener).toHaveBeenLastCalledWith({ source: "other-server", items: [] });
+    off();
+    stop();
+  });
   it("keeps one list per source and notifies subscribers of the path", () => {
     let calls = 0;
     const off = subscribeDiagnostics("/p/x.rs", () => calls++);
@@ -56,10 +72,19 @@ describe("toLintDiagnostics", () => {
       d(0, 3, 7, "error", { deprecated: true }),
     ]);
     expect(out).toEqual([
-      { from: 3, to: 7, severity: "error", message: "m0:3", source: undefined, markClass: "cm-lsp-deprecated" },
+      {
+        from: 3,
+        to: 7,
+        problem: d(0, 3, 7, "error", { deprecated: true }),
+        severity: "error",
+        message: "m0:3",
+        source: undefined,
+        markClass: "cm-lsp-deprecated",
+      },
       {
         from: 18,
         to: 19,
+        problem: d(1, 6, 7, "warning", { unnecessary: true, source: "rustc", code: "unused" }),
         severity: "warning",
         message: "m1:6",
         source: "rustc unused",
@@ -110,5 +135,27 @@ describe("diagnostics when returning to an inactive tab", () => {
       host.remove();
       setFileDiagnostics(path, "phpantom", []);
     }
+  });
+});
+
+describe("editor diagnostics in a view", () => {
+  it("skips a hidden view and catches up when it is shown again", async () => {
+    const view = new EditorView({
+      state: EditorState.create({
+        doc: "let x = 1;",
+        extensions: [lspDoc.of({ doc: 1, path: "/p/hidden.rs" } as EditorDocContext), diagnosticsExtension()],
+      }),
+      parent: document.body,
+    });
+    view.dom.remove();
+    setFileDiagnostics("/p/hidden.rs", "rust-analyzer", [d(0, 4, 5)]);
+    await Promise.resolve();
+    expect(diagnosticsAt(view, 4)).toHaveLength(0);
+    document.body.appendChild(view.dom);
+    view.dispatch({ effects: viewShown.of(null) });
+    await Promise.resolve();
+    expect(diagnosticsAt(view, 4)).toHaveLength(1);
+    view.destroy();
+    setFileDiagnostics("/p/hidden.rs", "rust-analyzer", []);
   });
 });

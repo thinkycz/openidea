@@ -57,6 +57,37 @@ fn fixture() -> Fixture {
     Fixture { _tmp: tmp, root, docs, events, rec }
 }
 
+#[test]
+fn own_disk_changes_preserve_the_open_documents_encoding() {
+    let f = fixture();
+    let path = f.root.join("query.sql");
+    let original = "SELECT '中文';\r\n";
+    fs::write(&path, ide_vfs::encode(original, "gbk", false).unwrap()).unwrap();
+    let mut defaults = f.docs.file_defaults();
+    defaults.project_fallback = "gbk".into();
+    f.docs.set_file_defaults(defaults.clone());
+    let doc = f.docs.open(&path).unwrap();
+    assert_eq!(doc.encoding, "gbk");
+    defaults.project_fallback = "windows-1252".into();
+    f.docs.set_file_defaults(defaults);
+    f.docs.sync_after_disk_change();
+    let unchanged = f.docs.snapshot(doc.id).unwrap();
+    assert_eq!(unchanged.text, doc.text);
+    assert_eq!(unchanged.encoding, "gbk");
+    assert!(!unchanged.dirty);
+    let changed = "SELECT '世界';\r\n";
+    let bytes = ide_vfs::encode(changed, "gbk", false).unwrap();
+    fs::write(&path, &bytes).unwrap();
+    f.docs.sync_after_disk_change();
+    let reloaded = f.docs.snapshot(doc.id).unwrap();
+    assert_eq!(reloaded.text, changed.replace("\r\n", "\n"));
+    assert_eq!(reloaded.encoding, "gbk");
+    assert_eq!(reloaded.line_ending, LineEnding::CrLf);
+    assert!(!reloaded.dirty);
+    f.docs.save_all().unwrap();
+    assert_eq!(fs::read(&path).unwrap(), bytes);
+}
+
 fn change(from: u32, to: u32, insert: &str) -> ChangeSet {
     ChangeSet { changes: vec![TextChange { from, to, insert: insert.into() }] }
 }
@@ -314,6 +345,57 @@ fn backend_edits_emit_patches() {
 }
 
 #[test]
+fn versioned_background_edits_are_marked_non_undoable() {
+    let f = fixture();
+    let path = f.root.join("remote.txt");
+    fs::write(&path, "one").unwrap();
+    let doc = f.docs.open(&path).unwrap().id;
+    let patches = || {
+        f.events
+            .lock()
+            .iter()
+            .filter_map(|event| match event {
+                IdeEvent::DocPatched { workspace_edit, .. } => Some(*workspace_edit),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    };
+
+    // A command's versioned edit stays an editor Undo step; a background one doesn't.
+    let edit = |text: &str| [TextEdit { range: Range::new(Pos::new(0, 0), Pos::new(0, 0)), new_text: text.into() }];
+    assert_eq!(f.docs.apply_edits_at(doc, 0, &edit("a")).unwrap(), Some(1));
+    assert_eq!(f.docs.apply_background_edits_at(doc, 1, &edit("b")).unwrap(), Some(2));
+    assert_eq!(patches(), [false, true]);
+    assert_eq!(f.docs.apply_background_edits_at(doc, 1, &edit("stale")).unwrap(), None);
+    assert_eq!(
+        f.docs.apply_edits_at(doc, 0, &[TextEdit { range: Range::default(), new_text: "stale".into() }]).unwrap(),
+        None
+    );
+}
+
+#[test]
+fn external_change_in_two_places_patches_each() {
+    let f = fixture();
+    let path = f.root.join("two.txt");
+    let old: String = (0..400).map(|i| format!("line {i}\n")).collect();
+    fs::write(&path, &old).unwrap();
+    let id = f.docs.open(&path).unwrap().id;
+
+    std::thread::sleep(std::time::Duration::from_millis(10));
+    let new = old.replace("line 20\n", "line 20x\n").replace("line 299\n", "line 299x\n");
+    fs::write(&path, &new).unwrap();
+    f.docs.on_disk_changed(std::slice::from_ref(&path));
+
+    assert_eq!(f.docs.snapshot(id).unwrap().text, new);
+    let events = f.events.lock();
+    let changes = events.iter().find_map(|e| match e {
+        IdeEvent::DocPatched { changes, .. } => Some(changes),
+        _ => None,
+    });
+    assert_eq!(changes.map(Vec::len), Some(2));
+}
+
+#[test]
 fn external_changes() {
     let f = fixture();
     let path = f.root.join("ext.txt");
@@ -348,6 +430,46 @@ fn external_changes() {
 
     // Unknown paths are ignored.
     f.docs.on_disk_changed(&[f.root.join("other.txt")]);
+}
+
+/// An IDE operation that rewrites a file with the same length and mtime still refreshes
+/// the clean buffer.
+#[test]
+fn own_disk_change_preserving_length_and_mtime_reloads_a_clean_document() {
+    let f = fixture();
+    let path = f.root.join("stamp.txt");
+    fs::write(&path, "first").unwrap();
+    let id = f.docs.open(&path).unwrap().id;
+    let mtime = fs::metadata(&path).unwrap().modified().unwrap();
+    fs::write(&path, "other").unwrap();
+    fs::File::options().write(true).open(&path).unwrap().set_modified(mtime).unwrap();
+    f.docs.sync_after_disk_change();
+    assert_eq!(f.docs.snapshot(id).unwrap().text, "other");
+}
+
+/// An external write that keeps the byte length and the mtime (timestamp-preserving
+/// tools, coarse-granularity filesystems) leaves the `(mtime, length)` stamp equal:
+/// the OS event is still authoritative, so a clean document reloads.
+#[test]
+fn external_change_preserving_length_and_mtime_reloads_a_clean_document() {
+    let f = fixture();
+    let path = f.root.join("stamp.txt");
+    fs::write(&path, "first").unwrap(); // 5 bytes
+    let id = f.docs.open(&path).unwrap().id;
+    let mtime = fs::metadata(&path).unwrap().modified().unwrap();
+
+    fs::write(&path, "other").unwrap(); // 5 bytes, different content
+    fs::File::options().write(true).open(&path).unwrap().set_modified(mtime).unwrap();
+    f.docs.on_disk_changed(std::slice::from_ref(&path));
+    let snap = f.docs.snapshot(id).unwrap();
+    assert_eq!(snap.text, "other");
+    assert!(!snap.dirty);
+
+    // The reload recorded the new stamp: repeating the same event changes nothing.
+    let before = f.events.lock().len();
+    f.docs.on_disk_changed(std::slice::from_ref(&path));
+    assert_eq!(f.events.lock().len(), before);
+    assert_eq!(f.docs.snapshot(id).unwrap().text, "other");
 }
 
 #[test]
@@ -393,11 +515,15 @@ fn reload_and_convert_encoding() {
     let (bytes, _, _) = encoding_rs::GBK.encode("中文内容");
     fs::write(&path, &bytes).unwrap();
     let info = f.docs.open(&path).unwrap();
-    assert_eq!(f.docs.set_encoding(info.id, "gbk", true).unwrap(), "gbk");
+    let encoding = f.docs.set_encoding(info.id, "gbk", true).unwrap();
+    assert_eq!(encoding.encoding, "gbk");
+    assert!(!encoding.has_bom);
     assert_eq!(f.docs.snapshot(info.id).unwrap().text, "中文内容");
 
     // Convert: same text, written in the new encoding on save.
-    assert_eq!(f.docs.set_encoding(info.id, "utf-8", false).unwrap(), "utf-8");
+    let encoding = f.docs.set_encoding(info.id, "utf-8", false).unwrap();
+    assert_eq!(encoding.encoding, "utf-8");
+    assert!(!encoding.has_bom);
     f.docs.save(info.id).unwrap();
     assert_eq!(fs::read_to_string(&path).unwrap(), "中文内容");
 
@@ -406,6 +532,71 @@ fn reload_and_convert_encoding() {
     // Reload refuses unsaved changes.
     f.docs.edit(info.id, f.docs.snapshot(info.id).unwrap().version, change(0, 0, "x")).unwrap();
     assert!(f.docs.set_encoding(info.id, "gbk", true).is_err());
+}
+
+#[test]
+fn external_changes_keep_a_chosen_encoding() {
+    // Valid UTF-8 bytes, so detection alone would read them as UTF-8.
+    let (first, changed) = (b"caf\xC3\xA9".as_slice(), b"caf\xC3\xA9 \xC3\xA8".as_slice());
+    for (encoding, reload) in [("windows-1252", true), ("gbk", true), ("windows-1252", false)] {
+        let f = fixture();
+        let path = f.root.join("legacy.txt");
+        fs::write(&path, first).unwrap();
+        let info = f.docs.open(&path).unwrap();
+        assert_eq!(info.encoding, "utf-8");
+        if reload {
+            f.docs.set_encoding(info.id, encoding, true).unwrap();
+        } else {
+            // Convert, then save: the file is now in the chosen encoding.
+            f.docs.replace_all(info.id, "café").unwrap();
+            f.docs.set_encoding(info.id, encoding, false).unwrap();
+            f.docs.save(info.id).unwrap();
+        }
+        let expected =
+            |bytes: &[u8]| encoding_rs::Encoding::for_label(encoding.as_bytes()).unwrap().decode(bytes).0.into_owned();
+        let changed = if reload { changed.to_vec() } else { ide_vfs::encode("café è", encoding, false).unwrap() };
+        fs::write(&path, &changed).unwrap();
+        f.docs.on_disk_changed(std::slice::from_ref(&path));
+        let snapshot = f.docs.snapshot(info.id).unwrap();
+        assert_eq!(snapshot.text, expected(&changed), "{encoding} reload={reload}");
+        assert_eq!(snapshot.encoding, encoding, "{encoding} reload={reload}");
+        assert!(!snapshot.dirty);
+    }
+}
+
+#[test]
+fn external_changes_redetect_an_encoding_the_user_never_chose() {
+    let f = fixture();
+    let path = f.root.join("plain.txt");
+    fs::write(&path, "plain").unwrap();
+    let info = f.docs.open(&path).unwrap();
+    fs::write(&path, ide_vfs::encode("wide", "utf-16le", true).unwrap()).unwrap();
+    f.docs.on_disk_changed(std::slice::from_ref(&path));
+    let snapshot = f.docs.snapshot(info.id).unwrap();
+    assert_eq!((snapshot.text.as_str(), snapshot.encoding.as_str()), ("wide", "utf-16le"));
+}
+
+#[test]
+fn utf8_bom_is_added_and_removed_on_save() {
+    let f = fixture();
+    let path = f.root.join("bom.txt");
+    fs::write(&path, "text").unwrap();
+    let info = f.docs.open(&path).unwrap();
+    assert!(!info.has_bom);
+
+    assert!(f.docs.set_bom(info.id, true).unwrap().has_bom);
+    assert_eq!(fs::read(&path).unwrap(), b"text", "written on save only");
+    f.docs.save(info.id).unwrap();
+    assert_eq!(fs::read(&path).unwrap(), b"\xEF\xBB\xBFtext");
+    assert_eq!(f.docs.snapshot(info.id).unwrap().text, "text");
+
+    assert!(!f.docs.set_bom(info.id, false).unwrap().has_bom);
+    f.docs.save(info.id).unwrap();
+    assert_eq!(fs::read(&path).unwrap(), b"text");
+
+    // Other encodings have no BOM to toggle.
+    f.docs.set_encoding(info.id, "gbk", false).unwrap();
+    assert!(f.docs.set_bom(info.id, true).is_err());
 }
 
 #[cfg(unix)]
@@ -536,14 +727,14 @@ fn editorconfig_applies_on_open_and_save() {
 fn virtual_documents_are_read_only_and_keyed_by_uri() {
     let f = fixture();
     let uri = "jdt://contents/a.jar/p/C.class?=x";
-    let info = f.docs.open_virtual(uri, LanguageId::new("java"), "class C {}\n").unwrap();
+    let info = f.docs.open_virtual(uri, LanguageId::new("java"), "class C {}\n", "utf-8", false, true).unwrap();
     assert_eq!(info.uri.as_deref(), Some(uri));
     assert_eq!(info.path, PathBuf::from(uri));
     assert!(info.read_only && !info.dirty);
     assert_eq!(info.language.as_str(), "java");
 
     // Re-opening shares the document; edits and saves never reach a file.
-    let again = f.docs.open_virtual(uri, LanguageId::new("java"), "ignored").unwrap();
+    let again = f.docs.open_virtual(uri, LanguageId::new("java"), "ignored", "utf-8", false, true).unwrap();
     assert_eq!(again.id, info.id);
     assert_eq!(again.text, "class C {}\n");
     let err = f.docs.edit(info.id, info.version, change(0, 0, "x")).unwrap_err();
@@ -555,6 +746,68 @@ fn virtual_documents_are_read_only_and_keyed_by_uri() {
     f.docs.close(info.id);
     assert!(f.docs.snapshot(info.id).is_err());
     assert_eq!(*f.rec.log.lock(), vec!["open v0 java".to_owned(), "close".to_owned()]);
+}
+
+#[test]
+fn virtual_documents_carry_their_encoding_and_reload_capability() {
+    let f = fixture();
+    // Archive sources decoded by the backend report the charset actually used.
+    let uri = "jar:///m2/lib-1.0-sources.jar!/p/C.java";
+    let info = f.docs.open_virtual(uri, LanguageId::new("java"), "中文", "gbk", false, true).unwrap();
+    assert_eq!((info.encoding.as_str(), info.has_bom, info.can_reload_encoding), ("gbk", false, true));
+    let bom =
+        f.docs.open_virtual("jar:///m2/b.jar!/p/B.java", LanguageId::new("java"), "x", "utf-8", true, true).unwrap();
+    assert!(bom.has_bom);
+    // Server-generated content (decompiled) cannot be re-decoded.
+    let decompiled = f
+        .docs
+        .open_virtual(
+            "csharp:/p/App.csproj/decompiled/Lib.cs",
+            LanguageId::new("csharp"),
+            "class Lib {}",
+            "utf-8",
+            false,
+            false,
+        )
+        .unwrap();
+    assert!(!decompiled.can_reload_encoding);
+    // File-backed documents can always be re-read from disk.
+    let path = f.root.join("f.txt");
+    fs::write(&path, "x").unwrap();
+    assert!(f.docs.open(&path).unwrap().can_reload_encoding);
+}
+
+#[test]
+fn virtual_documents_reload_with_another_encoding_without_becoming_editable() {
+    let f = fixture();
+    let uri = "jdt://contents/a.jar/p/C.class?=x";
+    let info = f.docs.open_virtual(uri, LanguageId::new("java"), "涓枃", "utf-8", false, true).unwrap();
+    let encoding = f.docs.replace_virtual(info.id, "中文", "gbk", false).unwrap();
+    assert_eq!((encoding.encoding.as_str(), encoding.has_bom), ("gbk", false));
+    let snap = f.docs.snapshot(info.id).unwrap();
+    assert_eq!(snap.text, "中文");
+    assert_eq!(snap.encoding, "gbk");
+    assert!(snap.read_only && !snap.dirty, "reloading is not an edit");
+    assert!(snap.version > info.version);
+    assert_eq!(f.docs.virtual_uri(info.id).unwrap().as_deref(), Some(uri));
+    // The replacement reached observers and the event stream (editors resync).
+    assert!(f.rec.log.lock().iter().any(|l| l.starts_with("change v") && l.contains("中文")));
+    assert!(f.events.lock().iter().any(|e| matches!(e, IdeEvent::DocPatched { doc, .. } if *doc == info.id)));
+
+    // Read-only protection is unchanged.
+    assert_eq!(f.docs.edit(info.id, snap.version, change(0, 0, "x")).unwrap_err().kind, ErrorKind::PermissionDenied);
+    assert!(f.docs.set_encoding(info.id, "utf-8", false).is_err());
+    assert!(f.docs.set_encoding(info.id, "gbk", true).is_err(), "the op layer routes virtual reloads");
+    assert!(f.docs.set_bom(info.id, true).is_err());
+    f.docs.save(info.id).unwrap();
+
+    // Unknown encodings are refused; file-backed documents are not virtual.
+    assert!(f.docs.replace_virtual(info.id, "x", "not-an-encoding", false).is_err());
+    let path = f.root.join("f.txt");
+    fs::write(&path, "x").unwrap();
+    let file = f.docs.open(&path).unwrap();
+    assert!(f.docs.replace_virtual(file.id, "y", "utf-8", false).is_err());
+    assert_eq!(f.docs.virtual_uri(file.id).unwrap(), None);
 }
 
 #[test]
@@ -666,6 +919,7 @@ fn reviewed_plan(docs: &Documents, files: Vec<ide_core::FileEdit>) -> ide_core::
         .collect();
     ide_core::WorkspaceEdit {
         files,
+        preconditions: Vec::new(),
         guard: Some(ide_core::WorkspaceEditGuard {
             disk_revisions,
             project_revision: "test-project".into(),
@@ -676,6 +930,7 @@ fn reviewed_plan(docs: &Documents, files: Vec<ide_core::FileEdit>) -> ide_core::
 }
 fn replace_name(path: &Path, from: u32, to: u32, name: &str) -> ide_core::FileEdit {
     ide_core::FileEdit::Edit {
+        version: None,
         path: path.into(),
         edits: vec![TextEdit { range: Range::new(Pos::new(0, from), Pos::new(0, to)), new_text: name.into() }],
     }
@@ -722,6 +977,7 @@ fn reviewed_edits_reject_collisions_bad_unicode_and_read_only_targets() {
         vec![replace_name(&a, 1, 2, "Split surrogate")],
         vec![replace_name(&a, 2, 99, "Bad column")],
         vec![ide_core::FileEdit::Edit {
+            version: None,
             path: a.clone().into(),
             edits: vec![
                 TextEdit { range: Range::new(Pos::new(0, 2), Pos::new(0, 5)), new_text: "New".into() },
@@ -1137,8 +1393,14 @@ fn properties_preserve_escape_spelling_only_after_revision_bound_confirmation() 
 fn reopening_php_builtin_refreshes_readonly_content_without_user_edits() {
     let f = fixture();
     let uri = "phpantom-stub://DateTime?project_context=1";
-    let first = f.docs.open_virtual(uri, LanguageId::new("php"), "<?php // target8.2\nclass DateTime {}\n").unwrap();
-    let next = f.docs.open_virtual(uri, LanguageId::new("php"), "<?php // target8.3\nclass DateTime {}\n").unwrap();
+    let first = f
+        .docs
+        .open_virtual(uri, LanguageId::new("php"), "<?php // target8.2\nclass DateTime {}\n", "utf-8", false, false)
+        .unwrap();
+    let next = f
+        .docs
+        .open_virtual(uri, LanguageId::new("php"), "<?php // target8.3\nclass DateTime {}\n", "utf-8", false, false)
+        .unwrap();
     assert_eq!(next.id, first.id);
     assert_eq!(next.text, "<?php // target8.3\nclass DateTime {}\n");
     assert_eq!(next.version, first.version + 1);
@@ -1163,6 +1425,7 @@ fn reviewed_rename_plan(
     files.append(&mut edits);
     let mut plan = ide_core::WorkspaceEdit {
         files,
+        preconditions: Vec::new(),
         guard: Some(ide_core::WorkspaceEditGuard {
             documents_revision: docs.edit_revision().unwrap(),
             ..Default::default()

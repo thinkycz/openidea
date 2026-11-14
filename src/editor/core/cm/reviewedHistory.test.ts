@@ -1,7 +1,7 @@
 import { describe, it, expect, vi } from "vitest";
 import { EditorState, EditorSelection, ChangeSet, Transaction } from "@codemirror/state";
 import { history, isolateHistory } from "@codemirror/commands";
-import { minimalChange } from "../sync/diff";
+import { minimalChanges } from "../sync/diff";
 import { reviewedUndo as undo, reviewedRedo as redo, reviewedHistory, reviewedTransaction } from "./reviewedHistory";
 
 function setup() {
@@ -134,7 +134,7 @@ it.each(["\n", "\r\n"])(
       [before, "undo"],
       [after, "redo"],
     ] as const) {
-      const change = minimalChange(state.doc.toString(), text)!;
+      const change = minimalChanges(state.doc.toString(), text);
       state = reviewedTransaction(
         state,
         ChangeSet.of(change, state.doc.length),

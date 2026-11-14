@@ -16,8 +16,9 @@ import type {
   SymbolMatch,
   WorkspaceSymbol,
 } from "@/platform/ipc";
-import type { SettingsSearchEntry } from "@/workbench/contributions";
+import type { EndpointEntry, SettingsSearchEntry } from "@/workbench/contributions";
 import { parseLocationQuery } from "../common/query";
+import { matchRoutes } from "./routes";
 import { passesFilter, type ResolvedFilter } from "./filters";
 import {
   ALL_TAB_LIMIT,
@@ -25,12 +26,15 @@ import {
   TAB_LIMIT,
   actionItem,
   fileItem,
+  folderItem,
   matchActions,
+  matchOutsideFiles,
   matchSettings,
   mergeActionResults,
   mergeSymbols,
   sectionsFor,
   textItems,
+  type OutsideFile,
   type SeItem,
   type SeTab,
   type SectionId,
@@ -39,6 +43,10 @@ import {
 
 export interface SeDeps {
   findFiles(query: string, limit: number): Promise<FileMatch[]>;
+  /** Directories by name or path (`relPath` ending in `/`), listed with the files. */
+  findDirs?(query: string, limit: number): Promise<FileMatch[]>;
+  /** Files outside the project index listed with its matches (Scratches). */
+  outsideFiles?(): Promise<OutsideFile[]>;
   findSymbols(query: string, filter: SymbolFilter, limit: number): Promise<SymbolMatch[]>;
   /** Optional language-server symbols; rejects with `unavailable` when no server. */
   workspaceSymbols?(request: RequestId, query: string): Promise<WorkspaceSymbol[]>;
@@ -56,6 +64,8 @@ export interface SeDeps {
   now(): number;
   /** Whether `path` is in a root-based named scope ("Project Test Files" …). */
   inFileSet?(set: ProjectFileSet, path: string): boolean;
+  /** Endpoints of the project, for request-path matches. */
+  routes?(): Promise<EndpointEntry[]>;
 }
 
 export interface SeRequest {
@@ -107,6 +117,14 @@ export class SeController {
     private readonly deps: SeDeps,
     private readonly onChange: (s: SeSnapshot) => void,
   ) {}
+
+  invalidateEndpoints() {
+    this.signatures.delete("endpoints");
+  }
+
+  invalidateFiles() {
+    for (const id of ["files", "classes", "symbols", "text"] as const) this.signatures.delete(id);
+  }
 
   run(req: SeRequest) {
     const gen = ++this.gen;
@@ -242,12 +260,27 @@ export class SeController {
               ? (path: string) => (!scope || scope(path)) && (!filter || passesFilter(filter, path))
               : null;
           // Over-fetch so a narrowed scope still fills the section.
-          const fetched = await this.deps.findFiles(text, keep ? limit * 4 + 1 : limit + 1);
-          const matches = keep ? fetched.filter((m) => keep(m.path)) : fetched;
+          const want = keep ? limit * 4 + 1 : limit + 1;
+          // Directories rank with the files (equal scores: the file first); a file type filter
+          // and a `File.kt:42` query ask for files only.
+          const withDirs = !!this.deps.findDirs && !!text && !filter && q.line === null;
+          const [indexed, dirs, outside] = await Promise.all([
+            this.deps.findFiles(text, want),
+            withDirs ? this.deps.findDirs!(text, want).catch(() => []) : [],
+            text && this.deps.outsideFiles ? this.deps.outsideFiles().catch(() => []) : [],
+          ]);
+          const fetched = outside.length ? [...indexed, ...matchOutsideFiles(outside, text)] : indexed;
+          const merged =
+            dirs.length || outside.length
+              ? [...fetched.map((m) => ({ m, folder: false })), ...dirs.map((m) => ({ m, folder: true }))].sort(
+                  (a, b) => b.m.score - a.m.score || Number(a.folder) - Number(b.folder),
+                )
+              : fetched.map((m) => ({ m, folder: false }));
+          const matches = keep ? merged.filter(({ m }) => keep(m.path)) : merged;
           this.set(
             id,
             gen,
-            matches.slice(0, limit).map((m) => fileItem(m, q.line, q.col)),
+            matches.slice(0, limit).map(({ m, folder }) => (folder ? folderItem(m) : fileItem(m, q.line, q.col))),
             matches.length > limit,
             false,
           );
@@ -256,6 +289,9 @@ export class SeController {
         case "classes":
         case "symbols":
           await this.startSymbols(id, gen, text, limit, req);
+          break;
+        case "endpoints":
+          await this.startEndpoints(id, gen, text, limit, req);
           break;
         case "actions": {
           const hits = matchActions(this.deps.actions(), text, {
@@ -282,6 +318,14 @@ export class SeController {
       // Unavailable sources (no project, no index yet) simply contribute nothing.
       this.set(id, gen, [], false, false);
     }
+  }
+
+  /** Project endpoints by request path (`/menu/search`), ranked in memory. */
+  private async startEndpoints(id: SectionId, gen: number, text: string, limit: number, req: SeRequest) {
+    const routes = (await this.deps.routes?.().catch((): EndpointEntry[] => [])) ?? [];
+    const { items, hasMore } = matchRoutes(routes, text, limit);
+    const keep = this.scopeFilter(req);
+    this.set(id, gen, keep ? items.filter((i) => keep(i.path)) : items, hasMore, false);
   }
 
   private async startSymbols(id: "classes" | "symbols", gen: number, text: string, limit: number, req: SeRequest) {

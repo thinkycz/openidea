@@ -7,6 +7,7 @@ pub(super) struct Target {
     pub source: PathBuf,
     pub path: PathBuf,
     pub edits: Vec<TextEdit>,
+    pub version: Option<i32>,
 }
 
 pub(super) fn destination(path: &Path) -> IdeResult<PathBuf> {
@@ -58,9 +59,9 @@ pub(super) fn targets(edit: &WorkspaceEdit) -> IdeResult<Vec<Target>> {
                 if !sources.insert(source.clone()) || renamed.insert(path.clone(), result.len()).is_some() {
                     return Err(IdeError::invalid("The edit plan contains colliding file renames"));
                 }
-                result.push(Target { source, path, edits: Vec::new() });
+                result.push(Target { source, path, edits: Vec::new(), version: None });
             }
-            FileEdit::Edit { path, edits } => {
+            FileEdit::Edit { path, edits, version } => {
                 saw_text = true;
                 let possible_destination = destination(path)?;
                 if let Some(index) = renamed.get(&possible_destination).copied() {
@@ -68,12 +69,13 @@ pub(super) fn targets(edit: &WorkspaceEdit) -> IdeResult<Vec<Target>> {
                         return Err(IdeError::invalid("The edit plan contains duplicate targets"));
                     }
                     result[index].edits = edits.clone();
+                    result[index].version = *version;
                 } else {
                     let path = dunce::canonicalize(path)?;
                     if sources.contains(&path) || !edited.insert(path.clone()) {
                         return Err(IdeError::invalid("The edit plan contains duplicate or obsolete rename targets"));
                     }
-                    result.push(Target { source: path.clone(), path, edits: edits.clone() });
+                    result.push(Target { source: path.clone(), path, edits: edits.clone(), version: *version });
                 }
             }
             _ => return Err(IdeError::invalid("Unsupported reviewed file operation")),

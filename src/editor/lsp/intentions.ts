@@ -8,21 +8,27 @@ import { EditorView, ViewPlugin, type ViewUpdate } from "@codemirror/view";
 import { forEachDiagnostic } from "@codemirror/lint";
 import { indentUnit } from "@codemirror/language";
 import { diff } from "@codemirror/merge";
-import { commands, isCancelled, type CodeAction } from "@/platform/ipc";
-import { contributedIntentions, intentionProviders, whenSynced } from "@/editor/api";
+import { commands, isCancelled, type CodeAction, type Diagnostic } from "@/platform/ipc";
+import {
+  contributedIntentions,
+  contributedQuickFixes,
+  intentionProviders,
+  intentionsChanged,
+  whenSynced,
+} from "@/editor/api";
 import { shortcutLabel } from "@/platform/keymap";
 import { debounce, docOf, isUnavailable, lspRequest, reportLspError } from "./lsp";
 import { offsetsToRange } from "./positions";
 import { showHint } from "./hint";
 import { formatLines } from "./format";
-import { pythonMemberIntentions } from "./pythonMembers";
+import { languageSemantics } from "./semantic";
 import { caretAnchor, openPopup, type ListPopupItem, type ListPreview } from "./popupStore";
 import { editPreviewLines } from "./workspaceEdit";
 import { featureBackoff } from "./availability";
 import { iconNode } from "./iconMarkup";
 import { editorPrefs } from "@/platform/editorSettings";
 import { spellingIntentions } from "./spelling";
-import { inspectionsAt } from "./diagnostics";
+import { inspectionsAt, type EditorDiagnostic } from "./diagnostics";
 import { SPELLING_INSPECTION } from "@/platform/inspections";
 import { editInspectionSettings, intentionControls } from "@/platform/inspectionControls";
 import { runInteractiveCodeAction } from "./interactiveCommand";
@@ -32,6 +38,27 @@ const codeActionBackoff = featureBackoff();
 
 const isQuickFix = (a: CodeAction) => !!a.kind && (a.kind === "quickfix" || a.kind.startsWith("quickfix."));
 
+/** The red bulb is reserved for errors; other inspections use the ordinary bulb. */
+export function quickFixIcon(view: EditorView): "bulb" | "bulb-fix" {
+  const sel = view.state.selection.main;
+  const line = view.state.doc.lineAt(sel.head);
+  let error = false;
+  forEachDiagnostic(view.state, (d, from, to) => {
+    if (d.severity === "error" && from <= line.to && to >= line.from) error = true;
+  });
+  return error ? "bulb-fix" : "bulb";
+}
+
+const isFixItem = (item: ListPopupItem) => item.quickFix ?? item.icon === "bulb-fix";
+
+/** Local and language-server fixes share icons and the same stable ordering. */
+export function listedIntentions(view: EditorView, items: ListPopupItem[]): ListPopupItem[] {
+  const rank = (item: ListPopupItem) => (item.disabled ? 4 : 0) + (isFixItem(item) ? 0 : 2) + (item.emphasis ? 0 : 1);
+  return items
+    .map((item) => (isFixItem(item) ? { ...item, quickFix: true, icon: quickFixIcon(view) } : item))
+    .sort((a, b) => rank(a) - rank(b));
+}
+
 /** IDEA ordering: quick fixes first, preferred before others, disabled last; stable otherwise. */
 export function sortCodeActions(actions: readonly CodeAction[]): CodeAction[] {
   const rank = (a: CodeAction) => (a.disabledReason ? 4 : 0) + (isQuickFix(a) ? 0 : 2) + (a.isPreferred ? 0 : 1);
@@ -39,6 +66,23 @@ export function sortCodeActions(actions: readonly CodeAction[]): CodeAction[] {
     .map((a, i) => ({ a, i }))
     .sort((x, y) => rank(x.a) - rank(y.a) || x.i - y.i)
     .map((x) => x.a);
+}
+
+/** Servers that omit diagnostic tags retain range-based actions. Tagged actions must match the problem. */
+export function actionsForDiagnostic(actions: readonly CodeAction[], problem: Diagnostic): CodeAction[] {
+  if (!actions.some((a) => a.diagnostics?.length)) return [...actions];
+  return actions.filter((a) =>
+    a.diagnostics?.some(
+      (d) =>
+        d.message === problem.message &&
+        d.range.start.line === problem.range.start.line &&
+        d.range.start.col === problem.range.start.col &&
+        d.range.end.line === problem.range.end.line &&
+        d.range.end.col === problem.range.end.col &&
+        (d.code == null || problem.code == null || d.code === problem.code) &&
+        (d.source == null || problem.source == null || d.source === problem.source),
+    ),
+  );
 }
 
 async function fetchActions(view: EditorView, only: string[], whole = false): Promise<CodeAction[]> {
@@ -104,15 +148,29 @@ async function fetchIntentions(view: EditorView): Promise<CodeAction[]> {
   return actions;
 }
 
-/** Enabled quick fixes of the problem at `from..to`, preferred first. */
-export async function quickFixesAt(view: EditorView, from: number, to: number): Promise<CodeAction[]> {
+export type EditorQuickFix = CodeAction | { title: string; run: () => void | Promise<void> };
+
+/** Enabled quick fixes of the problem at `from..to`, including local inspections. */
+export async function quickFixesAt(
+  view: EditorView,
+  from: number,
+  to: number,
+  problem?: Diagnostic,
+): Promise<EditorQuickFix[]> {
+  const local = contributedQuickFixes(view, from, to).map((fix) => ({ title: fix.label, run: fix.run }));
   const doc = docOf(view);
-  if (!doc) return [];
-  await whenSynced(view);
-  const actions = await lspRequest(() =>
-    commands.lspCodeActions(doc.doc, offsetsToRange(view.state.doc, from, to), ["quickfix"]),
-  );
-  return sortCodeActions(actions.filter((a) => isQuickFix(a) && !a.disabledReason));
+  if (!doc) return local;
+  try {
+    await whenSynced(view);
+    const actions = await lspRequest(() =>
+      commands.lspCodeActions(doc.doc, offsetsToRange(view.state.doc, from, to), ["quickfix"]),
+    );
+    const matching = problem ? actionsForDiagnostic(actions, problem) : actions;
+    return [...local, ...sortCodeActions(matching.filter((a) => isQuickFix(a) && !a.disabledReason))];
+  } catch (e) {
+    if (local.length) return local;
+    throw e;
+  }
 }
 
 /**
@@ -123,17 +181,17 @@ export async function applyQuickFix(view: EditorView) {
   const state = view.state;
   const caret = state.selection.main.head;
   const line = state.doc.lineAt(caret);
-  const problems: Array<PlacedProblem & { rank: number }> = [];
+  const problems: Array<PlacedProblem & { rank: number; problem?: Diagnostic }> = [];
   forEachDiagnostic(state, (d, from, to) => {
     if (d.severity === "hint" || to < line.from || from > line.to) return;
     const rank =
       (d.severity === "error" ? 0 : d.severity === "warning" ? 1 : 2) + (from <= caret && caret <= to ? 0 : 3);
-    problems.push({ from, to, severity: d.severity, rank });
+    problems.push({ from, to, severity: d.severity, rank, problem: (d as EditorDiagnostic).problem });
   });
   problems.sort((a, b) => a.rank - b.rank);
   try {
     for (const p of problems) {
-      const fix = (await quickFixesAt(view, p.from, p.to))[0];
+      const fix = (await quickFixesAt(view, p.from, p.to, p.problem))[0];
       if (view.state.doc !== state.doc) return;
       if (fix) return applyCodeAction(view, fix);
     }
@@ -144,7 +202,8 @@ export async function applyQuickFix(view: EditorView) {
   showHint(view, "No quick fixes available");
 }
 
-export async function applyCodeAction(view: EditorView, action: CodeAction) {
+export async function applyCodeAction(view: EditorView, action: EditorQuickFix) {
+  if ("run" in action) return action.run();
   const doc = docOf(view);
   if (!doc) return;
   if (action.disabledReason) {
@@ -240,25 +299,61 @@ export function changedLines(before: Text, after: Text): Array<{ from: number; t
  * Applies the first enabled whole-file action of `kind` without UI (Actions on
  * Save). Waits until the backend edit reached this editor; false when none.
  */
+/**
+ * Applies the server's `kind` action to the whole document without UI (Actions on Save,
+ * Code Cleanup). Fix-all runs once per server that offers it, one after another, each
+ * asked again for the document as the previous one left it (VS Code's codeActionsOnSave):
+ * vtsls and ESLint both answer `source.fixAll` for a TypeScript file.
+ */
 export async function applyKindSilently(view: EditorView, kind: string): Promise<boolean> {
   const doc = docOf(view);
   if (!doc || doc.readOnly) return false;
+  const matching = (actions: CodeAction[], server?: CodeAction["server"]) =>
+    actions.filter(
+      (a) =>
+        a.kind?.startsWith(kind) &&
+        !a.disabledReason &&
+        !isLazyPluginAction(a) &&
+        (server === undefined || a.server === server),
+    );
+  const pick = (actions: CodeAction[]) => actions.find((a) => a.isPreferred) ?? actions[0];
   let actions: CodeAction[];
   try {
-    actions = (await fetchActions(view, [kind], true)).filter((a) => a.kind?.startsWith(kind) && !a.disabledReason);
-  } catch {
+    actions = matching(await fetchActions(view, [kind], true));
+  } catch (e) {
+    console.warn(`[lsp] ${kind} on ${doc.path} failed`, e);
     return false;
   }
-  const action = actions.find((a) => a.isPreferred) ?? actions[0];
-  if (!action) return false;
-  const before = view.state.doc;
-  try {
-    await lspRequest(() => commands.lspApplyCodeAction(doc.doc, action));
-  } catch {
-    return false;
+  const first = pick(actions);
+  if (!first) return false;
+  const servers = kind.startsWith("source.fixAll")
+    ? [first.server, ...new Set(actions.map((a) => a.server).filter((s) => s !== first.server))]
+    : [first.server];
+  let applied = false;
+  for (const [i, server] of servers.entries()) {
+    let action: CodeAction | undefined = first;
+    if (i > 0) {
+      // The previous server's edit changed the document: this one's answer must be fresh.
+      try {
+        action = pick(matching(await fetchActions(view, [kind], true), server));
+      } catch (e) {
+        console.warn(`[lsp] ${kind} on ${doc.path} failed`, e);
+        continue;
+      }
+      if (!action) continue;
+    }
+    const before = view.state.doc;
+    const chosen = action;
+    try {
+      await lspRequest(() => commands.lspApplyCodeAction(doc.doc, chosen));
+    } catch (e) {
+      console.warn(`[lsp] applying ${chosen.kind} on ${doc.path} failed`, e);
+      continue;
+    }
+    applied = true;
+    for (let i = 0; i < 25 && view.state.doc === before; i++) await new Promise((r) => setTimeout(r, 20));
   }
-  for (let i = 0; i < 25 && view.state.doc === before; i++) await new Promise((r) => setTimeout(r, 20));
-  return true;
+  return applied;
 }
 
 /**
@@ -276,14 +371,19 @@ function actionItems(
   resolved?: Map<CodeAction, Promise<CodeAction>>,
 ): ListPopupItem[] {
   return listedCodeActions(actions).map((a, i) => ({
-    id: `${i}`,
+    id: `lsp:${i}`,
     label: a.title,
-    icon: isQuickFix(a) ? "bulb-fix" : "bulb",
+    icon: isQuickFix(a) ? quickFixIcon(view) : "bulb",
+    quickFix: isQuickFix(a),
     emphasis: a.isPreferred,
     disabled: a.disabledReason,
     // The edit the preview already resolved is applied as is.
     run: async () => applyCodeAction(view, (await resolved?.get(a)?.catch(() => a)) ?? a),
   }));
+}
+
+function isLazyPluginAction(action: CodeAction): boolean {
+  return action.server === 0 && !action.edit && !action.command;
 }
 
 /** The action with its edit (resolved once per popup; servers may compute edits lazily). */
@@ -313,6 +413,10 @@ export async function intentionPreview(
 ): Promise<ListPreview | null> {
   const ctx = docOf(view);
   if (!ctx) return null;
+  // Lazy plugin actions can ask the user; resolve only after invocation.
+  if (isLazyPluginAction(action)) {
+    return { kind: "text", text: "Preview isn't available for this action" };
+  }
   const doc = view.state.doc;
   const full = await resolveOnce(ctx.doc, action, cache);
   if (signal.aborted || view.state.doc !== doc) return null;
@@ -344,7 +448,7 @@ export function withInspectionControls(view: EditorView, items: ListPopupItem[])
     (i) => i.id !== SPELLING_INSPECTION,
   );
   if (!inspections.length) return items;
-  const fixes = items.filter((i) => i.icon === "bulb-fix" && !i.submenu);
+  const fixes = items.filter((i) => isFixItem(i) && !i.submenu);
   if (inspections.length === 1 && fixes.length) {
     const submenu = intentionControls(inspections[0]!);
     return items.map((i) => (fixes.includes(i) ? { ...i, submenu } : i));
@@ -364,7 +468,7 @@ export function withInspectionControls(view: EditorView, items: ListPopupItem[])
 /** ⌥↵ */
 export async function showIntentions(view: EditorView) {
   try {
-    // Typo fixes and feature-contributed actions come first and need no language server.
+    // Local inspections need no language server.
     const local: ListPopupItem[] = [...spellingIntentions(view), ...contributedIntentions(view)];
     let actions: CodeAction[] = [];
     let failure: { error: unknown } | null = null;
@@ -376,7 +480,9 @@ export async function showIntentions(view: EditorView) {
     }
     const sorted = listedCodeActions(actions);
     const resolved = new Map<CodeAction, Promise<CodeAction>>();
-    const items = withInspectionControls(view, [...local, ...actionItems(view, sorted, resolved)]);
+    const serverItems = actionItems(view, sorted, resolved);
+    const previews = new Map(serverItems.map((item, i) => [item.id, sorted[i]!]));
+    const items = withInspectionControls(view, listedIntentions(view, [...local, ...serverItems]));
     if (!items.length) {
       if (failure) throw failure.error;
       showHint(view, "No intentions available");
@@ -388,7 +494,7 @@ export async function showIntentions(view: EditorView) {
       title: "Intentions",
       items,
       preview: (item, signal) => {
-        const action = sorted[items.indexOf(item) - local.length];
+        const action = previews.get(item.id);
         return action ? intentionPreview(view, action, resolved, signal) : Promise.resolve(null);
       },
     });
@@ -500,7 +606,13 @@ const bulbPlugin = ViewPlugin.fromClass(
       this.lookup();
     }
     update(u: ViewUpdate) {
-      if (u.docChanged || u.selectionSet || (u.focusChanged && u.view.hasFocus)) this.lookup();
+      if (
+        u.docChanged ||
+        u.selectionSet ||
+        (u.focusChanged && u.view.hasFocus) ||
+        u.transactions.some((tr) => tr.effects.some((e) => e.is(intentionsChanged)))
+      )
+        this.lookup();
       else if (u.focusChanged) {
         this.lookup.cancel();
         // A blur dispatched from inside the update is not allowed.
@@ -516,16 +628,16 @@ const bulbPlugin = ViewPlugin.fromClass(
       if (!doc || doc.readOnly || !this.view.dom.isConnected || !this.view.hasFocus) return;
       const state = this.view.state;
       const typoFix = spellingIntentions(this.view).length > 0;
-      const local = typoFix || contributedIntentions(this.view).length > 0;
+      const selection = state.selection.main;
+      const ownFix = contributedQuickFixes(this.view, selection.from, selection.to).length > 0;
+      const local = typoFix || ownFix || contributedIntentions(this.view).length > 0;
       const backoff = codeActionBackoff.active(doc.doc);
-      if (backoff && !local) return;
       let actions: CodeAction[] = [];
       if (!backoff) {
         try {
           actions = await fetchIntentions(this.view);
         } catch (e) {
           if (isUnavailable(e)) codeActionBackoff.mark(doc.doc);
-          if (!local) return;
         }
       }
       if (this.view.state.doc !== state.doc || !this.view.state.selection.eq(state.selection) || !this.view.hasFocus)
@@ -533,7 +645,14 @@ const bulbPlugin = ViewPlugin.fromClass(
       const line = state.doc.lineAt(state.selection.main.head).number;
       const any = actions.some(lightsBulb) || local;
       this.view.dispatch({
-        effects: setBulb.of(any ? { line, quickFix: typoFix || actions.some(isQuickFix) } : null),
+        effects: setBulb.of(
+          any
+            ? {
+                line,
+                quickFix: (typoFix || ownFix || actions.some(isQuickFix)) && quickFixIcon(this.view) === "bulb-fix",
+              }
+            : null,
+        ),
       });
     }
     destroy() {
@@ -632,5 +751,10 @@ class FloatingBulb {
 const floatingBulb = ViewPlugin.fromClass(FloatingBulb);
 
 export function intentionsExtension(): Extension {
-  return [bulbField, bulbPlugin, floatingBulb, intentionProviders.of(pythonMemberIntentions)];
+  return [
+    bulbField,
+    bulbPlugin,
+    floatingBulb,
+    intentionProviders.of((view) => languageSemantics(docOf(view)?.language)?.intentions?.(view) ?? []),
+  ];
 }

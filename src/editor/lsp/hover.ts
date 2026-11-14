@@ -19,15 +19,16 @@ import {
 } from "@/platform/ipc";
 import { executeAction } from "@/platform/actions";
 import { shortcutLabel } from "@/platform/keymap";
-import { diagnosticsAt, type PlacedDiagnostic } from "./diagnostics";
+import { diagnosticsAt, type PlacedDiagnostic, type EditorDiagnostic } from "./diagnostics";
 import { isEmptyMarkup, languageForPath, renderMarkup } from "./markdown";
 import { selectableText } from "@/ui/selectableText";
 import { docOf, lspRequest, reportLspError } from "./lsp";
+import { requestNavigation } from "./configurationNavigation";
 import { offsetToPos, rangeToOffsets } from "./positions";
 import { showHint } from "./hint";
 import { caretAnchor, focusPopup, openPopup, useLspPopup, type DefinitionTarget, type DocEntry } from "./popupStore";
 import { selectedLookupDoc, showLookupDocs } from "./completion";
-import { identifierAt, readFileLines, withDocument } from "./files";
+import { readFileLines, targetLabel, withDocument } from "./files";
 import { docWindowVisible, moveDocPopupToWindow, showInDocWindow } from "./docs";
 import { structure } from "@/editor/structure";
 import { basename } from "@/platform/project";
@@ -36,7 +37,7 @@ import { applyCodeAction, quickFixesAt } from "./intentions";
 import { editorPrefs } from "@/platform/editorSettings";
 import { CONTRIBUTED_HOVER, contributedAt, type ContributedHover } from "@/editor/api";
 import { navigationModifierHeld, onNavigationModifier, pointerTarget } from "@/platform/navigationModifier";
-import { phpConstructAt } from "./phpConstructs";
+import { languageSemantics } from "./semantic";
 
 let hoverRequest: RequestId | null = null;
 let hoverRequestView: EditorView | null = null;
@@ -47,6 +48,11 @@ function cancelPendingHover(view?: EditorView) {
   hoverRequest = null;
   hoverRequestView = null;
   if (isTauri()) void commands.cancelRequest(request).catch(() => {});
+}
+
+/** Documentation of a language construct (PHP's `empty`) at `pos`, via the language's registration. */
+function constructAt(state: EditorView["state"], pos: number, language: string | null | undefined) {
+  return languageSemantics(language)?.constructAt?.(state, pos) ?? null;
 }
 
 export async function requestHover(view: EditorView, pos: number): Promise<Hover | null> {
@@ -62,7 +68,7 @@ export async function requestHover(view: EditorView, pos: number): Promise<Hover
   if (!doc) return null;
   const source = view.state.doc;
   const path = doc.path;
-  const construct = phpConstructAt(view.state, pos, doc.language);
+  const construct = constructAt(view.state, pos, doc.language);
   if (construct)
     return {
       contents: { kind: "markdown", value: construct.markdown },
@@ -120,7 +126,7 @@ function renderDiagnostics(view: EditorView, diags: PlacedDiagnostic[]): HTMLEle
     fix.className = "cm-lsp-link-button";
     const keys = shortcutLabel("code.showIntentions");
     fix.textContent = keys ? `More actions… ${keys}` : "More actions…";
-    if (d.severity === "error" || d.severity === "warning") offerQuickFix(view, meta, fix, from, to);
+    if (d.severity !== "hint") offerQuickFix(view, meta, fix, from, to, d);
     fix.addEventListener("mousedown", (e) => e.preventDefault());
     fix.addEventListener("click", () => {
       view.dispatch({ selection: EditorSelection.cursor(from) });
@@ -135,9 +141,16 @@ function renderDiagnostics(view: EditorView, diags: PlacedDiagnostic[]): HTMLEle
 }
 
 /** IDEA's hover link to the problem's preferred quick fix, shown once the server named one. */
-function offerQuickFix(view: EditorView, meta: HTMLElement, before: HTMLElement, from: number, to: number) {
+function offerQuickFix(
+  view: EditorView,
+  meta: HTMLElement,
+  before: HTMLElement,
+  from: number,
+  to: number,
+  diagnostic: EditorDiagnostic,
+) {
   const doc = view.state.doc;
-  void quickFixesAt(view, from, to)
+  void quickFixesAt(view, from, to, diagnostic.problem)
     .then(([action]) => {
       if (!action || view.state.doc !== doc || !before.isConnected) return;
       const link = document.createElement("button");
@@ -272,7 +285,7 @@ function showDoc(view: EditorView, entry: DocEntry, at: number) {
 }
 
 export function showPhpConstructDocumentation(view: EditorView, pos: number): boolean {
-  const construct = phpConstructAt(view.state, pos, docOf(view)?.language ?? null);
+  const construct = constructAt(view.state, pos, docOf(view)?.language);
   if (!construct) return false;
   showDoc(view, { markup: { kind: "markdown", value: construct.markdown }, language: "PHP" }, construct.from);
   return true;
@@ -312,7 +325,7 @@ export async function quickDocumentation(view: EditorView) {
         markup: hover.contents,
         language: ctx?.uiMode ?? null,
         source:
-          ctx && !phpConstructAt(view.state, pos, ctx.language)
+          ctx && !constructAt(view.state, pos, ctx.language)
             ? definitionOf(ctx.doc, offsetToPos(view.state.doc, pos))
             : undefined,
       },
@@ -360,7 +373,7 @@ async function definitionTarget(loc: Location, fallbackLanguage: string | null):
   const [lines, declaration] = await Promise.all([readFileLines(loc.path), declarationRange(loc)]);
   if (!lines) return null;
   const { first, last } = definitionSpan(loc, lines.length, declaration);
-  const name = identifierAt(lines[loc.range.start.line] ?? "", loc.range.start.col) ?? basename(loc.path);
+  const name = targetLabel(lines[loc.range.start.line] ?? "", loc.range.start.col) ?? basename(loc.path);
   return {
     location: loc,
     name,
@@ -378,9 +391,12 @@ export async function quickDefinition(view: EditorView, kind: "definition" | "ty
   const doc = docOf(view);
   if (!doc) return;
   const pos = view.state.selection.main.head;
+  const source = view.state.doc;
+  const stale = () => !view.dom.isConnected || view.state.doc !== source || docOf(view) !== doc;
   if (kind === "definition" && showPhpConstructDocumentation(view, pos)) return;
   try {
-    const found = await lspRequest(() => commands.lspGoto(doc.doc, offsetToPos(view.state.doc, pos), kind));
+    const found = await requestNavigation(view, pos, kind);
+    if (stale()) return;
     const seen = new Set<string>();
     const locations = found.filter((l) => {
       const key = `${l.path}:${l.range.start.line}:${l.range.start.col}`;
@@ -393,6 +409,7 @@ export async function quickDefinition(view: EditorView, kind: "definition" | "ty
     const targets = (
       await Promise.all(locations.slice(0, MAX_TARGETS).map((l) => definitionTarget(l, doc.uiMode)))
     ).filter((t): t is DefinitionTarget => !!t);
+    if (stale()) return;
     if (!targets.length) {
       showHint(view, "Cannot read the definition's file");
       return;
@@ -405,6 +422,6 @@ export async function quickDefinition(view: EditorView, kind: "definition" | "ty
       themeClasses: view.themeClasses,
     });
   } catch (e) {
-    reportLspError(view, e, true);
+    if (!stale()) reportLspError(view, e, true);
   }
 }

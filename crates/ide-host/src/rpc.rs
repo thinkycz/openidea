@@ -9,7 +9,10 @@
 //! * server → client notification `event` `{ window, event }` (an `IdeEvent`
 //!   for that window, or every window when `window` is null);
 //! * server → client notification `channel` `{ id, data }`: one value of a
-//!   streaming argument.
+//!   streaming argument;
+//! * server → client notification `plugin` `{ window, event }` and request
+//!   `plugin_secret` `{ plugin, name }` → `string | null`: code plugins of the
+//!   remote project (`plugins::remote_host`).
 
 use crate::Host;
 use crate::ops::{self, Emit};
@@ -178,19 +181,19 @@ impl Dispatcher {
             Ok(())
         })
         .add("cancel_task", |c| async move { Ok(ide_core::task::cancel(c.arg::<TaskId>("id")?)) })
-        .add("fs_read_dir", |c| async move { ops::fs::read_dir(&c.host, &c.window, c.arg("path")?) })
+        .add("fs_read_dir", |c| async move { ops::fs::read_dir(&c.host, &c.window, c.arg("path")?).await })
         .add("fs_entry_kind", |c| async move { ops::fs::entry_kind(&c.host, c.arg("path")?).await })
         .add("fs_create_file", |c| async move { ops::fs::create_file(&c.host, &c.window, c.arg("path")?) })
         .add("fs_create_file_bytes", |c| async move {
-            ops::fs::create_file_bytes(&c.host, c.arg("path")?, c.arg("data")?).await
+            ops::fs::create_file_bytes(&c.host, &c.window, c.arg("path")?, c.arg("data")?).await
         })
         .add("fs_create_dir", |c| async move { ide_vfs::create_dir(&c.arg::<PathBuf>("path")?) })
-        .add("fs_rename", |c| async move { ide_vfs::rename(&c.arg::<PathBuf>("from")?, &c.arg::<PathBuf>("to")?) })
+        .add("fs_rename", |c| async move { ops::fs::rename(&c.host, &c.window, c.arg("from")?, c.arg("to")?).await })
         .add("fs_set_writable", |c| async move {
             ops::fs::set_writable(&c.host, &c.window, c.arg("path")?, c.arg("writable")?)
         })
         .add("fs_delete", |c| async move { ops::fs::delete(&c.host, &c.window, c.arg("path")?).await })
-        .add("fs_copy", |c| async move { ops::fs::copy(&c.host, c.arg("from")?, c.arg("to")?).await })
+        .add("fs_copy", |c| async move { ops::fs::copy(&c.host, &c.window, c.arg("from")?, c.arg("to")?).await })
         .add("fs_copy_merge", |c| async move {
             ops::fs::copy_merge(
                 &c.host,
@@ -215,9 +218,14 @@ impl Dispatcher {
         })
         .add("fs_read_text", |c| async move { ops::fs::read_text(&c.host, &c.window, c.arg("path")?).await })
         .add("doc_open", |c| async move { ops::doc::open(&c.host, &c.window, c.arg("path")?).await })
-        .add("doc_close", |c| async move { ops::doc::close(&c.host, &c.window, c.arg("doc")?) })
+        .add("doc_close", |c| async move {
+            ops::doc::blocking(move || ops::doc::close(&c.host, &c.window, c.arg("doc")?)).await
+        })
         .add("doc_edit", |c| async move {
-            ops::doc::edit(&c.host, &c.window, c.arg("doc")?, c.arg("baseVersion")?, c.arg("changes")?)
+            ops::doc::blocking(move || {
+                ops::doc::edit(&c.host, &c.window, c.arg("doc")?, c.arg("baseVersion")?, c.arg("changes")?)
+            })
+            .await
         })
         .add("doc_save", |c| async move { ops::doc::save(&c.host, &c.window, c.arg("doc")?).await })
         .add("doc_save_checked", |c| async move {
@@ -234,13 +242,16 @@ impl Dispatcher {
             let on_output = c.channel("onOutput")?;
             ops::term::spawn(&c.host, &c.window, c.arg("options")?, on_output)
         })
+        .add("term_store_image", |c| async move {
+            ops::term::store_image(&c.host, c.arg("id")?, c.arg("data")?, c.arg("mime")?).await
+        })
         .add("term_write", |c| async move { ops::term::write(&c.host, c.arg("id")?, &c.arg::<String>("data")?) })
         .add("term_resize", |c| async move { ops::term::resize(&c.host, c.arg("id")?, c.arg("cols")?, c.arg("rows")?) })
         .add("term_kill", |c| async move { ops::term::kill(&c.host, c.arg("id")?) })
         .add("term_is_busy", |c| async move { ops::term::is_busy(&c.host, c.arg("id")?) })
         .add("term_default_shell", |_| async move { Ok(ide_terminal::default_shell_path()) })
         .add("term_available_shells", |_| async move { Ok(ide_terminal::available_shells()) })
-        .add("run_configs", |c| async move { ops::run::configs(&c.host, &c.window) })
+        .add("run_configs", |c| async move { ops::doc::blocking(move || ops::run::configs(&c.host, &c.window)).await })
         .add("run_save_configs", |c| async move {
             ops::run::save_configs(
                 &c.host,
@@ -249,17 +260,21 @@ impl Dispatcher {
                 &c.arg::<Option<Vec<String>>>("removedDetectedIds")?.unwrap_or_default(),
             )
         })
+        .add("run_without_derived", |c| async move { ops::run::without_derived(&c.host, &c.window, c.arg("configs")?) })
+        .add("run_apply_settings", |c| async move { ops::run::apply_settings(&c.host, &c.window, c.arg("configs")?) })
         .add("run_system_env", |_| async move { Ok(ide_run::system_env()) })
         .add("run_start", |c| async move {
             let on_output = c.channel("onOutput")?;
-            ops::run::start(&c.host, &c.window, c.arg("config")?, on_output).await
+            ops::run::start_request(&c.host, &c.window, c.arg("config")?, on_output, c.arg("request")?).await
         })
         .add("run_stop", |c| async move { ops::run::stop(&c.host, &c.window, c.arg("id")?) })
+        .add("web_url", |c| async move { ops::web::url(&c.host, &c.window, &c.arg::<PathBuf>("path")?).await })
         .add("run_stdin", |c| async move { ops::run::stdin(&c.host, c.arg("id")?, &c.arg::<String>("data")?) })
         .add("run_resize", |c| async move { ops::run::resize(&c.host, c.arg("id")?, c.arg("cols")?, c.arg("rows")?) })
         .add("run_close_stdin", |c| async move { ops::run::close_stdin(&c.host, c.arg("id")?) })
         .add("run_list", |c| async move { Ok(ops::run::list(&c.host)) })
-        .add("vcs_status", |c| async move { ops::vcs::status(&c.host, &c.window).await });
+        .add("vcs_status", |c| async move { ops::vcs::status(&c.host, &c.window).await })
+        .add("vcs_status_paths", |c| async move { ops::vcs::status_paths(&c.host, &c.window, c.arg("paths")?).await });
         ops::register_all(&mut d);
         d
     }
@@ -276,11 +291,66 @@ where
     let p = Peer::connect(reader, writer, handler);
     let _ = peer.set(p.clone());
     p.closed().await;
+    // Reports belong to the disconnected desktop, even while the host shuts down.
+    for window in host.projects.read().keys() {
+        host.mcp_reports.forget_window(window);
+    }
 }
 
 /// Sends a window's events to the client as `event` notifications.
 pub fn event_sink(peer: Arc<OnceLock<Peer>>, window: Option<String>) -> ide_core::SharedSink {
     Arc::new(PeerSink { peer, window })
+}
+
+/// Whether a desktop shows an `event` notification of its server in the window. A server reports
+/// on its project; what this machine answers or owns itself (MCP approvals, app updates, window
+/// groups) never comes from it.
+pub fn client_accepts(event: &IdeEvent) -> bool {
+    match event {
+        IdeEvent::McpRequest { .. }
+        | IdeEvent::McpRequestClosed { .. }
+        | IdeEvent::WindowGroupsChanged
+        | IdeEvent::WindowFullscreenChanged
+        | IdeEvent::UpdateStatusChanged { .. }
+        | IdeEvent::UpdateAvailable { .. } => false,
+        IdeEvent::DbSourcesChanged
+        | IdeEvent::ProjectTrustChanged { .. }
+        | IdeEvent::FsChanged { .. }
+        | IdeEvent::ExcludedDirsChanged { .. }
+        | IdeEvent::DocPatched { .. }
+        | IdeEvent::DocMoved { .. }
+        | IdeEvent::DocDirty { .. }
+        | IdeEvent::WorkspaceEditApplied { .. }
+        | IdeEvent::DocLanguage { .. }
+        | IdeEvent::Diagnostics { .. }
+        | IdeEvent::Task { .. }
+        | IdeEvent::IndexState { .. }
+        | IdeEvent::VcsChanged { .. }
+        | IdeEvent::LanguageServer { .. }
+        | IdeEvent::LanguageServerWarning { .. }
+        | IdeEvent::LanguageServerRemoved { .. }
+        | IdeEvent::LspRefresh { .. }
+        | IdeEvent::TerminalExited { .. }
+        | IdeEvent::RunExited { .. }
+        | IdeEvent::Debug { .. }
+        | IdeEvent::Notify { .. }
+        | IdeEvent::SettingsChanged { .. }
+        | IdeEvent::ProjectRootsChanged { .. }
+        | IdeEvent::Askpass { .. }
+        | IdeEvent::AskpassDone { .. }
+        | IdeEvent::NotebookKernel { .. } => true,
+    }
+}
+
+/// The commands a desktop routes to its server: what `openidea-server` of this build answers,
+/// fixed here rather than taken from the server, so a server cannot move a command to this machine.
+pub fn client_commands() -> Vec<&'static str> {
+    let mut out = Dispatcher::standard().commands();
+    out.extend(crate::plugins::remote_host::COMMANDS);
+    out.push(crate::plugins::remote::SYNC_COMMAND);
+    out.sort_unstable();
+    out.dedup();
+    out
 }
 
 struct PeerSink {
@@ -347,5 +417,63 @@ pub fn error_from_reply(e: ide_jsonrpc::RpcError) -> IdeError {
         ide_jsonrpc::RpcError::Server { message, .. } => serde_json::from_str(&message)
             .unwrap_or_else(|_| IdeError::new(ide_core::error::ErrorKind::Protocol, message)),
         other => other.into(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ide_core::event::{AskpassKind, McpUiRequest, NotifyLevel};
+
+    #[test]
+    fn a_server_cannot_raise_desktop_prompts() {
+        let confirm = McpUiRequest::Confirm {
+            client: "agent".into(),
+            tool: "run".into(),
+            subject: "rm -rf".into(),
+            project: "/srv/app".into(),
+            detail: None,
+        };
+        let update = ide_core::updates::UpdateInfo {
+            version: "9.9.9".into(),
+            current_version: "0.1.0".into(),
+            notes: None,
+            date: None,
+        };
+        for event in [
+            IdeEvent::McpRequest { id: 1, request: confirm },
+            IdeEvent::McpRequestClosed { id: 1 },
+            IdeEvent::UpdateAvailable { update },
+            IdeEvent::UpdateStatusChanged {
+                status: ide_core::updates::UpdateStatus { last_checked: None, checking: true },
+            },
+            IdeEvent::WindowGroupsChanged,
+            IdeEvent::WindowFullscreenChanged,
+        ] {
+            assert!(!client_accepts(&event), "{event:?}");
+        }
+    }
+
+    #[test]
+    fn a_server_reports_its_project_to_the_desktop() {
+        for event in [
+            IdeEvent::FsChanged {
+                created: vec!["/srv/app/a".into()],
+                modified: vec![],
+                removed: vec![],
+                ignore_rules: vec![],
+            },
+            IdeEvent::DocMoved {
+                doc: ide_core::DocId(1),
+                from: "/srv/app/Old.php".into(),
+                to: "/srv/app/New.php".into(),
+            },
+            IdeEvent::VcsChanged { root: "/srv/app".into() },
+            IdeEvent::Notify { level: NotifyLevel::Info, title: "Build".into(), body: None },
+            IdeEvent::Askpass { id: 1, prompt: "Password".into(), kind: AskpassKind::Secret, remember: false },
+            IdeEvent::ProjectTrustChanged { root: "/srv/app".into(), trusted: true },
+        ] {
+            assert!(client_accepts(&event), "{event:?}");
+        }
     }
 }

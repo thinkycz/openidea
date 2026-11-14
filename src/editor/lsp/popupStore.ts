@@ -18,12 +18,16 @@ export interface ListPopupItem {
   /** Second line / muted text after the label (code preview). */
   preview?: string;
   icon?: string;
+  /** Inspection fix, independent of the icon chosen for its severity. */
+  quickFix?: boolean;
   /** Symbol badge kind (`ui/icons` `SymbolBadge`) shown instead of an icon. */
   symbol?: string;
   emphasis?: boolean;
   /** Disabled reason; disabled rows are shown but not activatable. */
   disabled?: string | null;
   shortcut?: string;
+  /** The place the row goes to (`data-path` / `data-line`, 0-based, on the row). */
+  location?: { path: string; line: number };
   run: () => void | Promise<void>;
   /** IDEA's right-arrow menu of the row (inspection options of a fix). */
   submenu?: MenuItem[];
@@ -64,6 +68,12 @@ export interface ReformatOptions {
 
 export type LspPopup =
   | {
+      kind: "importsOnPaste";
+      imports: string[];
+      onApply: (selected: number[]) => void;
+      onClose: () => void;
+    }
+  | {
       kind: "doc";
       anchor: PopupPoint;
       /** Navigation history (links followed inside the popup); `index` is shown. */
@@ -86,6 +96,8 @@ export type LspPopup =
       items: ListPopupItem[];
       /** Rows 1-9 get a number; typing it runs the row (IDEA's numbered popups). */
       numbered?: boolean;
+      /** More rows are still being looked for (`aria-busy`). */
+      busy?: boolean;
       /** Header pin button (e.g. "Open in Find Tool Window"). */
       pin?: { label: string; run: () => void };
       /** Side panel for the selected row, fetched lazily; `signal` aborts when the selection moves. */
@@ -150,7 +162,7 @@ export function focusPopup() {
 }
 
 function disposed(popup: LspPopup | null) {
-  if (popup?.kind === "list") popup.onClose?.();
+  if (popup?.kind === "list" || popup?.kind === "importsOnPaste") popup.onClose?.();
 }
 
 export function openPopup(popup: LspPopup) {

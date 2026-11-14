@@ -3,9 +3,10 @@
  * Stepping), Python Debugger and Run/Debug. Consumed by the run and debugger
  * features (and `ide-run` for encoding / termination timeout).
  */
+import { CMakeProfiles } from "./cmake";
 import { WORKFLOW_LIMITS } from "@/platform/workflowSettings";
 import type { SelectOption } from "@/ui";
-import { GlobListEditor, NumberInput, Row } from "../components/Form";
+import { ColorSwatches, FormGroup, GlobListEditor, NumberInput, Row, Toggle } from "../components/Form";
 import { GradlePage, MavenPage } from "../languages/LanguagePages";
 import { useSetting } from "../components/context";
 import type { PageSpec } from "./spec";
@@ -65,6 +66,54 @@ function FoldPatterns() {
   );
 }
 
+/** The five console log levels, in severity order. */
+const LOG_LEVELS = [
+  { level: "error", label: "Error" },
+  { level: "warn", label: "Warning" },
+  { level: "info", label: "Info" },
+  { level: "debug", label: "Debug" },
+  { level: "trace", label: "Trace" },
+] as const;
+
+/** The level colours as presets: any level can take another level's colour. */
+const LOG_COLOR_PRESETS = [
+  { value: "var(--ansi-red)", label: "Red" },
+  { value: "var(--ansi-yellow)", label: "Yellow" },
+  { value: "var(--ansi-green)", label: "Green" },
+  { value: "var(--ansi-cyan)", label: "Cyan" },
+  { value: "var(--ansi-magenta)", label: "Magenta" },
+];
+
+function LogLevelColors() {
+  const [enabled, setEnabled] = useSetting<boolean>("console.logColors.enabled");
+  return (
+    <>
+      <Toggle
+        label="Colour log lines by level"
+        checked={enabled}
+        onChange={setEnabled}
+        hint="ERROR, WARN, INFO, DEBUG and TRACE lines take the colour of their level; colours the program prints itself are kept."
+      />
+      {enabled && (
+        <FormGroup indented>
+          {LOG_LEVELS.map(({ level, label }) => (
+            <LogLevelRow key={level} level={level} label={label} />
+          ))}
+        </FormGroup>
+      )}
+    </>
+  );
+}
+
+function LogLevelRow({ level, label }: { level: (typeof LOG_LEVELS)[number]["level"]; label: string }) {
+  const [value, setValue] = useSetting<string>(`console.logColors.${level}`);
+  return (
+    <Row label={label}>
+      <ColorSwatches value={value} presets={LOG_COLOR_PRESETS} onChange={setValue} aria-label={label} />
+    </Row>
+  );
+}
+
 function TooltipDelayRow() {
   const [enabled] = useSetting<boolean>("debugger.valueTooltip");
   const [delay, setDelay] = useSetting<number>("debugger.valueTooltipDelay");
@@ -91,6 +140,25 @@ function TooltipDelayRow() {
 
 export const EXECUTION_PAGES: PageSpec[] = [
   {
+    id: "build.cmake",
+    title: "CMake",
+    group: BUILD_GROUP,
+    order: 357,
+    projectScope: true,
+    defaultScope: "project",
+    keywords: [
+      "profile",
+      "generator",
+      "Ninja",
+      "Build type",
+      "CMake arguments",
+      "Build directory",
+      "Build arguments",
+      "Environment variables",
+    ],
+    component: CMakeProfiles,
+  },
+  {
     id: "build.gradle",
     projectScope: true,
     defaultScope: "project",
@@ -98,6 +166,9 @@ export const EXECUTION_PAGES: PageSpec[] = [
     group: BUILD_GROUP,
     order: 358,
     keywords: [
+      "Build and run using",
+      "delegate",
+      "JavaExec",
       "Gradle JVM",
       "JDK",
       "JAVA_HOME",
@@ -121,7 +192,27 @@ export const EXECUTION_PAGES: PageSpec[] = [
     group: BUILD_GROUP,
     // IntelliJ IDEA: Build Tools › Maven, before Console / Debugger.
     order: 359,
-    keywords: ["maven home", "mvn", "mvnw", "wrapper", "settings.xml", "user settings", "local repository", "m2"],
+    keywords: [
+      "Delegate IDE build/run actions to Maven",
+      "javac",
+      "ECJ",
+      "JRE",
+      "runner",
+      "JDK",
+      "JAVA_HOME",
+      "maven home",
+      "mvn",
+      "mvnw",
+      "wrapper",
+      "settings.xml",
+      "user settings",
+      "local repository",
+      "m2",
+      "thread count",
+      "threads",
+      "-T",
+      "parallel",
+    ],
     component: MavenPage,
   },
   {
@@ -130,7 +221,7 @@ export const EXECUTION_PAGES: PageSpec[] = [
     group: BUILD_GROUP,
     order: 360,
     projectScope: true,
-    keywords: ["run output", "encoding", "fold", "buffer"],
+    keywords: ["run output", "encoding", "fold", "buffer", "colour"],
     sections: [
       {
         options: [
@@ -142,6 +233,12 @@ export const EXECUTION_PAGES: PageSpec[] = [
             label: "Default encoding",
             options: CONSOLE_ENCODINGS,
             hint: "Encoding of the output of processes started from Run configurations.",
+          },
+          {
+            kind: "custom",
+            label: "Colour log lines by level",
+            keywords: ["rainbow", "severity", "log level", "ANSI"],
+            component: LogLevelColors,
           },
         ],
       },
@@ -161,6 +258,17 @@ export const EXECUTION_PAGES: PageSpec[] = [
           { kind: "toggle", key: "debugger.showOnBreakpoint", label: "Show debug window on breakpoint hit" },
           { kind: "toggle", key: "debugger.focusAppOnBreakpoint", label: "Focus application on breakpoint" },
           { kind: "toggle", key: "debugger.hideOnTermination", label: "Hide debug window on process termination" },
+        ],
+      },
+      {
+        title: "JavaScript",
+        options: [
+          {
+            kind: "toggle",
+            key: "debugger.debugServerPage",
+            label: "Debug a dev server's page in the browser",
+            hint: "Debugging a script that starts Vite, Next.js or another dev server also opens its page in Chrome or Edge with the debugger attached.",
+          },
         ],
       },
       {
@@ -197,6 +305,12 @@ export const EXECUTION_PAGES: PageSpec[] = [
             hint: "Values of local variables are shown after the lines that use them while suspended.",
           },
           { kind: "toggle", key: "debugger.sortValues", label: "Sort values alphabetically" },
+          {
+            kind: "toggle",
+            key: "debugger.liveWatches",
+            label: "Evaluate watches while the program runs",
+            hint: "Where the debugger can do it without suspending (JavaScript). A watch with side effects runs again on each refresh.",
+          },
           {
             kind: "toggle",
             key: "debugger.valueTooltip",
@@ -278,7 +392,7 @@ export const EXECUTION_PAGES: PageSpec[] = [
             integer: true,
             step: 500,
             unit: "ms",
-            hint: "After Stop, the process gets this long to exit after the interrupt before it is killed.",
+            hint: "After a configuration's stop command, the process gets this long to exit before it is interrupted. Press Stop again to kill a process that doesn't exit.",
           },
         ],
       },

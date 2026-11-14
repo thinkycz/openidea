@@ -72,16 +72,49 @@ pub async fn debug_evaluate(
     ide_host::ops::debug::debug_evaluate(&state.host, "", session, frame_id, expression).await
 }
 
+/// Completions for an expression typed in Evaluate (`line` / `column` 0-based, UTF-16).
+#[tauri::command]
+#[specta::specta]
+pub async fn debug_completions(
+    state: State<'_, AppState>,
+    session: DebugSessionId,
+    frame_id: Option<i64>,
+    text: String,
+    line: u32,
+    column: u32,
+) -> IdeResult<Vec<ide_dap::DebugCompletion>> {
+    ide_host::ops::debug::debug_completions(&state.host, "", session, frame_id, text, line, column).await
+}
+
 #[tauri::command]
 #[specta::specta]
 pub async fn debug_resume(state: State<'_, AppState>, session: DebugSessionId, thread_id: i64) -> IdeResult<()> {
     ide_host::ops::debug::debug_resume(&state.host, "", session, thread_id).await
 }
 
+/// Types `text` into the session's program (a `runInTerminal` program).
+#[tauri::command]
+#[specta::specta]
+pub async fn debug_send_input(state: State<'_, AppState>, session: DebugSessionId, text: String) -> IdeResult<()> {
+    ide_host::ops::debug::debug_send_input(&state.host, "", session, text).await
+}
+
 #[tauri::command]
 #[specta::specta]
 pub async fn debug_pause(state: State<'_, AppState>, session: DebugSessionId, thread_id: i64) -> IdeResult<()> {
     ide_host::ops::debug::debug_pause(&state.host, "", session, thread_id).await
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn debug_hot_reload(state: State<'_, AppState>, session: DebugSessionId) -> IdeResult<()> {
+    ide_host::ops::debug::debug_hot_reload(&state.host, "", session).await
+}
+
+#[tauri::command]
+#[specta::specta]
+pub async fn debug_hot_restart(state: State<'_, AppState>, session: DebugSessionId) -> IdeResult<()> {
+    ide_host::ops::debug::debug_hot_restart(&state.host, "", session).await
 }
 
 #[tauri::command]
@@ -211,6 +244,29 @@ pub async fn debug_restart_frame(state: State<'_, AppState>, session: DebugSessi
     ide_host::ops::debug::debug_restart_frame(&state.host, "", session, frame_id).await
 }
 
+/// The body of a response a debugged page received.
+#[tauri::command]
+#[specta::specta]
+pub async fn debug_js_response_body(
+    state: State<'_, AppState>,
+    session: DebugSessionId,
+    request_id: String,
+) -> IdeResult<ide_dap::JsResponseBody> {
+    ide_host::ops::debug::debug_js_response_body(&state.host, "", session, request_id).await
+}
+
+/// Breakpoints of a debugged page on DOM events and on requests (js-debug).
+#[tauri::command]
+#[specta::specta]
+pub async fn debug_js_custom_breakpoints(
+    state: State<'_, AppState>,
+    session: DebugSessionId,
+    ids: Vec<String>,
+    xhr: Vec<String>,
+) -> IdeResult<()> {
+    ide_host::ops::debug::debug_js_custom_breakpoints(&state.host, "", session, ids, xhr).await
+}
+
 #[tauri::command]
 #[specta::specta]
 pub fn debug_capabilities(state: State<'_, AppState>, session: DebugSessionId) -> IdeResult<DebugCapabilities> {
@@ -256,17 +312,25 @@ pub async fn debug_attachable_processes(state: State<'_, AppState>) -> IdeResult
     ide_host::ops::debug::debug_attachable_processes(&state.host, "").await
 }
 
+/// A loopback port that is free right now, for a debug agent the launch line starts.
+#[tauri::command]
+#[specta::specta]
+pub async fn debug_free_port(window: Window, state: State<'_, AppState>) -> IdeResult<u16> {
+    ide_host::ops::debug::debug_free_port(&state.host, window.label()).await
+}
+
 /// Remote JVM Debug in listen mode: waits (cancellable through `request`) for the remote
 /// JVM to connect to `host:port`; returns the loopback port java-debug attaches to.
 #[tauri::command]
 #[specta::specta]
 pub async fn debug_listen_for_jvm(
+    window: Window,
     state: State<'_, AppState>,
     request: ide_core::RequestId,
     host: String,
     port: u16,
 ) -> IdeResult<u16> {
-    ide_host::ops::debug::debug_listen_for_jvm(&state.host, "", request, host, port).await
+    ide_host::ops::debug::debug_listen_for_jvm(&state.host, window.label(), request, host, port).await
 }
 
 /// HotSwap (Reload Changed Classes) in a java-debug session.
@@ -274,4 +338,53 @@ pub async fn debug_listen_for_jvm(
 #[specta::specta]
 pub async fn debug_redefine_classes(state: State<'_, AppState>, session: DebugSessionId) -> IdeResult<HotSwapResult> {
     ide_host::ops::debug::debug_redefine_classes(&state.host, "", session).await
+}
+
+/// The debuggee JVM's loaded classes (instances and shallow bytes), or why they cannot be read.
+#[tauri::command]
+#[specta::specta]
+pub async fn debug_jvm_memory_classes(
+    window: Window,
+    state: State<'_, AppState>,
+    session: DebugSessionId,
+) -> IdeResult<JvmMemoryResult> {
+    ide_host::ops::debug::debug_jvm_memory_classes(&state.host, window.label(), session).await
+}
+
+/// Up to `limit` live instances of the class in the stopped JVM.
+#[tauri::command]
+#[specta::specta]
+pub async fn debug_jvm_memory_instances(
+    window: Window,
+    state: State<'_, AppState>,
+    session: DebugSessionId,
+    class_name: String,
+    limit: u32,
+) -> IdeResult<JvmInstancesResult> {
+    ide_host::ops::debug::debug_jvm_memory_instances(&state.host, window.label(), session, class_name, limit).await
+}
+
+/// The fields (or array elements) of an instance in the stopped JVM.
+#[tauri::command]
+#[specta::specta]
+pub async fn debug_jvm_memory_fields(
+    window: Window,
+    state: State<'_, AppState>,
+    session: DebugSessionId,
+    object: JvmObjectRef,
+) -> IdeResult<JvmFieldsResult> {
+    ide_host::ops::debug::debug_jvm_memory_fields(&state.host, window.label(), session, object).await
+}
+
+/// The objects that hold a reference to `object`; `limit` 0 selects the default.
+#[tauri::command]
+#[specta::specta]
+pub async fn debug_jvm_memory_referrers(
+    window: Window,
+    state: State<'_, AppState>,
+    session: DebugSessionId,
+    object: JvmObjectRef,
+    limit: u32,
+) -> IdeResult<JvmReferrersResult> {
+    ide_host::ops::debug::debug_jvm_memory_referrers(&state.host, window.label(), session, object, limit).await
 }

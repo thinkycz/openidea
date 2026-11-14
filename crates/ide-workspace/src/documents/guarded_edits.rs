@@ -124,7 +124,11 @@ impl Documents {
     /// Apply a host-validated text plan. Disk originals are retained before
     /// writes; rollback never overwrites a subsequent external modification.
     pub fn apply_guarded_edits(&self, edit: &WorkspaceEdit, recovery_root: &Path) -> IdeResult<ReviewedChanges> {
+        let _operation = self.operations.lock();
         let guard = edit.guard.as_ref().ok_or_else(|| IdeError::invalid("Missing edit revision"))?;
+        // Reuse upstream's preview fingerprints, under the common operation lock,
+        // before locking registry/buffers: fingerprinting reads those buffers too.
+        self.validate_preconditions(&edit.preconditions)?;
         let mut history = self.reviewed_history.lock();
         let mut registry = self.registry.lock();
         let mut slots: Vec<_> = registry.docs.iter().map(|(id, entry)| (*id, entry.slot.clone())).collect();
@@ -177,6 +181,15 @@ impl Documents {
                 return Err(stale());
             }
             let open = Self::lookup(&registry, &source);
+            if let Some(expected) = target.version {
+                match open.and_then(|id| states.iter().find(|(key, _)| *key == id)) {
+                    Some((_, state)) if i64::from(state.doc.version()) == i64::from(expected) => {}
+                    // A closed source can be versioned by the engine; the sealed
+                    // disk witness above must already match its original bytes.
+                    None => {}
+                    _ => return Err(stale()),
+                }
+            }
             let (mut proposal, encoding, bom) = if let Some(id) = open {
                 let st = &states.iter().find(|(key, _)| *key == id).ok_or_else(stale)?.1;
                 if st.read_only || st.binary || st.uri.is_some() || st.closed {
@@ -300,6 +313,7 @@ impl Documents {
         let changes = ReviewedChanges::staged(&staged);
         if !changes.created.is_empty() || !changes.removed.is_empty() {
             self.sink.emit(IdeEvent::FsChanged {
+                ignore_rules: Vec::new(),
                 created: changes.created.iter().cloned().map(Into::into).collect(),
                 modified: changes.modified.iter().cloned().map(Into::into).collect(),
                 removed: changes.removed.iter().cloned().map(Into::into).collect(),
@@ -321,6 +335,7 @@ impl Documents {
     /// Undo/redo exactly one reviewed transaction. Validate every disk and open
     /// overlay before writing. Never merge history into subsequent user edits.
     pub fn restore_reviewed_edit(&self, group: &str, redo: bool, recovery_root: &Path) -> IdeResult<ReviewedChanges> {
+        let _operation = self.operations.lock();
         let mut history = self.reviewed_history.lock();
         let index = if redo { Some(history.cursor) } else { history.cursor.checked_sub(1) };
         let entry = index
@@ -422,6 +437,7 @@ impl Documents {
         let changes = ReviewedChanges::staged(&staged);
         if !changes.created.is_empty() || !changes.removed.is_empty() {
             self.sink.emit(IdeEvent::FsChanged {
+                ignore_rules: Vec::new(),
                 created: changes.created.iter().cloned().map(Into::into).collect(),
                 modified: changes.modified.iter().cloned().map(Into::into).collect(),
                 removed: changes.removed.iter().cloned().map(Into::into).collect(),
@@ -532,6 +548,7 @@ impl Documents {
                     version: st.doc.version(),
                     changes: set.changes,
                     history: Some(history.clone()),
+                    workspace_edit: true,
                 });
                 st.disk_revision = blake3::hash(&file.replacement).to_hex().to_string();
                 st.disk_mtime = ide_vfs::mtime_ms(&std::fs::metadata(&file.path)?);
@@ -554,6 +571,100 @@ impl Documents {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn guarded_pair(docs: &Documents, root: &Path) -> (DocId, WorkspaceEdit) {
+        use ide_core::{FileEdit, Pos, Range, WorkspaceEditGuard};
+        let paths = [root.join("one.php"), root.join("two.php")];
+        for path in &paths {
+            std::fs::write(path, "<?php old();\n").unwrap();
+        }
+        let doc = docs.open(&paths[0]).unwrap();
+        let edit = WorkspaceEdit {
+            files: paths
+                .iter()
+                .map(|path| FileEdit::Edit {
+                    path: path.clone().into(),
+                    version: (path == &paths[0]).then_some(doc.version as i32),
+                    edits: vec![TextEdit { range: Range::new(Pos::new(0, 6), Pos::new(0, 9)), new_text: "new".into() }],
+                })
+                .collect(),
+            guard: Some(WorkspaceEditGuard {
+                documents_revision: docs.edit_revision().unwrap(),
+                disk_revisions: paths
+                    .iter()
+                    .map(|path| {
+                        (
+                            dunce::canonicalize(path).unwrap().into(),
+                            blake3::hash(&std::fs::read(path).unwrap()).to_hex().to_string(),
+                        )
+                    })
+                    .collect(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        (doc.id, edit)
+    }
+
+    #[test]
+    fn upstream_constraints_are_checked_before_any_reviewed_write() {
+        use ide_core::FileEdit;
+        for invalid in ["version", "negative version", "fingerprint"] {
+            let tmp = tempfile::tempdir().unwrap();
+            let docs = Documents::new(Arc::new(|_| {}), Box::new(|_, _| LanguageId::new("php")));
+            let (doc, mut edit) = guarded_pair(&docs, tmp.path());
+            docs.prepare_workspace_edit(&mut edit).unwrap();
+            if invalid == "fingerprint" {
+                edit.preconditions[1].hash = "outdated".into();
+            } else {
+                let FileEdit::Edit { version, .. } = &mut edit.files[0] else { panic!() };
+                *version = Some(if invalid == "version" { i32::MAX } else { -1 });
+            }
+            let before = docs.snapshot(doc).unwrap();
+            let error = docs.apply_guarded_edits(&edit, &tmp.path().join("recovery")).unwrap_err();
+            assert_eq!(error.kind, ErrorKind::OutOfSync, "{invalid}");
+            for name in ["one.php", "two.php"] {
+                assert_eq!(std::fs::read_to_string(tmp.path().join(name)).unwrap(), "<?php old();\n");
+            }
+            assert_eq!(docs.snapshot(doc).unwrap().text, before.text);
+            assert_eq!(docs.snapshot(doc).unwrap().version, before.version);
+            assert!(docs.reviewed_history.lock().entries.is_empty());
+            assert!(!tmp.path().join("recovery").exists());
+        }
+    }
+
+    #[test]
+    fn valid_upstream_constraints_keep_reviewed_apply_undo_and_redo() {
+        let tmp = tempfile::tempdir().unwrap();
+        let docs = Documents::new(Arc::new(|_| {}), Box::new(|_, _| LanguageId::new("php")));
+        let (doc, mut edit) = guarded_pair(&docs, tmp.path());
+        docs.prepare_workspace_edit(&mut edit).unwrap();
+        let recovery = tmp.path().join("recovery");
+        docs.apply_guarded_edits(&edit, &recovery).unwrap();
+        let group = docs.reviewed_history.lock().entries[0].group.clone();
+        assert_eq!(docs.snapshot(doc).unwrap().text, "<?php new();\n");
+        docs.restore_reviewed_edit(&group, false, &recovery).unwrap();
+        assert_eq!(docs.snapshot(doc).unwrap().text, "<?php old();\n");
+        docs.restore_reviewed_edit(&group, true, &recovery).unwrap();
+        for name in ["one.php", "two.php"] {
+            assert_eq!(std::fs::read_to_string(tmp.path().join(name)).unwrap(), "<?php new();\n");
+        }
+    }
+
+    #[test]
+    fn generic_workspace_paths_cannot_strip_a_reviewed_guard() {
+        let tmp = tempfile::tempdir().unwrap();
+        let docs = Documents::new(Arc::new(|_| {}), Box::new(|_, _| LanguageId::new("php")));
+        let (_, edit) = guarded_pair(&docs, tmp.path());
+        for agent in [false, true] {
+            let error = if agent { docs.apply_agent_workspace_edit(&edit) } else { docs.apply_workspace_edit(&edit) }
+                .unwrap_err();
+            assert!(error.message.contains("guarded project"));
+            for name in ["one.php", "two.php"] {
+                assert_eq!(std::fs::read_to_string(tmp.path().join(name)).unwrap(), "<?php old();\n");
+            }
+        }
+    }
 
     #[test]
     fn reviewed_move_commit_rolls_back_prior_writes_without_touching_a_late_destination() {

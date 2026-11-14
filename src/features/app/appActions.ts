@@ -1,6 +1,7 @@
 import { editCommand } from "./editCommand";
 export { editCommand } from "./editCommand";
 import type { Action } from "@/platform/actions";
+import { revealInFileManager } from "@/platform/fileManager";
 import { t } from "@/platform/i18n";
 import { call, commands, isTauri } from "@/platform/ipc";
 import { notifications } from "@/workbench/contributions";
@@ -18,8 +19,7 @@ export async function showLog(): Promise<void> {
   if (!isTauri()) return;
   try {
     const loc = await call(commands.appLogLocation());
-    const { revealItemInDir } = await import("@tauri-apps/plugin-opener");
-    await revealItemInDir(loc.file ?? loc.dir);
+    await revealInFileManager(loc.file ?? loc.dir, null);
   } catch (e) {
     notifications().notify({ level: "error", title: t("app.log.failed"), body: errorText(e) });
   }

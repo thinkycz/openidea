@@ -2,7 +2,7 @@
  * Data source types of New ▸ Data Source: the three drivers the backend speaks,
  * and products that speak their wire protocol (a preset of port, icon and URL scheme).
  */
-import type { DataSource, DbDriver, DbSslMode } from "@/platform/ipc";
+import type { DataSource, DbDriver, DbSnowflake, DbSslMode } from "@/platform/ipc";
 
 export interface DbVendor {
   /** Stored in `DataSource.vendor`; a driver's own entry has the driver's id. */
@@ -27,6 +27,14 @@ export const VENDORS: readonly DbVendor[] = [
     icon: "db-redshift",
     scheme: "redshift",
     ssl: "require",
+  },
+  {
+    id: "clickhouse",
+    label: "ClickHouse",
+    driver: "clickhouse",
+    port: 8123,
+    icon: "db-clickhouse",
+    scheme: "clickhouse",
   },
   {
     id: "cockroachdb",
@@ -56,6 +64,7 @@ export const VENDORS: readonly DbVendor[] = [
     icon: "db-oceanbase",
     scheme: "oceanbase",
   },
+  { id: "oracle", label: "Oracle", driver: "oracle", port: 1521, icon: "db-oracle", scheme: "oracle" },
   { id: "postgres", label: "PostgreSQL", driver: "postgres", port: 5432, icon: "db-postgres", scheme: "postgresql" },
   {
     id: "singlestore",
@@ -65,7 +74,17 @@ export const VENDORS: readonly DbVendor[] = [
     icon: "db-singlestore",
     scheme: "singlestore",
   },
+  { id: "snowflake", label: "Snowflake", driver: "snowflake", port: 443, icon: "db-snowflake", scheme: "snowflake" },
   { id: "sqlite", label: "SQLite", driver: "sqlite", port: null, icon: "db-sqlite", scheme: "sqlite" },
+  {
+    id: "starrocks",
+    label: "StarRocks",
+    driver: "mysql",
+    port: 9030,
+    // No dedicated glyph yet: StarRocks speaks the MySQL protocol, so reuse its icon.
+    icon: "db-mysql",
+    scheme: "starrocks",
+  },
   {
     id: "supabase",
     label: "Supabase",
@@ -101,11 +120,36 @@ export const vendorById = (id: string): DbVendor | undefined => BY_ID.get(id);
 export function vendorPreset(v: DbVendor): Partial<DataSource> {
   const preset: Partial<DataSource> = { driver: v.driver, vendor: v.id === v.driver ? "" : v.id, port: v.port };
   if (v.ssl) preset.ssl = v.ssl;
+  if (v.driver === "clickhouse") {
+    preset.user = "default";
+    preset.database = "default";
+    preset.ssl = "disable";
+  }
+  if (v.driver === "snowflake") {
+    // The account identifier has no useful default; key pairs are what Snowflake recommends.
+    preset.host = "";
+    preset.snowflake = blankSnowflake();
+  }
   return preset;
+}
+
+export const blankSnowflake = (): DbSnowflake => ({ warehouse: "", role: "", auth: "keyPair", privateKeyFile: "" });
+
+/** The host of a Snowflake account identifier (`myorg-myaccount` → `myorg-myaccount.snowflakecomputing.com`). */
+export function snowflakeHost(account: string): string {
+  const host = account
+    .trim()
+    .replace(/^https?:\/\//i, "")
+    .replace(/[/?#].*$/, "");
+  if (!host || /\.snowflakecomputing\./i.test(host)) return host;
+  return `${host.replace(/_/g, "-")}.snowflakecomputing.com`;
 }
 
 /** URL schemes (besides the JDBC ones) that name a type. */
 const SCHEMES: Record<string, string> = {
+  clickhouse: "clickhouse",
+  http: "clickhouse",
+  https: "clickhouse",
   postgres: "postgres",
   postgresql: "postgres",
   pgsql: "postgres",
@@ -121,8 +165,12 @@ const SCHEMES: Record<string, string> = {
   singlestore: "singlestore",
   memsql: "singlestore",
   oceanbase: "oceanbase",
+  starrocks: "starrocks",
+  oracle: "oracle",
+  oracledb: "oracle",
   sqlserver: "sqlServer",
   mssql: "sqlServer",
+  snowflake: "snowflake",
 };
 
 export const vendorOfScheme = (scheme: string): DbVendor | undefined => BY_ID.get(SCHEMES[scheme.toLowerCase()] ?? "");
@@ -136,5 +184,20 @@ export function sourceUrl(s: DataSource): string {
   const host = bracketed(s.host?.trim() || "localhost");
   const port = s.port ?? v.port;
   const db = s.database ? `/${encodeURIComponent(s.database)}` : "";
+  if (v.driver === "snowflake") {
+    const settings = s.snowflake ?? blankSnowflake();
+    const query = new URLSearchParams();
+    if (s.database) query.set("db", s.database);
+    if (s.options?.defaultSchema) query.set("schema", s.options.defaultSchema);
+    if (settings.warehouse) query.set("warehouse", settings.warehouse);
+    if (settings.role) query.set("role", settings.role);
+    const account = snowflakeHost(s.host ?? "") || "<account>.snowflakecomputing.com";
+    const text = query.toString();
+    return `jdbc:snowflake://${account}${s.port && s.port !== 443 ? `:${s.port}` : ""}/${text ? `?${text}` : ""}`;
+  }
+  if (v.driver === "clickhouse") {
+    const secure = s.ssl != null && s.ssl !== "disable" && s.ssl !== "prefer";
+    return `${secure ? "https" : "http"}://${host}:${s.port ?? (secure ? 8443 : 8123)}${db}`;
+  }
   return `jdbc:${v.scheme}://${host}${port ? `:${port}` : ""}${db}`;
 }

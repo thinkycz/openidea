@@ -173,20 +173,30 @@
 
 /* evaluate dialog */
 .evalBody {
+  height: 100%;
+  box-sizing: border-box;
   padding: 12px 14px;
   display: flex;
   flex-direction: column;
   gap: 10px;
 }
 
+.evalImport {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 8px;
+}
+
+/* Grows with the dialog when it is resized. */
 .evalResult {
-  height: 220px;
+  flex: 1;
+  min-height: 220px;
   display: flex;
   flex-direction: column;
   border: 1px solid var(--border-popup);
   border-radius: var(--radius-small);
   padding: 4px 6px;
-  min-height: 0;
 }
 
 .chooser {
@@ -227,6 +237,11 @@
   display: flex;
   align-items: center;
   min-height: 22px;
+}
+.exceptionHint {
+  font-size: var(--fs-small);
+  color: var(--fg-subtle);
+  padding: 0 0 4px 22px;
 }
 
 .attachList {

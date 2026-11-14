@@ -252,7 +252,7 @@ impl LspManager {
         let word =
             crate::scope::search_word(snap, pos).ok_or_else(|| IdeError::invalid("No PHP symbol at the caret"))?;
         let candidates = self
-            .candidates(t, word, cancel)
+            .candidates(t, word, crate::scope::MAX_CANDIDATES, Vec::new(), cancel)
             .await
             .ok_or_else(|| IdeError::unavailable("Project rename scope is unavailable"))?;
         if candidates.limit_hit {
@@ -392,6 +392,8 @@ impl LspManager {
             return Err(IdeError::invalid("PHP Optimize Imports returned an edit outside its source document"));
         }
         Ok(CodeAction {
+            diagnostics: Vec::new(),
+            original_diagnostics: None,
             title: "Optimize Imports".into(),
             kind: Some("source.organizeImports".into()),
             is_preferred: true,
@@ -636,7 +638,7 @@ mod checked_move_tests {
         FileEdit::Rename { from: PathBuf::from(from).into(), to: PathBuf::from(to).into() }
     }
     fn edit(path: &str) -> FileEdit {
-        FileEdit::Edit { path: PathBuf::from(path).into(), edits: vec![] }
+        FileEdit::Edit { path: PathBuf::from(path).into(), edits: vec![], version: None }
     }
     #[test]
     fn checked_file_move_uses_original_source_receipts() {

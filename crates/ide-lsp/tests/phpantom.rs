@@ -240,7 +240,7 @@ async fn checked_import_optimization_removes_unused_imports_and_keeps_used_alias
     assert!(!edit.files.is_empty(), "unused import must produce an edit");
     let mut result = ide_text::Document::new(source);
     for file in &edit.files {
-        let ide_core::FileEdit::Edit { path: target, edits } = file else { panic!("text edit required") };
+        let ide_core::FileEdit::Edit { path: target, edits, .. } = file else { panic!("text edit required") };
         assert_eq!(&**target, path);
         result.apply_edits(edits).unwrap();
     }
@@ -3566,7 +3566,7 @@ async fn laravel_routes_and_views_browse_from_translation_json_without_a_php_edi
             if bounded.views.len()!=1 || !bounded.incomplete { return Err("JSON-context browse lost bounded/incomplete information".into()); }
             if mgr.completion(doc,Pos::new(0,3),None,Default::default()).await.is_ok()
                 || mgr.rename(doc,Pos::new(0,3),"Changed".into(),Default::default()).await.is_ok()
-                || mgr.format(doc,None,ide_lsp::types::FormatOptions{tab_size:2,insert_spaces:true,on_save:false}).await.is_ok() {
+                || mgr.format(doc,None,ide_lsp::types::FormatOptions{tab_size:2,insert_spaces:true,on_save:false,tool:None}).await.is_ok() {
                 return Err("static navigation accidentally enabled PHP-only resource operations".into());
             }
             eprintln!("{relative}: JSON-first names, exact route13:68/Blade1:1 targets, incomplete limit and PHP-operation exclusions passed");
@@ -3658,7 +3658,7 @@ async fn laravel_translation_json_selects_nested_composer_context_without_php_ed
             pid=Some(current);
             if mgr.completion(doc,Pos::new(0,3),None,Default::default()).await.is_ok()
                 || mgr.rename(doc,Pos::new(0,3),"Changed".into(),Default::default()).await.is_ok()
-                || mgr.format(doc,None,ide_lsp::types::FormatOptions{tab_size:2,insert_spaces:true,on_save:false}).await.is_ok() { return Err("PHP-only operation enabled for nested JSON".into()); }
+                || mgr.format(doc,None,ide_lsp::types::FormatOptions{tab_size:2,insert_spaces:true,on_save:false,tool:None}).await.is_ok() { return Err("PHP-only operation enabled for nested JSON".into()); }
             eprintln!("{owner}: both shared-name destinations and exclusive names resolve in selected Composer context on PID{current}; PHP-only operations excluded");
         }
         mgr.restart(mgr.servers()[0].id).await.map_err(|e|e.to_string())?;
@@ -3757,7 +3757,7 @@ async fn laravel_translation_json_uses_configured_content_roots_and_recovers_aft
             if pids.insert(base.clone(),current).is_some_and(|previous|previous!=current) { return Err("context selection restarted an independent root".into()); }
             if mgr.completion(doc,Pos::new(0,3),None,Default::default()).await.is_ok()
                 || mgr.rename(doc,Pos::new(0,3),"Changed".into(),Default::default()).await.is_ok()
-                || mgr.format(doc,None,ide_lsp::types::FormatOptions{tab_size:2,insert_spaces:true,on_save:false}).await.is_ok() { return Err("PHP-only operation enabled for nested JSON".into()); }
+                || mgr.format(doc,None,ide_lsp::types::FormatOptions{tab_size:2,insert_spaces:true,on_save:false,tool:None}).await.is_ok() { return Err("PHP-only operation enabled for nested JSON".into()); }
             eprintln!("{owner}: both shared-name destinations and exclusive names resolve in selected content root on PID{current}; PHP-only operations excluded");
         }
         if pids.len()!=2 || pids[&root]==pids[&child] { return Err("independent roots did not use distinct processes".into()); }
@@ -4007,7 +4007,7 @@ async fn laravel_match_actions_follow_aliases_nested_owners_and_unsaved_controll
         if !class_plan.edit.files.iter().any(|f|matches!(f,ide_core::FileEdit::Rename{from,to} if **from==main_path && **to==root.join("app/ReceiptController.php"))) {
             return Err(format!("safe runtime class plan must retain PSR4 file move: {class_plan:?}"));
         }
-        let runtime_edits=class_plan.edit.files.iter().find_map(|f|match f{ide_core::FileEdit::Edit{path,edits} if **path==route_path=>Some(edits),_=>None}).ok_or("safe runtime class plan omitted route references")?;
+        let runtime_edits=class_plan.edit.files.iter().find_map(|f|match f{ide_core::FileEdit::Edit{path,edits,..} if **path==route_path=>Some(edits),_=>None}).ok_or("safe runtime class plan omitted route references")?;
         if !runtime_edits.iter().any(|e|e.new_text==r"App\\ReceiptController") || runtime_edits.iter().any(|e|e.new_text.contains("showInvoice")) {
             return Err(format!("runtime class plan must quote class interiors without rewriting method suffixes: {runtime_edits:?}"));
         }
@@ -4047,7 +4047,7 @@ async fn laravel_match_actions_follow_aliases_nested_owners_and_unsaved_controll
         let mut edits = Vec::new();
         for file in &rename.edit.files {
             match file {
-                ide_core::FileEdit::Edit { path, edits: items } => {
+                ide_core::FileEdit::Edit { path, edits: items, .. } => {
                     for e in items {
                         if e.new_text != "displayInvoice" {
                             return Err(format!("unexpected rename text: {e:?}"));

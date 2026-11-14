@@ -68,6 +68,7 @@ const KIND_LABEL: Record<DbObjectRef["kind"], string> = {
   schema: "schema",
   function: "function",
   procedure: "procedure",
+  package: "package",
   trigger: "trigger",
   sequence: "sequence",
 };
@@ -215,6 +216,22 @@ function TruncateDialog({ id, schema, table }: { id: string; schema: string; tab
 // ---- Modify Table / New Table -----------------------------------------------
 
 const TYPES: Record<DbDriver, string[]> = {
+  snowflake: [
+    "NUMBER(38,0)",
+    "NUMBER(10,2)",
+    "FLOAT",
+    "VARCHAR",
+    "BOOLEAN",
+    "DATE",
+    "TIME",
+    "TIMESTAMP_NTZ",
+    "TIMESTAMP_LTZ",
+    "TIMESTAMP_TZ",
+    "VARIANT",
+    "OBJECT",
+    "ARRAY",
+    "BINARY",
+  ],
   sqlite: ["INTEGER", "TEXT", "REAL", "NUMERIC", "BLOB", "BOOLEAN", "DATE", "DATETIME"],
   postgres: [
     "integer",
@@ -268,6 +285,27 @@ const TYPES: Record<DbDriver, string[]> = {
     "uniqueidentifier",
     "bit",
     "varbinary(max)",
+  ],
+  clickhouse: ["UInt64", "Int64", "Float64", "String", "Bool", "Date", "DateTime", "UUID", "Nullable(String)"],
+  oracle: [
+    "NUMBER",
+    "NUMBER(10)",
+    "NUMBER(19, 4)",
+    "INTEGER",
+    "BINARY_FLOAT",
+    "BINARY_DOUBLE",
+    "VARCHAR2(255)",
+    "VARCHAR2(4000)",
+    "NVARCHAR2(255)",
+    "CHAR(1)",
+    "CLOB",
+    "BLOB",
+    "RAW(16)",
+    "DATE",
+    "TIMESTAMP",
+    "TIMESTAMP WITH TIME ZONE",
+    "INTERVAL DAY TO SECOND",
+    "XMLTYPE",
   ],
 };
 
@@ -328,7 +366,8 @@ function ModifyTableForm({
   const driver = driverOf(id);
   const [name, setName] = useState(table ?? "table_name");
   const [columns, setColumns] = useState<ColumnDraft[]>(() => {
-    if (!initial) return [{ ...blankColumn(driver, 1), name: "id", primaryKey: true, notNull: true }];
+    if (!initial)
+      return [{ ...blankColumn(driver, 1), name: "id", primaryKey: driver !== "clickhouse", notNull: true }];
     const drafts = initial.map(draftOf);
     if (addColumn) drafts.push(blankColumn(driver, drafts.length + 1));
     return drafts;
@@ -448,14 +487,18 @@ function ModifyTableForm({
                   disabled={current.dropped || locked}
                   onChange={(e) => patch({ dataType: e.target.value })}
                 />
-                <span />
-                <Checkbox
-                  checked={current.notNull}
-                  disabled={current.dropped || locked}
-                  onChange={(notNull) => patch({ notNull })}
-                  label="Not null"
-                />
-                {!table && (
+                {driver !== "clickhouse" && (
+                  <>
+                    <span />
+                    <Checkbox
+                      checked={current.notNull}
+                      disabled={current.dropped || locked}
+                      onChange={(notNull) => patch({ notNull })}
+                      label="Not null"
+                    />
+                  </>
+                )}
+                {!table && driver !== "clickhouse" && (
                   <>
                     <span />
                     <Checkbox
@@ -607,6 +650,9 @@ function QuickDoc({ node, anchor }: { node: DbNode; anchor: { x: number; y: numb
       );
       if (node.routine.arguments) rows.push(["Arguments", node.routine.arguments]);
       if (node.routine.returns) rows.push(["Returns", node.routine.returns]);
+      break;
+    case "package":
+      rows.push(["Schema", node.schema], ["Package", node.package.name]);
       break;
     case "sequence":
       rows.push(["Schema", node.schema], ["Sequence", node.sequence.name], ["Type", node.sequence.dataType]);

@@ -141,7 +141,8 @@
         "0.1.46 signed diagnostic / engine125: native quoted controller completion (midword/selected index) now commits exact plain name after Unicode URI; required/optional/named/resource keys and unsaved URI cross-file completion pass. Static route targets,3occurrence/2file checked rename Cancel/apply, native Undo/cross-file Redo, controller/renamed-route navigation, settled restart, relaunch and cleanup/signature pass. FAILURE: unsaved duplicate-name change clears only edited-file warning; unchanged open sibling warning stale. First route goto after restart briefly misses, settled retry passes. Batch unaccepted pending diagnostic refresh. Frontend3046/focused32, workspace1318/40ignored/2separatelypendingSDKenvfiltered, typecheck/lint/build/fmt/Clippy/bindings pass; unchanged125engine/client15/host5 gates reused. Receipt artifacts/checks/route-navigation-0.1.46-native-result.json.",
         "0.1.47 signed arm64 development route batch accepted: both duplicate declaration warnings clear on one unsaved registration edit and return on Undo; exact disk unchanged. Grouped Unicode/duplicate target navigation, controller and parameter completion, checked3occurrence/2file rename, Cancel, native menu cross-file Undo/Redo and unchanged backward7character selection with physical CRLF preservation pass. Save-conflict prompt/Cancel/discard-reopen, settled engine restart, noargrelaunch, restored defaults/12originalfiles, app/server cleanup/signatures and installed21preservation pass. Source: frontend3049; workspace1319/41ignored/2pending env cases filtered; full pinned engine18384/17ignored plus FIFO child1; actual client16/host5. Evidence: artifacts/checks/route-navigation-0.1.47-native-result.json.",
         "Slice58 with unchanged app0.1.57/engine130: actual client and native Composer8.3->8.4->8.3 changes apply without process restart; fresh builtin navigation contexts1/3/5 and array_find availability track target. Client unsaved Unicode dependency survives; native Tab completion/save/undo/redo exact bytes verified. All5,330 frontend/1,740 Rust tests plus fmt/Clippy pass; native relaunch/quit and exact fixture restoration pass. Retained latest0.1.57 runtime unchanged; compiler output cleaned. See docs/OPENSTORM.md.",
-        "Slice95 engine source candidate149: quote-aware rooted class-interior completion for Laravel route actions/group controller strings;70 focused and18,483 full engine tests pass/17ignored, catalog/incomplete metadata, resolve and unsaved declarations covered. Active OpenStorm stays engine148/App0.1.88; actual client edit-path acceptance and app promotion are pending. Native UI remains user-skipped."
+        "Slice95 engine source candidate149: quote-aware rooted class-interior completion for Laravel route actions/group controller strings;70 focused and18,483 full engine tests pass/17ignored, catalog/incomplete metadata, resolve and unsaved declarations covered. Active OpenStorm stays engine148/App0.1.88; actual client edit-path acceptance and app promotion are pending. Native UI remains user-skipped.",
+        "0.1.89 source/client/signed local package: engine149 runtime controller class-string completion applies rooted, quote-aware class-only UTF16 edits with no PHP imports and preserves method suffixes. Same2host tests fail148/pass149;6quoting/group/action forms, resolve/goto/hover, unsaved/restart/close catalogs, incomplete/100limit metadata, stale target refusal and revision-bound save consent pass.4CodeMirror undo/redo/acceptance cases pass. Full4710Rust/166ignored,11887frontend/6skipped,52real host/client cases and allsource gates pass. NativeUI explicitly user-skipped; whole-area acceptance remains partial."
       ],
       "remaining": "Reassess current OpenStorm implementation against this full gate; Workbench acceptance does not transfer."
     },
@@ -420,7 +421,8 @@
         "Slice91 engine146: literal group-controller bindings retain all registered namespace targets and unknown-context information. Shared class resolver/index provides definition/type/hover/references/highlights; deferred/last-key semantics preserved, unsupported edits guarded.54priorpass/7fail ->62focused/18475ordinary+FIFOchild. Actualclientred145/green146 verifies2class/type targets,5unique refs,5edit refusals, unsaved target retirement/controller docs/restart/close and4originals; retained explicit case has16classrefs.320runtime/exact3diagnostics/47freshwire;41client/6host,5383frontend/1759workspace pass. Signed84; native skipped. Safe runtime rewrites, class completion and whole-area matrices partial. docs/OPENSTORM.md and slice91 receipts.",
         "Slice93 engine147: runtime controller action/group class strings decode PHP escapes for identity and encode replacements preserving quotes/method suffixes; short/full no-op names preserve escapes. Eight quoting/namespace/group source contexts and whole-plan shared/unknown refusal pass. Actual41client/8host includes3executed renamed Laravel routes, unchanged aliases and fresh undo/redo definitions. Runtime-literal rename starters and namespace transformations remain partial.",
         "Slice94 runtime class literal Rename now delegates to source-verified PHP declaration planning. Actualclient explicit/group file-plan parity and host first-request closed-declaration/group/encoded-action prepare paths pass; actual3renamed routes execute through Laravel/Composer. Source66focused/18479ordinary+FIFOchild,324runtime/exact3diagnostics pass; broad route forms and native remain partial.",
-        "Slice95 engine source candidate149: quote-aware rooted class-interior completion for Laravel route actions/group controller strings;70 focused and18,483 full engine tests pass/17ignored, catalog/incomplete metadata, resolve and unsaved declarations covered. Active OpenStorm stays engine148/App0.1.88; actual client edit-path acceptance and app promotion are pending. Native UI remains user-skipped."
+        "Slice95 engine source candidate149: quote-aware rooted class-interior completion for Laravel route actions/group controller strings;70 focused and18,483 full engine tests pass/17ignored, catalog/incomplete metadata, resolve and unsaved declarations covered. Active OpenStorm stays engine148/App0.1.88; actual client edit-path acceptance and app promotion are pending. Native UI remains user-skipped.",
+        "0.1.89 source/client/signed local package: engine149 runtime controller class-string completion applies rooted, quote-aware class-only UTF16 edits with no PHP imports and preserves method suffixes. Same2host tests fail148/pass149;6quoting/group/action forms, resolve/goto/hover, unsaved/restart/close catalogs, incomplete/100limit metadata, stale target refusal and revision-bound save consent pass.4CodeMirror undo/redo/acceptance cases pass. Full4710Rust/166ignored,11887frontend/6skipped,52real host/client cases and allsource gates pass. NativeUI explicitly user-skipped; whole-area acceptance remains partial."
       ],
       "remaining": "Broader route forms, immediate readiness/config-change and other cancellation permutations remain open. The0.1.58 pending route-list project-switch case is accepted; prior46 transient first-request miss remains tracked separately from settled navigation. Slice82 accepts recorded owner-preserving controller-group chains; direct inline controller owners, namespace changes, custom macros and unfinished/dynamic argument forms remain partial."
     },
@@ -1044,7 +1046,7 @@
   "runtime_controller_completion_candidate": {
     "slice": 95,
     "version": "0.11.1-openstorm.149",
-    "status": "engine-source verified; OpenStorm client/resource/app promotion pending",
+    "status": "promoted and source/client/package verified in slice96; native UI user-skipped",
     "source_pin": "engine/candidates/0.11.1-openstorm.149-source.json",
     "provenance": "engine/candidates/0.11.1-openstorm.149.json",
     "patches_sha256": "0e45f3d3564bbe21eea5d9566dcb4fb19f31569db59d2a741d3ee3a0092c3f93",
@@ -1053,9 +1055,38 @@
     "engine_tests_ignored": 17,
     "focused_route_tests_passed": 70,
     "laravel_fixture_assertions": 324,
-    "active_engine_unchanged": "0.11.1-openstorm.148",
-    "active_app_unchanged": "0.1.88",
     "native": "user-skipped",
-    "compiler_target": "owned artifacts/phpantom-build cleaned:6959 files/about2.0GiB"
+    "compiler_target": "owned artifacts/phpantom-build cleaned:6959 files/about2.0GiB",
+    "active_engine_at_source_slice": "0.11.1-openstorm.148",
+    "active_app_at_source_slice": "0.1.88",
+    "promotion_slice": 96,
+    "promoted_app": "0.1.89"
+  },
+  "runtime_controller_completion_delivery": {
+    "slice": 96,
+    "engine": "0.11.1-openstorm.149",
+    "app": "0.1.89",
+    "state": "source/client and signed local package verified; branch history/remote ref record commit/push",
+    "rust_passed": 4710,
+    "rust_ignored": 166,
+    "frontend_passed": 11887,
+    "frontend_skipped": 6,
+    "real_engine_host_passed": 11,
+    "real_engine_client_passed": 41,
+    "new_host_scenarios": 2,
+    "native": "user-skipped",
+    "evidence": "docs/OPENSTORM.md slice96; artifacts/checks/slice96-gates.json and slice96-client-host.json",
+    "local_delivery": {
+      "bundle": "artifacts/batches/0.1.89/OpenStorm.app",
+      "architecture": "arm64",
+      "signature": "ad-hoc;strict/deep verified",
+      "executable_sha256": "f6f7b1930cc17c9dd67133ee97452974442387492747c9bf6bec0bd73352aacb",
+      "engine_sha256": "8fe8f602a6f0bf9e098f7ef6dcfcebf3b3ab038d2b4ac0408e80a45b3f8714f8",
+      "latest_archive_only": true,
+      "compiler_cleanup": "23735 files/28.8GiB; owned artifacts/build removed",
+      "obsolete_engine_cleanup": "inactive148 executable removed after exactSHA check; metadata/source and114evaluation retained",
+      "installed": false,
+      "notarized": false
+    }
   }
 }

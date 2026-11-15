@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { EditorState, StateEffect, type Extension } from "@codemirror/state";
 import { EditorView, runScopeHandlers } from "@codemirror/view";
+import { history, redo, undo } from "@codemirror/commands";
 import type { CompletionItem } from "@/bindings";
 import type { EditorDocContext } from "@/editor/api";
 import { lspDoc } from "./lsp";
@@ -525,6 +526,45 @@ describe("applying completions", () => {
     expect(view.state.doc.toString()).toBe("svc.create()");
     expect(view.state.selection.main.head).toBe(11);
   });
+
+  for (const mode of ["insert", "replace"] as const) {
+    it.each(["'", '"'])("keeps runtime controller class edits inside PHP quotes (%s), " + mode, (quote) => {
+      const marked =
+        "<?php\nuse App\\Other\\InvoiceController;\nRoutes::get('/😀/invoice'," +
+        quote +
+        "App\\In|vOLD@showInvoice" +
+        quote +
+        ");";
+      const { view, req, pos } = setup(marked, "", [history()]);
+      const original = marked.replace("|", "");
+      const start = pos - "App\\In".length;
+      const end = start + "App\\InvOLD".length;
+      const line = view.state.doc.lineAt(start);
+      const insertText = "\\\\App\\\\InvoiceController";
+      const c = makeCompletion(
+        item({
+          label: "InvoiceController",
+          detail: "App\\InvoiceController",
+          kind: "class",
+          insertText,
+          filterText: "App\\InvoiceController",
+          replaceRange: {
+            start: { line: line.number - 1, col: start - line.from },
+            end: { line: line.number - 1, col: end - line.from },
+          },
+        }),
+        { ...req, path: "/p/routes/web.php", language: "php" },
+      );
+      applyLspCompletion(view, c, start, pos, mode);
+      const expected = original.slice(0, start) + insertText + original.slice(end);
+      expect(view.state.doc.toString()).toBe(expected);
+      expect(view.state.selection.main.head).toBe(start + insertText.length);
+      expect(undo(view)).toBe(true);
+      expect(view.state.doc.toString()).toBe(original);
+      expect(redo(view)).toBe(true);
+      expect(view.state.doc.toString()).toBe(expected);
+    });
+  }
 
   it("commits a whole quoted controller action without adding call parentheses", () => {
     for (const quote of ["'", '"', "`"]) {

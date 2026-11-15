@@ -15,6 +15,48 @@ slice, commit and push it, and retain only the latest generated app. Native UI
 cases remain deferred/unverified; earlier native-first blocking checkpoints are
 historical and no longer prevent independent implementation.
 
+Laravel slice96 (2026-11-15, verified local delivery): OpenStorm0.1.89 bundles
+PHPantom149 and enables runtime controller class-string completion. The exact
+same preflight executable fails both new cases with148 (missing completion),
+then passes both with149. Six quoting/action/group forms retain UTF-16 class
+ranges, @method, quotes, PHP imports and resolved documentation; accepted host
+edits navigate/hover the intended controller. Catalogs retain unknown/ambiguous
+metadata and the100-item bound, follow unsaved class changes through restart and
+closed-overlay recovery, and refuse stale buffer versions. Save consent stays
+bound to the external revision; old consent cannot overwrite a later disk edit.
+Four CodeMirror cases cover both acceptance modes and quote styles with undo/redo.
+
+All source gates pass: all-target compilation; Rust4,710 tests/166ignored;
+all-target Clippy with warnings denied; generated bindings (unchanged); frontend
+type check, lint, format and Knip; frontend11,887 tests/6skipped across921 files;
+production bundle and Safari16 startup API/syntax checks; Rust formatting.
+Eight packaging/retention Python tests pass. All52 real engine149 cases pass from
+fresh workspace test binaries:9 existing host,2 new completion-host and41 client.
+All7 fixture inventories remain unchanged. Existing lint/chunk warnings remain;
+there were no failed source/runtime gates in this delivery. The engine149
+immutable-source18,483 tests/17ignored and source/build/license evidence from
+slice95 are unchanged. No frontend/host implementation or IPC interface needed a
+behavioral fix. The local version bump preserves the public plugin API snapshot
+and registry dependency versions/checksums.
+
+Signed Apple Silicon development app: `artifacts/batches/0.1.89/OpenStorm.app`,
+identifier `cz.thinky.openstorm`, minimum macOS13.0. Strict/deep signature and
+engine provenance verification pass; the packaged executable reports engine149.
+App executable SHA-256:
+`f6f7b1930cc17c9dd67133ee97452974442387492747c9bf6bec0bd73352aacb`.
+Only0.1.89 remains archived. After verification the inactive0.1.88 archive and
+23,735 compiler outputs/28.8GiB were removed; the inactive superseded148 engine
+executable (56,272,976 bytes) was removed only after exact checksum/process checks.
+Source/provenance/license/test receipts, candidate149 and Workbench/evaluation114
+are preserved. The app was not launched, installed or notarized. Native UI checks
+remain explicitly user-skipped; all69 areas remain visible at67partial/2deferred.
+Commit/push identity is recorded in branch history and the remote-ref receipt.
+
+Evidence: `artifacts/checks/slice96-{host-completion-red,host-completion-green,
+resource-promotion,gates,workspace-totals,client-host,packaged-check,
+obsolete-engine-cleanup,continuation}.json`, source/runtime/package logs,
+`artifacts/batches/0.1.89/{build-receipt,retention}.json` and final source binding.
+
 Laravel slice95 (2026-11-15, engine source verified; client promotion pending):
 runtime controller class-string completion is implemented in candidate149. The
 four red regressions now pass: eight quoting/group/action forms preserve @method,

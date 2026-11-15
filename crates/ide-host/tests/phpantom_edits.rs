@@ -713,6 +713,12 @@ async fn checked_runtime_literal_rename_starters_use_the_guarded_class_plan() {
     }
 }
 
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires the pinned macOS Apple Silicon PHPantom executable"]
+async fn checked_invokable_literal_rename_uses_the_guarded_class_plan() {
+    check_controller_class_rename_entry(Some("'/invokable', 'App\\In")).await;
+}
+
 async fn check_controller_class_rename_entry(literal: Option<&str>) {
     fn at(text: &str, needle: &str) -> Pos {
         let offset = text.find(needle).unwrap() + needle.len();
@@ -738,8 +744,7 @@ async fn check_controller_class_rename_entry(literal: Option<&str>) {
     let old = root.join("src/InvoiceController.php");
     let new = root.join("src/ReceiptController.php");
     let route_path = root.join("routes/web.php");
-    let class =
-        "<?php\nnamespace App;\nclass InvoiceController { public function show(): string { return 'invoice'; } }\n";
+    let class = "<?php\nnamespace App;\nclass InvoiceController { public function __invoke(): string { return 'invoice'; } public function show(): string { return 'invoice'; } }\n";
     let route = r#"<?php
 use Illuminate\Support\Facades\Route;
 use App\InvoiceController;
@@ -748,6 +753,8 @@ $invoice = new InvoiceController();
 $other = new ReceiptController();
 Route::namespace('App')->controller('InvoiceController')->group(fn () => Route::get('/bound', 'show'));
 Route::get('/😀/direct', "App\\Inv\x6ficeController@show");
+Route::get('/invokable', 'App\InvoiceController');
+Route::namespace('App')->group(fn () => Route::get('/invokable-short', 'InvoiceController'));
 "#;
     std::fs::write(&old, class).unwrap();
     std::fs::write(&route_path, route).unwrap();
@@ -792,7 +799,7 @@ Route::get('/😀/direct', "App\\Inv\x6ficeController@show");
         let route_doc = project.documents.open(&route_path).unwrap();
         let unsaved_class = format!("{class}// Unsaved controller documentation.\n");
         let unsaved_route = format!(
-            "{route}Route::namespace('App')->group(fn () => Route::get('/unsaved', 'InvoiceController@show'));\n"
+            "{route}Route::namespace('App')->group(fn () => Route::get('/unsaved', 'InvoiceController@show'));\nRoute::get('/invokable-unsaved', \"\\u{{41}}pp\\\\InvoiceController\");\n"
         );
         project.documents.replace_all(class_doc.id, &unsaved_class).unwrap();
         project.documents.replace_all(route_doc.id, &unsaved_route).unwrap();
@@ -880,6 +887,9 @@ Route::get('/😀/direct', "App\\Inv\x6ficeController@show");
             "controller('ReceiptController')",
             r#""App\\ReceiptController@show""#,
             "'/unsaved', 'ReceiptController@show'",
+            r"'/invokable', 'App\\ReceiptController'",
+            "'/invokable-short', 'ReceiptController'",
+            r#"'/invokable-unsaved', "App\\ReceiptController""#,
         ] {
             if !changed.text.contains(expected) {
                 return Err(format!("missing correct literal/alias {expected:?}: {}", changed.text));
@@ -905,24 +915,27 @@ $router = new \Illuminate\Routing\Router(new \Illuminate\Events\Dispatcher());
 \Illuminate\Support\Facades\Route::swap($router);
 require $argv[1] . '/routes/web.php';
 $routes = $router->getRoutes();
-if (count($routes) !== 3) { throw new \RuntimeException('Expected three renamed routes'); }
+if (count($routes) !== 6) { throw new \RuntimeException('Expected six renamed routes'); }
 foreach ($routes as $route) {
-    if ($route->getActionName() !== 'App\\ReceiptController@show'
+    $method = str_starts_with($route->uri(), 'invokable') ? '__invoke' : 'show';
+    if ($route->getAction('uses') !== 'App\\ReceiptController@' . $method
         || get_class($route->getController()) !== 'App\\ReceiptController'
-        || $route->getController()->show() !== 'invoice') {
+        || $route->getController()->$method() !== 'invoice') {
         throw new \RuntimeException('A renamed runtime controller failed');
     }
 }
-echo '3 renamed controller routes executed';"#;
+echo '6 renamed controller routes executed';"#;
         let runtime = std::process::Command::new(&php)
             .args(["-n", "-r", script])
             .arg(&root)
             .arg(&laravel)
             .output()
             .map_err(|e| format!("explicit PHP verification: {e}"))?;
-        if !runtime.status.success() || runtime.stdout != b"3 renamed controller routes executed" {
+        if !runtime.status.success() || runtime.stdout != b"6 renamed controller routes executed" {
             return Err(format!(
-                "committed controller runtime verification failed: {}",
+                "committed controller runtime verification failed ({}): stdout={}, stderr={}",
+                runtime.status,
+                String::from_utf8_lossy(&runtime.stdout),
                 String::from_utf8_lossy(&runtime.stderr)
             ));
         }

@@ -15,6 +15,64 @@ slice, commit and push it, and retain only the latest generated app. Native UI
 cases remain deferred/unverified; earlier native-first blocking checkpoints are
 historical and no longer prevent independent implementation.
 
+Laravel slice 98 (2026-11-15, verified local development delivery): App 0.1.90
+bundles PHPantom 150 and enables class definition, hover, references, completion
+and guarded rename for invokable route strings without @method. Four additional
+completion forms retain class-only UTF-16 edits, quotes, imports and documentation.
+Unknown namespaces preserve incomplete results and refuse partial class renames;
+unsaved catalogs, restart, close-overlay recovery, bounded results and stale edit
+refusal pass through the actual host. Save-conflict consent remains tied to the
+external disk revision, including after invokable completion.
+
+The same test executables fail with 149 for missing completion, literal rename
+and class navigation, then pass with 150. The client finds exactly 19 class sites,
+retains namespace/refactoring guards, and follows unsaved declarations through
+restart and overlay close. Cross-file checked rename moves the PSR-4 controller,
+retains unrelated PHP aliases and saved/unsaved route callers, and refuses stale
+disk dependencies before writing. All six resulting routes execute through the
+pinned Laravel router. Shared undo/redo restores exact disk/overlay originals;
+later external changes refuse history restoration. Two fixture mistakes were
+proven and corrected: an initial cursor selected a PHP import rather than the
+route; the runtime oracle used Laravel's display action instead of executable
+`uses`. Failed attempts and diagnoses are retained; no client implementation
+change was needed.
+
+All source gates pass: 4,710 Rust tests / 168 ignored, workspace all-target check,
+Clippy with warnings denied, unchanged generated bindings, type checking, lint,
+formatting, Knip, 11,891 frontend tests / six skipped, production frontend/Safari 16
+startup checks and Rust formatting. All 54 real-engine checks pass from the final
+workspace executables (ten host edits/navigation, three host completion, 41 client),
+with every owned fixture restored. All 29 input/expected/control PHP fixtures
+parse; 115 CodeMirror completion checks pass, including four new invokable cases.
+Immutable engine 150 source gates from slice 97 remain valid and unchanged:
+18,489 tests / 17 ignored, 76 focused route checks, 324 Laravel assertions and
+exactly three intentional analyzer diagnostics.
+
+The sole archived app is `artifacts/batches/0.1.90/OpenStorm.app`, signed ad hoc
+with strict/deep verification, arm64, identifier `cz.thinky.openstorm`, minimum
+macOS 13.0. Executable SHA-256:
+`4ccedd42afbeb14500df8313013313cab88adbd3dd5287828d898737accfc535`.
+Bundled engine SHA-256:
+`98bf368b48e807186b3c55b09ce456b03e75ed62240e66818b0f971bdc54cc0a`.
+The build receipt binds all compiled source bytes; only this progress document
+and the acceptance ledger change afterward. The version helper's released plugin
+API snapshot advance was restored to the existing compatibility baseline because
+this is a local development build. Third-party dependency pins are unchanged.
+
+After signature/receipt checks, App 0.1.89 and the duplicate SDK bundle were removed;
+the inactive compiler target was cleaned (25,690 files / 29.8GiB). The inactive
+canonical 149 executable was removed after an exact checksum/process check;
+current 150, Workbench 114, source, provenance, licenses and evaluation artifacts
+remain. The app is not launched, installed or notarized. Native UI checks remain
+explicitly user-skipped. Dedicated `__invoke` method references and controller-group ambiguities that depend
+on `class_exists` remain unaccepted. Appearance, keymaps,
+autosave and debugger behavior have no implementation changes in this slice.
+All 69 areas remain visible: 67 partial / two user-deferred.
+Evidence: `artifacts/checks/slice98-{preflight-runtime-attempt3,cursor-diagnosis,
+runtime-diagnosis,runtime-probe-green,fixture-syntax,gates,workspace-totals,
+client-host,package-pipeline,packaged-check,obsolete-engine-cleanup,continuation}.json`
+and `artifacts/batches/0.1.90/{build-receipt,retention}.json`.
+
 Laravel slice 97 (2026-11-15, engine source verified; client promotion pending):
 PHPantom candidate 150 adds class definition, hover, references, rename and
 completion for Laravel invokable controller strings without @method. Named action

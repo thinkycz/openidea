@@ -6,7 +6,7 @@ use ide_lsp::types::{CompletionItem, CompletionKind, CompletionList, GotoKind};
 use std::{io::Write, path::PathBuf, process::Stdio, sync::Arc, time::Duration};
 
 const HEADER: &str = "<?php\nnamespace Harness;\nuse Illuminate\\Support\\Facades\\Route as Routes;\nuse App\\Other\\InvoiceController as InvoiceController;\n";
-const MAIN: &str = "<?php\nnamespace App;\n/** Main controller completion witness. */\nclass InvoiceController {public function showInvoice(): bool {return true;}}\n";
+const MAIN: &str = "<?php\nnamespace App;\n/** Main controller completion witness. */\nclass InvoiceController {public function __invoke(): bool {return true;} public function showInvoice(): bool {return true;}}\n";
 const OTHER: &str =
     "<?php namespace App\\Other; class InvoiceController {public function showInvoice(): string {return 'other';}}\n";
 
@@ -153,6 +153,14 @@ async fn runtime_class_completion_applies_only_the_class_and_keeps_save_conflict
              r#"Routes::namespace('App')->controller('\\App\\InvoiceController')->group(fn () => Routes::get('/bound','showInvoice'));"#),
             (r#"Routes::group(['namespace'=>'App','controller'=>'InvOLD'],fn () => Routes::get('/attrs','showInvoice'));"#, "InvOLD", "In",
              r#"Routes::group(['namespace'=>'App','controller'=>'\\App\\InvoiceController'],fn () => Routes::get('/attrs','showInvoice'));"#),
+            (r#"Routes::get('/😀/invokable','App\InvOLD');"#, r"App\InvOLD", r"App\In",
+             r#"Routes::get('/😀/invokable','\\App\\InvoiceController');"#),
+            (r#"Routes::match(action:'App\InvOLD',methods:['post'],uri:'/named');"#, r"App\InvOLD", r"App\In",
+             r#"Routes::match(action:'\\App\\InvoiceController',methods:['post'],uri:'/named');"#),
+            (r#"Routes::namespace('App')->group(fn () => Routes::get('/invokable-relative','InvOLD'));"#, "InvOLD", "In",
+             r#"Routes::namespace('App')->group(fn () => Routes::get('/invokable-relative','\\App\\InvoiceController'));"#),
+            (r#"Routes::get('/😀/invokable-hex',"App\\Inv\x4fLD");"#, r"App\\Inv\x4fLD", r"App\\Inv",
+             r#"Routes::get('/😀/invokable-hex',"\\App\\InvoiceController");"#),
         ] {
             let input = routes(call);
             Fixture::lint(&input);
@@ -205,6 +213,16 @@ async fn runtime_class_completion_applies_only_the_class_and_keeps_save_conflict
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires pinned PHPantom and owned PHP syntax-check executable"]
 async fn runtime_class_completion_keeps_catalog_metadata_unsaved_overlays_and_restart() {
+    check_runtime_class_catalog(false).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires pinned PHPantom and owned PHP syntax-check executable"]
+async fn invokable_completion_keeps_catalog_metadata_unsaved_overlays_and_restart() {
+    check_runtime_class_catalog(true).await;
+}
+
+async fn check_runtime_class_catalog(invokable: bool) {
     let draft =
         "<?php namespace App; class InvoiceDraftController {public function showInvoice(): bool {return true;}}\n";
     let published = draft.replace("InvoiceDraftController", "InvoicePublishedController");
@@ -212,9 +230,11 @@ async fn runtime_class_completion_keeps_catalog_metadata_unsaved_overlays_and_re
     for n in 0..104 {
         extra.push((format!("app/C{n:03}.php"), format!("<?php namespace App; class C{n:03} {{}}\n")));
     }
-    let original = routes(
-        "Routes::namespace('App')->controller('InvOLD')->group(fn () => Routes::get('/😀/main','showInvoice'));",
-    );
+    let original = routes(if invokable {
+        "Routes::namespace('App')->group(fn () => Routes::get('/😀/main','InvOLD'));"
+    } else {
+        "Routes::namespace('App')->controller('InvOLD')->group(fn () => Routes::get('/😀/main','showInvoice'));"
+    });
     let f = Fixture::new(&original, &extra);
     let outcome = std::panic::AssertUnwindSafe(async {
         let cursor = at(&original, original.find("InvOLD").unwrap() + 2);
@@ -249,7 +269,28 @@ async fn runtime_class_completion_keeps_catalog_metadata_unsaved_overlays_and_re
             let list = f.complete(at(&input, input.find("InvOLD").unwrap() + 2)).await;
             assert!(list.is_incomplete && list.items.is_empty(), "ambiguous context must remain incomplete: {list:?}");
         }
-        let input = routes("Routes::namespace('App')->controller('COLD')->group(fn () => Routes::get('/limit','showInvoice'));");
+        if invokable {
+            let input = routes("Routes::namespace($selected)->group(fn () => Routes::get('/unknown','InvoiceController'));");
+            f.project.documents.replace_all(f.doc, &input).unwrap();
+            let cursor = at(&input, input.rfind("InvoiceController").unwrap() + 2);
+            let list = f.complete(cursor).await;
+            assert!(list.is_incomplete && list.items.is_empty(), "unknown invokable action must retain incomplete metadata: {list:?}");
+            assert!(f.project.lsp.prepare_rename_details(f.doc, cursor).await.unwrap().is_none());
+            let main = f.project.documents.open(&f.root.join("app/InvoiceController.php")).unwrap().id;
+            let failure = ide_host::ops::lsp::lsp_rename(
+                &f.host, "main", RequestId::next(), main,
+                at(MAIN, MAIN.find("class InvoiceController").unwrap() + "class In".len()), "ReceiptController".into(),
+            ).await.unwrap_err();
+            assert!(failure.to_string().to_lowercase().contains("runtime controller"), "{failure}");
+            assert_eq!(f.project.documents.snapshot(main).unwrap().text, MAIN);
+            assert_eq!(f.project.documents.snapshot(f.doc).unwrap().text, input);
+            assert!(!f.root.join("app/ReceiptController.php").exists());
+        }
+        let input = routes(if invokable {
+            "Routes::namespace('App')->group(fn () => Routes::get('/limit','COLD'));"
+        } else {
+            "Routes::namespace('App')->controller('COLD')->group(fn () => Routes::get('/limit','showInvoice'));"
+        });
         f.project.documents.replace_all(f.doc, &input).unwrap();
         let list = f.complete(at(&input, input.find("COLD").unwrap() + 1)).await;
         assert!(list.is_incomplete);

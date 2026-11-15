@@ -1,0 +1,543 @@
+--- a/docs/CHANGELOG.md
++++ b/docs/CHANGELOG.md
+@@ -14,6 +14,8 @@
+ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+ 
+ ## [Unreleased]
++
++- **Complete runtime controller classes.** Laravel route action and group-controller strings offer class suggestions with rooted, quote-aware class-only edits. PHP imports stay unchanged; ambiguous namespaces and bounded catalogs preserve incomplete results. Completion resolve and unsaved class declarations use the shared class catalog. Contributed by @thinkycz.
+ 
+ - **Navigate controller group bindings.** Go to Definition and hover on a Laravel group controller string include the classes selected by its route namespaces. Find References includes these bindings, unresolved contexts stay visible, and unsupported class edits are refused. Contributed by @thinkycz.
+ 
+--- a/src/completion/handler/mod.rs
++++ b/src/completion/handler/mod.rs
+@@ -484,6 +484,15 @@
+                     && let Some(code) = code_ctx.as_ref()
+                     && let Some(response) =
+                         self.try_request_input_key_completion(&uri, &content, position, &ctx, code)
++                {
++                    return Ok(Some(response));
++                }
++
++                if matches!(
++                    string_ctx,
++                    StringContext::InStringLiteral | StringContext::NotInString
++                ) && let Some(response) =
++                    self.try_laravel_runtime_class_completion(&uri, &content, position)
+                 {
+                     return Ok(Some(response));
+                 }
+--- a/src/completion/laravel_route_controller.rs
++++ b/src/completion/laravel_route_controller.rs
+@@ -1,4 +1,4 @@
+-//! Laravel route controller method completion.
++//! Laravel route controller class and method completion.
+ //!
+ //! Detects when the cursor is inside the action string argument of a route
+ //! definition call within a `->controller(X::class)->group(fn(){…})` context
+@@ -396,6 +396,110 @@
+ // ─── Completion ─────────────────────────────────────────────────────────────
+ 
+ impl Backend {
++    /// Complete only AST-proven runtime class interiors; PHP imports do not apply here.
++    pub(crate) fn try_laravel_runtime_class_completion(
++        &self,
++        uri: &str,
++        content: &str,
++        position: Position,
++    ) -> Option<CompletionResponse> {
++        use super::context::class_completion::{ClassCompletionParams, ClassNameContext};
++        use crate::runtime_controller::{encode_runtime_class, is_runtime_class, runtime_spelling};
++        use crate::symbol_map::SymbolKind;
++        use crate::util::strip_fqn_prefix;
++
++        let offset = position_to_offset(content, position);
++        let map = self.symbol_maps.read().get(uri).cloned()?;
++        if !map.matches_source_fingerprint(content) {
++            return None;
++        }
++        let span = map.spans.iter().find(|span| {
++            span.start <= offset && offset <= span.end && is_runtime_class(&span.kind)
++        })?;
++        let unresolved = || {
++            Some(CompletionResponse::List(CompletionList {
++                items: Vec::new(),
++                is_incomplete: true,
++            }))
++        };
++        let identity = match &span.kind {
++            SymbolKind::ClassReference { name, .. } => name.as_str(),
++            SymbolKind::RuntimeControllerBinding {
++                targets,
++                incomplete: false,
++                ..
++            } if targets.len() == 1 => targets[0].as_str(),
++            _ => return unresolved(),
++        };
++        let Some((spelling, quote)) = runtime_spelling(content, span) else {
++            return unresolved();
++        };
++        let raw_prefix = content.get(span.start as usize..offset as usize)?;
++        let Some(decoded_prefix) =
++            crate::text_scan::decode_php_string_literal(&format!("{quote}{raw_prefix}{quote}"))
++                .map(|value| value.into_owned())
++        else {
++            return unresolved();
++        };
++        if !spelling.starts_with(&decoded_prefix) {
++            return unresolved();
++        }
++        let target = strip_fqn_prefix(identity);
++        let body = strip_fqn_prefix(&spelling);
++        let namespace = target.get(..target.len().checked_sub(body.len())?)?;
++        let prefix = if spelling.contains('\\') {
++            strip_fqn_prefix(&decoded_prefix).to_owned()
++        } else {
++            format!("{namespace}{decoded_prefix}")
++        };
++        let (mut items, is_incomplete) = self.build_class_name_completions(ClassCompletionParams {
++            file_use_map: &std::collections::HashMap::new(),
++            file_namespace: &None,
++            prefix: &prefix,
++            content,
++            context: ClassNameContext::UseImport,
++            position,
++            affinity_table_override: None,
++            uri,
++        });
++        items.retain(|item| item.kind == Some(CompletionItemKind::CLASS));
++        let range = Range::new(
++            offset_to_position(content, span.start as usize),
++            offset_to_position(content, span.end as usize),
++        );
++        for item in &mut items {
++            let fqn = item.detail.as_deref()?;
++            let text = encode_runtime_class(&format!("\\{}", strip_fqn_prefix(fqn)), quote);
++            item.insert_text = Some(text.clone());
++            item.insert_text_format = None;
++            item.additional_text_edits = None;
++            let candidate = if spelling.starts_with('\\') {
++                format!("\\{}", strip_fqn_prefix(fqn))
++            } else if spelling.contains('\\') {
++                strip_fqn_prefix(fqn).to_owned()
++            } else {
++                crate::util::short_name(fqn).to_owned()
++            };
++            let suffix = candidate
++                .get(..decoded_prefix.len())
++                .filter(|prefix| prefix.eq_ignore_ascii_case(&decoded_prefix))
++                .and_then(|_| candidate.get(decoded_prefix.len()..))
++                .unwrap_or(&candidate);
++            item.filter_text = Some(format!(
++                "{raw_prefix}{}",
++                encode_runtime_class(suffix, quote)
++            ));
++            item.text_edit = Some(CompletionTextEdit::Edit(TextEdit {
++                range,
++                new_text: text,
++            }));
++        }
++        Some(CompletionResponse::List(CompletionList {
++            items,
++            is_incomplete,
++        }))
++    }
++
+     /// Try Laravel route controller method completion.
+     ///
+     /// When the cursor is inside the action string of
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -320,6 +320,7 @@
+ pub(crate) mod resolution_deps;
+ mod resource_navigation;
+ pub(crate) mod return_collection;
++mod runtime_controller;
+ pub(crate) mod scope_collector;
+ mod selection_range;
+ #[cfg(not(target_arch = "wasm32"))]
+--- a/src/rename/runtime_controller.rs
++++ b/src/rename/runtime_controller.rs
+@@ -1,5 +1,6 @@
+ //! Quoting-aware short-name edits for statically proven runtime controller strings.
+ use crate::Backend;
++pub(super) use crate::runtime_controller::{is_runtime_class, runtime_spelling};
+ use crate::symbol_map::{ClassRefContext, SymbolKind, SymbolSpan};
+ use crate::text_position::offset_to_position;
+ use crate::util::{short_name, strip_fqn_prefix};
+@@ -22,88 +23,15 @@
+             .spelling
+             .rfind('\\')
+             .map_or("", |i| &self.spelling[..=i]);
+-        let mut encoded = String::with_capacity(
+-            prefix
+-                .len()
+-                .saturating_mul(2)
+-                .saturating_add(new_short_name.len()),
++        let encoded = crate::runtime_controller::encode_runtime_class(
++            &format!("{prefix}{new_short_name}"),
++            self.quote,
+         );
+-        for ch in prefix.chars().chain(new_short_name.chars()) {
+-            if ch == '\\' || ch == self.quote || (self.quote == '"' && ch == '$') {
+-                encoded.push('\\');
+-            }
+-            encoded.push(ch);
+-        }
+         TextEdit {
+             range: self.range,
+             new_text: encoded,
+         }
+     }
+-}
+-
+-/// Whether this symbol uses Laravel runtime class spelling rather than PHP imports.
+-pub(super) fn is_runtime_class(kind: &SymbolKind) -> bool {
+-    matches!(
+-        kind,
+-        SymbolKind::ClassReference {
+-            context: ClassRefContext::RuntimeControllerString,
+-            ..
+-        } | SymbolKind::RuntimeControllerBinding { .. }
+-    )
+-}
+-
+-/// The AST's full source fingerprint must be checked by the caller. Decode only
+-/// the class interior; quotes and an explicit @method suffix stay outside edits.
+-pub(super) fn runtime_spelling(content: &str, span: &SymbolSpan) -> Option<(String, char)> {
+-    let (identity, runtime_name) = match &span.kind {
+-        SymbolKind::ClassReference {
+-            name,
+-            context: ClassRefContext::RuntimeControllerString,
+-            ..
+-        } => (name.as_str(), None),
+-        SymbolKind::RuntimeControllerBinding {
+-            runtime_name,
+-            targets,
+-            incomplete: false,
+-        } if targets.len() == 1 => (targets[0].as_str(), Some(runtime_name.as_str())),
+-        _ => return None,
+-    };
+-    let start = span.start as usize;
+-    let end = span.end as usize;
+-    let quote = *content.as_bytes().get(start.checked_sub(1)?)? as char;
+-    if !matches!(quote, '\'' | '"')
+-        || !matches!(
+-            content.as_bytes().get(end),
+-            Some(b'@') | Some(b'\'') | Some(b'"')
+-        )
+-    {
+-        return None;
+-    }
+-    if content.as_bytes().get(end) != Some(&b'@')
+-        && content.as_bytes().get(end).copied() != Some(quote as u8)
+-    {
+-        return None;
+-    }
+-    let raw = content.get(start..end)?;
+-    let literal = format!("{quote}{raw}{quote}");
+-    let decoded = crate::text_scan::decode_php_string_literal(&literal)?.into_owned();
+-    let body = strip_fqn_prefix(&decoded);
+-    let target = strip_fqn_prefix(identity);
+-    let qualified_suffix = target.len().checked_sub(body.len()).is_some_and(|start| {
+-        start > 0
+-            && target.as_bytes().get(start - 1) == Some(&b'\\')
+-            && target
+-                .get(start..)
+-                .is_some_and(|suffix| suffix.eq_ignore_ascii_case(body))
+-    });
+-    if !short_name(body).eq_ignore_ascii_case(short_name(target))
+-        || (decoded.starts_with('\\') && !body.eq_ignore_ascii_case(target))
+-        || (!body.eq_ignore_ascii_case(target) && !qualified_suffix)
+-        || runtime_name.is_some_and(|name| !strip_fqn_prefix(name).eq_ignore_ascii_case(body))
+-    {
+-        return None;
+-    }
+-    Some((decoded, quote))
+ }
+ 
+ impl Backend {
+--- /dev/null
++++ b/src/runtime_controller.rs
+@@ -0,0 +1,80 @@
++//! Source-verified Laravel runtime class spelling shared by completion and rename.
++use crate::symbol_map::{ClassRefContext, SymbolKind, SymbolSpan};
++use crate::util::{short_name, strip_fqn_prefix};
++
++/// Encode an entire runtime class interior while retaining the PHP quote style.
++pub(crate) fn encode_runtime_class(spelling: &str, quote: char) -> String {
++    let mut encoded = String::with_capacity(spelling.len().saturating_mul(2));
++    for ch in spelling.chars() {
++        if ch == '\\' || ch == quote || (quote == '"' && ch == '$') {
++            encoded.push('\\');
++        }
++        encoded.push(ch);
++    }
++    encoded
++}
++
++/// Whether this symbol uses Laravel runtime class spelling rather than PHP imports.
++pub(crate) fn is_runtime_class(kind: &SymbolKind) -> bool {
++    matches!(
++        kind,
++        SymbolKind::ClassReference {
++            context: ClassRefContext::RuntimeControllerString,
++            ..
++        } | SymbolKind::RuntimeControllerBinding { .. }
++    )
++}
++
++/// The AST's full source fingerprint must be checked by the caller. Decode only
++/// the class interior; quotes and an explicit @method suffix stay outside edits.
++pub(crate) fn runtime_spelling(content: &str, span: &SymbolSpan) -> Option<(String, char)> {
++    let (identity, runtime_name) = match &span.kind {
++        SymbolKind::ClassReference {
++            name,
++            context: ClassRefContext::RuntimeControllerString,
++            ..
++        } => (name.as_str(), None),
++        SymbolKind::RuntimeControllerBinding {
++            runtime_name,
++            targets,
++            incomplete: false,
++        } if targets.len() == 1 => (targets[0].as_str(), Some(runtime_name.as_str())),
++        _ => return None,
++    };
++    let start = span.start as usize;
++    let end = span.end as usize;
++    let quote = *content.as_bytes().get(start.checked_sub(1)?)? as char;
++    if !matches!(quote, '\'' | '"')
++        || !matches!(
++            content.as_bytes().get(end),
++            Some(b'@') | Some(b'\'') | Some(b'"')
++        )
++    {
++        return None;
++    }
++    if content.as_bytes().get(end) != Some(&b'@')
++        && content.as_bytes().get(end).copied() != Some(quote as u8)
++    {
++        return None;
++    }
++    let raw = content.get(start..end)?;
++    let literal = format!("{quote}{raw}{quote}");
++    let decoded = crate::text_scan::decode_php_string_literal(&literal)?.into_owned();
++    let body = strip_fqn_prefix(&decoded);
++    let target = strip_fqn_prefix(identity);
++    let qualified_suffix = target.len().checked_sub(body.len()).is_some_and(|start| {
++        start > 0
++            && target.as_bytes().get(start - 1) == Some(&b'\\')
++            && target
++                .get(start..)
++                .is_some_and(|suffix| suffix.eq_ignore_ascii_case(body))
++    });
++    if !short_name(body).eq_ignore_ascii_case(short_name(target))
++        || (decoded.starts_with('\\') && !body.eq_ignore_ascii_case(target))
++        || (!body.eq_ignore_ascii_case(target) && !qualified_suffix)
++        || runtime_name.is_some_and(|name| !strip_fqn_prefix(name).eq_ignore_ascii_case(body))
++    {
++        return None;
++    }
++    Some((decoded, quote))
++}
+--- a/tests/integration/laravel_route_controller.rs
++++ b/tests/integration/laravel_route_controller.rs
+@@ -2377,3 +2377,198 @@
+         );
+     }
+ }
++
++#[tokio::test]
++async fn runtime_controller_class_completion_uses_rooted_names_without_php_imports() {
++    use crate::common::{apply_edits, position_after};
++    for (call, needle, expected) in [
++        (
++            r#"Routes::get('/😀/direct', 'App\InvOLD@showInvoice');"#,
++            r#"'/😀/direct', 'App\In"#,
++            r#"Routes::get('/😀/direct', '\\App\\InvoiceController@showInvoice');"#,
++        ),
++        (
++            r#"Routes::namespace('App')->group(fn () => Routes::get('/short', 'InvOLD@showInvoice'));"#,
++            r#"'/short', 'In"#,
++            r#"Routes::namespace('App')->group(fn () => Routes::get('/short', '\\App\\InvoiceController@showInvoice'));"#,
++        ),
++        (
++            r#"Routes::namespace('App')->group(fn () => Routes::get('/full', 'App\InvOLD@showInvoice'));"#,
++            r#"'/full', 'App\In"#,
++            r#"Routes::namespace('App')->group(fn () => Routes::get('/full', '\\App\\InvoiceController@showInvoice'));"#,
++        ),
++        (
++            r#"Routes::get('/hex', "App\\Inv\x4fLD@showInvoice");"#,
++            r#"'/hex', "App\\Inv"#,
++            r#"Routes::get('/hex', "\\App\\InvoiceController@showInvoice");"#,
++        ),
++        (
++            r#"Routes::get('/unicode', "\u{41}pp\\InvOLD@showInvoice");"#,
++            r#"'/unicode', "\u{41}pp\\In"#,
++            r#"Routes::get('/unicode', "\\App\\InvoiceController@showInvoice");"#,
++        ),
++        (
++            r#"Routes::namespace($selected)->controller('\App\InvOLD')->group(fn () => Routes::get('/rooted', 'showInvoice'));"#,
++            r#"controller('\App\In"#,
++            r#"Routes::namespace($selected)->controller('\\App\\InvoiceController')->group(fn () => Routes::get('/rooted', 'showInvoice'));"#,
++        ),
++        (
++            r#"Routes::namespace('App')->controller('InvOLD')->group(fn () => Routes::get('/bound', 'showInvoice'));"#,
++            r#"controller('In"#,
++            r#"Routes::namespace('App')->controller('\\App\\InvoiceController')->group(fn () => Routes::get('/bound', 'showInvoice'));"#,
++        ),
++        (
++            r#"Routes::group(['namespace'=>'App','controller'=>'InvOLD'],fn () => Routes::get('/attrs','showInvoice'));"#,
++            r#"'controller'=>'In"#,
++            r#"Routes::group(['namespace'=>'App','controller'=>'\\App\\InvoiceController'],fn () => Routes::get('/attrs','showInvoice'));"#,
++        ),
++    ] {
++        let text = runtime_action_class_fixture(call);
++        let backend = create_test_backend();
++        let uri = Url::parse("file:///runtime-class-completion.php").unwrap();
++        open_php(&backend, &uri, &text).await;
++        let at = position_after(&text, needle);
++        let items = complete_at(&backend, &uri, &text, at.line, at.character).await;
++        let item = items
++            .into_iter()
++            .find(|item| {
++                item.kind == Some(CompletionItemKind::CLASS)
++                    && item.detail.as_deref() == Some("App\\InvoiceController")
++            })
++            .expect("runtime class completion must offer the actual controller");
++        assert!(
++            item.additional_text_edits
++                .as_ref()
++                .is_none_or(Vec::is_empty),
++            "runtime strings must not add PHP imports"
++        );
++        assert!(item.insert_text_format.is_none());
++        assert!(
++            item.filter_text.as_deref().is_some_and(|text| {
++                text.ends_with("InvoiceController") && !text.contains("OLD")
++            }),
++            "filtering must follow the candidate, not the replaced suffix"
++        );
++        let Some(CompletionTextEdit::Edit(edit)) = &item.text_edit else {
++            panic!("runtime class completion requires a full class-interior edit: {item:?}")
++        };
++        assert_eq!(
++            apply_edits(&text, std::slice::from_ref(edit)),
++            runtime_action_class_fixture(expected),
++            "quotes/suffix/aliases/UTF16 must survive: {call}"
++        );
++        let resolved = backend.completion_resolve(item.clone()).await.unwrap();
++        assert_eq!(resolved.text_edit, item.text_edit);
++        assert_eq!(resolved.additional_text_edits, item.additional_text_edits);
++        assert!(
++            resolved.documentation.is_some(),
++            "controller documentation must resolve"
++        );
++    }
++}
++
++#[tokio::test]
++async fn runtime_controller_class_completion_retains_ambiguous_and_unknown_context() {
++    use crate::common::position_after;
++    for call in [
++        r#"Routes::namespace('App')->controller('InvOLD')->group(function () {Routes::get('/main','showInvoice');Routes::namespace('Other')->group(fn () => Routes::get('/other','showInvoice'));});"#,
++        r#"Routes::namespace($selected)->controller('InvOLD')->group(fn () => Routes::get('/unknown','showInvoice'));"#,
++    ] {
++        let text = runtime_action_class_fixture(call);
++        let backend = create_test_backend();
++        let uri = Url::parse("file:///runtime-class-completion-incomplete.php").unwrap();
++        open_php(&backend, &uri, &text).await;
++        let at = position_after(&text, "controller('In");
++        let response = backend
++            .completion(CompletionParams {
++                text_document_position: TextDocumentPositionParams {
++                    text_document: TextDocumentIdentifier { uri },
++                    position: at,
++                },
++                work_done_progress_params: Default::default(),
++                partial_result_params: Default::default(),
++                context: None,
++            })
++            .await
++            .unwrap();
++        assert!(
++            matches!(response,Some(CompletionResponse::List(ref list)) if list.items.is_empty()&&list.is_incomplete),
++            "unknown/ambiguous runtime context must remain incomplete: {response:?}"
++        );
++    }
++}
++
++#[tokio::test]
++async fn runtime_controller_class_completion_retains_catalog_limit() {
++    use crate::common::position_after;
++    let mut text = runtime_action_class_fixture(
++        "Routes::namespace('App')->controller('COLD')->group(fn () => Routes::get('/limit','showInvoice')); ",
++    );
++    text.push_str("namespace App {");
++    for n in 0..104 {
++        text.push_str(&format!("class C{n:03} {{}}"));
++    }
++    text.push('}');
++    let backend = create_test_backend();
++    let uri = Url::parse("file:///runtime-class-completion-limit.php").unwrap();
++    open_php(&backend, &uri, &text).await;
++    let at = position_after(&text, "controller('C");
++    let response = backend
++        .completion(CompletionParams {
++            text_document_position: TextDocumentPositionParams {
++                text_document: TextDocumentIdentifier { uri },
++                position: at,
++            },
++            work_done_progress_params: Default::default(),
++            partial_result_params: Default::default(),
++            context: None,
++        })
++        .await
++        .unwrap();
++    let Some(CompletionResponse::List(list)) = response else {
++        panic!("runtime class catalog must retain its list metadata")
++    };
++    assert!(list.is_incomplete);
++    assert_eq!(list.items.len(), 100);
++    assert!(list.items.iter().all(|item| {
++        item.kind == Some(CompletionItemKind::CLASS)
++            && item
++                .additional_text_edits
++                .as_ref()
++                .is_none_or(Vec::is_empty)
++    }));
++}
++
++#[tokio::test]
++async fn runtime_controller_class_completion_tracks_unsaved_candidate_declarations() {
++    use crate::common::position_after;
++    let text = runtime_action_class_fixture(
++        "Routes::namespace('App')->controller('InvOLD')->group(fn () => Routes::get('/unsaved','showInvoice')); ",
++    );
++    let backend = create_test_backend();
++    let uri = Url::parse("file:///runtime-class-completion-caller.php").unwrap();
++    let dependency = Url::parse("file:///runtime-class-completion-dependency.php").unwrap();
++    open_php(&backend, &uri, &text).await;
++    let at = position_after(&text, "controller('In");
++    for name in ["InvoiceDraftController", "InvoicePublishedController"] {
++        let source = format!(
++            "<?php namespace App; class {name} {{public function showInvoice(): bool {{return true;}}}}"
++        );
++        open_php(&backend, &dependency, &source).await;
++        let items = complete_at(&backend, &uri, &text, at.line, at.character).await;
++        assert!(
++            items
++                .iter()
++                .any(|item| item.detail.as_deref() == Some(&format!("App\\{name}"))),
++            "unsaved class must enter the runtime catalog"
++        );
++        if name == "InvoicePublishedController" {
++            assert!(
++                !items
++                    .iter()
++                    .any(|item| item.detail.as_deref() == Some("App\\InvoiceDraftController")),
++                "retired unsaved class must leave the catalog"
++            );
++        }
++    }
++}

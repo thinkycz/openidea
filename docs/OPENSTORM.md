@@ -15,6 +15,41 @@ slice, commit and push it, and retain only the latest generated app. Native UI
 cases remain deferred/unverified; earlier native-first blocking checkpoints are
 historical and no longer prevent independent implementation.
 
+Laravel slice95 (2026-11-15, engine source verified; client promotion pending):
+runtime controller class-string completion is implemented in candidate149. The
+four red regressions now pass: eight quoting/group/action forms preserve @method,
+UTF-16 ranges and quotes; every completion replaces only the class interior with
+a rooted FQN and adds no PHP imports. Filtering retains typed escape spellings;
+resolve keeps the edit and supplies documentation. Unknown/ambiguous bindings
+retain incomplete results, catalog truncation retains its100-item bound, and
+unsaved candidate declarations enter/leave the catalog. Completion and rename
+share the source-verified runtime spelling codec. Existing method/rename controls
+remain in the70-test focused suite.
+
+The pinned upstream archive plus149 checksummed patches reproduces the seven
+changed files exactly. Immutable-source gates pass18,483 tests/17ignored, all-target
+release Clippy with warnings denied, formatting, source fingerprints and canonical
+release build. All16 input/expected literal fixtures pass PHP syntax checks;
+12 plain-PHP and91 Laravel files pass syntax checks, plain assertions and all324
+Laravel assertions pass, and the analyzer retains exactly the3 intentional control
+diagnostics. Candidate149's Apple Silicon executable SHA-256:
+`8fe8f602a6f0bf9e098f7ef6dcfcebf3b3ab038d2b4ac0408e80a45b3f8714f8`.
+Sources, MIT/Apache license provenance and build receipts are retained under
+`artifacts/engines/0.11.1-openstorm.149`. The owned compiler target was removed
+only after archiving and checking inactive processes:6,959 files/about2.0GiB.
+
+This is an engine-source slice, not accepted OpenStorm runtime behavior yet.
+`engine/source.json`, bundled resources and the sole archived App0.1.88 remain on
+engine148. No frontend/host implementation changed; the prior merged-app gates
+remain valid for that unchanged deliverable. Next slice: actual OpenStorm client
+completion/resolve/edit/navigation and freshness checks, then resource/app0.1.89
+promotion with the normal source gates and latest-build cleanup. Native UI checks
+remain explicitly user-skipped. All69 areas stay visible:67partial/2user-deferred.
+Evidence: `artifacts/checks/slice95-{engine-red,engine-green1,source-freeze,
+engine-gates,source-test-summary,engine-frozen-focused,fixture-syntax,examples,
+analyzer-control,continuation}.json`, `slice95-compiler-clean.log` and the
+candidate149 source/provenance manifests under `engine/candidates`.
+
 Upstream merge (2026-11-14, verified local delivery):
 merge `l0ng-ai/openidea` through `a46f187428ff7dea57990403d4146000cef1d0fa`
 from merge base `041e7210`:1,643 upstream commits,4,149 changed paths and63

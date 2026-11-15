@@ -1,0 +1,488 @@
+--- a/docs/CHANGELOG.md
++++ b/docs/CHANGELOG.md
+@@ -14,6 +14,8 @@
+ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+ 
+ ## [Unreleased]
++
++- **Navigate invokable route class strings.** Laravel class-string handlers without `@method` support class definition, hover, references, rename and completion using runtime namespaces. Bare controller-group methods retain their meaning; unknown contexts preserve incomplete results and refuse partial class renames. Registration does not count as constructor execution. Contributed by @thinkycz.
+ 
+ - **Complete runtime controller classes.** Laravel route action and group-controller strings offer class suggestions with rooted, quote-aware class-only edits. PHP imports stay unchanged; ambiguous namespaces and bounded catalogs preserve incomplete results. Completion resolve and unsaved class declarations use the shared class catalog. Contributed by @thinkycz.
+ 
+--- a/src/symbol_map/extraction/laravel.rs
++++ b/src/symbol_map/extraction/laravel.rs
+@@ -2326,6 +2326,41 @@
+     ));
+ }
+ 
++/// A registered class-string action without an explicit method suffix.
++pub(crate) struct InvokableRouteClass {
++    pub controller: RouteControllerRef,
++    pub start: u32,
++    pub end: u32,
++}
++
++pub(crate) fn laravel_invokable_route_class(
++    expr: &Expression<'_>,
++    names: Option<&crate::names::OwnedResolvedNames>,
++    content: &str,
++) -> Option<InvokableRouteClass> {
++    let Expression::Literal(literal::Literal::String(value)) =
++        laravel_route_action_argument(expr, names)?
++    else {
++        return None;
++    };
++    let decoded = value.value.and_then(literal_bytes_to_str)?;
++    if decoded.contains('@') {
++        return None;
++    }
++    let controller = laravel_runtime_controller_ref(decoded)?;
++    let start = value.span.start.offset.checked_add(1)?;
++    let end = value.span.end.offset.checked_sub(1)?;
++    let quote = *content.as_bytes().get(value.span.start.offset as usize)?;
++    if !matches!(quote, b'\'' | b'"') || content.as_bytes().get(end as usize) != Some(&quote) {
++        return None;
++    }
++    Some(InvokableRouteClass {
++        controller,
++        start,
++        end,
++    })
++}
++
+ /// A literal controller action with an editable, unescaped method suffix.
+ pub(crate) struct ExplicitRouteAction<'a> {
+     /// Runtime controller spelling before namespace qualification.
+--- a/src/symbol_map/extraction/laravel_route_context.rs
++++ b/src/symbol_map/extraction/laravel_route_context.rs
+@@ -123,6 +123,7 @@
+ #[derive(Clone)]
+ struct Frame {
+     controller: Option<RouteControllerRef>,
++    controller_bound: bool,
+     namespace: Result<Option<String>, ()>,
+     invalid: bool,
+ }
+@@ -130,6 +131,7 @@
+     fn default() -> Self {
+         Self {
+             controller: None,
++            controller_bound: false,
+             namespace: Ok(None),
+             invalid: false,
+         }
+@@ -139,6 +141,7 @@
+     fn apply(&mut self, binding: Option<&Binding>) {
+         let Some(binding) = binding else {
+             self.controller = None;
++            self.controller_bound = false;
+             self.namespace = match &self.namespace {
+                 Ok(None) => Ok(None),
+                 Ok(Some(ns)) if ns.is_empty() => Ok(None),
+@@ -149,6 +152,7 @@
+         self.invalid |= binding.invalid;
+         if let Some(controller) = &binding.controller {
+             self.controller = controller.clone();
++            self.controller_bound = true;
+         }
+         if let Some(namespace) = &binding.namespace {
+             self.namespace = match namespace {
+@@ -205,6 +209,7 @@
+     end: u32,
+     parent: Option<usize>,
+     owner: Option<String>,
++    controller_bound: bool,
+     binding_span: Option<(u32, u32)>,
+     namespace: Result<Option<String>, ()>,
+     invalid: bool,
+@@ -286,6 +291,7 @@
+                 end: pending.end,
+                 parent,
+                 owner: frame.owner(),
++                controller_bound: frame.controller_bound,
+                 binding_span,
+                 namespace: frame.namespace.clone(),
+                 invalid: frame.invalid,
+@@ -310,6 +316,30 @@
+     }
+     pub(crate) fn owner_at(&self, offset: u32) -> Option<&str> {
+         self.region_at(offset)?.owner.as_deref()
++    }
++    fn invokable_owner_at(
++        &self,
++        offset: u32,
++        controller: &RouteControllerRef,
++    ) -> Option<Option<String>> {
++        let target = self.explicit_owner_at(offset, controller);
++        if let Some(region) = self.region_at(offset)
++            && region.controller_bound
++        {
++            // Bare names remain group methods. Qualified overrides are unresolved
++            // when the group would change the identity tested by class_exists.
++            let runtime = controller.runtime.as_deref()?;
++            if !runtime.contains('\\') {
++                return None;
++            }
++            if target
++                .as_ref()
++                .is_some_and(|name| !name.eq_ignore_ascii_case(&controller.subject))
++            {
++                return Some(None);
++            }
++        }
++        Some(target)
+     }
+     pub(crate) fn explicit_owner_at(
+         &self,
+@@ -375,6 +405,36 @@
+                 .entry(span)
+                 .or_default()
+                 .record(region.owner.as_deref());
++        }
++        if let Some(action) =
++            super::laravel::laravel_invokable_route_class(node, self.names, self.content)
++            && let Some(controller) = self
++                .contexts
++                .invokable_owner_at(action.start, &action.controller)
++        {
++            let kind = match controller {
++                Some(controller) => crate::symbol_map::SymbolKind::ClassReference {
++                    name: crate::atom::atom(controller.trim_start_matches('\\')),
++                    is_fqn: true,
++                    context: crate::symbol_map::ClassRefContext::RuntimeControllerString,
++                },
++                None => crate::symbol_map::SymbolKind::RuntimeControllerBinding {
++                    runtime_name: crate::atom::atom(
++                        action
++                            .controller
++                            .runtime
++                            .as_deref()
++                            .unwrap_or(&action.controller.subject),
++                    ),
++                    targets: Vec::new().into_boxed_slice(),
++                    incomplete: true,
++                },
++            };
++            out.0.push(SymbolSpan {
++                start: action.start,
++                end: action.end,
++                kind,
++            });
+         }
+         if let Some(action) =
+             super::laravel::laravel_explicit_route_action(node, self.names, self.content)
+@@ -429,11 +489,10 @@
+ ) {
+     let contexts = RouteGroupContexts::collect(program, content, names);
+     if contexts.regions.is_empty()
+-        && (!content.contains('@')
+-            || !content
+-                .as_bytes()
+-                .windows(5)
+-                .any(|s| s.eq_ignore_ascii_case(b"route")))
++        && !content
++            .as_bytes()
++            .windows(5)
++            .any(|s| s.eq_ignore_ascii_case(b"route"))
+     {
+         return;
+     }
+--- a/tests/integration/laravel_route_controller.rs
++++ b/tests/integration/laravel_route_controller.rs
+@@ -2572,3 +2572,296 @@
+         }
+     }
+ }
++
++fn invokable_action_class_fixture(calls: &str) -> String {
++    runtime_action_class_fixture(calls).replacen(
++        "class InvoiceController {",
++        "class InvoiceController { public function __invoke(): bool {return true;}",
++        1,
++    )
++}
++
++#[tokio::test]
++async fn invokable_route_class_strings_navigate_hover_and_rename_without_php_imports() {
++    use crate::common::{apply_edits, position_after};
++    for (call, needle) in [
++        (
++            r#"Routes::get('/😀/direct','App\InvoiceController');"#,
++            r#"'/😀/direct','App\In"#,
++        ),
++        (
++            r#"Routes::match(action:'App\InvoiceController',methods:['post'],uri:'/named');"#,
++            r#"action:'App\In"#,
++        ),
++        (
++            r#"Routes::namespace('App')->group(fn () => Routes::get('/relative','InvoiceController'));"#,
++            r#"'/relative','In"#,
++        ),
++        (
++            r#"Routes::namespace($selected)->group(fn () => Routes::get('/rooted','\App\InvoiceController'));"#,
++            r#"'/rooted','\App\In"#,
++        ),
++        (
++            r#"Routes::get('/encoded',"\u{41}pp\\InvoiceController");"#,
++            r#"'/encoded',"\u{41}pp\\In"#,
++        ),
++        (
++            r#"Routes::controller(\App\Other\InvoiceController::class)->group(fn () => Routes::get('/override','\App\InvoiceController'));"#,
++            r#"'/override','\App\In"#,
++        ),
++        (
++            r#"Routes::namespace('App')->controller(\App\Other\InvoiceController::class)->group(fn () => Routes::get('/qualified','App\InvoiceController'));"#,
++            r#"'/qualified','App\In"#,
++        ),
++    ] {
++        let text = invokable_action_class_fixture(call);
++        assert_runtime_action_class(&text, needle, "namespace App {").await;
++        let backend = create_test_backend();
++        let uri = Url::parse("file:///invokable-rename.php").unwrap();
++        open_php(&backend, &uri, &text).await;
++        let at = position_after(&text, needle);
++        let result = backend
++            .rename(RenameParams {
++                text_document_position: TextDocumentPositionParams {
++                    text_document: TextDocumentIdentifier { uri: uri.clone() },
++                    position: at,
++                },
++                new_name: "ReceiptController".into(),
++                work_done_progress_params: Default::default(),
++            })
++            .await
++            .unwrap();
++        let edits = result.unwrap().changes.unwrap().remove(&uri).unwrap();
++        let edited = apply_edits(&text, &edits);
++        assert!(
++            !edited.contains("InvoiceController');") && !edited.contains("InvoiceController\");"),
++            "invokable class starter must rename the literal: {edited}"
++        );
++        assert!(edited.contains("class ReceiptController"));
++        assert!(edited.contains("function __invoke()"));
++        assert!(
++            edited.contains("use App\\Other\\InvoiceController as InvoiceController;"),
++            "runtime class rename must retain unrelated PHP aliases"
++        );
++    }
++}
++
++#[tokio::test]
++async fn invokable_route_class_strings_complete_only_the_full_class_interior() {
++    use crate::common::{apply_edits, position_after};
++    for (call, needle, expected) in [
++        (
++            r#"Routes::get('/😀/direct','App\InvOLD');"#,
++            r#"'/😀/direct','App\In"#,
++            r#"Routes::get('/😀/direct','\\App\\InvoiceController');"#,
++        ),
++        (
++            r#"Routes::namespace('App')->group(fn () => Routes::get('/short','InvOLD'));"#,
++            r#"'/short','In"#,
++            r#"Routes::namespace('App')->group(fn () => Routes::get('/short','\\App\\InvoiceController'));"#,
++        ),
++        (
++            r#"Routes::get('/hex',"App\\Inv\x4fLD");"#,
++            r#"'/hex',"App\\Inv"#,
++            r#"Routes::get('/hex',"\\App\\InvoiceController");"#,
++        ),
++    ] {
++        let text = invokable_action_class_fixture(call);
++        let backend = create_test_backend();
++        let uri = Url::parse("file:///invokable-completion.php").unwrap();
++        open_php(&backend, &uri, &text).await;
++        let at = position_after(&text, needle);
++        let items = complete_at(&backend, &uri, &text, at.line, at.character).await;
++        let item = items
++            .into_iter()
++            .find(|i| i.detail.as_deref() == Some("App\\InvoiceController"))
++            .expect("invokable runtime class must complete");
++        assert!(
++            item.additional_text_edits
++                .as_ref()
++                .is_none_or(Vec::is_empty)
++        );
++        assert!(item.insert_text_format.is_none());
++        let Some(CompletionTextEdit::Edit(edit)) = &item.text_edit else {
++            panic!("invokable class needs an explicit full-interior edit")
++        };
++        assert_eq!(
++            apply_edits(&text, std::slice::from_ref(edit)),
++            invokable_action_class_fixture(expected)
++        );
++        let resolved = backend.completion_resolve(item.clone()).await.unwrap();
++        assert_eq!(resolved.text_edit, item.text_edit);
++        assert_eq!(resolved.additional_text_edits, item.additional_text_edits);
++    }
++}
++
++#[tokio::test]
++async fn invokable_route_class_references_include_literals_and_no_constructor_calls() {
++    use crate::common::position_after;
++    let text = invokable_action_class_fixture(
++        "Routes::get('/one','App\\InvoiceController'); Routes::namespace('App')->group(fn () => Routes::get('/two','InvoiceController')); function instantiateInvokable() {new \\App\\InvoiceController();}",
++    );
++    let backend = create_test_backend();
++    let uri = Url::parse("file:///invokable-references.php").unwrap();
++    open_php(&backend, &uri, &text).await;
++    let declaration = position_after(&text, "namespace App {class ");
++    let refs = backend
++        .references(ReferenceParams {
++            text_document_position: TextDocumentPositionParams {
++                text_document: TextDocumentIdentifier { uri: uri.clone() },
++                position: declaration,
++            },
++            context: ReferenceContext {
++                include_declaration: true,
++            },
++            work_done_progress_params: Default::default(),
++            partial_result_params: Default::default(),
++        })
++        .await
++        .unwrap()
++        .unwrap();
++    let mut actual: Vec<_> = refs.iter().map(|l| l.range.start).collect();
++    actual.sort_by_key(|p| (p.line, p.character));
++    let mut expected: Vec<_> = ["namespace App {class ", "'/one','", "'/two','", "new "]
++        .iter()
++        .map(|n| position_after(&text, n))
++        .collect();
++    expected.sort_by_key(|p| (p.line, p.character));
++    assert_eq!(
++        actual, expected,
++        "invokable strings must be class references"
++    );
++    let mut ctor = position_after(&text, "public function __construct");
++    ctor.character -= "__construct".len() as u32;
++    let item = backend
++        .prepare_call_hierarchy(CallHierarchyPrepareParams {
++            text_document_position_params: TextDocumentPositionParams {
++                text_document: TextDocumentIdentifier { uri: uri.clone() },
++                position: ctor,
++            },
++            work_done_progress_params: Default::default(),
++        })
++        .await
++        .unwrap()
++        .unwrap()
++        .remove(0);
++    let callers = backend
++        .incoming_calls(CallHierarchyIncomingCallsParams {
++            item,
++            work_done_progress_params: Default::default(),
++            partial_result_params: Default::default(),
++        })
++        .await
++        .unwrap()
++        .unwrap_or_default();
++    assert_eq!(
++        callers.len(),
++        1,
++        "registration is not constructor execution"
++    );
++    assert_eq!(callers[0].from.name, "instantiateInvokable");
++}
++
++#[tokio::test]
++async fn invokable_class_detection_preserves_bare_group_methods_and_ignores_other_literals() {
++    use crate::common::position_after;
++    let text = invokable_action_class_fixture(
++        "Routes::controller(\\App\\InvoiceController::class)->group(fn () => Routes::get('/group','showInvoice')); Routes::get('/App/InvoiceController',fn () => true); class LocalRoutes {public static function get($uri,$action) {}} LocalRoutes::get('/not-framework','App\\InvoiceController');",
++    );
++    let backend = create_test_backend();
++    let uri = Url::parse("file:///invokable-controls.php").unwrap();
++    open_php(&backend, &uri, &text).await;
++    let action = position_after(&text, "'/group','show");
++    let target = goto_def(&backend, &uri, action.line, action.character).await;
++    assert!(
++        matches!(target,Some(GotoDefinitionResponse::Scalar(ref l)) if l.range.start=={let mut declaration=position_after(&text, "public function showInvoice"); declaration.character -= "showInvoice".len() as u32; declaration})
++    );
++    for needle in ["'/App/Invoice", "'/not-framework','App\\In"] {
++        let at = position_after(&text, needle);
++        let result = goto_def(&backend, &uri, at.line, at.character).await;
++        assert!(
++            result.is_none()
++                || matches!(result,Some(GotoDefinitionResponse::Array(ref rows)) if rows.is_empty()),
++            "non-action literal must not become a class reference: {result:?}"
++        );
++    }
++}
++
++#[tokio::test]
++async fn invokable_unknown_namespace_keeps_incomplete_completion_and_hover() {
++    use crate::common::position_after;
++    let text = invokable_action_class_fixture(
++        "Routes::namespace($selected)->group(fn () => Routes::get('/unknown','InvoiceController'));",
++    );
++    let backend = create_test_backend();
++    let uri = Url::parse("file:///invokable-unknown.php").unwrap();
++    open_php(&backend, &uri, &text).await;
++    let at = position_after(&text, "'/unknown','In");
++    let result = backend
++        .completion(CompletionParams {
++            text_document_position: TextDocumentPositionParams {
++                text_document: TextDocumentIdentifier { uri: uri.clone() },
++                position: at,
++            },
++            work_done_progress_params: Default::default(),
++            partial_result_params: Default::default(),
++            context: None,
++        })
++        .await
++        .unwrap();
++    assert!(
++        matches!(result,Some(CompletionResponse::List(ref list)) if list.is_incomplete&&list.items.is_empty()),
++        "unknown invokable namespace must remain incomplete: {result:?}"
++    );
++    let hover = backend
++        .hover(HoverParams {
++            text_document_position_params: TextDocumentPositionParams {
++                text_document: TextDocumentIdentifier { uri },
++                position: at,
++            },
++            work_done_progress_params: Default::default(),
++        })
++        .await
++        .unwrap();
++    assert!(
++        matches!(hover,Some(ref h) if matches!(&h.contents,HoverContents::Markup(markup) if markup.value.contains("unresolved controller namespace"))),
++        "unknown context must remain visible: {hover:?}"
++    );
++}
++
++#[tokio::test]
++async fn invokable_unknown_namespace_refuses_partial_class_rename() {
++    use crate::common::position_after;
++    let text = invokable_action_class_fixture(
++        "Routes::namespace($selected)->group(fn () => Routes::get('/unknown','InvoiceController'));",
++    );
++    let backend = create_test_backend();
++    let uri = Url::parse("file:///invokable-unknown-rename.php").unwrap();
++    open_php(&backend, &uri, &text).await;
++    let literal = position_after(&text, "'/unknown','In");
++    assert!(
++        backend
++            .prepare_rename(TextDocumentPositionParams {
++                text_document: TextDocumentIdentifier { uri: uri.clone() },
++                position: literal
++            })
++            .await
++            .unwrap()
++            .is_none()
++    );
++    let at = position_after(&text, "namespace App {class ");
++    let result = backend
++        .rename(RenameParams {
++            text_document_position: TextDocumentPositionParams {
++                text_document: TextDocumentIdentifier { uri },
++                position: at,
++            },
++            new_name: "ReceiptController".into(),
++            work_done_progress_params: Default::default(),
++        })
++        .await;
++    assert!(
++        matches!(result,Err(ref error) if error.message.to_ascii_lowercase().contains("runtime controller")),
++        "unknown invokable target must refuse a partial declaration rename: {result:?}"
++    );
++}

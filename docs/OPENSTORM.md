@@ -15,6 +15,44 @@ slice, commit and push it, and retain only the latest generated app. Native UI
 cases remain deferred/unverified; earlier native-first blocking checkpoints are
 historical and no longer prevent independent implementation.
 
+Laravel slice 97 (2026-11-15, engine source verified; client promotion pending):
+PHPantom candidate 150 adds class definition, hover, references, rename and
+completion for Laravel invokable controller strings without @method. Named action
+arguments, UTF-16 ranges, namespace-relative/rooted names and encoded literals
+use the existing runtime class edit codec; PHP imports remain untouched. Controller
+group bare words retain method meaning, unrelated facade/URI literals stay out of
+the class index, and route registration does not count as constructor execution.
+Unknown namespaces preserve incomplete completion and visible hover context;
+class rename refuses the partial declaration-only edit exposed by the new test.
+
+The baseline has 3 new failing checks; the first implementation then exposed 2
+unknown-context failures. All 76 focused checks now pass, including 6 new tests.
+All 17 input/expected/control PHP fixtures parse. Nine assertions against pinned
+Laravel 13 registration behavior pass without invoking route handlers. The pinned
+source plus 150 checksummed patches reproduces exactly 4 changed files. Immutable
+source gates pass 18,489 tests / 17 ignored, release all-target Clippy with warnings
+denied, formatting, fingerprint verification and release build. The same frozen
+integration executable passes 76 focused checks; 12 plain-PHP and 91 Laravel files
+parse, plain assertions and 324 Laravel assertions pass, and static analysis
+retains exactly 3 intentional diagnostics. Candidate 150 Apple Silicon SHA-256:
+`98bf368b48e807186b3c55b09ce456b03e75ed62240e66818b0f971bdc54cc0a`.
+MIT/Apache provenance and build receipts remain in
+`artifacts/engines/0.11.1-openstorm.150`. The inactive owned engine compiler target
+was removed after all consumers finished: 6,959 files/about
+2.0 GiB reclaimed.
+
+This source-only slice leaves active PHPantom 149 and the sole archived signed
+App 0.1.89 unchanged. Candidate 150 is not yet accepted through OpenStorm's client
+or packaged app; those checks and resource promotion belong to the next slice.
+Unqualified `class_exists` collisions inside controller groups and qualified
+overrides whose namespace changes identity remain unresolved/limited. No new
+`__invoke` method-reference span is claimed. Native UI checks remain user-skipped.
+All 69 areas remain visible: 67 partial / 2 user-deferred; FEAT-011/030 stay partial.
+Evidence: `artifacts/checks/slice97-{engine-red,engine-edge-red,engine-green2,
+framework-control,framework-qualified-control,fixture-syntax,source-freeze,
+engine-gates,source-test-summary,engine-frozen-focused,examples,analyzer-control,
+compiler-clean,delivery-boundary,continuation}.json`, and candidate 150 manifests.
+
 Laravel slice96 (2026-11-15, verified local delivery): OpenStorm0.1.89 bundles
 PHPantom149 and enables runtime controller class-string completion. The exact
 same preflight executable fails both new cases with148 (missing completion),

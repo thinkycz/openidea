@@ -15,6 +15,56 @@ slice, commit and push it, and retain only the latest generated app. Native UI
 cases remain deferred/unverified; earlier native-first blocking checkpoints are
 historical and no longer prevent independent implementation.
 
+Laravel slice 99 (2026-11-15, engine source verified; client promotion pending):
+PHPantom candidate 151 corrects class/method roles when a prior unconditional
+local class or enum proves Laravel's raw `class_exists()` lookup. A proven
+invokable class overrides a same-named group method, independently of PHP import
+aliases. Class definition, hover, completion, references and identity-preserving
+rename select the class; false group-method references are removed. Unsaved class
+addition/removal updates the role. Namespace qualification occurs after the raw
+availability check: known namespace-dependent targets retain navigation and
+incomplete metadata, while renames of either the availability class or final
+target refuse partial edits. Deferred scopes and top-level `goto` flow cannot
+supply declaration-order proofs. Interfaces, traits and namespaced PHP aliases
+alone do not prove a bare runtime class exists. Editor inspection remains static.
+
+Baseline 150 passes 77 focused checks and fails three new navigation/freshness
+cases by selecting the group method. The first fix passes 81 checks; two added
+execution-order controls then fail, exposing unsafe lexical-order assumptions.
+The final scope/control-flow guards pass all 83 checks, including seven new tests.
+Thirteen PHP/Laravel assertions establish registration precedence, type kinds and
+forward-call/skipped-declaration behavior without invoking handlers. The initial
+execution control assumed a parent ordering that caused PHP early binding; the
+corrected forward-parent control and original failure are retained. All 18 expanded
+PHP input/expected/control fixtures parse.
+
+The pinned archive plus 151 checksummed patches reproduces exactly four changed
+files. Immutable-source gates pass 18,496 tests / 17 ignored, release all-target
+Clippy with warnings denied, formatting, fingerprint verification and release
+build. The exact frozen integration executable passes all 83 focused checks.
+Twelve plain-PHP and 91 Laravel files parse, plain assertions and 324 Laravel
+assertions pass, and the analyzer retains exactly three intentional diagnostics.
+Candidate 151 is arm64, version `0.11.1-openstorm.151`, SHA-256:
+`44a5509187f7e5be09e6d69c48380074324252a9680d0e7142c09be31699201b`.
+Source, MIT/Apache license provenance and build receipts remain under
+`artifacts/engines/0.11.1-openstorm.151`. After all consumers finished, the inactive
+engine compiler target was removed: 6,959 files / about
+2.0 GiB. The main application compiler target remains absent.
+
+This is a source-only engine slice. Active engine 150, application source,
+resources and the sole archived signed App 0.1.90 remain unchanged; their slice 98
+acceptance is reused. Actual OpenStorm client/edit-path verification and resource
+promotion belong to the next slice. This is not full `class_exists` parity:
+cross-file/autoload, conditional and deferred availability remain unaccepted,
+as do dedicated `__invoke` method references and namespace-dependent rewrites.
+Native UI checks remain explicitly user-skipped. All 69 areas remain visible:
+67 partial / two user-deferred; FEAT-011/030/066/067 remain partial.
+Evidence: `artifacts/checks/slice99-{engine-red,engine-green2,engine-edge-red,
+engine-green3,framework-control,execution-control-v2,expanded-fixture-syntax,
+work-gates,source-freeze,engine-gates,source-test-summary,engine-frozen-focused,
+examples,analyzer-control,compiler-clean,delivery-boundary,continuation}.json`
+and candidate 151 manifests under `engine/candidates`.
+
 Laravel slice 98 (2026-11-15, verified local development delivery): App 0.1.90
 bundles PHPantom 150 and enables class definition, hover, references, completion
 and guarded rename for invokable route strings without @method. Four additional

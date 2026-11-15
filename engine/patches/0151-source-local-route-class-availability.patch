@@ -1,0 +1,686 @@
+--- a/docs/CHANGELOG.md
++++ b/docs/CHANGELOG.md
+@@ -14,6 +14,8 @@
+ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+ 
+ ## [Unreleased]
++
++- **Honor locally available route classes.** Prior unconditional class and enum declarations can select invokable class actions over same-named controller-group methods, independently of PHP imports. Namespace-dependent targets retain navigation and incomplete metadata while refusing partial class renames. Deferred scopes and top-level goto flow do not supply declaration-order proofs. Contributed by @thinkycz.
+ 
+ - **Navigate invokable route class strings.** Laravel class-string handlers without `@method` support class definition, hover, references, rename and completion using runtime namespaces. Bare controller-group methods retain their meaning; unknown contexts preserve incomplete results and refuse partial class renames. Registration does not count as constructor execution. Contributed by @thinkycz.
+ 
+--- a/src/hover/mod.rs
++++ b/src/hover/mod.rs
+@@ -440,7 +440,7 @@
+                 let mut parts = Vec::new();
+                 if *incomplete {
+                     parts.push(
+-                        "Some route contexts have an unresolved controller namespace.".to_owned(),
++                        "Some route contexts depend on class availability or have an unresolved controller namespace.".to_owned(),
+                     );
+                 }
+                 for target in targets {
+--- a/src/symbol_map/extraction/laravel_route_context.rs
++++ b/src/symbol_map/extraction/laravel_route_context.rs
+@@ -33,6 +33,8 @@
+ struct Collected {
+     groups: Vec<Pending>,
+     scopes: Vec<(u32, u32)>,
++    execution_depth: usize,
++    has_top_level_goto: bool,
+ }
+ struct Collector<'a> {
+     names: Option<&'a OwnedResolvedNames>,
+@@ -72,6 +74,12 @@
+     }
+ }
+ impl<'ast, 'arena> Walker<'ast, 'arena, Collected> for Collector<'_> {
++    fn walk_in_statement(&self, node: &'ast Statement<'arena>, out: &mut Collected) {
++        if out.execution_depth == 0 && matches!(node, Statement::Goto(_)) {
++            out.has_top_level_goto = true;
++        }
++    }
++
+     fn walk_in_expression(&self, node: &'ast Expression<'arena>, out: &mut Collected) {
+         let Expression::Call(call) = node else { return };
+         let Some(group) = laravel_route_controller_group(call, self.names) else {
+@@ -96,23 +104,39 @@
+             });
+         }
+     }
++    fn walk_out_closure(&self, _node: &'ast Closure<'arena>, out: &mut Collected) {
++        out.execution_depth -= 1;
++    }
+     fn walk_in_closure(&self, node: &'ast Closure<'arena>, out: &mut Collected) {
++        out.execution_depth += 1;
+         out.scopes.push((
+             node.body.left_brace.start.offset,
+             node.body.right_brace.end.offset,
+         ));
+     }
++    fn walk_out_arrow_function(&self, _node: &'ast ArrowFunction<'arena>, out: &mut Collected) {
++        out.execution_depth -= 1;
++    }
+     fn walk_in_arrow_function(&self, node: &'ast ArrowFunction<'arena>, out: &mut Collected) {
++        out.execution_depth += 1;
+         let span = node.span();
+         out.scopes.push((span.start.offset, span.end.offset));
+     }
++    fn walk_out_function(&self, _node: &'ast Function<'arena>, out: &mut Collected) {
++        out.execution_depth -= 1;
++    }
+     fn walk_in_function(&self, node: &'ast Function<'arena>, out: &mut Collected) {
++        out.execution_depth += 1;
+         out.scopes.push((
+             node.body.left_brace.start.offset,
+             node.body.right_brace.end.offset,
+         ));
+     }
++    fn walk_out_method(&self, _node: &'ast Method<'arena>, out: &mut Collected) {
++        out.execution_depth -= 1;
++    }
+     fn walk_in_method(&self, node: &'ast Method<'arena>, out: &mut Collected) {
++        out.execution_depth += 1;
+         if let MethodBody::Concrete(body) = &node.body {
+             out.scopes
+                 .push((body.left_brace.start.offset, body.right_brace.end.offset));
+@@ -124,6 +148,7 @@
+ struct Frame {
+     controller: Option<RouteControllerRef>,
+     controller_bound: bool,
++    deferred: bool,
+     namespace: Result<Option<String>, ()>,
+     invalid: bool,
+ }
+@@ -132,6 +157,7 @@
+         Self {
+             controller: None,
+             controller_bound: false,
++            deferred: false,
+             namespace: Ok(None),
+             invalid: false,
+         }
+@@ -140,6 +166,7 @@
+ impl Frame {
+     fn apply(&mut self, binding: Option<&Binding>) {
+         let Some(binding) = binding else {
++            self.deferred = true;
+             self.controller = None;
+             self.controller_bound = false;
+             self.namespace = match &self.namespace {
+@@ -204,12 +231,65 @@
+     Some(format!("\\{}", name.trim_start_matches('\\')))
+ }
+ 
++// Prior unconditional declarations prove Laravel's raw class_exists lookup.
++fn local_class_declarations(program: &Program<'_>) -> BTreeMap<String, u32> {
++    fn scan<'arena>(
++        statements: &Sequence<'arena, Statement<'arena>>,
++        namespace: &str,
++        classes: &mut BTreeMap<String, u32>,
++    ) {
++        for statement in statements.iter() {
++            let name = match statement {
++                Statement::Namespace(namespace) => {
++                    let name = namespace
++                        .name
++                        .as_ref()
++                        .map_or("", |name| super::bytes_to_str(name.value()));
++                    scan(
++                        namespace.statements(),
++                        name.trim_start_matches('\\'),
++                        classes,
++                    );
++                    continue;
++                }
++                Statement::Block(block) => {
++                    scan(&block.statements, namespace, classes);
++                    continue;
++                }
++                Statement::Class(class) => class.name.value,
++                Statement::Enum(enumeration) => enumeration.name.value,
++                _ => continue,
++            };
++            let name = super::bytes_to_str(name);
++            let fqn = if namespace.is_empty() {
++                name.to_owned()
++            } else {
++                format!("{namespace}\\{name}")
++            };
++            let end = statement.span().end.offset;
++            classes
++                .entry(fqn.to_ascii_lowercase())
++                .and_modify(|previous| *previous = (*previous).min(end))
++                .or_insert(end);
++        }
++    }
++    let mut classes = BTreeMap::new();
++    scan(&program.statements, "", &mut classes);
++    classes
++}
++
++struct InvokableTarget {
++    target: Option<String>,
++    incomplete: bool,
++}
++
+ struct Region {
+     start: u32,
+     end: u32,
+     parent: Option<usize>,
+     owner: Option<String>,
+     controller_bound: bool,
++    deferred: bool,
+     binding_span: Option<(u32, u32)>,
+     namespace: Result<Option<String>, ()>,
+     invalid: bool,
+@@ -222,6 +302,7 @@
+ pub(crate) struct RouteGroupContexts {
+     regions: Vec<Region>,
+     bindings: BTreeMap<(u32, u32), BindingSite>,
++    available_classes: BTreeMap<String, u32>,
+ }
+ impl RouteGroupContexts {
+     pub(crate) fn collect(
+@@ -241,6 +322,11 @@
+         if collected.groups.is_empty() {
+             return Self::default();
+         }
++        let available_classes = if collected.has_top_level_goto {
++            BTreeMap::new()
++        } else {
++            local_class_declarations(program)
++        };
+         let invoked: HashSet<_> = collected.groups.iter().map(|r| (r.start, r.end)).collect();
+         collected.groups.extend(
+             collected
+@@ -292,6 +378,7 @@
+                 parent,
+                 owner: frame.owner(),
+                 controller_bound: frame.controller_bound,
++                deferred: frame.deferred,
+                 binding_span,
+                 namespace: frame.namespace.clone(),
+                 invalid: frame.invalid,
+@@ -299,7 +386,11 @@
+             frames.push(frame);
+             stack.push(index);
+         }
+-        Self { regions, bindings }
++        Self {
++            regions,
++            bindings,
++            available_classes,
++        }
+     }
+     fn region_at(&self, offset: u32) -> Option<&Region> {
+         let mut index = self
+@@ -321,25 +412,41 @@
+         &self,
+         offset: u32,
+         controller: &RouteControllerRef,
+-    ) -> Option<Option<String>> {
++    ) -> Option<InvokableTarget> {
+         let target = self.explicit_owner_at(offset, controller);
+         if let Some(region) = self.region_at(offset)
+             && region.controller_bound
+         {
+-            // Bare names remain group methods. Qualified overrides are unresolved
+-            // when the group would change the identity tested by class_exists.
+             let runtime = controller.runtime.as_deref()?;
+-            if !runtime.contains('\\') {
++            let available = !region.deferred
++                && self
++                    .available_classes
++                    .get(
++                        &controller
++                            .subject
++                            .trim_start_matches('\\')
++                            .to_ascii_lowercase(),
++                    )
++                    .is_some_and(|end| *end <= offset);
++            if !runtime.contains('\\') && !available {
+                 return None;
+             }
+             if target
+                 .as_ref()
+-                .is_some_and(|name| !name.eq_ignore_ascii_case(&controller.subject))
++                .is_none_or(|name| !name.eq_ignore_ascii_case(&controller.subject))
+             {
+-                return Some(None);
+-            }
+-        }
+-        Some(target)
++                // Namespace rewriting can make the availability proof and final
++                // controller different classes. Keep navigation, refuse partial edits.
++                return Some(InvokableTarget {
++                    target: if available { target } else { None },
++                    incomplete: true,
++                });
++            }
++        }
++        Some(InvokableTarget {
++            incomplete: target.is_none(),
++            target,
++        })
+     }
+     pub(crate) fn explicit_owner_at(
+         &self,
+@@ -389,7 +496,14 @@
+ }
+ impl<'ast, 'arena> Walker<'ast, 'arena, Emitted> for Emitter<'_> {
+     fn walk_in_expression(&self, node: &'ast Expression<'arena>, out: &mut Emitted) {
+-        if !self.contexts.bindings.is_empty()
++        let invokable =
++            super::laravel::laravel_invokable_route_class(node, self.names, self.content);
++        let invokable_target = invokable.as_ref().and_then(|action| {
++            self.contexts
++                .invokable_owner_at(action.start, &action.controller)
++        });
++        if invokable_target.is_none()
++            && !self.contexts.bindings.is_empty()
+             && let Some(Expression::Literal(literal::Literal::String(action))) =
+                 super::laravel::laravel_route_action_argument(node, self.names)
+             && let Some(method) = action.value.and_then(super::literal_bytes_to_str)
+@@ -406,19 +520,14 @@
+                 .or_default()
+                 .record(region.owner.as_deref());
+         }
+-        if let Some(action) =
+-            super::laravel::laravel_invokable_route_class(node, self.names, self.content)
+-            && let Some(controller) = self
+-                .contexts
+-                .invokable_owner_at(action.start, &action.controller)
+-        {
+-            let kind = match controller {
+-                Some(controller) => crate::symbol_map::SymbolKind::ClassReference {
++        if let Some((action, owner)) = invokable.zip(invokable_target) {
++            let kind = match (owner.target, owner.incomplete) {
++                (Some(controller), false) => crate::symbol_map::SymbolKind::ClassReference {
+                     name: crate::atom::atom(controller.trim_start_matches('\\')),
+                     is_fqn: true,
+                     context: crate::symbol_map::ClassRefContext::RuntimeControllerString,
+                 },
+-                None => crate::symbol_map::SymbolKind::RuntimeControllerBinding {
++                (target, _) => crate::symbol_map::SymbolKind::RuntimeControllerBinding {
+                     runtime_name: crate::atom::atom(
+                         action
+                             .controller
+@@ -426,7 +535,11 @@
+                             .as_deref()
+                             .unwrap_or(&action.controller.subject),
+                     ),
+-                    targets: Vec::new().into_boxed_slice(),
++                    targets: target
++                        .into_iter()
++                        .map(|name| crate::atom::atom(name.trim_start_matches('\\')))
++                        .collect::<Vec<_>>()
++                        .into_boxed_slice(),
+                     incomplete: true,
+                 },
+             };
+@@ -518,6 +631,21 @@
+             },
+         });
+     }
++    let class_ranges: HashSet<_> = out
++        .0
++        .iter()
++        .filter(|span| crate::runtime_controller::is_runtime_class(&span.kind))
++        .map(|span| (span.start, span.end))
++        .collect();
++    out.0.retain(|span| {
++        !matches!(
++            &span.kind,
++            crate::symbol_map::SymbolKind::MemberAccess {
++                is_method_call: true,
++                ..
++            }
++        ) || !class_ranges.contains(&(span.start, span.end))
++    });
+     spans.extend(out.0);
+     non_invoked.extend(out.1);
+ }
+--- a/tests/integration/laravel_route_controller.rs
++++ b/tests/integration/laravel_route_controller.rs
+@@ -2865,3 +2865,340 @@
+         "unknown invokable target must refuse a partial declaration rename: {result:?}"
+     );
+ }
++
++fn available_route_class_fixture(calls: &str, global: bool) -> String {
++    let global = if global {
++        "class InvoiceController {public function __invoke():string {return 'global';}}"
++    } else {
++        ""
++    };
++    format!(
++        "<?php\nnamespace {{{global}}}\nnamespace App {{class InvoiceController {{public function __invoke():string {{return 'app';}}}} class GroupController {{public function InvoiceController():string {{return 'method';}}}}}}\nnamespace Prefix\\App {{class InvoiceController {{public function __invoke():string {{return 'prefixed';}}}}}}\nnamespace Harness {{use Illuminate\\Support\\Facades\\Route as Routes;use App\\InvoiceController as InvoiceController;{calls}}}\n"
++    )
++}
++
++async fn available_class_target(
++    backend: &phpantom_lsp::Backend,
++    uri: &Url,
++    text: &str,
++    needle: &str,
++) -> Position {
++    use crate::common::position_after;
++    let at = position_after(text, needle);
++    match goto_def(backend, uri, at.line, at.character).await {
++        Some(GotoDefinitionResponse::Scalar(location)) => {
++            assert_eq!(&location.uri, uri);
++            location.range.start
++        }
++        Some(GotoDefinitionResponse::Array(mut locations)) if locations.len() == 1 => {
++            let location = locations.remove(0);
++            assert_eq!(&location.uri, uri);
++            location.range.start
++        }
++        other => panic!("available invokable class must have one definition: {other:?}"),
++    }
++}
++
++#[tokio::test]
++async fn available_global_invokable_class_overrides_the_same_named_group_method() {
++    use crate::common::{apply_edits, position_after};
++    let text = available_route_class_fixture(
++        "Routes::controller(\\App\\GroupController::class)->group(fn()=>Routes::get('/😀/bare','InvoiceController'));",
++        true,
++    );
++    let backend = create_test_backend();
++    let uri = Url::parse("file:///available-global.php").unwrap();
++    open_php(&backend, &uri, &text).await;
++    assert_eq!(
++        available_class_target(&backend, &uri, &text, "'/😀/bare','In").await,
++        position_after(&text, "namespace {"),
++        "preloaded global class wins over group method"
++    );
++    let literal = position_after(&text, "'/😀/bare','In");
++    let hover = backend
++        .hover(HoverParams {
++            text_document_position_params: TextDocumentPositionParams {
++                text_document: TextDocumentIdentifier { uri: uri.clone() },
++                position: literal,
++            },
++            work_done_progress_params: Default::default(),
++        })
++        .await
++        .unwrap()
++        .unwrap();
++    assert!(
++        matches!(hover.contents,HoverContents::Markup(ref m) if m.value.contains("class InvoiceController")),
++        "available class hover: {hover:?}"
++    );
++    for (position, count) in [
++        (position_after(&text, "namespace {class "), 2),
++        (
++            position_after(&text, "class GroupController {public function "),
++            1,
++        ),
++    ] {
++        let refs = backend
++            .references(ReferenceParams {
++                text_document_position: TextDocumentPositionParams {
++                    text_document: TextDocumentIdentifier { uri: uri.clone() },
++                    position,
++                },
++                context: ReferenceContext {
++                    include_declaration: true,
++                },
++                work_done_progress_params: Default::default(),
++                partial_result_params: Default::default(),
++            })
++            .await
++            .unwrap()
++            .unwrap();
++        assert_eq!(
++            refs.len(),
++            count,
++            "class and method roles must not overlap: {refs:?}"
++        );
++    }
++    let completion = backend
++        .completion(CompletionParams {
++            text_document_position: TextDocumentPositionParams {
++                text_document: TextDocumentIdentifier { uri: uri.clone() },
++                position: literal,
++            },
++            work_done_progress_params: Default::default(),
++            partial_result_params: Default::default(),
++            context: None,
++        })
++        .await
++        .unwrap()
++        .unwrap();
++    let items = match completion {
++        CompletionResponse::Array(items) => items,
++        CompletionResponse::List(list) => list.items,
++    };
++    assert!(
++        items
++            .iter()
++            .any(|item| item.kind == Some(CompletionItemKind::CLASS)
++                && item.label == "InvoiceController"),
++        "available class must offer class completion: {items:?}"
++    );
++    assert!(
++        !items
++            .iter()
++            .any(|item| item.kind == Some(CompletionItemKind::METHOD)),
++        "available class must not borrow group method completion"
++    );
++    let prepared = backend
++        .prepare_rename(TextDocumentPositionParams {
++            text_document: TextDocumentIdentifier { uri: uri.clone() },
++            position: literal,
++        })
++        .await
++        .unwrap();
++    assert!(prepared.is_some());
++    let edit = backend
++        .rename(RenameParams {
++            text_document_position: TextDocumentPositionParams {
++                text_document: TextDocumentIdentifier { uri: uri.clone() },
++                position: literal,
++            },
++            new_name: "ReceiptController".into(),
++            work_done_progress_params: Default::default(),
++        })
++        .await
++        .unwrap()
++        .unwrap();
++    let edits = edit.changes.unwrap().remove(&uri).unwrap();
++    let changed = apply_edits(&text, &edits);
++    assert!(changed.contains("namespace {class ReceiptController"));
++    assert!(changed.contains("'/😀/bare','ReceiptController'"));
++    assert!(changed.contains("class GroupController {public function InvoiceController"));
++    assert!(changed.contains("use App\\InvoiceController as InvoiceController;"));
++}
++
++#[tokio::test]
++async fn available_class_with_namespace_rewrite_navigates_but_refuses_dependency_renames() {
++    use crate::common::position_after;
++    for (call, needle, declaration) in [
++        (
++            "Routes::namespace('App')->controller('GroupController')->group(fn()=>Routes::get('/relative','InvoiceController'));",
++            "'/relative','In",
++            "namespace App {",
++        ),
++        (
++            "Routes::namespace('Prefix')->controller(\\App\\GroupController::class)->group(fn()=>Routes::get('/qualified','App\\InvoiceController'));",
++            "'/qualified','App\\In",
++            "namespace Prefix\\App {",
++        ),
++    ] {
++        let text = available_route_class_fixture(call, true);
++        let backend = create_test_backend();
++        let uri = Url::parse("file:///available-namespace.php").unwrap();
++        open_php(&backend, &uri, &text).await;
++        assert_eq!(
++            available_class_target(&backend, &uri, &text, needle).await,
++            position_after(&text, declaration),
++            "availability check precedes group namespace qualification"
++        );
++        let literal = position_after(&text, needle);
++        assert!(
++            backend
++                .prepare_rename(TextDocumentPositionParams {
++                    text_document: TextDocumentIdentifier { uri: uri.clone() },
++                    position: literal
++                })
++                .await
++                .unwrap()
++                .is_none(),
++            "dependent class spelling must not offer a partial rewrite"
++        );
++        for position in [
++            position_after(&text, "namespace {class "),
++            position_after(&text, "namespace App {class "),
++            position_after(&text, "namespace Prefix\\App {class "),
++        ] {
++            // Only the raw availability class and actual target are affected.
++            let affected = if call.contains("/relative") {
++                position != position_after(&text, "namespace Prefix\\App {class ")
++            } else {
++                position != position_after(&text, "namespace {class ")
++            };
++            if !affected {
++                continue;
++            }
++            let result = backend
++                .rename(RenameParams {
++                    text_document_position: TextDocumentPositionParams {
++                        text_document: TextDocumentIdentifier { uri: uri.clone() },
++                        position,
++                    },
++                    new_name: "ReceiptController".into(),
++                    work_done_progress_params: Default::default(),
++                })
++                .await;
++            assert!(
++                matches!(result,Err(ref e) if e.message.to_ascii_lowercase().contains("runtime controller")),
++                "availability-dependent rename must refuse partial edits: {result:?}"
++            );
++        }
++    }
++}
++
++#[tokio::test]
++async fn namespaced_class_and_php_import_do_not_prove_bare_runtime_class_availability() {
++    for declaration in [
++        "",
++        "interface InvoiceController {}",
++        "trait InvoiceController {}",
++    ] {
++        use crate::common::position_after;
++        let text = available_route_class_fixture(
++        "Routes::controller(\\App\\GroupController::class)->group(fn()=>Routes::get('/method','InvoiceController'));",
++        false,
++    ).replace("namespace {}", &format!("namespace {{{declaration}}}"));
++        let backend = create_test_backend();
++        let uri = Url::parse("file:///available-negative.php").unwrap();
++        open_php(&backend, &uri, &text).await;
++        assert_eq!(
++            available_class_target(&backend, &uri, &text, "'/method','In").await,
++            position_after(&text, "class GroupController {public function "),
++            "PHP aliases must not change class_exists runtime lookup"
++        );
++    }
++}
++
++#[tokio::test]
++async fn unsaved_available_global_class_retires_and_restores_group_method_role() {
++    use crate::common::position_after;
++    let call = "Routes::controller(\\App\\GroupController::class)->group(fn()=>Routes::get('/fresh','InvoiceController'));";
++    let absent = available_route_class_fixture(call, false);
++    let present = available_route_class_fixture(call, true);
++    let backend = create_test_backend();
++    let uri = Url::parse("file:///available-unsaved.php").unwrap();
++    open_php(&backend, &uri, &absent).await;
++    for (version, text, expected) in [
++        (2, &present, "namespace {"),
++        (3, &absent, "class GroupController {public function "),
++        (4, &present, "namespace {"),
++    ] {
++        backend
++            .did_change(DidChangeTextDocumentParams {
++                text_document: VersionedTextDocumentIdentifier {
++                    uri: uri.clone(),
++                    version,
++                },
++                content_changes: vec![TextDocumentContentChangeEvent {
++                    range: None,
++                    range_length: None,
++                    text: text.clone(),
++                }],
++            })
++            .await;
++        assert_eq!(
++            available_class_target(&backend, &uri, text, "'/fresh','In").await,
++            position_after(text, expected),
++            "class availability must follow current unsaved source"
++        );
++    }
++}
++
++#[tokio::test]
++async fn available_enum_proof_selects_the_namespaced_invokable_class() {
++    use crate::common::position_after;
++    let text = available_route_class_fixture("Routes::namespace('App')->controller('GroupController')->group(fn()=>Routes::get('/enum','InvoiceController'));", true)
++        .replace("class InvoiceController {public function __invoke():string {return 'global';}}", "enum InvoiceController {case Loaded;}");
++    let backend = create_test_backend();
++    let uri = Url::parse("file:///available-enum.php").unwrap();
++    open_php(&backend, &uri, &text).await;
++    assert_eq!(
++        available_class_target(&backend, &uri, &text, "'/enum','In").await,
++        position_after(&text, "namespace App {"),
++        "enum availability is a class_exists proof, not a group method"
++    );
++    assert!(
++        backend
++            .prepare_rename(TextDocumentPositionParams {
++                text_document: TextDocumentIdentifier { uri: uri.clone() },
++                position: position_after(&text, "'/enum','In")
++            })
++            .await
++            .unwrap()
++            .is_none()
++    );
++}
++
++async fn execution_sensitive_availability_keeps_group_method(deferred: bool) {
++    use crate::common::position_after;
++    let source = if deferred {
++        r#"<?php
++namespace { \Harness\register_forward(); class InvoiceController extends AvailabilityBase {public function __invoke():string {return 'class';}} class AvailabilityBase {} }
++namespace App {class GroupController {public function InvoiceController():string {return 'method';}}}
++namespace Harness {use Illuminate\Support\Facades\Route as Routes;function register_forward(){Routes::controller(\App\GroupController::class)->group(fn()=>Routes::get('/execution','InvoiceController'));}}
++"#
++    } else {
++        r#"<?php
++namespace {goto declaration_skipped;class InvoiceController extends AvailabilityBase {public function __invoke():string {return 'class';}}declaration_skipped:}
++namespace App {class GroupController {public function InvoiceController():string {return 'method';}}}
++namespace Harness {use Illuminate\Support\Facades\Route as Routes;Routes::controller(\App\GroupController::class)->group(fn()=>Routes::get('/execution','InvoiceController'));}
++namespace {class AvailabilityBase {}}
++"#
++    };
++    let backend = create_test_backend();
++    let uri = Url::parse("file:///availability-execution.php").unwrap();
++    open_php(&backend, &uri, source).await;
++    assert_eq!(
++        available_class_target(&backend, &uri, source, "'/execution','In").await,
++        position_after(source, "class GroupController {public function "),
++        "lexical declaration order must not invent a class availability proof (deferred={deferred})"
++    );
++}
++
++#[tokio::test]
++async fn forward_called_function_does_not_invent_prior_class_availability() {
++    execution_sensitive_availability_keeps_group_method(true).await;
++}
++
++#[tokio::test]
++async fn skipped_declaration_does_not_invent_prior_class_availability() {
++    execution_sensitive_availability_keeps_group_method(false).await;
++}

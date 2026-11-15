@@ -2,8 +2,8 @@
   "repository": "https://github.com/PHPantom-dev/phpantom_lsp",
   "commit": "1756b1f920c1290d4c4fdd4d2c902fad53a75cd3",
   "archive_sha256": "f0a1dc7fa44d309e6d5e8ed65a2075749c1fc177b45820031f58290f1aec5cee",
-  "patches_sha256": "fcdf332fd7260bc5cfe57f7fc47e630d1b014f69a0a31d0400b598b30d5dca7e",
-  "version": "0.11.1-openstorm.150",
+  "patches_sha256": "5d2f8ffa7d05949f82ed250cf39eda882bf45a73d4650a2f3fc8c83a5e430246",
+  "version": "0.11.1-openstorm.152",
   "patches": [
     {
       "file": "0001-workspace-tool-policy.patch",
@@ -604,6 +604,14 @@
     {
       "file": "0150-invokable-route-class-strings.patch",
       "sha256": "53dbfe1f55088f27d52ec2b0a1f1c2291fb943a70c93957e0f124b4f8f5eb3d6"
+    },
+    {
+      "file": "0151-source-local-route-class-availability.patch",
+      "sha256": "bdc2a145c340b019d3bf31740d5009b48f8bae2e1af9bfd55f3aab72f7c177c6"
+    },
+    {
+      "file": "0152-incremental-class-population-merge-thread.patch",
+      "sha256": "950c987409cb2d49375733f8896794cd4f0ef398444debd9005b37ca6e925bcd"
     }
   ]
 }

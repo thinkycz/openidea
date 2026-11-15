@@ -28,6 +28,7 @@ struct Fixture {
     host: Host,
     project: Arc<Project>,
     doc: DocId,
+    events: Arc<std::sync::Mutex<Vec<ide_core::IdeEvent>>>,
 }
 
 impl Fixture {
@@ -63,6 +64,8 @@ impl Fixture {
         assert_eq!(composer["autoload"]["psr-4"]["App\\"], "app/");
         let mut php = ide_language::LanguageRegistry::load(None).unwrap().get(&LanguageId::new("php")).unwrap();
         php.language_servers.retain(|s| s.name == "phpantom");
+        let events = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let listener = events.clone();
         let host = Host::new(HostConfig {
             project_environment: false,
             config_dir: tmp.path().join("config"),
@@ -70,7 +73,10 @@ impl Fixture {
             local_data_dir: tmp.path().join("local-data"),
             languages: Arc::new(ide_language::LanguageRegistry::from_configs(vec![php])),
             syntax: Arc::default(),
-            sink_for: Box::new(|_| Arc::new(|_| {})),
+            sink_for: Box::new(move |_| {
+                let events = listener.clone();
+                Arc::new(move |event| events.lock().unwrap().push(event))
+            }),
             owner: |w| w,
             runtime: tokio::runtime::Handle::current(),
         });
@@ -82,7 +88,7 @@ impl Fixture {
             }
         }));
         let doc = project.documents.open(&root.join("routes/web.php")).unwrap().id;
-        Self { _tmp: tmp, root, host, project, doc }
+        Self { _tmp: tmp, root, host, project, doc, events }
     }
 
     fn lint(text: &str) {
@@ -306,6 +312,101 @@ async fn check_runtime_class_catalog(invokable: bool) {
         }]).unwrap().is_none());
         assert_eq!(f.project.documents.snapshot(f.doc).unwrap().text, changed);
         assert_eq!(std::fs::read_to_string(f.root.join("routes/web.php")).unwrap(), original);
+    }).catch_unwind().await;
+    f.finish(outcome).await;
+}
+
+const GLOBAL: &str = "class InvoiceController {public function __invoke():string {return 'global';}}";
+const GROUP: &str =
+    "<?php namespace App; class GroupController {public function InvoiceController():string {return 'method';}}\n";
+
+fn available_routes(declaration: &str, call: &str) -> String {
+    format!(
+        "<?php\nnamespace {{{declaration}}}\nnamespace Harness {{use Illuminate\\Support\\Facades\\Route as Routes;use App\\InvoiceController as InvoiceController;{call}}}\n"
+    )
+}
+
+fn literal(text: &str, prefix: &str) -> Pos {
+    at(text, text.rfind(prefix).unwrap() + prefix.len())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires pinned PHPantom, owned PHP and disposable Laravel dependencies"]
+async fn available_route_class_uses_guarded_cross_file_rename_and_history() {
+    let caller = "<?php namespace App; class Caller {public function make(): \\InvoiceController {return new \\InvoiceController();}}\n";
+    let original = available_routes(
+        GLOBAL,
+        "Routes::controller(\\App\\GroupController::class)->group(fn()=>Routes::get('/😀/available','InvoiceController'));",
+    );
+    let f = Fixture::new(
+        &original,
+        &[("app/GroupController.php".into(), GROUP.into()), ("app/Caller.php".into(), caller.into())],
+    );
+    let outcome=std::panic::AssertUnwindSafe(async {
+        let cursor=literal(&original,"'/😀/available','In");
+        let targets=f.project.lsp.goto(f.doc,cursor,GotoKind::Definition).await.unwrap();
+        assert_eq!(targets.len(),1);assert_eq!(targets[0].path.to_path_buf(),f.root.join("routes/web.php"),"available class must override group method through host");
+        assert_eq!(targets[0].range.start,literal(&original,"namespace {"));
+        let list=f.complete(cursor).await;assert!(list.items.iter().any(|i|i.kind==Some(CompletionKind::Class)&&i.detail.as_deref()==Some("InvoiceController")),"host must complete the available global class: {list:?}");assert!(!list.items.iter().any(|i|i.kind==Some(CompletionKind::Method)));
+        let refs=ide_host::ops::lsp::lsp_references(&f.host,"main",RequestId::next(),f.doc,cursor,true,true,true,ide_host::ops::Channel::new(|_|{})).await.unwrap();
+        assert_eq!(refs.locations.len(),4,"class references include declaration/action/closed caller type and constructor: {refs:?}");assert!(refs.incomplete.is_none());assert!(refs.locations.iter().any(|l|l.path.ends_with("app/Caller.php")));
+        let group_doc=f.project.documents.open(&f.root.join("app/GroupController.php")).unwrap().id;
+        let method=literal(GROUP,"public function ");
+        let refs=ide_host::ops::lsp::lsp_references(&f.host,"main",RequestId::next(),group_doc,method,true,true,true,ide_host::ops::Channel::new(|_|{})).await.unwrap();assert_eq!(refs.locations.len(),1,"class action must not count as a group method caller: {refs:?}");
+        let unsaved=format!("{original}// Unsaved available-route witness.\n");Fixture::lint(&unsaved);f.project.documents.replace_all(f.doc,&unsaved).unwrap();
+        let plan=ide_host::ops::lsp::lsp_rename(&f.host,"main",RequestId::next(),f.doc,literal(&unsaved,"'/😀/available','In"),"ReceiptController".into()).await.unwrap().edit;
+        assert!(plan.guard.is_some());assert_eq!(plan.files.len(),2);
+        let caller_path=f.root.join("app/Caller.php");let external=format!("{caller}// External caller witness.\n");std::fs::write(&caller_path,&external).unwrap();
+        assert!(ide_host::ops::lsp::apply_workspace_edit(&f.host,"main",plan).await.is_err());assert_eq!(std::fs::read_to_string(f.root.join("routes/web.php")).unwrap(),original);assert_eq!(f.project.documents.snapshot(f.doc).unwrap().text,unsaved);assert_eq!(std::fs::read_to_string(&caller_path).unwrap(),external);
+        std::fs::write(&caller_path,caller).unwrap();
+        let plan=ide_host::ops::lsp::lsp_rename(&f.host,"main",RequestId::next(),f.doc,literal(&unsaved,"'/😀/available','In"),"ReceiptController".into()).await.unwrap().edit;
+        ide_host::ops::lsp::apply_workspace_edit(&f.host,"main",plan).await.unwrap();
+        let expected=unsaved.replacen("namespace {class InvoiceController","namespace {class ReceiptController",1).replacen("'/😀/available','InvoiceController'","'/😀/available','ReceiptController'",1);let changed_caller=caller.replace("\\InvoiceController","\\ReceiptController");
+        assert_eq!(f.project.documents.snapshot(f.doc).unwrap().text,expected);assert_eq!(std::fs::read_to_string(f.root.join("routes/web.php")).unwrap(),expected);assert_eq!(std::fs::read_to_string(&caller_path).unwrap(),changed_caller);assert_eq!(std::fs::read_to_string(f.root.join("app/GroupController.php")).unwrap(),GROUP);assert_eq!(std::fs::read_to_string(f.root.join("app/InvoiceController.php")).unwrap(),MAIN);
+        let repo=PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");let laravel=std::env::var_os("OPENSTORM_TEST_ENGINE_LARAVEL_ROOT").map(PathBuf::from).unwrap_or_else(||repo.join("artifacts/checks/engine-laravel13-37-148/project"));
+        let script=r#"$loader=require $argv[2].'/vendor/autoload.php';$loader->addPsr4('App\\',$argv[1].'/app',true);$router=new \Illuminate\Routing\Router(new \Illuminate\Events\Dispatcher());\Illuminate\Support\Facades\Route::swap($router);require $argv[1].'/routes/web.php';$routes=$router->getRoutes();assert(count($routes)===1);foreach($routes as $route){assert($route->getAction('uses')==='ReceiptController@__invoke');assert(get_class($route->getController())==='ReceiptController');assert(($route->getController())()==='global');}assert((new \App\Caller())->make() instanceof \ReceiptController);assert((new \App\GroupController())->InvoiceController()==='method');echo 'available class rename runtime passed';"#;
+        let output=std::process::Command::new(repo.join("artifacts/toolchains/php-8.4.23-static/php")).args(["-n","-d","zend.assertions=1","-r",script]).arg(&f.root).arg(laravel).output().unwrap();assert!(output.status.success(),"runtime {} stdout={} stderr={}",output.status,String::from_utf8_lossy(&output.stdout),String::from_utf8_lossy(&output.stderr));assert_eq!(output.stdout,b"available class rename runtime passed");
+        let group=f.events.lock().unwrap().iter().rev().find_map(|event|match event {ide_core::IdeEvent::DocPatched{history:Some(h),..}=>Some(h.group.clone()),_=>None}).expect("reviewed availability history");
+        for redo in [false,true] {
+            ide_host::ops::lsp::restore_reviewed_edit(&f.host,"main",group.clone(),redo).await.unwrap();
+            let current=f.project.documents.snapshot(f.doc).unwrap();assert_eq!(current.text,if redo{&expected}else{&unsaved}.as_str());assert_eq!(current.dirty,!redo);assert_eq!(std::fs::read_to_string(&caller_path).unwrap(),if redo{&changed_caller}else{caller});assert_eq!(std::fs::read_to_string(f.root.join("routes/web.php")).unwrap(),if redo{&expected}else{&original}.as_str());
+            let prefix=if redo{"'/😀/available','Re"}else{"'/😀/available','In"};let targets=f.project.lsp.goto(f.doc,literal(&current.text,prefix),GotoKind::Definition).await.unwrap();assert_eq!(targets.len(),1);assert_eq!(targets[0].path.to_path_buf(),f.root.join("routes/web.php"));
+        }
+        std::fs::write(&caller_path,&external).unwrap();assert!(ide_host::ops::lsp::restore_reviewed_edit(&f.host,"main",group,false).await.is_err());assert_eq!(std::fs::read_to_string(f.root.join("routes/web.php")).unwrap(),expected);assert_eq!(std::fs::read_to_string(&caller_path).unwrap(),external);
+    }).catch_unwind().await;
+    f.finish(outcome).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires pinned PHPantom and owned PHP syntax-check executable"]
+async fn available_route_class_roles_and_namespace_dependencies_stay_current() {
+    let call = "Routes::controller(\\App\\GroupController::class)->group(fn()=>Routes::get('/available','InvoiceController'));";
+    let original = available_routes(GLOBAL, call);
+    let f = Fixture::new(&original, &[("app/GroupController.php".into(), GROUP.into())]);
+    let outcome=std::panic::AssertUnwindSafe(async {
+        let first=f.project.lsp.goto(f.doc,literal(&original,"'/available','In"),GotoKind::Definition).await.unwrap();assert_eq!(first.len(),1);assert_eq!(first[0].path.to_path_buf(),f.root.join("routes/web.php"),"availability role must start at global class");
+        for (declaration,class_role) in [("",false),("interface InvoiceController {}",false),("trait InvoiceController {}",false),(GLOBAL,true)] {
+            let input=available_routes(declaration,call);Fixture::lint(&input);f.project.documents.replace_all(f.doc,&input).unwrap();let targets=f.project.lsp.goto(f.doc,literal(&input,"'/available','In"),GotoKind::Definition).await.unwrap();assert_eq!(targets.len(),1);assert_eq!(targets[0].path.to_path_buf(),f.root.join(if class_role{"routes/web.php"}else{"app/GroupController.php"}),"unsaved availability role: {declaration}");
+        }
+        let inherited = GLOBAL.replacen("class InvoiceController {", "class InvoiceController extends AvailabilityBase {", 1);
+        let deferred = available_routes(&format!("\\Harness\\register_forward();{inherited} class AvailabilityBase {{}}"), &format!("function register_forward(){{{call}}}"));
+        let skipped = format!("{}namespace {{class AvailabilityBase {{}}}}\n", available_routes(&format!("goto declaration_skipped;{inherited}declaration_skipped:"),call));
+        for input in [deferred, skipped] {
+            Fixture::lint(&input);f.project.documents.replace_all(f.doc,&input).unwrap();
+            let targets=f.project.lsp.goto(f.doc,literal(&input,"'/available','In"),GotoKind::Definition).await.unwrap();
+            assert_eq!(targets.len(),1);assert_eq!(targets[0].path.to_path_buf(),f.root.join("app/GroupController.php"),"lexical order must not invent a host class availability proof");
+        }
+        f.project.documents.replace_all(f.doc,&original).unwrap();
+        let server=f.project.lsp.servers().into_iter().find(|s|s.name=="phpantom").unwrap().id;f.project.lsp.restart(server).await.unwrap();let targets=f.project.lsp.goto(f.doc,literal(&original,"'/available','In"),GotoKind::Definition).await.unwrap();assert_eq!(targets[0].path.to_path_buf(),f.root.join("routes/web.php"));
+        let dependent=available_routes(GLOBAL,"Routes::namespace('App')->controller('GroupController')->group(fn()=>Routes::get('/dependent','InvoiceController'));");Fixture::lint(&dependent);f.project.documents.replace_all(f.doc,&dependent).unwrap();let cursor=literal(&dependent,"'/dependent','In");let targets=f.project.lsp.goto(f.doc,cursor,GotoKind::Definition).await.unwrap();assert_eq!(targets.len(),1);assert_eq!(targets[0].path.to_path_buf(),f.root.join("app/InvoiceController.php"),"namespace qualification follows raw availability check");let hover=f.project.lsp.hover(f.doc,cursor,Default::default()).await.unwrap().unwrap();assert!(hover.contents.value.contains("class availability")&&hover.contents.value.contains("Main controller completion witness."));assert!(f.project.lsp.prepare_rename_details(f.doc,cursor).await.unwrap().is_none());let list=f.complete(cursor).await;assert!(list.is_incomplete&&list.items.is_empty());
+        let app=f.project.documents.open(&f.root.join("app/InvoiceController.php")).unwrap().id;
+        for (doc,pos) in [(f.doc,literal(&dependent,"namespace {class In")),(app,literal(MAIN,"class In"))] {
+            let error=ide_host::ops::lsp::lsp_rename(&f.host,"main",RequestId::next(),doc,pos,"ReceiptController".into()).await.unwrap_err();assert!(error.to_string().to_lowercase().contains("runtime controller"),"{error}");assert_eq!(f.project.documents.snapshot(f.doc).unwrap().text,dependent);assert_eq!(std::fs::read_to_string(f.root.join("routes/web.php")).unwrap(),original);assert_eq!(std::fs::read_to_string(f.root.join("app/InvoiceController.php")).unwrap(),MAIN);
+        }
+        let enumerated=available_routes("enum InvoiceController {case Loaded;}","Routes::namespace('App')->controller('GroupController')->group(fn()=>Routes::get('/enum','InvoiceController'));");
+        Fixture::lint(&enumerated);f.project.documents.replace_all(f.doc,&enumerated).unwrap();let cursor=literal(&enumerated,"'/enum','In");
+        let targets=f.project.lsp.goto(f.doc,cursor,GotoKind::Definition).await.unwrap();assert_eq!(targets.len(),1);assert_eq!(targets[0].path.to_path_buf(),f.root.join("app/InvoiceController.php"),"enum proof must select the namespaced invokable class");
+        assert!(f.project.lsp.prepare_rename_details(f.doc,cursor).await.unwrap().is_none());
     }).catch_unwind().await;
     f.finish(outcome).await;
 }

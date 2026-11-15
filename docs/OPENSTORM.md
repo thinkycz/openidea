@@ -15,6 +15,88 @@ slice, commit and push it, and retain only the latest generated app. Native UI
 cases remain deferred/unverified; earlier native-first blocking checkpoints are
 historical and no longer prevent independent implementation.
 
+Laravel slice 100 (2026-11-16, verified local development delivery): App 0.1.91
+bundles PHPantom 152 after the same host test executable fails both new cases
+with 150 and passes with 152. Available local controller classes override bare
+group methods. Actual host definition, completion and exact references select the
+class; the group method retains only its own declaration. Cross-file checked
+rename changes the global class, Unicode route action and closed PHP caller while
+preserving unrelated imports, group method and namespaced controller. The edited
+files execute successfully through the pinned Laravel router and real PHP caller.
+
+External changes to a closed caller refuse the stale plan without partial writes.
+Shared reviewed undo/redo restores exact saved files and the original unsaved
+route overlay; a later external change refuses history restoration. Unsaved
+class/interface/trait changes and server restart refresh navigation. Forward-call
+and skipped inherited declarations do not provide lexical availability proofs.
+Namespace-dependent class/enum cases navigate to the final target while retaining
+incomplete metadata and refusing unsafe literal or declaration renames.
+Sixteen input/expected/control PHP fixtures parse. A separate expected-output
+runtime control validates the oracle; the actual host test independently executes
+the engine-produced edits. Both kinds of evidence remain distinct in receipts.
+
+The initial final-host run with 151 exposes a reproducible enum-change timeout,
+despite the earlier focused pass. Protocol traces and a process stack sample
+show AST publication holding a reentrant merge lock while joining a population
+worker; that worker loads a cold builtin stub and waits for the same lock on
+another thread. Patch 0152 keeps incremental population on the lock-owning thread,
+preserving recursive publication and startup parallelism. A bounded child test
+fails the old implementation after ten seconds and passes the fixed immutable
+source in 0.18 seconds. The original host scenario and consecutive fixed controls
+pass without timeout increases or retrying failed assertions. Failed attempts,
+wire traces and the sampled stacks remain in the local receipts.
+
+The first workspace run exposed an inherited diagnostic fixture race: its fake
+missing-server startup could publish concurrently with immediate event assertions.
+The unchanged test passed 20 isolated controls. The synchronous fixture now enters
+an unpolled current-thread runtime, keeping fake lifecycle work out of its manual
+diagnostic sequence. The complete workspace rerun passes; the fixture correction changes no
+production behavior. The initial failure and diagnosis remain in the local receipts.
+
+All source gates pass: 4,710 Rust tests / 170 ignored, workspace all-target check,
+Clippy with warnings denied, generated bindings, type checking, lint, formatting,
+Knip, 11,891 frontend tests / six skipped, production frontend/Safari 16 startup
+checks and Rust formatting. All 56 real-engine checks pass from the final workspace
+executables (ten host edits/navigation, five host completion, 41 client), with
+owned fixtures restored. Immutable engine 152 gates pass 18,497 tests / 17 ignored,
+plus separate FIFO and enum-deadlock child checks, release all-target Clippy, formatting, source
+fingerprint verification and optimized build. All 83 focused route checks and
+324 Laravel assertions pass; the analyzer retains exactly three intentional
+diagnostics. Rust workspace checks and bindings are refreshed after resource
+promotion because ide-tools embeds provenance at compile time. Unchanged frontend
+source retains the earlier passed gates from this same slice.
+
+The sole archived app is `artifacts/batches/0.1.91/OpenStorm.app`, signed ad hoc,
+strict/deep verified, arm64, identifier `cz.thinky.openstorm`, minimum macOS 13.0.
+Executable SHA-256:
+`17573977dc5566b8fe7674ce097d65ca071cd9e32253a8142293457f71b15ff2`.
+Bundled engine SHA-256:
+`eb0318831e5756201cb2e7e96838ac884d421d0c58ce545e711876d8534c3a33`.
+The receipt binds compiled source bytes; only this progress document and the
+acceptance ledger change afterward. Version 0.1.91 was prepared before the cold
+preflight. Third-party pins and the released plugin API baseline remain unchanged.
+The debug build retains the same compact-unwind linker warning as App 0.1.90;
+its exception-handling performance impact is unmeasured.
+
+After signature and receipt verification, App 0.1.90 and the duplicate SDK bundle
+were removed; the inactive compiler target was cleaned (23,715 files / 28.8GiB).
+The inactive canonical 150 executable and unshipped 151 candidate binary were
+removed after exact checksum/process checks. Engine 152, Workbench 114, immutable
+sources, provenance, licenses and previous evaluation receipts remain. The app is not launched, installed or
+notarized; native UI checks remain explicitly user-skipped. This slice changes no
+appearance, shortcuts, autosave or debugger implementation. Cross-file/autoload,
+conditional/deferred availability, namespace-dependent rewrites and dedicated
+__invoke method references remain unaccepted. Large incremental-population
+throughput is unmeasured. All 69 areas remain visible:
+67 partial / two user-deferred.
+Engine compiler cleanup is recorded separately in slice100-compiler-clean.json.
+Evidence: `artifacts/checks/slice100-{final-preflight-runtime,role-stability,
+merge-red,merge-green,source-freeze,engine-gates,source-test-summary,
+engine-frozen-focused,examples,analyzer-control,
+fixture-syntax,runtime-fixture-control,resource152-promotion,gates,workspace-totals,
+client-host-attempt2,package-pipeline,packaged-check,compiler-clean,obsolete-engine-cleanup}.json`
+and `artifacts/batches/0.1.91/{build-receipt,retention}.json`.
+
 Laravel slice 99 (2026-11-15, engine source verified; client promotion pending):
 PHPantom candidate 151 corrects class/method roles when a prior unconditional
 local class or enum proves Laravel's raw `class_exists()` lookup. A proven

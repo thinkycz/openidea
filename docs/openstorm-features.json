@@ -144,7 +144,8 @@
         "Slice95 engine source candidate149: quote-aware rooted class-interior completion for Laravel route actions/group controller strings;70 focused and18,483 full engine tests pass/17ignored, catalog/incomplete metadata, resolve and unsaved declarations covered. Active OpenStorm stays engine148/App0.1.88; actual client edit-path acceptance and app promotion are pending. Native UI remains user-skipped.",
         "0.1.89 source/client/signed local package: engine149 runtime controller class-string completion applies rooted, quote-aware class-only UTF16 edits with no PHP imports and preserves method suffixes. Same2host tests fail148/pass149;6quoting/group/action forms, resolve/goto/hover, unsaved/restart/close catalogs, incomplete/100limit metadata, stale target refusal and revision-bound save consent pass.4CodeMirror undo/redo/acceptance cases pass. Full4710Rust/166ignored,11887frontend/6skipped,52real host/client cases and allsource gates pass. NativeUI explicitly user-skipped; whole-area acceptance remains partial.",
         "0.1.90 / engine150, slice98: actual host completion accepts four invokable route forms with class-only UTF16 edits, unchanged imports/quotes/documentation, unknown incomplete metadata, bounded catalogs, unsaved/restart/closed-overlay recovery and stale-edit refusal. Same test executables fail149 then pass150. Save consent refuses a later external revision. 115CodeMirror tests pass including4new invokable cases; final54realengine client/host checks and all source gates pass. NativeUI user-skipped; wider area remains partial. See docs/OPENSTORM.md slice98 and artifacts/checks/slice98-client-host.json.",
-        "Slice99, source candidate151 only: prior unconditional local classes/enums select invokable class roles over same-named group methods, without PHP alias borrowing. Known namespace-dependent targets navigate with incomplete metadata and refuse partial proof/target renames. Interfaces/traits/aliases do not prove raw class availability; deferred scopes and top-level goto cannot supply declaration-order proofs. Unsaved role changes pass. 83focused/18496fullengine tests pass (17ignored),13PHP/Laravel registration/kind/execution assertions and18syntax fixtures pass; licenses/source/provenance archived, owned compiler output cleaned. Active150/App90 unchanged; real OpenStorm client promotion pending and nativeUI user-skipped. Wider class_exists/method-reference behavior and whole area remain partial. See docs/OPENSTORM.md slice99."
+        "Slice99, source candidate151 only: prior unconditional local classes/enums select invokable class roles over same-named group methods, without PHP alias borrowing. Known namespace-dependent targets navigate with incomplete metadata and refuse partial proof/target renames. Interfaces/traits/aliases do not prove raw class availability; deferred scopes and top-level goto cannot supply declaration-order proofs. Unsaved role changes pass. 83focused/18496fullengine tests pass (17ignored),13PHP/Laravel registration/kind/execution assertions and18syntax fixtures pass; licenses/source/provenance archived, owned compiler output cleaned. Active150/App90 unchanged; real OpenStorm client promotion pending and nativeUI user-skipped. Wider class_exists/method-reference behavior and whole area remain partial. See docs/OPENSTORM.md slice99.",
+        "Slice100 / App0.1.91 engine152: same host executable fails both new cases with150 and passes152. Completion offers the available global controller class without group methods; namespace-dependent contexts remain incomplete and offer no unsafe edits. The initial151 enum timeout is fixed by0152current-thread incremental population, with deterministic10sec red/0.18sec green. Final56real-engine checks and full source/build gates pass; native UI user-skipped. Whole area stays partial; docs/OPENSTORM.md slice100."
       ],
       "remaining": "Reassess current OpenStorm implementation against this full gate; Workbench acceptance does not transfer."
     },
@@ -426,7 +427,8 @@
         "Slice95 engine source candidate149: quote-aware rooted class-interior completion for Laravel route actions/group controller strings;70 focused and18,483 full engine tests pass/17ignored, catalog/incomplete metadata, resolve and unsaved declarations covered. Active OpenStorm stays engine148/App0.1.88; actual client edit-path acceptance and app promotion are pending. Native UI remains user-skipped.",
         "0.1.89 source/client/signed local package: engine149 runtime controller class-string completion applies rooted, quote-aware class-only UTF16 edits with no PHP imports and preserves method suffixes. Same2host tests fail148/pass149;6quoting/group/action forms, resolve/goto/hover, unsaved/restart/close catalogs, incomplete/100limit metadata, stale target refusal and revision-bound save consent pass.4CodeMirror undo/redo/acceptance cases pass. Full4710Rust/166ignored,11887frontend/6skipped,52real host/client cases and allsource gates pass. NativeUI explicitly user-skipped; whole-area acceptance remains partial.",
         "0.1.90 / engine150, slice98: invokable route class strings without@method support definition/hover/exact19site class references through unsaved declaration/restart/overlay close. Checked literal rename moves PSR4 controller, retains aliases/quoted saved and unsaved callers, refuses stale disk dependencies, executes all6resulting Laravel routes and preserves shared undo/redo/external-change refusal. Unknown namespace refuses partial declaration rename. Same binaries fail149 then pass150. Final54realengine checks and all source/package gates pass; 29PHP fixtures parse. NativeUI user-skipped; dedicated __invoke method references and class_exists group ambiguities remain unaccepted. FEAT030 stays partial; see docs/OPENSTORM.md slice98.",
-        "Slice99, source candidate151 only: prior unconditional local classes/enums select invokable class roles over same-named group methods, without PHP alias borrowing. Known namespace-dependent targets navigate with incomplete metadata and refuse partial proof/target renames. Interfaces/traits/aliases do not prove raw class availability; deferred scopes and top-level goto cannot supply declaration-order proofs. Unsaved role changes pass. 83focused/18496fullengine tests pass (17ignored),13PHP/Laravel registration/kind/execution assertions and18syntax fixtures pass; licenses/source/provenance archived, owned compiler output cleaned. Active150/App90 unchanged; real OpenStorm client promotion pending and nativeUI user-skipped. Wider class_exists/method-reference behavior and whole area remain partial. See docs/OPENSTORM.md slice99."
+        "Slice99, source candidate151 only: prior unconditional local classes/enums select invokable class roles over same-named group methods, without PHP alias borrowing. Known namespace-dependent targets navigate with incomplete metadata and refuse partial proof/target renames. Interfaces/traits/aliases do not prove raw class availability; deferred scopes and top-level goto cannot supply declaration-order proofs. Unsaved role changes pass. 83focused/18496fullengine tests pass (17ignored),13PHP/Laravel registration/kind/execution assertions and18syntax fixtures pass; licenses/source/provenance archived, owned compiler output cleaned. Active150/App90 unchanged; real OpenStorm client promotion pending and nativeUI user-skipped. Wider class_exists/method-reference behavior and whole area remain partial. See docs/OPENSTORM.md slice99.",
+        "Slice100 / App0.1.91 engine152: actual host class navigation/references override the same-named group method when local availability is proven. Checked Unicode route/global-class/closed-caller rename preserves PHP aliases and unrelated controllers; real Laravel/PHP runtime executes edited files. External stale plans/history refuse without partial writes, shared undo/redo restores saved files and unsaved overlay. Namespace-dependent targets retain navigation but refuse unsafe declaration/literal renames. Full56real-engine and source/package gates pass; dedicated __invoke references and wider availability remain partial; native skipped. docs/OPENSTORM.md slice100."
       ],
       "remaining": "Broader route forms, immediate readiness/config-change and other cancellation permutations remain open. The0.1.58 pending route-list project-switch case is accepted; prior46 transient first-request miss remains tracked separately from settled navigation. Slice82 accepts recorded owner-preserving controller-group chains; direct inline controller owners, namespace changes, custom macros and unfinished/dynamic argument forms remain partial."
     },
@@ -950,7 +952,8 @@
         "Slice92 reviewed moves preserve original source witnesses through adapter/host normalization; all roots/revisions/aliases/readonly/destinations checked before mutation. Native no-clobber syscall, rollback ownership and late same-byte collision regression protect external files. Undo/redo refusal and live fresh definitions pass. UTF16 checked-server moves only; broader freshness/platform matrices partial.",
         "Slice93 validates runtime source fingerprint once per file and complete single-target binding before any rename edit; no partial safe subset when another binding is ambiguous. Real host stale disk and external history refusal, fresh definitions after move/undo/redo and unchanged no-op escaping pass. Broader semantic freshness remains partial.",
         "Slice94 runtime Rename starters require full source/map and decoded literal identity, complete single-target bindings and a current user declaration; then use ordinary checked rename/source receipts. First prepare with declaration closed, stale disk refusal, fresh shared undo/redo definitions and external history refusal pass. Actual94redo cancellation trace proves a delayed own-write watcher echo. Bounded Unix identity/metadata/content witnesses now coalesce only unchanged reviewed-write echoes;11new mock cases/105suite preserve external-change and same-byte replacement invalidation, unmodified first-lookup assertions and final real-host history pass. Historical93view-cycle empty completion stays unexplained; no broader freshness claim.",
-        "Slice99 source151: adding/removing a prior global class in an unsaved document retires/restores the controller-group method role, with exact definition assertions. Scope/goto execution-order guards prevent false availability proofs. This is direct engine-source regression evidence; actual OpenStorm client promotion remains pending. Active App90 unchanged; area remains partial."
+        "Slice99 source151: adding/removing a prior global class in an unsaved document retires/restores the controller-group method role, with exact definition assertions. Scope/goto execution-order guards prevent false availability proofs. This is direct engine-source regression evidence; actual OpenStorm client promotion remains pending. Active App90 unchanged; area remains partial.",
+        "Slice100 actual host: unsaved class/interface/trait role changes, server restart, deferred-call and goto controls select the expected class/group target. Closed-caller external changes reject stale rename before writes; shared history refuses later external changes. Namespace-dependent class/enum proof preserves target information and edit guards. Full56real-engine checks pass; wider semantic matrices and native UI stay partial. docs/OPENSTORM.md slice100."
       ],
       "remaining": "Completion/diagnostic stale responses, target-profile builtin-cache invalidation, broader project/configuration and multi-project cases remain unaccepted. Slice74 closes the reproduced immediate-navigation null in source/client checks; packaged native repetition remains pending by explicit user instruction to skip native checks for now."
     },
@@ -962,7 +965,8 @@
       "status": "partial",
       "acceptance_gate": "Opening code does not boot app/run Composer scripts or query DB",
       "openstorm_evidence": [
-        "Slice99 source151 derives local class availability solely from parsed unconditional declarations and scope/control-flow boundaries; it does not invoke PHP or project tools in editor inspection. Thirteen explicit disposable PHP/Laravel test assertions register routes without executing handlers. Full engine source gates pass; broader execution boundaries and actual client promotion remain partial. See docs/OPENSTORM.md slice99."
+        "Slice99 source151 derives local class availability solely from parsed unconditional declarations and scope/control-flow boundaries; it does not invoke PHP or project tools in editor inspection. Thirteen explicit disposable PHP/Laravel test assertions register routes without executing handlers. Full engine source gates pass; broader execution boundaries and actual client promotion remain partial. See docs/OPENSTORM.md slice99.",
+        "Slice100 promotes static source152 availability to the bundled host: inspection uses parsed declarations; only explicit disposable test actions invoke the pinned PHP/Laravel runtime. Successful engine-produced edits execute through the real router and caller, separate from the expected-output oracle control. Wider execution boundaries remain partial; native skipped. docs/OPENSTORM.md slice100."
       ],
       "remaining": "Reassess current OpenStorm implementation against this full gate; Workbench acceptance does not transfer."
     },
@@ -1137,7 +1141,7 @@
   "source_local_route_availability_candidate": {
     "slice": 99,
     "version": "0.11.1-openstorm.151",
-    "status": "engine source verified; actual OpenStorm client promotion pending",
+    "status": "source151 route semantics promoted via deadlock-fixed152 and verified through actual host/client and signed local development package in slice100",
     "source_pin": "engine/candidates/0.11.1-openstorm.151-source.json",
     "provenance": "engine/candidates/0.11.1-openstorm.151.json",
     "patches_sha256": "e1e456cbd4d463e45dcc4638cf6ab46b9c7f7732f718f1beedd541e3c5839363",
@@ -1149,14 +1153,43 @@
     "php_laravel_control_assertions": 13,
     "php_syntax_cases": 18,
     "laravel_fixture_assertions": 324,
-    "active_engine": "0.11.1-openstorm.150",
-    "active_app": "0.1.90",
+    "active_engine": "0.11.1-openstorm.152",
+    "active_app": "0.1.91",
     "native": "user-skipped",
     "compiler_cleanup": "6959files/2147380094bytes; owned artifacts/phpantom-build removed",
     "limitations": [
       "cross-file/autoload, conditional and deferred class availability unaccepted",
       "namespace-dependent rewrites refused",
-      "dedicated __invoke method references unaccepted"
-    ]
+      "dedicated __invoke method references unaccepted",
+      "large incremental-population throughput unmeasured"
+    ],
+    "delivered_engine": "0.11.1-openstorm.152",
+    "delivered_source_pin": "engine/candidates/0.11.1-openstorm.152-source.json",
+    "delivered_engine_tests_passed": 18497,
+    "delivered_binary_sha256": "eb0318831e5756201cb2e7e96838ac884d421d0c58ce545e711876d8534c3a33",
+    "delivered_provenance": "engine/candidates/0.11.1-openstorm.152.json",
+    "delivered_patches_sha256": "5d2f8ffa7d05949f82ed250cf39eda882bf45a73d4650a2f3fc8c83a5e430246",
+    "promotion_slice": 100,
+    "rust_passed": 4710,
+    "rust_ignored": 170,
+    "frontend_passed": 11891,
+    "frontend_skipped": 6,
+    "real_engine_host_passed": 15,
+    "real_engine_client_passed": 41,
+    "new_host_scenarios": 2,
+    "evidence": "docs/OPENSTORM.md slice100; artifacts/checks/slice100-gates.json and artifacts/checks/slice100-client-host-attempt2.json",
+    "local_delivery": {
+      "bundle": "artifacts/batches/0.1.91/OpenStorm.app",
+      "profile": "development",
+      "architecture": "arm64",
+      "signature": "ad-hoc; strict/deep verified",
+      "executable_sha256": "17573977dc5566b8fe7674ce097d65ca071cd9e32253a8142293457f71b15ff2",
+      "engine_sha256": "eb0318831e5756201cb2e7e96838ac884d421d0c58ce545e711876d8534c3a33",
+      "latest_archive_only": true,
+      "compiler_cleanup": "23715files/28.8GiB; owned artifacts/build removed",
+      "obsolete_engine_cleanup": "inactive150 and unshipped151 canonical executables removed after exactSHA/process checks; source/metadata/licenses and Workbench114 retained",
+      "installed": false,
+      "notarized": false
+    }
   }
 }

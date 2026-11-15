@@ -697,6 +697,9 @@ mod tests {
 
     #[test]
     fn diagnostics_merge_fragments_native_source_and_clear() {
+        // Keep fake server startup from racing the synchronous diagnostic assertions.
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let _runtime = runtime.enter();
         let (mgr, root, events) = manager();
         let host = DocId::next();
         let path = root.path().join("a.java");

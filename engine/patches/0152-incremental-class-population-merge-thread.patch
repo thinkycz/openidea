@@ -1,0 +1,84 @@
+--- a/docs/CHANGELOG.md
++++ b/docs/CHANGELOG.md
+@@ -14,6 +14,8 @@
+ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+ 
+ ## [Unreleased]
++
++- **Keep incremental enum publication responsive.** Incremental class-cache population remains on the AST merge-lock owner so lazy builtin or vendor class parsing can safely reenter publication. Startup population remains parallel. Contributed by @thinkycz.
+ 
+ - **Honor locally available route classes.** Prior unconditional class and enum declarations can select invokable class actions over same-named controller-group methods, independently of PHP imports. Namespace-dependent targets retain navigation and incomplete metadata while refusing partial class renames. Deferred scopes and top-level goto flow do not supply declaration-order proofs. Contributed by @thinkycz.
+ 
+--- a/src/parser/ast_update.rs
++++ b/src/parser/ast_update.rs
+@@ -2049,11 +2049,17 @@
+ 
+             let class_loader =
+                 |name: &str| -> Option<Arc<ClassInfo>> { self.find_or_load_class(name) };
+-            crate::virtual_members::populate_from_sorted(
+-                &sorted,
+-                &self.resolved_class_cache,
+-                &class_loader,
+-            );
++            // Lazy stubs reenter the merge gate, which is reentrant only on
++            // this thread. Joining population workers here would deadlock.
++            for fqn in &sorted {
++                if let Some(class) = class_loader(fqn) {
++                    crate::virtual_members::resolve_class_fully_cached(
++                        &class,
++                        &class_loader,
++                        &self.resolved_class_cache,
++                    );
++                }
++            }
+         }
+ 
+         let structural_changed = any_signature_changed || any_function_changed;
+@@ -3929,3 +3935,47 @@
+         assert!(!classes.iter().any(|class| class.name == "HiddenNested"));
+     }
+ }
++
++#[cfg(test)]
++mod incremental_population_tests {
++    use super::*;
++    #[test]
++    fn incremental_enum_population_keeps_cold_stub_load_on_merge_thread() {
++        const CHILD: &str = "OPENSTORM_ENUM_MERGE_CHILD";
++        if std::env::var_os(CHILD).is_some() {
++            let backend = Backend::new_test_with_full_stubs();
++            let uri = "file:///incremental-enum.php";
++            backend.update_ast(uri, "<?php class InvoiceController {public function __invoke(): string {return 'global';}}");
++            let class = backend.find_or_load_class("InvoiceController").unwrap();
++            crate::virtual_members::resolve_class_fully_cached(
++                &class,
++                &|name| backend.find_or_load_class(name),
++                &backend.resolved_class_cache,
++            );
++            backend.update_ast(uri, "<?php enum InvoiceController {case Loaded;}");
++            let class = backend.find_or_load_class("InvoiceController").unwrap();
++            assert_eq!(class.kind, crate::types::ClassLikeKind::Enum);
++            return;
++        }
++        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
++            .args(["--exact", "parser::ast_update::incremental_population_tests::incremental_enum_population_keeps_cold_stub_load_on_merge_thread", "--nocapture"])
++            .env(CHILD, "1")
++            .spawn().unwrap();
++        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
++        loop {
++            if let Some(status) = child.try_wait().unwrap() {
++                assert!(
++                    status.success(),
++                    "cold enum population child failed: {status}"
++                );
++                break;
++            }
++            if std::time::Instant::now() >= deadline {
++                child.kill().unwrap();
++                child.wait().unwrap();
++                panic!("incremental enum population deadlocked while loading a cold builtin");
++            }
++            std::thread::sleep(std::time::Duration::from_millis(10));
++        }
++    }
++}

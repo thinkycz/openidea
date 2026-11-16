@@ -4,7 +4,8 @@
  * by `crates/ide-lsp/tests`.
  */
 import type { Locator, Page } from "@playwright/test";
-import type { CompletionItem } from "../src/bindings";
+import type { CompletionItem, Highlight, RenamePreparation, WorkspaceEdit_Deserialize } from "../src/bindings";
+import type { MemoryBackend } from "../src/editor/core/backend";
 import { expect, ipcCalls, openFromTree, stubDesktop, test } from "./fixtures";
 
 const ROOT = "/dev/acme-api";
@@ -27,6 +28,27 @@ async function openSample(page: Page) {
   const editor = await openFromTree(page, "build.gradle.kts");
   await stubDesktop(page);
   return editor;
+}
+
+/** Apply this fixture's returned edits through the real open document and patch path. */
+async function applyRenameToMemoryDocument(page: Page) {
+  await page.evaluate(async () => {
+    const apiPath = "/src/editor/api.ts";
+    const backendPath = "/src/editor/core/backend.ts";
+    const positionsPath = "/src/editor/lsp/positions.ts";
+    const { activeEditor } = await import(/* @vite-ignore */ apiPath);
+    const { docBackend } = await import(/* @vite-ignore */ backendPath);
+    const { textEditsToChanges } = await import(/* @vite-ignore */ positionsPath);
+    window.__ipc.handlers.apply_workspace_edit = ({ edit }) => {
+      const editor = activeEditor();
+      if (!editor) throw new Error("No editor for fixture rename");
+      for (const file of (edit as WorkspaceEdit_Deserialize).files) {
+        if (file.kind !== "edit" || file.path !== editor.ctx.path) throw new Error("Unexpected fixture edit target");
+        (docBackend() as MemoryBackend).patch(editor.ctx.doc, textEditsToChanges(editor.view.state.doc, file.edits));
+      }
+      return null;
+    };
+  });
 }
 
 test("completion lists the server's items and inserts the chosen one", async ({ workbench: page }) => {
@@ -344,7 +366,9 @@ test("⇧F6 renames in place and sends the server's edit to be applied", async (
   const editor = await openSample(page);
   await page.evaluate(
     ({ file, prepared, uses }) => {
-      window.__ipc.handlers.lsp_prepare_rename = () => prepared;
+      window.__ipc.handlers.lsp_prepare_rename_details = () => prepared;
+      window.__ipc.handlers.lsp_document_highlights = () =>
+        uses.map((range) => ({ range, kind: "read" })) satisfies Highlight[];
       window.__ipc.handlers.lsp_rename = (args) => ({
         edit: {
           files: [
@@ -358,20 +382,30 @@ test("⇧F6 renames in place and sends the server's edit to be applied", async (
         incomplete: null,
       });
     },
-    { file: FILE, prepared: range(20, 12, 17), uses: [range(20, 12, 17), range(21, 15, 20)] },
+    {
+      file: FILE,
+      prepared: { range: range(20, 12, 17), placeholder: null } satisfies RenamePreparation,
+      uses: [range(20, 12, 17), range(21, 15, 20)],
+    },
   );
+  await applyRenameToMemoryDocument(page);
   await caretAt(editor, page, "val order: Order", "order");
   await page.keyboard.press("Shift+F6");
   await expect(page.getByText(/Press ⇧F6 to show dialog/)).toBeVisible();
   // The name starts selected; occurrences follow as it's typed.
   await page.keyboard.type("placed");
   await expect(editor.locator(".cm-line", { hasText: "val placed: Order" })).toBeVisible();
+  await expect(editor.locator(".cm-line", { hasText: "return placed.toDto()" })).toBeVisible();
   await page.keyboard.press("Enter");
   await expect.poll(() => ipcCalls(page, "apply_workspace_edit")).toHaveLength(1);
   const [rename] = await ipcCalls(page, "lsp_rename");
   expect(rename).toMatchObject({ pos: at(20, 12), newName: "placed" });
   const [apply] = await ipcCalls(page, "apply_workspace_edit");
   expect(JSON.stringify(apply)).toContain('"new_text":"placed"');
+  expect(await ipcCalls(page, "lsp_prepare_rename_details")).toEqual([expect.objectContaining({ pos: at(20, 12) })]);
+  expect(await ipcCalls(page, "lsp_prepare_rename")).toHaveLength(0);
+  await expect(editor.locator(".cm-line", { hasText: "val placed: Order" })).toBeVisible();
+  await expect(editor.locator(".cm-line", { hasText: "return placed.toDto()" })).toBeVisible();
 });
 
 test("indexed single-file rename previews all anchors and applies only after confirmation", async ({
@@ -380,7 +414,9 @@ test("indexed single-file rename previews all anchors and applies only after con
   const editor = await openSample(page);
   await page.evaluate(
     ({ file, prepared, uses }) => {
-      window.__ipc.handlers.lsp_prepare_rename = () => prepared;
+      window.__ipc.handlers.lsp_prepare_rename_details = () => prepared;
+      window.__ipc.handlers.lsp_document_highlights = () =>
+        uses.map((range) => ({ range, kind: "read" })) satisfies Highlight[];
       window.__ipc.handlers.lsp_rename = (args) => ({
         preview: true,
         edit: {
@@ -389,10 +425,14 @@ test("indexed single-file rename previews all anchors and applies only after con
         },
         incomplete: null,
       });
-      window.__ipc.handlers.apply_workspace_edit = () => null;
     },
-    { file: FILE, prepared: range(20, 12, 17), uses: [range(20, 12, 17), range(21, 15, 20)] },
+    {
+      file: FILE,
+      prepared: { range: range(20, 12, 17), placeholder: null } satisfies RenamePreparation,
+      uses: [range(20, 12, 17), range(21, 15, 20)],
+    },
   );
+  await applyRenameToMemoryDocument(page);
   for (const confirm of [false, true]) {
     await caretAt(editor, page, "val order: Order", "order");
     await page.keyboard.press("Shift+F6");
@@ -401,6 +441,8 @@ test("indexed single-file rename previews all anchors and applies only after con
     await page.keyboard.press("Enter");
     const preview = page.getByRole("dialog", { name: "Rename 'order' to 'placed'" });
     await expect(preview).toBeVisible();
+    await expect(editor.locator(".cm-line", { hasText: "val order: Order" })).toBeVisible();
+    await expect(editor.locator(".cm-line", { hasText: "return order.toDto()" })).toBeVisible();
     await expect(preview.getByText("2 occurrences in 1 file")).toBeVisible();
     expect(await ipcCalls(page, "apply_workspace_edit")).toHaveLength(0);
     await preview.getByRole("button", { name: confirm ? "Do Refactor" : "Cancel", exact: true }).click();
@@ -409,6 +451,10 @@ test("indexed single-file rename previews all anchors and applies only after con
   await expect.poll(() => ipcCalls(page, "apply_workspace_edit")).toHaveLength(1);
   const [apply] = await ipcCalls(page, "apply_workspace_edit");
   expect(apply.edit).toMatchObject({ preconditions: [{ path: FILE, hash: "indexed-snapshot" }] });
+  expect(await ipcCalls(page, "lsp_prepare_rename_details")).toHaveLength(2);
+  expect(await ipcCalls(page, "lsp_prepare_rename")).toHaveLength(0);
+  await expect(editor.locator(".cm-line", { hasText: "val placed: Order" })).toBeVisible();
+  await expect(editor.locator(".cm-line", { hasText: "return placed.toDto()" })).toBeVisible();
 });
 
 test("diagnostics underline the range and ⌥⏎ applies the preferred quick fix", async ({ workbench: page }) => {

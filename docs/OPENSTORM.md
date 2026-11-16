@@ -48,6 +48,39 @@ At that merge checkpoint, source-only slice 101 remained unfinished;
 no candidate 153 adoption or new package was claimed. Area statuses remain 67
 partial/2 user-deferred.
 
+Verification slice 106 (2026-11-16, verified browser rename fixtures): close the
+two inherited Kotlin rename browser failures from slice 105. Both fixtures now
+answer lsp_prepare_rename_details with typed RenamePreparation data, retain the
+placeholder field and supply typed document highlights for linked occurrences.
+The tests assert the current preparation command/coordinates and reject use of
+the old preparation command. No production rename behavior changes.
+
+Strengthen the application boundary: the fixture apply handler feeds returned
+text edits through the existing range conversion and memory backend patch path,
+then the tests verify both declaration and reference text. The previous single-
+file check merely observed apply_workspace_edit being invoked without a handler;
+that could pass even when application failed. The indexed case now checks restored
+original text during preview, Cancel with no apply, confirmation with one apply,
+retained preconditions in the submitted edit and both final replacements. These
+controlled browser fixtures do not execute real server rename or validate disk
+hash preconditions; those remain covered separately by existing actual-host/client
+checks and their limitations.
+
+Evidence: slice 105 browser/baseline logs retain both original failures. Updating
+the prepare response first passes both cases; adding linked-occurrence assertions
+then fails without document highlights, proving the old fixture gap. Final
+artifacts/checks/slice106-browser.log passes all 13 cases without retries.
+Typecheck, lint, format and knip pass. Runtime frontend/Rust/IPC/engine sources are
+unchanged, so reuse slice 105's 12,469 frontend tests / 6 skipped and production
+frontend build, and slice 102's Rust/actual-engine gates. The earlier failed logs
+are preserved as slice106-browser-anchors-red.log and its traces.
+
+Only App 0.1.92 is retained; its executable/engine hashes and strict signature
+remain unchanged. No new app or compiler output, native checks, install, or
+release actions. Slices 104–105 still await a cohesive local package; native UI
+checks remain explicitly user-skipped. All 69 statuses remain 67 partial /
+2 user-deferred. Receipt: artifacts/checks/slice106-receipt.json.
+
 Laravel slice 105 (2026-11-16, verified frontend source): every Routes
 and Views list/target/Back/Retry query waits for the existing shared pending-edit
 barrier before issuing IPC. Check query generation and project identity after the

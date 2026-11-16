@@ -1965,7 +1965,9 @@ pub async fn restore_reviewed_edit(host: &Host, window: &str, group: String, red
     host.blocking(move || {
         let settings = project.settings.effective();
         let mut roots = vec![dunce::canonicalize(&project.root)?];
-        for root in crate::project::content_roots(&settings, &project.root, &project.build_cache_dir()) {
+        for root in
+            crate::project::content_roots(&settings, &project.root, &project.build_cache_dir(), project.is_trusted())
+        {
             roots.push(dunce::canonicalize(root)?);
         }
         for path in project.documents.reviewed_edit_paths(&group, redo)? {

@@ -148,7 +148,7 @@ export const commands = {
 	agentSubscribe: (onEvent: Channel<AgentEvent_Deserialize>) => typedError<AgentTask_Serialize[], IdeError>(__TAURI_INVOKE("agent_subscribe", { onEvent })),
 	agentProviders: () => typedError<AgentProvider[], IdeError>(__TAURI_INVOKE("agent_providers")),
 	/**  Refreshes the model catalog; force bypasses freshness, not the cooldown. */
-	agentRefreshModels: (provider: string, force: boolean) => typedError<AgentModelCatalog, IdeError>(__TAURI_INVOKE("agent_refresh_models", { provider, force })),
+	agentRefreshModels: (provider: string, force: boolean, model: string | null) => typedError<AgentModelCatalog, IdeError>(__TAURI_INVOKE("agent_refresh_models", { provider, force, model })),
 	/**
 	 *  Overrides built-in agent `id`'s command with `command` (its agent file keeps the
 	 *  built-in's driver and arguments), or returns it to auto-detection with `None`.
@@ -378,10 +378,11 @@ export const commands = {
 	docSyncFromDisk: () => typedError<null, IdeError>(__TAURI_INVOKE("doc_sync_from_disk")),
 	docSnapshot: (doc: DocId) => typedError<DocumentInfo, IdeError>(__TAURI_INVOKE("doc_snapshot", { doc })),
 	/**
-	 *  The CodeMirror mode `path` gets when opened (`DocumentInfo::ui_mode`),
-	 *  without opening it: previews of closed files.
+	 *  The language and CodeMirror mode `path` is shown with in an editor, without opening
+	 *  it: previews of closed files and diffs. `first_line` is the shown text's (a revision's)
+	 *  for hashbang detection; without it the file's on disk counts.
 	 */
-	docUiMode: (path: string) => typedError<string | null, IdeError>(__TAURI_INVOKE("doc_ui_mode", { path })),
+	docLanguage: (path: string, firstLine: string | null) => typedError<DocumentLanguage, IdeError>(__TAURI_INVOKE("doc_language", { path, firstLine })),
 	/**  "Reload with Encoding" (`reload`) or "Convert to Encoding"; returns the new encoding and BOM state. */
 	docSetEncoding: (doc: DocId, encoding: string, reload: boolean) => typedError<DocumentEncoding, IdeError>(__TAURI_INVOKE("doc_set_encoding", { doc, encoding, reload })),
 	docSetBom: (doc: DocId, hasBom: boolean) => typedError<DocumentEncoding, IdeError>(__TAURI_INVOKE("doc_set_bom", { doc, hasBom })),
@@ -1898,6 +1899,21 @@ export const commands = {
 	dbConsolePath: (id: string) => typedError<IpcPath, IdeError>(__TAURI_INVOKE("db_console_path", { id })),
 	/**  The query consoles of data source `id`; `create` adds the next one first. */
 	dbConsoles: (id: string, create: boolean) => typedError<IpcPath[], IdeError>(__TAURI_INVOKE("db_consoles", { id, create })),
+	/**  Installed copies of `tool`, newest first. */
+	dbToolInstalls: (tool: DbTool) => typedError<DbToolInstall[], IdeError>(__TAURI_INVOKE("db_tool_installs", { tool })),
+	/**  The version line of the executable at `path`. */
+	dbToolVersion: (path: string) => typedError<string, IdeError>(__TAURI_INVOKE("db_tool_version", { path })),
+	/**  The command line `db_run_tool` would run, without the password. */
+	dbToolPreview: (id: string, executable: string, job: DbToolJob) => typedError<string, IdeError>(__TAURI_INVOKE("db_tool_preview", { id, executable, job })),
+	/**  What made the dump at `path` (from its first bytes), so a restore picks the right tool. */
+	dbDumpKind: (path: string) => typedError<DbDumpKind, IdeError>(__TAURI_INVOKE("db_dump_kind", { path })),
+	/**
+	 *  Runs `job` against target `id` and streams the tool's output; returns its exit code. Stays
+	 *  in the desktop shell like [`db_export_file`]: the paths in `job` are local.
+	 */
+	dbRunTool: (request: RequestId, id: string, executable: string, job: DbToolJob, onOutput: Channel<DbToolLine[]>) => typedError<number | null, IdeError>(__TAURI_INVOKE("db_run_tool", { request, id, executable, job, onOutput })),
+	/**  `server_version_num` of the PostgreSQL server of target `id` (connects first). */
+	dbServerVersion: (id: string) => typedError<number, IdeError>(__TAURI_INVOKE("db_server_version", { id })),
 };
 
 /* Types */
@@ -2746,6 +2762,11 @@ export type AppearanceSettings_Deserialize = {
 	mainMenuStyle?: string,
 	/**  A lone Alt press focuses or opens the main menu (IDEA `ide.windows.main.menu.focus.on.alt`). */
 	mainMenuAlt?: boolean,
+	/**
+	 *  Settings open in a native window of their own (IDEA parity); off opens them
+	 *  as a dialog inside the project window, which needs no new webview.
+	 */
+	settingsInSeparateWindow?: boolean,
 	/**  `subpixel` | `greyscale` | `none` */
 	ideAntialiasing?: string,
 	editorAntialiasing?: string,
@@ -2810,6 +2831,11 @@ export type AppearanceSettings_Serialize = {
 	mainMenuStyle: string,
 	/**  A lone Alt press focuses or opens the main menu (IDEA `ide.windows.main.menu.focus.on.alt`). */
 	mainMenuAlt: boolean,
+	/**
+	 *  Settings open in a native window of their own (IDEA parity); off opens them
+	 *  as a dialog inside the project window, which needs no new webview.
+	 */
+	settingsInSeparateWindow: boolean,
 	/**  `subpixel` | `greyscale` | `none` */
 	ideAntialiasing: string,
 	editorAntialiasing: string,
@@ -3188,6 +3214,8 @@ export type ChangedFile = {
 	path: string,
 	kind: ChangeKind,
 	oldPath: string | null,
+	/**  Set when the entry is a symbolic link (git mode `120000`); only revision diffs fill it. */
+	link?: LinkTarget | null,
 };
 
 export type Changelist = {
@@ -4139,6 +4167,25 @@ export type DbDriver = "sqlite" | "postgres" |
 /**  Oracle Database (pure-Rust thin driver, no client library). */
 "oracle" | "snowflake";
 
+export type DbDumpContent = "all" | "schemaOnly" | "dataOnly";
+
+export type DbDumpFormat = 
+/**  SQL text, restored with `psql`. */
+"plain" | "custom" | 
+/**  A directory of files; the only format `pg_dump` writes in parallel. */
+"directory" | "tar";
+
+/**  What made a dump, read from its first bytes (a directory: its `toc.dat`). */
+export type DbDumpKind = 
+/**  `pg_dump` custom or tar archive, or a directory archive: `pg_restore`. */
+"postgresArchive" | 
+/**  Plain SQL from `pg_dump`: `psql`. */
+"postgresSql" | 
+/**  `mysqldump` / `mariadb-dump`: not for the PostgreSQL tools. */
+"mysqlSql" | "unknown";
+
+export type DbDumpStatements = "copy" | "inserts" | "columnInserts";
+
 /**  `schema.table (columns) REFERENCES ref_schema.ref_table (ref_columns)`. */
 export type DbForeignKey = {
 	schema: string,
@@ -4203,6 +4250,37 @@ export type DbPackageInfo = {
 	name: string,
 };
 
+/**  Name lists hold `pg_dump` patterns (`*`, `?`, quoted names). */
+export type DbPgDumpOptions = {
+	format: DbDumpFormat,
+	statements: DbDumpStatements,
+	content: DbDumpContent,
+	schemas: string[],
+	tables: string[],
+	excludeTables: string[],
+	/**  Plain format only: archives get DROP / CREATE at restore. */
+	clean: boolean,
+	ifExists: boolean,
+	create: boolean,
+	noOwner: boolean,
+	noPrivileges: boolean,
+	/**  Directory format only. */
+	jobs: number,
+};
+
+export type DbPgRestoreOptions = {
+	content: DbDumpContent,
+	schemas: string[],
+	clean: boolean,
+	ifExists: boolean,
+	noOwner: boolean,
+	noPrivileges: boolean,
+	singleTransaction: boolean,
+	exitOnError: boolean,
+	/**  Ignored with a single transaction, which `pg_restore` cannot split. */
+	jobs: number,
+};
+
 /**  One operation of a plan; `parent` indexes the plan's node list (roots: `None`). */
 export type DbPlanNode = {
 	parent: number | null,
@@ -4226,6 +4304,11 @@ export type DbPlanProperty = {
 export type DbProperty = {
 	name?: string,
 	value?: string,
+};
+
+export type DbPsqlOptions = {
+	singleTransaction: boolean,
+	stopOnError: boolean,
 };
 
 export type DbQueryResult = {
@@ -4382,6 +4465,26 @@ export type DbTablePage = {
 	result: DbQueryResult,
 	details: DbTableDetails,
 	offset: number | null,
+};
+
+export type DbTool = "pgDump" | "pgRestore" | "psql";
+
+/**  An installed copy of a tool. */
+export type DbToolInstall = {
+	path: string,
+	/**  First line of `--version`, e.g. `pg_dump (PostgreSQL) 17.2`. */
+	version: string,
+};
+
+/**  A run of a client tool: which one, the file it writes or reads, and its options. */
+export type DbToolJob = { tool: "pgDump"; file: string; options: DbPgDumpOptions } | 
+/**  `file`: an archive, or a directory archive. */
+{ tool: "pgRestore"; file: string; options: DbPgRestoreOptions } | { tool: "psql"; file: string; options: DbPsqlOptions };
+
+/**  A line the tool wrote. */
+export type DbToolLine = {
+	stderr: boolean,
+	text: string,
 };
 
 export type DbTriggerInfo = {
@@ -4995,6 +5098,13 @@ export type DocumentInfo = {
 	uiMode?: string | null,
 };
 
+/**  The language and CodeMirror mode a file is shown with, like `DocumentInfo`. */
+export type DocumentLanguage = {
+	language: LanguageId,
+	/**  CodeMirror mode replacing the language's own one (`DocumentInfo::ui_mode`). */
+	uiMode?: string | null,
+};
+
 /**
  *  A link in a document (`textDocument/documentLink`): an HTML `href`, a
  *  Markdown link, an `#include`, a JSON `$schema`…
@@ -5165,6 +5275,10 @@ export type EditorSettings_Deserialize = {
 	docstringFormat?: string,
 	/**  Color Scheme › Language Defaults › Rainbow brackets: `()`, `[]`, `{}` coloured by depth. */
 	rainbowBrackets?: boolean,
+	/**  The bracket kinds rainbow brackets colour. */
+	rainbowBracketKinds?: RainbowBracketKinds,
+	/**  Colours the rainbow bracket depth cycles through (2–5). */
+	rainbowBracketColors?: number,
 	ligatures?: boolean,
 	/**  Fallback font for glyphs the main font lacks; empty = none. */
 	fallbackFont?: string,
@@ -5219,6 +5333,10 @@ export type EditorSettings_Serialize = {
 	docstringFormat: string,
 	/**  Color Scheme › Language Defaults › Rainbow brackets: `()`, `[]`, `{}` coloured by depth. */
 	rainbowBrackets: boolean,
+	/**  The bracket kinds rainbow brackets colour. */
+	rainbowBracketKinds: RainbowBracketKinds,
+	/**  Colours the rainbow bracket depth cycles through (2–5). */
+	rainbowBracketColors: number,
 	ligatures: boolean,
 	/**  Fallback font for glyphs the main font lacks; empty = none. */
 	fallbackFont: string,
@@ -5514,6 +5632,15 @@ export type FileDecoration = {
 	note?: string | null,
 	/**  `[[contributes.fileIcons]]` id for this file or folder (API 1.8 `set-file-icon`). */
 	icon?: string | null,
+};
+
+/**  A diff opened by a plugin (API 1.10): `None` is a side where the file doesn't exist. */
+export type FileDiff = {
+	left: string | null,
+	right: string | null,
+	leftLabel: string | null,
+	rightLabel: string | null,
+	title: string | null,
 };
 
 export type FileEdit = { kind: "edit"; path: IpcPath; edits: TextEdit[]; 
@@ -5952,6 +6079,11 @@ export type GitOperation =
 export type GitSettings = {
 	/**  Show blame after the current editor line. */
 	inlineBlame?: boolean,
+	/**
+	 *  A click (or Enter / Space) on the inline blame label opens its commit; off, the
+	 *  label is plain text and a click on it places the caret as past the line end.
+	 */
+	inlineBlameClickable?: boolean,
 	showBranchInProjectView?: boolean,
 	/**  Path to the git executable; empty = auto-detect. */
 	executable?: string,
@@ -5963,6 +6095,8 @@ export type GitSettings = {
 	warnDetachedHead?: boolean,
 	/**  Background check for incoming commits: `auto` | `always` | `never`. */
 	incomingCheck?: string,
+	/**  Minutes between background checks for incoming commits. */
+	incomingCheckInterval?: number,
 	/**  Branch name globs, `;`/`,`-separated; force push to them is prohibited. */
 	protectedBranches?: string,
 	/**  Initial state of Commit Options › Sign-off Commit. */
@@ -6449,7 +6583,12 @@ export type IdeEvent =
 /**  Project window membership or selection changed. */
 { type: "windowGroupsChanged" } | 
 /**  A window entered or left full screen, itself or as a member of a full-screen window group. */
-{ type: "windowFullscreenChanged" } | { type: "projectTrustChanged"; root: IpcPath; trusted: boolean } | 
+{ type: "windowFullscreenChanged" } | 
+/**
+ *  This remote window's connection to its host ended on its own (network loss, the host or
+ *  its server went away); the window's project is unreachable until it reconnects.
+ */
+{ type: "remoteConnectionLost"; host: string } | { type: "projectTrustChanged"; root: IpcPath; trusted: boolean } | 
 /**  Files or directories changed on disk (after debouncing, ignore rules applied). */
 { type: "fsChanged"; created: IpcPath[]; modified: IpcPath[]; removed: IpcPath[]; 
 /**  Subtrees whose ignore rules changed, after the matchers were rebuilt. */
@@ -6655,6 +6794,8 @@ export type InlayHintsSettings = {
 	/**  Hints of other kinds (chaining, closing labels…). */
 	other?: boolean,
 	disabledLanguages?: string[],
+	/**  Code vision as a whole (usages, author and language-server lenses); the switches below apply while it is on. */
+	codeVision?: boolean,
 	/**  Code vision: usages above declarations. */
 	codeVisionUsages?: boolean,
 	/**  Code vision: last author of a declaration (VCS blame) beside its usages. */
@@ -7216,6 +7357,8 @@ export type LanguageInfo_Deserialize = {
 	firstLine?: string | null,
 	/**  Content of a new scratch file; `$END$` marks where the caret goes. */
 	scratchTemplate?: string | null,
+	/**  Syntax nodes whose `<` `>` rainbow brackets colour (Color Scheme › Rainbow brackets). */
+	rainbowBrackets?: RainbowBracketNodes,
 };
 
 /**  The UI-facing view of a language. */
@@ -7237,6 +7380,8 @@ export type LanguageInfo_Serialize = {
 	firstLine?: string | null,
 	/**  Content of a new scratch file; `$END$` marks where the caret goes. */
 	scratchTemplate?: string | null,
+	/**  Syntax nodes whose `<` `>` rainbow brackets colour (Color Scheme › Rainbow brackets). */
+	rainbowBrackets?: RainbowBracketNodes,
 };
 
 export type LanguageServerSettings = LanguageServerSettings_Serialize | LanguageServerSettings_Deserialize;
@@ -7509,6 +7654,11 @@ export type LineMatch = {
 	/**  Column offset of `text` in the real line (non-zero when truncated). */
 	textOffset: number,
 };
+
+/**  What a symbolic link in a revision points to, resolved inside that revision's tree. */
+export type LinkTarget = "dir" | "file" | 
+/**  Dangling, outside the repository (absolute or above its root), or a link loop. */
+"unresolved";
 
 /**  Settings › System Settings › Caches: where the local data lives. */
 export type LocalDataInfo = {
@@ -8313,6 +8463,10 @@ export type NotificationSettings = {
 	sound?: boolean,
 	/**  Mirror balloon notifications to the OS when no OpenIDEA window is focused. */
 	systemNotifications?: boolean,
+	/**  Terminal command completions (#3712): `off` | `longRunning` | `all`. */
+	terminalCompletion?: string,
+	/**  `longRunning`: the run time a finished command must reach, in seconds. */
+	terminalThresholdSeconds?: number,
 	/**  Group id → display; groups not listed use their default. */
 	groups?: { [key in string]: NotificationGroupSettings },
 };
@@ -8342,6 +8496,8 @@ export type OpenProject = {
 	root: string,
 	/**  Open in the calling window. */
 	current: boolean,
+	/**  Where the project lives when the window is connected to a remote host (`root` is then a path there). */
+	remote: RemoteTarget | null,
 };
 
 /**  A node of a document outline (Structure tool window, breadcrumbs). */
@@ -8541,7 +8697,7 @@ export type PluginEvent_Deserialize =
 /**  Reply to a content action in this window. */
 ({ type: "contentTabReply"; pluginId: string; requestId: string; reply: ContentTabReply }) & { actions?: never; arg?: never; args?: never; body?: never; cancellable?: never; capabilities?: never; chain?: never; channel?: never; column?: never; connection?: never; cwd?: never; diff?: never; done?: never; fileName?: never; id?: never; item?: never; key?: never; level?: never; line?: never; log?: never; message?: never; newWindow?: never; path?: never; program?: never; prompt?: never; promptId?: never; ranges?: never; request?: never; reveal?: never; root?: never; selection?: never; sets?: never; taskId?: never; text?: never; theme?: never; title?: never; total?: never; updates?: never; url?: never; value?: never; view?: never } | 
 /**  Open two texts in this window's diff viewer. */
-({ type: "openDiff"; pluginId: string; diff: ContentDiff; fileName: string | null }) & { actions?: never; arg?: never; args?: never; body?: never; cancellable?: never; capabilities?: never; chain?: never; channel?: never; column?: never; connection?: never; cwd?: never; done?: never; id?: never; item?: never; key?: never; level?: never; line?: never; log?: never; message?: never; newWindow?: never; path?: never; program?: never; prompt?: never; promptId?: never; ranges?: never; reply?: never; request?: never; requestId?: never; reveal?: never; root?: never; selection?: never; sets?: never; taskId?: never; text?: never; theme?: never; title?: never; total?: never; updates?: never; url?: never; value?: never; view?: never } | 
+({ type: "openDiff"; pluginId: string; diff: FileDiff; fileName: string | null }) & { actions?: never; arg?: never; args?: never; body?: never; cancellable?: never; capabilities?: never; chain?: never; channel?: never; column?: never; connection?: never; cwd?: never; done?: never; id?: never; item?: never; key?: never; level?: never; line?: never; log?: never; message?: never; newWindow?: never; path?: never; program?: never; prompt?: never; promptId?: never; ranges?: never; reply?: never; request?: never; requestId?: never; reveal?: never; root?: never; selection?: never; sets?: never; taskId?: never; text?: never; theme?: never; title?: never; total?: never; updates?: never; url?: never; value?: never; view?: never } | 
 /**  Plugins, their status or their contributions changed: re-fetch `plugin_list`. */
 ({ type: "commandsChanged" }) & { actions?: never; arg?: never; args?: never; body?: never; cancellable?: never; capabilities?: never; chain?: never; channel?: never; column?: never; connection?: never; cwd?: never; diff?: never; done?: never; fileName?: never; id?: never; item?: never; key?: never; level?: never; line?: never; log?: never; message?: never; newWindow?: never; path?: never; pluginId?: never; program?: never; prompt?: never; promptId?: never; ranges?: never; reply?: never; request?: never; requestId?: never; reveal?: never; root?: never; selection?: never; sets?: never; taskId?: never; text?: never; theme?: never; title?: never; total?: never; updates?: never; url?: never; value?: never; view?: never } | 
 /**  Complete replacement of one plugin's project-scoped decorations. */
@@ -8644,7 +8800,7 @@ export type PluginEvent_Serialize =
 /**  Reply to a content action in this window. */
 ({ type: "contentTabReply"; pluginId: string; requestId: string; reply: ContentTabReply }) & { actions?: never; arg?: never; args?: never; body?: never; cancellable?: never; capabilities?: never; chain?: never; channel?: never; column?: never; connection?: never; cwd?: never; diff?: never; done?: never; fileName?: never; id?: never; item?: never; key?: never; level?: never; line?: never; log?: never; message?: never; newWindow?: never; path?: never; program?: never; prompt?: never; promptId?: never; ranges?: never; request?: never; reveal?: never; root?: never; selection?: never; sets?: never; taskId?: never; text?: never; theme?: never; title?: never; total?: never; updates?: never; url?: never; value?: never; view?: never } | 
 /**  Open two texts in this window's diff viewer. */
-({ type: "openDiff"; pluginId: string; diff: ContentDiff; fileName: string | null }) & { actions?: never; arg?: never; args?: never; body?: never; cancellable?: never; capabilities?: never; chain?: never; channel?: never; column?: never; connection?: never; cwd?: never; done?: never; id?: never; item?: never; key?: never; level?: never; line?: never; log?: never; message?: never; newWindow?: never; path?: never; program?: never; prompt?: never; promptId?: never; ranges?: never; reply?: never; request?: never; requestId?: never; reveal?: never; root?: never; selection?: never; sets?: never; taskId?: never; text?: never; theme?: never; title?: never; total?: never; updates?: never; url?: never; value?: never; view?: never } | 
+({ type: "openDiff"; pluginId: string; diff: FileDiff; fileName: string | null }) & { actions?: never; arg?: never; args?: never; body?: never; cancellable?: never; capabilities?: never; chain?: never; channel?: never; column?: never; connection?: never; cwd?: never; done?: never; id?: never; item?: never; key?: never; level?: never; line?: never; log?: never; message?: never; newWindow?: never; path?: never; program?: never; prompt?: never; promptId?: never; ranges?: never; reply?: never; request?: never; requestId?: never; reveal?: never; root?: never; selection?: never; sets?: never; taskId?: never; text?: never; theme?: never; title?: never; total?: never; updates?: never; url?: never; value?: never; view?: never } | 
 /**  Plugins, their status or their contributions changed: re-fetch `plugin_list`. */
 ({ type: "commandsChanged" }) & { actions?: never; arg?: never; args?: never; body?: never; cancellable?: never; capabilities?: never; chain?: never; channel?: never; column?: never; connection?: never; cwd?: never; diff?: never; done?: never; fileName?: never; id?: never; item?: never; key?: never; level?: never; line?: never; log?: never; message?: never; newWindow?: never; path?: never; pluginId?: never; program?: never; prompt?: never; promptId?: never; ranges?: never; reply?: never; request?: never; requestId?: never; reveal?: never; root?: never; selection?: never; sets?: never; taskId?: never; text?: never; theme?: never; title?: never; total?: never; updates?: never; url?: never; value?: never; view?: never } | 
 /**  Complete replacement of one plugin's project-scoped decorations. */
@@ -9422,6 +9578,27 @@ export type PythonSettings = {
 	showInterpreterPaths?: boolean,
 };
 
+/**  Color Scheme › Language Defaults › Rainbow brackets: which delimiters are coloured. */
+export type RainbowBracketKinds = {
+	round?: boolean,
+	square?: boolean,
+	curly?: boolean,
+	/**  Type argument / parameter delimiters and markup tags, where the syntax tree marks them. */
+	angle?: boolean,
+};
+
+/**
+ *  `[rainbow-brackets]` of a language definition: node names of its editor (Lezer)
+ *  grammar, so angle brackets are coloured only where the syntax tree says they
+ *  delimit something, never in comparisons or shifts.
+ */
+export type RainbowBracketNodes = {
+	/**  Nodes spanning `<` … `>` whose delimiters pair up: type argument and parameter lists. */
+	angle?: string[],
+	/**  Markup tags (`<a>`, `</a>`, `<a/>`); an element's start and end tags pair up. */
+	tags?: string[],
+};
+
 /**  Half-open range `[start, end)`. */
 export type Range = {
 	start: Pos,
@@ -9773,6 +9950,8 @@ export type RevisionChange = {
 	before: string | null,
 	/**  Commit holding the new content; `None` when the file was deleted. */
 	after: string | null,
+	/**  Set when the entry is a symbolic link, resolved at `after` (`before`, for a deletion). */
+	link?: LinkTarget | null,
 };
 
 /**  How a grant is presented (plan 4.2). */

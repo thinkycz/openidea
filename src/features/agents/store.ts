@@ -102,6 +102,8 @@ interface AgentsState {
   providers: AgentProvider[];
   modelCatalogs: Map<string, AgentModelCatalog>;
   modelRequests: Set<string>;
+  /** Last New Task discovery target, so another model never inherits its error/cooldown. */
+  modelRequestTargets: Map<string, string | null>;
   /** The usage limits each agent last reported for its account, by provider. */
   limits: Map<string, AgentLimit[]>;
   draft: Draft;
@@ -187,6 +189,7 @@ export const useAgents = create<AgentsState>(() => ({
   limits: new Map(),
   modelCatalogs: new Map(),
   modelRequests: new Set(),
+  modelRequestTargets: new Map(),
   draft: savedDraft(load<Partial<Draft>>(DRAFT_KEY, {})),
   composers: new Map(),
   lastComposer: HOME,
@@ -335,7 +338,16 @@ function setUnread(task: string, value: boolean) {
 
 function markUnread(task: string) {
   const current = useAgents.getState().tasks.get(task);
-  if (current && current.status !== "archived" && !viewing(task)) setUnread(task, true);
+  if (current && current.status !== "archived" && !viewing(task) && !quietTasks.has(task)) setUnread(task, true);
+}
+
+/** Tasks the IDE runs on its own account (a generated commit message): no notifications, no unread mark. */
+const quietTasks = new Set<string>();
+
+export function runQuietly(task: string): () => void {
+  quietTasks.add(task);
+  setUnread(task, false);
+  return () => void quietTasks.delete(task);
 }
 
 export function markVisible(task: string): () => void {
@@ -382,18 +394,29 @@ function applyModelCatalog(catalog: AgentModelCatalog) {
 }
 
 /** Refreshes only the New Task agent; discovery failures stay beside the cached choices. */
-export async function refreshModels(provider = selectedProvider()?.id, force = true): Promise<void> {
+export async function refreshModels(
+  provider = selectedProvider()?.id,
+  force = true,
+  model?: string | null,
+): Promise<void> {
   const selected = selectedProvider();
   if (!provider || !selected?.installed || selected.id !== provider || useProject.getState().project?.trusted === false)
     return;
   const state = useAgents.getState();
   const catalog = state.modelCatalogs.get(provider);
+  model ??= draftConfig(selected, state.draft).find((o) => o.category === "model")?.current ?? null;
+  const missingModelSettings =
+    model !== null && !Object.hasOwn(catalog?.thoughtLevels ?? selected.thoughtLevels ?? {}, model);
+  const requestTarget = state.modelRequestTargets.get(provider);
   const launch = launchKey(selected);
   const pending = modelFlights.get(provider);
   if (
     (pending?.launch === launch && pending.generation === generation && pending.draftGeneration === draftGeneration) ||
     catalog?.refreshing ||
-    (force && catalog?.retryAtMs != null && catalog.retryAtMs > Date.now())
+    (force &&
+      (requestTarget === undefined || requestTarget === model || (!missingModelSettings && !catalog?.error)) &&
+      catalog?.retryAtMs != null &&
+      catalog.retryAtMs > Date.now())
   )
     return;
   const gen = generation;
@@ -401,7 +424,10 @@ export async function refreshModels(provider = selectedProvider()?.id, force = t
   const root = useProject.getState().project?.root;
   const flight = { launch, generation: gen, draftGeneration: draftGen };
   modelFlights.set(provider, flight);
-  useAgents.setState((s) => ({ modelRequests: new Set(s.modelRequests).add(provider) }));
+  useAgents.setState((s) => ({
+    modelRequests: new Set(s.modelRequests).add(provider),
+    modelRequestTargets: new Map(s.modelRequestTargets).set(provider, model),
+  }));
   const current = () =>
     gen === generation &&
     root === useProject.getState().project?.root &&
@@ -409,7 +435,7 @@ export async function refreshModels(provider = selectedProvider()?.id, force = t
     selectedProvider()?.id === provider &&
     launchKey(selectedProvider()!) === launch;
   try {
-    const result = await call(commands.agentRefreshModels(provider, force));
+    const result = await call(commands.agentRefreshModels(provider, force, model));
     // A streamed status/completion is newer than the snapshot returned by the command.
     if (current() && useAgents.getState().modelCatalogs.get(provider) === catalog) applyModelCatalog(result);
   } catch (e) {
@@ -536,6 +562,7 @@ export function disconnect() {
     groupedChanges: new Map(),
     modelCatalogs: new Map(),
     modelRequests: new Set(),
+    modelRequestTargets: new Map(),
     organize: EMPTY_ORGANIZE,
     organizeRoot: null,
     docked: null,
@@ -642,7 +669,7 @@ function onEvent(e: AgentEvent) {
 
 /** In-app balloon for an Attention event; OS delivery goes through the general balloon path. */
 function notifyAttention(taskId: string, reason: "finished" | "input" | "failed") {
-  if (viewing(taskId)) return;
+  if (viewing(taskId) || quietTasks.has(taskId)) return;
   const task = useAgents.getState().tasks.get(taskId);
   const title = task?.title ?? "Agent";
   const body =
@@ -776,12 +803,16 @@ export async function refreshProviders() {
   if (!providers || gen !== generation || root !== useProject.getState().project?.root) return;
   useAgents.setState((s) => {
     const modelCatalogs = new Map(s.modelCatalogs);
+    const modelRequestTargets = new Map(s.modelRequestTargets);
     for (const [id] of modelCatalogs) {
       const previous = s.providers.find((p) => p.id === id);
       const provider = providers.find((p) => p.id === id);
-      if (!provider || (previous && launchKey(previous) !== launchKey(provider))) modelCatalogs.delete(id);
+      if (!provider || (previous && launchKey(previous) !== launchKey(provider))) {
+        modelCatalogs.delete(id);
+        modelRequestTargets.delete(id);
+      }
     }
-    return { providers, modelCatalogs };
+    return { providers, modelCatalogs, modelRequestTargets };
   });
 }
 

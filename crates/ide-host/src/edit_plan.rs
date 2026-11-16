@@ -42,7 +42,7 @@ impl Project {
         let mut hash = blake3::Hasher::new();
         hash.update(&serde_json::to_vec(&settings).map_err(|e| IdeError::internal(e.to_string()))?);
         let mut roots = vec![self.root.clone()];
-        roots.extend(crate::project::content_roots(&settings, &self.root, &self.build_cache_dir()));
+        roots.extend(crate::project::content_roots(&settings, &self.root, &self.build_cache_dir(), self.is_trusted()));
         roots.sort();
         roots.dedup();
         let mut files = Vec::new();
@@ -103,7 +103,7 @@ impl Project {
         }
         let settings = self.settings.effective();
         let mut roots = vec![dunce::canonicalize(&self.root)?];
-        for root in crate::project::content_roots(&settings, &self.root, &self.build_cache_dir()) {
+        for root in crate::project::content_roots(&settings, &self.root, &self.build_cache_dir(), self.is_trusted()) {
             roots.push(dunce::canonicalize(root)?);
         }
         for (source, target) in ide_workspace::Documents::reviewed_edit_targets(edit)? {

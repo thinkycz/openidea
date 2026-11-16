@@ -15,6 +15,50 @@ slice, commit and push it, and retain only the latest generated app. Native UI
 cases remain deferred/unverified; earlier native-first blocking checkpoints are
 historical and no longer prevent independent implementation.
 
+Upstream merge slice120 (2026-11-16, automated acceptance verified): merge39 commits
+from2d85e745e through5a0bd7d1f from l0ng-ai/openidea. Import editor rainbow
+bracket/markup controls, Markdown fence highlighting, Code Vision controls,
+Git navigation/pickers/blame/incoming fixes, remote reconnect, terminal completion
+notifications, explicit database dump/restore, agent discovery/commit-message
+support, scoped MCP operations and plugin API1.10 build graphs/Java-agent support.
+Exclude921378d53's new Java stream tracing and the new plugin Java-agent injection
+into debugger launches to preserve the user-deferred debugger expansion boundary.
+Plugin Java agents remain available to explicit Run configurations. Retain existing
+debugger fixes without claiming new acceptance.
+
+Resolve conflicts by retaining PHPantom resource configuration beside upstream's
+Vue module-resolution adapter, trust-aware Maven roots beside guarded edits/history,
+external-save regression beside hashbang detection, file-move notifications beside
+the richer document-language query, and existing rainbow-bracket test instrumentation.
+Regenerate IPC bindings/command snapshot; do not hand-edit generated bindings.
+Preserve OpenStorm0.1.96 identity, default PHPantom156, disabled upstream updates,
+reviewed edit/freshness checks, save-conflict protection and project compatibility.
+Initial binding generation caught an over-applied trust argument on a Maven
+profile query; correct that call. The first frontend run reports13018 passes/
+6 skips and one stale generated theme-reference failure. Regenerate the reference
+for upstream's two new rainbow tokens; the full rerun passes13019/6 skipped.
+Typecheck/lint/format/knip and production build with Safari15.4 startup API and
+bundle syntax checks pass. Rust workspace5047 passes/188 ignored/1 excluded
+(`http_list_and_run_require_confirmation`, unchanged environment-fixture approval
+boundary); all-target workspace Clippy and Rustfmt pass. All71 actual PHPantom156
+client/host checks pass with fixture originals unchanged. All75 controlled-browser
+cases pass, including completion Enter/Tab, Unicode edits, undo/redo, explicit save,
+Laravel navigation, stale displayed results and reviewed actions. Browser mocks
+and CLI/library checks do not establish native UI or real-service acceptance.
+Generated command comparison retains checked saves, reviewed history and every
+existing PHP/Laravel command; doc_language replaces doc_ui_mode and six explicit
+database-tool commands are added. Evidence: artifacts/checks/upstream-5a0-gates.json,
+upstream-5a0-workspace-counts.json, upstream-5a0-command-proof.json,
+upstream-5a0-client-host.json, upstream-5a0-browser.json and their logs.
+
+Native checks remain explicitly skipped. No new app is requested for this merge;
+retain only artifacts/batches/0.1.96/OpenStorm.app and remove gate compiler outputs
+and frontend dist after validation. Remove28,035,116KiB of owned Cargo output
+and68,282,910 bytes of frontend dist; retain the sole App96 with its original
+805299e3fc2beba04c43ba412f5769ab4f77daa55dbaeda0a86dd2e95625a750
+main executable hash. Final typecheck/format/diff checks pass. Retention evidence:
+artifacts/checks/upstream-5a0-retention.json. All69-area statuses remain unchanged.
+
 Packaging slice119 (2026-11-16, verified local development package): promote
 exact PHPantom156 resources/source provenance after117's engine gates and118's
 71 actual client/host checks. Recheck156 patch checksums and the cached source

@@ -245,9 +245,17 @@ impl crate::Host {
     pub async fn refresh_project_trust(&self) -> IdeResult<()> {
         for project in self.projects().into_iter().filter(|p| !p.light) {
             let trusted = self.trust.window_trusted(&project.root).unwrap_or(false);
+            let roots = project.content_roots();
             let previous = project.trusted.swap(trusted, std::sync::atomic::Ordering::AcqRel);
             if previous == trusted {
                 continue;
+            }
+            // Maven reactor modules outside the project are content roots of a trusted project only.
+            if project.content_roots() != roots {
+                project.refresh_index_scope();
+                let p = project.clone();
+                tokio::task::spawn_blocking(move || p.refresh_repositories());
+                project.sink.emit(ide_core::IdeEvent::ProjectRootsChanged { root: project.root.clone().into() });
             }
             if let Some(bridge) = &project.kotlin_bridge {
                 bridge.schedule();
@@ -324,6 +332,7 @@ pub fn restricted_command_allowed(cmd: &str) -> bool {
             | "doc_edit"
             | "doc_folding"
             | "doc_highlights"
+            | "doc_language"
             | "doc_open"
             | "doc_open_untitled"
             | "doc_open_virtual"
@@ -338,7 +347,6 @@ pub fn restricted_command_allowed(cmd: &str) -> bool {
             | "doc_set_line_ending"
             | "doc_snapshot"
             | "doc_sync_from_disk"
-            | "doc_ui_mode"
             | "syntax_errors"
             | "syntax_expression_at"
             | "syntax_identifiers"

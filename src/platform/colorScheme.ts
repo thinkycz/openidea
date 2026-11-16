@@ -313,7 +313,7 @@ const BASE_ATTRIBUTES: readonly AttributeDef[] = [
   syn("markupTag", "Markup › Tag", [LD], "tag"),
   syn("markupAttribute", "Markup › Attribute", [LD], "attribute"),
   ...[1, 2, 3, 4, 5].map((n) => syn(`semantic${n}`, `Semantic highlighting › Color ${n}`, [LD], `rainbow-${n}`)),
-  ...[1, 2, 3].map((n) => syn(`bracket${n}`, `Rainbow brackets › Level ${n}`, [LD], `bracket-${n}`)),
+  ...[1, 2, 3, 4, 5].map((n) => syn(`bracket${n}`, `Rainbow brackets › Level ${n}`, [LD], `bracket-${n}`)),
 
   // Python's tree mirrors PyCharm's colour page (PythonColorsPage.java): every key the editor can
   // restyle, in the page's order. Language-scoped like java.*: shared-token attributes reuse the
@@ -771,7 +771,9 @@ export function schemeCss(
     ]
       .filter(([k, v]) => /^--[\w-]+$/.test(k) && SAFE.test(v))
       .map(([k, v]) => `  ${k}: ${v} !important;`);
-    if (languageBody.length) css += `.cm-editor[data-language="${language}"] {\n${languageBody.join("\n")}\n}\n`;
+    // The editor of that language, and a block of it in another editor (a Markdown code fence).
+    if (languageBody.length)
+      css += `.cm-editor[data-language="${language}"], .cm-editor [data-language="${language}"] {\n${languageBody.join("\n")}\n}\n`;
   }
   return css;
 }

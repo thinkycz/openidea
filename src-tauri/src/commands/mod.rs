@@ -217,7 +217,7 @@ pub fn builder() -> tauri_specta::Builder<tauri::Wry> {
         doc::doc_save_all,
         doc::doc_sync_from_disk,
         doc::doc_snapshot,
-        doc::doc_ui_mode,
+        doc::doc_language,
         doc::doc_set_encoding,
         doc::doc_set_bom,
         doc::doc_set_line_ending,
@@ -789,5 +789,11 @@ pub fn builder() -> tauri_specta::Builder<tauri::Wry> {
         db::db_apply_edits,
         db::db_console_path,
         db::db_consoles,
+        db::db_tool_installs,
+        db::db_tool_version,
+        db::db_tool_preview,
+        db::db_dump_kind,
+        db::db_run_tool,
+        db::db_server_version,
     ])
 }

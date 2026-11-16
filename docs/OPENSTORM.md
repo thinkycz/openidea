@@ -48,6 +48,57 @@ At that merge checkpoint, source-only slice 101 remained unfinished;
 no candidate 153 adoption or new package was claimed. Area statuses remain 67
 partial/2 user-deferred.
 
+Laravel slice 102 (2026-11-16, verified development resource): engine 153 is
+promoted into application development resources after 58 actual PHP host/client
+checks pass both before and after final source gates. The exact same new host
+test executable fails two cases with 152 and passes both with 153: 152 reports no
+implicit handler usages and offers an unsafe partial `__invoke` rename.
+
+Cross-file Composer fixtures validate exact UTF16 reference positions after a Unicode route
+URI, aliases/class constants, named/parenthesized actions, inherited handlers and
+unrelated-method exclusions. References and CodeLens command positions agree.
+Unsaved route rebinding refreshes 4→2 base-family associations, 1→2 other-class
+associations and 0→1 cached uppercase declarations, including restart. A separate
+ordinary method call establishes existing method-family scope: override references
+remain in the family, while definition navigation follows an unsaved override
+and its restoration. Class-constant definition navigation keeps its PHP class.
+All disk originals remain unchanged during these unsaved operations.
+
+Checked rename refuses the `__invoke` contract without changing buffers or disk.
+A normal class rename returns a guarded multi-file preview, preserves the import
+alias, includes a PSR4 file move and updates a closed caller. A later external
+caller edit refuses that plan before any writes. A fresh plan applies, and its
+actual edited files parse and execute through the pinned Laravel router and PHP
+caller. Shared Undo/Redo restores disk bytes, original unsaved route text/dirty
+state and the moved document's identity. Known namespace-dependent class constants
+and unknown namespaces refuse source/final-target class renames without writes.
+
+Two initial test expectations were corrected from authoritative behavior, without
+changing production code: references include inherited/overridden method families,
+and Laravel does not prefix a class already starting with its group namespace.
+The corrected guard fixture uses namespace Other, a valid second PSR4 prefix and
+an executed Laravel oracle proving the distinct Other\App target. Failed fixture
+expectations, the initial test-helper compile error, and final red/green receipts
+remain preserved. No retry of a wrong numeric/target result is used for acceptance.
+
+Final gates: 4,857 Rust tests pass/174 ignored (including the two new separately
+executed cases); all-target workspace Clippy, fmt, generated bindings, typecheck,
+lint, format, knip, 12,450 frontend tests/6 skipped and production frontend build
+pass. All 58 actual engine 153 cases pass from the final workspace executables:
+10 guarded-edit host, 7 completion/refactoring host and 41 LSP client cases.
+Engine 153 source 18,502/17 ignored plus both bounded children, 87 focused route
+checks and build/runtime/analyzer gates remain from slice 101 with unchanged
+canonical executable SHA256 303b4c7abfe275ed9fa89d13b18a1050b3747c0d02fa571509bf61c627f0eeca.
+Source/provenance resources and the Tools row now select 153. No app version bump,
+new bundle, native launch or installation is claimed in this slice. The sole
+signed App 0.1.91 stays on 152; packaging 0.1.92 is next. Native UI checks remain
+explicitly user-skipped, and all 69-area statuses remain 67 partial/2 user-deferred.
+
+Evidence: `artifacts/checks/slice102-receipt.json`, final/preflight client-host
+gates, handler-red3/green2 comparisons, resource-promotion/source-gate logs and
+compiler-clean receipt. 30.0 GiB of owned compiler output is removed after validation;
+App 0.1.91, both required engine controls and Workbench/evaluation artifacts stay.
+
 Laravel slice 101 (2026-11-16, verified source checkpoint): candidate 153 adds
 implicit `__invoke` handler references and declaration counts for statically
 resolved Laravel literal/class-constant controller actions. Aliases, named and
@@ -93,7 +144,7 @@ Active resources/source pin stay 152; the sole signed App 0.1.91 is unchanged.
 Main runtime code is unchanged from `cbeecaec`: its 4,857 Rust/172 ignored,
 12,450 frontend/6 skipped, 56 actual engine 152 host/client and 21 browser checks
 remain evidence for that baseline, not candidate 153 client acceptance.
-Candidate 153 OpenStorm client paths and packaging are the next slice. Native
+Candidate 153 OpenStorm client paths and promotion/build are subsequent slices. Native
 checks remain explicitly user-skipped. This checkpoint does not newly accept a
 whole feature area: 67 partial/2 user-deferred remain.
 

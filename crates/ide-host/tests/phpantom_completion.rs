@@ -365,7 +365,7 @@ async fn available_route_class_uses_guarded_cross_file_rename_and_history() {
         assert_eq!(f.project.documents.snapshot(f.doc).unwrap().text,expected);assert_eq!(std::fs::read_to_string(f.root.join("routes/web.php")).unwrap(),expected);assert_eq!(std::fs::read_to_string(&caller_path).unwrap(),changed_caller);assert_eq!(std::fs::read_to_string(f.root.join("app/GroupController.php")).unwrap(),GROUP);assert_eq!(std::fs::read_to_string(f.root.join("app/InvoiceController.php")).unwrap(),MAIN);
         let repo=PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");let laravel=std::env::var_os("OPENSTORM_TEST_ENGINE_LARAVEL_ROOT").map(PathBuf::from).unwrap_or_else(||repo.join("artifacts/checks/engine-laravel13-37-148/project"));
         let script=r#"$loader=require $argv[2].'/vendor/autoload.php';$loader->addPsr4('App\\',$argv[1].'/app',true);$router=new \Illuminate\Routing\Router(new \Illuminate\Events\Dispatcher());\Illuminate\Support\Facades\Route::swap($router);require $argv[1].'/routes/web.php';$routes=$router->getRoutes();assert(count($routes)===1);foreach($routes as $route){assert($route->getAction('uses')==='ReceiptController@__invoke');assert(get_class($route->getController())==='ReceiptController');assert(($route->getController())()==='global');}assert((new \App\Caller())->make() instanceof \ReceiptController);assert((new \App\GroupController())->InvoiceController()==='method');echo 'available class rename runtime passed';"#;
-        let output=std::process::Command::new(repo.join("artifacts/toolchains/php-8.4.23-static/php")).args(["-n","-d","zend.assertions=1","-r",script]).arg(&f.root).arg(laravel).output().unwrap();assert!(output.status.success(),"runtime {} stdout={} stderr={}",output.status,String::from_utf8_lossy(&output.stdout),String::from_utf8_lossy(&output.stderr));assert_eq!(output.stdout,b"available class rename runtime passed");
+        let output=std::process::Command::new(repo.join("artifacts/toolchains/php-8.4.23-static/php")).args(["-n","-d","zend.assertions=1","-r",script]).arg(&f.root).arg(&laravel).output().unwrap();assert!(output.status.success(),"runtime {} stdout={} stderr={}",output.status,String::from_utf8_lossy(&output.stdout),String::from_utf8_lossy(&output.stderr));assert_eq!(output.stdout,b"available class rename runtime passed");
         let group=f.events.lock().unwrap().iter().rev().find_map(|event|match event {ide_core::IdeEvent::DocPatched{history:Some(h),..}=>Some(h.group.clone()),_=>None}).expect("reviewed availability history");
         for redo in [false,true] {
             ide_host::ops::lsp::restore_reviewed_edit(&f.host,"main",group.clone(),redo).await.unwrap();
@@ -407,6 +407,266 @@ async fn available_route_class_roles_and_namespace_dependencies_stay_current() {
         Fixture::lint(&enumerated);f.project.documents.replace_all(f.doc,&enumerated).unwrap();let cursor=literal(&enumerated,"'/enum','In");
         let targets=f.project.lsp.goto(f.doc,cursor,GotoKind::Definition).await.unwrap();assert_eq!(targets.len(),1);assert_eq!(targets[0].path.to_path_buf(),f.root.join("app/InvoiceController.php"),"enum proof must select the namespaced invokable class");
         assert!(f.project.lsp.prepare_rename_details(f.doc,cursor).await.unwrap().is_none());
+    }).catch_unwind().await;
+    f.finish(outcome).await;
+}
+
+async fn handler_references(f: &Fixture, doc: DocId, source: &str, name: &str) -> ide_lsp::types::References {
+    let cursor = at(source, source.find(name).unwrap() + 2);
+    for _ in 0..80 {
+        match ide_host::ops::lsp::lsp_references(
+            &f.host,
+            "main",
+            RequestId::next(),
+            doc,
+            cursor,
+            false,
+            true,
+            true,
+            ide_host::ops::Channel::new(|_| {}),
+        )
+        .await
+        {
+            Ok(refs) => return refs,
+            Err(error) if error.kind == ide_core::error::ErrorKind::Cancelled => {
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+            Err(error) => panic!("handler references failed: {error}"),
+        }
+    }
+    panic!("handler references did not settle");
+}
+
+async fn handler_count(f: &Fixture, doc: DocId, source: &str, name: &str) -> ide_lsp::types::Command {
+    let line = at(source, source.find(name).unwrap()).line;
+    for _ in 0..80 {
+        match ide_host::ops::lsp::lsp_code_lens(&f.host, "main", doc).await {
+            Ok(lenses) => {
+                let command = lenses
+                    .into_iter()
+                    .filter(|l| l.range.start.line == line)
+                    .filter_map(|l| l.command)
+                    .find(|c| c.title.ends_with("reference") || c.title.ends_with("references"))
+                    .expect("implicit handler declaration must expose a reference lens");
+                if command.title != "- references" {
+                    return command;
+                }
+            }
+            Err(error) if error.kind == ide_core::error::ErrorKind::Cancelled => {}
+            Err(error) => panic!("handler count failed: {error}"),
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    panic!("handler reference lens remained pending");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires pinned PHPantom and owned PHP syntax-check executable"]
+async fn implicit_handler_references_counts_and_unsaved_inheritance_through_host() {
+    const BASE: &str =
+        "<?php\nnamespace App;\nclass BaseInvoice {\n public function __invoke(): string {return 'base';}\n}\n";
+    const CHILD: &str = "<?php namespace App; class InvoiceController extends BaseInvoice {}\n";
+    const INVOKABLE_OTHER: &str = "<?php\nnamespace App\\Other;\nclass InvoiceController {\n public function __invoke(): bool {return true;}\n}\n";
+    const UNUSED: &str = "<?php\nnamespace App;\nclass Unused {\n public function __INVOKE(): float {return 1.0;}\n}\n";
+    const GROUP: &str =
+        "<?php namespace App; class GroupController {public function InvoiceController():int{return 1;}}\n";
+    const ROUTES: &str = "<?php\nnamespace Harness;\nuse Illuminate\\Support\\Facades\\Route as Routes;\nuse App\\InvoiceController as InvoiceAlias;\nRoutes::get('/😀/literal','App\\InvoiceController');\nRoutes::get('/constant',InvoiceAlias::class);\nRoutes::namespace('App')->group(fn()=>Routes::get('/namespace','InvoiceController'));\nRoutes::match(action:(InvoiceAlias::class),uri:'/named',methods:['GET']);\nRoutes::controller(\\App\\GroupController::class)->group(fn()=>Routes::get('/method','InvoiceController'));\nRoutes::get('/other',\\App\\Other\\InvoiceController::class);\n$metadata=InvoiceAlias::class;$ordinary='App\\InvoiceController';\n";
+    let f = Fixture::new(
+        ROUTES,
+        &[
+            ("app/BaseInvoice.php".into(), BASE.into()),
+            ("app/InvoiceController.php".into(), CHILD.into()),
+            ("app/Other/InvoiceController.php".into(), INVOKABLE_OTHER.into()),
+            ("app/Unused.php".into(), UNUSED.into()),
+            ("app/GroupController.php".into(), GROUP.into()),
+        ],
+    );
+    let outcome = std::panic::AssertUnwindSafe(async {
+        tokio::time::timeout(Duration::from_secs(90), async {
+            let base = f.project.documents.open(&f.root.join("app/BaseInvoice.php")).unwrap().id;
+            let child = f.project.documents.open(&f.root.join("app/InvoiceController.php")).unwrap().id;
+            let other = f.project.documents.open(&f.root.join("app/Other/InvoiceController.php")).unwrap().id;
+            let unused = f.project.documents.open(&f.root.join("app/Unused.php")).unwrap().id;
+            let changed = ROUTES
+                .replace("'/😀/literal','App\\InvoiceController'", "'/😀/literal','App\\Unused'")
+                .replace("'/constant',InvoiceAlias::class", "'/constant',\\App\\Other\\InvoiceController::class");
+            Fixture::lint(&changed);
+            for phase in 0..3 {
+                if phase == 1 {
+                    f.project.documents.replace_all(f.doc, &changed).unwrap();
+                }
+                if phase == 2 {
+                    f.project.lsp.restart(f.project.lsp.servers()[0].id).await.unwrap();
+                }
+                let source = if phase == 0 { ROUTES } else { &changed };
+                let expected = if phase == 0 {
+                    vec![
+                        literal(source, "'/😀/literal','"),
+                        literal(source, "'/constant',"),
+                        literal(source, "'/namespace','"),
+                        literal(source, "action:("),
+                    ]
+                } else {
+                    vec![literal(source, "'/namespace','"), literal(source, "action:(")]
+                };
+                let refs = handler_references(&f, base, BASE, "__invoke").await;
+                let mut actual: Vec<_> = refs
+                    .locations
+                    .iter()
+                    .map(|l| {
+                        assert_eq!(l.path.to_path_buf(), f.root.join("routes/web.php"));
+                        l.range.start
+                    })
+                    .collect();
+                let mut expected = expected;
+                actual.sort_by_key(|p| (p.line, p.col));
+                expected.sort_by_key(|p| (p.line, p.col));
+                assert_eq!(
+                    actual, expected,
+                    "implicit inherited handler references must retain exact UTF16 action ranges"
+                );
+                for (doc, text, name, count) in [
+                    (base, BASE, "__invoke", if phase == 0 { 4 } else { 2 }),
+                    (other, INVOKABLE_OTHER, "__invoke", if phase == 0 { 1 } else { 2 }),
+                    (unused, UNUSED, "__INVOKE", if phase == 0 { 0 } else { 1 }),
+                ] {
+                    let refs = handler_references(&f, doc, text, name).await;
+                    assert!(refs.incomplete.is_none(), "owned handler fixture unexpectedly incomplete: {refs:?}");
+                    assert_eq!(refs.locations.len(), count);
+                    let lens = handler_count(&f, doc, text, name).await;
+                    assert_eq!(lens.title, format!("{count} reference{}", if count == 1 { "" } else { "s" }));
+                    assert_eq!(
+                        lens.arguments[2].as_array().unwrap().len(),
+                        count,
+                        "lens command must carry the exact reference set"
+                    );
+                    let mut lens_sites: Vec<_> = lens.arguments[2]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .map(|location| {
+                            (
+                                location["uri"].as_str().unwrap().to_owned(),
+                                location["range"]["start"]["line"].as_u64().unwrap(),
+                                location["range"]["start"]["character"].as_u64().unwrap(),
+                            )
+                        })
+                        .collect();
+                    let mut reference_sites: Vec<_> = refs
+                        .locations
+                        .iter()
+                        .map(|location| {
+                            (
+                                ide_lsp::path_to_uri_string(&location.path),
+                                u64::from(location.range.start.line),
+                                u64::from(location.range.start.col),
+                            )
+                        })
+                        .collect();
+                    lens_sites.sort();
+                    reference_sites.sort();
+                    assert_eq!(lens_sites, reference_sites);
+                }
+                let targets =
+                    f.project.lsp.goto(f.doc, literal(source, "action:("), GotoKind::Definition).await.unwrap();
+                assert_eq!(targets.len(), 1);
+                assert_eq!(
+                    targets[0].path.to_path_buf(),
+                    f.root.join("app/InvoiceController.php"),
+                    "class constant must keep PHP class navigation"
+                );
+                assert_eq!(std::fs::read_to_string(f.root.join("routes/web.php")).unwrap(), ROUTES);
+            }
+            let explicit = "<?php $controller=new \\App\\InvoiceController(); $controller->__invoke();\n";
+            Fixture::lint(explicit);
+            let explicit_path = f.root.join("app/ExplicitCaller.php");
+            std::fs::write(&explicit_path, explicit).unwrap();
+            let explicit_doc = f.project.documents.open(&explicit_path).unwrap().id;
+            let call_position = literal(explicit, "$controller->__in");
+            let before_override = f.project.lsp.goto(explicit_doc, call_position, GotoKind::Definition).await.unwrap();
+            assert_eq!(before_override.len(), 1);
+            assert_eq!(before_override[0].path.to_path_buf(), f.root.join("app/BaseInvoice.php"));
+            let overridden = CHILD.replace(
+                "extends BaseInvoice {}",
+                "extends BaseInvoice {\n public function __invoke():string{return 'override';}\n}",
+            );
+            Fixture::lint(&overridden);
+            f.project.documents.replace_all(child, &overridden).unwrap();
+            let overridden_targets =
+                f.project.lsp.goto(explicit_doc, call_position, GotoKind::Definition).await.unwrap();
+            assert_eq!(overridden_targets.len(), 1);
+            assert_eq!(overridden_targets[0].path.to_path_buf(), f.root.join("app/InvoiceController.php"));
+            assert_eq!(handler_references(&f, base, BASE, "__invoke").await.locations.len(), 3);
+            assert_eq!(handler_count(&f, base, BASE, "__invoke").await.title, "3 references");
+            assert_eq!(handler_references(&f, child, &overridden, "__invoke").await.locations.len(), 3);
+            assert_eq!(handler_count(&f, child, &overridden, "__invoke").await.title, "3 references");
+            f.project.documents.replace_all(child, CHILD).unwrap();
+            let restored_targets = f.project.lsp.goto(explicit_doc, call_position, GotoKind::Definition).await.unwrap();
+            assert_eq!(restored_targets.len(), 1);
+            assert_eq!(restored_targets[0].path.to_path_buf(), f.root.join("app/BaseInvoice.php"));
+            assert_eq!(handler_references(&f, base, BASE, "__invoke").await.locations.len(), 3);
+            assert_eq!(handler_count(&f, base, BASE, "__invoke").await.title, "3 references");
+            assert_eq!(std::fs::read_to_string(f.root.join("app/InvoiceController.php")).unwrap(), CHILD);
+            assert!(f.project.documents.snapshot(f.doc).unwrap().dirty);
+        })
+        .await
+        .expect("implicit handler host workflow exceeded its bound");
+    })
+    .catch_unwind()
+    .await;
+    f.finish(outcome).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires pinned PHPantom, owned PHP and disposable Laravel dependencies"]
+async fn implicit_handler_checked_rename_guards_and_reviewed_class_edits_through_host() {
+    const ORIGINAL: &str = "<?php\nnamespace Harness;\nuse Illuminate\\Support\\Facades\\Route as Routes;\nuse App\\InvoiceController as InvoiceAlias;\nRoutes::get('/😀/literal','App\\InvoiceController');\nRoutes::get('/constant',InvoiceAlias::class);\n";
+    const CALLER: &str = "<?php namespace App; class Caller {public function make():InvoiceController{return new InvoiceController();}}\n";
+    const QUALIFIED: &str =
+        "<?php namespace Other\\App; class InvoiceController {public function __invoke():int{return 42;}}\n";
+    let f = Fixture::new(
+        ORIGINAL,
+        &[("app/Caller.php".into(), CALLER.into()), ("other/InvoiceController.php".into(), QUALIFIED.into()), ("composer.json".into(), r#"{"require":{"php":"^8.3","laravel/framework":"^13.0"},"autoload":{"psr-4":{"App\\":"app/","Other\\App\\":"other/"}}}"#.into())],
+    );
+    let outcome=std::panic::AssertUnwindSafe(async {
+        tokio::time::timeout(Duration::from_secs(90),async {
+            let main_path=f.root.join("app/InvoiceController.php");let new_path=f.root.join("app/ReceiptController.php");let caller_path=f.root.join("app/Caller.php");let route_path=f.root.join("routes/web.php");
+            let main=f.project.documents.open(&main_path).unwrap().id;
+            let unsaved=ORIGINAL.replace("/😀/literal","/😀/unsaved-literal");f.project.documents.replace_all(f.doc,&unsaved).unwrap();
+            let error=ide_host::ops::lsp::lsp_rename(&f.host,"main",RequestId::next(),main,literal(MAIN,"function __in"),"dispatch".into()).await.unwrap_err();
+            assert!(error.to_string().contains("__invoke contract"),"checked rename must expose the magic-contract refusal: {error}");
+            assert_eq!(f.project.documents.snapshot(main).unwrap().text,MAIN);assert_eq!(f.project.documents.snapshot(f.doc).unwrap().text,unsaved);assert_eq!(std::fs::read_to_string(&route_path).unwrap(),ORIGINAL);assert_eq!(std::fs::read_to_string(&caller_path).unwrap(),CALLER);assert!(!new_path.exists());
+            let plan=ide_host::ops::lsp::lsp_rename(&f.host,"main",RequestId::next(),main,literal(MAIN,"class In"),"ReceiptController".into()).await.unwrap();
+            assert!(plan.edit.guard.is_some() && plan.edit.files.len() >= 3 && plan.incomplete.is_none());assert!(plan.edit.files.iter().any(|op|matches!(op,ide_core::FileEdit::Rename{from,to} if **from==main_path&&**to==new_path)),"checked class rename must retain PSR4 move");
+            // Computing a preview leaves disk and unsaved overlays intact.
+            assert_eq!(std::fs::read_to_string(&main_path).unwrap(),MAIN);assert_eq!(f.project.documents.snapshot(f.doc).unwrap().text,unsaved);
+            let external=format!("{CALLER}// external\n");std::fs::write(&caller_path,&external).unwrap();
+            assert!(ide_host::ops::lsp::apply_workspace_edit(&f.host,"main",plan.edit).await.is_err());assert_eq!(std::fs::read_to_string(&caller_path).unwrap(),external);assert_eq!(std::fs::read_to_string(&route_path).unwrap(),ORIGINAL);assert_eq!(std::fs::read_to_string(&main_path).unwrap(),MAIN);assert!(!new_path.exists());
+            std::fs::write(&caller_path,CALLER).unwrap();
+            let plan=ide_host::ops::lsp::lsp_rename(&f.host,"main",RequestId::next(),main,literal(MAIN,"class In"),"ReceiptController".into()).await.unwrap();
+            ide_host::ops::lsp::apply_workspace_edit(&f.host,"main",plan.edit).await.unwrap();
+            assert!(!main_path.exists());assert_eq!(f.project.documents.by_path(&new_path),Some(main));
+            let changed=f.project.documents.snapshot(f.doc).unwrap().text;assert!(changed.contains("as InvoiceAlias;")&&changed.contains("InvoiceAlias::class"));assert!(!changed.contains("InvoiceController"));assert!(changed.contains("unsaved-literal"));assert!(!f.project.documents.snapshot(f.doc).unwrap().dirty);
+            for path in [&new_path,&caller_path,&route_path] {Fixture::lint(&std::fs::read_to_string(path).unwrap());}
+            let repo=PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");let laravel=std::env::var_os("OPENSTORM_TEST_ENGINE_LARAVEL_ROOT").map(PathBuf::from).unwrap_or_else(||repo.join("artifacts/checks/engine-laravel13-37-148/project"));
+            let php=std::env::var_os("OPENSTORM_TEST_PHP_BIN").map(PathBuf::from).unwrap_or_else(||repo.join("artifacts/toolchains/php-8.4.23-static/php"));
+            let script=r#"$loader=require $argv[2].'/vendor/autoload.php';$loader->addPsr4('App\\',$argv[1].'/app',true);$router=new \Illuminate\Routing\Router(new \Illuminate\Events\Dispatcher());\Illuminate\Support\Facades\Route::swap($router);require $argv[1].'/routes/web.php';assert(count($router->getRoutes())===2);foreach($router->getRoutes() as $route){assert(ltrim($route->getAction('uses'),'\\')==='App\\ReceiptController@__invoke');assert(get_class($route->getController())==='App\\ReceiptController');assert(($route->getController())()===true);}assert((new \App\Caller())->make() instanceof \App\ReceiptController);echo 'implicit checked class rename runtime passed';"#;
+            let output=std::process::Command::new(&php).args(["-n","-d","zend.assertions=1","-r",script]).arg(&f.root).arg(&laravel).output().unwrap();assert!(output.status.success(),"runtime stdout={} stderr={}",String::from_utf8_lossy(&output.stdout),String::from_utf8_lossy(&output.stderr));assert_eq!(output.stdout,b"implicit checked class rename runtime passed");
+            let group=f.events.lock().unwrap().iter().rev().find_map(|e|match e{ide_core::IdeEvent::DocPatched{history:Some(h),..}=>Some(h.group.clone()),_=>None}).unwrap();
+            for redo in [false,true,false] {
+                ide_host::ops::lsp::restore_reviewed_edit(&f.host,"main",group.clone(),redo).await.unwrap();let snap=f.project.documents.snapshot(f.doc).unwrap();assert_eq!(snap.text,if redo{&changed}else{&unsaved}.as_str());assert_eq!(snap.dirty,!redo);assert_eq!(std::fs::read_to_string(&route_path).unwrap(),if redo { changed.as_str() } else { ORIGINAL });assert_eq!(f.project.documents.by_path(if redo{&new_path}else{&main_path}),Some(main));
+            }
+            let dependency_script=r#"$loader=require $argv[2].'/vendor/autoload.php';$loader->addPsr4('App\\',$argv[1].'/app',true);$loader->addPsr4('Other\\App\\',$argv[1].'/other',true);$router=new \Illuminate\Routing\Router(new \Illuminate\Events\Dispatcher());\Illuminate\Support\Facades\Route::swap($router);\Illuminate\Support\Facades\Route::namespace('Other')->group(fn()=>\Illuminate\Support\Facades\Route::get('/dependent',\App\InvoiceController::class));$route=$router->getRoutes()->getRoutes()[0];assert($route->getAction('uses')==='Other\\App\\InvoiceController@__invoke');assert(($route->getController())()===42);echo 'namespace dependency runtime passed';"#;
+            let output=std::process::Command::new(&php).args(["-n","-d","zend.assertions=1","-r",dependency_script]).arg(&f.root).arg(&laravel).output().unwrap();assert!(output.status.success(),"namespace oracle stdout={} stderr={}",String::from_utf8_lossy(&output.stdout),String::from_utf8_lossy(&output.stderr));assert_eq!(output.stdout,b"namespace dependency runtime passed");
+            let final_doc=f.project.documents.open(&f.root.join("other/InvoiceController.php")).unwrap().id;
+            for namespace in ["'Other'","$selected"] {
+                let dependent=format!("{HEADER}Routes::namespace({namespace})->group(fn()=>Routes::get('/prefixed',\\App\\InvoiceController::class));\n");Fixture::lint(&dependent);f.project.documents.replace_all(f.doc,&dependent).unwrap();
+                for (doc,text) in [(main,MAIN),(final_doc,QUALIFIED)] {
+                    let error=ide_host::ops::lsp::lsp_rename(&f.host,"main",RequestId::next(),doc,literal(text,"class In"),"ReceiptController".into()).await.unwrap_err();assert!(error.to_string().to_lowercase().contains("namespace-dependent controller class constant"),"namespace-dependent class constant must refuse partial edits: {error}");assert_eq!(f.project.documents.snapshot(doc).unwrap().text,text);
+                }
+                assert_eq!(f.project.documents.snapshot(f.doc).unwrap().text,dependent);assert_eq!(std::fs::read_to_string(&route_path).unwrap(),ORIGINAL);assert_eq!(std::fs::read_to_string(&main_path).unwrap(),MAIN);assert_eq!(std::fs::read_to_string(&caller_path).unwrap(),CALLER);assert!(!new_path.exists());
+            }
+        }).await.expect("implicit checked-rename host workflow exceeded its bound");
     }).catch_unwind().await;
     f.finish(outcome).await;
 }

@@ -15,6 +15,55 @@ slice, commit and push it, and retain only the latest generated app. Native UI
 cases remain deferred/unverified; earlier native-first blocking checkpoints are
 historical and no longer prevent independent implementation.
 
+Packaging slice119 (2026-11-16, verified local development package): promote
+exact PHPantom156 resources/source provenance after117's engine gates and118's
+71 actual client/host checks. Recheck156 patch checksums and the cached source
+fingerprint. Prepare unique app0.1.96: all44 Cargo.lock updates are workspace
+versions only, with external dependencies and plugin API1.9.0 unchanged. Runtime
+source hashes still match118; reuse Rust4972/188 ignored/1 excluded, frontend12807/
+6 skipped, six155 compatibility controls, the155 negative completion control and
+75 distinct controlled-browser cases. Preserve all retained exceptions and limits.
+
+The new app includes upstream2d85e745e, controller URL method completion and
+standard completion/resolve source freshness. Retain155/App95 until the new
+signature and receipt pass, then remove the old app. Preserve OpenStorm identity, default layout/keymaps,
+autosave/save-conflict protection, .openidea compatibility, licenses/attribution,
+PHPantom-first/optional alternate servers, opt-in Laravel companion and disabled
+upstream updates. No new debugger behavior or settings interface is introduced.
+
+Checksum/typecheck/lint/format/knip,5 version tests,3 bundled-server tests,
+1 PHP-default test, Rustfmt and ide-tools all-target Clippy pass. The cached source
+fingerprint and all156 patches validate. The production frontend build passes
+Safari15.4 startup API/bundle syntax checks. Actual bundle metadata reports0.1.96,
+cz.thinky.openstorm,arm64 and minimum macOS13.0. Ad-hoc deep/strict signature
+verification passes before and after CLI execution. Main executable SHA256:
+805299e3fc2beba04c43ba412f5769ab4f77daa55dbaeda0a86dd2e95625a750.
+Embedded engine SHA256:
+fd83779a5737d5acb694e0cd3165b7b9eec97c968103b7da73988aa84838c53b.
+Its actual version is0.11.1-openstorm.156; no global installation is borrowed.
+
+Seven embedded-server CLI groups pass: URL/helper/alias/facade navigation, method
+completion/resolve documentation and exact Unicode edits with unsaved dependency
+changes, encoded-method partial-rename refusal, global and namespace-fallback
+foreign-helper isolation,3 real Laravel13.37 completions plus3 declaration targets,
+and exactly the3 intentional analyzer diagnostics. Helper/completion children run
+with PATH empty and project tools disabled. All6 LSP children exit0 and fixture
+originals stay unchanged; analyzer exit1 is expected. No Composer/Artisan inspection
+commands or native app launch occur. Signature, source and checksum read-back
+pass again after execution. This is packaging/CLI evidence, not native acceptance.
+
+Latest/sole local app: artifacts/batches/0.1.96/OpenStorm.app. Package retention
+removes App95 only after the new signature/receipt succeeds, then removes the extra
+App96 copy and13683 compiler files/8.2GiB. Remove the67,937,500-byte frontend bundle
+as well. Both compiler roots and dist are absent, with no embedded test processes
+remaining. Preserve source/provenance/licenses, PHP Workbench and earlier evidence.
+Native UI stays user-skipped; installation/relaunch, migration, notarization,
+release publishing, tags and updater activation remain deferred. All69 areas stay
+67 partial/2 user-deferred. Evidence: artifacts/checks/slice119- promotion/gates,
+package-pipeline, packaged-check/CLI and cleanup receipts/logs;
+artifacts/batches/0.1.96/build-receipt.json and retention.json. Final reviewed-tree,
+commit, remote read-back and tracked-clean proof belong to the delivery receipt.
+
 Laravel slice118 (2026-11-16, verified client/host checkpoint): exercise inactive
 PHPantom156 URL method completion through OpenStorm's actual client, host and
 editor edit paths. The candidate executable/source pin stays byte-identical to117.

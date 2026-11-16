@@ -5775,6 +5775,87 @@ async fn cancelling_a_references_search_stops_the_candidate_search_and_closes_fi
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn standard_references_retire_changed_inputs_in_both_scope_queries() {
+    for phase in ["scoped", "first", "widened"] {
+        for mutation in ["caller", "dependency", "close", "disk", "roots", "restart", "no change"] {
+            let (h, state) = scope_harness();
+            let (doc, _) = h.open("a.mk", "call target\n");
+            let (dependency, path) = h.open("b.mk", "def target\n");
+            let closed = h.root.join("c.mk");
+            std::fs::write(&closed, "call target\n").unwrap();
+            grep_candidates(&h);
+            h.wait_status("mock", ServerStatus::Ready).await;
+            eventually(|| state.docs.lock().len() == 2).await;
+            let gate = Arc::new(Gate::default());
+            let held = gate.clone();
+            let closed_uri = uri_of(&closed);
+            let transient = closed_uri.clone();
+            *state.responder.lock() = Some(Arc::new(move |s, method, _| {
+                if method != "textDocument/references" {
+                    return None;
+                }
+                let docs = s.docs.lock();
+                let widening = docs.contains_key(&transient);
+                let rows = Value::Array(docs.iter().flat_map(|(uri, text)| occurrences(uri, text)).collect());
+                drop(docs);
+                if (phase == "widened") == widening {
+                    held.hold();
+                }
+                Some(rows)
+            }));
+            let client = h.mgr.clone();
+            let partials = Arc::new(Mutex::new(Vec::<References>::new()));
+            let seen = partials.clone();
+            let search = tokio::spawn(async move {
+                let push = |refs| seen.lock().push(refs);
+                client
+                    .references_streaming(
+                        doc,
+                        Pos::new(0, 5),
+                        true,
+                        phase != "scoped",
+                        true,
+                        Default::default(),
+                        Some(&push),
+                    )
+                    .await
+            });
+            eventually(|| gate.entered()).await;
+            match mutation {
+                "caller" | "dependency" => {
+                    let changed = if mutation == "caller" { doc } else { dependency };
+                    let source = if mutation == "caller" { "call target\n" } else { "def target\n" };
+                    h.mgr.did_change(changed, 2, &[change(rng(0, 0, 0, 0), "// updated\n")], &|| {
+                        format!("// updated\n{source}")
+                    });
+                }
+                "close" => h.mgr.did_close(dependency),
+                "disk" => {
+                    std::fs::write(&path, "def changed\n").unwrap();
+                    h.mgr.php_files_changed(&[], &[path], &[]);
+                }
+                "roots" => h.mgr.set_content_roots(vec![h.root.join("linked")]),
+                "restart" => h.mgr.restart(h.mgr.servers()[0].id).await.unwrap(),
+                _ => {}
+            }
+            gate.open();
+            let result = search.await.unwrap();
+            eventually(|| !state.docs.lock().contains_key(&closed_uri)).await;
+            h.mgr.shutdown_all().await;
+            if mutation == "no change" {
+                assert_eq!(result.unwrap().locations.len(), if phase == "scoped" { 2 } else { 3 }, "{phase}");
+            } else {
+                assert!(
+                    matches!(result, Err(ref error) if error.kind == ide_core::error::ErrorKind::Cancelled),
+                    "{phase}/{mutation}: {result:?}",
+                );
+                assert!(partials.lock().is_empty(), "stale partials escaped: {phase}/{mutation}");
+            }
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn diagnostics_of_files_opened_for_a_search_stay_out_of_problems() {
     let h = harness(&[("mock", incremental_caps())]);
     let s = h.launcher.state("mock");
@@ -5834,7 +5915,15 @@ async fn opening_a_file_during_a_search_takes_it_over() {
     h.mgr.did_open(user_doc, &b, &h.lang, 7, "edited target\n");
     eventually(|| s.docs.lock().get(&uri_of(&b)).map(String::as_str) == Some("edited target\n")).await;
     gate.open();
-    search.await.unwrap().unwrap();
+    assert_eq!(search.await.unwrap().unwrap_err().kind, ide_core::error::ErrorKind::Cancelled);
+    let fresh = h.mgr.references(doc, Pos::new(0, 5), true, true, Default::default()).await.unwrap();
+    assert!(
+        fresh
+            .locations
+            .iter()
+            .any(|location| location.path.to_path_buf() == b && location.range.start == Pos::new(0, 7)),
+        "a new search uses the edited buffer: {fresh:?}",
+    );
 
     // The temporary copy was closed before the user's didOpen, and the user's stays open.
     let events: Vec<(String, Value)> = s

@@ -8,6 +8,9 @@ use ide_text::AppliedChange;
 use parking_lot::Mutex;
 use std::{path::PathBuf, sync::Arc, time::Duration};
 
+#[path = "fixtures/controller_urls.rs"]
+mod controller_urls;
+
 fn pos(text: &str, needle: &str) -> Pos {
     let offset = text.find(needle).unwrap();
     let prefix = &text[..offset];

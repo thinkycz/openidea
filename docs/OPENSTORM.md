@@ -15,6 +15,66 @@ slice, commit and push it, and retain only the latest generated app. Native UI
 cases remain deferred/unverified; earlier native-first blocking checkpoints are
 historical and no longer prevent independent implementation.
 
+Laravel slice115 (2026-11-16, verified source/client checkpoint): exercise
+inactive PHPantom155 controller URL navigation and checked class/method edits
+through the actual LSP client and host. Disposable Composer/PSR-4 fixtures cover
+inherited methods, UTF-16 definitions/prepare ranges, aliases, named arguments,
+references/docs, dirty overlays, restart and nested non-Laravel project isolation.
+Checked edits reject unresolved/encoded bindings and external disk changes before
+writing. Class/file moves and method renames persist both dirty buffers; real
+Laravel executes all5 URLs/redirects plus ordinary method calls after each rename.
+Reviewed undo/redo restores the exact original dirty buffers and disk originals;
+subsequent external changes refuse undo without partial writes. No environment
+files are created by these new fixtures. Validate fixture PHP syntax/autoload
+configuration before accepting engine results.
+
+Four154 negative controls fail for missing URL targets/Rename support while
+ordinary PHP resolves. Initial155 navigation, real Laravel examples and both host
+renames pass. A held real reference response exposes a client defect: an unsaved
+parent change still returns the former declaration. An independent protocol mock
+also reproduces old/new caller locations merged during scope widening. Reuse the
+existing navigation source/generation receipts before/after standard reference
+queries, after widening and before Go partial/final publication. Both the engine
+and the standard LSP protocol stay unchanged; this fixes client result freshness.
+
+The21 scoped/first/widened mock scenarios and11 held real-engine mutation/control
+scenarios pass. The existing temporary-file takeover test now requires cancellation
+of its old search, then correct fresh locations, while retaining every ownership/
+notification assertion. Its first full-suite failure and corrected final run stay
+in the receipts. The independent runtime-oracle preflight also catches a fixture
+setup omission: Laravel13's url() requires its URL-generator contract bound in the
+container. Correct the disposable oracle; baseline runtime validation then passes.
+
+Final Rust4974 passed/185 ignored, with only
+http_list_and_run_require_confirmation excluded pending its separately scoped
+synthetic HTTP environment-fixture approval. All68 actual candidate155 host/client
+checks pass using executables from the final workspace Cargo JSON. Six focused
+current-default154 controls also pass, including Composer/builtins, framework
+references, approved synthetic environment keys and JSON/translation startup and
+content-root recovery. All retained fixture originals are restored. Frontend12708
+passed/6 skipped; typecheck/lint/format/knip, production build/Safari checks,
+all-target workspace Clippy and Rustfmt pass. Selected browser editor/refactoring/
+Laravel/diff/MCP flows:73 pass with controlled IPC, not native acceptance. IPC types,
+generated bindings and command snapshot are unchanged. Existing warnings remain
+recorded; no warning-free or performance-parity claim.
+
+Candidate155 stays inactive; active154 resources/source pin and sole signed
+App0.1.94 are unchanged. Native checks remain user-skipped. Java's classified
+usages path is unchanged; real-server acceptance for other languages and standard
+fallback performance remain unmeasured (jdtls is absent from PATH). All69 areas
+remain67 partial/2 user-deferred. Promote155 and build the next app in a subsequent
+slice, after this source/client checkpoint is committed and pushed.
+
+Remove17,161 compiler files/25,341,199,654 logical bytes plus the67,919,484-byte
+frontend bundle:25,409,119,138 logical build bytes total. Both compiler roots and
+dist are absent; no owned154/155 engine or browser test server remains. Preserve
+all pinned engine/source provenance, the sole App94, PHP Workbench and earlier
+evaluation evidence. Evidence prefix: artifacts/checks/slice115-, including
+preflight/final-preflight, mock-reference red/green, gates/workspace-counts,
+default-controls, client-host, browser, invariants and cleanup receipts. Final
+Git commit, reviewed tree, remote read-back and clean worktree are recorded in the
+ignored delivery receipt.
+
 Upstream refresh 3 (2026-11-16, verified source merge): merge
 `l0ng-ai/openidea` through `7a97fba491f3be46646abc640a046cca11f2cad9`
 (45 commits after `de107e145`).

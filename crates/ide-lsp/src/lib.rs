@@ -2429,17 +2429,27 @@ impl LspManager {
                 }
             }
         }
+        let sources =
+            targets.iter().map(|t| Ok((t, self.navigation_sources(&snap, t)?))).collect::<IdeResult<Vec<_>>>()?;
+        let current =
+            || !cancel.is_cancelled() && sources.iter().all(|(target, before)| self.navigation_current(target, before));
         let requests = targets.iter().map(|t| {
-            let (snap, cancel) = (&snap, &cancel);
+            let (snap, cancel, current) = (&snap, &cancel, &current);
             async move {
                 // The Angular server searches the file's own project only: more open
                 // files don't widen it.
                 let angular = t.server.name == angular::SERVER;
                 let query = || async move {
+                    if !current() {
+                        return Err(IdeError::cancelled());
+                    }
                     let mut params = snap.pos_params(t, pos);
                     params["context"] = json!({ "includeDeclaration": include_declaration });
                     let locs: Option<Vec<lsp::Location>> =
                         self.call(t, "textDocument/references", params, Some(cancel), LONG_TIMEOUT).await?;
+                    if !current() {
+                        return Err(IdeError::cancelled());
+                    }
                     let conv = self.conv(t.enc());
                     Ok(locs.unwrap_or_default().iter().filter_map(|l| conv.location(l)).collect::<Vec<Location>>())
                 };
@@ -2468,6 +2478,10 @@ impl LspManager {
                 .unwrap_or_default()
         };
         let (results, declarations) = futures::join!(join_all(requests), declarations);
+        // Scope widening may retain its first answer after a failed second query.
+        if !current() {
+            return Err(IdeError::cancelled());
+        }
         let mut out = Outcome::new();
         for (t, r) in results {
             match r {
@@ -2492,16 +2506,22 @@ impl LspManager {
         convert::dedup_locations(&mut v.locations);
         if project_wide && let Some(t) = targets.first().filter(|_| snap.language.as_str() == "go") {
             // Usages in other modules take a view per module: those in reach come first.
+            if !current() {
+                return Err(IdeError::cancelled());
+            }
             if let Some(partial) = partial
                 && !v.locations.is_empty()
             {
                 partial(v.clone());
             }
             v.locations.extend(self.go_mentions_beyond_search(&snap, t, pos, &cancel, false).await.locations);
-            if cancel.is_cancelled() {
+            if !current() {
                 return Err(IdeError::cancelled());
             }
             convert::dedup_locations(&mut v.locations);
+        }
+        if !current() {
+            return Err(IdeError::cancelled());
         }
         Ok(v)
     }

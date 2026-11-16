@@ -48,6 +48,45 @@ At that merge checkpoint, source-only slice 101 remained unfinished;
 no candidate 153 adoption or new package was claimed. Area statuses remain 67
 partial/2 user-deferred.
 
+Laravel slice 105 (2026-11-16, verified frontend source): every Routes
+and Views list/target/Back/Retry query waits for the existing shared pending-edit
+barrier before issuing IPC. Check query generation and project identity after the
+wait, and allocate a pending cancellation target only once the request is about
+to be sent. Acknowledgements covered by that barrier do not invalidate its own
+query; edits accepted after dispatch still retire rows/replies through slice 104.
+Closing/replacing the chooser, changing projects/roots, or observing a disk change
+while waiting prevents the retired request from being sent. Synchronization
+errors retain the selected name/incomplete notice and offer explicit Retry.
+
+Six new checks first reproduce immediate unsynchronized requests and ineffective
+pre-dispatch cancellation. Six older concurrency tests are updated to wait for
+actual dispatch before exercising post-dispatch cancellation; their first failed
+run is retained. Real mounted EditorSlot/DocumentManager tests delay backend
+acknowledgements across two successive sibling edits and prove that both chooser
+kinds query only after the final text reaches the memory backend, without a
+spurious file-change warning. Controlled LSP replies isolate client sequencing;
+no new PHPantom semantics or native runtime acceptance is claimed.
+
+Verification: 108 focused chooser/document-model checks pass; all 12,469 frontend
+tests pass / 6 skipped. Typecheck, lint, format, knip, production frontend build
+and Safari compatibility checks pass. Optional inherited browser code-insight
+smoke: 11 pass / 2 Kotlin rename cases fail because the in-place UI never appears.
+Both cases fail identically with the sole runtime change restored to parent
+c2e416b6; candidate source is then restored byte-for-byte. Their fixtures stub
+lsp_prepare_rename while production calls lsp_prepare_rename_details; repairing
+that stale fixture contract remains a separate slice. Do not report this browser
+suite as green or infer native/real-engine acceptance from its controlled replies.
+
+Evidence: artifacts/checks/slice105-{red,green1,green2,focused}.log,
+slice105-gates.json, slice105-browser.log, slice105-browser-baseline.{json,log},
+slice105-retained-app.json and slice105-receipt.json. All 69 areas retain their
+prior status: 67 partial / 2 user-deferred.
+
+No Rust, generated IPC or engine changes, new package, installation or native UI
+launch. App 0.1.92 remains the sole retained signed app and predates slices
+104–105. Reuse unchanged Rust/engine acceptance from slice 102; do not recreate
+compiler output for this frontend-only slice. Native checks remain user-skipped.
+
 Laravel slice 104 (2026-11-16, verified frontend source): Routes and
 Views chooser results now retire on accepted unsaved editor changes, backend
 patches, moved documents and closed sibling buffers. Retain the selected logical

@@ -1,6 +1,6 @@
 /** Static Laravel navigation through PHPantom; no project commands are executed. */
 import { create } from "zustand";
-import { onEditorEvent } from "@/editor/api";
+import { onEditorEvent, whenAllSynced } from "@/editor/api";
 import { tx } from "@/platform/i18n";
 import type { Location, ProjectInfo, LaravelRoutes, LaravelViews } from "@/bindings";
 import { commands, nextRequestId, isCancelled, onIdeEvent } from "@/platform/ipc";
@@ -36,11 +36,13 @@ export const useLaravelNavigation = create<NavigationState>(() => initial);
 let context: { doc: number; project: ProjectInfo } | null = null;
 let generation = 0;
 let pending: number | null = null;
+let syncing: number | null = null;
 
 export function closeLaravelNavigation() {
   generation++;
   if (pending !== null) void commands.cancelRequest(pending).catch(() => {});
   pending = null;
+  syncing = null;
   context = null;
   useLaravelNavigation.setState(initial);
 }
@@ -66,8 +68,10 @@ export function installLaravelNavigationEvents() {
   });
   const changed = () => invalidateLaravelNavigation(tx("Project files changed. Retry to refresh Laravel results."));
   const offEditors = onEditorEvent((event) => {
-    if (event.type === "docChanged") changed();
-    else if (event.type === "docClosed") {
+    if (event.type === "docChanged") {
+      // These acknowledgements are included in the query's pending-edit barrier.
+      if (syncing !== generation) changed();
+    } else if (event.type === "docClosed") {
       if (event.doc === context?.doc) closeLaravelNavigation();
       else changed();
     }
@@ -136,7 +140,8 @@ async function query(name: string | null) {
   const run = ++generation;
   if (pending !== null) void commands.cancelRequest(pending).catch(() => {});
   const request = nextRequestId();
-  pending = request;
+  pending = null;
+  syncing = run;
   useLaravelNavigation.setState({
     loading: true,
     error: null,
@@ -145,6 +150,10 @@ async function query(name: string | null) {
     selectedName: name,
   });
   try {
+    await whenAllSynced();
+    if (syncing === run) syncing = null;
+    if (run !== generation || useProject.getState().project !== current.project) return;
+    pending = request;
     const result = await lspRequest<LaravelRoutes | LaravelViews>(() =>
       kind === "routes"
         ? commands.lspLaravelRoutes(request, current.doc, name, 2000)
@@ -183,6 +192,7 @@ async function query(name: string | null) {
       error: isCancelled(error) ? tx("Cancelled") : error instanceof Error ? error.message : String(error),
     });
   } finally {
+    if (syncing === run) syncing = null;
     if (pending === request) pending = null;
   }
 }

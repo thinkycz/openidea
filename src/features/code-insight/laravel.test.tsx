@@ -94,6 +94,7 @@ it("cancels and discards a late response when the project changes", async () => 
       }),
   );
   const pending = openLaravelNavigation("views");
+  await waitFor(() => expect(resolve).toBeTypeOf("function"));
   useProject.setState({ project: null });
   expect(mock.cancel).toHaveBeenCalledOnce();
   resolve({ status: "ok", data: { views: ["stale"], locations: [], incomplete: false } });
@@ -111,6 +112,7 @@ it("ignores a canceled previous query when a newer chooser is open", async () =>
       }),
   );
   const pending = openLaravelNavigation("routes");
+  await waitFor(() => expect(resolve).toBeTypeOf("function"));
   await openLaravelNavigation("views");
   resolve({ status: "ok", data: { routes: [], locations: [loc(99)], incomplete: true } });
   await pending;
@@ -183,7 +185,7 @@ it("cancels a pending view retry on project replacement and ignores its late res
   );
   render(<LaravelNavigation />);
   fireEvent.click(screen.getByRole("button", { name: "Retry" }));
-  expect(mock.views).toHaveBeenCalledTimes(2);
+  await waitFor(() => expect(mock.views).toHaveBeenCalledTimes(2));
   expect(screen.getByRole("button", { name: "Show Targets" })).toBeDisabled();
   act(() => useProject.setState({ project: null }));
   expect(mock.cancel).toHaveBeenCalledOnce();
@@ -237,6 +239,7 @@ it("Back cancels a pending view target lookup and ignores its late result", asyn
       }),
   );
   const targetLookup = selectLaravelItem(useLaravelNavigation.getState().items[0]!);
+  await waitFor(() => expect(resolve).toBeTypeOf("function"));
   render(<LaravelNavigation />);
   mock.views.mockResolvedValueOnce({ status: "ok", data: { views: ["dashboard"], locations: [], incomplete: false } });
   fireEvent.click(screen.getByRole("button", { name: "Back" }));
@@ -468,6 +471,7 @@ it("allows initial PHPantom startup and ordinary progress, and ignores other ser
       }),
   );
   const pending = openLaravelNavigation("views");
+  await waitFor(() => expect(resolve).toBeTypeOf("function"));
   for (const status of ["starting", "busy", "ready"] as const)
     emitLocalIdeEvent({ type: "languageServer", server: 31, name: "phpantom", status, message: null });
   expect(mock.cancel).not.toHaveBeenCalled();
@@ -583,6 +587,7 @@ it("cancels a pending chooser and discards its reply after content-root removal"
       }),
   );
   const pending = openLaravelNavigation("routes");
+  await waitFor(() => expect(resolve).toBeTypeOf("function"));
   useProject.setState({ settings: { projectStructure: { contentRoots: [] } } as ProjectInfo["settings"] });
   expect(mock.cancel).toHaveBeenCalledTimes(1);
   resolve({
@@ -798,4 +803,222 @@ it("retires sibling-overlay results on close but ignores caret events and dispos
   _emitEditorEvent({ type: "docClosed", doc: 7, path: "/p/main.php" });
   expect(useLaravelNavigation.getState().items).toBe(retained);
   expect(useLaravelNavigation.getState().kind).toBe("views");
+});
+
+it.each(["routes", "views"] as const)("waits for all pending edits before querying %s", async (kind) => {
+  const { registerPendingEdits, _emitEditorEvent } = await import("@/editor/api");
+  let release!: () => void;
+  const barrier = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const sync = vi.fn(() => barrier);
+  const off = registerPendingEdits(sync);
+  const request = kind === "routes" ? mock.routes : mock.views;
+  const pending = openLaravelNavigation(kind);
+  try {
+    expect(sync).toHaveBeenCalledOnce();
+    expect(request).not.toHaveBeenCalled();
+    expect(useLaravelNavigation.getState()).toMatchObject({ loading: true, items: [], error: null });
+    // An edit accepted during the barrier is part of the pending source snapshot.
+    _emitEditorEvent({
+      type: "docChanged",
+      doc: 8,
+      path: "/p/routes/web.php",
+      baseVersion: 0,
+      version: 1,
+      changes: [{ from: 0, to: 0, insert: "\n" }],
+    });
+    release();
+    await pending;
+    expect(request).toHaveBeenCalledOnce();
+    expect(useLaravelNavigation.getState().items.length).toBeGreaterThan(0);
+    expect(useLaravelNavigation.getState().error).toBeNull();
+  } finally {
+    release();
+    off();
+    await pending;
+  }
+});
+
+it.each(["close", "project", "replacement"] as const)(
+  "never sends a query retired by %s while edits sync",
+  async (reason) => {
+    const { registerPendingEdits } = await import("@/editor/api");
+    let release!: () => void;
+    const barrier = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const off = registerPendingEdits(() => barrier);
+    const pending = openLaravelNavigation("routes");
+    let replacement: Promise<void> | undefined;
+    try {
+      if (reason === "close") closeLaravelNavigation();
+      else if (reason === "project") useProject.setState({ project: null });
+      else replacement = openLaravelNavigation("views");
+      release();
+      await pending;
+      await replacement;
+      expect(mock.routes).not.toHaveBeenCalled();
+      expect(mock.cancel).not.toHaveBeenCalled();
+      if (reason === "replacement") {
+        expect(mock.views).toHaveBeenCalledOnce();
+        expect(useLaravelNavigation.getState().items[0]?.name).toBe("invoices.show");
+      } else expect(useLaravelNavigation.getState().kind).toBeNull();
+    } finally {
+      release();
+      off();
+      await pending;
+      await replacement;
+    }
+  },
+);
+
+it("reports a failed sync without querying and retries the selected name after recovery", async () => {
+  await openLaravelNavigation("routes");
+  await selectLaravelItem(useLaravelNavigation.getState().items[0]!);
+  const name = useLaravelNavigation.getState().selectedName;
+  const { registerPendingEdits } = await import("@/editor/api");
+  const off = registerPendingEdits(() => Promise.reject(new Error("Cannot synchronize pending edits")));
+  const calls = mock.routes.mock.calls.length;
+  const { emitLocalIdeEvent } = await import("@/platform/ipc");
+  emitLocalIdeEvent({ type: "fsChanged", created: [], modified: ["/p/routes/web.php"], removed: [] });
+  const { retryLaravelNavigation } = await import("./laravel");
+  try {
+    await retryLaravelNavigation();
+    expect(mock.routes).toHaveBeenCalledTimes(calls);
+    expect(useLaravelNavigation.getState()).toMatchObject({ selectedName: name, loading: false, incomplete: true });
+    expect(useLaravelNavigation.getState().error).toContain("Cannot synchronize pending edits");
+  } finally {
+    off();
+  }
+  await retryLaravelNavigation();
+  expect(mock.routes.mock.calls.at(-1)).toEqual([expect.any(Number), 7, name, 2000]);
+  expect(useLaravelNavigation.getState().error).toBeNull();
+});
+
+it.each(["routes", "views"] as const)(
+  "queries %s only after both real sibling edits are acknowledged",
+  async (kind) => {
+    const { createMemoryBackend } = await import("@/editor/core/backend");
+    const { DocumentManager } = await import("@/editor/core/model/document");
+    const { EditorSlot } = await import("@/editor/core/model/slot");
+    const original = "<?php\nRoute::view('/invoices', 'invoices.show')->name('invoice.show');";
+    const backend = createMemoryBackend({ "/p/routes/web.php": original });
+    const edit = backend.edit.bind(backend);
+    const acks: Array<() => void> = [];
+    vi.spyOn(backend, "edit").mockImplementation(
+      (...args) =>
+        new Promise((resolve, reject) => {
+          acks.push(() => {
+            edit(...args).then(resolve, reject);
+          });
+        }),
+    );
+    const manager = new DocumentManager(backend, { settings: () => ({ files: { autoSave: false } }), notify: vi.fn() });
+    manager.start();
+    const model = await manager.acquire("/p/routes/web.php");
+    const slot = new EditorSlot(model, "unsaved-routes", {
+      onFocus: () => {},
+      onBlur: () => {},
+      onSelection: () => {},
+      onUserEdit: () => {},
+      onContextMenu: () => {},
+    });
+    slot.mount(document.body);
+    const request = kind === "routes" ? mock.routes : mock.views;
+    let queriedText: string | undefined;
+    request.mockImplementationOnce(async () => {
+      queriedText = (await backend.snapshot(model.doc)).text;
+      return {
+        status: "ok",
+        data:
+          kind === "routes"
+            ? {
+                routes: [{ name: "invoice.show", uri: "invoices", parameters: [], fromVendor: false }],
+                locations: [],
+                incomplete: false,
+              }
+            : { views: ["invoices.show"], locations: [], incomplete: false },
+      };
+    });
+    let pending: Promise<void> | undefined;
+    try {
+      slot.dispatchLocal({ changes: { from: 6, insert: "// première\n" }, userEvent: "input.type" });
+      model.sync.flush();
+      expect(acks).toHaveLength(1);
+      slot.dispatchLocal({ changes: { from: 6, insert: "// second\n" }, userEvent: "input.type" });
+      pending = openLaravelNavigation(kind);
+      expect(request).not.toHaveBeenCalled();
+      acks.shift()!();
+      await waitFor(() => expect(acks).toHaveLength(1));
+      expect(request).not.toHaveBeenCalled();
+      expect(useLaravelNavigation.getState().error).toBeNull();
+      acks.shift()!();
+      await pending;
+      expect(request).toHaveBeenCalledOnce();
+      expect(queriedText).toBe("<?php\n// second\n// première\n" + original.slice(6));
+      expect(useLaravelNavigation.getState()).toMatchObject({ loading: false, error: null });
+      expect(useLaravelNavigation.getState().items).toHaveLength(1);
+    } finally {
+      for (const ack of acks.splice(0)) ack();
+      await pending;
+      slot.dispose();
+      manager.stop();
+    }
+  },
+);
+
+it("Back replaces a target query still syncing without sending the retired name", async () => {
+  await openLaravelNavigation("views");
+  const { registerPendingEdits } = await import("@/editor/api");
+  let release!: () => void;
+  const barrier = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const off = registerPendingEdits(() => barrier);
+  const calls = mock.views.mock.calls.length;
+  const target = selectLaravelItem(useLaravelNavigation.getState().items[0]!);
+  const { backLaravelNavigation } = await import("./laravel");
+  const back = backLaravelNavigation();
+  try {
+    expect(mock.views).toHaveBeenCalledTimes(calls);
+    release();
+    await Promise.all([target, back]);
+    expect(mock.views).toHaveBeenCalledTimes(calls + 1);
+    expect(mock.views.mock.calls.at(-1)).toEqual([expect.any(Number), 7, null, 2000]);
+    expect(mock.cancel).not.toHaveBeenCalled();
+    expect(useLaravelNavigation.getState()).toMatchObject({ phase: "names", selectedName: null, error: null });
+  } finally {
+    release();
+    off();
+    await Promise.all([target, back]);
+  }
+});
+
+it("retains a retryable file-change warning when a waiting query is invalidated", async () => {
+  const { registerPendingEdits } = await import("@/editor/api");
+  let release!: () => void;
+  const barrier = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const off = registerPendingEdits(() => barrier);
+  const pending = openLaravelNavigation("routes");
+  const { emitLocalIdeEvent } = await import("@/platform/ipc");
+  try {
+    emitLocalIdeEvent({ type: "fsChanged", created: [], modified: ["/p/routes/web.php"], removed: [] });
+    release();
+    await pending;
+    expect(mock.routes).not.toHaveBeenCalled();
+    expect(mock.cancel).not.toHaveBeenCalled();
+    expect(useLaravelNavigation.getState()).toMatchObject({ loading: false, items: [] });
+    expect(useLaravelNavigation.getState().error).toContain("Project files changed");
+  } finally {
+    release();
+    off();
+    await pending;
+  }
+  const { retryLaravelNavigation } = await import("./laravel");
+  await retryLaravelNavigation();
+  expect(mock.routes).toHaveBeenCalledOnce();
+  expect(useLaravelNavigation.getState().error).toBeNull();
 });

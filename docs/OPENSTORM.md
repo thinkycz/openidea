@@ -85,6 +85,55 @@ At that merge checkpoint, source-only slice 101 remained unfinished;
 no candidate 153 adoption or new package was claimed. Area statuses remain 67
 partial/2 user-deferred.
 
+Packaging slice 112 (2026-11-16, verified local development package): promote
+unchanged PHPantom154 and its pinned source/provenance into development resources
+after slice109 engine acceptance and slice111's63 actual-engine host/client checks.
+Replay cached-source fingerprints and all154 patch checksums; licenses stay
+unchanged. App0.1.94 packages the checked invokable-handler action together with
+the upstream de107e14 merge and client/host integration. Cargo.lock changes exactly
+44 workspace versions; external dependencies and plugin API release snapshots
+remain unchanged.
+
+Reuse slice111's full Rust4940 passed/180 ignored/1 filtered, frontend12637
+passed/6 skipped,43 browser checks and63 real-engine host/client checks for
+unchanged runtime sources. Reuse source109's18,508 engine tests/17 ignored,
+bounded children,93 route regressions and full source/build gates for unchanged
+engine bytes. This slice passes5 version tests,3 bundled-server tests and1 PHP
+default-server test, resource checksum/source fingerprint checks, typecheck, lint,
+format, knip, Rust fmt and ide-tools all-target Clippy. Packaging reruns the
+production frontend build and Safari15.4 startup API/bundle syntax checks.
+Earlier full Rust acceptance still excludes exactly
+http_list_and_run_require_confirmation pending explicit fixture approval.
+The first gate runner used Python's unavailable tomllib; its lock comparison was
+replaced with exact package-entry comparisons before any gate ran.
+
+The arm64 development app has identifier cz.thinky.openstorm, version0.1.94,
+minimum macOS13.0 and a verified ad-hoc deep/strict signature. Its actual embedded
+PHPantom reports0.11.1-openstorm.154 and matches canonical SHA256
+3eb06c2ba672c3c8d968c514b2d2cd30b9d1d9aba6cdb234e2772c8a9c4b0c44.
+Main executable SHA256:
+7459c115d7b92750ae253b3fc125f4599c3cfda44c1e5fe090c593a83d1fe4c7.
+Actual embedded-server protocol checks cover capability/source receipts,
+inherited and unsaved targets, stale version/hash refusal, half-surrogate
+rejection, ordinary class-navigation separation and nested Composer isolation.
+The real Laravel13.37 example resolves its handler separately from its class.
+Both CLI sessions shut down successfully and fixture originals stay unchanged.
+Final bundle/signature/source read-back passes after these checks. This is
+packaging/CLI evidence, not native UI acceptance or performance acceptance.
+Inherited frontend warnings and the development compact-unwind linker warning
+remain; this is not an optimized production build.
+
+Latest local app: artifacts/batches/0.1.94/OpenStorm.app. Remove App0.1.93 only
+after the new signature/receipt succeeds. Remove the duplicate app and owned
+compiler output: Removed 13681 files, 8.2GiB total. Both owned compiler roots are absent.
+Receipts, source/provenance/licenses, canonical engines, PHP Workbench and earlier
+evaluation artifacts remain. No installation, app launch, notarization, tags,
+publishing or automatic-update activation occurs; native checks stay user-skipped.
+All69 areas remain67 partial/2 user-deferred. Evidence:
+artifacts/checks/slice112-receipt.json, gate/package/protocol receipts and logs,
+artifacts/batches/0.1.94/build-receipt.json and retention.json. The ignored delivery
+receipt records the final commit, remote read-back and clean-worktree proof.
+
 Laravel slice 111 (2026-11-16, verified action source checkpoint): expose
 candidate154's checked handler adapter through the typed Tauri command and shared
 host RPC dispatcher. Register navigate.laravelRouteHandler in Navigate and Find

@@ -1,6 +1,6 @@
 # Pinned PHPantom engine
 
-The local OpenStorm development candidate uses PHPantom `0.11.1-openstorm.153`
+The local OpenStorm development candidate uses PHPantom `0.11.1-openstorm.154`
 for Apple Silicon macOS. This is a local rebuild, not an upstream release.
 Source131 adds migration-derived declaration origins;132 follows registration
 order for container bindings and aliases within a provider group. Source133
@@ -60,11 +60,15 @@ Unsaved action rebinding, case-variant zero-hit caches and checked __invoke rena
 refusal are covered through the real client. Namespace-dependent class constants
 refuse partial class edits; unresolved forms and completeness limitations remain
 in the ledger. Optional memory-audit compilation is restored.
-OpenStorm0.1.93 targets this engine for local development packaging. Built
+Source154 adds a source-receipted, fixed-UTF16 routeHandler request for implicit
+invokable controller actions. It preserves incomplete results, inherited/trait
+handlers and ordinary class navigation. OpenStorm exposes the checked request
+through Go to Invokable Route Handler; stale/cancelled responses are rejected.
+OpenStorm0.1.94 targets this engine for local development packaging. Built
 artifact/signature and native acceptance evidence are tracked separately in
 `docs/OPENSTORM.md`.
 Full pinned source
-tests pass18,502 checks plus separate FIFO and enum-deadlock children (17 ignored).
+tests pass18,508 checks plus separate FIFO and enum-deadlock children (17 ignored).
 Examples, Clippy, formatting, source fingerprints and the optimized build pass.
 Current OpenStorm client/host and packaged native acceptance are tracked in
 `docs/OPENSTORM.md`; source checks alone do not establish native acceptance.
@@ -74,7 +78,7 @@ acceptance is claimed. The unaccepted129 source and its failed suite result
 remain reproducible.
 
 `source.json` pins the upstream source, archive checksum, unchanged114-patch PHP
-Workbench series and OpenStorm patches0115–0153. The bundled executable is
+Workbench series and OpenStorm patches0115–0154. The bundled executable is
 verified by `node scripts/verify-phpantom.mjs`; its provenance and licenses are
 under `src-tauri/resources/phpantom/`. Source checks and client/host checks do not
 replace packaged native acceptance; broader component and view-data work remains

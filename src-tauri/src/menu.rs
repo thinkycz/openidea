@@ -466,6 +466,7 @@ pub fn spec(os: Os) -> Vec<Entry> {
             act("navigate.callHierarchy", "Call Hierarchy"),
             act("navigate.typeHierarchy", "Type Hierarchy"),
             act("navigate.laravelRoutes", "Laravel Routes…"),
+            act("navigate.laravelRouteHandler", "Go to Invokable Route Handler"),
             act("navigate.laravelViews", "Laravel Views…"),
             act("navigate.customRegion", "Custom Folding…"),
             SEP,

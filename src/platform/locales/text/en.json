@@ -2035,5 +2035,10 @@
   "Create Step Definition": "Create Step Definition",
   "Create step definition '{text}'": "Create step definition '{text}'",
   "Undefined step": "Undefined step",
-  "Reports steps of a .feature file that no step definition of the project matches (Cucumber expressions and regular expressions, in JavaScript, TypeScript, Java and Kotlin files). Projects without step definitions in those files are not checked. Alt+Enter creates the definition.": "Reports steps of a .feature file that no step definition of the project matches (Cucumber expressions and regular expressions, in JavaScript, TypeScript, Java and Kotlin files). Projects without step definitions in those files are not checked. Alt+Enter creates the definition."
+  "Reports steps of a .feature file that no step definition of the project matches (Cucumber expressions and regular expressions, in JavaScript, TypeScript, Java and Kotlin files). Projects without step definitions in those files are not checked. Alt+Enter creates the definition.": "Reports steps of a .feature file that no step definition of the project matches (Cucumber expressions and regular expressions, in JavaScript, TypeScript, Java and Kotlin files). Projects without step definitions in those files are not checked. Alt+Enter creates the definition.",
+  "Go to Invokable Route Handler": "Go to Invokable Route Handler",
+  "Invokable Route Handlers": "Invokable Route Handlers",
+  "Open a PHP source to find its invokable route handler": "Open a PHP source to find its invokable route handler",
+  "Return to the original PHP source to retry handler lookup": "Return to the original PHP source to retry handler lookup",
+  "Place the caret on an invokable controller in a route action.": "Place the caret on an invokable controller in a route action."
 }

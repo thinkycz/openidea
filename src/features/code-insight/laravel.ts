@@ -1,14 +1,15 @@
 /** Static Laravel navigation through PHPantom; no project commands are executed. */
 import { create } from "zustand";
-import { onEditorEvent, whenAllSynced } from "@/editor/api";
+import { activeEditor, onEditorEvent, whenAllSynced } from "@/editor/api";
 import { tx } from "@/platform/i18n";
-import type { Location, ProjectInfo, LaravelRoutes, LaravelViews } from "@/bindings";
+import type { Location, ProjectInfo, LaravelRoutes, LaravelViews, LaravelRouteHandler } from "@/bindings";
 import { commands, nextRequestId, isCancelled, onIdeEvent } from "@/platform/ipc";
 import { useProject, relativePath } from "@/platform/project";
 import { validateProjectStructure } from "@/platform/languageSettings";
-import { caretContext, hint, lspRequest, openLocation, reportError } from "./ipc";
+import { isVirtualUri } from "@/platform/virtualDocs";
+import { caretContext, hint, lspRequest, openLocation, reportError, type CaretContext } from "./ipc";
 
-export type LaravelNavigationKind = "routes" | "views";
+export type LaravelNavigationKind = "routes" | "views" | "handler";
 export interface LaravelNavigationItem {
   label: string;
   name: string;
@@ -33,10 +34,36 @@ const initial: NavigationState = {
   error: null,
 };
 export const useLaravelNavigation = create<NavigationState>(() => initial);
-let context: { doc: number; project: ProjectInfo } | null = null;
+function handlerFrame(caret: CaretContext) {
+  return {
+    pos: { line: caret.line, col: caret.col },
+    path: caret.path,
+    label: caret.word,
+    text: caret.view?.state.doc ?? null,
+  };
+}
+type NavigationContext = { doc: number; project: ProjectInfo; handler?: ReturnType<typeof handlerFrame> };
+let context: NavigationContext | null = null;
 let generation = 0;
 let pending: number | null = null;
 let syncing: number | null = null;
+
+function isHandlerSource(caret: CaretContext) {
+  const editor = activeEditor();
+  return caret.doc >= 0 && editor?.ctx.doc === caret.doc && editor.ctx.language === "php" && !isVirtualUri(caret.path);
+}
+
+function handlerSourceCurrent(current: NavigationContext) {
+  const frame = current.handler;
+  const editor = activeEditor();
+  return (
+    !frame ||
+    (editor?.ctx.doc === current.doc &&
+      editor.ctx.language === "php" &&
+      editor.ctx.path === frame.path &&
+      (frame.text === null || editor.view.state.doc === frame.text))
+  );
+}
 
 export function closeLaravelNavigation() {
   generation++;
@@ -70,11 +97,18 @@ export function installLaravelNavigationEvents() {
   const offEditors = onEditorEvent((event) => {
     if (event.type === "docChanged") {
       // These acknowledgements are included in the query's pending-edit barrier.
-      if (syncing !== generation) changed();
+      if (
+        syncing !== generation ||
+        (context?.handler &&
+          event.doc === context.doc &&
+          (context.handler.text === null || !handlerSourceCurrent(context)))
+      )
+        changed();
     } else if (event.type === "docClosed") {
       if (event.doc === context?.doc) closeLaravelNavigation();
       else changed();
-    }
+    } else if (event.type === "activeEditorChanged" && context?.handler && event.doc !== context.doc)
+      closeLaravelNavigation();
   });
   const offPatches = onIdeEvent("docPatched", changed);
   const offMoves = onIdeEvent("docMoved", ({ doc }) => {
@@ -105,11 +139,19 @@ export async function openLaravelNavigation(kind: LaravelNavigationKind) {
   closeLaravelNavigation();
   const caret = caretContext();
   const { project, settings } = useProject.getState();
-  if (!caret || !project || !isNavigationSource(caret.path, navigationRoots(project, settings))) {
-    hint(tx("Open a PHP source or Laravel translation JSON file to browse routes and views"));
+  if (
+    !caret ||
+    !project ||
+    !(kind === "handler" ? isHandlerSource(caret) : isNavigationSource(caret.path, navigationRoots(project, settings)))
+  ) {
+    hint(
+      kind === "handler"
+        ? tx("Open a PHP source to find its invokable route handler")
+        : tx("Open a PHP source or Laravel translation JSON file to browse routes and views"),
+    );
     return;
   }
-  context = { doc: caret.doc, project };
+  context = { doc: caret.doc, project, ...(kind === "handler" ? { handler: handlerFrame(caret) } : {}) };
   useLaravelNavigation.setState({ kind });
   await query(null);
 }
@@ -136,7 +178,9 @@ function isNavigationSource(path: string, roots: string[]) {
 async function query(name: string | null) {
   const current = context;
   const kind = useLaravelNavigation.getState().kind;
-  if (!current || !kind) return;
+  if (!current || !kind || (kind === "handler" && !current.handler)) return;
+  const phase = kind === "handler" || name !== null ? "locations" : "names";
+  const selectedName = kind === "handler" ? current.handler!.label : name;
   const run = ++generation;
   if (pending !== null) void commands.cancelRequest(pending).catch(() => {});
   const request = nextRequestId();
@@ -146,24 +190,35 @@ async function query(name: string | null) {
     loading: true,
     error: null,
     items: [],
-    phase: name === null ? "names" : "locations",
-    selectedName: name,
+    phase,
+    selectedName,
   });
   try {
     await whenAllSynced();
     if (syncing === run) syncing = null;
     if (run !== generation || useProject.getState().project !== current.project) return;
+    if (!handlerSourceCurrent(current)) {
+      invalidateLaravelNavigation(tx("Project files changed. Retry to refresh Laravel results."));
+      return;
+    }
     pending = request;
-    const result = await lspRequest<LaravelRoutes | LaravelViews>(() =>
-      kind === "routes"
-        ? commands.lspLaravelRoutes(request, current.doc, name, 2000)
-        : commands.lspLaravelViews(request, current.doc, name, 2000),
+    const result = await lspRequest<LaravelRoutes | LaravelViews | LaravelRouteHandler>(() =>
+      kind === "handler"
+        ? commands.lspLaravelRouteHandler(request, current.doc, current.handler!.pos)
+        : kind === "routes"
+          ? commands.lspLaravelRoutes(request, current.doc, name, 2000)
+          : commands.lspLaravelViews(request, current.doc, name, 2000),
     );
     if (run !== generation || useProject.getState().project !== current.project) return;
+    if (pending === request) pending = null;
+    if (!handlerSourceCurrent(current)) {
+      invalidateLaravelNavigation(tx("Project files changed. Retry to refresh Laravel results."));
+      return;
+    }
     const items: LaravelNavigationItem[] =
-      name !== null
+      kind === "handler" || name !== null
         ? result.locations.map((location) => ({
-            name,
+            name: selectedName ?? "",
             location,
             label: `${relativePath(current.project.root, location.path)}:${location.range.start.line + 1}:${location.range.start.col + 1}`,
           }))
@@ -176,15 +231,19 @@ async function query(name: string | null) {
               ].join("  ");
               return { name: route.name, label };
             })
-          : result.views.map((view) => ({ name: view, label: view }));
+          : "views" in result
+            ? result.views.map((view) => ({ name: view, label: view }))
+            : [];
+    const incomplete = useLaravelNavigation.getState().incomplete || result.incomplete;
     useLaravelNavigation.setState({
       items,
-      phase: name === null ? "names" : "locations",
-      selectedName: name,
+      phase,
+      selectedName,
       // A complete selected-name reply cannot erase an incomplete list warning.
-      incomplete: useLaravelNavigation.getState().incomplete || result.incomplete,
+      incomplete,
       loading: false,
     });
+    if (kind === "handler" && !incomplete && items.length === 1) await selectLaravelItem(items[0]!);
   } catch (error) {
     if (run !== generation) return;
     useLaravelNavigation.setState({
@@ -199,7 +258,12 @@ async function query(name: string | null) {
 
 /** Refresh names in this chooser, cancelling any target lookup still in flight. */
 export async function backLaravelNavigation() {
-  if (!context || useLaravelNavigation.getState().phase !== "locations") return;
+  if (
+    !context ||
+    useLaravelNavigation.getState().kind === "handler" ||
+    useLaravelNavigation.getState().phase !== "locations"
+  )
+    return;
   if (useProject.getState().project !== context.project) {
     closeLaravelNavigation();
     return;
@@ -214,6 +278,14 @@ export async function retryLaravelNavigation() {
   if (useProject.getState().project !== context.project) {
     closeLaravelNavigation();
     return;
+  }
+  if (state.kind === "handler") {
+    const caret = caretContext();
+    if (!caret || caret.doc !== context.doc || !isHandlerSource(caret)) {
+      hint(tx("Return to the original PHP source to retry handler lookup"));
+      return;
+    }
+    context.handler = handlerFrame(caret);
   }
   await query(state.selectedName);
 }
@@ -230,6 +302,29 @@ export async function selectLaravelItem(item: LaravelNavigationItem) {
   if (!item.location) {
     await query(item.name);
     return;
+  }
+  if (context.handler) {
+    const current = context;
+    const run = generation;
+    useLaravelNavigation.setState({ loading: true });
+    try {
+      await whenAllSynced();
+    } catch (error) {
+      if (context === current && run === generation)
+        invalidateLaravelNavigation(error instanceof Error ? error.message : String(error));
+      return;
+    }
+    if (
+      context !== current ||
+      run !== generation ||
+      useProject.getState().project !== current.project ||
+      !useLaravelNavigation.getState().items.includes(item)
+    )
+      return;
+    if (!handlerSourceCurrent(current)) {
+      invalidateLaravelNavigation(tx("Project files changed. Retry to refresh Laravel results."));
+      return;
+    }
   }
   const location = item.location;
   closeLaravelNavigation();

@@ -331,6 +331,18 @@ pub async fn lsp_hierarchy_refactor(
 
 #[tauri::command]
 #[specta::specta]
+pub async fn lsp_laravel_route_handler(
+    window: Window,
+    state: State<'_, AppState>,
+    request: RequestId,
+    doc: DocId,
+    pos: Pos,
+) -> IdeResult<LaravelRouteHandler> {
+    ide_host::ops::lsp::lsp_laravel_route_handler(&state.host, window.label(), request, doc, pos).await
+}
+
+#[tauri::command]
+#[specta::specta]
 pub async fn lsp_laravel_routes(
     window: Window,
     state: State<'_, AppState>,

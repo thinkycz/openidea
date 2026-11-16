@@ -26,7 +26,7 @@ function LaravelNavigationDialog() {
   return (
     <Dialog
       open
-      title={kind === "routes" ? "Laravel Routes" : "Laravel Views"}
+      title={kind === "handler" ? "Invokable Route Handlers" : kind === "routes" ? "Laravel Routes" : "Laravel Views"}
       width={640}
       onClose={closeLaravelNavigation}
       buttons={[
@@ -38,13 +38,19 @@ function LaravelNavigationDialog() {
               disabled: loading || !visible[current],
               onClick: pick,
             },
-        ...(phase === "locations" ? [{ label: "Back", onClick: () => void backLaravelNavigation() }] : []),
+        ...(phase === "locations" && kind !== "handler"
+          ? [{ label: "Back", onClick: () => void backLaravelNavigation() }]
+          : []),
         { label: "Cancel", role: "cancel" },
       ]}
     >
       <div className={styles.content}>
         <div className={styles.hint}>
-          <T>Static source index; dynamic registrations may be unavailable.</T>
+          {kind === "handler" ? (
+            <T>Place the caret on an invokable controller in a route action.</T>
+          ) : (
+            <T>Static source index; dynamic registrations may be unavailable.</T>
+          )}
         </div>
         {selectedName && <div>{selectedName}</div>}
         {incomplete && (

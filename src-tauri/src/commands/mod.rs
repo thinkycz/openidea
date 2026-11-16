@@ -298,6 +298,7 @@ pub fn builder() -> tauri_specta::Builder<tauri::Wry> {
         lsp::lsp_prepare_rename_details,
         lsp::lsp_rename,
         lsp::lsp_laravel_routes,
+        lsp::lsp_laravel_route_handler,
         lsp::lsp_laravel_views,
         lsp::lsp_hierarchy_members,
         lsp::lsp_hierarchy_refactor,

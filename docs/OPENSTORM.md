@@ -85,6 +85,60 @@ At that merge checkpoint, source-only slice 101 remained unfinished;
 no candidate 153 adoption or new package was claimed. Area statuses remain 67
 partial/2 user-deferred.
 
+Laravel slice 111 (2026-11-16, verified action source checkpoint): expose
+candidate154's checked handler adapter through the typed Tauri command and shared
+host RPC dispatcher. Register navigate.laravelRouteHandler in Navigate and Find
+Action as Go to Invokable Route Handler, with English/Chinese text and no new
+default shortcut. Keep ordinary class goto unchanged. The existing Laravel popup
+shows incomplete/duplicate results for explicit selection; a single complete
+result opens directly at its UTF16 declaration. Explain the required controller
+caret placement when there is no static association. No names/Back phase exists
+for this positional lookup.
+
+Capture the source document, PHP language, text and caret; wait for all pending
+edits before dispatch and before opening a displayed target. Source changes retire
+old positions; explicit Retry recaptures the caret only in the original document.
+Keep incomplete warnings through Retry. Retire late results on edits, project or
+active-editor replacement, file moves, server restart and Cancel. At the host,
+register requests with their owning project/window before looking it up, retain
+trust gating and reject a replaced project after the response; always end the
+request. Actual in-memory RPC transport tests cover unsaved dependency updates,
+legacy153 capability refusal, auxiliary-window ownership, completed-request
+cleanup, close/replacement cancellation, and held replies.
+
+Browser preparation exposed PHP files being labelled plaintext by the memory
+backend. Seven failing open/Save As regressions prove it; add the same PHP
+extensions/comment/indent metadata as the native definition, keeping the existing
+language order/defaults. This changes browser/test metadata, not native language
+detection. Frontend handler tests fail14/14 before integration; actual host tests
+fail2/2 at the unimplemented host seam. Both turn green. A test-library-only
+unsupported role option fails the first typecheck and is corrected. Preflight:
+96 focused frontend tests and2 real host RPC tests pass, plus9 Laravel browser
+flows including4 handler workflows. The incomplete-result popup is visually
+inspected in the browser; this is controlled IPC, not native UI acceptance.
+
+Final source gates pass: frontend12637 passed/6 skipped; Rust4940 passed/180
+ignored, with exactly http_list_and_run_require_confirmation filtered pending
+explicit approval for its disposable environment fixture. Generated bindings and
+command snapshot, typecheck/lint/format/knip, production frontend build, all-target
+workspace Clippy and Rust fmt pass. All63 actual-engine host/client checks pass
+against candidate154, including legacy153 negative controls and2 new host RPC
+tests; persistent fixture originals remain unchanged. Selected browser editor,
+code insight, Laravel navigation, Find/Usages and Git-menu checks:43 pass, including
+4 handler workflows. The final incomplete-result popup is visually inspected;
+these browser flows use controlled IPC and do not establish native acceptance.
+Existing lint/build/linker warnings remain; exception performance is unmeasured.
+
+Remove 31,833,415,888 bytes (29.6 GiB) of owned compiler output after acceptance.
+No canonical153/154 test-server process remains. Preserve the sole App0.1.93,
+canonical engines, source/provenance, PHP Workbench and earlier evaluation artifacts.
+Candidate154 remains inactive, resource pins remain153, and App0.1.93 predates
+this source checkpoint. Promotion and a new cohesive signed app remain separate.
+Native checks remain user-skipped. FEAT-030/066/067 gain bounded evidence; all69
+areas remain67 partial/2 deferred. Evidence: artifacts/checks/slice111-receipt.json,
+gate/client-host/browser/cleanup receipts and logs; the ignored delivery receipt
+records the final commit, remote read-back and clean worktree.
+
 Laravel slice 110 (2026-11-16, verified client source checkpoint): add typed
 LspManager::laravel_route_handler for candidate154's checked protocol. Require
 its advertised capability and an open PHP file; use the actual synchronized LSP

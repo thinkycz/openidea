@@ -279,6 +279,7 @@
   "menu.navigate.gotoSymbol": "符号…",
   "menu.navigate.implementation": "实现",
   "menu.navigate.laravelRoutes": "Laravel 路由…",
+  "menu.navigate.laravelRouteHandler": "跳转到可调用路由处理器",
   "menu.navigate.laravelViews": "Laravel 视图…",
   "menu.navigate.nextError": "下一个高亮错误",
   "menu.navigate.prevError": "上一个高亮错误",

@@ -1334,6 +1334,30 @@ pub async fn lsp_rename(
     result
 }
 
+/// Checked, static invokable handler lookup, owned by the calling project's window.
+pub async fn lsp_laravel_route_handler(
+    host: &Host,
+    window: &str,
+    request: RequestId,
+    doc: DocId,
+    pos: Pos,
+) -> IdeResult<LaravelRouteHandler> {
+    let cancel = host.begin_project_request(window, request);
+    let result = async {
+        let project = host.project(window)?;
+        let reply = project.lsp.laravel_route_handler(doc, pos, cancel.clone()).await;
+        if cancel.is_cancelled()
+            || !host.project(window).is_ok_and(|current| std::sync::Arc::ptr_eq(&current, &project))
+        {
+            return Err(IdeError::cancelled());
+        }
+        reply
+    }
+    .await;
+    host.end_request(request);
+    result
+}
+
 /// Static PHPantom Laravel routes lookup; cancellable and scoped to this project.
 pub async fn lsp_laravel_routes(
     host: &Host,
@@ -2039,6 +2063,9 @@ pub(crate) fn register(d: &mut Dispatcher) {
     });
     d.add("lsp_rename", |c| async move {
         lsp_rename(&c.host, &c.window, c.arg("request")?, c.arg("doc")?, c.arg("pos")?, c.arg("newName")?).await
+    });
+    d.add("lsp_laravel_route_handler", |c| async move {
+        lsp_laravel_route_handler(&c.host, &c.window, c.arg("request")?, c.arg("doc")?, c.arg("pos")?).await
     });
     d.add("lsp_laravel_routes", |c| async move {
         lsp_laravel_routes(&c.host, &c.window, c.arg("request")?, c.arg("doc")?, c.arg("name")?, c.arg("limit")?).await

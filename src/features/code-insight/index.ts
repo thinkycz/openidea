@@ -142,6 +142,14 @@ export function activate(): () => void {
         run: () => openLaravelNavigation("routes"),
       },
       {
+        id: "navigate.laravelRouteHandler",
+        title: "Go to Invokable Route Handler",
+        category: "Navigate",
+        keywords: ["Laravel", "PHP", "controller", "__invoke", "route"],
+        when: EDITOR_WHEN,
+        run: () => openLaravelNavigation("handler"),
+      },
+      {
         id: "navigate.laravelViews",
         title: "Laravel Views…",
         category: "Navigate",

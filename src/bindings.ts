@@ -632,6 +632,7 @@ export const commands = {
 	/**  Computes the rename edit without applying it, so the UI can preview conflicts. */
 	lspRename: (request: RequestId, doc: DocId, pos: Pos, newName: string) => typedError<Renamed_Serialize, IdeError>(__TAURI_INVOKE("lsp_rename", { request, doc, pos, newName })),
 	lspLaravelRoutes: (request: RequestId, doc: DocId, name: string | null, limit: number) => typedError<LaravelRoutes, IdeError>(__TAURI_INVOKE("lsp_laravel_routes", { request, doc, name, limit })),
+	lspLaravelRouteHandler: (request: RequestId, doc: DocId, pos: Pos) => typedError<LaravelRouteHandler, IdeError>(__TAURI_INVOKE("lsp_laravel_route_handler", { request, doc, pos })),
 	lspLaravelViews: (request: RequestId, doc: DocId, name: string | null, limit: number) => typedError<LaravelViews, IdeError>(__TAURI_INVOKE("lsp_laravel_views", { request, doc, name, limit })),
 	/**  The class at `pos` and the members Pull Members Up / Push Members Down can move. */
 	lspHierarchyMembers: (request: RequestId, doc: DocId, pos: Pos, kind: HierarchyRefactoring) => typedError<HierarchyMembers, IdeError>(__TAURI_INVOKE("lsp_hierarchy_members", { request, doc, pos, kind })),
@@ -7227,6 +7228,12 @@ export type LaravelRoute = {
 	uri: string,
 	parameters: string[] | null,
 	fromVendor: boolean,
+};
+
+/**  Concrete invokable implementations associated with a checked route token. */
+export type LaravelRouteHandler = {
+	locations: Location[],
+	incomplete: boolean,
 };
 
 export type LaravelRoutes = {

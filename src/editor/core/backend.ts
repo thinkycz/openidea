@@ -145,6 +145,13 @@ interface MemDoc {
 }
 
 const EXT_LANG: Record<string, string> = {
+  php: "php",
+  phtml: "php",
+  php3: "php",
+  php4: "php",
+  php5: "php",
+  phps: "php",
+  phpt: "php",
   http: "http",
   rest: "http",
   ts: "typescript",
@@ -319,6 +326,15 @@ const MEM_LANGUAGES: LanguageInfo[] = [
     blockComment: id === "css" ? ["/*", "*/"] : ["<!--", "-->"],
     indent: { tabSize: 2, insertSpaces: true },
   })),
+  {
+    id: "php",
+    name: "PHP",
+    extensions: ["php", "phtml", "php3", "php4", "php5", "phps", "phpt"],
+    uiMode: "PHP",
+    lineComment: "//",
+    blockComment: ["/*", "*/"],
+    indent: { tabSize: 4, insertSpaces: true },
+  },
   {
     id: "plaintext",
     name: "Plain Text",

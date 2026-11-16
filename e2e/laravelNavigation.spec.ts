@@ -1,6 +1,6 @@
 /** Workbench actions and editor paths with controlled PHPantom IPC replies. */
 import type { Page } from "@playwright/test";
-import type { LaravelRoutes, LaravelViews } from "../src/bindings";
+import type { LaravelRouteHandler, LaravelRoutes, LaravelViews } from "../src/bindings";
 import type { MemoryBackend } from "../src/editor/core/backend";
 import { expect, ipcCalls, stubDesktop, test } from "./fixtures";
 
@@ -186,4 +186,154 @@ test("Cancel while edits synchronize prevents any Laravel request", async ({ wor
   await expect(chooser).toBeHidden();
   expect(await ipcCalls(page, "lsp_laravel_routes")).toHaveLength(0);
   expect(await ipcCalls(page, "cancel_request")).toHaveLength(0);
+});
+
+const HANDLER_SOURCE = `<?php\nuse App\\Invokable;\nuse Illuminate\\Support\\Facades\\Route;\nRoute::get('/😀', Invokable::class);\n`;
+const HANDLER_TARGET = `<?php\nnamespace App;\n/*😀*/ class Invokable { public function __invoke(): string { return 'ok'; } }\n`;
+const HANDLER_ROUTE = `${ROOT}/routes/invokable.php`;
+const HANDLER_PATH = `${ROOT}/app/Invokable.php`;
+const HANDLER_POS = { line: 3, col: HANDLER_SOURCE.split("\n")[3]!.indexOf("Invokable") };
+const HANDLER_DECL = { line: 2, col: HANDLER_TARGET.split("\n")[2]!.indexOf("__invoke") };
+async function seedHandler(page: Page, incomplete = false) {
+  await seed(page);
+  await page.evaluate(
+    async ({ source, target, sourceText, targetText, pos, decl, incomplete, root }) => {
+      const backendPath = "/src/editor/core/backend.ts";
+      const contributionPath = "/src/workbench/contributions.ts";
+      const backend = (await import(/* @vite-ignore */ backendPath)).docBackend() as MemoryBackend;
+      backend.files.set(source, sourceText);
+      backend.files.set(target, targetText);
+      backend.files.set(
+        `${root}/composer.json`,
+        JSON.stringify({ require: { "laravel/framework": "^12.0" }, autoload: { "psr-4": { "App\\": "app/" } } }),
+      );
+      window.__ipc.handlers.lsp_laravel_route_handler = () =>
+        ({
+          locations: [{ path: target, range: { start: decl, end: { line: decl.line, col: decl.col + 8 } } }],
+          incomplete,
+        }) satisfies LaravelRouteHandler;
+      await (
+        await import(/* @vite-ignore */ contributionPath)
+      )
+        .editorService()
+        .openFile(source, { asText: true, focus: true, selection: pos });
+    },
+    {
+      source: HANDLER_ROUTE,
+      target: HANDLER_PATH,
+      sourceText: HANDLER_SOURCE,
+      targetText: HANDLER_TARGET,
+      pos: HANDLER_POS,
+      decl: HANDLER_DECL,
+      incomplete,
+      root: ROOT,
+    },
+  );
+  await expect(page.locator(".cm-content").first()).toContainText("Invokable::class");
+}
+async function invokeHandler(page: Page) {
+  await page.keyboard.press("Meta+Shift+A");
+  const search = page.getByRole("dialog", { name: "Search Everywhere", exact: true });
+  await search.getByRole("combobox").fill("Go to Invokable Route Handler");
+  await expect(search.getByRole("option", { name: /Go to Invokable Route Handler/ })).toBeVisible();
+  await search.getByRole("combobox").press("Enter");
+  await expect(search).toBeHidden();
+}
+async function expectHandlerTarget(page: Page) {
+  await expect(page.getByRole("tab", { name: /Invokable\.php/ })).toHaveAttribute("aria-selected", "true");
+  await expect
+    .poll(() =>
+      page.evaluate(async () => {
+        const path = "/src/editor/api.ts";
+        const view = (await import(/* @vite-ignore */ path)).activeEditor()!.view;
+        const head = view.state.selection.main.head;
+        const line = view.state.doc.lineAt(head);
+        return { line: line.number - 1, col: head - line.from };
+      }),
+    )
+    .toEqual(HANDLER_DECL);
+}
+test("Find Action opens one complete invokable implementation at its UTF16 declaration", async ({
+  workbench: page,
+}) => {
+  await seedHandler(page);
+  await invokeHandler(page);
+  await expectHandlerTarget(page);
+  expect((await ipcCalls(page, "lsp_laravel_route_handler")).map((call) => call.pos)).toEqual([HANDLER_POS]);
+  await expect(page.getByRole("dialog", { name: "Invokable Route Handlers", exact: true })).toBeHidden();
+});
+test("incomplete single handlers require explicit opening and keep their warning", async ({
+  workbench: page,
+}, info) => {
+  await seedHandler(page, true);
+  await invokeHandler(page);
+  const chooser = page.getByRole("dialog", { name: "Invokable Route Handlers", exact: true });
+  await expect(chooser).toBeVisible();
+  await expect(chooser.getByText(/Results are incomplete/)).toBeVisible();
+  await expect(chooser.getByRole("option")).toHaveCount(1);
+  await expect(chooser.getByRole("button", { name: "Back", exact: true })).toHaveCount(0);
+  await page.screenshot({ path: info.outputPath("handler-incomplete.png"), animations: "disabled" });
+  await chooser.getByRole("button", { name: "Open", exact: true }).click();
+  await expectHandlerTarget(page);
+});
+test("an unsaved source edit retires a held handler and Retry uses the current caret", async ({ workbench: page }) => {
+  await seedHandler(page);
+  await page.evaluate(() => {
+    const original = window.__ipc.handlers.lsp_laravel_route_handler!;
+    let first = true;
+    window.__ipc.handlers.lsp_laravel_route_handler = (args) => {
+      if (!first) return original(args);
+      first = false;
+      return new Promise((resolve) => {
+        window.__ipc.handlers.fixture_release_handler = () => resolve(original(args));
+      });
+    };
+  });
+  await invokeHandler(page);
+  const chooser = page.getByRole("dialog", { name: "Invokable Route Handlers", exact: true });
+  await expect.poll(async () => (await ipcCalls(page, "lsp_laravel_route_handler")).length).toBe(1);
+  await page.evaluate(async () => {
+    const path = "/src/editor/api.ts";
+    (await import(/* @vite-ignore */ path))
+      .activeEditor()!
+      .view.dispatch({ changes: { from: 6, insert: "// unsaved source\n" }, userEvent: "input.type" });
+  });
+  await expect(chooser.getByRole("alert")).toContainText("Project files changed");
+  await page.evaluate(() => window.__ipc.handlers.fixture_release_handler!({}));
+  await expect(chooser).toBeVisible();
+  await expect(page.getByRole("tab", { name: /invokable\.php/ })).toHaveAttribute("aria-selected", "true");
+  await chooser.getByRole("button", { name: "Retry", exact: true }).click();
+  await expectHandlerTarget(page);
+  expect((await ipcCalls(page, "lsp_laravel_route_handler")).map((call) => call.pos)).toEqual([
+    HANDLER_POS,
+    { line: HANDLER_POS.line + 1, col: HANDLER_POS.col },
+  ]);
+  const disk = await page.evaluate(async (path) => {
+    const module = "/src/editor/core/backend.ts";
+    return ((await import(/* @vite-ignore */ module)).docBackend() as MemoryBackend).files.get(path);
+  }, HANDLER_ROUTE);
+  expect(disk).toBe(HANDLER_SOURCE);
+});
+test("Cancel before source synchronization prevents a handler request", async ({ workbench: page }) => {
+  await seedHandler(page);
+  await page.evaluate(async () => {
+    const path = "/src/editor/api.ts";
+    let release!: () => void;
+    const barrier = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const off = (await import(/* @vite-ignore */ path)).registerPendingEdits(() => barrier);
+    window.__ipc.handlers.fixture_release_edits = () => {
+      release();
+      off();
+    };
+  });
+  await invokeHandler(page);
+  const chooser = page.getByRole("dialog", { name: "Invokable Route Handlers", exact: true });
+  await expect(chooser).toBeVisible();
+  expect(await ipcCalls(page, "lsp_laravel_route_handler")).toHaveLength(0);
+  await chooser.getByRole("button", { name: "Cancel", exact: true }).click();
+  await page.evaluate(() => window.__ipc.handlers.fixture_release_edits!({}));
+  await expect(chooser).toBeHidden();
+  expect(await ipcCalls(page, "lsp_laravel_route_handler")).toHaveLength(0);
 });

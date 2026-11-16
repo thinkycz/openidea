@@ -310,6 +310,7 @@ lsp_hover                                    trusted            project_host bin
 lsp_implementations                          trusted            project_host bindings async
 lsp_inlay_hints                              trusted            project_host bindings async
 lsp_inline_completion                        trusted            project_host bindings async
+lsp_laravel_route_handler                    trusted            project_host bindings async
 lsp_laravel_routes                           trusted            project_host bindings async
 lsp_laravel_views                            trusted            project_host bindings async
 lsp_library_sources                          trusted            project_host bindings async

@@ -279,6 +279,7 @@
   "menu.navigate.gotoSymbol": "Symbol…",
   "menu.navigate.implementation": "Implementation(s)",
   "menu.navigate.laravelRoutes": "Laravel Routes…",
+  "menu.navigate.laravelRouteHandler": "Go to Invokable Route Handler",
   "menu.navigate.laravelViews": "Laravel Views…",
   "menu.navigate.nextError": "Next Highlighted Error",
   "menu.navigate.prevError": "Previous Highlighted Error",

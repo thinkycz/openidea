@@ -69,8 +69,15 @@ for (const theme of ["light", "dark"] as const) {
       await checkSize(fileIcon);
       await checkSize(directoryIcon);
       await checkSize(find.getByRole("status", { name: "Loading", exact: true }));
-      for (const title of ["Stop", "Expand All", "Collapse All", "Close Tab"])
-        await checkSize(find.getByRole("button", { name: title, exact: true }).last().locator("svg"));
+      for (const title of ["Stop", "Expand All", "Collapse All", "Close Tab"]) {
+        const button = find.getByRole("button", { name: title, exact: true }).last();
+        await checkSize(button.locator("svg:visible"));
+        if (title === "Close Tab") {
+          await button.hover();
+          await checkSize(button.locator("svg:visible"));
+          await page.mouse.move(0, 0);
+        }
+      }
 
       await page.evaluate(async () => {
         const path = "/src/ui/iconAppearance.ts";

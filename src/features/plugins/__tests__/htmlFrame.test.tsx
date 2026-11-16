@@ -35,7 +35,10 @@ describe("html bodies in the app", () => {
         "*",
       );
     });
-    const doc = (post.mock.calls[0]![0] as { document: string }).document;
+    // Theme messages may arrive before the document.
+    const doc = post.mock.calls
+      .map(([message]) => (message as { document?: string }).document)
+      .find((document) => typeof document === "string");
     expect(doc).toContain('<meta http-equiv="Content-Security-Policy"');
     expect(doc).toContain("window.openidea");
 

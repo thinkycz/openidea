@@ -15,6 +15,50 @@ slice, commit and push it, and retain only the latest generated app. Native UI
 cases remain deferred/unverified; earlier native-first blocking checkpoints are
 historical and no longer prevent independent implementation.
 
+Upstream merge checkpoint (2026-11-16, verified source checkpoint): merge
+18 upstream commits after7a97fba49 through2d85e745e78dba5374d8591ddb1db3b650eae1b9
+from l0ng-ai/openidea. Changes include safer terminal path quoting/bracketed
+paste, Git File History revision actions and Git Log component extraction,
+interpolated-literal bracket highlighting, plugin keyboard forwarding restrictions,
+Python hierarchy cycle handling, safe Rebuild output cleanup, declaration popups
+in diff views, retained blank-diff edits, and close-button/window-tab styling.
+Upstream also reverts temporary agent side conversations. Preserve the independent
+OpenStorm identity/version, disabled updater, PHPantom155 binary/provenance,
+Laravel client extensions, reviewed-edit and external-save-conflict protections.
+
+Resolve the sole textual conflict by retaining both the completed-parse regression
+and upstream's interpolation tests. Full frontend acceptance detects duplicate
+Extract Interface translation keys added on both branches; keep one English and
+Chinese entry each. A subsequent full run exposes an existing iframe-test race:
+a theme message can precede its document, so select the actual document message
+instead of assuming the first call. All75 focused plugin/catalog checks then pass;
+the final full frontend run passes12799 tests with6 skipped. Earlier failures and
+final run logs remain available. Workspace Rust tests pass4971/185 ignored/1
+excluded (the existing http_list_and_run_require_confirmation scope exception).
+Clippy catches one needless borrow in upstream's Copilot fallback; remove the
+redundant reference without changing behavior. Final all-target workspace Clippy
+passes, followed by303 affected agent tests/5 ignored. Regenerated bindings match
+the merged file exactly; Rustfmt, frontend type/lint/format/knip and production
+bundle/Safari checks pass.
+
+The controlled-browser run passes86 of90 cases, exposing four strict-locator
+failures after upstream's close button gains separate idle/hover SVGs. Adapt the
+icon-size test to select the visible SVG and check both states. All6 affected
+Find/Usages cases then pass; the other86 results remain valid. Keep both runs and
+traces. This covers90 distinct browser cases, not native or real-service acceptance.
+
+Native UI checks remain explicitly user-skipped. Keep the sole signed App0.1.95
+unchanged: it predates this merge and is not evidence of the new native behavior.
+Preserve unfinished slice117's ignored engine-test work separately; its production
+changes are not included. No environment-file changes are introduced by this merge.
+All69 areas remain67 partial/2 user-deferred. Cleanup removes20785 compiler
+files/27.6GiB, the67,937,500-byte frontend bundle, and the earlier1.2GiB engine-test
+output. Both compiler roots and dist are absent; the sole App95 main executable
+still matches its signed-build receipt. Preserve all engine/source provenance,
+canonical evaluation binaries, slice117 work, PHP Workbench and prior evidence.
+Evidence prefix: artifacts/checks/merge-2d85e745e-. The final ignored delivery
+receipt records the exact commit, remote read-back and clean tracked worktree.
+
 Packaging slice116 (2026-11-16, verified local development package): promote
 the exact PHPantom155 executable, source pin and provenance into application
 resources after source114 engine gates and slice115's68 actual-engine client/host

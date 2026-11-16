@@ -85,6 +85,47 @@ At that merge checkpoint, source-only slice 101 remained unfinished;
 no candidate 153 adoption or new package was claimed. Area statuses remain 67
 partial/2 user-deferred.
 
+Laravel slice 113 (2026-11-16, verified source checkpoint): bind the invokable
+handler action to its originating editor pane and complete selection, with exact
+caret coordinates when no view is available. Before dispatch, after a reply or
+error and before opening a displayed target, quietly retire a moved caret or
+replaced pane. Check actual CodeMirror selection so delayed caret-status events
+cannot admit stale results. Cancel pending lookups on source caret changes and
+same-document pane replacement. Keep source-edit Retry behavior, incomplete
+warnings and route/view name browsing unchanged. No new strings, appearance,
+shortcuts, IPC types or server behavior.
+
+Seven initial regressions reproduce stale dispatch, late focus jumps and selection
+after pending edits. A late-error case also fails on the old source; after the
+first fix, a separate same-document pane/no-notification case exposes a stale
+error popup and is corrected. Final99 focused tests pass. Both new full-workbench
+browser cases fail before the fix while all9 existing Laravel flows pass; final45
+combined browser checks pass, including fresh-action recovery and unchanged
+in-memory disk content. Visually inspected trace frames show the old unintended
+controller focus and the corrected source-caret preservation. Controlled IPC and
+browser editor checks do not establish native or real-engine acceptance.
+
+Full frontend12647 passed/6 skipped; typecheck, lint, format, knip and production
+frontend/Safari15.4 compatibility build pass. Reuse unchanged Rust/IPC/engine
+acceptance from111–112: Rust4940/180 ignored/1 filtered, all-target workspace
+Clippy/fmt, bundled-server/default tests, actual host/client63 and embedded protocol
+checks. The existing HTTP fixture-test exclusion remains recorded in111. This
+slice changes no Rust, generated bindings, dependency/version or engine input.
+
+Correct the machine-readable current delivery/candidate records to reflect the
+observed112 promotion/App0.1.94; do not leave them reporting inactive154/App93.
+Add this separate source checkpoint without claiming App94 contains the new guard.
+The sole signed App0.1.94 and engine154 remain unchanged; native UI stays
+user-skipped. Remove disposable frontend output (67,579,205 bytes/989 files)
+and 43 unrelated successful browser traces (58,179,431 bytes), retaining
+both new green regression traces, red traces, before/after images and all receipts.
+Both owned compiler roots remain absent; Workbench/earlier evaluation artifacts
+are untouched. All69 areas stay67 partial/2 user-deferred.
+Evidence: artifacts/checks/slice113-gates.json, browser/red/green logs and traces,
+slice113-before-focus-jump.jpeg, slice113-after-caret-preserved.jpeg,
+slice113-clean.json and slice113-receipt.json. The ignored delivery receipt
+records the final commit, remote read-back and clean worktree.
+
 Packaging slice 112 (2026-11-16, verified local development package): promote
 unchanged PHPantom154 and its pinned source/provenance into development resources
 after slice109 engine acceptance and slice111's63 actual-engine host/client checks.

@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { EditorView } from "@codemirror/view";
+import { EditorSelection, EditorState } from "@codemirror/state";
 import type { ProjectInfo } from "@/bindings";
 
 const mock = vi.hoisted(() => ({
@@ -294,5 +295,164 @@ it("explains where to invoke handler lookup when the caret has no static associa
   expect(screen.getByText("Place the caret on an invokable controller in a route action.")).toBeVisible();
   expect(screen.getByText("No static matches found")).toBeVisible();
   expect(screen.getByRole("button", { name: "Open" })).toBeDisabled();
+  expect(mock.open).not.toHaveBeenCalled();
+});
+
+it("does not dispatch an old handler position after the pending-edit barrier", async () => {
+  let release!: () => void;
+  const barrier = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const dispose = registerPendingEdits(() => barrier);
+  try {
+    const pending = openLaravelNavigation("handler");
+    mock.caret.mockReturnValue({ ...mock.caret(), col: 27 });
+    release();
+    await pending;
+    expect(mock.handler).not.toHaveBeenCalled();
+    expect(useLaravelNavigation.getState().kind).toBeNull();
+    expect(mock.open).not.toHaveBeenCalled();
+  } finally {
+    dispose();
+  }
+});
+it.each(["line", "col"])("quietly discards a completed handler after the source %s changed", async (coordinate) => {
+  let resolve!: (value: unknown) => void;
+  mock.handler.mockImplementation(
+    () =>
+      new Promise((done) => {
+        resolve = done;
+      }),
+  );
+  const pending = openLaravelNavigation("handler");
+  await waitFor(() => expect(resolve).toBeTypeOf("function"));
+  mock.caret.mockReturnValue({ ...mock.caret(), [coordinate]: mock.caret()[coordinate] + 1 });
+  resolve(ok());
+  await pending;
+  expect(mock.open).not.toHaveBeenCalled();
+  expect(useLaravelNavigation.getState().kind).toBeNull();
+  expect(mock.hint).not.toHaveBeenCalled();
+});
+it("checks the real source selection before a late reply even when the caret cache did not update", async () => {
+  const parent = document.createElement("div");
+  document.body.append(parent);
+  view = new EditorView({ doc: "<?php Action::class;", selection: EditorSelection.cursor(10), parent });
+  mock.caret.mockReturnValue({ ...mock.caret(), view, line: 0, col: 10 });
+  let resolve!: (value: unknown) => void;
+  mock.handler.mockImplementation(
+    () =>
+      new Promise((done) => {
+        resolve = done;
+      }),
+  );
+  const pending = openLaravelNavigation("handler");
+  await waitFor(() => expect(resolve).toBeTypeOf("function"));
+  view.dispatch({ selection: EditorSelection.range(7, 10) });
+  resolve(ok());
+  await pending;
+  expect(mock.open).not.toHaveBeenCalled();
+  expect(useLaravelNavigation.getState().kind).toBeNull();
+});
+it.each([true, false])(
+  "retires a pending handler when another pane of the same document becomes active (event=%s)",
+  async (event) => {
+    const parent = document.createElement("div");
+    document.body.append(parent);
+    view = new EditorView({ doc: "<?php Action::class;", parent });
+    mock.caret.mockReturnValue({ ...mock.caret(), view });
+    let resolve!: (value: unknown) => void;
+    mock.handler.mockImplementation(
+      () =>
+        new Promise((done) => {
+          resolve = done;
+        }),
+    );
+    const pending = openLaravelNavigation("handler");
+    await waitFor(() => expect(resolve).toBeTypeOf("function"));
+    const other = new EditorView({
+      state: EditorState.create({ doc: event ? view.state.doc : view.state.doc.toString() }),
+    });
+    try {
+      mock.caret.mockReturnValue({ ...mock.caret(), view: other });
+      if (event) _emitEditorEvent({ type: "activeEditorChanged", doc: 7, path: "/p/routes/web.php" });
+      resolve(ok());
+      await pending;
+      expect(mock.open).not.toHaveBeenCalled();
+      expect(useLaravelNavigation.getState().kind).toBeNull();
+      expect(mock.cancel).toHaveBeenCalledTimes(event ? 1 : 0);
+    } finally {
+      other.destroy();
+    }
+  },
+);
+it("cancels an in-flight handler on a source caret event but ignores other documents and unchanged positions", async () => {
+  let resolve!: (value: unknown) => void;
+  mock.handler.mockImplementation(
+    () =>
+      new Promise((done) => {
+        resolve = done;
+      }),
+  );
+  const pending = openLaravelNavigation("handler");
+  await waitFor(() => expect(resolve).toBeTypeOf("function"));
+  const event = { type: "caretMoved", doc: 7, path: "/p/routes/web.php", line: 4, col: 26, offset: 100 } as const;
+  _emitEditorEvent({ ...event, doc: 8 });
+  _emitEditorEvent(event);
+  expect(mock.cancel).not.toHaveBeenCalled();
+  mock.caret.mockReturnValue({ ...mock.caret(), col: 27 });
+  _emitEditorEvent({ ...event, col: 27, offset: 101 });
+  expect(mock.cancel).toHaveBeenCalledOnce();
+  expect(useLaravelNavigation.getState().kind).toBeNull();
+  resolve(ok());
+  await pending;
+  expect(mock.open).not.toHaveBeenCalled();
+});
+it("does not open a displayed handler after a caret change while selection waits for pending edits", async () => {
+  mock.handler.mockResolvedValue(ok(true));
+  await openLaravelNavigation("handler");
+  const item = useLaravelNavigation.getState().items[0]!;
+  let release!: () => void;
+  const barrier = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const dispose = registerPendingEdits(() => barrier);
+  try {
+    const pending = selectLaravelItem(item);
+    mock.caret.mockReturnValue({ ...mock.caret(), line: 5 });
+    release();
+    await pending;
+    expect(mock.open).not.toHaveBeenCalled();
+    expect(useLaravelNavigation.getState().kind).toBeNull();
+  } finally {
+    dispose();
+  }
+});
+it("keeps route-name browsing usable when its source caret changes", async () => {
+  mock.routes.mockResolvedValueOnce({
+    status: "ok",
+    data: { routes: [{ name: "home", uri: "/", parameters: [], fromVendor: false }], locations: [], incomplete: false },
+  });
+  await openLaravelNavigation("routes");
+  mock.caret.mockReturnValue({ ...mock.caret(), col: 27 });
+  _emitEditorEvent({ type: "caretMoved", doc: 7, path: "/p/routes/web.php", line: 4, col: 27, offset: 101 });
+  expect(useLaravelNavigation.getState().kind).toBe("routes");
+  expect(useLaravelNavigation.getState().items[0]!.name).toBe("home");
+});
+
+it("quietly retires a late handler error after the source caret moved", async () => {
+  let reject!: (error: unknown) => void;
+  mock.handler.mockImplementation(
+    () =>
+      new Promise((_done, fail) => {
+        reject = fail;
+      }),
+  );
+  const pending = openLaravelNavigation("handler");
+  await waitFor(() => expect(reject).toBeTypeOf("function"));
+  mock.caret.mockReturnValue({ ...mock.caret(), col: 27 });
+  reject(new Error("old lookup failed"));
+  await pending;
+  expect(useLaravelNavigation.getState().kind).toBeNull();
+  expect(useLaravelNavigation.getState().error).toBeNull();
   expect(mock.open).not.toHaveBeenCalled();
 });

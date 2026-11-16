@@ -337,3 +337,67 @@ test("Cancel before source synchronization prevents a handler request", async ({
   await expect(chooser).toBeHidden();
   expect(await ipcCalls(page, "lsp_laravel_route_handler")).toHaveLength(0);
 });
+
+test("a held handler reply cannot move focus after the source caret changes", async ({ workbench: page }) => {
+  await seedHandler(page);
+  await page.evaluate(() => {
+    const original = window.__ipc.handlers.lsp_laravel_route_handler!;
+    let first = true;
+    window.__ipc.handlers.lsp_laravel_route_handler = (args) => {
+      if (!first) return original(args);
+      first = false;
+      return new Promise((resolve) => {
+        window.__ipc.handlers.fixture_release_handler = () => resolve(original(args));
+      });
+    };
+  });
+  await invokeHandler(page);
+  await expect.poll(async () => (await ipcCalls(page, "lsp_laravel_route_handler")).length).toBe(1);
+  await page.evaluate(async () => {
+    const path = "/src/editor/api.ts";
+    const view = (await import(/* @vite-ignore */ path)).activeEditor()!.view;
+    view.dispatch({ selection: { anchor: view.state.selection.main.head + 1 }, userEvent: "select" });
+    window.__ipc.handlers.fixture_release_handler!({});
+  });
+  await expect(page.getByRole("dialog", { name: "Invokable Route Handlers", exact: true })).toBeHidden();
+  await expect(page.getByRole("tab", { name: /invokable\.php/ })).toHaveAttribute("aria-selected", "true");
+  await expect
+    .poll(() =>
+      page.evaluate(async () => {
+        const path = "/src/editor/api.ts";
+        const view = (await import(/* @vite-ignore */ path)).activeEditor()!.view;
+        const head = view.state.selection.main.head;
+        const line = view.state.doc.lineAt(head);
+        return { line: line.number - 1, col: head - line.from };
+      }),
+    )
+    .toEqual({ line: HANDLER_POS.line, col: HANDLER_POS.col + 1 });
+  await invokeHandler(page);
+  await expectHandlerTarget(page);
+  expect((await ipcCalls(page, "lsp_laravel_route_handler")).map((call) => call.pos)).toEqual([
+    HANDLER_POS,
+    { line: HANDLER_POS.line, col: HANDLER_POS.col + 1 },
+  ]);
+});
+test("a displayed handler cannot open from a changed source selection", async ({ workbench: page }) => {
+  await seedHandler(page, true);
+  await invokeHandler(page);
+  await expect(page.getByRole("dialog", { name: "Invokable Route Handlers", exact: true })).toBeVisible();
+  await page.evaluate(async () => {
+    const apiPath = "/src/editor/api.ts";
+    const navigationPath = "/src/features/code-insight/laravel.ts";
+    const api = await import(/* @vite-ignore */ apiPath);
+    const navigation = await import(/* @vite-ignore */ navigationPath);
+    const item = navigation.useLaravelNavigation.getState().items[0];
+    const view = api.activeEditor()!.view;
+    view.dispatch({ selection: { anchor: view.state.selection.main.head + 1 }, userEvent: "select" });
+    await navigation.selectLaravelItem(item);
+  });
+  await expect(page.getByRole("dialog", { name: "Invokable Route Handlers", exact: true })).toBeHidden();
+  await expect(page.getByRole("tab", { name: /invokable\.php/ })).toHaveAttribute("aria-selected", "true");
+  const disk = await page.evaluate(async (path) => {
+    const module = "/src/editor/core/backend.ts";
+    return ((await import(/* @vite-ignore */ module)).docBackend() as MemoryBackend).files.get(path);
+  }, HANDLER_ROUTE);
+  expect(disk).toBe(HANDLER_SOURCE);
+});

@@ -40,6 +40,8 @@ function handlerFrame(caret: CaretContext) {
     path: caret.path,
     label: caret.word,
     text: caret.view?.state.doc ?? null,
+    view: caret.view,
+    selection: caret.view?.state.selection ?? null,
   };
 }
 type NavigationContext = { doc: number; project: ProjectInfo; handler?: ReturnType<typeof handlerFrame> };
@@ -63,6 +65,36 @@ function handlerSourceCurrent(current: NavigationContext) {
       editor.ctx.path === frame.path &&
       (frame.text === null || editor.view.state.doc === frame.text))
   );
+}
+
+function handlerPositionCurrent(current: NavigationContext) {
+  const frame = current.handler;
+  if (!frame) return true;
+  if (frame.view && frame.selection)
+    return activeEditor()?.view === frame.view && frame.view.state.selection.eq(frame.selection);
+  const caret = caretContext();
+  return (
+    caret?.doc === current.doc &&
+    caret.path === frame.path &&
+    caret.line === frame.pos.line &&
+    caret.col === frame.pos.col
+  );
+}
+
+function handlerInputCurrent(current: NavigationContext) {
+  if (current.handler?.view && activeEditor()?.view !== current.handler.view) {
+    closeLaravelNavigation();
+    return false;
+  }
+  if (!handlerSourceCurrent(current)) {
+    invalidateLaravelNavigation(tx("Project files changed. Retry to refresh Laravel results."));
+    return false;
+  }
+  if (!handlerPositionCurrent(current)) {
+    closeLaravelNavigation();
+    return false;
+  }
+  return true;
 }
 
 export function closeLaravelNavigation() {
@@ -107,7 +139,16 @@ export function installLaravelNavigationEvents() {
     } else if (event.type === "docClosed") {
       if (event.doc === context?.doc) closeLaravelNavigation();
       else changed();
-    } else if (event.type === "activeEditorChanged" && context?.handler && event.doc !== context.doc)
+    } else if (event.type === "activeEditorChanged" && context?.handler) {
+      if (event.doc !== context.doc || !handlerPositionCurrent(context)) closeLaravelNavigation();
+    } else if (
+      event.type === "caretMoved" &&
+      context?.handler &&
+      event.doc === context.doc &&
+      // Text edits retain the existing Retry state even when they map the caret.
+      handlerSourceCurrent(context) &&
+      !handlerPositionCurrent(context)
+    )
       closeLaravelNavigation();
   });
   const offPatches = onIdeEvent("docPatched", changed);
@@ -197,10 +238,7 @@ async function query(name: string | null) {
     await whenAllSynced();
     if (syncing === run) syncing = null;
     if (run !== generation || useProject.getState().project !== current.project) return;
-    if (!handlerSourceCurrent(current)) {
-      invalidateLaravelNavigation(tx("Project files changed. Retry to refresh Laravel results."));
-      return;
-    }
+    if (!handlerInputCurrent(current)) return;
     pending = request;
     const result = await lspRequest<LaravelRoutes | LaravelViews | LaravelRouteHandler>(() =>
       kind === "handler"
@@ -211,10 +249,7 @@ async function query(name: string | null) {
     );
     if (run !== generation || useProject.getState().project !== current.project) return;
     if (pending === request) pending = null;
-    if (!handlerSourceCurrent(current)) {
-      invalidateLaravelNavigation(tx("Project files changed. Retry to refresh Laravel results."));
-      return;
-    }
+    if (!handlerInputCurrent(current)) return;
     const items: LaravelNavigationItem[] =
       kind === "handler" || name !== null
         ? result.locations.map((location) => ({
@@ -245,7 +280,8 @@ async function query(name: string | null) {
     });
     if (kind === "handler" && !incomplete && items.length === 1) await selectLaravelItem(items[0]!);
   } catch (error) {
-    if (run !== generation) return;
+    if (pending === request) pending = null;
+    if (run !== generation || !handlerInputCurrent(current)) return;
     useLaravelNavigation.setState({
       loading: false,
       error: isCancelled(error) ? tx("Cancelled") : error instanceof Error ? error.message : String(error),
@@ -310,7 +346,7 @@ export async function selectLaravelItem(item: LaravelNavigationItem) {
     try {
       await whenAllSynced();
     } catch (error) {
-      if (context === current && run === generation)
+      if (context === current && run === generation && handlerInputCurrent(current))
         invalidateLaravelNavigation(error instanceof Error ? error.message : String(error));
       return;
     }
@@ -321,10 +357,7 @@ export async function selectLaravelItem(item: LaravelNavigationItem) {
       !useLaravelNavigation.getState().items.includes(item)
     )
       return;
-    if (!handlerSourceCurrent(current)) {
-      invalidateLaravelNavigation(tx("Project files changed. Retry to refresh Laravel results."));
-      return;
-    }
+    if (!handlerInputCurrent(current)) return;
   }
   const location = item.location;
   closeLaravelNavigation();

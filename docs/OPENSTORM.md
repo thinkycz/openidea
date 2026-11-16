@@ -15,6 +15,52 @@ slice, commit and push it, and retain only the latest generated app. Native UI
 cases remain deferred/unverified; earlier native-first blocking checkpoints are
 historical and no longer prevent independent implementation.
 
+Packaging slice123 (2026-11-17, local artifact verified): promote the
+source121/client122 verified engine157 as the bundled default in local App97.
+Source pin and157-patch digest match the immutable source candidate; the arm64
+resource binary retains canonical SHA256
+904aa387a702bcc00ed3b8640c299efb0c26b3a00a247e86c2f389abb36b5feb.
+Preserve licenses, upstream attribution, reproducible build recipe and provenance.
+Version preparation advances44 local workspace package versions only, with no
+dependency updates, and copies the already-merged upstream WIT1.10 exactly into
+the released plugin API snapshot. All65 standalone SDK tests pass/2 doctests
+ignored. Bundle-resolution3 tests and PHP-default1 test pass; PHPantom remains
+default and the Laravel companion remains opt-in. Typecheck, lint, format, knip,
+release-preparation tests, Rust fmt and ide-tools all-target Clippy pass.
+
+No client/editor runtime changes: reuse slice122's frontend13027/6 skipped,
+workspace5047/191 ignored/1 excluded,74 actual157 client/host and79 browser cases,
+and source121's engine18545/17 ignored plus2 bounded child checks. The packaging
+gate confirms only metadata/resources and exact upstream release-snapshot changes.
+Frontend build and Safari15.4 startup checks pass again during packaging.
+
+Sole archive: artifacts/batches/0.1.97/OpenStorm.app, development profile, arm64,
+cz.thinky.openstorm, minimum macOS13.0, ad-hoc deep/strict signature verified.
+Main executable SHA256:
+a2d3c90cf95a784d489addb26a1ca5cc7f0938886cd009d812aef882f2c9c016.
+Its build receipt records the actual precommit source snapshot/base commit and
+engine provenance. Actual embedded CLI passes7 compatibility groups: controller
+helper/completion, encoded rename refusal, global/fallback shadowing, real Laravel
+controller URLs and exact3 intentional analyzer diagnostics (expected exit1).
+New guard probes pass on disposable plain and real Laravel13.37 fixtures: UTF-16
+whole-segment edits, resolve, hover, config definition/bidirectional references,
+foreign/static exclusions, warmed unsaved parent/config changes and restart.
+All4 guard children exit0 and fixture originals/borrowed inputs stay unchanged.
+The first compatibility attempt used an obsolete App96 path in a copied probe;
+preserve its failure and accept the corrected slice123b receipts instead.
+
+After App97's signature/receipt succeeded, retire App96 and delete8.6GiB of
+compiler output. Remove the regenerated dist after embedded acceptance; preserve
+canonical engines/source, receipts, PHP Workbench and earlier evaluation evidence.
+Native UI stays user-skipped; the app was not installed/launched/notarized or
+published. Encoded guard navigation, parameter whitespace normalization, other
+middleware aliases and large-project performance remain unaccepted. All69 statuses
+stay67 partial/2 user-deferred. Evidence: artifacts/checks/slice123-promotion.json,
+slice123-gates.json, slice123-package-pipeline.json, slice123-packaged-check.json,
+slice123-embedded2.json, slice123b-packaged-cli.json,
+slice123b-packaged-guards-{plain,laravel}.json, slice123-retention.json and
+artifacts/batches/0.1.97/{build-receipt,retention}.json.
+
 Client acceptance slice122 (2026-11-16–17): exercise candidate157's typed
 controller middleware guards through OpenStorm's real LSP and host document paths.
 The156 control fails to offer the new guard;157 passes both new host tests. Verify UTF-16 whole-segment completion/resolve,

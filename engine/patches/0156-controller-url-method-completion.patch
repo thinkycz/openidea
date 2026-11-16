@@ -1,0 +1,574 @@
+--- a/docs/CHANGELOG.md
++++ b/docs/CHANGELOG.md
+@@ -1,3 +1,7 @@
++## OpenStorm .156 controller URL method completion
++
++Rooted controller URL literals complete public methods using their published runtime identity. Aliases, named argument roles and inherited methods share navigation's static helper guards; unresolved roots retain incomplete results. Completion replaces the entire method suffix without imports or call snippets, including Unicode PHP method names. Unsaved parent and helper changes refresh results without caller edits.
++
+ ## Workbench .29 diagnostic run ownership
+ 
+ Queued native diagnostic refreshes retire prior fast/slow work without discarding unchanged parsed source. Save fanout observes the same per-document run boundary; repeated pull requests preserve pending current work.
+--- a/docs/todo/laravel.md
++++ b/docs/todo/laravel.md
+@@ -567,8 +567,12 @@
+ 
+ **Impact: Low · Complexity: Low**
+ 
+-Controller URL helpers still need completion and static recovery of a configured
+-URL controller root for unrooted literals. Encoded method spellings and separators
++Controller URL method completion uses published runtime controller identities for
++rooted helper/facade literals, including aliases and named argument roles. Public
++inherited methods produce plain suffix edits; unresolved/unrooted owners retain
++incomplete results, and unsaved parent/helper changes refresh without caller edits.
++Static recovery of a configured URL controller root remains open for unrooted
++literals. Encoded method spellings and separators
+ need range-aware method edits; uncertain action contexts need diagnostics that
+ retain their incomplete provenance. Dynamic arguments and broader
+ project/configuration-change cases need explicit acceptance. Low priority: the
+--- a/src/completion/laravel_route_controller.rs
++++ b/src/completion/laravel_route_controller.rs
+@@ -1,4 +1,4 @@
+-//! Laravel route controller class and method completion.
++//! Laravel route and controller URL class/method completion.
+ //!
+ //! Detects when the cursor is inside the action string argument of a route
+ //! definition call within a `->controller(X::class)->group(fn(){…})` context
+@@ -12,6 +12,9 @@
+ //! });
+ //! ```
+ //!
++//! Published runtime `Controller@method` spans also supply URL helper method
++//! contexts, without interpreting PHP imports as runtime namespaces.
++//!
+ //! This is the completion-time counterpart of the extraction-time
+ //! `MemberAccess` span emission in `symbol_map/extraction.rs`
+ //! (`try_emit_laravel_route_controller_spans`).  The extraction layer
+@@ -41,6 +44,11 @@
+     pub prefix: String,
+     /// The entire existing method identifier, excluding its surrounding quotes.
+     pub replace_range: Range,
++}
++
++enum RuntimeControllerMethodContext {
++    Resolved(LaravelRouteControllerContext),
++    Incomplete,
+ }
+ 
+ // ─── Route HTTP methods ─────────────────────────────────────────────────────
+@@ -396,6 +404,65 @@
+ // ─── Completion ─────────────────────────────────────────────────────────────
+ 
+ impl Backend {
++    /// Reuse published runtime identities, including refreshed helper-shadow guards.
++    fn runtime_controller_method_context(
++        &self,
++        uri: &str,
++        content: &str,
++        position: Position,
++    ) -> Option<RuntimeControllerMethodContext> {
++        use crate::runtime_controller::is_runtime_class;
++        use crate::symbol_map::SymbolKind;
++
++        let offset = position_to_offset(content, position);
++        let map = self.symbol_maps.read().get(uri).cloned()?;
++        if !map.matches_source_fingerprint(content) {
++            return None;
++        }
++        let mut result = None;
++        crate::virtual_members::laravel::walk_all_php_expressions(content, &mut |expr| {
++            let Some(action) =
++                crate::symbol_map::extraction::laravel::explicit_controller_action(expr, content)
++            else {
++                return ControlFlow::Continue(());
++            };
++            if offset < action.start || offset > action.end {
++                return ControlFlow::Continue(());
++            }
++            let Some(span) = map.spans.iter().find(|span| {
++                span.start == action.class_start
++                    && span.end == action.class_end
++                    && is_runtime_class(&span.kind)
++            }) else {
++                return ControlFlow::Continue(());
++            };
++            let identity = match &span.kind {
++                SymbolKind::ClassReference { name, .. } => Some(name.as_str()),
++                SymbolKind::RuntimeControllerBinding {
++                    targets,
++                    incomplete: false,
++                    ..
++                } if targets.len() == 1 => Some(targets[0].as_str()),
++                _ => None,
++            };
++            result = Some(match identity {
++                Some(identity) => {
++                    RuntimeControllerMethodContext::Resolved(LaravelRouteControllerContext {
++                        controller_class: format!("\\{}", identity.trim_start_matches('\\')),
++                        prefix: content[action.start as usize..offset as usize].to_owned(),
++                        replace_range: Range::new(
++                            offset_to_position(content, action.start as usize),
++                            offset_to_position(content, action.end as usize),
++                        ),
++                    })
++                }
++                None => RuntimeControllerMethodContext::Incomplete,
++            });
++            ControlFlow::Break(())
++        });
++        result
++    }
++
+     /// Complete only AST-proven runtime class interiors; PHP imports do not apply here.
+     pub(crate) fn try_laravel_runtime_class_completion(
+         &self,
+@@ -512,23 +579,44 @@
+         position: Position,
+         ctx: &FileContext,
+     ) -> Option<CompletionResponse> {
+-        let rc_ctx = detect_laravel_route_controller_context(
+-            content,
+-            position,
+-            ctx.resolved_names.as_deref(),
+-        )?;
++        let incomplete = || {
++            CompletionResponse::List(CompletionList {
++                items: Vec::new(),
++                is_incomplete: true,
++            })
++        };
++        let (rc_ctx, runtime_dispatch) =
++            match self.runtime_controller_method_context(uri, content, position) {
++                Some(RuntimeControllerMethodContext::Resolved(context)) => (context, true),
++                Some(RuntimeControllerMethodContext::Incomplete) => return Some(incomplete()),
++                None => (
++                    detect_laravel_route_controller_context(
++                        content,
++                        position,
++                        ctx.resolved_names.as_deref(),
++                    )?,
++                    false,
++                ),
++            };
+ 
+         let class_loader = self.class_loader(ctx);
+-
+-        // Resolve the controller class name to FQN and load.
+-        let fqn =
+-            super::array_callable::resolve_class_name_to_fqn(self, &rc_ctx.controller_class, ctx)?;
+-        let class_info = class_loader(&fqn)?;
++        let Some(fqn) =
++            super::array_callable::resolve_class_name_to_fqn(self, &rc_ctx.controller_class, ctx)
++        else {
++            return runtime_dispatch.then(incomplete);
++        };
++        let Some(class_info) = class_loader(&fqn) else {
++            return runtime_dispatch.then(incomplete);
++        };
+ 
+         // Build completion items using the standard builder.
+         let candidates = vec![class_info];
+         let cursor_offset = position_to_offset(content, position);
+-        let current_class = crate::class_lookup::find_class_at_offset(&ctx.classes, cursor_offset);
++        let current_class = if runtime_dispatch {
++            None
++        } else {
++            crate::class_lookup::find_class_at_offset(&ctx.classes, cursor_offset)
++        };
+         let mut items = super::builder::build_union_completion_items(
+             &candidates,
+             AccessKind::Arrow,
+@@ -550,6 +638,7 @@
+                     }));
+                 }
+                 item.insert_text_format = None;
++                item.command = None;
+             }
+         }
+ 
+@@ -567,7 +656,12 @@
+             });
+         }
+ 
+-        if items.is_empty() {
++        if runtime_dispatch {
++            Some(CompletionResponse::List(CompletionList {
++                items,
++                is_incomplete: false,
++            }))
++        } else if items.is_empty() {
+             None
+         } else {
+             Some(CompletionResponse::Array(items))
+--- a/src/symbol_map/extraction/laravel.rs
++++ b/src/symbol_map/extraction/laravel.rs
+@@ -2409,7 +2409,7 @@
+     explicit_controller_action(laravel_route_action_argument(expr, names)?, content)
+ }
+ 
+-pub(super) fn explicit_controller_action<'a>(
++pub(crate) fn explicit_controller_action<'a>(
+     expr: &Expression<'_>,
+     content: &'a str,
+ ) -> Option<ExplicitRouteAction<'a>> {
+@@ -2425,8 +2425,8 @@
+     // Refuse escaped method spellings: an edit must cover exactly the runtime name.
+     if method != decoded_method
+         || !method
+-            .chars()
+-            .all(|c| c.is_ascii_alphanumeric() || c == '_')
++            .bytes()
++            .all(|byte| crate::text_scan::is_ident_byte(byte) || byte >= 0x80)
+         || method.chars().next().is_some_and(|c| c.is_ascii_digit())
+     {
+         return None;
+--- a/tests/integration/laravel_route_controller.rs
++++ b/tests/integration/laravel_route_controller.rs
+@@ -4376,3 +4376,348 @@
+     );
+     assert_eq!(std::fs::read_to_string(path).unwrap(), original);
+ }
++
++async fn controller_url_completion(
++    backend: &phpantom_lsp::Backend,
++    uri: &Url,
++    text: &str,
++    needle: &str,
++) -> CompletionResponse {
++    backend
++        .completion(CompletionParams {
++            text_document_position: TextDocumentPositionParams {
++                text_document: TextDocumentIdentifier { uri: uri.clone() },
++                position: crate::common::position_after(text, needle),
++            },
++            work_done_progress_params: Default::default(),
++            partial_result_params: Default::default(),
++            context: None,
++        })
++        .await
++        .unwrap()
++        .unwrap_or(CompletionResponse::Array(Vec::new()))
++}
++fn controller_url_items(response: CompletionResponse) -> Vec<CompletionItem> {
++    match response {
++        CompletionResponse::Array(items) => items,
++        CompletionResponse::List(list) => list.items,
++    }
++}
++
++#[tokio::test]
++async fn controller_url_completion_commits_methods_for_helpers_facades_aliases_and_named_roles() {
++    for call in [
++        r#"$note='😀'; \action('\App\Invoice@shOLD');"#,
++        r#"controller_url(parameters:[], name:"\\App\\Invoice@shOLD", absolute:false);"#,
++        r#"(\url())->action(action:'\App\Invoice@shOLD');"#,
++        r#"\url()?->action(action:'\App\Invoice@shOLD');"#,
++        r#"\redirect()->action(action:'\App\Invoice@shOLD', headers:[]);"#,
++        r#"redirector()->action(parameters:[], action:'\App\Invoice@shOLD', status:303);"#,
++        r#"\response()->redirectToAction(action:'\App\Invoice@shOLD');"#,
++        r#"URL::action(absolute:false, action:'\App\Invoice@shOLD');"#,
++        r#"Redirect::action(headers:[], action:'\App\Invoice@shOLD');"#,
++        r#"Response::redirectToAction(parameters:[], action:'\App\Invoice@shOLD');"#,
++        r#"Route::namespace('Wrong')->controller(\Vendor\Other::class)->group(fn()=>\action('\App\Invoice@shOLD'));"#,
++    ] {
++        let text = controller_url_fixture(call);
++        let (backend, _dir, uri) = handler_workspace(&text).await;
++        let needle = &call[..call.find("@shOLD").unwrap() + 3];
++        let items =
++            controller_url_items(controller_url_completion(&backend, &uri, &text, needle).await);
++        let item = items
++            .iter()
++            .find(|i| i.filter_text.as_deref() == Some("show"))
++            .expect("URL methods must complete");
++        let item = backend.completion_resolve(item.clone()).await.unwrap();
++        assert!(
++            item.command.is_none(),
++            "{call}: no parameter-hint command in a literal"
++        );
++        assert_eq!(item.kind, Some(CompletionItemKind::METHOD), "{call}");
++        assert!(
++            item.additional_text_edits
++                .as_ref()
++                .is_none_or(Vec::is_empty),
++            "{call}: no PHP imports"
++        );
++        assert!(item.insert_text_format.is_none(), "{call}: no call snippet");
++        let Some(CompletionTextEdit::Edit(edit)) = &item.text_edit else {
++            panic!("explicit method edit required: {item:?}")
++        };
++        assert_eq!(edit.new_text, "show");
++        let updated = crate::common::apply_edits(&text, std::slice::from_ref(edit));
++        assert_eq!(
++            updated,
++            text.replacen("@shOLD", "@show", 1),
++            "{call}: must remove the entire suffix"
++        );
++    }
++}
++
++#[tokio::test]
++async fn controller_url_completion_empty_suffix_and_no_match_preserve_context() {
++    for (suffix, expected) in [("", true), ("notAMethod", false)] {
++        let call = format!("\\action('\\App\\Invoice@{suffix}');");
++        let text = controller_url_fixture(&call);
++        let (backend, _dir, uri) = handler_workspace(&text).await;
++        let needle = &call[..call.find('@').unwrap() + 1 + suffix.len()];
++        let response = controller_url_completion(&backend, &uri, &text, needle).await;
++        let CompletionResponse::List(list) = response else {
++            panic!("known URL context must return completeness: {response:?}")
++        };
++        assert!(
++            !list.is_incomplete,
++            "known controller method set is complete"
++        );
++        assert_eq!(
++            list.items
++                .iter()
++                .any(|i| i.filter_text.as_deref() == Some("show")),
++            expected
++        );
++        assert!(
++            list.items
++                .iter()
++                .all(|i| i.kind == Some(CompletionItemKind::METHOD))
++        );
++    }
++}
++
++#[tokio::test]
++async fn controller_url_completion_uses_public_runtime_owner_without_php_imports() {
++    let call = r#"\action('\App\Invoice@');"#;
++    let text=controller_url_fixture(call)
++        .replace("use Illuminate\\Support\\Facades\\Route;","use Vendor\\Wrong as App;\nuse Illuminate\\Support\\Facades\\Route;")
++        .replace("class Invoice {","class Invoice {protected function secret() {} private function internal() {}")
++        .replace("public function show():string {return 'invoice';}","public function show():string {return 'invoice';} public function links(){return \\action('\\App\\Invoice@');}");
++    let (backend, _dir, uri) = handler_workspace(&text).await;
++    let outer_needle = format!("\n{}", call.trim_end_matches("');"));
++    for needle in ["return \\action('\\App\\Invoice@", outer_needle.as_str()] {
++        let items =
++            controller_url_items(controller_url_completion(&backend, &uri, &text, needle).await);
++        let labels = method_labels(&items);
++        assert!(
++            labels.iter().any(|name| name == "show"),
++            "{needle}: {labels:?}"
++        );
++        assert!(
++            !labels
++                .iter()
++                .any(|name| name == "secret" || name == "internal"),
++            "URL dispatch is external even inside its own controller: {labels:?}"
++        );
++    }
++}
++
++#[tokio::test]
++async fn controller_url_completion_unresolved_and_unrooted_owners_stay_incomplete() {
++    for action in [r"Invoice@sh", r"App\Invoice@sh", r"\App\Missing@sh"] {
++        let call = format!("\\action('{action}');");
++        let text = controller_url_fixture(&call);
++        let (backend, _dir, uri) = handler_workspace(&text).await;
++        let needle = call.trim_end_matches("');");
++        let response = controller_url_completion(&backend, &uri, &text, needle).await;
++        assert!(
++            matches!(response,CompletionResponse::List(ref l) if l.items.is_empty() && l.is_incomplete),
++            "must not guess an owner: {action}: {response:?}"
++        );
++    }
++}
++
++#[tokio::test]
++async fn controller_url_completion_does_not_invent_foreign_or_wrong_argument_targets() {
++    for call in [
++        r#"function action(string $name):string{return $name;} action('\App\Invoice@sh');"#,
++        r#"\Vendor\action('\App\Invoice@sh');"#,
++        r#"$value->action('\App\Invoice@sh');"#,
++        r#"\action(action:'\App\Invoice@sh');"#,
++        r#"URL::action(name:'\App\Invoice@sh');"#,
++        r#"\url('/path')->action('\App\Invoice@sh');"#,
++        r#"$value='\App\Invoice@sh';"#,
++    ] {
++        let text = controller_url_fixture(call);
++        let (backend, _dir, uri) = handler_workspace(&text).await;
++        let needle = call.trim_end_matches("');").trim_end_matches("';");
++        let items =
++            controller_url_items(controller_url_completion(&backend, &uri, &text, needle).await);
++        assert!(
++            !method_labels(&items).iter().any(|name| name == "show"),
++            "{call}: unrelated literals must stay unrelated"
++        );
++    }
++}
++
++#[tokio::test]
++async fn controller_url_completion_non_laravel_project_stays_unassociated() {
++    let call = r#"\action('\App\Invoice@sh');"#;
++    let text = controller_url_fixture(call);
++    let (backend, _dir, uri) = crate::common::create_initialized_psr4_workspace(
++        r#"{"autoload":{"psr-4":{"App\\":"src/"}}}"#,
++        &[("src/Routes.php", &text)],
++        "src/Routes.php",
++    )
++    .await;
++    let items = controller_url_items(
++        controller_url_completion(&backend, &uri, &text, call.trim_end_matches("');")).await,
++    );
++    assert!(!method_labels(&items).iter().any(|name| name == "show"));
++}
++
++#[tokio::test]
++async fn controller_url_completion_unicode_methods_commit_and_navigate_with_utf16_ranges() {
++    let call = r#"$note='😀'; \action('\App\Invoice@shøOLD');"#;
++    let text = controller_url_fixture(call).replace(
++        "class Invoice {",
++        "class Invoice {public function shøw():string{return 'unicode';}",
++    );
++    let (backend, _dir, uri) = handler_workspace(&text).await;
++    let items = controller_url_items(
++        controller_url_completion(&backend, &uri, &text, r#"\action('\App\Invoice@shø"#).await,
++    );
++    let item = items
++        .iter()
++        .find(|i| i.filter_text.as_deref() == Some("shøw"))
++        .expect("Unicode method completion");
++    let Some(CompletionTextEdit::Edit(edit)) = &item.text_edit else {
++        panic!("Unicode method needs an exact edit")
++    };
++    let updated = crate::common::apply_edits(&text, std::slice::from_ref(edit));
++    assert_eq!(updated, text.replace("@shøOLD", "@shøw"));
++    backend
++        .did_change(DidChangeTextDocumentParams {
++            text_document: VersionedTextDocumentIdentifier {
++                uri: uri.clone(),
++                version: 2,
++            },
++            content_changes: vec![TextDocumentContentChangeEvent {
++                range: None,
++                range_length: None,
++                text: updated.clone(),
++            }],
++        })
++        .await;
++    let at = crate::common::position_after(&updated, r#"\action('\App\Invoice@shø"#);
++    let target = goto_def(&backend, &uri, at.line, at.character).await;
++    assert!(
++        matches!(target,Some(GotoDefinitionResponse::Scalar(ref l)) if l.uri==uri && l.range.start==crate::common::position_after(&updated,"class Invoice {public function ")),
++        "committed Unicode method must navigate: {target:?}"
++    );
++}
++
++#[tokio::test]
++async fn controller_url_completion_encoded_methods_remain_incomplete_without_edits() {
++    let call = r#"\action("\\App\\Invoice@sh\x6fw");"#;
++    let text = controller_url_fixture(call);
++    let (backend, _dir, uri) = handler_workspace(&text).await;
++    let response =
++        controller_url_completion(&backend, &uri, &text, r#"\action("\\App\\Invoice@sh"#).await;
++    assert!(
++        matches!(response,CompletionResponse::List(ref l) if l.items.is_empty() && l.is_incomplete),
++        "encoded method must not propose partial edits: {response:?}"
++    );
++}
++
++#[tokio::test]
++async fn controller_url_completion_tracks_unsaved_inherited_members_without_caller_edits() {
++    let caller = r"<?php namespace App; \action('\App\Invoice@sh');";
++    let invoice = "<?php namespace App; class Invoice extends Base {}";
++    let base = "<?php namespace App; class Base {public function showBase():string{return 'base';} protected function secret(){}}";
++    let other =
++        "<?php namespace App; class Other {public function showOther():string{return 'other';}}";
++    let (backend, dir, uri) = crate::common::create_initialized_psr4_workspace(
++        crate::common::LARAVEL_SRC_COMPOSER,
++        &[
++            ("src/Links.php", caller),
++            ("src/Invoice.php", invoice),
++            ("src/Base.php", base),
++            ("src/Other.php", other),
++        ],
++        "src/Links.php",
++    )
++    .await;
++    let declaration = Url::from_file_path(dir.path().join("src/Invoice.php")).unwrap();
++    open_php(&backend, &declaration, invoice).await;
++    for (version, parent, expected, absent) in [
++        (1, "Base", "showBase", "showOther"),
++        (2, "Other", "showOther", "showBase"),
++        (3, "Base", "showBase", "showOther"),
++    ] {
++        if version > 1 {
++            backend
++                .did_change(DidChangeTextDocumentParams {
++                    text_document: VersionedTextDocumentIdentifier {
++                        uri: declaration.clone(),
++                        version,
++                    },
++                    content_changes: vec![TextDocumentContentChangeEvent {
++                        range: None,
++                        range_length: None,
++                        text: invoice.replace("Base", parent),
++                    }],
++                })
++                .await;
++        }
++        let items = controller_url_items(
++            controller_url_completion(&backend, &uri, caller, r"\action('\App\Invoice@sh").await,
++        );
++        let labels = method_labels(&items);
++        assert!(
++            labels.iter().any(|name| name == expected),
++            "{parent}: {labels:?}"
++        );
++        assert!(
++            !labels.iter().any(|name| name == absent || name == "secret"),
++            "{parent}: {labels:?}"
++        );
++    }
++    assert_eq!(
++        std::fs::read_to_string(dir.path().join("src/Invoice.php")).unwrap(),
++        invoice
++    );
++}
++
++#[tokio::test]
++async fn controller_url_completion_retires_and_restores_unsaved_helper_bindings() {
++    let call = r"action('\App\Invoice@sh');";
++    let text = controller_url_fixture(call);
++    let (backend, dir, uri) = handler_workspace(&text).await;
++    let path = dir.path().join("src/Helpers.php");
++    let original = "<?php namespace App; function other():void {}";
++    std::fs::write(&path, original).unwrap();
++    let helper = Url::from_file_path(&path).unwrap();
++    open_php(&backend, &helper, original).await;
++    for (version, source, expected) in [
++        (1, original, true),
++        (
++            2,
++            "<?php namespace App; function action(string $name):string{return $name;}",
++            false,
++        ),
++        (3, original, true),
++    ] {
++        if version > 1 {
++            backend
++                .did_change(DidChangeTextDocumentParams {
++                    text_document: VersionedTextDocumentIdentifier {
++                        uri: helper.clone(),
++                        version,
++                    },
++                    content_changes: vec![TextDocumentContentChangeEvent {
++                        range: None,
++                        range_length: None,
++                        text: source.into(),
++                    }],
++                })
++                .await;
++        }
++        let items = controller_url_items(
++            controller_url_completion(&backend, &uri, &text, call.trim_end_matches("');")).await,
++        );
++        assert_eq!(
++            method_labels(&items).iter().any(|name| name == "show"),
++            expected,
++            "helper version {version}: {items:?}"
++        );
++    }
++    assert_eq!(std::fs::read_to_string(path).unwrap(), original);
++}

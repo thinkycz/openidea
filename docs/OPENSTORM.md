@@ -15,6 +15,57 @@ slice, commit and push it, and retain only the latest generated app. Native UI
 cases remain deferred/unverified; earlier native-first blocking checkpoints are
 historical and no longer prevent independent implementation.
 
+Laravel slice117 (2026-11-16, verified engine/source checkpoint): add method
+completion for rooted controller URL literals using PHPantom's published runtime
+controller identities. Reuse the static helper/facade/alias/named-argument guards
+instead of recognizing helper names independently. Use the standard method builder
+with external-dispatch visibility, whole-suffix UTF-16 text edits, no PHP imports,
+no call snippets and no parameter-hint command. Unknown/unrooted/ambiguous owners
+retain incomplete results; recognized empty/no-match suffixes retain their context.
+
+Ten new public-backend regressions cover11 helper/facade/alias/named-role forms,
+empty/no-match suffixes, runtime names versus PHP import aliases, public visibility,
+Unicode completion followed by declaration navigation, incomplete/encoded cases,
+foreign helpers/non-Laravel projects, and unsaved inherited-parent/helper changes
+without caller edits. The initial155-source run passes3/fails7; implementation
+passes all10, then the frozen-source full suite passes18532/17 ignored, plus both
+bounded child checks. Standard and mem-audit all-target Clippy, Rustfmt and source
+fingerprint checks and the pinned release-build recipe pass. Candidate156 is arm64;
+its executable SHA256 is
+fd83779a5737d5acb694e0cd3165b7b9eec97c968103b7da73988aa84838c53b.
+Archive it with toolchain/build receipts, provenance and unchanged MIT/Apache
+licenses at artifacts/engines/0.11.1-openstorm.156/.
+
+The actual155 stdio baseline resolves ordinary PHP declarations but lacks URL
+method completion. Actual156 stdio validates completion/resolve documentation,
+plain whole-suffix edits, Unicode, incomplete/refused contexts, and unsaved
+parent/helper transitions with the child PATH empty and project tools disabled.
+The Laravel13.37 fixture passes3 exact method completions plus3 declaration targets;
+PHP syntax and static App autoload mapping are valid. Analyzer output remains
+exactly the3 intentional diagnostics (expected analyzer exit1). All successful LSP
+runs exit0 and fixture originals stay unchanged. Preserve the first Laravel probe's
+startup ContentModified rejection; bounded retry of that explicit rejection then
+passes4 completion attempts/3 results, with no wrong-state result accepted.
+No Composer/Artisan inspection commands or native app launch occur.
+
+New source pin: engine/candidates/0.11.1-openstorm.156-source.json, adding
+0156-controller-url-method-completion.patch. The complete156-patch series SHA256 is
+17f58203d3b5eba07a16c40d26928e325ebdd18064f9018f1591ff713fae3205.
+The acquisition recipe exactly reproduces all5 changed source/test/documentation
+files from155. Keep configured URL roots, encoded method/separator edits, dynamic
+contexts and broader configuration/performance acceptance open in L27. No new
+settings, protocol, debugger or execution workflow is introduced.
+
+Active/bundled PHPantom155 and the sole signed App0.1.95 stay unchanged. This is
+an inactive engine candidate; actual OpenStorm client/host acceptance and promotion
+are separate slices. Native UI remains user-skipped; all69 areas remain67 partial/
+2 user-deferred. Main frontend/Rust runtime inputs are unchanged from the verified
+upstream merge d8454ee; reuse its checks with their recorded exclusions. Evidence
+prefix: artifacts/checks/slice117-. Preserve source/binary provenance, licenses,
+PHP Workbench and prior evaluation artifacts. The cleanup/delivery receipts record
+compiler-output removal (8210 files/2.2GiB), the sole unchanged App95, the reviewed
+tree, exact commit and remote read-back. Both compiler roots and dist are absent.
+
 Upstream merge checkpoint (2026-11-16, verified source checkpoint): merge
 18 upstream commits after7a97fba49 through2d85e745e78dba5374d8591ddb1db3b650eae1b9
 from l0ng-ai/openidea. Changes include safer terminal path quoting/bracketed

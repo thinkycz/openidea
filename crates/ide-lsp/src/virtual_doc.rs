@@ -32,7 +32,7 @@ pub(crate) fn normalize_uris(value: &mut serde_json::Value) {
                 if matches!(key.as_str(), "data" | "arguments") {
                     continue;
                 }
-                if matches!(key.as_str(), "uri" | "targetUri" | "oldUri" | "newUri")
+                if matches!(key.as_str(), "uri" | "targetUri" | "oldUri" | "newUri" | "target")
                     && let Some(uri) = value.as_str().and_then(escaped_uri)
                 {
                     *value = uri.into();
@@ -108,6 +108,17 @@ pub fn is_decompiled(text: &str) -> bool {
             .iter()
             .any(|marker| line.starts_with(marker))
         })
+}
+
+/// Whether a `.class` stub is written in Java: its first `package` or `import` line ends with `;`.
+/// The Kotlin language server shows Java classes from jars as Java and Kotlin ones as Kotlin, under
+/// the same `.class` name.
+pub fn is_java_class_stub(text: &str) -> bool {
+    text.lines()
+        .take(200)
+        .map(str::trim)
+        .find(|line| line.starts_with("package ") || line.starts_with("import "))
+        .is_some_and(|line| line.ends_with(';'))
 }
 
 /// `scheme` of a URI (`jdt` for `jdt://…`).
@@ -222,6 +233,17 @@ mod tests {
     const JDT: &str = "jdt://contents/spring-boot-4.1.1.jar/org.springframework.boot/SpringApplication.class?=spring-demo/%5C/Users%5C/me%5C/.m2%5C/repository%5C/spring-boot-4.1.1.jar%3Corg.springframework.boot%28SpringApplication.class";
 
     #[test]
+    fn class_stubs_in_java_or_kotlin() {
+        let java = "// IntelliJ API Decompiler stub source generated from a class file\n\npackage com.boydti.fawe.util;\n\npublic class EditSessionBuilder {\n}\n";
+        let kotlin = "// IntelliJ API Decompiler stub source generated from a class file\n// Implementation of methods is not available\n\npackage kotlin.collections\n\npublic fun <T> listOf(): List<T> { /* compiled code */ }\n";
+        let imports_only = "import java.util.List;\n\npublic class A {}\n";
+        assert!(is_java_class_stub(java));
+        assert!(is_java_class_stub(imports_only));
+        assert!(!is_java_class_stub(kotlin));
+        assert!(!is_java_class_stub("public class A {}"));
+    }
+
+    #[test]
     fn csharp_metadata_titles_and_kinds() {
         for (uri, expected) in [
             ("csharp:/D:/My%20Game/Game.csproj/decompiled/UnityEngine.MonoBehaviour.cs", true),
@@ -261,6 +283,22 @@ mod tests {
         assert_eq!(response[1]["location"]["targetUri"], encoded);
         assert_eq!(response.as_array().unwrap()[2..], original.as_array().unwrap()[2..]);
         assert!(encoded.parse::<lsp_types::Uri>().is_ok());
+    }
+
+    /// `DocumentLink.target` is a URI too: one unescaped link fails the whole `documentLink` response.
+    #[test]
+    fn document_link_targets_are_escaped() {
+        let range = serde_json::json!({ "start": { "line": 0, "character": 0 }, "end": { "line": 0, "character": 1 } });
+        let mut links = serde_json::json!([
+            { "range": range, "target": "file:///D:/My Game/项目/a.xsd" },
+            { "range": range, "target": "https://example.com/a b" }
+        ]);
+        assert!(serde_json::from_value::<Vec<lsp_types::DocumentLink>>(links.clone()).is_err());
+        normalize_uris(&mut links);
+        assert_eq!(links[0]["target"], "file:///D:/My%20Game/%E9%A1%B9%E7%9B%AE/a.xsd");
+        assert_eq!(links[1]["target"], "https://example.com/a b", "other schemes are not touched");
+        links[1]["target"] = "https://example.com/ab".into();
+        assert_eq!(serde_json::from_value::<Vec<lsp_types::DocumentLink>>(links).unwrap().len(), 2);
     }
 
     /// #3089: jdtls's Introduce Variable edit for a project under a Chinese path names the file

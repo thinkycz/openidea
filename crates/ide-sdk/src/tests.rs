@@ -21,7 +21,7 @@ fn fake_venv(root: &Path, name: &str) -> std::path::PathBuf {
     py
 }
 
-fn server(name: &str) -> LanguageServerConfig {
+pub(crate) fn server(name: &str) -> LanguageServerConfig {
     LanguageServerConfig {
         name: name.into(),
         command: name.into(),
@@ -35,6 +35,7 @@ fn server(name: &str) -> LanguageServerConfig {
         install_hint: None,
         connect: None,
         fallback: false,
+        replaces: Vec::new(),
         features: Vec::new(),
         code_action_kinds: Vec::new(),
         max_java: None,
@@ -42,6 +43,7 @@ fn server(name: &str) -> LanguageServerConfig {
         tsserver_project: false,
         tsserver_project_extras: Default::default(),
         resync_on_configuration: false,
+        display_name: None,
         pinned: None,
     }
 }
@@ -186,6 +188,48 @@ fn pyright_gets_python_path_and_venv_env() {
     assert_eq!(opts["python"]["pythonPath"], py.to_string_lossy().as_ref());
     assert_eq!(cfg.env["VIRTUAL_ENV"], tmp.path().join(".venv").to_string_lossy());
     assert!(cfg.env["PATH"].starts_with(&*tmp.path().join(".venv").join(bin_dir()).to_string_lossy()));
+}
+
+#[test]
+fn a_run_target_interpreter_hides_local_pythons() {
+    let tmp = tempfile::tempdir().unwrap();
+    fake_venv(tmp.path(), ".venv");
+    let mut s = Settings::default();
+    s.languages.python.interpreter = "target:web".into();
+    assert_eq!(python_interpreter(tmp.path(), &s), None, "the project virtualenv is not the interpreter");
+    assert_eq!(terminal_activation(tmp.path(), &s, "bash"), None);
+    assert!(!tool_install_environment(tmp.path(), &s).commands.contains_key("python"));
+    let mut cfg = server("basedpyright");
+    configure_server(&mut cfg, tmp.path(), tmp.path(), &s);
+    let opts = cfg.initialization_options.map(|o| serde_json::to_value(o).unwrap());
+    assert!(opts.and_then(|o| o.pointer("/python/pythonPath").cloned()).is_none());
+    assert!(!cfg.env.contains_key("VIRTUAL_ENV"));
+}
+
+#[test]
+fn python_configurations_run_on_the_interpreters_target() {
+    let tmp = tempfile::tempdir().unwrap();
+    fake_venv(tmp.path(), ".venv");
+    let mut s = Settings::default();
+    s.languages.python.interpreter = "target:web".into();
+    s.run.default_target = "box".into();
+    let mut own = run("python", "python3", &["main.py"]);
+    own.extras.target = Some(String::new());
+    let mut configs = vec![
+        run("python", "python3", &["manage.py", "runserver"]),
+        run("pytest", "python3", &["-m", "pytest"]),
+        run("npm", "npm", &["run", "dev"]),
+        own,
+    ];
+    apply_to_run_configs(&mut configs, tmp.path(), &s);
+    assert_eq!(configs[0].extras.target.as_deref(), Some("web"));
+    assert_eq!(configs[0].command, "python3", "the container resolves the interpreter");
+    assert!(!configs[0].env.contains_key("VIRTUAL_ENV"));
+    assert_eq!(configs[1].extras.target.as_deref(), Some("web"));
+    assert_eq!(configs[2].extras.target.as_deref(), Some("box"), "other languages keep the default target");
+    assert_eq!(configs[3].extras.target.as_deref(), Some(""), "a configuration's own choice wins");
+    let derived = without_derived(&configs[0], tmp.path(), &s);
+    assert_eq!(derived.extras.target, None, "the target is derived from the interpreter");
 }
 
 #[test]
@@ -950,16 +994,16 @@ fn openstorm_php_defaults_keep_the_laravel_companion_opt_in() {
     };
     let mut settings = Settings::default();
     assert!(!settings.languages.php.phpstan_on_save);
-    assert_eq!(names(&settings), ["phpantom", "intelephense", "phpactor"]);
+    assert_eq!(names(&settings), ["phpantom", "intelephense", "phpactor", "phoxite"]);
     let bundled = php.language_servers.iter().find(|server| server.name == "phpantom").unwrap();
     assert!(bundled.args.iter().any(|arg| arg == "--no-project-tools"));
     settings.language_servers.get_mut("laravel-lsp").unwrap().enabled = true;
-    assert_eq!(names(&settings), ["phpantom", "intelephense", "phpactor", "laravel-lsp"]);
+    assert_eq!(names(&settings), ["phpantom", "intelephense", "phpactor", "phoxite", "laravel-lsp"]);
     settings.language_servers.get_mut("laravel-lsp").unwrap().enabled = false;
     settings
         .language_servers
         .insert("phpantom".into(), ide_core::settings::LanguageServerSettings { enabled: false, ..Default::default() });
-    assert_eq!(names(&settings), ["intelephense", "phpactor"]);
+    assert_eq!(names(&settings), ["intelephense", "phpactor", "phoxite"]);
 }
 
 #[test]
@@ -1412,6 +1456,7 @@ fn typescript_7_runs_its_own_language_server() {
         configure_server(&mut cfg, tmp.path(), tmp.path(), &s);
         assert_eq!(Path::new(&cfg.command), native, "{name}");
         assert_eq!(cfg.args, ["--lsp", "--stdio"]);
+        assert_eq!(cfg.display_name.as_deref(), Some("TypeScript 7"));
         assert!(cfg.initialization_options.is_none());
     }
     // Picked as a directory (its `lib`, as for older versions), too.
@@ -1568,6 +1613,85 @@ fn go_modules_skip_the_main_module_and_missing_downloads() {
             std::path::PathBuf::from("/gopath/pkg/mod/golang.org/x/text@v0.14.0")
         )]
     );
+}
+
+#[test]
+fn build_zig_zon_dependencies_are_parsed() {
+    let zon = r#"// the manifest is a Zig struct literal
+.{
+    .name = .app,
+    .version = "0.1.0",
+    .fingerprint = 0x348e9ddfb4b9e03c,
+    .dependencies = .{
+        .zap = .{ .url = "https://example.com/zap.tar.gz", .hash = "zap-0.1.0-AAA" },
+        .@"weird name" = .{
+            .url = "https://example.com/w.tar.gz",
+            .hash = "weird-2.0.0-BBB",
+            .lazy = true,
+        },
+        .shared = .{ .path = "../shared" },
+    },
+    .paths = .{ "build.zig", "src" },
+}
+"#;
+    assert_eq!(
+        crate::zig::zon_dependencies(zon),
+        [
+            crate::zig::ZonDependency {
+                name: "zap".into(),
+                hash: Some("zap-0.1.0-AAA".into()),
+                path: None,
+                lazy: false
+            },
+            crate::zig::ZonDependency {
+                name: "weird name".into(),
+                hash: Some("weird-2.0.0-BBB".into()),
+                path: None,
+                lazy: true
+            },
+            crate::zig::ZonDependency {
+                name: "shared".into(),
+                hash: None,
+                path: Some("../shared".into()),
+                lazy: false
+            },
+        ]
+    );
+    assert!(crate::zig::zon_dependencies(".{ .name = .app, .dependencies = .{} }").is_empty());
+    assert!(crate::zig::zon_dependencies(".{ .name = .app }").is_empty());
+    assert!(crate::zig::zon_dependencies("{ broken").is_empty());
+    assert_eq!(
+        crate::zig::zon_string_field(".{ .name = .probe_pkg, .version = \"0.1.0\" }", "name").as_deref(),
+        Some("probe_pkg")
+    );
+}
+
+#[test]
+fn zig_env_is_parsed_from_json_and_struct_literals() {
+    let env = crate::zig::parse_zig_env(
+        r#"{"zig_exe":"/opt/zig/zig","lib_dir":"/opt/zig/lib","std_dir":"/opt/zig/lib/std","global_cache_dir":"/home/u/.cache/zig","version":"0.14.1"}"#,
+    )
+    .unwrap();
+    assert_eq!(env.std_sources().as_deref(), Some(std::path::Path::new("/opt/zig/lib/std")));
+    assert_eq!(env.global_cache_dir.as_deref(), Some(std::path::Path::new("/home/u/.cache/zig")));
+
+    // Zig ≥ 0.15 prints a struct literal; a relative std_dir resolves against the install dir.
+    let env = crate::zig::parse_zig_env(
+        r#".{
+    .zig_exe = "/opt/zig/zig",
+    .lib_dir = "/opt/zig/lib",
+    .std_dir = "lib/std",
+    .global_cache_dir = "/home/u/.cache/zig",
+    .version = "0.16.0",
+    .target = "aarch64-macos",
+    .env = .{ .ZIG_GLOBAL_CACHE_DIR = null, .HOME = "/home/u" },
+}"#,
+    )
+    .unwrap();
+    assert_eq!(env.std_sources().as_deref(), Some(std::path::Path::new("/opt/zig/lib/std")));
+    assert_eq!(env.version.as_deref(), Some("0.16.0"));
+    assert_eq!(env.global_cache_dir.as_deref(), Some(std::path::Path::new("/home/u/.cache/zig")));
+    assert!(crate::zig::parse_zig_env("error: nothing").is_none());
 }
 
 #[test]
@@ -2474,7 +2598,7 @@ fn a_member_without_python_falls_back_to_the_primary_project_interpreter() {
     assert_eq!(config.env["VIRTUAL_ENV"], outer.parent().unwrap().parent().unwrap().to_string_lossy());
     // Saving strips what settings derived, so the fallback keeps following settings.
     let stored = without_derived_in(&config, &bare, Some(&primary), &settings);
-    assert_eq!(stored.command, exe("python"));
+    assert_eq!(stored.command, "python", "the bare program, also on Windows");
     assert!(!stored.env.contains_key("VIRTUAL_ENV"));
 
     // The member's explicit interpreter wins over the primary project's venv —

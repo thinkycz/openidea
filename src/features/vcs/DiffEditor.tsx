@@ -28,7 +28,7 @@ import {
   Chunk,
 } from "@codemirror/merge";
 import { attachDocument, diffSideExtensions, embeddedEditorExtensions, type DocumentAttachment } from "@/editor/api";
-import { setFindOpen } from "@/editor/core/cm/find";
+import { findChangedRanges, setFindOpen } from "@/editor/core/cm/find";
 import { softWrapActive } from "@/editor/core/cm/prefs";
 import { FindPanel, searchAgain, seedFind, type FindTarget } from "@/editor/core/view/FindBar";
 import { executeAction, getAction } from "@/platform/actions";
@@ -40,9 +40,11 @@ import { bindingsFor, normalizeBinding, shortcutLabel, strokeOf } from "@/platfo
 import { tx } from "@/platform/i18n";
 import { useProject } from "@/platform/project";
 import { isVirtualUri } from "@/platform/virtualDocs";
-import { IconButton, Select, Spinner, T, showContextMenu } from "@/ui";
+import { isRemoteWindow } from "@/platform/remote";
+import { useWorkflowSettings } from "@/platform/workflowSettings";
+import { IconButton, Select, Spinner, T, isPopupOpen, showContextMenu } from "@/ui";
 import { registerSoftWrapSurface } from "@/workbench/softWrap";
-import { editorService, type EditorInput } from "@/workbench/contributions";
+import { editorService, notifications, type EditorInput } from "@/workbench/contributions";
 import { changedLineGutters, diffOverview, diffWords, languageFor, viewerBase } from "./cm";
 import { applyChunk, arrowControls, chunkAt, hoverRevert, revertUnifiedChunk } from "./diffControls";
 import {
@@ -91,7 +93,7 @@ import { UnalignedPanes } from "./diffScroll";
 import { groupOf } from "./changes";
 import { inclusionGutter } from "./hunkInclusion";
 import { hunksOverlapping } from "./hunks";
-import { effectiveKind, stripSlash } from "./model";
+import { baseName, effectiveKind, stripSlash } from "./model";
 import { errorMessage, logConsole, readWorkingText, runOp, saveAll } from "./ops";
 import { refreshNow, repoOf, useVcs } from "./store";
 import styles from "./DiffEditor.module.css";
@@ -216,8 +218,30 @@ async function attachSide(side: DiffSide, path: string): Promise<DocumentAttachm
 
 const editableExtensions = (): Extension => [history(), keymap.of(reviewedHistoryKeymap)];
 
+/** The request's side a pane shows: `a` is the left one unless the sides are swapped. */
+const originOf = (s: Side, swapped: boolean): "left" | "right" => ((s === "a") !== swapped ? "left" : "right");
+
+/** A side the user types into in the diff itself (Open Blank Diff Window). */
+const isEditableText = (s: DiffSide) => s.type === "text" && !!s.editable;
+
+/** The changed ranges of a diff pane, for the find bar's Search In Changes. */
+const changedRanges = findChangedRanges.of((state) => {
+  const got = getChunks(state);
+  if (!got) return [];
+  const len = state.doc.length;
+  return got.chunks.map((c) =>
+    got.side === "a"
+      ? { from: c.fromA, to: Math.min(Math.max(c.endA, c.fromA), len) }
+      : { from: c.fromB, to: Math.min(Math.max(c.endB, c.fromB), len) },
+  );
+});
+
 type Side = "a" | "b";
 type ViewUpdateFn = (u: { docChanged: boolean; selectionSet: boolean }) => void;
+
+/** Esc alone, not while composing text. */
+const plainEscape = (e: KeyboardEvent) =>
+  e.key === "Escape" && !e.shiftKey && !e.altKey && !e.metaKey && !e.ctrlKey && !e.nativeEvent.isComposing;
 
 /** Whether `e` is one of the strokes bound to `actionId`. */
 function isStrokeOf(e: KeyboardEvent, actionId: string): boolean {
@@ -230,6 +254,7 @@ export function DiffEditor({
   toolbarActions,
   onNeighbour,
   onJumpToSource,
+  onClose,
 }: {
   input: EditorInput;
   toolbarActions?: ReactNode;
@@ -241,9 +266,22 @@ export function DiffEditor({
   onNeighbour?: (data: DiffData) => void;
   /** Called as Jump to Source opens the file in an editor: a modal host closes, or the editor stays hidden behind it. */
   onJumpToSource?: () => void;
+  /** Closes the diff's editor tab (Esc, IDEA's Close Diff Editor); hosts that aren't tabs leave it out. */
+  onClose?: () => void;
 }) {
-  const data = input.data as DiffData;
+  const input_ = input.data as DiffData;
+  // Swap Sides shows the request's sides the other way round; another request starts unswapped.
+  const [swappedFor, setSwappedFor] = useState<DiffData | null>(null);
+  const swapped = swappedFor === input_;
+  const data = useMemo(
+    () => (swapped ? { ...input_, left: input_.right, right: input_.left } : input_),
+    [input_, swapped],
+  );
   const { path, left, right } = data;
+  /** The typed text of editable text sides (by the request's side), kept across rebuilt views. */
+  const edited = useRef<{ of: DiffData; left?: Text; right?: Text }>({ of: input_ });
+  if (edited.current.of !== input_) edited.current = { of: input_ };
+  const editedText = (s: Side) => edited.current[originOf(s, swapped)]?.toString();
   const [attached, setAttached] = useState<Attached | null>(null);
   const [binary, setBinary] = useState<boolean | null>(null);
   /** Text of the sides that are not live documents. */
@@ -383,8 +421,8 @@ export function DiffEditor({
     left.rev === "HEAD" &&
     !left.path &&
     isWorktree(right);
-  const editableA = !binary && !!attached?.a && !attached.a.readOnly;
-  const editableB = !binary && !!attached?.b && !attached.b.readOnly;
+  const editableA = !binary && (attached?.a ? !attached.a.readOnly : isEditableText(left));
+  const editableB = !binary && (attached?.b ? !attached.b.readOnly : isEditableText(right));
   const ready = !!attached && !!statics && lang !== null && binary !== null;
 
   // Soft wraps follow the editor's (Settings › Editor › General) unless toggled in the viewer settings.
@@ -413,8 +451,9 @@ export function DiffEditor({
   useEffect(() => {
     const host = hostRef.current;
     if (!host || !attached || !statics || lang === null) return;
-    const textA = attached.a?.text() ?? statics.a ?? "";
-    const textB = attached.b?.text() ?? statics.b ?? "";
+    const typed = (s: Side) => edited.current[originOf(s, swapped)]?.toString();
+    const textA = typed("a") ?? attached.a?.text() ?? statics.a ?? "";
+    const textB = typed("b") ?? attached.b?.text() ?? statics.b ?? "";
     const prev = viewsRef.current;
     const scrollTop = prev
       ? prev.merge && !prev.panes
@@ -427,6 +466,13 @@ export function DiffEditor({
       if (u.selectionSet || u.docChanged) updateChunkInfo(u.docChanged);
     });
     const findWatch = (s: Side) => EditorView.updateListener.of((u) => findWatchers.current[s].forEach((fn) => fn(u)));
+    /** Keeps what the user typed into an editable text side for the next rebuild (options, Swap Sides). */
+    const keepEdits = (s: Side) =>
+      isEditableText(s === "a" ? left : right)
+        ? EditorView.updateListener.of((u) => {
+            if (u.docChanged) edited.current[originOf(s, swapped)] = u.state.doc;
+          })
+        : [];
     const focusTracker = (side: "a" | "b") =>
       EditorView.domEventHandlers({
         focus: () => {
@@ -461,6 +507,7 @@ export function DiffEditor({
     const side = (att: DocumentAttachment | null, editable: boolean, notes?: "left" | "right"): Extension[] => [
       // The left pane of a side-by-side diff has its line numbers next to the divider, as in IDEA.
       viewerBase({ readOnly: !editable, findBar: true, lineNumbers: notes === "left" ? "after" : true }),
+      changedRanges,
       wrapSlot.of(softWrapRef.current ? EditorView.lineWrapping : []),
       // Esc closes the find bar before it collapses the selection (a found match); open popups go first.
       Prec.high(keymap.of([{ key: "Escape", run: () => findEscape.current() }])),
@@ -507,6 +554,7 @@ export function DiffEditor({
             panes?.extension ?? [],
             focusTracker("a"),
             findWatch("a"),
+            keepEdits("a"),
             editableA ? hoverRevert((_v, i) => merge && applyChunk(merge, i, "b")) : [],
           ],
         },
@@ -520,6 +568,7 @@ export function DiffEditor({
             listener,
             focusTracker("b"),
             findWatch("b"),
+            keepEdits("b"),
             inclusion,
             editableB ? hoverRevert((_v, i) => merge && applyChunk(merge, i, "a")) : [],
           ],
@@ -565,6 +614,7 @@ export function DiffEditor({
           listener,
           focusTracker("b"),
           findWatch("b"),
+          keepEdits("b"),
           inclusion,
           highlightChanges ? diffWords : [],
           unifiedMergeView({
@@ -647,6 +697,9 @@ export function DiffEditor({
     data.annotations,
     includable,
     path,
+    left,
+    right,
+    swapped,
   ]);
 
   useEffect(() => {
@@ -938,6 +991,8 @@ export function DiffEditor({
   /** The side the bar searches (the last one, once closed: closing clears its highlights). */
   const findSide = useRef<Side>("b");
   const findOpen = useRef(false);
+  /** The find bar's Search In Changes, for this diff (as IDEA keeps it in the diff's context). */
+  const searchInChanges = useRef(false);
   const findId = useId();
   const viewOf = (s: Side) => (s === "a" && viewsRef.current?.a) || viewsRef.current?.b || null;
   const findTarget = useMemo<FindTarget>(() => {
@@ -951,6 +1006,10 @@ export function DiffEditor({
         return () => void set.delete(fn);
       },
       isOpen: () => findOpen.current,
+      inChanges: {
+        get: () => searchInChanges.current,
+        set: (on) => void (searchInChanges.current = on),
+      },
     };
   }, [findId]);
   const editableSide = (s: Side) => (s === "a" ? editableA : editableB);
@@ -977,6 +1036,56 @@ export function DiffEditor({
     closeFind();
     return true;
   };
+  /** Select Opposite Diff Pane (⌃⇧⇥): the other side keeps its own caret, as in IDEA. */
+  const focusOpposite = () => {
+    const views = viewsRef.current;
+    if (!views?.a) return false;
+    (focusedSide.current === "a" ? views.b : views.a).focus();
+    return true;
+  };
+  const close = () => {
+    if (!onClose) return false;
+    onClose();
+    return true;
+  };
+  /** Show Diff in External Tool: the panes' text, or a saved file where a side is one. */
+  const externalDiff = useWorkflowSettings((s) => s.externalDiff);
+  const canExternal = externalDiff.enabled && !!externalDiff.path && !binary;
+  const showInExternalTool = () => {
+    const views = viewsRef.current;
+    if (!views || !canExternal) return false;
+    const remote = isRemoteWindow();
+    const sideOf = async (s: Side) => {
+      const side = s === "a" ? left : right;
+      const att = s === "a" ? attached?.a : attached?.b;
+      const file = sideFile(side, path);
+      const name = baseName((side.type === "rev" && side.path) || file || path) || "content";
+      if (file && att && !remote) {
+        await att.save();
+        return { path: file, text: null, name };
+      }
+      const doc = s === "b" ? views.b.state.doc : (views.a?.state.doc ?? getOriginalDoc(views.b.state));
+      return { path: null, text: doc.toString(), name };
+    };
+    void Promise.all([sideOf("a"), sideOf("b")])
+      .then(([a, b]) => call(commands.diffExternalTool(a, b, diffTitle(data))))
+      .catch((e) =>
+        notifications().notify({
+          group: "vcs",
+          level: "error",
+          title: "Cannot show diff in external tool",
+          body: errorMessage(e),
+        }),
+      );
+    return true;
+  };
+  /** Swap Sides: for diffs whose two sides the user picked (Compare Files, Clipboard, blank diff). */
+  const canSwap = !!input_.swappable && !single;
+  const swapSides = () => {
+    if (!canSwap) return false;
+    setSwappedFor(swapped ? null : input_);
+    return true;
+  };
   const onKeyDown = (e: KeyboardEvent) => {
     if (e.defaultPrevented) return;
     if (isStrokeOf(e, "find.inFile")) openFind(false);
@@ -985,7 +1094,8 @@ export function DiffEditor({
       if (!findOpen.current) findSide.current = focusedSide.current;
       if (!searchAgain(findTarget, isStrokeOf(e, "find.next"))) openFind(false);
     } else if (e.key === "Escape" && findOpen.current) closeFind();
-    else return;
+    // Esc that nothing in the diff took (find bar, selection, completion) closes its tab, as in IDEA.
+    else if (!plainEscape(e) || isPopupOpen() || !close()) return;
     e.preventDefault();
     e.stopPropagation();
   };
@@ -1123,6 +1233,10 @@ export function DiffEditor({
     applyChange,
     file,
     showSettings,
+    focusOpposite,
+    close,
+    swapSides,
+    showInExternalTool,
     viewer: viewerOf,
   });
   useLayoutEffect(() => {
@@ -1136,6 +1250,10 @@ export function DiffEditor({
       applyChange,
       file,
       showSettings,
+      focusOpposite,
+      close,
+      swapSides,
+      showInExternalTool,
       viewer: viewerOf,
     });
   });
@@ -1150,8 +1268,8 @@ export function DiffEditor({
     [],
   );
 
-  const textA = attached?.a?.text() ?? statics?.a ?? "";
-  const textB = attached?.b?.text() ?? statics?.b ?? "";
+  const textA = editedText("a") ?? attached?.a?.text() ?? statics?.a ?? "";
+  const textB = editedText("b") ?? attached?.b?.text() ?? statics?.b ?? "";
   const eolA = attached?.a?.lineEnding() ?? detectLineEnding(textA);
   const eolB = attached?.b?.lineEnding() ?? detectLineEnding(textB);
   const rawA = attached?.a ? liveSideText(textA, eolA) : textA;
@@ -1161,7 +1279,8 @@ export function DiffEditor({
   const sameText = rawA.replace(/\r\n?/g, "\n") === rawB.replace(/\r\n?/g, "\n");
   const eolOnly = ready && !binary && rawA !== rawB && sameText;
   const eolDiffers = ready && !binary && (badgeA !== badgeB || eolOnly);
-  const identical = ready && chunkInfo.count === 0 && rawA === rawB;
+  // Texts typed into a blank diff aren't files: no "identical" notice for them.
+  const identical = ready && chunkInfo.count === 0 && rawA === rawB && !isEditableText(left) && !isEditableText(right);
   // Equal texts with different git modes: the change git records (chmod).
   const modeChange =
     identical && modes !== null && modes.a !== null && modes.b !== null && modes.a !== modes.b
@@ -1246,6 +1365,7 @@ export function DiffEditor({
           />
         )}
         <span className={styles.sep} />
+        {canSwap && <IconButton icon="swap-panels" title="Swap Sides" size="small" onClick={() => void swapSides()} />}
         <IconButton
           icon="diff-side-by-side"
           title="Side-by-side Viewer"
@@ -1343,12 +1463,28 @@ export function DiffEditor({
         </span>
         {contribs.map((c, i) => c.Toolbar && <c.Toolbar key={i} host={viewer} />)}
         {toolbarActions}
+        {canExternal && (
+          <IconButton
+            icon="external-tools"
+            title="Show Diff in External Tool"
+            size="small"
+            onClick={() => void showInExternalTool()}
+          />
+        )}
         {getAction("vcs.showDiffInNewWindow") && auxiliaryWindow()?.kind !== "diff" && (
           <IconButton
             icon="external-link"
             title="Show Diff in New Window"
             size="small"
             onClick={() => void executeAction("vcs.showDiffInNewWindow", data)}
+          />
+        )}
+        {auxiliaryWindow()?.kind === "diff" && getAction("vcs.showDiffInEditorTab") && (
+          <IconButton
+            icon="editor-only"
+            title="Show Diff in Editor Tab"
+            size="small"
+            onClick={() => void executeAction("vcs.showDiffInEditorTab")}
           />
         )}
         <IconButton
@@ -1424,7 +1560,7 @@ export function DiffEditor({
         className={clsx(
           styles.host,
           opts.highlight === "none" && styles.noHighlight,
-          viewMode === "split" && (opts.alignChanges ? !opts.syncScroll && styles.unsynced : styles.unaligned),
+          viewMode === "split" && !opts.alignChanges && styles.unaligned,
         )}
         hidden={!!binary || !!error || !ready}
         aria-label={diffTitle(data)}

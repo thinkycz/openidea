@@ -50,6 +50,10 @@ export interface DocBackend {
   open(path: string): Promise<DocumentInfo>;
   /** Opens a read-only language-server document (library or disk class contents). */
   openVirtual(uri: string): Promise<DocumentInfo>;
+  /** Opens (or re-references) an editable untitled buffer (`untitled:Untitled-N`); `null` mints one. */
+  openUntitled(name: string | null): Promise<DocumentInfo>;
+  /** Save As for an untitled buffer: writes it to `path` and re-keys the document. */
+  saveAs(doc: DocId, path: string): Promise<DocumentInfo>;
   close(doc: DocId): Promise<void>;
   edit(doc: DocId, baseVersion: number, changes: TextChange[]): Promise<number>;
   save(doc: DocId, overwriteRevision?: string | null): Promise<string | null>;
@@ -91,6 +95,8 @@ export const ipcBackend: DocBackend = {
   },
   open: (path) => call(commands.docOpen(path)),
   openVirtual: (uri) => call(commands.docOpenVirtual(uri)),
+  openUntitled: (name) => call(commands.docOpenUntitled(name)),
+  saveAs: (doc, path) => call(commands.docSaveAs(doc, path)),
   close: async (doc) => void (await call(commands.docClose(doc))),
   edit: (doc, baseVersion, changes) => call(commands.docEdit(doc, baseVersion, { changes })),
   save: (doc, overwriteRevision = null) => call(commands.docSaveChecked(doc, overwriteRevision)),
@@ -125,6 +131,8 @@ interface MemDoc {
   path: string;
   text: string;
   saved: string;
+  /** Samples have initial text without a persisted file. */
+  diskText?: string;
   savedBom: boolean;
   version: number;
   refs: number;
@@ -400,6 +408,14 @@ export function createMemoryBackend(files: Record<string, string> = {}): MemoryB
   let nextId = 1;
   const store = new Map(Object.entries(files));
   const savedBoms = new Map<string, boolean>();
+  const memUntitledCount = () => {
+    let max = 0;
+    for (const key of byPath.keys()) {
+      const m = /^untitled:Untitled-(\d+)$/.exec(key);
+      if (m) max = Math.max(max, Number(m[1]));
+    }
+    return max;
+  };
 
   const info = (d: MemDoc): DocumentInfo => ({
     id: d.id,
@@ -488,6 +504,7 @@ export function createMemoryBackend(files: Record<string, string> = {}): MemoryB
         path,
         text,
         saved: text,
+        diskText: store.get(path),
         savedBom: hasBom,
         version: 0,
         refs: 1,
@@ -537,6 +554,48 @@ export function createMemoryBackend(files: Record<string, string> = {}): MemoryB
       docs.delete(doc);
       byPath.delete(d.path);
     },
+    async openUntitled(name) {
+      const key = name ?? `untitled:Untitled-${memUntitledCount() + 1}`;
+      const existing = byPath.get(key);
+      if (existing !== undefined) {
+        const d = get(existing);
+        d.refs++;
+        return info(d);
+      }
+      const d: MemDoc = {
+        id: nextId++,
+        path: key,
+        text: "",
+        saved: "",
+        savedBom: false,
+        version: 0,
+        refs: 1,
+        lineEnding: "lf",
+        hasBom: false,
+        readOnly: false,
+        language: "plaintext",
+        uri: key,
+      };
+      docs.set(d.id, d);
+      byPath.set(key, d.id);
+      return info(d);
+    },
+    async saveAs(doc, path) {
+      const d = get(doc);
+      const before = d.text !== d.saved || d.hasBom !== d.savedBom;
+      d.saved = d.text;
+      d.diskText = d.text;
+      d.savedBom = d.hasBom;
+      store.set(path, d.text);
+      savedBoms.set(path, d.hasBom);
+      byPath.delete(d.path);
+      byPath.set(path, d.id);
+      d.path = path;
+      d.uri = undefined;
+      d.language = EXT_LANG[path.slice(path.lastIndexOf(".") + 1).toLowerCase()] ?? "plaintext";
+      setDirty(d, before);
+      return info(d);
+    },
     edit(doc, baseVersion, changes) {
       return delay(() => {
         const d = get(doc);
@@ -555,9 +614,10 @@ export function createMemoryBackend(files: Record<string, string> = {}): MemoryB
       if (d.text === d.saved && d.hasBom === d.savedBom) return null;
       const disk = store.get(d.path);
       const revision = JSON.stringify([d.path, disk ?? null]);
-      if (disk !== d.saved && overwriteRevision !== revision) return revision;
+      if (disk !== d.diskText && overwriteRevision !== revision) return revision;
       const before = d.text !== d.saved || d.hasBom !== d.savedBom;
       d.saved = d.text;
+      d.diskText = d.text;
       d.savedBom = d.hasBom;
       store.set(d.path, d.text);
       savedBoms.set(d.path, d.hasBom);

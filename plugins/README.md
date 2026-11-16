@@ -157,6 +157,7 @@ work), but 0.1 code no longer runs: rebuild it against the 1.0 SDK.
 | `fileIcons`         | `id`, `patterns` (file names), `icon` (SVG), `iconDark?` — whatever icon theme is in use                                                                                                                                               | no            |
 | `fileTemplates`     | `id`, `name`, `extension`, `path`; API 1.3: `fileName`, `variables = [{ name, prompt }]` — New menu                                                                                                                                    | no            |
 | `commitChecks`      | `id`, `title` — a before-commit check in Commit Options (see _Commits_)                                                                                                                                                                | yes           |
+| `serverCommands`    | `server`, `command`, `run` — a language server's client command run by this plugin's command (API 1.9; see _Commands a server hands to the client_)                                                                                    |
 
 A `viewItem.context` menu needs `view`, the id of one of the plugin's own
 views. It adds the commands to the right-click menu of the items in that
@@ -356,6 +357,7 @@ machine. Users can revoke optional capabilities in Settings › Plugins.
 | `events`            | low    | file opened/saved, editor focused, repository changed events                                                                                                            |
 | `events.input`      | medium | `action-performed` and `input-mode-changed` events                                                                                                                      |
 | `process:<program>` | high   | `Project::run_process`, language servers, debug adapters, runs                                                                                                          |
+| `lsp:<server>`      | high   | API 1.9: `Project::language_server_request` / `language_server_notify` to that running language server (its name in the language definition); trusted projects only     |
 | `net:<host>`        | medium | `host::fetch` over HTTPS (also loopback HTTP); `*.example.com` matches subdomains                                                                                       |
 | `net:ask`           | medium | Ask the user at the first request to an HTTPS (or loopback) host that is not declared; one answer per host, revocable; API 1.5                                          |
 | `net.http:<host>`   | medium | Unencrypted HTTP to that host; API 1.4, same wildcard rules as `net:`                                                                                                   |
@@ -418,9 +420,28 @@ are always available. Calling a gated function without its capability returns
 
 ## 3. Writing code (Rust SDK)
 
+### API 1.9
+
+API 1.9.0 is in development on `main`. Use `engines.openidea = "^1.9"` and the
+matching SDK. Released 1.8 plugins keep working. New in 1.9:
+
+- The `launch-configurations` export (`LaunchConfigurations`, registration
+  `launch_configurations`, world `plugin-launch-configurations`): run
+  configurations with an `env` added to the run's environment and a `debugger`,
+  either `Debugger::Launch { language }` (the program starts under that
+  language's debugger) or `Debugger::AttachChild { kind, command_contains }`
+  (Debug runs the configuration and attaches to a process the run starts). See
+  _Environment and debugger_ under _Runs, terminal sessions and test results_.
+
+- **`[[contributes.serverCommands]]`** routes a command a language server leaves
+  to the client (a code lens's, a code action's) to the plugin's own command.
+- **Requests to a language server.** `Project::language_server_request` and
+  `language_server_notify` send a running server its own methods, behind the
+  high-risk `lsp:<server>` capability. See _Requests to a language server_.
+
 ### API 1.8
 
-API 1.8.0 is in development on `main`. Use `engines.openidea = "^1.8"` and the
+API 1.8.0 shipped with OpenIDEA 0.1.45. Use `engines.openidea = "^1.8"` and the
 matching SDK. Released 1.7 plugins keep working. New in 1.8:
 
 - `problems-changed` (activation `on-event:problems-changed`, event
@@ -445,7 +466,7 @@ matching SDK. Released 1.6 plugins keep working. New in 1.7:
   two texts in the invoking window's diff viewer, for example a merge request's
   file before and after; `file_name` picks the syntax highlighting. Web views
   send `{ op: "open-diff", left, right, leftLabel?, rightLabel?, title?, fileName? }`.
-  Commands and events only; each side at most 1 MiB.
+  Commands and events only; each side at most 1 MiB (8 MiB on current hosts).
 
 ### API 1.5
 
@@ -669,8 +690,9 @@ then run `openidea-plugin check`.
 | `host::write_terminal(key, text)`                                                                              | `views.write-terminal`                       | API 1.4: write only to this plugin's still-running terminal in this window; trusted project, commands/events only.                                                                                                                                                                                                                                        |
 | `host::open_content_tab(tab)`                                                                                  | `views.open-content-tab`                     | API 1.4: the shared content editor protocol, without a web view; actions arrive as `content-tab-action`.                                                                                                                                                                                                                                                  |
 | `host::reply_content_tab(request_id, reply)`                                                                   | `views.reply-content-tab`                    | API 1.4: reply to an owned action in the originating window. No capability; commands/events only.                                                                                                                                                                                                                                                         |
-| `host::open_diff(diff, file_name)`                                                                             | `views.open-diff`                            | API 1.7: two texts in the invoking window's diff viewer; `file_name` (at most 256 characters) picks the highlighting. Commands/events only; each side at most 1 MiB.                                                                                                                                                                                      |
+| `host::open_diff(diff, file_name)`                                                                             | `views.open-diff`                            | API 1.7: two texts in the invoking window's diff viewer; `file_name` (at most 256 characters) picks the highlighting. Commands/events only; each side at most 8 MiB (earlier hosts: 1 MiB), a larger side fails with `Invalid("diff too large: …")`.                                                                                                      |
 | `RunConfigurations::configurations(root)`                                                                      | export `run-configurations.configurations`   | API 1.4: optional `plugin-run-configurations` world; SDK registration `run_configurations`. Full project list, refreshed on configuration listing.                                                                                                                                                                                                        |
+| `LaunchConfigurations::launch_configurations(root)`                                                            | export `launch-configurations`               | API 1.9: optional `plugin-launch-configurations` world; SDK registration `launch_configurations`. The same list with `env` and `debugger`; preferred over `run-configurations`.                                                                                                                                                                           |
 | `TestResults::parse(config, chunk)`                                                                            | export `test-results.parse`                  | API 1.4: optional `plugin-test-results` world; SDK registration `test_results`. Bounded output batches for `framework = "plugin"`; failures use built-in parsers.                                                                                                                                                                                         |
 | `TestResults::select_tests(config, tests)`                                                                     | export `test-results.select-tests`           | API 1.4: full replacement argv for test-tree name paths, or `None` when unsupported (the SDK default). Enables rerunning failed tests and running tree selections.                                                                                                                                                                                        |
 | `host::open_location(path, line, column)`                                                                      | `views.open-location`                        | Opens a file inside the project in an editor of the invoking window, the caret at `line`/`column` (0-based, UTF-16): a view's links to code. Needs `project.read`.                                                                                                                                                                                        |
@@ -722,6 +744,77 @@ adds the two ways to the bytes:
 ```rust
 let bytes = project.read_bytes(&doc.path)?;  // the PDF's exact bytes
 ```
+
+### Requests to a language server (API 1.9)
+
+A plugin can ask a language server the IDE already runs for the server's own
+data: `rust-analyzer/expandMacro`, a framework server's route list. Declare
+`lsp:<server>` (high risk: the server reads and changes the project's files on
+the plugin's behalf), where `<server>` is the `name` of the
+`[[language-servers]]` entry in the language definition:
+
+```toml
+engines.openidea = "^1.9"
+
+[capabilities]
+required = ["lsp:phoxite"]
+```
+
+```rust
+let project = inv.project().ok_or("no project")?;
+let routes = project.language_server_request("phoxite", "phoxite/laravel/routes", Some("{}"))?; // JSON
+project.language_server_notify("phoxite", "phoxite/refresh", None)?;
+```
+
+| SDK                                                        | WIT                                    | Notes                                        |
+| ---------------------------------------------------------- | -------------------------------------- | -------------------------------------------- |
+| `Project::language_server_request(server, method, params)` | `language-servers.request(project, …)` | The result as JSON; `params` is JSON or none |
+| `Project::language_server_notify(server, method, params)`  | `language-servers.notify(project, …)`  | No answer is awaited                         |
+
+- Only the server's own methods pass. `initialize`, `initialized`, `shutdown`,
+  `exit`, anything starting with `$/` and any method whose first segment is an
+  LSP namespace (`textDocument`, `workspace`, `window`, `notebookDocument`,
+  `callHierarchy`, `typeHierarchy`, `completionItem`, `codeAction`, `codeLens`,
+  `documentLink`, `inlayHint`, `workspaceSymbol`, `client`, `telemetry`) are
+  `invalid`: a plugin can't touch document sync, the features the IDE asks for
+  itself or the server's lifecycle.
+- The call never starts a server: one that is not running for the project is
+  `not-found`. The server's own error is `failed` with its message.
+- The request ends with the invocation's cancellation and time budget. A method
+  is at most 256 bytes, params at most 1 MiB.
+- The project must be trusted; otherwise the call is `denied`.
+
+#### Commands a server hands to the client
+
+A server's code lens, code action or inlay hint can carry a command the server
+does not execute itself (it is not in its `executeCommandProvider`): the client
+is meant to. A plugin claims such a command in its manifest, and the IDE runs
+the plugin's own command instead of failing with "no language server provides
+command":
+
+```toml
+[[contributes.commands]]
+id = "model-view"
+title = "Show the Eloquent Model"
+
+[[contributes.serverCommands]]
+server = "phoxite"            # the server whose results carry the command
+command = "laravel.modelView" # the command name in the server's result
+run = "model-view"            # this plugin's command
+```
+
+- `run` gets the command's `arguments` array as JSON in `arg`, in the window and
+  editor where the lens or action was activated.
+- The manifest must declare `lsp:<server>`, and the claim counts only while the
+  plugin holds that grant.
+- A command listed in the server's `executeCommandProvider` still goes to the
+  server.
+- When two installed plugins claim the same `server` and `command`, the first
+  one loaded keeps it and the conflict is logged.
+
+In tests, `MockHost::set_language_server_response(server, method, json)` makes
+a server run and answer, and `language_server_requests()` /
+`language_server_notifications()` list what the plugin sent.
 
 ### Database sources (API 1.4)
 
@@ -1836,6 +1929,49 @@ Implement `RunConfigurations` and register `run_configurations`. Each returned
 valid list after an export failure. Entries without an approved program are not
 offered. Configuration exports run without a window or prompt context.
 
+#### Environment and debugger (API 1.9)
+
+Implement `LaunchConfigurations` and register `launch_configurations` instead
+to give configurations an environment and a debugger. Each
+`PluginLaunchConfiguration` wraps a `PluginRunConfiguration` (`config`) with:
+
+- `env`: variables added to the run's environment, at most 64. As with
+  `process` commands, a configuration only adds variables: a name the IDE's
+  own environment already has (`PATH`, …) makes the whole list invalid.
+- `debugger`: `None` keeps the default (Debug infers the debugger from a source
+  file in `args`). `Debugger::Launch { language }` starts `program` under the
+  debugger of that language id (its `[debugger]`), for programs whose arguments
+  name no source file. `Debugger::AttachChild { kind, command_contains }` makes
+  Debug run the configuration as Run does, then attach to the first process of
+  that Attach to Process kind (`dotnet`, `node`, `python`, `go` or `native`) the
+  run starts, optionally only one whose command line contains
+  `command_contains`. Only the run's own descendants are candidates; the IDE
+  waits for one while the run lasts, up to a minute, and otherwise leaves the
+  run going without the debugger. A host that predates a later variant treats
+  the configuration as having no debugger.
+
+```rust
+impl LaunchConfigurations for Functions {
+    fn launch_configurations(&mut self, _root: &str) -> Vec<PluginLaunchConfiguration> {
+        vec![PluginLaunchConfiguration {
+            config: PluginRunConfiguration {
+                id: "func".into(),
+                name: "Functions host".into(),
+                program: "func".into(),
+                args: vec!["start".into(), "--dotnet-isolated-debug".into()],
+                ..Default::default()
+            },
+            env: vec![("FUNCTIONS_WORKER_RUNTIME".into(), "dotnet-isolated".into())],
+            debugger: Some(Debugger::AttachChild { kind: "dotnet".into(), command_contains: None }),
+        }]
+    }
+}
+register_plugin!(Functions, launch_configurations);
+```
+
+A component exporting both uses `launch-configurations`. Plugins that call
+`run.start(config, args, true)` on such a configuration get the same Debug.
+
 For a static detector, `framework = "plugin"` is an API 1.4 manifest field. For
 either kind of configuration, it enables the optional `TestResults` export
 (registration `test_results`). `parse(config, chunk)` receives the short config
@@ -1883,8 +2019,9 @@ are forwarded to the originating desktop window.
 with the same content, action, reply and diff behavior. Its key is scoped to the
 plugin and window, independently of web views. Save and toolbar actions arrive
 as `content-tab-action`; answer with `host::reply_content_tab(request_id, reply)`.
-The host accepts replies only from that plugin and window. Content and diff text
-are limited to 1 Mi UTF-16 units, with at most 16 actions and one Save action.
+The host accepts replies only from that plugin and window. Content is limited to
+1 Mi UTF-16 units and each side of a diff to 8 Mi, with at most 16 actions and one
+Save action.
 
 ### Plugin-backed content editor tabs (API 1.3)
 
@@ -1913,7 +2050,10 @@ openidea.postMessage(JSON.stringify({
 are required. `key` (1–128 characters) defaults to `title` and is scoped to the
 calling plugin and view; `fileName` (1–256 characters, no path separators) and
 `language` (1–64 characters) select syntax highlighting and the tab's file icon.
-`readOnly` defaults to `false`. `actions` lists up to 16 toolbar buttons with
+A Markdown tab (`language` `markdown`, or a `fileName` ending in `.md`) has the
+Markdown file editor's layouts (Editor Only, Editor and Preview, Preview Only) and
+opens on the rendered preview when it is read-only; web links in the preview open
+in the browser. `readOnly` defaults to `false`. `actions` lists up to 16 toolbar buttons with
 unique `id`s (1–64 characters), `label`s (1–128 characters), an optional built-in
 `icon` name, `primary`, and `save` (at most one action may set `save: true`).
 Invalid requests send `content-tab-error { error }` through `openidea.onMessage`.
@@ -2454,7 +2594,7 @@ the API itself follows _Evolving the plugin API_ below.
 
 Released versions are frozen: 1.0.0 shipped with OpenIDEA 0.1.36, 1.1.0
 with 0.1.37, 1.2.0 with 0.1.38, 1.3.0 with 0.1.39 and 1.4.0 with 0.1.40.
-API 1.5.0 shipped with 0.1.41 and 1.6.0 with 0.1.43; API 1.7.0 is in development on `main`. wasmtime decides what stays compatible: it resolves interface names
+API 1.5.0 shipped with 0.1.41, 1.6.0 with 0.1.43, 1.7.0 with 0.1.44 and 1.8.0 with 0.1.45; API 1.9.0 is in development on `main`. wasmtime decides what stays compatible: it resolves interface names
 by semver (a component importing `openidea:plugin/x@1.0.0` links against a
 host defining `@1.1.0`, and the host finds its exports the same way), but
 function types must match exactly — a record with another field count, or a

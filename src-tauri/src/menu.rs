@@ -218,6 +218,7 @@ pub fn spec(os: Os) -> Vec<Entry> {
                 SEP,
                 act("file.new", "File…"),
                 act("file.newScratchFile", "Scratch File"),
+                act("file.newUntitled", "Untitled File"),
             ],
         ),
         act("file.openProject", "Open…"),
@@ -432,7 +433,8 @@ pub fn spec(os: Os) -> Vec<Entry> {
             SEP,
             act("view.quickSwitchScheme", "Quick Switch Scheme…"),
             SEP,
-            act("editor.resetFontSize", "Reset Font Size in All Editors"),
+            act("editor.resetFontSize", "Reset Font Size"),
+            act("editor.resetFontSizeAll", "Reset Font Size in All Editors"),
             SEP,
             act("view.notifications", "Notifications"),
         ],
@@ -795,6 +797,9 @@ pub fn spec(os: Os) -> Vec<Entry> {
             "toolWindowLayouts",
             "Tool Window Layouts",
             vec![
+                act("layout.saveCurrent", "Save Changes in Current Layout"),
+                act("layout.restoreCurrent", "Restore Current Layout"),
+                SEP,
                 act("layout.save", "Save Current Layout as…"),
                 act("layout.restoreDefault", "Restore Default Layout"),
                 SEP,
@@ -2000,7 +2005,7 @@ mod tests {
             };
             assert_eq!(
                 action_ids(new),
-                ["file.newProject", "workspace.create", "file.new", "file.newScratchFile"],
+                ["file.newProject", "workspace.create", "file.new", "file.newScratchFile", "file.newUntitled"],
                 "{os:?}"
             );
         }
@@ -2323,6 +2328,8 @@ mod tests {
                 "view.quickSwitchScheme",
                 "code.cleanup",
                 "runAnything.show",
+                "layout.saveCurrent",
+                "layout.restoreCurrent",
                 "layout.save",
                 "layout.restoreDefault",
                 "layout.rename",

@@ -430,6 +430,45 @@ describe("save cleanup", () => {
 });
 
 describe("external save conflicts", () => {
+  it("saves a browser sample once and still detects a later external disk change", async () => {
+    const backend = createMemoryBackend();
+    const doc = await backend.open("/p/sample.ts");
+    expect(backend.files.has(doc.path)).toBe(false);
+    await backend.edit(doc.id, doc.version, [{ from: 0, to: 0, insert: "first" }]);
+    expect(await backend.save(doc.id)).toBeNull();
+    expect(backend.files.get(doc.path)).toBe(`first${doc.text}`);
+    await backend.edit(doc.id, doc.version + 1, [{ from: 0, to: 5, insert: "second" }]);
+    backend.files.set(doc.path, "external");
+    const revision = await backend.save(doc.id);
+    expect(revision).not.toBeNull();
+    expect(backend.files.get(doc.path)).toBe("external");
+    expect(await backend.save(doc.id, revision)).toBeNull();
+    expect(backend.files.get(doc.path)).toBe(`second${doc.text}`);
+  });
+
+  it("keeps checked saves after an untitled buffer is saved to a real path", async () => {
+    const { manager, backend, frame } = setup({});
+    const model = manager.adopt(await backend.openUntitled(null));
+    const slot = new EditorSlot(model, "untitled", host);
+    slot.dispatchLocal({ changes: { from: 0, insert: "first\n" } });
+    await frame();
+    manager.retarget(model, await backend.saveAs(model.doc, "/p/draft.txt"));
+    slot.dispatchLocal({ changes: { from: 0, to: 5, insert: "second" } });
+    await frame();
+    await model.save("explicit");
+    expect(backend.files.get("/p/draft.txt")).toBe("second\n");
+    expect(ask).not.toHaveBeenCalled();
+    slot.dispatchLocal({ changes: { from: 0, to: 6, insert: "third" } });
+    await frame();
+    backend.files.set("/p/draft.txt", "external\n");
+    await model.save("auto");
+    expect(ask).not.toHaveBeenCalled();
+    expect(model.getMeta().dirty).toBe(true);
+    vi.mocked(ask).mockResolvedValue({ button: "cancel", checked: false });
+    await expect(model.save("explicit")).rejects.toMatchObject({ kind: "cancelled" });
+    expect(backend.files.get("/p/draft.txt")).toBe("external\n");
+  });
+
   async function conflict() {
     const state = setup({ "/p/a.txt": "original\n" });
     const model = await state.manager.acquire("/p/a.txt");

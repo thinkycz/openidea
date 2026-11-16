@@ -15,6 +15,56 @@ slice, commit and push it, and retain only the latest generated app. Native UI
 cases remain deferred/unverified; earlier native-first blocking checkpoints are
 historical and no longer prevent independent implementation.
 
+Upstream refresh (2026-11-16, verified source merge): merge `l0ng-ai/openidea`
+through `c8112f901001b7567fe500d295c9eef15d259407`: 198 new commits after
+`a46f1874`. Preserve OpenStorm branding/identity, version 0.1.91, engine 152 default,
+PHPantom resources, guarded saves/reviewed edits and disabled upstream updates.
+Upstream adds Phoxite as another fallback; PHPantom remains first, and Laravel's
+companion server stays opt-in. No environment files changed.
+
+Resolved 22 conflicted paths, regenerate IPC bindings, combine plugin server-command
+routing with guarded edit application and preserve cancellation-aware navigation.
+Untitled Save As records the exact written-byte revision so normal later saves
+succeed, external edits pause autosave, and stale overwrite approval re-prompts.
+New Rust and frontend regression checks cover this boundary. The browser sample
+backend initially treats an unpersisted sample as externally deleted; a failing
+regression proves it, then a separate disk witness fixes first-save behavior while
+retaining later external-change refusal. Use the existing 8px spacing token in
+Laravel navigation to satisfy upstream's new spacing-scale check.
+
+Final source gates: Rust 4,857 passed/172 ignored, all-target workspace
+Clippy, fmt, generated bindings, frontend 12,450 passed/6 skipped,
+typecheck, lint, format, knip and production frontend build. All 56 actual PHP
+host/client checks pass with active engine 152. Selected browser editor, chooser
+and Find/Usages checks: 21 pass, including CmdS after an edit. Earlier failed
+attempts remain in logs. Native checks remain explicitly user-skipped; browser
+checks do not establish native acceptance. The only retained signed App 0.1.91 is
+from the previous `e98db16b` baseline and does not contain this merge.
+
+Evidence: `artifacts/checks/upstream-c8112f90-receipt.json`, its gate/client-host
+logs, `upstream-c8112f90-browser2.log`, memory regression red/green logs and the
+`upstream-c8112f90-clean.json`. Removed 25.8 GiB of main compiler output.
+Preserve unfinished source-only slice 101 independently;
+no candidate 153 adoption or new package is claimed. Area statuses remain 67
+partial/2 user-deferred.
+
+Laravel slice 101 (2026-11-16, in progress): add explicit implicit-handler
+reference metadata for registered invokable Laravel controllers. Preserve normal
+class navigation and class rename, distinguish handler associations from calls
+executed during registration, share exact results with declaration reference
+counts, and reject method renames that cannot rewrite the framework contract.
+Real Laravel controls cover literal/class-constant actions, inherited methods and
+same-named group-method exclusions. Source candidate 153 is isolated from active
+engine 152 and the sole signed App 0.1.91 until its acceptance gates pass.
+The immutable candidate passes 18,502 ordinary engine tests (17 ignored), both
+bounded child regressions, and standard release Clippy. Optional `mem-audit`
+compilation fails in inherited code (`trans_keys` cache access and a missing
+`RuntimeControllerBinding` audit match); preserve this failure for the next
+source slice. Candidate 153 is unpromoted and uncommitted while the explicit
+upstream merge takes priority. Its 1.7 GiB compiler output was removed; source,
+patch pin, test logs and the recoverable Git stash remain. Native UI checks remain
+user-skipped.
+
 Laravel slice 100 (2026-11-16, verified local development delivery): App 0.1.91
 bundles PHPantom 152 after the same host test executable fails both new cases
 with 150 and passes with 152. Available local controller classes override bare

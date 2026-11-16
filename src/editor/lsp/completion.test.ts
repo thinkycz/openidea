@@ -3,7 +3,7 @@ import { EditorState, StateEffect, type Extension } from "@codemirror/state";
 import { EditorView, runScopeHandlers } from "@codemirror/view";
 import { history, redo, undo } from "@codemirror/commands";
 import type { CompletionItem } from "@/bindings";
-import type { EditorDocContext } from "@/editor/api";
+import { remoteChange, type EditorDocContext } from "@/editor/api";
 import { lspDoc } from "./lsp";
 import { insertTab, tabOut, tabOutOfScope } from "@/editor/core/cm/smartKeys";
 import {
@@ -23,6 +23,7 @@ import {
   explicitCompletion,
   makeCompletion,
   matchRanges,
+  positionCompletionInfo,
   sortAlphabetically,
 } from "./completion";
 import {
@@ -293,6 +294,32 @@ describe("applying completions", () => {
     expect(view.state.selection.main.head).toBe(17);
     // The parameter-info fallback also moves past `)`; let it settle before teardown.
     await vi.waitFor(() => expect(view.state.selection.main.head).toBe(17));
+  });
+
+  it("leaves an item its server inserts to the server, and puts the caret after what it inserted", async () => {
+    const executed: string[] = [];
+    setInvokeRoute((cmd) => {
+      executed.push(cmd);
+      return Promise.resolve(null);
+    });
+    try {
+      const { view, req } = setup("p.ref|\n", "", [completionExtension()]);
+      view.dispatch({ effects: StateEffect.appendConfig.of(lspDoc.of({ doc: 1 } as EditorDocContext)) });
+      // kotlin-lsp: an empty text, inserted by `jetbrains.kotlin.completion.apply` as a workspace edit.
+      const command = { title: "Apply Completion", command: "jetbrains.kotlin.completion.apply", arguments: ["1"] };
+      const kotlin = item({ label: "refreshName", labelDetail: "()", insertText: "", command });
+      applyLspCompletion(view, makeCompletion(kotlin, req), 5, 5, "insert");
+      expect(view.state.doc.toString()).toBe("p.ref\n");
+      await vi.waitFor(() => expect(executed).toContain("lsp_execute_command"));
+      view.dispatch({ changes: { from: 5, insert: "reshName()" }, annotations: remoteChange.of(true) });
+      expect(view.state.doc.toString()).toBe("p.refreshName()\n");
+      expect(view.state.selection.main.head).toBe(15);
+      // Later edits from elsewhere leave the caret alone.
+      view.dispatch({ changes: { from: 15, insert: " " }, annotations: remoteChange.of(true) });
+      expect(view.state.selection.main.head).toBe(15);
+    } finally {
+      setInvokeRoute(null);
+    }
   });
 
   it("does not register a scope when jumping outside closing brackets is off", () => {
@@ -617,6 +644,7 @@ describe("insert parentheses", () => {
     expect(callParens(item({ kind: "field" }), line("a.cr"), 2, 4)).toBeNull();
     expect(callParens(item({ isSnippet: true }), line("a.cr"), 2, 4)).toBeNull();
     expect(callParens(item({ insertText: "create()" }), line("a.cr"), 2, 4)).toBeNull();
+    expect(callParens(item({ insertText: "" }), line("a.cr"), 4, 4)).toBeNull();
   });
 
   it("does not add a call to a quoted symbol, including an unfinished quote", () => {
@@ -720,6 +748,58 @@ describe("explicit completion", () => {
     await new Promise((r) => setTimeout(r, 300));
     expect(view.state.doc.toString()).toBe("pri");
     view.destroy();
+  });
+});
+
+describe("documentation beside the lookup", () => {
+  const view = {} as EditorView;
+  const space = { left: 0, top: 0, right: 1200, bottom: 800 };
+  const option = { left: 100, right: 300, top: 120, bottom: 144 };
+  const info = { left: 0, right: 400, top: 0, bottom: 300 };
+  const beside = { left: 100, right: 520, top: 100, bottom: 400 };
+
+  const originalWidth = document.documentElement.clientWidth;
+  afterEach(() => {
+    Object.defineProperty(document.documentElement, "clientWidth", { value: originalWidth, configurable: true });
+  });
+
+  /** `windowWidth` is the room the pane may use; the editor's own box does not limit it. */
+  function place(list: typeof beside, windowWidth = 1200, bounds = space) {
+    Object.defineProperty(document.documentElement, "clientWidth", { value: windowWidth, configurable: true });
+    return positionCompletionInfo(view, list, option, info, bounds);
+  }
+
+  it("sits right of the list when there is room, top edges aligned", () => {
+    const pos = place(beside);
+    expect(pos.class).toBe("cm-completionInfo-right");
+    expect(pos.style).toContain("top: 0");
+    expect(pos.style).toContain("left: calc(100% + 6px)");
+    expect(pos.style).toContain("max-width: 440px");
+    expect(pos.style).toContain("max-height: 320px");
+  });
+
+  it("moves to the left of the list when the right side is narrower", () => {
+    const pos = place({ ...beside, left: 700, right: 1120 });
+    expect(pos.class).toBe("cm-completionInfo-left");
+    expect(pos.style).toContain("right: calc(100% + 6px)");
+  });
+
+  it("narrows the pane to the room the window has, not the editor's", () => {
+    // A 620px-wide editor would leave 94px; the window leaves 274px.
+    const pos = place(beside, 800, { ...space, right: 620 });
+    expect(pos.class).toBe("cm-completionInfo-right");
+    expect(pos.style).toContain("max-width: 274px");
+  });
+
+  it("keeps a readable width in a narrow window rather than covering the list", () => {
+    const pos = place(beside, 620);
+    expect(pos.class).toBe("cm-completionInfo-right");
+    expect(pos.style).toContain("max-width: 220px");
+  });
+
+  it("caps the height to the room below the list and to 320px", () => {
+    expect(place({ ...beside, top: 700, bottom: 780 }).style).toContain("max-height: 100px");
+    expect(place(beside, 1200, { ...space, bottom: 600 }).style).toContain("max-height: 320px");
   });
 });
 

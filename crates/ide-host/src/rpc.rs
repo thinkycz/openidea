@@ -165,6 +165,7 @@ impl Dispatcher {
         })
         .add("project_roots", |c| async move { ops::project::roots(&c.host, &c.window) })
         .add("settings_get", |c| async move { Ok(ops::project::settings(&c.host, &c.window)) })
+        .add("settings_removed_theme", |c| async move { Ok(ops::project::settings_removed_theme(&c.host, &c.window)) })
         .add("settings_set", |c| async move {
             let key: String = c.arg("key")?;
             let scope = c.arg("scope")?;
@@ -218,6 +219,13 @@ impl Dispatcher {
         })
         .add("fs_read_text", |c| async move { ops::fs::read_text(&c.host, &c.window, c.arg("path")?).await })
         .add("doc_open", |c| async move { ops::doc::open(&c.host, &c.window, c.arg("path")?).await })
+        .add("doc_open_untitled", |c| async move {
+            ops::doc::open_untitled(&c.host, &c.window, c.arg::<Option<String>>("name")?).await
+        })
+        .add(
+            "doc_save_as",
+            |c| async move { ops::doc::save_as(&c.host, &c.window, c.arg("doc")?, c.arg("path")?).await },
+        )
         .add("doc_close", |c| async move {
             ops::doc::blocking(move || ops::doc::close(&c.host, &c.window, c.arg("doc")?)).await
         })

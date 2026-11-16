@@ -4668,3 +4668,314 @@ async fn laravel_controller_binding_navigation_preserves_multiple_and_unknown_ta
     }
     result.unwrap();
 }
+
+fn route_handler_engine() -> PathBuf {
+    std::env::var_os("OPENSTORM_TEST_HANDLER_BIN").map(PathBuf::from).unwrap_or_else(|| {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../artifacts/engines/0.11.1-openstorm.154/phpantom_lsp")
+    })
+}
+
+fn route_handler_language(engine: &std::path::Path) -> ide_language::LanguageConfig {
+    let mut php = LanguageRegistry::load(None).unwrap().get(&LanguageId::new("php")).unwrap();
+    php.language_servers.retain(|s| s.name == "phpantom");
+    php.language_servers[0].command = engine.to_string_lossy().into_owned();
+    assert!(php.language_servers[0].args.iter().any(|arg| arg == "--no-project-tools"));
+    php
+}
+
+fn route_handler_fixture() -> (tempfile::TempDir, PathBuf, std::collections::BTreeMap<&'static str, &'static str>) {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().canonicalize().unwrap();
+    for dir in ["src", "routes", "plain/src", "plain/routes"] {
+        std::fs::create_dir_all(root.join(dir)).unwrap();
+    }
+    let source = "<?php\nuse App\\Action;\nuse Illuminate\\Support\\Facades\\Route;\nRoute::get('/😀/x', Action::class);\n$ordinary=Action::class;\nRoute::namespace($unknown)->group(fn()=>Route::get('/unknown', Action::class));\n";
+    let files = std::collections::BTreeMap::from([
+        ("composer.json", r#"{"require":{"laravel/framework":"^12.0"},"autoload":{"psr-4":{"App\\":"src/"}}}"#),
+        (
+            "src/BaseAction.php",
+            "<?php\nnamespace App;\nclass BaseAction { public function __invoke(): string { return 'base'; } }\n",
+        ),
+        ("src/Action.php", "<?php\nnamespace App;\nclass Action extends BaseAction {}\n"),
+        (
+            "src/Other.php",
+            "<?php\nnamespace App;\nclass Other { public function __invoke(): string { return 'other'; } }\n",
+        ),
+        ("routes/web.php", source),
+        ("plain/composer.json", r#"{"autoload":{"psr-4":{"App\\":"src/"}}}"#),
+        ("plain/routes/web.php", source),
+    ]);
+    let php_cli = std::env::var_os("OPENSTORM_TEST_PHP_BIN").map(PathBuf::from).unwrap_or_else(|| {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../artifacts/toolchains/php-8.4.23-static/php")
+    });
+    for (name, text) in &files {
+        let path = root.join(name);
+        std::fs::write(&path, text).unwrap();
+        if name.ends_with(".php") {
+            let check = std::process::Command::new(&php_cli).args(["-n", "-l"]).arg(&path).output().unwrap();
+            assert!(check.status.success(), "{name}: {}", String::from_utf8_lossy(&check.stderr));
+        } else {
+            let manifest: serde_json::Value = serde_json::from_str(text).unwrap();
+            assert_eq!(manifest["autoload"]["psr-4"]["App\\"], "src/");
+            assert!(path.parent().unwrap().join("src").is_dir());
+        }
+    }
+    (tmp, root, files)
+}
+
+async fn settled_route_handler(
+    mgr: &LspManager,
+    doc: DocId,
+    at: Pos,
+) -> Result<ide_lsp::types::LaravelRouteHandler, String> {
+    for _ in 0..120 {
+        match mgr.laravel_route_handler(doc, at, Default::default()).await {
+            Ok(reply) => return Ok(reply),
+            Err(error) if error.kind == ide_core::error::ErrorKind::Cancelled => {
+                tokio::time::sleep(Duration::from_millis(25)).await
+            }
+            Err(error) => return Err(error.to_string()),
+        }
+    }
+    Err("Route handler semantics did not settle".into())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires candidate154 and the retained153 negative-control executable"]
+async fn laravel_route_handler_client_preserves_class_goto_unsaved_inheritance_and_restart() {
+    for legacy in [true, false] {
+        let (_tmp, root, files) = route_handler_fixture();
+        let engine = if legacy {
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../artifacts/engines/0.11.1-openstorm.153/phpantom_lsp")
+        } else {
+            route_handler_engine()
+        };
+        let mgr = LspManager::new(
+            root.clone(),
+            Arc::new(LanguageRegistry::from_configs(vec![route_handler_language(&engine)])),
+            Arc::new(|_| {}),
+        );
+        let doc = DocId::next();
+        let action_doc = DocId::next();
+        let source = files["routes/web.php"];
+        mgr.did_open(doc, &root.join("routes/web.php"), &LanguageId::new("php"), 17, source);
+        mgr.did_open(action_doc, &root.join("src/Action.php"), &LanguageId::new("php"), 1, files["src/Action.php"]);
+        let mut at = pos(source, "Action::class");
+        at.col += "Action".len() as u32;
+        let result: Result<(), String> = async {
+            if legacy {
+                let error = mgr
+                    .laravel_route_handler(doc, at, Default::default())
+                    .await
+                    .expect_err("153 must not advertise the new extension");
+                return if error.kind == ide_core::error::ErrorKind::Unavailable {
+                    Ok(())
+                } else {
+                    Err(format!("legacy capability gate: {error}"))
+                };
+            }
+            let original = settled_route_handler(&mgr, doc, at).await?;
+            let expected = pos(files["src/BaseAction.php"], "__invoke");
+            if original.incomplete
+                || original.locations.len() != 1
+                || &*original.locations[0].path != root.join("src/BaseAction.php").as_path()
+                || original.locations[0].range.start != expected
+            {
+                return Err(format!("inherited handler: {original:?}"));
+            }
+            let normal = mgr.goto(doc, at, GotoKind::Definition).await.map_err(|e| e.to_string())?;
+            if normal.len() != 1 || &*normal[0].path != root.join("src/Action.php").as_path() {
+                return Err(format!("ordinary class goto changed: {normal:?}"));
+            }
+            let mut ordinary = pos(source, "$ordinary=Action");
+            ordinary.col += "$ordinary=".len() as u32;
+            let control = settled_route_handler(&mgr, doc, ordinary).await?;
+            if control.incomplete || !control.locations.is_empty() {
+                return Err(format!("ordinary class acquired route metadata: {control:?}"));
+            }
+            let mut unknown = pos(source, "'/unknown', Action");
+            unknown.col += "'/unknown', ".len() as u32;
+            let incomplete = settled_route_handler(&mgr, doc, unknown).await?;
+            if !incomplete.incomplete || !incomplete.locations.is_empty() {
+                return Err(format!("unknown namespace lost incomplete state: {incomplete:?}"));
+            }
+            let changed = files["src/Action.php"].replace("BaseAction", "Other");
+            replace(&mgr, action_doc, 93, files["src/Action.php"], &changed);
+            for restarted in [false, true] {
+                if restarted {
+                    mgr.restart(mgr.servers()[0].id).await.map_err(|e| e.to_string())?;
+                }
+                let current = settled_route_handler(&mgr, doc, at).await?;
+                if current.incomplete
+                    || current.locations.len() != 1
+                    || &*current.locations[0].path != root.join("src/Other.php").as_path()
+                    || current.locations[0].range.start != pos(files["src/Other.php"], "__invoke")
+                {
+                    return Err(format!("unsaved inheritance/restart={restarted}: {current:?}"));
+                }
+            }
+            let plain = DocId::next();
+            mgr.did_open(plain, &root.join("plain/routes/web.php"), &LanguageId::new("php"), 1, source);
+            let isolated = settled_route_handler(&mgr, plain, at).await?;
+            if isolated.incomplete || !isolated.locations.is_empty() {
+                return Err(format!("nested non-Laravel Composer context leaked: {isolated:?}"));
+            }
+            Ok(())
+        }
+        .await;
+        mgr.shutdown_all().await;
+        assert!(result.is_ok(), "legacy={legacy}: {result:?}");
+        for (name, text) in &files {
+            assert_eq!(std::fs::read_to_string(root.join(name)).unwrap(), *text, "navigation wrote {name}");
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires candidate154 and the retained Laravel13.37 fixture"]
+async fn laravel_route_handler_client_resolves_the_real_laravel_example() {
+    let root = std::env::var_os("OPENSTORM_TEST_HANDLER_LARAVEL_ROOT")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../artifacts/checks/engine-laravel13-37-154/project")
+        })
+        .canonicalize()
+        .unwrap();
+    let path = root.join("app/Demo.php");
+    let target = root.join("app/Http/Controllers/InvokableBakeryController.php");
+    let source = std::fs::read_to_string(&path).unwrap();
+    let handler = std::fs::read_to_string(&target).unwrap();
+    let mgr = LspManager::new(
+        root.clone(),
+        Arc::new(LanguageRegistry::from_configs(vec![route_handler_language(&route_handler_engine())])),
+        Arc::new(|_| {}),
+    );
+    let doc = DocId::next();
+    mgr.did_open(doc, &path, &LanguageId::new("php"), 17, &source);
+    let result = settled_route_handler(&mgr, doc, pos(&source, "InvokableBakeryController::class")).await;
+    mgr.shutdown_all().await;
+    let result = result.unwrap();
+    assert!(!result.incomplete);
+    assert_eq!(result.locations.len(), 1);
+    assert_eq!(&*result.locations[0].path, target.as_path());
+    assert_eq!(result.locations[0].range.start, pos(&handler, "__invoke"));
+    assert_eq!(std::fs::read_to_string(path).unwrap(), source);
+    assert_eq!(std::fs::read_to_string(target).unwrap(), handler);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires candidate154 and Python for a held real-engine response"]
+async fn laravel_route_handler_client_retires_real_replies_after_input_changes() {
+    for mutation in ["dependency", "caller", "close", "disk", "roots", "settings", "restart", "cancel", "no change"] {
+        let (_tmp, root, files) = route_handler_fixture();
+        let engine = route_handler_engine().canonicalize().unwrap();
+        let proxy = root.join("held-reply.py");
+        std::fs::write(&proxy, include_str!("fixtures/phpantom-held-reply.py")).unwrap();
+        let ready = root.join("reply.json");
+        let release = root.join("release");
+        let mut php = route_handler_language(&engine);
+        let cfg = &mut php.language_servers[0];
+        let args = std::mem::take(&mut cfg.args);
+        cfg.command = std::env::var("OPENSTORM_TEST_PYTHON").unwrap_or_else(|_| "python3".into());
+        cfg.args = vec![
+            "-I".into(),
+            proxy.to_string_lossy().into_owned(),
+            engine.to_string_lossy().into_owned(),
+            "phpWorkbench/routeHandler".into(),
+            ready.to_string_lossy().into_owned(),
+            release.to_string_lossy().into_owned(),
+        ];
+        cfg.args.extend(args);
+        let mgr = LspManager::new(root.clone(), Arc::new(LanguageRegistry::from_configs(vec![php])), Arc::new(|_| {}));
+        let doc = DocId::next();
+        let dependency = DocId::next();
+        let source = files["routes/web.php"];
+        mgr.did_open(doc, &root.join("routes/web.php"), &LanguageId::new("php"), 17, source);
+        mgr.did_open(dependency, &root.join("src/Action.php"), &LanguageId::new("php"), 1, files["src/Action.php"]);
+        let at = pos(source, "Action::class");
+        let result: Result<(), String> = async {
+            let warm = mgr.goto(doc, at, GotoKind::Definition).await.map_err(|e| e.to_string())?;
+            if warm.len() != 1 {
+                return Err(format!("class definition did not initialize: {warm:?}"));
+            }
+            let token = ide_core::CancellationToken::new();
+            let cancel = token.clone();
+            let client = mgr.clone();
+            let pending = tokio::spawn(async move { client.laravel_route_handler(doc, at, cancel).await });
+            for _ in 0..750 {
+                if ready.exists() || pending.is_finished() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            let captured = std::fs::read_to_string(&ready);
+            if captured.is_ok() {
+                match mutation {
+                    "dependency" => replace(
+                        &mgr,
+                        dependency,
+                        93,
+                        files["src/Action.php"],
+                        &files["src/Action.php"].replace("BaseAction", "Other"),
+                    ),
+                    "caller" => replace(&mgr, doc, 18, source, &source.replace("'/😀/x'", "'/changed'")),
+                    "close" => mgr.did_close(dependency),
+                    "disk" => {
+                        let file = root.join("src/BaseAction.php");
+                        std::fs::write(&file, files["src/BaseAction.php"].replace("'base'", "'external'"))
+                            .map_err(|e| e.to_string())?;
+                        mgr.php_files_changed(&[], &[file], &[]);
+                    }
+                    "roots" => mgr.set_content_roots(vec![root.join("linked")]),
+                    "settings" => {
+                        mgr.set_config_hook(Box::new(|cfg, _| {
+                            cfg.settings = Some(serde_json::json!({"handlerProfileFixture":true}))
+                        }));
+                        mgr.reconfigure().await;
+                    }
+                    "restart" => mgr.restart(mgr.servers()[0].id).await.map_err(|e| e.to_string())?,
+                    "cancel" => token.cancel(),
+                    _ => mgr.set_content_roots(vec![]),
+                }
+            }
+            std::fs::write(&release, "release").map_err(|e| e.to_string())?;
+            let reply = pending.await.map_err(|e| e.to_string())?;
+            let captured: serde_json::Value = serde_json::from_str(
+                &captured.map_err(|e| format!("no successful engine response: {e}; client={reply:?}"))?,
+            )
+            .map_err(|e| e.to_string())?;
+            if captured["result"]["locations"].as_array().is_none_or(|locations| locations.len() != 1)
+                || captured["result"]["source"]["version"] != 17
+            {
+                return Err(format!("held response was not the actual checked handler: {captured}"));
+            }
+            if mutation == "no change" {
+                if reply.is_err() {
+                    return Err(format!("current response refused: {reply:?}"));
+                }
+            } else {
+                let expected = if mutation == "cancel" {
+                    ide_core::error::ErrorKind::Cancelled
+                } else {
+                    ide_core::error::ErrorKind::OutOfSync
+                };
+                if !matches!(reply,Err(ref e) if e.kind==expected) {
+                    return Err(format!("stale response accepted or misclassified: {reply:?}"));
+                }
+            }
+            Ok(())
+        }
+        .await;
+        let _ = std::fs::write(&release, "release");
+        mgr.shutdown_all().await;
+        assert!(result.is_ok(), "{mutation}: {result:?}");
+        for (name, text) in &files {
+            let expected = if mutation == "disk" && *name == "src/BaseAction.php" {
+                text.replace("'base'", "'external'")
+            } else {
+                text.to_string()
+            };
+            assert_eq!(std::fs::read_to_string(root.join(name)).unwrap(), expected, "unexpected disk change: {name}");
+        }
+    }
+}

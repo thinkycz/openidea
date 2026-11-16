@@ -85,6 +85,50 @@ At that merge checkpoint, source-only slice 101 remained unfinished;
 no candidate 153 adoption or new package was claimed. Area statuses remain 67
 partial/2 user-deferred.
 
+Laravel slice 110 (2026-11-16, verified client source checkpoint): add typed
+LspManager::laravel_route_handler for candidate154's checked protocol. Require
+its advertised capability and an open PHP file; use the actual synchronized LSP
+version and exact complete UTF8 source hash. Keep extension positions/ranges in
+UTF16 regardless of ordinary LSP negotiation. Validate source echoes, exact caret
+boundaries and ordered target ranges. Capture all synchronized overlays, observed
+project/configuration changes and server generation; reject stale/cancelled
+responses, including changes while waiting for startup. Preserve duplicate targets,
+incomplete provenance and virtual-document ownership; lost target mappings remain
+incomplete. Ordinary class goto is unchanged. No automatic PHP/Composer/Artisan
+execution, new settings interface, IPC command or frontend action is added here.
+
+Preflight:8 mock protocol regressions pass;3 real-engine client tests pass,
+including inherited and unsaved cross-file handlers, restart, nested non-Laravel
+Composer isolation, unknown namespace incompleteness, the real Laravel13.37
+example, legacy153 capability refusal, and9 held-response controls (dependency,
+caller, close, disk, roots, settings, restart, cancel and unchanged inputs).
+Disposable PHP fixtures are syntax-checked and their PSR4 manifests checked before
+use. Disk originals remain unchanged except each disk-conflict test's explicitly
+owned mutation. The placeholder failed7/8 intended cases; an initial Unicode
+fixture used a half-surrogate position instead of the intended boundary, and the
+first real-client test harness had ambiguous path comparisons. Corrected tests
+pass; all earlier logs are retained rather than reported as final acceptance.
+
+Full source gates pass: Rust4940 passed/178 ignored, with exactly the existing
+unapproved HTTP environment fixture test filtered out; workspace all-target
+Clippy/fmt, frontend12611 passed/6 skipped, typecheck/lint/format/knip and production
+frontend build pass. Workspace export tests regenerate bindings and the command
+snapshot; both remain unchanged. Candidate154 regression replay:61 actual
+host/client tests pass (10 guarded edits,7 completion/host and44 client tests),
+including the retained153 capability-refusal control. Fixture originals are
+restored. Reuse candidate154's unchanged source/build/protocol receipts from109;
+no engine rebuild is needed. The unchanged frontend's39 browser checks remain
+recorded at upstream-de107e14; this slice adds no UI action or new native claim.
+
+Removed25,852,398,275 bytes (24.1 GiB) of owned compiler output after acceptance.
+Evidence: `artifacts/checks/slice110-receipt.json`, gate/client-host receipts and
+logs, and compiler cleanup receipt. Retain earlier failing preflight logs as
+historical evidence, not final failures. Native checks remain user-skipped.
+Candidate154 is still inactive; resources/default remain153 and the sole signed
+App0.1.93 remains unchanged. Action integration and candidate promotion require
+subsequent acceptance. FEAT-030/066 gain bounded client evidence; all69 areas
+remain visible with unchanged statuses:67 partial/2 user-deferred.
+
 Laravel slice 109 (2026-11-16, verified inactive engine candidate): PHPantom154
 adds phpWorkbench/routeHandler, advertised as phpWorkbenchRouteHandler. Requests
 bind a controller-token position to the preferred open source's version and exact

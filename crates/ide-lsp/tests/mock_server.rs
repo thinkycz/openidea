@@ -9219,3 +9219,224 @@ async fn hierarchy_refactorings_use_phoxites_requests_when_the_server_advertises
     assert_eq!(e.kind, ide_core::error::ErrorKind::Protocol);
     assert_eq!(e.message, "any-name: index out of bounds");
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn laravel_route_handler_requires_capability_and_php_source() {
+    for (language, capability) in
+        [("php", Value::Null), ("php", json!(false)), ("php", json!("true")), ("json", json!(true))]
+    {
+        let mut caps = incremental_caps();
+        caps["experimental"] = json!({"phpWorkbenchRouteHandler":capability});
+        let h = harness_for(language, language, &[("phpantom", caps)], &[]);
+        let (doc, _) = h.open(&format!("main.{language}"), "<?php\n");
+        h.wait_status("phpantom", ServerStatus::Ready).await;
+        assert!(h.mgr.laravel_route_handler(doc, Pos::new(0, 0), Default::default()).await.is_err());
+        assert!(h.launcher.state("phpantom").requested("phpWorkbench/routeHandler").is_empty());
+        h.mgr.shutdown_all().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn laravel_route_handler_binds_utf16_and_unsaved_source_receipt() {
+    use sha2::{Digest, Sha256};
+    let mut caps = incremental_caps();
+    caps["positionEncoding"] = json!("utf-8");
+    caps["experimental"] = json!({"phpWorkbenchRouteHandler":true});
+    let h = harness_for("php", "php", &[("phpantom", caps)], &[]);
+    let (doc, path) = h.open("main.php", "<?php");
+    let (_, target) = h.open("Handler.php", "<?php /*😀*/ class Handler { function __invoke() {} }");
+    h.wait_status("phpantom", ServerStatus::Ready).await;
+    let text = "<?php // 😀\r\nRoute::get('/', Handler::class);\r\n";
+    h.mgr.did_change(doc, 42, &[change(rng(0, 0, 0, 5), text)], &|| text.into());
+    let state = h.launcher.state("phpantom");
+    let location = json!({"uri":uri_of(&target),"range":php_range(0,38,0,46)});
+    state.responder.lock().replace(Arc::new(move |_, method, params| {
+        (method == "phpWorkbench/routeHandler").then(|| json!({"source":params["expectedSource"],"locations":[location.clone(),location.clone()],"incomplete":true}))
+    }));
+    let result = h.mgr.laravel_route_handler(doc, Pos::new(0, 11), Default::default()).await.unwrap();
+    assert!(result.incomplete);
+    assert_eq!(result.locations.len(), 2);
+    assert_eq!(&*result.locations[0].path, target.as_path());
+    assert_eq!(result.locations[0].range, rng(0, 38, 0, 46), "extension ranges are always UTF16");
+    assert_eq!(
+        state.requested("phpWorkbench/routeHandler"),
+        vec![json!({
+            "expectedSource":{"uri":uri_of(&path),"version":42,"sha256Utf8":format!("{:x}",Sha256::digest(text.as_bytes()))},
+            "position":{"line":0,"character":11}
+        })]
+    );
+    assert_eq!(std::fs::read_to_string(path).unwrap(), "<?php", "navigation must preserve disk bytes");
+    h.mgr.shutdown_all().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn laravel_route_handler_rejects_mismatched_source_receipts() {
+    for field in ["uri", "version", "sha256Utf8"] {
+        let mut caps = incremental_caps();
+        caps["experimental"] = json!({"phpWorkbenchRouteHandler":true});
+        let h = harness_for("php", "php", &[("phpantom", caps)], &[]);
+        let (doc, _) = h.open("main.php", "<?php\n");
+        h.wait_status("phpantom", ServerStatus::Ready).await;
+        h.launcher.state("phpantom").responder.lock().replace(Arc::new(move |_, method, params| {
+            if method != "phpWorkbench/routeHandler" {
+                return None;
+            }
+            let mut source = params["expectedSource"].clone();
+            source[field] = match field {
+                "uri" => json!("file:///different.php"),
+                "version" => json!(500),
+                _ => json!("0".repeat(64)),
+            };
+            Some(json!({"source":source,"locations":[],"incomplete":false}))
+        }));
+        let result = h.mgr.laravel_route_handler(doc, Pos::new(0, 1), Default::default()).await;
+        h.mgr.shutdown_all().await;
+        let error = result.unwrap_err();
+        assert_eq!(error.kind, ide_core::error::ErrorKind::InvalidInput, "{field}: {error}");
+        assert!(error.message.contains("source receipt"));
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn laravel_route_handler_rejects_stale_sources_and_project_changes() {
+    for mutation in ["caller", "dependency", "close", "disk", "roots", "no change"] {
+        let mut caps = incremental_caps();
+        caps["experimental"] = json!({"phpWorkbenchRouteHandler":true});
+        let h = harness_for("php", "php", &[("phpantom", caps)], &[]);
+        let (doc, path) = h.open("main.php", "<?php\n");
+        let (dependency, _) = h.open("Handler.php", "<?php\n");
+        h.wait_status("phpantom", ServerStatus::Ready).await;
+        let weak = Arc::downgrade(&h.mgr);
+        let root = h.root.clone();
+        h.launcher.state("phpantom").responder.lock().replace(Arc::new(move |_, method, params| {
+            if method != "phpWorkbench/routeHandler" {
+                return None;
+            }
+            let mgr = weak.upgrade().unwrap();
+            match mutation {
+                "caller" | "dependency" => mgr.did_change(
+                    if mutation == "caller" { doc } else { dependency },
+                    2,
+                    &[change(rng(0, 5, 0, 5), " // changed")],
+                    &|| unreachable!(),
+                ),
+                "close" => mgr.did_close(dependency),
+                "disk" => mgr.php_files_changed(&[], std::slice::from_ref(&path), &[]),
+                "roots" => mgr.set_content_roots(vec![root.join("linked")]),
+                _ => mgr.set_content_roots(vec![]),
+            }
+            Some(json!({"source":params["expectedSource"],"locations":[],"incomplete":true}))
+        }));
+        let result = h.mgr.laravel_route_handler(doc, Pos::new(0, 1), Default::default()).await;
+        h.mgr.shutdown_all().await;
+        if mutation == "no change" {
+            assert!(result.unwrap().incomplete);
+        } else {
+            assert_eq!(result.unwrap_err().kind, ide_core::error::ErrorKind::OutOfSync, "{mutation}");
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn laravel_route_handler_cancellation_retires_held_reply() {
+    for pre_cancel in [true, false] {
+        let mut caps = incremental_caps();
+        caps["experimental"] = json!({"phpWorkbenchRouteHandler":true});
+        let h = harness_for("php", "php", &[("phpantom", caps)], &[]);
+        let (doc, _) = h.open("main.php", "<?php\n");
+        h.wait_status("phpantom", ServerStatus::Ready).await;
+        let gate = Arc::new(Gate::default());
+        let held = gate.clone();
+        let state = h.launcher.state("phpantom");
+        state.responder.lock().replace(Arc::new(move |_, method, params| {
+            if method != "phpWorkbench/routeHandler" {
+                return None;
+            }
+            held.hold();
+            Some(json!({"source":params["expectedSource"],"locations":[],"incomplete":false}))
+        }));
+        let cancel = CancellationToken::new();
+        if pre_cancel {
+            cancel.cancel();
+        }
+        let token = cancel.clone();
+        let mgr = h.mgr.clone();
+        let pending = tokio::spawn(async move { mgr.laravel_route_handler(doc, Pos::new(0, 1), token).await });
+        if !pre_cancel {
+            eventually(|| gate.entered()).await;
+            cancel.cancel();
+        }
+        gate.open();
+        let error = pending.await.unwrap().unwrap_err();
+        h.mgr.shutdown_all().await;
+        assert_eq!(error.kind, ide_core::error::ErrorKind::Cancelled);
+        assert_eq!(state.requested("phpWorkbench/routeHandler").len(), usize::from(!pre_cancel));
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn laravel_route_handler_cancels_while_server_initializes() {
+    let mut caps = incremental_caps();
+    caps["experimental"] = json!({"phpWorkbenchRouteHandler":true});
+    let h = harness_for("php", "php", &[("phpantom", caps)], &[]);
+    let gate = Arc::new(Gate::default());
+    let state = h.launcher.state("phpantom");
+    *state.initialize_gate.lock() = Some(gate.clone());
+    let (doc, _) = h.open("main.php", "<?php\n");
+    eventually(|| gate.entered()).await;
+    let cancel = CancellationToken::new();
+    let token = cancel.clone();
+    let mgr = h.mgr.clone();
+    let pending = tokio::spawn(async move { mgr.laravel_route_handler(doc, Pos::new(0, 1), token).await });
+    tokio::task::yield_now().await;
+    cancel.cancel();
+    let result = tokio::time::timeout(Duration::from_secs(2), pending).await;
+    gate.open();
+    h.mgr.shutdown_all().await;
+    assert_eq!(result.unwrap().unwrap().unwrap_err().kind, ide_core::error::ErrorKind::Cancelled);
+    assert!(state.requested("phpWorkbench/routeHandler").is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn laravel_route_handler_rejects_invalid_positions_and_reversed_ranges() {
+    let mut caps = incremental_caps();
+    caps["experimental"] = json!({"phpWorkbenchRouteHandler":true});
+    let h = harness_for("php", "php", &[("phpantom", caps)], &[]);
+    let (doc, path) = h.open("main.php", "<?php 😀");
+    h.wait_status("phpantom", ServerStatus::Ready).await;
+    let state = h.launcher.state("phpantom");
+    for at in [Pos::new(0, 7), Pos::new(0, 9), Pos::new(9, 0)] {
+        assert_eq!(
+            h.mgr.laravel_route_handler(doc, at, Default::default()).await.unwrap_err().kind,
+            ide_core::error::ErrorKind::InvalidInput
+        );
+    }
+    assert!(state.requested("phpWorkbench/routeHandler").is_empty());
+    state.responder.lock().replace(Arc::new(move |_,method,params| {
+        (method=="phpWorkbench/routeHandler").then(||json!({"source":params["expectedSource"],"locations":[{"uri":uri_of(&path),"range":php_range(0,5,0,3)}],"incomplete":false}))
+    }));
+    assert_eq!(
+        h.mgr.laravel_route_handler(doc, Pos::new(0, 8), Default::default()).await.unwrap_err().kind,
+        ide_core::error::ErrorKind::InvalidInput
+    );
+    h.mgr.shutdown_all().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn laravel_route_handler_server_errors_do_not_fall_back_or_retry() {
+    for (code, kind) in
+        [(-32801, ide_core::error::ErrorKind::Cancelled), (-32601, ide_core::error::ErrorKind::Protocol)]
+    {
+        let mut caps = incremental_caps();
+        caps["experimental"] = json!({"phpWorkbenchRouteHandler":true});
+        let h = harness_for("php", "php", &[("phpantom", caps)], &[]);
+        let (doc, _) = h.open("main.php", "<?php\n");
+        h.wait_status("phpantom", ServerStatus::Ready).await;
+        let state = h.launcher.state("phpantom");
+        state.errors.lock().insert("phpWorkbench/routeHandler".into(), (code, "test error".into()));
+        assert_eq!(h.mgr.laravel_route_handler(doc, Pos::new(0, 1), Default::default()).await.unwrap_err().kind, kind);
+        assert_eq!(state.requested("phpWorkbench/routeHandler").len(), 1);
+        assert!(state.requested("textDocument/definition").is_empty());
+        h.mgr.shutdown_all().await;
+    }
+}

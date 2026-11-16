@@ -537,6 +537,14 @@ pub struct LaravelRoutes {
     pub incomplete: bool,
 }
 
+/// Concrete invokable implementations associated with a checked route token.
+#[derive(Clone, Debug, Serialize, Deserialize, Type)]
+#[serde(rename_all = "camelCase")]
+pub struct LaravelRouteHandler {
+    pub locations: Vec<Location>,
+    pub incomplete: bool,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub enum ReferenceKind {

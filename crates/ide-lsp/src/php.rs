@@ -435,7 +435,87 @@ struct ViewReply {
     incomplete: bool,
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RouteHandlerParams {
+    expected_source: ExpectedSource,
+    position: lsp::Position,
+}
+
+#[derive(Deserialize)]
+struct RouteHandlerReply {
+    source: ExpectedSource,
+    locations: Vec<lsp::Location>,
+    incomplete: bool,
+}
+
 impl LspManager {
+    /// Navigate a checked implicit route action without changing ordinary PHP goto.
+    pub async fn laravel_route_handler(
+        &self,
+        doc: DocId,
+        pos: Pos,
+        cancel: CancellationToken,
+    ) -> IdeResult<LaravelRouteHandler> {
+        let files_revision = self.project_files_revision.load(Ordering::Acquire);
+        let (snap, targets) = tokio::select! {
+            biased;
+            () = cancel.cancelled() => return Err(IdeError::cancelled()),
+            result = self.doc_targets(doc, "Laravel route handler", |caps| {
+                caps.raw.pointer("/experimental/phpWorkbenchRouteHandler").and_then(Value::as_bool) == Some(true)
+            }) => result?,
+        };
+        if snap.language.as_str() != "php" || !snap.uri.as_str().starts_with("file:") {
+            return Err(IdeError::unavailable("Open a PHP source to find its route handler"));
+        }
+        let utf8 = snap.text.ide_to_lsp(Encoding::Utf8, pos);
+        if pos.line as usize >= snap.text.line_count() || snap.text.lsp_to_ide(Encoding::Utf8, utf8) != pos {
+            return Err(IdeError::invalid("Expected an exact UTF-16 source position"));
+        }
+        let target = &targets[0];
+        let before = self.navigation_sources(&snap, target)?;
+        if before.files_revision != files_revision {
+            return Err(IdeError::new(ErrorKind::OutOfSync, "Project roots or files changed during Laravel lookup"));
+        }
+        let source = ExpectedSource::new(&snap.uri, snap.version, snap.text.as_str());
+        if cancel.is_cancelled() {
+            return Err(IdeError::cancelled());
+        }
+        // This extension uses UTF-16 for both positions and locations, independently
+        // of the encoding negotiated for ordinary LSP requests.
+        let response: IdeResult<RouteHandlerReply> = self
+            .call(
+                target,
+                "phpWorkbench/routeHandler",
+                RouteHandlerParams { expected_source: source.clone(), position: lsp::Position::new(pos.line, pos.col) },
+                Some(&cancel),
+                LONG_TIMEOUT,
+            )
+            .await;
+        if cancel.is_cancelled() {
+            return Err(IdeError::cancelled());
+        }
+        self.laravel_query_current(target, &before)?;
+        let reply = response?;
+        if reply.source != source {
+            return Err(IdeError::invalid("PHP route handler returned a mismatched source receipt"));
+        }
+        if reply.locations.iter().any(|loc| {
+            (loc.range.end.line, loc.range.end.character) < (loc.range.start.line, loc.range.start.character)
+        }) {
+            return Err(IdeError::invalid("PHP route handler returned a reversed location range"));
+        }
+        let conv = self.conv(Encoding::Utf16);
+        let locations: Vec<_> = reply.locations.iter().filter_map(|location| conv.location(location)).collect();
+        let incomplete = reply.incomplete || locations.len() != reply.locations.len();
+        if cancel.is_cancelled() {
+            return Err(IdeError::cancelled());
+        }
+        self.laravel_query_current(target, &before)?;
+        self.note_virtual(&target.server, locations.iter().map(|location| location.uri.as_deref()));
+        Ok(LaravelRouteHandler { locations, incomplete })
+    }
+
     async fn laravel_query<R: serde::de::DeserializeOwned>(
         &self,
         doc: DocId,

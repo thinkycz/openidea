@@ -69,6 +69,9 @@ pub struct GitSettings {
     pub push_dialog_only_protected: bool,
     /// Stashes and shelves share one tab.
     pub combine_stash_and_shelf: bool,
+    /// The non-modal Commit tool window works on the index: Staged / Unstaged groups,
+    /// stage and unstage instead of inclusion checkboxes, and no change lists.
+    pub staging_area: bool,
 }
 
 impl Default for GitSettings {
@@ -90,6 +93,7 @@ impl Default for GitSettings {
             show_push_dialog: true,
             push_dialog_only_protected: false,
             combine_stash_and_shelf: false,
+            staging_area: false,
         }
     }
 }
@@ -235,6 +239,30 @@ impl Default for LogLevelColors {
             trace: "var(--ansi-magenta)".into(),
         }
     }
+}
+
+/// Database settings: Query Execution and SQL Resolution Scopes.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, Type)]
+#[serde(default, rename_all = "camelCase")]
+pub struct DatabaseSettings {
+    /// A console's result sets show under the statements that produced them, in the editor,
+    /// instead of in the Services view's result tabs.
+    pub in_editor_results: bool,
+    /// Languages & Frameworks › SQL Resolution Scopes: the data source SQL in a file or folder
+    /// resolves against (completion, inspections, navigation), most specific path first.
+    pub resolution_scopes: Vec<SqlResolutionScope>,
+}
+
+/// One row of SQL Resolution Scopes.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, Type)]
+#[serde(default, rename_all = "camelCase")]
+pub struct SqlResolutionScope {
+    /// Project-relative file or folder, `/`-separated; empty for the whole project.
+    pub path: String,
+    /// Data source id.
+    pub data_source: String,
+    /// Schema unqualified names resolve in; empty for the data source's default.
+    pub schema: String,
 }
 
 /// Build, Execution, Deployment › Console.

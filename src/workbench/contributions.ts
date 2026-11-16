@@ -611,6 +611,34 @@ export function textEditorWrapperFor(
 }
 
 /**
+ * Panels at the right edge of every editor group (a plugin's minimap). Each group mounts one
+ * instance and keeps it while it switches tabs (a frame inside would reload if it moved);
+ * `tabId` is the group's text editor tab, or null while it shows anything else (the panel is
+ * hidden then, still mounted).
+ */
+export interface EditorGroupPanelContribution {
+  id: string;
+  /** Pixels. */
+  width: number;
+  component: ComponentType<{ paneId: string; tabId: string | null }>;
+}
+
+export const useEditorGroupPanels = create<{ panels: Map<string, EditorGroupPanelContribution> }>(() => ({
+  panels: new Map(),
+}));
+
+export function registerEditorGroupPanel(p: EditorGroupPanelContribution): () => void {
+  useEditorGroupPanels.setState((s) => ({ panels: new Map(s.panels).set(p.id, p) }));
+  return () =>
+    useEditorGroupPanels.setState((s) => {
+      if (s.panels.get(p.id) !== p) return s;
+      const panels = new Map(s.panels);
+      panels.delete(p.id);
+      return { panels };
+    });
+}
+
+/**
  * Spread on an element that handles files dropped from the OS itself (copy into
  * a folder, attach to a prompt); the window-wide drop (open in the editor)
  * leaves drops over it alone.
@@ -758,6 +786,8 @@ export interface NotificationService {
      * silence what the IDE reports on its own, not the answer to a request.
      */
     userInitiated?: boolean;
+    /** Skip the chime even when "Play sound" is on (e.g. native OS sound already played). */
+    silent?: boolean;
   }): void;
   /** Hides the balloon of the notification with `key` (it stays in the log), e.g. once its cause is gone. */
   expire?(key: string): void;
@@ -1089,6 +1119,8 @@ export interface SettingsPageContribution {
   component?: ComponentType;
   /** The page edits settings that a project can override (Global / This project switch). */
   projectScope?: boolean;
+  /** The scope the switch starts on (default: global). */
+  defaultScope?: "global" | "project";
 }
 
 /**

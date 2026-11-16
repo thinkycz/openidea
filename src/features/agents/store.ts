@@ -14,6 +14,7 @@ import type {
   AgentImage,
   AgentLimit,
   AgentModelCatalog,
+  AgentPrompt,
   AgentProvider,
   AgentTask,
   ExternalSession,
@@ -35,8 +36,10 @@ import {
   isMentioned,
   isPerModelOption,
   toPrompt,
+  withIdeContext,
   type ComposerDraft,
   type FileRef,
+  type IdeContext,
 } from "./composerModel";
 import { withQuote } from "./conversation";
 import {
@@ -53,7 +56,6 @@ import {
   SESSION_KIND,
   TOOL_WINDOW,
   appendEntry,
-  attentionChange,
   entriesKey,
   isBusy,
   sessionKey,
@@ -128,6 +130,8 @@ interface AgentsState {
   /** Side conversations by task id: kept out of the task list, discarded when their view closes. */
   ephemeral: ReadonlySet<string>;
   pinnedModels: string[];
+  /** Whether messages carry the editor's current file and selection. */
+  ideContext: boolean;
 }
 
 const DRAFT_KEY = "openidea.agents.draft.v2";
@@ -135,6 +139,7 @@ const HISTORY_KEY = "openidea.agents.history.v1";
 const HISTORY_SIZE = 50;
 const SESSION_LOCATION_KEY = "openidea.agents.sessionLocation.v1";
 const PINNED_MODELS_KEY = "openidea.agents.pinnedModels.v1";
+const IDE_CONTEXT_KEY = "openidea.agents.ideContext.v1";
 
 function load<T>(key: string, fallback: T): T {
   try {
@@ -199,6 +204,7 @@ export const useAgents = create<AgentsState>(() => ({
   homeOpen: false,
   ephemeral: new Set<string>(),
   pinnedModels: load<string[]>(PINNED_MODELS_KEY, []),
+  ideContext: load<boolean>(IDE_CONTEXT_KEY, true),
   scrollPositions: new Map(),
 }));
 
@@ -553,12 +559,15 @@ function onEvent(e: AgentEvent) {
       useAgents.setState({ tasks: new Map(s.tasks).set(e.task.id, e.task) });
       if (prev && (prev.title !== e.task.title || prev.status !== e.task.status)) notifyTabTitlesChanged();
       if (e.task.status === "archived") setUnread(e.task.id, false);
-      else if (attentionChange(prev?.status, e.task.status)) markUnread(e.task.id);
-      notifyChange(prev, e.task);
       if (prev?.status !== e.task.status && !isBusy(e.task.status)) {
         void refreshChanges(e.task.id);
         void refreshProviders();
       }
+      break;
+    }
+    case "attention": {
+      markUnread(e.task);
+      notifyAttention(e.task, e.reason);
       break;
     }
     case "removed": {
@@ -633,27 +642,28 @@ function onEvent(e: AgentEvent) {
   }
 }
 
-function notifyChange(prev: AgentTask | undefined, task: AgentTask) {
-  const change = attentionChange(prev?.status, task.status);
-  if (!change) return;
-  if (viewing(task.id)) return;
+/** In-app balloon for an Attention event; OS delivery goes through the general balloon path. */
+function notifyAttention(taskId: string, reason: "finished" | "input" | "failed") {
+  if (viewing(taskId)) return;
+  const task = useAgents.getState().tasks.get(taskId);
+  const title = task?.title ?? "Agent";
   const body =
-    change === "input"
+    reason === "input"
       ? "Waiting for your answer"
-      : change === "failed"
-        ? (task.error ?? "The agent stopped")
+      : reason === "failed"
+        ? (task?.error ?? "The agent stopped")
         : "Finished";
   notifications().notify({
-    level: change === "failed" ? "error" : "info",
-    title: task.title,
+    level: reason === "failed" ? "error" : "info",
+    title,
     body,
-    key: `agent:${task.id}`,
+    key: `agent:${taskId}`,
     group: "tools",
-    sticky: change !== "finished",
+    sticky: reason !== "finished",
     actions: [
       {
-        label: change === "finished" ? "Review" : "Open",
-        run: () => openTask(task.id),
+        label: reason === "finished" ? "Review" : "Open",
+        run: () => openTask(taskId),
       },
     ],
   });
@@ -969,7 +979,7 @@ export async function startTask(
     const task = await call(
       commands.agentCreate({
         projectRoot,
-        prompt: toPrompt(composer),
+        prompt: promptOf(HOME, composer),
         provider: draft.provider,
         config,
         isolation,
@@ -1083,6 +1093,28 @@ export async function importExternalSessions(
   void showError(title, failures.join("\n"));
 }
 
+export function setIdeContext(on: boolean) {
+  useAgents.setState({ ideContext: on });
+  save(IDE_CONTEXT_KEY, on);
+}
+
+/** The IDE context of each mounted composer, by draft key. */
+const ideContexts = new Map<string, () => IdeContext | null>();
+
+/** Registers what composer `key` sends as IDE context; returns the unregister. */
+export function provideIdeContext(key: string, context: () => IdeContext | null): () => void {
+  ideContexts.set(key, context);
+  return () => {
+    if (ideContexts.get(key) === context) ideContexts.delete(key);
+  };
+}
+
+/** The prompt of composer `key`, with the IDE context when it is on. */
+function promptOf(key: string, composer: ComposerDraft): AgentPrompt {
+  const context = useAgents.getState().ideContext ? (ideContexts.get(key)?.() ?? null) : null;
+  return toPrompt(withIdeContext(composer, context));
+}
+
 function remember(text: string) {
   if (!text) return;
   const history = [text, ...useAgents.getState().history.filter((h) => h !== text)].slice(0, HISTORY_SIZE);
@@ -1095,7 +1127,7 @@ export async function sendMessage(task: string, now: boolean): Promise<void> {
   const composer = composerDraft(task);
   if (!canSend(composer)) return;
   const started = generation;
-  await call(commands.agentPrompt(task, toPrompt(composer), now));
+  await call(commands.agentPrompt(task, promptOf(task, composer), now));
   clearSubmittedComposer(task, composer, started);
 }
 

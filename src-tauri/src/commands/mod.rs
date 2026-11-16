@@ -35,6 +35,7 @@ pub mod lsp;
 pub mod mcp;
 pub mod nav;
 pub mod notebook;
+pub mod notification;
 pub mod perf;
 pub mod plugin;
 pub mod profiler;
@@ -199,6 +200,7 @@ pub fn builder() -> tauri_specta::Builder<tauri::Wry> {
         clipboard::clipboard_has_image,
         clipboard::clipboard_image,
         clipboard::clipboard_set_file_list,
+        notification::show_system_notification,
         fonts::system_font_families,
         doc::doc_open,
         doc::doc_open_virtual,
@@ -247,6 +249,7 @@ pub fn builder() -> tauri_specta::Builder<tauri::Wry> {
         nav::index_status,
         nav::index_file_extensions,
         nav::spring_route_sources,
+        nav::cucumber_sources,
         nav::find_files,
         nav::find_files_named,
         nav::find_dirs,
@@ -492,6 +495,7 @@ pub fn builder() -> tauri_specta::Builder<tauri::Wry> {
         sdk::sdk_python_interpreter,
         sdk::sdk_python_effective,
         sdk::sdk_php_effective,
+        sdk::sdk_jdk_at,
         sdk::sdk_container_python,
         sdk::sdk_container_python_refresh,
         sdk::sdk_php_xdebug,
@@ -556,6 +560,7 @@ pub fn builder() -> tauri_specta::Builder<tauri::Wry> {
         debug::debug_data_breakpoint_info,
         debug::debug_attachable_processes,
         debug::debug_free_port,
+        debug::debug_unity_processes,
         debug::debug_listen_for_jvm,
         debug::debug_redefine_classes,
         debug::debug_jvm_memory_classes,

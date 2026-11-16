@@ -33,6 +33,7 @@ import {
   useFileDecoration,
   type DecorationSegment,
 } from "@/workbench/contributions";
+import { useFileColors } from "@/workbench/fileColors";
 import {
   FILES_DRAG,
   REMOTE_FILES_DRAG,
@@ -435,6 +436,8 @@ interface DragState {
 }
 
 const DRAG_THRESHOLD = 4;
+/** IDEA's "excluded" look: excluded folders and what is under them get a muted band. */
+const EXCLUDED_TINT = "var(--vcs-ignored)";
 
 /** Folder under a viewport point inside `container` (a file row resolves to its folder). */
 function folderAt(container: HTMLElement | null, x: number, y: number): { key: string; path: string } | null {
@@ -461,6 +464,7 @@ export function ProjectView() {
   useFileIconRevision();
   const root = useProjectTree((s) => s.root);
   const model = useProjectTree(selectModel);
+  const fileColors = useFileColors("projectView");
   const expanded = useProjectTree((s) => s.expanded);
   const selected = useProjectTree((s) => s.selected);
   const editing = useProjectTree((s) => s.editing);
@@ -871,7 +875,9 @@ export function ProjectView() {
         isExpandable={isExpandable}
         loadChildren={loadChildren}
         renderNode={renderNode}
-        rowClassName={(n) => (n.excluded ? styles.excludedRow : undefined)}
+        rowTint={(n) =>
+          n.excluded ? EXCLUDED_TINT : n.group || n.placeholder ? undefined : fileColors?.(n.path, n.dir)
+        }
         expanded={expanded}
         onExpandedChange={onExpandedChange}
         selected={selected}

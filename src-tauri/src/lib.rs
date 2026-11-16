@@ -26,6 +26,7 @@ mod relaunch;
 mod remote_container;
 mod remote_dev;
 mod remote_wsl;
+mod system_notifications;
 
 mod state;
 mod theme_frame;
@@ -55,6 +56,12 @@ pub fn specta_builder() -> tauri_specta::Builder<tauri::Wry> {
 
 pub fn export_bindings(builder: &tauri_specta::Builder<tauri::Wry>) {
     let target = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../src/bindings.ts"));
+    // Debug builds can end up on machines other than the one that built them
+    // (packaged test builds). Without the checkout there is nothing to sync,
+    // and `CARGO_MANIFEST_DIR` points at the build machine anyway.
+    if !target.parent().is_some_and(Path::is_dir) {
+        return;
+    }
     // Rewritten only when it changes: every debug launch exports, also a second instance that just
     // hands its path over, and a rewrite makes Vite reload the running app's windows.
     let fresh = std::env::temp_dir().join(format!("openidea-bindings-{}.ts", std::process::id()));
@@ -121,7 +128,10 @@ pub fn run() {
     // Install before window-state restores maximized geometry during window creation.
     #[cfg(windows)]
     let app = app.plugin(window_work_area::init());
-    let app = app.plugin(tauri_plugin_opener::init()).plugin(tauri_plugin_dialog::init());
+    let app = app
+        .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_dialog::init());
     #[cfg(target_os = "linux")]
     let app = app.plugin(linux_window_state::plugin());
     #[cfg(not(target_os = "linux"))]
@@ -220,6 +230,7 @@ pub fn run() {
             windows::report_cli_error(app.handle(), error);
         }
         app.manage(application_focus::ApplicationFocus::default());
+        system_notifications::init(app.handle());
         #[cfg(target_os = "macos")]
         macos::intercept_system_quit(app.handle());
         #[cfg(target_os = "macos")]
@@ -368,15 +379,24 @@ pub(crate) fn dispatch_menu_action(app: &tauri::AppHandle, id: &str) {
     let Some(route) = menu::route(&menu::spec(menu::Os::current()), id) else { return };
     match windows::target_window(app) {
         Some(w) => {
-            if let Some((kind, _)) = windows::auxiliary(w.label())
-                && !kind.modal()
-                && route.action == "editor.closeTab"
-            {
-                let _ = w.close();
-                return;
-            }
-            let Some(label) = windows::menu_target(w.label(), &route.action) else { return };
-            if let Err(e) = app.emit_to(label, menu::MENU_EVENT, &route) {
+            // The window to bring back to the front once what the action shows is closed (Settings).
+            let mut return_to = None;
+            let label = match windows::menu_destination(w.label(), &route.action) {
+                windows::MenuDestination::Own => w.label(),
+                windows::MenuDestination::Parent { label, raise } => {
+                    if raise && let Some(parent) = app.get_webview_window(label) {
+                        windows::focus(&parent);
+                        return_to = Some(w.label());
+                    }
+                    label
+                }
+                windows::MenuDestination::Close => {
+                    let _ = w.close();
+                    return;
+                }
+            };
+            let event = menu::MenuEvent { route: &route, return_to };
+            if let Err(e) = app.emit_to(label, menu::MENU_EVENT, &event) {
                 tracing::warn!("failed to deliver menu event {id}: {e}");
             }
         }

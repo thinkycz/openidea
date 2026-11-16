@@ -93,6 +93,11 @@ const OWN_MODES = [
     load: () => import("./restructuredtext").then((m) => new LanguageSupport(m.restructuredtextLanguage)),
   }),
   LanguageDescription.of({
+    name: "Gherkin",
+    extensions: ["feature"],
+    load: () => import("./gherkin").then((m) => m.gherkinSupport()),
+  }),
+  LanguageDescription.of({
     name: "Log",
     extensions: ["log"],
     load: () => import("./log").then((m) => new LanguageSupport(m.logLanguage)),
@@ -124,6 +129,7 @@ const OWN_MODES = [
     load: () => import("./angular/inline").then((m) => m.angularTypescript()),
   }),
   LanguageDescription.of({ name: "Angular Template", load: () => import("./angular").then((m) => m.angular()) }),
+  LanguageDescription.of({ name: "Thymeleaf", load: () => import("./thymeleaf").then((m) => m.thymeleafSupport()) }),
   LanguageDescription.of({
     name: "ERB",
     alias: ["erb", "rhtml"],

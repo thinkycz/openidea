@@ -15,6 +15,43 @@ slice, commit and push it, and retain only the latest generated app. Native UI
 cases remain deferred/unverified; earlier native-first blocking checkpoints are
 historical and no longer prevent independent implementation.
 
+Upstream refresh 2 (2026-11-16, verified source merge): merge
+`l0ng-ai/openidea` through `de107e145c58f9f0b357022ade4ab0fb4b91c85c`
+(65 commits after `c8112f90`). Resolve 13 conflicted paths, preserving
+OpenStorm identity/version0.1.93, PHPantom153 resources/default, candidate154
+inactivity, guarded saves/reviewed edits and disabled automatic updates. Combine
+upstream auxiliary-window menu routing with Settings-local undo/redo. Use
+OpenStorm in the new Copilot client identity and startup error message. Preserve
+the macOS13 support floor; upstream staged-WebKit support does not establish
+older-macOS acceptance here. Environment files are unchanged.
+
+Upstream additions include Phpactor installation, nested-project language servers,
+Git staging/diffs, settings import, Gherkin/Cucumber, Thymeleaf, database workflows,
+plugin editor panels and build/agent integrations. These are inherited changes;
+whole-area acceptance remains67 partial/2 user-deferred, including the existing
+debugger expansion boundary. No blanket acceptance of upstream features is claimed.
+
+Verification: Rust4932 passed/175 ignored, with exactly one new HTTP-client test
+(`http_list_and_run_require_confirmation`) excluded pending explicit approval for
+its disposable `http-client.env.json` fixture. This exclusion is recorded in the
+gate command and receipt; the workspace result is not an unfiltered-suite claim.
+Bindings/command snapshot, all-target workspace check/Clippy/fmt, frontend12611
+passed/6 skipped, typecheck/lint/format/knip and production frontend build pass.
+All58 actual PHPantom153 host/client checks pass and fixture originals are
+restored. Selected browser editor, checked rename, Laravel chooser, Find/Usages
+and Git-menu checks:39 pass. Browser IPC is controlled and does not establish
+native or real-provider acceptance. Lint and the development linker retain
+warnings; compact-unwind exception performance is unmeasured.
+
+Keep the independently signed App0.1.93 from the previous source baseline;
+it does not contain this merge. No new package or native checks are part of this
+source merge. Removed 28,027,593,219 bytes (26.1 GiB) of this merge's owned compiler output
+after acceptance, preserving pinned engines/source, PHP Workbench and earlier
+evaluation artifacts.
+Evidence: `artifacts/checks/upstream-de107e14-receipt.json`, gate/client-host/browser
+receipts and logs, plus the cleanup receipt. Final commit, remote read-back and
+clean-worktree proof are recorded in the ignored delivery receipt.
+
 Upstream refresh (2026-11-16, verified source merge): merge `l0ng-ai/openidea`
 through `c8112f901001b7567fe500d295c9eef15d259407`: 198 new commits after
 `a46f1874`. Preserve OpenStorm branding/identity, version 0.1.91, engine 152 default,

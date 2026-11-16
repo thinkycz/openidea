@@ -13,7 +13,7 @@
         details: "启动错误详情",
         timeout: "启动未在 60 秒内完成。",
         outdatedMac:
-          "这台 Mac 的系统网页引擎过旧：OpenStorm 的界面运行在 macOS 自带的 WebKit 引擎上，需要 macOS 13 Ventura 或更高版本。在 macOS 11、12 上更新 Safari 不会更新其他应用使用的引擎，需要升级 macOS。",
+          "这台 Mac 的系统网页引擎过旧：OpenStorm 需要 macOS 13 Ventura 或更高版本。请升级 macOS，然后重新打开 OpenStorm。",
         outdated:
           "系统的 WebKitGTK 版本过旧：OpenStorm 需要较新的 WebKitGTK（webkit2gtk-4.1）。请通过系统的包管理器更新后重新打开 OpenStorm。",
       }
@@ -27,7 +27,7 @@
         details: "Startup error details",
         timeout: "Startup did not finish within 60 seconds.",
         outdatedMac:
-          "The system web engine on this Mac is too old: OpenStorm's interface runs on macOS's built-in WebKit and needs macOS 13 Ventura or later. On macOS 11 and 12 a Safari update doesn't update the engine other apps use, so macOS itself needs upgrading.",
+          "The system web engine on this Mac is too old: OpenStorm needs macOS 13 Ventura or later. Upgrade macOS, then reopen OpenStorm.",
         outdated:
           "The system's WebKitGTK is too old: OpenStorm needs a recent WebKitGTK (webkit2gtk-4.1). Update it with your package manager, then open OpenStorm again.",
       };

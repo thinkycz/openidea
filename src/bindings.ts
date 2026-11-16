@@ -331,6 +331,8 @@ export const commands = {
 	 *  false when the clipboard stayed busy; the caller keeps working either way.
 	 */
 	clipboardSetFileList: (paths: string[]) => typedError<boolean, IdeError>(__TAURI_INVOKE("clipboard_set_file_list", { paths })),
+	/**  When a balloon is shown and OpenIDEA is unfocused, mirror it to the OS. */
+	showSystemNotification: (title: string, body: string) => typedError<null, IdeError>(__TAURI_INVOKE("show_system_notification", { title, body })),
 	/**
 	 *  Every installed family, sorted, each flagged monospaced or not. Read on
 	 *  first use (off the command threads), cached, and re-queried on `refresh`.
@@ -487,6 +489,8 @@ export const commands = {
 	indexFileExtensions: () => typedError<ExtensionCount[], IdeError>(__TAURI_INVOKE("index_file_extensions")),
 	/**  Spring Web mapping sources for the request-path index of Search Everywhere. */
 	springRouteSources: () => typedError<RouteSource[], IdeError>(__TAURI_INVOKE("spring_route_sources")),
+	/**  Cucumber feature files and step definition files, for step navigation. */
+	cucumberSources: () => typedError<StepSource[], IdeError>(__TAURI_INVOKE("cucumber_sources")),
 	findFiles: (query: string, limit: number) => typedError<FileMatch[], IdeError>(__TAURI_INVOKE("find_files", { query, limit })),
 	findFilesNamed: (name: string) => typedError<IpcPath[], IdeError>(__TAURI_INVOKE("find_files_named", { name })),
 	/**  Folders holding indexed files, for `@` references. */
@@ -1103,6 +1107,26 @@ export const commands = {
 	sdkPythonEffective: (near: string | null) => typedError<string | null, IdeError>(__TAURI_INVOKE("sdk_python_effective", { near })),
 	/**  The PHP interpreter chosen in Settings › Languages & Frameworks › PHP; `None`: the `php` on `PATH`. */
 	sdkPhpEffective: () => typedError<string | null, IdeError>(__TAURI_INVOKE("sdk_php_effective")),
+	/**  The JDK whose home is `path`, as the SDK list shows it; `None` when it is no JDK home. */
+	sdkJdkAt: (path: string) => typedError<{
+	/**
+	 *  Executable (`python`, `node`, `pnpm`) or directory (Rust toolchain bin
+	 *  dir, GOROOT, TypeScript `lib` dir) that the setting stores.
+	 */
+	path: IpcPath,
+	/**  Display name, e.g. `Python 3.12 (.venv)` or `stable-aarch64-apple-darwin`. */
+	name: string,
+	version: string | null,
+	/**
+	 *  Where it was found: `venv` | `system` | `pyenv` | `conda` | `uv` | `nvm` |
+	 *  `rustup` | `bundled` | `workspace` | `path` …
+	 */
+	source: string,
+	/**  Environment / toolchain root (virtualenv dir, rustup toolchain dir, GOROOT). */
+	home: IpcPath | null,
+	/**  Rust standard library sources, Go default GOPATH. */
+	extra: IpcPath | null,
+} | null, IdeError>(__TAURI_INVOKE("sdk_jdk_at", { path })),
 	/**  The project interpreter when it is a Docker or Compose run target's, with its snapshot. */
 	sdkContainerPython: () => typedError<{
 	/**  The run target's id. */
@@ -1304,11 +1328,13 @@ export const commands = {
 	appInstallUpdate: (source: UpdateSource, request: RequestId, onProgress: Channel<UpdateProgress>) => typedError<null, IdeError>(__TAURI_INVOKE("app_install_update", { source, request, onProgress })),
 	/**
 	 *  Release notes of `version` from the update manifest (`latest.json`), read
-	 *  through the configured source. An install records the notes it saw, so this
-	 *  is only for an update installed outside the app. `Ok(None)` when the manifest
-	 *  covers another version or carries no notes.
+	 *  through the configured source: the `notes` text under `"en"` plus any
+	 *  `notes.<lang>` translations keyed by their base language code, so the page
+	 *  can show the UI's language and fall back to English. An install records the
+	 *  notes it saw, so this is only for an update installed outside the app.
+	 *  `Ok(None)` when the manifest covers another version or carries no notes.
 	 */
-	appReleaseNotes: (version: string, source: UpdateSource) => typedError<string | null, IdeError>(__TAURI_INVOKE("app_release_notes", { version, source })),
+	appReleaseNotes: (version: string, source: UpdateSource) => typedError<{ [key in string]: string } | null, IdeError>(__TAURI_INVOKE("app_release_notes", { version, source })),
 	debugExceptionFilters: () => typedError<SessionExceptionFilters[], IdeError>(__TAURI_INVOKE("debug_exception_filters")),
 	debugSetExceptionBreakpoints: (choices: { [key in string]: boolean }) => typedError<null, IdeError>(__TAURI_INVOKE("debug_set_exception_breakpoints", { choices })),
 	debugSetVariable: (session: DebugSessionId, container: number, name: string, evaluateName: string | null, frameId: number | null, value: string) => typedError<Variable, IdeError>(__TAURI_INVOKE("debug_set_variable", { session, container, name, evaluateName, frameId, value })),
@@ -1342,6 +1368,7 @@ export const commands = {
 	debugAttachableProcesses: () => typedError<AttachableProcess[], IdeError>(__TAURI_INVOKE("debug_attachable_processes")),
 	/**  A loopback port that is free right now, for a debug agent the launch line starts. */
 	debugFreePort: () => typedError<number, IdeError>(__TAURI_INVOKE("debug_free_port")),
+	debugUnityProcesses: () => typedError<AttachableProcess[], IdeError>(__TAURI_INVOKE("debug_unity_processes")),
 	/**
 	 *  Remote JVM Debug in listen mode: waits (cancellable through `request`) for the remote
 	 *  JVM to connect to `host:port`; returns the loopback port java-debug attaches to.
@@ -1899,6 +1926,9 @@ export type AgentAcceptSkipped = {
 	reason: string,
 };
 
+/**  Why a task needs the user's attention (native / in-app notify). */
+export type AgentAttentionReason = "finished" | "input" | "failed";
+
 /**  A task the agent runs in the background while the conversation goes on. */
 export type AgentBackgroundTask = {
 	id: string,
@@ -2018,6 +2048,8 @@ export type AgentConfigValue = {
 	costCategory?: string | null,
 	/**  Usage multiplier from ACP `_meta` (`copilotUsage`, e.g. `1x`, `0x`, `3x`). */
 	usageMultiplier?: string | null,
+	/**  Detailed per-tier token pricing from `_meta.pricing` when available. */
+	pricing?: AgentModelPricing | null,
 };
 
 /**  How a setting is changed. */
@@ -2105,7 +2137,9 @@ export type AgentEvent =
 /**  A model lookup started or completed, including unsuccessful lookups. */
 { type: "modelCatalog"; catalog: AgentModelCatalog } | 
 /**  The installed or configured agent providers changed. */
-{ type: "providers" };
+{ type: "providers" } | 
+/**  The task needs attention once (finished turn, explicit input, or failure). */
+{ type: "attention"; task: string; eventId: string; reason: AgentAttentionReason };
 
 /**  A form the agent asks the user to fill in (ACP `elicitation/create`, form mode). */
 export type AgentForm = {
@@ -2201,6 +2235,16 @@ export type AgentModelCatalog = {
 	refreshedAtMs: number | null,
 	retryAtMs: number | null,
 	error: string | null,
+};
+
+/**  Pricing and context-tier metadata attached to a model [`AgentConfigValue`]. */
+export type AgentModelPricing = {
+	/**  `"low"`, `"medium"`, `"high"`, or `"very_high"`. */
+	costTier?: string | null,
+	/**  Request-based billing multiplier (e.g. `1.0`, `0.33`, `3.0`), when applicable. */
+	multiplier?: number | null,
+	/**  Token pricing keyed by context tier (`"default"`, `"long_context"`). */
+	tiers?: { [key in string]: AgentTokenPricing },
 };
 
 export type AgentPermissionOption = {
@@ -2489,6 +2533,15 @@ export type AgentTask = {
 	background?: AgentBackgroundTask[],
 };
 
+/**  Token pricing (Credits per 1M tokens) and context window capacity for one tier. */
+export type AgentTokenPricing = {
+	input: number | null,
+	output: number | null,
+	cacheRead?: number | null,
+	cacheWrite?: number | null,
+	contextTokens?: number | null,
+};
+
 export type AgentToolDiff = {
 	path: IpcPath,
 	added: number,
@@ -2737,7 +2790,7 @@ export type AskpassKind =
 /**  Yes / no (an unknown host key); answered with `yes` or `no`. */
 "confirm";
 
-export type AttachKind = "java" | "node" | "python" | "dotnet" | "go" | "native";
+export type AttachKind = "unity" | "java" | "node" | "python" | "dotnet" | "go" | "native";
 
 export type AttachableProcess = {
 	pid: number,
@@ -2921,6 +2974,8 @@ export type BuildMessage = {
 export type BuildModel = {
 	maven: MavenModel | null,
 	gradle?: GradleModel[],
+	/**  sbt builds, read from their `build.sbt` (sbt is not started). */
+	sbt?: SbtBuild[],
 };
 
 /**  How a Java launch builds the project before starting (IDEA's Before launch › Build). */
@@ -2949,7 +3004,9 @@ export type BuildResult = {
 	messages: BuildMessage[],
 };
 
-export type BuildSystem = "maven" | "gradle" | "cargo" | "go" | "typescript" | "cmake" | "dotnet";
+export type BuildSystem = "maven" | "gradle" | "cargo" | "go" | "typescript" | "cmake" | "dotnet" | 
+/**  A Java project without a build tool, compiled from its Project Structure. */
+"javac";
 
 export type BuildTool = "maven" | "gradle";
 
@@ -3893,6 +3950,20 @@ export type DataSource_Serialize = {
 	pluginOwner?: string | null,
 	/**  Id private to the owner, never used as a connection target. */
 	pluginSourceId?: string | null,
+};
+
+/**  Database settings: Query Execution and SQL Resolution Scopes. */
+export type DatabaseSettings = {
+	/**
+	 *  A console's result sets show under the statements that produced them, in the editor,
+	 *  instead of in the Services view's result tabs.
+	 */
+	inEditorResults?: boolean,
+	/**
+	 *  Languages & Frameworks › SQL Resolution Scopes: the data source SQL in a file or folder
+	 *  resolves against (completion, inspections, navigation), most specific path first.
+	 */
+	resolutionScopes?: SqlResolutionScope[],
 };
 
 /**  System Settings › Date Formats (Git log, Local History, blame). */
@@ -5302,6 +5373,24 @@ export type FieldValue = { kind: "label"; value: string } | { kind: "readonlyTex
 	selected: string,
 } };
 
+export type FileColor = {
+	/**
+	 *  A built-in scope (`Tests`, `Production`, `Project Files`, `Non-Project Files`) or a
+	 *  `scopes` entry, by name.
+	 */
+	scope?: string,
+	/**  A palette name (`blue`, `green`, `orange`, `rose`, `violet`, `yellow`, `gray`) or `#rrggbb`. */
+	color?: string,
+};
+
+export type FileColorSettings = {
+	enabled?: boolean,
+	editorTabs?: boolean,
+	projectView?: boolean,
+	/**  Scope → colour; the first scope that holds a file gives its colour. */
+	colors?: FileColor[],
+};
+
 export type FileCoverage = {
 	path: IpcPath,
 	/**  Sorted by line. */
@@ -5785,6 +5874,11 @@ export type GitSettings = {
 	pushDialogOnlyProtected?: boolean,
 	/**  Stashes and shelves share one tab. */
 	combineStashAndShelf?: boolean,
+	/**
+	 *  The non-modal Commit tool window works on the index: Staged / Unstaged groups,
+	 *  stage and unstage instead of inclusion checkboxes, and no change lists.
+	 */
+	stagingArea?: boolean,
 };
 
 export type GoBuildTags = {
@@ -6740,6 +6834,11 @@ export type JavaSettings = {
 	jdtlsVmArgs?: string,
 	/**  Share one JDT LS across builds in an ordinary project window; other windows remain separate. */
 	jdtlsShared?: boolean,
+	/**
+	 *  JDK homes added by hand (Platform Settings › SDKs › Add JDK from Disk…), listed with the
+	 *  detected ones.
+	 */
+	addedJdks?: string[],
 	/**  Build Tools › Maven. */
 	maven?: MavenSettings,
 	/**  Build Tools › Gradle. */
@@ -6768,7 +6867,10 @@ export type JdkVendor = {
  */
 export type JetBrainsSettings = {
 	entries: string[],
-	/**  Entry name → text, for `colors/*.icls` and the `options/*.xml` files OpenIDEA reads. */
+	/**
+	 *  Entry name → text, for the files OpenIDEA reads: `colors/*.icls`, `keymaps/*.xml`,
+	 *  `codestyles/*.xml` and some of `options/`.
+	 */
 	files: { [key in string]: string },
 };
 
@@ -7865,6 +7967,15 @@ export type ModuleStructureSettings = {
 };
 
 /**
+ *  A named set of files: `file:src//*.ts && !file:*.test.ts` (project-relative path patterns
+ *  joined with `||`, `&&`, `!` and parentheses).
+ */
+export type NamedScope = {
+	name?: string,
+	pattern?: string,
+};
+
+/**
  *  Where the Navigation Bar (the file path breadcrumbs) is shown. Mirrors
  *  IDEA's `View | Appearance | Navigation Bar` (Top / Status Bar / Don't show).
  */
@@ -8010,6 +8121,8 @@ export type NotificationLevel = "info" | "warning" | "error";
 export type NotificationSettings = {
 	balloons?: boolean,
 	sound?: boolean,
+	/**  Mirror balloon notifications to the OS when no OpenIDEA window is focused. */
+	systemNotifications?: boolean,
 	/**  Group id → display; groups not listed use their default. */
 	groups?: { [key in string]: NotificationGroupSettings },
 };
@@ -9752,6 +9865,26 @@ export type RustSettings = {
 	rustfmtArgs?: string,
 };
 
+export type SbtBuild = {
+	/**  Folder of `build.sbt`, relative to the project root (`""` for the root itself). */
+	dir: string,
+	/**  The launcher: a `sbt` / `sbtx` script in the build folder, else `sbt` on `PATH`. */
+	command: string,
+	/**  `sbt.version` of `project/build.properties`. */
+	version: string | null,
+	/**  The root project first, then the declared projects in source order. */
+	projects: SbtProject[],
+};
+
+export type SbtProject = {
+	/**  The project id tasks are scoped with (`core/compile`). */
+	id: string,
+	/**  Base folder relative to the build folder (`""` for the build's own). */
+	dir: string,
+	/**  The build's root project: its tasks run unscoped (and aggregate when sbt does). */
+	root: boolean,
+};
+
 /**  Progress of `scaffold_create`. */
 export type ScaffoldEvent = 
 /**  A new step began. */
@@ -10002,6 +10135,12 @@ export type Settings_Deserialize = {
 	mcpServer?: McpServerSettings,
 	/**  Tools › Agents: Command Execution Policy. */
 	agentSecurity?: AgentSecuritySettings,
+	/**  Appearance & Behavior › Scopes: named file sets other settings refer to. */
+	scopes?: NamedScope[],
+	/**  Appearance & Behavior › File Colors. */
+	fileColors?: FileColorSettings,
+	/**  Database › Query Execution, Languages & Frameworks › SQL Resolution Scopes. */
+	database?: DatabaseSettings,
 	/**  Plugin settings (`[contributes.settings]`): plugin id → its values by key. */
 	plugins?: { [key in string]: { [key in string]: unknown } },
 };
@@ -10068,6 +10207,12 @@ export type Settings_Serialize = {
 	mcpServer: McpServerSettings,
 	/**  Tools › Agents: Command Execution Policy. */
 	agentSecurity: AgentSecuritySettings,
+	/**  Appearance & Behavior › Scopes: named file sets other settings refer to. */
+	scopes: NamedScope[],
+	/**  Appearance & Behavior › File Colors. */
+	fileColors: FileColorSettings,
+	/**  Database › Query Execution, Languages & Frameworks › SQL Resolution Scopes. */
+	database: DatabaseSettings,
 	/**  Plugin settings (`[contributes.settings]`): plugin id → its values by key. */
 	plugins: { [key in string]: { [key in string]: unknown } },
 };
@@ -10216,6 +10361,16 @@ export type SpellingSettings = {
 	customDictionaries?: string[],
 };
 
+/**  One row of SQL Resolution Scopes. */
+export type SqlResolutionScope = {
+	/**  Project-relative file or folder, `/`-separated; empty for the whole project. */
+	path?: string,
+	/**  Data source id. */
+	dataSource?: string,
+	/**  Schema unqualified names resolve in; empty for the data source's default. */
+	schema?: string,
+};
+
 export type SqlStatement = {
 	/**
 	 *  UTF-16 offsets of the statement text (whitespace trimmed, `;` excluded except
@@ -10302,6 +10457,13 @@ export type StepInTarget = {
 };
 
 export type StepKind = "over" | "into" | "out";
+
+export type StepSource = {
+	path: IpcPath,
+	text: string,
+	/**  A Gherkin `.feature` file; otherwise a script defining steps. */
+	feature: boolean,
+};
 
 export type StructuralEvent = { type: "file"; file: StructuralFile } | { type: "done"; summary: StructuralSummary };
 
@@ -10751,6 +10913,12 @@ export type ToolInfo = {
 	 *  server and the `fallback` ones after it. Empty when it has none.
 	 */
 	alternatives: string[],
+	/**
+	 *  A language server used for part of what its languages need (`features` in its
+	 *  definition: pylsp-rope's refactorings next to basedpyright). Not offered for install
+	 *  when missing; the Language Servers page lists it.
+	 */
+	companion: boolean,
 };
 
 export type ToolKind = "languageServer" | "debugger" | 

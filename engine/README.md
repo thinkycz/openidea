@@ -338,3 +338,21 @@ fmt/fingerprint/build, updated examples/275Laravel runtime assertions and exact3
 intentional analyzer diagnostics pass. Source and actual-client red/green,
 example LSP definitions/completion edits/hover and final OpenStorm acceptance are
 tracked in docs/OPENSTORM.md. Native checks remain explicitly user-skipped.
+
+## Inactive source candidate 154: invokable handler navigation
+
+`engine/candidates/0.11.1-openstorm.154-source.json` pins a source-only candidate
+for `phpWorkbench/routeHandler`, advertised as `phpWorkbenchRouteHandler`.
+Engine153 remains the application default until actual OpenStorm client checks
+and resource promotion are completed.
+
+The request contains `expectedSource` (`uri`, `version`, `sha256Utf8`) and a
+UTF16 `position` (`line`, `character`). Its reply echoes the verified `source`,
+returns `locations` and retains `incomplete` dispatch provenance. A registered
+controller class token resolves to its real `__invoke` implementation, including
+inherited or trait implementations. Ordinary PHP class navigation stays intact.
+Unowned/stale versions or hashes return LSP ContentModified (-32801); malformed
+source identities or non-boundary UTF16 positions return InvalidParams (-32602).
+This first request covers implicit invokable actions; explicit method actions
+retain existing definition navigation. The matching Laravel example and runtime
+assertions are part of the source patch. Native UI acceptance remains deferred.

@@ -48,6 +48,69 @@ At that merge checkpoint, source-only slice 101 remained unfinished;
 no candidate 153 adoption or new package was claimed. Area statuses remain 67
 partial/2 user-deferred.
 
+Laravel slice 109 (2026-11-16, verified inactive engine candidate): PHPantom154
+adds phpWorkbench/routeHandler, advertised as phpWorkbenchRouteHandler. Requests
+bind a controller-token position to the preferred open source's version and exact
+UTF8 hash. Reject stale/unowned snapshots (-32801), malformed source shapes and
+invalid UTF16 boundaries (-32602). Read existing invokable dispatch metadata under
+the prepared semantic gate and return real inherited/trait implementations,
+including trait aliases and property-shadowed methods. Preserve incomplete
+namespace provenance. Ordinary PHP class navigation is unchanged; non-Laravel
+projects and ordinary class references produce no handler association.
+
+This first API covers implicit class/literal invokable actions, including a caret
+at the class-token end. Explicit method actions keep existing definition lookup;
+client commands, full action-shape coverage, configuration-change matrices and
+native UI acceptance remain separate. Do not promote candidate154 into application
+resources until actual OpenStorm adapter/action checks pass. Active engine153 and
+the sole signed App0.1.93 remain byte-for-byte unchanged.
+
+Regression evidence: the placeholder compiled and failed5/6 intended cases;
+non-Laravel control passed. The first implementation missed the blocking helper's
+optional-result unwrap and was corrected. Another expectation wrongly treated a
+fully known namespace prefix as incomplete; retain the resolved complete target
+and separately test genuinely conservative group-controller provenance. Final6
+new queries and all93 route-controller checks pass, as do18,508 ordinary engine
+tests/17 ignored plus both bounded children. Standard all-target Clippy (including
+--fix), memory-audit Clippy, formatting, source fingerprint and release build pass.
+The source patch replays exactly against the pinned upstream/153 patch series.
+
+PHPantom's contributor guide requires a matching Laravel example, so an initial
+fully passing source-only draft (e74be4c63a70) is preserved as intermediate evidence.
+The final ac403db7f398 source includes the invokable controller, Demo entry and four
+runtime assertions. The first demo fixture lacked a bound request; the next checked
+Laravel's display action instead of executable uses metadata. Bind a synthetic
+request and verify actual dispatch against the installed framework. Final328
+Laravel assertions, plain-PHP assertions,12 plain/92 Laravel syntax checks, four
+independent reflection assertions/two invocations and exactly3 intentional analyzer
+diagnostics pass. No diagnostics are suppressed and no Composer/Artisan execution
+is added. Final direct CLI protocol checks verify capability/schema, exact inherited
+and unsaved targets, stale versions/hashes, UTF16 rejection, nested non-Laravel
+Composer isolation and shutdown. The real Laravel13.37 demo separately confirms
+handler/ordinary class target positions and unchanged original bytes. Both server
+processes exit0 with --no-project-tools.
+
+Candidate version0.11.1-openstorm.154, canonical executable
+artifacts/engines/0.11.1-openstorm.154/phpantom_lsp, SHA256
+3eb06c2ba672c3c8d968c514b2d2cd30b9d1d9aba6cdb234e2772c8a9c4b0c44.
+Patch-series SHA256:
+ac403db7f39800acfddeb5277476ab1708f0e39048404cd632b4fd8164c0c60b.
+MIT/Apache licenses and source/build provenance are retained. Removed8,210 owned
+compiler files/2,325,065,503 bytes (~2.17GiB) after all required binaries/receipts
+were preserved; both compiler roots are absent. Workbench, prior evaluation
+artifacts and the sole App0.1.93 remain. No new app, profile migration, install,
+publication or updater activation. Native UI remains explicitly user-skipped.
+All69 statuses remain67 partial/2 user-deferred.
+
+Evidence: artifacts/checks/slice109-receipt.json, source-freeze/source-test-summary,
+engine-gates/engine-frozen-focused, examples/fixture-controls/analyzer-control,
+handler-wire/example-wire, compiler-clean and active-retained receipts; intermediate
+source/patch/gate and failed fixture logs are preserved separately. Candidate pin
+and provenance: engine/candidates/0.11.1-openstorm.154-source.json and
+engine/candidates/0.11.1-openstorm.154.json.
+Next dependent slice: typed OpenStorm adapter and invokable-handler action with
+real-client stale-response, cancellation, project and unsaved-overlay checks.
+
 Packaging slice 108 (2026-11-16, verified local development package): App0.1.93
 contains Laravel chooser freshness/synchronization slices104–105, verified through
 full-workbench browser flows in107 and repaired code-insight checks in106.

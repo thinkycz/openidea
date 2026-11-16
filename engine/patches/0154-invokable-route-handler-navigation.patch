@@ -1,0 +1,617 @@
+--- a/docs/CHANGELOG.md
++++ b/docs/CHANGELOG.md
+@@ -14,6 +14,8 @@
+ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+ 
+ ## [Unreleased]
++
++- **Navigate to invokable route implementations.** A separate version/hash-bound `phpWorkbench/routeHandler` request resolves real inherited and trait handler declarations without replacing ordinary PHP class navigation. It retains partial namespace provenance, validates exact UTF-16 positions and refuses stale or unowned sources. Contributed by @thinkycz.
+ 
+ - **Find implicit invokable route handlers.** Registered Laravel literal and class-constant actions contribute scoped `__invoke` references and declaration counts, including inherited handlers, aliases and namespace qualification. Rebinding invalidates zero-hit and differently-cased count caches. PHP class navigation stays separate; namespace-dependent class constants and fixed magic-method contract renames refuse partial edits. Contributed by @thinkycz.
+ 
+--- a/examples/laravel/app/Demo.php
++++ b/examples/laravel/app/Demo.php
+@@ -1774,6 +1774,13 @@
+         Route::get('/rename-direct', "App\\Http\\Controllers\\RenamePreviewController@index");
+     }
+ 
++    public function invokableControllerNavigation(): void
++    {
++        // Clients with phpWorkbenchRouteHandler support can open __invoke from
++        // this class token. Ordinary PHP definition navigation opens the class.
++        Route::get('/invokable-bakery', \App\Http\Controllers\InvokableBakeryController::class);
++    }
++
+ }
+ 
+ // PHP Workbench: Laravel: Go to Route lists statically named routes and opens
+--- /dev/null
++++ b/examples/laravel/app/Http/Controllers/InvokableBakeryController.php
+@@ -0,0 +1,11 @@
++<?php
++
++namespace App\Http\Controllers;
++
++class InvokableBakeryController
++{
++    public function __invoke(): string
++    {
++        return 'Invokable bakery.';
++    }
++}
+--- a/examples/laravel/assertions.php
++++ b/examples/laravel/assertions.php
+@@ -2112,6 +2112,27 @@
+     }
+ })();
+ 
++// Invokable controller registrations keep their implementation separate from
++// ordinary class navigation.
++(function (): void {
++    $previous = \Illuminate\Support\Facades\Route::getFacadeRoot();
++    $router = new \Illuminate\Routing\Router(new \Illuminate\Events\Dispatcher());
++    \Illuminate\Support\Facades\Route::swap($router);
++    try {
++        $class = \App\Http\Controllers\InvokableBakeryController::class;
++        $route = \Illuminate\Support\Facades\Route::get('/invokable-bakery', $class);
++        $route->bind(\Illuminate\Http\Request::create('/invokable-bakery'));
++        check('An invokable route dispatches to its magic method', $route->getAction('uses') === $class . '@__invoke');
++        check('The controller is callable as an object', is_callable(new $class()));
++        check('The route executes the declared handler', $route->run() === 'Invokable bakery.');
++        check('The handler implementation belongs to the controller source',
++            (new \ReflectionMethod($class, '__invoke'))->getFileName() === __DIR__ . '/app/Http/Controllers/InvokableBakeryController.php');
++    } finally {
++        if ($previous !== null) { \Illuminate\Support\Facades\Route::swap($previous); }
++        else { \Illuminate\Support\Facades\Route::clearResolvedInstance('router'); }
++    }
++})();
++
+ // ─── Summary ────────────────────────────────────────────────────────────────
+ 
+ echo "\n";
+--- a/src/backend/startup.rs
++++ b/src/backend/startup.rs
+@@ -282,7 +282,7 @@
+                     ..ExecuteCommandOptions::default()
+                 }),
+                 experimental: Some(
+-                    serde_json::json!({"phpWorkbenchEnvironmentResources": true, "phpWorkbenchJsonTranslations": true, "phpWorkbenchRoutes": true, "phpWorkbenchViews": true, "phpWorkbenchBuiltins": true, "phpWorkbenchActiveTarget": true, "phpWorkbenchRenameChecked": true, (crate::workbench_optimize_imports::CAPABILITY): true, "phpWorkbenchCallHierarchyAnalysis": true, (crate::structural_search::wire::EXPERIMENTAL_CAPABILITY): true, (crate::structural_search::wire::REPLACE_EXPERIMENTAL_CAPABILITY): true}),
++                    serde_json::json!({"phpWorkbenchEnvironmentResources": true, "phpWorkbenchJsonTranslations": true, "phpWorkbenchRoutes": true, (crate::workbench_route_handler::CAPABILITY): true, "phpWorkbenchViews": true, "phpWorkbenchBuiltins": true, "phpWorkbenchActiveTarget": true, "phpWorkbenchRenameChecked": true, (crate::workbench_optimize_imports::CAPABILITY): true, "phpWorkbenchCallHierarchyAnalysis": true, (crate::structural_search::wire::EXPERIMENTAL_CAPABILITY): true, (crate::structural_search::wire::REPLACE_EXPERIMENTAL_CAPABILITY): true}),
+                 ),
+                 ..ServerCapabilities::default()
+             },
+--- a/src/definition/member/mod.rs
++++ b/src/definition/member/mod.rs
+@@ -125,6 +125,45 @@
+             member_name,
+             member_kind,
+         )
++    }
++
++    /// Follow actual method ancestry without accepting a property or virtual mixin.
++    pub(crate) fn real_method_declaration_location(
++        &self,
++        class_fqn: &str,
++        member_name: &str,
++    ) -> Option<Location> {
++        let class = self.find_or_load_class(class_fqn)?;
++        let loader = |name: &str| self.find_or_load_class(name);
++        let effective = crate::inheritance::resolve_class_with_inheritance(&class, &loader);
++        let method = effective.get_method(member_name)?;
++        if method.is_virtual || method.is_abstract {
++            return None;
++        }
++        if let Some((name, owner, fqn)) =
++            Self::aliased_method_implementation(&class, member_name, &loader)
++        {
++            return self.member_position_location(&fqn, "", "", &owner, &name, MemberKind::Method);
++        }
++        let declares = |candidate: &ClassInfo| {
++            candidate.methods.iter().any(|m| {
++                !m.is_virtual
++                    && m.name.eq_ignore_ascii_case(member_name)
++                    && m.name_offset == method.name_offset
++            })
++        };
++        let (owner, fqn) = if declares(&class) {
++            (Arc::unwrap_or_clone(class.clone()), class.fqn().to_string())
++        } else {
++            let (fqn, owner) = crate::inheritance::find_declaring_member_ancestor(
++                &class,
++                Some(member_name),
++                &loader,
++                &declares,
++            )?;
++            (Arc::unwrap_or_clone(owner), fqn.to_string())
++        };
++        self.member_position_location(&fqn, "", "", &owner, member_name, MemberKind::Method)
+     }
+ 
+     /// Resolve a member access to all valid declarations using pre-extracted context.
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -89,6 +89,7 @@
+ pub mod workbench_builtins;
+ pub mod workbench_optimize_imports;
+ pub mod workbench_rename;
++pub mod workbench_route_handler;
+ pub mod workbench_routes;
+ pub mod workbench_views;
+ 
+--- a/src/main.rs
++++ b/src/main.rs
+@@ -575,6 +575,10 @@
+                     )
+                     .custom_method("phpWorkbench/routes", ProjectRouter::workbench_routes)
+                     .custom_method(
++                        phpantom_lsp::workbench_route_handler::METHOD,
++                        ProjectRouter::workbench_route_handler,
++                    )
++                    .custom_method(
+                         phpantom_lsp::workbench_optimize_imports::METHOD,
+                         ProjectRouter::workbench_optimize_imports,
+                     )
+@@ -623,6 +627,10 @@
+                     )
+                     .custom_method("phpWorkbench/routes", ProjectRouter::workbench_routes)
+                     .custom_method(
++                        phpantom_lsp::workbench_route_handler::METHOD,
++                        ProjectRouter::workbench_route_handler,
++                    )
++                    .custom_method(
+                         phpantom_lsp::workbench_optimize_imports::METHOD,
+                         ProjectRouter::workbench_optimize_imports,
+                     )
+--- a/src/symbol_map/extraction/laravel_route_context.rs
++++ b/src/symbol_map/extraction/laravel_route_context.rs
+@@ -523,6 +523,7 @@
+         }
+         if let Some((action, owner)) = invokable.zip(invokable_target) {
+             out.3.push(crate::symbol_map::LaravelInvokableAction {
++                incomplete: owner.incomplete,
+                 start: action.start,
+                 end: action.end,
+                 target: owner
+--- a/src/symbol_map/mod.rs
++++ b/src/symbol_map/mod.rs
+@@ -1248,6 +1248,7 @@
+ /// A framework handler association, independent of the PHP class-name span.
+ #[derive(Debug, Clone)]
+ pub(crate) struct LaravelInvokableAction {
++    pub incomplete: bool,
+     pub start: u32,
+     pub end: u32,
+     pub target: Option<Atom>,
+--- /dev/null
++++ b/src/workbench_route_handler.rs
+@@ -0,0 +1,156 @@
++//! Version-bound navigation to an invokable Laravel route handler.
++use crate::{Backend, project_router::ProjectRouter, workbench_rename::ExpectedSource};
++use serde::{Deserialize, Serialize};
++use tower_lsp::{
++    jsonrpc::{Error, ErrorCode, Result},
++    lsp_types::{Location, Position},
++};
++
++/// Separate handler navigation leaves ordinary PHP class definitions unchanged.
++pub const METHOD: &str = "phpWorkbench/routeHandler";
++/// Advertised only by servers implementing the checked source contract.
++pub const CAPABILITY: &str = "phpWorkbenchRouteHandler";
++
++/// An open source snapshot and a UTF-16 caret position within it.
++#[derive(Clone, Debug, Deserialize, Serialize)]
++#[serde(rename_all = "camelCase")]
++pub struct RouteHandlerParams {
++    /// Exact editor-owned source; aliases must use the preferred authority.
++    pub expected_source: ExpectedSource,
++    /// Caret within or immediately after the controller token or literal.
++    pub position: Position,
++}
++/// Unresolved runtime associations retain their incomplete provenance.
++#[derive(Clone, Debug, Serialize)]
++pub struct RouteHandlerReply {
++    /// Source verified before and after semantic lookup.
++    pub source: ExpectedSource,
++    /// Real __invoke declarations, including inherited or trait implementations.
++    pub locations: Vec<Location>,
++    /// A runtime association could not be fully established statically.
++    pub incomplete: bool,
++}
++fn changed() -> Error {
++    Error {
++        code: ErrorCode::ServerError(-32801),
++        message: "Route handler source changed or is not open".into(),
++        data: None,
++    }
++}
++impl RouteHandlerParams {
++    fn validate(&self) -> Result<()> {
++        let source = &self.expected_source;
++        if source.uri.as_str().len() > 1024 * 1024
++            || source.uri.scheme() != "file"
++            || source.uri.query().is_some()
++            || source.uri.fragment().is_some()
++            || !source.uri.to_file_path().is_ok_and(|p| p.is_absolute())
++        {
++            return Err(Error::invalid_params(
++                "Expected an absolute local source URI",
++            ));
++        }
++        if source.sha256_utf8.len() != 64
++            || !source.sha256_utf8.bytes().all(|b| b.is_ascii_hexdigit())
++        {
++            return Err(Error::invalid_params(
++                "sha256Utf8 must contain exactly 64 hexadecimal digits",
++            ));
++        }
++        Ok(())
++    }
++}
++impl ProjectRouter {
++    /// Select the consuming Composer graph and retain normal cancellation routing.
++    pub async fn workbench_route_handler(
++        &self,
++        params: RouteHandlerParams,
++    ) -> Result<RouteHandlerReply> {
++        params.validate()?;
++        let _request = self.request_guard().await;
++        let project = self.project_for(&params.expected_source.uri).await?;
++        project.backend.workbench_route_handler(params).await
++    }
++}
++impl Backend {
++    /// Read existing static dispatch associations under the current semantic gate.
++    pub async fn workbench_route_handler(
++        &self,
++        params: RouteHandlerParams,
++    ) -> Result<RouteHandlerReply> {
++        params.validate()?;
++        let backend = self.clone_for_blocking();
++        crate::server::run_blocking_cancel_safe("route_handler", move || {
++            crate::workbench_rename::authority_path(&params.expected_source.uri)
++                .map_err(|_| changed())?;
++            backend.with_prepared_current_semantics(|| {
++                let expected = std::slice::from_ref(&params.expected_source);
++                backend
++                    .verify_rename_sources(expected)
++                    .map_err(|_| changed())?;
++                let uri = params.expected_source.uri.as_str();
++                let content = backend
++                    .open_files
++                    .read()
++                    .get(uri)
++                    .cloned()
++                    .ok_or_else(changed)?;
++                let offset =
++                    crate::text_position::position_to_byte_offset(&content, params.position);
++                if crate::text_position::offset_to_position(&content, offset) != params.position {
++                    return Err(Error::invalid_params(
++                        "Expected an exact UTF-16 source position",
++                    ));
++                }
++                let mut reply = RouteHandlerReply {
++                    source: params.expected_source.clone(),
++                    locations: Vec::new(),
++                    incomplete: false,
++                };
++                if !backend.resolved_class_cache.read().is_laravel() || backend.is_blade_file(uri) {
++                    return Ok(reply);
++                }
++                let map = backend.symbol_map_for(uri).ok_or_else(changed)?;
++                if !map.matches_source_fingerprint(&content) {
++                    return Err(changed());
++                }
++                for action in map.laravel_invokable_actions.iter().filter(|action| {
++                    action.start as usize <= offset && offset <= (action.end as usize)
++                }) {
++                    reply.incomplete |= action.incomplete;
++                    let location = action.target.and_then(|target| {
++                        backend.real_method_declaration_location(&target, "__invoke")
++                    });
++                    if let Some(location) = location {
++                        reply.locations.push(location);
++                    } else {
++                        reply.incomplete = true;
++                    }
++                }
++                reply.locations.sort_by(|a, b| {
++                    (
++                        a.uri.as_str(),
++                        a.range.start.line,
++                        a.range.start.character,
++                        a.range.end.line,
++                        a.range.end.character,
++                    )
++                        .cmp(&(
++                            b.uri.as_str(),
++                            b.range.start.line,
++                            b.range.start.character,
++                            b.range.end.line,
++                            b.range.end.character,
++                        ))
++                });
++                reply.locations.dedup();
++                backend
++                    .verify_rename_sources(expected)
++                    .map_err(|_| changed())?;
++                Ok(reply)
++            })
++        })
++        .await
++        .ok_or_else(Error::internal_error)?
++    }
++}
+--- a/tests/integration/laravel_route_controller.rs
++++ b/tests/integration/laravel_route_controller.rs
+@@ -3576,3 +3576,271 @@
+         text.matches("function __invoke").count()
+     );
+ }
++
++fn handler_query(
++    uri: &Url,
++    text: &str,
++    version: i32,
++    needle: &str,
++) -> phpantom_lsp::workbench_route_handler::RouteHandlerParams {
++    use sha2::{Digest, Sha256};
++    phpantom_lsp::workbench_route_handler::RouteHandlerParams {
++        expected_source: phpantom_lsp::workbench_rename::ExpectedSource {
++            uri: uri.clone(),
++            version,
++            sha256_utf8: format!("{:x}", Sha256::digest(text.as_bytes())),
++        },
++        position: crate::common::position_after(text, needle),
++    }
++}
++async fn handler_workspace(text: &str) -> (phpantom_lsp::Backend, tempfile::TempDir, Url) {
++    crate::common::create_initialized_psr4_workspace(
++        crate::common::LARAVEL_SRC_COMPOSER,
++        &[("src/Routes.php", text)],
++        "src/Routes.php",
++    )
++    .await
++}
++
++#[tokio::test]
++async fn route_handler_query_resolves_implicit_owners_without_replacing_php_navigation() {
++    let text = implicit_handler_fixture();
++    let (backend, _dir, uri) = handler_workspace(text).await;
++    let before = goto_def(
++        &backend,
++        &uri,
++        crate::common::position_after(text, "'/constant',In").line,
++        crate::common::position_after(text, "'/constant',In").character,
++    )
++    .await;
++    for needle in [
++        "'/😀/literal','App",
++        "'/constant',In",
++        "'/constant',InvoiceAlias",
++        "'/namespace','In",
++        "'/group-constant',In",
++        "Routes::match(action:In",
++        "'/paren',(In",
++    ] {
++        let params = handler_query(&uri, text, 1, needle);
++        let reply = backend
++            .workbench_route_handler(params.clone())
++            .await
++            .unwrap();
++        assert!(!reply.incomplete, "{needle}");
++        assert_eq!(reply.source.uri, uri);
++        assert_eq!(reply.source.version, 1);
++        assert_eq!(reply.source.sha256_utf8, params.expected_source.sha256_utf8);
++        assert_eq!(reply.locations.len(), 1, "{needle}: {reply:?}");
++        assert_eq!(reply.locations[0].uri, uri);
++        assert_eq!(
++            reply.locations[0].range.start,
++            crate::common::position_after(text, "class BaseInvoice {\n public function ")
++        );
++    }
++    let after = goto_def(
++        &backend,
++        &uri,
++        crate::common::position_after(text, "'/constant',In").line,
++        crate::common::position_after(text, "'/constant',In").character,
++    )
++    .await;
++    assert_eq!(before, after, "ordinary PHP navigation stays unchanged");
++    for needle in ["$metadata=In", "'/group-method','In", "'/explicit','App"] {
++        let reply = backend
++            .workbench_route_handler(handler_query(&uri, text, 1, needle))
++            .await
++            .unwrap();
++        assert!(reply.locations.is_empty(), "{needle}: {reply:?}");
++        assert!(!reply.incomplete);
++    }
++}
++
++#[tokio::test]
++async fn route_handler_query_selects_real_methods_and_trait_aliases_not_properties_or_docblocks() {
++    let text = r#"<?php
++namespace App;
++use Illuminate\Support\Facades\Route;
++class ParentHandler {public function __invoke():void {}}
++class ChildHandler extends ParentHandler {public $__invoke;}
++trait Handles {public function run():void {}}
++class TraitHandler {use Handles {run as __invoke;}}
++/** @method void __invoke() */
++class VirtualHandler {}
++class PropertyHandler {public $__invoke;}
++Route::get('/child', ChildHandler::class);
++Route::get('/trait', TraitHandler::class);
++Route::get('/virtual', VirtualHandler::class);
++Route::get('/property', PropertyHandler::class);
++"#;
++    let (backend, _dir, uri) = handler_workspace(text).await;
++    for (needle, declaration) in [
++        ("'/child', Ch", "class ParentHandler {public function "),
++        ("'/trait', Tr", "trait Handles {public function "),
++    ] {
++        let reply = backend
++            .workbench_route_handler(handler_query(&uri, text, 1, needle))
++            .await
++            .unwrap();
++        assert_eq!(reply.locations.len(), 1, "{reply:?}");
++        assert_eq!(
++            reply.locations[0].range.start,
++            crate::common::position_after(text, declaration)
++        );
++        assert!(!reply.incomplete);
++    }
++    for needle in ["'/virtual', Vi", "'/property', Pr"] {
++        let reply = backend
++            .workbench_route_handler(handler_query(&uri, text, 1, needle))
++            .await
++            .unwrap();
++        assert!(reply.locations.is_empty());
++        assert!(
++            reply.incomplete,
++            "an indexed association without a real method remains incomplete"
++        );
++    }
++}
++
++#[tokio::test]
++async fn route_handler_query_keeps_uncertain_namespace_information() {
++    let text=implicit_handler_fixture().replace("Routes::get('/other',", "Routes::namespace($unknown)->group(fn()=>Routes::get('/unknown',InvoiceAlias::class));\nRoutes::get('/other',");
++    let text=text.replace("Routes::get('/other',", "Routes::controller(\\App\\Group::class)->namespace('Other')->group(fn()=>Routes::get('/partial',InvoiceAlias::class));\nRoutes::get('/other',");
++    let (backend, _dir, uri) = handler_workspace(&text).await;
++    let unknown = backend
++        .workbench_route_handler(handler_query(&uri, &text, 1, "'/unknown',In"))
++        .await
++        .unwrap();
++    assert!(unknown.locations.is_empty());
++    assert!(unknown.incomplete, "unknown runtime namespace");
++    let prefixed = backend
++        .workbench_route_handler(handler_query(&uri, &text, 1, "'/prefixed',In"))
++        .await
++        .unwrap();
++    assert_eq!(prefixed.locations.len(), 1);
++    assert_eq!(
++        prefixed.locations[0].range.start,
++        crate::common::position_after(
++            &text,
++            "namespace Other\\App {\nclass Invoice {public function "
++        )
++    );
++    assert!(
++        !prefixed.incomplete,
++        "a fully resolved namespace prefix is complete for navigation"
++    );
++    let partial = backend
++        .workbench_route_handler(handler_query(&uri, &text, 1, "'/partial',In"))
++        .await
++        .unwrap();
++    assert_eq!(partial.locations.len(), 1);
++    assert_eq!(
++        partial.locations[0].range.start,
++        crate::common::position_after(
++            &text,
++            "namespace Other\\App {\nclass Invoice {public function "
++        )
++    );
++    assert!(
++        partial.incomplete,
++        "retain the extractor's conservative group-controller provenance"
++    );
++}
++
++#[tokio::test]
++async fn route_handler_query_follows_unsaved_rebinding_and_rejects_old_versions_or_hashes() {
++    let text = implicit_handler_fixture();
++    let (backend, dir, uri) = handler_workspace(text).await;
++    let old = handler_query(&uri, text, 1, "'/constant',In");
++    let original = std::fs::read(dir.path().join("src/Routes.php")).unwrap();
++    let changed = text.replace(
++        "'/constant',InvoiceAlias::class",
++        "'/constant',\\App\\Other::class",
++    );
++    backend
++        .did_change(DidChangeTextDocumentParams {
++            text_document: VersionedTextDocumentIdentifier {
++                uri: uri.clone(),
++                version: 2,
++            },
++            content_changes: vec![TextDocumentContentChangeEvent {
++                range: None,
++                range_length: None,
++                text: changed.clone(),
++            }],
++        })
++        .await;
++    assert_eq!(
++        backend.workbench_route_handler(old).await.unwrap_err().code,
++        tower_lsp::jsonrpc::ErrorCode::ServerError(-32801)
++    );
++    let mut mismatch = handler_query(&uri, &changed, 2, "'/constant',\\App");
++    mismatch.expected_source.sha256_utf8 = "0".repeat(64);
++    assert_eq!(
++        backend
++            .workbench_route_handler(mismatch)
++            .await
++            .unwrap_err()
++            .code,
++        tower_lsp::jsonrpc::ErrorCode::ServerError(-32801)
++    );
++    let reply = backend
++        .workbench_route_handler(handler_query(&uri, &changed, 2, "'/constant',\\App"))
++        .await
++        .unwrap();
++    assert_eq!(reply.locations.len(), 1);
++    assert_eq!(
++        reply.locations[0].range.start,
++        crate::common::position_after(&changed, "class Other {\n public function ")
++    );
++    assert_eq!(
++        std::fs::read(dir.path().join("src/Routes.php")).unwrap(),
++        original
++    );
++}
++
++#[tokio::test]
++async fn route_handler_query_rejects_invalid_utf16_coordinates_and_source_shapes() {
++    let text = implicit_handler_fixture();
++    let (backend, _dir, uri) = handler_workspace(text).await;
++    let base = handler_query(&uri, text, 1, "'/constant',In");
++    let mut bad = base.clone();
++    bad.position = Position::new(99999, 99999);
++    assert!(backend.workbench_route_handler(bad).await.is_err());
++    let mut half = base.clone();
++    half.position = crate::common::position_after(text, "Routes::get('/");
++    half.position.character += 1;
++    assert!(
++        backend.workbench_route_handler(half).await.is_err(),
++        "half of the leading emoji is not a UTF16 boundary"
++    );
++    let mut bad = base.clone();
++    bad.expected_source.sha256_utf8 = "short".into();
++    assert_eq!(
++        backend.workbench_route_handler(bad).await.unwrap_err().code,
++        tower_lsp::jsonrpc::ErrorCode::InvalidParams
++    );
++    let mut bad = base;
++    bad.expected_source.uri = Url::parse("phpantom-stub://Forged").unwrap();
++    assert_eq!(
++        backend.workbench_route_handler(bad).await.unwrap_err().code,
++        tower_lsp::jsonrpc::ErrorCode::InvalidParams
++    );
++}
++
++#[tokio::test]
++async fn route_handler_query_is_not_enabled_for_a_non_laravel_project() {
++    let text = implicit_handler_fixture();
++    let (backend, _dir, uri) = crate::common::create_initialized_psr4_workspace(
++        r#"{"autoload":{"psr-4":{"App\\":"src/"}}}"#,
++        &[("src/Routes.php", text)],
++        "src/Routes.php",
++    )
++    .await;
++    let reply = backend
++        .workbench_route_handler(handler_query(&uri, text, 1, "'/constant',In"))
++        .await
++        .unwrap();
++    assert!(reply.locations.is_empty());
++    assert!(!reply.incomplete);
++}

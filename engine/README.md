@@ -60,7 +60,7 @@ Unsaved action rebinding, case-variant zero-hit caches and checked __invoke rena
 refusal are covered through the real client. Namespace-dependent class constants
 refuse partial class edits; unresolved forms and completeness limitations remain
 in the ledger. Optional memory-audit compilation is restored.
-OpenStorm0.1.92 targets this engine for local development packaging. Built
+OpenStorm0.1.93 targets this engine for local development packaging. Built
 artifact/signature and native acceptance evidence are tracked separately in
 `docs/OPENSTORM.md`.
 Full pinned source

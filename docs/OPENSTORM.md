@@ -48,6 +48,45 @@ At that merge checkpoint, source-only slice 101 remained unfinished;
 no candidate 153 adoption or new package was claimed. Area statuses remain 67
 partial/2 user-deferred.
 
+Packaging slice 108 (2026-11-16, verified local development package): App0.1.93
+contains Laravel chooser freshness/synchronization slices104–105, verified through
+full-workbench browser flows in107 and repaired code-insight checks in106.
+Runtime sources/engine bytes are unchanged from the current parent c5609cbc;
+only workspace/application version metadata advances. Cargo.lock changes exactly
+44 workspace versions; external async-trait0.1.92 remains pinned. An initial
+version-count assertion also counted that dependency and was replaced with an
+exact package-entry comparison before building. Plugin API release snapshots
+remain unchanged.
+
+Reuse slice105's 12,469 frontend tests/6 skipped and full frontend gates, slice107's
+18 browser checks, and slice102's 4,857 Rust tests/174 ignored plus58 actual PHP
+host/client checks. Rust/IPC/language sources are unchanged since102 and frontend
+runtime sources since105. This package reruns the production frontend build and
+Safari compatibility checks, Rust formatting and engine checksum verification.
+Do not treat reused source/browser checks as new native runtime acceptance.
+
+The arm64 development bundle has identifier cz.thinky.openstorm, version0.1.93,
+minimum macOS13.0 and a verified ad-hoc deep/strict signature. Bundled PHPantom
+reports 0.11.1-openstorm.153 with unchanged provenance SHA256
+303b4c7abfe275ed9fa89d13b18a1050b3747c0d02fa571509bf61c627f0eeca.
+Main executable SHA256:
+2a057e50c1b60e6f34a11c9ecb70327ccd653fd537d4116e5d0c55e29e84b3ea.
+The exact source receipt includes the validated chooser source; only this progress
+record and the feature ledger may differ after packaging. The development linker
+again warns that __eh_frame exceeds compact-unwind offset limits; exception
+performance remains unmeasured. This is not an optimized production release.
+
+Latest local app: artifacts/batches/0.1.93/OpenStorm.app. App0.1.92 was removed only
+after the new signature/receipt succeeded. Removed the duplicate app and10,076
+compiler files/6.9GiB; both owned compiler roots are absent. Receipts, sources,
+engine provenance/licenses, Workbench and earlier evaluation artifacts remain.
+Evidence: artifacts/checks/slice108-{preflight,package-pipeline,packaged-check,
+receipt}.json and artifacts/batches/0.1.93/{build-receipt,retention}.json.
+Native UI launch/install/recovery checks remain explicitly user-skipped. No
+installation, public publishing, notarization, profile migration, plugin API
+release-snapshot promotion or updater activation. All69 statuses remain67 partial /
+2 user-deferred; packaging closes the outstanding delivery of slices104–105.
+
 Laravel slice 107 (2026-11-16, verified browser workbench workflows): add five
 full-workbench checks for Routes/Views navigation through Find Action (CmdShiftA),
 filtering, target selection and exact file/line/UTF16-column opening. Route package

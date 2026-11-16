@@ -1,0 +1,1252 @@
+--- a/docs/CHANGELOG.md
++++ b/docs/CHANGELOG.md
+@@ -1,3 +1,7 @@
++## OpenStorm .157 typed controller middleware guards
++
++Controller `$this->middleware('auth:guard')` strings share config-backed completion, hover, definitions, diagnostics and references only after the shared type engine confirms the receiver. Aliased/inherited/anonymous controllers and explicit closure-this bindings retain their identities; foreign receivers and unavailable static `$this` are excluded. Unsaved parent changes invalidate confirmed spans. Middleware completion replaces the full current guard segment in UTF-16 coordinates, preserves following guards and quotes, escapes inserted keys, and refuses encoded/interpolated or unbounded suffixes.
++
+ ## OpenStorm .156 controller URL method completion
+ 
+ Rooted controller URL literals complete public methods using their published runtime identity. Aliases, named argument roles and inherited methods share navigation's static helper guards; unresolved roots retain incomplete results. Completion replaces the entire method suffix without imports or call snippets, including Unicode PHP method names. Unsaved parent and helper changes refresh results without caller edits.
+--- a/docs/todo/laravel.md
++++ b/docs/todo/laravel.md
+@@ -635,6 +635,15 @@
+ 
+ #### L59. Typed controller middleware names
+ 
++Implemented in OpenStorm .157 for direct instance `$this->middleware()` auth-guard
++strings: shared receiver typing, inherited/aliased/anonymous classes, static scope
++and explicit closure-this contracts. Completion, navigation, hover, diagnostics,
++references and unsaved-parent refresh share the config resource identity. Scalar,
++named and array values are covered; embedded guard edits keep comma boundaries,
++quotes and UTF-16 coordinates. Unsupported encoded/interpolated suffixes and tails
++over the scan bound are refused. Dynamic middleware aliases and native/client
++release acceptance remain outside this engine-source checkpoint.
++
+ **Impact: Low-Medium · Complexity: Medium**
+ 
+ `$this->middleware('auth:admin')` names middleware only when `$this` is a
+--- a/src/blade/call_site_inference.rs
++++ b/src/blade/call_site_inference.rs
+@@ -1321,10 +1321,9 @@
+             // receiver is resolved) would otherwise pay for all of them
+             // here, in the refresh pass, rather than in the diagnostic pass
+             // that has a warm scope cache.
+-            let has_candidate = symbol_map
+-                .view_receiver_sites
+-                .iter()
+-                .any(|site| view_names.contains(&site.key));
++            let has_candidate = symbol_map.view_receiver_sites.iter().any(|site| {
++                site.kind() == LaravelStringKind::View && view_names.contains(&site.key)
++            });
+             let extra = if has_candidate {
+                 self.typed_receiver_view_spans_for(file_uri, &symbol_map)
+             } else {
+--- a/src/blade/typed_receiver.rs
++++ b/src/blade/typed_receiver.rs
+@@ -19,8 +19,12 @@
+ //! The answer is a set of extra view spans, indistinguishable from the ones
+ //! the symbol map records, that every consumer of view keys reads alongside
+ //! the map's own.
+-
+-use std::collections::HashMap;
++//!
++//! The same cache carries controller middleware guard sites. Their config
++//! resource kind keeps view consumers separate while navigation, diagnostics
++//! and references share the confirmed receiver and dependency invalidation.
++
++use std::collections::BTreeMap;
+ use std::sync::Arc;
+ 
+ use mago_span::HasSpan;
+@@ -29,8 +33,8 @@
+ 
+ use crate::Backend;
+ use crate::parser::with_parsed_program;
+-use crate::symbol_map::{SymbolMap, SymbolSpan, ViewReceiverSite};
+-use crate::type_engine::resolver::{Loaders, VarResolutionCtx};
++use crate::symbol_map::{SymbolMap, SymbolSpan, ViewReceiverClass, ViewReceiverSite};
++use crate::type_engine::resolver::{CtxLoaders, Loaders, VarResolutionCtx, resolve_target_classes};
+ use crate::types::ClassInfo;
+ 
+ /// One file's confirmed extra view spans, and the source length they were
+@@ -42,6 +46,126 @@
+ pub(crate) type TypedReceiverSpans = (u32, Arc<Vec<SymbolSpan>>);
+ 
+ impl Backend {
++    /// Resolve `$this` exactly as member completion does, including static
++    /// scope, closure rebinding, trait bounds and namespace-local imports.
++    pub(crate) fn controller_middleware_this_at(
++        &self,
++        content: &str,
++        offset: u32,
++        file_ctx: &crate::types::FileContext,
++        map: &SymbolMap,
++    ) -> bool {
++        if !self.resolved_class_cache.read().is_laravel() {
++            return false;
++        }
++        // Confirm the actual indexed receiver, not a suffix of a larger
++        // expression such as `$wrapper->$this->middleware(...)`.
++        let direct_this = map.member_access_indices.iter().any(|(name, indices)| {
++            if !name.eq_ignore_ascii_case("middleware") {
++                return false;
++            }
++            let first = indices.partition_point(|index| map.spans[*index].start < offset + 5);
++            indices.get(first).is_some_and(|index| {
++                matches!(
++                    &map.spans[*index].kind,
++                    crate::symbol_map::SymbolKind::MemberAccess {
++                        subject_text: crate::symbol_map::SubjectText::Range { start, end },
++                        is_method_call: true,
++                        is_static: false,
++                        ..
++                    } if *start == offset && *end == offset + 5
++                )
++            })
++        });
++        if !direct_this {
++            return false;
++        }
++        // A nested instance method owns its `$this`, even when its class
++        // was constructed inside a static method or static closure.
++        let is_static_scope = map
++            .static_method_scopes
++            .iter()
++            .map(|&(start, end)| (start, end, true))
++            .chain(
++                map.instance_method_scopes
++                    .iter()
++                    .map(|&(start, end)| (start, end, false)),
++            )
++            .chain(
++                map.anonymous_callables
++                    .iter()
++                    .filter(|site| site.is_static)
++                    .map(|site| (site.body_start, site.body_end, true)),
++            )
++            .filter(|&(start, end, _)| start <= offset && offset < end)
++            .max_by_key(|&(start, _, _)| start)
++            .is_some_and(|(_, _, is_static)| is_static);
++        let method_start = map
++            .static_method_scopes
++            .iter()
++            .chain(map.instance_method_scopes.iter())
++            .filter(|&&(start, end)| start <= offset && offset < end)
++            .map(|&(start, _)| start)
++            .max()
++            .unwrap_or(0);
++        let anonymous = map
++            .anonymous_callables
++            .iter()
++            .filter(|site| {
++                method_start < site.body_start
++                    && site.body_start <= offset
++                    && offset < site.body_end
++            })
++            .max_by_key(|site| site.body_start);
++        if anonymous.is_some_and(|site| site.is_static) {
++            return false;
++        }
++        let class_loaders = self.class_loaders(file_ctx);
++        let class_loader = class_loaders.at(offset);
++        let function_loaders = self.function_loaders(file_ctx);
++        let function_loader = function_loaders.at(offset);
++        let macro_this = self.laravel_macro_this_resolver(class_loader);
++        let current_class = crate::class_lookup::find_class_at_offset(&file_ctx.classes, offset);
++        let context = self.resolution_ctx_at(
++            current_class,
++            &file_ctx.classes,
++            content,
++            offset,
++            CtxLoaders::new(class_loader, function_loader, &macro_this),
++        );
++        let types = if is_static_scope {
++            // An unbound closure in a static scope has no `$this`, but an
++            // explicit closure-this contract can give a non-static one a receiver.
++            if anonymous.is_none() {
++                return false;
++            }
++            crate::type_engine::variable::closure_resolution::find_closure_this_types(&context)
++                .unwrap_or_default()
++        } else {
++            resolve_target_classes("$this", crate::types::AccessKind::Arrow, &context)
++        };
++        !types.is_empty()
++            && types.iter().all(|ty| {
++                if let Some(class) = &ty.class_info
++                    && ty.type_string.is_named(class.fqn().as_str())
++                {
++                    // Anonymous classes are file-local identities, so retain
++                    // the resolved class instead of loading it again by name.
++                    crate::class_lookup::is_subtype_of(
++                        class,
++                        "Illuminate\\Routing\\Controller",
++                        class_loader,
++                    )
++                } else {
++                    crate::class_lookup::is_subtype_of_named(
++                        &ty.type_string,
++                        "Illuminate\\Routing\\Controller",
++                        class_loader,
++                    )
++                }
++            })
++    }
++
+     /// The view-name spans of `uri` whose render site is recognised by the
+     /// receiver's type rather than its spelling.
+     ///
+@@ -75,8 +199,7 @@
+             return empty_spans();
+         }
+ 
+-        let spans =
+-            Arc::new(self.confirm_view_receiver_sites(uri, &content, &map.view_receiver_sites));
++        let spans = Arc::new(self.confirm_view_receiver_sites(uri, &content, map));
+         self.typed_receiver_view_spans_cache
+             .write()
+             .insert(uri.to_string(), (map.source_len, Arc::clone(&spans)));
+@@ -107,15 +230,16 @@
+         &self,
+         uri: &str,
+         content: &str,
+-        sites: &[ViewReceiverSite],
++        map: &SymbolMap,
+     ) -> Vec<SymbolSpan> {
++        let sites = &map.view_receiver_sites;
+         // Confirmation can inspect a caller while another source owns the
+         // offset-only diagnostic snapshots. Resolve this file from its source.
+         let _foreign_scope = crate::type_engine::variable::forward_walk::suspend_diagnostic_scope();
+         let _resolver_guard = crate::type_engine::call_resolution::activate_type_engine_caches();
+         let _cache_guard =
+             crate::virtual_members::with_active_resolved_class_cache(&self.resolved_class_cache);
+-        let by_offset: HashMap<u32, &ViewReceiverSite> =
++        let by_offset: BTreeMap<u32, &ViewReceiverSite> =
+             sites.iter().map(|site| (site.start, site)).collect();
+ 
+         let file_ctx = self.file_context(uri);
+@@ -134,6 +258,16 @@
+             let mut confirmed = Vec::new();
+             for call in calls {
+                 let offset = call.receiver.span().start.offset;
++                if call
++                    .sites
++                    .iter()
++                    .all(|site| site.receiver == ViewReceiverClass::ControllerGuard)
++                {
++                    if self.controller_middleware_this_at(content, offset, &file_ctx, map) {
++                        confirmed.extend(call.sites.iter().map(|site| site.to_span()));
++                    }
++                    continue;
++                }
+                 let class_loader = class_loaders.at(offset);
+                 let function_loader = function_loaders.at(offset);
+                 let function_loader_cl = |name: &str, offset: u32| function_loader(name, offset);
+@@ -204,7 +338,7 @@
+ /// which is unique in the file, so a call owns exactly the candidates its
+ /// own argument list spells.
+ struct ReceiverCallWalker<'a, 'sites> {
+-    sites: &'a HashMap<u32, &'sites ViewReceiverSite>,
++    sites: &'a BTreeMap<u32, &'sites ViewReceiverSite>,
+ }
+ 
+ impl<'sites> ReceiverCallWalker<'_, 'sites> {
+@@ -213,21 +347,33 @@
+     fn matching_sites(&self, expr: &Expression<'_>, out: &mut Vec<&'sites ViewReceiverSite>) {
+         match expr {
+             Expression::Literal(Literal::String(s)) => {
+-                if let Some(site) = self.sites.get(&(s.span.start.offset + 1)) {
+-                    out.push(site);
++                // Middleware can embed several keys within one literal.
++                let start = s.span.start.offset + 1;
++                let end = s.span.end.offset.saturating_sub(1);
++                if start >= end {
++                    return;
+                 }
++                out.extend(
++                    self.sites
++                        .range(start..end)
++                        .filter_map(|(_, site)| (site.end <= end).then_some(*site)),
++                );
+             }
+             Expression::Array(array) => {
+                 for element in array.elements.iter() {
+-                    if let ArrayElement::Value(value) = element {
+-                        self.matching_sites(value.value, out);
++                    match element {
++                        ArrayElement::Value(value) => self.matching_sites(value.value, out),
++                        ArrayElement::KeyValue(value) => self.matching_sites(value.value, out),
++                        _ => {}
+                     }
+                 }
+             }
+             Expression::LegacyArray(array) => {
+                 for element in array.elements.iter() {
+-                    if let ArrayElement::Value(value) = element {
+-                        self.matching_sites(value.value, out);
++                    match element {
++                        ArrayElement::Value(value) => self.matching_sites(value.value, out),
++                        ArrayElement::KeyValue(value) => self.matching_sites(value.value, out),
++                        _ => {}
+                     }
+                 }
+             }
+--- a/src/completion/array_shape.rs
++++ b/src/completion/array_shape.rs
+@@ -826,7 +826,7 @@
+ ///
+ /// Escape literal key bytes for the PHP string delimiter being inserted.
+ /// Nonprintable controls are refused rather than inventing escape semantics.
+-fn escape_literal_key(key: &str, quote: char) -> Option<String> {
++pub(super) fn escape_literal_key(key: &str, quote: char) -> Option<String> {
+     let mut escaped = String::with_capacity(key.len());
+     for ch in key.chars() {
+         if ch.is_control() {
+--- a/src/completion/handler/mod.rs
++++ b/src/completion/handler/mod.rs
+@@ -374,8 +374,8 @@
+                         string_ctx,
+                         StringContext::InStringLiteral | StringContext::NotInString
+                     )
+-                    && let Some(response) =
+-                        self.try_laravel_string_key_completion_in_file(&content, position, &ctx)
++                    && let Some(response) = self
++                        .try_laravel_string_key_completion_in_file(&uri, &content, position, &ctx)
+                 {
+                     return Ok(Some(response));
+                 }
+--- a/src/completion/laravel_string_keys/context.rs
++++ b/src/completion/laravel_string_keys/context.rs
+@@ -12,11 +12,14 @@
+ use crate::text_position::position_to_offset;
+ 
+ pub(super) struct LaravelCallRoles<'a> {
++    pub(super) controller_this: &'a dyn Fn(u32) -> bool,
+     pub(super) route: &'a crate::completion::laravel_route_calls::RouteCallRole<'a>,
+     pub(super) key: &'a crate::completion::laravel_key_calls::KeyCallRole<'a>,
+ }
+ 
+ pub(super) struct LaravelStringKeyContext<'a> {
++    /// A middleware key ends before its comma or closing PHP quote.
++    pub(super) replacement: Option<(usize, char)>,
+     pub(super) kind: LaravelStringKind,
+     pub(super) prefix: &'a str,
+     /// Byte offset of the string content start (right after the opening quote).
+@@ -917,6 +920,7 @@
+     let quote_pos = quote_pos?;
+     let mut prefix = &content[quote_pos + 1..cursor_offset];
+     let mut content_start_offset = quote_pos + 1;
++    let mut middleware = false;
+ 
+     // ── Locate the call argument that owns this string ─────────────
+     let before_quote = content[..quote_pos].trim_end();
+@@ -1061,6 +1065,7 @@
+         {
+             let (middleware_kind, middleware_prefix, relative_start) =
+                 middleware_completion_context(prefix)?;
++            middleware = true;
+             prefix = middleware_prefix;
+             content_start_offset += relative_start;
+             Some(middleware_kind)
+@@ -1165,14 +1170,20 @@
+                 indexed_class_exists,
+             );
+ 
++        let controller_this = is_middleware
++            && receiver_is_this
++            && call_roles.is_some_and(|roles| {
++                (roles.controller_this)((receiver.len() - "$this".len()) as u32)
++            });
+         if is_middleware
+-            && chain_starts_at_route
++            && (chain_starts_at_route || controller_this)
+             && argument
+                 .named_argument
+                 .is_none_or(|name| name == "middleware")
+         {
+             let (middleware_kind, middleware_prefix, relative_start) =
+                 middleware_completion_context(prefix)?;
++            middleware = true;
+             prefix = middleware_prefix;
+             content_start_offset += relative_start;
+             Some(middleware_kind)
+@@ -1271,10 +1282,34 @@
+         _ => None,
+     };
+ 
++    let replacement = if middleware {
++        let quote = bytes[quote_pos] as char;
++        Some((middleware_key_end(content, cursor_offset, quote)?, quote))
++    } else {
++        None
++    };
+     Some(LaravelStringKeyContext {
++        replacement,
+         kind,
+         prefix,
+         content_start_offset,
+         config_sub_prefix,
+     })
+ }
++
++/// Do not consume PHP syntax, encoded escapes, interpolation or an unbounded tail.
++fn middleware_key_end(content: &str, cursor: usize, quote: char) -> Option<usize> {
++    let tail = content.get(cursor..)?;
++    for (count, (index, ch)) in tail.char_indices().enumerate() {
++        if count >= 4096 {
++            return None;
++        }
++        if ch == quote || ch == ',' {
++            return Some(cursor + index);
++        }
++        if !(ch.is_alphanumeric() || matches!(ch, '_' | '-' | '.' | ':' | ' ')) {
++            return None;
++        }
++    }
++    Some(content.len())
++}
+--- a/src/completion/laravel_string_keys/mod.rs
++++ b/src/completion/laravel_string_keys/mod.rs
+@@ -141,6 +141,7 @@
+     /// distinguish imported facade aliases from namespace-local homonyms.
+     pub(crate) fn try_laravel_string_key_completion_in_file(
+         &self,
++        uri: &str,
+         content: &str,
+         position: Position,
+         file_ctx: &FileContext,
+@@ -149,7 +150,15 @@
+         let indexed_class_exists = |name: &str| self.has_indexed_class(name);
+         let route_role = |callable: &str| self.laravel_route_call_role(content, callable, file_ctx);
+         let key_role = |callable: &str| self.laravel_key_call_role(content, callable, file_ctx);
++        let map = self.symbol_maps.read().get(uri).cloned();
++        let controller_this = |offset| {
++            map.as_ref().is_some_and(|map| {
++                map.matches_source_fingerprint(content)
++                    && self.controller_middleware_this_at(content, offset, file_ctx, map)
++            })
++        };
+         let call_roles = LaravelCallRoles {
++            controller_this: &controller_this,
+             route: &route_role,
+             key: &key_role,
+         };
+@@ -201,6 +210,7 @@
+             content,
+             ctx.content_start_offset,
+             position,
++            ctx.replacement,
+         )
+     }
+ 
+@@ -237,6 +247,7 @@
+             content,
+             sc.string_content_start,
+             position,
++            None,
+         )
+     }
+ }
+@@ -253,28 +264,41 @@
+     content: &str,
+     content_start: usize,
+     position: Position,
++    replacement: Option<(usize, char)>,
+ ) -> Option<CompletionResponse> {
+     if names.is_empty() {
+         return None;
+     }
+     let edit_range = Range {
+         start: crate::text_position::offset_to_position(content, content_start),
+-        end: position,
++        end: replacement.map_or(position, |(end, _)| {
++            crate::text_position::offset_to_position(content, end)
++        }),
+     };
+     let items: Vec<CompletionItem> = names
+         .into_iter()
+         .enumerate()
+-        .map(|(i, name)| CompletionItem {
+-            label: name.clone(),
+-            kind: Some(kind),
+-            sort_text: Some(format!("{:05}", i)),
+-            filter_text: Some(name.clone()),
+-            text_edit: Some(CompletionTextEdit::Edit(TextEdit {
+-                range: edit_range,
+-                new_text: name,
+-            })),
+-            ..Default::default()
++        .filter_map(|(i, name)| {
++            let new_text = if let Some((_, quote)) = replacement {
++                if name.contains(',') {
++                    return None;
++                }
++                crate::completion::array_shape::escape_literal_key(&name, quote)?
++            } else {
++                name.clone()
++            };
++            Some(CompletionItem {
++                label: name.clone(),
++                kind: Some(kind),
++                sort_text: Some(format!("{:05}", i)),
++                filter_text: Some(name.clone()),
++                text_edit: Some(CompletionTextEdit::Edit(TextEdit {
++                    range: edit_range,
++                    new_text,
++                })),
++                ..Default::default()
++            })
+         })
+         .collect();
+-    Some(CompletionResponse::Array(items))
++    (!items.is_empty()).then_some(CompletionResponse::Array(items))
+ }
+--- a/src/reference_index.rs
++++ b/src/reference_index.rs
+@@ -745,13 +745,7 @@
+         // narrows a workspace scan to the files that *might* hold a key,
+         // and every consumer of it re-checks what it found.
+         for site in &symbol_map.view_receiver_sites {
+-            entries.push((
+-                ReferenceIndexKey::LaravelString {
+-                    kind: crate::symbol_map::LaravelStringKind::View,
+-                    key: site.key.clone(),
+-                },
+-                false,
+-            ));
++            entries.push((laravel_string_reference_key(site.kind(), &site.key), false));
+         }
+ 
+         if let Some(classes) = self.symbols.uri_classes_index.read().get(uri).cloned() {
+--- a/src/symbol_map/extraction/expressions/calls.rs
++++ b/src/symbol_map/extraction/expressions/calls.rs
+@@ -1313,6 +1313,9 @@
+     if is_middleware && (receiver_is_this || route_receiver) {
+         let span_start = ctx.spans.len();
+         try_emit_can_middleware_spans(argument_list, route_receiver, ctx.content, &mut ctx.spans);
++        if receiver_is_this && !route_receiver {
++            record_controller_guard_sites(argument_list, ctx.content, &mut ctx.view_receiver_sites);
++        }
+         if let Some(dependency) = route_dependency {
+             ctx.defer_laravel_spans_since(span_start, dependency);
+         }
+--- a/src/symbol_map/extraction/expressions/closures.rs
++++ b/src/symbol_map/extraction/expressions/closures.rs
+@@ -11,6 +11,7 @@
+     let expression = closure.span();
+     ctx.anonymous_callables.push(AnonymousCallable {
+         kind: AnonymousCallableKind::Closure,
++        is_static: closure.r#static.is_some(),
+         expression_start: expression.start.offset,
+         expression_end: expression.end.offset,
+         keyword_start: closure.function.span.start.offset,
+@@ -108,6 +109,7 @@
+     ctx.scopes.push((arrow_scope_start, arrow_scope_end));
+     ctx.anonymous_callables.push(AnonymousCallable {
+         kind: AnonymousCallableKind::Arrow,
++        is_static: arrow.r#static.is_some(),
+         expression_start: arrow_scope_start,
+         expression_end: arrow_scope_end,
+         keyword_start: arrow.r#fn.span.start.offset,
+--- a/src/symbol_map/extraction/laravel.rs
++++ b/src/symbol_map/extraction/laravel.rs
+@@ -1470,6 +1470,36 @@
+             is_optional: false,
+         },
+     });
++}
++
++/// Auth guards on `$this` need the shared receiver type before publication.
++pub(super) fn record_controller_guard_sites(
++    argument_list: &ArgumentList<'_>,
++    content: &str,
++    sites: &mut Vec<ViewReceiverSite>,
++) {
++    let mut spans = Vec::new();
++    try_emit_can_middleware_spans(argument_list, true, content, &mut spans);
++    for span in spans {
++        if let SymbolKind::LaravelStringKey {
++            kind:
++                crate::symbol_map::LaravelStringKind::ConfigResource(
++                    crate::symbol_map::LaravelConfigResource::AuthGuard,
++                ),
++            key,
++            is_optional,
++            ..
++        } = span.kind
++        {
++            sites.push(ViewReceiverSite {
++                start: span.start,
++                end: span.end,
++                key,
++                is_optional,
++                receiver: ViewReceiverClass::ControllerGuard,
++            });
++        }
++    }
+ }
+ 
+ /// If the first argument of `argument_list` is a plain, non-empty string
+--- a/src/symbol_map/mod.rs
++++ b/src/symbol_map/mod.rs
+@@ -796,8 +796,7 @@
+ 
+ // ─── Render sites behind a typed receiver ───────────────────────────────────
+ 
+-/// The class a receiver has to be an instance of for the call it receives
+-/// to name a template.
++/// The receiver type that gives a candidate Laravel string its meaning.
+ #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+ pub(crate) enum ViewReceiverClass {
+     /// Laravel's view factory, whose `make()` / `first()` / `exists()` /
+@@ -810,6 +809,8 @@
+     /// notification's `toMail()` returns.  The two share no base class, but
+     /// `view()` and `markdown()` mean the same thing on both.
+     MailTemplate,
++    /// An instance controller middleware call naming authentication guards.
++    ControllerGuard,
+ }
+ 
+ impl ViewReceiverClass {
+@@ -821,6 +822,7 @@
+             // contract, so the contract covers both spellings.
+             Self::Factory => &["Illuminate\\Contracts\\View\\Factory"],
+             Self::Mailable => &["Illuminate\\Mail\\Mailable"],
++            Self::ControllerGuard => &["Illuminate\\Routing\\Controller"],
+             Self::MailTemplate => &[
+                 "Illuminate\\Mail\\Mailable",
+                 "Illuminate\\Notifications\\Messages\\MailMessage",
+@@ -846,16 +848,25 @@
+     pub start: u32,
+     /// Byte offset one past the last character of those contents.
+     pub end: u32,
+-    /// The view name in its canonical dotted spelling.
++    /// The canonical name (dotted for views, short for middleware guards).
+     pub key: String,
+     /// Whether the call renders whichever of several candidates exists,
+     /// so a name matching no template is the shape working as intended.
+     pub is_optional: bool,
+-    /// What the receiver has to be for this to name a template at all.
++    /// The receiver type required before the candidate contributes a span.
+     pub receiver: ViewReceiverClass,
+ }
+ 
+ impl ViewReceiverSite {
++    pub(crate) fn kind(&self) -> LaravelStringKind {
++        match self.receiver {
++            ViewReceiverClass::ControllerGuard => {
++                LaravelStringKind::ConfigResource(LaravelConfigResource::AuthGuard)
++            }
++            _ => LaravelStringKind::View,
++        }
++    }
++
+     /// The span this site contributes once its receiver is confirmed.
+     pub(crate) fn to_span(&self) -> SymbolSpan {
+         SymbolSpan {
+@@ -863,7 +874,7 @@
+             end: self.end,
+             kind: SymbolKind::LaravelStringKey {
+                 key: self.key.clone(),
+-                kind: LaravelStringKind::View,
++                kind: self.kind(),
+                 is_write: false,
+                 is_optional: self.is_optional,
+             },
+@@ -1095,6 +1106,8 @@
+ /// Exact virtual-PHP CST coordinates and lexical ownership of an anonymous body.
+ #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+ pub(crate) struct AnonymousCallable {
++    /// A static anonymous function cannot capture `$this`.
++    pub is_static: bool,
+     /// Closure or arrow syntax, never a variable's inferred callable value.
+     pub kind: AnonymousCallableKind,
+     /// Complete expression, including static/attributes when present in its CST span.
+--- a/src/virtual_members/laravel/config_keys.rs
++++ b/src/virtual_members/laravel/config_keys.rs
+@@ -490,7 +490,16 @@
+         // one line table rather than rescanning the file per hit.
+         let file_content = std::cell::OnceCell::new();
+         let lines = std::cell::OnceCell::new();
+-        for span in &symbol_map.spans {
++        let has_candidate = symbol_map
++            .view_receiver_sites
++            .iter()
++            .any(|site| config_keys_match(target_kind, target_key, &site.kind(), &site.key));
++        let extra = if has_candidate {
++            backend.typed_receiver_view_spans_for(file_uri, symbol_map)
++        } else {
++            Arc::new(Vec::new())
++        };
++        for span in symbol_map.spans.iter().chain(extra.iter()) {
+             if config_span_matches(span, target_kind, target_key) {
+                 let Some(content) = file_content
+                     .get_or_init(|| backend.get_file_content_arc(file_uri))
+--- a/src/virtual_members/laravel/string_keys.rs
++++ b/src/virtual_members/laravel/string_keys.rs
+@@ -298,7 +298,7 @@
+         let has_candidate = symbol_map
+             .view_receiver_sites
+             .iter()
+-            .any(|site| *kind == crate::symbol_map::LaravelStringKind::View && site.key == key);
++            .any(|site| site.kind() == *kind && site.key == key);
+         let extra = if has_candidate {
+             backend.typed_receiver_view_spans_for(file_uri, symbol_map)
+         } else {
+--- a/tests/integration/laravel_named_resources.rs
++++ b/tests/integration/laravel_named_resources.rs
+@@ -1352,3 +1352,553 @@
+         "log references: {log_from_array:#?}"
+     );
+ }
++
++const CONTROLLER_MIDDLEWARE: &str = r#"<?php
++namespace Illuminate\Routing { class Controller { public function middleware($middleware) {} } }
++namespace App {
++use Illuminate\Routing\Controller as FrameworkController;
++class BaseController extends FrameworkController {}
++class GuardController extends BaseController {
++    public function __construct() {
++        $this->middleware('auth:a');
++        $this->middleware(middleware: ['auth:web,admin', 'auth:missing']);
++        $this->middleware(['named' => 'auth:admin']);
++        $this->middleware(middleware:'auth:');
++    }
++}
++class ForeignController { public function middleware($middleware) {} public function run() {
++    $this->middleware('auth:foreign'); $this->middleware('auth:admin');
++} }
++class StaticController extends FrameworkController { public static function run() {
++    $this->middleware('auth:static'); $this->middleware('auth:admin');
++} }
++}
++"#;
++
++#[tokio::test]
++async fn typed_controller_middleware_completes_only_guard_segments() {
++    let (backend, _dir, uri) = open_workspace(CONTROLLER_MIDDLEWARE).await;
++    for (prefix, expected) in [
++        ("middleware('auth:a", vec!["admin"]),
++        ("middleware: ['auth:web,a", vec!["admin"]),
++        ("['named' => 'auth:ad", vec!["admin"]),
++        ("middleware(middleware:'auth:", vec!["admin", "web"]),
++    ] {
++        let items = completion_items(
++            &backend,
++            &uri,
++            position_after(CONTROLLER_MIDDLEWARE, prefix),
++        )
++        .await;
++        let labels: Vec<_> = items.iter().map(|item| item.label.as_str()).collect();
++        assert_eq!(labels, expected, "{prefix}");
++        for item in items {
++            let Some(CompletionTextEdit::Edit(edit)) = item.text_edit else {
++                panic!("guard completion needs an edit")
++            };
++            assert!(!text_in_range(CONTROLLER_MIDDLEWARE, edit.range).contains("auth:"));
++            assert!(!text_in_range(CONTROLLER_MIDDLEWARE, edit.range).contains(','));
++        }
++    }
++}
++
++#[tokio::test]
++async fn typed_controller_middleware_navigation_hover_diagnostics_and_references() {
++    let (backend, _dir, uri) = open_workspace(CONTROLLER_MIDDLEWARE).await;
++    let position = position_after(CONTROLLER_MIDDLEWARE, "auth:web,adm");
++    let hover = backend
++        .handle_hover(uri.as_str(), CONTROLLER_MIDDLEWARE, position)
++        .expect("typed middleware guard should hover");
++    assert!(hover_text(hover).contains("admin"));
++    let definition = backend
++        .goto_definition(GotoDefinitionParams {
++            text_document_position_params: TextDocumentPositionParams {
++                text_document: TextDocumentIdentifier { uri: uri.clone() },
++                position,
++            },
++            work_done_progress_params: Default::default(),
++            partial_result_params: Default::default(),
++        })
++        .await
++        .unwrap()
++        .expect("typed middleware guard should navigate");
++    let definition = definition_location(definition);
++    assert!(definition.uri.path().ends_with("/config/auth.php"));
++    assert_eq!(
++        definition.range.start,
++        position_of_config_key(AUTH_CONFIG, "admin")
++    );
++    let references = backend
++        .find_references(uri.as_str(), CONTROLLER_MIDDLEWARE, position, true)
++        .expect("typed middleware guard should share config references");
++    assert_eq!(
++        references.len(),
++        3,
++        "declaration plus two controller uses: {references:#?}"
++    );
++    let mut diagnostics = Vec::new();
++    backend.collect_slow_diagnostics(uri.as_str(), CONTROLLER_MIDDLEWARE, &mut diagnostics);
++    let guard_messages: Vec<_> = diagnostics
++        .iter()
++        .filter(|d| d.message.contains("guard"))
++        .collect();
++    assert_eq!(
++        guard_messages.len(),
++        2,
++        "partial a and missing only: {guard_messages:#?}"
++    );
++    assert!(guard_messages.iter().any(|d| d.message.contains("missing")));
++    assert!(
++        !guard_messages
++            .iter()
++            .any(|d| d.message.contains("foreign") || d.message.contains("static"))
++    );
++}
++
++#[tokio::test]
++async fn typed_controller_middleware_rejects_foreign_and_static_receivers() {
++    let (backend, _dir, uri) = open_workspace(CONTROLLER_MIDDLEWARE).await;
++    for prefix in ["auth:fore", "auth:stat"] {
++        let position = position_after(CONTROLLER_MIDDLEWARE, prefix);
++        assert!(completion_items(&backend, &uri, position).await.is_empty());
++        let hover = backend.handle_hover(uri.as_str(), CONTROLLER_MIDDLEWARE, position);
++        assert!(hover.is_none(), "{prefix}: {hover:#?}");
++    }
++}
++
++#[tokio::test]
++async fn typed_controller_middleware_refreshes_unsaved_parent_types() {
++    let source = r#"<?php
++namespace Illuminate\Routing { class Controller { public function middleware($middleware) {} } }
++namespace App { class Consumer extends ExternalBase {
++    public function boot() { $this->middleware('auth:admin'); }
++} }
++"#;
++    let parent =
++        "<?php namespace App; class ExternalBase extends \\Illuminate\\Routing\\Controller {}";
++    let foreign =
++        "<?php namespace App; class ExternalBase { public function middleware($middleware) {} }";
++    let mut files = workspace_files(source);
++    files.push(("app/ExternalBase.php", parent));
++    let (backend, dir) = create_psr4_workspace(COMPOSER_JSON, &files);
++    backend.initialized(InitializedParams {}).await;
++    let uri = Url::from_file_path(dir.path().join("app/NamedResourceConsumer.php")).unwrap();
++    let parent_uri = Url::from_file_path(dir.path().join("app/ExternalBase.php")).unwrap();
++    for (file, content) in [(&uri, source), (&parent_uri, parent)] {
++        backend
++            .did_open(DidOpenTextDocumentParams {
++                text_document: TextDocumentItem {
++                    uri: file.clone(),
++                    language_id: "php".into(),
++                    version: 1,
++                    text: content.into(),
++                },
++            })
++            .await;
++    }
++    let position = position_after(source, "auth:adm");
++    for (version, content, expected) in [(1, parent, true), (2, foreign, false), (3, parent, true)]
++    {
++        if version > 1 {
++            backend
++                .did_change(DidChangeTextDocumentParams {
++                    text_document: VersionedTextDocumentIdentifier {
++                        uri: parent_uri.clone(),
++                        version,
++                    },
++                    content_changes: vec![TextDocumentContentChangeEvent {
++                        range: None,
++                        range_length: None,
++                        text: content.into(),
++                    }],
++                })
++                .await;
++        }
++        let labels: Vec<_> = completion_items(&backend, &uri, position)
++            .await
++            .into_iter()
++            .map(|item| item.label)
++            .collect();
++        assert_eq!(
++            labels,
++            if expected { vec!["admin"] } else { vec![] },
++            "parent version {version}"
++        );
++        assert_eq!(
++            backend
++                .handle_hover(uri.as_str(), source, position)
++                .is_some(),
++            expected,
++            "cached typed span at version {version}"
++        );
++    }
++    assert_eq!(
++        std::fs::read_to_string(dir.path().join("app/ExternalBase.php")).unwrap(),
++        parent
++    );
++}
++
++#[tokio::test]
++async fn typed_controller_middleware_requires_a_laravel_project() {
++    let files = workspace_files(CONTROLLER_MIDDLEWARE);
++    let (backend, dir) =
++        create_psr4_workspace(r#"{"autoload":{"psr-4":{"App\\":"app/"}}}"#, &files);
++    backend.initialized(InitializedParams {}).await;
++    let uri = Url::from_file_path(dir.path().join("app/NamedResourceConsumer.php")).unwrap();
++    backend
++        .did_open(DidOpenTextDocumentParams {
++            text_document: TextDocumentItem {
++                uri: uri.clone(),
++                language_id: "php".into(),
++                version: 1,
++                text: CONTROLLER_MIDDLEWARE.into(),
++            },
++        })
++        .await;
++    let position = position_after(CONTROLLER_MIDDLEWARE, "auth:web,adm");
++    assert!(completion_items(&backend, &uri, position).await.is_empty());
++    assert!(
++        backend
++            .handle_hover(uri.as_str(), CONTROLLER_MIDDLEWARE, position)
++            .is_none()
++    );
++}
++
++#[tokio::test]
++async fn typed_controller_middleware_edits_full_suffix_in_utf16_coordinates() {
++    let source = CONTROLLER_MIDDLEWARE.replace(
++        "$this->middleware('auth:a');",
++        "$label = '🐘'; $this->middleware('auth:adminTail');",
++    );
++    let (backend, _dir, uri) = open_workspace(&source).await;
++    let offset = source.find("auth:ad").unwrap() + "auth:ad".len();
++    let before = &source[..offset];
++    let position = Position::new(
++        before.bytes().filter(|b| *b == b'\n').count() as u32,
++        before.rsplit('\n').next().unwrap().encode_utf16().count() as u32,
++    );
++    let mut items = completion_items(&backend, &uri, position).await;
++    assert_eq!(items.len(), 1);
++    let item = items.pop().unwrap();
++    assert_eq!(item.label, "admin");
++    assert!(
++        item.additional_text_edits
++            .as_ref()
++            .is_none_or(Vec::is_empty)
++    );
++    assert!(item.command.is_none());
++    let Some(CompletionTextEdit::Edit(edit)) = item.text_edit else {
++        panic!("expected edit")
++    };
++    let start = crate::common::lsp_pos_to_offset(&source, edit.range.start);
++    let end = crate::common::lsp_pos_to_offset(&source, edit.range.end);
++    assert_eq!(&source[start..end], "adminTail");
++    assert_eq!(
++        crate::common::apply_edits(&source, &[edit]),
++        source.replace("adminTail", "admin")
++    );
++}
++
++#[tokio::test]
++async fn typed_controller_middleware_survives_an_unterminated_unrelated_argument() {
++    let source = format!(
++        "{}\n$foreign->call('\n",
++        CONTROLLER_MIDDLEWARE.trim_end().strip_suffix('}').unwrap()
++    );
++    let (backend, _dir, uri) = open_workspace(&source).await;
++    let position = position_after(&source, "auth:web,adm");
++    // Incomplete PHP may lose semantic information; it must not panic,
++    // retain a stale result, or prevent recovery when the source is repaired.
++    let _ = backend.handle_hover(uri.as_str(), &source, position);
++    backend
++        .did_change(DidChangeTextDocumentParams {
++            text_document: VersionedTextDocumentIdentifier {
++                uri: uri.clone(),
++                version: 2,
++            },
++            content_changes: vec![TextDocumentContentChangeEvent {
++                range: None,
++                range_length: None,
++                text: CONTROLLER_MIDDLEWARE.into(),
++            }],
++        })
++        .await;
++    assert!(
++        backend
++            .handle_hover(
++                uri.as_str(),
++                CONTROLLER_MIDDLEWARE,
++                position_after(CONTROLLER_MIDDLEWARE, "auth:web,adm")
++            )
++            .is_some()
++    );
++}
++
++#[tokio::test]
++async fn typed_controller_middleware_distinguishes_static_and_captured_closures() {
++    let source = CONTROLLER_MIDDLEWARE.replace(
++        "$this->middleware(middleware:'auth:');",
++        r#"
++        $detached = static function () { $this->middleware('auth:admin'); };
++        $detachedArrow = static fn () => $this->middleware('auth:admin');
++        $captured = function () { $this->middleware('auth:admin'); };
++    "#,
++    );
++    let (backend, _dir, uri) = open_workspace(&source).await;
++    for (prefix, expected) in [
++        (
++            "$detached = static function () { $this->middleware('auth:adm",
++            false,
++        ),
++        (
++            "$detachedArrow = static fn () => $this->middleware('auth:adm",
++            false,
++        ),
++        (
++            "$captured = function () { $this->middleware('auth:adm",
++            true,
++        ),
++    ] {
++        let position = position_after(&source, prefix);
++        let items = completion_items(&backend, &uri, position).await;
++        assert_eq!(!items.is_empty(), expected, "{prefix}");
++        assert_eq!(
++            backend
++                .handle_hover(uri.as_str(), &source, position)
++                .is_some(),
++            expected,
++            "{prefix}"
++        );
++    }
++}
++
++#[tokio::test]
++async fn typed_controller_middleware_nested_instance_owns_this_in_static_factory() {
++    let source = r#"<?php
++namespace Illuminate\Routing { class Controller { public function middleware($middleware) {} } }
++namespace App { class Factory {
++    public static function make() {
++        return new class extends \Illuminate\Routing\Controller {
++            public function boot() { $this->middleware('auth:admin'); }
++        };
++    }
++} }
++"#;
++    let (backend, _dir, uri) = open_workspace(source).await;
++    let position = position_after(source, "auth:adm");
++    let items = completion_items(&backend, &uri, position).await;
++    assert_eq!(
++        items.iter().map(|i| i.label.as_str()).collect::<Vec<_>>(),
++        ["admin"]
++    );
++    assert!(
++        backend
++            .handle_hover(uri.as_str(), source, position)
++            .is_some()
++    );
++}
++
++#[tokio::test]
++async fn typed_controller_middleware_arrays_and_wrong_argument_roles() {
++    let source = CONTROLLER_MIDDLEWARE.replace(
++        "$this->middleware(middleware:'auth:');",
++        r#"
++        $this->middleware(array('auth:admin'));
++        $this->middleware(middleware: array('named' => 'auth:admin'));
++        $this->middleware(other: 'auth:admin');
++        $this->middleware('other', 'auth:admin');
++        $wrapper->$this->middleware('auth:admin');
++    "#,
++    );
++    let (backend, _dir, uri) = open_workspace(&source).await;
++    for (prefix, expected) in [
++        ("middleware(array('auth:adm", true),
++        ("middleware: array('named' => 'auth:adm", true),
++        ("middleware(other: 'auth:adm", false),
++        ("middleware('other', 'auth:adm", false),
++        ("$wrapper->$this->middleware('auth:adm", false),
++    ] {
++        let position = position_after(&source, prefix);
++        assert_eq!(
++            !completion_items(&backend, &uri, position).await.is_empty(),
++            expected,
++            "{prefix}"
++        );
++        assert_eq!(
++            backend
++                .handle_hover(uri.as_str(), &source, position)
++                .is_some(),
++            expected,
++            "{prefix}"
++        );
++    }
++}
++
++#[tokio::test]
++async fn typed_controller_middleware_follows_explicit_closure_this_bindings() {
++    let source = r#"<?php
++namespace Illuminate\Routing { class Controller { public function middleware($middleware) {} } }
++namespace App {
++class Foreign { public function middleware($middleware) {} }
++/** @param-closure-this \Illuminate\Routing\Controller $callback */
++function as_controller(\Closure $callback): void {}
++/** @param-closure-this \App\Foreign $callback */
++function as_foreign(\Closure $callback): void {}
++class Factory {
++    public static function make() {
++        $inside = as_controller(function () { $this->middleware('auth:admin'); });
++        $foreign = as_foreign(function () { $this->middleware('auth:admin'); });
++        $static = as_controller(static function () { $this->middleware('auth:admin'); });
++        $unbound = function () { $this->middleware('auth:admin'); };
++    }
++}
++$outside = as_controller(function () { $this->middleware('auth:admin'); });
++$outsideStatic = as_controller(static function () { $this->middleware('auth:admin'); });
++}
++"#;
++    let (backend, _dir, uri) = open_workspace(source).await;
++    for (prefix, expected) in [
++        (
++            "$inside = as_controller(function () { $this->middleware('auth:adm",
++            true,
++        ),
++        (
++            "$foreign = as_foreign(function () { $this->middleware('auth:adm",
++            false,
++        ),
++        (
++            "$static = as_controller(static function () { $this->middleware('auth:adm",
++            false,
++        ),
++        (
++            "$unbound = function () { $this->middleware('auth:adm",
++            false,
++        ),
++        (
++            "$outside = as_controller(function () { $this->middleware('auth:adm",
++            true,
++        ),
++        (
++            "$outsideStatic = as_controller(static function () { $this->middleware('auth:adm",
++            false,
++        ),
++    ] {
++        let position = position_after(source, prefix);
++        assert_eq!(
++            !completion_items(&backend, &uri, position).await.is_empty(),
++            expected,
++            "{prefix}"
++        );
++        assert_eq!(
++            backend
++                .handle_hover(uri.as_str(), source, position)
++                .is_some(),
++            expected,
++            "{prefix}"
++        );
++    }
++}
++
++#[tokio::test]
++async fn typed_controller_middleware_keeps_following_guards_and_refuses_ambiguous_suffixes() {
++    let source = CONTROLLER_MIDDLEWARE.replace(
++        "$this->middleware('auth:a');",
++        "$this->middleware('auth:adOLD,web');",
++    );
++    let (backend, _dir, uri) = open_workspace(&source).await;
++    let mut items = completion_items(&backend, &uri, position_after(&source, "auth:ad")).await;
++    assert_eq!(items.len(), 1);
++    let Some(CompletionTextEdit::Edit(edit)) = items.pop().unwrap().text_edit else {
++        panic!("expected edit")
++    };
++    assert_eq!(
++        crate::common::apply_edits(&source, &[edit]),
++        source.replace("adOLD,web", "admin,web")
++    );
++
++    for (version, literal) in [
++        (2, r#""auth:ad${value}""#.to_string()),
++        (3, r"'auth:ad\x6d'".to_string()),
++        (4, format!("'auth:ad{}'", "X".repeat(4097))),
++    ] {
++        let changed = CONTROLLER_MIDDLEWARE.replace("'auth:a'", &literal);
++        backend
++            .did_change(DidChangeTextDocumentParams {
++                text_document: VersionedTextDocumentIdentifier {
++                    uri: uri.clone(),
++                    version,
++                },
++                content_changes: vec![TextDocumentContentChangeEvent {
++                    range: None,
++                    range_length: None,
++                    text: changed.clone(),
++                }],
++            })
++            .await;
++        assert!(
++            completion_items(&backend, &uri, position_after(&changed, "auth:ad"))
++                .await
++                .is_empty(),
++            "{literal}"
++        );
++    }
++}
++
++#[tokio::test]
++async fn typed_controller_middleware_escapes_guard_names_for_the_existing_quote() {
++    let source = r#"<?php
++namespace Illuminate\Routing { class Controller { public function middleware($middleware) {} } }
++namespace App { class Consumer extends \Illuminate\Routing\Controller {
++    public function boot() {
++        $this->middleware('auth:adOLD');
++        $this->middleware("auth:adOLD");
++    }
++} }
++"#;
++    let auth = r#"<?php return ['guards' => ["ad'min" => [], 'ad$min' => [], 'ad\min' => [], 'ad,min' => [], "ad\nmin" => [], 'admin' => []]];"#;
++    let mut files = workspace_files(source);
++    files.retain(|(path, _)| *path != "config/auth.php");
++    files.push(("config/auth.php", auth));
++    let (backend, dir) = create_psr4_workspace(COMPOSER_JSON, &files);
++    backend.initialized(InitializedParams {}).await;
++    let uri = Url::from_file_path(dir.path().join("app/NamedResourceConsumer.php")).unwrap();
++    backend
++        .did_open(DidOpenTextDocumentParams {
++            text_document: TextDocumentItem {
++                uri: uri.clone(),
++                language_id: "php".into(),
++                version: 1,
++                text: source.into(),
++            },
++        })
++        .await;
++    for quote in ['\'', '"'] {
++        let prefix = format!("middleware({quote}auth:ad");
++        let items = completion_items(&backend, &uri, position_after(source, &prefix)).await;
++        let labels: std::collections::BTreeSet<_> =
++            items.iter().map(|i| i.label.as_str()).collect();
++        assert_eq!(
++            labels,
++            ["ad'min", "ad$min", r"ad\min", "admin"]
++                .into_iter()
++                .collect()
++        );
++        for item in items {
++            let escaped = match (item.label.as_str(), quote) {
++                ("ad'min", '\'') => r"ad\'min",
++                ("ad'min", _) => "ad'min",
++                ("ad$min", '"') => r"ad\$min",
++                ("ad$min", _) => "ad$min",
++                (r"ad\min", _) => r"ad\\min",
++                ("admin", _) => "admin",
++                _ => panic!("unexpected guard"),
++            };
++            let Some(CompletionTextEdit::Edit(edit)) = item.text_edit else {
++                panic!("expected edit")
++            };
++            assert_eq!(edit.new_text, escaped);
++            let applied = crate::common::apply_edits(source, &[edit]);
++            assert!(applied.contains(&format!("middleware({quote}auth:{escaped}{quote})")));
++        }
++    }
++}

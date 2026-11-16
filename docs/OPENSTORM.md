@@ -15,6 +15,69 @@ slice, commit and push it, and retain only the latest generated app. Native UI
 cases remain deferred/unverified; earlier native-first blocking checkpoints are
 historical and no longer prevent independent implementation.
 
+Engine source slice121 (2026-11-16, verified inactive candidate): add typed
+controller middleware auth-guard intelligence for FEAT-031/L59. Recognize direct
+`$this->middleware('auth:guard')` only through the shared receiver resolver and
+parsed scope ownership. Inherited/aliased/anonymous controllers and explicit
+closure-this bindings work; foreign classes, static methods/closures/arrows and
+wrong argument roles remain excluded. Reuse type-confirmed Laravel string sites,
+config resource identity and the existing dependency invalidation. Include typed
+sites in the canonical reference index and config-reference consumers without
+feeding guard names into view diagnostics or generation.
+
+Three initial Backend failures prove missing completion, typed hover and
+unsaved-parent recognition; one foreign/static control passes. Expanded coverage
+exposes missing reference-index candidates, unavailable-static-this handling,
+file-local anonymous-class reloads and prefix-only guard edits. Fix those paths.
+All13 focused tests then pass: completion, references, definitions,
+hover/diagnostics, warmed unsaved parent changes, static/captured/rebound closures,
+nested anonymous controllers, scalar/named/array roles, foreign-project exclusion,
+UTF-16 full-suffix edits, quote escaping, comma preservation and incomplete-source
+repair. Refuse encoded/interpolated suffixes and bounded-scan overflow.
+
+Patch0157 and the complete157 series replay exactly into immutable source
+artifacts/phpantom/1756b1f920c1-6ee8c2bfae43-verified. Series SHA256:
+6ee8c2bfae43f005845177b22c6f0e6230f386ffcfaf199e8cc8b97d7680e0a8.
+Full engine18545 tests pass/17 ignored, plus2 bounded child checks; standard and
+mem-audit all-target Clippy, fmt, source fingerprint and the pinned build recipe
+pass. Complete PHP source/config variants pass the owned PHP8.4 syntax check;
+only the deliberate incomplete-input fixture is exempt. Preserve MIT/Apache
+licenses, the upstream source pin, unchanged stub acquisition and build provenance.
+
+Final default-profile157 binary SHA256:
+904aa387a702bcc00ed3b8640c299efb0c26b3a00a247e86c2f389abb36b5feb.
+Actual stdio checks pass against that exact arm64 binary on disposable plain and
+real Laravel13.37 fixtures: advertised completion/navigation capabilities and
+observed UTF-16 ranges; completion resolve
+without imports/commands; exact segment edits; hover/definition and references in
+both directions; foreign-receiver exclusion; warmed parent, static-method and
+body-only static-closure changes; unsaved config refresh; clean restart. All4
+candidate children exit0 and fixture originals/recorded borrowed inputs remain
+unchanged. The156 control first proves ordinary PHP readiness, then the expected
+missing controller completion; its child exits0. Fix an initial probe-only shutdown
+null-parameter error and wildcard repository setup before accepting final receipts.
+The original Laravel analyzer fixture retains exactly3 intentional diagnostics
+(expected exit1). Keep first failures and test-profile evidence; final runtime
+acceptance binds the distinct default build hash above.
+
+Evidence: artifacts/checks/slice121-engine-gates.json, slice121-source-freeze.json,
+slice121-source-test-summary.json, slice121-fixture-syntax.json,
+slice121-wire-final.json, slice121-real-laravel2.json,
+slice121-baseline156-2.json and slice121-real-analyzer-control.json; canonical
+artifacts/engines/0.11.1-openstorm.157/build-receipt.json includes the full receipts.
+No app/client runtime source changes: reuse f4eb6fc's frontend13019/6 skipped,
+main Rust5047/188 ignored/1 excluded, default156's71 actual client/host checks and
+75 controlled-browser cases for unchanged inputs. These do not establish157 client
+or native acceptance. Candidate157 stays inactive; source/resource156 and sole
+signed App96 remain unchanged. Native checks stay user-skipped. Encoded guard
+navigation, parameter whitespace normalization, other middleware aliases and large
+project performance remain unaccepted. Keep all69 statuses unchanged; perform
+client adoption/packaging in later slices. Removed2,298,696KiB of owned compiler
+output and41,208KiB of redundant mutable121 source after canonical archival.
+App96's deep/strict signature and original main executable hash still verify.
+Retention: artifacts/checks/slice121-retention.json. Preserve immutable source,
+binaries, receipts, PHP Workbench and earlier evaluation artifacts.
+
 Upstream merge slice120 (2026-11-16, automated acceptance verified): merge39 commits
 from2d85e745e through5a0bd7d1f from l0ng-ai/openidea. Import editor rainbow
 bracket/markup controls, Markdown fence highlighting, Code Vision controls,

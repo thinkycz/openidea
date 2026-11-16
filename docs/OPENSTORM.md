@@ -15,6 +15,51 @@ slice, commit and push it, and retain only the latest generated app. Native UI
 cases remain deferred/unverified; earlier native-first blocking checkpoints are
 historical and no longer prevent independent implementation.
 
+Upstream refresh 3 (2026-11-16, verified source merge): merge
+`l0ng-ai/openidea` through `7a97fba491f3be46646abc640a046cca11f2cad9`
+(45 commits after `de107e145`).
+Preserve OpenStorm identity/version0.1.94, PHPantom154 resources/default,
+inactive candidate155, guarded saves/reviewed edits and disabled automatic
+updates. Combine upstream editable-diff blur autosave with reviewed-history
+extensions and add an external-conflict regression for that path. Retain both
+Laravel commands and upstream Java refactoring commands; regenerate IPC bindings
+and the command snapshot through their generator. Preserve the chooser focus
+rule and dirty-document cleanup while importing upstream layout/untitled fixes.
+
+Upstream includes Java refactoring dialogs, Rails/related-symbol navigation,
+Django template support, agent/MCP controls, safer artifact output handling,
+untitled-buffer close protection and editor/Git/terminal fixes. These are inherited
+changes requiring their own wider acceptance; all69 statuses remain67 partial/
+2 user-deferred, with debugger expansion still excluded. No feature-parity claim.
+Personal/project environment files and tool-version pins are unchanged. The
+user-approved ide-index/ide-web synthetic test scopes remain authorized.
+
+Native checks remain user-skipped. Keep the sole signed App0.1.94 unchanged;
+this source merge does not rebuild or promote a package or engine candidate.
+Verification: Rust4973 passed/180 ignored, with only
+`http_list_and_run_require_confirmation` excluded pending its separately scoped
+synthetic HTTP environment-fixture approval. All63 actual PHPantom154 host/client
+checks pass, with fixture originals restored. Frontend12708 passed/6 skipped;
+typecheck/lint/format/knip, production build/Safari checks, all-target workspace
+Clippy and Rustfmt pass. Selected browser editor/refactoring/Laravel/diff/MCP
+flows:73 pass with controlled IPC; this does not establish native acceptance.
+
+The first workspace run exposed missing native menu catalog labels for upstream's
+Related Symbol and Extract Interface actions. A direct executable reproduction
+confirmed both missing entries; add English/Chinese labels and rerun the workspace
+successfully. A focused Cargo invocation selected an unnecessary separate feature
+graph; stop its exact owned process tree and reuse the emitted workspace binary
+for reproduction. Preserve both failed-attempt and final receipts. Regenerated
+bindings/command snapshot retain every Laravel command beside upstream additions.
+Lint/test-environment warnings remain recorded; no blanket warning-free claim.
+
+Receipt prefix `artifacts/checks/upstream-7a97-` records exact commands/results,
+source/generated-input hashes, fixture restoration, cleanup and final Git/remote
+read-back. Owned compiler output and the temporary frontend bundle are removed
+after verification (25,354,529,176 bytes reclaimed); retain the sole signed
+App0.1.94, engine/source provenance,
+PHP Workbench and prior evaluation evidence. The retained app predates this merge.
+
 Upstream refresh 2 (2026-11-16, verified source merge): merge
 `l0ng-ai/openidea` through `de107e145c58f9f0b357022ade4ab0fb4b91c85c`
 (65 commits after `c8112f90`). Resolve 13 conflicted paths, preserving

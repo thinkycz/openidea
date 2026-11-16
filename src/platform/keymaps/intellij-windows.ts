@@ -57,6 +57,7 @@ export const intellijWindows: Record<string, string[]> = {
   "navigate.nextEditLocation": [],
   "navigate.gotoTest": ["Ctrl+Shift+T"],
   "navigate.superMethod": ["Ctrl+U"],
+  "navigate.relatedSymbol": ["Ctrl+Alt+Home"],
   "navigate.nextMethod": ["Alt+Down"],
   "navigate.previousMethod": ["Alt+Up"],
   "navigate.nextOccurrence": ["Ctrl+Alt+Down"],
@@ -172,6 +173,7 @@ export const intellijWindows: Record<string, string[]> = {
   "refactor.inline": ["Ctrl+Alt+N"],
   "refactor.move": ["F6"],
   "refactor.safeDelete": ["Alt+Delete"],
+  "refactor.extractInterface": [],
   "refactor.pullMembersUp": [],
   "refactor.pushMembersDown": [],
 

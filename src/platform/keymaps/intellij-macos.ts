@@ -56,6 +56,7 @@ export const intellijMacos: Record<string, string[]> = {
   "navigate.nextEditLocation": [],
   "navigate.gotoTest": ["Meta+Shift+T"],
   "navigate.superMethod": ["Meta+U"],
+  "navigate.relatedSymbol": ["Ctrl+Meta+Up"],
   "navigate.nextMethod": ["Ctrl+Shift+Down"],
   "navigate.previousMethod": ["Ctrl+Shift+Up"],
   "navigate.nextOccurrence": ["Meta+Alt+Down"],
@@ -171,6 +172,7 @@ export const intellijMacos: Record<string, string[]> = {
   "refactor.inline": ["Meta+Alt+N"],
   "refactor.move": ["F6"],
   "refactor.safeDelete": ["Meta+Delete"],
+  "refactor.extractInterface": [],
   "refactor.pullMembersUp": [],
   "refactor.pushMembersDown": [],
 

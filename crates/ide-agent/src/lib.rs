@@ -70,6 +70,8 @@ pub(crate) const LIMITS_UPDATE: &str = "openidea_limits";
 /// A native agent's own update: the background tasks its session runs
 /// (see [`TaskState::background_tasks`]).
 pub(crate) const BACKGROUND_TASKS_UPDATE: &str = "openidea_background_tasks";
+/// A native agent's diagnostic, including warnings emitted before a session exists.
+pub(crate) const WARNING_NOTIFICATION: &str = "_openidea/warning";
 /// Referenced files up to this size are embedded in the prompt (when the agent takes it).
 const MAX_EMBED: u64 = 256 * 1024;
 /// How long a probe waits for the agent to answer `initialize`.
@@ -208,11 +210,23 @@ impl Shared {
         }
     }
 
-    fn mcp_servers_for_session(&self, provider: &str, init: &acp::Negotiated) -> Vec<Value> {
-        let mut servers = mcp_servers_for(init.mcp_stdio(), &self.paths.project_root);
+    /// The MCP servers passed to a session, and the names of the ones off for it.
+    fn mcp_servers_for_session(
+        &self,
+        provider: &str,
+        init: &acp::Negotiated,
+        overrides: &BTreeMap<String, bool>,
+    ) -> McpForSession {
+        let builtin_off = overrides.get(mcp::BUILTIN_MCP_NAME) == Some(&false);
+        let mut servers =
+            if builtin_off { Vec::new() } else { mcp_servers_for(init.mcp_stdio(), &self.paths.project_root) };
         let configured = self.mcp_servers_hook.read().as_ref().map(|hook| hook()).unwrap_or_default();
-        servers.extend(mcp::acp_mcp_servers(&configured, provider, init));
-        servers
+        servers.extend(mcp::acp_mcp_servers(&configured, provider, init, overrides));
+        let mut off = mcp::servers_off(&configured, overrides);
+        if builtin_off {
+            off.push(BUILTIN_SERVER.to_owned());
+        }
+        McpForSession { servers, off }
     }
 
     fn known_config(&self, provider: &str) -> Vec<AgentConfigOption> {
@@ -409,6 +423,8 @@ struct Task {
     /// Bumped when the agent's last background task finishes: an idle release scheduled
     /// before that is void, the usual delay starts over from the report.
     idle_epoch: AtomicU64,
+    /// Turned on when per-session MCP overrides changed while a turn was busy; dropped once idle.
+    mcp_reload_pending: AtomicBool,
     /// Settings already sent this session (`(option, value)`), so a refusal is not retried.
     config_sent: Mutex<HashSet<(String, String)>>,
     dirty: Mutex<BTreeSet<(Session, usize)>>,
@@ -626,14 +642,9 @@ impl AgentManager {
             }
             offered = self.shared.known_commands(&provider);
         }
-        for &(name, description) in builtin_commands(&provider) {
-            if !offered.iter().any(|c| c.name == name) {
-                offered.push(AgentCommand {
-                    name: name.to_owned(),
-                    description: description.to_owned(),
-                    hint: None,
-                    source: AgentCommandSource::Command,
-                });
+        for command in builtin_commands(&provider) {
+            if !offered.iter().any(|c| c.name == command.name) {
+                offered.push(command);
             }
         }
         if provider != "claude" && provider != "claude-acp" {
@@ -724,6 +735,7 @@ impl AgentManager {
             resets_ms: None,
             retry: None,
             background: Box::default(),
+            mcp_overrides: BTreeMap::new(),
         };
         let handle = self.register(TaskFile {
             task: task.clone(),
@@ -815,6 +827,7 @@ impl AgentManager {
             resets_ms: None,
             retry: None,
             background: Box::default(),
+            mcp_overrides: req.mcp_overrides,
         };
         let handle = self.register(TaskFile {
             task: task.clone(),
@@ -881,7 +894,9 @@ impl AgentManager {
         let prompt = clean(req.prompt).ok_or_else(|| IdeError::invalid("describe the topic first"))?;
         let title = title_of(&prompt);
         let mut config = self.merged_config(&spec.id, &req.config);
-        config::ask_for_approvals(&mut config);
+        // The source task's choices may change the project without asking; the side conversation asks.
+        let wanted = config::asking_choices(&config, &req.config);
+        config::keep_asking(&mut config);
         if config::bypass_approvals(&config) {
             return Err(IdeError::invalid(
                 "this agent has no mode that asks before changing things, so it can't run a side conversation",
@@ -916,13 +931,14 @@ impl AgentManager {
             resets_ms: None,
             retry: None,
             background: Box::default(),
+            mcp_overrides: req.mcp_overrides,
             config,
         };
         let handle = self.register(TaskFile {
             task: task.clone(),
             session_id: None,
             entries: Vec::new(),
-            wanted: req.config,
+            wanted,
             before,
             saved: None,
             touched: None,
@@ -1039,6 +1055,15 @@ impl AgentManager {
             if !o.values.iter().any(|v| v.value == value) {
                 return Err(IdeError::invalid(format!("{} has no value {value}", o.name)));
             }
+            if s.ephemeral {
+                let mut next = s.task.config.clone();
+                if let Some(n) = next.iter_mut().find(|n| n.id == option) {
+                    n.current = Some(value.clone());
+                }
+                if !config::keeps_asking(&next) {
+                    return Err(IdeError::invalid("a side conversation asks before changing anything"));
+                }
+            }
             o.clone()
         };
         let previous = target.current.clone();
@@ -1117,15 +1142,21 @@ impl AgentManager {
         if !live.capabilities.fork || (keep < total && !live.capabilities.rollback) {
             return Err(IdeError::invalid("this agent can't copy a conversation from there"));
         }
-        let cwd = source.state.lock().task.cwd.0.clone();
-        let provider_id = source.state.lock().task.provider.clone();
-        let mcp_servers = source.shared.mcp_servers_for_session(&provider_id, &live.init);
+        let (cwd, provider_id, mcp_overrides) = {
+            let s = source.state.lock();
+            (s.task.cwd.0.clone(), s.task.provider.clone(), s.task.mcp_overrides.clone())
+        };
+        let mcp_servers = source.shared.mcp_servers_for_session(&provider_id, &live.init, &mcp_overrides);
         let cwd_s = dunce::canonicalize(&cwd).unwrap_or(cwd).to_string_lossy().into_owned();
         let reply: Value = live
             .peer
             .request(
                 "session/fork",
-                json!({ "sessionId": live.session, "cwd": cwd_s, "mcpServers": mcp_servers }),
+                {
+                    let mut params = session_params(&cwd_s, &mcp_servers);
+                    params["sessionId"] = json!(live.session);
+                    params
+                },
                 None,
             )
             .await
@@ -1603,6 +1634,43 @@ impl AgentManager {
         .await
     }
 
+    /// Updates per-session MCP server enable/disable overrides (`server_name` -> `enabled`).
+    /// When the task is idle and holds a resumable live session without running background tasks,
+    /// stops the idle process so the next turn reloads the session with the updated MCP servers;
+    /// when busy, schedules the reload for as soon as the turn finishes.
+    pub fn set_mcp_overrides(&self, id: &str, overrides: BTreeMap<String, bool>) -> IdeResult<AgentTask> {
+        let task = self.task(id)?;
+        let cleaned: BTreeMap<String, bool> = overrides
+            .into_iter()
+            .filter_map(|(k, v)| {
+                let k = k.trim();
+                (!k.is_empty()).then(|| (k.to_owned(), v))
+            })
+            .collect();
+        let (changed, busy, has_bg, out) = {
+            let mut s = task.state.lock();
+            if s.task.status == AgentStatus::Archived {
+                return Err(IdeError::invalid("the task is archived"));
+            }
+            let changed = s.task.mcp_overrides != cleaned;
+            if changed {
+                s.task.mcp_overrides = cleaned;
+                s.task.updated_ms = now_ms();
+            }
+            (changed, s.busy, !s.background_tasks.is_empty(), s.task.clone())
+        };
+        if changed {
+            task.persist();
+            task.emit_task();
+            if busy || has_bg || !task.permissions.lock().is_empty() {
+                task.mcp_reload_pending.store(true, Ordering::Release);
+            } else {
+                task.recycle_resumable_session();
+            }
+        }
+        Ok(out)
+    }
+
     /// Stops every agent (project closed).
     pub fn shutdown(&self) {
         for task in self.tasks.read().values() {
@@ -1647,6 +1715,7 @@ impl Task {
             turn_started: AtomicBool::new(false),
             turns: AtomicU64::new(0),
             idle_epoch: AtomicU64::new(0),
+            mcp_reload_pending: AtomicBool::new(false),
             config_sent: Mutex::new(HashSet::new()),
             dirty: Mutex::new(BTreeSet::new()),
             streamed: Mutex::new(HashMap::new()),
@@ -1704,7 +1773,7 @@ impl Task {
 
     fn emit_task(&self) {
         let task = self.state.lock().task.clone();
-        self.shared.emit(AgentEvent::Task { task });
+        self.shared.emit(AgentEvent::Task { task: Box::new(task) });
     }
 
     /// Shows (or clears) the agent's pending retry; emitted only when it changes.
@@ -1894,10 +1963,30 @@ impl Task {
                     if stop != "cancelled" {
                         self.emit_attention(AgentAttentionReason::Finished);
                     }
+                    if self.mcp_reload_pending.swap(false, Ordering::AcqRel)
+                        && self.state.lock().background_tasks.is_empty()
+                    {
+                        self.recycle_resumable_session();
+                        return;
+                    }
                     return self.release_when_idle();
                 }
                 (None, Err(failure)) => return self.fail(failure),
             }
+        }
+    }
+
+    /// Drops an idle resumable live session so the next turn reloads it with fresh MCP servers.
+    fn recycle_resumable_session(&self) {
+        self.mcp_reload_pending.store(false, Ordering::Release);
+        let live = {
+            let mut live = self.live.lock();
+            if live.as_ref().is_some_and(|l| l.resumable && !l.peer.is_closed()) { live.take() } else { None }
+        };
+        if let Some(live) = live {
+            tracing::debug!("agent task {}: restarting idle resumable session for MCP override update", self.id);
+            live.peer.kill();
+            self.clear_shown_background();
         }
     }
 
@@ -2231,7 +2320,8 @@ impl Task {
         let sign_in_message = spec.sign_in_message(&init.auth_methods);
         let can_load = init.load_session();
         let (capabilities, embedded) = capabilities_of(&init);
-        let mcp_servers = self.shared.mcp_servers_for_session(provider_id, &init);
+        let mcp_overrides = self.state.lock().task.mcp_overrides.clone();
+        let mcp_servers = self.shared.mcp_servers_for_session(provider_id, &init, &mcp_overrides);
         // Agents that compare canonical paths fail in a symlinked directory (macOS `/tmp`).
         let cwd_s = dunce::canonicalize(cwd).unwrap_or_else(|_| cwd.to_path_buf()).to_string_lossy().into_owned();
 
@@ -2239,7 +2329,8 @@ impl Task {
         let mut session = None;
         if let (Some(id), true) = (saved, can_load) {
             self.replaying.store(true, Ordering::Release);
-            let params = json!({ "sessionId": &id, "cwd": &cwd_s, "mcpServers": &mcp_servers });
+            let mut params = session_params(&cwd_s, &mcp_servers);
+            params["sessionId"] = json!(&id);
             let loaded = self.request_with_auth(&peer, &init, &mut tried_auth, "session/load", params).await;
             tokio::time::sleep(REPLAY_GRACE).await;
             self.replaying.store(false, Ordering::Release);
@@ -2252,7 +2343,7 @@ impl Task {
         let (session_id, result) = match session {
             Some(s) => s,
             None => {
-                let params = json!({ "cwd": &cwd_s, "mcpServers": &mcp_servers });
+                let params = session_params(&cwd_s, &mcp_servers);
                 let v = self.request_with_auth(&peer, &init, &mut tried_auth, "session/new", params).await.map_err(
                     |e| match self.sign_in_error(&e, Some(&sign_in_message)) {
                         Some(msg) => SessionOpenError { message: msg, allow_acp_fallback: false },
@@ -2293,7 +2384,10 @@ impl Task {
         }
         let (mut options, mut wanted) = {
             let s = self.state.lock();
-            (if known { reported } else { s.task.config.clone() }, s.wanted.clone())
+            let options = if known { reported } else { s.task.config.clone() };
+            // A side conversation asks before anything, whatever mode the agent starts in.
+            let wanted = if s.ephemeral { config::asking_choices(&options, &s.wanted) } else { s.wanted.clone() };
+            (options, wanted)
         };
         config::add_client_options(provider_id, &mut options);
         // Changing model can replace the effort / context-tier choices; validate those only afterwards.
@@ -2339,6 +2433,14 @@ impl Task {
                 }
                 Err(e) => tracing::warn!("agent task {}: setting {} to {} failed: {e}", self.id, o.id, choice.value),
             }
+        }
+        // A side conversation never runs in a mode that changes things without asking: when the
+        // agent refused the switch, it doesn't start.
+        if self.state.lock().ephemeral && !config::keeps_asking(&options) {
+            return Err(SessionOpenError {
+                message: "The agent didn't switch to a mode that asks before changing anything, so the side conversation can't start".into(),
+                allow_acp_fallback: false,
+            });
         }
         let model = model_of(&options).filter(|_| model_options);
         self.shared.remember(provider_id, Some(&options), None, model.as_deref());
@@ -2483,8 +2585,17 @@ impl Task {
             if let Some(title) = title {
                 // Check and write under one lock: a rename landing between them would be lost.
                 let mut s = self.state.lock();
-                if !s.title_renamed && s.task.title != title {
+                let user_named = update.get("userNamed").and_then(Value::as_bool) == Some(true);
+                let flag_changed = user_named && !s.title_renamed;
+                if user_named {
+                    s.title_renamed = true;
+                }
+                if (user_named || !s.title_renamed) && s.task.title != title {
                     s.task.title = title.to_owned();
+                    drop(s);
+                    self.persist();
+                    self.emit_task();
+                } else if flag_changed {
                     drop(s);
                     self.persist();
                     self.emit_task();
@@ -2837,6 +2948,15 @@ struct Client {
 
 impl Handler for Client {
     fn on_notification(&self, method: &str, params: Value) {
+        if method == WARNING_NOTIFICATION {
+            if let Some(task) = self.task.upgrade()
+                && let Some(message) = params.get("message").and_then(Value::as_str).filter(|s| !s.trim().is_empty())
+            {
+                task.push_entry(AgentEntry::Error { message: message.to_owned() });
+                task.persist();
+            }
+            return;
+        }
         if method == "session/update"
             && let (Some(task), Some(update)) = (self.task.upgrade(), params.get("update"))
         {
@@ -3047,9 +3167,13 @@ fn embeddable(path: &Path) -> Option<String> {
 /// A task file from before a field existed, with that field's empty value.
 fn upgrade(mut file: Value) -> Value {
     if let Some(task) = file.get_mut("task").and_then(Value::as_object_mut) {
-        for (key, empty) in
-            [("config", json!([])), ("commands", json!([])), ("usage", Value::Null), ("queue", json!([]))]
-        {
+        for (key, empty) in [
+            ("config", json!([])),
+            ("commands", json!([])),
+            ("usage", Value::Null),
+            ("queue", json!([])),
+            ("mcpOverrides", json!({})),
+        ] {
             task.entry(key).or_insert(empty);
         }
     }
@@ -3163,6 +3287,23 @@ fn turn_starts(entries: &[AgentEntry]) -> Vec<usize> {
         .collect()
 }
 
+/// The MCP servers of a session, and the names of the ones off for it.
+struct McpForSession {
+    servers: Vec<Value>,
+    off: Vec<String>,
+}
+
+/// The session parameters `session/new`, `session/load` and `session/fork` share: the MCP
+/// servers, and the ones off for this session, so an agent that also loads its own
+/// configuration (Claude Code) can keep a same-named server of it off too.
+fn session_params(cwd: &str, mcp: &McpForSession) -> Value {
+    let mut params = json!({ "cwd": cwd, "mcpServers": mcp.servers });
+    if !mcp.off.is_empty() {
+        params["_meta"] = json!({ "openidea": { "mcpServersOff": mcp.off } });
+    }
+    params
+}
+
 fn is_false(b: &bool) -> bool {
     !*b
 }
@@ -3196,13 +3337,20 @@ fn model_of(config: &[AgentConfigOption]) -> Option<String> {
     config.iter().find(|o| o.category.as_deref() == Some("model")).and_then(|o| o.current.clone())
 }
 
-/// Commands the agent implements on its own and never lists in `availableCommands` —
-/// its CLI builtins, passed through as prompt text (e.g. `/compact`). `(name, description)`.
-fn builtin_commands(provider: &str) -> &'static [(&'static str, &'static str)] {
+/// Commands the agent implements on its own and never lists in `availableCommands`.
+fn builtin_commands(provider: &str) -> Vec<AgentCommand> {
     match provider {
+        // Codex app-server has no command-list API, so the native adapter supplies its
+        // stable builtins and merges the session's dynamic skills separately.
+        "codex" => native::codex::builtin_commands(),
         // OpenCode ACP handles `/compact` via session.summarize but omits it from its command list.
-        "opencode" => &[("compact", "compact the conversation")],
-        _ => &[],
+        "opencode" => vec![AgentCommand {
+            name: "compact".into(),
+            description: "compact the conversation".into(),
+            hint: None,
+            source: AgentCommandSource::Command,
+        }],
+        _ => Vec::new(),
     }
 }
 
@@ -3264,6 +3412,9 @@ mod replay_tests;
 #[cfg(test)]
 mod tests;
 
+/// The name agents know the built-in server by (its tools are `mcp__OpenIDEA__…` in Claude Code).
+const BUILTIN_SERVER: &str = "OpenIDEA";
+
 // The desktop advertises its relay only while the built-in server is listening.
 static MCP_EXECUTABLE: parking_lot::RwLock<Option<std::path::PathBuf>> = parking_lot::RwLock::new(None);
 
@@ -3278,7 +3429,7 @@ fn mcp_servers_for(supported: bool, root: &std::path::Path) -> Vec<Value> {
 fn stdio_mcp_servers(executable: Option<&std::path::Path>, supported: bool, root: &std::path::Path) -> Vec<Value> {
     let Some(executable) = executable.filter(|_| supported) else { return Vec::new() };
     let command = ide_mcp::stdio_command(executable, root);
-    vec![json!({ "name": "OpenIDEA", "command": command[0], "args": command[1..], "env": [] })]
+    vec![json!({ "name": BUILTIN_SERVER, "command": command[0], "args": command[1..], "env": [] })]
 }
 
 /// What was sent of a streaming message: its first `bytes` (`utf16` UTF-16 units), which

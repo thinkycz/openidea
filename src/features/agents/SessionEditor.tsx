@@ -38,7 +38,6 @@ import { confirm } from "@/workbench/messages";
 import {
   Button,
   Checkbox,
-  Chip,
   EmptyState,
   Icon,
   IconButton,
@@ -80,6 +79,7 @@ import {
   workTime,
 } from "./composerModel";
 import { ConfigPickers } from "./ConfigPickers";
+import { McpPicker } from "./McpPicker";
 import { useEffortFocus } from "./effortFocus";
 import { useAgentFontZoomSurface } from "./fontZoom";
 import { findRanges, formatDuration, formatSentAt, isFindRangeShown } from "./conversation";
@@ -147,6 +147,7 @@ import {
   sendMessage,
   sendQueuedNow,
   setTaskConfig,
+  setTaskMcpOverrides,
   useAgentCommands,
   useAgents,
 } from "./store";
@@ -415,41 +416,34 @@ function SessionStatus({
         showContextMenu(e, taskMenu([task]));
       }}
     >
-      <span className={styles.agent} title={`${providerName(task.provider)} · ${task.cwd}`}>
-        <Icon name={providerIcon(task.provider)} size={13} className={styles.providerIcon} />
-        <span className={styles.agentName}>
-          {providerName(task.provider)}
-          {/* The composer's model picker shows the model when the agent offers one. */}
-          {task.model && !pickedModel ? ` · ${task.model}` : ""}
-        </span>
-      </span>
-      {/* The same three facts as the new-task composer: project, checkout, branch. */}
-      <span className={styles.where}>
-        {projectName && (
-          <Chip icon="folder" title={projectRoot ?? undefined}>
-            {projectName}
-          </Chip>
+      {/* Where the task works, in one quiet line like the new-task page: project (in a workspace), branch, worktree. */}
+      <span className={styles.where} title={task.cwd}>
+        {project?.workspace && projectName && (
+          <span className={styles.fact}>
+            <Icon name="folder" size={13} />
+            <span className={styles.factText}>{projectName}</span>
+          </span>
         )}
-        <Chip icon={local ? "folder" : "branch"}>
-          <T>{local ? "Local checkout" : "New worktree"}</T>
-        </Chip>
         {branch && (
-          <>
-            {local && (
-              <span className={styles.note}>
-                <T>on</T>
-              </span>
-            )}
-            <Chip icon="branch" title={branch}>
-              {branch}
-            </Chip>
-          </>
+          <span className={styles.fact}>
+            <Icon name="branch" size={13} />
+            <span className={styles.factText}>{branch}</span>
+          </span>
         )}
+        {!local && (
+          <span className={styles.fact}>
+            <T>Worktree</T>
+          </span>
+        )}
+        {task.model && !pickedModel && <span className={styles.fact}>{task.model}</span>}
       </span>
-      <span className={styles.state}>
-        <T>{statusLabel(task.status)}</T>
-        {task.status === "limited" && task.resetsMs != null && ` · ${tx`resets ${formatSentAt(task.resetsMs)}`}`}
-      </span>
+      {/* Ready is the usual state: only the others are worth a word. */}
+      {task.status !== "ready" && (
+        <span className={styles.state}>
+          <T>{statusLabel(task.status)}</T>
+          {task.status === "limited" && task.resetsMs != null && ` · ${tx`resets ${formatSentAt(task.resetsMs)}`}`}
+        </span>
+      )}
       <span className={styles.state} role="status" aria-live="polite" aria-atomic="true">
         {effortAnnouncement ? tx("Effort: {level}").replace("{level}", effortAnnouncement) : ""}
       </span>
@@ -537,7 +531,7 @@ function Usage({ usage }: { usage: AgentUsage }) {
       <span className={styles.usageBar} aria-hidden>
         <span style={{ width: `${label.percent}%` }} />
       </span>
-      {label.short}
+      {`${label.percent}%`}
     </span>
   );
 }
@@ -2868,6 +2862,7 @@ function SessionComposer({
   const project = useProject((s) => s.project);
   const composer = useAgents((s) => s.composers.get(task.id)) ?? emptyDraft();
   const [sending, setSending] = useState(false);
+  const [mcpOpenRequest, setMcpOpenRequest] = useState(0);
   const agentCommands = useAgentCommands(task.provider, task.id, task.commands);
   const busy = isBusy(task.status);
   // ↑ recalls this conversation's messages, newest first.
@@ -2903,20 +2898,11 @@ function SessionComposer({
         body: String(e),
       }),
     );
+  const openMcp = () => setMcpOpenRequest((n) => n + 1);
   const shown = useEditorShown();
   const effortAnnouncement = useEffortFocus(focusRoot, shown && task.status !== "archived", task.config, setOption);
   return (
     <div className={styles.composerArea}>
-      <SessionStatus
-        task={task}
-        entries={entries}
-        head={head}
-        changes={changes}
-        commits={commits}
-        changesOpen={changesOpen}
-        onToggleChanges={onToggleChanges}
-        effortAnnouncement={effortAnnouncement}
-      />
       {task.status === "archived" && (
         <div className={styles.banner}>
           <span className={styles.bannerText}>
@@ -2955,8 +2941,33 @@ function SessionComposer({
         config={task.config}
         onConfig={setOption}
         onSubmit={send}
+        onOpenMcp={openMcp}
         disabled={task.status === "archived"}
-        toolbar={<ConfigPickers config={task.config} onChange={setOption} />}
+        addMenu={[
+          { id: "mcp", label: "MCP Servers…", icon: "plugin", disabled: task.status === "archived", run: openMcp },
+        ]}
+        toolbar={
+          <>
+            <ConfigPickers config={task.config} onChange={setOption} />
+            <McpPicker
+              provider={task.provider}
+              overrides={task.mcpOverrides}
+              disabled={task.status === "archived"}
+              busy={busy}
+              openRequest={mcpOpenRequest}
+              hideTrigger
+              onChange={(next) =>
+                void setTaskMcpOverrides(task.id, next).catch((e: unknown) =>
+                  notifications().notify({
+                    level: "error",
+                    title: "Couldn't change the setting",
+                    body: String(e),
+                  }),
+                )
+              }
+            />
+          </>
+        }
         actions={
           <>
             {busy && <IconButton icon="stop" title="Stop" onClick={() => void cancelTask(task.id)} />}
@@ -2969,6 +2980,16 @@ function SessionComposer({
             />
           </>
         }
+      />
+      <SessionStatus
+        task={task}
+        entries={entries}
+        head={head}
+        changes={changes}
+        commits={commits}
+        changesOpen={changesOpen}
+        onToggleChanges={onToggleChanges}
+        effortAnnouncement={effortAnnouncement}
       />
     </div>
   );

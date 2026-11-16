@@ -54,6 +54,8 @@ struct FakeAgent {
     /// Advertises steering as OMP does (`_meta.steering` at the top of `initialize`)
     /// instead of `_meta.openidea.steer`.
     session_steering: bool,
+    /// Records the `mcpServers` array passed to `session/new`, `session/load`, and `session/fork`.
+    mcp_calls: Mutex<Vec<(String, Vec<String>)>>,
 }
 
 impl FakeAgent {
@@ -152,6 +154,18 @@ impl Handler for FakeAgent {
         {
             // Let the prompt's permission request reach the task before the mode changes.
             std::thread::sleep(Duration::from_millis(100));
+        }
+        if matches!(method, "session/new" | "session/load" | "session/fork") {
+            let names = params
+                .get("mcpServers")
+                .and_then(Value::as_array)
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.get("name").and_then(Value::as_str).map(str::to_owned))
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            self.mcp_calls.lock().push((method.to_owned(), names));
         }
         let session = params.get("sessionId").and_then(Value::as_str).unwrap_or("s1").to_owned();
         match method {
@@ -456,6 +470,7 @@ async fn saved_conversation_reads_do_not_start_or_load_the_agent() {
             config: Vec::new(),
             isolation: Isolation::Local,
             base: None,
+            ..Default::default()
         })
         .await
         .unwrap();
@@ -649,6 +664,7 @@ async fn authentication_failures_name_the_session_executable_at_start_and_during
                 config: vec![],
                 isolation: Isolation::Local,
                 base: None,
+                ..Default::default()
             })
             .await
             .unwrap();
@@ -699,6 +715,7 @@ async fn sign_in_errors_preserve_details_and_leave_unrelated_errors_unchanged() 
                     config: vec![],
                     isolation: Isolation::Local,
                     base: None,
+                    ..Default::default()
                 })
                 .await
                 .unwrap();
@@ -754,6 +771,7 @@ async fn registry_sign_in_errors_use_the_advertised_terminal_login() {
                 config: vec![],
                 isolation: Isolation::Local,
                 base: None,
+                ..Default::default()
             })
             .await
             .unwrap();
@@ -801,6 +819,7 @@ async fn authenticates_and_retries_session_setup_once_on_auth_error() {
             config: vec![],
             isolation: Isolation::Local,
             base: None,
+            ..Default::default()
         })
         .await
         .unwrap();
@@ -883,14 +902,30 @@ async fn commands_are_remembered_per_project_and_merged_with_skills_on_disk() {
             config: Vec::new(),
             isolation: Isolation::Local,
             base: None,
+            ..Default::default()
         })
         .await
         .unwrap();
     wait_for(&mgr_a, &task.id, AgentStatus::NeedsInput).await;
     assert_eq!(names(mgr_a.commands("claude", None).await.unwrap()), ["review", "triage"]);
     assert_eq!(names(mgr_a.commands("claude", Some(&task.id)).await.unwrap()), ["review", "triage"]);
-    // Other agents get only what they offered.
-    assert!(mgr_a.commands("codex", None).await.unwrap().is_empty());
+    // Other agents get only what they offered, plus verified native builtins.
+    assert_eq!(
+        names(mgr_a.commands("codex", None).await.unwrap()),
+        [
+            "plan",
+            "mcp",
+            "skills",
+            "status",
+            "review",
+            "review-branch",
+            "review-commit",
+            "compact",
+            "goal",
+            "rename",
+            "logout",
+        ]
+    );
     mgr_a.cancel(&task.id, None).unwrap();
     wait_for(&mgr_a, &task.id, AgentStatus::Ready).await;
     mgr_a.shutdown();
@@ -910,9 +945,27 @@ async fn builtin_commands_only_fill_verified_gaps_and_preserve_advertised_metada
     let tmp = tempfile::tempdir().unwrap();
     let agent = Arc::new(FakeAgent::default());
     let mgr = manager_at(tmp.path(), &tmp.path().join("models.json"), agent);
-    for provider in ["claude", "claude-acp", "opencode2", "codex", "custom"] {
+    for provider in ["claude", "claude-acp", "opencode2", "custom"] {
         assert!(mgr.commands(provider, None).await.unwrap().is_empty(), "{provider}");
     }
+    let commands = mgr.commands("codex", None).await.unwrap();
+    assert_eq!(
+        commands.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(),
+        [
+            "plan",
+            "mcp",
+            "skills",
+            "status",
+            "review",
+            "review-branch",
+            "review-commit",
+            "compact",
+            "goal",
+            "rename",
+            "logout",
+        ]
+    );
+    assert_eq!(commands[1].hint.as_deref(), Some("[reconnect]"));
     let commands = mgr.commands("opencode", None).await.unwrap();
     assert_eq!(commands.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(), ["compact"]);
     let task = mgr
@@ -923,6 +976,7 @@ async fn builtin_commands_only_fill_verified_gaps_and_preserve_advertised_metada
             config: Vec::new(),
             isolation: Isolation::Local,
             base: None,
+            ..Default::default()
         })
         .await
         .unwrap();
@@ -981,6 +1035,7 @@ async fn a_task_runs_asks_for_permission_and_survives_a_restart() {
             config: vec![AgentConfigChoice { id: "model".into(), value: "small".into() }],
             isolation: Isolation::Local,
             base: None,
+            ..Default::default()
         })
         .await
         .unwrap();
@@ -1104,6 +1159,7 @@ async fn steers_through_session_steering() {
             config: vec![],
             isolation: Isolation::Local,
             base: None,
+            ..Default::default()
         })
         .await
         .unwrap();
@@ -1140,6 +1196,7 @@ async fn messages_sent_while_busy_are_queued_and_send_now_interrupts() {
             config: vec![],
             isolation: Isolation::Local,
             base: None,
+            ..Default::default()
         })
         .await
         .unwrap();
@@ -1195,6 +1252,7 @@ async fn subagents_get_their_own_conversation() {
             config: vec![],
             isolation: Isolation::Local,
             base: None,
+            ..Default::default()
         })
         .await
         .unwrap();
@@ -1290,6 +1348,7 @@ async fn claude_questions_keep_the_answer_object_as_the_option_id() {
             config: vec![],
             isolation: Isolation::Local,
             base: None,
+            ..Default::default()
         })
         .await
         .unwrap();
@@ -1339,6 +1398,7 @@ async fn qwen_questions_answer_by_index_beside_the_submit_option() {
             config: vec![],
             isolation: Isolation::Local,
             base: None,
+            ..Default::default()
         })
         .await
         .unwrap();
@@ -1407,6 +1467,7 @@ async fn skipped_qwen_questions_cancel_the_request() {
             config: vec![],
             isolation: Isolation::Local,
             base: None,
+            ..Default::default()
         })
         .await
         .unwrap();
@@ -1446,6 +1507,7 @@ async fn cancelling_resolves_the_open_permission_and_delete_forgets_the_task() {
             config: vec![],
             isolation: Isolation::Local,
             base: None,
+            ..Default::default()
         })
         .await
         .unwrap();
@@ -1467,7 +1529,8 @@ async fn cancelling_resolves_the_open_permission_and_delete_forgets_the_task() {
             provider: "codex".into(),
             config: vec![],
             isolation: Isolation::Local,
-            base: None
+            base: None,
+            ..Default::default()
         })
         .await
         .is_err()
@@ -1516,6 +1579,7 @@ async fn real_claude_task_in_a_worktree() {
             config: vec![AgentConfigChoice { id: "model".into(), value: "haiku".into() }],
             isolation: Isolation::Worktree,
             base: None,
+            ..Default::default()
         })
         .await
         .unwrap();
@@ -1566,11 +1630,18 @@ async fn renamed_titles_survive_updates_forks_and_restart() {
             config: Vec::new(),
             isolation: Isolation::Local,
             base: None,
+            ..Default::default()
         })
         .await
         .unwrap();
     wait_for(&mgr, &task.id, AgentStatus::Ready).await;
     let handle = mgr.task(&task.id).unwrap();
+    // `/rename` reports an explicit title through the same update; later automatic names
+    // must not replace it even though AgentManager.rename was not called.
+    handle
+        .on_update(None, &json!({"sessionUpdate": "session_info_update", "title": "Command title", "userNamed": true}));
+    handle.on_update(None, &json!({"sessionUpdate": "session_info_update", "title": "Automatic title"}));
+    assert_eq!(handle.state.lock().task.title, "Command title");
     assert!(mgr.rename(&task.id, "  ").is_err());
     let initial = handle.state.lock().task.title.clone();
     for title in [initial, "My task".to_owned(), "名".repeat(205)] {
@@ -1592,6 +1663,67 @@ async fn renamed_titles_survive_updates_forks_and_restart() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn startup_warnings_survive_replay_and_restart_without_failing_the_task() {
+    let tmp = tempfile::tempdir().unwrap();
+    let agent = Arc::new(FakeAgent::default());
+    let mgr = manager(tmp.path(), agent.clone());
+    let task = mgr
+        .create(NewAgentTask { provider: "claude".into(), prompt: text("again"), ..Default::default() })
+        .await
+        .unwrap();
+    wait_for(&mgr, &task.id, AgentStatus::Ready).await;
+    let handle = mgr.task(&task.id).unwrap();
+    handle.replaying.store(true, Ordering::Release);
+    handle.turn_started.store(false, Ordering::Release);
+    let client = Client { task: Arc::downgrade(&handle) };
+    client.on_notification(WARNING_NOTIFICATION, json!({"message": "Project MCP config is disabled until trusted."}));
+    client.on_notification(WARNING_NOTIFICATION, json!({"message": "  "}));
+    client.on_notification(WARNING_NOTIFICATION, json!({}));
+    assert_eq!(handle.state.lock().task.status, AgentStatus::Ready);
+    assert!(!handle.turn_started.load(Ordering::Acquire));
+    mgr.shutdown();
+    let restored = manager(tmp.path(), agent);
+    let handle = restored.task(&task.id).unwrap();
+    assert_eq!(handle.state.lock().conversation.main.entries.iter().filter(|entry| matches!(entry, AgentEntry::Error {message} if message == "Project MCP config is disabled until trusted.")).count(), 1);
+    restored.shutdown();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn persistent_project_trust_needs_confirmation_even_with_bypass_and_is_denied_in_side_chats() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mgr = manager(tmp.path(), Arc::new(FakeAgent::default()));
+    let task = mgr
+        .create(NewAgentTask { provider: "claude".into(), prompt: text("again"), ..Default::default() })
+        .await
+        .unwrap();
+    wait_for(&mgr, &task.id, AgentStatus::Ready).await;
+    let handle = mgr.task(&task.id).unwrap();
+    handle.state.lock().task.config = config::options_of(&json!({"configOptions": [{
+        "id": "mode", "category": "mode", "type": "select", "currentValue": "full-access",
+        "options": [{"value": "full-access", "name": "Full Access"}]
+    }]}));
+    assert!(config::bypass_approvals(&handle.state.lock().task.config));
+    let params = json!({"toolCall": {"toolCallId": "trust", "kind": "edit", "title": "Trust Project in Codex"},
+    "options": [
+        {"optionId": "codex-trust-project", "name": "Trust Project in Codex", "kind": "allow_always"},
+        {"optionId": "codex-keep-untrusted", "name": "Keep Untrusted", "kind": "reject_once"}
+    ]});
+    let asking = {
+        let handle = handle.clone();
+        let params = params.clone();
+        tokio::task::spawn_blocking(move || handle.ask_permission(&params))
+    };
+    wait_for(&mgr, &task.id, AgentStatus::NeedsInput).await;
+    assert!(!asking.is_finished());
+    let id = *handle.permissions.lock().keys().next().unwrap();
+    mgr.respond(&task.id, id, Some("codex-keep-untrusted".into())).unwrap();
+    assert_eq!(asking.await.unwrap()["outcome"]["optionId"], "codex-keep-untrusted");
+    handle.state.lock().ephemeral = true;
+    assert_eq!(handle.ask_permission(&params)["outcome"]["optionId"], "codex-keep-untrusted");
+    mgr.shutdown();
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn forks_rollbacks_and_steering() {
     let tmp = tempfile::tempdir().unwrap();
     let agent = Arc::new(FakeAgent::default());
@@ -1603,6 +1735,7 @@ async fn forks_rollbacks_and_steering() {
         config: Vec::new(),
         isolation: Isolation::Local,
         base: None,
+        ..Default::default()
     };
     let task = mgr.create(new("again")).await.unwrap();
     wait_for(&mgr, &task.id, AgentStatus::Ready).await;
@@ -1682,6 +1815,7 @@ async fn usage_limits_and_late_settings() {
             config: vec![AgentConfigChoice { id: "effort".into(), value: "high".into() }],
             isolation: Isolation::Local,
             base: None,
+            ..Default::default()
         })
         .await
         .unwrap();
@@ -1735,6 +1869,7 @@ async fn remembered_settings_drop_per_model_choices_for_the_next_task() {
             config: vec![],
             isolation: Isolation::Local,
             base: None,
+            ..Default::default()
         })
         .await
         .unwrap();
@@ -1769,6 +1904,7 @@ async fn thinking_levels_are_remembered_per_provider_and_model() {
             config: vec![],
             isolation: Isolation::Local,
             base: None,
+            ..Default::default()
         })
         .await
         .unwrap();
@@ -1815,6 +1951,7 @@ async fn changing_an_idle_tasks_settings_keeps_its_models_effort_levels() {
                 config: vec![],
                 isolation: Isolation::Local,
                 base: None,
+                ..Default::default()
             })
             .await
             .unwrap();
@@ -1856,6 +1993,7 @@ async fn upfront_effort_is_validated_after_changing_model_before_the_prompt() {
                 ],
                 isolation: Isolation::Local,
                 base: None,
+                ..Default::default()
             })
             .await
             .unwrap();
@@ -1887,6 +2025,7 @@ async fn unreported_model_switch_does_not_cache_the_previous_models_levels() {
             config: vec![],
             isolation: Isolation::Local,
             base: None,
+            ..Default::default()
         })
         .await
         .unwrap();
@@ -1911,6 +2050,7 @@ async fn cached_effort_is_not_sent_without_real_session_options() {
         config,
         isolation: Isolation::Local,
         base: None,
+        ..Default::default()
     };
     let warm = mgr.create(new(vec![])).await.unwrap();
     wait_for(&mgr, &warm.id, AgentStatus::Ready).await;
@@ -1946,6 +2086,7 @@ async fn reported_levels_refresh_even_without_a_model_option() {
             config: vec![],
             isolation: Isolation::Local,
             base: None,
+            ..Default::default()
         })
         .await
         .unwrap();
@@ -1999,6 +2140,7 @@ async fn cursor_approval_switch_resolves_pending_and_survives_restart() {
         config: Vec::new(),
         isolation: Isolation::Local,
         base: None,
+        ..Default::default()
     };
     let task = mgr.create(new()).await.unwrap();
     wait_for(&mgr, &task.id, AgentStatus::NeedsInput).await;
@@ -2052,6 +2194,7 @@ async fn bypass_approvals_keeps_both_question_dialects_pending_but_allows_permis
                     },
                     isolation: Isolation::Local,
                     base: None,
+                    ..Default::default()
                 })
                 .await
                 .unwrap();
@@ -2113,6 +2256,7 @@ async fn an_agent_form_is_answered_declined_or_cancelled_even_when_approvals_are
                 config: vec![AgentConfigChoice { id: config::CURSOR_APPROVAL.into(), value: "bypass".into() }],
                 isolation: Isolation::Local,
                 base: None,
+                ..Default::default()
             })
             .await
             .unwrap();
@@ -2155,6 +2299,7 @@ async fn cursor_approval_choice_applies_before_first_prompt() {
             config: vec![AgentConfigChoice { id: config::CURSOR_APPROVAL.into(), value: "bypass".into() }],
             isolation: Isolation::Local,
             base: None,
+            ..Default::default()
         })
         .await
         .unwrap();
@@ -2179,6 +2324,7 @@ async fn a_full_access_mode_approves_tool_requests() {
             config: vec![AgentConfigChoice { id: "mode".into(), value: "full-access".into() }],
             isolation: Isolation::Local,
             base: None,
+            ..Default::default()
         })
         .await
         .unwrap();
@@ -2200,6 +2346,7 @@ async fn a_full_access_mode_approves_tool_requests() {
             config: Vec::new(),
             isolation: Isolation::Local,
             base: None,
+            ..Default::default()
         })
         .await
         .unwrap();
@@ -2228,6 +2375,7 @@ async fn a_late_full_access_option_approves_a_pending_request() {
             config: vec![AgentConfigChoice { id: "mode".into(), value: "full-access".into() }],
             isolation: Isolation::Local,
             base: None,
+            ..Default::default()
         })
         .await
         .unwrap();
@@ -2275,6 +2423,7 @@ async fn an_allow_all_permissions_option_approves_tool_requests() {
             config: vec![AgentConfigChoice { id: "allow_all".into(), value: "on".into() }],
             isolation: Isolation::Local,
             base: None,
+            ..Default::default()
         })
         .await
         .unwrap();
@@ -2302,6 +2451,7 @@ async fn archived_tasks_can_be_restored_and_continue_their_session() {
             config: vec![],
             isolation: Isolation::Local,
             base: None,
+            ..Default::default()
         })
         .await
         .unwrap();
@@ -2354,6 +2504,7 @@ async fn task_project_root_controls_local_and_worktree_repositories() {
                 config: vec![],
                 isolation,
                 base: None,
+                ..Default::default()
             })
             .await
             .unwrap();
@@ -2560,6 +2711,7 @@ async fn idle_agents_stop_and_resume_their_session_on_the_next_message() {
         config: Vec::new(),
         isolation: Isolation::Local,
         base: None,
+        ..Default::default()
     };
     let live =
         |mgr: &AgentManager, id: &str| mgr.task(id).unwrap().live.lock().as_ref().is_some_and(|l| !l.peer.is_closed());
@@ -2638,6 +2790,7 @@ async fn an_idle_agent_waits_for_its_background_tasks_before_it_stops() {
         config: Vec::new(),
         isolation: Isolation::Local,
         base: None,
+        ..Default::default()
     };
 
     let tmp = tempfile::tempdir().unwrap();
@@ -2672,6 +2825,7 @@ async fn the_task_shows_what_runs_in_the_background() {
             config: Vec::new(),
             isolation: Isolation::Local,
             base: None,
+            ..Default::default()
         })
         .await
         .unwrap();
@@ -2724,6 +2878,7 @@ async fn a_background_task_is_stopped_on_its_own() {
             config: Vec::new(),
             isolation: Isolation::Local,
             base: None,
+            ..Default::default()
         })
         .await
         .unwrap();
@@ -2811,6 +2966,7 @@ async fn delete_running_agent(no_load: bool) {
             config: vec![],
             isolation: Isolation::Worktree,
             base: None,
+            ..Default::default()
         })
         .await
         .unwrap();
@@ -2926,6 +3082,7 @@ async fn config_choice_shows_before_the_agent_answers() {
             config: vec![],
             isolation: Isolation::Local,
             base: None,
+            ..Default::default()
         })
         .await
         .unwrap();
@@ -3031,6 +3188,7 @@ async fn rolling_back_restores_the_start_of_the_task_and_keeps_the_users_own_edi
             config: Vec::new(),
             isolation: Isolation::Local,
             base: None,
+            ..Default::default()
         })
         .await
         .unwrap();
@@ -3137,6 +3295,7 @@ impl Checkout {
                 config: Vec::new(),
                 isolation: Isolation::Local,
                 base: None,
+                ..Default::default()
             })
             .await
             .unwrap();
@@ -3343,6 +3502,7 @@ async fn security_policy_auto_approves_whitelist_and_rejects_blacklist() {
             config: vec![],
             isolation: Isolation::Local,
             base: None,
+            ..Default::default()
         })
         .await
         .unwrap();
@@ -3373,6 +3533,7 @@ async fn security_policy_auto_approves_whitelist_and_rejects_blacklist() {
             config: vec![],
             isolation: Isolation::Local,
             base: None,
+            ..Default::default()
         })
         .await
         .unwrap();
@@ -3410,6 +3571,7 @@ async fn security_policy_never_auto_approves_a_request_that_only_reads_like_a_co
             config: vec![],
             isolation: Isolation::Local,
             base: None,
+            ..Default::default()
         })
         .await
         .unwrap();
@@ -3447,6 +3609,7 @@ async fn ephemeral_tasks_stay_in_memory_only() {
             config: vec![],
             isolation: Isolation::Local,
             base: None,
+            ..Default::default()
         })
         .await
         .unwrap();
@@ -3461,6 +3624,7 @@ async fn ephemeral_tasks_stay_in_memory_only() {
                 config: vec![],
                 isolation: Isolation::Local,
                 base: None,
+                ..Default::default()
             },
             &source.id,
         )
@@ -3562,6 +3726,7 @@ async fn ephemeral_tasks_deny_write_permissions() {
             config: vec![],
             isolation: Isolation::Local,
             base: None,
+            ..Default::default()
         })
         .await
         .unwrap();
@@ -3587,6 +3752,7 @@ async fn ephemeral_tasks_deny_write_permissions() {
                 config: vec![],
                 isolation: Isolation::Local,
                 base: None,
+                ..Default::default()
             },
             &source.id,
         )
@@ -3659,6 +3825,7 @@ async fn attention_finished_not_cancelled() {
             config: Vec::new(),
             isolation: Isolation::Local,
             base: None,
+            ..Default::default()
         })
         .await
         .unwrap();
@@ -3674,6 +3841,7 @@ async fn attention_finished_not_cancelled() {
             config: Vec::new(),
             isolation: Isolation::Local,
             base: None,
+            ..Default::default()
         })
         .await
         .unwrap();
@@ -3710,6 +3878,7 @@ async fn attention_failed() {
             config: Vec::new(),
             isolation: Isolation::Local,
             base: None,
+            ..Default::default()
         })
         .await
         .unwrap();
@@ -3735,6 +3904,7 @@ async fn attention_input_not_auto_bypass() {
             config: Vec::new(),
             isolation: Isolation::Local,
             base: None,
+            ..Default::default()
         })
         .await
         .unwrap();
@@ -3752,6 +3922,7 @@ async fn attention_input_not_auto_bypass() {
             config: vec![AgentConfigChoice { id: config::CURSOR_APPROVAL.into(), value: "bypass".into() }],
             isolation: Isolation::Local,
             base: None,
+            ..Default::default()
         })
         .await
         .unwrap();
@@ -3778,6 +3949,7 @@ async fn attention_not_emitted_on_restore() {
             config: Vec::new(),
             isolation: Isolation::Local,
             base: None,
+            ..Default::default()
         })
         .await
         .unwrap();
@@ -3792,6 +3964,80 @@ async fn attention_not_emitted_on_restore() {
     tokio::time::sleep(Duration::from_millis(50)).await;
     assert!(attention_reasons(&events.lock()).is_empty(), "snapshot restore must not re-notify: {:?}", *events.lock());
     restored.shutdown();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn per_session_mcp_overrides_filter_session_and_reload_when_idle() {
+    let tmp = tempfile::tempdir().unwrap();
+    let agent = Arc::new(FakeAgent::default());
+    let mgr = manager(tmp.path(), agent.clone());
+    mgr.set_mcp_servers_hook(Box::new(|| {
+        vec![
+            McpServer {
+                id: "user::github".into(),
+                name: "github".into(),
+                scope: McpScope::User,
+                transport: McpTransport::Stdio,
+                enabled: true,
+                command: Some("npx".into()),
+                args: vec!["gh-mcp".into()],
+                env: Vec::new(),
+                url: None,
+                headers: Vec::new(),
+                agents: Vec::new(),
+                unapproved: false,
+            },
+            McpServer {
+                id: "user::slack".into(),
+                name: "slack".into(),
+                scope: McpScope::User,
+                transport: McpTransport::Stdio,
+                enabled: true,
+                command: Some("npx".into()),
+                args: vec!["slack-mcp".into()],
+                env: Vec::new(),
+                url: None,
+                headers: Vec::new(),
+                agents: Vec::new(),
+                unapproved: false,
+            },
+        ]
+    }));
+
+    let task = mgr
+        .create(NewAgentTask {
+            project_root: None,
+            prompt: text("again"),
+            provider: "claude".into(),
+            config: Vec::new(),
+            isolation: Isolation::Local,
+            base: None,
+            mcp_overrides: BTreeMap::from([("slack".into(), false)]),
+        })
+        .await
+        .unwrap();
+    wait_for(&mgr, &task.id, AgentStatus::Ready).await;
+
+    let first_mcp = agent.mcp_calls.lock().last().cloned().unwrap();
+    assert_eq!(first_mcp.0, "session/new");
+    assert!(first_mcp.1.contains(&"github".to_string()));
+    assert!(!first_mcp.1.contains(&"slack".to_string()));
+
+    // Toggle `slack` back on and `github` off while idle -> recycles the resumable session,
+    // so the next prompt calls `session/load` with the updated MCP servers.
+    let updated =
+        mgr.set_mcp_overrides(&task.id, BTreeMap::from([("github".into(), false), ("slack".into(), true)])).unwrap();
+    assert_eq!(updated.mcp_overrides.get("github"), Some(&false));
+    assert_eq!(updated.mcp_overrides.get("slack"), Some(&true));
+
+    mgr.prompt(&task.id, text("again"), false).await.unwrap();
+    wait_for(&mgr, &task.id, AgentStatus::Ready).await;
+
+    let reloaded = agent.mcp_calls.lock().last().cloned().unwrap();
+    assert_eq!(reloaded.0, "session/load");
+    assert!(!reloaded.1.contains(&"github".to_string()));
+    assert!(reloaded.1.contains(&"slack".to_string()));
+    mgr.shutdown();
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -3893,6 +4139,7 @@ async fn copilot_falls_back_to_acp_when_headless_probe_session_or_prompt_fails()
             config: vec![AgentConfigChoice { id: "context_tier".into(), value: "long_context".into() }],
             isolation: Isolation::Local,
             base: None,
+            mcp_overrides: BTreeMap::new(),
         })
         .await
         .unwrap();
@@ -3916,6 +4163,7 @@ async fn copilot_falls_back_to_acp_when_headless_probe_session_or_prompt_fails()
             config: vec![],
             isolation: Isolation::Local,
             base: None,
+            mcp_overrides: BTreeMap::new(),
         })
         .await
         .unwrap();
@@ -3989,4 +4237,15 @@ done
         Some("medium")
     );
     mgr.shutdown();
+}
+
+#[test]
+fn session_params_name_the_servers_off() {
+    let mcp = McpForSession { servers: vec![json!({ "name": "docs" })], off: vec!["github".into()] };
+    let params = session_params("/p", &mcp);
+    assert_eq!(params["cwd"], "/p");
+    assert_eq!(params["mcpServers"][0]["name"], "docs");
+    assert_eq!(params["_meta"]["openidea"]["mcpServersOff"], json!(["github"]));
+    let none = McpForSession { servers: Vec::new(), off: Vec::new() };
+    assert!(session_params("/p", &none).get("_meta").is_none());
 }

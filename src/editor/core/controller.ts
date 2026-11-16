@@ -5,6 +5,7 @@
  */
 import { writeClipboardText } from "@/platform/clipboard";
 import { pasteEditorClipboard } from "./cm/clipboard";
+import { saveOnBlur } from "./saveOnBlur";
 import type { ReactNode } from "react";
 import { EditorSelection } from "@codemirror/state";
 import { create } from "zustand";
@@ -861,19 +862,7 @@ export class EditorController implements SlotHost {
     setContext("editorTextFocus", false);
     if (!this.autoSave()) return;
     const save = () => void slot.model.save("auto").catch(() => {});
-    if (typeof document === "undefined") return save();
-    // A popup (intentions, completion, …) belongs to the editor: saving under it would change
-    // the text (save cleanup) its items were computed for. Save once focus leaves it elsewhere.
-    setTimeout(() => {
-      if (slot.view?.hasFocus) return;
-      if (!inPopup(document.activeElement)) return save();
-      const onFocusIn = (e: FocusEvent) => {
-        if (inPopup(e.target)) return;
-        document.removeEventListener("focusin", onFocusIn);
-        if (!slot.view?.hasFocus) save();
-      };
-      document.addEventListener("focusin", onFocusIn);
-    });
+    saveOnBlur(() => !!slot.view?.hasFocus, save);
   }
 
   onSelection(slot: EditorSlot, navigatedFrom?: { line: number; col: number }) {
@@ -970,6 +959,7 @@ export class EditorController implements SlotHost {
           { kind: "action", action: "navigate.implementation", label: "Implementation(s)" },
           { kind: "action", action: "navigate.typeDeclaration", label: "Type Declaration" },
           { kind: "action", action: "navigate.superMethod", label: "Super Method" },
+          { kind: "action", action: "navigate.relatedSymbol", label: "Related Symbol…" },
           { kind: "action", action: "navigate.gotoTest", label: "Test" },
           { kind: "separator" },
           { kind: "action", action: "find.usages", label: "Find Usages" },
@@ -1001,6 +991,7 @@ export class EditorController implements SlotHost {
           { kind: "action", action: "refactor.extractVariable" },
           { kind: "action", action: "refactor.extractConstant" },
           { kind: "action", action: "refactor.extractMethod" },
+          { kind: "action", action: "refactor.extractInterface" },
           { kind: "action", action: "refactor.inline" },
           { kind: "action", action: "refactor.pullMembersUp" },
           { kind: "action", action: "refactor.pushMembersDown" },
@@ -2458,8 +2449,4 @@ let controller: EditorController | null = null;
 
 export function editorController(): EditorController {
   return (controller ??= new EditorController());
-}
-
-function inPopup(target: EventTarget | null): boolean {
-  return target instanceof Element && !!target.closest("[data-popup]");
 }

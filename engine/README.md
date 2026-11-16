@@ -60,8 +60,9 @@ Unsaved action rebinding, case-variant zero-hit caches and checked __invoke rena
 refusal are covered through the real client. Namespace-dependent class constants
 refuse partial class edits; unresolved forms and completeness limitations remain
 in the ledger. Optional memory-audit compilation is restored.
-The sole signed App0.1.91 remains on152; this development resource promotion is
-not a new package or native acceptance.
+OpenStorm0.1.92 targets this engine for local development packaging. Built
+artifact/signature and native acceptance evidence are tracked separately in
+`docs/OPENSTORM.md`.
 Full pinned source
 tests pass18,502 checks plus separate FIFO and enum-deadlock children (17 ignored).
 Examples, Clippy, formatting, source fingerprints and the optimized build pass.

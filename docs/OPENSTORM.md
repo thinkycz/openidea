@@ -48,6 +48,36 @@ At that merge checkpoint, source-only slice 101 remained unfinished;
 no candidate 153 adoption or new package was claimed. Area statuses remain 67
 partial/2 user-deferred.
 
+Laravel slice 103 (2026-11-16, verified local development package): App 0.1.92
+contains the upstream c8112f90 merge and engine 153. Runtime source and engine
+bytes are unchanged from slice 102; only workspace/application version metadata
+advances. Cargo.lock changes only the 44 workspace package versions. Reuse slice
+102's full source gates and 58 actual PHP host/client checks; the packaging build
+also reruns the production frontend bundle and Safari compatibility checks.
+
+The new arm64 development bundle has identifier cz.thinky.openstorm, minimum
+macOS 13.0, and passes ad-hoc deep/strict signature verification. Its bundled
+engine reports 0.11.1-openstorm.153 and matches canonical/provenance SHA256
+303b4c7abfe275ed9fa89d13b18a1050b3747c0d02fa571509bf61c627f0eeca.
+Main executable SHA256:
+db02404cdef439ffb654525ddab8813459c62cb7cd4677267ae06fdbfbee0ae1.
+The receipt binds the exact source snapshot; only this progress record and the
+feature ledger may change after packaging. The linker warns that this debug
+binary's __eh_frame exceeds compact-unwind offset limits; build succeeds, but
+exception-handling performance is unmeasured.
+
+Latest app: artifacts/batches/0.1.92/OpenStorm.app. App 0.1.91 was removed only
+after the new signature and receipt succeeded. Removed 10,076 compiler files /
+6.9 GiB and the duplicate app; both owned compiler target roots are absent.
+Receipts, engine provenance/source, Workbench and earlier evaluation artifacts
+remain. Evidence: artifacts/checks/slice103-preflight.json,
+slice103-package-pipeline.json, slice103-packaged-check.json, slice103-receipt.json
+and artifacts/batches/0.1.92/{build-receipt,retention}.json.
+Native UI launch/install/recovery checks remain explicitly user-skipped. This is
+a local development package, not an installed or notarized release. Plugin API
+release-snapshot promotion, public publishing and update activation remain
+deferred. All 69 areas remain visible: 67 partial and 2 user-deferred.
+
 Laravel slice 102 (2026-11-16, verified development resource): engine 153 is
 promoted into application development resources after 58 actual PHP host/client
 checks pass both before and after final source gates. The exact same new host

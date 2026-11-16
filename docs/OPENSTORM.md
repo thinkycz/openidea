@@ -15,6 +15,40 @@ slice, commit and push it, and retain only the latest generated app. Native UI
 cases remain deferred/unverified; earlier native-first blocking checkpoints are
 historical and no longer prevent independent implementation.
 
+Client acceptance slice122 (2026-11-16–17): exercise candidate157's typed
+controller middleware guards through OpenStorm's real LSP and host document paths.
+The156 control fails to offer the new guard;157 passes both new host tests. Verify UTF-16 whole-segment completion/resolve,
+comma preservation, hover, config definition and references, unsaved parent/config
+refresh and restart. Checked save preserves external changes, asks for overwrite
+consent and rejects that consent if the disk changes again before confirmation.
+Nine held-response scenarios verify parent/config changes, restart, cancellation
+and unchanged completion/resolve controls against actual157 responses.
+
+All74 actual-engine client/host tests pass against canonical157 SHA256
+904aa387a702bcc00ed3b8640c299efb0c26b3a00a247e86c2f389abb36b5feb,
+using the exact binaries emitted by the workspace gate. Recorded fixture originals
+remain unchanged. Eight new CodeMirror cases cover insert/replace, both quote
+styles, Unicode, comma preservation and undo/redo; all137 completion unit tests
+pass. Four new controlled-IPC browser cases cover Enter/Tab, both quote styles,
+undo/redo and explicit save; all79 controlled-browser workbench cases pass.
+
+Frontend13027 tests pass/6 skipped; typecheck, lint, format, knip, frontend build
+and Safari15.4 startup checks pass. Workspace5047 tests pass/191 ignored, with
+only the existing HTTP environment-fixture test excluded. Run ignored integration
+tests explicitly as above. Workspace all-target Clippy, Rust fmt and active engine
+checksum verification pass. No production client runtime changes were required.
+Candidate157 remains inactive; source/resource156 and the sole signed App96 stay
+unchanged. Native UI checks remain user-skipped; encoded guard navigation,
+parameter whitespace normalization, other middleware aliases, packaging adoption
+and large-project performance remain unaccepted. All69 statuses stay67 partial/
+2 user-deferred. Evidence: artifacts/checks/slice122-gates.json,
+slice122-workspace-counts.json, slice122-host-red.log, slice122-host-green.log,
+slice122-client-host.json and slice122-browser.json. Removed28,308,892KiB of
+owned compiler output and68,804KiB of dist after the gates. App96 remains the only
+archived app; its deep/strict signature and original executable hash still verify.
+Retention: artifacts/checks/slice122-retention.json. Preserve canonical engine157,
+immutable source, provenance, PHP Workbench and earlier evaluation evidence.
+
 Engine source slice121 (2026-11-16, verified inactive candidate): add typed
 controller middleware auth-guard intelligence for FEAT-031/L59. Recognize direct
 `$this->middleware('auth:guard')` only through the shared receiver resolver and

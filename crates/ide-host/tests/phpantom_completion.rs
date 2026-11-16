@@ -33,6 +33,10 @@ struct Fixture {
 
 impl Fixture {
     fn new(initial: &str, extra: &[(String, String)]) -> Self {
+        Self::new_at(initial, extra, "routes/web.php")
+    }
+
+    fn new_at(initial: &str, extra: &[(String, String)], relative: &str) -> Self {
         let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
         let bin = std::env::var_os("OPENSTORM_TEST_PHPANTOM_BIN")
             .map(PathBuf::from)
@@ -49,7 +53,7 @@ impl Fixture {
             ),
             ("app/InvoiceController.php".to_owned(), MAIN.to_owned()),
             ("app/Other/InvoiceController.php".to_owned(), OTHER.to_owned()),
-            ("routes/web.php".to_owned(), initial.to_owned()),
+            (relative.to_owned(), initial.to_owned()),
         ];
         for (name, text) in files.iter().chain(extra) {
             let path = root.join(name);
@@ -87,7 +91,7 @@ impl Fixture {
                 cfg.command = bin.to_string_lossy().into_owned();
             }
         }));
-        let doc = project.documents.open(&root.join("routes/web.php")).unwrap().id;
+        let doc = project.documents.open(&root.join(relative)).unwrap().id;
         Self { _tmp: tmp, root, host, project, doc, events }
     }
 
@@ -780,6 +784,120 @@ async fn controller_url_method_completion_refreshes_unsaved_parents_and_restart(
             assert_eq!(f.project.documents.snapshot(f.doc).unwrap().text, original);
             assert_eq!(std::fs::read_to_string(f.root.join("app/InvoiceController.php")).unwrap(), declaration);
         }
+    })
+    .catch_unwind()
+    .await;
+    f.finish(outcome).await;
+}
+
+const GUARD_SOURCE: &str = "<?php\nnamespace App;\nclass GuardController extends BaseController {\n    public function boot(): void {\n        $note='😀'; $this->middleware('auth:adOLD,web');\n        $this->middleware(middleware: ['auth:admin', 'auth:missing']);\n    }\n}\n";
+const GUARD_PARENT: &str = "<?php namespace App; class BaseController extends \\Illuminate\\Routing\\Controller {}\n";
+const GUARD_FOREIGN: &str = "<?php namespace App; class BaseController {public function middleware($middleware) {}}\n";
+const GUARD_CONFIG: &str = "<?php return ['guards'=>['web'=>[], 'admin'=>[]]];\n";
+
+fn guard_fixture() -> Fixture {
+    Fixture::new_at(GUARD_SOURCE, &[
+        ("composer.json".into(), r#"{"require":{"php":"^8.3","laravel/framework":"^13.0"},"autoload":{"psr-4":{"App\\":"app/","Illuminate\\Routing\\":"framework/"}}}"#.into()),
+        ("app/BaseController.php".into(), GUARD_PARENT.into()),
+        ("framework/Controller.php".into(), "<?php namespace Illuminate\\Routing; class Controller {public function middleware($middleware) {}}\n".into()),
+        ("config/auth.php".into(), GUARD_CONFIG.into()),
+    ], "app/GuardController.php")
+}
+
+fn after(text: &str, prefix: &str) -> Pos {
+    at(text, text.find(prefix).unwrap() + prefix.len())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires candidate157 and owned PHP syntax-check executable"]
+async fn typed_guard_completion_uses_host_edits_navigation_and_save_conflicts() {
+    let f = guard_fixture();
+    let outcome = std::panic::AssertUnwindSafe(async {
+        let before = f.project.documents.snapshot(f.doc).unwrap();
+        let item = f
+            .complete(after(GUARD_SOURCE, "auth:ad"))
+            .await
+            .items
+            .into_iter()
+            .find(|item| item.label == "admin")
+            .expect("typed controller guard must offer admin");
+        let start = GUARD_SOURCE.find("adOLD").unwrap();
+        let range = Range::new(at(GUARD_SOURCE, start), at(GUARD_SOURCE, start + 5));
+        assert_eq!(item.replace_range, Some(range));
+        assert_eq!(item.kind, Some(CompletionKind::Property));
+        assert!(!item.is_snippet && item.additional_edits.is_empty() && item.command.is_none());
+        let item = ide_host::ops::lsp::lsp_resolve_completion(&f.host, "main", f.doc, item).await.unwrap();
+        assert_eq!(item.replace_range, Some(range));
+        assert!(item.additional_edits.is_empty() && item.command.is_none());
+        assert!(
+            f.project
+                .documents
+                .apply_edits_at(f.doc, before.version, &[TextEdit { range, new_text: item.insert_text }])
+                .unwrap()
+                .is_some()
+        );
+        let expected = GUARD_SOURCE.replace("adOLD", "admin");
+        Fixture::lint(&expected);
+        assert_eq!(f.project.documents.snapshot(f.doc).unwrap().text, expected);
+        let position = after(&expected, "auth:adm");
+        let definitions = f.project.lsp.goto(f.doc, position, GotoKind::Definition).await.unwrap();
+        assert_eq!(definitions.len(), 1);
+        assert_eq!(definitions[0].path.to_path_buf(), f.root.join("config/auth.php"));
+        let hover = f.project.lsp.hover(f.doc, position, Default::default()).await.unwrap().unwrap();
+        assert!(hover.contents.value.contains("admin"));
+        let references = f.project.lsp.references(f.doc, position, true, true, Default::default()).await.unwrap();
+        assert_eq!(references.locations.len(), 3, "{references:?}");
+        let path = f.root.join("app/GuardController.php");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), GUARD_SOURCE);
+        let external = format!("{GUARD_SOURCE}// External first\n");
+        std::fs::write(&path, &external).unwrap();
+        let consent = ide_host::ops::doc::save_checked(&f.host, "main", f.doc, None).await.unwrap().unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), external);
+        let newer = format!("{GUARD_SOURCE}// External second\n");
+        std::fs::write(&path, &newer).unwrap();
+        let consent = ide_host::ops::doc::save_checked(&f.host, "main", f.doc, Some(consent)).await.unwrap().unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), newer);
+        assert!(ide_host::ops::doc::save_checked(&f.host, "main", f.doc, Some(consent)).await.unwrap().is_none());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), expected);
+        assert_eq!(std::fs::read_to_string(f.root.join("app/BaseController.php")).unwrap(), GUARD_PARENT);
+        assert_eq!(std::fs::read_to_string(f.root.join("config/auth.php")).unwrap(), GUARD_CONFIG);
+    })
+    .catch_unwind()
+    .await;
+    f.finish(outcome).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires candidate157 and owned PHP syntax-check executable"]
+async fn typed_guard_completion_refreshes_host_overlays_and_restart() {
+    let f = guard_fixture();
+    let outcome = std::panic::AssertUnwindSafe(async {
+        let source = GUARD_SOURCE.replace("adOLD", "admin");
+        f.project.documents.replace_all(f.doc, &source).unwrap();
+        let parent = f.project.documents.open(&f.root.join("app/BaseController.php")).unwrap().id;
+        let config = f.project.documents.open(&f.root.join("config/auth.php")).unwrap().id;
+        let position = after(&source, "auth:adm");
+        for (text, expected) in [(GUARD_PARENT, true), (GUARD_FOREIGN, false), (GUARD_PARENT, true)] {
+            f.project.documents.replace_all(parent, text).unwrap();
+            let items = f.complete(position).await.items;
+            assert_eq!(items.iter().any(|item| item.label == "admin"), expected);
+            assert_eq!(!f.project.lsp.goto(f.doc, position, GotoKind::Definition).await.unwrap().is_empty(), expected);
+        }
+        f.project.documents.replace_all(config, &GUARD_CONFIG.replace("admin", "staff")).unwrap();
+        assert!(!f.complete(position).await.items.iter().any(|item| item.label == "admin"));
+        let staff = source.replace("auth:admin,web", "auth:stOLD,web");
+        f.project.documents.replace_all(f.doc, &staff).unwrap();
+        let position = after(&staff, "auth:st");
+        assert!(f.complete(position).await.items.iter().any(|item| item.label == "staff"));
+        let server = f.project.lsp.servers()[0].id;
+        f.project.lsp.restart(server).await.unwrap();
+        assert!(
+            f.complete(position).await.items.iter().any(|item| item.label == "staff"),
+            "restart must resend unsaved config and caller"
+        );
+        assert_eq!(std::fs::read_to_string(f.root.join("app/GuardController.php")).unwrap(), GUARD_SOURCE);
+        assert_eq!(std::fs::read_to_string(f.root.join("app/BaseController.php")).unwrap(), GUARD_PARENT);
+        assert_eq!(std::fs::read_to_string(f.root.join("config/auth.php")).unwrap(), GUARD_CONFIG);
     })
     .catch_unwind()
     .await;

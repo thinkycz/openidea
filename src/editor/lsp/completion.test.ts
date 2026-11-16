@@ -633,6 +633,41 @@ describe("applying completions", () => {
     }
   }
 
+  for (const mode of ["insert", "replace"] as const) {
+    for (const quote of ["'", '"']) {
+      for (const following of ["", ",web"]) {
+        it(`commits a typed middleware guard (${mode}, ${quote}, ${following})`, () => {
+          const marked = `<?php\n$label='😀'; $this->middleware(${quote}auth:ad|OLD${following}${quote});`;
+          const { view, req, pos } = setup(marked, "", [history()]);
+          const original = marked.replace("|", "");
+          const start = original.indexOf("adOLD");
+          const line = view.state.doc.lineAt(start);
+          const completion = makeCompletion(
+            item({
+              label: "admin",
+              kind: "property",
+              filterText: "admin",
+              insertText: "admin",
+              replaceRange: {
+                start: { line: line.number - 1, col: start - line.from },
+                end: { line: line.number - 1, col: start - line.from + 5 },
+              },
+            }),
+            { ...req, path: "/p/app/GuardController.php", language: "php" },
+          );
+          applyLspCompletion(view, completion, start, pos, mode);
+          const expected = original.replace("adOLD", "admin");
+          expect(view.state.doc.toString()).toBe(expected);
+          expect(view.state.selection.main.head).toBe(start + 5);
+          expect(undo(view)).toBe(true);
+          expect(view.state.doc.toString()).toBe(original);
+          expect(redo(view)).toBe(true);
+          expect(view.state.doc.toString()).toBe(expected);
+        });
+      }
+    }
+  }
+
   it("commits a whole quoted controller action without adding call parentheses", () => {
     for (const quote of ["'", '"', "`"]) {
       const text = `Routes::get('/😀/invoice', ${quote}s|how${quote});`;

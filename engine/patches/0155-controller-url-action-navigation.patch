@@ -1,0 +1,1268 @@
+--- a/docs/CHANGELOG.md
++++ b/docs/CHANGELOG.md
+@@ -14,6 +14,8 @@
+ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+ 
+ ## [Unreleased]
++
++- **Navigate controller URL actions.** Rooted `Controller@method` literals in Laravel action helpers and URL/redirect facades now support class/method navigation, references and safe renames. Unrooted actions retain their unresolved URL namespace; encoded spellings also prevent partial renames. Contributed by @thinkycz.
+ 
+ - **Navigate to invokable route implementations.** A separate version/hash-bound `phpWorkbench/routeHandler` request resolves real inherited and trait handler declarations without replacing ordinary PHP class navigation. It retains partial namespace provenance, validates exact UTF-16 positions and refuses stale or unowned sources. Contributed by @thinkycz.
+ 
+--- a/docs/todo/laravel.md
++++ b/docs/todo/laravel.md
+@@ -567,14 +567,12 @@
+ 
+ **Impact: Low · Complexity: Low**
+ 
+-We already complete and resolve the modern `[Controller::class,
+-'method']` array form (which the Laravel LSP does *not* complete), and
+-method-name strings inside `Route::controller()` groups. The legacy
+-`'App\Http\Controllers\FooController@method'` string form gets nothing.
+-Split on `@`, resolve the class through normal resolution (honoring any
+-group namespace prefix), and provide completion, go-to-definition, and
+-an unknown-action diagnostic. Low priority: the string form is
+-discouraged since Laravel 8.
++Controller URL helpers still need completion and static recovery of a configured
++URL controller root for unrooted literals. Encoded method spellings and separators
++need range-aware method edits; uncertain action contexts need diagnostics that
++retain their incomplete provenance. Dynamic arguments and broader
++project/configuration-change cases need explicit acceptance. Low priority: the
++string form is discouraged since Laravel 8.
+ 
+ #### L29. Livewire and Volt component names
+ 
+--- a/examples/laravel/app/Demo.php
++++ b/examples/laravel/app/Demo.php
+@@ -1774,6 +1774,16 @@
+         Route::get('/rename-direct', "App\\Http\\Controllers\\RenamePreviewController@index");
+     }
+ 
++    public function controllerActionUrls(): array
++    {
++        // Try: definition, references or Rename in these rooted controller literals.
++        // URL namespaces do not change rooted actions; route-group owners do not apply.
++        $url = \action('\App\Http\Controllers\BakeryController@index');
++        $redirect = \redirect()->action('\App\Http\Controllers\BakeryController@index');
++        $facade = \Illuminate\Support\Facades\URL::action('\App\Http\Controllers\BakeryController@index');
++        return ['url' => $url, 'redirect' => $redirect, 'facade' => $facade];
++    }
++
+     public function invokableControllerNavigation(): void
+     {
+         // Clients with phpWorkbenchRouteHandler support can open __invoke from
+--- a/examples/laravel/assertions.php
++++ b/examples/laravel/assertions.php
+@@ -2133,6 +2133,25 @@
+     }
+ })();
+ 
++// URL controller actions have their own root namespace, independent of route groups.
++(function (): void {
++    $router = new \Illuminate\Routing\Router(new \Illuminate\Events\Dispatcher());
++    $controller = '\App\Http\Controllers\BakeryController@index';
++    $router->get('/controller-action-url', $controller);
++    $url = new \Illuminate\Routing\UrlGenerator($router->getRoutes(), \Illuminate\Http\Request::create('https://example.invalid'));
++    $expected = 'https://example.invalid/controller-action-url';
++    check('A rooted controller action generates the registered URL', $url->action($controller) === $expected);
++    $redirect = new \Illuminate\Routing\Redirector($url);
++    check('Redirect actions use the same rooted controller identity', $redirect->action($controller)->getTargetUrl() === $expected);
++    $url->setRootControllerNamespace('Different');
++    check('A configured URL namespace cannot prefix a rooted action', $url->action($controller) === $expected);
++    check('Redirects also preserve the rooted identity after a namespace change', $redirect->action($controller)->getTargetUrl() === $expected);
++    $rejected = false;
++    try { $url->action('App\Http\Controllers\BakeryController@index'); }
++    catch (\InvalidArgumentException $error) { $rejected = str_contains($error->getMessage(), 'Different\App\Http\Controllers\BakeryController@index'); }
++    check('An unrooted action depends on the configured URL namespace', $rejected);
++})();
++
+ // ─── Summary ────────────────────────────────────────────────────────────────
+ 
+ echo "\n";
+--- a/src/parser/ast_update.rs
++++ b/src/parser/ast_update.rs
+@@ -365,9 +365,45 @@
+     /// span from meaning what Laravel would make of it.
+     fn laravel_string_dependency_exists(&self, dependency: LaravelStringDependency) -> bool {
+         match dependency {
++            LaravelStringDependency::Laravel => !self.resolved_class_cache.read().is_laravel(),
++            LaravelStringDependency::LaravelFunction(name) => {
++                let laravel = self.resolved_class_cache.read().is_laravel();
++                !laravel
++                    || if name.contains('\\') {
++                        self.has_indexed_function(name.as_str())
++                            || self.controller_url_global_helper_is_shadowed(
++                                crate::util::short_name(name.as_str()),
++                            )
++                    } else {
++                        self.controller_url_global_helper_is_shadowed(name.as_str())
++                    }
++            }
++            LaravelStringDependency::LaravelClass(name) => {
++                !self.resolved_class_cache.read().is_laravel()
++                    || self.has_indexed_class(name.as_str())
++            }
+             LaravelStringDependency::Function(name) => self.has_indexed_function(name.as_str()),
+             LaravelStringDependency::Class(name) => self.has_indexed_class(name.as_str()),
+         }
++    }
++
++    fn controller_url_global_helper_is_shadowed(&self, name: &str) -> bool {
++        const FRAMEWORK_HELPERS: &str = "/laravel/framework/src/Illuminate/Foundation/helpers.php";
++        if let Some((uri, _)) = self.symbols.global_functions.read().get(name) {
++            return !uri.ends_with(FRAMEWORK_HELPERS);
++        }
++        self.symbols
++            .autoload_function_index
++            .read()
++            .get(name)
++            .is_some_and(|path| {
++                !path.ends_with(std::path::Path::new(
++                    "laravel/framework/src/Illuminate/Foundation/helpers.php",
++                )) && !self
++                    .parsed_uris
++                    .read()
++                    .contains(&crate::util::path_to_uri(path))
++            })
+     }
+ 
+     /// Clone and reconcile only published maps whose dormant Laravel spans
+@@ -2128,6 +2164,9 @@
+                 if let Some(dependency) = LaravelStringDependency::namespaced_route_helper(fqn) {
+                     affected_laravel_dependencies.insert(dependency);
+                 }
++                if let Some(dependency) = LaravelStringDependency::controller_url_helper(fqn) {
++                    affected_laravel_dependencies.insert(dependency);
++                }
+             }
+         }
+         let prepared_uris: HashSet<&str> =
+--- a/src/rename/collisions.rs
++++ b/src/rename/collisions.rs
+@@ -107,6 +107,12 @@
+                     };
+                 receivers.sort();
+                 for receiver in receivers {
++                    if kind == MemberKind::Method
++                        && let Some(reason) =
++                            self.runtime_controller_method_conflict(&receiver, old_name)
++                    {
++                        return Some(reason);
++                    }
+                     let Some(class) = loader(&receiver) else {
+                         continue;
+                     };
+--- a/src/rename/runtime_controller.rs
++++ b/src/rename/runtime_controller.rs
+@@ -163,6 +163,69 @@
+         Ok(sites)
+     }
+ 
++    /// An unresolved URL root must not leave a possible method reference behind.
++    pub(super) fn runtime_controller_method_conflict(
++        &self,
++        fqn: &str,
++        method: &str,
++    ) -> Option<String> {
++        let keys = crate::references::class_candidate_keys(fqn, short_name(fqn));
++        for (uri, map) in self.user_file_symbol_maps_for_reference_keys(&keys) {
++            let mut source = None;
++            for span in &map.spans {
++                let SymbolKind::RuntimeControllerBinding {
++                    runtime_name,
++                    incomplete: true,
++                    ..
++                } = &span.kind
++                else {
++                    continue;
++                };
++                if !short_name(runtime_name).eq_ignore_ascii_case(short_name(fqn)) {
++                    continue;
++                }
++                let Some(content) = source
++                    .get_or_insert_with(|| self.reference_file_content_arc(&uri))
++                    .as_deref()
++                else {
++                    return Some(
++                        "Could not read a runtime controller source; no edits were produced."
++                            .into(),
++                    );
++                };
++                if !map.matches_source_fingerprint(content) {
++                    return Some(
++                        "A runtime controller source changed; request a new rename.".into(),
++                    );
++                }
++                let ambiguous_method = if let Some(suffix) = content
++                    .get(span.end as usize..)
++                    .and_then(|s| s.strip_prefix('@'))
++                {
++                    let end = suffix
++                        .bytes()
++                        .take_while(|b| b.is_ascii_alphanumeric() || *b == b'_')
++                        .count();
++                    suffix[..end].eq_ignore_ascii_case(method)
++                } else {
++                    span.start
++                        .checked_sub(1)
++                        .and_then(|start| content.get(start as usize..span.end as usize + 1))
++                        .and_then(crate::text_scan::decode_php_string_literal)
++                        .is_some_and(|decoded| {
++                            decoded
++                                .rsplit_once('@')
++                                .is_some_and(|(_, name)| name.eq_ignore_ascii_case(method))
++                        })
++                };
++                if ambiguous_method {
++                    return Some("A runtime controller method has an unresolved URL namespace, encoded spelling or ambiguous action; no edits were produced.".into());
++                }
++            }
++        }
++        None
++    }
++
+     /// Refuse an unsafe runtime reference anywhere in the affected class set.
+     pub(super) fn reject_runtime_controller_class_rename(&self, fqn: &str) -> Result<(), String> {
+         self.runtime_controller_sites(fqn).map(|_| ())
+--- a/src/symbol_map/extraction/expressions/calls.rs
++++ b/src/symbol_map/extraction/expressions/calls.rs
+@@ -359,6 +359,7 @@
+     scope_start: u32,
+     visit_receiver: bool,
+ ) {
++    super::super::laravel_action_helpers::emit(call, ctx);
+     let (callee, arguments, kind) = match call {
+         Call::Function(call) => {
+             let expr = crate::parser::unwrap_parens(call.function);
+--- a/src/symbol_map/extraction/laravel.rs
++++ b/src/symbol_map/extraction/laravel.rs
+@@ -2406,9 +2406,14 @@
+     names: Option<&crate::names::OwnedResolvedNames>,
+     content: &'a str,
+ ) -> Option<ExplicitRouteAction<'a>> {
+-    let Expression::Literal(literal::Literal::String(value)) =
+-        laravel_route_action_argument(expr, names)?
+-    else {
++    explicit_controller_action(laravel_route_action_argument(expr, names)?, content)
++}
++
++pub(super) fn explicit_controller_action<'a>(
++    expr: &Expression<'_>,
++    content: &'a str,
++) -> Option<ExplicitRouteAction<'a>> {
++    let Expression::Literal(literal::Literal::String(value)) = expr else {
+         return None;
+     };
+     let decoded = value.value.and_then(literal_bytes_to_str)?;
+@@ -2436,7 +2441,7 @@
+     })
+ }
+ 
+-fn laravel_runtime_controller_ref(name: &str) -> Option<RouteControllerRef> {
++pub(super) fn laravel_runtime_controller_ref(name: &str) -> Option<RouteControllerRef> {
+     if name.contains("::") || !super::expressions::valid_literal_callable_target(name) {
+         return None;
+     }
+--- /dev/null
++++ b/src/symbol_map/extraction/laravel_action_helpers.rs
+@@ -0,0 +1,283 @@
++//! Runtime controller literals in Laravel URL-building calls, not invocations.
++use super::laravel::{explicit_controller_action, laravel_helper_name, laravel_route_method_span};
++use super::{ExtractionCtx, SymbolKind, SymbolSpan};
++use crate::symbol_map::{ClassRefContext, LaravelStringDependency};
++use mago_span::HasSpan;
++use mago_syntax::cst::*;
++
++#[derive(Clone, Copy)]
++enum ActionSignature {
++    Helper,
++    Url,
++    Redirect,
++}
++impl ActionSignature {
++    fn role(self) -> &'static [u8] {
++        if matches!(self, Self::Helper) {
++            b"name"
++        } else {
++            b"action"
++        }
++    }
++    fn named(self, name: &[u8]) -> bool {
++        let names: &[&[u8]] = match self {
++            Self::Helper => &[b"name", b"parameters", b"absolute"],
++            Self::Url => &[b"action", b"parameters", b"absolute"],
++            Self::Redirect => &[b"action", b"parameters", b"status", b"headers"],
++        };
++        names.contains(&name)
++    }
++}
++
++fn function_guard(
++    ident: &Identifier<'_>,
++    names: Option<&crate::names::OwnedResolvedNames>,
++) -> LaravelStringDependency {
++    match LaravelStringDependency::controller_url_helper(
++        names
++            .and_then(|n| n.get(ident.span().start.offset))
++            .unwrap_or_else(|| super::bytes_to_str(ident.value())),
++    ) {
++        Some(LaravelStringDependency::Function(name)) => {
++            LaravelStringDependency::LaravelFunction(name)
++        }
++        _ => LaravelStringDependency::Laravel,
++    }
++}
++fn receiver_guard(
++    object: &Expression<'_>,
++    method: &ClassLikeMemberSelector<'_>,
++    names: Option<&crate::names::OwnedResolvedNames>,
++) -> Option<(LaravelStringDependency, ActionSignature)> {
++    let ClassLikeMemberSelector::Identifier(method) = method else {
++        return None;
++    };
++    if !method.value.eq_ignore_ascii_case(b"action")
++        && !method.value.eq_ignore_ascii_case(b"redirectToAction")
++    {
++        return None;
++    }
++    let Expression::Call(Call::Function(call)) = crate::parser::unwrap_parens(object) else {
++        return None;
++    };
++    if !call.argument_list.arguments.is_empty() {
++        return None;
++    }
++    let Expression::Identifier(ident) = call.function else {
++        return None;
++    };
++    let name = laravel_helper_name(
++        super::bytes_to_str(ident.value()),
++        ident.span().start.offset,
++        names,
++    );
++    let valid = if method.value.eq_ignore_ascii_case(b"action") {
++        name.eq_ignore_ascii_case("url") || name.eq_ignore_ascii_case("redirect")
++    } else {
++        method.value.eq_ignore_ascii_case(b"redirectToAction")
++            && name.eq_ignore_ascii_case("response")
++    };
++    valid.then(|| {
++        (
++            function_guard(ident, names),
++            if name.eq_ignore_ascii_case("url") {
++                ActionSignature::Url
++            } else {
++                ActionSignature::Redirect
++            },
++        )
++    })
++}
++fn context<'a>(
++    call: &'a Call<'a>,
++    names: Option<&crate::names::OwnedResolvedNames>,
++) -> Option<(
++    &'a ArgumentList<'a>,
++    LaravelStringDependency,
++    ActionSignature,
++)> {
++    match call {
++        Call::Function(call) => {
++            let Expression::Identifier(ident) = call.function else {
++                return None;
++            };
++            let name = laravel_helper_name(
++                super::bytes_to_str(ident.value()),
++                ident.span().start.offset,
++                names,
++            );
++            name.eq_ignore_ascii_case("action").then(|| {
++                (
++                    &call.argument_list,
++                    function_guard(ident, names),
++                    ActionSignature::Helper,
++                )
++            })
++        }
++        Call::Method(call) => receiver_guard(call.object, &call.method, names)
++            .map(|(guard, signature)| (&call.argument_list, guard, signature)),
++        Call::NullSafeMethod(call) => receiver_guard(call.object, &call.method, names)
++            .map(|(guard, signature)| (&call.argument_list, guard, signature)),
++        Call::StaticMethod(call) => {
++            let ClassLikeMemberSelector::Identifier(method) = &call.method else {
++                return None;
++            };
++            if !method.value.eq_ignore_ascii_case(b"action")
++                && !method.value.eq_ignore_ascii_case(b"redirectToAction")
++            {
++                return None;
++            }
++            let Expression::Identifier(ident) = call.class else {
++                return None;
++            };
++            let raw = super::bytes_to_str(ident.value());
++            let name = names
++                .and_then(|n| n.get(ident.span().start.offset))
++                .unwrap_or(raw)
++                .trim_start_matches('\\');
++            let valid = if method.value.eq_ignore_ascii_case(b"action") {
++                [
++                    "URL",
++                    "Redirect",
++                    "Illuminate\\Support\\Facades\\URL",
++                    "Illuminate\\Support\\Facades\\Redirect",
++                ]
++                .iter()
++                .any(|f| name.eq_ignore_ascii_case(f))
++            } else {
++                method.value.eq_ignore_ascii_case(b"redirectToAction")
++                    && ["Response", "Illuminate\\Support\\Facades\\Response"]
++                        .iter()
++                        .any(|f| name.eq_ignore_ascii_case(f))
++            };
++            if !valid {
++                return None;
++            }
++            let guard = match LaravelStringDependency::root_facade(name) {
++                Some(LaravelStringDependency::Class(name)) => {
++                    LaravelStringDependency::LaravelClass(name)
++                }
++                _ => LaravelStringDependency::Laravel,
++            };
++            Some((
++                &call.argument_list,
++                guard,
++                if name.eq_ignore_ascii_case("URL")
++                    || name.eq_ignore_ascii_case("Illuminate\\Support\\Facades\\URL")
++                {
++                    ActionSignature::Url
++                } else {
++                    ActionSignature::Redirect
++                },
++            ))
++        }
++    }
++}
++fn emit_argument<'a>(
++    expr: &'a Expression<'a>,
++    ambiguous: bool,
++    guard: LaravelStringDependency,
++    ctx: &mut ExtractionCtx<'a>,
++) {
++    let expr = crate::parser::unwrap_parens(expr);
++    let Some(action) = explicit_controller_action(expr, ctx.content) else {
++        let Expression::Literal(literal::Literal::String(value)) = expr else {
++            return;
++        };
++        let Some(decoded) = value.value.and_then(super::literal_bytes_to_str) else {
++            return;
++        };
++        let Some((class, _method)) = decoded.rsplit_once('@') else {
++            return;
++        };
++        let Some(controller) = super::laravel::laravel_runtime_controller_ref(class) else {
++            return;
++        };
++        let first = ctx.spans.len();
++        ctx.spans.push(SymbolSpan {
++            start: value.span.start.offset + 1,
++            end: value.span.end.offset - 1,
++            kind: SymbolKind::RuntimeControllerBinding {
++                runtime_name: crate::atom::atom(controller.subject.trim_start_matches('\\')),
++                targets: Box::new([]),
++                incomplete: true,
++            },
++        });
++        ctx.defer_laravel_spans_since(first, guard);
++        return;
++    };
++    let first = ctx.spans.len();
++    let complete = action.controller.rooted && !ambiguous;
++    let name = crate::atom::atom(action.controller.subject.trim_start_matches('\\'));
++    let kind = if complete {
++        SymbolKind::ClassReference {
++            name,
++            is_fqn: true,
++            context: ClassRefContext::RuntimeControllerString,
++        }
++    } else {
++        SymbolKind::RuntimeControllerBinding {
++            runtime_name: name,
++            targets: Box::new([]),
++            incomplete: true,
++        }
++    };
++    ctx.spans.push(SymbolSpan {
++        start: action.class_start,
++        end: action.class_end,
++        kind,
++    });
++    if complete && !action.method.is_empty() {
++        ctx.spans.push(laravel_route_method_span(
++            &action.controller.subject,
++            action.method,
++            action.start,
++            action.end,
++        ));
++        ctx.non_invoked_callable_spans
++            .push((action.start, action.end));
++    }
++    ctx.defer_laravel_spans_since(first, guard);
++}
++pub(super) fn emit<'a>(call: &'a Call<'a>, ctx: &mut ExtractionCtx<'a>) {
++    let Some((arguments, guard, signature)) = context(call, ctx.resolved_names) else {
++        return;
++    };
++    let mut selected = None;
++    let mut ambiguous = false;
++    let mut named_seen = false;
++    for (index, arg) in arguments.arguments.iter().enumerate() {
++        let value = match arg {
++            Argument::Positional(p) => {
++                ambiguous |= p.ellipsis.is_some() || named_seen;
++                (index == 0 && p.ellipsis.is_none()).then_some(p.value)
++            }
++            Argument::Named(n) => {
++                named_seen = true;
++                ambiguous |= !signature.named(n.name.value);
++                (n.name.value == signature.role()).then_some(n.value)
++            }
++        };
++        if let Some(value) = value {
++            ambiguous |= selected.is_some();
++            selected = Some(value);
++        }
++    }
++    if !ambiguous {
++        if let Some(value) = selected {
++            emit_argument(value, false, guard, ctx);
++        }
++    } else {
++        // Preserve identifiable ambiguous references so refactors cannot skip them.
++        for (index, arg) in arguments.arguments.iter().enumerate() {
++            let value = match arg {
++                Argument::Positional(p) if index == 0 && p.ellipsis.is_none() => Some(p.value),
++                Argument::Named(n) if n.name.value == signature.role() => Some(n.value),
++                _ => None,
++            };
++            if let Some(value) = value {
++                emit_argument(value, true, guard, ctx);
++            }
++        }
++    }
++}
+--- a/src/symbol_map/extraction/mod.rs
++++ b/src/symbol_map/extraction/mod.rs
+@@ -151,7 +151,6 @@
+         let spans = &mut self.spans;
+         let candidates = &mut self.conditional_laravel_spans;
+         for span in spans.drain(start..) {
+-            debug_assert!(matches!(&span.kind, SymbolKind::LaravelStringKey { .. }));
+             candidates.push(super::ConditionalLaravelStringSpan::new(dependency, span));
+         }
+     }
+@@ -164,6 +163,7 @@
+ mod expressions;
+ mod keywords;
+ pub(crate) mod laravel;
++mod laravel_action_helpers;
+ pub(crate) mod laravel_route_context;
+ mod phpunit;
+ mod statements;
+--- a/src/symbol_map/mod.rs
++++ b/src/symbol_map/mod.rs
+@@ -604,11 +604,27 @@
+ /// the spans without reparsing either file or adding work to request paths.
+ #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+ pub(crate) enum LaravelStringDependency {
++    Laravel,
++    LaravelFunction(Atom),
++    LaravelClass(Atom),
+     Function(Atom),
+     Class(Atom),
+ }
+ 
+ impl LaravelStringDependency {
++    fn affected_by(self, changed: &std::collections::HashSet<Self>) -> bool {
++        changed.contains(&self)
++            || match self {
++                Self::LaravelFunction(name) => {
++                    changed.contains(&Self::Function(name))
++                        || changed.contains(&Self::Function(crate::atom::ascii_lowercase_atom(
++                            crate::util::short_name(name.as_str()),
++                        )))
++                }
++                Self::LaravelClass(name) => changed.contains(&Self::Class(name)),
++                _ => false,
++            }
++    }
+     /// The namespace-local `auth` function that may prevent PHP from reaching
+     /// Laravel's global helper.
+     pub(crate) fn namespaced_auth(name: &str) -> Option<Self> {
+@@ -617,12 +633,21 @@
+             .then(|| Self::Function(crate::atom::ascii_lowercase_atom(name)))
+     }
+ 
++    pub(crate) fn controller_url_helper(name: &str) -> Option<Self> {
++        let name = name.trim_start_matches('\\');
++        let short = name.rsplit('\\').next()?;
++        ["action", "url", "redirect", "response"]
++            .iter()
++            .any(|helper| short.eq_ignore_ascii_case(helper))
++            .then(|| Self::Function(crate::atom::ascii_lowercase_atom(name)))
++    }
++
+     /// A namespace-local route/URL helper that prevents global fallback.
+     pub(crate) fn namespaced_route_helper(name: &str) -> Option<Self> {
+         let name = name.trim_start_matches('\\');
+         let (namespace, short) = name.rsplit_once('\\')?;
+         (!namespace.is_empty()
+-            && ["route", "to_route", "redirect", "url", "response"]
++            && ["route", "to_route", "redirect", "url", "response", "action"]
+                 .iter()
+                 .any(|helper| short.eq_ignore_ascii_case(helper)))
+         .then(|| Self::Function(crate::atom::ascii_lowercase_atom(name)))
+@@ -664,13 +689,60 @@
+     }
+ }
+ 
++#[derive(Debug, Clone, Copy)]
++enum ConditionalLaravelSpanKind {
++    Key,
++    Class,
++    Binding,
++    Method,
++}
++impl ConditionalLaravelSpanKind {
++    fn of(kind: &SymbolKind) -> Self {
++        match kind {
++            SymbolKind::LaravelStringKey { .. } => Self::Key,
++            SymbolKind::ClassReference {
++                context: ClassRefContext::RuntimeControllerString,
++                ..
++            } => Self::Class,
++            SymbolKind::RuntimeControllerBinding { .. } => Self::Binding,
++            SymbolKind::MemberAccess {
++                is_method_call: true,
++                ..
++            } => Self::Method,
++            _ => unreachable!("unsupported conditional Laravel span"),
++        }
++    }
++    fn matches(self, kind: &SymbolKind) -> bool {
++        matches!(
++            (self, kind),
++            (Self::Key, SymbolKind::LaravelStringKey { .. })
++                | (
++                    Self::Class,
++                    SymbolKind::ClassReference {
++                        context: ClassRefContext::RuntimeControllerString,
++                        ..
++                    }
++                )
++                | (Self::Binding, SymbolKind::RuntimeControllerBinding { .. })
++                | (
++                    Self::Method,
++                    SymbolKind::MemberAccess {
++                        is_method_call: true,
++                        ..
++                    }
++                )
++        )
++    }
++}
++
+ /// A Laravel string span whose meaning depends on a workspace symbol being
+ /// absent. The payload moves between this side table and [`SymbolMap::spans`]
+ /// as it becomes dormant/active, so an active candidate does not duplicate
+-/// its key string in memory.
++/// its payload in memory.
+ #[derive(Debug, Clone)]
+ pub(crate) struct ConditionalLaravelStringSpan {
+     pub dependency: LaravelStringDependency,
++    kind: ConditionalLaravelSpanKind,
+     start: u32,
+     end: u32,
+     dormant_span: Option<SymbolSpan>,
+@@ -680,6 +752,7 @@
+     pub(crate) fn new(dependency: LaravelStringDependency, span: SymbolSpan) -> Self {
+         Self {
+             dependency,
++            kind: ConditionalLaravelSpanKind::of(&span.kind),
+             start: span.start,
+             end: span.end,
+             dormant_span: Some(span),
+@@ -700,9 +773,7 @@
+ }
+ 
+ fn is_candidate_span(span: &SymbolSpan, candidate: &ConditionalLaravelStringSpan) -> bool {
+-    span.start == candidate.start
+-        && span.end == candidate.end
+-        && matches!(&span.kind, SymbolKind::LaravelStringKey { .. })
++    span.start == candidate.start && span.end == candidate.end && candidate.kind.matches(&span.kind)
+ }
+ 
+ /// The model a gate check names, recorded alongside its ability span.
+@@ -1464,7 +1535,7 @@
+         affected: Option<&std::collections::HashSet<LaravelStringDependency>>,
+     ) -> bool {
+         self.conditional_laravel_spans.iter().any(|candidate| {
+-            affected.is_none_or(|dependencies| dependencies.contains(&candidate.dependency))
++            affected.is_none_or(|dependencies| candidate.dependency.affected_by(dependencies))
+         })
+     }
+ 
+@@ -1477,7 +1548,7 @@
+         mut dependency_exists: impl FnMut(LaravelStringDependency) -> bool,
+     ) -> bool {
+         self.conditional_laravel_spans.iter().any(|candidate| {
+-            affected.is_none_or(|dependencies| dependencies.contains(&candidate.dependency))
++            affected.is_none_or(|dependencies| candidate.dependency.affected_by(dependencies))
+                 && candidate.is_inserted() == dependency_exists(candidate.dependency)
+         })
+     }
+@@ -1494,7 +1565,7 @@
+         let mut changed = false;
+         let mut added = false;
+         for candidate in &mut self.conditional_laravel_spans {
+-            if affected.is_some_and(|set| !set.contains(&candidate.dependency)) {
++            if affected.is_some_and(|set| !candidate.dependency.affected_by(set)) {
+                 continue;
+             }
+             let should_insert = !dependency_exists(candidate.dependency);
+--- a/tests/integration/laravel_route_controller.rs
++++ b/tests/integration/laravel_route_controller.rs
+@@ -3844,3 +3844,535 @@
+     assert!(reply.locations.is_empty());
+     assert!(!reply.incomplete);
+ }
++
++fn controller_url_fixture(call: &str) -> String {
++    format!(
++        r#"<?php
++namespace App;
++use Illuminate\Support\Facades\Route;
++use Illuminate\Support\Facades\URL;
++use Illuminate\Support\Facades\Redirect;
++use Illuminate\Support\Facades\Response;
++use function action as controller_url;
++use function redirect as redirector;
++class Invoice {{public function show():string {{return 'invoice';}}}}
++$metadata='\\App\\Invoice@show';
++{call}
++"#
++    )
++}
++async fn controller_url_definition(
++    backend: &phpantom_lsp::Backend,
++    uri: &Url,
++    text: &str,
++    needle: &str,
++) -> Option<GotoDefinitionResponse> {
++    let at = crate::common::position_after(text, needle);
++    goto_def(backend, uri, at.line, at.character).await
++}
++fn controller_url_rename(uri: &Url, text: &str, needle: &str, name: &str) -> RenameParams {
++    RenameParams {
++        text_document_position: TextDocumentPositionParams {
++            text_document: TextDocumentIdentifier { uri: uri.clone() },
++            position: crate::common::position_after(text, needle),
++        },
++        new_name: name.into(),
++        work_done_progress_params: Default::default(),
++    }
++}
++#[tokio::test]
++async fn controller_url_rooted_functions_receivers_facades_and_named_actions() {
++    for call in [
++        r#"\action('\\App\\Invoice@show');"#,
++        r#"controller_url(absolute:false,name:'\\App\\Invoice@show');"#,
++        r#"\redirect()->action('\\App\\Invoice@show');"#,
++        r#"redirector()->action(parameters:[],action:'\\App\\Invoice@show');"#,
++        r#"\url()->action('\\App\\Invoice@show');"#,
++        r#"URL::action('\\App\\Invoice@show');"#,
++        r#"Redirect::action('\\App\\Invoice@show');"#,
++        r#"Response::redirectToAction('\\App\\Invoice@show');"#,
++        r#"\response()->redirectToAction('\\App\\Invoice@show');"#,
++    ] {
++        let text = controller_url_fixture(call);
++        let (backend, _dir, uri) = handler_workspace(&text).await;
++        let needle = &call[..call.find("@show").unwrap() + 3];
++        let result = controller_url_definition(&backend, &uri, &text, needle).await;
++        let Some(GotoDefinitionResponse::Scalar(location)) = result else {
++            panic!("{call}: {result:?}")
++        };
++        assert_eq!(location.uri, uri);
++        assert_eq!(
++            location.range.start,
++            crate::common::position_after(&text, "class Invoice {public function "),
++            "{call}"
++        );
++        let needle = &call[..call.find("Invoice@").unwrap() + 3];
++        let result = controller_url_definition(&backend, &uri, &text, needle).await;
++        let Some(GotoDefinitionResponse::Scalar(location)) = result else {
++            panic!("class {call}: {result:?}")
++        };
++        assert_eq!(
++            location.range.start,
++            Position::new(crate::common::position_after(&text, "class ").line, 0)
++        );
++    }
++}
++#[tokio::test]
++async fn controller_url_method_references_and_rename_keep_quotes_unicode_and_metadata() {
++    let text = controller_url_fixture(
++        r#"$note='😀'; \action('\\App\\Invoice@show');
++URL::action(action:"\\App\\Invoice@show");
++\redirect()->action('\\App\\Invoice@show');"#,
++    );
++    let (backend, _dir, uri) = handler_workspace(&text).await;
++    let refs = implicit_method_refs(&backend, &uri, &text, "class Invoice {public function ").await;
++    assert_eq!(refs.len(), 3, "{refs:?}");
++    let plan = backend
++        .rename(controller_url_rename(
++            &uri,
++            &text,
++            "class Invoice {public function ",
++            "display",
++        ))
++        .await
++        .unwrap()
++        .expect("method rename");
++    let changes = plan.changes.unwrap();
++    let edits = changes.get(&uri).unwrap();
++    assert_eq!(edits.len(), 4, "declaration and3helpers: {edits:?}");
++    let updated = crate::common::apply_edits(&text, edits);
++    assert!(updated.contains("$metadata='\\\\App\\\\Invoice@show';"));
++    assert!(updated.contains("$note='😀'"));
++    assert_eq!(updated.matches("@display").count(), 3);
++    assert!(updated.contains("function display"));
++}
++#[tokio::test]
++async fn controller_url_class_rename_updates_rooted_runtime_spellings() {
++    let text = controller_url_fixture(
++        r#"\action('\\App\\Invoice@show'); URL::action("\\App\\Invoice@show");"#,
++    );
++    let (backend, _dir, uri) = handler_workspace(&text).await;
++    let plan = backend
++        .rename(controller_url_rename(&uri, &text, "class ", "Receipt"))
++        .await
++        .unwrap()
++        .expect("class rename");
++    let changes = plan.changes.unwrap();
++    let edits = changes.get(&uri).unwrap();
++    assert_eq!(edits.len(), 3, "declaration and2helpers: {edits:?}");
++    let updated = crate::common::apply_edits(&text, edits);
++    assert!(updated.contains("class Receipt"));
++    assert_eq!(updated.matches("Receipt@show").count(), 2);
++    assert!(updated.contains("$metadata='\\\\App\\\\Invoice@show';"));
++}
++#[tokio::test]
++async fn controller_url_helper_homonyms_receivers_and_ambiguous_arguments_are_not_targets() {
++    let calls = r#"function action(string $name):string {return $name;}
++function url(): object {return new class {function action(string $name):string {return $name;}};}
++action('\\App\\Invoice@show');
++url()->action('\\App\\Invoice@show');
++\Vendor\action('\\App\\Invoice@show');
++$unrelated->action('\\App\\Invoice@show');
++\action(name:'\\App\\Invoice@show',name:'other');
++\action(...$arguments,name:'\\App\\Invoice@show');
++\action('\\App\\Invoice@show',name:'other');
++$control=\action('\\App\\Invoice@show');"#;
++    let text = controller_url_fixture(calls);
++    let (backend, _dir, uri) = handler_workspace(&text).await;
++    for line in calls
++        .lines()
++        .filter(|line| line.contains("@show") && !line.starts_with("$control="))
++    {
++        let needle = &line[..line.find("@show").unwrap() + 3];
++        assert!(
++            controller_url_definition(&backend, &uri, &text, needle)
++                .await
++                .is_none(),
++            "{line}"
++        );
++    }
++    let needle = "$control=\\action('\\\\App\\\\Invoice@sh";
++    assert!(
++        controller_url_definition(&backend, &uri, &text, needle)
++            .await
++            .is_some(),
++        "global helper control"
++    );
++}
++#[tokio::test]
++async fn controller_url_unrooted_actions_do_not_borrow_namespaces_or_allow_partial_renames() {
++    let text = controller_url_fixture(
++        r#"\action('\\App\\Invoice@show'); URL::action('App\\Invoice@show');"#,
++    );
++    let (backend, _dir, uri) = handler_workspace(&text).await;
++    assert!(
++        controller_url_definition(&backend, &uri, &text, "URL::action('App\\\\Invoice@sh")
++            .await
++            .is_none()
++    );
++    for (needle, name) in [
++        ("class ", "Receipt"),
++        ("class Invoice {public function ", "display"),
++    ] {
++        let result = backend
++            .rename(controller_url_rename(&uri, &text, needle, name))
++            .await;
++        assert!(
++            result.is_err(),
++            "unknown URL root cannot permit partial edits: {result:?}"
++        );
++    }
++}
++#[tokio::test]
++async fn controller_url_non_laravel_project_keeps_literals_unassociated() {
++    let text = controller_url_fixture(
++        r#"\action('\\App\\Invoice@show'); URL::action('\\App\\Invoice@show');"#,
++    );
++    let (backend, _dir, uri) = crate::common::create_initialized_psr4_workspace(
++        r#"{"autoload":{"psr-4":{"App\\":"src/"}}}"#,
++        &[("src/Routes.php", &text)],
++        "src/Routes.php",
++    )
++    .await;
++    for needle in [
++        "\\action('\\\\App\\\\Invoice@sh",
++        "URL::action('\\\\App\\\\Invoice@sh",
++    ] {
++        assert!(
++            controller_url_definition(&backend, &uri, &text, needle)
++                .await
++                .is_none()
++        );
++    }
++}
++#[tokio::test]
++async fn controller_url_open_callers_follow_unsaved_namespace_helper_shadowing() {
++    let text = controller_url_fixture(r#"action('\\App\\Invoice@show');"#);
++    let (backend, dir, uri) = handler_workspace(&text).await;
++    let path = dir.path().join("src/Helpers.php");
++    std::fs::write(&path, "<?php namespace App; function other():void {}\n").unwrap();
++    let helpers = Url::from_file_path(&path).unwrap();
++    open_php(
++        &backend,
++        &helpers,
++        "<?php namespace App; function other():void {}\n",
++    )
++    .await;
++    let needle = "action('\\\\App\\\\Invoice@sh";
++    assert!(
++        controller_url_definition(&backend, &uri, &text, needle)
++            .await
++            .is_some(),
++        "fallback control"
++    );
++    backend
++        .did_change(DidChangeTextDocumentParams {
++            text_document: VersionedTextDocumentIdentifier {
++                uri: helpers.clone(),
++                version: 2,
++            },
++            content_changes: vec![TextDocumentContentChangeEvent {
++                range: None,
++                range_length: None,
++                text: "<?php namespace App; function action(string $name):string {return $name;}\n"
++                    .into(),
++            }],
++        })
++        .await;
++    assert!(
++        controller_url_definition(&backend, &uri, &text, needle)
++            .await
++            .is_none(),
++        "unsaved local helper must retire caller spans"
++    );
++    backend
++        .did_change(DidChangeTextDocumentParams {
++            text_document: VersionedTextDocumentIdentifier {
++                uri: helpers,
++                version: 3,
++            },
++            content_changes: vec![TextDocumentContentChangeEvent {
++                range: None,
++                range_length: None,
++                text: "<?php namespace App; function other():void {}\n".into(),
++            }],
++        })
++        .await;
++    assert!(
++        controller_url_definition(&backend, &uri, &text, needle)
++            .await
++            .is_some(),
++        "restored fallback"
++    );
++    assert_eq!(
++        std::fs::read_to_string(path).unwrap(),
++        "<?php namespace App; function other():void {}\n"
++    );
++}
++#[tokio::test]
++async fn controller_url_rooted_action_ignores_enclosing_route_namespace_and_controller() {
++    let call = r#"Route::namespace($unknown)->controller('Other')->group(fn()=>\action('\\App\\Invoice@show'));"#;
++    let text = controller_url_fixture(call);
++    let (backend, _dir, uri) = handler_workspace(&text).await;
++    let result =
++        controller_url_definition(&backend, &uri, &text, "\\action('\\\\App\\\\Invoice@sh").await;
++    let Some(GotoDefinitionResponse::Scalar(location)) = result else {
++        panic!("{result:?}")
++    };
++    assert_eq!(
++        location.range.start,
++        crate::common::position_after(&text, "class Invoice {public function ")
++    );
++}
++
++#[tokio::test]
++async fn controller_url_crossfile_unknown_actions_refuse_renames_until_the_caller_is_proven() {
++    let class =
++        "<?php namespace App; class Invoice {public function show():string {return 'ok';}}\n";
++    let caller = r#"<?php namespace App;
++\action('\\App\\Invoice@show');
++\action('App\\Invoice@show');
++"#;
++    let (backend, dir, uri) = crate::common::create_initialized_psr4_workspace(
++        crate::common::LARAVEL_SRC_COMPOSER,
++        &[("src/Invoice.php", class), ("src/Links.php", caller)],
++        "src/Invoice.php",
++    )
++    .await;
++    let links = Url::from_file_path(dir.path().join("src/Links.php")).unwrap();
++    open_php(&backend, &links, caller).await;
++    for (needle, name) in [("class ", "Receipt"), ("function ", "display")] {
++        let result = backend
++            .rename(controller_url_rename(&uri, class, needle, name))
++            .await;
++        assert!(
++            result.is_err(),
++            "crossfile ambiguous action cannot be skipped: {result:?}"
++        );
++    }
++    let proven = caller.replacen("\\action('App", "\\action('\\\\App", 1);
++    backend
++        .did_change(DidChangeTextDocumentParams {
++            text_document: VersionedTextDocumentIdentifier {
++                uri: links.clone(),
++                version: 2,
++            },
++            content_changes: vec![TextDocumentContentChangeEvent {
++                range: None,
++                range_length: None,
++                text: proven.clone(),
++            }],
++        })
++        .await;
++    let plan = backend
++        .rename(controller_url_rename(&uri, class, "function ", "display"))
++        .await
++        .unwrap()
++        .expect("proven crossfile method");
++    let changes = plan.changes.unwrap();
++    assert_eq!(changes.get(&uri).unwrap().len(), 1);
++    assert_eq!(changes.get(&links).unwrap().len(), 2);
++    assert_eq!(
++        std::fs::read_to_string(dir.path().join("src/Links.php")).unwrap(),
++        caller
++    );
++}
++
++#[tokio::test]
++async fn controller_url_encoded_methods_or_separators_refuse_partial_rename_plans() {
++    for encoded in [
++        r#"\action("\\App\\Invoice@sh\x6fw");"#,
++        r#"\action("\\App\\Invoice\x40show");"#,
++        r#"\action("\\App\\Invoice@sh\u{6f}w");"#,
++    ] {
++        let calls = format!("\\action('\\\\App\\\\Invoice@show'); {encoded}");
++        let text = controller_url_fixture(&calls);
++        let (backend, _dir, uri) = handler_workspace(&text).await;
++        for (needle, name) in [
++            ("class ", "Receipt"),
++            ("class Invoice {public function ", "display"),
++        ] {
++            let result = backend
++                .rename(controller_url_rename(&uri, &text, needle, name))
++                .await;
++            assert!(
++                result.is_err(),
++                "encoded helper cannot be skipped: {encoded}: {result:?}"
++            );
++        }
++    }
++}
++
++#[tokio::test]
++async fn controller_url_user_global_helpers_are_not_framework_builders_and_restore_after_edits() {
++    let text = controller_url_fixture(r#"\action('\\App\\Invoice@show');"#);
++    let (backend, dir, uri) = handler_workspace(&text).await;
++    let path = dir.path().join("src/GlobalHelpers.php");
++    let original = "<?php function otherGlobal():void {}\n";
++    std::fs::write(&path, original).unwrap();
++    let helpers = Url::from_file_path(&path).unwrap();
++    open_php(&backend, &helpers, original).await;
++    let at = "\\action('\\\\App\\\\Invoice@sh";
++    assert!(
++        controller_url_definition(&backend, &uri, &text, at)
++            .await
++            .is_some()
++    );
++    backend
++        .did_change(DidChangeTextDocumentParams {
++            text_document: VersionedTextDocumentIdentifier {
++                uri: helpers.clone(),
++                version: 2,
++            },
++            content_changes: vec![TextDocumentContentChangeEvent {
++                range: None,
++                range_length: None,
++                text: "<?php function action(string $name):string {return $name;}\n".into(),
++            }],
++        })
++        .await;
++    assert!(
++        controller_url_definition(&backend, &uri, &text, at)
++            .await
++            .is_none(),
++        "a user global helper is not Laravel"
++    );
++    backend
++        .did_change(DidChangeTextDocumentParams {
++            text_document: VersionedTextDocumentIdentifier {
++                uri: helpers,
++                version: 3,
++            },
++            content_changes: vec![TextDocumentContentChangeEvent {
++                range: None,
++                range_length: None,
++                text: original.into(),
++            }],
++        })
++        .await;
++    assert!(
++        controller_url_definition(&backend, &uri, &text, at)
++            .await
++            .is_some()
++    );
++    assert_eq!(std::fs::read_to_string(path).unwrap(), original);
++}
++#[tokio::test]
++async fn controller_url_link_references_are_not_controller_execution_edges() {
++    let text = controller_url_fixture(
++        r#"function links():void {\action('\\App\\Invoice@show');}
++function execute(Invoice $invoice):string {return $invoice->show();}"#,
++    );
++    let (backend, _dir, uri) = handler_workspace(&text).await;
++    let at = crate::common::position_after(&text, "class Invoice {public function ");
++    let items = backend
++        .prepare_call_hierarchy(CallHierarchyPrepareParams {
++            text_document_position_params: TextDocumentPositionParams {
++                text_document: TextDocumentIdentifier { uri },
++                position: at,
++            },
++            work_done_progress_params: Default::default(),
++        })
++        .await
++        .unwrap()
++        .unwrap();
++    assert_eq!(items.len(), 1);
++    let incoming = backend
++        .incoming_calls(CallHierarchyIncomingCallsParams {
++            item: items[0].clone(),
++            work_done_progress_params: Default::default(),
++            partial_result_params: Default::default(),
++        })
++        .await
++        .unwrap()
++        .unwrap_or_default();
++    assert_eq!(
++        incoming.len(),
++        1,
++        "URL generation is a reference, not a dispatch: {incoming:?}"
++    );
++    assert_eq!(incoming[0].from.name, "execute");
++}
++#[tokio::test]
++async fn controller_url_named_parameter_roles_match_helper_and_method_signatures() {
++    for (call, valid) in [
++        (r#"\action(name:'\\App\\Invoice@show');"#, true),
++        (r#"URL::action(action:'\\App\\Invoice@show');"#, true),
++        (
++            r#"\redirect()->action(action:'\\App\\Invoice@show',status:303);"#,
++            true,
++        ),
++        (r#"\action(action:'\\App\\Invoice@show');"#, false),
++        (r#"URL::action(name:'\\App\\Invoice@show');"#, false),
++        (
++            r#"URL::action(action:'\\App\\Invoice@show',status:303);"#,
++            false,
++        ),
++    ] {
++        let text = controller_url_fixture(call);
++        let (backend, _dir, uri) = handler_workspace(&text).await;
++        let needle = &call[..call.find("@show").unwrap() + 3];
++        assert_eq!(
++            controller_url_definition(&backend, &uri, &text, needle)
++                .await
++                .is_some(),
++            valid,
++            "{call}"
++        );
++    }
++}
++
++#[tokio::test]
++async fn controller_url_namespace_fallback_tracks_foreign_global_helpers() {
++    let text = controller_url_fixture(r#"action('\\App\\Invoice@show');"#);
++    let (backend, dir, uri) = handler_workspace(&text).await;
++    let path = dir.path().join("src/GlobalHelpers.php");
++    let original = "<?php function otherGlobal():void {}\n";
++    std::fs::write(&path, original).unwrap();
++    let helpers = Url::from_file_path(&path).unwrap();
++    open_php(&backend, &helpers, original).await;
++    let at = "action('\\\\App\\\\Invoice@sh";
++    assert!(
++        controller_url_definition(&backend, &uri, &text, at)
++            .await
++            .is_some()
++    );
++    backend
++        .did_change(DidChangeTextDocumentParams {
++            text_document: VersionedTextDocumentIdentifier {
++                uri: helpers.clone(),
++                version: 2,
++            },
++            content_changes: vec![TextDocumentContentChangeEvent {
++                range: None,
++                range_length: None,
++                text: "<?php function action(string $name):string {return $name;}\n".into(),
++            }],
++        })
++        .await;
++    assert!(
++        controller_url_definition(&backend, &uri, &text, at)
++            .await
++            .is_none(),
++        "a user global helper is not Laravel"
++    );
++    backend
++        .did_change(DidChangeTextDocumentParams {
++            text_document: VersionedTextDocumentIdentifier {
++                uri: helpers,
++                version: 3,
++            },
++            content_changes: vec![TextDocumentContentChangeEvent {
++                range: None,
++                range_length: None,
++                text: original.into(),
++            }],
++        })
++        .await;
++    assert!(
++        controller_url_definition(&backend, &uri, &text, at)
++            .await
++            .is_some()
++    );
++    assert_eq!(std::fs::read_to_string(path).unwrap(), original);
++}

@@ -85,6 +85,76 @@ At that merge checkpoint, source-only slice 101 remained unfinished;
 no candidate 153 adoption or new package was claimed. Area statuses remain 67
 partial/2 user-deferred.
 
+Laravel slice 114 (2026-11-16, verified inactive engine candidate): PHPantom155
+adds normal class/method navigation, references and safe short-name renames for
+rooted Controller@method literals in action()/import aliases, url()/redirect()
+receivers, URL/Redirect facades and Response redirectToAction. Bind named arguments
+to their actual signatures: global action uses name; URL/redirect methods use
+action. Receiver arguments, foreign imports/types, user global or namespace-local
+helpers and non-Laravel projects do not borrow framework meaning. Global helper
+origins use the indexed Laravel Foundation helper file. Published callers follow
+both local and global helper edits, including namespace-to-global fallback.
+
+Reuse the existing runtime-controller literal decoder, class/member resolution,
+quoting-aware edits and conditional-span publication. URL construction records a
+reference, not controller execution. Unrooted strings retain an unresolved URL
+namespace; route-group owners/PHP imports are not borrowed. Unrooted, ambiguous
+and encoded method/separator forms retain identifiable references and refuse
+partial class/method edits. No new protocol, frontend action, settings, automatic
+Composer/Artisan execution or debugger behavior.
+
+The actual154 CLI has6 missing rooted helper/facade targets while route strings
+and callable arrays resolve. Seven primary regressions fail before implementation
+and the non-Laravel control passes. The first compile catches a lifetime mismatch
+and unreachable arm; the first behavioral pass also corrects a class-range test
+oracle (class keyword, not name). Actual CLI controls later expose omitted encoded
+references, global helper shadowing, and namespace fallback to a foreign global
+helper. Retain all red/green evidence. Cancel the known-invalid first immutable
+draft before acceptance, preserving its source/patch/pin/logs and stopping only
+its owned process tree. Final14 regressions and all107 route-controller checks
+pass; the call-hierarchy case retains a real execution edge and excludes URL links.
+
+Full pinned Rust source18522 passed/17 ignored, plus both bounded FIFO/enum
+children; all-target standard and memory-audit Clippy, fmt, complete source
+fingerprints and optimized build pass. Laravel13.37 runtime333 assertions,
+10 independent URL/root/named-role assertions, plain runtime checks and12 plain/
+92 Laravel syntax checks pass. The first fixture preparation wrongly required
+^13.0 to equal its existing13.37.0 pin; validate that exact compatible difference
+and resume only the inspected owned partial fixture without Composer execution.
+No environment files are acquired or created by the new fixtures.
+
+The analyzer initially reports3 extra unused demo variables. Return those values
+without suppressions; final analysis retains exactly the3 intentional diagnostics.
+Only Demo.php and the source marker change after the full Rust run: all Rust,
+Cargo, build, stub and test inputs match the accepted source. Reuse those source
+checks, replay the amended patch into a fresh immutable source, rerun PHP checks
+and rebuild through the pinned recipe. The optimized executable is observed
+byte-identical; no general reproducible-build/parity claim. Final canonical CLI
+checks pass for helper targets/coordinates, both helper shadowing forms, encoded
+rename refusal,3 real Laravel demo method targets, exact diagnostics, unchanged
+fixture originals and normal shutdown. Actual OpenStorm client/host and packaged
+native acceptance remain separate, pending subsequent slices.
+
+Candidate0.11.1-openstorm.155, canonical executable
+artifacts/engines/0.11.1-openstorm.155/phpantom_lsp, SHA256
+6663feb2e9c9b283a9f44c737e78169146eaf57287058be73287993d99080e58.
+Final patch-series SHA256:
+50aa8da7ccce053b00c8a98d848b0b215471397429efb43b18ed2873fd160dba.
+Source/binary recipes and MIT/Apache provenance remain checked. Update the L27
+backlog to its remaining completion, configured URL roots, encoded edits,
+diagnostics and broader context cases, retaining its ID. App0.1.94/default154
+remain unchanged; no activation, package, install, publication or updater change.
+Native UI remains user-skipped. All69 areas stay67 partial/2 user-deferred.
+
+Remove 8,210 compiler files/2,324,896,479 bytes (~2.17GiB)
+and the SHA-verified identical 56,213,056-byte same-slice draft
+executable. Both owned compiler roots are absent. Preserve all source/draft pins,
+patches, receipts/licenses, the sole App94, active154, Workbench and earlier
+evaluation artifacts. Evidence: artifacts/checks/slice114-receipt.json,
+source-freeze/source-test-summary, engine-gates2/frozen-focused, final-build,
+final-examples, runtime-roles, cli-final/analyzer-final-control and compiler-clean
+receipts/logs. The ignored delivery receipt records commit, remote and clean tree.
+
 Laravel slice 113 (2026-11-16, verified source checkpoint): bind the invokable
 handler action to its originating editor pane and complete selection, with exact
 caret coordinates when no view is available. Before dispatch, after a reply or

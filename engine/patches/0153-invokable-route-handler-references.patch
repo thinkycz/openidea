@@ -1,0 +1,979 @@
+--- a/docs/CHANGELOG.md
++++ b/docs/CHANGELOG.md
+@@ -14,6 +14,8 @@
+ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+ 
+ ## [Unreleased]
++
++- **Find implicit invokable route handlers.** Registered Laravel literal and class-constant actions contribute scoped `__invoke` references and declaration counts, including inherited handlers, aliases and namespace qualification. Rebinding invalidates zero-hit and differently-cased count caches. PHP class navigation stays separate; namespace-dependent class constants and fixed magic-method contract renames refuse partial edits. Contributed by @thinkycz.
+ 
+ - **Keep incremental enum publication responsive.** Incremental class-cache population remains on the AST merge-lock owner so lazy builtin or vendor class parsing can safely reenter publication. Startup population remains parallel. Contributed by @thinkycz.
+ 
+--- a/src/code_lens.rs
++++ b/src/code_lens.rs
+@@ -134,7 +134,7 @@
+                 };
+ 
+                 let proto = self.find_prototype(class, &method.name, uri, content);
+-                if !method.name.starts_with("__")
++                if (!method.name.starts_with("__") || method.name.eq_ignore_ascii_case("__invoke"))
+                     && let Some(lens) = self.build_member_reference_lens(
+                         uri,
+                         &index,
+@@ -310,6 +310,9 @@
+             return None;
+         }
+         let mut candidate_count = self.indexed_member_reference_count(&member)?;
++        if member.eq_ignore_ascii_case("__invoke") && member.as_str() != "__invoke" {
++            candidate_count += self.indexed_member_reference_count("__invoke")?;
++        }
+         // A scope or an accessor is used under a name of its own, which
+         // the search counts too.
+         if let Some(magic) = self.eloquent_magic_member_at(origin_uri, declaration_offset, &member)
+--- a/src/mem_audit.rs
++++ b/src/mem_audit.rs
+@@ -162,7 +162,7 @@
+ 
+ fn vs(v: &[String]) -> Sz {
+     let mut z = Sz::default();
+-    z.add(v.len() * size_of::<String>());
++    z.add(std::mem::size_of_val(v));
+     for x in v {
+         z.add(x.capacity());
+     }
+@@ -1355,6 +1355,10 @@
+                 sm.conditional_laravel_spans.capacity()
+                     * size_of::<crate::symbol_map::ConditionalLaravelStringSpan>(),
+             );
++            sym.add(
++                sm.laravel_invokable_actions.capacity()
++                    * size_of::<crate::symbol_map::LaravelInvokableAction>(),
++            );
+             for candidate in &sm.conditional_laravel_spans {
+                 sym.add(candidate.audit_heap());
+             }
+@@ -1538,8 +1542,11 @@
+         if let Some(keys) = &c.config_keys {
+             laravel_keys += vs(keys);
+         }
+-        for v in [&c.view_names, &c.trans_keys].into_iter().flatten() {
+-            laravel_keys += vs(v);
++        if let Some(keys) = &c.view_names {
++            laravel_keys += vs(keys);
++        }
++        if let Some(catalog) = &c.translations {
++            laravel_keys += vs(&catalog.keys);
+         }
+         if let Some(discovery) = &c.routes {
+             if let Some(first) = discovery.routes.first() {
+--- a/src/reference_counts/cache.rs
++++ b/src/reference_counts/cache.rs
+@@ -354,6 +354,21 @@
+         }
+     }
+ 
++    /// Bindings without a method-name token also affect differently cased declarations.
++    pub(crate) fn invalidate_member_variants(&self, member: Atom, uris: &HashSet<Arc<str>>) {
++        let names: Vec<_> = self
++            .counts
++            .read()
++            .by_member
++            .keys()
++            .copied()
++            .filter(|name| name.eq_ignore_ascii_case(&member))
++            .collect();
++        for name in names {
++            self.invalidate_member(name, uris);
++        }
++    }
++
+     /// Mark the locations a reparse of `uris` can have moved.
+     ///
+     /// A cached result is only affected when one of its own locations sits in
+--- a/src/reference_index.rs
++++ b/src/reference_index.rs
+@@ -619,12 +619,15 @@
+         // editing a method body without touching an access leaves every
+         // count valid, and recomputing one is expensive.
+         let mut stale = AtomSet::default();
++        let mut invokable_reparsed = false;
+ 
+         let mut index = self.reference_index.write();
+         let mut previous = Vec::with_capacity(if track_members { rebuilt.len() } else { 0 });
+         for (uri, _) in &rebuilt {
+             if track_members {
+-                previous.push(member_contributions(&index, uri));
++                let old = member_contributions(&index, uri);
++                invokable_reparsed |= old.contains_key(&atom("__invoke"));
++                previous.push(old);
+             }
+             evict_reference_index_uri_locked(&mut index, uri);
+         }
+@@ -632,6 +635,7 @@
+             if track_members {
+                 let old = &previous[idx];
+                 let new = member_contributions_of_entries(&entries);
++                invokable_reparsed |= new.contains_key(&atom("__invoke"));
+                 stale.extend(
+                     old.iter()
+                         .filter(|(name, count)| new.get(*name) != Some(count))
+@@ -664,6 +668,10 @@
+             index.uri_keys.insert(uri, keys.into_iter().collect());
+         }
+         drop(index);
++        if invokable_reparsed {
++            self.member_ref_counts
++                .invalidate_member_variants(atom("__invoke"), &reparsed);
++        }
+ 
+         for name in stale {
+             self.member_ref_counts.invalidate_member(name, &reparsed);
+@@ -711,6 +719,23 @@
+ 
+             for (key, counts_as_reference) in self.reference_keys_for_span(uri, span, &namespaces) {
+                 entries.push((key, counts_as_reference && !is_declaration));
++            }
++        }
++
++        for action in &symbol_map.laravel_invokable_actions {
++            entries.push((
++                ReferenceIndexKey::Member {
++                    name: "__invoke".into(),
++                    is_static: false,
++                },
++                action.target.is_some(),
++            ));
++            for name in [action.source_class, action.target].into_iter().flatten() {
++                entries.extend(
++                    class_keys(&name, &name)
++                        .into_iter()
++                        .map(|(key, _)| (key, false)),
++                );
+             }
+         }
+ 
+--- a/src/references/members.rs
++++ b/src/references/members.rs
+@@ -413,6 +413,19 @@
+             locations[query_index].push(location);
+         }
+ 
++        let implicit: Vec<_> = prepared
++            .iter()
++            .enumerate()
++            .filter_map(|(index, query)| {
++                (query.member.eq_ignore_ascii_case("__invoke") && !query.is_static)
++                    .then(|| query.hierarchy.as_ref().map(|scope| (index, scope)))
++                    .flatten()
++            })
++            .collect();
++        for (query, location) in self.laravel_invokable_references(&implicit, restrict_to) {
++            locations[query].push(location);
++        }
++
+         // A model method used under a magic name (a scope, an accessor) is
+         // referenced under that name too.
+         let magic: Vec<(usize, EloquentMagicMember)> = queries
+@@ -466,7 +479,7 @@
+         let candidate_keys = member_candidate_keys(target_member, target_is_static, hierarchy);
+         let member = crate::atom::atom(target_member);
+         let target_name = target_member.strip_prefix('$').unwrap_or(target_member);
+-        self.scan_reference_candidates(
++        let mut locations = self.scan_reference_candidates(
+             &candidate_keys,
+             "Scanning for member references",
+             |file, symbol_map, locations| {
+@@ -581,6 +594,64 @@
+                     }
+                 }
+             },
++        );
++        if target_member.eq_ignore_ascii_case("__invoke")
++            && !target_is_static
++            && let Some(hierarchy) = hierarchy
++        {
++            locations.extend(
++                self.laravel_invokable_references(&[(0, hierarchy)], None)
++                    .into_iter()
++                    .map(|(_, location)| location),
++            );
++        }
++        locations
++    }
++
++    fn laravel_invokable_references(
++        &self,
++        scopes: &[(usize, &MemberScope)],
++        restrict_to: Option<&HashSet<Arc<str>>>,
++    ) -> Vec<(usize, Location)> {
++        if scopes.is_empty() {
++            return Vec::new();
++        }
++        let keys = [ReferenceIndexKey::Member {
++            name: "__invoke".into(),
++            is_static: false,
++        }];
++        let mut snapshot = self.user_file_symbol_maps_for_reference_keys(&keys);
++        if let Some(files) = restrict_to {
++            snapshot.retain(|(uri, _)| files.contains(uri.as_str()));
++        }
++        self.scan_candidate_snapshot(
++            snapshot,
++            "Scanning for invokable route handlers",
++            |file, map| {
++                if map.laravel_invokable_actions.is_empty() {
++                    return Vec::new();
++                }
++                let Some(content) = file.content() else {
++                    return Vec::new();
++                };
++                if !map.matches_source_fingerprint(content) {
++                    return Vec::new();
++                }
++                let mut matches = Vec::new();
++                for action in &map.laravel_invokable_actions {
++                    let Some(target) = action.target else {
++                        continue;
++                    };
++                    for &(query, hierarchy) in scopes {
++                        if hierarchy.contains(self, &target)
++                            && let Some(location) = file.location(action.start, action.end)
++                        {
++                            matches.push((query, location));
++                        }
++                    }
++                }
++                matches
++            },
+         )
+     }
+ 
+@@ -642,3 +713,63 @@
+         }
+     }
+ }
++
++#[cfg(test)]
++mod invokable_source_revision_tests {
++    use super::*;
++
++    #[test]
++    fn same_length_namespace_edits_cannot_reuse_implicit_handler_roles() {
++        let backend = Backend::new_test();
++        let class_uri = "file:///handler-classes.php";
++        let route_uri = "file:///handler-routes.php";
++        let classes = "<?php namespace App {class Invoice {public function __invoke(){}}} namespace Other\\App {class Invoice {public function __invoke(){}}} namespace Third\\App {class Invoice {public function __invoke(){}}}";
++        let routes = "<?php namespace Harness; use Illuminate\\Support\\Facades\\Route; Route::namespace('Other')->group(fn()=>Route::get('/case',\\App\\Invoice::class));";
++        backend
++            .open_files
++            .write()
++            .insert(class_uri.into(), Arc::new(classes.into()));
++        backend.update_ast(class_uri, classes);
++        backend
++            .open_files
++            .write()
++            .insert(route_uri.into(), Arc::new(routes.into()));
++        backend.update_ast(route_uri, routes);
++        let other = classes.find("namespace Other").unwrap();
++        let method = other + classes[other..].find("__invoke").unwrap();
++        assert_eq!(
++            backend
++                .member_declaration_references(class_uri, method as u32, "__invoke", false)
++                .len(),
++            1
++        );
++        let third = classes.find("namespace Third").unwrap();
++        let declaration = third + classes[third..].find("class ").unwrap() + "class ".len();
++        let position = offset_to_position(classes, declaration);
++        assert!(
++            backend
++                .handle_rename(class_uri, classes, position, "Receipt")
++                .unwrap()
++                .is_some()
++        );
++        let changed = routes.replace("'Other'", "'Third'");
++        assert_eq!(routes.len(), changed.len());
++        // Model a retained map while its producer has not published the new role.
++        backend
++            .open_files
++            .write()
++            .insert(route_uri.into(), Arc::new(changed));
++        assert!(
++            backend
++                .member_declaration_references(class_uri, method as u32, "__invoke", false)
++                .is_empty(),
++            "a stale namespace must not credit the old handler"
++        );
++        assert!(
++            backend
++                .handle_rename(class_uri, classes, position, "Receipt")
++                .is_err(),
++            "a retained handler map must not allow a partial class rename"
++        );
++    }
++}
+--- a/src/rename/prepare.rs
++++ b/src/rename/prepare.rs
+@@ -242,6 +242,22 @@
+         if !self.rename_map_matches(uri, content) || !self.rename_span_verified(uri, content, &span)
+         {
+             return Ok(None);
++        }
++
++        let invokes_object = match &span.kind {
++            SymbolKind::MemberDeclaration {
++                name,
++                is_static: false,
++            } => name.eq_ignore_ascii_case("__invoke"),
++            SymbolKind::MemberAccess {
++                member_name,
++                is_method_call: true,
++                ..
++            } => member_name.eq_ignore_ascii_case("__invoke"),
++            _ => false,
++        };
++        if invokes_object {
++            return Err("The PHP __invoke contract has implicit callers and cannot be safely renamed as a method name; no edits were produced.".into());
+         }
+ 
+         // Reject non-renameable symbols (same logic as prepare_rename).
+--- a/src/rename/runtime_controller.rs
++++ b/src/rename/runtime_controller.rs
+@@ -81,6 +81,35 @@
+         for (uri, map) in self.user_file_symbol_maps_for_reference_keys(&keys) {
+             let mut content = None;
+             let mut source_verified = false;
++            if !map.laravel_invokable_actions.is_empty() {
++                let current = content
++                    .get_or_insert_with(|| self.reference_file_content_arc(&uri))
++                    .as_deref()
++                    .ok_or(
++                        "Could not read a runtime controller reference; no edits were produced.",
++                    )?;
++                if !map.matches_source_fingerprint(current) {
++                    return Err("A runtime controller source changed; request a new rename.".into());
++                }
++                source_verified = true;
++            }
++            for action in &map.laravel_invokable_actions {
++                let Some(source) = action.source_class else {
++                    continue;
++                };
++                let same_identity = action
++                    .target
++                    .is_some_and(|name| name.eq_ignore_ascii_case(&source));
++                let affected = source.eq_ignore_ascii_case(target)
++                    || action
++                        .target
++                        .is_some_and(|name| name.eq_ignore_ascii_case(target))
++                    || (action.target.is_none()
++                        && short_name(&source).eq_ignore_ascii_case(short_name(target)));
++                if !same_identity && affected {
++                    return Err("A namespace-dependent controller class constant cannot be safely rewritten; no edits were produced.".into());
++                }
++            }
+             for span in &map.spans {
+                 let affected = match &span.kind {
+                     SymbolKind::ClassReference {
+--- a/src/symbol_map/extraction/laravel.rs
++++ b/src/symbol_map/extraction/laravel.rs
+@@ -2329,6 +2329,7 @@
+ /// A registered class-string action without an explicit method suffix.
+ pub(crate) struct InvokableRouteClass {
+     pub controller: RouteControllerRef,
++    pub is_literal: bool,
+     pub start: u32,
+     pub end: u32,
+ }
+@@ -2338,9 +2339,30 @@
+     names: Option<&crate::names::OwnedResolvedNames>,
+     content: &str,
+ ) -> Option<InvokableRouteClass> {
+-    let Expression::Literal(literal::Literal::String(value)) =
+-        laravel_route_action_argument(expr, names)?
+-    else {
++    let action = crate::parser::unwrap_parens(laravel_route_action_argument(expr, names)?);
++    if let Expression::Access(Access::ClassConstant(class)) = action {
++        let controller = laravel_route_controller_value(action, names)?;
++        let runtime = controller.runtime?;
++        if matches!(
++            runtime.to_ascii_lowercase().as_str(),
++            "self" | "static" | "parent"
++        ) {
++            return None;
++        }
++        let span = class.class.span();
++        return Some(InvokableRouteClass {
++            controller: RouteControllerRef {
++                subject: runtime.clone(),
++                runtime: Some(runtime),
++                rooted: false,
++                literal_span: None,
++            },
++            is_literal: false,
++            start: span.start.offset,
++            end: span.end.offset,
++        });
++    }
++    let Expression::Literal(literal::Literal::String(value)) = action else {
+         return None;
+     };
+     let decoded = value.value.and_then(literal_bytes_to_str)?;
+@@ -2356,6 +2378,7 @@
+     }
+     Some(InvokableRouteClass {
+         controller,
++        is_literal: true,
+         start,
+         end,
+     })
+--- a/src/symbol_map/extraction/laravel_route_context.rs
++++ b/src/symbol_map/extraction/laravel_route_context.rs
+@@ -487,6 +487,7 @@
+     Vec<SymbolSpan>,
+     Vec<(u32, u32)>,
+     BTreeMap<(u32, u32), BindingUses>,
++    Vec<crate::symbol_map::LaravelInvokableAction>,
+ );
+ 
+ struct Emitter<'a> {
+@@ -521,33 +522,45 @@
+                 .record(region.owner.as_deref());
+         }
+         if let Some((action, owner)) = invokable.zip(invokable_target) {
+-            let kind = match (owner.target, owner.incomplete) {
+-                (Some(controller), false) => crate::symbol_map::SymbolKind::ClassReference {
+-                    name: crate::atom::atom(controller.trim_start_matches('\\')),
+-                    is_fqn: true,
+-                    context: crate::symbol_map::ClassRefContext::RuntimeControllerString,
+-                },
+-                (target, _) => crate::symbol_map::SymbolKind::RuntimeControllerBinding {
+-                    runtime_name: crate::atom::atom(
+-                        action
+-                            .controller
+-                            .runtime
+-                            .as_deref()
+-                            .unwrap_or(&action.controller.subject),
+-                    ),
+-                    targets: target
+-                        .into_iter()
+-                        .map(|name| crate::atom::atom(name.trim_start_matches('\\')))
+-                        .collect::<Vec<_>>()
+-                        .into_boxed_slice(),
+-                    incomplete: true,
+-                },
+-            };
+-            out.0.push(SymbolSpan {
++            out.3.push(crate::symbol_map::LaravelInvokableAction {
+                 start: action.start,
+                 end: action.end,
+-                kind,
++                target: owner
++                    .target
++                    .as_deref()
++                    .map(|name| crate::atom::atom(name.trim_start_matches('\\'))),
++                source_class: (!action.is_literal)
++                    .then(|| crate::atom::atom(&action.controller.subject)),
+             });
++            if action.is_literal {
++                let kind = match (owner.target, owner.incomplete) {
++                    (Some(controller), false) => crate::symbol_map::SymbolKind::ClassReference {
++                        name: crate::atom::atom(controller.trim_start_matches('\\')),
++                        is_fqn: true,
++                        context: crate::symbol_map::ClassRefContext::RuntimeControllerString,
++                    },
++                    (target, _) => crate::symbol_map::SymbolKind::RuntimeControllerBinding {
++                        runtime_name: crate::atom::atom(
++                            action
++                                .controller
++                                .runtime
++                                .as_deref()
++                                .unwrap_or(&action.controller.subject),
++                        ),
++                        targets: target
++                            .into_iter()
++                            .map(|name| crate::atom::atom(name.trim_start_matches('\\')))
++                            .collect::<Vec<_>>()
++                            .into_boxed_slice(),
++                        incomplete: true,
++                    },
++                };
++                out.0.push(SymbolSpan {
++                    start: action.start,
++                    end: action.end,
++                    kind,
++                });
++            }
+         }
+         if let Some(action) =
+             super::laravel::laravel_explicit_route_action(node, self.names, self.content)
+@@ -599,6 +612,7 @@
+     names: Option<&OwnedResolvedNames>,
+     spans: &mut Vec<SymbolSpan>,
+     non_invoked: &mut Vec<(u32, u32)>,
++    invokable_actions: &mut Vec<crate::symbol_map::LaravelInvokableAction>,
+ ) {
+     let contexts = RouteGroupContexts::collect(program, content, names);
+     if contexts.regions.is_empty()
+@@ -609,7 +623,12 @@
+     {
+         return;
+     }
+-    let mut out = (Vec::new(), Vec::new(), BTreeMap::<_, BindingUses>::new());
++    let mut out = (
++        Vec::new(),
++        Vec::new(),
++        BTreeMap::<_, BindingUses>::new(),
++        Vec::new(),
++    );
+     Emitter {
+         content,
+         names,
+@@ -648,4 +667,5 @@
+     });
+     spans.extend(out.0);
+     non_invoked.extend(out.1);
+-}
++    invokable_actions.extend(out.3);
++}
+--- a/src/symbol_map/extraction/mod.rs
++++ b/src/symbol_map/extraction/mod.rs
+@@ -282,12 +282,14 @@
+         extract_from_statement(stmt, &mut ctx, 0);
+     }
+ 
++    let mut laravel_invokable_actions = Vec::new();
+     laravel_route_context::emit(
+         program,
+         content,
+         resolved_names,
+         &mut ctx.spans,
+         &mut ctx.non_invoked_callable_spans,
++        &mut laravel_invokable_actions,
+     );
+ 
+     // ── Sweep all docblock trivia for floating references ───────────
+@@ -406,6 +408,7 @@
+         embedded_source: None,
+         spans: ctx.spans,
+         conditional_laravel_spans: ctx.conditional_laravel_spans,
++        laravel_invokable_actions,
+         member_access_indices,
+         var_defs: ctx.var_defs,
+         scopes: ctx.scopes,
+--- a/src/symbol_map/mod.rs
++++ b/src/symbol_map/mod.rs
+@@ -485,6 +485,9 @@
+             | Self::ConstantReference { .. }
+             | Self::MemberDeclaration { .. }
+             | Self::NamespaceDeclaration { .. } => 0,
++            Self::RuntimeControllerBinding { targets, .. } => {
++                std::mem::size_of_val(targets.as_ref())
++            }
+             Self::LaravelMacroString { name, .. } | Self::CommandOwnParam { name, .. } => {
+                 name.capacity()
+             }
+@@ -1242,6 +1245,15 @@
+     }
+ }
+ 
++/// A framework handler association, independent of the PHP class-name span.
++#[derive(Debug, Clone)]
++pub(crate) struct LaravelInvokableAction {
++    pub start: u32,
++    pub end: u32,
++    pub target: Option<Atom>,
++    pub source_class: Option<Atom>,
++}
++
+ /// Per-file symbol location index.
+ ///
+ /// The `spans` vec is sorted by `start` offset.  Gaps between spans
+@@ -1261,6 +1273,7 @@
+     /// Laravel string spans gated by cross-file function/class membership.
+     /// Empty for ordinary PHP files and never consulted by request handlers.
+     pub conditional_laravel_spans: Vec<ConditionalLaravelStringSpan>,
++    pub laravel_invokable_actions: Vec<LaravelInvokableAction>,
+     /// Member-access span indices keyed by member name.
+     ///
+     /// This lets references/rename jump straight to relevant `->name` /
+--- a/tests/integration/laravel_route_controller.rs
++++ b/tests/integration/laravel_route_controller.rs
+@@ -3202,3 +3202,377 @@
+ async fn skipped_declaration_does_not_invent_prior_class_availability() {
+     execution_sensitive_availability_keeps_group_method(false).await;
+ }
++
++fn implicit_handler_fixture() -> &'static str {
++    r#"<?php
++namespace App {
++class BaseInvoice {
++ public function __invoke():string {return 'base';}
++ public function show():string {return 'show';}
++}
++class Invoice extends BaseInvoice {}
++class Other {
++ public function __invoke():bool {return true;}
++}
++class Unused {
++ public function __INVOKE():float {return 1.0;}
++}
++class Group {public function Invoice():string {return 'method';}}
++}
++namespace Other\App {
++class Invoice {public function __invoke():int {return 42;}}
++}
++namespace Harness {
++use Illuminate\Support\Facades\Route as Routes;
++use App\Invoice as InvoiceAlias;
++Routes::get('/😀/literal','App\Invoice');
++Routes::get('/constant',InvoiceAlias::class);
++Routes::namespace('App')->group(fn()=>Routes::get('/namespace','Invoice'));
++Routes::controller(\App\Group::class)->group(function(){
++ Routes::get('/group-constant',InvoiceAlias::class);
++ Routes::get('/group-method','Invoice');
++});
++Routes::match(action:InvoiceAlias::class,uri:'/match',methods:['GET']);
++Routes::get('/paren',(InvoiceAlias::class));
++Routes::namespace('Other')->group(fn()=>Routes::get('/prefixed',InvoiceAlias::class));
++Routes::get('/other',\App\Other::class);
++Routes::get('/explicit','App\Invoice@show');
++$metadata=InvoiceAlias::class;$notAHandler='App\Invoice';
++}
++"#
++}
++
++async fn implicit_method_refs(
++    backend: &phpantom_lsp::Backend,
++    uri: &Url,
++    text: &str,
++    prefix: &str,
++) -> Vec<Location> {
++    backend
++        .references(ReferenceParams {
++            text_document_position: TextDocumentPositionParams {
++                text_document: TextDocumentIdentifier { uri: uri.clone() },
++                position: crate::common::position_after(text, prefix),
++            },
++            context: ReferenceContext {
++                include_declaration: false,
++            },
++            work_done_progress_params: Default::default(),
++            partial_result_params: Default::default(),
++        })
++        .await
++        .unwrap()
++        .unwrap_or_default()
++}
++
++#[tokio::test]
++async fn implicit_invokable_handler_references_keep_class_semantics_and_owner_scope() {
++    let backend = create_test_backend();
++    let uri = Url::parse("file:///implicit-handlers.php").unwrap();
++    let text = implicit_handler_fixture();
++    open_php(&backend, &uri, text).await;
++    let refs = implicit_method_refs(
++        &backend,
++        &uri,
++        text,
++        "class BaseInvoice {\n public function ",
++    )
++    .await;
++    let mut actual: Vec<_> = refs.iter().map(|l| l.range.start).collect();
++    actual.sort_by_key(|p| (p.line, p.character));
++    let mut expected: Vec<_> = [
++        "'/😀/literal','",
++        "'/constant',",
++        "'/namespace','",
++        "'/group-constant',",
++        "Routes::match(action:",
++        "'/paren',(",
++    ]
++    .iter()
++    .map(|p| crate::common::position_after(text, p))
++    .collect();
++    expected.sort_by_key(|p| (p.line, p.character));
++    assert_eq!(
++        actual, expected,
++        "implicit __invoke references must include exactly the six inherited handler associations"
++    );
++    let other =
++        implicit_method_refs(&backend, &uri, text, "class Other {\n public function ").await;
++    assert_eq!(other.len(), 1);
++    assert_eq!(
++        other[0].range.start,
++        crate::common::position_after(text, "'/other',")
++    );
++    let prefixed = implicit_method_refs(
++        &backend,
++        &uri,
++        text,
++        "namespace Other\\App {\nclass Invoice {public function ",
++    )
++    .await;
++    assert_eq!(prefixed.len(), 1);
++    assert_eq!(
++        prefixed[0].range.start,
++        crate::common::position_after(text, "'/prefixed',")
++    );
++    let pos = crate::common::position_after(text, "'/constant',In");
++    let target = goto_def(&backend, &uri, pos.line, pos.character)
++        .await
++        .unwrap();
++    let loc = match target {
++        GotoDefinitionResponse::Scalar(l) => l,
++        other => panic!("expected ordinary class navigation: {other:?}"),
++    };
++    assert_eq!(
++        loc.range.start,
++        crate::common::position_after(text, " public function show():string {return 'show';}\n}\n")
++    );
++}
++
++async fn implicit_handler_lens(
++    backend: &phpantom_lsp::Backend,
++    uri: &Url,
++    text: &str,
++    prefix: &str,
++) -> String {
++    let line = crate::common::position_after(text, prefix).line;
++    let lenses = backend
++        .code_lens(CodeLensParams {
++            text_document: TextDocumentIdentifier { uri: uri.clone() },
++            work_done_progress_params: Default::default(),
++            partial_result_params: Default::default(),
++        })
++        .await
++        .unwrap()
++        .unwrap();
++    let lens = lenses
++        .into_iter()
++        .find(|l| {
++            l.range.start.line == line
++                && (l
++                    .data
++                    .as_ref()
++                    .is_some_and(|d| d["kind"] == "phpMemberReferences")
++                    || l.command.as_ref().is_some_and(|c| {
++                        c.title.ends_with("reference") || c.title.ends_with("references")
++                    }))
++        })
++        .expect("implicit handler declaration lens");
++    backend
++        .code_lens_resolve(lens)
++        .await
++        .unwrap()
++        .command
++        .unwrap()
++        .title
++}
++
++#[tokio::test]
++async fn implicit_invokable_handler_counts_rebind_without_changing_member_totals() {
++    let text = implicit_handler_fixture();
++    let (backend, dir) = crate::common::create_psr4_workspace(
++        r#"{"autoload":{"classmap":["handlers.php"]}}"#,
++        &[("handlers.php", text)],
++    );
++    let uri = Url::from_file_path(dir.path().join("handlers.php")).unwrap();
++    open_php(&backend, &uri, text).await;
++    let base = "class BaseInvoice {\n public function ";
++    let _ = implicit_method_refs(&backend, &uri, text, base).await;
++    let other = "class Other {\n public function ";
++    let unused = "class Unused {\n public function ";
++    assert_eq!(
++        implicit_handler_lens(&backend, &uri, text, base).await,
++        "6 references"
++    );
++    assert_eq!(
++        implicit_handler_lens(&backend, &uri, text, other).await,
++        "1 reference"
++    );
++    assert_eq!(
++        implicit_handler_lens(&backend, &uri, text, unused).await,
++        "0 references"
++    );
++    let changed = text
++        .replace(
++            "'/😀/literal','App\\Invoice'",
++            "'/😀/literal','App\\Unused'",
++        )
++        .replace(
++            "'/constant',InvoiceAlias::class",
++            "'/constant',\\App\\Other::class",
++        );
++    assert_ne!(changed, text);
++    backend
++        .did_change(DidChangeTextDocumentParams {
++            text_document: VersionedTextDocumentIdentifier {
++                uri: uri.clone(),
++                version: 2,
++            },
++            content_changes: vec![TextDocumentContentChangeEvent {
++                range: None,
++                range_length: None,
++                text: changed.clone(),
++            }],
++        })
++        .await;
++    assert_eq!(
++        implicit_method_refs(&backend, &uri, &changed, base)
++            .await
++            .len(),
++        4
++    );
++    assert_eq!(
++        implicit_method_refs(&backend, &uri, &changed, other)
++            .await
++            .len(),
++        2
++    );
++    assert_eq!(
++        implicit_handler_lens(&backend, &uri, &changed, base).await,
++        "4 references"
++    );
++    assert_eq!(
++        implicit_handler_lens(&backend, &uri, &changed, other).await,
++        "2 references"
++    );
++    assert_eq!(
++        implicit_method_refs(&backend, &uri, &changed, unused)
++            .await
++            .len(),
++        1
++    );
++    assert_eq!(
++        implicit_handler_lens(&backend, &uri, &changed, unused).await,
++        "1 reference"
++    );
++}
++
++#[tokio::test]
++async fn implicit_invokable_handler_rename_refuses_even_when_class_spells_magic_method() {
++    let backend = create_test_backend();
++    let uri = Url::parse("file:///implicit-magic-rename.php").unwrap();
++    let text = "<?php class __invoke {public function __invoke():string{return 'ok';}} Route::get('/magic','__invoke');";
++    open_php(&backend, &uri, text).await;
++    let result = backend
++        .rename(RenameParams {
++            text_document_position: TextDocumentPositionParams {
++                text_document: TextDocumentIdentifier { uri: uri.clone() },
++                position: crate::common::position_after(text, "public function "),
++            },
++            new_name: "dispatch".into(),
++            work_done_progress_params: Default::default(),
++        })
++        .await;
++    assert!(
++        result.is_err(),
++        "implicit magic-handler rename must refuse a partial contract change: {result:?}"
++    );
++    let edit = backend
++        .rename(RenameParams {
++            text_document_position: TextDocumentPositionParams {
++                text_document: TextDocumentIdentifier { uri: uri.clone() },
++                position: crate::common::position_after(text, "class "),
++            },
++            new_name: "ReceiptController".into(),
++            work_done_progress_params: Default::default(),
++        })
++        .await
++        .unwrap()
++        .unwrap();
++    let edits = edit.changes.unwrap().remove(&uri).unwrap();
++    assert_eq!(
++        crate::common::apply_edits(text, &edits),
++        text.replacen("class __invoke", "class ReceiptController", 1)
++            .replace("'/magic','__invoke'", "'/magic','ReceiptController'")
++    );
++    let ordinary_uri = Url::parse("file:///ordinary-invoke-function.php").unwrap();
++    let ordinary = "<?php function __invoke():string{return 'ordinary';} __invoke();";
++    open_php(&backend, &ordinary_uri, ordinary).await;
++    let edit = backend
++        .rename(RenameParams {
++            text_document_position: TextDocumentPositionParams {
++                text_document: TextDocumentIdentifier {
++                    uri: ordinary_uri.clone(),
++                },
++                position: crate::common::position_after(ordinary, "function "),
++            },
++            new_name: "handle".into(),
++            work_done_progress_params: Default::default(),
++        })
++        .await
++        .unwrap()
++        .unwrap();
++    let mut files = edit.changes.unwrap();
++    assert_eq!(files.len(), 1);
++    assert_eq!(
++        crate::common::apply_edits(ordinary, &files.remove(&ordinary_uri).unwrap()),
++        ordinary.replace("__invoke", "handle")
++    );
++}
++
++#[tokio::test]
++async fn implicit_invokable_handler_class_rename_refuses_prefix_dependent_constants() {
++    for unknown in [false, true] {
++        let backend = create_test_backend();
++        let uri = Url::parse("file:///implicit-class-dependency.php").unwrap();
++        let text = if unknown {
++            implicit_handler_fixture().replace(
++                "Routes::namespace('Other')",
++                "$registrationNamespace='Other'; Routes::namespace($registrationNamespace)",
++            )
++        } else {
++            implicit_handler_fixture().into()
++        };
++        open_php(&backend, &uri, &text).await;
++        for prefix in [
++            " public function show():string {return 'show';}\n}\nclass ",
++            "namespace Other\\App {\nclass ",
++        ] {
++            let result = backend
++                .rename(RenameParams {
++                    text_document_position: TextDocumentPositionParams {
++                        text_document: TextDocumentIdentifier { uri: uri.clone() },
++                        position: crate::common::position_after(&text, prefix),
++                    },
++                    new_name: "ReceiptController".into(),
++                    work_done_progress_params: Default::default(),
++                })
++                .await;
++            assert!(
++                result.is_err(),
++                "namespace-dependent class constant rename must refuse partial source/final edits: unknown={unknown} {prefix} {result:?}"
++            );
++        }
++    }
++    let backend = create_test_backend();
++    let uri = Url::parse("file:///implicit-safe-constant.php").unwrap();
++    let text = implicit_handler_fixture().replace(
++        "Routes::namespace('Other')->group(fn()=>Routes::get('/prefixed',InvoiceAlias::class));\n",
++        "",
++    );
++    open_php(&backend, &uri, &text).await;
++    let edit = backend
++        .rename(RenameParams {
++            text_document_position: TextDocumentPositionParams {
++                text_document: TextDocumentIdentifier { uri: uri.clone() },
++                position: crate::common::position_after(
++                    &text,
++                    " public function show():string {return 'show';}\n}\nclass ",
++                ),
++            },
++            new_name: "ReceiptController".into(),
++            work_done_progress_params: Default::default(),
++        })
++        .await
++        .unwrap()
++        .unwrap();
++    let edited = crate::common::apply_edits(&text, &edit.changes.unwrap().remove(&uri).unwrap());
++    assert!(edited.contains("class ReceiptController extends BaseInvoice"));
++    assert!(edited.contains("use App\\ReceiptController as InvoiceAlias;"));
++    assert!(edited.contains("InvoiceAlias::class"));
++    assert!(edited.contains("namespace Other\\App {\nclass Invoice"));
++    assert_eq!(
++        edited.matches("function __invoke").count(),
++        text.matches("function __invoke").count()
++    );
++}

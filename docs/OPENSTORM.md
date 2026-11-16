@@ -44,26 +44,70 @@ from the previous `e98db16b` baseline and does not contain this merge.
 Evidence: `artifacts/checks/upstream-c8112f90-receipt.json`, its gate/client-host
 logs, `upstream-c8112f90-browser2.log`, memory regression red/green logs and the
 `upstream-c8112f90-clean.json`. Removed 25.8 GiB of main compiler output.
-Preserve unfinished source-only slice 101 independently;
-no candidate 153 adoption or new package is claimed. Area statuses remain 67
+At that merge checkpoint, source-only slice 101 remained unfinished;
+no candidate 153 adoption or new package was claimed. Area statuses remain 67
 partial/2 user-deferred.
 
-Laravel slice 101 (2026-11-16, in progress): add explicit implicit-handler
-reference metadata for registered invokable Laravel controllers. Preserve normal
-class navigation and class rename, distinguish handler associations from calls
-executed during registration, share exact results with declaration reference
-counts, and reject method renames that cannot rewrite the framework contract.
-Real Laravel controls cover literal/class-constant actions, inherited methods and
-same-named group-method exclusions. Source candidate 153 is isolated from active
-engine 152 and the sole signed App 0.1.91 until its acceptance gates pass.
-The immutable candidate passes 18,502 ordinary engine tests (17 ignored), both
-bounded child regressions, and standard release Clippy. Optional `mem-audit`
-compilation fails in inherited code (`trans_keys` cache access and a missing
-`RuntimeControllerBinding` audit match); preserve this failure for the next
-source slice. Candidate 153 is unpromoted and uncommitted while the explicit
-upstream merge takes priority. Its 1.7 GiB compiler output was removed; source,
-patch pin, test logs and the recoverable Git stash remain. Native UI checks remain
-user-skipped.
+Laravel slice 101 (2026-11-16, verified source checkpoint): candidate 153 adds
+implicit `__invoke` handler references and declaration counts for statically
+resolved Laravel literal/class-constant controller actions. Aliases, named and
+parenthesized actions, controller groups, namespaces and inherited owners retain
+their runtime identities. Bare group methods and unrelated strings/constants are
+excluded. Normal PHP class navigation and class rename stay separate from handler
+associations; registrations add no ordinary method/constructor execution edges.
+
+Reference searches and declaration counts share one scoped scan. Unsaved rebinds
+refresh 6→4 inherited references, 1→2 other-handler references and 0→1 differently
+cased cached declarations without a change in the overall member total. Full
+source fingerprints reject retained roles after same-length namespace edits.
+Method rename refuses the fixed PHP `__invoke` contract, including a class with
+the same spelling. Positive class/function renames remain accepted. Namespace-
+dependent class constants refuse source/final-target class renames instead of
+silently changing the Laravel handler; removing the dependency restores normal
+class rename.
+
+Earlier red regressions and the interrupted first draft remain preserved. The
+second draft passes ordinary tests but exposes inherited optional memory-audit
+compile errors. The revision counts current shared translation keys and the
+boxed runtime-controller target array, restoring optional audit compilation.
+A further inherited manual slice-size lint is corrected and the optional audit
+configuration passes a strict all-target preflight before the final freeze.
+Audit storage estimates are not a measured memory/performance acceptance claim.
+
+Final immutable source: `1756b1f920c1-beb88d2e68ee-verified`;
+patch series SHA256: `beb88d2e68ee7145ebe216d1e261c4969fc98658b63d1afe97bf2de37823f2e8`.
+All 18,502 ordinary engine tests pass (17 ignored), plus both bounded FIFO/enum
+child checks; 87 route-controller checks pass from the exact full-suite test
+executable. Standard and `mem-audit` all-target release Clippy, formatting,
+source replay/fingerprint and optimized arm64 build pass. All 12 plain-PHP and 91
+Laravel fixture files parse; plain assertions and 324 Laravel assertions pass.
+The analyzer retains exactly the three intentional fixture diagnostics. Real
+Laravel controls verify 10 exact action identities, 6 inherited handlers and zero
+constructor/handler execution during registration. The first revised runtime
+harness invocation omitted its fixture argument; the corrected invocation and
+exact frozen-fixture comparison pass, separately from engine-produced edits.
+
+Candidate executable SHA256: `303b4c7abfe275ed9fa89d13b18a1050b3747c0d02fa571509bf61c627f0eeca`; provenance/licenses are in
+`engine/candidates/0.11.1-openstorm.153.json` and its canonical local artifact.
+Active resources/source pin stay 152; the sole signed App 0.1.91 is unchanged.
+Main runtime code is unchanged from `cbeecaec`: its 4,857 Rust/172 ignored,
+12,450 frontend/6 skipped, 56 actual engine 152 host/client and 21 browser checks
+remain evidence for that baseline, not candidate 153 client acceptance.
+Candidate 153 OpenStorm client paths and packaging are the next slice. Native
+checks remain explicitly user-skipped. This checkpoint does not newly accept a
+whole feature area: 67 partial/2 user-deferred remain.
+
+Unresolved/dynamic handler actions and relative class constants remain limited;
+unknown targets are omitted from handler results, and generic reference counts
+have no completeness flag. Dedicated implicit-handler/call-hierarchy UI and
+large-project performance measurements remain unverified. Do not infer complete
+Laravel reference coverage from the known-target fixture checks.
+
+Evidence: `artifacts/checks/slice101-source-receipt.json`, source/focused gates,
+`slice101-runtime-controls-revised.json`, analyzer/examples results and preserved
+failed-attempt logs/sources. Owned compiler output is removed after retaining
+the canonical candidate; App 0.1.91, engine 152 and Workbench/evaluation artifacts
+remain intact.
 
 Laravel slice 100 (2026-11-16, verified local development delivery): App 0.1.91
 bundles PHPantom 152 after the same host test executable fails both new cases

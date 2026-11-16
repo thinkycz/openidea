@@ -48,6 +48,41 @@ At that merge checkpoint, source-only slice 101 remained unfinished;
 no candidate 153 adoption or new package was claimed. Area statuses remain 67
 partial/2 user-deferred.
 
+Laravel slice 107 (2026-11-16, verified browser workbench workflows): add five
+full-workbench checks for Routes/Views navigation through Find Action (CmdShiftA),
+filtering, target selection and exact file/line/UTF16-column opening. Route package
+labels and incomplete warnings remain visible. A real unsaved shared-editor edit
+retires selected route targets; Retry keeps the logical name and incomplete note,
+and Cancel leaves unsaved text intact with unchanged memory-disk bytes. Cancel
+retires an issued Views request/late reply and prevents an unissued Routes query
+while the shared edit barrier is pending.
+
+Both freshness checks fail against the exact pre-104/105 Laravel client source
+from 95834a71, then the current f7225d3d client is restored byte-for-byte. The first
+five-case run passes; a later draft cursor assertion mistakenly compares a cursor
+object with a path string, and its two failures are retained separately. Final
+combined run: all 18 Laravel/code-intelligence browser checks pass without retries.
+Typecheck, lint, format and knip pass. Both in-memory PHP source strings parse with
+PHP8.3.31. Route/View target chooser screenshots are captured in the final trace
+output; the route target screenshot is visually inspected. No product UI/source
+changes are needed for this slice.
+
+The new e2e/laravelNavigation.spec.ts uses actual action search, dialogs, editor
+models, bindings and cancellation paths with controlled PHPantom replies. Its
+PHP/Blade files and autosave setting are confined to the disposable browser memory
+backend; it does not prove Composer/Laravel detection, engine semantics, native
+focus, actual disk recovery or native app acceptance. Existing source/engine
+acceptance remains separate. Reuse unchanged slice 105 frontend/build and slice
+102 Rust/actual-server gates. All 69 areas remain 67 partial / 2 user-deferred.
+
+Evidence: artifacts/checks/slice107-browser-first.log,
+slice107-browser-baseline.{json,log}, slice107-browser-draft.log,
+slice107-browser.log, slice107-fixture-syntax.json, static-check logs and
+slice107-receipt.json. Final screenshots/traces: slice107-browser-traces/.
+App0.1.92 remains the sole unchanged signed archive; no compiler targets or new
+bundle, installation or native launch. Native UI remains user-skipped, and slices
+104–105 still await cohesive packaging.
+
 Verification slice 106 (2026-11-16, verified browser rename fixtures): close the
 two inherited Kotlin rename browser failures from slice 105. Both fixtures now
 answer lsp_prepare_rename_details with typed RenamePreparation data, retain the

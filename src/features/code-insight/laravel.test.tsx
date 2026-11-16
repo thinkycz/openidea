@@ -648,3 +648,154 @@ it("preserves literal trailing spaces in the primary project path", async () => 
   await openLaravelNavigation("routes");
   expect(mock.routes).toHaveBeenCalledWith(expect.any(Number), 7, null, 2000);
 });
+
+it.each(["routes", "views"] as const)(
+  "retires displayed %s targets after a real unsaved sibling edit and retries the same name",
+  async (kind) => {
+    const { createMemoryBackend } = await import("@/editor/core/backend");
+    const { DocumentManager } = await import("@/editor/core/model/document");
+    const { EditorSlot } = await import("@/editor/core/model/slot");
+    const backend = createMemoryBackend({
+      "/p/routes/web.php": "<?php\nRoute::get('/invoices', 'InvoiceController');",
+    });
+    const scheduled: Array<() => void> = [];
+    const manager = new DocumentManager(backend, { settings: () => ({}), notify: vi.fn() }, (fn) => scheduled.push(fn));
+    manager.start();
+    const model = await manager.acquire("/p/routes/web.php");
+    const slot = new EditorSlot(model, "routes", {
+      onFocus: () => {},
+      onBlur: () => {},
+      onSelection: () => {},
+      onUserEdit: () => {},
+      onContextMenu: () => {},
+    });
+    if (kind === "views")
+      mock.views.mockImplementation((_request, _doc, name) =>
+        ok(
+          name === null
+            ? { views: ["invoices.show"], locations: [], incomplete: true }
+            : { views: [], locations: [loc(2)], incomplete: false },
+        ),
+      );
+    try {
+      await openLaravelNavigation(kind);
+      await selectLaravelItem(useLaravelNavigation.getState().items[0]!);
+      const stale = useLaravelNavigation.getState().items[0]!;
+      const name = useLaravelNavigation.getState().selectedName;
+      render(<LaravelNavigation />);
+      act(() => slot.dispatchLocal({ changes: { from: 0, insert: "// unsaved\n" }, userEvent: "input.type" }));
+      await act(async () => {
+        scheduled.splice(0).forEach((fn) => fn());
+        await model.sync.whenIdle();
+      });
+      expect((await backend.snapshot(model.doc)).text).toContain("// unsaved");
+      expect(screen.queryAllByRole("option")).toHaveLength(0);
+      expect(screen.getByRole("alert")).toHaveTextContent("Project files changed");
+      expect(useLaravelNavigation.getState().selectedName).toBe(name);
+      await selectLaravelItem(stale);
+      expect(mock.open).not.toHaveBeenCalled();
+      fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+      await waitFor(() => expect(screen.getAllByRole("option").length).toBeGreaterThan(0));
+      expect((kind === "routes" ? mock.routes : mock.views).mock.calls.at(-1)).toEqual([
+        expect.any(Number),
+        7,
+        name,
+        2000,
+      ]);
+      expect(screen.getByText(/Results are incomplete/)).toBeInTheDocument();
+    } finally {
+      manager.stop();
+    }
+  },
+);
+
+it.each(["docPatched", "docMoved"] as const)(
+  "retires pending queries on %s and ignores the late reply",
+  async (type) => {
+    let resolve!: (value: unknown) => void;
+    mock.views.mockImplementationOnce(
+      () =>
+        new Promise((done) => {
+          resolve = done;
+        }),
+    );
+    const pending = openLaravelNavigation("views");
+    const { emitLocalIdeEvent } = await import("@/platform/ipc");
+    emitLocalIdeEvent(
+      type === "docPatched"
+        ? { type, doc: 8, baseVersion: 1, version: 2, changes: [{ from: 0, to: 0, insert: "\n" }] }
+        : { type, doc: 8, from: "/p/routes/web.php", to: "/p/routes/api.php" },
+    );
+    expect(mock.cancel).toHaveBeenCalledOnce();
+    resolve({ status: "ok", data: { views: ["stale"], locations: [], incomplete: false } });
+    await pending;
+    expect(useLaravelNavigation.getState().items).toEqual([]);
+    expect(useLaravelNavigation.getState().error).toContain("Project files changed");
+  },
+);
+
+it.each(["docClosed", "docMoved"] as const)("closes the chooser when its source is %s", async (type) => {
+  await openLaravelNavigation("routes");
+  if (type === "docClosed") {
+    const { _emitEditorEvent } = await import("@/editor/api");
+    _emitEditorEvent({ type, doc: 7, path: "/p/main.php" });
+  } else {
+    const { emitLocalIdeEvent } = await import("@/platform/ipc");
+    emitLocalIdeEvent({ type, doc: 7, from: "/p/main.php", to: "/p/renamed.php" });
+  }
+  expect(useLaravelNavigation.getState().kind).toBeNull();
+});
+
+it.each(["routes", "views"] as const)("discards pending %s names after an unsaved change", async (kind) => {
+  const request = kind === "routes" ? mock.routes : mock.views;
+  let resolve!: (value: unknown) => void;
+  request.mockImplementationOnce(
+    () =>
+      new Promise((done) => {
+        resolve = done;
+      }),
+  );
+  const pending = openLaravelNavigation(kind);
+  const { _emitEditorEvent } = await import("@/editor/api");
+  _emitEditorEvent({
+    type: "docChanged",
+    doc: 8,
+    path: "/p/routes/web.php",
+    baseVersion: 2,
+    version: 3,
+    changes: [{ from: 0, to: 0, insert: "\n" }],
+  });
+  expect(mock.cancel).toHaveBeenCalledOnce();
+  resolve({ status: "ok", data: { routes: [], views: ["stale"], locations: [], incomplete: false } });
+  await pending;
+  expect(useLaravelNavigation.getState()).toMatchObject({ items: [], loading: false, selectedName: null });
+  expect(useLaravelNavigation.getState().error).toContain("Project files changed");
+});
+
+it("retires sibling-overlay results on close but ignores caret events and disposed subscriptions", async () => {
+  const { _emitEditorEvent } = await import("@/editor/api");
+  await openLaravelNavigation("routes");
+  const original = useLaravelNavigation.getState().items;
+  _emitEditorEvent({ type: "caretMoved", doc: 7, path: "/p/main.php", line: 0, col: 0, offset: 0 });
+  expect(useLaravelNavigation.getState().items).toBe(original);
+  _emitEditorEvent({ type: "docClosed", doc: 8, path: "/p/routes/web.php" });
+  expect(useLaravelNavigation.getState().items).toEqual([]);
+  expect(useLaravelNavigation.getState().kind).toBe("routes");
+  await openLaravelNavigation("views");
+  const retained = useLaravelNavigation.getState().items;
+  uninstall();
+  _emitEditorEvent({
+    type: "docChanged",
+    doc: 7,
+    path: "/p/main.php",
+    baseVersion: 0,
+    version: 1,
+    changes: [{ from: 0, to: 0, insert: "\n" }],
+  });
+  const { emitLocalIdeEvent } = await import("@/platform/ipc");
+  emitLocalIdeEvent({ type: "docPatched", doc: 7, baseVersion: 1, version: 2, changes: [] });
+  emitLocalIdeEvent({ type: "docMoved", doc: 7, from: "/p/main.php", to: "/p/new.php" });
+  _emitEditorEvent({ type: "docClosed", doc: 7, path: "/p/main.php" });
+  expect(useLaravelNavigation.getState().items).toBe(retained);
+  expect(useLaravelNavigation.getState().kind).toBe("views");
+});

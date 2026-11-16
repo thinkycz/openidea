@@ -1,5 +1,6 @@
 /** Static Laravel navigation through PHPantom; no project commands are executed. */
 import { create } from "zustand";
+import { onEditorEvent } from "@/editor/api";
 import { tx } from "@/platform/i18n";
 import type { Location, ProjectInfo, LaravelRoutes, LaravelViews } from "@/bindings";
 import { commands, nextRequestId, isCancelled, onIdeEvent } from "@/platform/ipc";
@@ -63,9 +64,22 @@ export function installLaravelNavigationEvents() {
     )
       closeLaravelNavigation();
   });
+  const changed = () => invalidateLaravelNavigation(tx("Project files changed. Retry to refresh Laravel results."));
+  const offEditors = onEditorEvent((event) => {
+    if (event.type === "docChanged") changed();
+    else if (event.type === "docClosed") {
+      if (event.doc === context?.doc) closeLaravelNavigation();
+      else changed();
+    }
+  });
+  const offPatches = onIdeEvent("docPatched", changed);
+  const offMoves = onIdeEvent("docMoved", ({ doc }) => {
+    if (doc === context?.doc) closeLaravelNavigation();
+    else changed();
+  });
   const offFiles = onIdeEvent("fsChanged", ({ created, modified, removed }) => {
     if (!created.length && !modified.length && !removed.length) return;
-    invalidateLaravelNavigation(tx("Project files changed. Retry to refresh Laravel results."));
+    changed();
   });
   const offServer = onIdeEvent("languageServer", ({ name, status }) => {
     // Initial startup and ordinary request/indexing progress must not cancel
@@ -76,6 +90,9 @@ export function installLaravelNavigationEvents() {
   return () => {
     offProject();
     offFiles();
+    offEditors();
+    offPatches();
+    offMoves();
     offServer();
   };
 }

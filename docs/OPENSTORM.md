@@ -48,6 +48,38 @@ At that merge checkpoint, source-only slice 101 remained unfinished;
 no candidate 153 adoption or new package was claimed. Area statuses remain 67
 partial/2 user-deferred.
 
+Laravel slice 104 (2026-11-16, verified frontend source): Routes and
+Views chooser results now retire on accepted unsaved editor changes, backend
+patches, moved documents and closed sibling buffers. Retain the selected logical
+name and incomplete-result warning for explicit Retry. Cancel in-flight queries,
+discard late responses, and refuse queued activations of removed rows. Close the
+chooser when its source document closes or moves, avoiding a Retry with an
+obsolete document identity. Caret movement leaves results intact; disposal removes
+all added subscriptions. This extends the existing conservative disk-change
+invalidation policy to editor overlays without changing PHPantom or IPC.
+
+Six new checks failed before the fix for retained stale rows, missing cancellation
+and an obsolete source context. Final regression coverage includes real
+DocumentManager/EditorSlot edits through the memory backend, rendered Routes/Views
+chooser selection/Retry, pending queries and lifecycle events. LSP replies are
+controlled test data: these checks prove client retirement behavior, not new
+server semantics or native runtime acceptance. A separate pending-sync barrier
+before issuing chooser queries remains a follow-up; this slice observes accepted
+editor edits rather than claiming synchronization before every query.
+
+Verification: 98 focused chooser/document-model checks pass; all 12,459 frontend
+tests pass / 6 skipped. Typecheck, lint, format, knip, production frontend build
+and Safari compatibility checks pass. Rust, generated IPC and engine source/bytes
+are unchanged, so slice 102 source/server acceptance is reused without rebuilding
+the Rust workspace. Evidence: artifacts/checks/slice104-{red,green1,focused}.log,
+slice104-gates.json, slice104-retained-app.json and slice104-receipt.json.
+All 69 areas retain their prior status: 67 partial / 2 user-deferred.
+
+No Rust/runtime engine changes or new native bundle in this slice. App 0.1.92
+remains the only retained signed app and predates this source change; engine 153
+and app executable checksums/signature remain unchanged. Both owned compiler
+targets remain absent. Native UI checks remain explicitly user-skipped.
+
 Laravel slice 103 (2026-11-16, verified local development package): App 0.1.92
 contains the upstream c8112f90 merge and engine 153. Runtime source and engine
 bytes are unchanged from slice 102; only workspace/application version metadata

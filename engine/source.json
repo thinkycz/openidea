@@ -2,8 +2,8 @@
   "repository": "https://github.com/PHPantom-dev/phpantom_lsp",
   "commit": "1756b1f920c1290d4c4fdd4d2c902fad53a75cd3",
   "archive_sha256": "f0a1dc7fa44d309e6d5e8ed65a2075749c1fc177b45820031f58290f1aec5cee",
-  "patches_sha256": "ac403db7f39800acfddeb5277476ab1708f0e39048404cd632b4fd8164c0c60b",
-  "version": "0.11.1-openstorm.154",
+  "patches_sha256": "50aa8da7ccce053b00c8a98d848b0b215471397429efb43b18ed2873fd160dba",
+  "version": "0.11.1-openstorm.155",
   "patches": [
     {
       "file": "0001-workspace-tool-policy.patch",
@@ -620,6 +620,10 @@
     {
       "file": "0154-invokable-route-handler-navigation.patch",
       "sha256": "571ade68baa13139b5e4fae2f23663991163e2e0369cb68e36e897b3ffb049c4"
+    },
+    {
+      "file": "0155-controller-url-action-navigation.patch",
+      "sha256": "e56dc77472046b88e97692f3dc992d2400de3f1417352044f7f2f21a8ea07fb7"
     }
   ]
 }

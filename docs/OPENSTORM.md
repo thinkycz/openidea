@@ -15,6 +15,60 @@ slice, commit and push it, and retain only the latest generated app. Native UI
 cases remain deferred/unverified; earlier native-first blocking checkpoints are
 historical and no longer prevent independent implementation.
 
+Packaging slice116 (2026-11-16, verified local development package): promote
+the exact PHPantom155 executable, source pin and provenance into application
+resources after source114 engine gates and slice115's68 actual-engine client/host
+checks. Recheck all155 patch checksums and the cached source fingerprint. Prepare
+local version0.1.95; all44 Cargo.lock changes are workspace versions only, with
+external dependencies and plugin API1.9.0 unchanged. Preserve licenses, upstream
+attribution, .openidea compatibility, PHPantom-first defaults, optional alternate
+servers, opt-in Laravel companion, save/reviewed-edit guards and disabled updates.
+
+Runtime source hashes still match slice115. Reuse its Rust4974 passed/185 ignored/
+1 excluded, frontend12708 passed/6 skipped,68 actual155 client/host checks and73
+controlled-browser checks; reuse source114's engine/source/build acceptance for
+byte-identical155. The inherited full-Rust exclusion remains exactly
+http_list_and_run_require_confirmation pending separately scoped synthetic HTTP
+environment-fixture approval. This slice passes checksum, typecheck/lint/format/
+knip,5 version tests,3 bundled-server resolution/version tests,1 PHP-default test,
+Rustfmt and ide-tools all-target Clippy. Packaging reruns the production frontend
+build and Safari15.4 startup API/bundle syntax checks.
+
+Latest local app: artifacts/batches/0.1.95/OpenStorm.app. It packages the upstream
+7a97fba49 merge, slice113 caret/pane protection, slice115 reference freshness guard
+and default PHPantom155 controller URL navigation/checked edits. Actual bundle
+metadata reports cz.thinky.openstorm,0.1.95,arm64 and minimum macOS13.0; the ad-hoc
+deep/strict signature passes. Main executable SHA256:
+55d351bd70d4a97dbf0e175a22234fb26e7b6ad18dba43a6fbf55890f9272841.
+Embedded engine SHA256:
+6663feb2e9c9b283a9f44c737e78169146eaf57287058be73287993d99080e58.
+The actual embedded executable reports0.11.1-openstorm.155 and arm64.
+
+Six embedded-server CLI checks pass: route/helper/alias/URL/Redirect facade and
+callable-array targets, class/method rename refusal around encoded method literals
+for the correct semantic reason, global and namespace-fallback foreign-helper isolation,3 exact
+real Laravel13.37 controller URL targets, and exactly the3 intentional analyzer
+diagnostics. Helper navigation also passes with the child PATH cleared. No global
+server is borrowed. All5 LSP processes exit0 and fixture originals stay unchanged;
+the analyzer's expected exit1 is retained. Final bundle/source/checksum/signature
+read-back passes again after CLI execution. This is packaging/CLI evidence; native
+UI, installation/relaunch, profile migration, real Java and platform-performance
+acceptance stay unverified. This is a development build, not an optimized
+production artifact. Existing frontend/linker warnings remain recorded.
+
+Retain App94 until the new signature/build receipt succeeds, then remove it and
+the duplicate App95/compiler output: Removed 13683 files, 8.2GiB total. Remove the extra
+frontend bundle as well. Both compiler roots and dist are absent; only App95 is
+retained. Preserve all engine/source provenance, canonical evaluation binaries,
+licenses, receipts, PHP Workbench and prior evaluation artifacts. No app launch,
+installation, notarization, tags, public publishing, user-server deployment or
+update activation occurs. Native UI stays user-skipped; all69 areas remain67
+partial/2 user-deferred. Evidence: artifacts/checks/slice116- promotion/gates,
+package-pipeline, packaged-check, packaged-cli and cleanup receipts/logs;
+artifacts/batches/0.1.95/build-receipt.json and retention.json. Final reviewed tree,
+commit, remote read-back and clean-worktree proof belong to the ignored delivery
+receipt.
+
 Laravel slice115 (2026-11-16, verified source/client checkpoint): exercise
 inactive PHPantom155 controller URL navigation and checked class/method edits
 through the actual LSP client and host. Disposable Composer/PSR-4 fixtures cover

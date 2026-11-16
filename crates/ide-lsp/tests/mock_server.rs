@@ -9575,3 +9575,75 @@ async fn laravel_route_handler_server_errors_do_not_fall_back_or_retry() {
         h.mgr.shutdown_all().await;
     }
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn completion_and_resolve_retire_changed_semantic_sources() {
+    for method in ["textDocument/completion", "completionItem/resolve"] {
+        for mutation in ["caller", "dependency", "close", "disk", "roots", "restart", "cancel", "no change"] {
+            if method == "completionItem/resolve" && mutation == "cancel" {
+                continue;
+            }
+            let h = harness(&[("mock", incremental_caps())]);
+            let state = h.launcher.state("mock");
+            let (doc, _) = h.open("a.mk", "current");
+            let (dependency, path) = h.open("b.mk", "dependency");
+            h.wait_status("mock", ServerStatus::Ready).await;
+            eventually(|| state.docs.lock().len() == 2).await;
+            state.respond(
+                "textDocument/completion",
+                json!({"isIncomplete": false, "items": [{"label":"current", "kind":2, "data":{"member":"current"}}]}),
+            );
+            let item = h.mgr.completion(doc, Pos::new(0, 0), None, Default::default()).await.unwrap().items.remove(0);
+            let gate = Arc::new(Gate::default());
+            let held = gate.clone();
+            *state.responder.lock() = Some(Arc::new(move |_, request, _| {
+                if request != method {
+                    return None;
+                }
+                held.hold();
+                Some(if method == "textDocument/completion" {
+                    json!({"isIncomplete": false, "items": [{"label":"current", "kind":2}]})
+                } else {
+                    json!({"label":"current", "kind":2, "documentation":"Current docs"})
+                })
+            }));
+            let client = h.mgr.clone();
+            let token = ide_core::CancellationToken::new();
+            let cancel = token.clone();
+            let pending = tokio::spawn(async move {
+                if method == "textDocument/completion" {
+                    client.completion(doc, Pos::new(0, 0), None, cancel).await.map(|r| r.items)
+                } else {
+                    client.resolve_completion(doc, item).await.map(|r| vec![r])
+                }
+            });
+            eventually(|| gate.entered()).await;
+            match mutation {
+                "caller" | "dependency" => {
+                    let changed = if mutation == "caller" { doc } else { dependency };
+                    h.mgr.did_change(changed, 2, &[change(rng(0, 0, 0, 0), "updated ")], &|| "updated source".into());
+                }
+                "close" => h.mgr.did_close(dependency),
+                "disk" => {
+                    std::fs::write(&path, "external").unwrap();
+                    h.mgr.php_files_changed(&[], &[path], &[]);
+                }
+                "roots" => h.mgr.set_content_roots(vec![h.root.join("linked")]),
+                "restart" => h.mgr.restart(h.mgr.servers()[0].id).await.unwrap(),
+                "cancel" => token.cancel(),
+                _ => {}
+            }
+            gate.open();
+            let result = pending.await.unwrap();
+            h.mgr.shutdown_all().await;
+            if mutation == "no change" {
+                assert_eq!(result.unwrap()[0].label, "current");
+            } else {
+                assert!(
+                    matches!(result,Err(ref e) if e.kind==ide_core::error::ErrorKind::Cancelled),
+                    "{method}/{mutation}: {result:?}"
+                );
+            }
+        }
+    }
+}

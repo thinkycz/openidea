@@ -599,6 +599,40 @@ describe("applying completions", () => {
     }
   }
 
+  for (const mode of ["insert", "replace"] as const) {
+    for (const method of ["showInvoice", "shøw"]) {
+      it.each(["'", '"'])(`commits a controller URL method with UTF16 ranges (${mode}, ${method}, %s)`, (quote) => {
+        const marked = `<?php\n$label='😀'; \\action(${quote}\\App\\InvoiceController@sh|OLD${quote});`;
+        const { view, req, pos } = setup(marked, "", [history()]);
+        const original = marked.replace("|", "");
+        const start = original.indexOf("@sh") + 1;
+        const line = view.state.doc.lineAt(start);
+        const completion = makeCompletion(
+          item({
+            label: `${method}()`,
+            labelDescription: "InvoiceController",
+            filterText: method,
+            insertText: method,
+            detail: "string",
+            replaceRange: {
+              start: { line: line.number - 1, col: start - line.from },
+              end: { line: line.number - 1, col: start - line.from + "shOLD".length },
+            },
+          }),
+          { ...req, path: "/p/routes/web.php", language: "php" },
+        );
+        applyLspCompletion(view, completion, start, pos, mode);
+        const expected = original.replace("@shOLD", `@${method}`);
+        expect(view.state.doc.toString()).toBe(expected);
+        expect(view.state.selection.main.head).toBe(start + method.length);
+        expect(undo(view)).toBe(true);
+        expect(view.state.doc.toString()).toBe(original);
+        expect(redo(view)).toBe(true);
+        expect(view.state.doc.toString()).toBe(expected);
+      });
+    }
+  }
+
   it("commits a whole quoted controller action without adding call parentheses", () => {
     for (const quote of ["'", '"', "`"]) {
       const text = `Routes::get('/😀/invoice', ${quote}s|how${quote});`;

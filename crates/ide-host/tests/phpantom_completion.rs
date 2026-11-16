@@ -670,3 +670,118 @@ async fn implicit_handler_checked_rename_guards_and_reviewed_class_edits_through
     }).catch_unwind().await;
     f.finish(outcome).await;
 }
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires candidate156 and owned PHP syntax-check executable"]
+async fn controller_url_method_completion_uses_real_host_edits_and_save_conflicts() {
+    let original = routes(r"\action('\App\InvoiceController@showInvoice');");
+    let declaration = "<?php namespace App; class InvoiceController {/** URL method documentation. */ public function showInvoice():string{return 'ok';} /** URL method documentation. */ public function shøw():string{return 'unicode';} protected function secret(){} private function hidden(){}}\n";
+    let f = Fixture::new(&original, &[("app/InvoiceController.php".into(), declaration.into())]);
+    let outcome = std::panic::AssertUnwindSafe(async {
+        for (call, suffix, method) in [
+            (r"$label='😀'; \action('\App\InvoiceController@shOLD');", "shOLD", "showInvoice"),
+            (
+                r#"use function action as controller_url; controller_url(name:"\\App\\InvoiceController@shøOLD");"#,
+                "shøOLD",
+                "shøw",
+            ),
+            (
+                r"\Illuminate\Support\Facades\URL::action(action:'\App\InvoiceController@shOLD');",
+                "shOLD",
+                "showInvoice",
+            ),
+        ] {
+            let input = routes(call);
+            Fixture::lint(&input);
+            f.project.documents.replace_all(f.doc, &input).unwrap();
+            let before = f.project.documents.snapshot(f.doc).unwrap();
+            let start = input.find(&format!("@{suffix}")).unwrap() + 1;
+            let range = Range::new(at(&input, start), at(&input, start + suffix.len()));
+            let cursor = at(&input, start + suffix.len() - "OLD".len());
+            let list = f.complete(cursor).await;
+            assert!(!list.is_incomplete);
+            let item = list
+                .items
+                .into_iter()
+                .find(|i| i.filter_text.as_deref() == Some(method))
+                .expect("runtime URL method completion");
+            assert_eq!(item.kind, Some(CompletionKind::Method));
+            assert_eq!(item.replace_range, Some(range));
+            assert!(!item.is_snippet && item.additional_edits.is_empty() && item.command.is_none());
+            let resolved = ide_host::ops::lsp::lsp_resolve_completion(&f.host, "main", f.doc, item).await.unwrap();
+            assert_eq!(resolved.insert_text, method);
+            assert_eq!(resolved.replace_range, Some(range));
+            assert!(resolved.documentation.as_ref().unwrap().value.contains("URL method documentation."));
+            assert!(resolved.additional_edits.is_empty() && resolved.command.is_none() && !resolved.is_snippet);
+            let edit = TextEdit { range, new_text: resolved.insert_text };
+            assert!(f.project.documents.apply_edits_at(f.doc, before.version, &[edit]).unwrap().is_some());
+            let current = f.project.documents.snapshot(f.doc).unwrap();
+            assert_eq!(current.text, input.replace(&format!("@{suffix}"), &format!("@{method}")));
+            assert!(current.dirty);
+            assert_eq!(std::fs::read_to_string(f.root.join("routes/web.php")).unwrap(), original);
+            let targets = f.project.lsp.goto(f.doc, range.start, GotoKind::Definition).await.unwrap();
+            assert_eq!(targets.len(), 1);
+            assert_eq!(targets[0].path.to_path_buf(), f.root.join("app/InvoiceController.php"));
+        }
+        let path = f.root.join("routes/web.php");
+        let current = f.project.documents.snapshot(f.doc).unwrap().text;
+        let external = format!("{original}// External change\n");
+        std::fs::write(&path, &external).unwrap();
+        let consent = ide_host::ops::doc::save_checked(&f.host, "main", f.doc, None).await.unwrap().unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), external);
+        assert!(ide_host::ops::doc::save_checked(&f.host, "main", f.doc, Some(consent)).await.unwrap().is_none());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), current);
+        assert_eq!(std::fs::read_to_string(f.root.join("app/InvoiceController.php")).unwrap(), declaration);
+    })
+    .catch_unwind()
+    .await;
+    f.finish(outcome).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires candidate156 and owned PHP syntax-check executable"]
+async fn controller_url_method_completion_refreshes_unsaved_parents_and_restart() {
+    let original = routes(r"\action('\App\InvoiceController@sh');");
+    let declaration = "<?php namespace App; class InvoiceController extends BaseController {}\n";
+    let f = Fixture::new(&original, &[
+        ("app/InvoiceController.php".into(), declaration.into()),
+        ("app/BaseController.php".into(), "<?php namespace App; class BaseController {/** Base URL docs. */ public function showInvoice():string{return 'base';} protected function secret(){}}\n".into()),
+        ("app/OtherController.php".into(), "<?php namespace App; class OtherController {/** Other URL docs. */ public function showOther():string{return 'other';}}\n".into()),
+    ]);
+    let outcome = std::panic::AssertUnwindSafe(async {
+        let parent = f.project.documents.open(&f.root.join("app/InvoiceController.php")).unwrap().id;
+        let at = at(&original, original.find("@sh").unwrap() + 3);
+        for (name, restart, expected, absent, docs) in [
+            ("BaseController", false, "showInvoice", "showOther", "Base URL docs."),
+            ("OtherController", false, "showOther", "showInvoice", "Other URL docs."),
+            ("OtherController", true, "showOther", "showInvoice", "Other URL docs."),
+            ("BaseController", false, "showInvoice", "showOther", "Base URL docs."),
+        ] {
+            if restart {
+                f.project.lsp.restart(f.project.lsp.servers()[0].id).await.unwrap();
+            } else {
+                f.project.documents.replace_all(parent, &declaration.replace("BaseController", name)).unwrap();
+            }
+            let list = f.complete(at).await;
+            assert!(!list.is_incomplete);
+            assert!(
+                !list
+                    .items
+                    .iter()
+                    .any(|i| i.filter_text.as_deref() == Some(absent) || i.filter_text.as_deref() == Some("secret"))
+            );
+            let item = list
+                .items
+                .into_iter()
+                .find(|i| i.filter_text.as_deref() == Some(expected))
+                .expect("current unsaved parent method");
+            let resolved = ide_host::ops::lsp::lsp_resolve_completion(&f.host, "main", f.doc, item).await.unwrap();
+            assert!(resolved.documentation.as_ref().unwrap().value.contains(docs));
+            assert_eq!(f.project.documents.snapshot(f.doc).unwrap().text, original);
+            assert_eq!(std::fs::read_to_string(f.root.join("app/InvoiceController.php")).unwrap(), declaration);
+        }
+    })
+    .catch_unwind()
+    .await;
+    f.finish(outcome).await;
+}

@@ -286,3 +286,100 @@ async fn controller_url_navigation_rejects_stale_replies_and_cancels_references(
         }
     }
 }
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires candidate156 and Python for held real-engine completion replies"]
+async fn controller_url_method_completion_rejects_stale_replies() {
+    for (method, mutation) in [
+        ("completion", "dependency"),
+        ("completion", "caller"),
+        ("completion", "close"),
+        ("completion", "disk"),
+        ("completion", "roots"),
+        ("completion", "settings"),
+        ("completion", "restart"),
+        ("completion", "cancel"),
+        ("completion", "no change"),
+    ] {
+        let (_tmp, root, files) = fixture();
+        let engine = std::env::var_os("OPENSTORM_TEST_URL_BIN")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| {
+                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .join("../../artifacts/engines/0.11.1-openstorm.156/phpantom_lsp")
+            })
+            .canonicalize()
+            .unwrap();
+        let proxy = root.join("held-reply.py");
+        std::fs::write(&proxy, include_str!("phpantom-held-reply.py")).unwrap();
+        let ready = root.join("reply.json");
+        let release = root.join("release");
+        let mut php = route_handler_language(&engine);
+        let cfg = &mut php.language_servers[0];
+        let args = std::mem::take(&mut cfg.args);
+        cfg.command = std::env::var("OPENSTORM_TEST_PYTHON").unwrap_or_else(|_| "python3".into());
+        cfg.args = vec![
+            "-I".into(),
+            proxy.to_string_lossy().into_owned(),
+            engine.to_string_lossy().into_owned(),
+            format!("textDocument/{method}"),
+            ready.to_string_lossy().into_owned(),
+            release.to_string_lossy().into_owned(),
+        ];
+        cfg.args.extend(args);
+        let mgr = LspManager::new(root.clone(), Arc::new(LanguageRegistry::from_configs(vec![php])), Arc::new(|_| {}));
+        let doc = DocId::next();
+        let dependency = DocId::next();
+        let source = &files["src/Links.php"];
+        mgr.did_open(doc, &root.join("src/Links.php"), &LanguageId::new("php"), 1, source);
+        mgr.did_open(dependency, &root.join("src/Invoice.php"), &LanguageId::new("php"), 1, &files["src/Invoice.php"]);
+        let result:Result<(),String>=async {
+            // Hover starts indexing without consuming the reply held by the proxy.
+            mgr.hover(doc,pos(source,"show');"),Default::default()).await.map_err(|e|e.to_string())?;
+            let client=mgr.clone();let at=pos(source,"show');");
+            let token=ide_core::CancellationToken::new();let cancel=token.clone();
+            let pending=tokio::spawn(async move{
+                client.completion(doc,at,None,cancel).await
+            });
+            for _ in 0..750 {
+                if ready.exists() || pending.is_finished(){break;}
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            let captured=std::fs::read_to_string(&ready);
+            if captured.is_ok() {
+                match mutation {
+                    "dependency"=>replace(&mgr,dependency,2,&files["src/Invoice.php"],&files["src/Invoice.php"].replace("Base","Other")),
+                    "close"=>mgr.did_close(dependency),
+                    "caller"=>replace(&mgr,doc,2,source,&source.replace("$label=","$changed=")),
+                    "disk"=>{let path=root.join("src/Base.php");std::fs::write(&path,files["src/Base.php"].replace("'base'","'external'")).unwrap();mgr.php_files_changed(&[],&[path],&[]);},
+                    "roots"=>mgr.set_content_roots(vec![root.join("linked")]),
+                    "settings"=>{mgr.set_config_hook(Box::new(|cfg,_|cfg.settings=Some(serde_json::json!({"controllerUrlFixture":true}))));mgr.reconfigure().await;},
+                    "restart"=>mgr.restart(mgr.servers()[0].id).await.map_err(|e|e.to_string())?,
+                    "cancel"=>token.cancel(),
+                    _=>{},
+                }
+            }
+            std::fs::write(&release,"release").unwrap();
+            let reply=pending.await.map_err(|e|e.to_string())?;
+            let captured:serde_json::Value=serde_json::from_str(&captured.map_err(|e|format!("no held URL definition: {e}; reply={reply:?}"))?).map_err(|e|e.to_string())?;
+            if !captured["result"]["items"].as_array().is_some_and(|items| items.iter().any(|item|item["filterText"]=="show")) {return Err(format!("proxy held no URL method completion: {captured}"));}
+            if mutation=="no change" {
+                if !reply.as_ref().is_ok_and(|list|!list.is_incomplete && list.items.iter().any(|i|i.filter_text.as_deref()==Some("show"))) {return Err(format!("current URL completion refused: {reply:?}"));}
+            } else if !matches!(reply,Err(ref e) if matches!(e.kind,ide_core::error::ErrorKind::Cancelled|ide_core::error::ErrorKind::OutOfSync)) {
+                return Err(format!("stale URL response accepted, {mutation}: {reply:?}"));
+            }
+            Ok(())
+        }.await;
+        let _ = std::fs::write(&release, "release");
+        mgr.shutdown_all().await;
+        assert!(result.is_ok(), "{method}/{mutation}: {result:?}");
+        for (name, text) in &files {
+            let expected = if mutation == "disk" && name == "src/Base.php" {
+                text.replace("'base'", "'external'")
+            } else {
+                text.clone()
+            };
+            assert_eq!(std::fs::read_to_string(root.join(name)).unwrap(), expected);
+        }
+    }
+}

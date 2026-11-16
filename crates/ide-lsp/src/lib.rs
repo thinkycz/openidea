@@ -1593,7 +1593,12 @@ impl LspManager {
         cancel: CancellationToken,
     ) -> IdeResult<CompletionList> {
         let (snap, targets) = self.doc_targets(doc, "completion", |c| c.has("completionProvider")).await?;
-        let requests = targets.iter().filter(|t| snap.asks(t, pos)).map(|t| {
+        let sources = targets
+            .iter()
+            .filter(|t| snap.asks(t, pos))
+            .map(|t| Ok((t, self.navigation_sources(&snap, t)?)))
+            .collect::<IdeResult<Vec<_>>>()?;
+        let requests = sources.iter().map(|(t, before)| {
             let context = match &trigger {
                 Some(ch) if t.caps().completion_triggers().contains(ch) => {
                     json!({ "triggerKind": 2, "triggerCharacter": ch })
@@ -1604,8 +1609,15 @@ impl LspManager {
             params["context"] = context;
             let cancel = &cancel;
             async move {
-                let r = self.call::<_, Value>(t, "textDocument/completion", params, Some(cancel), COMPLETION_TIMEOUT);
-                (t, r.await)
+                if cancel.is_cancelled() || !self.navigation_current(t, before) {
+                    return (*t, Err(IdeError::cancelled()));
+                }
+                let result =
+                    self.call::<_, Value>(t, "textDocument/completion", params, Some(cancel), COMPLETION_TIMEOUT).await;
+                if cancel.is_cancelled() || !self.navigation_current(t, before) {
+                    return (*t, Err(IdeError::cancelled()));
+                }
+                (*t, result)
             }
         });
         let mut out = Outcome::new();
@@ -1623,6 +1635,9 @@ impl LspManager {
                 }
                 Err(e) => out.fail(e),
             }
+        }
+        if cancel.is_cancelled() || sources.iter().any(|(t, before)| !self.navigation_current(t, before)) {
+            return Err(IdeError::cancelled());
         }
         out.finish(CompletionList { is_incomplete: false, items: Vec::new() })
     }
@@ -1677,15 +1692,20 @@ impl LspManager {
         if let Some(command) = item.command.take() {
             item.command = Some(self.injected_command(doc, command)?.1);
         }
+        let sources = self.navigation_sources(&snap, &t)?;
         let lsp_item = convert::lsp_completion_item(&snap.text, t.enc(), &item);
-        let resolved: lsp::CompletionItem =
-            self.call(&t, "completionItem/resolve", lsp_item, None, DEFAULT_TIMEOUT).await?;
+        let resolved: IdeResult<lsp::CompletionItem> =
+            self.call(&t, "completionItem/resolve", lsp_item, None, DEFAULT_TIMEOUT).await;
+        if !self.navigation_current(&t, &sources) {
+            return Err(IdeError::cancelled());
+        }
+        let resolved = resolved?;
         if doc != host_doc {
             self.check_injected_request(doc, snap.version)?;
         }
         let mut out = item;
         convert::overlay_completion(&self.conv(t.enc()), &snap.path, &mut out, resolved, false);
-        if !self.bound_completion(doc, &mut out) {
+        if !self.bound_completion(doc, &mut out) || !self.navigation_current(&t, &sources) {
             return Err(IdeError::cancelled());
         }
         Ok(out)

@@ -15,6 +15,57 @@ slice, commit and push it, and retain only the latest generated app. Native UI
 cases remain deferred/unverified; earlier native-first blocking checkpoints are
 historical and no longer prevent independent implementation.
 
+Laravel slice118 (2026-11-16, verified client/host checkpoint): exercise inactive
+PHPantom156 URL method completion through OpenStorm's actual client, host and
+editor edit paths. The candidate executable/source pin stays byte-identical to117.
+Preserve the standard completion DTO, incomplete flags, opaque server data,
+UTF-16 replacement ranges, optional PHP servers, save-conflict protection and all
+existing defaults. Active resources remain155; the sole App95 is unchanged.
+
+New regressions first reproduce accepted stale completions: the automatic mock
+accepts a reply after a caller edit, and the held actual156 reply still offers
+Base's method after an unsaved parent change. Reuse existing navigation semantic
+source/generation receipts around standard completion and resolve requests and
+before publishing the combined list. Check freshness even when a resolve RPC
+fails, so restart retires the response as cancellation instead of leaking its
+unavailability error. Do not alter server completion data or the engine protocol.
+
+All15 automatic completion/resolve mutation/control scenarios pass; all9 held
+actual156 completion cases pass across caller/dependency/close/disk/root/settings/
+restart/cancel/no-change. Eight CodeMirror commit cases pass for Enter/Tab-style
+insert/replace, quotes and Unicode with whole-suffix replacement, no call parens,
+caret placement and undo/redo. The full frontend passes12807 tests/6 skipped, plus
+typecheck/lint/format/knip and production build/Safari checks. Workspace Rust passes
+4972 tests/188 ignored/1 excluded; all-target workspace Clippy and Rustfmt pass.
+The exact Cargo-emitted binaries then pass71 actual156 client/host tests:2 URL-host,
+10 reviewed-edit host,9 completion-host,2 handler-host and48 client. The new host
+cases preserve exact UTF-16 method edits, documentation and public API fields,
+keep disk originals until Save, require external-conflict consent, and refresh
+unsaved inherited methods after parent changes and restart. All tracked fixture
+originals remain unchanged. Six focused active155 controls pass; a155 negative
+host control fails specifically for missing URL-method suggestions.
+
+The controlled-browser run passes73/75 cases. Both new tests press accept during
+CodeMirror's documented75ms interaction guard, inserting normal text instead of
+committing. Preserve those traces; correct only the fixture to offer two methods
+(avoiding default single-suggestion auto insertion) and wait beyond that guard.
+Both affected tests then pass, including Enter/Tab selection, Unicode suffix edits,
+undo/redo and explicit save. This is75 distinct browser cases across the recorded
+runs; frontend runtime/defaults remain unchanged. The test-only correction is
+checked separately; main runtime hashes still match the full gate receipts.
+
+The exact legacy HTTP fixture test exclusion remains pending its separately scoped
+authorization. Native UI remains user-skipped. Reuse117's unchanged engine source,
+stdio/Laravel diagnostics, patch replay, licenses and checksum acceptance. Retained
+items across later semantic changes, wider large-project performance, native and
+real-service cases remain outside these in-flight checks and unaccepted. All69
+areas remain67 partial/2 user-deferred. Evidence prefix: artifacts/checks/slice118-.
+Finish this client slice before engine promotion. Cleanup/delivery receipts record
+owned compiler/frontend-output removal (19329 files/24.6GiB plus67,937,500 frontend
+bytes), no remaining canonical test-engine/proxy processes, the sole unchanged
+App95, the reviewed tree, exact commit, remote read-back and clean tracked worktree.
+Both compiler roots and dist are absent; source/provenance and prior evidence stay.
+
 Laravel slice117 (2026-11-16, verified engine/source checkpoint): add method
 completion for rooted controller URL literals using PHPantom's published runtime
 controller identities. Reuse the static helper/facade/alias/named-argument guards

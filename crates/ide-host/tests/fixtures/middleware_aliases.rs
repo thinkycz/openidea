@@ -568,3 +568,120 @@ function remove(\App\ResourceChild $resource) {$resource->withoutMiddlewareFor('
     }).catch_unwind().await;
     f.finish(outcome).await;
 }
+
+#[cfg(target_os = "macos")]
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires PHPantom163, Python3 and owned PHP syntax-check executable"]
+async fn managed_stdio_releases_foreign_writer_and_preserves_dirty_restart() {
+    use std::io::Read;
+    use std::os::unix::fs::OpenOptionsExt;
+
+    let (f, (mut reader, expected_engine)) =
+        Fixture::new_at_with_setup(CALLER, &fixture_files(), "routes/web.php", |project, scratch| {
+            let fifo = scratch.join("foreign-writer.fifo");
+            assert!(
+                std::process::Command::new("/usr/bin/mkfifo")
+                    .args(["-m", "600"])
+                    .arg(&fifo)
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+            let reader = std::fs::OpenOptions::new()
+                .read(true)
+                .custom_flags(rustix::fs::OFlags::NONBLOCK.bits() as i32)
+                .open(&fifo)
+                .unwrap();
+            let witness = scratch.join("stdio-launches.jsonl");
+            let wrapper = scratch.join("inject_writer.py");
+            std::fs::write(
+                &wrapper,
+                r#"import fcntl, json, os, sys
+engine, fifo, witness = sys.argv[1:4]
+writer = os.open(fifo, os.O_WRONLY | os.O_NONBLOCK)
+foreign = fcntl.fcntl(writer, fcntl.F_DUPFD, 128)
+os.close(writer)
+os.set_inheritable(foreign, True)
+with open(witness, "a", encoding="utf-8") as output:
+    output.write(json.dumps({"pid": os.getpid(), "fd": foreign, "engine": engine}) + "\n")
+os.execv(engine, [engine, *sys.argv[4:]])
+"#,
+            )
+            .unwrap();
+            let engine = std::env::var_os("OPENSTORM_TEST_PHPANTOM_BIN").map(PathBuf::from).unwrap_or_else(|| {
+                PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../src-tauri/resources/phpantom/phpantom_lsp")
+            });
+            let engine = dunce::canonicalize(engine).unwrap();
+            let expected_engine = engine.to_string_lossy().into_owned();
+            project.lsp.set_config_hook(Box::new(move |cfg, _| {
+                if cfg.name == "phpantom" {
+                    let mut arguments = vec![
+                        wrapper.to_string_lossy().into_owned(),
+                        engine.to_string_lossy().into_owned(),
+                        fifo.to_string_lossy().into_owned(),
+                        witness.to_string_lossy().into_owned(),
+                    ];
+                    arguments.append(&mut cfg.args);
+                    cfg.command = "/usr/bin/python3".into();
+                    cfg.args = arguments;
+                }
+            }));
+            (reader, expected_engine)
+        });
+    let outcome = std::panic::AssertUnwindSafe(async {
+        let boot = f.root.join("bootstrap/app.php");
+        let mut pids = Vec::new();
+        for launch in 0..2 {
+            assert!(!definitions(&f, cursor(CALLER, "Audit;")).await.is_empty(), "ordinary PHP readiness");
+            let found = definitions(&f, cursor(CALLER, r"64ited")).await;
+            assert_eq!(found.len(), 1, "application alias after managed launch: {found:?}");
+            assert_eq!(*found[0].path, boot);
+            let launches = std::fs::read_to_string(f._tmp.path().join("stdio-launches.jsonl")).unwrap();
+            let launches: Vec<serde_json::Value> =
+                launches.lines().map(|line| serde_json::from_str(line).unwrap()).collect();
+            assert_eq!(launches.len(), launch + 1);
+            let pid = f.project.lsp.servers()[0].pid.expect("managed server must remain alive");
+            let last = launches.last().unwrap();
+            assert_eq!(last["pid"].as_u64(), Some(u64::from(pid)), "wrapper must exec the managed server");
+            assert_eq!(last["engine"].as_str(), Some(expected_engine.as_str()));
+            assert!(last["fd"].as_u64().unwrap() >= 128);
+            pids.push(pid);
+            let mut byte = [0];
+            let eof = reader.read(&mut byte);
+            eprintln!("managed stdio launch {launch}: pid={pid} foreign_fd={} read={eof:?}", last["fd"]);
+            assert!(matches!(eof, Ok(0)), "managed stdio server retained inherited writer after readiness: {eof:?}");
+            target(&f, if launch == 0 { "App\\Http\\Middleware\\Audit" } else { "App\\Http\\Middleware\\Trace" }).await;
+            if launch == 0 {
+                let doc = f.project.documents.open(&boot).unwrap();
+                f.project
+                    .documents
+                    .replace_all(doc.id, &BOOTSTRAP.replace("Middleware\\Audit as", "Middleware\\Trace as"))
+                    .unwrap();
+                target(&f, "App\\Http\\Middleware\\Trace").await;
+                f.project.lsp.restart(f.project.lsp.servers()[0].id).await.unwrap();
+            }
+        }
+        assert_ne!(pids[0], pids[1], "restart must launch a fresh managed process");
+        assert_eq!(std::fs::read_to_string(&boot).unwrap(), BOOTSTRAP);
+        assert_eq!(std::fs::read_to_string(f.root.join("routes/web.php")).unwrap(), CALLER);
+        f.project.lsp.shutdown_all().await;
+        for raw in pids {
+            let pid = rustix::process::Pid::from_raw(raw.try_into().unwrap()).unwrap();
+            for _ in 0..100 {
+                if rustix::process::test_kill_process(pid) == Err(rustix::io::Errno::SRCH) {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            assert_eq!(
+                rustix::process::test_kill_process(pid),
+                Err(rustix::io::Errno::SRCH),
+                "managed engine process must exit after shutdown"
+            );
+            eprintln!("managed stdio pid={raw} exited");
+        }
+    })
+    .catch_unwind()
+    .await;
+    f.finish(outcome).await;
+}

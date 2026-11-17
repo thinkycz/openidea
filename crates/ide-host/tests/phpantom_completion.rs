@@ -40,6 +40,15 @@ impl Fixture {
     }
 
     fn new_at(initial: &str, extra: &[(String, String)], relative: &str) -> Self {
+        Self::new_at_with_setup(initial, extra, relative, |_, _| ()).0
+    }
+
+    fn new_at_with_setup<T>(
+        initial: &str,
+        extra: &[(String, String)],
+        relative: &str,
+        setup: impl FnOnce(&Arc<Project>, &std::path::Path) -> T,
+    ) -> (Self, T) {
         let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
         let bin = std::env::var_os("OPENSTORM_TEST_PHPANTOM_BIN")
             .map(PathBuf::from)
@@ -94,8 +103,9 @@ impl Fixture {
                 cfg.command = bin.to_string_lossy().into_owned();
             }
         }));
+        let context = setup(&project, tmp.path());
         let doc = project.documents.open(&root.join(relative)).unwrap().id;
-        Self { _tmp: tmp, root, host, project, doc, events }
+        (Self { _tmp: tmp, root, host, project, doc, events }, context)
     }
 
     fn lint(text: &str) {

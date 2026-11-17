@@ -15,6 +15,48 @@ slice, commit and push it, and retain only the latest generated app. Native UI
 cases remain deferred/unverified; earlier native-first blocking checkpoints are
 historical and no longer prevent independent implementation.
 
+Client/host slice138 (2026-11-17, verified;163 inactive): verify source163's managed
+macOS stdio descriptor boundary through the production host launch path (FEAT-068).
+Inject a suite-owned FIFO writer at sparse fd128 before exec, preserving the host's
+arguments and standard streams. The witness PID must equal the actual managed engine
+PID. After real definitions, prove pipe EOF while hover still works, retain unsaved
+bootstrap registration through restart, repeat with the new PID and verify both
+owned engine PIDs disappear after shutdown. Original fixture files stay unchanged.
+No new project-tool execution, production API, settings, bindings or debugger scope.
+
+The same final compiled test executable fails on canonical162 at the intended
+retained-writer assertion (WouldBlock after readiness). Checksum-bound163 passes
+both launches, continued navigation, dirty replay and actual process-exit checks.
+The first control is rejected because document open eagerly starts the server before
+the initial injection hook. Move fixture setup before first document open; the
+existing constructors retain their default setup. Stop only the verified owned
+obsolete Cargo run, preserve its interrupted log, recompile and rerun the complete
+workspace. Retain the rejected harness control separately from acceptance.
+
+All84 actual163 client/host cases pass (2 URL,10 edit,20 completion,2 handler,50
+client). Emitted executables/fingerprints, runtime sources and borrowed fixtures
+stay unchanged. The complete serialized Rust workspace passes5124 tests with201
+ignored and the previously deferred HTTP test excluded; retain the existing default
+parallel CLI socket-test limitation from the upstream merge. Workspace Clippy with
+warnings denied, Rust formatting, source recipe/fingerprint and engine checksums
+pass. Current frontend type checking, lint, formatting, unused-code checks, build
+and13374 tests pass with6 skipped. Reuse unchanged86 controlled-browser cases from
+fc191cfbd; no browser flow changes. Native UI remains explicitly user-skipped.
+
+Archive a separate163 client-host receipt; preserve the historical source/build
+receipt, acquisition provenance and licenses. Candidate163 stays inactive pending
+packaging; active source/resource pins remain161 and the sole signed App0.1.100
+keeps its main/resource hashes and valid deep/strict signature. Remove26,653,678,874 bytes of compiler output and68,777,218 bytes of frontend dist
+after acceptance; preserve Workbench, canonical sources,
+engines and evaluation evidence. No app build, install, migration, publishing or
+updater activation. Keep other transports/providers/platforms as F27/FEAT-068 gaps.
+All69 statuses stay67 partial/2 user-deferred. Commit/push this slice, verify the
+remote ref and clean worktree, then proceed to packaging before dependent work.
+
+Evidence: artifacts/checks/slice138/{source-input,harness-correction,controls-attempt1,
+controls,gates,frontend,client-host,retention,delivery}.json, final162/163 control logs
+and the canonical163 client-host sidecar. Historical source137 proof stays immutable.
+
 Upstream merge (2026-11-17, source/client verified; native UI skipped): merge
 l0ng-ai/openidea main182285647 (50 commits since f86c5e346). Adopt shared command
 declarations, editor/LSP/plugin/tool-download fixes, the PHP include-path chooser,

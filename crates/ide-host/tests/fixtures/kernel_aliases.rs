@@ -19,18 +19,20 @@ class Foreign {public function middleware($value){} public function run() {$this
 "#;
 
 fn fixture(kernel: &str) -> Fixture {
-    Fixture::new_at(
-        CALLER,
-        &[
+    fixture_with(kernel, &[])
+}
+
+fn fixture_with(kernel: &str, extra: &[(String, String)]) -> Fixture {
+    let mut files = vec![
             ("composer.json".into(), r#"{"require":{"laravel/framework":"^10.0"},"autoload":{"psr-4":{"App\\":"app/","Illuminate\\":"framework/"}}}"#.into()),
             ("app/Http/Kernel.php".into(), kernel.into()),
             ("app/Http/KernelBase.php".into(), BASE.into()),
             ("app/Http/Middleware/Audit.php".into(), CLASS.into()),
             ("app/Http/Middleware/Trace.php".into(), CLASS.replace("Audit", "Trace")),
             ("framework/Foundation/Http/Kernel.php".into(), "<?php namespace Illuminate\\Foundation\\Http; class Kernel {}\n".into()),
-        ],
-        "routes/web.php",
-    )
+    ];
+    files.extend_from_slice(extra);
+    Fixture::new_at(CALLER, &files, "routes/web.php")
 }
 
 fn cursor(text: &str, needle: &str) -> Pos {
@@ -41,13 +43,13 @@ async fn definitions(f: &Fixture) -> Vec<ide_core::Location> {
     ide_host::ops::lsp::lsp_goto(&f.host, "main", f.doc, cursor(CALLER, r"64ited"), GotoKind::Definition).await.unwrap()
 }
 
-async fn hover(f: &Fixture, expected: &str) {
+async fn hover(f: &Fixture, expected: &str, relative: &str) {
     let result = ide_host::ops::lsp::lsp_hover(&f.host, "main", RequestId::next(), f.doc, cursor(CALLER, r"64ited"))
         .await
         .unwrap()
         .expect("Kernel middleware hover");
     assert!(result.contents.value.contains(expected), "{result:?}");
-    assert!(result.contents.value.contains("app/Http/Kernel.php"), "{result:?}");
+    assert!(result.contents.value.contains(relative), "{result:?}");
     assert!(!result.contents.value.contains("bootstrap/app.php"), "{result:?}");
 }
 
@@ -56,94 +58,141 @@ async fn hover(f: &Fixture, expected: &str) {
 async fn kernel_alias_navigation_tracks_dirty_ancestry_ranges_and_restart() {
     for property in ["middlewareAliases", "routeMiddleware"] {
         let original = KERNEL.replace("middlewareAliases", property);
-        let f = fixture(&original);
-        let outcome = std::panic::AssertUnwindSafe(async {
-            let kernel = f.root.join("app/Http/Kernel.php");
-            let parent = f.root.join("app/Http/KernelBase.php");
-            let ready =
-                ide_host::ops::lsp::lsp_goto(&f.host, "main", f.doc, cursor(CALLER, "Audit;"), GotoKind::Definition)
-                    .await
-                    .unwrap();
-            assert!(!ready.is_empty(), "ordinary PHP readiness");
-            let found = definitions(&f).await;
-            assert_eq!(found.len(), 1, "managed Kernel alias definition: {found:?}");
-            assert_eq!(*found[0].path, kernel);
-            assert_eq!(found[0].range.start, cursor(&original, r"au\x64ited"));
-            assert_eq!(found[0].range.end, found[0].range.start);
-            hover(&f, "App\\Http\\Middleware\\Audit").await;
-            let refs = ide_host::ops::lsp::lsp_references(
-                &f.host,
-                "main",
-                RequestId::next(),
-                f.doc,
-                cursor(CALLER, r"64ited"),
-                true,
-                true,
-                true,
-                ide_host::ops::Channel::new(|_| {}),
-            )
-            .await
-            .unwrap();
-            assert!(refs.incomplete.is_none(), "{refs:?}");
-            assert_eq!(refs.locations.len(), 2, "foreign middleware must stay excluded: {refs:?}");
-            for (path, text) in [(&kernel, original.as_str()), (&f.root.join("routes/web.php"), CALLER)] {
-                let location = refs.locations.iter().find(|location| *location.path == *path).unwrap();
-                assert_eq!(location.range.start, cursor(text, r"au\x64ited"));
-                assert_eq!(location.range.end.col - location.range.start.col, 10);
-            }
-            let doc = f.project.documents.open(&kernel).unwrap();
-            for (id, text, needle) in [(f.doc, CALLER, r"64ited"), (doc.id, original.as_str(), r"64ited")] {
-                let position = cursor(text, needle);
-                assert!(f.project.lsp.prepare_rename_details(id, position).await.unwrap().is_none());
-                let refused =
-                    ide_host::ops::lsp::lsp_rename(&f.host, "main", RequestId::next(), id, position, "reviewed".into())
-                        .await;
-                assert!(
-                    refused.as_ref().is_err_and(|error| error.message.contains("Middleware alias rename")),
-                    "{refused:?}"
-                );
-            }
-            let changed = original.replace("Middleware\\Audit as", "Middleware\\Trace as");
-            f.project.documents.replace_all(doc.id, &changed).unwrap();
-            hover(&f, "App\\Http\\Middleware\\Trace").await;
-            let parent_doc = f.project.documents.open(&parent).unwrap();
-            f.project.documents.replace_all(parent_doc.id, "<?php namespace App\\Http; class KernelBase {}\n").unwrap();
-            assert!(definitions(&f).await.is_empty(), "dirty parent removes Kernel ancestry");
-            let restored = format!("{BASE}// Unsaved Kernel parent documentation.\n");
-            f.project.documents.replace_all(parent_doc.id, &restored).unwrap();
-            assert_eq!(definitions(&f).await.len(), 1);
-            f.project.lsp.restart(f.project.lsp.servers()[0].id).await.unwrap();
-            hover(&f, "App\\Http\\Middleware\\Trace").await;
-            let renamed = changed.replace(r"au\x64ited", "different");
-            f.project.documents.replace_all(doc.id, &renamed).unwrap();
-            assert!(definitions(&f).await.is_empty(), "dirty alias removes the old key");
-            assert_eq!(std::fs::read_to_string(&kernel).unwrap(), original);
-            assert_eq!(std::fs::read_to_string(&parent).unwrap(), BASE);
-            assert_eq!(std::fs::read_to_string(f.root.join("routes/web.php")).unwrap(), CALLER);
-            assert_eq!(f.project.documents.snapshot(parent_doc.id).unwrap().text, restored);
-        })
-        .catch_unwind()
+        navigation_case(
+            fixture(&original),
+            &original,
+            "app/Http/Kernel.php",
+            "app/Http/KernelBase.php",
+            BASE,
+            "<?php namespace App\\Http; class KernelBase {}\n",
+        )
         .await;
-        f.finish(outcome).await;
     }
+}
+
+async fn navigation_case(
+    f: Fixture,
+    original: &str,
+    relative: &str,
+    ancestry_relative: &str,
+    ancestry_original: &str,
+    removed: &str,
+) {
+    let outcome = std::panic::AssertUnwindSafe(async {
+        let kernel = f.root.join(relative);
+        let parent = f.root.join(ancestry_relative);
+        let ready =
+            ide_host::ops::lsp::lsp_goto(&f.host, "main", f.doc, cursor(CALLER, "Audit;"), GotoKind::Definition)
+                .await
+                .unwrap();
+        assert!(!ready.is_empty(), "ordinary PHP readiness");
+        let found = definitions(&f).await;
+        assert_eq!(found.len(), 1, "managed Kernel alias definition: {found:?}");
+        assert_eq!(*found[0].path, kernel);
+        assert_eq!(found[0].range.start, cursor(original, r"au\x64ited"));
+        assert_eq!(found[0].range.end, found[0].range.start);
+        hover(&f, "App\\Http\\Middleware\\Audit", relative).await;
+        let refs = ide_host::ops::lsp::lsp_references(
+            &f.host,
+            "main",
+            RequestId::next(),
+            f.doc,
+            cursor(CALLER, r"64ited"),
+            true,
+            true,
+            true,
+            ide_host::ops::Channel::new(|_| {}),
+        )
+        .await
+        .unwrap();
+        assert!(refs.incomplete.is_none(), "{refs:?}");
+        assert_eq!(refs.locations.len(), 2, "foreign middleware must stay excluded: {refs:?}");
+        for (path, text) in [(&kernel, original), (&f.root.join("routes/web.php"), CALLER)] {
+            let location = refs.locations.iter().find(|location| *location.path == *path).unwrap();
+            assert_eq!(location.range.start, cursor(text, r"au\x64ited"));
+            assert_eq!(location.range.end.col - location.range.start.col, 10);
+        }
+        let doc = f.project.documents.open(&kernel).unwrap();
+        for (id, text, needle) in [(f.doc, CALLER, r"64ited"), (doc.id, original, r"64ited")] {
+            let position = cursor(text, needle);
+            assert!(f.project.lsp.prepare_rename_details(id, position).await.unwrap().is_none());
+            let refused =
+                ide_host::ops::lsp::lsp_rename(&f.host, "main", RequestId::next(), id, position, "reviewed".into())
+                    .await;
+            assert!(
+                refused.as_ref().is_err_and(|error| error.message.contains("Middleware alias rename")),
+                "{refused:?}"
+            );
+        }
+        let changed = original.replace("Middleware\\Audit as", "Middleware\\Trace as");
+        f.project.documents.replace_all(doc.id, &changed).unwrap();
+        hover(&f, "App\\Http\\Middleware\\Trace", relative).await;
+        let parent_doc = f.project.documents.open(&parent).unwrap();
+        f.project.documents.replace_all(parent_doc.id, removed).unwrap();
+        assert!(definitions(&f).await.is_empty(), "dirty parent removes Kernel ancestry");
+        let restored = format!("{ancestry_original}// Unsaved Kernel parent documentation.\n");
+        f.project.documents.replace_all(parent_doc.id, &restored).unwrap();
+        assert_eq!(definitions(&f).await.len(), 1);
+        f.project.lsp.restart(f.project.lsp.servers()[0].id).await.unwrap();
+        hover(&f, "App\\Http\\Middleware\\Trace", relative).await;
+        let renamed = changed.replace(r"au\x64ited", "different");
+        f.project.documents.replace_all(doc.id, &renamed).unwrap();
+        assert!(definitions(&f).await.is_empty(), "dirty alias removes the old key");
+        assert_eq!(std::fs::read_to_string(&kernel).unwrap(), original);
+        assert_eq!(std::fs::read_to_string(&parent).unwrap(), ancestry_original);
+        assert_eq!(std::fs::read_to_string(f.root.join("routes/web.php")).unwrap(), CALLER);
+        assert_eq!(f.project.documents.snapshot(parent_doc.id).unwrap().text, restored);
+    })
+    .catch_unwind()
+    .await;
+    f.finish(outcome).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires PHPantom164 and owned PHP syntax-check executable"]
 async fn kernel_alias_checked_rename_preserves_conflicts_dirty_buffers_and_history() {
-    let f = fixture(KERNEL);
+    checked_rename_case(fixture(KERNEL), KERNEL, "app/Http/Kernel.php").await;
+}
+
+async fn checked_rename_case(f: Fixture, original: &str, relative: &str) {
     let outcome = std::panic::AssertUnwindSafe(async {
         let old = f.root.join("app/Http/Middleware/Audit.php");
         let new = f.root.join("app/Http/Middleware/Auditor.php");
-        let kernel = f.root.join("app/Http/Kernel.php");
+        let kernel = f.root.join(relative);
         let class = f.project.documents.open(&old).unwrap();
         let registration = f.project.documents.open(&kernel).unwrap();
         let overlay = format!("{CLASS}// Unsaved middleware documentation.\n");
         f.project.documents.replace_all(class.id, &overlay).unwrap();
         let position = cursor(CLASS, "Audit {}");
+        if relative == "app/Http/AliasInner.php" {
+            let parent = f.root.join("app/Http/KernelBase.php");
+            let parent_doc = f.project.documents.open(&parent).unwrap();
+            let overlapping =
+                original.replace("trait AliasInner", "class KernelBase extends \\Illuminate\\Foundation\\Http\\Kernel");
+            assert_ne!(overlapping, original);
+            Fixture::lint(&overlapping);
+            f.project.documents.replace_all(parent_doc.id, &overlapping).unwrap();
+            let refused = ide_host::ops::lsp::lsp_rename(
+                &f.host,
+                "main",
+                RequestId::next(),
+                class.id,
+                position,
+                "Auditor".into(),
+            )
+            .await;
+            assert!(
+                refused.as_ref().is_err_and(|error| error.message.contains("middleware")),
+                "overlapping trait property plan: {refused:?}"
+            );
+            assert_eq!(f.project.documents.snapshot(class.id).unwrap().text, overlay);
+            assert_eq!(std::fs::read_to_string(&parent).unwrap(), BASE);
+            assert!(!new.exists());
+            f.project.documents.replace_all(parent_doc.id, BASE).unwrap();
+        }
         for value in [r"['audited'=>'App\Http\Middleware\Audit']", "ALIASES", "['audited'=>AliasTargets::AUDIT]"] {
-            let changed = KERNEL.replace(r#"[/* 😀 */ "au\x64ited" => AuditAlias::class]"#, value);
-            assert_ne!(changed, KERNEL);
+            let changed = original.replace(r#"[/* 😀 */ "au\x64ited" => AuditAlias::class]"#, value);
+            assert_ne!(changed, original);
             Fixture::lint(&changed);
             f.project.documents.replace_all(registration.id, &changed).unwrap();
             for name in ["Auditor", "App\\Moved\\Audit"] {
@@ -171,34 +220,34 @@ async fn kernel_alias_checked_rename_preserves_conflicts_dirty_buffers_and_histo
             assert_eq!(f.project.documents.snapshot(class.id).unwrap().text, overlay);
             assert_eq!(f.project.documents.snapshot(registration.id).unwrap().text, changed);
             assert_eq!(std::fs::read_to_string(&old).unwrap(), CLASS);
-            assert_eq!(std::fs::read_to_string(&kernel).unwrap(), KERNEL);
+            assert_eq!(std::fs::read_to_string(&kernel).unwrap(), original);
             assert!(!new.exists());
         }
-        f.project.documents.replace_all(registration.id, KERNEL).unwrap();
+        f.project.documents.replace_all(registration.id, original).unwrap();
         let stale =
             ide_host::ops::lsp::lsp_rename(&f.host, "main", RequestId::next(), class.id, position, "Auditor".into())
                 .await
                 .unwrap()
                 .edit;
-        f.project.documents.replace_all(registration.id, &format!("{KERNEL}// Later buffer edit.\n")).unwrap();
+        f.project.documents.replace_all(registration.id, &format!("{original}// Later buffer edit.\n")).unwrap();
         assert!(ide_host::ops::lsp::apply_workspace_edit(&f.host, "main", stale).await.is_err());
         assert_eq!(f.project.documents.snapshot(class.id).unwrap().text, overlay);
         assert_eq!(std::fs::read_to_string(&old).unwrap(), CLASS);
         assert!(!new.exists());
-        f.project.documents.replace_all(registration.id, KERNEL).unwrap();
+        f.project.documents.replace_all(registration.id, original).unwrap();
         let stale =
             ide_host::ops::lsp::lsp_rename(&f.host, "main", RequestId::next(), class.id, position, "Auditor".into())
                 .await
                 .unwrap()
                 .edit;
-        let external = format!("{KERNEL}// External Kernel change.\n");
+        let external = format!("{original}// External Kernel change.\n");
         std::fs::write(&kernel, &external).unwrap();
         assert!(ide_host::ops::lsp::apply_workspace_edit(&f.host, "main", stale).await.is_err());
         assert_eq!(std::fs::read_to_string(&kernel).unwrap(), external);
         assert_eq!(f.project.documents.snapshot(class.id).unwrap().text, overlay);
         assert_eq!(std::fs::read_to_string(&old).unwrap(), CLASS);
         assert!(!new.exists());
-        std::fs::write(&kernel, KERNEL).unwrap();
+        std::fs::write(&kernel, original).unwrap();
         let plan =
             ide_host::ops::lsp::lsp_rename(&f.host, "main", RequestId::next(), class.id, position, "Auditor".into())
                 .await
@@ -246,7 +295,7 @@ async fn kernel_alias_checked_rename_preserves_conflicts_dirty_buffers_and_histo
                     && restored.text.contains("Unsaved middleware documentation")
             );
             assert_eq!(restored.dirty, !redo);
-            assert_eq!(std::fs::read_to_string(&kernel).unwrap(), if redo { updated.text.as_str() } else { KERNEL });
+            assert_eq!(std::fs::read_to_string(&kernel).unwrap(), if redo { updated.text.as_str() } else { original });
             assert_eq!(
                 std::fs::read_to_string(f.root.join("routes/web.php")).unwrap(),
                 if redo { caller.text.as_str() } else { CALLER }
@@ -256,4 +305,60 @@ async fn kernel_alias_checked_rename_preserves_conflicts_dirty_buffers_and_histo
     .catch_unwind()
     .await;
     f.finish(outcome).await;
+}
+
+fn inherited_fixture(is_trait: bool, property: &str) -> (Fixture, String, String) {
+    let root = if is_trait {
+        "<?php namespace App\\Http; class Kernel extends KernelBase {use AliasOuter;}\n"
+    } else {
+        "<?php namespace App\\Http; class Kernel extends KernelBase {}\n"
+    };
+    let declaration = KERNEL
+        .replace("use App\\Http\\KernelBase as BaseKernel;\n", "")
+        .replace(
+            "class Kernel extends BaseKernel",
+            if is_trait {
+                "trait AliasInner"
+            } else {
+                "class KernelBase extends \\Illuminate\\Foundation\\Http\\Kernel"
+            },
+        )
+        .replace("middlewareAliases", property);
+    let relative = if is_trait { "app/Http/AliasInner.php" } else { "app/Http/KernelBase.php" };
+    let mut extra = vec![(relative.into(), declaration.clone())];
+    if is_trait {
+        extra.push((
+            "app/Http/AliasOuter.php".into(),
+            "<?php namespace App\\Http; trait AliasOuter {use AliasInner;}\n".into(),
+        ));
+    }
+    let f = fixture_with(root, &extra);
+    (f, declaration, root.into())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires PHPantom165 and owned PHP syntax-check executable"]
+async fn inherited_kernel_alias_navigation_keeps_declaration_ownership_and_dirty_replay() {
+    for is_trait in [false, true] {
+        for property in ["middlewareAliases", "routeMiddleware"] {
+            let (f, declaration, root) = inherited_fixture(is_trait, property);
+            let relative = if is_trait { "app/Http/AliasInner.php" } else { "app/Http/KernelBase.php" };
+            let removed = if is_trait {
+                root.replace("use AliasOuter;", "")
+            } else {
+                "<?php namespace App\\Http; class Kernel {}\n".into()
+            };
+            navigation_case(f, &declaration, relative, "app/Http/Kernel.php", &root, &removed).await;
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires PHPantom165 and owned PHP syntax-check executable"]
+async fn inherited_kernel_alias_checked_plans_preserve_conflicts_and_reviewed_history() {
+    for is_trait in [false, true] {
+        let (f, declaration, _) = inherited_fixture(is_trait, "middlewareAliases");
+        let relative = if is_trait { "app/Http/AliasInner.php" } else { "app/Http/KernelBase.php" };
+        checked_rename_case(f, &declaration, relative).await;
+    }
 }

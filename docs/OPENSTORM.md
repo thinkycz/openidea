@@ -15,6 +15,55 @@ slice, commit and push it, and retain only the latest generated app. Native UI
 cases remain deferred/unverified; earlier native-first blocking checkpoints are
 historical and no longer prevent independent implementation.
 
+Laravel client/host slice144 (2026-11-18, verified;165 inactive pending packaging):
+accept inherited HTTP Kernel alias navigation through actual production host,
+managed documents, LSP conversion, checked-rename adapter and reviewed edits.
+Extend the existing acceptance helpers and add two genuine-server regressions for
+parent and nested-trait property ownership. Both property names, encoded keys and
+UTF-16 definition/reference ranges preserve the declaring URI. Foreign receivers
+stay excluded; hover names the real parent/trait file. Dirty imports, keys and
+ancestry refresh unchanged callers and survive managed-server restart without
+writing fixture originals. All four new fixture compositions load in PHP and
+retain their expected property defaults; PSR-4 metadata validates before acceptance.
+
+Reject literal/dynamic targets, partial class/FQN/namespace plans and overlapping
+trait properties. Safe named targets retain PSR-4 file moves plus parent/trait
+import and caller edits. Reject stale buffers and newer external disk content
+without overwriting files or discarding unsaved middleware documentation. Apply
+fresh plans through the real host, lint edited PHP, and restore grouped document/
+file state through reviewed undo/redo. The two new tests fail for missing navigation
+and unsafe plans on canonical164; the identical compiled executable passes both
+with canonical165. All88 actual client/host cases pass:2 URL-host,10 guarded-edit
+host,24 completion host,2 handler host and50 client tests. Runtime-source, binary
+and Cargo fingerprint hashes stay fixed; borrowed fixture originals stay unchanged.
+
+Fresh frontend typecheck/lint/format/knip,13,393 passes/6 skipped, production build
+and Safari15.4 checks pass. Workspace all-target Clippy and Rust formatting pass.
+Fresh serialized workspace tests:5,151 passes/205 ignored/one retained HTTP-test
+exclusion. The two additional ignored cases run explicitly in genuine acceptance;
+ignored-test counts alone are not acceptance. Binding and command-snapshot exports
+run in the workspace suite and match the merged sources. Retain the existing
+default-parallel CLI socket-test limitation and test-link unwind-metadata warning.
+Reuse38 controlled-browser cases from upstream-c1782f01e for unchanged UI paths.
+Native inherited Kernel UI/discovery/preview acceptance remains user-skipped.
+
+Source143's engine18602/17 ignored plus2 bounded checks,22 stdio stages, exact
+source replay, licenses/provenance and immutable build receipt remain unchanged.
+Candidate165 SHA256:2701aaaea7adb7a567f291e25f84cf84eab0b351792b71e88e324ab3a497d732.
+App102/default164 hashes, deep/strict signature and sole-app status stay unchanged.
+No new app, installation, migration, updater activation or debugger functionality.
+Removed 22,127,406,009 compiler bytes and 68,854,219 generated frontend bytes;
+retain canonical engines/source, Workbench, fixtures and receipts. All69 areas stay
+67 partial/2 user-deferred. Bound Kernel discovery remains L62; dynamic/ambiguous
+registrations and property compatibility proofs remain L63; wider middleware catalogs
+and transformations remain L61. Package165 in a separate slice after this acceptance
+slice is committed/pushed and its exact remote ref and clean worktree are verified.
+
+Evidence: artifacts/checks/slice144/{source-input,fixture-check,gates,controls,
+client-host,retention,delivery}.json; control-164/control-165 and stage logs;
+canonical165 client-host sidecar added after remote verification. Passing host/client
+paths do not establish complete feature-area parity or native UI acceptance.
+
 Engine source slice143 (2026-11-17, verified;165 inactive): resolve effective
 middleware alias property declarations through Kernel parents and nested traits,
 anchored at conventional app/Http/Kernel.php. Reuse shared ancestry/member resolution

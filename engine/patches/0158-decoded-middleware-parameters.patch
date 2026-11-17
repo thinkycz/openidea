@@ -1,0 +1,511 @@
+--- a/docs/CHANGELOG.md
++++ b/docs/CHANGELOG.md
+@@ -22,6 +22,8 @@
+ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+ 
+ ## [Unreleased]
++
++- **Navigate escaped middleware parameters.** Static PHP escapes in authentication guards and authorization abilities now resolve to their runtime names, including escaped separators. Hover, definitions, references and diagnostics retain the exact source spelling. Contributed by @thinkycz.
+ 
+ - **Navigate controller URL actions.** Rooted `Controller@method` literals in Laravel action helpers and URL/redirect facades now support class/method navigation, references and safe renames. Unrooted actions retain their unresolved URL namespace; encoded spellings also prevent partial renames. Contributed by @thinkycz.
+ 
+--- a/docs/todo/laravel.md
++++ b/docs/todo/laravel.md
+@@ -641,7 +641,10 @@
+ references and unsaved-parent refresh share the config resource identity. Scalar,
+ named and array values are covered; embedded guard edits keep comma boundaries,
+ quotes and UTF-16 coordinates. Unsupported encoded/interpolated suffixes and tails
+-over the scan bound are refused. Dynamic middleware aliases and native/client
++over the scan bound are refused. OpenStorm .158 decodes static middleware names
++and separators for read navigation, references and diagnostics, with exact raw
++source ranges. Dynamic/interpolated expressions remain excluded; encoded suffix
++completion edits are still refused. Dynamic middleware aliases and native/client
+ release acceptance remain outside this engine-source checkpoint.
+ 
+ **Impact: Low-Medium · Complexity: Medium**
+--- a/examples/laravel/app/Demo.php
++++ b/examples/laravel/app/Demo.php
+@@ -1784,6 +1784,17 @@
+         return ['url' => $url, 'redirect' => $redirect, 'facade' => $facade];
+     }
+ 
++    public function encodedMiddlewareNavigation(): void
++    {
++        new class extends \Illuminate\Routing\Controller {
++            public function __construct()
++            {
++                // Navigate the runtime web guard while retaining its escaped source range.
++                $this->middleware("auth:w\x65b");
++            }
++        };
++    }
++
+     public function invokableControllerNavigation(): void
+     {
+         // Clients with phpWorkbenchRouteHandler support can open __invoke from
+--- a/src/symbol_map/extraction/laravel.rs
++++ b/src/symbol_map/extraction/laravel.rs
+@@ -1417,19 +1417,40 @@
+     content: &str,
+     spans: &mut Vec<SymbolSpan>,
+ ) {
+-    let Some((text, inner_start, _)) = string_literal_at_range(expr, content) else {
+-        return;
+-    };
++    let Some((raw, inner_start, inner_end)) = string_literal_at_range(expr, content) else {
++        return;
++    };
++    let source_spans = if raw.contains('\\') {
++        let Some(value) = crate::text_scan::decode_php_string_literal_spans(
++            &content[inner_start as usize - 1..inner_end as usize + 1],
++        ) else {
++            return;
++        };
++        let Some((runtime, _, _)) =
++            crate::virtual_members::laravel::helpers::resolved_string_literal(expr, content)
++        else {
++            return;
++        };
++        if value.value() != runtime {
++            return;
++        }
++        Some(value)
++    } else {
++        None
++    };
++    let text = source_spans.as_ref().map_or(raw, |value| value.value());
+     let Some((alias, parameters)) = text.split_once(':') else {
+         return;
+     };
+-    let parameter_start = inner_start + alias.len() as u32 + 1;
++    let parameter_start = alias.len() + 1;
+     if alias == "can" {
+         let ability = parameters.split(',').next().unwrap_or(parameters);
+         push_embedded_string_span(
+             crate::symbol_map::LaravelStringKind::GateAbility,
+             ability,
+             parameter_start,
++            inner_start,
++            source_spans.as_ref(),
+             spans,
+         );
+     } else if include_auth_guards
+@@ -1444,9 +1465,11 @@
+                 ),
+                 guard,
+                 offset,
++                inner_start,
++                source_spans.as_ref(),
+                 spans,
+             );
+-            offset += guard.len() as u32 + 1;
++            offset += guard.len() + 1;
+         }
+     }
+ }
+@@ -1454,15 +1477,29 @@
+ fn push_embedded_string_span(
+     kind: crate::symbol_map::LaravelStringKind,
+     key: &str,
+-    start: u32,
++    decoded_start: usize,
++    inner_start: u32,
++    source_spans: Option<&crate::text_scan::DecodedPhpString<'_>>,
+     spans: &mut Vec<SymbolSpan>,
+ ) {
+     if key.is_empty() {
+         return;
+     }
++    let (start, end) = if let Some(source) = source_spans {
++        let Some(range) = source.source_range(decoded_start..decoded_start + key.len()) else {
++            return;
++        };
++        (
++            inner_start - 1 + range.start as u32,
++            inner_start - 1 + range.end as u32,
++        )
++    } else {
++        let start = inner_start + decoded_start as u32;
++        (start, start + key.len() as u32)
++    };
+     spans.push(SymbolSpan {
+         start,
+-        end: start + key.len() as u32,
++        end,
+         kind: SymbolKind::LaravelStringKey {
+             kind,
+             key: key.to_string(),
+--- a/src/text_scan.rs
++++ b/src/text_scan.rs
+@@ -148,6 +148,74 @@
+ /// `\u{...}` escape encodes a code point PHP itself would reject
+ /// (out of range, or a surrogate half).
+ pub(crate) fn decode_php_string_literal(raw: &str) -> Option<Cow<'_, str>> {
++    decode_php_string_literal_with_chunks(raw, |_, _| {})
++}
++
++/// A decoded literal with compact source ranges for literal and escaped runs.
++pub(crate) struct DecodedPhpString<'a> {
++    value: Cow<'a, str>,
++    chunks: Vec<(std::ops::Range<usize>, std::ops::Range<usize>)>,
++}
++
++impl DecodedPhpString<'_> {
++    /// The decoded runtime value.
++    pub(crate) fn value(&self) -> &str {
++        &self.value
++    }
++
++    /// Map a nonempty runtime byte range back into the quoted source literal.
++    pub(crate) fn source_range(
++        &self,
++        range: std::ops::Range<usize>,
++    ) -> Option<std::ops::Range<usize>> {
++        if range.is_empty() || range.end > self.value.len() {
++            return None;
++        }
++        let first = self.chunks.get(
++            self.chunks
++                .partition_point(|(decoded, _)| decoded.end <= range.start),
++        )?;
++        let last = self.chunks.get(
++            self.chunks
++                .partition_point(|(decoded, _)| decoded.end < range.end),
++        )?;
++        let start = if first.0.len() == first.1.len() {
++            first.1.start + range.start - first.0.start
++        } else {
++            first.1.start
++        };
++        let end = if last.0.len() == last.1.len() {
++            last.1.start + range.end - last.0.start
++        } else {
++            last.1.end
++        };
++        Some(start..end)
++    }
++}
++
++/// Decode once, coalescing ordinary text instead of allocating a map per byte.
++pub(crate) fn decode_php_string_literal_spans(raw: &str) -> Option<DecodedPhpString<'_>> {
++    let mut chunks: Vec<(std::ops::Range<usize>, std::ops::Range<usize>)> = Vec::new();
++    let value = decode_php_string_literal_with_chunks(raw, |decoded, source| {
++        if let Some(last) = chunks.last_mut()
++            && last.0.len() == last.1.len()
++            && decoded.len() == source.len()
++            && last.0.end == decoded.start
++            && last.1.end == source.start
++        {
++            last.0.end = decoded.end;
++            last.1.end = source.end;
++        } else {
++            chunks.push((decoded, source));
++        }
++    })?;
++    Some(DecodedPhpString { value, chunks })
++}
++
++fn decode_php_string_literal_with_chunks<'a>(
++    raw: &'a str,
++    mut chunk: impl FnMut(std::ops::Range<usize>, std::ops::Range<usize>),
++) -> Option<Cow<'a, str>> {
+     let (double_quoted, content) =
+         if let Some(r) = raw.strip_prefix('\'').and_then(|r| r.strip_suffix('\'')) {
+             (false, r)
+@@ -157,6 +225,7 @@
+         };
+ 
+     if !content.contains('\\') {
++        chunk(0..content.len(), 1..raw.len() - 1);
+         return Some(Cow::Borrowed(content));
+     }
+ 
+@@ -164,14 +233,17 @@
+     let mut result = Vec::with_capacity(bytes.len());
+     let mut i = 0;
+     while i < bytes.len() {
++        let output_start = result.len();
+         let b = bytes[i];
+         if b != b'\\' {
+             result.push(b);
++            chunk(output_start..result.len(), i + 1..i + 2);
+             i += 1;
+             continue;
+         }
+         let Some(&next) = bytes.get(i + 1) else {
+             result.push(b'\\');
++            chunk(output_start..result.len(), i + 1..i + 2);
+             i += 1;
+             continue;
+         };
+@@ -265,6 +337,7 @@
+                 }
+             }
+         }
++        chunk(output_start..result.len(), i + 1..i + consumed + 1);
+         i += consumed;
+     }
+ 
+--- a/src/text_scan_tests.rs
++++ b/src/text_scan_tests.rs
+@@ -96,3 +96,61 @@
+     let src = "<?php\nnamespace App;\n$namespaced = 1;\nfunction t() { | }\n";
+     assert_eq!(ns_at_marker(src).as_deref(), Some("App"));
+ }
++
++#[test]
++fn decoded_literal_ranges_cover_php_escapes_and_unicode() {
++    for (raw, expected, range, source) in [
++        (
++            r#""auth:ad\x6din,web""#,
++            "auth:admin,web",
++            5..10,
++            r#"ad\x6din"#,
++        ),
++        (
++            r#""auth\x3aweb\054ad\u{6d}in""#,
++            "auth:web,admin",
++            9..14,
++            r#"ad\u{6d}in"#,
++        ),
++        (r#"'auth:it\'s,web'"#, "auth:it's,web", 5..9, r#"it\'s"#),
++        (
++            r#""auth:\xF0\x9F\x98\x80,web""#,
++            "auth:😀,web",
++            5..9,
++            r#"\xF0\x9F\x98\x80"#,
++        ),
++        (
++            r#""auth:\u{1f600},web""#,
++            "auth:😀,web",
++            5..9,
++            r#"\u{1f600}"#,
++        ),
++        (
++            r#"'auth:ad\x6din'"#,
++            r#"auth:ad\x6din"#,
++            5..13,
++            r#"ad\x6din"#,
++        ),
++        (r#""auth:cash\$,web""#, "auth:cash$,web", 5..10, r#"cash\$"#),
++    ] {
++        let decoded = super::decode_php_string_literal_spans(raw).unwrap();
++        assert_eq!(decoded.value(), expected, "{raw}");
++        assert_eq!(&raw[decoded.source_range(range).unwrap()], source, "{raw}");
++        assert!(decoded.source_range(0..0).is_none());
++        assert!(decoded.source_range(0..expected.len() + 1).is_none());
++    }
++    for invalid in [r#""\u{d800}""#, r#""\u{110000}""#, r#""\xff""#] {
++        assert!(
++            super::decode_php_string_literal_spans(invalid).is_none(),
++            "{invalid}"
++        );
++    }
++}
++
++#[test]
++fn decoded_literal_source_map_coalesces_long_ordinary_runs() {
++    let raw = format!("\"{}\\x6d{}\"", "a".repeat(8192), "b".repeat(8192));
++    let decoded = super::decode_php_string_literal_spans(&raw).unwrap();
++    assert_eq!(decoded.chunks.len(), 3);
++    assert_eq!(&raw[decoded.source_range(8191..8194).unwrap()], "a\\x6db");
++}
+--- a/tests/integration/laravel_named_resources.rs
++++ b/tests/integration/laravel_named_resources.rs
+@@ -1902,3 +1902,196 @@
+         }
+     }
+ }
++
++#[tokio::test]
++async fn encoded_controller_middleware_guards_navigate_with_raw_source_ranges() {
++    let source = r#"<?php
++namespace Illuminate\Routing { class Controller { public function middleware($middleware) {} } }
++namespace App {
++class GuardController extends \Illuminate\Routing\Controller {
++ public function boot() {
++  $this->middleware("auth:ad\x6din,web");
++  $this->middleware("auth\x3aweb\054ad\u{6d}in");
++ }
++}
++}
++"#;
++    let (backend, _dir, uri) = open_workspace(source).await;
++    for (prefix, raw) in [
++        (r#"auth:ad\x6d"#, r#"ad\x6din"#),
++        (r#"\054ad\u{6d}"#, r#"ad\u{6d}in"#),
++    ] {
++        let position = position_after(source, prefix);
++        let hover = backend
++            .handle_hover(uri.as_str(), source, position)
++            .expect("encoded guard must hover by its runtime name");
++        assert!(hover_text(hover).contains("admin"));
++        let definition = backend
++            .goto_definition(GotoDefinitionParams {
++                text_document_position_params: TextDocumentPositionParams {
++                    text_document: TextDocumentIdentifier { uri: uri.clone() },
++                    position,
++                },
++                work_done_progress_params: Default::default(),
++                partial_result_params: Default::default(),
++            })
++            .await
++            .unwrap()
++            .expect("encoded guard must navigate");
++        let location = definition_location(definition);
++        assert!(location.uri.path().ends_with("/config/auth.php"));
++        assert_eq!(
++            location.range.start,
++            position_of_config_key(AUTH_CONFIG, "admin")
++        );
++        let refs = backend
++            .find_references(uri.as_str(), source, position, true)
++            .expect("encoded guards share references");
++        assert_eq!(
++            refs.len(),
++            3,
++            "declaration plus both decoded uses: {refs:?}"
++        );
++        assert!(
++            refs.iter()
++                .any(|reference| reference.uri == uri
++                    && text_in_range(source, reference.range) == raw)
++        );
++    }
++}
++
++#[tokio::test]
++async fn encoded_middleware_parameters_share_route_guard_and_ability_identity() {
++    let source = r#"<?php
++use Illuminate\Support\Facades\Route;
++use Illuminate\Support\Facades\Gate;
++Gate::define('publish',fn()=>true);
++Route::get('/test',fn()=>null)->middleware(["auth\x3aad\155in", "can:pu\x62lish", "auth:mis\163ing"]);
++"#;
++    let (backend, _dir, uri) = open_workspace(source).await;
++    for (prefix, key, raw, count) in [
++        (r#"ad\155"#, "admin", r#"ad\155in"#, 2),
++        (r#"pu\x62"#, "publish", r#"pu\x62lish"#, 2),
++    ] {
++        let position = position_after(source, prefix);
++        let hover = backend
++            .handle_hover(uri.as_str(), source, position)
++            .unwrap();
++        assert!(hover_text(hover).contains(key));
++        let refs = backend
++            .find_references(uri.as_str(), source, position, true)
++            .unwrap();
++        assert_eq!(refs.len(), count, "{refs:?}");
++        assert!(
++            refs.iter()
++                .any(|reference| reference.uri == uri
++                    && text_in_range(source, reference.range) == raw)
++        );
++    }
++    let mut diagnostics = Vec::new();
++    backend.collect_slow_diagnostics(uri.as_str(), source, &mut diagnostics);
++    let missing = diagnostics
++        .iter()
++        .find(|diagnostic| {
++            diagnostic.message.contains("missing") && diagnostic.message.contains("guard")
++        })
++        .expect("diagnostic uses decoded guard name");
++    assert_eq!(text_in_range(source, missing.range), r#"mis\163ing"#);
++    assert!(
++        !diagnostics
++            .iter()
++            .any(|diagnostic| diagnostic.message.contains("ad\\155in")
++                || diagnostic.message.contains("pu\\x62lish"))
++    );
++}
++
++#[tokio::test]
++async fn encoded_controller_guard_spans_refresh_after_same_length_body_changes() {
++    let original = r#"<?php
++namespace Illuminate\Routing {class Controller {public function middleware($middleware) {}}}
++namespace App {class GuardController extends \Illuminate\Routing\Controller {
++public function boot() {$this->middleware("auth:ad\x6din");}
++}}
++"#;
++    let (backend, _dir, uri) = open_workspace(original).await;
++    for (index, source, key) in [
++        (0, original.to_string(), "admin"),
++        (1, original.replace(r#"\x6d"#, r#"\x78"#), "adxin"),
++        (2, original.to_string(), "admin"),
++    ] {
++        if index > 0 {
++            backend
++                .did_change(DidChangeTextDocumentParams {
++                    text_document: VersionedTextDocumentIdentifier {
++                        uri: uri.clone(),
++                        version: index + 1,
++                    },
++                    content_changes: vec![TextDocumentContentChangeEvent {
++                        range: None,
++                        range_length: None,
++                        text: source.clone(),
++                    }],
++                })
++                .await;
++        }
++        let position = position_after(&source, "auth:ad");
++        let hover = backend
++            .handle_hover(uri.as_str(), &source, position)
++            .unwrap();
++        assert!(hover_text(hover).contains(key));
++        let definition = backend
++            .goto_definition(GotoDefinitionParams {
++                text_document_position_params: TextDocumentPositionParams {
++                    text_document: TextDocumentIdentifier { uri: uri.clone() },
++                    position,
++                },
++                work_done_progress_params: Default::default(),
++                partial_result_params: Default::default(),
++            })
++            .await
++            .unwrap();
++        assert_eq!(definition.is_some(), key == "admin");
++    }
++}
++
++#[tokio::test]
++async fn encoded_guard_literals_keep_dynamic_and_foreign_boundaries() {
++    let source = r#"<?php
++namespace Illuminate\Routing {class Controller {public function middleware($middleware) {}}}
++namespace App {
++class Foreign {public function middleware($middleware) {} public function boot() {
++$this->middleware("auth:ad\x6din");
++}}
++class StaticController extends \Illuminate\Routing\Controller {public static function boot() {
++$this->middleware("auth:ad\x6din");
++}}
++class GuardController extends \Illuminate\Routing\Controller {public function boot() {
++$this->middleware('auth:ad\x6din');
++$guard='admin';$this->middleware("auth:$guard");
++}}
++}
++"#;
++    let (backend, dir, uri) = open_workspace(source).await;
++    let config_uri = Url::from_file_path(dir.path().join("config/auth.php")).unwrap();
++    let refs = backend
++        .find_references(
++            config_uri.as_str(),
++            AUTH_CONFIG,
++            position_of_config_key(AUTH_CONFIG, "admin"),
++            true,
++        )
++        .unwrap();
++    assert_eq!(refs.len(), 1, "no decoded admin caller exists: {refs:?}");
++    let mut diagnostics = Vec::new();
++    backend.collect_slow_diagnostics(uri.as_str(), source, &mut diagnostics);
++    let guards: Vec<_> = diagnostics
++        .iter()
++        .filter(|diagnostic| diagnostic.message.contains("guard"))
++        .collect();
++    assert_eq!(
++        guards.len(),
++        1,
++        "only the literal single-quoted key is invalid: {guards:?}"
++    );
++    assert_eq!(text_in_range(source, guards[0].range), r#"ad\x6din"#);
++}

@@ -15,6 +15,68 @@ slice, commit and push it, and retain only the latest generated app. Native UI
 cases remain deferred/unverified; earlier native-first blocking checkpoints are
 historical and no longer prevent independent implementation.
 
+Engine source slice124 (2026-11-17, verified inactive candidate): fix middleware
+read navigation that used raw PHP spelling instead of its runtime value. The
+original Backend test fails for `auth:ad\x6din`; signed App97's actual stdio hover
+also displays the raw key instead of `admin`. An initial unqualified exact test
+filter selects zero tests; the emitted integration executable then reproduces the
+intended single-test failure. Preserve both records and the packaged negative.
+
+Reuse the PHP string decoder with compact source-run mapping, require agreement
+with the parser's runtime value, split decoded middleware names/parameters and
+publish exact raw ranges through existing canonical resource and receiver paths.
+Ordinary quoted static escapes, encoded colon/comma separators, guard names and
+`can:` abilities share hover, definitions, references and diagnostics. Dynamic
+expressions and foreign/static receivers remain excluded; single quotes retain
+PHP's own escape semantics. Completion still refuses unsafe encoded suffix edits.
+Nine focused integration checks pass (4 new middleware tests plus5 existing
+encoded-edit controls);2 new decoder tests cover escape/Unicode ranges and compact
+mapping over long ordinary text. Same-length unsaved body changes retire old keys.
+
+Patch0158 replays exactly into immutable source
+artifacts/phpantom/1756b1f920c1-c3d0c403bfd5-verified. Series SHA256:
+c3d0c403bfd52c3ea0ddd300a835452b56d55d46ee37e9625d01e718cbdef3ba.
+Full engine18551 tests pass/17 ignored, plus2 bounded child checks. Standard and
+mem-audit all-target Clippy, the required worktree Clippy/fmt pass, source
+fingerprint verification and pinned default build recipe pass. All13 PHP playground
+and Laravel example files pass syntax checks; playground runtime assertions and
+all4 new integration fixtures pass. Owned PHP8.4 confirms the expected decoded
+runtime values. Update the Laravel example and unreleased changelog. Preserve
+source acquisition, MIT/Apache licenses, unchanged stub pin and build provenance.
+
+Final default-profile158 arm64 binary SHA256:
+d53f9cba91c852e0612174a3fd3fb3855a2448818db751ba83228fe2a542600a.
+Actual stdio checks against that exact binary pass on disposable and real
+Laravel13.37 fixtures: escaped names/separators, Unicode/quote/dollar guard names,
+UTF-16 raw reference ranges, definitions/hover, unsaved config/caller updates and
+restart back to disk state. Existing typed-guard compatibility checks pass on the
+real fixture. A supplemental encoded `can:` ability probe verifies hover,
+references and the exact declaration point. Correct its initial probe-only word-
+range expectation and preserve that failed receipt. All7 accepted stdio children
+exit0 and fixture originals/borrowed inputs stay unchanged. The real Laravel analyzer retains exactly3 intentional diagnostics
+(expected exit1). Canonical artifacts/engines/0.11.1-openstorm.158 contains the
+binary, licenses, provenance, toolchain and full acceptance receipt.
+
+Candidate158 stays inactive; source/resource157 and sole signed App97 remain
+unchanged. No main client/editor runtime changes: reuse slice122's frontend13027/
+6 skipped, workspace5047/191 ignored/1 excluded,74 actual157 client/host and79
+controlled-browser cases, plus App97's source123 packaging/embedded checks. These
+do not establish158 client, packaged or native acceptance. Native checks stay
+user-skipped. Main client adoption, packaging, middleware aliases, whitespace
+normalization and large-project performance remain unaccepted; all69 statuses stay
+67 partial/2 user-deferred. Remove3,789,548KiB of owned compiler output and41,304KiB
+of redundant mutable source; preserve immutable sources, canonical engines,
+receipts, PHP Workbench and earlier evaluation evidence. App97's deep/strict
+signature and original executable hash still verify.
+
+Evidence: artifacts/checks/slice124-source-freeze.json, slice124-red-exact.log,
+slice124-wire-red157.json, slice124-green3.log, slice124-engine-gates.json,
+slice124-source-test-summary.json, slice124-example-checks.json,
+slice124-fixture-syntax.json, slice124-php-decoding.json, slice124-wire-gates.json,
+slice124-{encoded-wire-final,encoded-laravel-final,guard-compat}.json,
+slice124-real-analyzer-control.json, slice124-ability-wire2.json and
+slice124-retention.json.
+
 Packaging slice123 (2026-11-17, local artifact verified): promote the
 source121/client122 verified engine157 as the bundled default in local App97.
 Source pin and157-patch digest match the immutable source candidate; the arm64

@@ -15,6 +15,60 @@ slice, commit and push it, and retain only the latest generated app. Native UI
 cases remain deferred/unverified; earlier native-first blocking checkpoints are
 historical and no longer prevent independent implementation.
 
+Package slice134 (2026-11-17, local signed App0.1.100 verified): promote
+source/stdio/client-verified PHPantom161 into the default resource pin and app.
+Checksum, provenance, immutable-tree fingerprint and bundled license contents agree.
+Keep cz.thinky.openstorm, separate settings/caches, .openidea compatibility, default
+appearance/keymaps/autosave, save-conflict protection and existing debugger scope.
+Updater endpoints remain empty. Only engine resources/pins and app version metadata
+change;44 local Cargo packages move0.1.99 to0.1.100, with external dependencies and
+plugin API1.10.0 snapshot unchanged. The new app also contains merged upstream132.
+
+Affected checks pass: bundled-engine checksum, typecheck, lint, formatting, knip,
+release-version tests, Rust formatting, all3 bundled-server resource/version/path
+checks, PHP-default/optional-companion settings and ide-tools all-target Clippy.
+Reuse unchanged slice133's5076 workspace Rust passes/198 ignored/one HTTP exclusion
+and81 actual161 client/host passes; merge132's13136 frontend/6 skipped and106 controlled
+browser passes. Engine source131's18582 ordinary/17 ignored plus2 bounded checks,
+default/memory-audit Clippy, exact replay, runtime fixture assertions and build remain
+valid for this identical executable/source. These evidence layers do not establish
+native UI or whole-area acceptance.
+
+Build an arm64 development/debug Apple Silicon app; production frontend bundle and
+Safari15.4 startup/syntax checks pass. Ad-hoc sign and verify deep/strict signature.
+CFBundleShortVersionString0.1.100, identifier and minimum-OS13.0 metadata verify;
+macOS13 runtime remains untested. Bundle: artifacts/batches/0.1.100/OpenStorm.app.
+Main executable SHA256: b54c8072d1bed9af2975e207d91c42ad257c8c0877695986aa56076fc90faa71.
+Embedded/default PHPantom0.11.1-openstorm.161 SHA256:
+ea579db0ecf7fb174190f2bc7b7ee2d84994e611e6b413c449cc84a3bbe1f5fb.
+Source/build receipt hashes match, apart from post-build progress documentation.
+
+Actual embedded-server probes pass for plain/Composer and real Laravel13.37 PHP
+intelligence, encoded/typed guards, aliases and middleware exclusions, concrete/magic
+argument binding, valid receiver unions, first class publication and unsaved parent
+refresh. Shared stdio controls disable project tools and empty server PATH. Preserve
+multi-project ownership, deletion/recreation/restart, stale registration refusal and
+checked class/FQN/namespace safeguards with named ::class positive edits and syntax
+checks. Analyzer retains exactly3 intentional diagnostics (expected CLI exit1).
+Owned/borrowed inputs remain intact and children exit0. An exclusions-runner receipt
+reader initially mishandles the union report schema; retain its failed harness log,
+correct validation and resume remaining probes without rebuilding the product.
+Signature remains valid after embedded checks. These protocol/CLI probes do not
+establish packaged GUI acceptance.
+
+Keep App99 until App100's signature/build receipt succeeds, then remove the older app
+and redundant staging bundle. The recipe cleans owned compiler output; remove generated
+dist after acceptance. Only App100 remains; preserve canonical engines/immutable source,
+provenance/licenses, Workbench, fixtures and earlier evaluation receipts. No install,
+profile migration, notarization, public release, updater activation or native app launch.
+Native checks remain user-skipped; all69 area statuses stay67 partial/2 user-deferred.
+Continue remaining Laravel navigation gaps in the next small source slice. Commit/push
+this package slice and verify the exact remote ref and clean worktree.
+
+Evidence: artifacts/checks/slice134-{promotion,identity-provenance,gates,package-pipeline,
+packaged-check,embedded,packaged-aliases,exclusions,retention,delivery}.json, per-stage logs
+and artifacts/batches/0.1.100/{build-receipt,retention}.json.
+
 Client/host slice133 (2026-11-17, verified;161 inactive): exercise route
 middleware exclusions through OpenStorm's production document and LSP paths
 (FEAT-030/066). Add two real-engine host regressions covering native/magic/case

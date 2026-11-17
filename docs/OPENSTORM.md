@@ -15,6 +15,63 @@ slice, commit and push it, and retain only the latest generated app. Native UI
 cases remain deferred/unverified; earlier native-first blocking checkpoints are
 historical and no longer prevent independent implementation.
 
+Package slice139 (2026-11-17, signed local App0.1.101 verified): promote
+source/stdio/host-verified PHPantom163 into the default resource pin and signed app.
+This includes resource middleware exclusions from162 and managed macOS stdio descriptor
+cleanup from163. Preserve OpenStorm branding/identifier, separate settings/caches,
+.openidea compatibility, default appearance/keymaps/autosave, save-conflict protection
+and existing debugger scope. Updater endpoints remain empty. The app also contains
+the upstream merge through182285647. Only version metadata, engine resources/pins and
+this progress record change;45 local Cargo packages move0.1.100 to0.1.101. External
+dependencies and plugin API1.10.0 snapshot stay unchanged.
+
+Affected checksum/source-fingerprint, typecheck, lint, formatting, knip, version tests,
+Rust formatting, all3 bundled-server resource/version/path checks, PHP-default/optional
+companion settings and ide-tools all-target Clippy pass. Reuse slice138's5124 serialized
+workspace passes/201 ignored/one HTTP exclusion,84 actual163 host/client passes and
+13374 frontend passes/6 skipped. Retain its existing default-parallel CLI socket-test
+limitation. Source137's18588 ordinary engine tests/17 ignored plus2 bounded tests,
+default/memory-audit Clippy, exact replay/build and stdio controls remain valid for
+this identical engine executable. These layers do not establish native UI acceptance.
+
+Build a development/debug Apple Silicon app with production frontend assets and
+Safari15.4 checks. Ad-hoc sign; verify deep/strict signature, arm64 architecture,
+OpenStorm identifier and CFBundleShortVersionString0.1.101. Minimum-OS13.0 metadata
+verifies; macOS13 runtime remains untested. Bundle:
+artifacts/batches/0.1.101/OpenStorm.app.
+Main executable SHA256: f5fdb6e5ef496d79b3e6caacc2174f63fbcde8df8d5d7d566e24e27750e3ba34.
+Embedded/default PHPantom0.11.1-openstorm.163 SHA256:
+780e787841874ff5725fd668e3ee0fbcea4a1f8509177cd66e6493c4f063b2aa.
+Source/build receipt fingerprints match except this post-build progress update.
+Bundled MIT/Apache notices retain their hashes; PHPantom's MIT notice matches the
+pinned source license. OpenIDEA copyright attribution and compatibility header stay.
+
+All12 embedded stage groups pass against the actual copied engine: plain/Composer and
+Laravel13.37 intelligence; encoded guards, aliases and middleware exclusions; native
+resource/singleton method/argument binding; multi-project and unsaved source freshness;
+checked class/FQN/namespace safeguards; and inherited descriptor cleanup. Both ordinary
+and sparse injected pipe writers and unrelated files release while definitions/hover
+continue; children exit0 and owned/borrowed originals remain unchanged. All115 PHP
+syntax checks and348 Laravel runtime assertions pass. Analyzer retains exactly3
+intentional diagnostics (expected CLI exit1). A final summary lookup initially uses a
+nonexistent short receipt name; read the actual checks/runtime receipts without
+rerunning or weakening successful probes. Signature still verifies after all checks.
+
+Retain App100 until App101's signature/build receipt succeeds, then remove the older
+app and duplicate staging bundle. Clean8.2GiB compiler output and68,777,218 frontend
+bytes; only App101 remains. Preserve canonical source/engine provenance, Workbench,
+fixtures and evaluation evidence. No install, app UI launch, profile migration,
+notarization, public release or updater activation. Native UI remains user-skipped;
+all69 statuses stay67 partial/2 user-deferred, with F27/FEAT-068 transport/provider/
+platform gaps retained. Commit/push this package slice, verify exact remote ref and
+clean worktree, then continue remaining Laravel navigation in small slices.
+
+Evidence: artifacts/checks/slice139/{promotion-input,version-proof,identity-provenance,
+gates,package,embedded,postprocessing-check}.json; slice139-{packaged-check,embedded,
+packaged-cli,packaged-aliases,exclusions,fd,fd-sparse,new-example-checks,retention}.json;
+retained stage logs; artifacts/batches/0.1.101/{build-receipt,retention}.json; and the
+final slice139/delivery.json plus canonical163 packaged sidecar.
+
 Client/host slice138 (2026-11-17, verified;163 inactive): verify source163's managed
 macOS stdio descriptor boundary through the production host launch path (FEAT-068).
 Inject a suite-owned FIFO writer at sparse fd128 before exec, preserving the host's

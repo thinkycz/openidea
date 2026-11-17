@@ -15,6 +15,42 @@ slice, commit and push it, and retain only the latest generated app. Native UI
 cases remain deferred/unverified; earlier native-first blocking checkpoints are
 historical and no longer prevent independent implementation.
 
+Upstream follow-up merge (2026-11-17, automated acceptance verified): integrate18
+commits from l0ng-ai/openidea through577193d3878e896b7e01b50812e475ef6ad53b37.
+Import plugin editor-panel APIs (caret/selections, semantic highlighting, folded/
+wrapped rows, problems, VCS markers and tab size), curved VCS merge bands, bounded
+rainbow-bracket scanning, color-scheme/spelling/clipboard fixes, Doctrine XML schema
+catalog support, unused JDTLS-cache cleanup and Gradle configuration-cache/older-version
+fixes. Preserve upstream attribution/schema notice. Retain OpenStorm0.1.98 identity,
+separate data/settings, active158, disabled upstream updates, save-conflict protection
+and inactive source160 from35b100dc5. Resolve four version-only conflicts with the
+OpenStorm Cargo/package/Tauri metadata and lock. No dependency upgrades or newly
+added debugger functionality; the earlier stream-tracing exclusion remains intact.
+
+Merged-tree verification passes: typecheck, lint, format, knip, 13122 frontend
+cases/6 skipped, production frontend build and Safari15.4 startup/bundle checks;
+Rust workspace tests 5070 passed/194 ignored, retaining the existing single
+`http_list_and_run_require_confirmation` exclusion; workspace/all-target Clippy,
+regenerated bindings and Rust formatting. Generated bindings remain unchanged.
+95 browser cases pass across editor/code insight, Laravel navigation, usages,
+diff/merge, plugin views/details/markers and terminal clipboard, using controlled
+IPC/in-memory backends. 77 actual158 client/host checks pass from exact executables
+emitted by this workspace build: edits, completion, handler/URL navigation, guards,
+source freshness and conflict protection. Fixture snapshots remain unchanged.
+These checks are not native, real-service or160 client acceptance.
+
+The sole App98's deep/strict signature and executable hash verify unchanged;
+active158 and canonical160 checksums still match provenance. No new app bundle,
+installation, publication or updater activation. Native checks remain explicitly
+user-skipped. After acceptance removed the owned Cargo cache
+(28,664,308,746 bytes) and dist (68,381,369 bytes), retaining
+only App98 plus canonical engine/source/provenance, Workbench, fixtures and earlier
+receipts. All69 statuses remain67 partial/2 user-deferred; source160 client adoption
+and the outstanding Laravel/native/platform cases remain separate work.
+
+Evidence: artifacts/checks/upstream-577193d38-{resolution,gates,browser,client-host,
+summary,retention}.json and individual gate/test logs.
+
 Engine source slice128 (2026-11-17, source/stdio verified; inactive): prevent
 class/namespace renames and class moves from stranding literal middleware targets
 in typed `bootstrap/app.php` alias registrations (FEAT-011/022/030/066). Reuse the

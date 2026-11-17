@@ -15,6 +15,64 @@ slice, commit and push it, and retain only the latest generated app. Native UI
 cases remain deferred/unverified; earlier native-first blocking checkpoints are
 historical and no longer prevent independent implementation.
 
+Engine source slice140 (2026-11-17, verified;164 inactive): follow static
+middleware alias declarations in conventional app/Http/Kernel.php, supporting both
+`$middlewareAliases` and `$routeMiddleware`. Confirm the owning class's Kernel ancestry
+through the shared resolver. Definitions, hover and references preserve encoded
+source spelling and UTF-16 positions. Dirty imports, alias keys and parent classes
+refresh unchanged callers. Duplicate static registrations stay separate, without
+inventing runtime precedence. Refuse checked class/namespace edits that would strand
+literal targets or unresolved maps; named `::class` targets remain renameable.
+
+The canonical163 stdio control lacks Kernel navigation. Two new public-handler
+regressions first fail for missing navigation and unsafe partial class rename. The
+expanded six-test run then exposes a zero-width declaration reference. Fix that
+shared path for bootstrap and Kernel aliases, preserving point definitions and full
+raw reference ranges. Strengthen the existing encoded bootstrap reference test.
+The full suite then exposes alias-key rename relying on zero-width ranges for
+refusal; add an explicit guarded refusal while registration discovery remains
+incomplete, and retain prepare-rename rejection. A real wire probe also exposes
+a hardcoded bootstrap label for Kernel aliases; report the actual registration
+files and assert single/multiple-source hover labels. Normalize standard single
+Location responses and inspect Markdown payloads in the wire harness. All 18,594
+ordinary engine tests pass (17 ignored), plus 2 bounded child checks. Default and
+mem-audit release all-target Clippy and formatting pass. Replay patch0164 from
+the pinned archive and prior163 series; source bytes match the scratch changes,
+then build the default executable with the reproducible recipe. Cargo.toml,
+Cargo.lock, build.rs and MIT/stubs license inputs remain unchanged.
+
+All 18 final executable-bound stdio stage groups pass: Kernel alias navigation,
+hover, references, same-length dirty updates, checked rename refusals/safe edits and
+stale-source rejection; descriptor isolation; plain/Composer and real Laravel 13.37
+resource/exclusion/guard/encoded navigation; receiver and multi-project freshness;
+and class/FQN/namespace refactor safeguards. Proposed edits pass PHP syntax checks;
+owned engine children exit 0 and original fixture inputs remain unchanged. All 12
+plain-PHP syntax checks and runtime assertions pass. The Laravel example has 116
+syntax-valid files and 350 runtime assertions; analyzer output retains exactly 3
+intentional diagnostics (expected exit 1).
+
+Canonical inactive PHPantom0.11.1-openstorm.164 SHA256:
+7282b77b626a53fa5621257de10aaca1fef40d2a8181d5aae6d0018d8c475f38.
+Source series SHA256: c0f4bbcf42baa28c6d82b7231ca0891ae82c5e7f3b72c869bf49520fc7f5ea1c.
+Candidate: artifacts/engines/0.11.1-openstorm.164/phpantom_lsp. Source/client and
+packaging remain separate slices. Active App101/default resource163 hashes and
+signature are unchanged; App101 remains the sole generated app. Reuse unchanged
+slice138 frontend/client/workspace and slice139 package evidence, retaining the
+known default-parallel CLI socket-test limitation. Native UI remains user-skipped.
+Removed 2.2 GiB of compiler output, the scratch checkout and three superseded
+source freezes after verified archival. Preserve canonical engines, source/provenance,
+Workbench and evaluation evidence.
+All 69 area statuses stay 67 partial/2 user-deferred. Custom bound Kernel paths and
+parent/trait-owned maps remain L62; builtin/group catalogs, completion/validation,
+ordering and transformations remain in L61. Commit/push this source slice and verify
+the exact remote ref and clean worktree before client adoption.
+
+Evidence: artifacts/checks/slice140-{source-freeze,engine-gates,source-test-summary,
+wire-gates,baseline163,kernel-final,kernel-refactors,new-example-checks,playground,
+retention}.json; slice140-final-*.log; slice140/{red-tests,green-tests,
+clippy-fix-attempt5}.log; slice140/{postprocessing-check,delivery}.json; retained
+stdio stage receipts and canonical164 build receipt.
+
 Package slice139 (2026-11-17, signed local App0.1.101 verified): promote
 source/stdio/host-verified PHPantom163 into the default resource pin and signed app.
 This includes resource middleware exclusions from162 and managed macOS stdio descriptor

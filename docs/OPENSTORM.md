@@ -15,6 +15,50 @@ slice, commit and push it, and retain only the latest generated app. Native UI
 cases remain deferred/unverified; earlier native-first blocking checkpoints are
 historical and no longer prevent independent implementation.
 
+Client/host slice136 (2026-11-17, verified;162 inactive): exercise native resource
+middleware exclusions through production host/client/document paths (FEAT-030/066).
+Add two real-engine regressions for consumed positional/named arguments, both fluent
+factories, raw UTF-16 references, guard/ability definitions, alias rename refusal,
+same-length unsaved registrations, first receiver publication, custom overrides,
+native method removal/restoration and dirty-overlay restart. Definitions and hover
+refresh without saving; owned fixture disk contents stay intact and server cleanup
+clears process ids. All26 literal/rendered PHP syntax checks pass. No new environment
+files, application UI, settings, bindings or debugger scope.
+
+The exact final workspace-emitted executable fails both new cases at the intended
+missing-feature assertions on canonical161 and passes both on checksum-bound162.
+All83 actual162 client/host cases pass (2 URL,10 edit,19 completion,2 handler,50 client),
+including guarded edits, imports/rename/history, save-conflict consent, Composer/
+Laravel inference, stale-result refusal and restart. Original/borrowed fixtures and
+runtime source hashes remain intact. Final workspace tests pass5076 with200 ignored;
+retain the existing explicit exclusion of http_list_and_run_require_confirmation.
+All-target workspace Clippy with warnings denied, Rust/frontend formatting pass.
+Reuse unchanged frontend/browser and source135's18586 engine/17 ignored plus2 bounded
+checks and348 Laravel runtime assertions; these are not native162 acceptance.
+
+The first full client attempt exposes a fixture-checker hang before rename: live
+samples show PHP waiting for stdin EOF while PHPantom owns its inherited pipe writer
+(fd57). Stop only the proven stuck suite-owned checker and retain the interrupted
+run (18 other cases pass); do not count it as acceptance. Use owned temporary input/
+output files and a30-second deadline in Fixture::lint so inherited pipe ends cannot
+block its EOF/exit observation. Rebuild and rerun workspace, controls and all83 cases.
+A separate real-PHP malformed-input control confirms syntax failures still reject,
+with file arguments/output and no stdin pipe. Broader macOS production child-descriptor
+isolation remains an explicit FEAT-068 gap for a separate follow-up; this fixture fix
+does not establish process-isolation parity.
+
+Canonical162/source/provenance remain intact, client-verified and inactive pending
+packaging. Keep active161 and sole signed App0.1.100 unchanged; recheck main/engine
+hashes and deep/strict signature. Clean owned compiler output after acceptance;
+preserve canonical engines/source, Workbench, fixtures and evaluation receipts.
+No app rebuilt/installed; native checks remain user-skipped. All69 area statuses stay
+67 partial/2 user-deferred. Commit/push this small test/harness/documentation slice,
+verify the exact remote ref and clean worktree, then continue the descriptor follow-up.
+
+Evidence: artifacts/checks/slice136-{fixture-syntax,pipe-inheritance,lint-control,
+controls,gates,workspace-totals,client-host,retention,delivery}.json, retained samples,
+interrupted-attempt logs and final per-stage results.
+
 Engine source slice135 (2026-11-17, source/stdio verified;162 inactive): add
 `withoutMiddlewareFor(methods, middleware)` alias/auth-guard/ability definitions,
 hover and references on native resource/singleton registrations (FEAT-030/066).

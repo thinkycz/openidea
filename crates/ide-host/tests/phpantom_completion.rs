@@ -103,16 +103,38 @@ impl Fixture {
         let php = std::env::var_os("OPENSTORM_TEST_PHP_BIN")
             .map(PathBuf::from)
             .unwrap_or_else(|| repo.join("artifacts/toolchains/php-8.4.23-static/php"));
+        // Concurrent server starts can inherit pipe ends on macOS and prevent EOF.
+        let mut source = tempfile::Builder::new().suffix(".php").tempfile().unwrap();
+        source.write_all(text.as_bytes()).unwrap();
+        source.flush().unwrap();
+        let stdout = tempfile::NamedTempFile::new().unwrap();
+        let stderr = tempfile::NamedTempFile::new().unwrap();
         let mut child = std::process::Command::new(php)
             .args(["-n", "-l"])
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
+            .arg(source.path())
+            .stdin(Stdio::null())
+            .stdout(Stdio::from(stdout.reopen().unwrap()))
+            .stderr(Stdio::from(stderr.reopen().unwrap()))
             .spawn()
             .unwrap();
-        child.stdin.take().unwrap().write_all(text.as_bytes()).unwrap();
-        let output = child.wait_with_output().unwrap();
-        assert!(output.status.success(), "invalid PHP fixture: {}", String::from_utf8_lossy(&output.stderr));
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        let status = loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                break status;
+            }
+            if std::time::Instant::now() >= deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("PHP fixture syntax check exceeded 30 seconds");
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        assert!(
+            status.success(),
+            "invalid PHP fixture: {}{}",
+            std::fs::read_to_string(stdout.path()).unwrap(),
+            std::fs::read_to_string(stderr.path()).unwrap(),
+        );
     }
 
     async fn complete(&self, position: Pos) -> CompletionList {

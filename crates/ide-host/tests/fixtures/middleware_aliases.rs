@@ -220,7 +220,7 @@ async fn alias_target_rename_refuses_partial_plans_and_preserves_reviewed_histor
     f.finish(outcome).await;
 }
 
-fn exclusion_fixture(source: &str) -> Fixture {
+fn exclusion_files() -> Vec<(String, String)> {
     let mut files = fixture_files();
     files.extend([
         ("framework/Routing/Route.php".into(), r#"<?php namespace Illuminate\Routing; class Route {public function withoutMiddleware($middleware): static {return $this;}}"#.into()),
@@ -230,7 +230,11 @@ fn exclusion_fixture(source: &str) -> Fixture {
         ("framework/Routing/PendingSingletonResourceRegistration.php".into(), r#"<?php namespace Illuminate\Routing; class PendingSingletonResourceRegistration {public function withoutMiddleware($middleware): static {return $this;}}"#.into()),
         ("framework/Support/Facades/Route.php".into(), r#"<?php namespace Illuminate\Support\Facades; class Route {public static function get($uri,$action): \Illuminate\Routing\Route {return new \Illuminate\Routing\Route;} public static function prefix($prefix): \Illuminate\Routing\RouteRegistrar {return new \Illuminate\Routing\RouteRegistrar;}}"#.into()),
     ]);
-    Fixture::new_at(source, &files, "routes/web.php")
+    files
+}
+
+fn exclusion_fixture(source: &str) -> Fixture {
+    Fixture::new_at(source, &exclusion_files(), "routes/web.php")
 }
 
 fn exclusion_position(text: &str, prefix: &str) -> Pos {
@@ -391,5 +395,176 @@ function remove(\App\RouteBase $route) {$route->withoutMiddleware("au\x64ited");
     })
     .catch_unwind()
     .await;
+    f.finish(outcome).await;
+}
+
+fn resource_exclusion_fixture(source: &str) -> Fixture {
+    let mut files = exclusion_files();
+    for (name, text) in &mut files {
+        if matches!(
+            name.as_str(),
+            "framework/Routing/PendingResourceRegistration.php"
+                | "framework/Routing/PendingSingletonResourceRegistration.php"
+        ) {
+            text.insert_str(
+                text.rfind('}').unwrap(),
+                " public function withoutMiddlewareFor($methods,$middleware): static {return $this;}",
+            );
+        }
+        if name == "framework/Support/Facades/Route.php" {
+            text.insert_str(text.rfind('}').unwrap(), " public static function resource($name,$controller): \\Illuminate\\Routing\\PendingResourceRegistration {return new \\Illuminate\\Routing\\PendingResourceRegistration;} public static function singleton($name,$controller): \\Illuminate\\Routing\\PendingSingletonResourceRegistration {return new \\Illuminate\\Routing\\PendingSingletonResourceRegistration;}");
+        }
+    }
+    files.extend([
+        ("config/auth.php".into(), "<?php return ['guards'=>['admin'=>[], 'staff'=>[]]];".into()),
+        (
+            "app/Http/Controllers/ReportController.php".into(),
+            "<?php namespace App\\Http\\Controllers; class ReportController {public function show() {return null;}}"
+                .into(),
+        ),
+    ]);
+    Fixture::new_at(source, &files, "routes/web.php")
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires PHPantom162 and owned PHP syntax-check executable"]
+async fn resource_exclusions_binding_ranges_and_unsaved_registration_survive_restart() {
+    let source = r#"<?php
+use Illuminate\Support\Facades\Route;
+new \App\Http\Middleware\Audit;
+\Illuminate\Support\Facades\Gate::define('edit-report',fn()=>true);
+function excluded(\Illuminate\Routing\PendingResourceRegistration $resource, \Illuminate\Routing\PendingSingletonResourceRegistration $singleton, \Illuminate\Routing\PendingResourceRegistration|\Illuminate\Routing\PendingSingletonResourceRegistration|null $pair, \Illuminate\Routing\Route $route, array $arguments) {
+ /* 😀 */ $resource->withoutMiddlewareFor('show', "au\x64ited:encoded");
+ $resource->withoutMiddlewareFor(methods: 'show', middleware: 'audited:named');
+ $resource->withoutMiddlewareFor(middleware: 'audited:reordered', methods: ['show']);
+ $resource->WITHOUTMIDDLEWAREFOR('show', 'audited:case');
+ $singleton->withoutMiddlewareFor(['show'], 'audited:singleton');
+ $pair?->withoutMiddlewareFor('show', 'audited:union');
+ $resource->withoutMiddlewareFor('audited:selector', 'audited:extra', 'audited:ignored');
+ $resource->withoutMiddlewareFor(middleware: 'audited:missing');
+ $resource->withoutMiddlewareFor('show', 'audited:duplicate', middleware: 'audited:ignored');
+ $resource->withoutMiddlewareFor('show', middleware: 'audited:unknown', unknown: true);
+ $resource->withoutMiddlewareFor(...$arguments, middleware: 'audited:unpacked');
+ $route->withoutMiddlewareFor('show', 'audited:foreign');
+ $resource->withoutMiddlewareFor(['show'], middleware: ([...["auth:ad\x6din", 'can:edit-report']]));
+}
+(new \Illuminate\Routing\PendingResourceRegistration)->withoutMiddlewareFor('show', 'audited:constructed');
+Route::resource('reports', \App\Http\Controllers\ReportController::class)->withoutMiddlewareFor('show', 'audited:fluent-resource');
+Route::singleton('report', \App\Http\Controllers\ReportController::class)->withoutMiddlewareFor('show', 'audited:fluent-singleton');
+"#;
+    let f = resource_exclusion_fixture(source);
+    let outcome = std::panic::AssertUnwindSafe(async {
+        let boot = f.root.join("bootstrap/app.php");
+        assert!(!definitions(&f, cursor(source, "Audit;")).await.is_empty(), "ordinary PHP readiness");
+        let consumed = [
+            r#"withoutMiddlewareFor('show', "au\x64"#,
+            "withoutMiddlewareFor(methods: 'show', middleware: 'aud",
+            "withoutMiddlewareFor(middleware: 'aud",
+            "WITHOUTMIDDLEWAREFOR('show', 'aud",
+            "$singleton->withoutMiddlewareFor(['show'], 'aud",
+            "$pair?->withoutMiddlewareFor('show', 'aud",
+            "withoutMiddlewareFor('audited:selector', 'aud",
+            "Registration)->withoutMiddlewareFor('show', 'aud",
+            "Route::resource('reports', \\App\\Http\\Controllers\\ReportController::class)->withoutMiddlewareFor('show', 'aud",
+            "Route::singleton('report', \\App\\Http\\Controllers\\ReportController::class)->withoutMiddlewareFor('show', 'aud",
+        ];
+        for prefix in consumed {
+            let found = definitions(&f, exclusion_position(source, prefix)).await;
+            assert_eq!(found.len(), 1, "resource middleware definition {prefix}: {found:?}");
+            assert_eq!(*found[0].path, boot);
+            assert_eq!(found[0].range.start, cursor(BOOTSTRAP, r"au\x64ited"));
+            assert_eq!(found[0].range.end, found[0].range.start);
+        }
+        for prefix in [
+            "withoutMiddlewareFor('aud",
+            "withoutMiddlewareFor('audited:selector', 'audited:extra', 'aud",
+            "withoutMiddlewareFor(middleware: 'audited:mis",
+            "withoutMiddlewareFor('show', 'audited:dup",
+            "withoutMiddlewareFor('show', 'audited:duplicate', middleware: 'aud",
+            "withoutMiddlewareFor('show', middleware: 'audited:unk",
+            "withoutMiddlewareFor(...$arguments, middleware: 'aud",
+            "$route->withoutMiddlewareFor('show', 'aud",
+        ] {
+            assert!(definitions(&f, exclusion_position(source, prefix)).await.is_empty(), "unconsumed resource {prefix}");
+        }
+        let guard = definitions(&f, exclusion_position(source, r"auth:ad\x6d")).await;
+        assert_eq!(guard.len(), 1, "resource auth guard definition: {guard:?}");
+        assert_eq!(*guard[0].path, f.root.join("config/auth.php"));
+        let ability = definitions(&f, exclusion_position(source, "can:edit-rep")).await;
+        assert_eq!(ability.len(), 1, "resource ability definition: {ability:?}");
+        assert_eq!(*ability[0].path, f.root.join("routes/web.php"));
+        let position = exclusion_position(source, consumed[0]);
+        exclusion_hover(&f, source, consumed[0], "App\\Http\\Middleware\\Audit").await;
+        let refs = ide_host::ops::lsp::lsp_references(
+            &f.host, "main", RequestId::next(), f.doc, position, true, true, true,
+            ide_host::ops::Channel::new(|_| {}),
+        ).await.unwrap();
+        assert!(refs.incomplete.is_none(), "{refs:?}");
+        assert_eq!(refs.locations.len(), consumed.len() + 1, "only consumed resource aliases are references: {refs:?}");
+        let encoded = refs.locations.iter().find(|location| *location.path == f.root.join("routes/web.php") && location.range.start == cursor(source, r"au\x64ited")).expect("encoded resource reference");
+        assert_eq!(encoded.range.end.col - encoded.range.start.col, 10);
+        assert!(f.project.lsp.prepare_rename_details(f.doc, position).await.unwrap().is_none(), "resource alias-key rename must refuse partial edits");
+        let bootstrap = f.project.documents.open(&boot).unwrap();
+        let target = BOOTSTRAP.replace("Middleware\\Audit as", "Middleware\\Trace as");
+        assert_eq!(target.len(), BOOTSTRAP.len());
+        f.project.documents.replace_all(bootstrap.id, &target).unwrap();
+        exclusion_hover(&f, source, consumed[0], "App\\Http\\Middleware\\Trace").await;
+        let missing = target.replace(r"au\x64ited", r"mi\x73sing");
+        assert_eq!(missing.len(), target.len());
+        f.project.documents.replace_all(bootstrap.id, &missing).unwrap();
+        assert!(definitions(&f, position).await.is_empty(), "dirty resource alias registration must retire navigation");
+        f.project.documents.replace_all(bootstrap.id, &target).unwrap();
+        f.project.lsp.restart(f.project.lsp.servers()[0].id).await.unwrap();
+        exclusion_hover(&f, source, consumed[0], "App\\Http\\Middleware\\Trace").await;
+        assert_eq!(std::fs::read_to_string(&boot).unwrap(), BOOTSTRAP);
+        assert_eq!(std::fs::read_to_string(f.root.join("routes/web.php")).unwrap(), source);
+    }).catch_unwind().await;
+    f.finish(outcome).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires PHPantom162 and owned PHP syntax-check executable"]
+async fn resource_exclusions_native_availability_and_unsaved_overrides_survive_restart() {
+    let source = r#"<?php
+new \App\Http\Middleware\Audit;
+function remove(\App\ResourceChild $resource) {$resource->withoutMiddlewareFor('show', "au\x64ited");}
+"#;
+    let f = resource_exclusion_fixture(source);
+    let outcome = std::panic::AssertUnwindSafe(async {
+        assert!(!definitions(&f, cursor(source, "Audit;")).await.is_empty(), "ordinary PHP readiness");
+        let position = exclusion_position(source, r#"withoutMiddlewareFor('show', "au\x64"#);
+        assert!(definitions(&f, position).await.is_empty(), "unknown resource receiver must not invent navigation");
+        let inherited = "<?php namespace App; class ResourceChild extends \\Illuminate\\Routing\\PendingResourceRegistration {}\n";
+        let custom = "<?php namespace App; class ResourceChild extends \\Illuminate\\Routing\\PendingResourceRegistration {public function withoutMiddlewareFor($methods,$middleware): static {return $this;}}\n";
+        Fixture::lint(inherited);
+        Fixture::lint(custom);
+        let path = f.root.join("app/ResourceChild.php");
+        std::fs::write(&path, inherited).unwrap();
+        let child = f.project.documents.open(&path).unwrap();
+        let found = definitions(&f, position).await;
+        assert_eq!(found.len(), 1, "published resource receiver must enable navigation: {found:?}");
+        assert_eq!(*found[0].path, f.root.join("bootstrap/app.php"));
+        f.project.documents.replace_all(child.id, custom).unwrap();
+        assert!(definitions(&f, position).await.is_empty(), "custom resource origin must retire navigation");
+        f.project.lsp.restart(f.project.lsp.servers()[0].id).await.unwrap();
+        assert!(definitions(&f, position).await.is_empty(), "restart must retain the dirty custom origin");
+        f.project.documents.replace_all(child.id, inherited).unwrap();
+        assert_eq!(definitions(&f, position).await.len(), 1);
+        let native_path = f.root.join("framework/Routing/PendingResourceRegistration.php");
+        let native = f.project.documents.open(&native_path).unwrap();
+        let original = f.project.documents.snapshot(native.id).unwrap().text;
+        let missing = r"<?php namespace Illuminate\Routing; class PendingResourceRegistration {public function withoutMiddleware($middleware): static {return $this;}}";
+        Fixture::lint(missing);
+        f.project.documents.replace_all(native.id, missing).unwrap();
+        assert!(definitions(&f, position).await.is_empty(), "missing native method must retire resource semantics");
+        f.project.lsp.restart(f.project.lsp.servers()[0].id).await.unwrap();
+        assert!(definitions(&f, position).await.is_empty(), "restart must retain dirty native-method absence");
+        f.project.documents.replace_all(native.id, &original).unwrap();
+        exclusion_hover(&f, source, r#"withoutMiddlewareFor('show', "au\x64"#, "App\\Http\\Middleware\\Audit").await;
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), inherited);
+        assert_eq!(std::fs::read_to_string(&native_path).unwrap(), original);
+        assert_eq!(std::fs::read_to_string(f.root.join("bootstrap/app.php")).unwrap(), BOOTSTRAP);
+        assert_eq!(std::fs::read_to_string(f.root.join("routes/web.php")).unwrap(), source);
+    }).catch_unwind().await;
     f.finish(outcome).await;
 }

@@ -15,6 +15,61 @@ slice, commit and push it, and retain only the latest generated app. Native UI
 cases remain deferred/unverified; earlier native-first blocking checkpoints are
 historical and no longer prevent independent implementation.
 
+Engine source slice137 (2026-11-17, source/stdio verified;163 inactive): release
+unrelated inherited descriptors at PHPantom's managed macOS stdio startup boundary
+(FEAT-068). Enumerate open descriptors before runtime threads/application resources,
+retain standard input/output/error and the enumeration handle, and close unmarked
+foreign handles. Keep already-CLOEXEC handles untouched. Cleanup errors reject startup
+through stderr/exit1. Explicit CLI commands and TCP do not use this cleanup policy.
+Native argument parsing now precedes runtime construction; allocator tuning still runs
+first. No new setting, process-profile UI or project-tool execution is introduced.
+
+The live136 pipe-owner samples motivate this change. A deterministic162 control keeps
+an injected pipe writer and an unrelated file open while initialization, definition
+and hover work; EOF arrives only after exit. The observation is consistent with the
+[documented macOS pipe-inheritance race](https://github.com/oconnor663/duct.py/blob/master/gotchas.md#preventing-pipe-inheritance-races-on-macos);
+its precise syscall timing was not captured. Inject the resulting descriptor state
+without relying on race timing. The same final compiled Rust test executable fails
+both ordinary/sparse cases at retention on162 and passes both on default-build163.
+Checksum-bound protocol controls prove pipe EOF and file release while the server is
+alive, continued definition/hover, sparse fd128 handling and clean shutdown/exit0.
+Owned witness files remain intact. Do not run startup cleanup after initialization.
+
+All18588 ordinary engine tests pass with17 ignored plus2 bounded checks. Required
+Clippy-fix/format, default and memory-audit all-target release Clippy, source replay/
+fingerprint and default recipe build pass. First harness attempts expose invalid null
+shutdown params and missing replies to server registration requests; retain their
+failed logs and bidirectional trace, correct the minimal client, then verify the full
+frozen suite. These are harness corrections, not suppressed production failures.
+Series SHA256: 0c8bd3997d2217ee5f33113454e8e4546812fee96f00ea90986a7ef8132c4cf0.
+Canonical artifacts/engines/0.11.1-openstorm.163/phpantom_lsp is arm64/version163;
+default-build SHA256: 780e787841874ff5725fd668e3ee0fbcea4a1f8509177cd66e6493c4f063b2aa.
+Preserve pinned source acquisition, version/provenance and MIT/Apache notices.
+Cargo.lock and stub acquisition build.rs are byte-identical to162; only an existing
+rustix API feature is enabled, with no external dependency version changes.
+
+All17 checksum-bound control stages pass: final Rust comparisons, descriptor ownership,
+plain/Composer and real Laravel13.37 resource/exclusion binding and navigation, guards/
+abilities, UTF-16 ranges, unsaved origins/registrations, multi-project lookup/restart,
+checked refactor safeguards and CLI analysis. Plain PHP12 syntax/runtime checks and
+Laravel115 syntax/348 runtime assertions pass; retain exactly3 intentional analyzer
+diagnostics (expected CLI exit1). Protocol children exit0 and owned/borrowed inputs
+remain intact. These are source/stdio checks, not current client/native163 acceptance.
+
+Archive163 inactive pending actual OpenStorm client/host verification and packaging.
+Active resource/source pins remain161 and sole signed App0.1.100 remains unchanged;
+main/engine hashes and deep/strict signature still verify. Clean owned engine compiler
+output and duplicate mutable work after acceptance. Preserve canonical engines/source,
+Workbench, fixtures and evaluation receipts. No new app, installation, migration,
+notarization, release publishing or native UI check. Carry remaining TCP/CLI/platform
+contracts as F27 and broader editor child-launch isolation as FEAT-068; do not claim
+whole-area isolation. All69 statuses stay67 partial/2 user-deferred. Commit/push this
+small source slice, verify the remote ref/clean worktree, then verify client adoption.
+
+Evidence: artifacts/checks/slice137-{research,baseline162,source-freeze,engine-gates,
+source-test-summary,final-rust-controls,wire-gates,fd-final,fd-sparse-final,retention,
+delivery}.json, retained attempt logs/trace, and the canonical163 build receipt.
+
 Client/host slice136 (2026-11-17, verified;162 inactive): exercise native resource
 middleware exclusions through production host/client/document paths (FEAT-030/066).
 Add two real-engine regressions for consumed positional/named arguments, both fluent

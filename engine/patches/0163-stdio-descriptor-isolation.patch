@@ -1,0 +1,302 @@
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -55,7 +55,7 @@
+ # release from their own targets and use the system allocator both in
+ # CI and locally, so they are already representative and are left alone.
+ [target.'cfg(unix)'.dependencies]
+-rustix = { version = "=1.1.4", features = ["fs"] }
++rustix = { version = "=1.1.4", features = ["fs", "try_close"] }
+ 
+ [target.'cfg(target_os = "linux")'.dependencies]
+ mimalloc = { version = "0.1.47", optional = true }
+--- a/docs/CHANGELOG.md
++++ b/docs/CHANGELOG.md
+@@ -1,3 +1,7 @@
++## OpenStorm .163 stdio descriptor ownership
++
++**Isolated stdio startup on macOS.** The language server releases unrelated inherited streams before starting its workers, so another tool can finish reading its input while PHPantom stays running. Standard LSP input/output remain available. Contributed by @thinkycz.
++
+ ## OpenStorm .162 resource middleware exclusions
+ 
+ **Resource middleware navigation.** Names passed to `withoutMiddlewareFor()` navigate to their application registrations, auth guards and abilities, with hover and references. Route-method selectors and custom overrides do not borrow middleware semantics. Contributed by @thinkycz.
+--- a/docs/todo.md
++++ b/docs/todo.md
+@@ -146,6 +146,7 @@
+ | F13 | [Homebrew formula](todo/lsp-features.md#f13-homebrew-formula)                                                                                                                | Medium      | Low         |
+ | F17 | [Wire class move to `workspace/willRenameFiles`](todo/lsp-features.md#f17-wire-class-move-to-workspacewillrenamefiles)                                                       | Medium      | Medium      |
+ | F23 | [Rename a class through its YAML/XML occurrences](todo/lsp-features.md#f23-rename-a-class-through-its-yamlxml-occurrences)                                                  | Medium      | Medium      |
++| F27 | [Define descriptor ownership for remaining launch modes](todo/lsp-features.md#f27-define-descriptor-ownership-for-remaining-launch-modes) | Medium | Medium-High |
+ | F2  | [Partial result streaming via `$/progress`](todo/lsp-features.md#f2-partial-result-streaming-via-progress)                                                                  | Medium      | Medium-High |
+ | F7  | [Evaluatable expression support (DAP integration)](todo/lsp-features.md#f7-evaluatable-expression-support-dap-integration)                                                  | Low-Medium  | Low         |
+ | F15 | [Go-to-declaration](todo/lsp-features.md#f15-go-to-declaration)                                                                                                              | Low-Medium  | Low         |
+--- a/docs/todo/lsp-features.md
++++ b/docs/todo/lsp-features.md
+@@ -641,3 +641,15 @@
+ - Distinguish unsupported cleanup from verified-clean/no-op in the CLI result contract, without reporting invented fixes.
+ 
+ Protect exact Unicode/CRLF source, all used siblings, cancellation and one reviewed transaction; add real legacy/CLI/checked endpoint regressions. These are deferred breadth, not a completed universal-import claim.
++
++## F27. Define descriptor ownership for remaining launch modes
++
++**Impact: Medium · Complexity: Medium-High**
++
++Define and verify inherited-descriptor contracts for TCP, other native platforms,
++and explicit CLI input profiles. Preserve deliberately supplied resources while
++preventing unrelated streams from remaining live. Startup cleanup must precede
++runtime threads and application-owned descriptors; never reuse it after initialization.
++Include deterministic inherited-pipe and sparse-descriptor controls, protocol/CLI
++behavior, startup failure reporting and shutdown. Broader editor tool launchers have
++their own process-boundary acceptance.
+--- a/src/main.rs
++++ b/src/main.rs
+@@ -1,3 +1,6 @@
++#[cfg(target_os = "macos")]
++mod startup;
++
+ #[cfg(not(target_arch = "wasm32"))]
+ use std::net::SocketAddr;
+ 
+@@ -315,6 +318,15 @@
+     // parse data is returned to the OS after indexing rather than held
+     // resident. Must run before the runtime builder below.
+     phpantom_lsp::configure_allocator();
++    let cli = Cli::parse();
++    #[cfg(target_os = "macos")]
++    if cli.command.is_none() && cli.tcp.is_none() {
++        // No runtime, logger or application file descriptors exist yet.
++        if let Err(error) = unsafe { startup::close_inherited_descriptors() } {
++            eprintln!("cannot isolate stdio server descriptors: {error}");
++            std::process::exit(1);
++        }
++    }
+ 
+     // Build the Tokio runtime by hand (rather than `#[tokio::main]`) so
+     // its worker and blocking threads get a larger stack. LSP request
+@@ -329,7 +341,7 @@
+         .thread_stack_size(PARSE_WORKER_STACK_SIZE)
+         .build()
+         .expect("failed to build Tokio runtime");
+-    runtime.block_on(async_main());
++    runtime.block_on(async_main(cli));
+ }
+ 
+ // wasm has no threads, so there is no allocator to tune, no multi-threaded
+@@ -341,11 +353,10 @@
+         .enable_all()
+         .build()
+         .expect("failed to build Tokio runtime");
+-    runtime.block_on(async_main());
+-}
+-
+-async fn async_main() {
+-    let cli = Cli::parse();
++    runtime.block_on(async_main(Cli::parse()));
++}
++
++async fn async_main(cli: Cli) {
+     if cli.no_project_tools {
+         phpantom_lsp::restrict_project_tools();
+     }
+--- /dev/null
++++ b/src/startup.rs
+@@ -0,0 +1,37 @@
++//! Descriptor ownership at the macOS stdio server boundary.
++use std::os::fd::{AsRawFd, BorrowedFd};
++
++/// Release descriptors outside the standard LSP transport.
++///
++/// # Safety
++/// Call once during process startup, before spawning threads or opening any
++/// application-owned descriptors. Only stdin, stdout and stderr may be owned.
++pub(super) unsafe fn close_inherited_descriptors() -> rustix::io::Result<()> {
++    let fd = rustix::fs::open(
++        "/dev/fd",
++        rustix::fs::OFlags::RDONLY | rustix::fs::OFlags::DIRECTORY | rustix::fs::OFlags::CLOEXEC,
++        rustix::fs::Mode::empty(),
++    )?;
++    let mut directory = rustix::fs::Dir::new(fd)?;
++    let directory_fd = directory.fd()?.as_raw_fd();
++    let mut inherited = Vec::new();
++    for entry in directory.by_ref() {
++        let entry = entry?;
++        if let Ok(name) = entry.file_name().to_str()
++            && let Ok(fd) = name.parse::<i32>()
++            && fd > 2
++            && fd != directory_fd
++        {
++            inherited.push(fd);
++        }
++    }
++    for fd in inherited {
++        // The directory remains open. Before threads start, every other
++        // descriptor in this snapshot is still live and has no Rust owner.
++        let flags = rustix::io::fcntl_getfd(unsafe { BorrowedFd::borrow_raw(fd) })?;
++        if !flags.contains(rustix::io::FdFlags::CLOEXEC) {
++            unsafe { rustix::io::try_close(fd)? };
++        }
++    }
++    Ok(())
++}
+--- /dev/null
++++ b/tests/inherited_fds.rs
+@@ -0,0 +1,160 @@
++//! The stdio server must not keep unrelated parent streams alive.
++#![cfg(target_os = "macos")]
++
++use std::io::{BufRead, BufReader, Read, Write};
++use std::os::fd::AsFd;
++use std::process::{Child, ChildStdin, Command, Stdio};
++use std::sync::mpsc::{self, Receiver};
++use std::time::{Duration, Instant};
++
++use serde_json::{Value, json};
++
++struct Server {
++    child: Child,
++    stdin: Option<ChildStdin>,
++    messages: Receiver<Value>,
++}
++
++impl Server {
++    fn send(&mut self, value: Value) {
++        let bytes = serde_json::to_vec(&value).unwrap();
++        let input = self.stdin.as_mut().unwrap();
++        write!(input, "Content-Length: {}\r\n\r\n", bytes.len()).unwrap();
++        input.write_all(&bytes).unwrap();
++        input.flush().unwrap();
++    }
++
++    fn response(&mut self, id: u64) -> Value {
++        let deadline = Instant::now() + Duration::from_secs(15);
++        loop {
++            let message = self
++                .messages
++                .recv_timeout(deadline.saturating_duration_since(Instant::now()))
++                .unwrap();
++            if message.get("method").is_some()
++                && let Some(server_id) = message.get("id")
++            {
++                self.send(json!({"jsonrpc":"2.0","id":server_id,"result":null}));
++                continue;
++            }
++            if message.get("id").and_then(Value::as_u64) == Some(id) {
++                assert!(message.get("error").is_none(), "{message}");
++                return message;
++            }
++        }
++    }
++}
++
++impl Drop for Server {
++    fn drop(&mut self) {
++        let _ = self.child.kill();
++        let _ = self.child.wait();
++    }
++}
++
++fn check_descriptor_release(sparse: bool) {
++    let root = tempfile::tempdir().unwrap();
++    std::fs::write(root.path().join("composer.json"), "{}").unwrap();
++    let (mut reader, writer) = std::io::pipe().unwrap();
++    let inherited = if sparse {
++        rustix::io::fcntl_dupfd_cloexec(writer.as_fd(), 128).unwrap()
++    } else {
++        rustix::io::dup(writer.as_fd()).unwrap()
++    };
++    drop(writer);
++    rustix::io::fcntl_setfd(&inherited, rustix::io::FdFlags::empty()).unwrap();
++    let binary = std::env::var_os("OPENSTORM_FD_TEST_BIN")
++        .map(std::path::PathBuf::from)
++        .unwrap_or_else(|| env!("CARGO_BIN_EXE_phpantom_lsp").into());
++    let mut child = Command::new(binary)
++        .args(["--stdio", "--no-project-tools"])
++        .current_dir(root.path())
++        .stdin(Stdio::piped())
++        .stdout(Stdio::piped())
++        .stderr(Stdio::null())
++        .spawn()
++        .unwrap();
++    drop(inherited);
++    let stdout = child.stdout.take().unwrap();
++    let (sender, messages) = mpsc::channel();
++    std::thread::spawn(move || {
++        let mut output = BufReader::new(stdout);
++        loop {
++            let mut length = None;
++            loop {
++                let mut header = String::new();
++                if output.read_line(&mut header).unwrap_or(0) == 0 {
++                    return;
++                }
++                if header == "\r\n" {
++                    break;
++                }
++                if let Some(value) = header.strip_prefix("Content-Length:") {
++                    length = value.trim().parse::<usize>().ok();
++                }
++            }
++            let mut body = vec![0; length.expect("LSP content length")];
++            if output.read_exact(&mut body).is_err() {
++                return;
++            }
++            if sender.send(serde_json::from_slice(&body).unwrap()).is_err() {
++                return;
++            }
++        }
++    });
++    let stdin = child.stdin.take();
++    let mut server = Server {
++        child,
++        stdin,
++        messages,
++    };
++    server.send(
++        json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{
++            "processId":null,
++            "rootUri":tower_lsp::lsp_types::Url::from_directory_path(root.path()).unwrap(),
++            "capabilities":{"workspace":{"didChangeWatchedFiles":{"dynamicRegistration":true},"didChangeConfiguration":{"dynamicRegistration":true}}}
++        }}),
++    );
++    let initialized = server.response(1);
++    assert!(initialized["result"]["capabilities"].is_object());
++    server.send(json!({"jsonrpc":"2.0","method":"initialized","params":{}}));
++    assert!(server.child.try_wait().unwrap().is_none());
++    let flags = rustix::fs::fcntl_getfl(&reader).unwrap();
++    rustix::fs::fcntl_setfl(&reader, flags | rustix::fs::OFlags::NONBLOCK).unwrap();
++    let deadline = Instant::now() + Duration::from_secs(2);
++    loop {
++        match reader.read(&mut [0]) {
++            Ok(0) => break,
++            Err(error)
++                if error.kind() == std::io::ErrorKind::WouldBlock && Instant::now() < deadline =>
++            {
++                std::thread::sleep(Duration::from_millis(5));
++            }
++            result => panic!("stdio server retained unrelated descriptor: {result:?}"),
++        }
++    }
++    assert!(server.child.try_wait().unwrap().is_none());
++    server.send(json!({"jsonrpc":"2.0","id":2,"method":"shutdown"}));
++    server.response(2);
++    server.send(json!({"jsonrpc":"2.0","method":"exit"}));
++    drop(server.stdin.take());
++    let deadline = Instant::now() + Duration::from_secs(5);
++    loop {
++        if let Some(status) = server.child.try_wait().unwrap() {
++            assert!(status.success(), "{status}");
++            break;
++        }
++        assert!(Instant::now() < deadline, "stdio server did not exit");
++        std::thread::sleep(Duration::from_millis(10));
++    }
++}
++
++#[test]
++fn stdio_server_releases_foreign_pipe_while_protocol_remains_live() {
++    check_descriptor_release(false);
++}
++
++#[test]
++fn stdio_server_releases_sparse_foreign_descriptor() {
++    check_descriptor_release(true);
++}

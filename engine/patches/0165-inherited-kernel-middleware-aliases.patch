@@ -1,0 +1,1234 @@
+--- a/docs/CHANGELOG.md
++++ b/docs/CHANGELOG.md
+@@ -30,6 +30,8 @@
+ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+ 
+ ## [Unreleased]
++
++- **Follow inherited Kernel middleware.** Navigation, hover and references show the effective parent and trait declarations, including unsaved changes. Incomplete or ambiguous registration metadata cannot authorize partial transformations. Contributed by @thinkycz.
+ 
+ - **Navigate Kernel middleware aliases.** Definitions, hover and references follow static HTTP Kernel registrations and unsaved changes. Class and namespace transformations refuse unresolved or literal middleware targets that would be left behind. Contributed by @thinkycz.
+ 
+--- a/docs/todo.md
++++ b/docs/todo.md
+@@ -165,7 +165,8 @@
+ | L58 | [Laravel rate limiter names](todo/laravel.md#l58-laravel-rate-limiter-names)                                                                                                | Medium      | Medium      |
+ | L57 | [Laravel queue names](todo/laravel.md#l57-laravel-queue-names)                                                                                                              | Low-Medium  | Medium      |
+ | L61 | [Middleware alias catalogs and transformations](todo/laravel.md#l61-middleware-alias-catalogs-and-transformations)                                                          | Medium      | Medium      |
+-| L62 | [Bound and inherited Kernel middleware registrations](todo/laravel.md#l62-bound-and-inherited-kernel-middleware-registrations) | Medium | Medium |
++| L62 | [Bound HTTP Kernel registrations](todo/laravel.md#l62-bound-http-kernel-registrations) | Medium | Medium |
++| L63 | [Dynamic and ambiguous Kernel registration metadata](todo/laravel.md#l63-dynamic-and-ambiguous-kernel-registration-metadata) | Medium | Medium |
+ | L53 | [Collection key types from the column for `keyBy` / `groupBy` / `pluck`](todo/laravel.md#l53-collection-key-types-from-the-column-for-keyby-groupby-pluck)                   | Medium      | Medium      |
+ | L49 | [Unguarded Eloquent mass assignment diagnostic](todo/laravel.md#l49-unguarded-eloquent-mass-assignment-diagnostic)                                                          | Medium      | Medium      |
+ | L17 | [Additional string contexts without booting](todo/laravel.md#l17-additional-string-contexts-without-booting) (middleware, assets, validation, Inertia)                     | Medium      | Medium-High |
+--- a/docs/todo/laravel.md
++++ b/docs/todo/laravel.md
+@@ -645,15 +645,26 @@
+ refactors. Extend argument binding to unpacked call arguments and user-overridden
+ magic registrar methods before accepting those forms. Registration-site discovery must not invent runtime override ordering.
+ 
+-#### L62. Bound and inherited Kernel middleware registrations
++#### L62. Bound HTTP Kernel registrations
+ 
+ **Impact: Medium · Complexity: Medium**
+ 
+ Discover application-bound HTTP Kernels outside the conventional application file.
+-Follow parent and trait declaration origins through shared member resolution when
+-collecting alias properties. Preserve source ownership, inherited property precedence,
+-unsaved updates and complete-target guards for class/namespace changes. Runtime-built
+-maps and unresolved hierarchy must not produce partial transformations.
++Connect static container/bootstrap bindings to the effective property catalogs,
++preserving project/source ownership, dirty updates and complete-target guards.
++
++#### L63. Dynamic and ambiguous Kernel registration metadata
++
++**Impact: Medium · Complexity: Medium**
++
++Resolve runtime-built alias maps and property mutations without executing bootstrap
++code. Prove compatible multiple-trait declarations before enabling transformations;
++otherwise keep all known source origins and explicit incomplete/ambiguous metadata.
++Preserve complete target/source receipts for class and namespace changes, including
++unresolved and read-only declaration origins.
++
++Prove PHP compatibility of overlapping parent, class and trait property defaults
++before allowing transformations that could update only one declaration.
+ 
+ #### L57. Laravel queue names
+ 
+--- a/examples/laravel/app/Demo.php
++++ b/examples/laravel/app/Demo.php
+@@ -1790,9 +1790,12 @@
+         Route::get('/audited-demo', fn () => null)->middleware('demo.audit:strict');
+         // A class rename must refuse while this bootstrap target remains a literal string.
+         Route::get('/audited-literal-demo', fn () => null)->middleware('demo.audit.literal');
+-        // These static declarations live in app/Http/Kernel.php.
++        // The conventional Kernel inherits these static declarations.
+         Route::get('/kernel-audit-demo', fn () => null)->middleware('demo.kernel.audit:strict');
+         Route::get('/legacy-audit-demo', fn () => null)->middleware('demo.kernel.legacy');
++        // Effective property declarations live in ApplicationKernel and Concerns/KernelAliases.
++        Route::get('/parent-audit-demo', fn () => null)->middleware('demo.kernel.parent');
++        Route::get('/trait-audit-demo', fn () => null)->middleware('demo.kernel.trait');
+     }
+ 
+     public function excludedMiddlewareNavigation(\Illuminate\Routing\Route $route): void
+--- /dev/null
++++ b/examples/laravel/app/Http/ApplicationKernel.php
+@@ -0,0 +1,23 @@
++<?php
++
++namespace App\Http;
++
++use App\Http\Concerns\KernelAliases;
++use App\Http\Middleware\AuditRequests;
++use Illuminate\Foundation\Http\Kernel as BaseKernel;
++
++abstract class ApplicationKernel extends BaseKernel
++{
++    use KernelAliases;
++
++    // PHP requires this class declaration to match the trait's inherited property.
++    protected $routeMiddleware = [
++        'demo.kernel.legacy' => 'App\Http\Middleware\AuditRequests',
++        'demo.kernel.trait' => AuditRequests::class,
++    ];
++
++    protected $middlewareAliases = [
++        'demo.kernel.audit' => AuditRequests::class,
++        'demo.kernel.parent' => AuditRequests::class,
++    ];
++}
+--- /dev/null
++++ b/examples/laravel/app/Http/Concerns/KernelAliases.php
+@@ -0,0 +1,13 @@
++<?php
++
++namespace App\Http\Concerns;
++
++use App\Http\Middleware\AuditRequests;
++
++trait KernelAliases
++{
++    protected $routeMiddleware = [
++        'demo.kernel.legacy' => 'App\Http\Middleware\AuditRequests',
++        'demo.kernel.trait' => AuditRequests::class,
++    ];
++}
+--- a/examples/laravel/app/Http/Kernel.php
++++ b/examples/laravel/app/Http/Kernel.php
+@@ -2,12 +2,6 @@
+ 
+ namespace App\Http;
+ 
+-use App\Http\Middleware\AuditRequests;
+-use Illuminate\Foundation\Http\Kernel as BaseKernel;
+-
+-class Kernel extends BaseKernel
++class Kernel extends ApplicationKernel
+ {
+-    protected $middlewareAliases = ['demo.kernel.audit' => AuditRequests::class];
+-
+-    protected $routeMiddleware = ['demo.kernel.legacy' => 'App\Http\Middleware\AuditRequests'];
+ }
+--- a/examples/laravel/assertions.php
++++ b/examples/laravel/assertions.php
+@@ -2212,6 +2212,8 @@
+ $exampleKernel = (new \ReflectionClass(\App\Http\Kernel::class))->newInstanceWithoutConstructor();
+ check('Kernel middlewareAliases keeps its runtime target', $exampleKernel->getMiddlewareAliases()['demo.kernel.audit'] === \App\Http\Middleware\AuditRequests::class);
+ check('Kernel routeMiddleware remains an alias source', $exampleKernel->getMiddlewareAliases()['demo.kernel.legacy'] === \App\Http\Middleware\AuditRequests::class);
++check('Kernel inherits parent alias defaults', $exampleKernel->getMiddlewareAliases()['demo.kernel.parent'] === \App\Http\Middleware\AuditRequests::class);
++check('Kernel keeps compatible trait and class alias defaults', $exampleKernel->getMiddlewareAliases()['demo.kernel.trait'] === \App\Http\Middleware\AuditRequests::class);
+ 
+ echo "\n";
+ if ($failed === 0) {
+--- a/src/blade/typed_receiver.rs
++++ b/src/blade/typed_receiver.rs
+@@ -281,32 +281,16 @@
+ 
+             let default_class = ClassInfo::default();
+             let mut confirmed = Vec::new();
+-            if self.resolved_class_cache.read().is_laravel() && self.is_kernel_middleware_uri(uri) {
++            if self.resolved_class_cache.read().is_laravel()
++                && sites.iter().any(|site| {
++                    site.receiver == ViewReceiverClass::KernelMiddlewareAliasDeclaration
++                })
++                && let Some(sources) = self.kernel_alias_sources()
++            {
+                 for site in sites.iter().filter(|site| {
+                     site.receiver == ViewReceiverClass::KernelMiddlewareAliasDeclaration
+                 }) {
+-                    let Some(class) =
+-                        crate::class_lookup::find_class_at_offset(&file_ctx.classes, site.start)
+-                    else {
+-                        continue;
+-                    };
+-                    if class.kind != crate::types::ClassLikeKind::Class {
+-                        continue;
+-                    }
+-                    let class_loader = class_loaders.at(site.start);
+-                    let missing = std::cell::Cell::new(false);
+-                    let tracking_loader = |name: &str| {
+-                        let loaded = class_loader(name);
+-                        if loaded.is_none() {
+-                            missing.set(true);
+-                        }
+-                        loaded
+-                    };
+-                    let matches = site.receiver.fqns().iter().any(|fqn| {
+-                        crate::class_lookup::is_subtype_of(class, fqn, &tracking_loader)
+-                    });
+-                    // Unknown ancestry cannot authorize navigation or an incomplete refactor.
+-                    if matches || (allow_uncertain && missing.get()) {
++                    if self.confirmed_kernel_alias_site(uri, map, site, allow_uncertain, &sources) {
+                         confirmed.push(site.to_span());
+                     }
+                 }
+--- a/src/symbol_map/extraction/class_like.rs
++++ b/src/symbol_map/extraction/class_like.rs
+@@ -884,6 +884,7 @@
+                             &mut ctx.view_receiver_sites,
+                             &mut ctx.middleware_alias_targets,
+                             crate::symbol_map::ViewReceiverClass::KernelMiddlewareAliasDeclaration,
++                            Some(var.span.start.offset),
+                         );
+                     }
+                     extract_from_expression(concrete.value, ctx, 0);
+--- a/src/symbol_map/extraction/laravel.rs
++++ b/src/symbol_map/extraction/laravel.rs
+@@ -1742,6 +1742,7 @@
+         sites,
+         targets,
+         ViewReceiverClass::MiddlewareAliasDeclaration,
++        None,
+     );
+ }
+ 
+@@ -1753,6 +1754,7 @@
+     sites: &mut Vec<ViewReceiverSite>,
+     targets: &mut Vec<crate::symbol_map::MiddlewareAliasTarget>,
+     receiver: ViewReceiverClass,
++    declaration_offset: Option<u32>,
+ ) {
+     let argument = crate::parser::unwrap_parens(argument);
+     if crate::parser::array_literal_elements(argument).is_none() {
+@@ -1766,6 +1768,7 @@
+         if !scalar && !class_string {
+             targets.push(crate::symbol_map::MiddlewareAliasTarget {
+                 receiver,
++                declaration_offset,
+                 name: None,
+                 start: 0,
+                 end: 0,
+@@ -1781,6 +1784,7 @@
+         let Some(elements) = crate::parser::array_literal_elements(array) else {
+             targets.push(crate::symbol_map::MiddlewareAliasTarget {
+                 receiver,
++                declaration_offset,
+                 name: None,
+                 start: 0,
+                 end: 0,
+@@ -1837,6 +1841,7 @@
+             }
+             targets.push(crate::symbol_map::MiddlewareAliasTarget {
+                 receiver,
++                declaration_offset,
+                 name: key.as_ref().map(|(name, _, _)| name.to_string()),
+                 start: key.as_ref().map_or(0, |(_, start, _)| *start as u32),
+                 end: key.as_ref().map_or(0, |(_, _, end)| *end as u32),
+--- a/src/symbol_map/mod.rs
++++ b/src/symbol_map/mod.rs
+@@ -1399,6 +1399,7 @@
+ pub(crate) struct MiddlewareAliasTarget {
+     /// Declaration context that must be confirmed before this entry is used.
+     pub receiver: ViewReceiverClass,
++    pub declaration_offset: Option<u32>,
+     pub name: Option<String>,
+     pub start: u32,
+     pub end: u32,
+--- /dev/null
++++ b/src/virtual_members/laravel/kernel_middleware.rs
+@@ -0,0 +1,357 @@
++//! Effective HTTP Kernel alias-property ownership through shared inheritance.
++use crate::{
++    Backend,
++    types::{ClassInfo, ClassLikeKind, MAX_INHERITANCE_DEPTH, MAX_TRAIT_DEPTH, Visibility},
++};
++use std::{
++    cell::{Cell, RefCell},
++    collections::{HashMap, HashSet},
++    sync::Arc,
++};
++
++pub(crate) struct KernelAliasOrigin {
++    pub uri: String,
++    pub declaration_offset: u32,
++}
++
++pub(crate) struct KernelAliasSources {
++    pub origins: Vec<KernelAliasOrigin>,
++    pub complete: bool,
++}
++
++fn identity(name: &str) -> String {
++    name.trim_start_matches('\\').to_ascii_lowercase()
++}
++
++fn complete_graph(
++    root: &ClassInfo,
++    loaded: &HashMap<String, Arc<ClassInfo>>,
++    traits: bool,
++) -> bool {
++    fn visit(
++        name: String,
++        loaded: &HashMap<String, Arc<ClassInfo>>,
++        active: &mut HashSet<String>,
++        done: &mut HashSet<String>,
++        depth: u32,
++        traits: bool,
++    ) -> bool {
++        if done.contains(&name) {
++            return true;
++        }
++        if depth > MAX_INHERITANCE_DEPTH + MAX_TRAIT_DEPTH || !active.insert(name.clone()) {
++            return false;
++        }
++        let Some(class) = loaded.get(&name) else {
++            return false;
++        };
++        for next in class
++            .parent_class
++            .iter()
++            .chain(class.used_traits.iter().filter(|_| traits))
++        {
++            if !visit(identity(next), loaded, active, done, depth + 1, traits) {
++                return false;
++            }
++        }
++        active.remove(&name);
++        done.insert(name);
++        true
++    }
++    visit(
++        identity(&root.fqn()),
++        loaded,
++        &mut HashSet::new(),
++        &mut HashSet::new(),
++        0,
++        traits,
++    )
++}
++
++fn trait_property_overlaps(
++    scope: &ClassInfo,
++    name: &str,
++    loader: &dyn Fn(&str) -> Option<Arc<ClassInfo>>,
++) -> bool {
++    let declares = |candidate: &ClassInfo| {
++        candidate
++            .get_property(name)
++            .is_some_and(|property| !property.is_virtual)
++    };
++    if crate::inheritance::find_declaring_trait(&scope.used_traits, loader, &declares).is_none() {
++        return false;
++    }
++    declares(scope)
++        || crate::inheritance::ancestors(scope, loader).any(|(_, parent)| {
++            declares(&parent)
++                || crate::inheritance::find_declaring_trait(&parent.used_traits, loader, &declares)
++                    .is_some()
++        })
++}
++
++fn trait_property_origins(
++    owner: Arc<ClassInfo>,
++    name: &str,
++    scopes: Vec<Arc<ClassInfo>>,
++    loader: &dyn Fn(&str) -> Option<Arc<ClassInfo>>,
++) -> Vec<Arc<ClassInfo>> {
++    let mut selected = vec![owner];
++    if selected[0].kind != ClassLikeKind::Trait {
++        return selected;
++    }
++    let owner_name = selected[0].fqn();
++    for scope in scopes {
++        if scope.get_property(name).is_some_and(|p| !p.is_virtual) {
++            continue;
++        }
++        let mut origins = Vec::new();
++        for used in &scope.used_traits {
++            if let Some((_, declared)) = crate::inheritance::find_declaring_trait(
++                std::slice::from_ref(used),
++                loader,
++                &|candidate| candidate.get_property(name).is_some_and(|p| !p.is_virtual),
++            ) {
++                origins.push(declared);
++            }
++        }
++        if origins
++            .iter()
++            .any(|candidate| candidate.fqn() == owner_name)
++        {
++            for origin in origins {
++                if !selected
++                    .iter()
++                    .any(|candidate| candidate.fqn() == origin.fqn())
++                {
++                    selected.push(origin);
++                }
++            }
++        }
++    }
++    selected
++}
++
++impl Backend {
++    fn kernel_source_syntax_valid(&self, uri: &str, content: &str) -> bool {
++        if self
++            .symbol_map_for(uri)
++            .is_some_and(|map| map.matches_source(content))
++        {
++            !self
++                .parse_errors
++                .read()
++                .get(uri)
++                .is_some_and(|errors| !errors.is_empty())
++        } else {
++            crate::parser::with_parsed_program(content, "kernel_alias_source", |program, _| {
++                program.errors.is_empty()
++            })
++        }
++    }
++
++    fn kernel_graph_sources_valid(
++        &self,
++        uri: &str,
++        content: &str,
++        root: &ClassInfo,
++        classes: Vec<Arc<ClassInfo>>,
++    ) -> bool {
++        let mut checked = HashSet::new();
++        for class in classes {
++            if !checked.insert(class.fqn()) {
++                continue;
++            }
++            let Some(source_uri) = (if class.fqn() == root.fqn() {
++                Some(uri.to_string())
++            } else {
++                self.find_class_file_uri_for_fqn(&class.fqn())
++            }) else {
++                return false;
++            };
++            if source_uri == uri {
++                if !self.kernel_source_syntax_valid(uri, content) {
++                    return false;
++                }
++            } else {
++                let Some(source) = self.get_file_content(&source_uri) else {
++                    return false;
++                };
++                if !self.kernel_source_syntax_valid(&source_uri, &source) {
++                    return false;
++                }
++            }
++        }
++        true
++    }
++
++    pub(crate) fn kernel_alias_sources(&self) -> Option<KernelAliasSources> {
++        let _foreign_scope = crate::type_engine::variable::forward_walk::suspend_diagnostic_scope();
++        let mut sources = KernelAliasSources {
++            origins: Vec::new(),
++            complete: true,
++        };
++        let Some(root) = self.workspace.workspace_root.read().clone() else {
++            return Some(sources);
++        };
++        let path = root.join("app/Http/Kernel.php");
++        let uri = crate::util::path_to_uri(&path);
++        let Some(content) = self.get_file_content(&uri) else {
++            return (!path.try_exists().unwrap_or(true)).then_some(sources);
++        };
++        sources.complete = self.kernel_source_syntax_valid(&uri, &content);
++        let context = self.source_file_context(&content);
++        let loaders = self.class_loaders(&context);
++        for class in &context.classes {
++            if class.kind != ClassLikeKind::Class {
++                continue;
++            }
++            let loaded = RefCell::new(HashMap::new());
++            loaded
++                .borrow_mut()
++                .insert(identity(&class.fqn()), Arc::clone(class));
++            let missing = Cell::new(false);
++            let base_loader = loaders.at(class.keyword_offset);
++            let loader = |name: &str| {
++                let value = base_loader(name);
++                if let Some(value) = &value {
++                    let mut entries = loaded.borrow_mut();
++                    entries.insert(identity(name), Arc::clone(value));
++                    entries.insert(identity(&value.fqn()), Arc::clone(value));
++                } else {
++                    missing.set(true);
++                }
++                value
++            };
++            if !crate::class_lookup::is_subtype_of(
++                class,
++                "Illuminate\\Foundation\\Http\\Kernel",
++                &loader,
++            ) {
++                if missing.get() || !complete_graph(class, &loaded.borrow(), false) {
++                    sources.complete = false;
++                }
++                continue;
++            }
++            let effective = crate::inheritance::resolve_class_with_inheritance(class, &loader);
++            let graph_complete = !missing.get()
++                && complete_graph(class, &loaded.borrow(), true)
++                && self.kernel_graph_sources_valid(
++                    &uri,
++                    &content,
++                    class,
++                    loaded.borrow().values().cloned().collect(),
++                );
++            sources.complete &= graph_complete;
++            // PHP requires overlapping trait properties to have compatible declarations
++            // and defaults. Do not authorize edits without proving that compatibility.
++            let scopes: Vec<_> = loaded.borrow().values().cloned().collect();
++            sources.complete &= !scopes.iter().any(|scope| {
++                ["middlewareAliases", "routeMiddleware"]
++                    .iter()
++                    .any(|name| trait_property_overlaps(scope, name, &loader))
++            });
++            for name in ["middlewareAliases", "routeMiddleware"] {
++                let Some(property) = effective.get_property(name) else {
++                    continue;
++                };
++                if property.is_virtual
++                    || property.is_static
++                    || property.visibility == Visibility::Private
++                    || property.name_offset == 0
++                {
++                    sources.complete = false;
++                    continue;
++                }
++                let declares = |candidate: &ClassInfo| {
++                    candidate.get_property(name).is_some_and(|p| {
++                        !p.is_virtual
++                            && p.name_offset == property.name_offset
++                            && p.source == property.source
++                    })
++                };
++                let own = declares(class);
++                let owner = if own {
++                    Arc::clone(class)
++                } else {
++                    let Some((_, owner)) =
++                        crate::inheritance::find_declaring_ancestor(class, &loader, &declares)
++                    else {
++                        sources.complete = false;
++                        continue;
++                    };
++                    owner
++                };
++                // Unknown higher-priority declarations cannot authorize inherited navigation.
++                if !own && !graph_complete {
++                    continue;
++                }
++                let snapshot = loaded.borrow().values().cloned().collect();
++                let owners = trait_property_origins(owner, name, snapshot, &loader);
++                if owners.len() > 1 {
++                    sources.complete = false;
++                }
++                for owner in owners {
++                    if !matches!(owner.kind, ClassLikeKind::Class | ClassLikeKind::Trait) {
++                        sources.complete = false;
++                        continue;
++                    }
++                    let offset = owner
++                        .get_property(name)
++                        .map_or(0, |property| property.name_offset);
++                    let owner_uri = if own {
++                        Some(uri.clone())
++                    } else {
++                        self.find_class_file_uri_for_fqn(&owner.fqn())
++                    };
++                    let Some(owner_uri) = owner_uri else {
++                        sources.complete = false;
++                        continue;
++                    };
++                    if offset == 0 {
++                        sources.complete = false;
++                        continue;
++                    }
++                    if !sources.origins.iter().any(|origin| {
++                        origin.uri == owner_uri && origin.declaration_offset == offset
++                    }) {
++                        sources.origins.push(KernelAliasOrigin {
++                            uri: owner_uri,
++                            declaration_offset: offset,
++                        });
++                    }
++                }
++            }
++        }
++        Some(sources)
++    }
++
++    pub(crate) fn confirmed_kernel_alias_site(
++        &self,
++        uri: &str,
++        map: &crate::symbol_map::SymbolMap,
++        site: &crate::symbol_map::ViewReceiverSite,
++        writer: bool,
++        sources: &KernelAliasSources,
++    ) -> bool {
++        if writer && !sources.complete {
++            return false;
++        }
++        map.middleware_alias_targets.iter().any(|target| {
++            target.receiver
++                == crate::symbol_map::ViewReceiverClass::KernelMiddlewareAliasDeclaration
++                && if writer {
++                    target
++                        .target_value_span
++                        .is_some_and(|span| span.0 == site.start)
++                } else {
++                    target.start == site.start
++                }
++                && target.declaration_offset.is_some_and(|offset| {
++                    sources
++                        .origins
++                        .iter()
++                        .any(|origin| origin.uri == uri && origin.declaration_offset == offset)
++                })
++        })
++    }
++}
+--- a/src/virtual_members/laravel/middleware_aliases.rs
++++ b/src/virtual_members/laravel/middleware_aliases.rs
+@@ -9,6 +9,7 @@
+     pub location: Location,
+     pub reference_range: Range,
+     pub target: Option<String>,
++    pub context_complete: bool,
+ }
+ 
+ impl Backend {
+@@ -18,15 +19,6 @@
+             .read()
+             .as_ref()
+             .is_some_and(|root| crate::util::path_to_uri(&root.join("bootstrap/app.php")) == uri)
+-    }
+-
+-    /// Conventional application file that owns HTTP Kernel alias declarations.
+-    pub(crate) fn is_kernel_middleware_uri(&self, uri: &str) -> bool {
+-        self.workspace
+-            .workspace_root
+-            .read()
+-            .as_ref()
+-            .is_some_and(|root| crate::util::path_to_uri(&root.join("app/Http/Kernel.php")) == uri)
+     }
+ 
+     /// Read only registrations whose shared type resolution confirms Middleware.
+@@ -66,15 +58,23 @@
+         let Some(root) = self.workspace.workspace_root.read().clone() else {
+             return Some(Vec::new());
+         };
++        let sources = self.kernel_alias_sources()?;
++        if require_complete && !sources.complete {
++            return None;
++        }
++        let mut uris = vec![crate::util::path_to_uri(&root.join("bootstrap/app.php"))];
++        for origin in &sources.origins {
++            if !uris.contains(&origin.uri) {
++                uris.push(origin.uri.clone());
++            }
++        }
+         let mut registrations = Vec::new();
+-        for path in [
+-            root.join("bootstrap/app.php"),
+-            root.join("app/Http/Kernel.php"),
+-        ] {
++        for uri in uris {
+             registrations.extend(self.middleware_alias_registration_sites_in(
+-                &path,
++                &uri,
+                 name,
+                 require_complete,
++                &sources,
+             )?);
+         }
+         Some(registrations)
+@@ -82,47 +82,59 @@
+ 
+     fn middleware_alias_registration_sites_in(
+         &self,
+-        path: &std::path::Path,
++        uri: &str,
+         name: Option<&str>,
+         require_complete: bool,
++        sources: &super::kernel_middleware::KernelAliasSources,
+     ) -> Option<Vec<MiddlewareAliasDefinition>> {
+-        let uri = crate::util::path_to_uri(path);
+-        let Some(content) = self.get_file_content(&uri) else {
++        let Some(content) = self.get_file_content(uri) else {
++            let path = Url::parse(uri).ok()?.to_file_path().ok()?;
+             return (!path.try_exists().unwrap_or(true)).then(Vec::new);
+         };
+         if self
+-            .symbol_map_for(&uri)
++            .symbol_map_for(uri)
+             .is_none_or(|map| !map.matches_source(&content))
+         {
+             // An open buffer belongs to the editor publisher; never overwrite it
+             // from a lazy read while its new metadata is being admitted.
+-            if self.open_files.read().contains_key(&uri) {
++            if self.open_files.read().contains_key(uri) {
+                 return None;
+             }
+-            let ticket = self.index_source_ticket(&uri);
++            let ticket = self.index_source_ticket(uri);
+             // The ticket must predate the read whose symbols it admits.
+-            if self.get_file_content(&uri).as_deref() != Some(content.as_str()) {
+-                self.release_index_source_ticket(&uri, &ticket);
++            if self.get_file_content(uri).as_deref() != Some(content.as_str()) {
++                self.release_index_source_ticket(uri, &ticket);
+                 return None;
+             }
+-            let parsed = self.parse_ast_index_update_for_ticket(&uri, &content, ticket);
++            let parsed = self.parse_ast_index_update_for_ticket(uri, &content, ticket);
+             self.apply_ast_index_parse_results_batch(vec![parsed]);
+         }
+         let map = self
+-            .symbol_map_for(&uri)
++            .symbol_map_for(uri)
+             .filter(|map| map.matches_source(&content))?;
+         if require_complete
+             && self
+                 .parse_errors
+                 .read()
+-                .get(&uri)
++                .get(uri)
+                 .is_some_and(|errors| !errors.is_empty())
+         {
+             return None;
+         }
++        let eligible = |target: &&crate::symbol_map::MiddlewareAliasTarget| {
++            target.receiver
++                != crate::symbol_map::ViewReceiverClass::KernelMiddlewareAliasDeclaration
++                || target.declaration_offset.is_some_and(|offset| {
++                    sources
++                        .origins
++                        .iter()
++                        .any(|origin| origin.uri == uri && origin.declaration_offset == offset)
++                })
++        };
+         if !map
+             .middleware_alias_targets
+             .iter()
++            .filter(eligible)
+             .any(|target| name.is_none_or(|name| target.name.as_deref() == Some(name)))
+         {
+             return Some(Vec::new());
+@@ -130,6 +142,7 @@
+         let writer_sites: Vec<_> = if require_complete {
+             map.middleware_alias_targets
+                 .iter()
++                .filter(eligible)
+                 .filter_map(|target| {
+                     let (start, end) = target.target_value_span?;
+                     Some(ViewReceiverSite {
+@@ -146,21 +159,22 @@
+         };
+         let confirmed = if require_complete {
+             std::sync::Arc::new(self.confirm_typed_receiver_sites(
+-                &uri,
++                uri,
+                 &content,
+                 &map,
+                 &writer_sites,
+                 true,
+             ))
+         } else {
+-            self.typed_receiver_view_spans_for(&uri, &map)
+-        };
+-        let Ok(url) = Url::parse(&uri) else {
++            self.typed_receiver_view_spans_for(uri, &map)
++        };
++        let Ok(url) = Url::parse(uri) else {
+             return Some(Vec::new());
+         };
+         Some(
+             map.middleware_alias_targets
+                 .iter()
++                .filter(eligible)
+                 .filter(|target| {
+                     name.is_none_or(|name| target.name.as_deref() == Some(name))
+                         && confirmed.iter().any(|span| {
+@@ -197,6 +211,7 @@
+                         crate::text_position::offset_to_position(&content, target.end as usize),
+                     ),
+                     target: target.target.clone(),
++                    context_complete: sources.complete,
+                 })
+                 .collect(),
+         )
+@@ -216,11 +231,17 @@
+         let mut files: Vec<_> = registrations
+             .iter()
+             .map(|site| {
+-                if self.is_kernel_middleware_uri(site.location.uri.as_str()) {
+-                    "app/Http/Kernel.php"
+-                } else {
+-                    "bootstrap/app.php"
+-                }
++                let root = self.workspace.workspace_root.read().clone();
++                site.location
++                    .uri
++                    .to_file_path()
++                    .ok()
++                    .and_then(|path| {
++                        root.as_ref()
++                            .and_then(|root| path.strip_prefix(root).ok())
++                            .map(|path| path.to_string_lossy().replace('\\', "/"))
++                    })
++                    .unwrap_or_else(|| site.location.uri.to_string())
+             })
+             .collect();
+         files.sort_unstable();
+@@ -237,6 +258,9 @@
+         if !targets.is_empty() && registrations.iter().any(|site| site.target.is_none()) {
+             detail.push_str("\n\nSome registration targets are not statically resolved");
+         }
++        if registrations.iter().any(|site| !site.context_complete) {
++            detail.push_str("\n\nKernel registration context is incomplete or ambiguous; only known declarations are shown");
++        }
+         if registrations.len() > 1 {
+             detail
+                 .push_str("\n\nMultiple static registrations; runtime overrides are not evaluated");
+--- a/src/virtual_members/laravel/mod.rs
++++ b/src/virtual_members/laravel/mod.rs
+@@ -123,6 +123,7 @@
+ pub(crate) mod gates;
+ pub(crate) mod helpers;
+ mod higher_order_proxy;
++mod kernel_middleware;
+ mod macros;
+ mod magic_uses;
+ mod middleware_aliases;
+--- a/tests/integration/laravel_middleware_aliases.rs
++++ b/tests/integration/laravel_middleware_aliases.rs
+@@ -1516,3 +1516,413 @@
+     );
+     assert_eq!(std::fs::read_to_string(path).unwrap(), parent);
+ }
++
++const INHERITED_KERNEL: &str = "<?php namespace App\\Http; class Kernel extends ParentKernel {}";
++const ALIAS_PARENT: &str = r#"<?php
++namespace App\Http;
++use App\Http\Middleware\Audit as AuditAlias;
++class ParentKernel extends \Illuminate\Foundation\Http\Kernel {
++    protected $middlewareAliases = [/* 😀 */ "au\x64ited" => AuditAlias::class];
++}
++"#;
++
++#[tokio::test]
++async fn inherited_kernel_parent_navigation_ranges_and_dirty_sources() {
++    for property in ["middlewareAliases", "routeMiddleware"] {
++        let parent = ALIAS_PARENT.replace("middlewareAliases", property);
++        let (backend, dir, caller, _) =
++            kernel_workspace_extra(INHERITED_KERNEL, &[("app/Http/ParentKernel.php", &parent)])
++                .await;
++        let uri = Url::from_file_path(dir.path().join("app/Http/ParentKernel.php")).unwrap();
++        let found = definitions(&backend, &caller, SOURCE, "middleware('aud").await;
++        assert_eq!(found.len(), 1, "inherited Kernel definition: {found:?}");
++        assert_eq!(found[0].uri, uri);
++        assert_eq!(found[0].range.start, position_after(&parent, "\""));
++        let detail = hover(&backend, &caller, SOURCE, "middleware('aud").await;
++        assert!(
++            detail.contains("App\\Http\\Middleware\\Audit")
++                && detail.contains("app/Http/ParentKernel.php"),
++            "{detail}"
++        );
++        let refs = find_references(
++            &backend,
++            &caller,
++            position_after(SOURCE, "middleware('aud"),
++            true,
++        )
++        .await;
++        let declaration = refs.iter().find(|location| location.uri == uri).unwrap();
++        assert_eq!(
++            declaration.range.end.character - declaration.range.start.character,
++            10
++        );
++        open_document(&backend, &uri, "php", &parent).await;
++        let changed = parent.replace("Middleware\\Audit as", "Middleware\\Trace as");
++        assert_eq!(parent.len(), changed.len());
++        change(&backend, &uri, &changed, 2).await;
++        assert!(
++            hover(&backend, &caller, SOURCE, "middleware('aud")
++                .await
++                .contains("Middleware\\Trace")
++        );
++        change(
++            &backend,
++            &uri,
++            &changed.replace(r"au\x64ited", "different"),
++            3,
++        )
++        .await;
++        assert!(
++            definitions(&backend, &caller, SOURCE, "middleware('aud")
++                .await
++                .is_empty()
++        );
++        assert_eq!(
++            std::fs::read_to_string(dir.path().join("app/Http/ParentKernel.php")).unwrap(),
++            parent
++        );
++    }
++}
++
++#[tokio::test]
++async fn inherited_kernel_nested_trait_owns_navigation_and_refreshes_composition() {
++    let root = r"<?php namespace App\Http; class Kernel extends \Illuminate\Foundation\Http\Kernel {use AliasOuter;}";
++    let outer = r"<?php namespace App\Http; trait AliasOuter {use AliasInner;}";
++    let inner = ALIAS_PARENT.replace(
++        "class ParentKernel extends \\Illuminate\\Foundation\\Http\\Kernel",
++        "trait AliasInner",
++    );
++    let (backend, dir, caller, kernel) = kernel_workspace_extra(
++        root,
++        &[
++            ("app/Http/AliasOuter.php", outer),
++            ("app/Http/AliasInner.php", &inner),
++        ],
++    )
++    .await;
++    let uri = Url::from_file_path(dir.path().join("app/Http/AliasInner.php")).unwrap();
++    let found = definitions(&backend, &caller, SOURCE, "middleware('aud").await;
++    assert_eq!(found.len(), 1, "trait Kernel definition: {found:?}");
++    assert_eq!(found[0].uri, uri);
++    assert!(
++        hover(&backend, &caller, SOURCE, "middleware('aud")
++            .await
++            .contains("app/Http/AliasInner.php")
++    );
++    open_document(&backend, &uri, "php", &inner).await;
++    change(
++        &backend,
++        &uri,
++        &inner.replace("Middleware\\Audit as", "Middleware\\Trace as"),
++        2,
++    )
++    .await;
++    assert!(
++        hover(&backend, &caller, SOURCE, "middleware('aud")
++            .await
++            .contains("Middleware\\Trace")
++    );
++    open_document(&backend, &kernel, "php", root).await;
++    change(&backend, &kernel, &root.replace("use AliasOuter;", ""), 2).await;
++    assert!(
++        definitions(&backend, &caller, SOURCE, "middleware('aud")
++            .await
++            .is_empty()
++    );
++    change(&backend, &kernel, root, 3).await;
++    assert_eq!(
++        definitions(&backend, &caller, SOURCE, "middleware('aud")
++            .await
++            .len(),
++        1
++    );
++    assert_eq!(
++        std::fs::read_to_string(dir.path().join("app/Http/AliasInner.php")).unwrap(),
++        inner
++    );
++}
++
++#[tokio::test]
++async fn inherited_kernel_property_precedence_keeps_separate_legacy_maps() {
++    let parent = ALIAS_PARENT.replace(
++        "\n}",
++        "\nprotected $routeMiddleware = ['audited' => \\App\\Http\\Middleware\\Trace::class];\n}",
++    );
++    let root = r"<?php namespace App\Http; class Kernel extends ParentKernel {protected $middlewareAliases = []; }";
++    let (backend, dir, caller, kernel) =
++        kernel_workspace_extra(root, &[("app/Http/ParentKernel.php", &parent)]).await;
++    let found = definitions(&backend, &caller, SOURCE, "middleware('aud").await;
++    assert_eq!(
++        found.len(),
++        1,
++        "only effective legacy map should remain: {found:?}"
++    );
++    assert_eq!(
++        found[0].uri,
++        Url::from_file_path(dir.path().join("app/Http/ParentKernel.php")).unwrap()
++    );
++    assert_eq!(
++        found[0].range.start,
++        position_after(&parent, "$routeMiddleware = ['")
++    );
++    let detail = hover(&backend, &caller, SOURCE, "middleware('aud").await;
++    assert!(
++        detail.contains("Middleware\\Trace") && !detail.contains("Middleware\\Audit"),
++        "{detail}"
++    );
++    open_document(&backend, &kernel, "php", root).await;
++    change(
++        &backend,
++        &kernel,
++        &root.replace("protected $middlewareAliases = [];", ""),
++        2,
++    )
++    .await;
++    assert_eq!(
++        definitions(&backend, &caller, SOURCE, "middleware('aud")
++            .await
++            .len(),
++        2
++    );
++    change(&backend, &kernel, root, 3).await;
++    assert_eq!(
++        definitions(&backend, &caller, SOURCE, "middleware('aud")
++            .await
++            .len(),
++        1
++    );
++}
++
++#[tokio::test]
++async fn inherited_kernel_literal_and_opaque_targets_refuse_class_and_namespace_edits() {
++    for is_trait in [false, true] {
++        for value in [
++            r"['audited' => 'App\Http\Middleware\Audit']",
++            "ALIASES",
++            "['audited'=>AliasTargets::AUDIT]",
++        ] {
++            let source =
++                ALIAS_PARENT.replace(r#"[/* 😀 */ "au\x64ited" => AuditAlias::class]"#, value);
++            let source = if is_trait {
++                source.replace(
++                    "class ParentKernel extends \\Illuminate\\Foundation\\Http\\Kernel",
++                    "trait AliasInner",
++                )
++            } else {
++                source
++            };
++            let root = if is_trait {
++                r"<?php namespace App\Http; class Kernel extends \Illuminate\Foundation\Http\Kernel {use AliasInner;}"
++            } else {
++                INHERITED_KERNEL
++            };
++            let path = if is_trait {
++                "app/Http/AliasInner.php"
++            } else {
++                "app/Http/ParentKernel.php"
++            };
++            let (backend, dir, _, _) = kernel_workspace_extra(root, &[(path, &source)]).await;
++            let file = dir.path().join("app/Http/Middleware/Audit.php");
++            let text = std::fs::read_to_string(&file).unwrap();
++            let uri = Url::from_file_path(file).unwrap();
++            open_document(&backend, &uri, "php", &text).await;
++            for (needle, name) in [
++                ("class Aud", "Auditor"),
++                ("class Aud", r"App\Moved\Audit"),
++                ("namespace Ap", "Changed"),
++            ] {
++                let result = settled_target_rename(&backend, &uri, &text, needle, name).await;
++                assert!(
++                    result
++                        .as_ref()
++                        .is_err_and(|message| message.contains("middleware")),
++                    "inherited target must not strand {value}: {result:?}"
++                );
++            }
++        }
++    }
++}
++
++#[tokio::test]
++async fn inherited_kernel_trait_precedence_and_compatible_own_declaration() {
++    let inner = ALIAS_PARENT.replace(
++        "class ParentKernel extends \\Illuminate\\Foundation\\Http\\Kernel",
++        "trait AliasInner",
++    );
++    let root = r"<?php namespace App\Http; class Kernel extends ParentKernel {use AliasInner;}";
++    let (backend, dir, caller, kernel) = kernel_workspace_extra(
++        root,
++        &[
++            ("app/Http/ParentKernel.php", ALIAS_PARENT),
++            ("app/Http/AliasInner.php", &inner),
++        ],
++    )
++    .await;
++    let found = definitions(&backend, &caller, SOURCE, "middleware('aud").await;
++    assert_eq!(found.len(), 1, "trait must win over the parent: {found:?}");
++    assert_eq!(
++        found[0].uri,
++        Url::from_file_path(dir.path().join("app/Http/AliasInner.php")).unwrap()
++    );
++    assert!(
++        hover(&backend, &caller, SOURCE, "middleware('aud")
++            .await
++            .contains("incomplete")
++    );
++    let middleware = dir.path().join("app/Http/Middleware/Audit.php");
++    let text = std::fs::read_to_string(&middleware).unwrap();
++    let uri = Url::from_file_path(middleware).unwrap();
++    open_document(&backend, &uri, "php", &text).await;
++    let result = settled_target_rename(&backend, &uri, &text, "class Aud", "Auditor").await;
++    assert!(
++        result
++            .as_ref()
++            .is_err_and(|message| message.contains("middleware")),
++        "{result:?}"
++    );
++    let own=root.replace("use AliasInner;",r"use AliasInner; protected $middlewareAliases=['audited'=>\App\Http\Middleware\Audit::class];");
++    open_document(&backend, &kernel, "php", root).await;
++    change(&backend, &kernel, &own, 2).await;
++    let found = definitions(&backend, &caller, SOURCE, "middleware('aud").await;
++    assert_eq!(
++        found.len(),
++        1,
++        "compatible own declaration keeps ownership: {found:?}"
++    );
++    assert_eq!(found[0].uri, kernel);
++    assert!(
++        hover(&backend, &caller, SOURCE, "middleware('aud")
++            .await
++            .contains("Middleware\\Audit")
++    );
++}
++#[tokio::test]
++async fn inherited_kernel_unresolved_and_cyclic_graphs_cannot_authorize_edits() {
++    for (root, parent) in [
++        (
++            r"<?php namespace App\Http; class Kernel extends ParentKernel {use MissingAliases;}",
++            ALIAS_PARENT.to_string(),
++        ),
++        (
++            INHERITED_KERNEL,
++            ALIAS_PARENT.replace("\\Illuminate\\Foundation\\Http\\Kernel", "Kernel"),
++        ),
++    ] {
++        let (backend, dir, caller, _) =
++            kernel_workspace_extra(root, &[("app/Http/ParentKernel.php", &parent)]).await;
++        assert!(
++            definitions(&backend, &caller, SOURCE, "middleware('aud")
++                .await
++                .is_empty()
++        );
++        let file = dir.path().join("app/Http/Middleware/Audit.php");
++        let text = std::fs::read_to_string(&file).unwrap();
++        let uri = Url::from_file_path(file).unwrap();
++        open_document(&backend, &uri, "php", &text).await;
++        let result = settled_target_rename(&backend, &uri, &text, "class Aud", "Auditor").await;
++        assert!(
++            result
++                .as_ref()
++                .is_err_and(|message| message.contains("middleware")),
++            "uncertain graph must refuse edits: {result:?}"
++        );
++    }
++    let root = KERNEL.replace(
++        "class Kernel extends BaseKernel {",
++        "class Kernel extends BaseKernel {use MissingAliases;",
++    );
++    let (backend, _dir, caller, _) = kernel_workspace(&root).await;
++    assert_eq!(
++        definitions(&backend, &caller, SOURCE, "middleware('aud")
++            .await
++            .len(),
++        1,
++        "known own metadata remains navigable while a trait is missing"
++    );
++    assert!(
++        hover(&backend, &caller, SOURCE, "middleware('aud")
++            .await
++            .contains("incomplete")
++    );
++}
++
++#[tokio::test]
++async fn inherited_kernel_named_targets_keep_parent_import_rename_edits() {
++    let (backend, dir, _, _) = kernel_workspace_extra(
++        INHERITED_KERNEL,
++        &[("app/Http/ParentKernel.php", ALIAS_PARENT)],
++    )
++    .await;
++    let file = dir.path().join("app/Http/Middleware/Audit.php");
++    let text = std::fs::read_to_string(&file).unwrap();
++    let uri = Url::from_file_path(file).unwrap();
++    open_document(&backend, &uri, "php", &text).await;
++    let edit = settled_target_rename(&backend, &uri, &text, "class Aud", "Auditor")
++        .await
++        .unwrap()
++        .unwrap();
++    let parent = Url::from_file_path(dir.path().join("app/Http/ParentKernel.php")).unwrap();
++    assert!(
++        edit.changes
++            .as_ref()
++            .unwrap()
++            .get(&parent)
++            .unwrap()
++            .iter()
++            .any(|e| e.new_text.contains("Middleware\\Auditor as AuditAlias")),
++        "{edit:?}"
++    );
++    assert_eq!(
++        std::fs::read_to_string(dir.path().join("app/Http/ParentKernel.php")).unwrap(),
++        ALIAS_PARENT
++    );
++}
++
++#[tokio::test]
++async fn inherited_kernel_multiple_trait_origins_stay_explicit_and_refuse_ambiguous_edits() {
++    let root = r"<?php namespace App\Http; class Kernel extends \Illuminate\Foundation\Http\Kernel {use AliasOne, AliasTwo;}";
++    let first = ALIAS_PARENT.replace(
++        "class ParentKernel extends \\Illuminate\\Foundation\\Http\\Kernel",
++        "trait AliasOne",
++    );
++    let second = first.replace("trait AliasOne", "trait AliasTwo");
++    let (backend, dir, caller, _) = kernel_workspace_extra(
++        root,
++        &[
++            ("app/Http/AliasOne.php", &first),
++            ("app/Http/AliasTwo.php", &second),
++        ],
++    )
++    .await;
++    let found = definitions(&backend, &caller, SOURCE, "middleware('aud").await;
++    assert_eq!(
++        found.len(),
++        2,
++        "compatible trait sources must not acquire an invented winner: {found:?}"
++    );
++    for name in ["AliasOne", "AliasTwo"] {
++        assert!(
++            found
++                .iter()
++                .any(|location| location.uri.path().ends_with(&format!("/{name}.php")))
++        );
++    }
++    let detail = hover(&backend, &caller, SOURCE, "middleware('aud").await;
++    assert!(
++        detail.contains("ambiguous")
++            && detail.contains("AliasOne.php")
++            && detail.contains("AliasTwo.php"),
++        "{detail}"
++    );
++    let path = dir.path().join("app/Http/Middleware/Audit.php");
++    let text = std::fs::read_to_string(&path).unwrap();
++    let uri = Url::from_file_path(path).unwrap();
++    open_document(&backend, &uri, "php", &text).await;
++    let result = settled_target_rename(&backend, &uri, &text, "class Aud", "Auditor").await;
++    assert!(
++        result
++            .as_ref()
++            .is_err_and(|message| message.contains("middleware")),
++        "ambiguous ownership must not authorize edits: {result:?}"
++    );
++}

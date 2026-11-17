@@ -15,6 +15,71 @@ slice, commit and push it, and retain only the latest generated app. Native UI
 cases remain deferred/unverified; earlier native-first blocking checkpoints are
 historical and no longer prevent independent implementation.
 
+Engine source slice143 (2026-11-17, verified;165 inactive): resolve effective
+middleware alias property declarations through Kernel parents and nested traits,
+anchored at conventional app/Http/Kernel.php. Reuse shared ancestry/member resolution
+and authoritative source contexts. Definitions, hover and references retain the
+actual declaring file, encoded alias spelling and UTF-16 ranges. Property-specific
+class overrides shadow inherited maps; keep separate legacy maps and all known
+multiple-trait origins. Dirty imports, keys and composition refresh unchanged callers.
+Known declarations remain navigable with explicit incomplete/ambiguous hover context;
+missing or cyclic higher-priority graphs cannot invent inherited targets. Checked
+class/FQN/namespace transformations refuse unresolved or literal alias targets.
+
+The real Laravel preflight exposes PHP's trait/property compatibility constraint.
+Correct the happy-path trait/parent regression to use compatible defaults and make
+the real fixture's class declaration match its trait. Guard overlapping parent,
+class and trait properties until compatibility can be proven: rename must not change
+only one declaration and make a valid PHP composition unloadable. Retain navigation
+of known declarations. Both compatible and dirty incompatible compositions refuse
+checked edits over stdio. Safe named parent import edits and stale-source rejection
+remain exercised. Dynamic/default compatibility proofs stay explicitly in L63.
+
+Canonical164 parent/trait stdio controls reproduce missing navigation, and the four
+initial public-handler regressions fail for missing declarations and unsafe partial
+rename. Correct two harness mistakes (namespace cursor on a separator and prematurely
+dropped TempDir) without relaxing their behavioral assertions. All eight new
+regressions pass in the full frozen-source suite: 18,602 ordinary passes/17 ignored
+plus two bounded child checks. Default and mem-audit release all-target Clippy,
+formatting, exact source fingerprint and default executable build pass. Patch0165
+replays byte-for-byte from the pinned archive plus the164 patch series. Cargo.toml,
+Cargo.lock, build.rs and license/stubs inputs remain unchanged.
+
+All22 executable-bound stdio stage groups pass, including real Laravel13.37 Kernel
+ancestry: parent declaration navigation, hover, references, same-length dirty-key
+refresh, restart/replay and guarded rename. Retain plain/Composer/resource exclusion,
+encoded receiver, multi-project, namespace and descriptor-isolation regressions.
+Owned engine children exit0; original and borrowed fixture inputs remain unchanged.
+All12 plain-PHP syntax checks and runtime assertions pass. The final Laravel example
+has118 syntax-valid files and352 runtime assertions; analyzer output remains exactly
+three deliberate diagnostics at the original lines, expected exit1.
+
+Inactive PHPantom0.11.1-openstorm.165 SHA256:
+2701aaaea7adb7a567f291e25f84cf84eab0b351792b71e88e324ab3a497d732.
+Source series SHA256: 5b3b3fe61b67b52b8b57cdf6ace9cd00acc69005f6ef7f62a37ec473f6d5571f.
+Candidate: artifacts/engines/0.11.1-openstorm.165/phpantom_lsp. The arm64 executable
+links only macOS system libraries. Archive source/provenance/licenses and immutable
+build receipts. Client/host acceptance and default resource adoption/packaging remain
+separate slices. App102/default164 hashes and deep/strict signature are unchanged;
+App102 remains the sole generated app. Clean2.2GiB compiler output, the mutable scratch
+copy and superseded unpublished freeze; retain its patch/manifest/failure evidence.
+Reuse the unchanged upstream-merge frontend13,393/6 skipped and serialized workspace
+Rust5,151/203 ignored/one HTTP exclusion, plus App102's package evidence. Retain the
+known default-parallel CLI socket-test limitation. Native UI remains user-skipped.
+
+All69 area statuses stay67 partial/2 user-deferred. Custom bound Kernel discovery
+remains L62; dynamic/ambiguous maps and property compatibility proofs remain L63;
+builtin/group catalogs, completion/validation, runtime ordering and middleware
+transformations remain in L61. Commit/push this source slice and verify its remote
+ref before client adoption. The completed source replaces the saved143 draft; preserve
+older stashes, Workbench and prior canonical/evaluation artifacts.
+
+Evidence: artifacts/checks/slice143-{source-freeze,engine-gates,source-test-summary,
+wire-gates,baseline164,baseline164-trait,inherited-parent,inherited-trait,
+inherited-refactors,real-kernel,new-example-checks,playground,runtime-libraries,
+retention}.json; slice143-final-*.log; slice143/{red-tests,green-tests,
+clippy-fix-compatible}.log; retained stage receipts and canonical165 build receipt.
+
 Upstream merge checkpoint (2026-11-17, verified source merge): merge five
 commits from l0ng-ai/openidea through c1782f01eb47bb2e040f0d59ae6b29c585c1e8d8.
 Includes MCP call hierarchy, clickable documentation signature types, MySQL

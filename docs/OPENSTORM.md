@@ -15,6 +15,39 @@ slice, commit and push it, and retain only the latest generated app. Native UI
 cases remain deferred/unverified; earlier native-first blocking checkpoints are
 historical and no longer prevent independent implementation.
 
+Client/host slice133 (2026-11-17, verified;161 inactive): exercise route
+middleware exclusions through OpenStorm's production document and LSP paths
+(FEAT-030/066). Add two real-engine host regressions covering native/magic/case
+argument binding, valid receiver unions, encoded raw UTF-16 reference ranges,
+foreign/static receivers and alias-key rename refusal. Verify same-length unsaved
+registration/import changes, first receiver-class publication, unsaved parent removal
+and restoration, and server restart with dirty overlays. Definitions/hover/references
+must update without saving; owned fixture disk contents remain intact and server
+processes exit on fixture cleanup. PHP/Composer fixture literals pass17 syntax checks;
+no new environment files, UI, settings, bindings or production application changes.
+
+The exact workspace-emitted host test executable fails both new cases at the intended
+missing-feature assertions with canonical160 and passes both with checksum-bound161.
+All81 actual161 client/host cases pass (2 URL,10 edit,17 completion,2 handler,50 client),
+including existing guarded edits, imports/rename/history, save-conflict consent,
+Composer/Laravel understanding, stale-result refusal and restart recovery. Borrowed
+PHP/Laravel fixtures and tested runtime source hashes remain unchanged. Workspace
+Rust tests pass5076 with198 ignored; retain the explicit existing exclusion of
+http_list_and_run_require_confirmation. All-target workspace Clippy with warnings
+denied, Rust formatting and frontend formatting pass. Reuse unchanged merge132
+frontend13136/6 skipped and106 controlled-browser results; these do not establish
+native161 acceptance.
+
+Canonical161/source/provenance remain intact, client-verified and inactive pending
+a separate packaging slice. Keep active160 and sole signed App0.1.99 unchanged;
+recheck main/engine hashes and deep/strict signature. Remove this slice's owned Rust
+compiler output after acceptance. No app rebuilt/installed; native checks stay
+user-skipped. All69 area statuses remain67 partial/2 user-deferred. Commit/push the
+small test/documentation slice, verify the exact remote ref and clean worktree.
+
+Evidence: artifacts/checks/slice133-{fixture-syntax,controls,gates,workspace-totals,
+client-host,retention,delivery}.json and retained per-stage logs.
+
 Upstream merge slice132 (2026-11-17, source/client/browser verified): merge16
 commits from l0ng-ai/openidea through f86c5e3460c5d2a67dd2101e04e8989562888196,
 following the earlier577193d38 checkpoint. The automatic merge is conflict-free.

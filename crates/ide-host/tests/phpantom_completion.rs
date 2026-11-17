@@ -5,6 +5,8 @@ use ide_host::{Host, HostConfig, Project};
 use ide_lsp::types::{CompletionItem, CompletionKind, CompletionList, GotoKind};
 use std::{io::Write, path::PathBuf, process::Stdio, sync::Arc, time::Duration};
 
+#[path = "fixtures/kernel_aliases.rs"]
+mod kernel_aliases;
 #[path = "fixtures/middleware_aliases.rs"]
 mod middleware_aliases;
 

@@ -15,6 +15,50 @@ slice, commit and push it, and retain only the latest generated app. Native UI
 cases remain deferred/unverified; earlier native-first blocking checkpoints are
 historical and no longer prevent independent implementation.
 
+Client/host slice141 (2026-11-17, verified;164 inactive pending packaging):
+accept conventional HTTP Kernel middleware aliases through the production host,
+documents, checked-rename adapter and reviewed-edit paths. Add two real-server
+regressions. Cover both property names, inherited Kernel ancestry, encoded keys
+and UTF-16 definition/reference ranges, foreign receiver exclusion and truthful
+hover source labels. Dirty imports, parent classes and keys refresh unchanged
+callers; unsaved dependencies survive managed-server restart without disk writes.
+
+Literal and unresolved Kernel targets refuse partial class, FQN and namespace
+renames. Alias-key rename stays explicitly unsupported. Named `::class` targets
+produce guarded PSR-4 moves and import/caller edits. Reject a changed buffer and
+an external disk change after planning, without overwriting newer data or losing
+unsaved class documentation. Apply a fresh plan through the host, lint all edited
+PHP, and restore the grouped class/Kernel/caller state through reviewed undo/redo.
+Both new tests fail for the intended missing-navigation/unsafe-plan reasons on
+canonical163; the identical compiled executable passes both with canonical164.
+
+All 86 actual client/host cases pass: 2 URL-host, 10 guarded-edit host, 22 completion
+host, 2 handler host and 50 client tests. Executable/fingerprint and runtime-source
+hashes stay fixed; borrowed fixture originals remain unchanged. Fresh frontend
+checks pass: typecheck, lint, formatting, knip, 13,374 tests/6 skipped, build and
+Safari 15.4 startup/bundle checks. Fresh serialized Rust workspace acceptance has
+5,124 passes/203 ignored and the retained HTTP-test exclusion; workspace all-target
+Clippy and Rust formatting pass. Keep the existing default-parallel CLI socket-test
+limitation. Reuse 86 controlled-browser cases only for unchanged frontend paths;
+actual native Kernel UI/discoverability/preview acceptance remains user-skipped.
+
+Source140's engine tests, source replay, licenses, provenance and build receipt
+remain unchanged. Inactive PHPantom164 SHA256:
+7282b77b626a53fa5621257de10aaca1fef40d2a8181d5aae6d0018d8c475f38.
+Active App101/default163 hashes, signature and sole-app status are unchanged. No
+new app build, install, profile migration, updater activation or debugger scope.
+Removed 26,681,809,904 compiler bytes and 68,777,218 generated frontend bytes
+after acceptance; preserve canonical source/engines, Workbench, fixtures and
+receipts. All 69 statuses remain 67 partial/2 user-deferred. Custom Kernel paths,
+parent/trait-owned registrations and remaining middleware catalogs/transformations
+stay in L61/L62. Package164 in a separate slice after committing and pushing this
+acceptance slice and verifying the exact remote ref and clean worktree.
+
+Evidence: artifacts/checks/slice141/{source-input,gates,frontend,controls,
+client-host,retention,delivery}.json; control-163/control-164 and all affected stage logs;
+canonical164 client-host sidecar added after remote verification. Native UI remains
+unverified; passing host/client paths do not establish complete feature-area parity.
+
 Engine source slice140 (2026-11-17, verified;164 inactive): follow static
 middleware alias declarations in conventional app/Http/Kernel.php, supporting both
 `$middlewareAliases` and `$routeMiddleware`. Confirm the owning class's Kernel ancestry

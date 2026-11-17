@@ -15,6 +15,44 @@ slice, commit and push it, and retain only the latest generated app. Native UI
 cases remain deferred/unverified; earlier native-first blocking checkpoints are
 historical and no longer prevent independent implementation.
 
+Upstream merge (2026-11-17, automated acceptance verified): integrate31 commits through
+`382f5d71f` from l0ng-ai/openidea. Preserve OpenStorm identity, bundled158,
+save-conflict checks and the unfinished candidate159 source work. Retain the prior
+exclusion of new Java stream tracing, including its follow-up fixes and inspector
+binary, under the deferred debugger expansion boundary. Merge upstream's editor,
+terminal, Python, plugin, Git, MCP, remote and database improvements. Preserve the
+no-op close guard beside diff navigation history, PHP virtual-document tests beside
+Git revision tests, and existing visible/hovered icon-size regression coverage.
+Native checks remain user-skipped; no additional app bundle is produced.
+Frontend13105 tests pass/6 skipped; typecheck, lint, format, knip, build and
+Safari startup checks pass. All108 controlled-browser cases pass, including the
+changed editor and agent flows plus Laravel navigation. Regenerate bindings and
+the command snapshot; their merged contents match generation. Workspace5059 tests
+pass/194 ignored/1 existing HTTP fixture exclusion
+(`http_list_and_run_require_confirmation`); all-target workspace Clippy with
+warnings denied and Rust fmt pass. All77 actual158 host/client checks pass
+(2 URL host,10 guarded edits,13 completion host,2 handler host,50 client),
+including external-save consent, unsaved dependencies, cancellation, restart,
+project isolation and UTF-16 source ranges. Fixture originals stay unchanged.
+Retain the previously recorded linker unwind-size warning and plain-browser
+unstubbed-native-API warnings; these are not native acceptance. Sole App98's
+deep/strict signature and active158 provenance/checksum verify unchanged.
+Evidence: artifacts/checks/upstream-20261117-{inputs,static,rust,client-host}.json
+and corresponding binding/frontend/browser logs. Removed26.7GiB of compiler output
+and68,338,323 bytes of dist after acceptance; retain the removal/signature receipt
+in upstream-20261117-retention.json. Preserve App98, unfinished candidate159,
+immutable sources, canonical engines, Workbench and earlier evaluation evidence.
+The final format gate caught new ledger wrapping; format that file and rerun passes.
+
+Engine source slice127 (2026-11-17, in progress): add static application
+middleware alias navigation/hover for typed `bootstrap/app.php` registrations,
+route middleware strings and type-confirmed controller calls. Reuse cached symbol
+maps, decoded literals and shared receiver typing. Keep registration alternatives
+visible; do not execute bootstrap code or diagnose unresolved names as invalid.
+Built-in/group aliases, legacy Kernel/attribute/withoutMiddleware forms and full
+completion/validation remain tracked separately. Active158 and sole App98 stay
+unchanged while candidate159 is developed; native UI checks remain user-skipped.
+
 Packaging slice126 (2026-11-17, local artifact verified): promote accepted
 engine158 and source125's hover freshness fix in local App98. Source/resource pin,
 158-patch digest and canonical engine checksum agree; preserve provenance,

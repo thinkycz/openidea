@@ -5320,7 +5320,7 @@
   "{count} modified action": "已修改 {count} 个操作",
   "{count} modified actions": "已修改 {count} 个操作",
   "Runs “<base> -m venv <location>”; the new interpreter becomes the project interpreter.": "运行“<base> -m venv <location>”；新的解释器将成为项目解释器。",
-  "Runs “conda create -p <location> python=<version>”: a new environment with only Python in it; the new interpreter becomes the project interpreter.": "运行“conda create -p <location> python=<version>”：新建一个只包含 Python 的环境；新的解释器将成为项目解释器。",
+  "Runs “conda create -n <name> python=<version>”: a new environment with only Python in it, in conda's envs directory; the new interpreter becomes the project interpreter.": "运行“conda create -n <name> python=<version>”：在 conda 的 envs 目录中新建一个只包含 Python 的环境；新的解释器将成为项目解释器。",
   "Python version": "Python 版本",
   "Python {short}": "Python {short}",
   "Runs “poetry env use <base>” in the project; poetry keeps the environment under its own cache directory.": "在项目中运行“poetry env use <base>”；Poetry 会将环境保存在其自己的缓存目录下。",
@@ -8691,5 +8691,7 @@
   "When off, Settings opens as a dialog in the project window, which is faster": "关闭时，设置以对话框形式在项目窗口中打开，速度更快",
   "Run code inside the Java applications you start": "在你启动的 Java 应用中运行代码",
   "Java agents of {list} were not added: they load only in local projects.": "未添加 {list} 的 Java 代理：Java 代理只加载到本地项目中。",
-  "Java agent": "Java 代理"
+  "Java agent": "Java 代理",
+  "Java Agents": "Java 代理",
+  "File at a Git revision (read-only).": "Git 修订版中的文件（只读）。"
 }

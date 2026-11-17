@@ -2062,6 +2062,7 @@ mod tests {
             name: "openidea".into(),
             opened_at_ms: 0.0,
             branch: None,
+            missing: false,
         }];
         let items = recent_items(&recent, Some(Path::new("/home/me")));
         assert_eq!(items[0].label, "openidea  —  ~/code/openidea");

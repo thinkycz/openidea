@@ -1621,6 +1621,14 @@ export class EditorController implements SlotHost {
     );
     const emptyPanes = paneIds(initial).filter((id) => !planned.panes[id] && !initial.panes[id]?.tabs.length);
     if (!targets.size && !emptyPanes.length && !options.beforeRemove) return Promise.resolve(true);
+    // Closing the active diff leaves it as a place, so Back reopens it.
+    const active = this.activeInput();
+    if (
+      active &&
+      !isTextInput(active) &&
+      Object.values(initial.panes).some((p) => p.tabs.some((t) => targets.has(t.id) && t.input.key === active.key))
+    )
+      this.recordLeaving();
     return this.enqueueRemoval(async () => {
       if (generation !== this.projectGeneration || this.closeSession) return false;
       const prepared: CustomDocument[] = [];

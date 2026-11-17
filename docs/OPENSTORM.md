@@ -15,6 +15,52 @@ slice, commit and push it, and retain only the latest generated app. Native UI
 cases remain deferred/unverified; earlier native-first blocking checkpoints are
 historical and no longer prevent independent implementation.
 
+Upstream merge (2026-11-17, source/client verified; native UI skipped): merge
+l0ng-ai/openidea main182285647 (50 commits since f86c5e346). Adopt shared command
+declarations, editor/LSP/plugin/tool-download fixes, the PHP include-path chooser,
+Git stash preview and appearance/language additions. Retire obsolete nightly
+machinery. Preserve app0.1.100 identity, active engine161, disabled updater and
+user-deferred debugger expansion. Engine163 remains inactive pending its separate
+client-adoption slice; this merge does not promote or package it.
+
+Adapt checked saves, reviewed edits, rename details and Laravel navigation to the
+new derived desktop/remote catalogue. Keep PHP builtin revalidation/read-only
+navigation and guarded project application paths. Move refactoring history work
+into the blocking task. Add a catalogue/trust regression and exercise confirmation
+through real JSON-RPC: ordinary save refuses external changes, a same-size second
+external revision invalidates old consent, and only current consent writes the
+buffer. The real regression passes without modifying personal files.
+
+Generate bindings and the command snapshot from Rust. Type checking, lint,
+formatting, unused-code checks, frontend build, workspace Clippy with warnings
+denied, Rust formatting and bundled-engine checksum verification pass. All13374
+frontend tests pass with6 skipped; all86 selected controlled-browser cases and83
+real PHP/Laravel client/host cases pass. Live cases use checksum-bound existing
+candidate162 and immutable emitted executables/fingerprints; all borrowed fixtures
+and runtime sources remain unchanged. Do not claim current163/native acceptance.
+
+The complete workspace passes5124 tests with200 ignored using one test thread;
+the previously deferred HTTP test stays excluded. Two default-parallel attempts
+fail unchanged ide-cli's suite-owned stale-socket test with AddrInUse. Ten isolated
+runs, three full CLI runs, normal/canonical temporary-path controls, root/crate
+invocation controls and an isolated Cargo run pass. Cause remains unestablished:
+retain the failed parallel result and logs, rather than claiming
+the socket issue fixed. The initial frontend run exposes a partially parsed C++
+indentation fixture; finish its syntax tree before asserting indentation. Its full
+16-case file and the subsequent full frontend suite pass. Existing linker/frontend
+warnings remain recorded; do not suppress them or assert whole-area parity.
+
+Retain the sole signed App0.1.100 with unchanged main/resource hashes and valid
+strict/deep signature. Remove29,944,726,054 bytes of owned compiler output and68,777,218 bytes of frontend dist after checks;
+preserve canonical sources/engines, Workbench and evaluation evidence. No new app,
+installation, profile migration, updater activation, release publication or native
+UI check. All69 area statuses remain67 partial/2 user-deferred. Commit/push this
+merge and verify the exact remote ref and clean worktree.
+
+Evidence: artifacts/checks/upstream-182285647/{baseline,gates,cli-controls,
+cli-tmp-controls,cli-invocation-controls,browser,client-host,retention,delivery}.json,
+retained failed/control logs, checked-save-rpc.log and generated-source checkpoint.
+
 Engine source slice137 (2026-11-17, source/stdio verified;163 inactive): release
 unrelated inherited descriptors at PHPantom's managed macOS stdio startup boundary
 (FEAT-068). Enumerate open descriptors before runtime threads/application resources,

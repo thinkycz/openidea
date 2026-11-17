@@ -15,6 +15,51 @@ slice, commit and push it, and retain only the latest generated app. Native UI
 cases remain deferred/unverified; earlier native-first blocking checkpoints are
 historical and no longer prevent independent implementation.
 
+Packaging slice126 (2026-11-17, local artifact verified): promote accepted
+engine158 and source125's hover freshness fix in local App98. Source/resource pin,
+158-patch digest and canonical engine checksum agree; preserve provenance,
+upstream attribution, MIT/Apache licenses and reproducible acquisition/build recipe.
+Advance44 local package versions only; no dependency updates. Plugin API1.10 and
+its released snapshot remain unchanged. Bundle-resolution3 and PHP-default1 tests
+pass; PHPantom remains default and the Laravel companion stays opt-in. SDK65 tests
+pass/2 doctests ignored; version tests, typecheck, lint, format, knip, Rust fmt and
+ide-tools all-target Clippy pass. Reuse source125's unchanged runtime acceptance:
+frontend13027/6 skipped, workspace5047/194 ignored/1 excluded,77 actual158 client/
+host and81 controlled-browser cases, plus source124's engine18551/17 ignored and
+2 bounded children. Source/runtime hash and metadata-only diff checks pass.
+
+Sole archive: artifacts/batches/0.1.98/OpenStorm.app, development profile, arm64,
+cz.thinky.openstorm, ad-hoc deep/strict signature verified. Both Info.plist and
+Mach-O minimum target are macOS13.0; this is not an observed macOS13 runtime test.
+Main executable SHA256:
+ea923b05e43ea3c6b0b3e46669d79236bde0b4835bcba37b84a3f5521681561b.
+Embedded158 SHA256:
+d53f9cba91c852e0612174a3fd3fb3855a2448818db751ba83228fe2a542600a.
+The receipt records actual precommit source76d3fbedf and dirty build snapshot;
+version/resource edits are frozen before building. Frontend build and Safari
+startup checks pass again. Actual embedded CLI passes7 compatibility groups
+(helper/completion, encoded rename refusal, global/fallback shadowing, real Laravel
+controller URLs and exact3 intentional analyzer diagnostics, expected exit1).
+Encoded plain/real Laravel13.37 probes pass for raw UTF-16 ranges, decoded names/
+separators, Unicode/quote/dollar guards, unsaved updates and restart. Existing
+real-fixture typed-guard controls pass; all6 guard-probe children exit0, and
+original/borrowed files remain unchanged. Verify the final signature after CLI use.
+
+After the new signature/receipt succeeds, retire App97 and remove31.8GiB of owned
+compiler output (26598 files reported by cargo clean), plus68,804KiB of dist after
+embedded acceptance. Preserve immutable sources, canonical engines, receipts,
+PHP Workbench and earlier evaluation artifacts. Native UI remains user-skipped;
+app not installed/launched/notarized/published. Keep existing debug-linker unwind
+warnings and unmeasured native/performance cases explicit. Encoded completion edits,
+other middleware aliases, whitespace normalization and wider platform acceptance
+remain unaccepted; all69 statuses stay67 partial/2 user-deferred.
+
+Evidence: artifacts/checks/slice126-promotion.json, slice126-gates.json,
+slice126-package-pipeline.json, slice126-packaged-check.json, slice126-macho.json,
+slice126-embedded.json, slice126-packaged-cli.json,
+slice126-packaged-{encoded-plain,encoded-laravel,typed-guard-compat}.json,
+slice126-retention.json and artifacts/batches/0.1.98/{build-receipt,retention}.json.
+
 Client acceptance slice125 (2026-11-17, automated acceptance verified): exercise
 candidate158's encoded middleware read paths through actual host/client code for
 FEAT-031/066. A held real158 hover exposes a client bug: changing an unsaved parent
@@ -53,7 +98,7 @@ are unchanged. Native UI remains user-skipped. Keep all69 statuses67 partial/
 2 user-deferred; encoded completion edits, other middleware aliases, whitespace
 normalization, performance and wider native acceptance remain unaccepted. Retain
 the owned compile cache only for the immediate App98 packaging slice126, which
-will remove it after signature/receipt verification; preserve earlier evaluation
+removes it after signature/receipt verification; preserve earlier evaluation
 artifacts and PHP Workbench.
 
 Evidence: artifacts/checks/slice125-gates.json, slice125-workspace-counts.json,

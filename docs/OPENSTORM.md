@@ -15,6 +15,64 @@ slice, commit and push it, and retain only the latest generated app. Native UI
 cases remain deferred/unverified; earlier native-first blocking checkpoints are
 historical and no longer prevent independent implementation.
 
+Engine source slice127 (2026-11-17, read source/stdio verified; inactive): add
+static application middleware alias navigation, hover and references for typed
+`bootstrap/app.php` registrations, route strings and confirmed controller calls
+(FEAT-030/066). Reuse decoded literal source ranges, cached symbol maps, shared
+receiver typing and ticketed closed-file publication. Array-key candidates now
+reach the receiver walker. A realistic bootstrap callback followed by `->create()`
+exposes a shared PHP scope gap: per-request variable resolution misses callbacks
+in fluent receivers. Fix that traversal in the shared scope walker while retaining
+closure-call rebinding first. No bootstrap execution or new settings. Multiple
+registration sites and unresolved targets stay explicit; alias-key prepare/rename
+refuses unsupported edits.
+
+Eleven alias regressions and one generic fluent-callback regression pass. Full
+reconstructed-source testing passes18563 ordinary cases/17 ignored plus2 bounded
+child checks. Release all-target Clippy, mem-audit all-target Clippy, formatting,
+full source fingerprint verification and default recipe build pass. Clippy's fix
+pass removes one needless borrow before formatting. Freeze20 files as patch0159;
+exact replay matches the working source. Series SHA256:
+93bff5f18c443381aaad490e9ecca0510f18380badbd8aa404415812693eae93.
+Canonical artifacts/engines/0.11.1-openstorm.159/phpantom_lsp is arm64, version159;
+default-build SHA256:
+23444f1359c970dba3b5d25605fe48e937aeb0b217fcf6377b5d37f8a3d128dd.
+Preserve acquisition/build provenance, upstream attribution and MIT/Apache licenses.
+
+Final checksum-bound stdio probes pass on small and real Laravel13.37 fixtures:
+cold bootstrap reads, exact raw UTF-16 ranges after emoji/escapes, references,
+foreign-receiver exclusion, unsaved imports/keys/parents, multiple static sites,
+deletion/recreation and restart. Two-project lookup preserves bootstrap ownership
+and isolates unsaved changes. Existing typed/encoded guard probes still pass;
+158's negative control lacks alias navigation after ordinary PHP readiness. All
+probe children exit0 and original/borrowed input checks pass. The new Laravel
+example has115 syntax-valid PHP files, a passing middleware runtime assertion,
+and exactly the same3 intentional analyzer diagnostics as the retained reference
+fixture (expected CLI exit1). PHP playground assertions and initial15-file syntax
+checks also pass. Test-profile receipts remain separate from the final build.
+
+An additional actual checked-rename probe confirms a pre-existing gap in both158
+and final159: renaming a middleware class leaves its literal bootstrap class-string
+target unchanged. No edits were applied. This is a promotion blocker; the next
+small source slice must support those target edits or refuse a partial class
+rename before client/app adoption. Candidate159 stays inactive. Builtin/group
+aliases, legacy Kernel/attribute/withoutMiddleware forms, full completion/validation,
+broader performance and native/platform checks remain unaccepted. All69 statuses
+stay67 partial/2 user-deferred; native checks remain user-skipped.
+
+Main frontend/host/runtime inputs are unchanged from c2a0e9e9c; retain that merge's
+13105 frontend/6 skipped,5059 Rust/194 ignored/1 HTTP exclusion,108 browser and77
+actual158 client/host results. These are not159 client acceptance. Active158's
+checksum and sole App98's deep/strict signature/original executable hash verify
+unchanged. Remove2.2GiB of compiler output and35,492,931 bytes of mutable work after
+canonical archival; preserve immutable source, canonical engines, Workbench and
+earlier evaluation evidence. No additional app bundle is produced.
+
+Evidence: artifacts/checks/slice127-{source-freeze,engine-gates,source-test-summary,
+wire-gates,wire-final-plain,wire-final-laravel,projects-final,new-example-checks,
+target-rename-baseline158,target-rename-final,retention}.json, retained red/green
+logs and artifacts/engines/0.11.1-openstorm.159/build-receipt.json.
+
 Upstream merge (2026-11-17, automated acceptance verified): integrate31 commits through
 `382f5d71f` from l0ng-ai/openidea. Preserve OpenStorm identity, bundled158,
 save-conflict checks and the unfinished candidate159 source work. Retain the prior
@@ -43,15 +101,6 @@ and68,338,323 bytes of dist after acceptance; retain the removal/signature recei
 in upstream-20261117-retention.json. Preserve App98, unfinished candidate159,
 immutable sources, canonical engines, Workbench and earlier evaluation evidence.
 The final format gate caught new ledger wrapping; format that file and rerun passes.
-
-Engine source slice127 (2026-11-17, in progress): add static application
-middleware alias navigation/hover for typed `bootstrap/app.php` registrations,
-route middleware strings and type-confirmed controller calls. Reuse cached symbol
-maps, decoded literals and shared receiver typing. Keep registration alternatives
-visible; do not execute bootstrap code or diagnose unresolved names as invalid.
-Built-in/group aliases, legacy Kernel/attribute/withoutMiddleware forms and full
-completion/validation remain tracked separately. Active158 and sole App98 stay
-unchanged while candidate159 is developed; native UI checks remain user-skipped.
 
 Packaging slice126 (2026-11-17, local artifact verified): promote accepted
 engine158 and source125's hover freshness fix in local App98. Source/resource pin,

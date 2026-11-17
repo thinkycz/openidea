@@ -1,0 +1,1078 @@
+--- a/docs/CHANGELOG.md
++++ b/docs/CHANGELOG.md
+@@ -22,6 +22,8 @@
+ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+ 
+ ## [Unreleased]
++
++- **Navigate application middleware aliases.** Go to Definition on route or typed controller middleware names opens static alias registrations in `bootstrap/app.php`. Hover shows declared targets; references and unsaved edits retain exact source ranges. Multiple registrations and unresolved targets remain explicit without running the application. Contributed by @thinkycz.
+ 
+ - **Navigate escaped middleware parameters.** Static PHP escapes in authentication guards and authorization abilities now resolve to their runtime names, including escaped separators. Hover, definitions, references and diagnostics retain the exact source spelling. Contributed by @thinkycz.
+ 
+--- a/docs/todo/laravel.md
++++ b/docs/todo/laravel.md
+@@ -647,6 +647,15 @@
+ completion edits are still refused. Dynamic middleware aliases and native/client
+ release acceptance remain outside this engine-source checkpoint.
+ 
++OpenStorm .159 adds read navigation, hover and references for literal application
++alias maps on type-confirmed Configuration\Middleware receivers in bootstrap/app.php.
++It retains all static registration sites, unresolved target information and exact
++raw UTF-16 ranges after PHP escape decoding. Unsaved bootstrap changes refresh the
++lookup; closed-file metadata uses ticketed publication and never replaces editor
++buffers. Builtin/group alias catalogs, legacy Kernel maps, attributes, withoutMiddleware,
++completion and alias rename/validation remain separate work. Registration sites do
++not establish effective runtime override order.
++
+ **Impact: Low-Medium · Complexity: Medium**
+ 
+ `$this->middleware('auth:admin')` names middleware only when `$this` is a
+--- a/examples/laravel/app/Demo.php
++++ b/examples/laravel/app/Demo.php
+@@ -1784,6 +1784,12 @@
+         return ['url' => $url, 'redirect' => $redirect, 'facade' => $facade];
+     }
+ 
++    public function applicationMiddlewareAliases(): void
++    {
++        // Try definition, hover or references on demo.audit; bootstrap stays unexecuted.
++        Route::get('/audited-demo', fn () => null)->middleware('demo.audit:strict');
++    }
++
+     public function encodedMiddlewareNavigation(): void
+     {
+         new class extends \Illuminate\Routing\Controller {
+--- /dev/null
++++ b/examples/laravel/app/Http/Middleware/AuditRequests.php
+@@ -0,0 +1,11 @@
++<?php
++
++namespace App\Http\Middleware;
++
++class AuditRequests
++{
++    public function handle(mixed $request, \Closure $next, string $mode = 'default'): mixed
++    {
++        return $next($request);
++    }
++}
+--- a/examples/laravel/bootstrap/app.php
++++ b/examples/laravel/bootstrap/app.php
+@@ -18,7 +18,7 @@
+         __DIR__.'/../app/Actions',
+     ])
+     ->withMiddleware(function (Middleware $middleware) {
+-        //
++        $middleware->alias(['demo.audit' => \App\Http\Middleware\AuditRequests::class]);
+     })
+     ->withExceptions(function (Exceptions $exceptions) {
+         //
+--- a/src/blade/typed_receiver.rs
++++ b/src/blade/typed_receiver.rs
+@@ -258,11 +258,13 @@
+             let mut confirmed = Vec::new();
+             for call in calls {
+                 let offset = call.receiver.span().start.offset;
+-                if call
+-                    .sites
+-                    .iter()
+-                    .all(|site| site.receiver == ViewReceiverClass::ControllerGuard)
+-                {
++                if call.sites.iter().all(|site| {
++                    matches!(
++                        site.receiver,
++                        ViewReceiverClass::ControllerGuard
++                            | ViewReceiverClass::ControllerMiddlewareAlias
++                    )
++                }) {
+                     if self.controller_middleware_this_at(content, offset, &file_ctx, map) {
+                         confirmed.extend(call.sites.iter().map(|site| site.to_span()));
+                     }
+@@ -298,6 +300,11 @@
+                     continue;
+                 };
+                 for site in call.sites {
++                    if site.receiver == ViewReceiverClass::MiddlewareAliasDeclaration
++                        && !self.is_bootstrap_middleware_uri(uri)
++                    {
++                        continue;
++                    }
+                     if site
+                         .receiver
+                         .fqns()
+@@ -363,7 +370,10 @@
+                 for element in array.elements.iter() {
+                     match element {
+                         ArrayElement::Value(value) => self.matching_sites(value.value, out),
+-                        ArrayElement::KeyValue(value) => self.matching_sites(value.value, out),
++                        ArrayElement::KeyValue(value) => {
++                            self.matching_sites(value.key, out);
++                            self.matching_sites(value.value, out);
++                        }
+                         _ => {}
+                     }
+                 }
+@@ -372,7 +382,10 @@
+                 for element in array.elements.iter() {
+                     match element {
+                         ArrayElement::Value(value) => self.matching_sites(value.value, out),
+-                        ArrayElement::KeyValue(value) => self.matching_sites(value.value, out),
++                        ArrayElement::KeyValue(value) => {
++                            self.matching_sites(value.key, out);
++                            self.matching_sites(value.value, out);
++                        }
+                         _ => {}
+                     }
+                 }
+--- a/src/completion/laravel_string_keys/mod.rs
++++ b/src/completion/laravel_string_keys/mod.rs
+@@ -41,6 +41,7 @@
+         | LaravelStringKind::Command
+         | LaravelStringKind::Section
+         | LaravelStringKind::Stack
++        | LaravelStringKind::MiddlewareAlias
+         | LaravelStringKind::ContainerBinding => CompletionItemKind::VALUE,
+     }
+ }
+@@ -120,6 +121,7 @@
+             }
+             LaravelStringKind::Section
+             | LaravelStringKind::Stack
++            | LaravelStringKind::MiddlewareAlias
+             | LaravelStringKind::ContainerBinding => Arc::new([]),
+         }
+     }
+--- a/src/diagnostics/laravel_string_keys.rs
++++ b/src/diagnostics/laravel_string_keys.rs
+@@ -314,6 +314,7 @@
+                         LaravelStringKind::Section
+                         | LaravelStringKind::Stack
+                         | LaravelStringKind::ContainerBinding
++                        | LaravelStringKind::MiddlewareAlias
+                         | LaravelStringKind::Env => return None,
+                     };
+                     Some((checked, key.as_str(), span.start, span.end))
+--- a/src/hover/mod.rs
++++ b/src/hover/mod.rs
+@@ -790,6 +790,7 @@
+                 ("Morph type", detail)
+             }
+             LaravelStringKind::GateAbility => ("Ability", self.gate_ability_detail(key)),
++            LaravelStringKind::MiddlewareAlias => ("Middleware", self.middleware_alias_detail(key)),
+             LaravelStringKind::ContainerBinding => {
+                 let detail = match self.container_binding_target(key) {
+                     Some(target) => {
+--- a/src/symbol_map/extraction/expressions/calls.rs
++++ b/src/symbol_map/extraction/expressions/calls.rs
+@@ -1263,6 +1263,15 @@
+     argument_list: &'a ArgumentList<'a>,
+     ctx: &mut ExtractionCtx<'a>,
+ ) {
++    if member_name.eq_ignore_ascii_case("alias") {
++        record_middleware_alias_declarations(
++            argument_list,
++            ctx.content,
++            ctx.resolved_names,
++            &mut ctx.view_receiver_sites,
++            &mut ctx.middleware_alias_targets,
++        );
++    }
+     // Every shape below is one of a handful of method names, and this runs for
+     // every method call in every file, so reject on the name first — before
+     // walking any receiver chain or touching the heap.
+--- a/src/symbol_map/extraction/laravel.rs
++++ b/src/symbol_map/extraction/laravel.rs
+@@ -1439,9 +1439,20 @@
+         None
+     };
+     let text = source_spans.as_ref().map_or(raw, |value| value.value());
+-    let Some((alias, parameters)) = text.split_once(':') else {
+-        return;
+-    };
++    let (alias, parameters) = text.split_once(':').unwrap_or((text, ""));
++    if include_auth_guards {
++        push_embedded_string_span(
++            crate::symbol_map::LaravelStringKind::MiddlewareAlias,
++            alias,
++            0,
++            inner_start,
++            source_spans.as_ref(),
++            spans,
++        );
++    }
++    if !text.contains(':') {
++        return;
++    }
+     let parameter_start = alias.len() + 1;
+     if alias == "can" {
+         let ability = parameters.split(',').next().unwrap_or(parameters);
+@@ -1518,24 +1529,85 @@
+     let mut spans = Vec::new();
+     try_emit_can_middleware_spans(argument_list, true, content, &mut spans);
+     for span in spans {
+-        if let SymbolKind::LaravelStringKey {
+-            kind:
+-                crate::symbol_map::LaravelStringKind::ConfigResource(
+-                    crate::symbol_map::LaravelConfigResource::AuthGuard,
+-                ),
++        let SymbolKind::LaravelStringKey {
++            kind,
+             key,
+             is_optional,
+             ..
+         } = span.kind
+-        {
+-            sites.push(ViewReceiverSite {
+-                start: span.start,
+-                end: span.end,
+-                key,
+-                is_optional,
+-                receiver: ViewReceiverClass::ControllerGuard,
+-            });
+-        }
++        else {
++            continue;
++        };
++        let receiver = match kind {
++            crate::symbol_map::LaravelStringKind::ConfigResource(
++                crate::symbol_map::LaravelConfigResource::AuthGuard,
++            ) => ViewReceiverClass::ControllerGuard,
++            crate::symbol_map::LaravelStringKind::MiddlewareAlias => {
++                ViewReceiverClass::ControllerMiddlewareAlias
++            }
++            _ => continue,
++        };
++        sites.push(ViewReceiverSite {
++            start: span.start,
++            end: span.end,
++            key,
++            is_optional,
++            receiver,
++        });
++    }
++}
++
++/// Record alias keys without trusting the receiver's variable spelling.
++pub(super) fn record_middleware_alias_declarations(
++    argument_list: &ArgumentList<'_>,
++    content: &str,
++    names: Option<&OwnedResolvedNames>,
++    sites: &mut Vec<ViewReceiverSite>,
++    targets: &mut Vec<crate::symbol_map::MiddlewareAliasTarget>,
++) {
++    let Some(argument) = argument_expr_for_parameter(argument_list, "aliases") else {
++        return;
++    };
++    let Some(elements) = crate::parser::array_literal_elements(argument) else {
++        return;
++    };
++    for element in elements.iter() {
++        let ArrayElement::KeyValue(element) = element else {
++            continue;
++        };
++        let Some((name, start, end)) =
++            crate::virtual_members::laravel::helpers::resolved_string_literal(element.key, content)
++        else {
++            continue;
++        };
++        if name.is_empty() {
++            continue;
++        }
++        let target = if matches!(
++            element.value,
++            Expression::Literal(literal::Literal::String(_))
++        ) {
++            crate::virtual_members::laravel::helpers::resolved_string_literal(
++                element.value,
++                content,
++            )
++            .and_then(|(value, _, _)| laravel_runtime_controller_ref(value))
++            .and_then(|value| value.runtime)
++        } else {
++            laravel_route_controller_value(element.value, names).and_then(|value| value.runtime)
++        };
++        targets.push(crate::symbol_map::MiddlewareAliasTarget {
++            name: name.to_string(),
++            start: start as u32,
++            target,
++        });
++        sites.push(ViewReceiverSite {
++            start: start as u32,
++            end: end as u32,
++            key: name.to_string(),
++            is_optional: false,
++            receiver: ViewReceiverClass::MiddlewareAliasDeclaration,
++        });
+     }
+ }
+ 
+--- a/src/symbol_map/extraction/mod.rs
++++ b/src/symbol_map/extraction/mod.rs
+@@ -101,6 +101,7 @@
+     /// Render sites whose receiver only a type settles, left for
+     /// `Backend::typed_receiver_view_spans` to confirm.
+     view_receiver_sites: Vec<ViewReceiverSite>,
++    middleware_alias_targets: Vec<super::MiddlewareAliasTarget>,
+     /// The model argument of each authorization check that named one.
+     gate_subjects: Vec<crate::symbol_map::GateSubject>,
+     /// Current conditional nesting depth (if/else, switch, while, for, etc.).
+@@ -267,6 +268,7 @@
+         conditional_laravel_spans: Vec::new(),
+         untyped_closure_sites: Vec::new(),
+         view_receiver_sites: Vec::new(),
++        middleware_alias_targets: Vec::new(),
+         gate_subjects: Vec::new(),
+         cond_nesting_depth: 0,
+         cond_block_end_stack: Vec::new(),
+@@ -443,6 +445,7 @@
+         instance_method_scopes: ctx.instance_method_scopes,
+         untyped_closure_sites: ctx.untyped_closure_sites,
+         view_receiver_sites: ctx.view_receiver_sites,
++        middleware_alias_targets: ctx.middleware_alias_targets,
+         gate_subjects: ctx.gate_subjects,
+         source_len: u32::try_from(content.len()).unwrap_or(u32::MAX),
+         source_fingerprint: {
+--- a/src/symbol_map/mod.rs
++++ b/src/symbol_map/mod.rs
+@@ -585,6 +585,8 @@
+     /// `Env::get('APP_NAME')` reads, resolving to the line that declares it
+     /// in the project's `.env`.
+     Env,
++    /// An application middleware alias before its optional parameter separator.
++    MiddlewareAlias,
+ }
+ 
+ impl LaravelStringKind {
+@@ -811,6 +813,10 @@
+     MailTemplate,
+     /// An instance controller middleware call naming authentication guards.
+     ControllerGuard,
++    /// An instance controller call naming a middleware alias.
++    ControllerMiddlewareAlias,
++    /// An alias array key on a typed middleware configuration receiver.
++    MiddlewareAliasDeclaration,
+ }
+ 
+ impl ViewReceiverClass {
+@@ -822,7 +828,12 @@
+             // contract, so the contract covers both spellings.
+             Self::Factory => &["Illuminate\\Contracts\\View\\Factory"],
+             Self::Mailable => &["Illuminate\\Mail\\Mailable"],
+-            Self::ControllerGuard => &["Illuminate\\Routing\\Controller"],
++            Self::ControllerGuard | Self::ControllerMiddlewareAlias => {
++                &["Illuminate\\Routing\\Controller"]
++            }
++            Self::MiddlewareAliasDeclaration => {
++                &["Illuminate\\Foundation\\Configuration\\Middleware"]
++            }
+             Self::MailTemplate => &[
+                 "Illuminate\\Mail\\Mailable",
+                 "Illuminate\\Notifications\\Messages\\MailMessage",
+@@ -863,6 +874,8 @@
+             ViewReceiverClass::ControllerGuard => {
+                 LaravelStringKind::ConfigResource(LaravelConfigResource::AuthGuard)
+             }
++            ViewReceiverClass::ControllerMiddlewareAlias
++            | ViewReceiverClass::MiddlewareAliasDeclaration => LaravelStringKind::MiddlewareAlias,
+             _ => LaravelStringKind::View,
+         }
+     }
+@@ -875,7 +888,7 @@
+             kind: SymbolKind::LaravelStringKey {
+                 key: self.key.clone(),
+                 kind: self.kind(),
+-                is_write: false,
++                is_write: self.receiver == ViewReceiverClass::MiddlewareAliasDeclaration,
+                 is_optional: self.is_optional,
+             },
+         }
+@@ -1337,6 +1350,14 @@
+     pub end: u32,
+     pub target: Option<Atom>,
+     pub source_class: Option<Atom>,
++}
++
++/// One literal alias key and its statically readable target value.
++#[derive(Debug, Clone)]
++pub(crate) struct MiddlewareAliasTarget {
++    pub name: String,
++    pub start: u32,
++    pub target: Option<String>,
+ }
+ 
+ /// Per-file symbol location index.
+@@ -1475,6 +1496,8 @@
+     /// a mailable through something other than the spellings
+     /// [`SymbolKind::LaravelStringKey`] is emitted for.
+     pub view_receiver_sites: Vec<ViewReceiverSite>,
++    /// Bootstrap alias candidates; receiver confirmation is shared with typed sites.
++    pub middleware_alias_targets: Vec<MiddlewareAliasTarget>,
+     /// The model argument of each gate check that named one, keyed back to
+     /// its ability span by [`GateSubject::ability_start`].  Empty for every
+     /// file that performs no authorization checks.
+--- a/src/type_engine/variable/forward_walk/closures.rs
++++ b/src/type_engine/variable/forward_walk/closures.rs
+@@ -467,6 +467,22 @@
+             {
+                 *scope = call_scope;
+                 return true;
++            }
++            // A later fluent call can wrap the call whose argument owns
++            // the cursor. Keep that callback's scope visible through the chain.
++            let receiver = match call {
++                Call::Method(mc) => Some(mc.object),
++                Call::NullSafeMethod(mc) => Some(mc.object),
++                _ => None,
++            };
++            if let Some(receiver) = receiver {
++                let span = receiver.span();
++                if ctx.cursor_offset >= span.start.offset
++                    && ctx.cursor_offset <= span.end.offset
++                    && try_enter_closure_expr(receiver, scope, ctx, None)
++                {
++                    return true;
++                }
+             }
+             // An immediately invoked closure (`(function () { … })()`) is
+             // the callee itself.
+--- /dev/null
++++ b/src/virtual_members/laravel/middleware_aliases.rs
+@@ -0,0 +1,129 @@
++//! Static application middleware registrations, without booting the framework.
++use crate::{
++    Backend,
++    symbol_map::{LaravelStringKind, SymbolKind},
++};
++use tower_lsp::lsp_types::{Location, Url};
++
++pub(crate) struct MiddlewareAliasDefinition {
++    pub location: Location,
++    pub target: Option<String>,
++}
++
++impl Backend {
++    pub(crate) fn is_bootstrap_middleware_uri(&self, uri: &str) -> bool {
++        self.workspace
++            .workspace_root
++            .read()
++            .as_ref()
++            .is_some_and(|root| crate::util::path_to_uri(&root.join("bootstrap/app.php")) == uri)
++    }
++
++    /// Read only registrations whose shared type resolution confirms Middleware.
++    /// Multiple static sites stay separate; runtime overrides are not executed.
++    pub(crate) fn middleware_alias_registrations(
++        &self,
++        name: &str,
++    ) -> Vec<MiddlewareAliasDefinition> {
++        if !self.resolved_class_cache.read().is_laravel() {
++            return Vec::new();
++        }
++        let Some(root) = self.workspace.workspace_root.read().clone() else {
++            return Vec::new();
++        };
++        let path = root.join("bootstrap/app.php");
++        let uri = crate::util::path_to_uri(&path);
++        let Some(content) = self.get_file_content(&uri) else {
++            return Vec::new();
++        };
++        if self
++            .symbol_map_for(&uri)
++            .is_none_or(|map| !map.matches_source(&content))
++        {
++            // An open buffer belongs to the editor publisher; never overwrite it
++            // from a lazy read while its new metadata is being admitted.
++            if self.open_files.read().contains_key(&uri) {
++                return Vec::new();
++            }
++            let ticket = self.index_source_ticket(&uri);
++            // The ticket must predate the read whose symbols it admits.
++            if self.get_file_content(&uri).as_deref() != Some(content.as_str()) {
++                self.release_index_source_ticket(&uri, &ticket);
++                return Vec::new();
++            }
++            let parsed = self.parse_ast_index_update_for_ticket(&uri, &content, ticket);
++            self.apply_ast_index_parse_results_batch(vec![parsed]);
++        }
++        let Some(map) = self
++            .symbol_map_for(&uri)
++            .filter(|map| map.matches_source(&content))
++        else {
++            return Vec::new();
++        };
++        if !map
++            .middleware_alias_targets
++            .iter()
++            .any(|target| target.name == name)
++        {
++            return Vec::new();
++        }
++        let confirmed = self.typed_receiver_view_spans_for(&uri, &map);
++        let Ok(url) = Url::parse(&uri) else {
++            return Vec::new();
++        };
++        map.middleware_alias_targets
++            .iter()
++            .filter(|target| {
++                target.name == name
++                    && confirmed.iter().any(|span| {
++                        span.start == target.start
++                            && matches!(
++                                span.kind,
++                                SymbolKind::LaravelStringKey {
++                                    kind: LaravelStringKind::MiddlewareAlias,
++                                    is_write: true,
++                                    ..
++                                }
++                            )
++                    })
++            })
++            .map(|target| MiddlewareAliasDefinition {
++                location: crate::definition::point_location(
++                    url.clone(),
++                    crate::text_position::offset_to_position(&content, target.start as usize),
++                ),
++                target: target.target.clone(),
++            })
++            .collect()
++    }
++
++    pub(crate) fn middleware_alias_detail(&self, name: &str) -> String {
++        let registrations = self.middleware_alias_registrations(name);
++        if registrations.is_empty() {
++            return "No statically resolved application alias registration".into();
++        }
++        let mut targets: Vec<_> = registrations
++            .iter()
++            .filter_map(|site| site.target.as_deref())
++            .collect();
++        targets.sort_unstable();
++        targets.dedup();
++        let mut detail = "Application registrations in `bootstrap/app.php`".to_string();
++        if targets.is_empty() {
++            detail.push_str("\n\nTarget is not statically resolved");
++        } else {
++            detail.push_str(&format!(
++                "\n\nRegistered targets: `{}`",
++                targets.join("`, `")
++            ));
++        }
++        if !targets.is_empty() && registrations.iter().any(|site| site.target.is_none()) {
++            detail.push_str("\n\nSome registration targets are not statically resolved");
++        }
++        if registrations.len() > 1 {
++            detail
++                .push_str("\n\nMultiple static registrations; runtime overrides are not evaluated");
++        }
++        detail
++    }
++}
+--- a/src/virtual_members/laravel/mod.rs
++++ b/src/virtual_members/laravel/mod.rs
+@@ -125,6 +125,7 @@
+ mod higher_order_proxy;
+ mod macros;
+ mod magic_uses;
++mod middleware_aliases;
+ mod model_extraction;
+ pub(crate) mod morph_map;
+ pub(crate) mod patches;
+--- a/src/virtual_members/laravel/string_keys.rs
++++ b/src/virtual_members/laravel/string_keys.rs
+@@ -64,6 +64,11 @@
+             .collect(),
+         LaravelStringKind::MorphAlias => resolve_morph_alias_definitions(backend, key),
+         LaravelStringKind::GateAbility => resolve_gate_ability_definitions(backend, key),
++        LaravelStringKind::MiddlewareAlias => backend
++            .middleware_alias_registrations(key)
++            .into_iter()
++            .map(|site| site.location)
++            .collect(),
+         LaravelStringKind::ContainerBinding => resolve_container_binding_definitions(backend, key),
+         LaravelStringKind::Env => super::env_vars::resolve_env_definitions(backend, key),
+     }
+@@ -253,6 +258,7 @@
+         | LaravelStringKind::Command
+         | LaravelStringKind::MorphAlias
+         | LaravelStringKind::GateAbility
++        | LaravelStringKind::MiddlewareAlias
+         | LaravelStringKind::ContainerBinding
+         | LaravelStringKind::Env => find_string_key_usages(kind, key, backend, snapshot),
+     };
+@@ -285,7 +291,7 @@
+     snapshot: &[(String, std::sync::Arc<crate::symbol_map::SymbolMap>)],
+ ) -> Vec<Location> {
+     use crate::references::push_location;
+-    use crate::symbol_map::SymbolKind;
++    use crate::symbol_map::{LaravelStringKind, SymbolKind};
+     use crate::text_position::LineIndex;
+     use tower_lsp::lsp_types::Url;
+ 
+@@ -334,6 +340,14 @@
+         };
+         let lines = LineIndex::new(&content);
+         for span in symbol_map.spans.iter().chain(extra.iter()) {
++            if *kind == LaravelStringKind::MiddlewareAlias
++                && matches!(
++                    span.kind,
++                    SymbolKind::LaravelStringKey { is_write: true, .. }
++                )
++            {
++                continue;
++            }
+             if let SymbolKind::LaravelStringKey {
+                 kind: span_kind,
+                 key: span_key,
+--- a/tests/integration/completion_multiline_chains.rs
++++ b/tests/integration/completion_multiline_chains.rs
+@@ -632,3 +632,38 @@
+         "Union member B should survive the chain walk, got: {names:?}"
+     );
+ }
++
++#[tokio::test]
++async fn typed_callback_scope_survives_a_later_fluent_call() {
++    use crate::common::{
++        definition_locations, goto_definition_at, hover_text_at, open_document, position_after,
++    };
++    for (callback, suffix) in [
++        (
++            "function(Payload $value) {$value->display();}",
++            "->finish()",
++        ),
++        (
++            "function(Payload $value) {$value->display();}",
++            "?->finish()",
++        ),
++        ("fn(Payload $value) => $value->display()", "->finish()"),
++    ] {
++        let backend = create_test_backend();
++        let uri = Url::parse("file:///fluent_callback.php").unwrap();
++        let source = format!(
++            "<?php\nclass Payload {{public function display(): string {{return 'ok';}}}}\nclass Builder {{public function tap(callable $callback): static {{return $this;}} public function finish(): static {{return $this;}}}}\nreturn (new Builder())->tap({callback}){suffix};\n"
++        );
++        open_document(&backend, &uri, "php", &source).await;
++        let position = position_after(&source, "$value->dis");
++        let result = definition_locations(
++            goto_definition_at(&backend, &uri, position.line, position.character).await,
++        );
++        assert_eq!(result.len(), 1, "{callback}{suffix}: {result:?}");
++        assert_eq!(result[0].range.start.line, 1);
++        let text = hover_text_at(&backend, &uri, position.line, position.character)
++            .await
++            .unwrap_or_default();
++        assert!(text.contains("display"), "{text}");
++    }
++}
+--- /dev/null
++++ b/tests/integration/laravel_middleware_aliases.rs
+@@ -0,0 +1,399 @@
++//! Application middleware registrations through public LSP handlers.
++use crate::common::{
++    create_psr4_workspace, definition_locations, find_references, goto_definition_at,
++    hover_text_at, open_document, position_after,
++};
++use phpantom_lsp::Backend;
++use tower_lsp::{LanguageServer, lsp_types::*};
++
++const SOURCE: &str = r#"<?php
++use Illuminate\Support\Facades\Route;
++Route::get('/audit',fn()=>null)->middleware('audited:strict');
++"#;
++const BOOTSTRAP: &str = r#"<?php
++use Illuminate\Foundation\Application;
++use Illuminate\Foundation\Configuration\Middleware as Stack;
++use App\Http\Middleware\Audit as AuditAlias;
++return Application::configure(basePath: dirname(__DIR__))
++    ->withMiddleware(function (Stack $pipeline): void {
++        $pipeline->alias(['audited' => AuditAlias::class]);
++    })->create();
++"#;
++const COMPOSER: &str = r#"{"require":{"laravel/framework":"^13.0"},"autoload":{"psr-4":{"App\\":"app/","Illuminate\\":"framework/"}}}"#;
++
++async fn workspace(bootstrap: &str, source: &str) -> (Backend, tempfile::TempDir, Url, Url) {
++    workspace_with_composer(COMPOSER, bootstrap, source).await
++}
++async fn workspace_with_composer(
++    composer: &str,
++    bootstrap: &str,
++    source: &str,
++) -> (Backend, tempfile::TempDir, Url, Url) {
++    let files = [
++        ("routes/web.php", source),
++        ("bootstrap/app.php", bootstrap),
++        (
++            "framework/Foundation/Configuration/Middleware.php",
++            "<?php namespace Illuminate\\Foundation\\Configuration; class Middleware {public function alias(array $aliases): static {return $this;}}",
++        ),
++        (
++            "framework/Foundation/Application.php",
++            "<?php namespace Illuminate\\Foundation; class Application {public static function configure(?string $basePath = null): \\Illuminate\\Foundation\\Configuration\\ApplicationBuilder {return new \\Illuminate\\Foundation\\Configuration\\ApplicationBuilder;} }",
++        ),
++        (
++            "framework/Foundation/Configuration/ApplicationBuilder.php",
++            "<?php namespace Illuminate\\Foundation\\Configuration; class ApplicationBuilder {public function withMiddleware(?callable $callback = null): static {return $this;} public function create(): \\Illuminate\\Foundation\\Application {return new \\Illuminate\\Foundation\\Application;}}",
++        ),
++        (
++            "framework/Routing/Controller.php",
++            "<?php namespace Illuminate\\Routing; class Controller {protected function middleware($middleware): static {return $this;}}",
++        ),
++        (
++            "app/Http/Middleware/Audit.php",
++            "<?php namespace App\\Http\\Middleware; class Audit {}",
++        ),
++        (
++            "app/Http/Middleware/Trace.php",
++            "<?php namespace App\\Http\\Middleware; class Trace {}",
++        ),
++    ];
++    let (backend, dir) = create_psr4_workspace(composer, &files);
++    backend.initialized(InitializedParams {}).await;
++    let uri = Url::from_file_path(dir.path().join("routes/web.php")).unwrap();
++    let bootstrap_uri = Url::from_file_path(dir.path().join("bootstrap/app.php")).unwrap();
++    open_document(&backend, &uri, "php", source).await;
++    (backend, dir, uri, bootstrap_uri)
++}
++async fn definitions(backend: &Backend, uri: &Url, source: &str, needle: &str) -> Vec<Location> {
++    let p = position_after(source, needle);
++    definition_locations(goto_definition_at(backend, uri, p.line, p.character).await)
++}
++async fn hover(backend: &Backend, uri: &Url, source: &str, needle: &str) -> String {
++    let p = position_after(source, needle);
++    hover_text_at(backend, uri, p.line, p.character)
++        .await
++        .unwrap_or_default()
++}
++async fn change(backend: &Backend, uri: &Url, content: &str, version: i32) {
++    backend
++        .did_change(DidChangeTextDocumentParams {
++            text_document: VersionedTextDocumentIdentifier {
++                uri: uri.clone(),
++                version,
++            },
++            content_changes: vec![TextDocumentContentChangeEvent {
++                range: None,
++                range_length: None,
++                text: content.into(),
++            }],
++        })
++        .await;
++}
++
++#[tokio::test]
++async fn middleware_alias_cold_bootstrap_navigation_and_hover() {
++    let (backend, _dir, uri, bootstrap_uri) = workspace(BOOTSTRAP, SOURCE).await;
++    let locations = definitions(&backend, &uri, SOURCE, "middleware('aud").await;
++    assert_eq!(locations.len(), 1, "{locations:?}");
++    assert_eq!(locations[0].uri, bootstrap_uri);
++    assert_eq!(
++        locations[0].range.start,
++        position_after(BOOTSTRAP, "alias(['")
++    );
++    let text = hover(&backend, &uri, SOURCE, "middleware('aud").await;
++    assert!(text.contains("App\\Http\\Middleware\\Audit"), "{text}");
++}
++
++#[tokio::test]
++async fn middleware_alias_unsaved_same_length_target_and_key_changes() {
++    let (backend, _dir, uri, bootstrap_uri) = workspace(BOOTSTRAP, SOURCE).await;
++    assert!(
++        hover(&backend, &uri, SOURCE, "middleware('aud")
++            .await
++            .contains("Middleware\\Audit")
++    );
++    open_document(&backend, &bootstrap_uri, "php", BOOTSTRAP).await;
++    let changed = BOOTSTRAP.replace("Middleware\\Audit as", "Middleware\\Trace as");
++    assert_eq!(changed.len(), BOOTSTRAP.len());
++    change(&backend, &bootstrap_uri, &changed, 2).await;
++    let text = hover(&backend, &uri, SOURCE, "middleware('aud").await;
++    assert!(
++        text.contains("Middleware\\Trace") && !text.contains("Middleware\\Audit"),
++        "{text}"
++    );
++    let renamed = changed.replace("'audited'", "'auditor'");
++    change(&backend, &bootstrap_uri, &renamed, 3).await;
++    assert!(
++        definitions(&backend, &uri, SOURCE, "middleware('aud")
++            .await
++            .is_empty()
++    );
++    change(&backend, &bootstrap_uri, BOOTSTRAP, 4).await;
++    assert_eq!(
++        definitions(&backend, &uri, SOURCE, "middleware('aud")
++            .await
++            .len(),
++        1
++    );
++}
++
++#[tokio::test]
++async fn middleware_alias_typed_receivers_reassignment_and_bootstrap_ownership() {
++    let changed = BOOTSTRAP.replace(
++        "$pipeline->alias",
++        "$pipeline = new \\stdClass; $pipeline->alias",
++    );
++    let (backend, dir, uri, bootstrap_uri) = workspace(&changed, SOURCE).await;
++    assert!(
++        definitions(&backend, &uri, SOURCE, "middleware('aud")
++            .await
++            .is_empty()
++    );
++    open_document(&backend, &bootstrap_uri, "php", BOOTSTRAP).await;
++    assert_eq!(
++        definitions(&backend, &uri, SOURCE, "middleware('aud")
++            .await
++            .len(),
++        1
++    );
++    let other_uri = Url::from_file_path(dir.path().join("app/Other.php")).unwrap();
++    let other = BOOTSTRAP.replace("'audited'", "'outside'");
++    open_document(&backend, &other_uri, "php", &other).await;
++    let caller = SOURCE.replace("audited:strict", "outside:strict");
++    change(&backend, &uri, &caller, 2).await;
++    assert!(
++        definitions(&backend, &uri, &caller, "middleware('out")
++            .await
++            .is_empty()
++    );
++}
++
++#[tokio::test]
++async fn middleware_alias_controller_inheritance_excludes_foreign_and_static_this() {
++    let source = r#"<?php
++class Base extends \Illuminate\Routing\Controller {}
++class Page extends Base {public function boot() {$this->middleware('audited:strict');}}
++class Foreign {public function middleware($value) {} public function boot() {$this->middleware('audited');}}
++class StaticPage extends Base {public static function boot() {$this->middleware('audited');}}
++"#;
++    let (backend, _dir, uri, _) = workspace(BOOTSTRAP, source).await;
++    assert_eq!(
++        definitions(&backend, &uri, source, "middleware('aud")
++            .await
++            .len(),
++        1
++    );
++    let foreign = "class Foreign {public function middleware($value) {} public function boot() {$this->middleware('aud";
++    assert!(
++        definitions(&backend, &uri, source, foreign)
++            .await
++            .is_empty()
++    );
++    let static_this =
++        "class StaticPage extends Base {public static function boot() {$this->middleware('aud";
++    assert!(
++        definitions(&backend, &uri, source, static_this)
++            .await
++            .is_empty()
++    );
++}
++
++#[tokio::test]
++async fn middleware_alias_named_array_arguments_and_legacy_declaration_array() {
++    let bootstrap = BOOTSTRAP.replace(
++        "alias(['audited' => AuditAlias::class])",
++        "alias(aliases: array('audited' => AuditAlias::class))",
++    );
++    let source = r#"<?php
++use Illuminate\Support\Facades\Route;
++Route::middleware(middleware: ['audited:strict', 'auth:admin']);
++Route::get('/audit',fn()=>null)->middleware(middleware: 'audited:soft');
++"#;
++    let (backend, _dir, uri, _) = workspace(&bootstrap, source).await;
++    for needle in ["middleware: ['aud", "middleware: 'aud"] {
++        assert_eq!(
++            definitions(&backend, &uri, source, needle).await.len(),
++            1,
++            "{needle}"
++        );
++    }
++}
++
++#[tokio::test]
++async fn middleware_alias_multiple_sites_and_unresolved_targets_remain_explicit() {
++    let bootstrap = BOOTSTRAP.replace("$pipeline->alias(['audited' => AuditAlias::class]);", "$pipeline->alias(['audited' => AuditAlias::class]);\n        $pipeline->alias(['audited' => $runtimeTarget]);");
++    let (backend, dir, uri, _) = workspace(&bootstrap, SOURCE).await;
++    assert_eq!(
++        definitions(&backend, &uri, SOURCE, "middleware('aud")
++            .await
++            .len(),
++        2
++    );
++    let text = hover(&backend, &uri, SOURCE, "middleware('aud").await;
++    assert!(
++        text.contains("Multiple static registrations; runtime overrides are not evaluated"),
++        "{text}"
++    );
++    assert!(
++        text.contains("Some registration targets are not statically resolved"),
++        "{text}"
++    );
++    let bootstrap_uri = Url::from_file_path(dir.path().join("bootstrap/app.php")).unwrap();
++    let dynamic = BOOTSTRAP.replace("AuditAlias::class", "$runtimeTarget");
++    open_document(&backend, &bootstrap_uri, "php", &dynamic).await;
++    assert_eq!(
++        definitions(&backend, &uri, SOURCE, "middleware('aud")
++            .await
++            .len(),
++        1
++    );
++    assert!(
++        hover(&backend, &uri, SOURCE, "middleware('aud")
++            .await
++            .contains("not statically resolved")
++    );
++    change(
++        &backend,
++        &bootstrap_uri,
++        &BOOTSTRAP.replace("['audited' => AuditAlias::class]", "$aliases"),
++        2,
++    )
++    .await;
++    assert!(
++        definitions(&backend, &uri, SOURCE, "middleware('aud")
++            .await
++            .is_empty()
++    );
++}
++
++#[tokio::test]
++async fn middleware_alias_decoded_unicode_source_ranges_and_references() {
++    let bootstrap = BOOTSTRAP.replace(
++        "$pipeline->alias(['audited'",
++        "/* 😀 */ $pipeline->alias([\"au\\x64ited\"",
++    );
++    let source = r#"<?php
++use Illuminate\Support\Facades\Route;
++/* 😀 */ Route::middleware("au\x64ited:strict");
++Route::get('/audit',fn()=>null)->middleware('audited:soft');
++"#;
++    let (backend, _dir, uri, bootstrap_uri) = workspace(&bootstrap, source).await;
++    let locations = definitions(&backend, &uri, source, "middleware(\"au").await;
++    assert_eq!(locations.len(), 1, "{locations:?}");
++    assert_eq!(
++        locations[0].range.start,
++        position_after(&bootstrap, "alias([\"")
++    );
++    assert_eq!(locations[0].uri, bootstrap_uri);
++    let refs = find_references(
++        &backend,
++        &uri,
++        position_after(source, "middleware(\"au"),
++        false,
++    )
++    .await;
++    assert_eq!(refs.len(), 2, "{refs:?}");
++    let raw = refs.iter().find(|x| x.range.start.line == 2).unwrap();
++    assert_eq!(raw.range.start, position_after(source, "middleware(\""));
++    assert_eq!(
++        raw.range.end,
++        position_after(source, r#"middleware("au\x64ited"#)
++    );
++    let refs = find_references(
++        &backend,
++        &uri,
++        position_after(source, "middleware(\"au"),
++        true,
++    )
++    .await;
++    assert_eq!(refs.len(), 3, "{refs:?}");
++    open_document(&backend, &bootstrap_uri, "php", &bootstrap).await;
++    let from_declaration = find_references(
++        &backend,
++        &bootstrap_uri,
++        position_after(&bootstrap, "alias([\"au"),
++        false,
++    )
++    .await;
++    assert_eq!(from_declaration.len(), 2, "{from_declaration:?}");
++}
++
++#[tokio::test]
++async fn middleware_alias_deleted_bootstrap_has_no_phantom_target_and_recovers() {
++    let (backend, dir, uri, bootstrap_uri) = workspace(BOOTSTRAP, SOURCE).await;
++    assert_eq!(
++        definitions(&backend, &uri, SOURCE, "middleware('aud")
++            .await
++            .len(),
++        1
++    );
++    std::fs::remove_file(dir.path().join("bootstrap/app.php")).unwrap();
++    backend
++        .did_change_watched_files(DidChangeWatchedFilesParams {
++            changes: vec![FileEvent {
++                uri: bootstrap_uri.clone(),
++                typ: FileChangeType::DELETED,
++            }],
++        })
++        .await;
++    assert!(
++        definitions(&backend, &uri, SOURCE, "middleware('aud")
++            .await
++            .is_empty()
++    );
++    std::fs::write(dir.path().join("bootstrap/app.php"), BOOTSTRAP).unwrap();
++    backend
++        .did_change_watched_files(DidChangeWatchedFilesParams {
++            changes: vec![FileEvent {
++                uri: bootstrap_uri,
++                typ: FileChangeType::CREATED,
++            }],
++        })
++        .await;
++    assert_eq!(
++        definitions(&backend, &uri, SOURCE, "middleware('aud")
++            .await
++            .len(),
++        1
++    );
++}
++
++#[tokio::test]
++async fn middleware_alias_string_targets_decode_runtime_names_without_php_imports() {
++    let bootstrap = BOOTSTRAP.replace("AuditAlias::class", r#""App\\Http\\Middleware\\\x41udit""#);
++    let (backend, _dir, uri, _) = workspace(&bootstrap, SOURCE).await;
++    let text = hover(&backend, &uri, SOURCE, "middleware('aud").await;
++    assert!(text.contains("App\\Http\\Middleware\\Audit"), "{text}");
++    assert!(!text.contains("AuditAlias"), "{text}");
++}
++
++#[tokio::test]
++async fn middleware_alias_plain_php_does_not_invent_laravel_navigation() {
++    let composer = r#"{"autoload":{"psr-4":{"App\\":"app/","Illuminate\\":"framework/"}}}"#;
++    let (backend, _dir, uri, _) = workspace_with_composer(composer, BOOTSTRAP, SOURCE).await;
++    assert!(
++        definitions(&backend, &uri, SOURCE, "middleware('aud")
++            .await
++            .is_empty()
++    );
++}
++
++#[tokio::test]
++async fn middleware_alias_rename_is_refused_until_all_registration_forms_are_supported() {
++    let (backend, _dir, uri, bootstrap_uri) = workspace(BOOTSTRAP, SOURCE).await;
++    open_document(&backend, &bootstrap_uri, "php", BOOTSTRAP).await;
++    for (file, text, needle) in [
++        (&uri, SOURCE, "middleware('aud"),
++        (&bootstrap_uri, BOOTSTRAP, "alias(['aud"),
++    ] {
++        let p = position_after(text, needle);
++        assert!(
++            crate::common::prepare_rename(&backend, file, p.line, p.character)
++                .await
++                .is_none()
++        );
++        let result =
++            crate::common::rename_result(&backend, file, p.line, p.character, "reviewed").await;
++        assert!(!matches!(result, Ok(Some(_))), "{result:?}");
++    }
++}
+--- a/tests/integration/main.rs
++++ b/tests/integration/main.rs
+@@ -214,6 +214,7 @@
+ mod laravel_gates;
+ mod laravel_macro_facade;
+ mod laravel_macros;
++mod laravel_middleware_aliases;
+ mod laravel_migration_columns;
+ mod laravel_morph_map;
+ mod laravel_named_resources;

@@ -15,6 +15,65 @@ slice, commit and push it, and retain only the latest generated app. Native UI
 cases remain deferred/unverified; earlier native-first blocking checkpoints are
 historical and no longer prevent independent implementation.
 
+Package slice145 (2026-11-18, signed local App0.1.103 verified): promote
+source/stdio/client/host-verified PHPantom165 into the default resource pin and
+signed development app. Inherited parent/nested-trait Kernel aliases retain their
+declaring files, decoded/UTF-16 navigation and reference ranges, dirty replay and
+restart behavior. Keep partial/ambiguous metadata explicit and refuse unsupported
+class/FQN/namespace or overlapping trait-property plans. Broader middleware catalogs
+and transformations remain L61; custom bound Kernels remain L62; dynamic metadata
+and compatibility proofs remain L63. Native UI stays user-skipped.
+
+Preserve branding/identifier, independent settings/caches, .openidea compatibility,
+appearance/keymaps/autosave, external-conflict protection and debugger scope.
+Updater endpoints remain empty. Only version metadata, engine resources/pins and
+this record change. All45 local Cargo versions move0.1.102 to0.1.103; external
+blocks and plugin API1.10.0 remain unchanged. Checksums, exact source fingerprint,
+typecheck/lint/format/knip, version-helper tests, Rust formatting,3 bundled-server
+checks, PHP default/optional-companion check and ide-tools Clippy pass. Reuse slice144's
+fresh5151 workspace passes/205 ignored/one HTTP exclusion,88 genuine165 client/host
+passes and13393 frontend passes/6 skipped. Keep the known default-parallel CLI
+socket-test limitation. Source143's18602 ordinary engine passes/17 ignored plus2
+bounded checks, both Clippy modes, exact replay/default build and22 stdio stages
+remain valid for this identical executable. These layers do not prove native UI.
+
+Build an Apple Silicon development/debug app with production frontend assets and
+Safari15.4 checks. Ad-hoc sign and verify deep/strict signature, arm64 architecture,
+OpenStorm identifier and version0.1.103. Minimum-OS13.0 metadata verifies; actual
+macOS13 runtime remains untested. Bundle:
+artifacts/batches/0.1.103/OpenStorm.app.
+Main executable SHA256:a5af62f8f7ec37fa1a5eecd4d5b281a950ee4a0a0d479e435426a8997c6ec9c7.
+Embedded/default PHPantom0.11.1-openstorm.165 SHA256:
+2701aaaea7adb7a567f291e25f84cf84eab0b351792b71e88e324ab3a497d732.
+Copied provenance equals canonical165; source/build-receipt fingerprints match
+except this post-build progress update. MIT/Apache notice hashes remain unchanged;
+MIT matches the pinned source. Upstream attribution and OpenIDEA compatibility
+header remain. The embedded engine depends only on macOS system libraries.
+
+All18 embedded stage groups pass using the actual copied executable: inherited
+parent/trait navigation, truthful hover, UTF-16 references, same-length dirty updates,
+restart/replay, checked class plans, source freshness and conservative overlap
+refusals, including the real Laravel13.37 Kernel ancestry. Retain plain/Composer/
+Laravel intelligence, encoded guards, aliases, resource exclusions, native argument
+binding, multi-project freshness, namespace safeguards and descriptor isolation.
+Owned children exit0 and original/borrowed fixture inputs remain unchanged. All118
+PHP syntax checks and352 Laravel runtime assertions pass, with exactly3 deliberate
+analyzer diagnostics at their original lines, expected exit1. Deep/strict signature
+still verifies after every embedded stage finishes.
+
+Retain App102 until App103's signature/build receipt succeeds, then remove the
+older app and duplicate staging bundle. The recipe cleans compiler output; remove
+68,854,219 generated frontend bytes. Keep only App103, preserving canonical
+source/engines, Workbench, fixtures and receipts. No install, UI launch, migration,
+notarization, public release or automatic-update activation. All69 areas remain
+67 partial/2 user-deferred. Commit/push this package slice and verify the exact
+remote ref and clean worktree before the next Laravel navigation slice.
+
+Evidence: artifacts/checks/slice145/{promotion-input,version-proof,
+identity-provenance,gates,package,embedded,final-check,delivery}.json; stage logs,
+slice145-* probe receipts; artifacts/batches/0.1.103/{build-receipt,retention}.json;
+canonical165 packaged sidecar added after remote verification.
+
 Laravel client/host slice144 (2026-11-18, verified;165 inactive pending packaging):
 accept inherited HTTP Kernel alias navigation through actual production host,
 managed documents, LSP conversion, checked-rename adapter and reviewed edits.

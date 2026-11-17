@@ -2,8 +2,8 @@
   "repository": "https://github.com/PHPantom-dev/phpantom_lsp",
   "commit": "1756b1f920c1290d4c4fdd4d2c902fad53a75cd3",
   "archive_sha256": "f0a1dc7fa44d309e6d5e8ed65a2075749c1fc177b45820031f58290f1aec5cee",
-  "patches_sha256": "0c8bd3997d2217ee5f33113454e8e4546812fee96f00ea90986a7ef8132c4cf0",
-  "version": "0.11.1-openstorm.163",
+  "patches_sha256": "c0f4bbcf42baa28c6d82b7231ca0891ae82c5e7f3b72c869bf49520fc7f5ea1c",
+  "version": "0.11.1-openstorm.164",
   "patches": [
     {
       "file": "0001-workspace-tool-policy.patch",
@@ -656,6 +656,10 @@
     {
       "file": "0163-stdio-descriptor-isolation.patch",
       "sha256": "4e5a1f975b33037f83e7523fa2e562fc54671c0d231ada74605bc8884f2c811f"
+    },
+    {
+      "file": "0164-kernel-middleware-alias-navigation.patch",
+      "sha256": "851c0475421c1173b07c0b5b93f4e09c7308bb2300d60d559cbff2bb055548b8"
     }
   ]
 }

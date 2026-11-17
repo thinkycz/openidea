@@ -15,6 +15,69 @@ slice, commit and push it, and retain only the latest generated app. Native UI
 cases remain deferred/unverified; earlier native-first blocking checkpoints are
 historical and no longer prevent independent implementation.
 
+Package slice142 (2026-11-17, signed local App0.1.102 verified): promote
+source/stdio/client/host-verified PHPantom164 into the default resource pin and
+signed development app. Conventional HTTP Kernel middleware alias definitions,
+hover and references follow static registrations, encoded keys and unsaved
+ancestry/import/key changes. Preserve explicit alias-key rename refusal and
+guards against partial class/FQN/namespace edits. Custom Kernel paths and
+parent/trait-owned declarations remain L62; middleware catalogs, completion,
+validation and transformations remain partially accepted in L61.
+
+Preserve OpenStorm branding/identifier, separate settings/caches, .openidea
+compatibility, appearance/keymaps/autosave, external-conflict protection and the
+existing debugger scope. Updater endpoints remain empty. Only version metadata,
+engine resources/pins and this progress record change: 45 local Cargo packages
+move 0.1.101 to 0.1.102; all external dependency blocks and plugin API 1.10.0 remain
+unchanged. Affected checksum, source fingerprint, typecheck, lint, formatting,
+knip, version-helper tests, Rust formatting, all 3 bundled-server resource/path/
+version checks, PHP default/optional-companion check and ide-tools Clippy pass.
+Reuse slice141's fresh 5,124 serialized workspace passes/203 ignored/one HTTP
+exclusion, 86 actual engine164 client/host passes and 13,374 frontend passes/6 skipped.
+Retain its existing default-parallel CLI socket-test limitation. Source140's
+18,594 ordinary engine passes/17 ignored plus 2 bounded checks, both Clippy modes,
+exact replay/default build and 18 stdio stages remain valid for this identical
+engine executable. These layers do not establish native UI acceptance.
+
+Build a development/debug Apple Silicon app with production frontend assets and
+Safari 15.4 checks. Ad-hoc sign and verify deep/strict signature, arm64 architecture,
+OpenStorm identifier and version 0.1.102. Minimum-OS 13.0 metadata
+verifies; macOS 13 runtime remains untested. Bundle:
+artifacts/batches/0.1.102/OpenStorm.app.
+Main executable SHA256: b50077e7da45445e3d105d7d82584d4e727da48b64d058be0ad6c5c8c7fc23ac.
+Embedded/default PHPantom0.11.1-openstorm.164 SHA256:
+7282b77b626a53fa5621257de10aaca1fef40d2a8181d5aae6d0018d8c475f38.
+Resource provenance matches canonical164; source/build receipt fingerprints match
+except this post-build progress update. Bundled MIT/Apache notice hashes are
+unchanged; MIT matches the pinned source license. Upstream attribution and
+OpenIDEA compatibility header stay. The embedded engine links only macOS system
+libraries, with no developer-toolchain library dependency.
+
+All 14 embedded stage groups pass against the actual copied executable: Kernel
+alias navigation, truthful hover, raw UTF-16 reference ranges, same-length dirty
+updates, checked rename refusals/safe edits and stale-source rejection; plain/
+Composer and Laravel 13.37 intelligence; encoded guards, aliases, resource middleware
+exclusions, native method/argument binding, multi-project/unsaved freshness and
+class/FQN/namespace safeguards. Ordinary and sparse foreign writers/unrelated files
+release while definitions/hover work; owned children exit 0 and original fixture
+inputs remain unchanged. All 116 PHP syntax checks and 350 Laravel runtime
+assertions pass. Analyzer output retains exactly 3 intentional diagnostics (expected
+exit 1). Signature still verifies after all embedded probes.
+
+Retain App101 until App102's signature/build receipt succeeds, then remove the
+older app and duplicate staging bundle. The recipe cleans compiler output; remove
+68,777,218 generated frontend bytes. Only App102 remains. Preserve canonical
+source/engines/provenance, Workbench, fixtures and evaluation receipts. No install,
+app UI launch, profile migration, notarization, public release or updater activation.
+Native UI remains user-skipped; all 69 statuses stay 67 partial/2 user-deferred.
+Commit/push this package slice, verify the exact remote ref and clean worktree,
+then resume the remaining Laravel navigation backlog in small slices.
+
+Evidence: artifacts/checks/slice142/{promotion-input,version-proof,
+identity-provenance,gates,package,embedded,final-check,delivery}.json; retained stage
+logs and slice142-* probe receipts; artifacts/batches/0.1.102/{build-receipt,
+retention}.json; canonical164 packaged sidecar added after remote verification.
+
 Client/host slice141 (2026-11-17, verified;164 inactive pending packaging):
 accept conventional HTTP Kernel middleware aliases through the production host,
 documents, checked-rename adapter and reviewed-edit paths. Add two real-server

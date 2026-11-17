@@ -5,6 +5,9 @@ use ide_host::{Host, HostConfig, Project};
 use ide_lsp::types::{CompletionItem, CompletionKind, CompletionList, GotoKind};
 use std::{io::Write, path::PathBuf, process::Stdio, sync::Arc, time::Duration};
 
+#[path = "fixtures/middleware_aliases.rs"]
+mod middleware_aliases;
+
 const HEADER: &str = "<?php\nnamespace Harness;\nuse Illuminate\\Support\\Facades\\Route as Routes;\nuse App\\Other\\InvoiceController as InvoiceController;\n";
 const MAIN: &str = "<?php\nnamespace App;\n/** Main controller completion witness. */\nclass InvoiceController {public function __invoke(): bool {return true;} public function showInvoice(): bool {return true;}}\n";
 const OTHER: &str =

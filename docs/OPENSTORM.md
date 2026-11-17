@@ -15,6 +15,51 @@ slice, commit and push it, and retain only the latest generated app. Native UI
 cases remain deferred/unverified; earlier native-first blocking checkpoints are
 historical and no longer prevent independent implementation.
 
+Client/host slice129 (2026-11-17, actual160 client/host verified; inactive): verify
+application middleware aliases through the production LSP/document/guarded-edit
+paths (FEAT-011/030/066). Add two ignored real-engine regressions, reusing the
+existing host fixture and owned PHP syntax checker. No new UI, production adapter,
+settings surface, debugger behavior or environment-file mutations. The same emitted
+test executable establishes158's two missing behaviors and159's remaining unsafe
+class-target plan before160 passes. Baselines never apply those unsafe plans.
+The initial159 run exposes an overstrict test assumption: definitions intentionally
+return a point. Keep exact UTF-16 navigation starts and assert full raw spans on
+references instead; preserve that failure log and rerun the corrected workspace.
+
+Actual160 checks cover cold closed-bootstrap definition/hover, raw UTF-16 key ranges
+after emoji/escapes, references excluding foreign receivers, refused alias-key Rename,
+unsaved target/key changes and restart. Literal/encoded/computed-key/unresolved
+middleware registrations refuse checked class rename, FQN moves and namespace edits
+without changing buffers/disk. Named `::class` remains supported: a guarded PSR-4
+rename preserves dirty documentation and import aliases, rejects a bootstrap disk
+conflict before any writes, commits syntax-valid files and keeps shared undo/redo
+with the original dirty-buffer state and moved document identity. Each regression
+shuts down its actual server/project even on an expected baseline assertion failure.
+Framework inspection remains static; fixtures are linted, not booted.
+
+Rust workspace verification passes5070 ordinary tests/196 ignored, retaining the
+single unapproved HTTP-test exclusion. Workspace/all-target Clippy, Rust formatting,
+repository formatting and diff checks pass. The complete actual160 client/host run
+passes79 cases (URL2, edits10, completion/alias15, handlers2, client50), using
+checksum-bound exact executables emitted by the workspace build. Borrowed/owned
+fixture snapshots remain unchanged. Keep the source12818573-case engine/default/
+mem-audit/fingerprint/build evidence; no engine source or binary changed. Reuse
+03a095c50's13122 frontend/6 skipped, production bundle/Safari and95 controlled-browser
+results for unchanged production/frontend inputs. This is not native acceptance.
+
+Canonical160 remains checksum45021ea078365cfb3118dd4ba5aef8d66c1f6e9a15c4e04e4c938f8ae9506467.
+Its actual client/host adoption gate is now closed; next perform the separate pinned
+resource/version/package slice. Active158 and sole signed App98 are unchanged; their
+checksums and deep/strict signature verify again. Removed owned compiler output
+(25,449,870,455 bytes); preserve canonical engines/source/provenance,
+Workbench, fixtures and evaluation receipts. No new app bundle or installation.
+Native checks remain user-skipped; all69 areas remain67 partial/2 user-deferred.
+Alias-key edits, builtin/group aliases, legacy Kernel/attributes/withoutMiddleware,
+full completion/validation and broader platform/performance acceptance remain open.
+
+Evidence: artifacts/checks/slice129-{gates,red,client-host,retention}.json,
+negative158/159 and actual160 logs; local canonical160/client-acceptance-slice129.json.
+
 Upstream follow-up merge (2026-11-17, automated acceptance verified): integrate18
 commits from l0ng-ai/openidea through577193d3878e896b7e01b50812e475ef6ad53b37.
 Import plugin editor-panel APIs (caret/selections, semantic highlighting, folded/

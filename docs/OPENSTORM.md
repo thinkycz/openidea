@@ -15,6 +15,56 @@ slice, commit and push it, and retain only the latest generated app. Native UI
 cases remain deferred/unverified; earlier native-first blocking checkpoints are
 historical and no longer prevent independent implementation.
 
+Upstream merge slice132 (2026-11-17, source/client/browser verified): merge16
+commits from l0ng-ai/openidea through f86c5e3460c5d2a67dd2101e04e8989562888196,
+following the earlier577193d38 checkpoint. The automatic merge is conflict-free.
+Changes include session pull-request/issue/reference/artifact panels and MCP session
+refresh, Copilot queue/stop behavior, plugin marketplace layout, remote path pickers,
+Find Usages discovery, Kotlin keyword/archive handling, project-tree dragging,
+Git blame/diff scrolling, spelling and mixed-DPI auxiliary-window sizing.
+
+Keep OpenStorm0.1.99 branding/identifier/settings, pinned PHPantom160, save-conflict
+protection, existing shortcuts/autosave and disabled upstream updater. The merge
+changes no engine/resource/version manifests or environment files. No new debugger
+scope, deployment, settings migration or public publishing. Preserve unfinished
+source131 separately; its candidate161 feature code is not part of this merge.
+
+Validation passes: typecheck, lint, format, knip, frontend13136/6 skipped, production
+bundle/Safari startup checks, Rust formatting and all-target workspace Clippy.
+Workspace tests pass5076 with196 ignored;
+retain the existing explicit exclusion of http_list_and_run_require_confirmation.
+Run all79 actual160 PHP client/host cases from the exact workspace-emitted test
+executables; original/borrowed PHP/Laravel fixtures remain unchanged. All106 selected
+controlled-browser cases pass: editor/Laravel/guard/encoded navigation, usages, agent
+MCP/session assets, diff scrolling, plugin/settings layouts and project-tree drag.
+These browser/CLI/unit checks do not establish native UI or real-service acceptance.
+
+Native checks remain user-skipped. Keep only the existing signed local
+artifacts/batches/0.1.99/OpenStorm.app; it predates this merge and is not rebuilt or
+installed. Its main/engine hashes and deep/strict signature remain intact. Clean the
+owned Rust compiler output and generated frontend dist after acceptance; preserve
+canonical engines/source, source131 work, Workbench, fixtures and earlier receipts.
+All69 area statuses remain67 partial/2 user-deferred. Commit and push this merge on
+codex/openstorm-php-laravel, then verify the exact remote ref and clean worktree.
+
+Evidence: artifacts/checks/slice132-{upstream,gates,workspace-totals,client-host,
+browser,extra-browser,retention}.json and retained per-stage logs.
+
+Engine source slice131 (2026-11-17, in progress; upstream merge prioritized):
+route `withoutMiddleware` alias/guard/ability navigation is implemented only in
+artifacts/phpantom/slice131-route-exclusions-work. The prototype passes26 of27
+public-handler cases and initial stdio probes; a cold real-server reproduction
+exposes a stale empty confirmation after a receiver class is first published.
+First declarations bypass signature-change invalidation. A focused cache fix is
+applied and formatted, but remains uncompiled/unverified. Retain red/green logs,
+negative160/prototype controls and artifacts/checks/slice131-pending-source.patch
+with its nine-file checksum receipt. Stop the redundant auxiliary diagnostic build
+(exit130), remove owned compiler output, and preserve unfinished source separately.
+Do not freeze, promote, commit feature code or claim candidate161 acceptance yet.
+Active160 and sole signed App99 remain unchanged. Native checks stay user-skipped;
+builtin/group/legacy aliases and literal middleware-class transformations remain
+unaccepted. Resume source validation after completing the upstream merge slice.
+
 Package slice130 (2026-11-17, local signed App0.1.99 verified): promote
 client-verified engine160 into the pinned resources/default application bundle.
 Source/provenance, immutable-tree fingerprint, license hashes and embedded executable

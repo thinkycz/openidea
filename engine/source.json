@@ -2,8 +2,8 @@
   "repository": "https://github.com/PHPantom-dev/phpantom_lsp",
   "commit": "1756b1f920c1290d4c4fdd4d2c902fad53a75cd3",
   "archive_sha256": "f0a1dc7fa44d309e6d5e8ed65a2075749c1fc177b45820031f58290f1aec5cee",
-  "patches_sha256": "c3d0c403bfd52c3ea0ddd300a835452b56d55d46ee37e9625d01e718cbdef3ba",
-  "version": "0.11.1-openstorm.158",
+  "patches_sha256": "686d78f8529701562d0853f7fab24224eff6f7765bb316053318d11f0026aa15",
+  "version": "0.11.1-openstorm.160",
   "patches": [
     {
       "file": "0001-workspace-tool-policy.patch",
@@ -636,6 +636,14 @@
     {
       "file": "0158-decoded-middleware-parameters.patch",
       "sha256": "8d4da9148b4bd1deb827556d258cdd7ba08c099c3c14be95f22beac494755168"
+    },
+    {
+      "file": "0159-application-middleware-alias-navigation.patch",
+      "sha256": "b4d9ff55a32e653e73219b946ade634f2d88582938d683e4a42bf0337478a10b"
+    },
+    {
+      "file": "0160-guard-middleware-target-refactoring.patch",
+      "sha256": "fba3488ee1fe173468244f934b0a7e9c5731cc257ab45775d908da2a0bc733e1"
     }
   ]
 }

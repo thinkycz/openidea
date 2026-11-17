@@ -15,6 +15,61 @@ slice, commit and push it, and retain only the latest generated app. Native UI
 cases remain deferred/unverified; earlier native-first blocking checkpoints are
 historical and no longer prevent independent implementation.
 
+Package slice130 (2026-11-17, local signed App0.1.99 verified): promote
+client-verified engine160 into the pinned resources/default application bundle.
+Source/provenance, immutable-tree fingerprint, license hashes and embedded executable
+checksum agree. App identifier stays cz.thinky.openstorm; updater endpoints remain
+empty and no public key is activated. Preserve separate settings/caches, .openidea
+compatibility, default appearance/keymaps/autosave and existing debugger support.
+Only resource/pin and version metadata change. Cargo updates44 local packages from
+0.1.98 to0.1.99; external dependencies and plugin API1.10.0 snapshot stay unchanged.
+
+Affected gates pass: checksum, typecheck, lint, format, knip, release-version tests,
+Rust formatting, all3 bundled-server resolution/version/path tests, PHP-default/
+companion opt-in test and ide-tools all-target Clippy. Reuse slice129's5070 Rust/
+196 ignored/one HTTP exclusion and79 actual160 client/host cases, plus the unchanged
+frontend13122/6 skipped and95 controlled-browser results. Engine source128's18573
+ordinary/17 ignored plus2 bounded, default/mem-audit Clippy, replay and default-build
+evidence remains valid: binary/source are identical. These are separate evidence
+layers, not native UI or blanket feature acceptance.
+
+Build an arm64 development/debug Apple Silicon app with the existing recipe; production
+frontend and Safari15.4 startup/bundle checks pass during packaging. Ad-hoc signing
+and deep/strict signature verification pass. CFBundleShortVersionString0.1.99,
+identifier and minimum-OS13.0 metadata verify (no runtime macOS13 claim). Bundle:
+artifacts/batches/0.1.99/OpenStorm.app. Main executable SHA256:
+3639a6a2d6658dac782a5a188788f9997fa2631ed23033ccc69bca789c93d9bf.
+Embedded/default PHPantom0.11.1-openstorm.160 SHA256:
+45021ea078365cfb3118dd4ba5aef8d66c1f6e9a15c4e04e4c938f8ae9506467.
+Full source/build receipt and deletion inventory accompany the app. Compiled source
+hashes agree; progress-doc completion notes are recorded after the build.
+
+Actual embedded-server probes pass with project tools disabled and empty server PATH:
+plain/Composer and real Laravel13.37 controller/helper/completion/navigation controls,
+typed/encoded guards, cold/unsaved alias lookup/references, multi-project ownership,
+watched deletion/recreation and restart. Checked class/FQN/namespace refusals produce
+no partial middleware target edits; named ::class positive edits, PHP syntax and stale
+registration checks pass. Generic namespace layout probes preserve comments/UTF-16.
+An initial copied encoded probe still named the pruned App98; retain its failed
+harness log, correct it to use the supplied App99 engine path and resume remaining
+checks. No product/binary rebuild is required. Reference analyzer retains exactly3
+intentional diagnostics (expected CLI exit1).
+Original/borrowed inputs remain unchanged and probe children exit0. Verify signature
+again after the embedded probes; it remains intact. These CLI/protocol checks do not
+establish packaged GUI acceptance.
+
+Retain App98 until App99's signature/receipt succeeds, then remove it and the redundant
+staging bundle. The recipe cleans its owned compiler cache; removed dist
+(68,381,369 bytes) after acceptance. Only App99 remains. Canonical engine/source,
+Workbench, fixtures and earlier evaluation receipts remain intact. No installation,
+profile migration, notarization, public release, updater activation or native launch.
+Native checks remain explicitly user-skipped; all69 areas stay67 partial/2 deferred.
+Continue remaining Laravel navigation gaps in the next small source slice.
+
+Evidence: artifacts/checks/slice130-{gates,package-pipeline,packaged-check,embedded,
+packaged-cli,packaged-aliases,retention}.json, individual probe logs and
+artifacts/batches/0.1.99/{build-receipt,retention}.json.
+
 Client/host slice129 (2026-11-17, actual160 client/host verified; inactive): verify
 application middleware aliases through the production LSP/document/guarded-edit
 paths (FEAT-011/030/066). Add two ignored real-engine regressions, reusing the

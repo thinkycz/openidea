@@ -337,6 +337,11 @@ pub struct HierarchyItem {
     pub selection_range: Range,
     /// Call sites, for call hierarchy.
     pub from_ranges: Vec<Range>,
+    /// The file of `from_ranges` when it is not the item's own: for an outgoing call, the
+    /// file of the prepared item that makes it (a path, or the URI of a virtual document).
+    #[serde(default)]
+    #[specta(optional)]
+    pub from_path: Option<ide_core::IpcPath>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Type)]
@@ -583,6 +588,10 @@ pub struct ServerRefactored {
 #[derive(Clone, Debug, Default, Serialize, Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct CallHierarchy {
+    /// The symbol the hierarchy is for: the first item the server prepared at the position.
+    #[serde(default)]
+    #[specta(optional)]
+    pub root: Option<HierarchyItem>,
     pub items: Vec<HierarchyItem>,
     pub incomplete: Option<ReferencesIncomplete>,
 }

@@ -15,6 +15,33 @@ slice, commit and push it, and retain only the latest generated app. Native UI
 cases remain deferred/unverified; earlier native-first blocking checkpoints are
 historical and no longer prevent independent implementation.
 
+Upstream merge checkpoint (2026-11-17, verified source merge): merge five
+commits from l0ng-ai/openidea through c1782f01eb47bb2e040f0d59ae6b29c585c1e8d8.
+Includes MCP call hierarchy, clickable documentation signature types, MySQL
+dump/restore actions, the Windows clipboard compile fix, and documentation
+landing page/marketplace updates. Automatic merge is conflict-free.
+
+Validation: 13,393 frontend passes/6 skipped; typecheck, lint, formatting, knip,
+production build and Safari15.4 checks pass. Workspace Rust formatting and Clippy
+with warnings denied pass. Serialized workspace tests: 5,151 passes/203 ignored/
+one retained HTTP confirmation-test exclusion. The workspace run executes both
+export_bindings and export_command_snapshot successfully, and their generated
+outputs match the merged index; stop the redundant standalone generator attempt
+when it starts recompiling under a different dependency feature set. All38
+controlled Chromium database/hover checks pass. Debug test linking reports a
+large-unwind-metadata warning; it does not fail validation. Native UI checks stay
+user-skipped. Windows compilation and live MySQL/Postgres roundtrips are untested;
+configuration-gated database tests returning early do not establish acceptance.
+
+Preserve unfinished source143 as stash0336b63a49d8eaf71c207a29e8bd71910138ee26
+and its ignored scratch/evidence trees. Its real-Laravel fixture preflight exposes
+a trait/property composition conflict and remains unaccepted; do not promote165.
+App102/default164 checksums remain unchanged. Remove workspace and draft-engine
+compiler output plus generated dist; retain only App0.1.102 and preserve engine
+provenance, source, evaluation evidence and Workbench artifacts. All69 ledger
+statuses remain67 partial/2 user-deferred. Evidence, logs and cleanup receipts:
+artifacts/checks/upstream-c1782f01e/.
+
 Package slice142 (2026-11-17, signed local App0.1.102 verified): promote
 source/stdio/client/host-verified PHPantom164 into the default resource pin and
 signed development app. Conventional HTTP Kernel middleware alias definitions,

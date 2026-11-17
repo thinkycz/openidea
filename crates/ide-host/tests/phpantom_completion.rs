@@ -903,3 +903,139 @@ async fn typed_guard_completion_refreshes_host_overlays_and_restart() {
     .await;
     f.finish(outcome).await;
 }
+
+const ENCODED_GUARDS: &str = r#"<?php
+namespace App;
+class GuardController extends BaseController {public function boot() {$note='😀';$this->middleware("auth:ad\x6din,web");$this->middleware("auth\x3aweb\054ad\u{6d}in");}}
+"#;
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires candidate158 and owned PHP syntax-check executable"]
+async fn encoded_guards_keep_host_utf16_navigation_references_and_checked_save() {
+    let f = guard_fixture();
+    let outcome = std::panic::AssertUnwindSafe(async {
+        Fixture::lint(ENCODED_GUARDS);
+        f.project.documents.replace_all(f.doc, ENCODED_GUARDS).unwrap();
+        for raw in [r"ad\x6din", r"ad\u{6d}in"] {
+            let start = ENCODED_GUARDS.find(raw).unwrap();
+            let range = Range::new(at(ENCODED_GUARDS, start), at(ENCODED_GUARDS, start + raw.len()));
+            let position = at(ENCODED_GUARDS, start + 2);
+            let hover = ide_host::ops::lsp::lsp_hover(&f.host, "main", RequestId::next(), f.doc, position)
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(hover.contents.value.contains("admin"), "host hover must use decoded guard identity: {hover:?}");
+            assert_eq!(hover.range, Some(range));
+            let definitions =
+                ide_host::ops::lsp::lsp_goto(&f.host, "main", f.doc, position, GotoKind::Definition).await.unwrap();
+            assert_eq!(definitions.len(), 1);
+            assert_eq!(definitions[0].path.to_path_buf(), f.root.join("config/auth.php"));
+            assert_eq!(definitions[0].range.start, at(GUARD_CONFIG, GUARD_CONFIG.find("admin").unwrap()));
+            let references = ide_host::ops::lsp::lsp_references(
+                &f.host,
+                "main",
+                RequestId::next(),
+                f.doc,
+                position,
+                true,
+                true,
+                true,
+                ide_host::ops::Channel::new(|_| {}),
+            )
+            .await
+            .unwrap();
+            assert_eq!(references.locations.len(), 3);
+            assert!(references.incomplete.is_none());
+            assert!(
+                references
+                    .locations
+                    .iter()
+                    .any(|location| location.path.to_path_buf() == f.root.join("app/GuardController.php")
+                        && location.range == range)
+            );
+        }
+        let caller = f.root.join("app/GuardController.php");
+        assert_eq!(std::fs::read_to_string(&caller).unwrap(), GUARD_SOURCE);
+        let external = format!("{GUARD_SOURCE}// External encoded guard witness\n");
+        std::fs::write(&caller, &external).unwrap();
+        let consent = ide_host::ops::doc::save_checked(&f.host, "main", f.doc, None).await.unwrap().unwrap();
+        assert_eq!(std::fs::read_to_string(&caller).unwrap(), external);
+        assert!(ide_host::ops::doc::save_checked(&f.host, "main", f.doc, Some(consent)).await.unwrap().is_none());
+        assert_eq!(std::fs::read_to_string(&caller).unwrap(), ENCODED_GUARDS);
+        assert_eq!(std::fs::read_to_string(f.root.join("config/auth.php")).unwrap(), GUARD_CONFIG);
+    })
+    .catch_unwind()
+    .await;
+    f.finish(outcome).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires candidate158 and owned PHP syntax-check executable"]
+async fn encoded_guards_refresh_host_parent_config_body_and_restart() {
+    let f = guard_fixture();
+    let outcome = std::panic::AssertUnwindSafe(async {
+        f.project.documents.replace_all(f.doc, ENCODED_GUARDS).unwrap();
+        let parent = f.project.documents.open(&f.root.join("app/BaseController.php")).unwrap().id;
+        let config = f.project.documents.open(&f.root.join("config/auth.php")).unwrap().id;
+        let position = after(ENCODED_GUARDS, "auth:ad");
+        for (text, expected) in [(GUARD_PARENT, true), (GUARD_FOREIGN, false), (GUARD_PARENT, true)] {
+            f.project.documents.replace_all(parent, text).unwrap();
+            let targets =
+                ide_host::ops::lsp::lsp_goto(&f.host, "main", f.doc, position, GotoKind::Definition).await.unwrap();
+            assert_eq!(!targets.is_empty(), expected);
+        }
+        f.project.documents.replace_all(config, &GUARD_CONFIG.replace("admin", "staff")).unwrap();
+        assert!(
+            ide_host::ops::lsp::lsp_goto(&f.host, "main", f.doc, position, GotoKind::Definition)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        let staff = ENCODED_GUARDS.replace(r"ad\x6din", r"st\x61ff").replace(r"ad\u{6d}in", r"st\u{61}ff");
+        Fixture::lint(&staff);
+        f.project.documents.replace_all(f.doc, &staff).unwrap();
+        let position = after(&staff, "auth:st");
+        let targets =
+            ide_host::ops::lsp::lsp_goto(&f.host, "main", f.doc, position, GotoKind::Definition).await.unwrap();
+        assert_eq!(targets.len(), 1);
+        let stale = staff.replace(r"\x61", r"\x62");
+        assert_eq!(staff.len(), stale.len());
+        f.project.documents.replace_all(f.doc, &stale).unwrap();
+        assert!(
+            ide_host::ops::lsp::lsp_goto(&f.host, "main", f.doc, position, GotoKind::Definition)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        f.project.documents.replace_all(f.doc, &staff).unwrap();
+        let server = f.project.lsp.servers()[0].id;
+        f.project.lsp.restart(server).await.unwrap();
+        let hover =
+            ide_host::ops::lsp::lsp_hover(&f.host, "main", RequestId::next(), f.doc, position).await.unwrap().unwrap();
+        assert!(hover.contents.value.contains("staff"));
+        let references = ide_host::ops::lsp::lsp_references(
+            &f.host,
+            "main",
+            RequestId::next(),
+            f.doc,
+            position,
+            true,
+            true,
+            true,
+            ide_host::ops::Channel::new(|_| {}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(references.locations.len(), 3);
+        for (path, original) in [
+            ("app/GuardController.php", GUARD_SOURCE),
+            ("app/BaseController.php", GUARD_PARENT),
+            ("config/auth.php", GUARD_CONFIG),
+        ] {
+            assert_eq!(std::fs::read_to_string(f.root.join(path)).unwrap(), original);
+        }
+    })
+    .catch_unwind()
+    .await;
+    f.finish(outcome).await;
+}

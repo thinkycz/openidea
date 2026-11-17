@@ -1717,7 +1717,7 @@ impl LspManager {
         for t in targets.iter().filter(|t| snap.asks(t, pos)) {
             let r: IdeResult<Option<lsp::Hover>> =
                 loading::while_loading(&t.server, Some(&cancel), loading::LOADING_WAIT, Option::is_none, || {
-                    self.current_hover(doc, &snap, t, pos, &cancel)
+                    self.current_hover(&snap, t, pos, &cancel)
                 })
                 .await;
             match r {
@@ -1745,7 +1745,6 @@ impl LspManager {
     /// Retry only that explicit protocol error, within one normal request deadline.
     async fn current_hover(
         &self,
-        doc: DocId,
         snap: &DocSnap,
         t: &Target,
         pos: Pos,
@@ -1754,17 +1753,8 @@ impl LspManager {
         let method = "textDocument/hover";
         let params = snap.pos_params(t, pos);
         let deadline = tokio::time::Instant::now() + DEFAULT_TIMEOUT;
-        let current = || {
-            !cancel.is_cancelled()
-                && t.server.running_gen(t.run.generation).is_some()
-                && self.docs.lock().get(&doc).is_some_and(|d| {
-                    d.uri == snap.uri
-                        && Arc::ptr_eq(&d.text, &snap.text)
-                        && d.servers
-                            .iter()
-                            .any(|a| a.server.id == t.server.id && a.opened_gen == Some(t.run.generation))
-                })
-        };
+        let sources = self.navigation_sources(snap, t)?;
+        let current = || !cancel.is_cancelled() && self.navigation_current(t, &sources);
         loop {
             if !current() {
                 return Err(IdeError::cancelled());

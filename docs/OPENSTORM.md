@@ -15,6 +15,52 @@ slice, commit and push it, and retain only the latest generated app. Native UI
 cases remain deferred/unverified; earlier native-first blocking checkpoints are
 historical and no longer prevent independent implementation.
 
+Client acceptance slice125 (2026-11-17, automated acceptance verified): exercise
+candidate158's encoded middleware read paths through actual host/client code for
+FEAT-031/066. A held real158 hover exposes a client bug: changing an unsaved parent
+still accepts the old `admin` hover. Reuse the existing navigation source snapshot
+in hover, including attached dependency buffers, observed file/project revisions
+and server generation. Keep the source receipt across explicit publication retries
+and preserve cancellation/deadlines; remove the now-unused private caller parameter.
+All17 held-response scenarios pass for hover/definitions/references after parent,
+config, caller, disk, roots/settings changes, restart and cancellation, with
+unchanged controls accepted. No new settings or IPC types.
+
+Two new host cases verify decoded guard hover, exact UTF-16 raw ranges after an
+emoji, config declaration points, references, checked-save consent preserving an
+external write, unsaved parent/config updates, same-length body changes and restart.
+The157 host control fails with the raw guard identity;158 passes both cases.
+Correct an initial test-only IpcPath/string comparison before accepting the control.
+All77 actual158 client/host tests pass (2 URL host,10 guarded edits,13 completion
+host,2 handler host,50 client) using exact workspace-emitted executables and recorded
+fingerprints. Original fixture files remain unchanged outside each test's declared
+owned disk-change case; all existing shared corpus receipts still match.
+
+Frontend13027 tests pass/6 skipped; typecheck, lint, format, knip, build and Safari
+startup checks pass. Workspace5047 tests pass/194 ignored/1 existing HTTP fixture
+exclusion; workspace all-target Clippy and Rust fmt pass. Explicitly run ignored
+integration cases above. All81 controlled-browser cases pass, including2 new
+encoded navigation shortcut cases. Preserve the first80-pass/1-failure run: its
+new test incorrectly expected the raw caret point for definition lookup, which
+intentionally clamps word-boundary queries inside the preceding word. Correct the
+assertion without changing product behavior; rerun fixture static/build gates and
+the complete81-case browser set. Frontend unit inputs and Rust sources stay unchanged
+after that fixture correction. Existing debug-linker unwind-size warnings also
+appear in the prior slice122 workspace and App97 build; retain the limitation.
+
+Candidate158 remains inactive until packaging; source/resource157 and sole App97
+are unchanged. Native UI remains user-skipped. Keep all69 statuses67 partial/
+2 user-deferred; encoded completion edits, other middleware aliases, whitespace
+normalization, performance and wider native acceptance remain unaccepted. Retain
+the owned compile cache only for the immediate App98 packaging slice126, which
+will remove it after signature/receipt verification; preserve earlier evaluation
+artifacts and PHP Workbench.
+
+Evidence: artifacts/checks/slice125-gates.json, slice125-workspace-counts.json,
+slice125-hover-red.log, slice125-hover-green1.log, slice125-host-red157-2.log,
+slice125-host-green1.log, slice125-client-host.json, slice125-browser.json,
+slice125-fixture-gates.json and slice125b-browser.json.
+
 Engine source slice124 (2026-11-17, verified inactive candidate): fix middleware
 read navigation that used raw PHP spelling instead of its runtime value. The
 original Backend test fails for `auth:ad\x6din`; signed App97's actual stdio hover

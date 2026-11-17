@@ -50,20 +50,60 @@ codex/openstorm-php-laravel, then verify the exact remote ref and clean worktree
 Evidence: artifacts/checks/slice132-{upstream,gates,workspace-totals,client-host,
 browser,extra-browser,retention}.json and retained per-stage logs.
 
-Engine source slice131 (2026-11-17, in progress; upstream merge prioritized):
-route `withoutMiddleware` alias/guard/ability navigation is implemented only in
-artifacts/phpantom/slice131-route-exclusions-work. The prototype passes26 of27
-public-handler cases and initial stdio probes; a cold real-server reproduction
-exposes a stale empty confirmation after a receiver class is first published.
-First declarations bypass signature-change invalidation. A focused cache fix is
-applied and formatted, but remains uncompiled/unverified. Retain red/green logs,
-negative160/prototype controls and artifacts/checks/slice131-pending-source.patch
-with its nine-file checksum receipt. Stop the redundant auxiliary diagnostic build
-(exit130), remove owned compiler output, and preserve unfinished source separately.
-Do not freeze, promote, commit feature code or claim candidate161 acceptance yet.
-Active160 and sole signed App99 remain unchanged. Native checks stay user-skipped;
-builtin/group/legacy aliases and literal middleware-class transformations remain
-unaccepted. Resume source validation after completing the upstream merge slice.
+Engine source slice131 (2026-11-17, source/stdio verified; inactive): add
+`withoutMiddleware` middleware-alias/auth-guard/ability navigation, hover and
+references (FEAT-030/066). Reuse literal decoding and shared receiver typing for
+Route, RouteRegistrar, Router and pending resource/singleton registrations. Confirm
+every union alternative against the accepted family; exclude foreign receivers and
+unavailable static $this. Class-first publication invalidates cached receiver answers
+so a newly added parent/receiver enables lookup without re-editing its caller.
+
+PHP argument binding follows Laravel13.37 runtime behavior: concrete methods consume
+named middleware arguments; magic registrar/router/facade paths consume positional
+values and check attribute casing exactly. Keep literal middleware-array spreads,
+parentheses, named concrete arguments and decoded UTF-16 ranges. Correct mocks that
+had made magic calls look like native methods. The initial frozen candidate passes
+18580 source cases but fails actual union/magic-argument protocol controls; preserve
+its rejected patch/manifest and receipts. Passing mocks/capability flags alone do not
+establish acceptance. The final eleven-file patch0161 adds nine public-handler
+regressions and retains all29 middleware cases:18582 ordinary passes/17 ignored plus
+2 bounded checks. Default and memory-audit all-target release Clippy, formatting,
+exact source replay and the pinned default build pass.
+Series SHA256: 216da62f8e5939686f19e05137c545a1bd2b67be728e84aafc079dd51d0f6bbe.
+Canonical artifacts/engines/0.11.1-openstorm.161/phpantom_lsp is arm64/version161;
+default-build SHA256: ea579db0ecf7fb174190f2bc7b7ee2d84994e611e6b413c449cc84a3bbe1f5fb.
+Preserve upstream acquisition/build provenance, source pin and MIT/Apache licenses.
+
+Checksum-bound stdio controls pass on disposable plain/Composer and real Laravel13.37
+fixtures, covering valid unions, native/magic/case-sensitive binding, cold and unsaved
+registration/parent changes, references, alias-key rename refusal, project isolation,
+watched removal/recreation and restart. Existing guard/encoded-string controls pass.
+Class/namespace refactoring retains12 refusal cases, the named ::class positive and
+3 namespace layouts; no partial target plans or original-file changes. Probe children
+exit0 and borrowed inputs remain unchanged. With project tools disabled, the real
+analyzer retains exactly3 intentional diagnostics (expected exit1). The source
+Laravel example passes115 syntax checks and340 complete runtime assertions using
+owned Composer metadata and borrowed package sources, without application boot.
+The plain-PHP playground passes12 syntax checks and its runtime assertions.
+
+Candidate161 remains inactive pending separate production client/host adoption and
+packaging. Active160, resource pins and sole signed App0.1.99 stay unchanged. Reuse
+857e4f948's unchanged main frontend13136/6 skipped, Rust5076/196 ignored/one HTTP
+exclusion,106 controlled-browser and79 actual160 client/host results; these are not
+161 client/native acceptance. Native checks stay user-skipped. Catalogs/groups,
+legacy Kernel/attributes, withoutMiddlewareFor, alias/class-string transformations,
+call-argument unpacking/overrides and full completion/validation remain backlog work.
+No new UI/settings/debugger behavior or environment-file mutations. All69 statuses
+remain67 partial/2 user-deferred. Clean owned compiler output and redundant mutable/
+rejected source copies after exact replay comparison; retain canonical161/final
+immutable source, rejected patch/manifest/logs, Workbench and earlier evidence.
+App99's main/engine hashes and deep/strict signature remain intact; no new app.
+
+Evidence: artifacts/checks/slice131-{source-freeze,engine-gates,source-test-summary,
+wire-gates,unions-final,named-final,receivers-final,refactor-guards-final,
+refactor-namespaces-final,runtime-exclusions-expanded,new-example-checks,playground,
+retention}.json, retained negative/attempt logs and
+artifacts/engines/0.11.1-openstorm.161/build-receipt.json.
 
 Package slice130 (2026-11-17, local signed App0.1.99 verified): promote
 client-verified engine160 into the pinned resources/default application bundle.

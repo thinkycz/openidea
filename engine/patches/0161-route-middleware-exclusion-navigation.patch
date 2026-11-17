@@ -1,0 +1,1079 @@
+--- a/docs/CHANGELOG.md
++++ b/docs/CHANGELOG.md
+@@ -22,6 +22,8 @@
+ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+ 
+ ## [Unreleased]
++
++- **Navigate excluded route middleware.** Route `withoutMiddleware()` calls offer middleware, guard and ability definitions, hover and references through shared receiver typing. Positional calls and supported named method arguments retain encoded source ranges, including valid route unions. Class and registration changes refresh navigation. Contributed by @thinkycz.
+ 
+ - **Refuse incomplete middleware class renames.** Class and namespace changes stop when a literal bootstrap middleware target would be left behind, including computed alias keys, literal spreads, nullable calls and uncertain receivers. Unresolved maps/targets refuse unverified edits; named `::class` targets remain renameable. Contributed by @thinkycz.
+ 
+--- a/docs/todo.md
++++ b/docs/todo.md
+@@ -163,7 +163,7 @@
+ | L56 | [Typed Laravel connection names](todo/laravel.md#l56-typed-laravel-connection-names)                                                                                        | Medium      | Medium      |
+ | L58 | [Laravel rate limiter names](todo/laravel.md#l58-laravel-rate-limiter-names)                                                                                                | Medium      | Medium      |
+ | L57 | [Laravel queue names](todo/laravel.md#l57-laravel-queue-names)                                                                                                              | Low-Medium  | Medium      |
+-| L59 | [Typed controller middleware names](todo/laravel.md#l59-typed-controller-middleware-names)                                                                                  | Low-Medium  | Medium      |
++| L60 | [Middleware alias catalogs and transformations](todo/laravel.md#l60-middleware-alias-catalogs-and-transformations)                                                          | Medium      | Medium      |
+ | L53 | [Collection key types from the column for `keyBy` / `groupBy` / `pluck`](todo/laravel.md#l53-collection-key-types-from-the-column-for-keyby-groupby-pluck)                   | Medium      | Medium      |
+ | L49 | [Unguarded Eloquent mass assignment diagnostic](todo/laravel.md#l49-unguarded-eloquent-mass-assignment-diagnostic)                                                          | Medium      | Medium      |
+ | L17 | [Additional string contexts without booting](todo/laravel.md#l17-additional-string-contexts-without-booting) (middleware, assets, validation, Inertia)                     | Medium      | Medium-High |
+--- a/docs/todo/laravel.md
++++ b/docs/todo/laravel.md
+@@ -633,46 +633,18 @@
+ queue connection. Each confirmed literal should receive the same completion,
+ hover, navigation, diagnostics, and references as the direct facade spelling.
+ 
+-#### L59. Typed controller middleware names
+-
+-Implemented in OpenStorm .157 for direct instance `$this->middleware()` auth-guard
+-strings: shared receiver typing, inherited/aliased/anonymous classes, static scope
+-and explicit closure-this contracts. Completion, navigation, hover, diagnostics,
+-references and unsaved-parent refresh share the config resource identity. Scalar,
+-named and array values are covered; embedded guard edits keep comma boundaries,
+-quotes and UTF-16 coordinates. Unsupported encoded/interpolated suffixes and tails
+-over the scan bound are refused. OpenStorm .158 decodes static middleware names
+-and separators for read navigation, references and diagnostics, with exact raw
+-source ranges. Dynamic/interpolated expressions remain excluded; encoded suffix
+-completion edits are still refused. Dynamic middleware aliases and native/client
+-release acceptance remain outside this engine-source checkpoint.
+-
+-OpenStorm .159 adds read navigation, hover and references for literal application
+-alias maps on type-confirmed Configuration\Middleware receivers in bootstrap/app.php.
+-It retains all static registration sites, unresolved target information and exact
+-raw UTF-16 ranges after PHP escape decoding. Unsaved bootstrap changes refresh the
+-lookup; closed-file metadata uses ticketed publication and never replaces editor
+-buffers. Builtin/group alias catalogs, legacy Kernel maps, attributes, withoutMiddleware,
+-completion and alias rename/validation remain separate work. Registration sites do
+-not establish effective runtime override order. OpenStorm .160 refuses class/namespace
+-changes that would strand direct literal class-string targets in bootstrap alias
+-arrays. Guard-only value sites share receiver typing without becoming navigation
+-spans; computed/numeric alias names and literal unpacking retain these dependencies.
+-Nullsafe calls and uncertain receiver types are conservative for writes; proven
+-unrelated concrete receivers do not block renames. Missing/stale or syntactically
+-incomplete bootstrap metadata refuses a plan. Class-constant targets keep normal
+-PHP rename behavior. Unresolved alias maps/targets refuse unverified class and namespace plans; they
+-are not interpreted or rewritten. Named ::class targets remain on the normal PHP
+-rename path. Legacy Kernel targets, runtime-computed method names and arbitrary
+-runtime class strings remain outside this checkpoint.
+-
+-**Impact: Low-Medium · Complexity: Medium**
+-
+-`$this->middleware('auth:admin')` names middleware only when `$this` is a
+-Laravel controller; an unrelated class may define the same method for a
+-different purpose. Confirm the enclosing class through the shared type engine
+-before completing or validating embedded authentication guards. Static and
+-fluent `Route::middleware()` calls remain syntactically unambiguous.
++#### L60. Middleware alias catalogs and transformations
++
++**Impact: Medium · Complexity: Medium**
++
++Extend middleware intelligence to builtin/group catalogs, legacy HTTP Kernel maps,
++controller attributes and `withoutMiddlewareFor`. Add completion and validation for
++these forms, including embedded guard/ability parameters, while retaining decoded
++PHP string ranges. Offer alias-key rename and middleware class-string transformations
++only with complete registration metadata and reviewed cross-file edits. Unresolved
++maps, dynamic method names and runtime-generated strings must not produce partial
++refactors. Extend argument binding to unpacked call arguments and user-overridden
++magic registrar methods before accepting those forms. Registration-site discovery must not invent runtime override ordering.
+ 
+ #### L57. Laravel queue names
+ 
+--- a/examples/laravel/app/Demo.php
++++ b/examples/laravel/app/Demo.php
+@@ -1792,6 +1792,13 @@
+         Route::get('/audited-literal-demo', fn () => null)->middleware('demo.audit.literal');
+     }
+ 
++    public function excludedMiddlewareNavigation(\Illuminate\Routing\Route $route): void
++    {
++        // Definition, hover and references work on the alias and web guard.
++        $route->withoutMiddleware(middleware: ([...['demo.audit:strict'], 'auth:web']));
++        Route::withoutMiddleware('demo.audit')->get('/excluded-audit-demo', fn () => null);
++    }
++
+     public function encodedMiddlewareNavigation(): void
+     {
+         new class extends \Illuminate\Routing\Controller {
+--- a/examples/laravel/assertions.php
++++ b/examples/laravel/assertions.php
+@@ -2154,6 +2154,49 @@
+ 
+ // ─── Summary ────────────────────────────────────────────────────────────────
+ 
++// ─── Middleware exclusion argument binding ───────────────────────────────────
++
++$middlewareContainer = new \Illuminate\Container\Container();
++$middlewareRouter = new \Illuminate\Routing\Router(
++    new \Illuminate\Events\Dispatcher($middlewareContainer),
++    $middlewareContainer,
++);
++\Illuminate\Support\Facades\Route::swap($middlewareRouter);
++check(
++    'Concrete route methods consume named middleware arguments',
++    $middlewareRouter->get('/middleware-native', fn () => null)
++        ->withoutMiddleware(middleware: 'demo.audit')->excludedMiddleware() === ['demo.audit'],
++);
++check(
++    'The routing service consumes positional middleware arguments',
++    $middlewareRouter->withoutMiddleware('demo.audit')
++        ->get('/middleware-router', fn () => null)->excludedMiddleware() === ['demo.audit'],
++);
++check(
++    'Magic registrar methods do not bind named middleware arguments',
++    $middlewareRouter->withoutMiddleware(middleware: 'ignored')
++        ->get('/middleware-registrar', fn () => null)->excludedMiddleware() === [true],
++);
++check(
++    'The route facade uses the magic registrar argument binding',
++    \Illuminate\Support\Facades\Route::withoutMiddleware(middleware: 'ignored')
++        ->get('/middleware-facade', fn () => null)->excludedMiddleware() === [true],
++);
++check(
++    'A fluent route retains the concrete method argument binding',
++    \Illuminate\Support\Facades\Route::get('/middleware-fluent', fn () => null)
++        ->withoutMiddleware(middleware: 'demo.audit')->excludedMiddleware() === ['demo.audit'],
++);
++foreach ([
++    'resource' => $middlewareRouter->resource('middleware-resource', \App\Http\Controllers\BakeryController::class),
++    'singleton' => $middlewareRouter->singleton('middleware-singleton', \App\Http\Controllers\BakeryController::class),
++] as $middlewareKind => $middlewarePending) {
++    $middlewarePending->withoutMiddleware(middleware: 'demo.audit');
++    $middlewareOptions = (new \ReflectionProperty($middlewarePending, 'options'))->getValue($middlewarePending);
++    check("$middlewareKind methods consume named middleware arguments", $middlewareOptions['excluded_middleware'] === ['demo.audit']);
++    $middlewarePending->register();
++}
++
+ echo "\n";
+ if ($failed === 0) {
+     echo "\033[32m✓ All $passed assertions passed.\033[0m\n";
+--- a/src/blade/typed_receiver.rs
++++ b/src/blade/typed_receiver.rs
+@@ -80,6 +80,39 @@
+         if !direct_this {
+             return false;
+         }
++        let types = self.receiver_this_types_at(content, offset, file_ctx, map);
++        let class_loaders = self.class_loaders(file_ctx);
++        let class_loader = class_loaders.at(offset);
++        !types.is_empty()
++            && types.iter().all(|ty| {
++                if let Some(class) = &ty.class_info
++                    && ty.type_string.is_named(class.fqn().as_str())
++                {
++                    // Anonymous classes are file-local identities, so retain
++                    // the resolved class instead of loading it again by name.
++                    crate::class_lookup::is_subtype_of(
++                        class,
++                        "Illuminate\\Routing\\Controller",
++                        class_loader,
++                    )
++                } else {
++                    crate::class_lookup::is_subtype_of_named(
++                        &ty.type_string,
++                        "Illuminate\\Routing\\Controller",
++                        class_loader,
++                    )
++                }
++            })
++    }
++
++    /// The shared member resolver's `$this`, filtered by lexical availability.
++    fn receiver_this_types_at(
++        &self,
++        content: &str,
++        offset: u32,
++        file_ctx: &crate::types::FileContext,
++        map: &SymbolMap,
++    ) -> Vec<crate::types::ResolvedType> {
+         // A nested instance method owns its `$this`, even when its class
+         // was constructed inside a static method or static closure.
+         let is_static_scope = map
+@@ -118,7 +151,7 @@
+             })
+             .max_by_key(|site| site.body_start);
+         if anonymous.is_some_and(|site| site.is_static) {
+-            return false;
++            return Vec::new();
+         }
+         let class_loaders = self.class_loaders(file_ctx);
+         let class_loader = class_loaders.at(offset);
+@@ -133,37 +166,18 @@
+             offset,
+             CtxLoaders::new(class_loader, function_loader, &macro_this),
+         );
+-        let types = if is_static_scope {
++
++        if is_static_scope {
+             // An unbound closure in a static scope has no `$this`, but an
+             // explicit closure-this contract can give a non-static one a receiver.
+             if anonymous.is_none() {
+-                return false;
++                return Vec::new();
+             }
+             crate::type_engine::variable::closure_resolution::find_closure_this_types(&context)
+                 .unwrap_or_default()
+         } else {
+             resolve_target_classes("$this", crate::types::AccessKind::Arrow, &context)
+-        };
+-        !types.is_empty()
+-            && types.iter().all(|ty| {
+-                if let Some(class) = &ty.class_info
+-                    && ty.type_string.is_named(class.fqn().as_str())
+-                {
+-                    // Anonymous classes are file-local identities, so retain
+-                    // the resolved class instead of loading it again by name.
+-                    crate::class_lookup::is_subtype_of(
+-                        class,
+-                        "Illuminate\\Routing\\Controller",
+-                        class_loader,
+-                    )
+-                } else {
+-                    crate::class_lookup::is_subtype_of_named(
+-                        &ty.type_string,
+-                        "Illuminate\\Routing\\Controller",
+-                        class_loader,
+-                    )
+-                }
+-            })
++        }
+     }
+ 
+     /// The view-name spans of `uri` whose render site is recognised by the
+@@ -279,6 +293,13 @@
+                     if self.controller_middleware_this_at(content, offset, &file_ctx, map) {
+                         confirmed.extend(call.sites.iter().map(|site| site.to_span()));
+                     }
++                    continue;
++                }
++                if receiver_uses_this(call.receiver)
++                    && self
++                        .receiver_this_types_at(content, offset, &file_ctx, map)
++                        .is_empty()
++                {
+                     continue;
+                 }
+                 let class_loader = class_loaders.at(offset);
+@@ -321,39 +342,37 @@
+                     {
+                         continue;
+                     }
+-                    if site.receiver.fqns().iter().any(|fqn| {
+-                        if ty.as_ref().is_some_and(|ty| {
+-                            crate::class_lookup::is_subtype_of_named(ty, fqn, class_loader)
+-                        }) {
+-                            return true;
+-                        }
+-                        if !allow_uncertain {
+-                            return false;
+-                        }
+-                        // Writes must refuse an ambiguous receiver; only a known
+-                        // unrelated concrete class rules this registration out.
+-                        let foreign = ty
+-                            .as_ref()
+-                            .and_then(|ty| ty.base_name())
+-                            .and_then(class_loader)
+-                            .zip(class_loader(fqn))
+-                            .is_some_and(|(receiver, expected)| {
+-                                matches!(
+-                                    receiver.kind,
+-                                    crate::types::ClassLikeKind::Class
+-                                        | crate::types::ClassLikeKind::Enum
+-                                ) && !crate::class_lookup::is_subtype_of(
+-                                    &receiver,
+-                                    fqn,
+-                                    class_loader,
+-                                ) && !crate::class_lookup::is_subtype_of(
+-                                    &expected,
+-                                    receiver.fqn().as_str(),
+-                                    class_loader,
+-                                )
+-                            });
+-                        !foreign
+-                    }) {
++                    let matches_receiver = ty.as_ref().is_some_and(|ty| {
++                        matches_receiver_family(ty, site.receiver.fqns(), class_loader)
++                    });
++                    if matches_receiver
++                        || (allow_uncertain
++                            && site.receiver.fqns().iter().any(|fqn| {
++                                // Writes must refuse an ambiguous receiver; only a known
++                                // unrelated concrete class rules this registration out.
++                                let foreign = ty
++                                    .as_ref()
++                                    .and_then(|ty| ty.base_name())
++                                    .and_then(class_loader)
++                                    .zip(class_loader(fqn))
++                                    .is_some_and(|(receiver, expected)| {
++                                        matches!(
++                                            receiver.kind,
++                                            crate::types::ClassLikeKind::Class
++                                                | crate::types::ClassLikeKind::Enum
++                                        ) && !crate::class_lookup::is_subtype_of(
++                                            &receiver,
++                                            fqn,
++                                            class_loader,
++                                        ) && !crate::class_lookup::is_subtype_of(
++                                            &expected,
++                                            receiver.fqn().as_str(),
++                                            class_loader,
++                                        )
++                                    });
++                                !foreign
++                            }))
++                    {
+                         confirmed.push(site.to_span());
+                     }
+                 }
+@@ -362,6 +381,23 @@
+             confirmed
+         })
+     }
++}
++
++/// Every alternative must belong to the accepted family; an unrelated branch
++/// cannot borrow another alternative's middleware semantics.
++fn matches_receiver_family(
++    ty: &crate::php_type::PhpType,
++    family: &[&str],
++    class_loader: &dyn Fn(&str) -> Option<Arc<ClassInfo>>,
++) -> bool {
++    if let crate::php_type::TypeKind::Union(members) = ty.kind() {
++        return members
++            .iter()
++            .all(|member| matches_receiver_family(member, family, class_loader));
++    }
++    family
++        .iter()
++        .any(|fqn| crate::class_lookup::is_subtype_of_named(ty, fqn, class_loader))
+ }
+ 
+ /// The shared empty answer, so the overwhelmingly common "this file has no
+@@ -486,6 +522,19 @@
+         ctx: &mut CollectCtx<'w, 'ast, 'arena, 'sites>,
+     ) {
+         self.collect_call(node.object, &node.argument_list, true, ctx.calls);
++    }
++}
++
++/// Follow only the receiver chain, not unrelated arguments or closure bodies.
++fn receiver_uses_this(expression: &Expression<'_>) -> bool {
++    match crate::parser::unwrap_parens(expression) {
++        Expression::Variable(Variable::Direct(variable)) => variable.name == b"$this",
++        Expression::Access(Access::Property(access)) => receiver_uses_this(access.object),
++        Expression::Access(Access::NullSafeProperty(access)) => receiver_uses_this(access.object),
++        Expression::Call(Call::Method(call)) => receiver_uses_this(call.object),
++        Expression::Call(Call::NullSafeMethod(call)) => receiver_uses_this(call.object),
++        Expression::ArrayAccess(access) => receiver_uses_this(access.array),
++        _ => false,
+     }
+ }
+ 
+--- a/src/parser/ast_update.rs
++++ b/src/parser/ast_update.rs
+@@ -2116,9 +2116,13 @@
+             if !self.member_ref_counts.is_empty() {
+                 self.member_ref_counts.invalidate_locations_all();
+             }
+-            // A receiver's type is settled against the classes of the whole
+-            // workspace, so a signature change anywhere can turn a call that
+-            // was not a render into one, or the other way round.
++        }
++        // A first declaration can confirm a previously unknown receiver too;
++        // the signature cache's first-parse fast path does not count it above.
++        let new_receiver_class = prepared
++            .iter()
++            .any(|update| update.old_fqns.is_empty() && !update.new_fqns.is_empty());
++        if structural_changed || new_receiver_class {
+             self.typed_receiver_view_spans_cache.write().clear();
+         } else {
+             for update in &prepared {
+--- a/src/symbol_map/extraction/expressions/calls.rs
++++ b/src/symbol_map/extraction/expressions/calls.rs
+@@ -888,6 +888,14 @@
+             extract_dynamic_member_selector(&method_call.method, ctx, scope_start);
+             if let Some(selector) = known_method_selector(&method_call.method, ctx) {
+                 let member_name = selector.name;
++                if member_name.eq_ignore_ascii_case("withoutMiddleware") {
++                    emit_gate_ability_spans_for_method(
++                        method_call.object,
++                        &member_name,
++                        &method_call.argument_list,
++                        ctx,
++                    );
++                }
+                 if member_name.eq_ignore_ascii_case("alias") {
+                     record_middleware_alias_declarations(
+                         &method_call.argument_list,
+@@ -1146,14 +1154,24 @@
+                 if is_gate_facade(clean_subject) {
+                     emit_gate_facade_ability_spans(&member_name, &static_call.argument_list, ctx);
+                 } else if matches_laravel_facade(semantic_subject, "Route")
+-                    && member_name.eq_ignore_ascii_case("middleware")
++                    && (member_name.eq_ignore_ascii_case("middleware")
++                        || member_name.eq_ignore_ascii_case("withoutMiddleware"))
+                 {
+-                    try_emit_can_middleware_spans(
+-                        &static_call.argument_list,
+-                        true,
+-                        ctx.content,
+-                        &mut ctx.spans,
+-                    );
++                    if member_name.eq_ignore_ascii_case("withoutMiddleware") {
++                        try_emit_route_facade_exclusion_spans(
++                            &member_name,
++                            &static_call.argument_list,
++                            ctx.content,
++                            &mut ctx.spans,
++                        );
++                    } else {
++                        try_emit_can_middleware_spans(
++                            &static_call.argument_list,
++                            true,
++                            ctx.content,
++                            &mut ctx.spans,
++                        );
++                    }
+                 }
+                 // Eloquent morph aliases: the keys of a
+                 // `Relation::morphMap(['post' => Post::class])` registration,
+@@ -1290,9 +1308,11 @@
+         || member_name.eq_ignore_ascii_case("canAny");
+     let is_authorize_for_user = member_name.eq_ignore_ascii_case("authorizeForUser");
+     let is_middleware = member_name.eq_ignore_ascii_case("middleware");
++    let is_exclusion = member_name.eq_ignore_ascii_case("withoutMiddleware");
+     if !is_can
+         && !is_authorize_for_user
+         && !is_middleware
++        && !is_exclusion
+         && !member_name.eq_ignore_ascii_case("authorize")
+         && !is_gate_check_method(member_name)
+     {
+@@ -1321,6 +1341,15 @@
+         return;
+     }
+ 
++    if is_exclusion {
++        record_route_exclusion_sites(
++            member_name,
++            argument_list,
++            ctx.content,
++            &mut ctx.view_receiver_sites,
++        );
++        return;
++    }
+     let route_dependency = if is_middleware || is_can {
+         ctx.resolved_names
+             .and_then(|names| route_facade_root_dependency(object, names))
+--- a/src/symbol_map/extraction/laravel.rs
++++ b/src/symbol_map/extraction/laravel.rs
+@@ -1,6 +1,7 @@
+ use mago_span::HasSpan;
+ 
+ use super::*;
++use crate::symbol_map::RouteMiddlewareReceiver;
+ use crate::virtual_members::laravel::helpers::string_literal_at_range;
+ 
+ /// Namespace prefix for Laravel's container-injection attributes.
+@@ -1396,18 +1397,43 @@
+     let Some(middleware) = argument_expr_for_parameter(argument_list, "middleware") else {
+         return;
+     };
+-    // Laravel reads a middleware array's values whatever their keys.
+-    let Some(elements) = crate::parser::array_literal_elements(middleware) else {
+-        push_middleware_parameter_spans(middleware, include_auth_guards, content, spans);
+-        return;
+-    };
+-    for element in elements.iter() {
+-        let value = match element {
+-            ArrayElement::KeyValue(element) => element.value,
+-            ArrayElement::Value(element) => element.value,
+-            ArrayElement::Variadic(_) | ArrayElement::Missing(_) => continue,
++    emit_middleware_argument_spans(middleware, include_auth_guards, content, spans);
++}
++
++fn emit_middleware_argument_spans(
++    middleware: &Expression<'_>,
++    include_auth_guards: bool,
++    content: &str,
++    spans: &mut Vec<SymbolSpan>,
++) {
++    let mut pending = vec![middleware];
++    while let Some(value) = pending.pop() {
++        let value = crate::parser::unwrap_parens(value);
++        let Some(elements) = crate::parser::array_literal_elements(value) else {
++            push_middleware_parameter_spans(value, include_auth_guards, content, spans);
++            continue;
+         };
+-        push_middleware_parameter_spans(value, include_auth_guards, content, spans);
++        // Array keys do not name middleware; only literal spreads add more entries.
++        for element in elements.iter() {
++            let value = match element {
++                ArrayElement::KeyValue(element) => element.value,
++                ArrayElement::Value(element) => element.value,
++                ArrayElement::Variadic(element) => {
++                    let array = crate::parser::unwrap_parens(element.value);
++                    if crate::parser::array_literal_elements(array).is_some() {
++                        pending.push(array);
++                    }
++                    continue;
++                }
++                ArrayElement::Missing(_) => continue,
++            };
++            push_middleware_parameter_spans(
++                crate::parser::unwrap_parens(value),
++                include_auth_guards,
++                content,
++                spans,
++            );
++        }
+     }
+ }
+ 
+@@ -1553,6 +1579,105 @@
+             key,
+             is_optional,
+             receiver,
++        });
++    }
++}
++
++/// Route exclusions require a routing receiver, not a same-named test-case method.
++/// Match PHP's binding on the concrete route method or magic registrar path.
++fn route_exclusion_argument<'a>(
++    arguments: &ArgumentList<'a>,
++) -> Option<(&'a Expression<'a>, RouteMiddlewareReceiver)> {
++    if arguments.arguments.iter().any(|argument| {
++        matches!(argument, Argument::Positional(positional) if positional.ellipsis.is_some())
++    }) {
++        return None;
++    }
++    let mut arguments = arguments.arguments.iter();
++    match arguments.next()? {
++        Argument::Positional(positional) => {
++            let receiver = if arguments.any(|argument| matches!(argument, Argument::Named(_))) {
++                // Magic calls keep their positional value; a concrete method
++                // has no second named parameter and would reject the call.
++                RouteMiddlewareReceiver::Magic
++            } else {
++                RouteMiddlewareReceiver::Any
++            };
++            Some((positional.value, receiver))
++        }
++        Argument::Named(named)
++            if named.name.value == b"middleware" && arguments.next().is_none() =>
++        {
++            Some((named.value, RouteMiddlewareReceiver::Concrete))
++        }
++        Argument::Named(_) => None,
++    }
++}
++
++/// The facade dispatches this method through Router's positional-only magic path.
++pub(super) fn try_emit_route_facade_exclusion_spans(
++    method_name: &str,
++    arguments: &ArgumentList<'_>,
++    content: &str,
++    spans: &mut Vec<SymbolSpan>,
++) {
++    if method_name != "withoutMiddleware" {
++        return;
++    }
++    let Some((value, receiver)) = route_exclusion_argument(arguments) else {
++        return;
++    };
++    if receiver != RouteMiddlewareReceiver::Concrete {
++        emit_middleware_argument_spans(value, true, content, spans);
++    }
++}
++
++/// Record only argument spans the confirmed receiver family consumes.
++pub(super) fn record_route_exclusion_sites(
++    method_name: &str,
++    argument_list: &ArgumentList<'_>,
++    content: &str,
++    sites: &mut Vec<ViewReceiverSite>,
++) {
++    let Some((value, mut receiver)) = route_exclusion_argument(argument_list) else {
++        return;
++    };
++    if method_name != "withoutMiddleware" {
++        // PHP's concrete methods are case-insensitive; the registrar's
++        // magic dispatcher checks its attribute names exactly.
++        match receiver {
++            RouteMiddlewareReceiver::Magic => return,
++            _ => receiver = RouteMiddlewareReceiver::Concrete,
++        }
++    }
++    let mut spans = Vec::new();
++    emit_middleware_argument_spans(value, true, content, &mut spans);
++    for span in spans {
++        let SymbolKind::LaravelStringKey {
++            kind,
++            key,
++            is_optional,
++            ..
++        } = span.kind
++        else {
++            continue;
++        };
++        if !matches!(
++            kind,
++            crate::symbol_map::LaravelStringKind::MiddlewareAlias
++                | crate::symbol_map::LaravelStringKind::GateAbility
++                | crate::symbol_map::LaravelStringKind::ConfigResource(
++                    crate::symbol_map::LaravelConfigResource::AuthGuard
++                )
++        ) {
++            continue;
++        }
++        sites.push(ViewReceiverSite {
++            start: span.start,
++            end: span.end,
++            key,
++            is_optional,
++            receiver: ViewReceiverClass::RouteMiddleware(kind, receiver),
+         });
+     }
+ }
+--- a/src/symbol_map/mod.rs
++++ b/src/symbol_map/mod.rs
+@@ -817,6 +817,16 @@
+     ControllerMiddlewareAlias,
+     /// An alias array key on a typed middleware configuration receiver.
+     MiddlewareAliasDeclaration,
++    /// A middleware name or parameter on a typed route exclusion receiver.
++    RouteMiddleware(LaravelStringKind, RouteMiddlewareReceiver),
++}
++
++/// The route families that consume the extracted middleware argument.
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++pub(crate) enum RouteMiddlewareReceiver {
++    Any,
++    Concrete,
++    Magic,
+ }
+ 
+ impl ViewReceiverClass {
+@@ -834,6 +844,22 @@
+             Self::MiddlewareAliasDeclaration => {
+                 &["Illuminate\\Foundation\\Configuration\\Middleware"]
+             }
++            Self::RouteMiddleware(_, RouteMiddlewareReceiver::Any) => &[
++                "Illuminate\\Routing\\Route",
++                "Illuminate\\Routing\\RouteRegistrar",
++                "Illuminate\\Routing\\Router",
++                "Illuminate\\Routing\\PendingResourceRegistration",
++                "Illuminate\\Routing\\PendingSingletonResourceRegistration",
++            ],
++            Self::RouteMiddleware(_, RouteMiddlewareReceiver::Concrete) => &[
++                "Illuminate\\Routing\\Route",
++                "Illuminate\\Routing\\PendingResourceRegistration",
++                "Illuminate\\Routing\\PendingSingletonResourceRegistration",
++            ],
++            Self::RouteMiddleware(_, RouteMiddlewareReceiver::Magic) => &[
++                "Illuminate\\Routing\\RouteRegistrar",
++                "Illuminate\\Routing\\Router",
++            ],
+             Self::MailTemplate => &[
+                 "Illuminate\\Mail\\Mailable",
+                 "Illuminate\\Notifications\\Messages\\MailMessage",
+@@ -871,6 +897,7 @@
+ impl ViewReceiverSite {
+     pub(crate) fn kind(&self) -> LaravelStringKind {
+         match self.receiver {
++            ViewReceiverClass::RouteMiddleware(kind, _) => kind,
+             ViewReceiverClass::ControllerGuard => {
+                 LaravelStringKind::ConfigResource(LaravelConfigResource::AuthGuard)
+             }
+--- a/tests/integration/laravel_middleware_aliases.rs
++++ b/tests/integration/laravel_middleware_aliases.rs
+@@ -677,3 +677,386 @@
+         );
+     }
+ }
++
++async fn exclusion_workspace(source: &str) -> (Backend, tempfile::TempDir, Url, Url) {
++    let (backend, dir, uri, boot) = workspace(BOOTSTRAP, source).await;
++    for (file, text) in [
++        (
++            "framework/Routing/Router.php",
++            "<?php namespace Illuminate\\Routing; /** @method \\Illuminate\\Routing\\RouteRegistrar withoutMiddleware(array|string $middleware) */ class Router {public function __call(string $method, array $arguments): RouteRegistrar {return new RouteRegistrar;}}",
++        ),
++        (
++            "framework/Support/Facades/Route.php",
++            "<?php namespace Illuminate\\Support\\Facades; class Route {public static function get($uri, $action): \\Illuminate\\Routing\\Route {return new \\Illuminate\\Routing\\Route;} public static function prefix($prefix): \\Illuminate\\Routing\\RouteRegistrar {return new \\Illuminate\\Routing\\RouteRegistrar;}}",
++        ),
++        (
++            "framework/Routing/Route.php",
++            "<?php namespace Illuminate\\Routing; class Route {public function withoutMiddleware($middleware): static {return $this;}}",
++        ),
++        (
++            "framework/Routing/RouteRegistrar.php",
++            "<?php namespace Illuminate\\Routing; /** @method \\Illuminate\\Routing\\RouteRegistrar withoutMiddleware(array|string $middleware) */ class RouteRegistrar {public function __call(string $method, array $arguments): static {return $this;}}",
++        ),
++        (
++            "framework/Routing/PendingResourceRegistration.php",
++            "<?php namespace Illuminate\\Routing; class PendingResourceRegistration {public function withoutMiddleware($middleware): static {return $this;}}",
++        ),
++        (
++            "framework/Routing/PendingSingletonResourceRegistration.php",
++            "<?php namespace Illuminate\\Routing; class PendingSingletonResourceRegistration {public function withoutMiddleware($middleware): static {return $this;}}",
++        ),
++        (
++            "config/auth.php",
++            "<?php return ['guards'=>['admin'=>[], 'staff'=>[]]];",
++        ),
++    ] {
++        let path = dir.path().join(file);
++        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
++        std::fs::write(&path, text).unwrap();
++        open_document(&backend, &Url::from_file_path(path).unwrap(), "php", text).await;
++    }
++    (backend, dir, uri, boot)
++}
++
++#[tokio::test]
++async fn exclusion_facade_and_fluent_alias_navigation() {
++    let source = r#"<?php
++use Illuminate\Support\Facades\Route as Routes;
++Routes::withoutMiddleware('audited');
++Routes::get('/audit',fn()=>null)->withoutMiddleware(middleware: ['audited:strict']);
++\Illuminate\Support\Facades\Route::withoutMiddleware("au\x64ited");
++"#;
++    let (backend, _dir, uri, boot) = exclusion_workspace(source).await;
++    for needle in ["withoutMiddleware('aud", "['aud", r#""au\x64"#] {
++        let found = definitions(&backend, &uri, source, needle).await;
++        assert_eq!(
++            found.len(),
++            1,
++            "exclusion alias definition {needle}: {found:?}"
++        );
++        assert_eq!(found[0].uri, boot);
++        assert_eq!(found[0].range.start, position_after(BOOTSTRAP, "alias(['"));
++        assert!(
++            hover(&backend, &uri, source, needle)
++                .await
++                .contains("Middleware\\Audit")
++        );
++    }
++}
++
++#[tokio::test]
++async fn exclusion_typed_routes_registrars_and_nullable_receivers() {
++    let source = r#"<?php
++function remove(\Illuminate\Routing\Route $route, \Illuminate\Routing\RouteRegistrar $registrar, ?\Illuminate\Routing\Route $maybe, \Illuminate\Routing\PendingResourceRegistration $resource, \Illuminate\Routing\PendingSingletonResourceRegistration $singleton): void {
++ $route->withoutMiddleware('audited');
++ $registrar->withoutMiddleware(['audited:strict']);
++ $maybe?->withoutMiddleware('audited');
++ $resource->withoutMiddleware('audited');
++ $singleton->withoutMiddleware('audited');
++}
++class Owner {public function __construct(private \Illuminate\Routing\Route $route) {} public function run() {$this->route->withoutMiddleware('audited');}}
++"#;
++    let (backend, _dir, uri, boot) = exclusion_workspace(source).await;
++    for needle in [
++        "$route->withoutMiddleware('aud",
++        "['aud",
++        "$maybe?->withoutMiddleware('aud",
++        "$this->route->withoutMiddleware('aud",
++        "$resource->withoutMiddleware('aud",
++        "$singleton->withoutMiddleware('aud",
++    ] {
++        let found = definitions(&backend, &uri, source, needle).await;
++        assert_eq!(found.len(), 1, "typed exclusion alias {needle}: {found:?}");
++        assert_eq!(found[0].uri, boot);
++    }
++}
++
++#[tokio::test]
++async fn exclusion_guard_and_ability_decode_array_values_and_spreads() {
++    let source = r#"<?php
++use Illuminate\Support\Facades\Route;
++use Illuminate\Support\Facades\Gate;
++Gate::define('edit-report', fn()=>true);
++/* 😀 */ Route::get('/guard',fn()=>null)->withoutMiddleware(middleware: ([...["auth:ad\x6din", 'can:edit-report'], 'label'=>('audited:strict')]));
++function remove(\Illuminate\Routing\Route $route) {$route->withoutMiddleware(middleware: ([...['auth:admin','can:edit-report'], 'label'=>'audited']));}
++"#;
++    let (backend, dir, uri, boot) = exclusion_workspace(source).await;
++    for (needle, target) in [
++        (
++            r"auth:ad\x6d",
++            Url::from_file_path(dir.path().join("config/auth.php")).unwrap(),
++        ),
++        ("can:edit-rep", uri.clone()),
++        ("('aud", boot.clone()),
++        (
++            "['auth:adm",
++            Url::from_file_path(dir.path().join("config/auth.php")).unwrap(),
++        ),
++    ] {
++        let found = definitions(&backend, &uri, source, needle).await;
++        assert!(
++            found.iter().any(|location| location.uri == target),
++            "exclusion parameter {needle}: {found:?}"
++        );
++    }
++}
++
++#[tokio::test]
++async fn exclusion_references_and_alias_rename_refusal() {
++    let source = r#"<?php
++use Illuminate\Support\Facades\Route;
++/* 😀 */ Route::withoutMiddleware("au\x64ited:strict");
++function remove(\Illuminate\Routing\Route $route) {$route->withoutMiddleware('audited');}
++class Foreign {public function withoutMiddleware($middleware){} public function run() {$this->withoutMiddleware('audited');}}
++"#;
++    let (backend, _dir, uri, boot) = exclusion_workspace(source).await;
++    let at = position_after(source, r#""au\x64"#);
++    let refs = find_references(&backend, &uri, at, true).await;
++    assert_eq!(refs.len(), 3, "exclusion references: {refs:?}");
++    assert!(refs.iter().any(|location| location.uri == boot));
++    let caller = refs
++        .iter()
++        .find(|location| location.uri == uri && location.range.start.line == 2)
++        .unwrap();
++    assert_eq!(
++        caller.range.start,
++        position_after(source, "withoutMiddleware(\"")
++    );
++    assert_eq!(
++        caller.range.end.character - caller.range.start.character,
++        10
++    );
++    assert!(
++        crate::common::prepare_rename(&backend, &uri, at.line, at.character)
++            .await
++            .is_none()
++    );
++    let renamed =
++        crate::common::rename_result(&backend, &uri, at.line, at.character, "changed").await;
++    assert!(
++        !matches!(renamed, Ok(Some(_))),
++        "alias Rename must return no edit: {renamed:?}"
++    );
++}
++
++#[tokio::test]
++async fn exclusion_foreign_receivers_and_reassignment_are_not_aliases() {
++    let source = r#"<?php
++class Foreign {public function withoutMiddleware($middleware){} public function run() {$this->withoutMiddleware('audited');}}
++class Controller extends \Illuminate\Routing\Controller {public function withoutMiddleware($middleware){} public function boot() {$this->withoutMiddleware('audited');}}
++function remove(\Illuminate\Routing\Route $route, Foreign $foreign) {
++ $route->withoutMiddleware('audited');
++ $foreign->withoutMiddleware('audited');
++ $route=new Foreign; $route->withoutMiddleware('audited:strict');
++}
++"#;
++    let (backend, _dir, uri, _boot) = exclusion_workspace(source).await;
++    assert_eq!(
++        definitions(&backend, &uri, source, "$route->withoutMiddleware('aud")
++            .await
++            .len(),
++        1
++    );
++    for needle in [
++        "function run() {$this->withoutMiddleware('aud",
++        "function boot() {$this->withoutMiddleware('aud",
++        "$foreign->withoutMiddleware('aud",
++        "$route=new Foreign; $route->withoutMiddleware('aud",
++    ] {
++        assert!(
++            definitions(&backend, &uri, source, needle).await.is_empty(),
++            "foreign exclusion {needle}"
++        );
++        assert!(
++            !hover(&backend, &uri, source, needle)
++                .await
++                .contains("Application registrations")
++        );
++    }
++}
++
++#[tokio::test]
++async fn exclusion_unsaved_alias_target_key_and_receiver_parent_refresh() {
++    let source =
++        "<?php function remove(\\App\\RouteBase $route) {$route->withoutMiddleware('audited');}";
++    let (backend, dir, uri, boot) = exclusion_workspace(source).await;
++    let route = Url::from_file_path(dir.path().join("app/RouteBase.php")).unwrap();
++    let parent = "<?php namespace App; class RouteBase extends \\Illuminate\\Routing\\Route {}";
++    std::fs::write(dir.path().join("app/RouteBase.php"), parent).unwrap();
++    open_document(&backend, &route, "php", parent).await;
++    assert!(
++        hover(&backend, &uri, source, "withoutMiddleware('aud")
++            .await
++            .contains("Middleware\\Audit")
++    );
++    open_document(&backend, &boot, "php", BOOTSTRAP).await;
++    let target = BOOTSTRAP.replace("Middleware\\Audit as", "Middleware\\Trace as");
++    change(&backend, &boot, &target, 2).await;
++    assert!(
++        hover(&backend, &uri, source, "withoutMiddleware('aud")
++            .await
++            .contains("Middleware\\Trace")
++    );
++    change(
++        &backend,
++        &boot,
++        &target.replace("'audited'", "'another'"),
++        3,
++    )
++    .await;
++    assert!(
++        definitions(&backend, &uri, source, "withoutMiddleware('aud")
++            .await
++            .is_empty()
++    );
++    change(&backend, &boot, BOOTSTRAP, 4).await;
++    let foreign = "<?php namespace App; class RouteBase {}";
++    change(&backend, &route, foreign, 2).await;
++    assert!(
++        definitions(&backend, &uri, source, "withoutMiddleware('aud")
++            .await
++            .is_empty()
++    );
++}
++
++#[tokio::test]
++async fn exclusion_static_this_null_and_ambiguous_union_are_not_routes() {
++    let source = r#"<?php
++class Foreign {public function withoutMiddleware($middleware){}}
++class Owner {
++ public function __construct(private \Illuminate\Routing\Route $route) {}
++ public static function missingThis() {$this->route->withoutMiddleware('audited');}
++ public function staticClosure() {(static function() {$this->route->withoutMiddleware('audited');})();}
++}
++function ambiguous(\Illuminate\Routing\Route|Foreign $maybe) {$maybe->withoutMiddleware('audited');}
++(null)?->withoutMiddleware('audited');
++"#;
++    let (backend, _dir, uri, _boot) = exclusion_workspace(source).await;
++    for needle in [
++        "function missingThis() {$this->route->withoutMiddleware('aud",
++        "function() {$this->route->withoutMiddleware('aud",
++        "$maybe->withoutMiddleware('aud",
++        "(null)?->withoutMiddleware('aud",
++    ] {
++        assert!(
++            definitions(&backend, &uri, source, needle).await.is_empty(),
++            "unavailable/ambiguous exclusion receiver {needle}"
++        );
++    }
++}
++
++#[tokio::test]
++async fn exclusion_valid_route_unions_preserve_all_alternatives() {
++    let source = r#"<?php
++class Foreign {public function withoutMiddleware($middleware){}}
++function pair(\Illuminate\Routing\Route|\Illuminate\Routing\RouteRegistrar $pair) {$pair->withoutMiddleware('audited');}
++function nullable(\Illuminate\Routing\Route|\Illuminate\Routing\RouteRegistrar|null $nullable) {$nullable?->withoutMiddleware('audited');}
++function allRoutes(\Illuminate\Routing\Route|\Illuminate\Routing\Router|\Illuminate\Routing\RouteRegistrar|\Illuminate\Routing\PendingResourceRegistration|\Illuminate\Routing\PendingSingletonResourceRegistration $all) {$all->withoutMiddleware('audited');}
++function native(\Illuminate\Routing\Route|\Illuminate\Routing\PendingResourceRegistration|\Illuminate\Routing\PendingSingletonResourceRegistration $native) {$native->withoutMiddleware(middleware: 'audited');}
++function foreign(\Illuminate\Routing\Route|Foreign $foreign) {$foreign->withoutMiddleware('audited');}
++function magic(\Illuminate\Routing\Route|\Illuminate\Routing\RouteRegistrar $magic) {$magic->withoutMiddleware(middleware: 'audited');}
++"#;
++    let (backend, _dir, uri, boot) = exclusion_workspace(source).await;
++    for needle in [
++        "$pair->withoutMiddleware('aud",
++        "$nullable?->withoutMiddleware('aud",
++        "$all->withoutMiddleware('aud",
++        "$native->withoutMiddleware(middleware: 'aud",
++    ] {
++        let found = definitions(&backend, &uri, source, needle).await;
++        assert_eq!(found.len(), 1, "valid route family {needle}: {found:?}");
++        assert_eq!(found[0].uri, boot);
++        assert!(
++            hover(&backend, &uri, source, needle)
++                .await
++                .contains("Middleware\\Audit")
++        );
++    }
++    for needle in [
++        "$foreign->withoutMiddleware('aud",
++        "$magic->withoutMiddleware(middleware: 'aud",
++    ] {
++        assert!(
++            definitions(&backend, &uri, source, needle).await.is_empty(),
++            "unconfirmed alternative {needle}"
++        );
++    }
++    let refs = find_references(
++        &backend,
++        &uri,
++        position_after(source, "$pair->withoutMiddleware('aud"),
++        true,
++    )
++    .await;
++    assert_eq!(
++        refs.len(),
++        5,
++        "union references include only consumed arguments: {refs:?}"
++    );
++}
++
++#[tokio::test]
++async fn exclusion_argument_binding_follows_native_and_magic_methods() {
++    let source = r#"<?php
++use Illuminate\Support\Facades\Route;
++function calls(\Illuminate\Routing\Route $native, \Illuminate\Routing\RouteRegistrar $registrar, \Illuminate\Routing\Router $router, array $arguments) {
++ $native->withoutMiddleware(middleware: 'audited:native');
++ $router->withoutMiddleware('audited:router');
++ $router->withoutMiddleware(middleware: 'audited:ignored');
++ $native->WITHOUTMIDDLEWARE(middleware: 'audited:case');
++ $registrar->WITHOUTMIDDLEWARE('audited:ignored');
++ $registrar->withoutMiddleware(middleware: 'audited:ignored');
++ $registrar->withoutMiddleware('audited:registrar', middleware: 'audited:ignored');
++ $native->withoutMiddleware('audited:duplicate', middleware: 'audited:ignored');
++ Route::withoutMiddleware(...$arguments, middleware: 'audited:ignored');
++}
++Route::withoutMiddleware(middleware: 'audited:ignored');
++Route::WITHOUTMIDDLEWARE('audited:ignored');
++Route::withoutMiddleware('audited:facade', middleware: 'audited:ignored');
++Route::get('/native',fn()=>null)->withoutMiddleware(middleware: 'audited:fluent');
++Route::prefix('/magic')->withoutMiddleware(middleware: 'audited:ignored');
++"#;
++    let (backend, _dir, uri, boot) = exclusion_workspace(source).await;
++    for needle in [
++        "$native->withoutMiddleware(middleware: 'aud",
++        "$router->withoutMiddleware('aud",
++        "$native->WITHOUTMIDDLEWARE(middleware: 'aud",
++        "$registrar->withoutMiddleware('aud",
++        "Route::withoutMiddleware('aud",
++        "Route::get('/native',fn()=>null)->withoutMiddleware(middleware: 'aud",
++    ] {
++        let found = definitions(&backend, &uri, source, needle).await;
++        assert_eq!(found.len(), 1, "consumed argument {needle}: {found:?}");
++        assert_eq!(found[0].uri, boot);
++    }
++    for needle in [
++        "$registrar->withoutMiddleware(middleware: 'aud",
++        "$router->withoutMiddleware(middleware: 'aud",
++        "$registrar->WITHOUTMIDDLEWARE('aud",
++        "Route::WITHOUTMIDDLEWARE('aud",
++        "$registrar->withoutMiddleware('audited:registrar', middleware: 'aud",
++        "$native->withoutMiddleware('aud",
++        "$native->withoutMiddleware('audited:duplicate', middleware: 'aud",
++        "Route::withoutMiddleware(...$arguments, middleware: 'aud",
++        "Route::withoutMiddleware(middleware: 'aud",
++        "Route::withoutMiddleware('audited:facade', middleware: 'aud",
++        "Route::prefix('/magic')->withoutMiddleware(middleware: 'aud",
++    ] {
++        assert!(
++            definitions(&backend, &uri, source, needle).await.is_empty(),
++            "unconsumed argument {needle}"
++        );
++    }
++    let refs = find_references(
++        &backend,
++        &uri,
++        position_after(source, "$native->withoutMiddleware(middleware: 'aud"),
++        true,
++    )
++    .await;
++    assert_eq!(
++        refs.len(),
++        7,
++        "references must exclude ignored and invalid bindings: {refs:?}"
++    );
++}

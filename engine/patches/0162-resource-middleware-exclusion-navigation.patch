@@ -1,0 +1,462 @@
+--- a/docs/CHANGELOG.md
++++ b/docs/CHANGELOG.md
+@@ -1,3 +1,7 @@
++## OpenStorm .162 resource middleware exclusions
++
++**Resource middleware navigation.** Names passed to `withoutMiddlewareFor()` navigate to their application registrations, auth guards and abilities, with hover and references. Route-method selectors and custom overrides do not borrow middleware semantics. Contributed by @thinkycz.
++
+ ## OpenStorm .157 typed controller middleware guards
+ 
+ Controller `$this->middleware('auth:guard')` strings share config-backed completion, hover, definitions, diagnostics and references only after the shared type engine confirms the receiver. Aliased/inherited/anonymous controllers and explicit closure-this bindings retain their identities; foreign receivers and unavailable static `$this` are excluded. Unsaved parent changes invalidate confirmed spans. Middleware completion replaces the full current guard segment in UTF-16 coordinates, preserves following guards and quotes, escapes inserted keys, and refuses encoded/interpolated or unbounded suffixes.
+--- a/docs/todo.md
++++ b/docs/todo.md
+@@ -163,7 +163,7 @@
+ | L56 | [Typed Laravel connection names](todo/laravel.md#l56-typed-laravel-connection-names)                                                                                        | Medium      | Medium      |
+ | L58 | [Laravel rate limiter names](todo/laravel.md#l58-laravel-rate-limiter-names)                                                                                                | Medium      | Medium      |
+ | L57 | [Laravel queue names](todo/laravel.md#l57-laravel-queue-names)                                                                                                              | Low-Medium  | Medium      |
+-| L60 | [Middleware alias catalogs and transformations](todo/laravel.md#l60-middleware-alias-catalogs-and-transformations)                                                          | Medium      | Medium      |
++| L61 | [Middleware alias catalogs and transformations](todo/laravel.md#l61-middleware-alias-catalogs-and-transformations)                                                          | Medium      | Medium      |
+ | L53 | [Collection key types from the column for `keyBy` / `groupBy` / `pluck`](todo/laravel.md#l53-collection-key-types-from-the-column-for-keyby-groupby-pluck)                   | Medium      | Medium      |
+ | L49 | [Unguarded Eloquent mass assignment diagnostic](todo/laravel.md#l49-unguarded-eloquent-mass-assignment-diagnostic)                                                          | Medium      | Medium      |
+ | L17 | [Additional string contexts without booting](todo/laravel.md#l17-additional-string-contexts-without-booting) (middleware, assets, validation, Inertia)                     | Medium      | Medium-High |
+--- a/docs/todo/laravel.md
++++ b/docs/todo/laravel.md
+@@ -633,13 +633,13 @@
+ queue connection. Each confirmed literal should receive the same completion,
+ hover, navigation, diagnostics, and references as the direct facade spelling.
+ 
+-#### L60. Middleware alias catalogs and transformations
++#### L61. Middleware alias catalogs and transformations
+ 
+ **Impact: Medium · Complexity: Medium**
+ 
+ Extend middleware intelligence to builtin/group catalogs, legacy HTTP Kernel maps,
+-controller attributes and `withoutMiddlewareFor`. Add completion and validation for
+-these forms, including embedded guard/ability parameters, while retaining decoded
++controller attributes. Add completion and validation for middleware calls, including
++resource exclusions and embedded guard/ability parameters, while retaining decoded
+ PHP string ranges. Offer alias-key rename and middleware class-string transformations
+ only with complete registration metadata and reviewed cross-file edits. Unresolved
+ maps, dynamic method names and runtime-generated strings must not produce partial
+--- a/examples/laravel/app/Demo.php
++++ b/examples/laravel/app/Demo.php
+@@ -1799,6 +1799,15 @@
+         Route::withoutMiddleware('demo.audit')->get('/excluded-audit-demo', fn () => null);
+     }
+ 
++    public function excludedResourceMiddlewareNavigation(
++        \Illuminate\Routing\PendingResourceRegistration $resource,
++        \Illuminate\Routing\PendingSingletonResourceRegistration $singleton,
++    ): void {
++        // Navigate middleware names in the second argument, not route-method selectors.
++        $resource->withoutMiddlewareFor(methods: ['show'], middleware: ['demo.audit:strict', 'auth:web']);
++        $singleton->withoutMiddlewareFor(middleware: 'demo.audit', methods: ['show']);
++    }
++
+     public function encodedMiddlewareNavigation(): void
+     {
+         new class extends \Illuminate\Routing\Controller {
+--- a/examples/laravel/assertions.php
++++ b/examples/laravel/assertions.php
+@@ -2194,6 +2194,18 @@
+     $middlewarePending->withoutMiddleware(middleware: 'demo.audit');
+     $middlewareOptions = (new \ReflectionProperty($middlewarePending, 'options'))->getValue($middlewarePending);
+     check("$middlewareKind methods consume named middleware arguments", $middlewareOptions['excluded_middleware'] === ['demo.audit']);
++    $middlewarePending->withoutMiddlewareFor('show', 'demo.audit');
++    $resourceOptions = (new \ReflectionProperty($middlewarePending, 'options'))->getValue($middlewarePending);
++    check("$middlewareKind resource exclusions bind the second positional argument", $resourceOptions['excluded_middleware_for']['show'] === ['demo.audit']);
++    $middlewarePending->withoutMiddlewareFor(middleware: ['auth:web'], methods: ['show', 'edit']);
++    $resourceOptions = (new \ReflectionProperty($middlewarePending, 'options'))->getValue($middlewarePending);
++    check("$middlewareKind resource exclusions allow reordered named arguments", $resourceOptions['excluded_middleware_for']['show'] === ['auth:web'] && $resourceOptions['excluded_middleware_for']['edit'] === ['auth:web']);
++    $middlewarePending->WITHOUTMIDDLEWAREFOR('index', middleware: 'demo.audit');
++    $resourceOptions = (new \ReflectionProperty($middlewarePending, 'options'))->getValue($middlewarePending);
++    check("$middlewareKind resource exclusion method names ignore case", $resourceOptions['excluded_middleware_for']['index'] === ['demo.audit']);
++    $middlewarePending->withoutMiddlewareFor('create', 'demo.audit', 'ignored');
++    $resourceOptions = (new \ReflectionProperty($middlewarePending, 'options'))->getValue($middlewarePending);
++    check("$middlewareKind resource exclusions ignore extra positional arguments", $resourceOptions['excluded_middleware_for']['create'] === ['demo.audit']);
+     $middlewarePending->register();
+ }
+ 
+--- a/src/blade/typed_receiver.rs
++++ b/src/blade/typed_receiver.rs
+@@ -342,9 +342,9 @@
+                     {
+                         continue;
+                     }
+-                    let matches_receiver = ty.as_ref().is_some_and(|ty| {
+-                        matches_receiver_family(ty, site.receiver.fqns(), class_loader)
+-                    });
++                    let matches_receiver = ty
++                        .as_ref()
++                        .is_some_and(|ty| matches_receiver_family(ty, site.receiver, class_loader));
+                     if matches_receiver
+                         || (allow_uncertain
+                             && site.receiver.fqns().iter().any(|fqn| {
+@@ -387,17 +387,47 @@
+ /// cannot borrow another alternative's middleware semantics.
+ fn matches_receiver_family(
+     ty: &crate::php_type::PhpType,
+-    family: &[&str],
++    receiver: ViewReceiverClass,
+     class_loader: &dyn Fn(&str) -> Option<Arc<ClassInfo>>,
+ ) -> bool {
+     if let crate::php_type::TypeKind::Union(members) = ty.kind() {
+         return members
+             .iter()
+-            .all(|member| matches_receiver_family(member, family, class_loader));
+-    }
++            .all(|member| matches_receiver_family(member, receiver, class_loader));
++    }
++    let family = receiver.fqns();
++    if !family
++        .iter()
++        .any(|fqn| crate::class_lookup::is_subtype_of_named(ty, fqn, class_loader))
++    {
++        return false;
++    }
++    if !matches!(
++        receiver,
++        ViewReceiverClass::RouteMiddleware(_, crate::symbol_map::RouteMiddlewareReceiver::Resource)
++    ) {
++        return true;
++    }
++    let Some(class) = ty.base_name().and_then(class_loader) else {
++        return false;
++    };
++    let crate::inheritance::ancestry::MethodOrigin::Known { owner, method } =
++        crate::inheritance::ancestry::resolve_concrete_method_origin(
++            &class,
++            "withoutMiddlewareFor",
++            class_loader,
++        )
++    else {
++        return false;
++    };
+     family
+         .iter()
+-        .any(|fqn| crate::class_lookup::is_subtype_of_named(ty, fqn, class_loader))
++        .any(|fqn| owner.fqn().eq_ignore_ascii_case(fqn))
++        && !method.is_static
++        && method.visibility == crate::types::Visibility::Public
++        && method.parameters.len() == 2
++        && method.parameters[0].name.as_str() == "$methods"
++        && method.parameters[1].name.as_str() == "$middleware"
+ }
+ 
+ /// The shared empty answer, so the overwhelmingly common "this file has no
+--- a/src/symbol_map/extraction/expressions/calls.rs
++++ b/src/symbol_map/extraction/expressions/calls.rs
+@@ -888,7 +888,9 @@
+             extract_dynamic_member_selector(&method_call.method, ctx, scope_start);
+             if let Some(selector) = known_method_selector(&method_call.method, ctx) {
+                 let member_name = selector.name;
+-                if member_name.eq_ignore_ascii_case("withoutMiddleware") {
++                if member_name.eq_ignore_ascii_case("withoutMiddleware")
++                    || member_name.eq_ignore_ascii_case("withoutMiddlewareFor")
++                {
+                     emit_gate_ability_spans_for_method(
+                         method_call.object,
+                         &member_name,
+@@ -1308,7 +1310,8 @@
+         || member_name.eq_ignore_ascii_case("canAny");
+     let is_authorize_for_user = member_name.eq_ignore_ascii_case("authorizeForUser");
+     let is_middleware = member_name.eq_ignore_ascii_case("middleware");
+-    let is_exclusion = member_name.eq_ignore_ascii_case("withoutMiddleware");
++    let is_exclusion = member_name.eq_ignore_ascii_case("withoutMiddleware")
++        || member_name.eq_ignore_ascii_case("withoutMiddlewareFor");
+     if !is_can
+         && !is_authorize_for_user
+         && !is_middleware
+--- a/src/symbol_map/extraction/laravel.rs
++++ b/src/symbol_map/extraction/laravel.rs
+@@ -1614,6 +1614,41 @@
+     }
+ }
+ 
++/// The resource method binds its route-method selector before the middleware.
++fn resource_exclusion_argument<'a>(arguments: &ArgumentList<'a>) -> Option<&'a Expression<'a>> {
++    let mut methods = None;
++    let mut middleware = None;
++    let mut named_seen = false;
++    for (index, argument) in arguments.arguments.iter().enumerate() {
++        let (slot, value) = match argument {
++            Argument::Positional(positional) => {
++                if positional.ellipsis.is_some() || named_seen {
++                    return None;
++                }
++                let slot = match index {
++                    0 => &mut methods,
++                    1 => &mut middleware,
++                    _ => continue,
++                };
++                (slot, positional.value)
++            }
++            Argument::Named(named) => {
++                named_seen = true;
++                let slot = match named.name.value {
++                    b"methods" => &mut methods,
++                    b"middleware" => &mut middleware,
++                    _ => return None,
++                };
++                (slot, named.value)
++            }
++        };
++        if slot.replace(value).is_some() {
++            return None;
++        }
++    }
++    methods.and(middleware)
++}
++
+ /// The facade dispatches this method through Router's positional-only magic path.
+ pub(super) fn try_emit_route_facade_exclusion_spans(
+     method_name: &str,
+@@ -1639,17 +1674,24 @@
+     content: &str,
+     sites: &mut Vec<ViewReceiverSite>,
+ ) {
+-    let Some((value, mut receiver)) = route_exclusion_argument(argument_list) else {
+-        return;
+-    };
+-    if method_name != "withoutMiddleware" {
+-        // PHP's concrete methods are case-insensitive; the registrar's
+-        // magic dispatcher checks its attribute names exactly.
+-        match receiver {
+-            RouteMiddlewareReceiver::Magic => return,
+-            _ => receiver = RouteMiddlewareReceiver::Concrete,
+-        }
+-    }
++    let (value, receiver) = if method_name.eq_ignore_ascii_case("withoutMiddlewareFor") {
++        let Some(value) = resource_exclusion_argument(argument_list) else {
++            return;
++        };
++        (value, RouteMiddlewareReceiver::Resource)
++    } else {
++        let Some((value, mut receiver)) = route_exclusion_argument(argument_list) else {
++            return;
++        };
++        if method_name != "withoutMiddleware" {
++            // Concrete PHP methods ignore case; magic attributes do not.
++            match receiver {
++                RouteMiddlewareReceiver::Magic => return,
++                _ => receiver = RouteMiddlewareReceiver::Concrete,
++            }
++        }
++        (value, receiver)
++    };
+     let mut spans = Vec::new();
+     emit_middleware_argument_spans(value, true, content, &mut spans);
+     for span in spans {
+--- a/src/symbol_map/mod.rs
++++ b/src/symbol_map/mod.rs
+@@ -827,6 +827,7 @@
+     Any,
+     Concrete,
+     Magic,
++    Resource,
+ }
+ 
+ impl ViewReceiverClass {
+@@ -853,6 +854,10 @@
+             ],
+             Self::RouteMiddleware(_, RouteMiddlewareReceiver::Concrete) => &[
+                 "Illuminate\\Routing\\Route",
++                "Illuminate\\Routing\\PendingResourceRegistration",
++                "Illuminate\\Routing\\PendingSingletonResourceRegistration",
++            ],
++            Self::RouteMiddleware(_, RouteMiddlewareReceiver::Resource) => &[
+                 "Illuminate\\Routing\\PendingResourceRegistration",
+                 "Illuminate\\Routing\\PendingSingletonResourceRegistration",
+             ],
+--- a/tests/integration/laravel_middleware_aliases.rs
++++ b/tests/integration/laravel_middleware_aliases.rs
+@@ -699,11 +699,11 @@
+         ),
+         (
+             "framework/Routing/PendingResourceRegistration.php",
+-            "<?php namespace Illuminate\\Routing; class PendingResourceRegistration {public function withoutMiddleware($middleware): static {return $this;}}",
++            "<?php namespace Illuminate\\Routing; class PendingResourceRegistration {public function withoutMiddleware($middleware): static {return $this;} public function withoutMiddlewareFor($methods,$middleware): static {return $this;}}",
+         ),
+         (
+             "framework/Routing/PendingSingletonResourceRegistration.php",
+-            "<?php namespace Illuminate\\Routing; class PendingSingletonResourceRegistration {public function withoutMiddleware($middleware): static {return $this;}}",
++            "<?php namespace Illuminate\\Routing; class PendingSingletonResourceRegistration {public function withoutMiddleware($middleware): static {return $this;} public function withoutMiddlewareFor($methods,$middleware): static {return $this;}}",
+         ),
+         (
+             "config/auth.php",
+@@ -1060,3 +1060,175 @@
+         "references must exclude ignored and invalid bindings: {refs:?}"
+     );
+ }
++
++#[tokio::test]
++async fn resource_exclusions_bind_only_the_consumed_native_middleware_argument() {
++    let source = r#"<?php
++function excluded(\Illuminate\Routing\PendingResourceRegistration $resource, \Illuminate\Routing\PendingSingletonResourceRegistration $singleton, \Illuminate\Routing\PendingResourceRegistration|\Illuminate\Routing\PendingSingletonResourceRegistration|null $pair) {
++ /* 😀 */ $resource->withoutMiddlewareFor('show', "au\x64ited:encoded");
++ $resource->withoutMiddlewareFor(methods: 'show', middleware: 'audited:named');
++ $resource->withoutMiddlewareFor(middleware: 'audited:reordered', methods: ['show']);
++ $resource->WITHOUTMIDDLEWAREFOR('show', 'audited:case');
++ $singleton->withoutMiddlewareFor(['show'], 'audited:singleton');
++ $pair?->withoutMiddlewareFor('show', 'audited:union');
++ $resource->withoutMiddlewareFor('audited:selector', 'audited:extra', 'audited:ignored');
++ $resource->withoutMiddlewareFor(middleware: 'audited:missing');
++ $resource->withoutMiddlewareFor('show', 'audited:duplicate', middleware: 'audited:ignored');
++ $resource->withoutMiddlewareFor('show', middleware: 'audited:unknown', unknown: true);
++ $resource->withoutMiddlewareFor(...['show'], middleware: 'audited:unpacked');
++}
++(new \Illuminate\Routing\PendingResourceRegistration)->withoutMiddlewareFor('show', 'audited:constructed');
++"#;
++    let (backend, _dir, uri, boot) = exclusion_workspace(source).await;
++    let consumed = [
++        r#"withoutMiddlewareFor('show', "au\x64"#,
++        "withoutMiddlewareFor(methods: 'show', middleware: 'aud",
++        "withoutMiddlewareFor(middleware: 'aud",
++        "WITHOUTMIDDLEWAREFOR('show', 'aud",
++        "$singleton->withoutMiddlewareFor(['show'], 'aud",
++        "$pair?->withoutMiddlewareFor('show', 'aud",
++        "withoutMiddlewareFor('audited:selector', 'aud",
++        "Registration)->withoutMiddlewareFor('show', 'aud",
++    ];
++    for needle in consumed {
++        let found = definitions(&backend, &uri, source, needle).await;
++        assert_eq!(
++            found.len(),
++            1,
++            "resource middleware argument {needle}: {found:?}"
++        );
++        assert_eq!(found[0].uri, boot);
++        assert!(
++            hover(&backend, &uri, source, needle)
++                .await
++                .contains("Middleware\\Audit")
++        );
++    }
++    for needle in [
++        "withoutMiddlewareFor('aud",
++        "withoutMiddlewareFor('audited:selector', 'audited:extra', 'aud",
++        "withoutMiddlewareFor(middleware: 'audited:mis",
++        "withoutMiddlewareFor('show', 'audited:dup",
++        "withoutMiddlewareFor('show', 'audited:duplicate', middleware: 'aud",
++        "withoutMiddlewareFor('show', middleware: 'audited:unk",
++        "withoutMiddlewareFor(...['show'], middleware: 'aud",
++    ] {
++        assert!(
++            definitions(&backend, &uri, source, needle).await.is_empty(),
++            "unconsumed argument {needle}"
++        );
++    }
++    let refs = find_references(&backend, &uri, position_after(source, consumed[0]), true).await;
++    assert_eq!(
++        refs.len(),
++        consumed.len() + 1,
++        "only consumed aliases are references: {refs:?}"
++    );
++    let encoded = refs
++        .iter()
++        .find(|location| location.uri == uri && location.range.start.line == 2)
++        .unwrap();
++    assert_eq!(
++        encoded.range.end.character - encoded.range.start.character,
++        10
++    );
++}
++
++#[tokio::test]
++async fn resource_exclusions_reject_foreign_unavailable_and_overridden_methods() {
++    let source = r#"<?php
++class Foreign {public function withoutMiddlewareFor($methods,$middleware){}}
++class Custom extends \Illuminate\Routing\PendingResourceRegistration {public function withoutMiddlewareFor($methods,$middleware): static {return $this;}}
++trait Replacement {public function withoutMiddlewareFor($methods,$middleware): static {return $this;}}
++class MixedIn extends \Illuminate\Routing\PendingResourceRegistration {use Replacement;}
++function rejected(\Illuminate\Routing\Route $route, \Illuminate\Routing\Router $router, \Illuminate\Routing\PendingResourceRegistration|Foreign $mixed, Foreign $foreign, Custom $custom, MixedIn $trait) {
++ $route->withoutMiddlewareFor('show', 'audited:route');
++ $router->withoutMiddlewareFor('show', 'audited:router');
++ $mixed->withoutMiddlewareFor('show', 'audited:mixed');
++ $foreign->withoutMiddlewareFor('show', 'audited:foreign');
++ $custom->withoutMiddlewareFor('show', 'audited:custom');
++ $trait->withoutMiddlewareFor('show', 'audited:trait');
++}
++class Owner {public function __construct(private \Illuminate\Routing\PendingResourceRegistration $resource) {} public static function invalid() {$this->resource->withoutMiddlewareFor('show', 'audited:static');}}
++\Illuminate\Support\Facades\Route::withoutMiddlewareFor('show', 'audited:facade');
++"#;
++    let (backend, _dir, uri, _boot) = exclusion_workspace(source).await;
++    for label in [
++        "route", "router", "mixed", "foreign", "custom", "trait", "static", "facade",
++    ] {
++        let needle = format!("'audited:{label}");
++        assert!(
++            definitions(&backend, &uri, source, &needle)
++                .await
++                .is_empty(),
++            "unconfirmed origin {label}"
++        );
++    }
++}
++
++#[tokio::test]
++async fn resource_exclusions_decode_guard_and_ability_array_parameters() {
++    let source = r#"<?php
++\Illuminate\Support\Facades\Gate::define('edit-report',fn()=>true);
++function excluded(\Illuminate\Routing\PendingResourceRegistration $resource) {
++ $resource->withoutMiddlewareFor(['show'], middleware: ([...["auth:ad\x6din", 'can:edit-report']]));
++}
++"#;
++    let (backend, dir, uri, _boot) = exclusion_workspace(source).await;
++    let guards = definitions(&backend, &uri, source, r"auth:ad\x6d").await;
++    assert_eq!(guards.len(), 1, "resource guard definition: {guards:?}");
++    assert_eq!(
++        guards[0].uri,
++        Url::from_file_path(dir.path().join("config/auth.php")).unwrap()
++    );
++    let ability = definitions(&backend, &uri, source, "can:edit-rep").await;
++    assert_eq!(ability.len(), 1, "resource ability definition: {ability:?}");
++    assert_eq!(ability[0].uri, uri);
++    assert!(
++        hover(&backend, &uri, source, r"auth:ad\x6d")
++            .await
++            .contains("admin")
++    );
++    assert_eq!(
++        find_references(&backend, &uri, position_after(source, "can:edit-rep"), true)
++            .await
++            .len(),
++        2
++    );
++}
++
++#[tokio::test]
++async fn resource_exclusions_refresh_concrete_origins_and_same_length_registration_edits() {
++    let source = r#"<?php
++function remove(\App\ResourceChild $resource) {$resource->withoutMiddlewareFor('show', 'audited');}
++"#;
++    let (backend, dir, uri, boot) = exclusion_workspace(source).await;
++    let path = Url::from_file_path(dir.path().join("app/ResourceChild.php")).unwrap();
++    let inherited = "<?php namespace App; class ResourceChild extends \\Illuminate\\Routing\\PendingResourceRegistration {}";
++    let custom = "<?php namespace App; class ResourceChild extends \\Illuminate\\Routing\\PendingResourceRegistration {public function withoutMiddlewareFor($methods,$middleware): static {return $this;}}";
++    let needle = "withoutMiddlewareFor('show', 'aud";
++    assert!(definitions(&backend, &uri, source, needle).await.is_empty());
++    std::fs::write(dir.path().join("app/ResourceChild.php"), inherited).unwrap();
++    open_document(&backend, &path, "php", inherited).await;
++    assert_eq!(definitions(&backend, &uri, source, needle).await.len(), 1);
++    change(&backend, &path, custom, 2).await;
++    assert!(
++        definitions(&backend, &uri, source, needle).await.is_empty(),
++        "unsaved override retires resource semantics"
++    );
++    change(&backend, &path, inherited, 3).await;
++    assert_eq!(definitions(&backend, &uri, source, needle).await.len(), 1);
++    let target = BOOTSTRAP.replace("Middleware\\Audit as", "Middleware\\Trace as");
++    assert_eq!(target.len(), BOOTSTRAP.len());
++    open_document(&backend, &boot, "php", BOOTSTRAP).await;
++    change(&backend, &boot, &target, 2).await;
++    assert!(
++        hover(&backend, &uri, source, needle)
++            .await
++            .contains("Middleware\\Trace")
++    );
++    let changed_key = target.replace("'audited'", "'missing'");
++    assert_eq!(changed_key.len(), target.len());
++    change(&backend, &boot, &changed_key, 3).await;
++    assert!(definitions(&backend, &uri, source, needle).await.is_empty());
++}

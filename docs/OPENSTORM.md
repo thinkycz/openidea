@@ -15,6 +15,59 @@ slice, commit and push it, and retain only the latest generated app. Native UI
 cases remain deferred/unverified; earlier native-first blocking checkpoints are
 historical and no longer prevent independent implementation.
 
+Engine source slice135 (2026-11-17, source/stdio verified;162 inactive): add
+`withoutMiddlewareFor(methods, middleware)` alias/auth-guard/ability definitions,
+hover and references on native resource/singleton registrations (FEAT-030/066).
+Bind the second argument, including reordered named arguments, and retain decoded
+raw UTF-16 ranges, literal arrays/spreads and case-insensitive concrete method names.
+Route-method selectors and ignored positional arguments do not become middleware
+references. Refuse missing, duplicate/unknown named and unpacked arguments, foreign
+or ambiguous receivers and unavailable static $this.
+
+Reuse shared receiver typing and concrete method-origin resolution. Require the
+native resource method and signature; custom/trait overrides and missing methods
+cannot borrow framework semantics. Actual fluent Route::resource/singleton calls
+pass against real Laravel13.37. Two-project controls prove distinct method
+availability, unsaved native method removal/restoration, per-project alias updates
+and dirty-overlay restart without crossing Composer contexts. Navigation stays
+static; runtime assertions execute only through explicit fixture checks.
+
+Canonical161 is a missing-feature control with ordinary PHP readiness. All4 new
+public-handler regressions pass; all33 middleware module cases and the full18586
+ordinary engine tests pass with17 ignored plus2 bounded child checks. Default and
+memory-audit all-target release Clippy, required Clippy-fix/format sequence, exact
+source replay/fingerprint and default recipe build pass. Series SHA256:
+a9f52e7545825b073d3230382d323e44522d246fb2e4e93b84f588ff97b3405e.
+Canonical artifacts/engines/0.11.1-openstorm.162/phpantom_lsp is arm64/version162;
+default-build SHA256: 1eec50b4f2c7801c220ff7badc288af032d790c082211a1a14d01f22b27b1a41.
+Keep pinned acquisition, provenance/versioning and unchanged MIT/Apache licenses.
+
+Checksum-bound stdio controls pass for disposable plain/Composer and real Laravel13.37
+projects: consumed arguments/references, encoded guards/abilities, source origins,
+same-length unsaved registrations, first class publication, factories and restart.
+Retain existing exclusions, union/native/magic binding, multi-project ownership,
+delete/recreate/restart, guard/encoded compatibility and checked target/FQN/namespace
+refactoring safeguards. Alias-key rename stays refused. Plain PHP12 syntax/runtime
+checks pass; Laravel115 syntax checks and348 runtime assertions pass.
+Analyzer retains exactly3 intentional diagnostics (expected CLI exit1). Owned and
+borrowed inputs stay intact; protocol children exit0.
+
+Archive162 as source/stdio verified and inactive pending a separate actual client/host
+slice and packaging. Active resource/source pins stay161; sole signed App0.1.100
+main/engine hashes and deep/strict signature remain intact. No application UI,
+settings, bindings, debugger expansion or new environment files. Reuse unchanged
+slice133/134 application acceptance; it is not162 client/native acceptance. Clean
+owned engine compiler output and the duplicate mutable source work tree after
+acceptance; preserve canonical engines/immutable source, Workbench and evaluation
+receipts. No new app build; native checks remain user-skipped. Carry remaining
+middleware catalog/completion/validation/unpacking/transformation work as L61.
+All69 area statuses remain67 partial/2 user-deferred. Commit/push this small source
+slice and verify the exact remote ref and clean worktree.
+
+Evidence: artifacts/checks/slice135-{source-freeze,engine-gates,source-test-summary,
+wire-gates,availability,extra-compatibility,playground,new-example-checks,retention,delivery}.json,
+individual probes/logs, and artifacts/engines/0.11.1-openstorm.162/build-receipt.json.
+
 Package slice134 (2026-11-17, local signed App0.1.100 verified): promote
 source/stdio/client-verified PHPantom161 into the default resource pin and app.
 Checksum, provenance, immutable-tree fingerprint and bundled license contents agree.

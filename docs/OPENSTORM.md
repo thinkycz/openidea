@@ -15,6 +15,59 @@ slice, commit and push it, and retain only the latest generated app. Native UI
 cases remain deferred/unverified; earlier native-first blocking checkpoints are
 historical and no longer prevent independent implementation.
 
+Engine source slice128 (2026-11-17, source/stdio verified; inactive): prevent
+class/namespace renames and class moves from stranding literal middleware targets
+in typed `bootstrap/app.php` alias registrations (FEAT-011/022/030/066). Reuse the
+shared alias registry and receiver resolver; refuse unsupported target edits before
+producing a partial plan. Cover encoded/case-folded literals, computed/numeric/empty
+keys, literal spreads/parentheses, nullable/nullsafe/uncertain receivers and unsaved
+registration changes. Unresolved target values/maps conservatively refuse class and
+namespace refactors. Keep named `::class` edits supported. No bootstrap execution.
+
+A failing actual159 checked-rename probe and regressions establish the missing-target
+edit before the fix. Also fix namespace declaration collection: use parsed namespace
+spans rather than line starts, preserving inline/bracketed/multiline declarations,
+UTF-16 positions and comments. The first full run catches a stale-source response
+compatibility regression; retain its failure evidence, preserve the existing no-plan
+response and rerun the corrected frozen source. Nine new middleware regressions and
+one namespace-layout regression pass with the existing suite: 18573 ordinary
+cases/17 ignored, plus2 bounded child checks. Both release all-target Clippy
+configurations (default/mem-audit), formatting, fingerprint replay and pinned default
+recipe build pass. Freeze16 source files as patch0160; exact replay matches work.
+Series SHA256: 686d78f8529701562d0853f7fab24224eff6f7765bb316053318d11f0026aa15.
+Canonical artifacts/engines/0.11.1-openstorm.160/phpantom_lsp is arm64, version160;
+default-build SHA256: 45021ea078365cfb3118dd4ba5aef8d66c1f6e9a15c4e04e4c938f8ae9506467.
+Preserve acquisition/build provenance, upstream attribution and MIT/Apache licenses.
+
+Checksum-bound final stdio probes pass on small and real Laravel13.37 fixtures,
+including existing alias navigation/references, typed/encoded guards, two-project
+isolation, unsaved source changes, watched deletion/recreation and restart. New
+actual protocol checks refuse checked class rename/FQN moves, namespace edits and
+prepareRename for literal or unresolved bootstrap targets, with no edit payload;
+stale registration provenance is rejected. A named `::class` positive verifies a
+PSR-4 file rename plus class/registration edits and lints the edited snapshots.
+Dry-run CLI class and namespace moves refuse before writing. Three actual namespace
+layout cases update both declaration/import and preserve fake comments/emoji. All
+probe children exit0; original and borrowed inputs stay unchanged. The source Laravel
+example has115 syntax-valid PHP files, a passing middleware runtime assertion and
+exactly3 retained intentional analyzer diagnostics (expected exit1).
+
+This resolves source127's bootstrap-target promotion hold by refusing unsupported
+edits. Candidate160 remains inactive pending a separate actual-client/host adoption
+slice; active158 and sole signed App98 are unchanged. No new app is produced. Reuse
+c2a0e9e9c's unchanged main frontend/host evidence; it is not160 client acceptance.
+Alias-key rename, builtin/group aliases, legacy Kernel/attributes/withoutMiddleware,
+full completion/validation, wider performance and native/platform acceptance remain
+outstanding. All69 statuses remain67 partial/2 user-deferred; native checks stay
+user-skipped. Remove owned compiler output, the redundant mutable source and the
+failed reconstructed tree after preserving its patch/manifest/logs. Keep canonical
+engines, final immutable source, Workbench, earlier receipts and only App98.
+
+Evidence: artifacts/checks/slice128-{source-freeze,engine-gates,source-test-summary,
+wire-gates,guards-final,namespaces-final,new-example-checks,retention}.json,
+retained red/green/failed-attempt logs and
+artifacts/engines/0.11.1-openstorm.160/build-receipt.json.
+
 Engine source slice127 (2026-11-17, read source/stdio verified; inactive): add
 static application middleware alias navigation, hover and references for typed
 `bootstrap/app.php` registrations, route strings and confirmed controller calls

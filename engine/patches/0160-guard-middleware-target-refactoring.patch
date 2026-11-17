@@ -1,0 +1,1172 @@
+--- a/docs/CHANGELOG.md
++++ b/docs/CHANGELOG.md
+@@ -22,6 +22,10 @@
+ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+ 
+ ## [Unreleased]
++
++- **Refuse incomplete middleware class renames.** Class and namespace changes stop when a literal bootstrap middleware target would be left behind, including computed alias keys, literal spreads, nullable calls and uncertain receivers. Unresolved maps/targets refuse unverified edits; named `::class` targets remain renameable. Contributed by @thinkycz.
++
++- **Keep namespace declarations in namespace edits.** Inline, bracketed and multiline PHP namespace declarations now follow their imports and references, with comments preserved. Contributed by @thinkycz.
+ 
+ - **Navigate application middleware aliases.** Go to Definition on route or typed controller middleware names opens static alias registrations in `bootstrap/app.php`. Hover shows declared targets; references and unsaved edits retain exact source ranges. Multiple registrations and unresolved targets remain explicit without running the application. Contributed by @thinkycz.
+ 
+--- a/docs/todo/laravel.md
++++ b/docs/todo/laravel.md
+@@ -654,7 +654,17 @@
+ lookup; closed-file metadata uses ticketed publication and never replaces editor
+ buffers. Builtin/group alias catalogs, legacy Kernel maps, attributes, withoutMiddleware,
+ completion and alias rename/validation remain separate work. Registration sites do
+-not establish effective runtime override order.
++not establish effective runtime override order. OpenStorm .160 refuses class/namespace
++changes that would strand direct literal class-string targets in bootstrap alias
++arrays. Guard-only value sites share receiver typing without becoming navigation
++spans; computed/numeric alias names and literal unpacking retain these dependencies.
++Nullsafe calls and uncertain receiver types are conservative for writes; proven
++unrelated concrete receivers do not block renames. Missing/stale or syntactically
++incomplete bootstrap metadata refuses a plan. Class-constant targets keep normal
++PHP rename behavior. Unresolved alias maps/targets refuse unverified class and namespace plans; they
++are not interpreted or rewritten. Named ::class targets remain on the normal PHP
++rename path. Legacy Kernel targets, runtime-computed method names and arbitrary
++runtime class strings remain outside this checkpoint.
+ 
+ **Impact: Low-Medium · Complexity: Medium**
+ 
+--- a/examples/laravel/app/Demo.php
++++ b/examples/laravel/app/Demo.php
+@@ -1788,6 +1788,8 @@
+     {
+         // Try definition, hover or references on demo.audit; bootstrap stays unexecuted.
+         Route::get('/audited-demo', fn () => null)->middleware('demo.audit:strict');
++        // A class rename must refuse while this bootstrap target remains a literal string.
++        Route::get('/audited-literal-demo', fn () => null)->middleware('demo.audit.literal');
+     }
+ 
+     public function encodedMiddlewareNavigation(): void
+--- a/examples/laravel/bootstrap/app.php
++++ b/examples/laravel/bootstrap/app.php
+@@ -18,7 +18,10 @@
+         __DIR__.'/../app/Actions',
+     ])
+     ->withMiddleware(function (Middleware $middleware) {
+-        $middleware->alias(['demo.audit' => \App\Http\Middleware\AuditRequests::class]);
++        $middleware->alias([
++            'demo.audit' => \App\Http\Middleware\AuditRequests::class,
++            'demo.audit.literal' => 'App\\Http\\Middleware\\AuditRequests',
++        ]);
+     })
+     ->withExceptions(function (Exceptions $exceptions) {
+         //
+--- a/src/blade/typed_receiver.rs
++++ b/src/blade/typed_receiver.rs
+@@ -232,7 +232,18 @@
+         content: &str,
+         map: &SymbolMap,
+     ) -> Vec<SymbolSpan> {
+-        let sites = &map.view_receiver_sites;
++        self.confirm_typed_receiver_sites(uri, content, map, &map.view_receiver_sites, false)
++    }
++
++    /// Confirm caller-owned sites without publishing writer-only spans into navigation.
++    pub(crate) fn confirm_typed_receiver_sites(
++        &self,
++        uri: &str,
++        content: &str,
++        map: &SymbolMap,
++        sites: &[ViewReceiverSite],
++        allow_uncertain: bool,
++    ) -> Vec<SymbolSpan> {
+         // Confirmation can inspect a caller while another source owns the
+         // offset-only diagnostic snapshots. Resolve this file from its source.
+         let _foreign_scope = crate::type_engine::variable::forward_walk::suspend_diagnostic_scope();
+@@ -291,26 +302,58 @@
+                         class_loader,
+                     )
+                 };
+-                let Some(ty) =
++                let mut ty =
+                     crate::type_engine::variable::foreach_resolution::resolve_expression_type(
+                         call.receiver,
+                         &var_ctx,
+-                    )
+-                else {
+-                    continue;
+-                };
++                    );
++                if call.is_nullsafe || allow_uncertain {
++                    if ty.as_ref().is_some_and(|ty| ty.is_null()) {
++                        continue;
++                    }
++                    if let Some(non_null) = ty.as_ref().and_then(|ty| ty.non_null_type()) {
++                        ty = Some(non_null);
++                    }
++                }
+                 for site in call.sites {
+                     if site.receiver == ViewReceiverClass::MiddlewareAliasDeclaration
+                         && !self.is_bootstrap_middleware_uri(uri)
+                     {
+                         continue;
+                     }
+-                    if site
+-                        .receiver
+-                        .fqns()
+-                        .iter()
+-                        .any(|fqn| crate::class_lookup::is_subtype_of_named(&ty, fqn, class_loader))
+-                    {
++                    if site.receiver.fqns().iter().any(|fqn| {
++                        if ty.as_ref().is_some_and(|ty| {
++                            crate::class_lookup::is_subtype_of_named(ty, fqn, class_loader)
++                        }) {
++                            return true;
++                        }
++                        if !allow_uncertain {
++                            return false;
++                        }
++                        // Writes must refuse an ambiguous receiver; only a known
++                        // unrelated concrete class rules this registration out.
++                        let foreign = ty
++                            .as_ref()
++                            .and_then(|ty| ty.base_name())
++                            .and_then(class_loader)
++                            .zip(class_loader(fqn))
++                            .is_some_and(|(receiver, expected)| {
++                                matches!(
++                                    receiver.kind,
++                                    crate::types::ClassLikeKind::Class
++                                        | crate::types::ClassLikeKind::Enum
++                                ) && !crate::class_lookup::is_subtype_of(
++                                    &receiver,
++                                    fqn,
++                                    class_loader,
++                                ) && !crate::class_lookup::is_subtype_of(
++                                    &expected,
++                                    receiver.fqn().as_str(),
++                                    class_loader,
++                                )
++                            });
++                        !foreign
++                    }) {
+                         confirmed.push(site.to_span());
+                     }
+                 }
+@@ -333,6 +376,7 @@
+ struct ReceiverCall<'ast, 'arena, 'sites> {
+     receiver: &'ast Expression<'arena>,
+     sites: Vec<&'sites ViewReceiverSite>,
++    is_nullsafe: bool,
+ }
+ 
+ struct CollectCtx<'w, 'ast, 'arena, 'sites> {
+@@ -349,10 +393,37 @@
+ }
+ 
+ impl<'sites> ReceiverCallWalker<'_, 'sites> {
++    fn collect_call<'ast, 'arena>(
++        &self,
++        receiver: &'ast Expression<'arena>,
++        arguments: &'ast ArgumentList<'arena>,
++        is_nullsafe: bool,
++        calls: &mut Vec<ReceiverCall<'ast, 'arena, 'sites>>,
++    ) {
++        let mut sites = Vec::new();
++        for argument in arguments.arguments.iter() {
++            self.matching_sites(argument.value(), &mut sites);
++        }
++        if !sites.is_empty() {
++            calls.push(ReceiverCall {
++                receiver,
++                sites,
++                is_nullsafe,
++            });
++        }
++    }
++
+     /// The candidates one argument holds: the string itself, or the entries
+     /// of the array a `first(['a', 'b'])` names.
+     fn matching_sites(&self, expr: &Expression<'_>, out: &mut Vec<&'sites ViewReceiverSite>) {
++        let expression_span = expr.span();
++        if let Some(site) = self.sites.get(&expression_span.start.offset)
++            && site.end <= expression_span.end.offset
++        {
++            out.push(*site);
++        }
+         match expr {
++            Expression::Parenthesized(inner) => self.matching_sites(inner.expression, out),
+             Expression::Literal(Literal::String(s)) => {
+                 // Middleware can embed several keys within one literal.
+                 let start = s.span.start.offset + 1;
+@@ -370,6 +441,7 @@
+                 for element in array.elements.iter() {
+                     match element {
+                         ArrayElement::Value(value) => self.matching_sites(value.value, out),
++                        ArrayElement::Variadic(value) => self.matching_sites(value.value, out),
+                         ArrayElement::KeyValue(value) => {
+                             self.matching_sites(value.key, out);
+                             self.matching_sites(value.value, out);
+@@ -382,6 +454,7 @@
+                 for element in array.elements.iter() {
+                     match element {
+                         ArrayElement::Value(value) => self.matching_sites(value.value, out),
++                        ArrayElement::Variadic(value) => self.matching_sites(value.value, out),
+                         ArrayElement::KeyValue(value) => {
+                             self.matching_sites(value.key, out);
+                             self.matching_sites(value.value, out);
+@@ -404,16 +477,15 @@
+         node: &'ast MethodCall<'arena>,
+         ctx: &mut CollectCtx<'w, 'ast, 'arena, 'sites>,
+     ) {
+-        let mut sites = Vec::new();
+-        for argument in node.argument_list.arguments.iter() {
+-            self.matching_sites(argument.value(), &mut sites);
+-        }
+-        if !sites.is_empty() {
+-            ctx.calls.push(ReceiverCall {
+-                receiver: node.object,
+-                sites,
+-            });
+-        }
++        self.collect_call(node.object, &node.argument_list, false, ctx.calls);
++    }
++
++    fn walk_in_null_safe_method_call(
++        &self,
++        node: &'ast NullSafeMethodCall<'arena>,
++        ctx: &mut CollectCtx<'w, 'ast, 'arena, 'sites>,
++    ) {
++        self.collect_call(node.object, &node.argument_list, true, ctx.calls);
+     }
+ }
+ 
+--- a/src/rename/class/mod.rs
++++ b/src/rename/class/mod.rs
+@@ -201,6 +201,7 @@
+             return Ok(None);
+         }
+ 
++        self.reject_middleware_target_class_rename(old_fqn_normalized)?;
+         let new_fqn = if let Some(ns_sep) = old_fqn_normalized.rfind('\\') {
+             format!("{}\\{}", &old_fqn_normalized[..ns_sep], new_short_name)
+         } else {
+@@ -314,6 +315,7 @@
+         if !class_name_changed && !namespace_changed {
+             return Ok(None);
+         }
++        self.reject_middleware_target_class_rename(old_fqn)?;
+         if !self.runtime_controller_sites(old_fqn)?.is_empty() {
+             if namespace_changed {
+                 return Err("Namespace moves involving runtime controller strings are not supported; no edits were produced.".into());
+--- /dev/null
++++ b/src/rename/middleware.rs
+@@ -0,0 +1,38 @@
++//! Refuse transformations that would strand known middleware class strings.
++use crate::{Backend, util::strip_fqn_prefix};
++
++const REFUSAL: &str = "Class or namespace changes involving a literal middleware target are not supported; no edits were produced.";
++
++impl Backend {
++    pub(super) fn reject_middleware_target_class_rename(&self, fqn: &str) -> Result<(), String> {
++        let fqn = strip_fqn_prefix(fqn);
++        if self
++            .middleware_alias_string_targets()?
++            .iter()
++            .any(|target| target.eq_ignore_ascii_case(fqn))
++        {
++            return Err(REFUSAL.into());
++        }
++        Ok(())
++    }
++
++    pub(super) fn reject_middleware_target_namespace_rename(
++        &self,
++        prefix: &str,
++    ) -> Result<(), String> {
++        let prefix = strip_fqn_prefix(prefix);
++        if self
++            .middleware_alias_string_targets()?
++            .iter()
++            .any(|target| {
++                target
++                    .get(..prefix.len())
++                    .is_some_and(|head| head.eq_ignore_ascii_case(prefix))
++                    && target.as_bytes().get(prefix.len()) == Some(&b'\\')
++            })
++        {
++            return Err(REFUSAL.into());
++        }
++        Ok(())
++    }
++}
+--- a/src/rename/mod.rs
++++ b/src/rename/mod.rs
+@@ -33,6 +33,7 @@
+ mod blade;
+ mod class;
+ mod collisions;
++mod middleware;
+ mod namespace;
+ mod prepare;
+ mod route;
+--- a/src/rename/namespace/mod.rs
++++ b/src/rename/namespace/mod.rs
+@@ -5,6 +5,8 @@
+ //! across every workspace file.  The PSR-4 directory move that goes with
+ //! it is planned in [`layout`].
+ 
++use mago_span::HasSpan;
++use mago_syntax::cst::Statement;
+ use std::cell::OnceCell;
+ use std::collections::HashMap;
+ use std::sync::atomic::Ordering;
+@@ -14,7 +16,7 @@
+ use crate::Backend;
+ use crate::code_actions::{document_changes_edit, multi_file_edit};
+ use crate::symbol_map::{ClassRefContext, SymbolKind};
+-use crate::text_position::{line_start_byte_offset, offset_to_position, ranges_overlap};
++use crate::text_position::{offset_to_position, ranges_overlap};
+ use crate::types::FileContext;
+ use crate::util::{resolve_to_fqn, short_name, strip_fqn_prefix};
+ 
+@@ -72,6 +74,9 @@
+         old_prefix: &str,
+         new_prefix: &str,
+     ) -> RenameOutcome {
++        if old_prefix != new_prefix {
++            self.reject_middleware_target_namespace_rename(old_prefix)?;
++        }
+         // A namespace spread over several PSR-4 roots has no single
+         // directory to move, so refuse before planning anything.
+         if let Some(conflict) = self.namespace_psr4_root_conflict(old_prefix, new_prefix) {
+@@ -153,16 +158,22 @@
+             //    Find lines like `namespace App\Bar\Service;` or
+             //    `namespace App\Bar\Service {` where the namespace
+             //    starts with `old_prefix`.
+-            self.collect_namespace_decl_edits(&content, old_prefix, new_prefix, &mut file_edits);
++            if !self.collect_namespace_decl_edits(
++                file_uri,
++                &content,
++                old_prefix,
++                new_prefix,
++                &mut file_edits,
++            ) {
++                return Ok(None);
++            }
+ 
+             // 2. Update `use` statements.
+             self.collect_use_statement_edits(&content, old_prefix, new_prefix, &mut file_edits);
+ 
+             // 3. Update inline FQN references from the symbol map.
+-            //    Steps 1 and 2 scan `content` directly, so only this one
+-            //    can be poisoned by a map that predates the file; when it
+-            //    is, the whole rename is dropped.  Emitting the other two
+-            //    files' edits would leave the workspace half-renamed.
++            //    Recheck the map before returning any edit from this file;
++            //    a stale map must never leave a partially renamed workspace.
+             if !self.collect_fqn_reference_edits(
+                 file_uri,
+                 &content,
+@@ -250,33 +261,53 @@
+         Ok(Some(multi_file_edit(changes)))
+     }
+ 
+-    /// Collect text edits for `namespace` declaration lines where the
+-    /// namespace starts with `old_prefix`.
++    /// Use parsed name spans so inline, multiline and bracketed declarations
++    /// retain their syntax and never rewrite a namespace-looking comment.
+     fn collect_namespace_decl_edits(
+         &self,
++        file_uri: &str,
+         content: &str,
+         old_prefix: &str,
+         new_prefix: &str,
+         edits: &mut Vec<TextEdit>,
+-    ) {
+-        for (line_idx, line) in content.lines().enumerate() {
+-            let trimmed = line.trim();
+-            let Some(rest) = trimmed.strip_prefix("namespace ") else {
+-                continue;
+-            };
+-            let rest = rest.trim();
+-            let ns_name = rest.trim_end_matches(';').trim_end_matches('{').trim();
+-
+-            if ns_name.is_empty() {
+-                continue;
+-            }
+-
+-            let ns_start =
+-                line_start_byte_offset(content, line_idx) + line.find(ns_name).unwrap_or(0);
+-            edits.extend(prefix_rename_edit(
+-                content, ns_start, ns_name, old_prefix, new_prefix,
+-            ));
+-        }
++    ) -> bool {
++        if let Some(map) = self.symbol_map_for(file_uri) {
++            if !map.matches_source(content) {
++                return false;
++            }
++            for span in &map.spans {
++                if let SymbolKind::NamespaceDeclaration { name } = &span.kind {
++                    edits.extend(prefix_rename_edit(
++                        content,
++                        span.start as usize,
++                        name.as_str(),
++                        old_prefix,
++                        new_prefix,
++                    ));
++                }
++            }
++            return true;
++        }
++        crate::parser::with_parsed_program(
++            content,
++            "rename_namespace_declarations",
++            |program, content| {
++                for statement in program.statements.iter() {
++                    if let Statement::Namespace(namespace) = statement
++                        && let Some(name) = &namespace.name
++                    {
++                        edits.extend(prefix_rename_edit(
++                            content,
++                            name.span().start.offset as usize,
++                            crate::atom::bytes_to_str(name.value()),
++                            old_prefix,
++                            new_prefix,
++                        ));
++                    }
++                }
++                true
++            },
++        )
+     }
+ 
+     /// Collect text edits for `use` statements that reference the old
+--- a/src/rename/prepare.rs
++++ b/src/rename/prepare.rs
+@@ -150,6 +150,12 @@
+         // Reject vendor symbols: if the definition lives under the
+         // vendor directory the user shouldn't rename it.
+         if self.is_vendor_symbol(uri, content, position) {
++            return None;
++        }
++
++        if let Some(fqn) = self.resolve_class_rename_fqn(&span.kind, uri, span.start)
++            && self.reject_middleware_target_class_rename(&fqn).is_err()
++        {
+             return None;
+         }
+ 
+--- a/src/symbol_map/extraction/expressions/calls.rs
++++ b/src/symbol_map/extraction/expressions/calls.rs
+@@ -888,6 +888,16 @@
+             extract_dynamic_member_selector(&method_call.method, ctx, scope_start);
+             if let Some(selector) = known_method_selector(&method_call.method, ctx) {
+                 let member_name = selector.name;
++                if member_name.eq_ignore_ascii_case("alias") {
++                    record_middleware_alias_declarations(
++                        &method_call.argument_list,
++                        ctx.content,
++                        ctx.resolved_names,
++                        &mut ctx.view_receiver_sites,
++                        &mut ctx.middleware_alias_targets,
++                    );
++                }
++
+                 if is_laravel_config_repository_call(
+                     method_call.object,
+                     &member_name,
+--- a/src/symbol_map/extraction/laravel.rs
++++ b/src/symbol_map/extraction/laravel.rs
+@@ -1568,46 +1568,99 @@
+     let Some(argument) = argument_expr_for_parameter(argument_list, "aliases") else {
+         return;
+     };
+-    let Some(elements) = crate::parser::array_literal_elements(argument) else {
+-        return;
+-    };
+-    for element in elements.iter() {
+-        let ArrayElement::KeyValue(element) = element else {
++    let argument = crate::parser::unwrap_parens(argument);
++    if crate::parser::array_literal_elements(argument).is_none() {
++        // A scalar or ::class cannot satisfy Middleware::alias(array).
++        let scalar = matches!(
++            crate::parser::unwrap_parens(argument),
++            Expression::Literal(_)
++        );
++        let class_string =
++            laravel_route_controller_value(crate::parser::unwrap_parens(argument), names).is_some();
++        if !scalar && !class_string {
++            targets.push(crate::symbol_map::MiddlewareAliasTarget {
++                name: None,
++                start: 0,
++                target: None,
++                target_value_span: Some((argument.span().start.offset, argument.span().end.offset)),
++            });
++        }
++        return;
++    }
++    let mut arrays = vec![argument];
++    while let Some(array) = arrays.pop() {
++        let array = crate::parser::unwrap_parens(array);
++        let Some(elements) = crate::parser::array_literal_elements(array) else {
++            targets.push(crate::symbol_map::MiddlewareAliasTarget {
++                name: None,
++                start: 0,
++                target: None,
++                target_value_span: Some((array.span().start.offset, array.span().end.offset)),
++            });
+             continue;
+         };
+-        let Some((name, start, end)) =
+-            crate::virtual_members::laravel::helpers::resolved_string_literal(element.key, content)
+-        else {
+-            continue;
+-        };
+-        if name.is_empty() {
+-            continue;
+-        }
+-        let target = if matches!(
+-            element.value,
+-            Expression::Literal(literal::Literal::String(_))
+-        ) {
+-            crate::virtual_members::laravel::helpers::resolved_string_literal(
+-                element.value,
+-                content,
+-            )
+-            .and_then(|(value, _, _)| laravel_runtime_controller_ref(value))
+-            .and_then(|value| value.runtime)
+-        } else {
+-            laravel_route_controller_value(element.value, names).and_then(|value| value.runtime)
+-        };
+-        targets.push(crate::symbol_map::MiddlewareAliasTarget {
+-            name: name.to_string(),
+-            start: start as u32,
+-            target,
+-        });
+-        sites.push(ViewReceiverSite {
+-            start: start as u32,
+-            end: end as u32,
+-            key: name.to_string(),
+-            is_optional: false,
+-            receiver: ViewReceiverClass::MiddlewareAliasDeclaration,
+-        });
++        for element in elements.iter() {
++            let (key, value) = match element {
++                ArrayElement::KeyValue(element) => (Some(element.key), element.value),
++                ArrayElement::Value(element) => (None, element.value),
++                ArrayElement::Variadic(element) => {
++                    arrays.push(element.value);
++                    continue;
++                }
++                ArrayElement::Missing(_) => continue,
++            };
++            let key = key
++                .and_then(|key| {
++                    crate::virtual_members::laravel::helpers::resolved_string_literal(
++                        crate::parser::unwrap_parens(key),
++                        content,
++                    )
++                })
++                .filter(|(name, _, _)| !name.is_empty());
++            let value = crate::parser::unwrap_parens(value);
++            let literal =
++                crate::virtual_members::laravel::helpers::resolved_string_literal(value, content);
++            let class_reference = laravel_route_controller_value(value, names);
++            let structural = class_reference.as_ref().is_some_and(|reference| {
++                reference.literal_span.is_none()
++                    && (["self", "parent", "static"]
++                        .iter()
++                        .any(|name| reference.subject.eq_ignore_ascii_case(name))
++                        || laravel_runtime_controller_ref(&reference.subject).is_some())
++            });
++            let target_value_span = if let Some((_, start, end)) = literal {
++                Some((start as u32, end as u32))
++            } else if structural {
++                None
++            } else {
++                Some((value.span().start.offset, value.span().end.offset))
++            };
++            let target = if let Some((value, _, _)) = literal {
++                laravel_runtime_controller_ref(value).and_then(|value| value.runtime)
++            } else if structural {
++                class_reference.and_then(|reference| reference.runtime)
++            } else {
++                None
++            };
++            if key.is_none() && target_value_span.is_none() {
++                continue;
++            }
++            targets.push(crate::symbol_map::MiddlewareAliasTarget {
++                name: key.as_ref().map(|(name, _, _)| name.to_string()),
++                start: key.as_ref().map_or(0, |(_, start, _)| *start as u32),
++                target,
++                target_value_span,
++            });
++            if let Some((name, start, end)) = key {
++                sites.push(ViewReceiverSite {
++                    start: start as u32,
++                    end: end as u32,
++                    key: name.to_string(),
++                    is_optional: false,
++                    receiver: ViewReceiverClass::MiddlewareAliasDeclaration,
++                });
++            }
++        }
+     }
+ }
+ 
+--- a/src/symbol_map/mod.rs
++++ b/src/symbol_map/mod.rs
+@@ -1352,12 +1352,13 @@
+     pub source_class: Option<Atom>,
+ }
+ 
+-/// One literal alias key and its statically readable target value.
++/// One alias-array entry, including targets whose alias name is computed.
+ #[derive(Debug, Clone)]
+ pub(crate) struct MiddlewareAliasTarget {
+-    pub name: String,
++    pub name: Option<String>,
+     pub start: u32,
+     pub target: Option<String>,
++    pub target_value_span: Option<(u32, u32)>,
+ }
+ 
+ /// Per-file symbol location index.
+--- a/src/virtual_members/laravel/middleware_aliases.rs
++++ b/src/virtual_members/laravel/middleware_aliases.rs
+@@ -1,7 +1,7 @@
+ //! Static application middleware registrations, without booting the framework.
+ use crate::{
+     Backend,
+-    symbol_map::{LaravelStringKind, SymbolKind},
++    symbol_map::{LaravelStringKind, SymbolKind, ViewReceiverClass, ViewReceiverSite},
+ };
+ use tower_lsp::lsp_types::{Location, Url};
+ 
+@@ -25,16 +25,41 @@
+         &self,
+         name: &str,
+     ) -> Vec<MiddlewareAliasDefinition> {
++        self.middleware_alias_registration_sites(Some(name), false)
++            .unwrap_or_default()
++    }
++
++    pub(crate) fn middleware_alias_string_targets(&self) -> Result<Vec<String>, String> {
++        let sites = self
++            .middleware_alias_registration_sites(None, true)
++            .ok_or_else(|| {
++                "Bootstrap middleware registrations could not be verified; no edits were produced."
++                    .to_string()
++            })?;
++        if sites.iter().any(|site| site.target.is_none()) {
++            return Err(
++                "Bootstrap middleware targets are not fully resolved; no edits were produced."
++                    .into(),
++            );
++        }
++        Ok(sites.into_iter().filter_map(|site| site.target).collect())
++    }
++
++    fn middleware_alias_registration_sites(
++        &self,
++        name: Option<&str>,
++        require_complete: bool,
++    ) -> Option<Vec<MiddlewareAliasDefinition>> {
+         if !self.resolved_class_cache.read().is_laravel() {
+-            return Vec::new();
++            return Some(Vec::new());
+         }
+         let Some(root) = self.workspace.workspace_root.read().clone() else {
+-            return Vec::new();
++            return Some(Vec::new());
+         };
+         let path = root.join("bootstrap/app.php");
+         let uri = crate::util::path_to_uri(&path);
+         let Some(content) = self.get_file_content(&uri) else {
+-            return Vec::new();
++            return (!path.try_exists().unwrap_or(true)).then(Vec::new);
+         };
+         if self
+             .symbol_map_for(&uri)
+@@ -43,58 +68,105 @@
+             // An open buffer belongs to the editor publisher; never overwrite it
+             // from a lazy read while its new metadata is being admitted.
+             if self.open_files.read().contains_key(&uri) {
+-                return Vec::new();
++                return None;
+             }
+             let ticket = self.index_source_ticket(&uri);
+             // The ticket must predate the read whose symbols it admits.
+             if self.get_file_content(&uri).as_deref() != Some(content.as_str()) {
+                 self.release_index_source_ticket(&uri, &ticket);
+-                return Vec::new();
++                return None;
+             }
+             let parsed = self.parse_ast_index_update_for_ticket(&uri, &content, ticket);
+             self.apply_ast_index_parse_results_batch(vec![parsed]);
+         }
+-        let Some(map) = self
++        let map = self
+             .symbol_map_for(&uri)
+-            .filter(|map| map.matches_source(&content))
+-        else {
+-            return Vec::new();
+-        };
++            .filter(|map| map.matches_source(&content))?;
++        if require_complete
++            && self
++                .parse_errors
++                .read()
++                .get(&uri)
++                .is_some_and(|errors| !errors.is_empty())
++        {
++            return None;
++        }
+         if !map
+             .middleware_alias_targets
+             .iter()
+-            .any(|target| target.name == name)
++            .any(|target| name.is_none_or(|name| target.name.as_deref() == Some(name)))
+         {
+-            return Vec::new();
+-        }
+-        let confirmed = self.typed_receiver_view_spans_for(&uri, &map);
++            return Some(Vec::new());
++        }
++        let writer_sites: Vec<_> = if require_complete {
++            map.middleware_alias_targets
++                .iter()
++                .filter_map(|target| {
++                    let (start, end) = target.target_value_span?;
++                    Some(ViewReceiverSite {
++                        start,
++                        end,
++                        key: target.target.clone().unwrap_or_default(),
++                        is_optional: false,
++                        receiver: ViewReceiverClass::MiddlewareAliasDeclaration,
++                    })
++                })
++                .collect()
++        } else {
++            Vec::new()
++        };
++        let confirmed = if require_complete {
++            std::sync::Arc::new(self.confirm_typed_receiver_sites(
++                &uri,
++                &content,
++                &map,
++                &writer_sites,
++                true,
++            ))
++        } else {
++            self.typed_receiver_view_spans_for(&uri, &map)
++        };
+         let Ok(url) = Url::parse(&uri) else {
+-            return Vec::new();
+-        };
+-        map.middleware_alias_targets
+-            .iter()
+-            .filter(|target| {
+-                target.name == name
+-                    && confirmed.iter().any(|span| {
+-                        span.start == target.start
+-                            && matches!(
+-                                span.kind,
+-                                SymbolKind::LaravelStringKey {
+-                                    kind: LaravelStringKind::MiddlewareAlias,
+-                                    is_write: true,
+-                                    ..
++            return Some(Vec::new());
++        };
++        Some(
++            map.middleware_alias_targets
++                .iter()
++                .filter(|target| {
++                    name.is_none_or(|name| target.name.as_deref() == Some(name))
++                        && confirmed.iter().any(|span| {
++                            Some(span.start)
++                                == if require_complete {
++                                    target.target_value_span.map(|span| span.0)
++                                } else {
++                                    Some(target.start)
+                                 }
+-                            )
+-                    })
+-            })
+-            .map(|target| MiddlewareAliasDefinition {
+-                location: crate::definition::point_location(
+-                    url.clone(),
+-                    crate::text_position::offset_to_position(&content, target.start as usize),
+-                ),
+-                target: target.target.clone(),
+-            })
+-            .collect()
++                                && matches!(
++                                    span.kind,
++                                    SymbolKind::LaravelStringKey {
++                                        kind: LaravelStringKind::MiddlewareAlias,
++                                        is_write: true,
++                                        ..
++                                    }
++                                )
++                        })
++                })
++                .map(|target| MiddlewareAliasDefinition {
++                    location: crate::definition::point_location(
++                        url.clone(),
++                        crate::text_position::offset_to_position(
++                            &content,
++                            if require_complete {
++                                target.target_value_span.map_or(target.start, |span| span.0)
++                            } else {
++                                target.start
++                            } as usize,
++                        ),
++                    ),
++                    target: target.target.clone(),
++                })
++                .collect(),
++        )
+     }
+ 
+     pub(crate) fn middleware_alias_detail(&self, name: &str) -> String {
+--- a/tests/integration/laravel_middleware_aliases.rs
++++ b/tests/integration/laravel_middleware_aliases.rs
+@@ -397,3 +397,283 @@
+         assert!(!matches!(result, Ok(Some(_))), "{result:?}");
+     }
+ }
++
++async fn settled_target_rename(
++    backend: &Backend,
++    uri: &Url,
++    source: &str,
++    needle: &str,
++    new_name: &str,
++) -> Result<Option<WorkspaceEdit>, String> {
++    let at = position_after(source, needle);
++    for _ in 0..3 {
++        let result =
++            crate::common::rename_result(backend, uri, at.line, at.character, new_name).await;
++        if result
++            .as_ref()
++            .is_err_and(|message| message.contains("changed"))
++        {
++            continue;
++        }
++        return result;
++    }
++    panic!("rename did not settle against unchanged source");
++}
++
++#[tokio::test]
++async fn middleware_target_literal_class_rename_refuses_partial_edits() {
++    for value in [
++        r"'App\Http\Middleware\Audit'",
++        r#""\\App\\Http\\Middleware\\\x41udit""#,
++        r"'app\http\middleware\audit'",
++    ] {
++        let bootstrap = BOOTSTRAP.replace("AuditAlias::class", value);
++        let (backend, dir, _, _) = workspace(&bootstrap, SOURCE).await;
++        let file = dir.path().join("app/Http/Middleware/Audit.php");
++        let source = std::fs::read_to_string(&file).unwrap();
++        let uri = Url::from_file_path(file).unwrap();
++        open_document(&backend, &uri, "php", &source).await;
++        for new_name in ["Auditor", "App\\Other\\Auditor"] {
++            let result =
++                settled_target_rename(&backend, &uri, &source, "class Aud", new_name).await;
++            assert!(
++                result
++                    .as_ref()
++                    .is_err_and(|message| message.contains("literal middleware target")),
++                "{value}: {result:?}"
++            );
++        }
++    }
++}
++
++#[tokio::test]
++async fn middleware_target_namespace_move_refuses_partial_edits() {
++    let bootstrap = BOOTSTRAP.replace("AuditAlias::class", r"'App\Http\Middleware\Audit'");
++    let (backend, dir, _, _) = workspace(&bootstrap, SOURCE).await;
++    let file = dir.path().join("app/Http/Middleware/Audit.php");
++    let source = std::fs::read_to_string(&file).unwrap();
++    let uri = Url::from_file_path(file).unwrap();
++    open_document(&backend, &uri, "php", &source).await;
++    let result = settled_target_rename(
++        &backend,
++        &uri,
++        &source,
++        "namespace App\\Http\\Middle",
++        "Pipeline",
++    )
++    .await;
++    assert!(
++        result
++            .as_ref()
++            .is_err_and(|message| message.contains("literal middleware target")),
++        "{result:?}"
++    );
++}
++
++#[tokio::test]
++async fn middleware_target_unsaved_registration_controls_prepare_and_rename() {
++    let (backend, dir, caller, bootstrap_uri) = workspace(BOOTSTRAP, SOURCE).await;
++    let file = dir.path().join("app/Http/Middleware/Audit.php");
++    let source = std::fs::read_to_string(&file).unwrap();
++    let uri = Url::from_file_path(file).unwrap();
++    open_document(&backend, &uri, "php", &source).await;
++    open_document(&backend, &bootstrap_uri, "php", BOOTSTRAP).await;
++    let literal = BOOTSTRAP.replace("AuditAlias::class", r"'App\Http\Middleware\Audit'");
++    change(&backend, &bootstrap_uri, &literal, 2).await;
++    let _ = hover(&backend, &caller, SOURCE, "middleware('aud").await;
++    let at = position_after(&source, "class Aud");
++    assert!(
++        crate::common::prepare_rename(&backend, &uri, at.line, at.character)
++            .await
++            .is_none()
++    );
++    assert!(
++        settled_target_rename(&backend, &uri, &source, "class Aud", "Auditor")
++            .await
++            .is_err()
++    );
++    change(&backend, &bootstrap_uri, BOOTSTRAP, 3).await;
++    let result = settled_target_rename(&backend, &uri, &source, "class Aud", "Auditor").await;
++    assert!(matches!(result, Ok(Some(_))), "{result:?}");
++    let _ = hover(&backend, &caller, SOURCE, "middleware('aud").await;
++    assert!(
++        crate::common::prepare_rename(&backend, &uri, at.line, at.character)
++            .await
++            .is_some()
++    );
++}
++
++#[tokio::test]
++async fn middleware_target_foreign_and_other_class_registrations_allow_rename() {
++    for bootstrap in [
++        BOOTSTRAP.replace("AuditAlias::class", r"'App\Http\Middleware\Trace'"),
++        BOOTSTRAP
++            .replace(
++                "$pipeline->alias",
++                "$pipeline = new Foreign; $pipeline->alias",
++            )
++            .replace(
++                "return Application::",
++                "class Foreign {public function alias(array $aliases) {}}\nreturn Application::",
++            )
++            .replace("AuditAlias::class", r"'App\Http\Middleware\Audit'"),
++    ] {
++        let (backend, dir, _, _) = workspace(&bootstrap, SOURCE).await;
++        let file = dir.path().join("app/Http/Middleware/Audit.php");
++        let source = std::fs::read_to_string(&file).unwrap();
++        let uri = Url::from_file_path(file).unwrap();
++        open_document(&backend, &uri, "php", &source).await;
++        let result = settled_target_rename(&backend, &uri, &source, "class Aud", "Auditor").await;
++        assert!(matches!(result, Ok(Some(_))), "{result:?}");
++    }
++}
++
++#[tokio::test]
++async fn middleware_target_namespace_boundaries_allow_unrelated_literals() {
++    for value in [
++        r"'App\Http\MiddlewareExtra\Trace'",
++        r"'App\Http\Middleware'",
++    ] {
++        let bootstrap = BOOTSTRAP.replace("AuditAlias::class", value);
++        let (backend, dir, _, _) = workspace(&bootstrap, SOURCE).await;
++        let file = dir.path().join("app/Http/Middleware/Audit.php");
++        let source = std::fs::read_to_string(&file).unwrap();
++        let uri = Url::from_file_path(file).unwrap();
++        open_document(&backend, &uri, "php", &source).await;
++        let result = settled_target_rename(
++            &backend,
++            &uri,
++            &source,
++            "namespace App\\Http\\Middle",
++            "Pipeline",
++        )
++        .await
++        .unwrap()
++        .unwrap();
++        let updated =
++            crate::common::apply_edits(&source, &crate::common::edits_for_uri(&result, &uri));
++        assert!(
++            updated.contains("namespace App\\Http\\Pipeline;"),
++            "{updated}"
++        );
++    }
++}
++
++#[tokio::test]
++async fn middleware_target_incomplete_bootstrap_refuses_class_rename() {
++    let (backend, dir, _, bootstrap_uri) = workspace(BOOTSTRAP, SOURCE).await;
++    let file = dir.path().join("app/Http/Middleware/Audit.php");
++    let source = std::fs::read_to_string(&file).unwrap();
++    let uri = Url::from_file_path(file).unwrap();
++    open_document(&backend, &uri, "php", &source).await;
++    open_document(&backend, &bootstrap_uri, "php", "<?php $stack->alias([").await;
++    let result = settled_target_rename(&backend, &uri, &source, "class Aud", "Auditor").await;
++    assert!(
++        result
++            .as_ref()
++            .is_err_and(|message| message.contains("could not be verified")),
++        "{result:?}"
++    );
++}
++
++#[tokio::test]
++async fn middleware_target_computed_alias_keys_and_literal_spreads_refuse_partial_edits() {
++    for argument in [
++        r"[$key => 'App\Http\Middleware\Audit']",
++        r"['App\Http\Middleware\Audit']",
++        r"['' => 'App\Http\Middleware\Audit']",
++        r"[...['audited' => 'App\Http\Middleware\Audit']]",
++        r"(([('audited') => ('App\Http\Middleware\Audit')]))",
++        r"[...(['audited' => 'App\Http\Middleware\Audit'])]",
++    ] {
++        let bootstrap = BOOTSTRAP.replace(
++            "$pipeline->alias(['audited' => AuditAlias::class]);",
++            &format!("$key='audited'; $pipeline->alias({argument});"),
++        );
++        let (backend, dir, _, _) = workspace(&bootstrap, SOURCE).await;
++        let file = dir.path().join("app/Http/Middleware/Audit.php");
++        let source = std::fs::read_to_string(&file).unwrap();
++        let uri = Url::from_file_path(file).unwrap();
++        open_document(&backend, &uri, "php", &source).await;
++        let result = settled_target_rename(&backend, &uri, &source, "class Aud", "Auditor").await;
++        assert!(
++            result
++                .as_ref()
++                .is_err_and(|message| message.contains("literal middleware target")),
++            "{argument}: {result:?}"
++        );
++    }
++}
++
++#[tokio::test]
++async fn middleware_target_nullsafe_and_uncertain_receivers_refuse_partial_edits() {
++    for (parameter, operator) in [
++        ("Stack", "?->"),
++        ("?Stack", "?->"),
++        ("?Stack", "->"),
++        ("object", "->"),
++        ("Stack|Foreign", "->"),
++        ("mixed", "->"),
++    ] {
++        let bootstrap = BOOTSTRAP
++            .replace("Stack $pipeline", &format!("{parameter} $pipeline"))
++            .replace("$pipeline->alias", &format!("$pipeline{operator}alias"))
++            .replace("AuditAlias::class", r"'App\Http\Middleware\Audit'")
++            .replace(
++                "return Application::",
++                "class Foreign {public function alias(array $aliases) {}}\nreturn Application::",
++            );
++        let (backend, dir, caller, _) = workspace(&bootstrap, SOURCE).await;
++        let file = dir.path().join("app/Http/Middleware/Audit.php");
++        let source = std::fs::read_to_string(&file).unwrap();
++        let uri = Url::from_file_path(file).unwrap();
++        open_document(&backend, &uri, "php", &source).await;
++        if operator == "?->" {
++            assert_eq!(
++                definitions(&backend, &caller, SOURCE, "middleware('aud")
++                    .await
++                    .len(),
++                1
++            );
++        }
++        let result = settled_target_rename(&backend, &uri, &source, "class Aud", "Auditor").await;
++        assert!(
++            result
++                .as_ref()
++                .is_err_and(|message| message.contains("literal middleware target")),
++            "{parameter}{operator}: {result:?}"
++        );
++    }
++}
++
++#[tokio::test]
++async fn middleware_target_unresolved_maps_and_values_refuse_unverified_edits() {
++    for (setup, argument) in [
++        (r"$aliases=['a'=>'App\Http\Middleware\Audit'];", "$aliases"),
++        (
++            r"$target='App\Http\Middleware\Audit';",
++            "['audited'=>$target]",
++        ),
++        (
++            r"$other=['a'=>'App\Http\Middleware\Audit'];",
++            "['audited'=>AuditAlias::class,...$other]",
++        ),
++    ] {
++        let bootstrap = BOOTSTRAP.replace(
++            "$pipeline->alias(['audited' => AuditAlias::class]);",
++            &format!("{setup}$pipeline->alias({argument});"),
++        );
++        let (backend, dir, _, _) = workspace(&bootstrap, SOURCE).await;
++        let file = dir.path().join("app/Http/Middleware/Audit.php");
++        let source = std::fs::read_to_string(&file).unwrap();
++        let uri = Url::from_file_path(file).unwrap();
++        open_document(&backend, &uri, "php", &source).await;
++        let result = settled_target_rename(&backend, &uri, &source, "class Aud", "Auditor").await;
++        assert!(
++            result
++                .as_ref()
++                .is_err_and(|message| message.contains("targets are not fully resolved")),
++            "{argument}: {result:?}"
++        );
++    }
++}
+--- a/tests/integration/rename_namespace.rs
++++ b/tests/integration/rename_namespace.rs
+@@ -1405,3 +1405,52 @@
+         result_usage
+     );
+ }
++
++#[tokio::test]
++async fn namespace_rename_preserves_inline_bracketed_and_multiline_declarations() {
++    use crate::common::position_after;
++    for (text, needle, before, after) in [
++        (
++            "<?php\n/* 😀\nnamespace App\\Tools;\n*/\nnamespace App\\Tools {class Thing {}}",
++            "*/\nnamespace App\\To",
++            "*/\nnamespace App\\Tools",
++            "*/\nnamespace App\\Lib",
++        ),
++        (
++            "<?php namespace App\\Tools; class Thing {}",
++            "namespace App\\To",
++            "namespace App\\Tools",
++            "namespace App\\Lib",
++        ),
++        (
++            "<?php /* 😀 namespace App\\Tools; */ namespace App\\Tools {class Thing {}} namespace Other {class Keep {}}",
++            "*/ namespace App\\To",
++            "*/ namespace App\\Tools",
++            "*/ namespace App\\Lib",
++        ),
++        (
++            "<?php\nnamespace\nApp\\Tools;\nclass Thing {}",
++            "\nApp\\To",
++            "\nApp\\Tools",
++            "\nApp\\Lib",
++        ),
++    ] {
++        let backend = create_test_backend();
++        let uri = Url::parse("file:///namespace_inline.php").unwrap();
++        let consumer = Url::parse("file:///namespace_consumer.php").unwrap();
++        let other = "<?php\nuse App\\Tools\\Thing;\nnew Thing;";
++        open_php(&backend, &uri, text).await;
++        open_php(&backend, &consumer, other).await;
++        let at = position_after(text, needle);
++        let edit = rename(&backend, &uri, at.line, at.character, "Lib")
++            .await
++            .unwrap();
++        assert_eq!(
++            apply_edits(text, &edits_for_uri(&edit, &uri)),
++            text.replace(before, after)
++        );
++        assert!(
++            apply_edits(other, &edits_for_uri(&edit, &consumer)).contains("use App\\Lib\\Thing;")
++        );
++    }
++}

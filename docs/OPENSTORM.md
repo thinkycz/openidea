@@ -15,6 +15,80 @@ slice, commit and push it, and retain only the latest generated app. Native UI
 cases remain deferred/unverified; earlier native-first blocking checkpoints are
 historical and no longer prevent independent implementation.
 
+Engine source slice169 (2026-11-18, inactive PHPantom173 verified): fix the
+single transport's mixed-Composer checked-rename witness rejection. Released172
+succeeds with two local witnesses but rejects an additional valid dirty nested
+source with -32801. The same owned wire fixture now returns the same real class
+move and edits with all three witnesses. Every supplied transport version/hash
+is checked before/after computation; consuming sources retain the backend's
+semantic fence. No client witness is dropped. Closed, stale and shadowed
+sources remain rejected, and transport-only foreign targets cannot be edited.
+
+A separate prototype regression proves that simply accepting foreign witnesses
+could permit a shared package class move while missing another app's references.
+The corrected guard refuses that incomplete proposal with InvalidRequest when
+another witnessed graph consumes a proposed target. The existing single-consumer
+installed-package rename remains accepted. Cross-graph reference aggregation is
+unsupported and tracked as F28 in the pinned engine backlog; it is not claimed
+complete. No second type-resolution path or new editor setting is introduced.
+
+The frozen code passes18,663 ordinary engine tests/17 ignored plus2 bounded
+children,19 checked-rename integration cases and the private foreign-target guard.
+Both release all-target Clippy modes (default/mem-audit), Rust formatting, exact
+patch replay and pinned release build pass with normal optimization/default
+stack limits. Source-package fix-mode Clippy and following formatting change no
+Rust bytes. Final documentation moves the changelog entry under Unreleased and
+records the aggregation backlog; all2488 other source/data/fixture inputs match
+the measured snapshot. Rebuilding that amended source reproduces the identical
+binary SHA256, so the code and runtime receipts apply to the final executable.
+The superseded documentation-only tree is removed; its pin/patch/gate snapshots
+and code-equivalence receipt remain archived. No new broad-test run is claimed
+for documentation-only changes.
+
+Seven stdio callback groups/nine real Laravel13.37 fixtures now pass with all123
+PHP sources open and witnessed per fixture, replacing the earlier six-source
+workaround. Exact Unicode declarations, references, hover, dirty callback refresh,
+physical rename guards and uncertainty remain correct. All1107 fixture syntax
+checks and owned Composer/runtime resolutions pass. The plain-PHP playground
+passes12 syntax checks and runtime assertions; the current Laravel example passes
+121 syntax checks/374 runtime assertions and exactly the previous3 deliberate
+analyzer diagnostics (expected exit1). RPC cancellation is observed with a
+9,450,041-byte foreign source; after replacement a fresh checked rename succeeds
+in28.69ms in that bounded run. This is not startup/large-file/performance parity.
+
+Ten unaffected real OpenStorm client cases pass against the exact final binary.
+The original mixed-context client path now returns an Ok checked edit with its
+dirty nested source still open: its old must-refuse assertion intentionally fails
+and is preserved as an obsolete-expectation diagnostic. Updating that regression
+and verifying callback-specific Host apply/conflict/history remain next. Do not
+count this diagnostic as a passing11th test or new guarded-application acceptance.
+All owned children exit and original/borrowed fixture files remain unchanged.
+The initial shared-test setup mismatch was cancelled before executing tests;
+only the corrected qualified red test supplies the partial-plan failure evidence.
+
+Canonical:artifacts/engines/0.11.1-openstorm.173/phpantom_lsp.
+SHA256:f7ed9ae7cdc8d731162d6a42cdb13ea0889860fe4df202dd8cf999f56d3eb127.
+Source:artifacts/phpantom/1756b1f920c1-75d0d1da1fb2-verified;
+series SHA256:75d0d1da1fb2e58b4fb543e27ded703bce8c1972d48b520d7999e2823480f576.
+Pinned source/build recipe, MIT/Apache notices, arm64/minOS13 metadata and strict
+CLI signature verify. This is a local rebuilt engine, not an upstream release.
+App110/default171 remains unchanged, deep/strict signed and the sole app. No
+source/resource activation, new app, install, migration, publishing or tag.
+Removed2,410,075,128 logical bytes of engine compiler/prototype/superseded-source
+output, using cargo clean for the target tree. Root compiler/dist remain absent.
+Retain final canonical engines/source, the client harness, fixtures, receipts,
+toolchains, PHP Workbench and prior evaluation artifacts. Native UI stays skipped.
+Reuse unchanged167/168 root5155 workspace and13397 frontend/6 skipped evidence;
+claim no fresh root workspace/frontend or173 native acceptance. All69 statuses
+remain67 partial/2 user-deferred; wider L63/L64 and platform/performance gates
+remain partial. Next: client/Host adoption, then a separately signed package.
+
+Evidence:artifacts/checks/slice169/{source-freeze,code-equivalence,engine-gates,
+source-test-summary,prototype-final,shared-red,wire-172,wire-173,wire-gates,
+cancel-wire,source-checklist,final-build,retention,delivery}.json; archived
+code-verified-snapshot; canonical173 build-receipt.json. The full-code snapshot
+used prefix3e4aeca0a1b4; the final documentation-amended source uses75d0d1da1fb2.
+
 Retention slice168 (2026-11-18): source167 is committed/pushed as cf86b0122.
 Removed27,035,919,112 logical bytes of current workspace compiler and frontend
 output after its gates; artifacts/build and dist are absent. The engine witness

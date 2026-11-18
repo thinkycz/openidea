@@ -24,8 +24,20 @@ fn fixture_files() -> Vec<(String, String)> {
         ("bootstrap/app.php".into(), BOOTSTRAP.into()),
         ("app/Http/Middleware/Audit.php".into(), CLASS.into()),
         ("app/Http/Middleware/Trace.php".into(), CLASS.replace("Audit", "Trace")),
-        ("framework/Foundation/Application.php".into(), "<?php namespace Illuminate\\Foundation; class Application {public static function configure(): \\Illuminate\\Foundation\\Configuration\\ApplicationBuilder {return new \\Illuminate\\Foundation\\Configuration\\ApplicationBuilder;}}".into()),
-        ("framework/Foundation/Configuration/ApplicationBuilder.php".into(), "<?php namespace Illuminate\\Foundation\\Configuration; class ApplicationBuilder {public function withMiddleware(callable $callback): static {return $this;} public function create(): \\Illuminate\\Foundation\\Application {return new \\Illuminate\\Foundation\\Application;}}".into()),
+        ("framework/Foundation/Application.php".into(), r"<?php namespace Illuminate\Foundation;
+class Application {
+    protected static string $applicationBuilder = Configuration\ApplicationBuilder::class;
+    public static function configure(): Configuration\ApplicationBuilder {return (new static::$applicationBuilder(new static))->withKernels();}
+    public function singleton($abstract,$concrete=null): void {}
+}".into()),
+        ("framework/Foundation/Configuration/ApplicationBuilder.php".into(), r"<?php namespace Illuminate\Foundation\Configuration;
+class ApplicationBuilder {
+    public function __construct(protected \Illuminate\Foundation\Application $app) {}
+    public function withKernels(): static {$this->app->singleton(\Illuminate\Contracts\Http\Kernel::class,\Illuminate\Foundation\Http\Kernel::class);return $this;}
+    public function withMiddleware(callable $callback): static {return $this;}
+    public function create(): \Illuminate\Foundation\Application {return $this->app;}
+}".into()),
+        ("framework/Foundation/Http/Kernel.php".into(), r"<?php namespace Illuminate\Foundation\Http; class Kernel {}".into()),
         ("framework/Foundation/Configuration/Middleware.php".into(), "<?php namespace Illuminate\\Foundation\\Configuration; class Middleware {public function alias(array $aliases): static {return $this;}}".into()),
         ("framework/Routing/Controller.php".into(), "<?php namespace Illuminate\\Routing; class Controller {protected function middleware($middleware): static {return $this;}}".into()),
     ]

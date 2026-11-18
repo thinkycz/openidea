@@ -455,3 +455,109 @@ async fn bound_kernel_bootstrap_changes_retire_plans_and_replay_dirty_selection(
     .await;
     f.finish(outcome).await;
 }
+
+const BUILDER_APP: &str = r"<?php namespace Illuminate\Foundation;
+class Application {
+    protected static string $applicationBuilder = Configuration\ApplicationBuilder::class;
+    public static function configure(): Configuration\ApplicationBuilder {return (new static::$applicationBuilder(new static))->withKernels();}
+    public function singleton($abstract,$concrete=null): void {}
+}
+";
+const BUILDER: &str = r"<?php namespace Illuminate\Foundation\Configuration;
+class ApplicationBuilder {
+    public function __construct(protected \Illuminate\Foundation\Application $app) {}
+    public function withKernels(): static {$this->app->singleton(\Illuminate\Contracts\Http\Kernel::class,\Illuminate\Foundation\Http\Kernel::class);return $this;}
+    public function create(): \Illuminate\Foundation\Application {return $this->app;}
+}
+";
+const BUILDER_BOOTSTRAP: &str = r"<?php $app=\Illuminate\Foundation\Application::configure()->create();return $app;";
+fn builder_fixture() -> (Fixture, String) {
+    let framework = KERNEL
+        .replace("namespace App\\Http;", "namespace Illuminate\\Foundation\\Http;")
+        .replace("use App\\Http\\KernelBase as BaseKernel;\n", "")
+        .replace("class Kernel extends BaseKernel", "class Kernel");
+    let conventional = KERNEL.replace("Middleware\\Audit as", "Middleware\\Trace as");
+    let f = fixture_with(
+        &conventional,
+        &[
+            ("bootstrap/app.php".into(), BUILDER_BOOTSTRAP.into()),
+            ("framework/Foundation/Application.php".into(), BUILDER_APP.into()),
+            ("framework/Foundation/Configuration/ApplicationBuilder.php".into(), BUILDER.into()),
+            ("framework/Foundation/Http/Kernel.php".into(), framework.clone()),
+        ],
+    );
+    (f, framework)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires PHPantom168 and owned PHP syntax-check executable"]
+async fn builder_kernel_navigation_retires_dirty_dependency_plans_and_replays_restart() {
+    let (f, framework) = builder_fixture();
+    let outcome = std::panic::AssertUnwindSafe(async {
+        let path = f.root.join("framework/Foundation/Http/Kernel.php");
+        let found = definitions(&f).await;
+        assert_eq!(found.len(), 1, "managed standard-builder Kernel: {found:?}");
+        assert_eq!(*found[0].path, path);
+        assert_eq!(found[0].range.start, cursor(&framework, r"au\x64ited"));
+        hover(&f, "App\\Http\\Middleware\\Audit", "framework/Foundation/Http/Kernel.php").await;
+        let refs = ide_host::ops::lsp::lsp_references(
+            &f.host,
+            "main",
+            RequestId::next(),
+            f.doc,
+            cursor(CALLER, r"64ited"),
+            true,
+            true,
+            true,
+            ide_host::ops::Channel::new(|_| {}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(refs.locations.len(), 2, "{refs:?}");
+        assert!(
+            refs.locations
+                .iter()
+                .all(|location| *location.path == path || *location.path == f.root.join("routes/web.php"))
+        );
+        let class = f.project.documents.open(&f.root.join("app/Http/Middleware/Audit.php")).unwrap();
+        let plan = ide_host::ops::lsp::lsp_rename(
+            &f.host,
+            "main",
+            RequestId::next(),
+            class.id,
+            cursor(CLASS, "Audit {}"),
+            "Auditor".into(),
+        )
+        .await
+        .unwrap()
+        .edit;
+        let builder = f.root.join("framework/Foundation/Configuration/ApplicationBuilder.php");
+        let doc = f.project.documents.open(&builder).unwrap();
+        let changed = BUILDER.replace(r"\Illuminate\Foundation\Http\Kernel::class", r"\App\Http\Kernel::class");
+        f.project.documents.replace_all(doc.id, &changed).unwrap();
+        assert!(
+            ide_host::ops::lsp::apply_workspace_edit(&f.host, "main", plan).await.is_err(),
+            "dirty builder registration must retire a Kernel plan"
+        );
+        assert_eq!(*definitions(&f).await[0].path, f.root.join("app/Http/Kernel.php"));
+        hover(&f, "App\\Http\\Middleware\\Trace", "app/Http/Kernel.php").await;
+        f.project.lsp.restart(f.project.lsp.servers()[0].id).await.unwrap();
+        hover(&f, "App\\Http\\Middleware\\Trace", "app/Http/Kernel.php").await;
+        f.project.documents.replace_all(doc.id, BUILDER).unwrap();
+        assert_eq!(*definitions(&f).await[0].path, path);
+        assert_eq!(std::fs::read_to_string(builder).unwrap(), BUILDER);
+        assert_eq!(std::fs::read_to_string(path).unwrap(), framework);
+        assert_eq!(std::fs::read_to_string(f.root.join("app/Http/Middleware/Audit.php")).unwrap(), CLASS);
+        assert!(!f.root.join("app/Http/Middleware/Auditor.php").exists());
+    })
+    .catch_unwind()
+    .await;
+    f.finish(outcome).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires PHPantom168 and owned PHP syntax-check executable"]
+async fn builder_kernel_checked_edits_keep_conflict_guards_and_shared_history() {
+    let (f, framework) = builder_fixture();
+    checked_rename_case(f, &framework, "framework/Foundation/Http/Kernel.php").await;
+}

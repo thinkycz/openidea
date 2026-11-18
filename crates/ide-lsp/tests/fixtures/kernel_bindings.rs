@@ -252,3 +252,98 @@ async fn bound_kernel_client_resolves_real_laravel_and_refuses_incomplete_edits(
         std::panic::resume_unwind(panic);
     }
 }
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires PHPantom168 and the retained Laravel13.37 standard-builder fixture"]
+async fn builder_kernel_client_retires_inactive_legacy_aliases_and_keeps_queued_binding_phase() {
+    let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let root = std::env::var_os("OPENSTORM_TEST_BUILDER_KERNEL_ROOT")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| repo.join("artifacts/checks/slice152-laravel-example-13-37"))
+        .canonicalize()
+        .unwrap();
+    let engine = std::env::var_os("OPENSTORM_TEST_PHPANTOM_BIN")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| repo.join("src-tauri/resources/phpantom/phpantom_lsp"));
+    let path = root.join("app/Demo.php");
+    let source = std::fs::read_to_string(&path).unwrap();
+    let bootstrap = root.join("bootstrap/app.php");
+    let original = std::fs::read_to_string(&bootstrap).unwrap();
+    let binding = r"$application->singleton(HttpKernelContract::class, \App\Runtime\SiteKernel::class);";
+    assert_eq!(original.matches(binding).count(), 1);
+    let standard = original.replace(binding, "");
+    let parent = root.join("app/Http/ApplicationKernel.php");
+    let parent_source = std::fs::read_to_string(&parent).unwrap();
+    let declaration = root.join("app/Http/Middleware/AuditRequests.php");
+    let class_source = std::fs::read_to_string(&declaration).unwrap();
+    let mgr = LspManager::new(
+        root.clone(),
+        Arc::new(LanguageRegistry::from_configs(vec![route_handler_language(&engine)])),
+        Arc::new(|_| {}),
+    );
+    let doc = DocId::next();
+    let bootstrap_doc = DocId::next();
+    let parent_doc = DocId::next();
+    mgr.did_open(doc, &path, &LanguageId::new("php"), 1, &source);
+    mgr.did_open(bootstrap_doc, &bootstrap, &LanguageId::new("php"), 1, &standard);
+    mgr.did_open(parent_doc, &parent, &LanguageId::new("php"), 1, &parent_source);
+    let outcome = std::panic::AssertUnwindSafe(async {
+        assert!(
+            !mgr.goto(parent_doc, pos(&parent_source, "Middleware\\AuditRequests;"), GotoKind::Definition)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(source.matches("demo.kernel.parent").count(), 1);
+        let position = pos(&source, "demo.kernel.parent");
+        let inactive = mgr.goto(doc, position, GotoKind::Definition).await.unwrap();
+        assert!(inactive.is_empty(), "client standard builder must retire inactive legacy aliases: {inactive:?}");
+        let queued = standard.replace(
+            "->create()",
+            r"->withSingletons([HttpKernelContract::class=>\App\Runtime\SiteKernel::class])->create()",
+        );
+        assert_ne!(queued, standard);
+        replace(&mgr, bootstrap_doc, 2, &standard, &queued);
+        assert!(mgr.goto(doc, position, GotoKind::Definition).await.unwrap().is_empty());
+        mgr.restart(mgr.servers()[0].id).await.unwrap();
+        assert!(mgr.goto(doc, position, GotoKind::Definition).await.unwrap().is_empty());
+        replace(&mgr, bootstrap_doc, 3, &queued, &original);
+        let active = mgr.goto(doc, position, GotoKind::Definition).await.unwrap();
+        assert_eq!(active.len(), 1, "explicit binding must restore inherited aliases: {active:?}");
+        assert_eq!(*active[0].path, parent);
+        let mut refs = None;
+        for _ in 0..80 {
+            match mgr.references(doc, position, true, true, Default::default()).await {
+                Ok(found) => {
+                    refs = Some(found);
+                    break;
+                }
+                Err(error) if error.kind == ide_core::error::ErrorKind::Cancelled => {
+                    tokio::time::sleep(Duration::from_millis(25)).await;
+                }
+                Err(error) => panic!("restored Kernel references failed: {error}"),
+            }
+        }
+        let refs = refs.expect("restored Kernel references must settle");
+        assert!(
+            refs.locations
+                .iter()
+                .any(|location| *location.path == parent && location.range.end.col - location.range.start.col == 18),
+            "{refs:?}"
+        );
+        replace(&mgr, bootstrap_doc, 4, &original, &standard);
+        assert!(mgr.goto(doc, position, GotoKind::Definition).await.unwrap().is_empty());
+    })
+    .catch_unwind()
+    .await;
+    mgr.shutdown_all().await;
+    assert!(mgr.servers().iter().all(|server| server.pid.is_none()));
+    for (path, text) in
+        [(&path, &source), (&bootstrap, &original), (&parent, &parent_source), (&declaration, &class_source)]
+    {
+        assert_eq!(std::fs::read_to_string(path).unwrap(), *text);
+    }
+    if let Err(panic) = outcome {
+        std::panic::resume_unwind(panic);
+    }
+}

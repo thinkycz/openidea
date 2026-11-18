@@ -15,6 +15,59 @@ slice, commit and push it, and retain only the latest generated app. Native UI
 cases remain deferred/unverified; earlier native-first blocking checkpoints are
 historical and no longer prevent independent implementation.
 
+Client/host slice153 (2026-11-18, verified;168 inactive pending packaging):
+exercise source152 standard Application::configure Kernel selection through actual
+LspManager and managed host operations. Two new host regressions and one real
+Laravel13.37 client regression fail on167 and pass on168. Host controls use the
+same executable; final client controls use the same rebuilt executable. Standard
+builder navigation selects the framework Kernel instead of inactive legacy
+aliases, retaining decoded UTF-16 ranges and foreign-receiver exclusions. Dirty
+withKernels selection changes retire reviewed plans even when the builder is not
+an edit target. Navigation follows the new target, survives restart and restores
+without caller edits. Checked class plans retain unsupported-target refusals,
+external-conflict guards, atomic cross-file application and shared undo/redo.
+Original dirty documents and disk files remain recoverable.
+
+The real Laravel13.37 client removes its explicit custom binding and verifies that
+inactive legacy aliases disappear. Queued withSingletons callbacks do not replace
+the initial request Kernel. Dirty restart preserves that phase, restoring the
+explicit binding returns inherited declaration/reference ownership, and removing
+it retires those aliases again. Original fixture files remain unchanged and owned
+server processes exit. Preserve the initial cancelled reference request; the test
+retries only cancellation within a fixed bound after dirty bootstrap analysis.
+The first middleware preflight had6 passes and1 checked-rename refusal because its
+old mock builder omitted standard configure/withKernels/app/create semantics. Fix
+that fixture to model the actual standard setup, retaining every original check.
+No engine fallback or diagnostic suppression was added for the fixture.
+
+All97 actual168 client/host cases pass:53 client,29 completion-host,10 guarded
+edits,2 controller URL-host,2 handler-host and1 PHP-target settings-host. Final
+runtime source, emitted executables and Cargo fingerprints stay fixed during the
+corpus. Frontend13,393 passes/6 skipped, typecheck/lint/format/knip and production
+build pass. Rust formatting and workspace all-target Clippy pass. Serialized
+workspace:5,152 passes/214 ignored/one retained HTTP
+exclusion across224 groups. The3 new ignored regressions run explicitly in
+controls and the actual corpus. Generated bindings/command snapshots are unchanged.
+Keep the known default-parallel CLI socket-test limitation. Native UI remains
+user-skipped; broader platform/performance acceptance remains partial. Identical
+168 retains source152's18,625 ordinary passes/17 ignored plus2 bounded children,
+both engine Clippy modes, exact source replay/build,28 stdio groups,119 Laravel
+syntax/358 runtime assertions and exact3 intentional analyzer diagnostics.
+
+Candidate168 SHA256:b8272d4cd7d8655fa69e09e4edcfd046e35114586439cd5d1dae7292b110fefe.
+Client/host receipt SHA256:84d5fe55b3c91ae706509abc8ca05d4e53bc432bbf6b82065c36e7f2d2f0c8a5.
+App105/default167 hashes and deep/strict signature remain unchanged; App105 is the
+sole generated app. Keep only the current compiler/dist output needed immediately
+for the next package slice, then remove it after signed package verification.
+No new app, installation, migration, updater activation or debugger functionality.
+All69 statuses remain67 partial/2 user-deferred. L63 and the remaining L64 shapes
+stay open. Commit/push and verify the remote ref and clean worktree before the
+separate dependent packaging slice.
+
+Evidence:artifacts/checks/slice153/{source-input,gates,controls,controls-process-cleanup,
+client-host,retention,delivery}.json; retained initial-cancellation and old-mock
+preflight logs, all final stage logs, and canonical168 client-host/delivery sidecars.
+
 Engine source slice152 (2026-11-18, verified;168 inactive): select the
 initial HTTP Kernel registered by Laravel's standard Application::configure()
 builder instead of always inspecting a legacy App\Http\Kernel. The real13.37

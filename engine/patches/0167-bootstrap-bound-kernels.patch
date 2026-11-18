@@ -1,0 +1,1059 @@
+--- a/docs/CHANGELOG.md
++++ b/docs/CHANGELOG.md
+@@ -30,6 +30,10 @@
+ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+ 
+ ## [Unreleased]
++
++- **Decode Laravel constant strings.** Escaped names used as route or container keys retain their PHP runtime values when folded from syntax. Contributed by @thinkycz.
++
++- **Follow bound HTTP Kernels.** Middleware alias navigation follows literal application bindings in bootstrap files, including unsaved rebinding, rather than assuming the conventional file. Uncertain registrations cannot authorize partial transformations. Contributed by @thinkycz.
+ 
+ - **Editor-selected PHP targets.** Clients can select a PHP language level across Composer projects without rewriting saved configuration. Auto retains each project's configured target. Contributed by @thinkycz.
+ 
+--- a/docs/todo.md
++++ b/docs/todo.md
+@@ -165,8 +165,8 @@
+ | L58 | [Laravel rate limiter names](todo/laravel.md#l58-laravel-rate-limiter-names)                                                                                                | Medium      | Medium      |
+ | L57 | [Laravel queue names](todo/laravel.md#l57-laravel-queue-names)                                                                                                              | Low-Medium  | Medium      |
+ | L61 | [Middleware alias catalogs and transformations](todo/laravel.md#l61-middleware-alias-catalogs-and-transformations)                                                          | Medium      | Medium      |
+-| L62 | [Bound HTTP Kernel registrations](todo/laravel.md#l62-bound-http-kernel-registrations) | Medium | Medium |
+ | L63 | [Dynamic and ambiguous Kernel registration metadata](todo/laravel.md#l63-dynamic-and-ambiguous-kernel-registration-metadata) | Medium | Medium |
++| L64 | [Provider and builder HTTP Kernel selection](todo/laravel.md#l64-provider-and-builder-http-kernel-selection) | Medium | Medium |
+ | L53 | [Collection key types from the column for `keyBy` / `groupBy` / `pluck`](todo/laravel.md#l53-collection-key-types-from-the-column-for-keyby-groupby-pluck)                   | Medium      | Medium      |
+ | L49 | [Unguarded Eloquent mass assignment diagnostic](todo/laravel.md#l49-unguarded-eloquent-mass-assignment-diagnostic)                                                          | Medium      | Medium      |
+ | L17 | [Additional string contexts without booting](todo/laravel.md#l17-additional-string-contexts-without-booting) (middleware, assets, validation, Inertia)                     | Medium      | Medium-High |
+--- a/docs/todo/laravel.md
++++ b/docs/todo/laravel.md
+@@ -645,14 +645,6 @@
+ refactors. Extend argument binding to unpacked call arguments and user-overridden
+ magic registrar methods before accepting those forms. Registration-site discovery must not invent runtime override ordering.
+ 
+-#### L62. Bound HTTP Kernel registrations
+-
+-**Impact: Medium · Complexity: Medium**
+-
+-Discover application-bound HTTP Kernels outside the conventional application file.
+-Connect static container/bootstrap bindings to the effective property catalogs,
+-preserving project/source ownership, dirty updates and complete-target guards.
+-
+ #### L63. Dynamic and ambiguous Kernel registration metadata
+ 
+ **Impact: Medium · Complexity: Medium**
+@@ -663,8 +655,22 @@
+ Preserve complete target/source receipts for class and namespace changes, including
+ unresolved and read-only declaration origins.
+ 
++Model framework callbacks that reset alias properties, including
++`setMiddlewareAliases`, in registration order rather than assuming class defaults
++stay active.
++
+ Prove PHP compatibility of overlapping parent, class and trait property defaults
+ before allowing transformations that could update only one declaration.
++
++#### L64. Provider and builder HTTP Kernel selection
++
++**Impact: Medium · Complexity: Medium**
++
++Follow remaining HTTP Kernel bindings through registered providers, application
++builder callbacks, container aliases and closure factories. Establish application
++identity and framework registration/execution order before replacing property
++catalog roots. Preserve project/source ownership, dirty updates, known alternatives
++and complete-target guards without executing bootstrap code.
+ 
+ #### L57. Laravel queue names
+ 
+--- a/examples/laravel/app/Demo.php
++++ b/examples/laravel/app/Demo.php
+@@ -1790,12 +1790,14 @@
+         Route::get('/audited-demo', fn () => null)->middleware('demo.audit:strict');
+         // A class rename must refuse while this bootstrap target remains a literal string.
+         Route::get('/audited-literal-demo', fn () => null)->middleware('demo.audit.literal');
+-        // The conventional Kernel inherits these static declarations.
++        // The bound SiteKernel inherits these declarations; callbacks may replace runtime maps.
+         Route::get('/kernel-audit-demo', fn () => null)->middleware('demo.kernel.audit:strict');
+         Route::get('/legacy-audit-demo', fn () => null)->middleware('demo.kernel.legacy');
+         // Effective property declarations live in ApplicationKernel and Concerns/KernelAliases.
+         Route::get('/parent-audit-demo', fn () => null)->middleware('demo.kernel.parent');
+         Route::get('/trait-audit-demo', fn () => null)->middleware('demo.kernel.trait');
++        // Try definition on the alias declared by the custom bound Kernel.
++        Route::get('/bound-audit-demo', fn () => null)->middleware('demo.kernel.bound');
+     }
+ 
+     public function excludedMiddlewareNavigation(\Illuminate\Routing\Route $route): void
+--- /dev/null
++++ b/examples/laravel/app/Runtime/SiteKernel.php
+@@ -0,0 +1,15 @@
++<?php
++
++namespace App\Runtime;
++
++use App\Http\Kernel;
++use App\Http\Middleware\AuditRequests;
++
++class SiteKernel extends Kernel
++{
++    protected $routeMiddleware = [
++        'demo.kernel.legacy' => 'App\Http\Middleware\AuditRequests',
++        'demo.kernel.trait' => AuditRequests::class,
++        'demo.kernel.bound' => AuditRequests::class,
++    ];
++}
+--- a/examples/laravel/assertions.php
++++ b/examples/laravel/assertions.php
+@@ -2215,6 +2215,12 @@
+ check('Kernel inherits parent alias defaults', $exampleKernel->getMiddlewareAliases()['demo.kernel.parent'] === \App\Http\Middleware\AuditRequests::class);
+ check('Kernel keeps compatible trait and class alias defaults', $exampleKernel->getMiddlewareAliases()['demo.kernel.trait'] === \App\Http\Middleware\AuditRequests::class);
+ 
++$boundApplication = require __DIR__.'/bootstrap/app.php';
++$boundKernel = $boundApplication->make(\Illuminate\Contracts\Http\Kernel::class);
++check('Bootstrap selects the custom PSR-4 HTTP Kernel', $boundKernel instanceof \App\Runtime\SiteKernel);
++check('Bound Kernel exposes its own legacy alias', $boundKernel->getMiddlewareAliases()['demo.kernel.bound'] === \App\Http\Middleware\AuditRequests::class);
++check('Bound Kernel preserves legacy aliases alongside builder configuration', $boundKernel->getMiddlewareAliases()['demo.kernel.legacy'] === \App\Http\Middleware\AuditRequests::class);
++
+ echo "\n";
+ if ($failed === 0) {
+     echo "\033[32m✓ All $passed assertions passed.\033[0m\n";
+--- a/examples/laravel/bootstrap/app.php
++++ b/examples/laravel/bootstrap/app.php
+@@ -1,5 +1,6 @@
+ <?php
+ 
++use Illuminate\Contracts\Http\Kernel as HttpKernelContract;
+ use Illuminate\Foundation\Application;
+ use Illuminate\Foundation\Configuration\Exceptions;
+ use Illuminate\Foundation\Configuration\Middleware;
+@@ -10,7 +11,7 @@
+  * commands under `app/Actions` are real Artisan commands even though nothing
+  * about their name or location says so.
+  */
+-return Application::configure(basePath: dirname(__DIR__))
++$application = Application::configure(basePath: dirname(__DIR__))
+     ->withRouting(
+         web: __DIR__.'/../routes/web.php',
+     )
+@@ -26,3 +27,8 @@
+     ->withExceptions(function (Exceptions $exceptions) {
+         //
+     })->create();
++
++// The HTTP Kernel may live outside app/Http/Kernel.php.
++$application->singleton(HttpKernelContract::class, \App\Runtime\SiteKernel::class);
++
++return $application;
+--- a/src/virtual_members/laravel/const_eval.rs
++++ b/src/virtual_members/laravel/const_eval.rs
+@@ -110,7 +110,7 @@
+ ///
+ /// Only a plain quoted literal or an integer folds.  An escape sequence or an
+ /// interpolation would mean re-implementing PHP's string syntax over text the
+-/// parser already threw away, and no container key is written that way.
++/// parser already threw away, so this ClassInfo fallback stays conservative; AST literals retain their decoded values.
+ fn literal_text(source: &str) -> Option<String> {
+     let source = source.trim();
+     let quote = source.chars().next()?;
+@@ -278,7 +278,7 @@
+     match expr {
+         Expression::Parenthesized(inner) => const_value(inner.expression, content, scope),
+         Expression::Literal(Literal::String(literal)) => {
+-            match string_literal_text(literal, content) {
++            match literal.value.and_then(crate::atom::literal_bytes_to_str) {
+                 Some(text) => ConstValue::Scalar(text.to_string()),
+                 None => ConstValue::Unknown,
+             }
+@@ -793,17 +793,6 @@
+     ConstValue::Scalar(text)
+ }
+ 
+-/// The source text between a string literal's quotes, including the empty
+-/// string that `''` is.
+-fn string_literal_text<'c>(literal: &LiteralString<'_>, content: &'c str) -> Option<&'c str> {
+-    let start = literal.span.start.offset as usize + 1;
+-    let end = literal.span.end.offset as usize - 1;
+-    if start > end || end > content.len() {
+-        return None;
+-    }
+-    Some(&content[start..end])
+-}
+-
+ fn direct_variable_name<'a>(expr: &Expression<'a>) -> Option<&'a str> {
+     match expr {
+         Expression::Variable(Variable::Direct(variable)) => Some(variable_name(variable)),
+@@ -814,3 +803,42 @@
+ fn variable_name<'a>(variable: &DirectVariable<'a>) -> &'a str {
+     bytes_to_str(variable.name).trim_start_matches('$')
+ }
++
++#[cfg(test)]
++mod decoded_literal_tests {
++    use super::*;
++
++    #[test]
++    fn constant_strings_use_parser_decoded_runtime_values() {
++        for (expression, expected) in [
++            (
++                r"'App\\Runtime\\SiteKernel'",
++                Some(r"App\Runtime\SiteKernel"),
++            ),
++            (r#""\x41\u{1F600}""#, Some("A😀")),
++            (r"'it\'s'", Some("it's")),
++            (r#""$unknown""#, None),
++        ] {
++            let source = format!("<?php {expression};");
++            let values = crate::parser::with_parsed_program(
++                &source,
++                "decoded_constant",
++                |program, content| {
++                    program
++                        .statements
++                        .iter()
++                        .filter_map(|statement| match statement {
++                            Statement::Expression(statement) => Some(const_string(
++                                statement.expression,
++                                content,
++                                &Scope::default(),
++                            )),
++                            _ => None,
++                        })
++                        .collect::<Vec<_>>()
++                },
++            );
++            assert_eq!(values, vec![expected.map(str::to_owned)], "{expression}");
++        }
++    }
++}
+--- /dev/null
++++ b/src/virtual_members/laravel/kernel_binding.rs
+@@ -0,0 +1,356 @@
++//! Bootstrap HTTP Kernel bindings, resolved without executing application code.
++use std::{collections::HashMap, ops::ControlFlow};
++
++use mago_span::HasSpan;
++use mago_syntax::cst::*;
++
++use super::{
++    const_eval::{Scope, const_string},
++    provider_resources::{class_string_fqn, resolved_class_fqn},
++};
++use crate::type_engine::resolver::{Loaders, VarResolutionCtx};
++use crate::{Backend, atom::bytes_to_str, types::ClassInfo};
++
++const CONTRACT: &str = "Illuminate\\Contracts\\Http\\Kernel";
++const APPLICATION: &str = "Illuminate\\Foundation\\Application";
++
++#[derive(Clone, Debug, PartialEq, Eq)]
++pub(crate) enum KernelRoot {
++    Conventional,
++    Bound(String),
++}
++
++#[derive(Default)]
++pub(crate) struct KernelSelection {
++    pub roots: Vec<KernelRoot>,
++    pub complete: bool,
++}
++impl KernelSelection {
++    fn conventional(complete: bool) -> Self {
++        Self {
++            roots: vec![KernelRoot::Conventional],
++            complete,
++        }
++    }
++    fn uncertain(&mut self, target: Option<String>) {
++        self.complete = false;
++        if let Some(target) = target {
++            let root = KernelRoot::Bound(target);
++            if !self.roots.contains(&root) {
++                self.roots.push(root);
++            }
++        }
++    }
++}
++
++#[derive(Default)]
++struct TopLevel {
++    direct: HashMap<(u32, u32), bool>,
++    returned: Option<(Option<String>, u32)>,
++    limit: Option<u32>,
++    certain: bool,
++}
++fn unwrapped<'a>(mut expr: &'a Expression<'a>) -> &'a Expression<'a> {
++    while let Expression::Parenthesized(inner) = expr {
++        expr = inner.expression;
++    }
++    expr
++}
++fn variable(expr: &Expression<'_>) -> Option<String> {
++    match unwrapped(expr) {
++        Expression::Variable(Variable::Direct(var)) => Some(bytes_to_str(var.name).to_owned()),
++        _ => None,
++    }
++}
++fn span(expr: &Expression<'_>) -> (u32, u32) {
++    (expr.span().start.offset, expr.span().end.offset)
++}
++impl TopLevel {
++    fn statements<'a>(&mut self, statements: impl Iterator<Item = &'a Statement<'a>>) {
++        for statement in statements {
++            if self.returned.is_some() {
++                break;
++            }
++            match statement {
++                Statement::Namespace(ns) => self.statements(ns.statements().iter()),
++                Statement::Block(block) => self.statements(block.statements.iter()),
++                Statement::Declare(declare) => match &declare.body {
++                    DeclareBody::Statement(statement) => {
++                        self.statements(std::iter::once(*statement))
++                    }
++                    DeclareBody::ColonDelimited(body) => self.statements(body.statements.iter()),
++                },
++                Statement::Expression(statement) => {
++                    self.direct
++                        .insert(span(unwrapped(statement.expression)), self.certain);
++                }
++                Statement::Return(ret) => {
++                    self.returned = Some((ret.value.and_then(variable), ret.span().start.offset));
++                    self.limit = Some(ret.span().end.offset);
++                }
++                Statement::OpeningTag(_)
++                | Statement::ClosingTag(_)
++                | Statement::Inline(_)
++                | Statement::Use(_)
++                | Statement::Class(_)
++                | Statement::Interface(_)
++                | Statement::Trait(_)
++                | Statement::Enum(_)
++                | Statement::Function(_)
++                | Statement::Constant(_)
++                | Statement::Noop(_) => {}
++                _ => self.certain = false,
++            }
++        }
++    }
++}
++fn in_callable(node: Node<'_, '_>, at: u32) -> bool {
++    let span = node.span();
++    if at < span.start.offset || at >= span.end.offset {
++        return false;
++    }
++    if matches!(
++        node,
++        Node::Function(_) | Node::Method(_) | Node::Closure(_) | Node::ArrowFunction(_)
++    ) {
++        return true;
++    }
++    let mut found = false;
++    node.visit_children(|child| {
++        if !found {
++            found = in_callable(child, at);
++        }
++    });
++    found
++}
++
++struct AssignmentSite {
++    name: String,
++    at: u32,
++    origin: u32,
++    alias: Option<String>,
++    certain: bool,
++}
++fn origin(name: &str, before: u32, sites: &[AssignmentSite], depth: usize) -> Option<u32> {
++    if depth > 64 || depth > sites.len() {
++        return None;
++    }
++    let site = sites
++        .iter()
++        .filter(|site| site.name == name && site.at < before)
++        .max_by_key(|site| site.at)?;
++    if !site.certain {
++        return None;
++    }
++    match &site.alias {
++        Some(alias) => origin(alias, site.at, sites, depth + 1),
++        None => Some(site.origin),
++    }
++}
++struct BindingCall {
++    receiver: Option<String>,
++    at: u32,
++    target: Option<String>,
++    certain: bool,
++    proven: bool,
++}
++fn argument<'a>(
++    args: &'a ArgumentList<'a>,
++    index: usize,
++    name: &[u8],
++) -> Option<&'a Expression<'a>> {
++    let mut value = None;
++    for (position, arg) in args.arguments.iter().enumerate() {
++        let candidate = match arg {
++            Argument::Positional(arg) => {
++                if arg.ellipsis.is_some() {
++                    return None;
++                }
++                (position == index).then_some(arg.value)
++            }
++            Argument::Named(arg) => (arg.name.value == name).then_some(arg.value),
++        };
++        if let Some(candidate) = candidate {
++            if value.is_some() {
++                return None;
++            }
++            value = Some(candidate);
++        }
++    }
++    value
++}
++
++impl Backend {
++    /// Follow bootstrap bindings of the returned Application, preserving uncertain alternatives.
++    pub(crate) fn bootstrap_kernel_selection(&self) -> KernelSelection {
++        let Some(root) = self.workspace.workspace_root.read().clone() else {
++            return KernelSelection::conventional(true);
++        };
++        let path = root.join("bootstrap/app.php");
++        let uri = crate::util::path_to_uri(&path);
++        let Some(content) = self.get_file_content(&uri) else {
++            return KernelSelection::conventional(!path.try_exists().unwrap_or(true));
++        };
++        let _parse = crate::parser::with_parse_cache(&content);
++        let context = self.source_file_context(&content);
++        let Some(names) = context.resolved_names.as_deref() else {
++            return KernelSelection::conventional(false);
++        };
++        let classes = self.class_loaders(&context);
++        let functions = self.function_loaders(&context);
++        let default_class = ClassInfo::default();
++        crate::parser::with_parsed_program(&content, "kernel_binding", |program, content| {
++            let mut top = TopLevel {
++                certain: true,
++                ..Default::default()
++            };
++            top.statements(program.statements.iter());
++            let mut assignments = Vec::new();
++            let mut calls = Vec::new();
++            super::helpers::walk_program_expressions(program, &mut |expr| {
++                let at = expr.span().start.offset;
++                if top.limit.is_some_and(|limit| at >= limit) {
++                    return ControlFlow::Continue(());
++                }
++                if !in_callable(Node::Program(program), at)
++                    && let Expression::Assignment(assign) = expr
++                    && let Some(name) = variable(assign.lhs)
++                {
++                    assignments.push(AssignmentSite {
++                        name,
++                        at,
++                        origin: assign.rhs.span().start.offset,
++                        alias: variable(assign.rhs),
++                        certain: top.direct.get(&span(expr)).copied().unwrap_or(false)
++                            && matches!(assign.operator, AssignmentOperator::Assign(_)),
++                    });
++                }
++                let Expression::Call(Call::Method(call)) = expr else {
++                    return ControlFlow::Continue(());
++                };
++                let ClassLikeMemberSelector::Identifier(method) = &call.method else {
++                    return ControlFlow::Continue(());
++                };
++                let method = method.value.to_ascii_lowercase();
++                if ![
++                    b"bind".as_slice(),
++                    b"singleton",
++                    b"scoped",
++                    b"instance",
++                    b"bindif",
++                    b"singletonif",
++                    b"scopedif",
++                    b"extend",
++                ]
++                .contains(&method.as_slice())
++                {
++                    return ControlFlow::Continue(());
++                }
++                let key = argument(&call.argument_list, 0, b"abstract").and_then(|expr| {
++                    class_string_fqn(unwrapped(expr), names)
++                        .or_else(|| const_string(expr, content, &Scope::default()))
++                });
++                if key.as_deref().is_some_and(|key| key != CONTRACT) {
++                    return ControlFlow::Continue(());
++                }
++                let class_loader = classes.at(call.object.span().start.offset);
++                let function_loader = functions.at(at);
++                let function_loader = |name: &str, offset: u32| function_loader(name, offset);
++                let current = crate::class_lookup::find_class_at_offset(&context.classes, at)
++                    .unwrap_or(&default_class);
++                let ctx = VarResolutionCtx {
++                    backend: Some(self),
++                    loaders: Loaders::with_function(Some(&function_loader)),
++                    resolved_class_cache: Some(&self.resolved_class_cache),
++                    ..VarResolutionCtx::new(
++                        "",
++                        current,
++                        &context.classes,
++                        content,
++                        at,
++                        class_loader,
++                    )
++                };
++                let ty = crate::type_engine::variable::foreach_resolution::resolve_expression_type(
++                    call.object,
++                    &ctx,
++                );
++                let proven = ty.as_ref().is_some_and(|ty| {
++                    crate::class_lookup::is_subtype_of_named(ty, APPLICATION, class_loader)
++                });
++                if !proven
++                    && ty
++                        .as_ref()
++                        .and_then(|ty| ty.base_name())
++                        .and_then(class_loader)
++                        .is_some()
++                {
++                    return ControlFlow::Continue(());
++                }
++                let value = argument(
++                    &call.argument_list,
++                    1,
++                    if method == b"instance" {
++                        b"instance"
++                    } else {
++                        b"concrete"
++                    },
++                );
++                let target = value.and_then(|value| {
++                    let value = unwrapped(value);
++                    if method == b"instance" {
++                        if let Expression::Instantiation(inst) = value
++                            && let Expression::Identifier(id) = inst.class
++                        {
++                            return resolved_class_fqn(id, names);
++                        }
++                        return None;
++                    }
++                    class_string_fqn(value, names)
++                        .or_else(|| const_string(value, content, &Scope::default()))
++                });
++                calls.push(BindingCall {
++                    receiver: (!in_callable(Node::Program(program), at))
++                        .then(|| variable(call.object))
++                        .flatten(),
++                    at,
++                    target,
++                    certain: top.direct.get(&span(expr)).copied().unwrap_or(false)
++                        && key.as_deref() == Some(CONTRACT)
++                        && [b"bind".as_slice(), b"singleton", b"scoped", b"instance"]
++                            .contains(&method.as_slice()),
++                    proven,
++                });
++                ControlFlow::Continue(())
++            });
++            let returned = top.returned.as_ref().and_then(|(name, at)| {
++                name.as_deref()
++                    .and_then(|name| origin(name, *at, &assignments, 0))
++            });
++            calls.sort_by_key(|call| call.at);
++            let mut selection = KernelSelection::conventional(program.errors.is_empty());
++            for call in calls {
++                let owner = call
++                    .receiver
++                    .as_deref()
++                    .and_then(|name| origin(name, call.at, &assignments, 0));
++                if owner.is_some() && returned.is_some() && owner != returned {
++                    continue;
++                }
++                if owner.is_some() && owner == returned && call.certain && !call.proven {
++                    selection.roots.clear();
++                    selection.complete = false;
++                    continue;
++                }
++                if owner.is_none() || returned.is_none() || !call.proven || !call.certain {
++                    selection.uncertain(call.target);
++                } else {
++                    selection.roots = call.target.map(KernelRoot::Bound).into_iter().collect();
++                    selection.complete =
++                        !selection.roots.is_empty() && program.errors.is_empty() && top.certain;
++                }
++            }
++            selection
++        })
++    }
++}
+--- a/src/virtual_members/laravel/kernel_middleware.rs
++++ b/src/virtual_members/laravel/kernel_middleware.rs
+@@ -193,18 +193,56 @@
+         let Some(root) = self.workspace.workspace_root.read().clone() else {
+             return Some(sources);
+         };
+-        let path = root.join("app/Http/Kernel.php");
+-        let uri = crate::util::path_to_uri(&path);
+-        let Some(content) = self.get_file_content(&uri) else {
+-            return (!path.try_exists().unwrap_or(true)).then_some(sources);
+-        };
+-        sources.complete = self.kernel_source_syntax_valid(&uri, &content);
+-        let context = self.source_file_context(&content);
++        let selection = self.bootstrap_kernel_selection();
++        sources.complete = selection.complete;
++        for selected in selection.roots {
++            let (uri, fqn) = match selected {
++                super::kernel_binding::KernelRoot::Conventional => (
++                    crate::util::path_to_uri(&root.join("app/Http/Kernel.php")),
++                    None,
++                ),
++                super::kernel_binding::KernelRoot::Bound(fqn) => {
++                    let Some(uri) = self.find_class_file_uri_for_fqn(&fqn) else {
++                        sources.complete = false;
++                        continue;
++                    };
++                    (uri, Some(fqn))
++                }
++            };
++            let Some(content) = self.get_file_content(&uri) else {
++                if fqn.is_some()
++                    || tower_lsp::lsp_types::Url::parse(&uri)
++                        .ok()
++                        .and_then(|uri| uri.to_file_path().ok())
++                        .is_none_or(|path| path.try_exists().unwrap_or(true))
++                {
++                    sources.complete = false;
++                }
++                continue;
++            };
++            self.collect_kernel_alias_sources(&uri, &content, fqn.as_deref(), &mut sources);
++        }
++        Some(sources)
++    }
++
++    fn collect_kernel_alias_sources(
++        &self,
++        uri: &str,
++        content: &str,
++        selected: Option<&str>,
++        sources: &mut KernelAliasSources,
++    ) {
++        let mut found = false;
++        sources.complete &= self.kernel_source_syntax_valid(uri, content);
++        let context = self.source_file_context(content);
+         let loaders = self.class_loaders(&context);
+         for class in &context.classes {
+-            if class.kind != ClassLikeKind::Class {
++            if class.kind != ClassLikeKind::Class
++                || selected.is_some_and(|fqn| identity(fqn) != identity(&class.fqn()))
++            {
+                 continue;
+             }
++            found = true;
+             let loaded = RefCell::new(HashMap::new());
+             loaded
+                 .borrow_mut()
+@@ -227,7 +265,10 @@
+                 "Illuminate\\Foundation\\Http\\Kernel",
+                 &loader,
+             ) {
+-                if missing.get() || !complete_graph(class, &loaded.borrow(), false) {
++                if selected.is_some()
++                    || missing.get()
++                    || !complete_graph(class, &loaded.borrow(), false)
++                {
+                     sources.complete = false;
+                 }
+                 continue;
+@@ -236,8 +277,8 @@
+             let graph_complete = !missing.get()
+                 && complete_graph(class, &loaded.borrow(), true)
+                 && self.kernel_graph_sources_valid(
+-                    &uri,
+-                    &content,
++                    uri,
++                    content,
+                     class,
+                     loaded.borrow().values().cloned().collect(),
+                 );
+@@ -299,7 +340,7 @@
+                         .get_property(name)
+                         .map_or(0, |property| property.name_offset);
+                     let owner_uri = if own {
+-                        Some(uri.clone())
++                        Some(uri.to_owned())
+                     } else {
+                         self.find_class_file_uri_for_fqn(&owner.fqn())
+                     };
+@@ -322,7 +363,9 @@
+                 }
+             }
+         }
+-        Some(sources)
++        if selected.is_some() && !found {
++            sources.complete = false;
++        }
+     }
+ 
+     pub(crate) fn confirmed_kernel_alias_site(
+--- a/src/virtual_members/laravel/middleware_aliases.rs
++++ b/src/virtual_members/laravel/middleware_aliases.rs
+@@ -177,7 +177,9 @@
+                 .filter(eligible)
+                 .filter(|target| {
+                     name.is_none_or(|name| target.name.as_deref() == Some(name))
+-                        && confirmed.iter().any(|span| {
++                        // Kernel ownership comes from this request's bootstrap selection,
++                        // not a receiver cache warmed for a different active Kernel.
++                        && ((!require_complete && target.receiver == crate::symbol_map::ViewReceiverClass::KernelMiddlewareAliasDeclaration) || confirmed.iter().any(|span| {
+                             Some(span.start)
+                                 == if require_complete {
+                                     target.target_value_span.map(|span| span.0)
+@@ -192,7 +194,7 @@
+                                         ..
+                                     }
+                                 )
+-                        })
++                        }))
+                 })
+                 .map(|target| MiddlewareAliasDefinition {
+                     location: crate::definition::point_location(
+--- a/src/virtual_members/laravel/mod.rs
++++ b/src/virtual_members/laravel/mod.rs
+@@ -123,6 +123,7 @@
+ pub(crate) mod gates;
+ pub(crate) mod helpers;
+ mod higher_order_proxy;
++mod kernel_binding;
+ mod kernel_middleware;
+ mod macros;
+ mod magic_uses;
+--- a/src/virtual_members/laravel/provider_resources.rs
++++ b/src/virtual_members/laravel/provider_resources.rs
+@@ -1342,7 +1342,10 @@
+ 
+ /// The FQN an `X::class` expression spells, or `None` for any other
+ /// expression.
+-fn class_string_fqn(expr: &Expression<'_>, resolved: &OwnedResolvedNames) -> Option<String> {
++pub(super) fn class_string_fqn(
++    expr: &Expression<'_>,
++    resolved: &OwnedResolvedNames,
++) -> Option<String> {
+     let Expression::Access(Access::ClassConstant(access)) = expr else {
+         return None;
+     };
+@@ -1362,7 +1365,10 @@
+ /// The FQN a class-name identifier resolves to, through the file's namespace
+ /// and `use` statements, falling back to the written name when the resolver
+ /// did not track the offset.
+-fn resolved_class_fqn(ident: &Identifier<'_>, resolved: &OwnedResolvedNames) -> Option<String> {
++pub(super) fn resolved_class_fqn(
++    ident: &Identifier<'_>,
++    resolved: &OwnedResolvedNames,
++) -> Option<String> {
+     if let Some(fqn) = resolved.get(ident.span().start.offset) {
+         return Some(fqn.trim_start_matches('\\').to_string());
+     }
+--- a/tests/integration/laravel_middleware_aliases.rs
++++ b/tests/integration/laravel_middleware_aliases.rs
+@@ -1926,3 +1926,305 @@
+         "ambiguous ownership must not authorize edits: {result:?}"
+     );
+ }
++
++const BOUND_BOOTSTRAP: &str = r#"<?php
++use Illuminate\Contracts\Http\Kernel as HttpKernel;
++use App\Runtime\SiteKernel as ProjectKernel;
++$app = new \Illuminate\Foundation\Application;
++$app->singleton(HttpKernel::class, ProjectKernel::class);
++return $app;
++"#;
++const SITE_KERNEL: &str = r#"<?php
++namespace App\Runtime;
++use App\Http\Middleware\Trace as BoundTarget;
++class SiteKernel extends \Illuminate\Foundation\Http\Kernel {
++    protected $middlewareAliases = [/* 😀 */ "au\x64ited" => BoundTarget::class];
++}
++"#;
++
++async fn bound_kernel_workspace(
++    bootstrap: &str,
++    extra: &[(&str, &str)],
++) -> (Backend, tempfile::TempDir, Url, Url) {
++    let arena = mago_allocator::LocalArena::new();
++    let parsed = mago_syntax::parser::parse_file_content(
++        &arena,
++        mago_database::file::FileId::new(b"bootstrap.php"),
++        bootstrap.as_bytes(),
++    );
++    assert!(
++        parsed.errors.is_empty(),
++        "bootstrap fixture syntax: {:?}\n{bootstrap}",
++        parsed.errors
++    );
++    let mut files = vec![
++        ("bootstrap/app.php", bootstrap),
++        ("app/Runtime/SiteKernel.php", SITE_KERNEL),
++        (
++            "framework/Contracts/Http/Kernel.php",
++            "<?php namespace Illuminate\\Contracts\\Http; interface Kernel {}",
++        ),
++        (
++            "framework/Foundation/Application.php",
++            "<?php namespace Illuminate\\Foundation; class Application {public function bind($abstract,$concrete=null,$shared=false): void {} public function singleton($abstract,$concrete=null): void {} public function scoped($abstract,$concrete=null): void {} public function instance($abstract,$instance): object {return $instance;}}",
++        ),
++    ];
++    files.extend_from_slice(extra);
++    kernel_workspace_extra(KERNEL, &files).await
++}
++
++async fn assert_bound_kernel(
++    backend: &Backend,
++    dir: &std::path::Path,
++    route: &Url,
++    relative: &str,
++) {
++    let found = definitions(backend, route, SOURCE, "middleware('aud").await;
++    assert_eq!(found.len(), 1, "bound Kernel alias: {found:?}");
++    assert_eq!(
++        found[0].uri,
++        Url::from_file_path(dir.join(relative)).unwrap()
++    );
++    let detail = hover(backend, route, SOURCE, "middleware('aud").await;
++    assert!(detail.contains(relative), "{detail}");
++}
++
++#[tokio::test]
++async fn bound_kernel_bootstrap_literal_bindings_select_only_the_bound_declaration() {
++    for call in [
++        "$app->bind(HttpKernel::class, ProjectKernel::class);",
++        "$app->singleton(HttpKernel::class, ProjectKernel::class);",
++        "$app->scoped(concrete: ProjectKernel::class, abstract: HttpKernel::class);",
++        "$app->instance(HttpKernel::class, new ProjectKernel);",
++        "$app->singleton('Illuminate\\\\Contracts\\\\Http\\\\Kernel', 'App\\\\Runtime\\\\SiteKernel');",
++    ] {
++        let bootstrap = BOUND_BOOTSTRAP.replace(
++            "$app->singleton(HttpKernel::class, ProjectKernel::class);",
++            call,
++        );
++        let (backend, dir, route, conventional) = bound_kernel_workspace(&bootstrap, &[]).await;
++        assert_bound_kernel(&backend, dir.path(), &route, "app/Runtime/SiteKernel.php").await;
++        let detail = hover(&backend, &route, SOURCE, "middleware('aud").await;
++        assert!(
++            detail.contains("Middleware\\Trace") && !detail.contains("Middleware\\Audit"),
++            "{detail}"
++        );
++        let references = find_references(
++            &backend,
++            &route,
++            position_after(SOURCE, "middleware('aud"),
++            true,
++        )
++        .await;
++        assert!(
++            !references
++                .iter()
++                .any(|reference| reference.uri == conventional),
++            "{references:?}"
++        );
++        let selected = references
++            .iter()
++            .find(|reference| reference.uri.path().ends_with("SiteKernel.php"))
++            .unwrap();
++        assert_eq!(
++            selected.range.end.character - selected.range.start.character,
++            10
++        );
++    }
++}
++
++#[tokio::test]
++async fn bound_kernel_bootstrap_tracks_object_aliases_and_ignores_other_applications() {
++    for prefix in [
++        "$alias=$app; $alias->singleton(HttpKernel::class,ProjectKernel::class);",
++        "$other=new \\Illuminate\\Foundation\\Application; $other->singleton(HttpKernel::class,\\App\\Http\\Kernel::class); $app->singleton(HttpKernel::class,ProjectKernel::class);",
++        "$app->singleton(HttpKernel::class,\\App\\Http\\Kernel::class); $app=new \\Illuminate\\Foundation\\Application; $app->singleton(HttpKernel::class,ProjectKernel::class);",
++        "$app->singleton(HttpKernel::class,ProjectKernel::class); $other=new \\Illuminate\\Foundation\\Application; $other->singleton(HttpKernel::class,\\App\\Http\\Kernel::class);",
++    ] {
++        let bootstrap = BOUND_BOOTSTRAP.replace(
++            "$app->singleton(HttpKernel::class, ProjectKernel::class);",
++            prefix,
++        );
++        let (backend, dir, route, _) = bound_kernel_workspace(&bootstrap, &[]).await;
++        assert_bound_kernel(&backend, dir.path(), &route, "app/Runtime/SiteKernel.php").await;
++    }
++}
++
++#[tokio::test]
++async fn bound_kernel_bootstrap_dirty_switch_retires_inactive_receiver_caches() {
++    let next = SITE_KERNEL
++        .replace("SiteKernel", "NextKernel")
++        .replace("Middleware\\Trace", "Middleware\\Audit");
++    let (backend, dir, route, conventional) =
++        bound_kernel_workspace(BOUND_BOOTSTRAP, &[("app/Runtime/NextKernel.php", &next)]).await;
++    let next_uri = Url::from_file_path(dir.path().join("app/Runtime/NextKernel.php")).unwrap();
++    open_document(&backend, &next_uri, "php", &next).await;
++    let _ = hover(&backend, &next_uri, &next, "\"au").await;
++    assert_bound_kernel(&backend, dir.path(), &route, "app/Runtime/SiteKernel.php").await;
++    let bootstrap_uri = Url::from_file_path(dir.path().join("bootstrap/app.php")).unwrap();
++    open_document(&backend, &bootstrap_uri, "php", BOUND_BOOTSTRAP).await;
++    let changed = BOUND_BOOTSTRAP.replace("SiteKernel as", "NextKernel as");
++    assert_eq!(changed.len(), BOUND_BOOTSTRAP.len());
++    backend
++        .did_change(DidChangeTextDocumentParams {
++            text_document: VersionedTextDocumentIdentifier {
++                uri: bootstrap_uri.clone(),
++                version: 2,
++            },
++            content_changes: vec![TextDocumentContentChangeEvent {
++                range: None,
++                range_length: None,
++                text: changed,
++            }],
++        })
++        .await;
++    assert_bound_kernel(&backend, dir.path(), &route, "app/Runtime/NextKernel.php").await;
++    let refs = find_references(
++        &backend,
++        &route,
++        position_after(SOURCE, "middleware('aud"),
++        true,
++    )
++    .await;
++    assert!(
++        !refs.iter().any(|reference| reference.uri == conventional
++            || reference.uri.path().ends_with("SiteKernel.php")),
++        "{refs:?}"
++    );
++    backend
++        .did_change(DidChangeTextDocumentParams {
++            text_document: VersionedTextDocumentIdentifier {
++                uri: bootstrap_uri,
++                version: 3,
++            },
++            content_changes: vec![TextDocumentContentChangeEvent {
++                range: None,
++                range_length: None,
++                text: BOUND_BOOTSTRAP.into(),
++            }],
++        })
++        .await;
++    assert_bound_kernel(&backend, dir.path(), &route, "app/Runtime/SiteKernel.php").await;
++    assert_eq!(
++        std::fs::read_to_string(dir.path().join("bootstrap/app.php")).unwrap(),
++        BOUND_BOOTSTRAP
++    );
++}
++
++#[tokio::test]
++async fn bound_kernel_bootstrap_unknown_targets_cannot_restore_conventional_origins() {
++    for target in [
++        "$unknown",
++        "fn()=>new ProjectKernel",
++        "\\App\\Runtime\\MissingKernel::class",
++    ] {
++        let bootstrap = BOUND_BOOTSTRAP.replace("ProjectKernel::class", target);
++        let (backend, dir, route, _) = bound_kernel_workspace(&bootstrap, &[]).await;
++        assert!(
++            definitions(&backend, &route, SOURCE, "middleware('aud")
++                .await
++                .is_empty(),
++            "{target}"
++        );
++        let path = dir.path().join("app/Http/Middleware/Trace.php");
++        let text = std::fs::read_to_string(&path).unwrap();
++        let uri = Url::from_file_path(path).unwrap();
++        open_document(&backend, &uri, "php", &text).await;
++        let result = settled_target_rename(&backend, &uri, &text, "class Tra", "Traced").await;
++        assert!(
++            result.is_err(),
++            "unresolved active Kernel cannot authorize edits: {result:?}"
++        );
++    }
++}
++
++#[tokio::test]
++async fn bound_kernel_bootstrap_conditional_targets_keep_alternatives_and_refuse_edits() {
++    let bootstrap = BOUND_BOOTSTRAP.replace("$app->singleton", "if ($condition) $app->singleton");
++    let (backend, dir, route, conventional) = bound_kernel_workspace(&bootstrap, &[]).await;
++    let found = definitions(&backend, &route, SOURCE, "middleware('aud").await;
++    assert_eq!(found.len(), 2, "{found:?}");
++    assert!(found.iter().any(|location| location.uri == conventional));
++    assert!(
++        found
++            .iter()
++            .any(|location| location.uri.path().ends_with("SiteKernel.php"))
++    );
++    let path = dir.path().join("app/Http/Middleware/Trace.php");
++    let text = std::fs::read_to_string(&path).unwrap();
++    let uri = Url::from_file_path(path).unwrap();
++    open_document(&backend, &uri, "php", &text).await;
++    assert!(
++        settled_target_rename(&backend, &uri, &text, "class Tra", "Traced")
++            .await
++            .is_err()
++    );
++}
++
++#[tokio::test]
++async fn bound_kernel_bootstrap_checked_rename_updates_the_selected_import() {
++    let (backend, dir, _, conventional) = bound_kernel_workspace(BOUND_BOOTSTRAP, &[]).await;
++    let path = dir.path().join("app/Http/Middleware/Trace.php");
++    let text = std::fs::read_to_string(&path).unwrap();
++    let uri = Url::from_file_path(path).unwrap();
++    open_document(&backend, &uri, "php", &text).await;
++    let edit = settled_target_rename(&backend, &uri, &text, "class Tra", "Traced")
++        .await
++        .unwrap()
++        .unwrap();
++    let changes = edit.changes.unwrap();
++    let selected = Url::from_file_path(dir.path().join("app/Runtime/SiteKernel.php")).unwrap();
++    assert!(
++        changes[&selected]
++            .iter()
++            .any(|edit| edit.new_text.contains("Traced")),
++        "{changes:?}"
++    );
++    assert!(!changes.contains_key(&conventional));
++}
++
++#[tokio::test]
++async fn bound_kernel_bootstrap_reuses_parent_and_trait_property_ownership() {
++    for (body, extra, relative) in [
++        (
++            "class SiteKernel extends ParentKernel {}",
++            SITE_KERNEL.replace("SiteKernel", "ParentKernel"),
++            "app/Runtime/ParentKernel.php",
++        ),
++        (
++            "class SiteKernel extends \\Illuminate\\Foundation\\Http\\Kernel {use AliasTrait;}",
++            SITE_KERNEL.replace(
++                "class SiteKernel extends \\Illuminate\\Foundation\\Http\\Kernel",
++                "trait AliasTrait",
++            ),
++            "app/Runtime/AliasTrait.php",
++        ),
++    ] {
++        let selected = format!("<?php namespace App\\Runtime; {body}");
++        let (backend, dir, route, _) = bound_kernel_workspace(
++            BOUND_BOOTSTRAP,
++            &[
++                ("app/Runtime/SiteKernel.php", &selected),
++                (relative, &extra),
++            ],
++        )
++        .await;
++        assert_bound_kernel(&backend, dir.path(), &route, relative).await;
++    }
++}
++
++#[tokio::test]
++async fn bound_kernel_bootstrap_unused_callable_locals_do_not_replace_the_returned_object() {
++    let bootstrap=BOUND_BOOTSTRAP.replace("return $app;","function unused() {$app = new \\Illuminate\\Foundation\\Application; return $app;} return $app; $app->singleton(HttpKernel::class,\\App\\Http\\Kernel::class);");
++    let (backend, dir, route, _) = bound_kernel_workspace(&bootstrap, &[]).await;
++    assert_bound_kernel(&backend, dir.path(), &route, "app/Runtime/SiteKernel.php").await;
++}
++
++#[tokio::test]
++async fn bound_kernel_bootstrap_container_keys_retain_runtime_case_sensitivity() {
++    let bootstrap = BOUND_BOOTSTRAP.replace("$app->singleton(HttpKernel::class, ProjectKernel::class);", r"$app->singleton(HttpKernel::class, \App\Http\Kernel::class); $app->singleton('illuminate\\contracts\\http\\kernel', ProjectKernel::class);");
++    let (backend, _dir, route, conventional) = bound_kernel_workspace(&bootstrap, &[]).await;
++    let found = definitions(&backend, &route, SOURCE, "middleware('aud").await;
++    assert_eq!(found.len(), 1);
++    assert_eq!(found[0].uri, conventional);
++}

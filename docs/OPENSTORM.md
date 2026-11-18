@@ -15,6 +15,73 @@ slice, commit and push it, and retain only the latest generated app. Native UI
 cases remain deferred/unverified; earlier native-first blocking checkpoints are
 historical and no longer prevent independent implementation.
 
+Engine source slice149 (2026-11-18, verified;167 inactive): follow literal
+bootstrap HTTP Kernel bindings of the returned Application instead of always
+selecting app/Http/Kernel.php. A syntax/autoload/runtime-validated fixture proves
+shipped166 navigates to the wrong conventional alias. Reuse shared type resolution,
+source ownership and the inherited/trait property catalog for bind/singleton/scoped
+and literal instance bindings, including named arguments and Application variable
+aliases. Distinguish separate Application objects; ignore dormant local assignments
+and unreachable bindings. Known conditional alternatives stay incomplete; opaque
+or missing targets cannot silently restore conventional origins, and unsafe checked
+renames are refused. PHP constant strings use parser-decoded runtime values, while
+container key matching preserves PHP's case sensitivity.
+
+Nine public integration regressions and one private literal regression pass in the
+frozen-source suite:18,618 ordinary passes/17 ignored plus2 bounded children. The
+initial string-key failure exposed raw-source constant folding; the final remaining
+case was a test lifetime error that deleted its TempDir before navigation. Preserve
+both failed logs and the correction; no production guard was weakened. Default and
+mem-audit release all-target Clippy, formatting, exact source reconstruction and
+standalone default build pass. Patch0167 replays byte-for-byte; Cargo.toml/Cargo.lock,
+build.rs, PHPantom MIT and stubs inputs stay unchanged. All26 final executable-bound
+stdio groups pass. New custom-Kernel checks cover UTF-16 encoded declarations,
+references excluding inactive maps, checked rename previews, stale bootstrap
+refusal, same-length unsaved switches, restoration and dirty replay after restart. Existing language targets, inherited
+parent/trait ownership, guarded refactoring, route/resource/receiver exclusions,
+project freshness and descriptor isolation stay green. Every owned child exits0;
+originals and borrowed inputs are unchanged.
+
+All12 plain-PHP syntax/runtime checks and119 Laravel syntax checks/355 runtime
+assertions pass. The real Laravel13.37 example binds a custom SiteKernel and proves
+its legacy map reaches the actual container-resolved kernel. Real-engine navigation,
+references, dirty retirement/restart and incomplete checked-rename refusal pass for
+both the new bound-only alias and inherited parent alias. Analyzer output remains
+exactly the same3 deliberate diagnostics at their original locations, expected exit1.
+Laravel's builder callbacks can replace modern middlewareAliases at runtime; this
+bounded static slice does not claim those class defaults survive every boot path.
+Provider/builder selection, container aliases and closure factories remain L64;
+callback/property mutation order and dynamic registration metadata remain L63.
+
+Inactive PHPantom0.11.1-openstorm.167 SHA256:
+cd17bb14d8c699d05b24242f81b1a73750e85cae072b6be0a5c611e471b0d35c.
+Source series SHA256:c1013a3d96305769f7cef1baccb8fcbe43b97399c35ade07e519cfbfe15b6cb0.
+Candidate:artifacts/engines/0.11.1-openstorm.167/phpantom_lsp; arm64 and only macOS
+system runtime libraries. Source/provenance/licenses and immutable build receipt
+SHA256:7467a29323365948f87a2e60ed665d01202d35e85c5dfdcdc8fc754f8d16fd6a.
+Genuine OpenStorm client/host adoption and packaging follow as separate slices.
+App104/default166 hashes and deep/strict signature remain unchanged; App104 stays
+the sole generated app. Clean compiler output and mutable scratch only after exact
+source comparison and archive verification; removed
+2,445,107,407 logical bytes. Preserve canonical source,
+engines, Workbench, fixtures and receipts. Reuse unchanged147 frontend13,393/6 skipped,
+serialized workspace5,152/206 ignored/one retained HTTP exclusion,89 genuine166
+client/host cases and148 package checks. No fresh root frontend/workspace or native
+claim for this source-only slice. Native checks stay user-skipped; no install,
+migration, updater activation or new debugger functionality. All69 areas remain
+67 partial/2 user-deferred. Commit/push this source slice and verify its remote ref
+before starting the next dependent client slice.
+
+Wire harness corrections accept a singleton definition response and use an actual
+equal-length replacement key. Preserve the failed harness logs; the final affected
+probe passes against unchanged engine bytes, retaining the other25 passing groups.
+
+Evidence:artifacts/checks/slice149-{source-freeze,engine-gates,source-test-summary,
+wire-gates,baseline166,bound-kernel-final,real-bound-kernel,real-kernel,new-example-checks,
+playground,runtime-libraries,retention,final-check}.json; final/stage logs and
+slice149/{clippy-fix-final,fmt-final,focused-initial,focused-decoded,focused-case-debug}.log;
+canonical167 build receipt and a delivery sidecar after Git remote verification.
+
 Package slice148 (2026-11-18, signed local App0.1.104 verified): promote
 source/stdio/client/host-verified PHPantom166 and the existing PHP language-level
 adapter into the default resource pin and signed development app. Explicit PHP

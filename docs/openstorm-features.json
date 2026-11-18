@@ -271,7 +271,8 @@
       "openstorm_evidence": [
         "0.1.57: real-client stale builtin target after Composer8.3 + restart reproduced/fixed; frontend/LSP PHP builtin cache revalidation, mixed-target refusal and existing readonly host-buffer refresh pass. Native same-tab/same-URI8.2->8.3 after restart, readonly typing/Save All, no-argument relaunch and process cleanup pass. Full5,330 frontend/1,740 Rust tests, fmt/Clippy pass. The old-URI polling timeout is reinterpreted by Slice58; builtin-tab session restoration remains open. Engine130 unchanged; see docs/OPENSTORM.md.",
         "Slice58 with unchanged app0.1.57/engine130: actual client and native Composer8.3->8.4->8.3 changes apply without process restart; fresh builtin navigation contexts1/3/5 and array_find availability track target. Client unsaved Unicode dependency survives; native Tab completion/save/undo/redo exact bytes verified. All5,330 frontend/1,740 Rust tests plus fmt/Clippy pass; native relaunch/quit and exact fixture restoration pass. Retained latest0.1.57 runtime unchanged; compiler output cleaned. See docs/OPENSTORM.md.",
-        "Slice146/147: explicit PHP target override in pinned PHPantom166 and existing SDK/settings adapter; root/nested saved-target Auto, versioned builtin navigation and applied builtin banners, dirty buffer replay/restart verified through the production host. Same compiled case fails on165 and passes on166;89 genuine client/host cases,5152 workspace and13393 frontend passes. Engine18608 ordinary passes plus2 bounded checks; source exact replay, both Clippy modes and24 stdio groups pass. Candidate inactive pending packaging; App103/default165 unchanged; native UI user-skipped. See docs/OPENSTORM.md."
+        "Slice146/147: explicit PHP target override in pinned PHPantom166 and existing SDK/settings adapter; root/nested saved-target Auto, versioned builtin navigation and applied builtin banners, dirty buffer replay/restart verified through the production host. Same compiled case fails on165 and passes on166;89 genuine client/host cases,5152 workspace and13393 frontend passes. Engine18608 ordinary passes plus2 bounded checks; source exact replay, both Clippy modes and24 stdio groups pass. Candidate inactive pending packaging; App103/default165 unchanged; native UI user-skipped. See docs/OPENSTORM.md.",
+        "Slice148: signed local arm64 development App0.1.104/default166 contains the verified PHP level adapter. All20 embedded stage groups pass, including explicit/Auto targets, saved refresh/dirty buffers, builtin gates, invalid-init recovery, inherited Kernel and real Laravel13.37;118 syntax/352 runtime assertions and3 deliberate diagnostics. Exact hashes/provenance, licenses, signature, source receipt and sole-app/compiler cleanup verify. Native UI remains user-skipped; Auto widget/profile/extension/framework gates remain partial. See docs/OPENSTORM.md."
       ],
       "remaining": "Complete unavailable syntax/functions, extension selection, settings and framework/version invalidation matrices. Composer8.3/8.4 live navigation and versioned function completion have bounded client/native evidence; no whole-profile acceptance. Auto status widget remains Composer-derived and can differ from saved PHPantom profiles; use the active target context for accurate widget display."
     },
@@ -1278,38 +1279,39 @@
     "notarized": false
   },
   "current_local_delivery": {
-    "package_slice": 145,
-    "source_slices": [143, 144],
-    "verification_slices": [143, 144, 145],
-    "app": "0.1.103",
-    "engine": "0.11.1-openstorm.165",
+    "package_slice": 148,
+    "source_slices": [146, 147],
+    "verification_slices": [146, 147, 148],
+    "app": "0.1.104",
+    "engine": "0.11.1-openstorm.166",
     "local_delivery": {
-      "bundle": "/Users/longdo/Code/openidea/artifacts/batches/0.1.103/OpenStorm.app",
-      "version": "0.1.103",
+      "bundle": "/Users/longdo/Code/openidea/artifacts/batches/0.1.104/OpenStorm.app",
+      "version": "0.1.104",
       "identifier": "cz.thinky.openstorm",
       "minimum_os": "13.0",
       "architecture": "arm64",
       "signature": true,
-      "engine_sha256": "2701aaaea7adb7a567f291e25f84cf84eab0b351792b71e88e324ab3a497d732",
-      "executable_sha256": "a5af62f8f7ec37fa1a5eecd4d5b281a950ee4a0a0d479e435426a8997c6ec9c7",
+      "engine_sha256": "f68ad4d7628d387f401b109d19c526948fe089781f23a3f383552f7cfa992d71",
+      "executable_sha256": "d9cdd425a075f69f6170e8274d2141672f5e2f0b0ae903b8881048f536bc3028",
       "sole_archive": true,
       "compiler_target_removed": true,
       "native_ui": "user-skipped;app not launched/installed/notarized",
-      "compiled_source_unchanged": false
+      "compiled_source_unchanged": true
     },
     "profile": "development",
     "signing": "ad-hoc; deep/strict verified",
     "installed": false,
     "notarized": false,
-    "compiler_cleanup": "slice147: 27809990035 compiler bytes and 68853451 frontend bytes removed; compiler root and dist absent",
-    "evidence": "artifacts/checks/slice145/final-check.json; artifacts/batches/0.1.103/build-receipt.json; artifacts/checks/slice147/retention.json",
+    "compiler_cleanup": "Packaging recipe cargo-cleaned its compiler root and removed duplicate staging; dist removed after embedded checks.",
+    "evidence": "artifacts/checks/slice148/final-check.json; artifacts/batches/0.1.104/build-receipt.json",
     "later_source_checkpoint": {
       "slice": 147,
       "source_slice": 146,
-      "packaged": false,
+      "packaged": true,
+      "promotion_package_slice": 148,
       "engine": "0.11.1-openstorm.166",
-      "description": "Explicit PHP language-level adapter and candidate166 verified; current App103/default165 remain unchanged. Auto status widget remains Composer-derived.",
-      "evidence": "artifacts/checks/slice147/retention.json; artifacts/engines/0.11.1-openstorm.166/client-host-receipt.json"
+      "description": "Explicit PHP language-level adapter and candidate166 packaged in App104; Auto status widget remains Composer-derived.",
+      "evidence": "artifacts/checks/slice147/retention.json; artifacts/checks/slice148/final-check.json"
     }
   },
   "invokable_handler_navigation_candidate": {

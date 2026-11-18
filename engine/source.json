@@ -2,8 +2,8 @@
   "repository": "https://github.com/PHPantom-dev/phpantom_lsp",
   "commit": "1756b1f920c1290d4c4fdd4d2c902fad53a75cd3",
   "archive_sha256": "f0a1dc7fa44d309e6d5e8ed65a2075749c1fc177b45820031f58290f1aec5cee",
-  "patches_sha256": "5b3b3fe61b67b52b8b57cdf6ace9cd00acc69005f6ef7f62a37ec473f6d5571f",
-  "version": "0.11.1-openstorm.165",
+  "patches_sha256": "985f258917408ea0d62293f553f205996b6f5cedcfc4fb9c8754e5e1c88b45f5",
+  "version": "0.11.1-openstorm.166",
   "patches": [
     {
       "file": "0001-workspace-tool-policy.patch",
@@ -664,6 +664,10 @@
     {
       "file": "0165-inherited-kernel-middleware-aliases.patch",
       "sha256": "dc697129d08224b4279fc7826baac44839a19f5b4841319c77ff2a1edf744619"
+    },
+    {
+      "file": "0166-editor-php-language-level.patch",
+      "sha256": "b85368e53f924a5dd20c142859314e2aa74f5f5a959fadc234cfd2e0a9acccde"
     }
   ]
 }

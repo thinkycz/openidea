@@ -15,6 +15,64 @@ slice, commit and push it, and retain only the latest generated app. Native UI
 cases remain deferred/unverified; earlier native-first blocking checkpoints are
 historical and no longer prevent independent implementation.
 
+Package slice148 (2026-11-18, signed local App0.1.104 verified): promote
+source/stdio/client/host-verified PHPantom166 and the existing PHP language-level
+adapter into the default resource pin and signed development app. Explicit PHP
+version selections override saved/Composer targets; Auto keeps each project's
+engine policy. The Composer-derived Auto status widget remains a tracked gap;
+readable builtin banners report the applied target. Retain inherited parent/trait
+Kernel aliases, encoded navigation, dirty replay, checked edits and conservative
+partial-result refusals. Native UI stays user-skipped; no whole-profile claim.
+
+Branding/identifier, independent settings/caches, .openidea compatibility,
+appearance/keymaps/autosave, conflict protection and debugger scope are preserved.
+Updater endpoints stay empty. All45 local Cargo versions move0.1.103 to0.1.104;
+external lockfile blocks and plugin API1.10.0 stay unchanged. Checksums, source
+fingerprint, typecheck/lint/format/knip, version-helper tests, Rust formatting,
+three bundled-server checks, PHP default/optional-companion check and ide-tools
+Clippy pass. Reuse slice147's fresh5,152 workspace passes/206 ignored/one retained
+HTTP exclusion,89 genuine166 client/host passes and13,393 frontend passes/6 skipped.
+Retain the default-parallel CLI socket-test limitation and the packaged debug
+linker warning about the oversized __eh_frame unwind table. Identical166 retains
+source146's18,608 ordinary engine passes/17 ignored plus2 bounded checks, both
+Clippy modes, exact replay/build and24 stdio stages. These layers do not prove UI.
+
+Build an arm64 development/debug app with production frontend assets and passing
+Safari15.4 checks. Ad-hoc sign and verify deep/strict signature, identifier
+cz.thinky.openstorm and version0.1.104. Minimum-OS13.0 metadata verifies; actual
+macOS13 runtime remains untested. Bundle:artifacts/batches/0.1.104/OpenStorm.app.
+Main executable SHA256:d9cdd425a075f69f6170e8274d2141672f5e2f0b0ae903b8881048f536bc3028.
+Embedded/default PHPantom166 SHA256:f68ad4d7628d387f401b109d19c526948fe089781f23a3f383552f7cfa992d71.
+Provenance equals canonical166. The immutable build receipt binds the compiled
+source; only post-build progress/ledger metadata differ. MIT/Apache notice hashes,
+upstream attribution and OpenIDEA compatibility header remain. Engine dependencies
+are macOS system libraries only. Source/build and client receipt fingerprints match.
+
+All20 embedded stage groups pass using the copied executable: explicit8.1/8.4 and
+Auto across nested/sibling projects, saved-profile refresh with dirty buffers,
+version-gated builtins/UTF-16 ranges, malformed initialization and corrected retry,
+plus inherited Kernel navigation/hover/references/refactors, plain/Composer/Laravel
+intelligence, encoded guards, resource exclusions, native argument binding,
+project freshness, namespace safeguards and descriptor isolation. Owned children
+exit0; original/borrowed inputs remain unchanged. All118 Laravel syntax checks and
+352 runtime assertions pass; analyzer output stays exactly3 deliberate diagnostics
+at original lines, expected exit1. Signature still verifies after all embedded probes.
+
+Retain App103 until App104's signature/build receipt succeeds, then remove the
+older app and duplicate staging copy. The recipe cleans compiler output; remove
+68,853,451 generated frontend bytes. Keep only App104 and preserve canonical
+sources/engines, Workbench, fixtures and receipts. No install, UI launch, migration,
+notarization, public release or updater activation. All69 areas remain67 partial/
+2 user-deferred. FEAT-019 retains Auto-widget, unavailable syntax, extensions and
+framework invalidation limits. Broader middleware catalogs/transformations remain
+L61, custom bound Kernels L62 and dynamic/property compatibility proofs L63. Commit/
+push and verify the exact remote ref and clean worktree before further navigation.
+
+Evidence:artifacts/checks/slice148/{promotion-input,version-proof,identity-provenance,
+gates,package,embedded,final-check,delivery}.json; stage/probe logs;
+artifacts/batches/0.1.104/{build-receipt,retention}.json; canonical166 packaged
+sidecar recorded after remote verification. Native checks remain user-skipped.
+
 PHP client slice147 (2026-11-18, verified;166 inactive pending packaging):
 forward an explicit languages.php.languageLevel through the existing SDK adapter
 as phpLanguageLevel. Normalize the literal using the shared parser, preserve custom

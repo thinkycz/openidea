@@ -57,7 +57,10 @@ export interface DocBackend {
   saveAs(doc: DocId, path: string): Promise<DocumentInfo>;
   close(doc: DocId): Promise<void>;
   edit(doc: DocId, baseVersion: number, changes: TextChange[]): Promise<number>;
+  autosave?(doc: DocId): Promise<boolean>;
   save(doc: DocId, overwriteRevision?: string | null): Promise<string | null>;
+
+  /** Re-check every open file for external changes missed by file watchers. */
   syncFromDisk?(): Promise<void>;
   snapshot(doc: DocId): Promise<DocumentInfo>;
   setLineEnding(doc: DocId, lineEnding: LineEnding): Promise<void>;
@@ -101,6 +104,7 @@ export const ipcBackend: DocBackend = {
   close: async (doc) => void (await call(commands.docClose(doc))),
   edit: (doc, baseVersion, changes) => call(commands.docEdit(doc, baseVersion, { changes })),
   save: (doc, overwriteRevision = null) => call(commands.docSaveChecked(doc, overwriteRevision)),
+  autosave: (doc) => call(commands.docAutosave(doc)),
   syncFromDisk: async () => void (await call(commands.docSyncFromDisk())),
   snapshot: (doc) => call(commands.docSnapshot(doc)),
   setLineEnding: async (doc, le) => void (await call(commands.docSetLineEnding(doc, le))),

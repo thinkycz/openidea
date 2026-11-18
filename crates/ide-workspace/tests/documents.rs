@@ -229,6 +229,59 @@ fn dirty_events(events: &[IdeEvent]) -> Vec<bool> {
 }
 
 #[test]
+fn autosave_leaves_a_file_changed_on_disk_after_an_edit() {
+    let f = fixture();
+    let path = f.root.join("notes.txt");
+    fs::write(&path, "alpha\nbeta\n").unwrap();
+    let info = f.docs.open(&path).unwrap();
+    f.docs.edit(info.id, 0, change(0, 5, "edited")).unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    fs::write(&path, "alpha\nbeta external\n").unwrap();
+    f.docs.on_disk_changed(std::slice::from_ref(&path));
+
+    assert!(!f.docs.autosave(info.id).unwrap());
+    assert_eq!(fs::read_to_string(&path).unwrap(), "alpha\nbeta external\n");
+    assert!(f.docs.snapshot(info.id).unwrap().dirty);
+
+    // An explicit save also needs approval of the exact external disk revision.
+    assert!(f.docs.save(info.id).is_err());
+    let revision = f.docs.save_checked(info.id, None).unwrap().unwrap();
+    assert!(f.docs.save_checked(info.id, Some(&revision)).unwrap().is_none());
+    assert_eq!(fs::read_to_string(&path).unwrap(), "edited\nbeta\n");
+    f.docs.edit(info.id, 1, change(0, 0, "x")).unwrap();
+    assert!(f.docs.autosave(info.id).unwrap());
+    assert_eq!(fs::read_to_string(&path).unwrap(), "xedited\nbeta\n");
+}
+
+#[test]
+fn autosave_checks_external_bytes_even_without_a_watcher_notification() {
+    let f = fixture();
+    let path = f.root.join("notes.txt");
+    fs::write(&path, "original").unwrap();
+    let info = f.docs.open(&path).unwrap();
+    f.docs.edit(info.id, 0, change(0, 8, "local")).unwrap();
+    fs::write(&path, "external").unwrap();
+    assert!(!f.docs.autosave(info.id).unwrap());
+    assert_eq!(fs::read_to_string(&path).unwrap(), "external");
+    let revision = f.docs.save_checked(info.id, None).unwrap().unwrap();
+    fs::write(&path, "new external").unwrap();
+    assert!(f.docs.save_checked(info.id, Some(&revision)).unwrap().is_some());
+    assert!(!f.docs.autosave(info.id).unwrap());
+    assert_eq!(fs::read_to_string(&path).unwrap(), "new external");
+    assert!(f.docs.snapshot(info.id).unwrap().dirty);
+}
+
+#[test]
+fn closing_a_modified_buffer_reports_it_clean() {
+    let f = fixture();
+    let info = f.docs.open_untitled(None).unwrap();
+    f.docs.edit(info.id, 0, change(0, 0, "draft")).unwrap();
+    assert_eq!(dirty_events(&f.events.lock()), vec![true]);
+    f.docs.close(info.id);
+    assert_eq!(dirty_events(&f.events.lock()), vec![true, false]);
+}
+
+#[test]
 fn open_edit_save_close() {
     let f = fixture();
     let path = f.root.join("main.rs");

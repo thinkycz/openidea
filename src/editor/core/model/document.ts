@@ -67,6 +67,31 @@ import { ask } from "@/workbench/messages";
 import { logError } from "@/platform/errorLog";
 import { WorkspaceHistory } from "./workspaceHistory";
 
+/**
+ * Whether a comment fold is the file header (as opposed to a documentation
+ * comment). Both conditions must hold: the fold sits at the top of the file
+ * (its first line is at or before the first code line) and that line starts
+ * with a comment token. Otherwise ordinary documentation comments further down
+ * would follow the file-header toggle. A Python module docstring opens with
+ * quotes, so it is documentation even though it is the first thing in the file.
+ *
+ * Line numbers are 1-based; `firstCodeLine` is 0 when the file has no code line
+ * (only blanks / shebang), in which case nothing is a header.
+ */
+export function isFileHeaderFold(
+  foldLine: number,
+  firstCodeLine: number,
+  line: string,
+  lineComment: string | null | undefined,
+  blockComment: readonly [string, string] | null | undefined,
+): boolean {
+  if (firstCodeLine === 0 || foldLine > firstCodeLine) return false;
+  const text = line.trimStart();
+  if (lineComment && text.startsWith(lineComment)) return true;
+  if (blockComment && text.startsWith(blockComment[0])) return true;
+  return false;
+}
+
 export type Banner = "binary" | "tooLarge" | "readOnly" | "library" | null;
 
 /** A view attached to a document outside the tab system (see `attachment.ts`). */
@@ -238,6 +263,7 @@ export class DocModel {
   private refreshTimer: ReturnType<typeof setTimeout> | undefined;
   private saving: Promise<void> = Promise.resolve();
   private conflictRevision: string | null = null;
+  private discardRevision: number | null = null;
 
   hasSaveConflict(): boolean {
     return this.conflictRevision !== null;
@@ -245,6 +271,12 @@ export class DocModel {
   /** Called only after explicit discard consent, so closing may release a conflicted buffer. */
   confirmDiscardOnClose() {
     this.conflictRevision = null;
+    this.discardRevision = this.changeCounter;
+  }
+  takeDiscardOnClose(): boolean {
+    const discard = this.discardRevision === this.changeCounter;
+    this.discardRevision = null;
+    return discard;
   }
   private meta: DocMeta;
 
@@ -661,17 +693,23 @@ export class DocModel {
     for (const s of this.slots) {
       const state = s.currentState();
       const folds = state.field(backendFolds, false) ?? [];
-      const firstCode = (() => {
+      const info = this.info;
+      const firstCodeLine = (() => {
         for (let n = 1; n <= state.doc.lines; n++) {
           const t = state.doc.line(n).text.trim();
-          if (t && !t.startsWith("#!")) return state.doc.line(n).from;
+          if (t && !t.startsWith("#!")) return n;
         }
         return 0;
       })();
       const chosen = folds.filter((r) => {
         if (r.kind === "imports") return f.imports;
         if (r.kind !== "comment") return false;
-        const header = state.doc.lineAt(r.from).from <= firstCode;
+        // A file header must sit at the top AND start with a comment token.
+        // Keeping the position check keeps ordinary doc comments further down
+        // under "documentation comments"; the token check keeps a Python module
+        // docstring (which opens with quotes) out of the file-header toggle.
+        const first = state.doc.lineAt(r.from);
+        const header = isFileHeaderFold(first.number, firstCodeLine, first.text, info?.lineComment, info?.blockComment);
         return header ? f.fileHeader : f.docComments;
       });
       const effects: StateEffect<unknown>[] = chosen.map((r) => foldEffect.of({ from: r.from, to: r.to }));
@@ -1027,14 +1065,16 @@ export class DocumentManager {
     // Defer so that "close tab + reopen in split" in one tick keeps the model.
     queueMicrotask(async () => {
       if (model.inUse() || model.closed) return;
+      const discard = model.takeDiscardOnClose();
       const files = this.settings()?.files;
-      if (files?.autoSave !== false && model.getMeta().dirty) {
+      if (!discard && files?.autoSave !== false && model.getMeta().dirty) {
         try {
           await model.save("auto");
         } catch (e) {
           console.warn(`autosave of ${model.path} failed`, e);
         }
       }
+      if (!discard && model.getMeta().dirty && !isUntitledUri(model.path)) return;
       if (model.inUse() || model.hasSaveConflict()) return;
       await model.sync.whenIdle();
       if (model.closed || model.inUse() || this.byPath.get(model.path) !== model) return;

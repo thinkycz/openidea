@@ -21,6 +21,7 @@ pub mod history;
 pub mod java;
 pub mod jvm_icons;
 pub mod lsp;
+pub mod maven_placeholder;
 pub mod nav;
 pub mod notebook;
 pub mod project;
@@ -96,6 +97,7 @@ ide_command::domains!(
     plugins_commit: crate::plugins::commit,
     plugins_index_ops: crate::plugins::index_ops,
     plugins_run_targets: crate::plugins::run_targets,
+    plugins_search: crate::plugins::search,
     plugins_views: crate::plugins::views,
     project: crate::ops::project,
     refactor: crate::ops::refactor,

@@ -1,3 +1,4 @@
+import { MENU_EVENT, isMenuRoute } from "@/platform/menuRoute";
 /**
  * Native menu ↔ action system.
  *
@@ -25,20 +26,8 @@ import { isDistractionFree, useDistractionFree } from "@/workbench/distractionFr
 import { orderStatusItems } from "@/workbench/StatusBar";
 import { statusWidgetRows } from "@/workbench/statusBarWidgets";
 import { useToolWindowLayouts } from "@/workbench/toolwindows/layouts";
+import { toolWindowsRestorable, useToolWindowLayout } from "@/workbench/toolwindows/store";
 import { hostOs, type HostOs } from "./host";
-
-export const MENU_EVENT = "openidea://menu";
-
-export interface MenuRoute {
-  action: string;
-  arg?: string | null;
-  /** The window in front when the item was chosen, if it is not this one (this window's Settings). */
-  returnTo?: string;
-}
-
-export function isMenuRoute(v: unknown): v is MenuRoute {
-  return typeof v === "object" && v !== null && typeof (v as MenuRoute).action === "string";
-}
 
 /** Runs the action a menu item stands for. Returns whether it ran. */
 export function routeMenuEvent(
@@ -100,7 +89,11 @@ export function menuAccelerator(binding: string): string | undefined {
 export function buildMenuConfig(os: HostOs): MenuConfig {
   const labels: Record<string, string> = {};
   // Per-window state some labels follow (View › Appearance › Enter / Exit Distraction Free Mode).
-  const params = { os, distractionFree: isDistractionFree() ? "on" : "off" };
+  const params = {
+    os,
+    distractionFree: isDistractionFree() ? "on" : "off",
+    toolWindows: toolWindowsRestorable() ? "hidden" : "shown",
+  };
   for (const key of keysWithPrefix("menu.")) labels[key] = t(key, params);
   const accelerators: Record<string, string> = {};
   const seen = new Set<string>();
@@ -264,6 +257,10 @@ export function installMenuBridge(): () => void {
     useKeymap.subscribe(push),
     useDistractionFree.subscribe((s, prev) => {
       if (s.active !== prev.active) push();
+    }),
+    // Window › Hide All Tool Windows reads "Restore Tool Windows" while it would restore them.
+    useToolWindowLayout.subscribe((s, prev) => {
+      if (toolWindowsRestorable(s) !== toolWindowsRestorable(prev)) push();
     }),
     useContributions.subscribe((s, prev) => {
       if (s.toolWindows !== prev.toolWindows || s.statusItems !== prev.statusItems) push();

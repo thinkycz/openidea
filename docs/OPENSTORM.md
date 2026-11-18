@@ -15,6 +15,67 @@ slice, commit and push it, and retain only the latest generated app. Native UI
 cases remain deferred/unverified; earlier native-first blocking checkpoints are
 historical and no longer prevent independent implementation.
 
+Upstream merge checkpoint (2026-11-19, automated acceptance verified): integrate
+189 commits from l0ng-ai/openidea through
+958b3db122f698df56eb3839ea55aaba754401f8. Includes editor/Git fixes, run/build
+handling, plugin API/custom search, Docker, project environments and agent tooling.
+Preserve OpenStorm 0.1.110 identity, empty updater endpoints, bundled PHPantom 171
+and save-conflict protection. Retain the Java stream-tracing/plugin-agent exclusions
+and defer the new java-analyzer debug adapter under the no-new-debugger boundary.
+Ordinary debugger fixes remain inherited improvements.
+
+Upstream autosave now uses the existing exact disk-revision save guard. Explicit
+saves still require review before overwriting external bytes. Adapt the autosave
+regression and add a no-watcher/stale-consent regression. Keep untabbed dirty
+buffers, while explicit discard releases only the reviewed buffer revision.
+All 52 focused document/tab-close checks pass. The standalone Settings window
+retains local history without importing editor/workbench menu implementations:
+share the typed menu-event contract and use registered local undo/native field
+history. Its 20 focused checks pass.
+
+The frontend suite passes 13,837 tests with 8 skipped, both with two workers and
+independently through the normal pnpm test command. Preserve the earlier
+default-concurrency linked-tag deletion failure; its 26 focused tests pass without
+source changes. Typecheck, lint, format, knip, production build and Safari startup
+checks pass. All 20 selected Chromium Laravel navigation, settings, plugin-search
+and conflict-marker cases pass. These are controlled browser checks, not native
+or real-service acceptance.
+
+Serialized cargo test --workspace passes 5,332 tests with 232 ignored and 11
+filtered across 227 result groups. The filters retain the HTTP confirmation-test
+exclusion and omit new direnv tests writing temporary .envrc files; earlier
+approvals remain scoped to their named synthetic fixtures. User environment files
+remain unchanged. Workspace Clippy with --all-targets and -D warnings, Rust
+formatting, binding generation and command-snapshot generation pass. Commit the
+generated outputs, including the debugger-adapter exclusion and autosave docs.
+
+All 112 real PHP client/Host cases pass using the exact emitted workspace
+executables: 1 language-level, 2 URL, 10 guarded-edit, 38 completion/navigation/
+history, 2 handler and 59 client cases. Coverage includes Composer/builtins,
+Eloquent, routes, views, config/translations, unsaved dependency freshness,
+cancellation, restart, imports, checked rename, external conflicts and shared
+undo/history. The two inactive-engine callback cases are excluded; unfinished
+173 client/Host adoption is not accepted here. Executable/fingerprint/source
+hashes and recorded fixture originals remain unchanged. No matching owned
+engine/test process remains after the run.
+
+The final branding audit changes the new Windows recovery dialog and Gradle task
+description to OpenStorm while preserving attribution. After these copy-only
+edits, all 1,023 run-feature tests, formatting and the production frontend/Safari
+checks pass. The Windows-only copy does not change the macOS-tested Rust inputs;
+Windows compilation/runtime remain unverified. Native checks remain user-skipped.
+No new app is built: App 0.1.110 is the sole retained app, with its original main
+executable/resource hashes and strict/deep signature verified.
+
+Remove 27,733,031,367 logical bytes of workspace compiler output and generated
+dist using Cargo clean and a checked output-directory cleanup. No .env files are
+present in those output trees. Preserve sources, engines, Workbench, fixtures,
+tooling and earlier evaluation evidence. Preserve the unfinished two-file Laravel
+regression draft in stash fb3453170e306fa5fd8812dadfd56a1703553e85 and an ignored
+patch backup; restore it after this merge's commit/push, outside its accepted scope.
+All 69 ledger areas remain 67 partial and 2 user-deferred. Final Git delivery,
+retention and all check receipts/logs: artifacts/checks/upstream-2026-11-18/.
+
 Engine source slice169 (2026-11-18, inactive PHPantom173 verified): fix the
 single transport's mixed-Composer checked-rename witness rejection. Released172
 succeeds with two local witnesses but rejects an additional valid dirty nested

@@ -15,6 +15,72 @@ slice, commit and push it, and retain only the latest generated app. Native UI
 cases remain deferred/unverified; earlier native-first blocking checkpoints are
 historical and no longer prevent independent implementation.
 
+Package slice160 (2026-11-18, signed local App0.1.108 verified): promote
+source158/client159-verified PHPantom170 into the default bundled resource and
+local development app. Immediate literal Application::register providers select
+the initial HTTP Kernel through register-method ownership and ordered public
+bindings/singletons maps. Duplicate/force/raw-case registration, standard builder
+identity and dirty provider refresh retain their accepted meaning. Unmodeled
+bootstrap execution, constructor defaults and provider loading remain incomplete
+and refuse checked edits. Source158 retains the runtime/prototype counterexamples;
+client159 proves actual managed edits, conflicts, grouped history and restart.
+
+Only45 local Cargo versions, app metadata and engine/source resource pins change.
+External lock blocks and plugin API1.10.0 stay unchanged. Identity
+cz.thinky.openstorm, independent settings/caches, .openidea compatibility, default
+appearance/keymaps/autosave, attribution/licenses and existing debugger scope stay
+unchanged. Updater endpoints remain empty. Source fingerprint, engine checksum,
+typecheck/lint/format/knip, fresh frontend13,393 passes/6 skipped, version-helper
+checks, Rust formatting, bundled-server resolution, PHP companion-default tests
+and ide-tools Clippy pass. Reuse client159's unchanged production-source full
+workspace5,155 passes/224 ignored/one retained HTTP exclusion, full workspace
+Clippy and107 actual170 client/host cases (five new regressions). Four cases fail
+169/pass170; the lifecycle regression fails the retained unsafe prototype and
+passes170. Engine source158 retains18,644 ordinary passes/17 ignored plus2 bounded
+children, both Clippy modes, exact170-patch replay/build and36 stdio groups.
+
+App108 is arm64 development/debug with production frontend assets, including
+passing Safari15.4 build checks. Ad-hoc signature verifies deep/strict before and
+after all embedded probes. Minimum-OS13.0 metadata verifies; actual macOS13 runtime
+remains untested. Bundle:artifacts/batches/0.1.108/OpenStorm.app.
+Main executable SHA256:582606aae8acdba45ac380373d3f7247e4538b00930353a8de8062d437d03028.
+Embedded/default PHPantom170 SHA256:ae706f51662acdb81712048264a31592a90eed401f8119e6f8d241e5a1078d9c.
+Source/build, client and package receipts bind the exact source snapshot and
+canonical provenance; only later progress/ledger metadata differ. MIT/Apache
+notices and upstream attribution match. Engine dynamic dependencies are macOS
+system libraries. No global language server supplies the embedded results.
+
+All32 embedded stage groups pass, including five provider controls: immediate
+method and property-order complete previews, dirty provider import refresh, and
+external helper/default-constructor/source-loading incomplete refusals. Existing
+real Laravel13.37 builder default/queued/variable/parenthesized/repeated phase
+controls, custom/inherited/trait Kernel ownership, guarded edits, UTF16 ranges,
+restart, PHP targets/builtins, plain PHP/Composer/Laravel, malformed initialization,
+aliases/exclusions, source/project freshness, namespace guards and descriptor
+isolation stay green. Owned children exit0; original and borrowed files stay
+unchanged. The current engine example passes120 PHP syntax checks,364 runtime
+assertions and exactly3 deliberate analyzer diagnostics (expected analyzer exit1).
+
+The recipe retained App107 until App108's signature/receipt passed, then removed
+App107 and duplicate staging. It cargo-cleaned current compiler output retained
+from159, and removed68,853,451 generated frontend bytes after the
+embedded probes. Only App108 remains; canonical sources/engines, Workbench,
+fixtures, earlier evaluation evidence and receipts remain preserved. No install,
+app UI launch, migration, notarization, public publication or updater activation.
+Native checks remain user-skipped. The existing debug __eh_frame warning and
+serialized CLI socket-test limitation remain recorded.
+
+All69 statuses stay67 partial/2 user-deferred. L63/L64 retain runtime/property/
+callback alias ordering, nested/dynamic providers, instances, custom constructors/
+applications/builders, closure factories and unmodeled execution. The Auto PHP
+widget remains Composer-derived. Wider middleware, native/platform/performance
+acceptance and earlier unfiltered candidate-scope limits remain partial. Commit/
+push this package checkpoint and verify the exact remote ref and clean worktree.
+
+Evidence:artifacts/checks/slice160/{promotion-input,version-proof,identity-provenance,
+gates,package,embedded,final-check,delivery}.json; stage/probe logs; App108
+build-receipt/retention sidecars and canonical170 packaged sidecar after push.
+
 Client/host slice159 (2026-11-18, verified;170 inactive): immediate literal
 provider register methods and public bindings/singletons select the initial HTTP
 Kernel through actual OpenStorm managed documents and LspManager. Five new

@@ -881,3 +881,159 @@ async fn immediate_provider_maps_keep_order_and_unknown_lifecycle_refuses_checke
     .await;
     f.finish(outcome).await;
 }
+
+const PRIORITY_BASE: &str = r"<?php namespace Illuminate\Foundation\Http;
+class Kernel {public function __construct() {} protected function syncMiddlewareToRouter() {}}
+";
+
+fn kernel_priority_source() -> String {
+    KERNEL.replace("\n}", "\nprotected $routeMiddleware=['audited'=>\\App\\Http\\Middleware\\Trace::class];\n}")
+}
+
+fn kernel_priority_fixture(kernel: &str, extra: &[(String, String)]) -> Fixture {
+    let mut files = vec![("framework/Foundation/Http/Kernel.php".into(), PRIORITY_BASE.into())];
+    files.extend_from_slice(extra);
+    fixture_with(kernel, &files)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires PHPantom171 and owned PHP syntax-check executable"]
+async fn kernel_priority_parent_dependency_retires_plans_and_replays_dirty_overrides() {
+    let parent = KERNEL.replace("class Kernel extends", "class PriorityKernelBase extends");
+    let root = r"<?php namespace App\Http; class Kernel extends PriorityKernelBase {protected $routeMiddleware=['audited'=>\App\Http\Middleware\Trace::class];}";
+    let f = kernel_priority_fixture(root, &[("app/Http/PriorityKernelBase.php".into(), parent.clone())]);
+    let outcome = std::panic::AssertUnwindSafe(async {
+        let declaration = f.root.join("app/Http/PriorityKernelBase.php");
+        let found = definitions(&f).await;
+        assert_eq!(found.len(), 1, "managed effective Kernel alias owner: {found:?}");
+        assert_eq!(*found[0].path, declaration);
+        assert_eq!(found[0].range.start, cursor(&parent, r"au\x64ited"));
+        let refs = ide_host::ops::lsp::lsp_references(
+            &f.host,
+            "main",
+            RequestId::next(),
+            f.doc,
+            cursor(CALLER, r"64ited"),
+            true,
+            true,
+            true,
+            ide_host::ops::Channel::new(|_| {}),
+        )
+        .await
+        .unwrap();
+        assert!(refs.incomplete.is_none(), "{refs:?}");
+        assert_eq!(refs.locations.len(), 2, "only the effective declaration is referenced: {refs:?}");
+        assert!(refs.locations.iter().all(|location| location.range.end.col - location.range.start.col == 10));
+        let dependency = f.root.join("app/Http/Kernel.php");
+        let doc = f.project.documents.open(&dependency).unwrap();
+        let class = f.project.documents.open(&f.root.join("app/Http/Middleware/Audit.php")).unwrap();
+        let plan = ide_host::ops::lsp::lsp_rename(
+            &f.host,
+            "main",
+            RequestId::next(),
+            class.id,
+            cursor(CLASS, "Audit {}"),
+            "Auditor".into(),
+        )
+        .await
+        .unwrap()
+        .edit;
+        assert_eq!(plan.guard.as_ref().unwrap().documents_revision, f.project.documents.edit_revision().unwrap());
+        assert!(
+            !plan.files.iter().any(|edit| matches!(edit,ide_core::FileEdit::Edit{path,..} if **path==dependency)),
+            "Kernel dependency must be outside the reviewed targets"
+        );
+        let changed =
+            root.replace("protected $routeMiddleware", "protected $middlewareAliases=[];protected $routeMiddleware");
+        Fixture::lint(&changed);
+        f.project.documents.replace_all(doc.id, &changed).unwrap();
+        assert!(
+            ide_host::ops::lsp::apply_workspace_edit(&f.host, "main", plan).await.is_err(),
+            "alias priority dependency must retire a reviewed plan"
+        );
+        assert_eq!(*definitions(&f).await[0].path, dependency);
+        hover(&f, "App\\Http\\Middleware\\Trace", "app/Http/Kernel.php").await;
+        f.project.lsp.restart(f.project.lsp.servers()[0].id).await.unwrap();
+        hover(&f, "App\\Http\\Middleware\\Trace", "app/Http/Kernel.php").await;
+        f.project.documents.replace_all(doc.id, root).unwrap();
+        assert_eq!(*definitions(&f).await[0].path, declaration);
+        assert_eq!(std::fs::read_to_string(&dependency).unwrap(), root);
+        assert_eq!(std::fs::read_to_string(&declaration).unwrap(), parent);
+        assert_eq!(std::fs::read_to_string(f.root.join("app/Http/Middleware/Audit.php")).unwrap(), CLASS);
+        assert!(!f.root.join("app/Http/Middleware/Auditor.php").exists());
+    })
+    .catch_unwind()
+    .await;
+    f.finish(outcome).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires PHPantom171 and owned PHP syntax-check executable"]
+async fn kernel_priority_checked_edits_preserve_conflicts_dirty_buffers_and_history() {
+    let source = kernel_priority_source();
+    let f = kernel_priority_fixture(&source, &[]);
+    let readiness = std::panic::AssertUnwindSafe(async {
+        let found = definitions(&f).await;
+        assert_eq!(found.len(), 1, "managed modern Kernel alias must override the legacy declaration: {found:?}");
+        assert_eq!(found[0].range.start, cursor(&source, r"au\x64ited"));
+    })
+    .catch_unwind()
+    .await;
+    if readiness.is_err() {
+        f.finish(readiness).await;
+        return;
+    }
+    checked_rename_case(f, &source, "app/Http/Kernel.php").await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires PHPantom171 and owned PHP syntax-check executable"]
+async fn kernel_priority_shadowed_class_strings_stay_guarded_after_effective_navigation() {
+    let source = kernel_priority_source().replace(r"\App\Http\Middleware\Trace::class", r"'App\Http\Middleware\Trace'");
+    let f = kernel_priority_fixture(&source, &[]);
+    let outcome = std::panic::AssertUnwindSafe(async {
+        let found = definitions(&f).await;
+        assert_eq!(found.len(), 1, "shadowed physical alias must not be an effective definition: {found:?}");
+        hover(&f, "App\\Http\\Middleware\\Audit", "app/Http/Kernel.php").await;
+        let trace = CLASS.replace("Audit", "Trace");
+        let doc = f.project.documents.open(&f.root.join("app/Http/Middleware/Trace.php")).unwrap();
+        let refused = ide_host::ops::lsp::lsp_rename(
+            &f.host,
+            "main",
+            RequestId::next(),
+            doc.id,
+            cursor(&trace, "Trace {}"),
+            "Traced".into(),
+        )
+        .await;
+        assert!(
+            refused.as_ref().is_err_and(|error| error.message.contains("middleware")),
+            "shadowed physical class string must still refuse an unsupported edit: {refused:?}"
+        );
+        let audit = f.project.documents.open(&f.root.join("app/Http/Middleware/Audit.php")).unwrap();
+        let plan = ide_host::ops::lsp::lsp_rename(
+            &f.host,
+            "main",
+            RequestId::next(),
+            audit.id,
+            cursor(CLASS, "Audit {}"),
+            "Auditor".into(),
+        )
+        .await
+        .unwrap()
+        .edit;
+        assert!(
+            plan.files.iter().any(
+                |edit| matches!(edit,ide_core::FileEdit::Edit{path,..} if **path==f.root.join("app/Http/Kernel.php"))
+            ),
+            "named class preview remains complete: {plan:?}"
+        );
+        assert_eq!(std::fs::read_to_string(f.root.join("app/Http/Kernel.php")).unwrap(), source);
+        assert_eq!(std::fs::read_to_string(f.root.join("app/Http/Middleware/Trace.php")).unwrap(), trace);
+        assert!(!f.root.join("app/Http/Middleware/Traced.php").exists());
+        assert!(!f.root.join("app/Http/Middleware/Auditor.php").exists());
+    })
+    .catch_unwind()
+    .await;
+    f.finish(outcome).await;
+}

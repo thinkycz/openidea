@@ -640,3 +640,148 @@ async fn immediate_provider_client_keeps_lifecycle_refusals_across_restart() {
         }
     }
 }
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires PHPantom171 and retained real Laravel13.37 alias-priority fixtures"]
+async fn kernel_priority_client_keeps_effective_ranges_dirty_maps_and_restart() {
+    let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let engine = std::env::var_os("OPENSTORM_TEST_PHPANTOM_BIN")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| repo.join("src-tauri/resources/phpantom/phpantom_lsp"));
+    for (setting, fixture) in [
+        ("OPENSTORM_TEST_KERNEL_PRIORITY_ROOT", "slice161-laravel-kernel-map-precedence"),
+        ("OPENSTORM_TEST_KERNEL_DUPLICATES_ROOT", "slice161-laravel-map-duplicates"),
+        ("OPENSTORM_TEST_KERNEL_PARENT_ROOT", "slice161-laravel-map-inherited"),
+    ] {
+        let root = std::env::var_os(setting)
+            .map(PathBuf::from)
+            .unwrap_or_else(|| repo.join("artifacts/checks").join(fixture))
+            .canonicalize()
+            .unwrap();
+        let caller = root.join("routes/builder.php");
+        let kernel = root.join("app/Runtime/BuilderKernel.php");
+        let parent = root.join("app/Runtime/PriorityKernelBase.php");
+        let declaration = if parent.exists() { parent } else { kernel.clone() };
+        let target = root.join("app/Http/Middleware/BuilderAudit.php");
+        let source = std::fs::read_to_string(&caller).unwrap();
+        let initial = std::fs::read_to_string(&declaration).unwrap();
+        let kernel_source = std::fs::read_to_string(&kernel).unwrap();
+        let class = std::fs::read_to_string(&target).unwrap();
+        let mgr = builder_variable_client(&root, &engine);
+        let doc = DocId::next();
+        let config = DocId::next();
+        let class_doc = DocId::next();
+        mgr.did_open(doc, &caller, &LanguageId::new("php"), 1, &source);
+        mgr.did_open(config, &declaration, &LanguageId::new("php"), 1, &initial);
+        if declaration != kernel {
+            mgr.did_open(DocId::next(), &kernel, &LanguageId::new("php"), 1, &kernel_source);
+        }
+        mgr.did_open(class_doc, &target, &LanguageId::new("php"), 1, &class);
+        let outcome=std::panic::AssertUnwindSafe(async {
+            assert!(!mgr.goto(doc,pos(&source,"BuilderAudit;"),GotoKind::Definition).await.unwrap().is_empty());
+            let position=pos(&source,"builder.audit");let found=mgr.goto(doc,position,GotoKind::Definition).await.unwrap();
+            assert_eq!(found.len(),1,"real effective Kernel alias client owner: {found:?}");
+            assert_eq!(*found[0].path,declaration);
+            let duplicates=fixture.ends_with("duplicates");let key=if duplicates{r"builder\x2Eaudit"}else{"builder.audit"};
+            assert_eq!(found[0].range.start,pos(&initial,key));
+            let refs=mgr.references(doc,position,true,true,Default::default()).await.unwrap();
+            assert!(refs.incomplete.is_none(),"{refs:?}");assert_eq!(refs.locations.len(),2,"{refs:?}");
+            assert!(refs.locations.iter().any(|location|*location.path==declaration && location.range.end.col-location.range.start.col==if duplicates{16}else{13}),"decoded alias reference range: {refs:?}");
+            let hover=mgr.hover(doc,position,Default::default()).await.unwrap().unwrap();
+            assert!(hover.contents.value.contains("BuilderAudit") && !hover.contents.value.contains("AuditRequests") && !hover.contents.value.contains("incomplete"),"{hover:?}");
+            let overlay=format!("{class}// Unsaved priority middleware documentation.\n");replace(&mgr,class_doc,2,&class,&overlay);
+            let rename=mgr.rename(class_doc,pos(&class,"BuilderAudit {}"),"ReviewedPriorityAudit".into(),Default::default()).await.unwrap();
+            assert!(rename.incomplete.is_none(),"{rename:?}");
+            assert!(rename.edit.files.iter().any(|edit|matches!(edit,ide_core::FileEdit::Edit{path,edits,..} if **path==declaration && edits.iter().any(|edit|edit.new_text.contains("ReviewedPriorityAudit")))),"{rename:?}");
+            if !duplicates {
+                let comment=if declaration==kernel{"/* 😀 */"}else{"/* 😀 winner */"};
+                let old=format!("[{comment} 'builder.audit'=>\\App\\Http\\Middleware\\BuilderAudit::class]");
+                let changed=initial.replace(&old,"[]");assert_ne!(changed,initial);
+                replace(&mgr,config,2,&initial,&changed);
+                let found=mgr.goto(doc,position,GotoKind::Definition).await.unwrap();assert_eq!(found.len(),1,"{found:?}");assert_eq!(*found[0].path,kernel);
+                let hover=mgr.hover(doc,position,Default::default()).await.unwrap().unwrap();
+                assert!(hover.contents.value.contains("AuditRequests") && !hover.contents.value.contains("BuilderAudit"),"dirty empty map exposes legacy: {hover:?}");
+                mgr.restart(mgr.servers()[0].id).await.unwrap();
+                let hover=mgr.hover(doc,position,Default::default()).await.unwrap().unwrap();
+                assert!(hover.contents.value.contains("AuditRequests") && !hover.contents.value.contains("BuilderAudit"),"restart must replay dirty priority dependencies: {hover:?}");
+                replace(&mgr,config,3,&changed,&initial);
+            }
+            let restored=mgr.rename(class_doc,pos(&class,"BuilderAudit {}"),"ReviewedPriorityAudit".into(),Default::default()).await.unwrap();
+            assert!(restored.incomplete.is_none(),"{restored:?}");
+            assert!(restored.edit.files.iter().any(|edit|matches!(edit,ide_core::FileEdit::Edit{path,..} if **path==declaration)),"{restored:?}");
+        }).catch_unwind().await;
+        mgr.shutdown_all().await;
+        assert!(mgr.servers().iter().all(|server| server.pid.is_none()));
+        for (path, text) in [(&caller, &source), (&kernel, &kernel_source), (&declaration, &initial), (&target, &class)]
+        {
+            assert_eq!(std::fs::read_to_string(path).unwrap(), *text);
+        }
+        assert!(!root.join("app/Http/Middleware/ReviewedPriorityAudit.php").exists());
+        if let Err(panic) = outcome {
+            std::panic::resume_unwind(panic);
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires PHPantom171 and retained real Laravel13.37 uncertain-map fixtures"]
+async fn kernel_priority_client_keeps_uncertain_maps_and_lifecycle_refusals_after_restart() {
+    let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let engine = std::env::var_os("OPENSTORM_TEST_PHPANTOM_BIN")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| repo.join("src-tauri/resources/phpantom/phpantom_lsp"));
+    for (setting, fixture) in [
+        ("OPENSTORM_TEST_KERNEL_CUSTOM_ROOT", "slice161-laravel-map-custom"),
+        ("OPENSTORM_TEST_KERNEL_OPAQUE_ROOT", "slice161-laravel-map-opaque"),
+    ] {
+        let root = std::env::var_os(setting)
+            .map(PathBuf::from)
+            .unwrap_or_else(|| repo.join("artifacts/checks").join(fixture))
+            .canonicalize()
+            .unwrap();
+        let caller = root.join("routes/builder.php");
+        let target = root.join("app/Http/Middleware/BuilderAudit.php");
+        let source = std::fs::read_to_string(&caller).unwrap();
+        let class = std::fs::read_to_string(&target).unwrap();
+        let mgr = builder_variable_client(&root, &engine);
+        let doc = DocId::next();
+        let class_doc = DocId::next();
+        mgr.did_open(doc, &caller, &LanguageId::new("php"), 1, &source);
+        mgr.did_open(class_doc, &target, &LanguageId::new("php"), 1, &class);
+        let outcome = std::panic::AssertUnwindSafe(async {
+            assert!(!mgr.goto(doc, pos(&source, "BuilderAudit;"), GotoKind::Definition).await.unwrap().is_empty());
+            for restarted in [false, true] {
+                if restarted {
+                    mgr.restart(mgr.servers()[0].id).await.unwrap();
+                }
+                let hover = mgr.hover(doc, pos(&source, "builder.audit"), Default::default()).await.unwrap().unwrap();
+                assert!(
+                    hover.contents.value.contains("incomplete"),
+                    "uncertain real Kernel metadata must remain incomplete: {fixture}: {hover:?}"
+                );
+                let refused = mgr
+                    .rename(
+                        class_doc,
+                        pos(&class, "BuilderAudit {}"),
+                        "ReviewedPriorityAudit".into(),
+                        Default::default(),
+                    )
+                    .await;
+                assert!(
+                    refused.as_ref().is_err_and(|error| error.message.contains("middleware")),
+                    "uncertain alias proof cannot authorize a rename: {refused:?}"
+                );
+            }
+        })
+        .catch_unwind()
+        .await;
+        mgr.shutdown_all().await;
+        assert!(mgr.servers().iter().all(|server| server.pid.is_none()));
+        assert_eq!(std::fs::read_to_string(&caller).unwrap(), source);
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), class);
+        assert!(!root.join("app/Http/Middleware/ReviewedPriorityAudit.php").exists());
+        if let Err(panic) = outcome {
+            std::panic::resume_unwind(panic);
+        }
+    }
+}

@@ -15,6 +15,57 @@ slice, commit and push it, and retain only the latest generated app. Native UI
 cases remain deferred/unverified; earlier native-first blocking checkpoints are
 historical and no longer prevent independent implementation.
 
+Client/host slice162 (2026-11-18, verified;171 inactive): effective literal
+Kernel alias precedence now passes through actual OpenStorm managed documents and
+LspManager. Five new regressions verify modern-over-legacy selection, parent-owned
+properties, UTF-16/escaped-spread declaration/reference ranges, dirty map changes,
+engine restart and restored ownership. A fresh reviewed preview is rejected after
+a non-target Kernel dependency adds an empty modern map. The test opens that
+file before requesting the preview, verifies its document witness is current and
+that it is outside the edit targets, then changes its unsaved content.
+
+The shared checked-edit scenario verifies external conflicts, stale target buffers/
+disk, unsaved content, real file/class rename and grouped undo/redo under alias
+collisions. Effective navigation hides shadowed aliases while unsupported physical
+class-string changes still refuse. A named-class preview stays available when its
+own target does not need a class-string transformation. Real constructor mutation
+and opaque constant maps retain incomplete hover and checked-edit refusal before/
+after restart. The same emitted test executables fail all five new cases on170
+and pass them on171; these are actual server/client paths, not capability flags.
+
+All112 actual client/host cases pass (53 host/59 client). The full serialized Rust
+workspace passes5,155/229 ignored, retaining the existing single HTTP confirmation
+test exclusion. Full workspace Clippy, Rust/frontend formatting, binding fidelity
+and active170 checksum checks pass. Fresh frontend gates pass typecheck/lint/knip/
+build and13,393 tests/6 skipped. Exact emitted executables, Cargo fingerprints and
+runtime sources are hashed. All six real Laravel fixtures pass syntax, autoload,
+Kernel/Router runtime selection and original-hash checks. Owned servers exit;
+no existing environment file changes. Previous synthetic test approvals persist.
+Production editor/frontend sources remain identical to package160; no new setting,
+menu/action, debugger scope or timeout is introduced. Native UI stays user-skipped.
+
+Candidate171 client receipt SHA256:8f8e3a70034cff3238e21adcc895325f2bd2bd246ebbe725bdd95de4efdc36ac.
+Source receipt SHA256:a21e7d957f05850fbf4eae58a514d94700a3d0c9744fd530c22201501f839497.
+This is actual client/host acceptance, with171 still inactive pending separate
+package163. App108/default170 hashes, licenses and deep/strict signature stay
+unchanged. App108 remains the sole generated app. Retain only current compiler/
+frontend outputs as immediate package163 inputs (26,886,965,973
+compiler bytes/68,853,451 frontend bytes), then remove them
+after signed-package acceptance. Canonical engines/sources, Workbench, prior
+evaluations and receipts remain. Commit/push and verify the exact remote ref and
+clean worktree before promoting the package.
+
+L63 retains callback/property mutation order, withMiddleware resets, dynamic/
+constant/numeric maps, custom lifecycle methods and compatible overlapping
+property proofs. L64 retains unsupported dynamic/nested providers, custom apps/
+builders and factories. The Auto PHP status widget remains Composer-derived.
+Wider native/platform/performance and all69-area statuses stay67 partial/2 deferred.
+
+Evidence:artifacts/checks/slice162/{source-input,fixture-input,gates,controls,
+client-host,frontend,retention,delivery}.json and stage/control logs; canonical171
+client-host-receipt/client-delivery sidecars. Source161 remains source/stdio
+acceptance; package promotion is separate.
+
 Engine source slice161 (2026-11-18, verified;171 inactive): effective Kernel
 alias navigation now selects the modern middlewareAliases property ahead of
 routeMiddleware, independently of property layout. Resolve each selected Kernel

@@ -1,0 +1,533 @@
+--- a/docs/CHANGELOG.md
++++ b/docs/CHANGELOG.md
+@@ -30,6 +30,8 @@
+ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+ 
+ ## [Unreleased]
++
++- **Editor-selected PHP targets.** Clients can select a PHP language level across Composer projects without rewriting saved configuration. Auto retains each project's configured target. Contributed by @thinkycz.
+ 
+ - **Follow inherited Kernel middleware.** Navigation, hover and references show the effective parent and trait declarations, including unsaved changes. Incomplete or ambiguous registration metadata cannot authorize partial transformations. Contributed by @thinkycz.
+ 
+--- a/docs/configuration.md
++++ b/docs/configuration.md
+@@ -61,6 +61,21 @@
+ | --------- | ------ | --------------------------- | ----------- |
+ | `version` | string | Inferred from composer.json | Override the detected PHP version (e.g. `"8.3"`). |
+ 
++#### Editor language-level selection
++
++Clients may send a literal `initializationOptions.phpLanguageLevel` such as
++`"8.1"` or `"8.1.0"`. This session choice takes precedence over `[php].version`
++and Composer requirements in every routed project; it does not rewrite saved
++configuration. Omit it, use `null`, or send an empty string for Auto, which retains
++the normal saved-configuration/Composer/default policy. Malformed selections reject
++initialization without echoing their values.
++
++The server advertises `experimental.phpWorkbenchLanguageLevel`. The existing
++`phpWorkbench/activeTarget` query reports the applied major/minor version. A new
++selection requires a fresh initialized session; saved-profile and extension
++refreshes retain the editor's selection. Extensions keep their existing independent
++configuration policy.
++
+ ### `[diagnostics]`
+ 
+ | Key                        | Type   | Default | Description |
+--- a/src/backend/startup.rs
++++ b/src/backend/startup.rs
+@@ -16,6 +16,10 @@
+ 
+ impl Backend {
+     pub(crate) async fn on_initialize(&self, params: InitializeParams) -> Result<InitializeResult> {
++        let level = crate::workbench_active_target::client_language_level(
++            params.initialization_options.as_ref(),
++        )?;
++        self.workspace.client_language_level.get_or_init(|| level);
+         self.workspace.php_runtime.get_or_init(|| {
+             crate::php_runtime::PhpRuntime::from_options(params.initialization_options.as_ref())
+         });
+@@ -282,7 +286,7 @@
+                     ..ExecuteCommandOptions::default()
+                 }),
+                 experimental: Some(
+-                    serde_json::json!({"phpWorkbenchEnvironmentResources": true, "phpWorkbenchJsonTranslations": true, "phpWorkbenchRoutes": true, (crate::workbench_route_handler::CAPABILITY): true, "phpWorkbenchViews": true, "phpWorkbenchBuiltins": true, "phpWorkbenchActiveTarget": true, "phpWorkbenchRenameChecked": true, (crate::workbench_optimize_imports::CAPABILITY): true, "phpWorkbenchCallHierarchyAnalysis": true, (crate::structural_search::wire::EXPERIMENTAL_CAPABILITY): true, (crate::structural_search::wire::REPLACE_EXPERIMENTAL_CAPABILITY): true}),
++                    serde_json::json!({"phpWorkbenchEnvironmentResources": true, "phpWorkbenchJsonTranslations": true, "phpWorkbenchRoutes": true, (crate::workbench_route_handler::CAPABILITY): true, "phpWorkbenchViews": true, "phpWorkbenchBuiltins": true, "phpWorkbenchActiveTarget": true, (crate::workbench_active_target::CLIENT_LEVEL_CAPABILITY): true, "phpWorkbenchRenameChecked": true, (crate::workbench_optimize_imports::CAPABILITY): true, "phpWorkbenchCallHierarchyAnalysis": true, (crate::structural_search::wire::EXPERIMENTAL_CAPABILITY): true, (crate::structural_search::wire::REPLACE_EXPERIMENTAL_CAPABILITY): true}),
+                 ),
+                 ..ServerCapabilities::default()
+             },
+@@ -326,14 +330,17 @@
+             // so the file is never re-read during startup.
+             let composer_package = composer::read_composer_package(&root);
+ 
+-            // Detect the target PHP version.  The config file override
+-            // takes precedence; otherwise fall back to composer.json.
+-            let php_version = self.workspace.startup_target.unwrap_or_else(|| {
+-                crate::workbench_active_target::resolve_php_version(
+-                    &self.config(),
+-                    composer_package.as_ref(),
+-                )
+-            });
++            // An explicit editor selection wins. Auto resolves the saved
++            // configuration against this Composer project's own requirements.
++            let php_version = self
++                .client_language_level()
++                .or(self.workspace.startup_target)
++                .unwrap_or_else(|| {
++                    crate::workbench_active_target::resolve_php_version(
++                        &self.config(),
++                        composer_package.as_ref(),
++                    )
++                });
+             self.set_php_version(php_version);
+ 
+             // ── Create a progress token for indexing feedback ────────
+@@ -426,7 +433,10 @@
+                     .await;
+             }
+         } else {
+-            self.set_php_version(self.php_version());
++            self.set_php_version(
++                self.client_language_level()
++                    .unwrap_or_else(|| self.php_version()),
++            );
+             self.log(MessageType::INFO, "PHPantom initialized!".to_string())
+                 .await;
+         }
+--- a/src/project_router.rs
++++ b/src/project_router.rs
+@@ -156,8 +156,9 @@
+             return false;
+         };
+         let composer_package = composer::read_composer_package(root);
+-        let version =
+-            crate::workbench_active_target::resolve_php_version(&config, composer_package.as_ref());
++        let version = self.backend.client_language_level().unwrap_or_else(|| {
++            crate::workbench_active_target::resolve_php_version(&config, composer_package.as_ref())
++        });
+         let requested = crate::workbench_active_target::ActiveTarget::applied(
+             version,
+             config.php.extensions.as_deref(),
+@@ -281,6 +282,9 @@
+             &HashMap<PathBuf, (crate::config::Config, crate::types::PhpVersion)>,
+         >,
+     ) -> Result<InitializeResult> {
++        crate::workbench_active_target::client_language_level(
++            params.initialization_options.as_ref(),
++        )?;
+         *self.state.params.write() = Some(params.clone());
+         let mut folders: Vec<PathBuf> = params
+             .workspace_folders
+--- a/src/project_router_global_config.rs
++++ b/src/project_router_global_config.rs
+@@ -180,6 +180,7 @@
+                         context.backend.php_version(),
+                         context.backend.version.clone(),
+                         context.backend.workspace.active_php_target.read().clone(),
++                        context.backend.client_language_level(),
+                     )
+                 })
+             })
+@@ -188,15 +189,19 @@
+             let mut prepared = HashMap::new();
+             let mut target_changed = false;
+             let mut warnings = Vec::new();
+-            for (root, global_path, previous, previous_version, engine, applied) in inputs {
++            for (root, global_path, previous, previous_version, engine, applied, selected_level) in
++                inputs
++            {
+                 let (config, version) =
+                     match crate::config::load_config_from(&root, global_path.as_deref()) {
+                         Ok(config) => {
+                             let composer_package = composer::read_composer_package(&root);
+-                            let version = crate::workbench_active_target::resolve_php_version(
+-                                &config,
+-                                composer_package.as_ref(),
+-                            );
++                            let version = selected_level.unwrap_or_else(|| {
++                                crate::workbench_active_target::resolve_php_version(
++                                    &config,
++                                    composer_package.as_ref(),
++                                )
++                            });
+                             (config, version)
+                         }
+                         // A malformed profile preserves the actual applied target,
+--- a/src/project_router_global_config_tests.rs
++++ b/src/project_router_global_config_tests.rs
+@@ -20,6 +20,15 @@
+         project: &str,
+         sibling: bool,
+         sibling_project: &str,
++    ) -> Self {
++        Self::new_with_options(global, project, sibling, sibling_project, None).await
++    }
++    async fn new_with_options(
++        global: &str,
++        project: &str,
++        sibling: bool,
++        sibling_project: &str,
++        initialization_options: Option<serde_json::Value>,
+     ) -> Self {
+         let dir = tempfile::tempdir().unwrap();
+         let root = dir.path().canonicalize().unwrap().join("project");
+@@ -47,6 +56,7 @@
+         router
+             .initialize(InitializeParams {
+                 root_uri: Some(Url::from_directory_path(&root).unwrap()),
++                initialization_options,
+                 workspace_folders: Some(vec![WorkspaceFolder {
+                     uri: Url::from_directory_path(&root).unwrap(),
+                     name: "owned-global".into(),
+@@ -747,3 +757,48 @@
+     );
+     f.router.shutdown().await.unwrap();
+ }
++
++#[tokio::test]
++async fn client_language_level_survives_global_profile_version_and_extension_refresh() {
++    let f = Fixture::new_with_options(
++        "[php]\nversion='8.4'\nextensions=['core','standard']\n",
++        "",
++        true,
++        "[php]\nversion='8.5'\n",
++        Some(serde_json::json!({"phpLanguageLevel":"8.1"})),
++    )
++    .await;
++    let mut seen = Inputs::new();
++    assert!(!f.apply(&mut seen).await);
++    let before = f.router.state.contexts.read()[0].id;
++    assert_eq!(f.target().await.php_version, "8.1");
++    std::fs::write(
++        &f.global,
++        "[php]\nversion='8.5'\nextensions=['core','standard']\n",
++    )
++    .unwrap();
++    assert!(!f.apply(&mut seen).await);
++    assert_eq!(
++        f.router.state.contexts.read()[0].id,
++        before,
++        "shadowed saved version must not replace the applied service"
++    );
++    assert_eq!(f.target().await.php_version, "8.1");
++    std::fs::write(&f.global, "[php]\nversion='8.4'\nextensions=['core']\n").unwrap();
++    assert!(!f.apply(&mut seen).await);
++    assert_ne!(
++        f.router.state.contexts.read()[0].id,
++        before,
++        "extension changes still rebuild the target"
++    );
++    for context in f.router.state.contexts.read().iter() {
++        assert_eq!(
++            context.backend.php_version(),
++            crate::types::PhpVersion::new(8, 1)
++        );
++    }
++    let target = f.target().await;
++    assert_eq!(target.php_version, "8.1");
++    assert_eq!(target.extensions, Some(vec!["core".into()]));
++    f.router.shutdown().await.unwrap();
++}
+--- a/src/workbench_active_target.rs
++++ b/src/workbench_active_target.rs
+@@ -20,6 +20,49 @@
+     pub engine_version: String,
+     /// Version of the embedded declaration corpus.
+     pub stubs_version: String,
++}
++
++/// Initialization option advertised for an explicit editor language-level selection.
++pub(crate) const CLIENT_LEVEL_CAPABILITY: &str = "phpWorkbenchLanguageLevel";
++
++/// One literal editor selection. Auto keeps the existing saved/Composer policy.
++pub(crate) fn client_language_level(
++    options: Option<&serde_json::Value>,
++) -> Result<Option<PhpVersion>> {
++    let value = options.and_then(|options| options.get("phpLanguageLevel"));
++    let Some(value) = value.filter(|value| !value.is_null()) else {
++        return Ok(None);
++    };
++    let invalid = || {
++        Error::invalid_params(
++            "phpLanguageLevel must be one PHP version (X.Y or X.Y.Z), or empty for Auto",
++        )
++    };
++    let text = value.as_str().ok_or_else(invalid)?.trim();
++    if text.is_empty() {
++        return Ok(None);
++    }
++    if text.len() > 32 {
++        return Err(invalid());
++    }
++    let mut parts = text.split('.');
++    let component = |value: Option<&str>| {
++        value
++            .filter(|part| !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit()))
++            .and_then(|part| part.parse::<u8>().ok())
++            .ok_or_else(invalid)
++    };
++    let major = component(parts.next())?;
++    let minor = component(parts.next())?;
++    let patch_valid = parts.next().is_none_or(|patch| {
++        !patch.is_empty()
++            && patch.bytes().all(|byte| byte.is_ascii_digit())
++            && patch.parse::<u32>().is_ok()
++    });
++    if major == 0 || !patch_valid || parts.next().is_some() {
++        return Err(invalid());
++    }
++    Ok(Some(PhpVersion::new(major, minor)))
+ }
+ 
+ /// Shared startup and saved-profile resolution policy. Keep override, Composer
+@@ -54,6 +97,15 @@
+ }
+ 
+ impl Backend {
++    /// Session choice shared with diagnostic/request clones; changing it needs reinitialization.
++    pub(crate) fn client_language_level(&self) -> Option<PhpVersion> {
++        self.workspace
++            .client_language_level
++            .get()
++            .copied()
++            .flatten()
++    }
++
+     /// Return only applied settings, never relabel a service from changed TOML.
+     pub async fn workbench_active_target(&self, _: TargetQuery) -> Result<ActiveTarget> {
+         self.workspace
+@@ -67,3 +119,64 @@
+             })
+     }
+ }
++
++#[cfg(test)]
++mod client_language_level_tests {
++    use super::*;
++    use serde_json::json;
++    #[test]
++    fn client_language_level_literals_auto_and_invalid_are_distinct() {
++        for value in [serde_json::Value::Null, json!(""), json!("  ")] {
++            assert_eq!(
++                client_language_level(Some(&json!({"phpLanguageLevel":value}))).unwrap(),
++                None
++            );
++        }
++        assert_eq!(client_language_level(None).unwrap(), None);
++        for value in ["8.1", "8.1.99", " 8.1.0 "] {
++            assert_eq!(
++                client_language_level(Some(&json!({"phpLanguageLevel":value}))).unwrap(),
++                Some(PhpVersion::new(8, 1))
++            );
++        }
++        for value in [
++            json!(true),
++            json!(81),
++            json!([]),
++            json!({}),
++            json!("^8.1"),
++            json!("8"),
++            json!("8.1.2.3"),
++            json!("8.-1"),
++            json!("0.1"),
++            json!("8.1 \n secret-value"),
++            json!("8.1.4294967296"),
++        ] {
++            let error =
++                client_language_level(Some(&json!({"phpLanguageLevel":value}))).unwrap_err();
++            assert_eq!(error.code, tower_lsp::jsonrpc::ErrorCode::InvalidParams);
++            assert!(!error.message.contains("secret-value"));
++        }
++    }
++    #[tokio::test]
++    async fn client_language_level_worker_clones_share_initialized_choice() {
++        let backend = Backend::new_test();
++        backend
++            .on_initialize(tower_lsp::lsp_types::InitializeParams {
++                initialization_options: Some(json!({"phpLanguageLevel":"8.1"})),
++                ..Default::default()
++            })
++            .await
++            .unwrap();
++        for worker in [
++            backend.clone_for_blocking(),
++            backend.clone_for_diagnostic_worker(),
++        ] {
++            assert_eq!(worker.client_language_level(), Some(PhpVersion::new(8, 1)));
++            assert!(std::sync::Arc::ptr_eq(
++                &backend.workspace.client_language_level,
++                &worker.workspace.client_language_level
++            ));
++        }
++    }
++}
+--- a/src/workspace_env.rs
++++ b/src/workspace_env.rs
+@@ -24,6 +24,8 @@
+ pub(crate) struct WorkspaceEnv {
+     /// Set once at initialize; shared unchanged with workers and child-session clones.
+     pub(crate) php_runtime: Arc<std::sync::OnceLock<crate::php_runtime::PhpRuntime>>,
++    /// Explicit editor language level, fixed for this initialized service.
++    pub(crate) client_language_level: Arc<std::sync::OnceLock<Option<PhpVersion>>>,
+     /// The root directory of the workspace (set during `initialize`).
+     pub(crate) workspace_root: Arc<RwLock<Option<PathBuf>>>,
+     /// PSR-4 autoload mappings parsed from `composer.json`.
+@@ -107,6 +109,7 @@
+     fn with_global_config(global_config_path: Option<PathBuf>) -> Self {
+         Self {
+             php_runtime: Arc::new(std::sync::OnceLock::new()),
++            client_language_level: Arc::new(std::sync::OnceLock::new()),
+             workspace_root: Arc::new(RwLock::new(None)),
+             psr4_mappings: Arc::new(RwLock::new(Vec::new())),
+             vendor_uri_prefixes: Mutex::new(Vec::new()),
+@@ -131,6 +134,7 @@
+     fn clone(&self) -> Self {
+         Self {
+             php_runtime: Arc::clone(&self.php_runtime),
++            client_language_level: Arc::clone(&self.client_language_level),
+             workspace_root: Arc::clone(&self.workspace_root),
+             psr4_mappings: Arc::clone(&self.psr4_mappings),
+             vendor_uri_prefixes: Mutex::new(self.vendor_uri_prefixes.lock().clone()),
+--- a/tests/integration/composer_project_contexts.rs
++++ b/tests/integration/composer_project_contexts.rs
+@@ -2526,3 +2526,141 @@
+     assert_eq!(fs::read_to_string(&bcaller).unwrap(), bsource);
+     router.shutdown().await.unwrap();
+ }
++
++#[tokio::test]
++async fn client_language_level_explicit_selection_applies_to_projects_and_refreshes() {
++    let fixture = projects_with_distinct_php_targets();
++    fixture.write("apps/a/.phpantom.toml", "[php]\nversion=\"8.4\"\n");
++    let router = ProjectRouter::new_test_with_full_stubs();
++    let folders = project_folders(&fixture);
++    let init = router
++        .initialize(InitializeParams {
++            root_uri: Some(folders[0].uri.clone()),
++            workspace_folders: Some(folders),
++            initialization_options: Some(serde_json::json!({"phpLanguageLevel":"8.1.0"})),
++            ..Default::default()
++        })
++        .await
++        .unwrap();
++    assert_eq!(
++        init.capabilities.experimental.unwrap()["phpWorkbenchLanguageLevel"],
++        true
++    );
++    router.initialized(InitializedParams {}).await;
++    for project in ["a", "b"] {
++        let path = fixture.path(project, "builtin.php");
++        open(&router, &path).await;
++        assert_eq!(
++            router
++                .workbench_active_target(ProjectTargetQuery {
++                    uri: Some(Url::from_file_path(&path).unwrap())
++                })
++                .await
++                .unwrap()
++                .php_version,
++            "8.1"
++        );
++    }
++    let config = fixture.path("a", ".phpantom.toml");
++    fixture.write(
++        "apps/a/.phpantom.toml",
++        "[php]\nversion=\"8.5\"\nextensions=[\"core\"]\n",
++    );
++    router
++        .did_change_watched_files(DidChangeWatchedFilesParams {
++            changes: vec![FileEvent {
++                uri: Url::from_file_path(&config).unwrap(),
++                typ: FileChangeType::CHANGED,
++            }],
++        })
++        .await;
++    let a = fixture.path("a", "builtin.php");
++    let target = router
++        .workbench_active_target(ProjectTargetQuery {
++            uri: Some(Url::from_file_path(&a).unwrap()),
++        })
++        .await
++        .unwrap();
++    assert_eq!(target.php_version, "8.1");
++    assert!(
++        target
++            .extensions
++            .as_ref()
++            .unwrap()
++            .iter()
++            .any(|group| group == "core")
++    );
++    assert_eq!(
++        fs::read_to_string(config).unwrap(),
++        "[php]\nversion=\"8.5\"\nextensions=[\"core\"]\n"
++    );
++    router.shutdown().await.unwrap();
++}
++
++#[tokio::test]
++async fn client_language_level_auto_keeps_independent_saved_and_composer_targets() {
++    let fixture = projects_with_distinct_php_targets();
++    fixture.write("apps/a/.phpantom.toml", "[php]\nversion=\"8.3\"\n");
++    let router = ProjectRouter::new_test_with_full_stubs();
++    let folders = project_folders(&fixture);
++    router
++        .initialize(InitializeParams {
++            root_uri: Some(folders[0].uri.clone()),
++            workspace_folders: Some(folders),
++            initialization_options: Some(serde_json::json!({"phpLanguageLevel":""})),
++            ..Default::default()
++        })
++        .await
++        .unwrap();
++    router.initialized(InitializedParams {}).await;
++    for (project, expected) in [("a", "8.3"), ("b", "8.4")] {
++        let path = fixture.path(project, "builtin.php");
++        open(&router, &path).await;
++        assert_eq!(
++            router
++                .workbench_active_target(ProjectTargetQuery {
++                    uri: Some(Url::from_file_path(path).unwrap())
++                })
++                .await
++                .unwrap()
++                .php_version,
++            expected
++        );
++    }
++    router.shutdown().await.unwrap();
++}
++
++#[tokio::test]
++async fn client_language_level_rootless_selection_and_invalid_initialize() {
++    use phpantom_lsp::workbench_active_target::TargetQuery;
++    let backend = phpantom_lsp::Backend::new_test();
++    backend
++        .initialize(InitializeParams {
++            initialization_options: Some(serde_json::json!({"phpLanguageLevel":"8.1"})),
++            ..Default::default()
++        })
++        .await
++        .unwrap();
++    backend.initialized(InitializedParams {}).await;
++    assert_eq!(
++        backend
++            .workbench_active_target(TargetQuery {})
++            .await
++            .unwrap()
++            .php_version,
++        "8.1"
++    );
++    backend.shutdown().await.unwrap();
++    let router = ProjectRouter::new_test();
++    let result = router
++        .initialize(InitializeParams {
++            initialization_options: Some(serde_json::json!({"phpLanguageLevel":true})),
++            ..Default::default()
++        })
++        .await;
++    assert_eq!(
++        result.unwrap_err().code,
++        tower_lsp::jsonrpc::ErrorCode::InvalidParams
++    );
++    router.shutdown().await.unwrap();
++}

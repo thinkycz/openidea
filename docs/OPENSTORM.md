@@ -15,6 +15,60 @@ slice, commit and push it, and retain only the latest generated app. Native UI
 cases remain deferred/unverified; earlier native-first blocking checkpoints are
 historical and no longer prevent independent implementation.
 
+Engine source slice146 (2026-11-18, verified;166 inactive): add explicit
+PHP language-level initialization for the existing editor setting, without changing
+project files. Shipped165 stdio reproduces selected8.1 being ignored in favor of
+saved8.4. New phpLanguageLevel accepts one X.Y/X.Y.Z literal; omitted/null/empty
+keeps Auto's independent saved-config/Composer/default targets. Reject malformed
+values without echoing them, and advertise phpWorkbenchLanguageLevel. An explicit
+session selection applies to routed projects, rootless contexts and worker clones;
+saved/global profile version refresh cannot replace it. Extension selection stays
+independent. A changed initialization choice requires a fresh server session.
+
+All six new regressions pass in the frozen-source suite:18,608 ordinary passes,
+17 ignored and two bounded child checks. Default and mem-audit release all-target
+Clippy, formatting, exact source fingerprint and default build pass. Patch0166
+replays byte-for-byte from pinned165's source series. Cargo.toml/Cargo.lock/build.rs,
+PHPantom MIT and stubs inputs remain unchanged. All24 executable-bound stdio groups
+pass, including explicit8.1/8.4 and Auto across nested/sibling Composer projects,
+version-gated builtin definitions with UTF-16 coordinates, saved refresh with dirty
+buffers, fresh sessions, malformed initialization and corrected retry on the same
+connection. Every owned child exits0; original/borrowed fixtures stay unchanged.
+Retain inherited parent/trait Kernel alias navigation, hover, references, guarded
+rename, dirty dependency/restart behavior, route/resource/receiver exclusions,
+multi-project freshness, namespace guards and descriptor isolation. All12 plain-PHP
+syntax checks/runtime assertions and118 Laravel syntax checks/352 runtime assertions
+pass. Laravel13.37 analyzer output stays exactly three deliberate diagnostics at
+the original lines, expected exit1. These engine checks do not establish native UI.
+
+Inactive PHPantom0.11.1-openstorm.166 SHA256:
+f68ad4d7628d387f401b109d19c526948fe089781f23a3f383552f7cfa992d71.
+Source series SHA256:985f258917408ea0d62293f553f205996b6f5cedcfc4fb9c8754e5e1c88b45f5.
+Candidate:artifacts/engines/0.11.1-openstorm.166/phpantom_lsp. The arm64 executable
+links only macOS system libraries. Archive source/provenance/licenses and immutable
+build receipt SHA256:6232ac9130141f99a6d0db8a479c630065ae85900f04c4cf4f1826d97c10baba.
+Client settings wiring, genuine client/host acceptance and packaging follow in
+separate slices. Correct the existing PHP status fallback's Intelephense-specific
+wording with the client adapter; do not claim the current app applies this option.
+
+App103/default165 hashes and deep/strict signature remain unchanged; App103 stays
+the sole generated app. Clean compiler output and mutable scratch after archiving
+and exact source comparison; removed 2,442,516,489 bytes.
+Preserve Workbench, canonical sources/engines, fixtures and receipts. Reuse unchanged
+slice144 frontend13,393/6 skipped, serialized workspace5,151/205 ignored/one HTTP
+exclusion,88 genuine165 client/host cases and slice145 package evidence. No fresh
+root frontend/workspace gate or native UI claim for this source-only change.
+Native checks remain user-skipped. No install, migration, updater activation or
+new debugger functionality. All69 areas remain67 partial/2 user-deferred, including
+FEAT-019 until client wiring and its broader acceptance are complete. Commit/push
+this source slice and verify the remote ref before the next dependent slice.
+
+Evidence:artifacts/checks/slice146-{source-freeze,engine-gates,source-test-summary,
+wire-gates,baseline165,language-level-final,language-level-matrix,new-example-checks,
+playground,runtime-libraries,retention,final-check}.json; final/stage logs;
+slice146/{clippy-fix-final,fmt-final}.log; canonical166 build receipt and delivery
+sidecar recorded after remote verification.
+
 Package slice145 (2026-11-18, signed local App0.1.103 verified): promote
 source/stdio/client/host-verified PHPantom165 into the default resource pin and
 signed development app. Inherited parent/nested-trait Kernel aliases retain their

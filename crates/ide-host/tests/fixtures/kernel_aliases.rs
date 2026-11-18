@@ -467,11 +467,15 @@ const BUILDER: &str = r"<?php namespace Illuminate\Foundation\Configuration;
 class ApplicationBuilder {
     public function __construct(protected \Illuminate\Foundation\Application $app) {}
     public function withKernels(): static {$this->app->singleton(\Illuminate\Contracts\Http\Kernel::class,\Illuminate\Foundation\Http\Kernel::class);return $this;}
+    public function withSingletons(array $singletons): static {return $this;}
     public function create(): \Illuminate\Foundation\Application {return $this->app;}
 }
 ";
 const BUILDER_BOOTSTRAP: &str = r"<?php $app=\Illuminate\Foundation\Application::configure()->create();return $app;";
 fn builder_fixture() -> (Fixture, String) {
+    builder_fixture_with(BUILDER_BOOTSTRAP)
+}
+fn builder_fixture_with(bootstrap: &str) -> (Fixture, String) {
     let framework = KERNEL
         .replace("namespace App\\Http;", "namespace Illuminate\\Foundation\\Http;")
         .replace("use App\\Http\\KernelBase as BaseKernel;\n", "")
@@ -480,7 +484,8 @@ fn builder_fixture() -> (Fixture, String) {
     let f = fixture_with(
         &conventional,
         &[
-            ("bootstrap/app.php".into(), BUILDER_BOOTSTRAP.into()),
+            ("composer.json".into(), r#"{"require":{"laravel/framework":"^13.0"},"autoload":{"psr-4":{"App\\":"app/","Illuminate\\":"framework/"}}}"#.into()),
+            ("bootstrap/app.php".into(), bootstrap.into()),
             ("framework/Foundation/Application.php".into(), BUILDER_APP.into()),
             ("framework/Foundation/Configuration/ApplicationBuilder.php".into(), BUILDER.into()),
             ("framework/Foundation/Http/Kernel.php".into(), framework.clone()),
@@ -560,4 +565,162 @@ async fn builder_kernel_navigation_retires_dirty_dependency_plans_and_replays_re
 async fn builder_kernel_checked_edits_keep_conflict_guards_and_shared_history() {
     let (f, framework) = builder_fixture();
     checked_rename_case(f, &framework, "framework/Foundation/Http/Kernel.php").await;
+}
+
+const VARIABLE_BOOTSTRAP: &str = r"<?php
+$builder=\Illuminate\Foundation\Application::configure();
+$alias=$builder->withSingletons([]);
+$app=($alias)->create();
+return $app;
+";
+const REPEATED_BOOTSTRAP: &str = r"<?php
+$builder=\Illuminate\Foundation\Application::configure();
+$app=($builder->withSingletons([]))->create();
+$app->singleton(\Illuminate\Contracts\Http\Kernel::class,\App\Http\Kernel::class);
+return $builder->create();
+";
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires PHPantom169 and owned PHP syntax-check executable"]
+async fn variable_builder_navigation_preserves_alias_identity_dirty_ranges_and_restart() {
+    let (f, framework) = builder_fixture_with(VARIABLE_BOOTSTRAP);
+    let outcome = std::panic::AssertUnwindSafe(async {
+        let path = f.root.join("framework/Foundation/Http/Kernel.php");
+        let found = definitions(&f).await;
+        assert_eq!(found.len(), 1, "managed variable builder declaration: {found:?}");
+        assert_eq!(*found[0].path, path);
+        assert_eq!(found[0].range.start, cursor(&framework, r"au\x64ited"));
+        hover(&f, "App\\Http\\Middleware\\Audit", "framework/Foundation/Http/Kernel.php").await;
+        let refs = ide_host::ops::lsp::lsp_references(
+            &f.host,
+            "main",
+            RequestId::next(),
+            f.doc,
+            cursor(CALLER, r"64ited"),
+            true,
+            true,
+            true,
+            ide_host::ops::Channel::new(|_| {}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(refs.locations.len(), 2, "{refs:?}");
+        assert!(refs.incomplete.is_none(), "{refs:?}");
+        assert!(
+            refs.locations
+                .iter()
+                .all(|location| *location.path == path || *location.path == f.root.join("routes/web.php"))
+        );
+        assert!(refs.locations.iter().all(|location| location.range.end.col - location.range.start.col == 10));
+        let bootstrap = f.root.join("bootstrap/app.php");
+        let doc = f.project.documents.open(&bootstrap).unwrap();
+        let unknown = VARIABLE_BOOTSTRAP.replace("$alias=$builder->withSingletons([]);", r"$alias=new \stdClass;");
+        Fixture::lint(&unknown);
+        f.project.documents.replace_all(doc.id, &unknown).unwrap();
+        assert!(definitions(&f).await.is_empty(), "dirty variable alias must retire its declaration");
+        let restored = VARIABLE_BOOTSTRAP
+            .replace("$app=($alias)->create();\nreturn $app;", "return (($alias->withSingletons([])))->create();");
+        assert_ne!(restored, VARIABLE_BOOTSTRAP);
+        Fixture::lint(&restored);
+        f.project.documents.replace_all(doc.id, &restored).unwrap();
+        assert_eq!(*definitions(&f).await[0].path, path);
+        f.project.lsp.restart(f.project.lsp.servers()[0].id).await.unwrap();
+        hover(&f, "App\\Http\\Middleware\\Audit", "framework/Foundation/Http/Kernel.php").await;
+        assert_eq!(f.project.documents.snapshot(doc.id).unwrap().text, restored);
+        assert_eq!(std::fs::read_to_string(bootstrap).unwrap(), VARIABLE_BOOTSTRAP);
+        assert_eq!(std::fs::read_to_string(path).unwrap(), framework);
+    })
+    .catch_unwind()
+    .await;
+    f.finish(outcome).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires PHPantom169 and owned PHP syntax-check executable"]
+async fn variable_builder_checked_edits_preserve_conflicts_dirty_buffers_and_shared_history() {
+    let (f, framework) = builder_fixture_with(VARIABLE_BOOTSTRAP);
+    checked_rename_case(f, &framework, "framework/Foundation/Http/Kernel.php").await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires PHPantom169 and owned PHP syntax-check executable"]
+async fn variable_builder_repeated_creation_keeps_owner_and_retires_off_target_plans() {
+    let (f, _) = builder_fixture_with(REPEATED_BOOTSTRAP);
+    let outcome = std::panic::AssertUnwindSafe(async {
+        let expected = f.root.join("app/Http/Kernel.php");
+        let found = definitions(&f).await;
+        assert_eq!(found.len(), 1, "managed repeated builder application owner: {found:?}");
+        assert_eq!(*found[0].path, expected);
+        hover(&f, "App\\Http\\Middleware\\Trace", "app/Http/Kernel.php").await;
+        let path = f.root.join("app/Http/Middleware/Trace.php");
+        let source = CLASS.replace("Audit", "Trace");
+        let doc = f.project.documents.open(&path).unwrap();
+        let plan = ide_host::ops::lsp::lsp_rename(
+            &f.host,
+            "main",
+            RequestId::next(),
+            doc.id,
+            cursor(&source, "Trace {}"),
+            "Traced".into(),
+        )
+        .await
+        .unwrap()
+        .edit;
+        assert!(
+            plan.files.iter().any(|edit| matches!(edit,ide_core::FileEdit::Edit {path,..} if **path==expected)),
+            "{plan:?}"
+        );
+        let bootstrap = f.root.join("bootstrap/app.php");
+        let config = f.project.documents.open(&bootstrap).unwrap();
+        let changed = REPEATED_BOOTSTRAP
+            .replace("return $builder->create();", "$builder->withKernels(); return $builder->create();");
+        Fixture::lint(&changed);
+        f.project.documents.replace_all(config.id, &changed).unwrap();
+        assert!(
+            ide_host::ops::lsp::apply_workspace_edit(&f.host, "main", plan).await.is_err(),
+            "variable builder dependency must retire a reviewed plan"
+        );
+        let refused = ide_host::ops::lsp::lsp_rename(
+            &f.host,
+            "main",
+            RequestId::next(),
+            doc.id,
+            cursor(&source, "Trace {}"),
+            "Traced".into(),
+        )
+        .await;
+        assert!(
+            refused.as_ref().is_err_and(|error| error.message.contains("middleware")),
+            "post-create mutation must remain incomplete: {refused:?}"
+        );
+        let restored =
+            REPEATED_BOOTSTRAP.replace("return $builder->create();", "$same=$builder->create(); return $same;");
+        Fixture::lint(&restored);
+        f.project.documents.replace_all(config.id, &restored).unwrap();
+        assert_eq!(*definitions(&f).await[0].path, expected);
+        f.project.lsp.restart(f.project.lsp.servers()[0].id).await.unwrap();
+        let restored_plan = ide_host::ops::lsp::lsp_rename(
+            &f.host,
+            "main",
+            RequestId::next(),
+            doc.id,
+            cursor(&source, "Trace {}"),
+            "Traced".into(),
+        )
+        .await
+        .unwrap()
+        .edit;
+        assert!(
+            restored_plan
+                .files
+                .iter()
+                .any(|edit| matches!(edit,ide_core::FileEdit::Edit {path,..} if **path==expected))
+        );
+        assert_eq!(std::fs::read_to_string(bootstrap).unwrap(), REPEATED_BOOTSTRAP);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), source);
+        assert!(!f.root.join("app/Http/Middleware/Traced.php").exists());
+    })
+    .catch_unwind()
+    .await;
+    f.finish(outcome).await;
 }

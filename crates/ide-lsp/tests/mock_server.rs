@@ -9763,3 +9763,138 @@ async fn completion_and_resolve_retire_changed_semantic_sources() {
         }
     }
 }
+
+#[tokio::test]
+async fn references_retry_pending_publication_with_the_original_utf16_request_and_context() {
+    for project_wide in [false, true] {
+        let h = harness(&[("mock", incremental_caps())]);
+        let (doc, path) = h.open("caller.mk", "😀 target\n");
+        let state = h.launcher.state("mock");
+        state.respond("textDocument/references", json!([{"uri":uri_of(&path),"range":php_range(0,3,0,9)}]));
+        *state.fault.lock() = Some(Arc::new(|s, method| {
+            (method == "textDocument/references" && s.requested(method).len() == 1)
+                .then(|| (ide_jsonrpc::codes::CONTENT_MODIFIED, "publishing".into()))
+        }));
+        let result = h.mgr.references(doc, Pos::new(0, 4), true, project_wide, Default::default()).await;
+        h.mgr.shutdown_all().await;
+        let found = result.unwrap();
+        assert_eq!(found.locations.len(), 1);
+        assert_eq!(found.locations[0].range.start, Pos::new(0, 3));
+        let requests = state.requested("textDocument/references");
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0], requests[1], "retry must keep original coordinates and declaration context");
+        assert_eq!(requests[0]["context"]["includeDeclaration"], true);
+        assert!(state.requested("initialize")[0]["capabilities"]["general"]["staleRequestSupport"]["retryOnContentModified"]
+            .as_array().unwrap().contains(&json!("textDocument/references")));
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn reference_retry_is_bounded_and_refuses_changed_sources_and_other_results() {
+    for mode in
+        ["busy", "caller", "dependency", "closed", "opened", "disk", "empty", "server error", "server cancelled"]
+    {
+        let h = harness(&[("mock", incremental_caps())]);
+        let (doc, _) = h.open("caller.mk", "target\n");
+        let (dependency, path) = h.open("dependency.mk", "target\n");
+        let state = h.launcher.state("mock");
+        state.respond("textDocument/references", Value::Null);
+        let first_request = Arc::new(Mutex::new(None));
+        let request_started = first_request.clone();
+        let weak = Arc::downgrade(&h.mgr);
+        *state.fault.lock() = Some(Arc::new(move |_, method| {
+            if method != "textDocument/references" {
+                return None;
+            }
+            request_started.lock().get_or_insert_with(tokio::time::Instant::now);
+            let mgr = weak.upgrade().unwrap();
+            match mode {
+                "caller" | "dependency" => mgr.did_change(
+                    if mode == "caller" { doc } else { dependency },
+                    2,
+                    &[change(rng(0, 0, 0, 0), "// revised\n")],
+                    &|| "// revised\ntarget\n".into(),
+                ),
+                "closed" => mgr.did_close(dependency),
+                "opened" => mgr.did_open(
+                    DocId::next(),
+                    &path.with_file_name("extra.mk"),
+                    &LanguageId::new("mock"),
+                    1,
+                    "extra\n",
+                ),
+                "disk" => mgr.php_files_changed(&[], std::slice::from_ref(&path), &[]),
+                _ => {}
+            }
+            (mode != "empty").then(|| {
+                (
+                    match mode {
+                        "server error" => -32603,
+                        "server cancelled" => -32800,
+                        _ => ide_jsonrpc::codes::CONTENT_MODIFIED,
+                    },
+                    "publishing".into(),
+                )
+            })
+        }));
+        let result = h.mgr.references(doc, Pos::new(0, 1), true, false, Default::default()).await;
+        let attempts = state.requested("textDocument/references").len();
+        let elapsed = first_request.lock().expect("reference request started").elapsed();
+        h.mgr.shutdown_all().await;
+        if mode == "empty" {
+            assert!(result.unwrap().locations.is_empty());
+        } else {
+            assert!(result.is_err(), "{mode}");
+        }
+        if mode == "busy" {
+            assert!((2..=600).contains(&attempts), "bounded retry: {attempts}");
+            assert!(
+                (Duration::from_secs(29)..=Duration::from_secs(30)).contains(&elapsed),
+                "request retry elapsed {elapsed:?}"
+            );
+        } else {
+            assert_eq!(attempts, 1, "{mode}");
+        }
+    }
+}
+
+#[tokio::test]
+async fn reference_retry_stops_on_settings_reconfiguration_restart_and_explicit_cancel() {
+    for mutation in ["settings", "restart", "cancel"] {
+        let mut caps = incremental_caps();
+        caps["implementationProvider"] = json!(true);
+        let h = harness(&[("mock", caps)]);
+        let (doc, _) = h.open("caller.mk", "target\n");
+        h.wait_status("mock", ServerStatus::Ready).await;
+        let state = h.launcher.state("mock");
+        let attempted = Arc::new(tokio::sync::Notify::new());
+        let notify = attempted.clone();
+        *state.fault.lock() = Some(Arc::new(move |_, method| {
+            if method != "textDocument/references" {
+                return None;
+            }
+            notify.notify_one();
+            Some((ide_jsonrpc::codes::CONTENT_MODIFIED, "publishing".into()))
+        }));
+        let cancel = ide_core::CancellationToken::new();
+        let token = cancel.clone();
+        let mgr = h.mgr.clone();
+        let pending = tokio::spawn(async move { mgr.references(doc, Pos::new(0, 1), true, false, token).await });
+        attempted.notified().await;
+        match mutation {
+            "settings" => {
+                h.mgr.set_config_hook(Box::new(|cfg, _| cfg.settings = Some(json!({"navigationFixture":true}))));
+                h.mgr.reconfigure().await;
+                assert_eq!(state.requested("initialize").len(), 1, "settings-only change must keep the process");
+                eventually(|| !state.notified("workspace/didChangeConfiguration").is_empty()).await;
+            }
+            "restart" => h.mgr.restart(h.mgr.servers()[0].id).await.unwrap(),
+            "cancel" => cancel.cancel(),
+            _ => unreachable!(),
+        }
+        let result = pending.await.unwrap();
+        h.mgr.shutdown_all().await;
+        assert_eq!(result.unwrap_err().kind, ide_core::error::ErrorKind::Cancelled, "{mutation}");
+        assert_eq!(state.requested("textDocument/references").len(), 1, "{mutation}");
+    }
+}

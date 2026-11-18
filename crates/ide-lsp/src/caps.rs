@@ -17,6 +17,7 @@ pub fn client_capabilities() -> Value {
                     "textDocument/declaration",
                     "textDocument/typeDefinition",
                     "textDocument/implementation",
+                    "textDocument/references",
                     "phpWorkbench/renameChecked",
                     "textDocument/semanticTokens/full",
                     "textDocument/inlayHint",

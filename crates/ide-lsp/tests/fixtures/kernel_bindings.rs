@@ -347,3 +347,157 @@ async fn builder_kernel_client_retires_inactive_legacy_aliases_and_keeps_queued_
         std::panic::resume_unwind(panic);
     }
 }
+
+fn builder_variable_client(root: &std::path::Path, engine: &std::path::Path) -> Arc<LspManager> {
+    let mgr = LspManager::new(
+        root.to_path_buf(),
+        Arc::new(LanguageRegistry::from_configs(vec![route_handler_language(engine)])),
+        Arc::new(|_| {}),
+    );
+    let candidates = rename_candidates(root);
+    mgr.set_candidates_hook(Box::new(move |query, cancel| ide_lsp::CandidateFiles {
+        files: candidates
+            .iter()
+            .filter(|path| {
+                !cancel.is_cancelled()
+                    && path.starts_with(&query.root)
+                    && !query.skip.iter().any(|skip| path.starts_with(skip))
+                    && std::fs::read_to_string(path).unwrap().contains(&query.word)
+            })
+            .cloned()
+            .collect(),
+        limit_hit: false,
+    }));
+    mgr
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires PHPantom169 and retained Laravel13.37 builder-variable fixtures"]
+async fn variable_builder_client_keeps_real_parentheses_repeated_identity_and_checked_previews() {
+    let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let engine = std::env::var_os("OPENSTORM_TEST_PHPANTOM_BIN")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| repo.join("src-tauri/resources/phpantom/phpantom_lsp"));
+    for (setting, fixture) in [
+        ("OPENSTORM_TEST_VARIABLE_BUILDER_ROOT", "slice155-laravel-builder-variable"),
+        ("OPENSTORM_TEST_PAREN_BUILDER_ROOT", "slice155-laravel-builder-parenthesized-queued"),
+        ("OPENSTORM_TEST_REPEAT_BUILDER_ROOT", "slice155-laravel-builder-repeat-direct"),
+    ] {
+        let root = std::env::var_os(setting)
+            .map(PathBuf::from)
+            .unwrap_or_else(|| repo.join("artifacts/checks").join(fixture))
+            .canonicalize()
+            .unwrap();
+        let caller = root.join("routes/builder.php");
+        let bootstrap = root.join("bootstrap/app.php");
+        let declaration = root.join("app/Runtime/BuilderKernel.php");
+        let target = root.join("app/Http/Middleware/BuilderAudit.php");
+        let source = std::fs::read_to_string(&caller).unwrap();
+        let initial = std::fs::read_to_string(&bootstrap).unwrap();
+        let registration = std::fs::read_to_string(&declaration).unwrap();
+        let class = std::fs::read_to_string(&target).unwrap();
+        let php = std::env::var_os("OPENSTORM_TEST_PHP_BIN")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| repo.join("artifacts/toolchains/php-8.4.23-static/php"));
+        for path in [&caller, &bootstrap, &declaration, &target] {
+            let lint = std::process::Command::new(&php).args(["-n", "-l"]).arg(path).output().unwrap();
+            assert!(lint.status.success(), "{}: {}", path.display(), String::from_utf8_lossy(&lint.stderr));
+        }
+        let mgr = builder_variable_client(&root, &engine);
+        let doc = DocId::next();
+        let config = DocId::next();
+        let class_doc = DocId::next();
+        let declaration_doc = DocId::next();
+        mgr.did_open(doc, &caller, &LanguageId::new("php"), 1, &source);
+        mgr.did_open(config, &bootstrap, &LanguageId::new("php"), 1, &initial);
+        mgr.did_open(class_doc, &target, &LanguageId::new("php"), 1, &class);
+        mgr.did_open(declaration_doc, &declaration, &LanguageId::new("php"), 1, &registration);
+        let outcome=std::panic::AssertUnwindSafe(async {
+            assert!(!mgr.goto(doc,pos(&source,"BuilderAudit;"),GotoKind::Definition).await.unwrap().is_empty());
+            let position=pos(&source,"builder.audit");
+            let found=mgr.goto(doc,position,GotoKind::Definition).await.unwrap();
+            assert_eq!(found.len(),1,"real variable builder client owner: {found:?}");
+            assert_eq!(*found[0].path,declaration);
+            assert_eq!(found[0].range.start,pos(&registration,"builder.audit"));
+            let refs=mgr.references(doc,position,true,true,Default::default()).await.unwrap();
+            assert!(refs.locations.iter().any(|location|*location.path==declaration && location.range.end.col-location.range.start.col==13),"{refs:?}");
+            let overlay=format!("{class}// Unsaved builder middleware documentation.\n");
+            replace(&mgr,class_doc,2,&class,&overlay);
+            let rename=mgr.rename(class_doc,pos(&class,"BuilderAudit {}"),"ReviewedBuilderAudit".into(),Default::default()).await.unwrap();
+            assert!(rename.incomplete.is_none(),"{rename:?}");
+            assert!(rename.edit.files.iter().any(|edit|matches!(edit,ide_core::FileEdit::Edit {path,edits,..} if **path==declaration && edits.iter().any(|edit|edit.new_text.contains("ReviewedBuilderAudit")))),"{rename:?}");
+            mgr.restart(mgr.servers()[0].id).await.unwrap();
+            let replayed=mgr.rename(class_doc,pos(&class,"BuilderAudit {}"),"ReviewedBuilderAudit".into(),Default::default()).await.unwrap();
+            assert!(replayed.edit.files.iter().any(|edit|matches!(edit,ide_core::FileEdit::Edit {path,edits,..} if **path==declaration && edits.iter().any(|edit|edit.new_text.contains("ReviewedBuilderAudit")))));
+        }).catch_unwind().await;
+        mgr.shutdown_all().await;
+        assert!(mgr.servers().iter().all(|server| server.pid.is_none()));
+        for (path, text) in
+            [(&caller, &source), (&bootstrap, &initial), (&declaration, &registration), (&target, &class)]
+        {
+            assert_eq!(std::fs::read_to_string(path).unwrap(), *text);
+        }
+        assert!(!root.join("app/Http/Middleware/ReviewedBuilderAudit.php").exists());
+        if let Err(panic) = outcome {
+            std::panic::resume_unwind(panic);
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires PHPantom169 and the retained Laravel13.37 builder-variable fixture"]
+async fn variable_builder_client_keeps_mutation_refusals_and_restores_dirty_dependencies() {
+    let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let root = std::env::var_os("OPENSTORM_TEST_VARIABLE_BUILDER_ROOT")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| repo.join("artifacts/checks/slice155-laravel-builder-variable"))
+        .canonicalize()
+        .unwrap();
+    let engine = std::env::var_os("OPENSTORM_TEST_PHPANTOM_BIN")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| repo.join("src-tauri/resources/phpantom/phpantom_lsp"));
+    let caller = root.join("routes/builder.php");
+    let bootstrap = root.join("bootstrap/app.php");
+    let declaration = root.join("app/Runtime/BuilderKernel.php");
+    let target = root.join("app/Http/Middleware/BuilderAudit.php");
+    let source = std::fs::read_to_string(&caller).unwrap();
+    let initial = std::fs::read_to_string(&bootstrap).unwrap();
+    let registration = std::fs::read_to_string(&declaration).unwrap();
+    let class = std::fs::read_to_string(&target).unwrap();
+    let mgr = builder_variable_client(&root, &engine);
+    let doc = DocId::next();
+    let config = DocId::next();
+    let class_doc = DocId::next();
+    let declaration_doc = DocId::next();
+    mgr.did_open(doc, &caller, &LanguageId::new("php"), 1, &source);
+    mgr.did_open(config, &bootstrap, &LanguageId::new("php"), 1, &initial);
+    mgr.did_open(class_doc, &target, &LanguageId::new("php"), 1, &class);
+    mgr.did_open(declaration_doc, &declaration, &LanguageId::new("php"), 1, &registration);
+    let outcome=std::panic::AssertUnwindSafe(async {
+        let rename=mgr.rename(class_doc,pos(&class,"BuilderAudit {}"),"ReviewedBuilderAudit".into(),Default::default()).await.unwrap();
+        assert!(rename.edit.files.iter().any(|edit|matches!(edit,ide_core::FileEdit::Edit {path,..} if **path==declaration)),"real variable builder complete plan: {rename:?}");
+        assert_eq!(initial.matches("$alias=$builder;").count(),1);
+        let changed=initial.replace("$alias=$builder;","$alias=$builder; $escaped=$builder; mutate($escaped);");
+        replace(&mgr,config,2,&initial,&changed);
+        let hover=mgr.hover(doc,pos(&source,"builder.audit"),Default::default()).await.unwrap().unwrap();
+        assert!(hover.contents.value.contains("incomplete"),"{hover:?}");
+        let refused=mgr.rename(class_doc,pos(&class,"BuilderAudit {}"),"ReviewedBuilderAudit".into(),Default::default()).await;
+        assert!(refused.as_ref().is_err_and(|error|error.message.contains("middleware")),"escaped builder cannot authorize a checked rename: {refused:?}");
+        mgr.restart(mgr.servers()[0].id).await.unwrap();
+        let refused=mgr.rename(class_doc,pos(&class,"BuilderAudit {}"),"ReviewedBuilderAudit".into(),Default::default()).await;
+        assert!(refused.as_ref().is_err_and(|error|error.message.contains("middleware")),"escaped builder refusal must survive restart: {refused:?}");
+        replace(&mgr,config,3,&changed,&initial);
+        let restored=mgr.rename(class_doc,pos(&class,"BuilderAudit {}"),"ReviewedBuilderAudit".into(),Default::default()).await.unwrap();
+        assert!(restored.incomplete.is_none(),"{restored:?}");
+        assert!(restored.edit.files.iter().any(|edit|matches!(edit,ide_core::FileEdit::Edit {path,edits,..} if **path==declaration && edits.iter().any(|edit|edit.new_text.contains("ReviewedBuilderAudit")))));
+    }).catch_unwind().await;
+    mgr.shutdown_all().await;
+    assert!(mgr.servers().iter().all(|server| server.pid.is_none()));
+    for (path, text) in [(&caller, &source), (&bootstrap, &initial), (&declaration, &registration), (&target, &class)] {
+        assert_eq!(std::fs::read_to_string(path).unwrap(), *text);
+    }
+    assert!(!root.join("app/Http/Middleware/ReviewedBuilderAudit.php").exists());
+    if let Err(panic) = outcome {
+        std::panic::resume_unwind(panic);
+    }
+}

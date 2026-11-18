@@ -15,6 +15,73 @@ slice, commit and push it, and retain only the latest generated app. Native UI
 cases remain deferred/unverified; earlier native-first blocking checkpoints are
 historical and no longer prevent independent implementation.
 
+Client/host slice156 (2026-11-18, verified;169 inactive pending packaging):
+exercise source155 builder-variable identity through actual LspManager and managed
+host operations. Three new host tests and two direct-client tests fail on168 and
+pass on169 using the same executables for each comparison. Aliases, nested
+parentheses and repeated/direct creation retain the selected Kernel's declaration
+ownership, decoded UTF-16 ranges and checked-renaming authority. Dirty aliases
+retire/restore navigation without caller edits and replay on restart. Bootstrap
+changes invalidate reviewed plans even when bootstrap is not an edit target.
+Post-create mutation retains an explicit middleware refusal. Shared history,
+external-conflict guards, atomic cross-file application and dirty documents keep
+their existing behavior.
+
+The real Laravel13.37 client covers ordinary aliases, nested parentheses and
+repeated/direct returns using source155's disposable fixtures. It checks alias
+definition/reference ownership and reviewed class edits, including unsaved class
+documentation and restart replay. Escaped builder identity retains incomplete
+hover information and a middleware-specific rename refusal after restart; restoring
+its dirty bootstrap restores complete edits. All original fixture files remain
+unchanged and owned engine processes exit. The new helper initially declared
+LspManager instead of Arc<LspManager>; preserve the compiler error and correction.
+Host source and executable stay unchanged through that client-only fixture fix.
+The first full corpus exposed a transient Cancelled reference request in the
+inherited real bound-Kernel fixture. Its isolated pass was insufficient acceptance.
+A focused mock reproduces the same missing ContentModified retry. Reuse the
+existing navigation source/generation/project guards and fixed deadline for
+references, advertise that retry capability, and retain original UTF-16 parameters
+and declaration context. Only explicit ContentModified retries; cancellation,
+other server errors and changed dependencies do not. Three new ordinary tests
+cover the deadline, changed/opened/closed/disk sources, settings, restart and real
+cancellation. The focused reference cohort passes14 cases. The first full workspace run caught
+a paused-clock assertion measuring initialization/teardown too; measure only
+from first request to return before shutdown, keeping the same deadline bound.
+Preserve that failure and the corrected full acceptance. Preserve the initial
+zero-test filter and corrected failing single-test run. All affected Rust and
+actual client/host gates rerun after the production correction; unchanged frontend
+checks are reused with explicit provenance. No empty-result fallback, suppression
+or timeout increase was added.
+
+All102 actual169 client/host cases pass:55 client,32 completion-host,10 guarded
+edits,2 controller URL-host,2 handler-host and1 PHP-target settings-host. Runtime
+source, emitted executables and Cargo fingerprints remain fixed during the final
+corpus. Frontend13,393 passes/6 skipped, typecheck/lint/format/knip and production
+build pass. Rust formatting and workspace all-target Clippy pass. Serialized
+workspace:5,155 passes/219 ignored/one retained HTTP
+exclusion across224 groups. The5 new ignored regressions run explicitly
+in controls and the actual corpus. Generated bindings/command snapshots remain
+unchanged. Keep the known default-parallel CLI socket-test limitation. Native UI
+stays user-skipped; wider platform/performance gates remain partial. Identical169
+retains source155's18,632 ordinary/17 ignored plus2 bounded children, both engine
+Clippy modes, exact replay/build,31 stdio groups,119 Laravel syntax/361 runtime
+assertions and exact3 intentional analyzer diagnostics.
+
+Candidate169 SHA256:f95a8d17de31a19eb2a2573116184bd90fb16105c94b163fbda5dad940747a6b.
+Client/host receipt SHA256:6e502cf345732984d1e6ee34c9e4ad26c72b7ae298b0c03793af5d83d7f181bf.
+App106/default168 hashes and deep/strict signature remain unchanged; App106 is the
+sole generated app. Keep only current compiler/dist output needed immediately for
+the next package, then remove it after signed verification. No new app, migration,
+installation, updater activation or debugger functionality. All69 statuses remain
+67 partial/2 user-deferred. Remaining L63/L64 shapes and broader middleware work
+stay tracked, including actual withMiddleware alias replacement. The Auto status
+widget remains Composer-derived. Commit/push and verify exact remote ref and clean
+worktree before the separate packaging slice.
+
+Evidence:artifacts/checks/slice156/{source-input,gates,controls,controls-process-cleanup,
+client-host,retention,delivery}.json; retained helper compiler error, focused and
+final stage logs; canonical169 client-host/delivery sidecars.
+
 Engine source slice155 (2026-11-18, verified;169 inactive): standard Laravel
 application builders stored in variables retain shared application and initial
 HTTP Kernel identity through aliases and fluent assignments. Reassignment does

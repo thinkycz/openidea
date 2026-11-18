@@ -1933,18 +1933,17 @@ impl LspManager {
 
     /// A semantic publication is not evidence that a declaration is absent.
     /// Keep the original source receipt and deadline across explicit stale replies.
-    async fn current_navigation(
+    async fn current_navigation<R: DeserializeOwned>(
         &self,
-        snap: &DocSnap,
         target: &Target,
         method: &str,
-        pos: Pos,
+        params: Value,
         sources: &NavigationSnapshot,
         cancel: Option<&CancellationToken>,
-    ) -> IdeResult<Option<lsp::GotoDefinitionResponse>> {
-        let params = snap.pos_params(target, pos);
+        timeout: Duration,
+    ) -> IdeResult<R> {
         let cancel = cancel.cloned().unwrap_or_default();
-        let deadline = tokio::time::Instant::now() + DEFAULT_TIMEOUT;
+        let deadline = tokio::time::Instant::now() + timeout;
         let current = || !cancel.is_cancelled() && self.navigation_current(target, sources);
         loop {
             if !current() {
@@ -2162,7 +2161,7 @@ impl LspManager {
                 }
             }
             let response = loading::while_loading(&t.server, cancel, loading::LOADING_WAIT, goto_is_empty, || {
-                self.current_navigation(snap, t, method, pos, &sources, cancel)
+                self.current_navigation(t, method, snap.pos_params(t, pos), &sources, cancel, DEFAULT_TIMEOUT)
             })
             .await;
             if !self.navigation_current(t, &sources) {
@@ -2453,7 +2452,7 @@ impl LspManager {
             targets.iter().map(|t| Ok((t, self.navigation_sources(&snap, t)?))).collect::<IdeResult<Vec<_>>>()?;
         let current =
             || !cancel.is_cancelled() && sources.iter().all(|(target, before)| self.navigation_current(target, before));
-        let requests = targets.iter().map(|t| {
+        let requests = targets.iter().zip(&sources).map(|(t, (_, before))| {
             let (snap, cancel, current) = (&snap, &cancel, &current);
             async move {
                 // The Angular server searches the file's own project only: more open
@@ -2465,8 +2464,9 @@ impl LspManager {
                     }
                     let mut params = snap.pos_params(t, pos);
                     params["context"] = json!({ "includeDeclaration": include_declaration });
-                    let locs: Option<Vec<lsp::Location>> =
-                        self.call(t, "textDocument/references", params, Some(cancel), LONG_TIMEOUT).await?;
+                    let locs: Option<Vec<lsp::Location>> = self
+                        .current_navigation(t, "textDocument/references", params, before, Some(cancel), LONG_TIMEOUT)
+                        .await?;
                     if !current() {
                         return Err(IdeError::cancelled());
                     }

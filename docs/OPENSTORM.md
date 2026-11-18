@@ -15,6 +15,56 @@ slice, commit and push it, and retain only the latest generated app. Native UI
 cases remain deferred/unverified; earlier native-first blocking checkpoints are
 historical and no longer prevent independent implementation.
 
+Client verification slice167 (2026-11-18; candidate172 remains unpromoted):
+all11 affected real OpenStorm LspManager cases pass against172, including2 new
+cases across nine Laravel13.37 callback fixtures. The same emitted executable
+fails the intended effective-alias assertion against171. Literal callbacks,
+encoded duplicate/spread keys and independent builder identities select the exact
+bootstrap UTF16 declaration, hover and two references. Dirty callback/class text,
+restoration and main server restart preserve current meaning. Conditional/empty
+reset cases retain all known alternatives and an incomplete notice; opaque
+callbacks/custom setters refuse physical edits. Shadowed named Kernel references
+remain in safe checked plans. Original fixture files and owned process cleanup
+verify. Fresh syntax checks cover1107 PHP files across the nine fixtures;18
+Composer manifests parse and their PSR4 directories exist. Reuse source166's
+autoload/runtime checks. This does not establish native UI or callback-specific
+Host apply/history acceptance.
+
+Actual client testing confirms the inherited mixed-Composer witness failure.
+Root discovery deliberately selects the outermost marker and shares one
+transport. A dirty nested CommonServiceProvider document makes main-project
+checked rename wait30s and report that PHP is still updating. Closing that
+transport document restores the checked plan; no source witness is filtered out.
+The new regression verifies safe refusal and recovery, not successful mixed-
+context rename. Success with that document open and the misleading updating
+message remain failures requiring an engine witness-routing fix before promotion.
+The initial separate-server assertion was wrong and is retained as a failed test
+assumption, not an engine negative control. The corrected172 diagnostic fails at
+rename as recorded in mixed-project-diagnostic-172.json/log. Two explicitly
+interrupted no-run builds used a standalone graph/noncanonical TMPDIR; final
+workspace no-run compilation uses the canonical gate environment.
+
+The ordinary workspace run passes5155/231 ignored, with the existing explicit
+http_list_and_run_require_confirmation exclusion. Only the new ignored test
+bodies changed afterward; all production code and ordinary test inputs remain
+unchanged. Final no-run compilation and the11 actual cases cover those corrected
+bodies. Final Rust formatting/all-target Clippy, client ordinary pass and binding
+checks succeed; their receipts are authoritative. All six final frontend
+gates pass, including13,397 tests/6 skipped; the initial ledger-JSON formatting
+failure is corrected and preserved separately. Broader171 client/host
+and165 browser/package evidence remains historical, not a new172 full sweep.
+App110/default171 remains unchanged and the sole packaged app. Retain only the
+current compiler/frontend inputs for the immediately following witness fix,
+Host acceptance and package slices; remove them after package acceptance. No
+engine compiler tree, new app, install, migration, release/tag or updater change.
+Native UI stays user-skipped. All69 statuses remain67 partial/2 user-deferred.
+
+Evidence:artifacts/checks/slice167/{gates,client,frontend,final-rust,retention,
+delivery}.json; exact emitted client-final-build.log; initial-root-assumption*
+and mixed-project-diagnostic-172* failures preserved. Next: fix engine receipt
+routing without dropping unsaved witnesses, then Host callback apply/history
+acceptance and a separately signed package.
+
 Engine source slice166 (2026-11-18, inactive PHPantom172 verified): resolve
 explicit literal alias overrides in the selected standard builder's final
 Middleware callback. Real Laravel13.37 plus bundled171 proved one runtime Router/

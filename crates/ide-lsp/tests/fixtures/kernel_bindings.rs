@@ -1,6 +1,179 @@
 use super::*;
 use futures::FutureExt;
 
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires PHPantom172 and retained real Laravel13.37 builder-callback fixtures"]
+async fn builder_callback_client_tracks_effective_aliases_and_preserves_nested_source_refusal() {
+    let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let engine = std::env::var_os("OPENSTORM_TEST_PHPANTOM_BIN")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| repo.join("src-tauri/resources/phpantom/phpantom_lsp"));
+    for variant in ["basic", "duplicates", "variable", "independent"] {
+        let root = repo.join(format!("artifacts/checks/slice166-managed-wire-{variant}")).canonicalize().unwrap();
+        let caller = root.join("routes/builder.php");
+        let bootstrap = root.join("bootstrap/app.php");
+        let kernel = root.join("app/Runtime/BuilderKernel.php");
+        let target = root.join("app/Http/Middleware/BuilderAudit.php");
+        let nested = root.join("app-modules/common/src/CommonServiceProvider.php");
+        let originals: Vec<_> = [&caller, &bootstrap, &kernel, &target, &nested]
+            .into_iter()
+            .map(|path| (path.clone(), std::fs::read_to_string(path).unwrap()))
+            .collect();
+        let source = &originals[0].1;
+        let initial = &originals[1].1;
+        let class = &originals[3].1;
+        let mgr = builder_variable_client(&root, &engine);
+        let doc = DocId::next();
+        let config = DocId::next();
+        let class_doc = DocId::next();
+        let nested_doc = DocId::next();
+        for (id, path, text) in [
+            (doc, &caller, source),
+            (config, &bootstrap, initial),
+            (class_doc, &target, class),
+            (nested_doc, &nested, &originals[4].1),
+        ] {
+            mgr.did_open(id, path, &LanguageId::new("php"), 1, text);
+        }
+        let outcome = std::panic::AssertUnwindSafe(async {
+            assert!(!mgr.goto(doc, pos(source, "BuilderAudit;"), GotoKind::Definition).await.unwrap().is_empty());
+            assert!(!mgr.goto(nested_doc, pos(&originals[4].1, "CommonServiceProvider extends"), GotoKind::Definition).await.unwrap().is_empty());
+            let servers = mgr.servers();
+            assert!(servers.iter().any(|server| *server.root == root), "{servers:?}");
+            assert_eq!(servers.len(), 1, "outermost Composer root intentionally shares one transport: {servers:?}");
+            if variant != "basic" {
+                mgr.did_close(nested_doc);
+            }
+            let position = pos(source, "builder.audit");
+            let found = mgr.goto(doc, position, GotoKind::Definition).await.unwrap();
+            assert_eq!(found.len(), 1, "selected callback must retire initial Kernel aliases: {variant}: {found:?}");
+            assert_eq!(*found[0].path, bootstrap);
+            let key = if variant == "duplicates" { r"builder\x2Eaudit" } else { "builder.audit" };
+            let chosen = initial.find("/* 😀 chosen */").unwrap();
+            let key_offset = chosen + initial[chosen..].find(key).unwrap();
+            assert_eq!(found[0].range.start, pos(initial, &initial[key_offset..]));
+            let refs = mgr.references(doc, position, true, true, Default::default()).await.unwrap();
+            assert!(refs.incomplete.is_none(), "{refs:?}");
+            assert_eq!(refs.locations.len(), 2, "{refs:?}");
+            assert!(refs.locations.iter().any(|location| *location.path == bootstrap && location.range.end.col - location.range.start.col == key.encode_utf16().count() as u32), "{refs:?}");
+            let hover = mgr.hover(doc, position, Default::default()).await.unwrap().unwrap();
+            assert!(hover.contents.value.contains("AuditRequests") && !hover.contents.value.contains("BuilderAudit") && !hover.contents.value.contains("incomplete"), "{hover:?}");
+            let overlay = format!("{class}// Unsaved shadowed middleware documentation.\n");
+            replace(&mgr, class_doc, 2, class, &overlay);
+            if variant == "basic" {
+                let nested_dirty = format!("{}\n// Unsaved nested Composer dependency.\n", originals[4].1);
+                replace(&mgr, nested_doc, 2, &originals[4].1, &nested_dirty);
+                let refused = mgr.rename(class_doc, pos(class, "BuilderAudit {}"), "ReviewedCallbackAudit".into(), Default::default()).await.unwrap_err();
+                assert_eq!(refused.kind, ide_core::error::ErrorKind::Unavailable);
+                assert_eq!(refused.message, "PHP project is still updating. Retry Rename after indexing finishes.");
+                mgr.did_close(nested_doc);
+            }
+            let rename = mgr.rename(class_doc, pos(class, "BuilderAudit {}"), "ReviewedCallbackAudit".into(), Default::default()).await.unwrap();
+            assert!(rename.incomplete.is_none(), "closing the foreign transport document must restore the main-project plan: {rename:?}");
+            assert!(rename.edit.files.iter().any(|edit| matches!(edit, ide_core::FileEdit::Edit { path, edits, .. } if **path == kernel && edits.iter().any(|edit| edit.new_text.contains("ReviewedCallbackAudit")))), "shadowed Kernel references must remain in checked edits: {rename:?}");
+            assert!(!rename.edit.files.iter().any(|edit| matches!(edit, ide_core::FileEdit::Edit { path, .. } if **path == nested)), "{rename:?}");
+            let changed = initial.replace("AuditRequests::class", "BuilderAudit::class");
+            assert_ne!(&changed, initial);
+            replace(&mgr, config, 2, initial, &changed);
+            for restarted in [false, true] {
+                if restarted {
+                    let main = mgr.servers().into_iter().find(|server| *server.root == root).unwrap();
+                    mgr.restart(main.id).await.unwrap();
+                }
+                let found = mgr.goto(doc, position, GotoKind::Definition).await.unwrap();
+                assert_eq!(found.len(), 1, "dirty callback must survive restart: {found:?}");
+                assert_eq!(*found[0].path, bootstrap);
+                let hover = mgr.hover(doc, position, Default::default()).await.unwrap().unwrap();
+                assert!(hover.contents.value.contains("BuilderAudit") && !hover.contents.value.contains("AuditRequests"), "dirty callback must determine hover after restart: {hover:?}");
+            }
+            replace(&mgr, config, 3, &changed, initial);
+            let restored = mgr.hover(doc, position, Default::default()).await.unwrap().unwrap();
+            assert!(restored.contents.value.contains("AuditRequests") && !restored.contents.value.contains("BuilderAudit"), "{restored:?}");
+        }).catch_unwind().await;
+        mgr.shutdown_all().await;
+        assert!(mgr.servers().iter().all(|server| server.pid.is_none()));
+        for (path, text) in originals {
+            assert_eq!(std::fs::read_to_string(path).unwrap(), text);
+        }
+        assert!(!root.join("app/Http/Middleware/ReviewedCallbackAudit.php").exists());
+        if let Err(panic) = outcome {
+            std::panic::resume_unwind(panic);
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires PHPantom172 and retained real Laravel13.37 uncertain-callback fixtures"]
+async fn builder_callback_client_preserves_uncertainty_and_checked_rename_boundaries() {
+    let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let engine = std::env::var_os("OPENSTORM_TEST_PHPANTOM_BIN")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| repo.join("src-tauri/resources/phpantom/phpantom_lsp"));
+    for (variant, declarations, refused) in [
+        ("conditional", 3, false),
+        ("opaque", 3, true),
+        ("setter", 3, true),
+        ("empty-legacy", 3, false),
+        ("empty-retained", 2, false),
+    ] {
+        let root = repo.join(format!("artifacts/checks/slice166-managed-wire-{variant}")).canonicalize().unwrap();
+        let caller = root.join("routes/builder.php");
+        let target = root.join("app/Http/Middleware/BuilderAudit.php");
+        let source = std::fs::read_to_string(&caller).unwrap();
+        let class = std::fs::read_to_string(&target).unwrap();
+        let mgr = builder_variable_client(&root, &engine);
+        let doc = DocId::next();
+        let class_doc = DocId::next();
+        mgr.did_open(doc, &caller, &LanguageId::new("php"), 1, &source);
+        mgr.did_open(class_doc, &target, &LanguageId::new("php"), 1, &class);
+        let outcome = std::panic::AssertUnwindSafe(async {
+            assert!(!mgr.goto(doc, pos(&source, "BuilderAudit;"), GotoKind::Definition).await.unwrap().is_empty());
+            for restarted in [false, true] {
+                if restarted {
+                    mgr.restart(mgr.servers()[0].id).await.unwrap();
+                }
+                let found = mgr.goto(doc, pos(&source, "builder.audit"), GotoKind::Definition).await.unwrap();
+                assert_eq!(
+                    found.len(),
+                    declarations,
+                    "uncertain callback must retain every known declaration: {variant}: {found:?}"
+                );
+                let hover = mgr.hover(doc, pos(&source, "builder.audit"), Default::default()).await.unwrap().unwrap();
+                assert!(hover.contents.value.contains("incomplete"), "{variant}: {hover:?}");
+                let rename = mgr
+                    .rename(
+                        class_doc,
+                        pos(&class, "BuilderAudit {}"),
+                        "ReviewedCallbackAudit".into(),
+                        Default::default(),
+                    )
+                    .await;
+                if refused {
+                    assert!(
+                        rename.as_ref().is_err_and(|error| error.message.contains("middleware")),
+                        "opaque callback lifecycle must refuse checked edits: {variant}: {rename:?}"
+                    );
+                } else {
+                    assert!(
+                        rename.unwrap().incomplete.is_none(),
+                        "known physical references may be renamed independently of uncertain read ordering: {variant}"
+                    );
+                }
+            }
+        })
+        .catch_unwind()
+        .await;
+        mgr.shutdown_all().await;
+        assert!(mgr.servers().iter().all(|server| server.pid.is_none()));
+        assert_eq!(std::fs::read_to_string(&caller).unwrap(), source);
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), class);
+        assert!(!root.join("app/Http/Middleware/ReviewedCallbackAudit.php").exists());
+        if let Err(panic) = outcome {
+            std::panic::resume_unwind(panic);
+        }
+    }
+}
+
 const CALLER: &str = r#"<?php
 use Illuminate\Support\Facades\Route;
 new \App\Http\Middleware\Audit;

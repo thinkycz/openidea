@@ -454,7 +454,8 @@
         "2026-11-16 slice113 source: invokable navigation binds source pane/full selection (fallback exact caret), checks pending-edit/response/error/target-selection boundaries, and quietly retires moved carets or replaced same-document panes. Source-edit Retry and name browsing remain unchanged.9 red regressions across initial/late-error/pane fallback cases turn green;99 focused,12647 frontend/6 skipped and45 controlled browser checks pass, including2 red-before browser focus-jump cases and fresh-action recovery. App0.1.94/engine154 unchanged and predating this source guard; native UI skipped. See docs/OPENSTORM.md and slice113-receipt.json.",
         "2026-11-16 slice114 inactive engine155: rooted controller URL literals in action/helper aliases, URL/redirect receivers/facades and Response support normal class/method goto, references and safe rename. Actual named roles and global/local helper identities are checked; caller spans retire/restore on helper edits, including namespace fallback. Unrooted/ambiguous/encoded references refuse partial renames, and URL links do not become controller execution edges.14 new/107 route checks,18522 ordinary engine tests/17 ignored+2 children, all-target standard/mem-audit Clippy/fmt, source replay/build,333 Laravel assertions/10 independent controls and final actual CLI/real Laravel13 targets pass. Corrected demo retains exact3 intentional diagnostics. PHP-only final correction reuses identical Rust-input checks and rebuilds byte-identically. App94/default154 unchanged; client promotion/native acceptance pending or user-skipped. See docs/OPENSTORM.md and slice114-receipt.json.",
         "2026-11-18 source slice149, inactive167: literal bootstrap bindings select the returned Application HTTP Kernel, with shared typing, inherited/trait ownership, decoded constants, case-sensitive container keys, guarded edits and dirty bootstrap freshness.9 public/1 private regressions,18618 ordinary engine passes/17 ignored+2 bounded children, both all-target Clippy modes/fmt/replay/build and26 stdio groups pass. Real Laravel13.37 bound and inherited aliases pass navigation/references/dirty restart/refusal;119 syntax/355 runtime assertions and exact3 prior intentional diagnostics. App104/default166 unchanged; genuine client/host adoption and packaging next. Providers/builders/aliases/closures remain L64; runtime mutation/callback order remains L63. Native skipped; broader area acceptance partial. See docs/OPENSTORM.md and slice149-final-check.json.",
-        "2026-11-18 client/host slice150, inactive167: five new actual host/client regressions fail on166 and pass on167. Custom Kernel ownership, both alias properties, UTF16 references, dirty bootstrap selection/restart, stale off-target dependency plans, conflict protection and shared reviewed history pass. Real Laravel13.37 client verifies the bound-only alias, dirty retirement/restoration and incomplete rename refusal.94 actual client/host,5152 workspace/211 ignored/one HTTP exclusion and13393 frontend passes/6 skipped; Clippy/fmt/build/binding fidelity pass. Initial missing candidate hook and unfiltered119-source timeout retained; production word-filtered scope6 passes without changing timeouts. App104/default166 unchanged; package next, native skipped. L63/L64 and wider performance/area gates remain partial. See docs/OPENSTORM.md and slice150 receipts."
+        "2026-11-18 client/host slice150, inactive167: five new actual host/client regressions fail on166 and pass on167. Custom Kernel ownership, both alias properties, UTF16 references, dirty bootstrap selection/restart, stale off-target dependency plans, conflict protection and shared reviewed history pass. Real Laravel13.37 client verifies the bound-only alias, dirty retirement/restoration and incomplete rename refusal.94 actual client/host,5152 workspace/211 ignored/one HTTP exclusion and13393 frontend passes/6 skipped; Clippy/fmt/build/binding fidelity pass. Initial missing candidate hook and unfiltered119-source timeout retained; production word-filtered scope6 passes without changing timeouts. App104/default166 unchanged; package next, native skipped. L63/L64 and wider performance/area gates remain partial. See docs/OPENSTORM.md and slice150 receipts.",
+        "Slice151: signed local arm64 development App0.1.105/default167 packages source149/client150 custom HTTP Kernel support.22 embedded stage groups pass, including custom/inherited Kernel ownership, checked edits, dirty bootstrap/restart, PHP targets/builtins and real Laravel13.37;119 syntax/355 runtime assertions and exact3 intentional diagnostics. Exact source/hash/provenance/licenses and signature verify; only App105 remains, prior app/staging/compiler/dist removed. Reuse94 actual client/host,5152 workspace and13393 frontend passes; native UI skipped. L63/L64, Auto-widget and wider performance/native/platform gates remain partial. See docs/OPENSTORM.md."
       ],
       "remaining": "Broader route forms, immediate readiness/config-change and other cancellation permutations remain open. The0.1.58 pending route-list project-switch case is accepted; prior46 transient first-request miss remains tracked separately from settled navigation. Slice82 accepts recorded owner-preserving controller-group chains; direct inline controller owners, namespace changes, custom macros and unfinished/dynamic argument forms remain partial. Controller URL helper completion, configured unrooted URL roots, encoded method edits and broader project/configuration/native acceptance remain open."
     },
@@ -1000,7 +1001,8 @@
         "2026-11-16 slice113 source: invokable navigation binds source pane/full selection (fallback exact caret), checks pending-edit/response/error/target-selection boundaries, and quietly retires moved carets or replaced same-document panes. Source-edit Retry and name browsing remain unchanged.9 red regressions across initial/late-error/pane fallback cases turn green;99 focused,12647 frontend/6 skipped and45 controlled browser checks pass, including2 red-before browser focus-jump cases and fresh-action recovery. App0.1.94/engine154 unchanged and predating this source guard; native UI skipped. See docs/OPENSTORM.md and slice113-receipt.json.",
         "2026-11-16 slice114 inactive engine155: rooted controller URL literals in action/helper aliases, URL/redirect receivers/facades and Response support normal class/method goto, references and safe rename. Actual named roles and global/local helper identities are checked; caller spans retire/restore on helper edits, including namespace fallback. Unrooted/ambiguous/encoded references refuse partial renames, and URL links do not become controller execution edges.14 new/107 route checks,18522 ordinary engine tests/17 ignored+2 children, all-target standard/mem-audit Clippy/fmt, source replay/build,333 Laravel assertions/10 independent controls and final actual CLI/real Laravel13 targets pass. Corrected demo retains exact3 intentional diagnostics. PHP-only final correction reuses identical Rust-input checks and rebuilds byte-identically. App94/default154 unchanged; client promotion/native acceptance pending or user-skipped. See docs/OPENSTORM.md and slice114-receipt.json.",
         "2026-11-18 source slice149, inactive167: literal bootstrap bindings select the returned Application HTTP Kernel, with shared typing, inherited/trait ownership, decoded constants, case-sensitive container keys, guarded edits and dirty bootstrap freshness.9 public/1 private regressions,18618 ordinary engine passes/17 ignored+2 bounded children, both all-target Clippy modes/fmt/replay/build and26 stdio groups pass. Real Laravel13.37 bound and inherited aliases pass navigation/references/dirty restart/refusal;119 syntax/355 runtime assertions and exact3 prior intentional diagnostics. App104/default166 unchanged; genuine client/host adoption and packaging next. Providers/builders/aliases/closures remain L64; runtime mutation/callback order remains L63. Native skipped; broader area acceptance partial. See docs/OPENSTORM.md and slice149-final-check.json.",
-        "2026-11-18 client/host slice150, inactive167: five new actual host/client regressions fail on166 and pass on167. Custom Kernel ownership, both alias properties, UTF16 references, dirty bootstrap selection/restart, stale off-target dependency plans, conflict protection and shared reviewed history pass. Real Laravel13.37 client verifies the bound-only alias, dirty retirement/restoration and incomplete rename refusal.94 actual client/host,5152 workspace/211 ignored/one HTTP exclusion and13393 frontend passes/6 skipped; Clippy/fmt/build/binding fidelity pass. Initial missing candidate hook and unfiltered119-source timeout retained; production word-filtered scope6 passes without changing timeouts. App104/default166 unchanged; package next, native skipped. L63/L64 and wider performance/area gates remain partial. See docs/OPENSTORM.md and slice150 receipts."
+        "2026-11-18 client/host slice150, inactive167: five new actual host/client regressions fail on166 and pass on167. Custom Kernel ownership, both alias properties, UTF16 references, dirty bootstrap selection/restart, stale off-target dependency plans, conflict protection and shared reviewed history pass. Real Laravel13.37 client verifies the bound-only alias, dirty retirement/restoration and incomplete rename refusal.94 actual client/host,5152 workspace/211 ignored/one HTTP exclusion and13393 frontend passes/6 skipped; Clippy/fmt/build/binding fidelity pass. Initial missing candidate hook and unfiltered119-source timeout retained; production word-filtered scope6 passes without changing timeouts. App104/default166 unchanged; package next, native skipped. L63/L64 and wider performance/area gates remain partial. See docs/OPENSTORM.md and slice150 receipts.",
+        "Slice151: signed local arm64 development App0.1.105/default167 packages source149/client150 custom HTTP Kernel support.22 embedded stage groups pass, including custom/inherited Kernel ownership, checked edits, dirty bootstrap/restart, PHP targets/builtins and real Laravel13.37;119 syntax/355 runtime assertions and exact3 intentional diagnostics. Exact source/hash/provenance/licenses and signature verify; only App105 remains, prior app/staging/compiler/dist removed. Reuse94 actual client/host,5152 workspace and13393 frontend passes; native UI skipped. L63/L64, Auto-widget and wider performance/native/platform gates remain partial. See docs/OPENSTORM.md."
       ],
       "remaining": "Completion/diagnostic stale responses, target-profile builtin-cache invalidation, broader project/configuration and multi-project cases remain unaccepted. Slice74 closes the reproduced immediate-navigation null in source/client checks; packaged native repetition remains pending by explicit user instruction to skip native checks for now."
     },
@@ -1284,20 +1286,20 @@
     "notarized": false
   },
   "current_local_delivery": {
-    "package_slice": 148,
-    "source_slices": [146, 147],
-    "verification_slices": [146, 147, 148],
-    "app": "0.1.104",
-    "engine": "0.11.1-openstorm.166",
+    "package_slice": 151,
+    "source_slices": [149, 150],
+    "verification_slices": [149, 150, 151],
+    "app": "0.1.105",
+    "engine": "0.11.1-openstorm.167",
     "local_delivery": {
-      "bundle": "/Users/longdo/Code/openidea/artifacts/batches/0.1.104/OpenStorm.app",
-      "version": "0.1.104",
+      "bundle": "/Users/longdo/Code/openidea/artifacts/batches/0.1.105/OpenStorm.app",
+      "version": "0.1.105",
       "identifier": "cz.thinky.openstorm",
       "minimum_os": "13.0",
       "architecture": "arm64",
       "signature": true,
-      "engine_sha256": "f68ad4d7628d387f401b109d19c526948fe089781f23a3f383552f7cfa992d71",
-      "executable_sha256": "d9cdd425a075f69f6170e8274d2141672f5e2f0b0ae903b8881048f536bc3028",
+      "engine_sha256": "cd17bb14d8c699d05b24242f81b1a73750e85cae072b6be0a5c611e471b0d35c",
+      "executable_sha256": "46b5b83f3e5cfa0efd82bd503eec1b62890e784799ffa73cbb8c99d269e85f33",
       "sole_archive": true,
       "compiler_target_removed": true,
       "native_ui": "user-skipped;app not launched/installed/notarized",
@@ -1307,16 +1309,16 @@
     "signing": "ad-hoc; deep/strict verified",
     "installed": false,
     "notarized": false,
-    "compiler_cleanup": "Packaging recipe cargo-cleaned its compiler root and removed duplicate staging; dist removed after embedded checks.",
-    "evidence": "artifacts/checks/slice148/final-check.json; artifacts/batches/0.1.104/build-receipt.json",
+    "compiler_cleanup": "Package recipe cargo-cleaned current compiler output and duplicate staging; dist removed after embedded checks.",
+    "evidence": "artifacts/checks/slice151/final-check.json; artifacts/batches/0.1.105/build-receipt.json",
     "later_source_checkpoint": {
-      "slice": 147,
-      "source_slice": 146,
+      "slice": 150,
+      "source_slice": 149,
       "packaged": true,
-      "promotion_package_slice": 148,
-      "engine": "0.11.1-openstorm.166",
-      "description": "Explicit PHP language-level adapter and candidate166 packaged in App104; Auto status widget remains Composer-derived.",
-      "evidence": "artifacts/checks/slice147/retention.json; artifacts/checks/slice148/final-check.json"
+      "promotion_package_slice": 151,
+      "engine": "0.11.1-openstorm.167",
+      "description": "Literal bootstrap-bound HTTP Kernel navigation and checked edits packaged in App105; L63/L64 and wider acceptance remain partial.",
+      "evidence": "artifacts/checks/slice150/retention.json; artifacts/checks/slice151/final-check.json"
     }
   },
   "invokable_handler_navigation_candidate": {

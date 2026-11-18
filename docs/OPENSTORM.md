@@ -15,6 +15,73 @@ slice, commit and push it, and retain only the latest generated app. Native UI
 cases remain deferred/unverified; earlier native-first blocking checkpoints are
 historical and no longer prevent independent implementation.
 
+Package slice151 (2026-11-18, signed local App0.1.105 verified): promote
+source149/client150-verified PHPantom167 into the default resource pin and signed
+development app. Literal bootstrap HTTP Kernel bindings now select custom Kernel
+declarations through the established client/editor paths, preserving inherited and
+trait property ownership, UTF-16 ranges, dirty dependency/restart freshness and
+checked-edit refusals. PHP constant strings retain decoded runtime values. Preserve
+existing PHP targets, imports, Composer/Laravel intelligence, conflict protection
+and reviewed history. Native UI stays user-skipped; broader area gates stay partial.
+
+Branding/identifier, independent settings/caches, .openidea compatibility,
+appearance/keymaps/autosave and debugger scope are unchanged. Updater endpoints
+stay empty. All45 local Cargo versions move0.1.104 to0.1.105; external lockfile
+blocks and plugin API1.10.0 remain unchanged. Checksums, exact source fingerprint,
+typecheck/lint/format/knip, version-helper tests, Rust formatting, three bundled-
+server checks, PHP default/optional-companion check and ide-tools Clippy pass.
+Reuse slice150's fresh5,152 workspace passes/211 ignored/one retained HTTP exclusion,
+94 actual167 client/host passes and13,393 frontend passes/6 skipped. Keep its5
+same-executable negative166/positive167 controls. Identical167 retains source149's
+18,618 ordinary engine passes/17 ignored plus2 bounded checks, both Clippy modes,
+exact replay/build and26 stdio groups. Keep the known default-parallel CLI socket-
+test limitation and debug linker __eh_frame unwind-table warning. These source and
+backend layers do not establish native UI acceptance.
+
+Build an arm64 development/debug app with production frontend assets and passing
+Safari15.4 checks. Ad-hoc sign and deep/strict verify identifier cz.thinky.openstorm
+and version0.1.105. Minimum-OS13.0 metadata verifies; actual macOS13 runtime remains
+untested. Bundle:artifacts/batches/0.1.105/OpenStorm.app.
+Main executable SHA256:46b5b83f3e5cfa0efd82bd503eec1b62890e784799ffa73cbb8c99d269e85f33.
+Embedded/default PHPantom167 SHA256:cd17bb14d8c699d05b24242f81b1a73750e85cae072b6be0a5c611e471b0d35c.
+Provenance equals canonical167. Immutable build receipt binds compiled source;
+only post-build progress/ledger metadata differ. MIT/Apache notices, upstream
+attribution and the OpenIDEA compatibility header remain intact. Engine runtime
+dependencies are macOS system libraries only. Source/build and client receipt
+fingerprints match; no global server installation is used by the embedded probes.
+
+All22 embedded stage groups pass using the copied executable. New bound-Kernel
+navigation, references, checked-rename preview, stale bootstrap refusal, unsaved
+selection changes and dirty restart replay pass. Real Laravel13.37 bound-only and
+inherited aliases retain declaration ownership, dirty retirement/restoration and
+incomplete-plan refusal. Existing PHP-target selection, builtin gates, malformed
+initialization recovery, inherited Kernel/trait navigation/refactoring, plain PHP,
+Composer, Laravel, encoded guards, resource exclusions, receiver identity, project
+freshness, namespace safeguards and descriptor isolation stay green. Owned children
+exit0; original/borrowed inputs stay unchanged. All119 Laravel syntax checks and
+355 runtime assertions pass. Analyzer output remains exactly3 deliberate diagnostics
+at their original lines, expected exit1. Signature verifies after all probes.
+
+Keep App104 until App105's signature/build receipt succeeds, then remove the older
+app and duplicate staging copy. The recipe cargo-cleans all compiler output,
+including the current output retained across slice150 for this package; remove
+68,853,451 generated frontend bytes after embedded checks. Retain only App105,
+canonical sources/engines, Workbench, fixtures and receipts. No install, native UI
+launch, migration, notarization, public release or updater activation. All69 areas
+remain67 partial/2 user-deferred. Provider/builder/alias/closure Kernel selection
+remains L64; dynamic/property/callback ordering remains L63 and broader middleware
+catalog/transformation work remains tracked. Auto PHP status remains Composer-
+derived and can differ from saved PHPantom profiles. The unfiltered119-source
+candidate-hook timeout remains recorded; production's6 matching source contract
+passes, with no timeout increase or performance-fix claim. Wider native/platform/
+performance and whole-area gates stay partial. Commit/push and verify the exact
+remote ref and clean worktree before the next navigation slice.
+
+Evidence:artifacts/checks/slice151/{promotion-input,version-proof,identity-provenance,
+gates,package,embedded,final-check,delivery}.json; stage/probe logs;
+artifacts/batches/0.1.105/{build-receipt,retention}.json; canonical167 packaged
+sidecar after remote verification. Native checks remain user-skipped.
+
 Client/host slice150 (2026-11-18, verified;167 inactive pending packaging):
 exercise the source149 custom Kernel selection through actual LspManager and managed
 host operations. Three new host tests and two direct-client tests fail on166 and

@@ -5624,7 +5624,6 @@
   "PHP Language Level: {label}": "Nivel de lenguaje PHP: {label}",
   "Select PHP Language Level": "Seleccionar nivel de lenguaje PHP",
   "Cannot select PHP language level": "No se puede seleccionar el nivel de lenguaje PHP",
-  "No PHP version in the settings or composer.json: Intelephense uses its default": "No hay versión de PHP en la configuración ni en composer.json: Intelephense usa su valor predeterminado",
   "PHP {version}, set in the settings": "PHP {version}, establecido en la configuración",
   "PHP {version}, from config.platform.php in composer.json": "PHP {version}, de config.platform.php en composer.json",
   "PHP {version}, the lowest version require.php in composer.json allows": "PHP {version}, la versión más baja que permite require.php en composer.json",

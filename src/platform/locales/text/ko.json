@@ -5692,7 +5692,6 @@
   "PHP Language Level: {label}": "PHP 언어 레벨: {label}",
   "Select PHP Language Level": "PHP 언어 레벨 선택",
   "Cannot select PHP language level": "PHP 언어 레벨을 선택할 수 없습니다",
-  "No PHP version in the settings or composer.json: Intelephense uses its default": "설정과 composer.json에 PHP 버전이 없습니다. Intelephense가 기본 버전을 사용합니다",
   "PHP {version}, set in the settings": "PHP {version}, 설정에서 지정",
   "PHP {version}, from config.platform.php in composer.json": "PHP {version}, composer.json의 config.platform.php 기준",
   "PHP {version}, the lowest version require.php in composer.json allows": "PHP {version}, composer.json의 require.php가 허용하는 가장 낮은 버전",

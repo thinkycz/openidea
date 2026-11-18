@@ -2379,6 +2379,28 @@ fn intelephense_gets_the_php_language_level() {
 }
 
 #[test]
+fn phpantom_gets_only_the_explicit_php_language_level() {
+    use serde_json::json;
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(tmp.path().join("composer.json"), r#"{"require":{"php":"^8.3"}}"#).unwrap();
+    let configured = |name: &str, level: &str| {
+        let mut settings = Settings::default();
+        settings.languages.php.language_level = level.into();
+        let mut cfg = server(name);
+        cfg.initialization_options = Some(toml::Value::try_from(json!({"customOption": true})).unwrap());
+        configure_server(&mut cfg, tmp.path(), tmp.path(), &settings);
+        serde_json::to_value(cfg.initialization_options).unwrap()
+    };
+    assert_eq!(configured("phpantom", " 8.1 "), json!({"customOption":true,"phpLanguageLevel":"8.1.0"}));
+    for auto in ["", "  ", "invalid"] {
+        assert_eq!(configured("phpantom", auto), json!({"customOption":true}), "{auto:?}");
+    }
+    for other in ["phpactor", "intelephense", "basedpyright"] {
+        assert!(configured(other, "8.1").get("phpLanguageLevel").is_none(), "{other}");
+    }
+}
+
+#[test]
 fn intelephense_gets_the_required_stubs_and_include_paths() {
     use serde_json::json;
     let tmp = tempfile::tempdir().unwrap();

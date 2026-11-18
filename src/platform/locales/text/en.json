@@ -1,4 +1,5 @@
 {
+  "No PHP version in the settings or composer.json: using the language server configuration": "No PHP version in the settings or composer.json: using the language server configuration",
   "Presentation Assistant": "Presentation Assistant",
   "Small": "Small",
   "Large": "Large",

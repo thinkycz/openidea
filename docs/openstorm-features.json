@@ -270,9 +270,10 @@
       "acceptance_gate": "Do not suggest unavailable syntax/functions; version change invalidates facts",
       "openstorm_evidence": [
         "0.1.57: real-client stale builtin target after Composer8.3 + restart reproduced/fixed; frontend/LSP PHP builtin cache revalidation, mixed-target refusal and existing readonly host-buffer refresh pass. Native same-tab/same-URI8.2->8.3 after restart, readonly typing/Save All, no-argument relaunch and process cleanup pass. Full5,330 frontend/1,740 Rust tests, fmt/Clippy pass. The old-URI polling timeout is reinterpreted by Slice58; builtin-tab session restoration remains open. Engine130 unchanged; see docs/OPENSTORM.md.",
-        "Slice58 with unchanged app0.1.57/engine130: actual client and native Composer8.3->8.4->8.3 changes apply without process restart; fresh builtin navigation contexts1/3/5 and array_find availability track target. Client unsaved Unicode dependency survives; native Tab completion/save/undo/redo exact bytes verified. All5,330 frontend/1,740 Rust tests plus fmt/Clippy pass; native relaunch/quit and exact fixture restoration pass. Retained latest0.1.57 runtime unchanged; compiler output cleaned. See docs/OPENSTORM.md."
+        "Slice58 with unchanged app0.1.57/engine130: actual client and native Composer8.3->8.4->8.3 changes apply without process restart; fresh builtin navigation contexts1/3/5 and array_find availability track target. Client unsaved Unicode dependency survives; native Tab completion/save/undo/redo exact bytes verified. All5,330 frontend/1,740 Rust tests plus fmt/Clippy pass; native relaunch/quit and exact fixture restoration pass. Retained latest0.1.57 runtime unchanged; compiler output cleaned. See docs/OPENSTORM.md.",
+        "Slice146/147: explicit PHP target override in pinned PHPantom166 and existing SDK/settings adapter; root/nested saved-target Auto, versioned builtin navigation and applied builtin banners, dirty buffer replay/restart verified through the production host. Same compiled case fails on165 and passes on166;89 genuine client/host cases,5152 workspace and13393 frontend passes. Engine18608 ordinary passes plus2 bounded checks; source exact replay, both Clippy modes and24 stdio groups pass. Candidate inactive pending packaging; App103/default165 unchanged; native UI user-skipped. See docs/OPENSTORM.md."
       ],
-      "remaining": "Complete unavailable syntax/functions, extension selection, settings and framework/version invalidation matrices. Composer8.3/8.4 live navigation and versioned function completion have bounded client/native evidence; no whole-profile acceptance."
+      "remaining": "Complete unavailable syntax/functions, extension selection, settings and framework/version invalidation matrices. Composer8.3/8.4 live navigation and versioned function completion have bounded client/native evidence; no whole-profile acceptance. Auto status widget remains Composer-derived and can differ from saved PHPantom profiles; use the active target context for accurate widget display."
     },
     {
       "id": "FEAT-020",
@@ -1277,36 +1278,38 @@
     "notarized": false
   },
   "current_local_delivery": {
-    "package_slice": 112,
-    "source_slices": [110, 111],
-    "verification_slices": [109, 110, 111, 112],
-    "app": "0.1.94",
-    "engine": "0.11.1-openstorm.154",
+    "package_slice": 145,
+    "source_slices": [143, 144],
+    "verification_slices": [143, 144, 145],
+    "app": "0.1.103",
+    "engine": "0.11.1-openstorm.165",
     "local_delivery": {
-      "bundle": "/Users/longdo/Code/openidea/artifacts/batches/0.1.94/OpenStorm.app",
-      "version": "0.1.94",
+      "bundle": "/Users/longdo/Code/openidea/artifacts/batches/0.1.103/OpenStorm.app",
+      "version": "0.1.103",
       "identifier": "cz.thinky.openstorm",
       "minimum_os": "13.0",
       "architecture": "arm64",
       "signature": true,
-      "engine_sha256": "3eb06c2ba672c3c8d968c514b2d2cd30b9d1d9aba6cdb234e2772c8a9c4b0c44",
-      "executable_sha256": "7459c115d7b92750ae253b3fc125f4599c3cfda44c1e5fe090c593a83d1fe4c7",
+      "engine_sha256": "2701aaaea7adb7a567f291e25f84cf84eab0b351792b71e88e324ab3a497d732",
+      "executable_sha256": "a5af62f8f7ec37fa1a5eecd4d5b281a950ee4a0a0d479e435426a8997c6ec9c7",
       "sole_archive": true,
       "compiler_target_removed": true,
       "native_ui": "user-skipped;app not launched/installed/notarized",
-      "compiled_source_unchanged": true
+      "compiled_source_unchanged": false
     },
     "profile": "development",
     "signing": "ad-hoc; deep/strict verified",
     "installed": false,
     "notarized": false,
-    "compiler_cleanup": "13681 files/8.2GiB; both owned compiler roots absent",
-    "evidence": "artifacts/checks/slice112-receipt.json; artifacts/batches/0.1.94/build-receipt.json",
+    "compiler_cleanup": "slice147: 27809990035 compiler bytes and 68853451 frontend bytes removed; compiler root and dist absent",
+    "evidence": "artifacts/checks/slice145/final-check.json; artifacts/batches/0.1.103/build-receipt.json; artifacts/checks/slice147/retention.json",
     "later_source_checkpoint": {
-      "slice": 113,
+      "slice": 147,
+      "source_slice": 146,
       "packaged": false,
-      "description": "caret/pane ownership guard; current App94 remains unchanged",
-      "evidence": "artifacts/checks/slice113-receipt.json"
+      "engine": "0.11.1-openstorm.166",
+      "description": "Explicit PHP language-level adapter and candidate166 verified; current App103/default165 remain unchanged. Auto status widget remains Composer-derived.",
+      "evidence": "artifacts/checks/slice147/retention.json; artifacts/engines/0.11.1-openstorm.166/client-host-receipt.json"
     }
   },
   "invokable_handler_navigation_candidate": {

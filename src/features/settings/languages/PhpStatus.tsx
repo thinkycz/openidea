@@ -42,7 +42,7 @@ function popupShown(): boolean {
 const shortVersion = (level: PhpLanguageLevel) => level.version.split(".").slice(0, 2).join(".");
 
 function origin(level: PhpLanguageLevel | null): string {
-  if (!level) return tx("No PHP version in the settings or composer.json: Intelephense uses its default");
+  if (!level) return tx("No PHP version in the settings or composer.json: using the language server configuration");
   const version = level.version;
   switch (level.source) {
     case "settings":

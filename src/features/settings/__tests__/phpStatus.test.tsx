@@ -121,7 +121,7 @@ describe("PHP language level status", () => {
     await focus("php", "/project/b.php");
     const fallback = await screen.findByRole("button", { name: "PHP Language Level: PHP" });
     expect(fallback.dataset.tooltip).toBe(
-      "No PHP version in the settings or composer.json: Intelephense uses its default",
+      "No PHP version in the settings or composer.json: using the language server configuration",
     );
   });
 

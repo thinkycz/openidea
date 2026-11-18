@@ -1228,6 +1228,13 @@ pub fn configure_server(cfg: &mut LanguageServerConfig, root: &Path, server_root
         configure_vue_typescript(cfg, root, server_root, s);
     }
 
+    // PHPantom resolves Auto per Composer project; forward only an explicit selection.
+    if name == "phpantom"
+        && !s.languages.php.language_level.trim().is_empty()
+        && let Some(level) = crate::php::language_level(root, s)
+    {
+        merge_init_options(cfg, json!({ "phpLanguageLevel": level.version }));
+    }
     // Intelephense reads it as `intelephense.environment.phpVersion` (`workspace/configuration`).
     if name == "intelephense"
         && let Some(level) = crate::php::language_level(root, s)

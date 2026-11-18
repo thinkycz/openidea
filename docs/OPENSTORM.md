@@ -15,6 +15,57 @@ slice, commit and push it, and retain only the latest generated app. Native UI
 cases remain deferred/unverified; earlier native-first blocking checkpoints are
 historical and no longer prevent independent implementation.
 
+PHP client slice147 (2026-11-18, verified;166 inactive pending packaging):
+forward an explicit languages.php.languageLevel through the existing SDK adapter
+as phpLanguageLevel. Normalize the literal using the shared parser, preserve custom
+initialization options, and leave Auto to each Composer project's engine profile.
+Optional PHP servers retain their existing adapters. The SDK regression first fails
+for the absent option, then passes after forwarding. The status fallback now names
+the language server configuration; English/Chinese are supplied and three obsolete
+Spanish/French/Korean entries are removed to use English fallback. The initial full
+frontend run catches those three stale keys; preserve its failure and the final
+successful rerun. No replacement settings interface or default shortcut changes.
+
+The new genuine host regression uses production settings_set and the production
+SDK configuration hook, managed documents and actual server restarts. Root and
+nested Composer projects have independent saved targets. Explicit8.1/8.4 overrides
+both, clearing the setting restores8.4/8.3, and builtin navigation plus readable
+builtin target banners witness the applied version. Dirty Unicode buffers survive
+settings changes and restart without disk writes; version-gated array_find follows
+the applied target. The same compiled regression fails on165 for ignored8.1 and
+passes on166; owned server processes exit and original fixture files stay unchanged.
+All89 genuine166 client/host cases pass: the new host case plus88 existing cases
+covering PHP/Composer/Laravel navigation, documentation, checked transformations,
+stale buffer/disk rejection, conflict protection, reviewed undo/redo and restart.
+Source, executable and Cargo fingerprints remain fixed throughout acceptance.
+
+Fresh frontend typecheck/lint/format/knip,13,393 passes/6 skipped, production build
+and Safari15.4 checks pass. Rust formatting and workspace all-target Clippy pass.
+Fresh serialized workspace:5,152 passes/206 ignored/one retained HTTP exclusion.
+Generated bindings/command snapshots remain unchanged. Keep the known default-
+parallel CLI socket-test limitation. Reuse38 controlled-browser cases for unchanged
+UI paths; tooltip copy has focused tests. Native UI remains user-skipped. Source146's
+18,608/17 ignored plus2 bounded checks and24 stdio stages remain valid for identical
+166; immutable source/build receipt, licenses and fingerprint are preserved.
+
+Candidate166 SHA256:f68ad4d7628d387f401b109d19c526948fe089781f23a3f383552f7cfa992d71.
+Client/host receipt SHA256:f1757695db5c50597f86f5bce5e0c95f557a4cafa037b69d3bf6fe37956a71a8.
+App103/default165 hashes and deep/strict signature stay unchanged; only App103
+is retained. Clean 27,809,990,035 compiler bytes and
+68,853,451 frontend bytes after acceptance. No new app,
+installation, migration, updater activation or debugger functionality. Packaging
+follows separately. All69 statuses remain67 partial/2 user-deferred. FEAT-019 still
+needs unavailable-syntax/extension/framework invalidation acceptance. Its status
+widget still derives Auto from Composer and may differ from a saved PHPantom
+profile; actual builtin banners report the applied engine target. Keep that widget
+integration gap visible. Correct the ledger's stale current-delivery metadata from
+App94/engine154 to observed App103/engine165, with147 explicitly unpackaged and
+compiled_source_unchanged=false. Commit/push and verify the remote ref and clean worktree.
+
+Evidence:artifacts/checks/slice147/{source-input,gates,controls,client-host,
+retention,delivery}.json, focused red/green logs, retained failed catalog run,
+final stage logs and canonical166 client-host/delivery sidecars.
+
 Engine source slice146 (2026-11-18, verified;166 inactive): add explicit
 PHP language-level initialization for the existing editor setting, without changing
 project files. Shipped165 stdio reproduces selected8.1 being ignored in favor of

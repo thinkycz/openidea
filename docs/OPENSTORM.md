@@ -15,6 +15,82 @@ slice, commit and push it, and retain only the latest generated app. Native UI
 cases remain deferred/unverified; earlier native-first blocking checkpoints are
 historical and no longer prevent independent implementation.
 
+Engine source slice155 (2026-11-18, verified;169 inactive): standard Laravel
+application builders stored in variables retain shared application and initial
+HTTP Kernel identity through aliases and fluent assignments. Reassignment does
+not change another alias's object; independent builders and unused
+callable-local builder assignments remain separate. Unicode variable names
+retain their identities. Queued bindings preserve the initial request phase,
+and later explicit application bindings still select their Kernel.
+Parenthesized fluent creation and repeated create() reads keep the same
+identity, including direct returns after explicit application bindings. Dirty
+bootstrap aliases retire and restore declaration/reference ownership without
+caller edits. Checked class edits include the selected registration source.
+
+The real Laravel 13.37 control proves engine168 refuses a checked rename when a
+standard builder passes through a variable alias, although PHP resolves the
+intended custom Kernel. The initial Rust regression also returns no declaration
+for a simple builder variable. Preserve both failures. The direct-return
+regression exposed duplicate Kernel targets. Direct returns now resolve to the
+same application owner. The corrected implementation passes seven new/70
+middleware tests. Unknown methods, captured or escaped identities, reference
+assignments, nonlinear state and post-create mutations keep edit plans
+incomplete. Excessive capture/alias depth and unresolved returned identities
+cannot restore complete authority. Variable provenance reuses existing
+bootstrap assignment identity; framework declarations and shared class/type
+resolution remain the source of builder and application semantics. No second
+type engine, bootstrap execution for inspection, diagnostic suppression or
+timeout increase was added.
+
+The first exact Rust filter selected zero tests; retain that log and the
+corrected failing invocation. A new dirty-alias test initially had a Rust
+string-literal escape error; preserve and correct it. Subsequent fixture syntax
+checks and the full frozen-source gates pass. A real parenthesized
+fluent-creation control exposed an offset comparison gap; normalize expression
+spans and retain both the refusal and corrected control. Stop the superseded
+acceptance run before refreezing. An initial empty withMiddleware fixture also
+demonstrated the already tracked L63 alias-replacement behavior; use queued
+singleton configuration to isolate expression identity. Clippy fixups were
+followed by formatting. Ordinary engine suites:18,632 passes/17 ignored, plus2
+passing bounded child checks. Release all-target Clippy passes with default and
+mem-audit features; formatting, exact 169-patch replay and the pinned build
+pass. All31 stdio stage groups pass, including successful real Laravel
+builder-variable checked-rename preview, existing Kernel ownership/refactors,
+target/builtin controls, stale inputs, receiver identity, resource
+aliases/exclusions, project boundaries and descriptor isolation. Owned children
+exit and original/borrowed inputs remain unchanged. Plain-PHP syntax and
+runtime checks pass. The Laravel example now uses a builder variable:119 syntax
+checks and361 runtime assertions pass, with exactly the same3 deliberate
+analyzer diagnostics at their original locations (expected exit1).
+
+Candidate169 SHA256:f95a8d17de31a19eb2a2573116184bd90fb16105c94b163fbda5dad940747a6b.
+Series SHA256:a88e3b8cbfa2eaebbc98a790f70aa4c0d6d394f0663892d617edd7a098a57acd.
+Build/source receipt SHA256:113f05e20710a44868d85b0fda41a142688737cfdc10ef9d61abdceb6f472fcf.
+Preserve pinned upstream source, acquisition/build recipes, notices and canonical
+binary provenance. Engine runtime dependencies remain macOS system libraries.
+Actual OpenStorm client/host adoption and packaging follow in separate slices;
+no candidate169 editor/native acceptance is claimed here. App106/default168 hashes
+and deep/strict signature remain unchanged, and App106 remains the sole generated
+app. Compare archived source before removing scratch and cargo-cleaning engine
+output:removed2,438,740,778 logical bytes. Preserve
+canonical source/engines, Workbench, fixtures and receipts. Reuse unchanged153
+frontend13,393/6 skipped, workspace5,152/214 ignored/one retained HTTP exclusion,
+97 actual168 client/host cases and154 signed package checks. No new root workspace,
+frontend or native acceptance claim for this source-only slice.
+
+L64 retains immediate providers, custom/inherited application/builders,
+nonlinear builder state, escaped identities, complete container-alias ordering
+and closure factories. L63 retains runtime/property/callback alias-map ordering
+and wider middleware work remains tracked. Auto status is still
+Composer-derived. Native UI stays user-skipped; wider
+native/platform/performance gates stay partial. All69 areas remain67 partial/2
+user-deferred. Commit/push and verify remote ref and clean worktree before the
+dependent client slice.
+
+Evidence:artifacts/checks/slice155-{source-freeze,engine-gates,source-test-summary,
+wire-gates,baseline168,builder-variable-final,fixture-syntax,new-example-checks,
+playground,runtime-libraries,retention,final-check}.json; initial/final stage
+logs; canonical169 source/build receipt and delivery sidecar after push.
 Package slice154 (2026-11-18, signed local App0.1.106 verified): promote
 source152/client153-verified PHPantom168 into the default resource pin and signed
 development app. Standard Application::configure selects the initial framework

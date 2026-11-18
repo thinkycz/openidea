@@ -1,0 +1,779 @@
+--- a/docs/CHANGELOG.md
++++ b/docs/CHANGELOG.md
+@@ -30,6 +30,8 @@
+ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+ 
+ ## [Unreleased]
++
++- **Follow Laravel builder variables.** Middleware navigation and reviewed PHP changes follow standard application builders stored in variables or aliases. Unsaved changes refresh their Kernel selection; ambiguous mutations keep transformations unavailable. Contributed by @thinkycz.
+ 
+ - **Respect application-builder Kernel registration.** Modern Laravel middleware navigation follows the Kernel selected by the standard application builder and preserves later explicit bindings. Dirty framework registrations refresh their source origins; unresolved effects cannot authorize partial transformations. Contributed by @thinkycz.
+ 
+--- a/docs/todo/laravel.md
++++ b/docs/todo/laravel.md
+@@ -662,13 +662,17 @@
+ Prove PHP compatibility of overlapping parent, class and trait property defaults
+ before allowing transformations that could update only one declaration.
+ 
++Account for standard `ApplicationBuilder::withMiddleware()` replacing Kernel
++aliases during resolution, including its empty-callback form.
++
+ #### L64. Provider and builder HTTP Kernel selection
+ 
+ **Impact: Medium · Complexity: Medium**
+ 
+ Follow remaining HTTP Kernel bindings through immediate provider registration,
+-custom or inherited application/builder implementations, builder variables,
+-container aliases and closure factories. Establish application identity and actual
++custom or inherited application/builder implementations, post-create mutations,
++nonlinear builder state,
++escaped builder identities, container aliases and closure factories. Establish application identity and actual
+ framework execution order before replacing catalog roots. Distinguish the Kernel
+ resolved for the initial request from bindings changed by later registered/boot
+ callbacks. Preserve dirty source updates, known alternatives and complete-target
+--- a/examples/laravel/app/Demo.php
++++ b/examples/laravel/app/Demo.php
+@@ -1796,7 +1796,7 @@
+         // Effective property declarations live in ApplicationKernel and Concerns/KernelAliases.
+         Route::get('/parent-audit-demo', fn () => null)->middleware('demo.kernel.parent');
+         Route::get('/trait-audit-demo', fn () => null)->middleware('demo.kernel.trait');
+-        // Try definition on the alias declared by the custom bound Kernel.
++        // Try definition on the alias selected through the builder variable and custom Kernel binding.
+         Route::get('/bound-audit-demo', fn () => null)->middleware('demo.kernel.bound');
+     }
+ 
+--- a/examples/laravel/assertions.php
++++ b/examples/laravel/assertions.php
+@@ -2221,10 +2221,17 @@
+ check('Bound Kernel exposes its own legacy alias', $boundKernel->getMiddlewareAliases()['demo.kernel.bound'] === \App\Http\Middleware\AuditRequests::class);
+ check('Bound Kernel preserves legacy aliases alongside builder configuration', $boundKernel->getMiddlewareAliases()['demo.kernel.legacy'] === \App\Http\Middleware\AuditRequests::class);
+ 
+-$defaultApplication = \Illuminate\Foundation\Application::configure(basePath: __DIR__)->create();
++$standardBuilder = \Illuminate\Foundation\Application::configure(basePath: __DIR__);
++$builderAlias = $standardBuilder;
++$defaultApplication = $builderAlias->create();
++check('Builder aliases preserve application identity', $standardBuilder->create() === $defaultApplication);
++check('Reusing a builder preserves the application', $builderAlias->create() === $defaultApplication);
+ $defaultKernel = $defaultApplication->make(\Illuminate\Contracts\Http\Kernel::class);
+ check('Standard builder selects the framework HTTP Kernel', get_class($defaultKernel) === \Illuminate\Foundation\Http\Kernel::class);
+ check('Legacy application Kernel maps are inactive without a binding', !array_key_exists('demo.kernel.parent', $defaultKernel->getMiddlewareAliases()));
++$defaultApplication->singleton(\Illuminate\Contracts\Http\Kernel::class, \App\Runtime\SiteKernel::class);
++check('Repeated builder creation preserves application bindings', $builderAlias->create()->make(\Illuminate\Contracts\Http\Kernel::class) instanceof \App\Runtime\SiteKernel);
++
+ $queuedApplication = \Illuminate\Foundation\Application::configure(basePath: __DIR__)
+     ->withSingletons([\Illuminate\Contracts\Http\Kernel::class => \App\Runtime\SiteKernel::class])
+     ->create();
+--- a/examples/laravel/bootstrap/app.php
++++ b/examples/laravel/bootstrap/app.php
+@@ -11,7 +11,7 @@
+  * commands under `app/Actions` are real Artisan commands even though nothing
+  * about their name or location says so.
+  */
+-$application = Application::configure(basePath: dirname(__DIR__))
++$builder = Application::configure(basePath: dirname(__DIR__))
+     ->withRouting(
+         web: __DIR__.'/../routes/web.php',
+     )
+@@ -26,7 +26,8 @@
+     })
+     ->withExceptions(function (Exceptions $exceptions) {
+         //
+-    })->create();
++    });
++$application = $builder->create();
+ 
+ // configure() selects the framework Kernel unless an application binding replaces it.
+ // The HTTP Kernel may live outside app/Http/Kernel.php.
+--- a/src/virtual_members/laravel/builder_kernel.rs
++++ b/src/virtual_members/laravel/builder_kernel.rs
+@@ -82,6 +82,53 @@
+     }
+ }
+ 
++pub(super) fn builder_method(name: &[u8]) -> bool {
++    [
++        b"withkernels".as_slice(),
++        b"withevents",
++        b"withcommands",
++        b"withproviders",
++        b"withrouting",
++        b"withmiddleware",
++        b"withexceptions",
++        b"withbindings",
++        b"withsingletons",
++        b"withscopedsingletons",
++        b"registered",
++        b"withschedule",
++        b"withcommandrouting",
++        b"create",
++    ]
++    .iter()
++    .any(|known| name.eq_ignore_ascii_case(known))
++}
++pub(super) fn builder_receiver<'a>(expr: &'a Expression<'a>) -> Option<&'a DirectVariable<'a>> {
++    let mut current = unwrapped(expr);
++    while let Expression::Call(Call::Method(call)) = current {
++        if !matches!(&call.method,ClassLikeMemberSelector::Identifier(name) if builder_method(name.value) && !name.value.eq_ignore_ascii_case(b"create"))
++        {
++            return None;
++        }
++        current = unwrapped(call.object);
++    }
++    match current {
++        Expression::Variable(Variable::Direct(variable)) => Some(variable),
++        _ => None,
++    }
++}
++pub(super) fn created_builder(expr: &Expression<'_>) -> Option<String> {
++    let Expression::Call(Call::Method(call)) = unwrapped(expr) else {
++        return None;
++    };
++    if !call.argument_list.arguments.is_empty()
++        || !matches!(&call.method,ClassLikeMemberSelector::Identifier(name) if name.value.eq_ignore_ascii_case(b"create"))
++    {
++        return None;
++    }
++    builder_receiver(call.object)
++        .map(|variable| crate::atom::bytes_to_str(variable.name).to_owned())
++}
++
+ impl Backend {
+     pub(super) fn configured_kernel_factory(
+         &self,
+@@ -95,14 +142,32 @@
+         {
+             return None;
+         }
+-        let mut known = create.argument_list.arguments.is_empty();
+-        let mut current = unwrapped(create.object);
++        if !create.argument_list.arguments.is_empty() {
++            return Some(KernelSelection::default());
++        }
++        Some(
++            self.configured_builder_kernel(create.object, names)
++                .unwrap_or_default(),
++        )
++    }
++
++    pub(super) fn configured_builder_kernel(
++        &self,
++        expr: &Expression<'_>,
++        names: &OwnedResolvedNames,
++    ) -> Option<KernelSelection> {
++        let mut known = true;
++        let mut current = unwrapped(expr);
+         while let Expression::Call(Call::Method(call)) = current {
+-            known &= matches!(&call.method,ClassLikeMemberSelector::Identifier(name) if [b"withkernels".as_slice(),b"withevents",b"withcommands",b"withproviders",b"withrouting",b"withmiddleware",b"withexceptions",b"withbindings",b"withsingletons",b"withscopedsingletons",b"registered",b"withschedule",b"withcommandrouting"].iter().any(|known|name.value.eq_ignore_ascii_case(known)));
++            if matches!(&call.method,ClassLikeMemberSelector::Identifier(name) if name.value.eq_ignore_ascii_case(b"create"))
++            {
++                return None;
++            }
++            known &= matches!(&call.method,ClassLikeMemberSelector::Identifier(name) if builder_method(name.value) && !name.value.eq_ignore_ascii_case(b"create"));
+             current = unwrapped(call.object);
+         }
+         let Expression::Call(Call::StaticMethod(configure)) = current else {
+-            return Some(KernelSelection::default());
++            return None;
+         };
+         if !matches!(&configure.method,ClassLikeMemberSelector::Identifier(name) if name.value.eq_ignore_ascii_case(b"configure"))
+         {
+--- a/src/virtual_members/laravel/kernel_binding.rs
++++ b/src/virtual_members/laravel/kernel_binding.rs
+@@ -1,10 +1,14 @@
+ //! Bootstrap HTTP Kernel bindings, resolved without executing application code.
+-use std::{collections::HashMap, ops::ControlFlow};
++use std::{
++    collections::{HashMap, HashSet},
++    ops::ControlFlow,
++};
+ 
+ use mago_span::HasSpan;
+ use mago_syntax::cst::*;
+ 
+ use super::{
++    builder_kernel::{builder_method, builder_receiver, created_builder},
+     const_eval::{Scope, const_string},
+     provider_resources::{class_string_fqn, resolved_class_fqn},
+ };
+@@ -87,7 +91,7 @@
+                 }
+                 Statement::Return(ret) => {
+                     self.returned = Some((ret.value.and_then(variable), ret.span().start.offset));
+-                    self.return_value = ret.value.map(span);
++                    self.return_value = ret.value.map(|value| span(unwrapped(value)));
+                     self.limit = Some(ret.span().end.offset);
+                 }
+                 Statement::OpeningTag(_)
+@@ -133,8 +137,18 @@
+     alias: Option<String>,
+     certain: bool,
+     factory: Option<KernelSelection>,
+-}
+-fn origin(name: &str, before: u32, sites: &[AssignmentSite], depth: usize) -> Option<u32> {
++    builder: Option<KernelSelection>,
++    builder_alias: Option<String>,
++    factory_builder: Option<String>,
++    value_span: (u32, u32),
++}
++fn origin(
++    name: &str,
++    before: u32,
++    sites: &[AssignmentSite],
++    depth: usize,
++    builders: bool,
++) -> Option<u32> {
+     if depth > 64 || depth > sites.len() {
+         return None;
+     }
+@@ -145,11 +159,172 @@
+     if !site.certain {
+         return None;
+     }
+-    match &site.alias {
+-        Some(alias) => origin(alias, site.at, sites, depth + 1),
++    match site
++        .alias
++        .as_ref()
++        .or_else(|| builders.then_some(site.builder_alias.as_ref()).flatten())
++    {
++        Some(alias) => origin(alias, site.at, sites, depth + 1, builders),
+         None => Some(site.origin),
+     }
+ }
++struct BuilderTouch<'a> {
++    name: &'a str,
++    range: (u32, u32),
++}
++struct BuilderEffect {
++    receiver: String,
++    at: u32,
++    known: bool,
++    creates: bool,
++    end: u32,
++}
++fn builder_touches<'ast, 'arena>(
++    node: Node<'ast, 'arena>,
++    touches: &mut Vec<BuilderTouch<'arena>>,
++    depth: usize,
++) -> bool {
++    if depth >= 64 {
++        return false;
++    }
++    let mut pending = vec![node];
++    let mut complete = true;
++    while let Some(node) = pending.pop() {
++        match node {
++            Node::Function(_)
++            | Node::Method(_)
++            | Node::Class(_)
++            | Node::Trait(_)
++            | Node::Interface(_)
++            | Node::Enum(_) => continue,
++            Node::Closure(closure) => {
++                if let Some(captures) = &closure.use_clause {
++                    for capture in captures.variables.iter() {
++                        let variable = &capture.variable;
++                        touches.push(BuilderTouch {
++                            name: bytes_to_str(variable.name),
++                            range: (variable.span.start.offset, variable.span.end.offset),
++                        });
++                    }
++                }
++                continue;
++            }
++            Node::ArrowFunction(arrow) => {
++                let mut captures = Vec::new();
++                complete &=
++                    builder_touches(Node::Expression(arrow.expression), &mut captures, depth + 1);
++                touches.extend(captures.into_iter().filter(|capture| {
++                    !arrow
++                        .parameter_list
++                        .parameters
++                        .iter()
++                        .any(|parameter| bytes_to_str(parameter.variable.name) == capture.name)
++                }));
++                continue;
++            }
++            Node::DirectVariable(variable) => touches.push(BuilderTouch {
++                name: bytes_to_str(variable.name),
++                range: (variable.span.start.offset, variable.span.end.offset),
++            }),
++            _ => {}
++        }
++        node.visit_children(|child| pending.push(child));
++    }
++    complete
++}
++fn allowed_builder_uses(expr: &Expression<'_>, allowed: &mut HashSet<(u32, u32)>) {
++    let mut current = unwrapped(expr);
++    loop {
++        match current {
++            Expression::Variable(Variable::Direct(variable)) => {
++                allowed.insert((variable.span.start.offset, variable.span.end.offset));
++                break;
++            }
++            Expression::Assignment(assignment)
++                if matches!(assignment.operator, AssignmentOperator::Assign(_))
++                    && variable(assignment.lhs).is_some() =>
++            {
++                allowed.insert(span(unwrapped(assignment.lhs)));
++                current = unwrapped(assignment.rhs);
++            }
++            Expression::Call(Call::Method(call)) => current = unwrapped(call.object),
++            _ => break,
++        }
++    }
++}
++
++fn builder_site<'a>(
++    name: &str,
++    at: u32,
++    sites: &'a [AssignmentSite],
++) -> Option<&'a AssignmentSite> {
++    let source = origin(name, at, sites, 0, true)?;
++    sites
++        .iter()
++        .find(|site| site.origin == source && site.builder.is_some())
++}
++// Each create() returns the same application held by its proven builder.
++fn application_origin(name: &str, before: u32, sites: &[AssignmentSite]) -> Option<u32> {
++    let source = origin(name, before, sites, 0, false)?;
++    let site = sites.iter().find(|site| site.origin == source)?;
++    match site.factory_builder.as_deref() {
++        Some(builder) => builder_site(builder, site.value_span.0, sites).map(|site| site.origin),
++        None => Some(source),
++    }
++}
++struct BuilderContext<'a> {
++    sites: &'a [AssignmentSite],
++    effects: &'a [BuilderEffect],
++    touches: &'a [BuilderTouch<'a>],
++    allowed: &'a HashSet<(u32, u32)>,
++    limit: u32,
++    complete: bool,
++}
++impl BuilderContext<'_> {
++    fn factory(&self, name: &str, range: (u32, u32)) -> Option<KernelSelection> {
++        let Self {
++            sites,
++            effects,
++            touches,
++            allowed,
++            limit,
++            complete,
++        } = self;
++        let source = builder_site(name, range.0, sites)?;
++        let mut selection = source.builder.clone()?;
++        selection.complete &= *complete;
++        // Receiver-chain calls finish before create; later builder mutations remain opaque.
++        let first_create_end = effects
++            .iter()
++            .filter(|effect| {
++                effect.creates
++                    && builder_site(&effect.receiver, effect.at, sites)
++                        .is_some_and(|site| site.origin == source.origin)
++            })
++            .map(|effect| effect.end)
++            .min()
++            .unwrap_or(range.1);
++        for effect in *effects {
++            if effect.at < *limit
++                && builder_site(&effect.receiver, effect.at, sites)
++                    .is_some_and(|site| site.origin == source.origin)
++                && (!effect.known || (effect.at >= first_create_end && !effect.creates))
++            {
++                selection.complete = false;
++            }
++        }
++        if touches.iter().any(|touch| {
++            touch.range.0 < *limit
++                && !allowed.contains(&touch.range)
++                && builder_site(touch.name, touch.range.0, sites)
++                    .is_some_and(|site| site.origin == source.origin)
++        }) {
++            selection.complete = false;
++        }
++        Some(selection)
++    }
++}
++
+ struct BindingCall {
+     receiver: Option<String>,
+     at: u32,
+@@ -212,13 +387,41 @@
+             let mut assignments = Vec::new();
+             let mut calls = Vec::new();
+             let mut returned_factory = None;
++            let mut returned_builder = None;
++            let mut returned_configuration = false;
++            let mut touches = Vec::new();
++            let touches_complete = builder_touches(Node::Program(program), &mut touches, 0);
++            let mut allowed = HashSet::new();
++            let mut builder_effects = Vec::new();
+             super::helpers::walk_program_expressions(program, &mut |expr| {
+                 let at = expr.span().start.offset;
+                 if top.return_value == Some(span(expr)) {
+                     returned_factory = self.configured_kernel_factory(expr, names);
++                    returned_builder = created_builder(expr);
++                    returned_configuration = self.configured_builder_kernel(expr, names).is_some();
++                    allowed_builder_uses(expr, &mut allowed);
+                 }
+                 if top.limit.is_some_and(|limit| at >= limit) {
+                     return ControlFlow::Continue(());
++                }
++                if top.direct.get(&span(unwrapped(expr))) == Some(&true) {
++                    allowed_builder_uses(expr, &mut allowed);
++                }
++                if !in_callable(Node::Program(program), at)
++                    && let Expression::Call(Call::Method(call)) = expr
++                    && let Some(receiver) = builder_receiver(call.object)
++                {
++                    let method = match &call.method {
++                        ClassLikeMemberSelector::Identifier(name) => Some(name.value),
++                        _ => None,
++                    };
++                    builder_effects.push(BuilderEffect {
++                        receiver: bytes_to_str(receiver.name).to_owned(),
++                        at,
++                        known: method.is_some_and(builder_method),
++                        creates: method.is_some_and(|name| name.eq_ignore_ascii_case(b"create")),
++                        end: expr.span().end.offset,
++                    });
+                 }
+                 if !in_callable(Node::Program(program), at)
+                     && let Expression::Assignment(assign) = expr
+@@ -230,6 +433,11 @@
+                         origin: assign.rhs.span().start.offset,
+                         alias: variable(assign.rhs),
+                         factory: self.configured_kernel_factory(assign.rhs, names),
++                        builder: self.configured_builder_kernel(assign.rhs, names),
++                        builder_alias: builder_receiver(assign.rhs)
++                            .map(|variable| bytes_to_str(variable.name).to_owned()),
++                        factory_builder: created_builder(assign.rhs),
++                        value_span: span(unwrapped(assign.rhs)),
+                         certain: top.direct.get(&span(expr)).copied().unwrap_or(false)
+                             && matches!(assign.operator, AssignmentOperator::Assign(_)),
+                     });
+@@ -370,32 +578,97 @@
+             });
+             let returned = top.returned.as_ref().and_then(|(name, at)| {
+                 name.as_deref()
+-                    .and_then(|name| origin(name, *at, &assignments, 0))
++                    .and_then(|name| origin(name, *at, &assignments, 0, false))
+             });
++            let returned_object = top
++                .returned
++                .as_ref()
++                .and_then(|(name, at)| {
++                    name.as_deref()
++                        .and_then(|name| application_origin(name, *at, &assignments))
++                })
++                .or_else(|| {
++                    returned_builder.as_deref().and_then(|name| {
++                        top.return_value.and_then(|range| {
++                            builder_site(name, range.0, &assignments).map(|site| site.origin)
++                        })
++                    })
++                });
+             calls.sort_by_key(|call| call.at);
+-            let factory = returned
+-                .and_then(|origin| assignments.iter().find(|site| site.origin == origin))
+-                .and_then(|site| site.factory.clone())
++            let limit = top.limit.unwrap_or(u32::MAX);
++            let builder_context = BuilderContext {
++                sites: &assignments,
++                effects: &builder_effects,
++                touches: &touches,
++                allowed: &allowed,
++                limit,
++                complete: touches_complete,
++            };
++            let resolve_builder = |name: &str, range| builder_context.factory(name, range);
++            let selected =
++                returned.and_then(|origin| assignments.iter().find(|site| site.origin == origin));
++            let variable_factory = selected
++                .and_then(|site| {
++                    site.factory_builder
++                        .as_deref()
++                        .and_then(|name| resolve_builder(name, site.value_span))
++                })
++                .or_else(|| {
++                    returned_builder.as_deref().and_then(|name| {
++                        top.return_value
++                            .and_then(|range| resolve_builder(name, range))
++                    })
++                });
++            let mut factory = variable_factory
++                .or_else(|| selected.and_then(|site| site.factory.clone()))
+                 .or(returned_factory);
++            if factory.is_none()
++                && (returned_configuration || selected.is_some_and(|site| site.builder.is_some()))
++            {
++                factory = Some(KernelSelection::default());
++            }
++            let value_span = selected.map(|site| site.value_span).or(top.return_value);
++            if factory.is_none()
++                && value_span.is_some_and(|range| {
++                    touches.iter().any(|touch| {
++                        touch.range.0 >= range.0
++                            && touch.range.1 <= range.1
++                            && builder_site(touch.name, touch.range.0, &assignments).is_some()
++                    })
++                })
++            {
++                factory = Some(KernelSelection::default());
++            }
+             let mut opaque = factory.as_ref().is_some_and(|factory| !factory.complete);
+-            let mut selection =
+-                factory.unwrap_or_else(|| KernelSelection::conventional(program.errors.is_empty()));
++            let mut selection = factory.unwrap_or_else(|| {
++                KernelSelection::conventional(
++                    program.errors.is_empty()
++                        && !top
++                            .returned
++                            .as_ref()
++                            .is_some_and(|(name, _)| name.is_some() && returned.is_none()),
++                )
++            });
+             selection.complete &= program.errors.is_empty() && top.certain;
+             for call in calls {
+                 let owner = call
+                     .receiver
+                     .as_deref()
+-                    .and_then(|name| origin(name, call.at, &assignments, 0));
+-                if owner.is_some() && returned.is_some() && owner != returned {
++                    .and_then(|name| application_origin(name, call.at, &assignments));
++                if owner.is_some() && returned_object.is_some() && owner != returned_object {
+                     continue;
+                 }
+                 opaque |= call.opaque_effect;
+-                if owner.is_some() && owner == returned && call.certain && !call.proven {
++                if owner.is_some() && owner == returned_object && call.certain && !call.proven {
+                     selection.roots.clear();
+                     selection.complete = false;
+                     continue;
+                 }
+-                if opaque || owner.is_none() || returned.is_none() || !call.proven || !call.certain
++                if opaque
++                    || owner.is_none()
++                    || returned_object.is_none()
++                    || !call.proven
++                    || !call.certain
+                 {
+                     selection.uncertain(call.target);
+                 } else {
+--- a/tests/integration/laravel_middleware_aliases.rs
++++ b/tests/integration/laravel_middleware_aliases.rs
+@@ -2395,7 +2395,6 @@
+ #[tokio::test]
+ async fn builder_kernel_factory_unsupported_builder_state_refuses_legacy_fallback() {
+     for bootstrap in [
+-        r"<?php $builder=\Illuminate\Foundation\Application::configure(); return $builder->create();",
+         r"<?php return \Illuminate\Foundation\Application::configure()->tap(fn($builder)=>$builder)->create();",
+     ] {
+         let (backend, dir, caller, _) = builder_kernel_workspace(bootstrap).await;
+@@ -2440,3 +2439,204 @@
+         );
+     }
+ }
++
++#[tokio::test]
++async fn builder_variable_factory_preserves_standard_identity_and_aliases() {
++    for bootstrap in [
++        r"<?php $builder=\Illuminate\Foundation\Application::configure(); return $builder->create();",
++        r"<?php $builder=\Illuminate\Foundation\Application::configure(); $alias=$builder; return $alias->create();",
++        r"<?php $builder=\Illuminate\Foundation\Application::configure(); $alias=$builder->withMiddleware(); $app=$alias->create(); return $app;",
++        r"<?php $builder=\Illuminate\Foundation\Application::configure(); $builder->withSingletons([\Illuminate\Contracts\Http\Kernel::class=>\App\Runtime\SiteKernel::class]); return $builder->create();",
++        r"<?php $builder=\Illuminate\Foundation\Application::configure(); return ($builder->withSingletons([])->create());",
++        r"<?php $builder=\Illuminate\Foundation\Application::configure(); $app=($builder->withSingletons([])->create()); return $app;",
++        r"<?php $builder=\Illuminate\Foundation\Application::configure(); return ($builder->withSingletons([]))->create();",
++        r"<?php $builder=\Illuminate\Foundation\Application::configure(); $app=(($builder->withSingletons([])))->create(); return $app;",
++    ] {
++        let (backend, dir, caller, _) = builder_kernel_workspace(bootstrap).await;
++        let found = definitions(&backend, &caller, SOURCE, "middleware('aud").await;
++        assert_eq!(found.len(), 1, "{bootstrap}: {found:?}");
++        assert_eq!(
++            found[0].uri,
++            Url::from_file_path(dir.path().join("framework/Foundation/Http/Kernel.php")).unwrap()
++        );
++        let target = Url::from_file_path(dir.path().join("app/Http/Middleware/Trace.php")).unwrap();
++        let text = "<?php namespace App\\Http\\Middleware; class Trace {}";
++        open_document(&backend, &target, "php", text).await;
++        let plan = settled_target_rename(&backend, &target, text, "class Tra", "Traced")
++            .await
++            .unwrap()
++            .unwrap();
++        let framework =
++            Url::from_file_path(dir.path().join("framework/Foundation/Http/Kernel.php")).unwrap();
++        assert!(
++            plan.changes.unwrap()[&framework]
++                .iter()
++                .any(|edit| edit.new_text.contains("Traced")),
++            "{bootstrap}"
++        );
++    }
++}
++
++#[tokio::test]
++async fn builder_variable_factory_tracks_reassignment_and_independent_objects() {
++    for bootstrap in [
++        r"<?php $builder=\Illuminate\Foundation\Application::configure(); $alias=$builder; $builder=new \stdClass; return $alias->create();",
++        r"<?php $builder=\Illuminate\Foundation\Application::configure(); $other=\Illuminate\Foundation\Application::configure(); $other->unknown(); return $builder->create();",
++        r"<?php $builder=\Illuminate\Foundation\Application::configure(); function unused() {$builder=new \stdClass; $builder->unknown();} return $builder->create();",
++        r"<?php $builder=\Illuminate\Foundation\Application::configure(); $local=fn($builder)=>$builder; return $builder->create();",
++        r"<?php $工厂=\Illuminate\Foundation\Application::configure(); $别名=$工厂; return $别名->create();",
++    ] {
++        let (backend, dir, caller, _) = builder_kernel_workspace(bootstrap).await;
++        let found = definitions(&backend, &caller, SOURCE, "middleware('aud").await;
++        assert_eq!(found.len(), 1, "{bootstrap}: {found:?}");
++        assert_eq!(
++            found[0].uri,
++            Url::from_file_path(dir.path().join("framework/Foundation/Http/Kernel.php")).unwrap()
++        );
++    }
++}
++
++#[tokio::test]
++async fn builder_variable_factory_keeps_literal_application_overrides() {
++    for bootstrap in [
++        r"<?php $builder=\Illuminate\Foundation\Application::configure(); $alias=$builder; $app=$alias->create(); $app->singleton(\Illuminate\Contracts\Http\Kernel::class,\App\Runtime\SiteKernel::class); return $app;",
++        r"<?php $builder=\Illuminate\Foundation\Application::configure(); $app=$builder->create(); $app->singleton(\Illuminate\Contracts\Http\Kernel::class,\App\Runtime\SiteKernel::class); $same=$builder->create(); return $same;",
++        r"<?php $builder=\Illuminate\Foundation\Application::configure(); $app=$builder->create(); $alias=$builder; $same=$alias->create(); $app->singleton(\Illuminate\Contracts\Http\Kernel::class,\App\Runtime\SiteKernel::class); return $same;",
++        r"<?php $builder=\Illuminate\Foundation\Application::configure(); $app=$builder->create(); $app->singleton(\Illuminate\Contracts\Http\Kernel::class,\App\Runtime\SiteKernel::class); return $builder->create();",
++    ] {
++        let (backend, dir, caller, _) = builder_kernel_workspace(bootstrap).await;
++        assert_bound_kernel(&backend, dir.path(), &caller, "app/Runtime/SiteKernel.php").await;
++        let target = Url::from_file_path(dir.path().join("app/Http/Middleware/Trace.php")).unwrap();
++        let text = "<?php namespace App\\Http\\Middleware; class Trace {}";
++        open_document(&backend, &target, "php", text).await;
++        let plan = settled_target_rename(&backend, &target, text, "class Tra", "Traced")
++            .await
++            .unwrap()
++            .unwrap();
++        let selected = Url::from_file_path(dir.path().join("app/Runtime/SiteKernel.php")).unwrap();
++        assert!(
++            plan.changes.unwrap()[&selected]
++                .iter()
++                .any(|edit| edit.new_text.contains("Traced"))
++        );
++    }
++}
++
++#[tokio::test]
++async fn builder_variable_factory_refuses_mutation_and_escaped_identity() {
++    for effect in [
++        "$builder->unknown();",
++        "$alias=$builder; mutate($alias);",
++        "mutate([$builder]);",
++        "mutate($builder->withMiddleware());",
++        "$escaped=&$builder;",
++        "$callback=function() use($builder) {};",
++        "$callback=fn()=>$builder;",
++        "$builder->$method();",
++        "unset($builder);",
++        "if ($unknown) {$builder->withKernels();}",
++    ] {
++        let bootstrap = format!(
++            r"<?php $builder=\Illuminate\Foundation\Application::configure(); {effect} $app=$builder->create(); $app->singleton(\Illuminate\Contracts\Http\Kernel::class,\App\Runtime\SiteKernel::class); return $app;"
++        );
++        let (backend, dir, _, _) = builder_kernel_workspace(&bootstrap).await;
++        let target = Url::from_file_path(dir.path().join("app/Http/Middleware/Trace.php")).unwrap();
++        let text = "<?php namespace App\\Http\\Middleware; class Trace {}";
++        open_document(&backend, &target, "php", text).await;
++        assert!(
++            settled_target_rename(&backend, &target, text, "class Tra", "Traced")
++                .await
++                .is_err(),
++            "{bootstrap}"
++        );
++    }
++}
++
++#[tokio::test]
++async fn builder_variable_factory_post_create_mutations_cannot_restore_edit_authority() {
++    for bootstrap in [
++        r"<?php $builder=\Illuminate\Foundation\Application::configure(); $app=$builder->create(); $app->singleton(\Illuminate\Contracts\Http\Kernel::class,\App\Runtime\SiteKernel::class); $builder->withKernels(); return $app;",
++        r"<?php $builder=\Illuminate\Foundation\Application::configure(); $app=$builder->create(); $app->singleton(\Illuminate\Contracts\Http\Kernel::class,\App\Runtime\SiteKernel::class); $builder->withKernels(); $same=$builder->create(); return $same;",
++    ] {
++        let (backend, dir, _, _) = builder_kernel_workspace(bootstrap).await;
++        let target = Url::from_file_path(dir.path().join("app/Http/Middleware/Trace.php")).unwrap();
++        let text = "<?php namespace App\\Http\\Middleware; class Trace {}";
++        open_document(&backend, &target, "php", text).await;
++        assert!(
++            settled_target_rename(&backend, &target, text, "class Tra", "Traced")
++                .await
++                .is_err()
++        );
++    }
++}
++
++#[tokio::test]
++async fn builder_variable_factory_dirty_alias_changes_retire_and_restore_ownership() {
++    let bootstrap = r"<?php $builder=\Illuminate\Foundation\Application::configure(); $alias=$builder; return $alias->create();";
++    let (backend, dir, caller, conventional) = builder_kernel_workspace(bootstrap).await;
++    let declaration =
++        Url::from_file_path(dir.path().join("framework/Foundation/Http/Kernel.php")).unwrap();
++    let path = dir.path().join("bootstrap/app.php");
++    let uri = Url::from_file_path(&path).unwrap();
++    open_document(&backend, &uri, "php", bootstrap).await;
++    assert_eq!(
++        definitions(&backend, &caller, SOURCE, "middleware('aud").await[0].uri,
++        declaration
++    );
++    let unknown = bootstrap.replace("$alias=$builder;", r"$alias=new \stdClass;");
++    change(&backend, &uri, &unknown, 2).await;
++    assert!(
++        definitions(&backend, &caller, SOURCE, "middleware('aud")
++            .await
++            .is_empty()
++    );
++    let restored = bootstrap.replace("$alias=$builder;", "$alias=$builder->withMiddleware();");
++    change(&backend, &uri, &restored, 3).await;
++    assert_eq!(
++        definitions(&backend, &caller, SOURCE, "middleware('aud").await[0].uri,
++        declaration
++    );
++    let refs = find_references(
++        &backend,
++        &caller,
++        position_after(SOURCE, "middleware('aud"),
++        true,
++    )
++    .await;
++    assert!(refs.iter().any(|location| location.uri == declaration));
++    assert!(!refs.iter().any(|location| location.uri == conventional));
++    assert_eq!(std::fs::read_to_string(path).unwrap(), bootstrap);
++}
++
++#[tokio::test]
++async fn builder_variable_factory_unresolved_results_keep_plans_incomplete() {
++    let prefix = r"<?php $builder=\Illuminate\Foundation\Application::configure();";
++    let mut aliases = format!("{prefix} $app=$builder->create();");
++    let mut previous = "$app".to_owned();
++    for index in 0..80 {
++        let next = format!("$alias{index}");
++        aliases.push_str(&format!("{next}={previous};"));
++        previous = next;
++    }
++    aliases.push_str(&format!("return {previous};"));
++    let captured = format!(
++        "{prefix} $capture={} $builder; return $builder->create();",
++        "fn()=>".repeat(70)
++    );
++    for bootstrap in [
++        aliases,
++        captured,
++        format!("{prefix} return $builder;"),
++        r"<?php return \Illuminate\Foundation\Application::configure();".to_owned(),
++    ] {
++        let (backend, dir, _, _) = builder_kernel_workspace(&bootstrap).await;
++        let target = Url::from_file_path(dir.path().join("app/Http/Middleware/Trace.php")).unwrap();
++        let text = "<?php namespace App\\Http\\Middleware; class Trace {}";
++        open_document(&backend, &target, "php", text).await;
++        assert!(
++            settled_target_rename(&backend, &target, text, "class Tra", "Traced")
++                .await
++                .is_err()
++        );
++    }
++}

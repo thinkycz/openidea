@@ -15,6 +15,92 @@ slice, commit and push it, and retain only the latest generated app. Native UI
 cases remain deferred/unverified; earlier native-first blocking checkpoints are
 historical and no longer prevent independent implementation.
 
+Engine source slice158 (2026-11-18, verified;170 inactive): immediate literal
+Application::register providers select the returned application's initial HTTP
+Kernel. Use shared class/trait MethodOrigin ownership and existing bootstrap
+identity, ordering and source-graph checks. Analyze the actual register method,
+then public literal bindings and singletons maps in Laravel order. Application
+aliases, named parameters, duplicate/forced registration and raw class-string
+case preserve their runtime meaning. Standard builder variables, pure fluent
+configuration and repeated application identity keep their established behavior.
+Provider boot methods and builder-queued providers do not run in the initial
+phase. Unsaved provider imports, methods and maps retire/restore ownership without
+caller changes. Checked target edits include the selected Kernel registration.
+
+Real Laravel13.37 proves169 has no declaration and refuses a checked rename even
+though an immediate provider selects BuilderKernel. Preserve that failure and the
+corrected complete preview. Runtime phase controls verify initial registration,
+duplicate skip, force, case-variant registration and queued-provider timing.
+Three additional valid runtime/protocol controls found unsafe complete plans in
+unaccepted170 prototypes: an external helper booted the app, a register parameter
+default constructed a booting object, and top-level provider-file code booted it
+during autoload. Each makes the framework Kernel win after the provider's register
+method; a complete edit based only on that method was wrong. Preserve the raw
+unsafe previews and both prototype image hashes. The corrected candidate retains
+known navigation alternatives as incomplete and refuses edits in all three cases.
+It executes no project code while inspecting framework behavior.
+
+Only modeled bootstrap execution and application uses establish the initial
+lifecycle. Unused helper bodies and unreachable escapes do not execute. Verify
+register parameter defaults and provider/ancestor file declarations and property
+initializers as non-executing data. Unknown constructors, defaults, source loading,
+control flow, captures, factory closures, instances and nested registration cannot
+restore complete edit authority. Shared inheritance handles parent/trait method
+selection; invalid or unresolved composition remains incomplete. This adds no
+parallel type engine, new settings interface, debugger scope or timeout increase.
+
+Twelve new/82 middleware regressions pass. The first exact regression fails on
+conventional-versus-provider ownership before the change. Preserve the initial
+internal Atom/String conversion compiler error and corrected build. A new test
+initially dropped its temporary directory before hover; keep the directory alive,
+retain its failure and the intentionally stopped unchanged rerun. The first eadb
+freeze passed18,642 ordinary tests and default Clippy but was intentionally
+superseded after the valid default-initializer counterexample; its source, pin,
+patch and receipts remain evaluation evidence. An initial configure()->boot()
+fixture lacked filesystem services; retain that invalid oracle and use the valid
+minimal real Application with an explicit initial framework binding instead.
+Inline helper bodies already produced an incomplete refusal; the separate-file
+case established the actual missing execution boundary. Do not count those
+superseded or invalid controls as final acceptance.
+
+Final exact frozen-source gates:18,644 ordinary passes/17 ignored plus2 bounded
+child checks; both release all-target Clippy modes (default and mem-audit),
+formatting, exact170-patch replay and pinned build pass. All36 stdio stage groups
+pass, including complete real provider and property-order previews, dirty provider
+refresh and the three lifecycle refusals. Existing builder/custom/inherited/trait
+Kernel controls, target/builtins, plain PHP, Composer/Laravel, exclusions, guards,
+receiver/project freshness and descriptor isolation remain green. Twelve plain-PHP
+syntax checks and runtime pass. The example adds KernelServiceProvider and three
+runtime checks:120 Laravel syntax files/364 runtime assertions and exactly the
+previous3 deliberate analyzer diagnostics (expected analyzer exit1). Owned
+children exit0; original and borrowed files remain unchanged.
+
+Candidate170 SHA256:ae706f51662acdb81712048264a31592a90eed401f8119e6f8d241e5a1078d9c.
+Series SHA256:42dfb4808667bd20b9c4498f5b8de21bae5d5a2e82c0596c6f7bd899a8c5fcb4.
+Build/source receipt SHA256:15057447c692ee9f0a5f34f4077c9c1305a957e5adc9ec220da24b2754b1c5b5.
+Preserve source acquisition/build recipes, upstream pins, notices and canonical
+binary provenance. Runtime dependencies remain macOS system libraries. Actual
+OpenStorm client/host adoption and packaging follow separately; this source-only
+slice claims no170 editor/native acceptance. App107/default169 hashes and deep/
+strict signature stay unchanged. App107 remains the sole app; root compiler/dist
+remain absent. After exact replay/archive comparison, remove only engine compiler
+output and working scratch: 2,371,508,453 logical bytes.
+Canonical sources/engines, superseded evaluations, Workbench, fixtures and receipts
+remain intact. Reuse unchanged156/157 source/editor/package acceptance without
+claiming new frontend/workspace/native runs here. Native UI remains user-skipped.
+
+L64 retains dynamic/nested providers and instances, custom constructor/application/
+builder implementations, unmodeled execution, complete alias ordering and closure
+factories. L63 retains runtime/property/callback alias-map ordering. Auto PHP status
+still comes from Composer. Wider middleware, native/platform/performance gates
+remain partial; all69 statuses stay67 partial/2 user-deferred. Commit/push and
+verify exact remote ref and clean worktree before client adoption.
+
+Evidence:artifacts/checks/slice158-{source-freeze,engine-gates,source-test-summary,
+wire-gates,playground,new-example-checks,provider-before169,runtime-phase,retention,
+delivery}.json; provider-_-final/prototype-_.json and retained stage/failure logs;
+canonical170 build/source/delivery sidecars. Oldeadb evaluation remains archived.
+
 Package slice157 (2026-11-18, signed local App0.1.107 verified): promote
 source155/client156-verified PHPantom169 into the default resource pin and signed
 development app, including the guarded ContentModified reference retry. Standard Application::configure selects the initial framework

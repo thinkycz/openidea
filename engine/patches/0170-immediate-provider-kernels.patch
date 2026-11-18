@@ -1,0 +1,1449 @@
+--- a/docs/CHANGELOG.md
++++ b/docs/CHANGELOG.md
+@@ -1,3 +1,16 @@
++## OpenStorm .170 immediate provider HTTP Kernels
++
++Literal providers registered on the returned application participate in initial
++HTTP Kernel ownership. Concrete register methods use shared class/trait source
++resolution; public bindings then singletons maps retain Laravel's ordering.
++Application aliases, duplicate registration and explicit force preserve object
++identity. Queued providers and boot callbacks remain outside the initial phase.
++Unmodeled bootstrap execution or escaped application values cannot establish a
++complete lifecycle; constructor expressions in register parameter defaults also
++remain incomplete. Provider and ancestor files must load only modeled declarations
++and data. Unused helper bodies remain separate. Unknown effects keep alternatives incomplete and cannot authorize checked edits.
++Contributed by @thinkycz.
++
+ ## OpenStorm .163 stdio descriptor ownership
+ 
+ **Isolated stdio startup on macOS.** The language server releases unrelated inherited streams before starting its workers, so another tool can finish reading its input while PHPantom stays running. Standard LSP input/output remain available. Contributed by @thinkycz.
+--- a/docs/todo/laravel.md
++++ b/docs/todo/laravel.md
+@@ -669,7 +669,18 @@
+ 
+ **Impact: Medium · Complexity: Medium**
+ 
+-Follow remaining HTTP Kernel bindings through immediate provider registration,
++Literal immediate `Application::register()` providers now contribute initial
++Kernel selection through their concrete register method and public literal
++`$bindings`/`$singletons` maps, in framework order. Shared class/trait ownership,
++application aliases, duplicate/forced registration and dirty provider changes are
++tracked. Unmodeled bootstrap execution and escaped application values retain
++incomplete results, while unused helper bodies and unreachable code do not run.
++Builder-queued providers and provider `boot()` bodies do not run before
++initial Kernel resolution. Unmodeled provider-file loading or property initialization, unknown constructors,
++executable parameter defaults, control flow, factory closures,
++provider instances and nested provider registration remain incomplete.
++
++Follow remaining HTTP Kernel bindings through nested or dynamic providers,
+ custom or inherited application/builder implementations, post-create mutations,
+ nonlinear builder state,
+ escaped builder identities, container aliases and closure factories. Establish application identity and actual
+--- /dev/null
++++ b/examples/laravel/app/Providers/KernelServiceProvider.php
+@@ -0,0 +1,15 @@
++<?php
++
++namespace App\Providers;
++
++use App\Runtime\SiteKernel;
++use Illuminate\Contracts\Http\Kernel as HttpKernel;
++use Illuminate\Support\ServiceProvider;
++
++class KernelServiceProvider extends ServiceProvider
++{
++    public function register(): void
++    {
++        $this->app->singleton(HttpKernel::class, SiteKernel::class);
++    }
++}
+--- a/examples/laravel/assertions.php
++++ b/examples/laravel/assertions.php
+@@ -2238,6 +2238,16 @@
+ $queuedKernel = $queuedApplication->make(\Illuminate\Contracts\Http\Kernel::class);
+ check('Provider-registered callbacks do not precede initial Kernel resolution', get_class($queuedKernel) === \Illuminate\Foundation\Http\Kernel::class);
+ 
++// Immediate providers affect the initial Kernel; repeated registrations are not forced.
++$providerApplication = new \Illuminate\Foundation\Application(__DIR__);
++$providerApplication->register(\App\Providers\KernelServiceProvider::class);
++check('Immediate provider selects its HTTP Kernel', $providerApplication->make(\Illuminate\Contracts\Http\Kernel::class) instanceof \App\Runtime\SiteKernel);
++$providerApplication->singleton(\Illuminate\Contracts\Http\Kernel::class, \App\Http\Kernel::class);
++$providerApplication->register(\App\Providers\KernelServiceProvider::class);
++check('Duplicate provider registration preserves a later binding', get_class($providerApplication->make(\Illuminate\Contracts\Http\Kernel::class)) === \App\Http\Kernel::class);
++$providerApplication->register(\App\Providers\KernelServiceProvider::class, true);
++check('Forced provider registration reapplies its binding', $providerApplication->make(\Illuminate\Contracts\Http\Kernel::class) instanceof \App\Runtime\SiteKernel);
++
+ echo "\n";
+ if ($failed === 0) {
+     echo "\033[32m✓ All $passed assertions passed.\033[0m\n";
+--- a/src/virtual_members/laravel/kernel_binding.rs
++++ b/src/virtual_members/laravel/kernel_binding.rs
+@@ -15,7 +15,7 @@
+ use crate::type_engine::resolver::{Loaders, VarResolutionCtx};
+ use crate::{Backend, atom::bytes_to_str, types::ClassInfo};
+ 
+-const CONTRACT: &str = "Illuminate\\Contracts\\Http\\Kernel";
++pub(super) const CONTRACT: &str = "Illuminate\\Contracts\\Http\\Kernel";
+ const APPLICATION: &str = "Illuminate\\Foundation\\Application";
+ 
+ #[derive(Clone, Debug, PartialEq, Eq)]
+@@ -48,12 +48,12 @@
+ }
+ 
+ #[derive(Default)]
+-struct TopLevel {
+-    direct: HashMap<(u32, u32), bool>,
++pub(super) struct TopLevel {
++    pub(super) direct: HashMap<(u32, u32), bool>,
+     returned: Option<(Option<String>, u32)>,
+-    return_value: Option<(u32, u32)>,
+-    limit: Option<u32>,
+-    certain: bool,
++    pub(super) return_value: Option<(u32, u32)>,
++    pub(super) limit: Option<u32>,
++    pub(super) certain: bool,
+ }
+ pub(super) fn unwrapped<'a>(mut expr: &'a Expression<'a>) -> &'a Expression<'a> {
+     while let Expression::Parenthesized(inner) = expr {
+@@ -71,7 +71,13 @@
+     (expr.span().start.offset, expr.span().end.offset)
+ }
+ impl TopLevel {
+-    fn statements<'a>(&mut self, statements: impl Iterator<Item = &'a Statement<'a>>) {
++    pub(super) fn new() -> Self {
++        Self {
++            certain: true,
++            ..Self::default()
++        }
++    }
++    pub(super) fn statements<'a>(&mut self, statements: impl Iterator<Item = &'a Statement<'a>>) {
+         for statement in statements {
+             if self.returned.is_some() {
+                 break;
+@@ -110,7 +116,7 @@
+         }
+     }
+ }
+-fn in_callable(node: Node<'_, '_>, at: u32) -> bool {
++pub(super) fn in_callable(node: Node<'_, '_>, at: u32) -> bool {
+     let span = node.span();
+     if at < span.start.offset || at >= span.end.offset {
+         return false;
+@@ -130,7 +136,68 @@
+     found
+ }
+ 
++pub(super) fn pure_argument(expr: &Expression<'_>) -> bool {
++    pure_argument_depth(expr, 0)
++}
++fn pure_argument_depth(expr: &Expression<'_>, depth: usize) -> bool {
++    if depth >= 64 {
++        return false;
++    }
++    match unwrapped(expr) {
++        Expression::Literal(_)
++        | Expression::Variable(Variable::Direct(_))
++        | Expression::Closure(_)
++        | Expression::ArrowFunction(_)
++        | Expression::Identifier(_)
++        | Expression::MagicConstant(_) => true,
++        Expression::Access(Access::ClassConstant(access)) => {
++            matches!(&access.constant,ClassLikeConstantSelector::Identifier(name) if name.value.eq_ignore_ascii_case(b"class"))
++                && matches!(unwrapped(access.class), Expression::Identifier(_))
++        }
++        Expression::Array(array) => array.elements.iter().all(|element| match element {
++            ArrayElement::KeyValue(kv) => {
++                pure_argument_depth(kv.key, depth + 1) && pure_argument_depth(kv.value, depth + 1)
++            }
++            ArrayElement::Value(v) => pure_argument_depth(v.value, depth + 1),
++            _ => false,
++        }),
++        Expression::Binary(binary) => {
++            !matches!(unwrapped(binary.lhs), Expression::Variable(_))
++                && !matches!(unwrapped(binary.rhs), Expression::Variable(_))
++                && pure_argument_depth(binary.lhs, depth + 1)
++                && pure_argument_depth(binary.rhs, depth + 1)
++        }
++        _ => false,
++    }
++}
++fn pure_builder_chain(expr: &Expression<'_>) -> bool {
++    let mut current = unwrapped(expr);
++    for _ in 0..64 {
++        match current {
++            Expression::Call(Call::Method(call)) => {
++                if !matches!(&call.method,ClassLikeMemberSelector::Identifier(name) if builder_method(name.value))
++                    || !call
++                        .argument_list
++                        .arguments
++                        .iter()
++                        .all(|arg| pure_argument(arg.value()))
++                {
++                    return false;
++                }
++                current = unwrapped(call.object);
++            }
++            Expression::Variable(Variable::Direct(_)) => return true,
++            Expression::Call(Call::StaticMethod(call)) => {
++                return matches!(&call.method,ClassLikeMemberSelector::Identifier(name) if name.value.eq_ignore_ascii_case(b"configure"));
++            }
++            _ => return false,
++        }
++    }
++    false
++}
++
+ struct AssignmentSite {
++    pure_builder: bool,
+     name: String,
+     at: u32,
+     origin: u32,
+@@ -173,6 +240,7 @@
+     range: (u32, u32),
+ }
+ struct BuilderEffect {
++    pure: bool,
+     receiver: String,
+     at: u32,
+     known: bool,
+@@ -325,7 +393,14 @@
+     }
+ }
+ 
++struct ProviderRegistration {
++    name: Option<String>,
++    force: Option<bool>,
++    standard: bool,
++}
+ struct BindingCall {
++    in_callable: bool,
++    provider: Option<ProviderRegistration>,
+     receiver: Option<String>,
+     at: u32,
+     target: Option<String>,
+@@ -379,12 +454,10 @@
+         let functions = self.function_loaders(&context);
+         let default_class = ClassInfo::default();
+         crate::parser::with_parsed_program(&content, "kernel_binding", |program, content| {
+-            let mut top = TopLevel {
+-                certain: true,
+-                ..Default::default()
+-            };
++            let mut top = TopLevel::new();
+             top.statements(program.statements.iter());
+             let mut assignments = Vec::new();
++            let mut trusted_statements = HashSet::new();
+             let mut calls = Vec::new();
+             let mut returned_factory = None;
+             let mut returned_builder = None;
+@@ -416,6 +489,7 @@
+                         _ => None,
+                     };
+                     builder_effects.push(BuilderEffect {
++                        pure: pure_builder_chain(expr),
+                         receiver: bytes_to_str(receiver.name).to_owned(),
+                         at,
+                         known: method.is_some_and(builder_method),
+@@ -427,13 +501,26 @@
+                     && let Expression::Assignment(assign) = expr
+                     && let Some(name) = variable(assign.lhs)
+                 {
++                    let factory = self.configured_kernel_factory(assign.rhs, names);
++                    let builder = self.configured_builder_kernel(assign.rhs, names);
++                    let allocation = matches!(unwrapped(assign.rhs),Expression::Instantiation(inst) if matches!(unwrapped(inst.class),Expression::Identifier(id) if resolved_class_fqn(id,names).is_some_and(|name|name.eq_ignore_ascii_case(APPLICATION) || name.eq_ignore_ascii_case("stdClass"))));
++                    if top.direct.get(&span(expr)) == Some(&true)
++                        && (pure_argument(assign.rhs)
++                            || allocation
++                            || (pure_builder_chain(assign.rhs)
++                                && (factory.as_ref().is_some_and(|f| f.complete)
++                                    || builder.as_ref().is_some_and(|b| b.complete))))
++                    {
++                        trusted_statements.insert(span(expr));
++                    }
+                     assignments.push(AssignmentSite {
++                        pure_builder: pure_builder_chain(assign.rhs),
+                         name,
+                         at,
+                         origin: assign.rhs.span().start.offset,
+                         alias: variable(assign.rhs),
+-                        factory: self.configured_kernel_factory(assign.rhs, names),
+-                        builder: self.configured_builder_kernel(assign.rhs, names),
++                        factory,
++                        builder,
+                         builder_alias: builder_receiver(assign.rhs)
+                             .map(|variable| bytes_to_str(variable.name).to_owned()),
+                         factory_builder: created_builder(assign.rhs),
+@@ -485,9 +572,6 @@
+                         class_string_fqn(unwrapped(expr), names)
+                             .or_else(|| const_string(expr, content, &Scope::default()))
+                     });
+-                if key.as_deref().is_some_and(|key| key != CONTRACT) {
+-                    return ControlFlow::Continue(());
+-                }
+                 let class_loader = classes.at(call.object.span().start.offset);
+                 let function_loader = functions.at(at);
+                 let function_loader = |name: &str, offset: u32| function_loader(name, offset);
+@@ -530,6 +614,19 @@
+                 {
+                     return ControlFlow::Continue(());
+                 }
++                if proven
++                    && top.direct.get(&span(expr)) == Some(&true)
++                    && call
++                        .argument_list
++                        .arguments
++                        .iter()
++                        .all(|arg| pure_argument(arg.value()))
++                {
++                    trusted_statements.insert(span(expr));
++                }
++                if key.as_deref().is_some_and(|key| key != CONTRACT) {
++                    return ControlFlow::Continue(());
++                }
+                 let value = if method == b"alias" {
+                     argument(&call.argument_list, 0, b"abstract")
+                 } else {
+@@ -559,16 +656,51 @@
+                         class_string_fqn(value, names)
+                             .or_else(|| const_string(value, content, &Scope::default()))
+                     });
++                let provider = (method == b"register").then(|| {
++                    let valid = call.argument_list.arguments.len() <= 2
++                        && call.argument_list.arguments.iter().all(|arg| match arg {
++                            Argument::Positional(p) => p.ellipsis.is_none(),
++                            Argument::Named(n) => {
++                                [b"provider".as_slice(), b"force"].contains(&n.name.value)
++                            }
++                        });
++                    let name = argument(&call.argument_list, 0, b"provider").and_then(|expr| {
++                        class_string_fqn(unwrapped(expr), names)
++                            .or_else(|| const_string(unwrapped(expr), content, &Scope::default()))
++                    });
++                    let force = if valid {
++                        match argument(&call.argument_list, 1, b"force").map(unwrapped) {
++                            None | Some(Expression::Literal(Literal::False(_))) => Some(false),
++                            Some(Expression::Literal(Literal::True(_))) => Some(true),
++                            _ => None,
++                        }
++                    } else {
++                        None
++                    };
++                    ProviderRegistration {
++                        name,
++                        force,
++                        standard: proven
++                            && ty
++                                .as_ref()
++                                .and_then(|t| t.base_name())
++                                .and_then(class_loader)
++                                .is_some_and(|c| c.fqn().eq_ignore_ascii_case(APPLICATION)),
++                    }
++                });
+                 calls.push(BindingCall {
++                    in_callable: in_callable(Node::Program(program), at),
++                    provider,
+                     receiver: (!in_callable(Node::Program(program), at))
+                         .then(|| variable(call.object))
+                         .flatten(),
+                     at,
+                     target,
+                     certain: top.direct.get(&span(expr)).copied().unwrap_or(false)
+-                        && key.as_deref() == Some(CONTRACT)
+-                        && [b"bind".as_slice(), b"singleton", b"scoped", b"instance"]
+-                            .contains(&method.as_slice()),
++                        && (method == b"register"
++                            || (key.as_deref() == Some(CONTRACT)
++                                && [b"bind".as_slice(), b"singleton", b"scoped", b"instance"]
++                                    .contains(&method.as_slice()))),
+                     proven,
+                     opaque_effect: deferred_or_provider
+                         || method == b"extend"
+@@ -650,12 +782,107 @@
+                 )
+             });
+             selection.complete &= program.errors.is_empty() && top.certain;
++            let provider_mode = calls
++                .iter()
++                .any(|call| call.provider.is_some() && !call.in_callable);
++            if provider_mode {
++                for site in &assignments {
++                    if site.certain
++                        && site.pure_builder
++                        && site
++                            .builder_alias
++                            .as_deref()
++                            .or(site.factory_builder.as_deref())
++                            .is_some_and(|name| builder_site(name, site.at, &assignments).is_some())
++                        && let Some(range) = top.direct.keys().find(|range| range.0 == site.at)
++                    {
++                        trusted_statements.insert(*range);
++                    }
++                }
++                for effect in &builder_effects {
++                    if effect.known
++                        && effect.pure
++                        && builder_site(&effect.receiver, effect.at, &assignments).is_some()
++                        && top.direct.get(&(effect.at, effect.end)) == Some(&true)
++                    {
++                        trusted_statements.insert((effect.at, effect.end));
++                    }
++                }
++                // Provider boot effects depend on everything executed before registration.
++                opaque |= top
++                    .direct
++                    .keys()
++                    .any(|range| !trusted_statements.contains(range));
++                opaque |= touches.iter().any(|touch| {
++                    touch.range.0 < limit
++                        && builder_site(touch.name, touch.range.0, &assignments).is_none()
++                        && returned_object.is_some()
++                        && application_origin(touch.name, touch.range.0, &assignments)
++                            == returned_object
++                        && !allowed.contains(&touch.range)
++                });
++                opaque |= calls
++                    .iter()
++                    .any(|call| !call.in_callable && call.provider.is_none() && call.opaque_effect);
++                if opaque {
++                    selection.complete = false;
++                }
++            }
++            let mut registered = HashSet::new();
+             for call in calls {
++                if provider_mode && call.in_callable {
++                    continue;
++                }
+                 let owner = call
+                     .receiver
+                     .as_deref()
+                     .and_then(|name| application_origin(name, call.at, &assignments));
+                 if owner.is_some() && returned_object.is_some() && owner != returned_object {
++                    if provider_mode
++                        && let Some(provider) = &call.provider
++                        && (!provider.standard
++                            || provider.force.is_none()
++                            || provider
++                                .name
++                                .as_deref()
++                                .is_none_or(|name| !self.immediate_provider_kernel(name).complete))
++                    {
++                        opaque = true;
++                        selection.complete = false;
++                    }
++                    continue;
++                }
++                if let Some(provider) = call.provider {
++                    let verified = call.proven
++                        && call.certain
++                        && provider.standard
++                        && owner.is_some()
++                        && owner == returned_object
++                        && provider.force.is_some();
++                    if let Some(name) = provider.name.as_deref() {
++                        if verified && provider.force == Some(false) && registered.contains(name) {
++                            continue;
++                        }
++                        let effects = self.immediate_provider_kernel(name);
++                        opaque |= !verified || !effects.complete || effects.class.is_empty();
++                        if verified && !effects.class.is_empty() {
++                            registered.insert(effects.class);
++                        }
++                        if opaque {
++                            selection.complete = false;
++                        }
++                        for target in effects.targets {
++                            if opaque {
++                                selection.uncertain(Some(target));
++                            } else {
++                                selection.roots = vec![KernelRoot::Bound(target)];
++                                selection.complete = program.errors.is_empty() && top.certain;
++                            }
++                        }
++                    } else {
++                        opaque = true;
++                        selection.complete = false;
++                    }
+                     continue;
+                 }
+                 opaque |= call.opaque_effect;
+--- a/src/virtual_members/laravel/kernel_middleware.rs
++++ b/src/virtual_members/laravel/kernel_middleware.rs
+@@ -23,7 +23,7 @@
+     name.trim_start_matches('\\').to_ascii_lowercase()
+ }
+ 
+-fn complete_graph(
++pub(super) fn complete_graph(
+     root: &ClassInfo,
+     loaded: &HashMap<String, Arc<ClassInfo>>,
+     traits: bool,
+@@ -68,7 +68,7 @@
+     )
+ }
+ 
+-fn trait_property_overlaps(
++pub(super) fn trait_property_overlaps(
+     scope: &ClassInfo,
+     name: &str,
+     loader: &dyn Fn(&str) -> Option<Arc<ClassInfo>>,
+@@ -149,7 +149,7 @@
+         }
+     }
+ 
+-    fn kernel_graph_sources_valid(
++    pub(super) fn middleware_graph_sources_valid(
+         &self,
+         uri: &str,
+         content: &str,
+@@ -276,7 +276,7 @@
+             let effective = crate::inheritance::resolve_class_with_inheritance(class, &loader);
+             let graph_complete = !missing.get()
+                 && complete_graph(class, &loaded.borrow(), true)
+-                && self.kernel_graph_sources_valid(
++                && self.middleware_graph_sources_valid(
+                     uri,
+                     content,
+                     class,
+--- /dev/null
++++ b/src/virtual_members/laravel/kernel_provider.rs
+@@ -0,0 +1,500 @@
++//! Initial HTTP Kernel effects of a provider registered by the returned application.
++use super::{
++    const_eval::{Scope, const_string},
++    kernel_binding::{CONTRACT, TopLevel, argument, in_callable, pure_argument, unwrapped},
++    kernel_middleware::{complete_graph, trait_property_overlaps},
++    provider_resources::class_string_fqn,
++};
++use crate::{
++    Backend,
++    names::OwnedResolvedNames,
++    types::{ClassInfo, ClassLikeKind, Visibility},
++};
++use mago_span::HasSpan;
++use mago_syntax::cst::*;
++use std::{
++    cell::{Cell, RefCell},
++    collections::{HashMap, HashSet},
++    ops::ControlFlow,
++    sync::Arc,
++};
++
++const PROVIDER: &str = "Illuminate\\Support\\ServiceProvider";
++#[derive(Clone, Default)]
++pub(super) struct ProviderKernelEffects {
++    pub class: String,
++    pub targets: Vec<String>,
++    pub complete: bool,
++}
++fn class_value(expr: &Expression<'_>, content: &str, names: &OwnedResolvedNames) -> Option<String> {
++    class_string_fqn(unwrapped(expr), names)
++        .or_else(|| const_string(unwrapped(expr), content, &Scope::default()))
++}
++fn provider_app(expr: &Expression<'_>) -> bool {
++    matches!(unwrapped(expr), Expression::Access(Access::Property(p))
++        if matches!(unwrapped(p.object),Expression::Variable(Variable::Direct(v)) if v.name==b"$this")
++        && matches!(&p.property,ClassLikeMemberSelector::Identifier(n) if n.value==b"app"))
++}
++fn binding_call(
++    expr: &Expression<'_>,
++    content: &str,
++    names: &OwnedResolvedNames,
++) -> Option<(Option<String>, bool)> {
++    let Expression::Call(Call::Method(call)) = unwrapped(expr) else {
++        return None;
++    };
++    if !provider_app(call.object) {
++        return None;
++    }
++    let ClassLikeMemberSelector::Identifier(name) = &call.method else {
++        return None;
++    };
++    let name = name.value.to_ascii_lowercase();
++    if ![
++        b"bind".as_slice(),
++        b"singleton",
++        b"scoped",
++        b"bindif",
++        b"singletonif",
++        b"scopedif",
++    ]
++    .contains(&name.as_slice())
++    {
++        return None;
++    }
++    let plain = [b"bind".as_slice(), b"singleton", b"scoped"].contains(&name.as_slice());
++    let valid = call.argument_list.arguments.len()
++        <= if name == b"bind" || name == b"bindif" {
++            3
++        } else {
++            2
++        }
++        && call.argument_list.arguments.iter().all(|arg| match arg {
++            Argument::Positional(p) => p.ellipsis.is_none(),
++            Argument::Named(n) => {
++                [b"abstract".as_slice(), b"concrete"].contains(&n.name.value)
++                    || ((name == b"bind" || name == b"bindif") && n.name.value == b"shared")
++            }
++        });
++    let key =
++        argument(&call.argument_list, 0, b"abstract").and_then(|e| class_value(e, content, names));
++    let value =
++        argument(&call.argument_list, 1, b"concrete").and_then(|e| class_value(e, content, names));
++    let shared = argument(&call.argument_list, 2, b"shared");
++    let shared_valid = shared.is_none_or(|e| {
++        matches!(
++            unwrapped(e),
++            Expression::Literal(Literal::True(_) | Literal::False(_))
++        )
++    });
++    match key {
++        Some(key) if key != CONTRACT => Some((None, valid && value.is_some() && shared_valid)),
++        Some(_) => Some((
++            value.clone(),
++            valid && plain && value.is_some() && shared_valid,
++        )),
++        None => Some((value, false)),
++    }
++}
++fn scan_register(
++    block: &Block<'_>,
++    content: &str,
++    names: &OwnedResolvedNames,
++    effects: &mut ProviderKernelEffects,
++) {
++    let mut top = TopLevel::new();
++    top.statements(block.statements.iter());
++    let mut matched = HashSet::new();
++    let mut bindings = Vec::new();
++    super::helpers::walk_block_expressions(block, &mut |expr| {
++        let at = expr.span().start.offset;
++        if top.limit.is_some_and(|limit| at >= limit) || in_callable(Node::Block(block), at) {
++            return ControlFlow::Continue(());
++        }
++        let Some((target, complete)) = binding_call(expr, content, names) else {
++            return ControlFlow::Continue(());
++        };
++        let range = (
++            unwrapped(expr).span().start.offset,
++            unwrapped(expr).span().end.offset,
++        );
++        if top.direct.contains_key(&range) {
++            matched.insert(range);
++        }
++        effects.complete &= complete && top.direct.get(&range) == Some(&true);
++        if let Some(target) = target {
++            bindings.push((at, target));
++        }
++        ControlFlow::Continue(())
++    });
++    effects.complete &= top.certain
++        && top.return_value.is_none()
++        && top.direct.keys().all(|range| matched.contains(range));
++    bindings.sort_by_key(|b| b.0);
++    effects.targets.extend(bindings.into_iter().map(|b| b.1));
++}
++fn register_body(
++    node: Node<'_, '_>,
++    offset: u32,
++    content: &str,
++    names: &OwnedResolvedNames,
++    effects: &mut ProviderKernelEffects,
++) -> bool {
++    let mut pending = vec![node];
++    let mut remaining = 16_384;
++    while let Some(node) = pending.pop() {
++        if remaining == 0 {
++            return false;
++        }
++        remaining -= 1;
++        if let Node::Method(method) = node
++            && method.name.span.start.offset == offset
++        {
++            if let MethodBody::Concrete(block) = &method.body {
++                effects.complete &= method.parameter_list.parameters.iter().all(|parameter| {
++                    parameter
++                        .default_value
++                        .as_ref()
++                        .is_none_or(|default| pure_argument(default.value))
++                });
++                scan_register(block, content, names, effects);
++                return true;
++            }
++            return false;
++        }
++        node.visit_children(|child| pending.push(child));
++    }
++    false
++}
++fn property_map(
++    node: Node<'_, '_>,
++    offset: u32,
++    content: &str,
++    names: &OwnedResolvedNames,
++    singletons: bool,
++    effects: &mut ProviderKernelEffects,
++) -> bool {
++    let mut pending = vec![node];
++    let mut remaining = 16_384;
++    while let Some(node) = pending.pop() {
++        if remaining == 0 {
++            return false;
++        }
++        remaining -= 1;
++        if matches!(node, Node::HookedProperty(_)) {
++            continue;
++        }
++        if let Node::PropertyItem(PropertyItem::Concrete(item)) = node
++            && item.variable.span.start.offset == offset
++        {
++            let Expression::Array(array) = unwrapped(item.value) else {
++                return false;
++            };
++            for element in array.elements.iter() {
++                let (mut key, value) = match element {
++                    ArrayElement::KeyValue(kv) => {
++                        (class_value(kv.key, content, names), Some(kv.value))
++                    }
++                    ArrayElement::Value(v) if singletons => {
++                        (class_value(v.value, content, names), Some(v.value))
++                    }
++                    _ => {
++                        effects.complete = false;
++                        continue;
++                    }
++                };
++                if singletons
++                    && key
++                        .as_ref()
++                        .is_some_and(|k| k.parse::<i64>().is_ok_and(|n| n.to_string() == *k))
++                {
++                    key = value.and_then(|v| class_value(v, content, names));
++                }
++                let Some(key) = key else {
++                    effects.complete = false;
++                    continue;
++                };
++                let value = value.and_then(|v| class_value(v, content, names));
++                if key == CONTRACT {
++                    if let Some(value) = value {
++                        effects.targets.push(value);
++                    } else {
++                        effects.complete = false;
++                    }
++                } else if value.is_none() {
++                    effects.complete = false;
++                }
++            }
++            return true;
++        }
++        node.visit_children(|child| pending.push(child));
++    }
++    false
++}
++fn property_defaults_pure(member: &ClassLikeMember<'_>) -> bool {
++    let item_pure = |item: &PropertyItem<'_>| match item {
++        PropertyItem::Concrete(item) => pure_argument(item.value),
++        PropertyItem::Abstract(_) => true,
++    };
++    match member {
++        ClassLikeMember::Property(Property::Plain(property)) => {
++            property.items.iter().all(item_pure)
++        }
++        ClassLikeMember::Property(Property::Hooked(property)) => item_pure(&property.item),
++        ClassLikeMember::Constant(constant) => {
++            constant.items.iter().all(|item| pure_argument(item.value))
++        }
++        _ => true,
++    }
++}
++fn declarations_only(statement: &Statement<'_>, allowed: &HashSet<u32>, depth: usize) -> bool {
++    if depth >= 64 {
++        return false;
++    }
++    match statement {
++        Statement::Namespace(ns) => ns
++            .statements()
++            .iter()
++            .all(|s| declarations_only(s, allowed, depth + 1)),
++        Statement::Block(block) => block
++            .statements
++            .iter()
++            .all(|s| declarations_only(s, allowed, depth + 1)),
++        Statement::Class(class) => {
++            allowed.contains(&class.left_brace.start.offset)
++                && class.members.iter().all(property_defaults_pure)
++        }
++        Statement::Trait(class) => {
++            allowed.contains(&class.left_brace.start.offset)
++                && class.members.iter().all(property_defaults_pure)
++        }
++        Statement::Interface(class) => {
++            allowed.contains(&class.left_brace.start.offset)
++                && class.members.iter().all(property_defaults_pure)
++        }
++        Statement::Enum(class) => {
++            allowed.contains(&class.left_brace.start.offset)
++                && class.members.iter().all(property_defaults_pure)
++        }
++        Statement::Constant(constant) => {
++            constant.items.iter().all(|item| pure_argument(item.value))
++        }
++        Statement::Function(_)
++        | Statement::OpeningTag(_)
++        | Statement::ClosingTag(_)
++        | Statement::Use(_)
++        | Statement::Noop(_) => true,
++        Statement::Declare(declare) => match &declare.body {
++            DeclareBody::Statement(s) => declarations_only(s, allowed, depth + 1),
++            DeclareBody::ColonDelimited(body) => body
++                .statements
++                .iter()
++                .all(|s| declarations_only(s, allowed, depth + 1)),
++        },
++        _ => false,
++    }
++}
++
++impl Backend {
++    pub(super) fn immediate_provider_kernel(&self, name: &str) -> ProviderKernelEffects {
++        use crate::inheritance::ancestry::{MethodOrigin, resolve_concrete_method_origin};
++        let Some(class) = self.find_or_load_class(name) else {
++            return ProviderKernelEffects::default();
++        };
++        let loaded = RefCell::new(HashMap::<String, Arc<ClassInfo>>::from([(
++            class.fqn().to_ascii_lowercase(),
++            Arc::clone(&class),
++        )]));
++        let missing = Cell::new(false);
++        let loader = |name: &str| {
++            let value = self.find_or_load_class(name);
++            if let Some(value) = &value {
++                loaded
++                    .borrow_mut()
++                    .insert(value.fqn().to_ascii_lowercase(), Arc::clone(value));
++            } else {
++                missing.set(true);
++            }
++            value
++        };
++        let mut effects = ProviderKernelEffects {
++            class: class.fqn().to_string(),
++            targets: Vec::new(),
++            complete: class.kind == ClassLikeKind::Class
++                && !class.is_abstract
++                && crate::class_lookup::is_subtype_of(&class, PROVIDER, &loader),
++        };
++        let effective = crate::inheritance::resolve_class_with_inheritance(&class, &loader);
++        effects.complete &= loaded.borrow().values().all(|c| {
++            c.fqn().eq_ignore_ascii_case(PROVIDER)
++                || c.get_property("app").is_none_or(|p| p.is_virtual)
++        });
++        let constructor = resolve_concrete_method_origin(&class, "__construct", &loader);
++        effects.complete &= matches!(constructor,MethodOrigin::Known{owner,..} if owner.fqn().eq_ignore_ascii_case(PROVIDER));
++        let method = resolve_concrete_method_origin(&class, "register", &loader);
++        if let MethodOrigin::Known { owner, method } = method {
++            effects.complete &= effective.get_method("register").is_some_and(|m| {
++                !m.is_static
++                    && m.visibility == Visibility::Public
++                    && m.parameters
++                        .iter()
++                        .all(|p| p.default_value.is_some() || p.is_variadic)
++            });
++            if !owner.fqn().eq_ignore_ascii_case(PROVIDER) {
++                if let Some(uri) = self.find_class_file_uri_for_fqn(&owner.fqn())
++                    && let Some(content) = self.get_file_content(&uri)
++                {
++                    let _parse = crate::parser::with_parse_cache(&content);
++                    let context = self.source_file_context(&content);
++                    if let Some(names) = context.resolved_names.as_deref() {
++                        let valid = crate::parser::with_parsed_program(
++                            &content,
++                            "provider_kernel_register",
++                            |program, content| {
++                                let found = register_body(
++                                    Node::Program(program),
++                                    method.name_offset,
++                                    content,
++                                    names,
++                                    &mut effects,
++                                );
++                                found && program.errors.is_empty()
++                            },
++                        );
++                        effects.complete &= valid;
++                    } else {
++                        effects.complete = false;
++                    }
++                } else {
++                    effects.complete = false;
++                }
++            }
++        } else {
++            effects.complete = false;
++        }
++        for name in ["bindings", "singletons"] {
++            let Some(property) = effective.get_property(name).filter(|p| !p.is_virtual) else {
++                effects.complete &= !loaded
++                    .borrow()
++                    .values()
++                    .any(|c| c.get_property(name).is_some_and(|p| !p.is_virtual));
++                continue;
++            };
++            let declares = |c: &ClassInfo| {
++                c.get_property(name).is_some_and(|p| {
++                    !p.is_virtual
++                        && p.name_offset == property.name_offset
++                        && p.source == property.source
++                })
++            };
++            let owner = if declares(&class) {
++                Some(Arc::clone(&class))
++            } else {
++                crate::inheritance::find_declaring_ancestor(&class, &loader, &declares)
++                    .map(|(_, c)| c)
++            };
++            effects.complete &= !property.is_static
++                && property.visibility == Visibility::Public
++                && property.name_offset != 0;
++            let scopes: Vec<_> = loaded.borrow().values().cloned().collect();
++            effects.complete &= !scopes
++                .iter()
++                .any(|c| trait_property_overlaps(c, name, &loader));
++            effects.complete &= scopes
++                .iter()
++                .filter(|c| {
++                    c.kind == ClassLikeKind::Trait
++                        && c.get_property(name).is_some_and(|p| !p.is_virtual)
++                })
++                .count()
++                < 2;
++            if let Some(owner) = owner
++                && let Some(uri) = self.find_class_file_uri_for_fqn(&owner.fqn())
++                && let Some(content) = self.get_file_content(&uri)
++            {
++                let _parse = crate::parser::with_parse_cache(&content);
++                let context = self.source_file_context(&content);
++                if let Some(names) = context.resolved_names.as_deref() {
++                    let valid = crate::parser::with_parsed_program(
++                        &content,
++                        "provider_kernel_property",
++                        |program, content| {
++                            let found = property_map(
++                                Node::Program(program),
++                                property.name_offset,
++                                content,
++                                names,
++                                name == "singletons",
++                                &mut effects,
++                            );
++                            found && program.errors.is_empty()
++                        },
++                    );
++                    effects.complete &= valid;
++                } else {
++                    effects.complete = false;
++                }
++            } else {
++                effects.complete = false;
++            }
++        }
++        effects.complete &= !missing.get() && complete_graph(&class, &loaded.borrow(), true);
++        let scopes: Vec<_> = loaded.borrow().values().cloned().collect();
++        let known: HashSet<_> = scopes
++            .iter()
++            .map(|c| c.fqn().to_ascii_lowercase())
++            .collect();
++        let mut checked = HashSet::new();
++        for scope in &scopes {
++            let Some(uri) = self.find_class_file_uri_for_fqn(&scope.fqn()) else {
++                effects.complete = false;
++                continue;
++            };
++            if !checked.insert(uri.clone()) {
++                continue;
++            }
++            let Some(content) = self.get_file_content(&uri) else {
++                effects.complete = false;
++                continue;
++            };
++            let _parse = crate::parser::with_parse_cache(&content);
++            let context = self.source_file_context(&content);
++            let allowed: HashSet<_> = context
++                .classes
++                .iter()
++                .filter(|c| {
++                    known.contains(&c.fqn().to_ascii_lowercase())
++                        || (c.kind == ClassLikeKind::Class
++                            && c.parent_class.is_none()
++                            && c.interfaces.is_empty()
++                            && c.used_traits.is_empty())
++                })
++                .map(|c| c.start_offset)
++                .collect();
++            effects.complete &= crate::parser::with_parsed_program(
++                &content,
++                "provider_kernel_loading",
++                |program, _| {
++                    program.errors.is_empty()
++                        && program
++                            .statements
++                            .iter()
++                            .all(|s| declarations_only(s, &allowed, 0))
++                },
++            );
++        }
++        if let Some(uri) = self.find_class_file_uri_for_fqn(&class.fqn())
++            && let Some(content) = self.get_file_content(&uri)
++        {
++            effects.complete &= self.middleware_graph_sources_valid(
++                &uri,
++                &content,
++                &class,
++                loaded.borrow().values().cloned().collect(),
++            );
++        } else {
++            effects.complete = false;
++        }
++        effects
++    }
++}
+--- a/src/virtual_members/laravel/mod.rs
++++ b/src/virtual_members/laravel/mod.rs
+@@ -126,6 +126,7 @@
+ mod higher_order_proxy;
+ mod kernel_binding;
+ mod kernel_middleware;
++mod kernel_provider;
+ mod macros;
+ mod magic_uses;
+ mod middleware_aliases;
+--- a/tests/integration/laravel_middleware_aliases.rs
++++ b/tests/integration/laravel_middleware_aliases.rs
+@@ -1968,7 +1968,7 @@
+         ),
+         (
+             "framework/Foundation/Application.php",
+-            "<?php namespace Illuminate\\Foundation; class Application {public function bind($abstract,$concrete=null,$shared=false): void {} public function singleton($abstract,$concrete=null): void {} public function scoped($abstract,$concrete=null): void {} public function instance($abstract,$instance): object {return $instance;}}",
++            "<?php namespace Illuminate\\Foundation; class Application {public function bind($abstract,$concrete=null,$shared=false): void {} public function singleton($abstract,$concrete=null): void {} public function scoped($abstract,$concrete=null): void {} public function register($provider,$force=false): \\Illuminate\\Support\\ServiceProvider {} public function instance($abstract,$instance): object {return $instance;}}",
+         ),
+     ];
+     files.extend_from_slice(extra);
+@@ -2640,3 +2640,418 @@
+         );
+     }
+ }
++
++const IMMEDIATE_PROVIDER: &str = r"<?php namespace App\Providers;
++use Illuminate\Contracts\Http\Kernel as HttpKernel;
++use App\Runtime\SiteKernel as SelectedKernel;
++class KernelProvider extends \Illuminate\Support\ServiceProvider {
++    public function register(): void {$this->app->singleton(HttpKernel::class, SelectedKernel::class);}
++}";
++const SERVICE_PROVIDER: &str = r"<?php namespace Illuminate\Support;
++class ServiceProvider {
++    protected $app;
++    public function __construct($app) {$this->app=$app;}
++    public function register() {}
++}";
++const PROVIDER_BOOTSTRAP: &str = r"<?php
++$app=new \Illuminate\Foundation\Application;
++$app->register(\App\Providers\KernelProvider::class);
++return $app;
++";
++async fn immediate_provider_workspace(
++    provider: &str,
++    bootstrap: &str,
++) -> (Backend, tempfile::TempDir, Url, Url) {
++    immediate_provider_workspace_extra(provider, bootstrap, &[]).await
++}
++async fn immediate_provider_workspace_extra(
++    provider: &str,
++    bootstrap: &str,
++    extra: &[(&str, &str)],
++) -> (Backend, tempfile::TempDir, Url, Url) {
++    let mut files = vec![
++        ("framework/Support/ServiceProvider.php", SERVICE_PROVIDER),
++        ("app/Providers/KernelProvider.php", provider),
++    ];
++    files.extend_from_slice(extra);
++    bound_kernel_workspace(bootstrap, &files).await
++}
++
++#[tokio::test]
++async fn immediate_provider_kernel_register_selects_initial_owner_and_checked_edits() {
++    let (backend, dir, route, conventional) =
++        immediate_provider_workspace(IMMEDIATE_PROVIDER, PROVIDER_BOOTSTRAP).await;
++    assert_bound_kernel(&backend, dir.path(), &route, "app/Runtime/SiteKernel.php").await;
++    let detail = hover(&backend, &route, SOURCE, "middleware('aud").await;
++    assert!(
++        !detail.contains("incomplete"),
++        "verified immediate provider must be complete: {detail}"
++    );
++    let refs = find_references(
++        &backend,
++        &route,
++        position_after(SOURCE, "middleware('aud"),
++        true,
++    )
++    .await;
++    assert!(refs.iter().all(|r| r.uri != conventional), "{refs:?}");
++    let target = Url::from_file_path(dir.path().join("app/Http/Middleware/Trace.php")).unwrap();
++    let text = std::fs::read_to_string(target.to_file_path().unwrap()).unwrap();
++    open_document(&backend, &target, "php", &text).await;
++    let edit = settled_target_rename(&backend, &target, &text, "class Trac", "Traced")
++        .await
++        .unwrap()
++        .unwrap();
++    assert!(
++        edit.changes
++            .as_ref()
++            .unwrap()
++            .iter()
++            .any(|(uri, edits)| uri.path().ends_with("SiteKernel.php")
++                && edits.iter().any(|e| e.new_text.contains("Traced"))),
++        "{edit:?}"
++    );
++}
++
++#[tokio::test]
++async fn immediate_provider_kernel_keeps_named_arguments_object_aliases_and_registration_order() {
++    for (statement, owner) in [
++        (
++            "$alias=$app;$alias->REGISTER(provider: \\App\\Providers\\KernelProvider::class);",
++            "app/Runtime/SiteKernel.php",
++        ),
++        (
++            "$app->register(\\App\\Providers\\KernelProvider::class);$app->singleton(\\Illuminate\\Contracts\\Http\\Kernel::class,\\App\\Http\\Kernel::class);$app->register(\\App\\Providers\\KernelProvider::class);",
++            "app/Http/Kernel.php",
++        ),
++        (
++            "$app->register(\\App\\Providers\\KernelProvider::class);$app->singleton(\\Illuminate\\Contracts\\Http\\Kernel::class,\\App\\Http\\Kernel::class);$app->register(force: true,provider: \\App\\Providers\\KernelProvider::class);",
++            "app/Runtime/SiteKernel.php",
++        ),
++        (
++            "$app->register(\\App\\Providers\\KernelProvider::class);$app->singleton(\\Illuminate\\Contracts\\Http\\Kernel::class,\\App\\Http\\Kernel::class);$app->register(\\app\\providers\\kernelprovider::class);",
++            "app/Runtime/SiteKernel.php",
++        ),
++        (
++            "$other=new \\Illuminate\\Foundation\\Application;$other->register(\\App\\Providers\\KernelProvider::class);",
++            "app/Http/Kernel.php",
++        ),
++    ] {
++        let bootstrap = PROVIDER_BOOTSTRAP.replace(
++            "$app->register(\\App\\Providers\\KernelProvider::class);",
++            statement,
++        );
++        let (backend, dir, route, _) =
++            immediate_provider_workspace(IMMEDIATE_PROVIDER, &bootstrap).await;
++        assert_bound_kernel(&backend, dir.path(), &route, owner).await;
++        let detail = hover(&backend, &route, SOURCE, "middleware('aud").await;
++        assert!(!detail.contains("incomplete"), "{statement}: {detail}");
++    }
++}
++
++#[tokio::test]
++async fn immediate_provider_kernel_properties_override_register_in_runtime_order() {
++    for (properties, owner) in [
++        (
++            r"public $bindings=[HttpKernel::class=>\App\Http\Kernel::class];",
++            "app/Http/Kernel.php",
++        ),
++        (
++            r"public $bindings=[HttpKernel::class=>\App\Http\Kernel::class];public $singletons=[HttpKernel::class=>SelectedKernel::class];",
++            "app/Runtime/SiteKernel.php",
++        ),
++        (
++            r"public $bindings=[];public $singletons=[];",
++            "app/Runtime/SiteKernel.php",
++        ),
++    ] {
++        let provider = IMMEDIATE_PROVIDER.replace(
++            "public function register()",
++            &format!("{properties}\npublic function register()"),
++        );
++        let (backend, dir, route, _) =
++            immediate_provider_workspace(&provider, PROVIDER_BOOTSTRAP).await;
++        assert_bound_kernel(&backend, dir.path(), &route, owner).await;
++        let detail = hover(&backend, &route, SOURCE, "middleware('aud").await;
++        assert!(!detail.contains("incomplete"), "{properties}: {detail}");
++    }
++}
++
++#[tokio::test]
++async fn immediate_provider_kernel_uses_shared_parent_and_trait_register_ownership() {
++    for is_trait in [false, true] {
++        let base = if is_trait {
++            IMMEDIATE_PROVIDER.replace(
++                "class KernelProvider extends \\Illuminate\\Support\\ServiceProvider",
++                "trait ProviderRegisters",
++            )
++        } else {
++            IMMEDIATE_PROVIDER.replace("class KernelProvider", "class ProviderBase")
++        };
++        let (provider, name) = if is_trait {
++            (
++                r"<?php namespace App\Providers;class KernelProvider extends \Illuminate\Support\ServiceProvider {use ProviderRegisters;}",
++                "ProviderRegisters",
++            )
++        } else {
++            (
++                r"<?php namespace App\Providers;class KernelProvider extends ProviderBase {}",
++                "ProviderBase",
++            )
++        };
++        let relative = format!("app/Providers/{name}.php");
++        let (backend, dir, route, _) =
++            immediate_provider_workspace_extra(provider, PROVIDER_BOOTSTRAP, &[(&relative, &base)])
++                .await;
++        assert_bound_kernel(&backend, dir.path(), &route, "app/Runtime/SiteKernel.php").await;
++        assert!(
++            !hover(&backend, &route, SOURCE, "middleware('aud")
++                .await
++                .contains("incomplete")
++        );
++    }
++}
++
++#[tokio::test]
++async fn immediate_provider_kernel_uses_inherited_maps_but_does_not_run_boot() {
++    let parent = r"<?php namespace App\Providers;use Illuminate\Contracts\Http\Kernel as HttpKernel;use App\Runtime\SiteKernel as SelectedKernel;class ProviderBase extends \Illuminate\Support\ServiceProvider {public $bindings=[HttpKernel::class=>SelectedKernel::class];public function boot():void {$this->app->singleton(HttpKernel::class,\App\Http\Kernel::class);}}";
++    let provider = r"<?php namespace App\Providers;class KernelProvider extends ProviderBase {}";
++    let (backend, dir, route, _) = immediate_provider_workspace_extra(
++        provider,
++        PROVIDER_BOOTSTRAP,
++        &[("app/Providers/ProviderBase.php", parent)],
++    )
++    .await;
++    assert_bound_kernel(&backend, dir.path(), &route, "app/Runtime/SiteKernel.php").await;
++    assert!(
++        !hover(&backend, &route, SOURCE, "middleware('aud")
++            .await
++            .contains("incomplete")
++    );
++}
++
++#[tokio::test]
++async fn immediate_provider_kernel_dirty_body_and_property_changes_refresh_without_caller_edits() {
++    let (backend, dir, route, _) =
++        immediate_provider_workspace(IMMEDIATE_PROVIDER, PROVIDER_BOOTSTRAP).await;
++    let uri = Url::from_file_path(dir.path().join("app/Providers/KernelProvider.php")).unwrap();
++    open_document(&backend, &uri, "php", IMMEDIATE_PROVIDER).await;
++    assert_bound_kernel(&backend, dir.path(), &route, "app/Runtime/SiteKernel.php").await;
++    let changed = IMMEDIATE_PROVIDER.replace(
++        "App\\Runtime\\SiteKernel as SelectedKernel",
++        "App\\Http\\Kernel as SelectedKernel",
++    );
++    assert_ne!(changed, IMMEDIATE_PROVIDER);
++    change(&backend, &uri, &changed, 2).await;
++    assert_bound_kernel(&backend, dir.path(), &route, "app/Http/Kernel.php").await;
++    let restored = IMMEDIATE_PROVIDER.replace(
++        "public function register()",
++        r"public $bindings=[HttpKernel::class=>SelectedKernel::class];public function register()",
++    );
++    change(&backend, &uri, &restored, 3).await;
++    assert_bound_kernel(&backend, dir.path(), &route, "app/Runtime/SiteKernel.php").await;
++    assert!(
++        !hover(&backend, &route, SOURCE, "middleware('aud")
++            .await
++            .contains("incomplete")
++    );
++    assert_eq!(
++        std::fs::read_to_string(uri.to_file_path().unwrap()).unwrap(),
++        IMMEDIATE_PROVIDER
++    );
++}
++
++#[tokio::test]
++async fn immediate_provider_kernel_unknown_effects_and_force_values_never_authorize_edits() {
++    for provider in [
++        IMMEDIATE_PROVIDER.replace("public function register()",r"public function __construct($app){parent::__construct($app);}public function register()"),
++        IMMEDIATE_PROVIDER.replace("$this->app->singleton(HttpKernel::class, SelectedKernel::class);",r"if ($unknown) {$this->app->singleton(HttpKernel::class, SelectedKernel::class);}"),
++        IMMEDIATE_PROVIDER.replace("$this->app->singleton(HttpKernel::class, SelectedKernel::class);",r"$this->app=new \stdClass;$this->app->singleton(HttpKernel::class, SelectedKernel::class);"),
++        IMMEDIATE_PROVIDER.replace("SelectedKernel::class);","fn()=>new SelectedKernel);"),
++        IMMEDIATE_PROVIDER.replace("public function register(): void", "public function register()").replace("SelectedKernel::class);","SelectedKernel::class);return mutate($this->app);"),
++        IMMEDIATE_PROVIDER.replace("public function register()",r"public $bindings = [HttpKernel::class=>SelectedKernel::class] {get => [];} public function register()"),
++    ] {
++        let (backend,dir,route,_)=immediate_provider_workspace(&provider,PROVIDER_BOOTSTRAP).await;
++        let detail=hover(&backend,&route,SOURCE,"middleware('aud").await;
++        assert!(detail.contains("incomplete"),"unknown immediate provider effect: {provider}\n{detail}");
++        let target=Url::from_file_path(dir.path().join("app/Http/Middleware/Trace.php")).unwrap();let text=std::fs::read_to_string(target.to_file_path().unwrap()).unwrap();open_document(&backend,&target,"php",&text).await;
++        let edit=settled_target_rename(&backend,&target,&text,"class Trac","Traced").await;
++        assert!(edit.as_ref().is_err_and(|m|m.contains("middleware")),"{provider}: {edit:?}");
++    }
++    let bootstrap = PROVIDER_BOOTSTRAP.replace(
++        "KernelProvider::class);",
++        "KernelProvider::class,force:$unknown);",
++    );
++    let (backend, _dir, route, _) =
++        immediate_provider_workspace(IMMEDIATE_PROVIDER, &bootstrap).await;
++    assert!(
++        hover(&backend, &route, SOURCE, "middleware('aud")
++            .await
++            .contains("incomplete")
++    );
++}
++
++#[tokio::test]
++async fn immediate_provider_kernel_unmodeled_bootstrap_execution_refuses_complete_edits() {
++    let helper = r"<?php function bootBeforeProvider($app):void {$app->boot();} function setupProject():void {} function existingApplication(): \Illuminate\Foundation\Application {return new \Illuminate\Foundation\Application;}";
++    for effect in [
++        "bootBeforeProvider($app);",
++        "require_once __DIR__.'/../app/helper.php';bootBeforeProvider($app);",
++        "$app->unknownPhase();",
++        "setupProject();",
++        "$app=existingApplication();",
++        "$escaped=[$app];",
++        "$callback=function()use($app){};",
++    ] {
++        let bootstrap =
++            PROVIDER_BOOTSTRAP.replace("$app->register(", &format!("{effect}$app->register("));
++        let (backend, dir, route, _) = immediate_provider_workspace_extra(
++            IMMEDIATE_PROVIDER,
++            &bootstrap,
++            &[("app/helper.php", helper)],
++        )
++        .await;
++        let detail = hover(&backend, &route, SOURCE, "middleware('aud").await;
++        assert!(
++            detail.contains("incomplete"),
++            "unmodeled bootstrap must keep provider selection incomplete: {effect}\n{detail}"
++        );
++        let target = Url::from_file_path(dir.path().join("app/Http/Middleware/Trace.php")).unwrap();
++        let text = std::fs::read_to_string(target.to_file_path().unwrap()).unwrap();
++        open_document(&backend, &target, "php", &text).await;
++        let edit = settled_target_rename(&backend, &target, &text, "class Trac", "Traced").await;
++        assert!(
++            edit.as_ref().is_err_and(|m| m.contains("middleware")),
++            "{effect}: {edit:?}"
++        );
++    }
++}
++
++#[tokio::test]
++async fn immediate_provider_kernel_unexecuted_helpers_and_unreachable_escapes_keep_identity() {
++    let bootstrap = PROVIDER_BOOTSTRAP.replace(
++        "$app=new",
++        r"function unused(\Illuminate\Foundation\Application $app):void {$app->boot();}$app=new",
++    ) + "mutate($app);";
++    let (backend, dir, route, _) =
++        immediate_provider_workspace(IMMEDIATE_PROVIDER, &bootstrap).await;
++    assert_bound_kernel(&backend, dir.path(), &route, "app/Runtime/SiteKernel.php").await;
++    assert!(
++        !hover(&backend, &route, SOURCE, "middleware('aud")
++            .await
++            .contains("incomplete")
++    );
++}
++
++#[tokio::test]
++async fn immediate_provider_kernel_keeps_standard_builder_variables_and_pure_configuration() {
++    for creation in [
++        r"$builder=\Illuminate\Foundation\Application::configure();$alias=$builder->withSingletons([]);$app=($alias)->create();",
++        r"$builder=\Illuminate\Foundation\Application::configure();$builder->withSingletons([]);$app=$builder->create();",
++        r"$app=\Illuminate\Foundation\Application::configure()->withSingletons([\Illuminate\Contracts\Http\Kernel::class=>\App\Runtime\SiteKernel::class])->create();",
++    ] {
++        let bootstrap =
++            PROVIDER_BOOTSTRAP.replace(r"$app=new \Illuminate\Foundation\Application;", creation);
++        let (backend, dir, route, _) = immediate_provider_workspace_extra(
++            IMMEDIATE_PROVIDER,
++            &bootstrap,
++            &[
++                ("framework/Foundation/Application.php", FACTORY_APPLICATION),
++                (
++                    "framework/Foundation/Configuration/ApplicationBuilder.php",
++                    FACTORY_BUILDER,
++                ),
++                ("framework/Foundation/Http/Kernel.php", FACTORY_KERNEL),
++            ],
++        )
++        .await;
++        assert_bound_kernel(&backend, dir.path(), &route, "app/Runtime/SiteKernel.php").await;
++        assert!(
++            !hover(&backend, &route, SOURCE, "middleware('aud")
++                .await
++                .contains("incomplete"),
++            "{creation}"
++        );
++    }
++}
++
++#[tokio::test]
++async fn immediate_provider_kernel_parameter_defaults_cannot_hide_lifecycle_execution() {
++    for (parameters, complete) in [
++        (
++            "$options=[],string $label='Kernel',?string $scope=null",
++            true,
++        ),
++        (r"$phase=new DefaultPhase", false),
++    ] {
++        let provider = IMMEDIATE_PROVIDER.replace(
++            "function register()",
++            &format!("function register({parameters})"),
++        ) + r" class DefaultPhase {public function __construct(){}}";
++        let (backend, dir, route, _) =
++            immediate_provider_workspace(&provider, PROVIDER_BOOTSTRAP).await;
++        let detail = hover(&backend, &route, SOURCE, "middleware('aud").await;
++        assert_eq!(
++            !detail.contains("incomplete"),
++            complete,
++            "{parameters}: {detail}"
++        );
++        if !complete {
++            let target =
++                Url::from_file_path(dir.path().join("app/Http/Middleware/Trace.php")).unwrap();
++            let text = std::fs::read_to_string(target.to_file_path().unwrap()).unwrap();
++            open_document(&backend, &target, "php", &text).await;
++            let edit =
++                settled_target_rename(&backend, &target, &text, "class Trac", "Traced").await;
++            assert!(
++                edit.as_ref().is_err_and(|m| m.contains("middleware")),
++                "{edit:?}"
++            );
++        }
++    }
++}
++
++#[tokio::test]
++async fn immediate_provider_kernel_source_loading_and_property_defaults_need_modeled_data() {
++    for (prefix, property, complete) in [
++        (
++            "const PACKAGE_MODE='local';function unusedLoad(){}",
++            r"public $path=__DIR__.'/resources';",
++            true,
++        ),
++        ("sideEffectAtLoad();", "", false),
++        ("", "public $options=ExtraSettings::VALUE;", false),
++        (r"const PHASE=new \stdClass;", "", false),
++    ] {
++        let provider = IMMEDIATE_PROVIDER
++            .replace(
++                "class KernelProvider",
++                &format!("{prefix} class KernelProvider"),
++            )
++            .replace(
++                "public function register()",
++                &format!("{property} public function register()"),
++            )
++            + " class ExtraSettings {public const VALUE=1;}";
++        let (backend, dir, route, _) =
++            immediate_provider_workspace(&provider, PROVIDER_BOOTSTRAP).await;
++        let detail = hover(&backend, &route, SOURCE, "middleware('aud").await;
++        assert_eq!(
++            !detail.contains("incomplete"),
++            complete,
++            "{prefix} {property}: {detail}"
++        );
++        if !complete {
++            let target =
++                Url::from_file_path(dir.path().join("app/Http/Middleware/Trace.php")).unwrap();
++            let text = std::fs::read_to_string(target.to_file_path().unwrap()).unwrap();
++            open_document(&backend, &target, "php", &text).await;
++            let edit =
++                settled_target_rename(&backend, &target, &text, "class Trac", "Traced").await;
++            assert!(
++                edit.as_ref().is_err_and(|m| m.contains("middleware")),
++                "{edit:?}"
++            );
++        }
++    }
++}

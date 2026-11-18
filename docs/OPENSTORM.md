@@ -15,6 +15,25 @@ slice, commit and push it, and retain only the latest generated app. Native UI
 cases remain deferred/unverified; earlier native-first blocking checkpoints are
 historical and no longer prevent independent implementation.
 
+Retention slice168 (2026-11-18): source167 is committed/pushed as cf86b0122.
+Removed27,035,919,112 logical bytes of current workspace compiler and frontend
+output after its gates; artifacts/build and dist are absent. The engine witness
+fix blocks immediate packaging, so the earlier167 compiler-retention plan is
+superseded. Keep the sole signed App110/default171 plus the exact83,036,504-byte
+client-test executable at artifacts/checks/slice167/bin/phpantom. Its SHA256 is
+2d3e6294426fd5e970b581a091aad29a4d828ac599206db0757c093af50c7dcf;
+it lists all61 tests after relocation and links only macOS system libraries.
+Historical compiler/executable paths in167 receipts describe the measured run;
+168 retention maps the preserved executable. No active compiler used the trees,
+and neither contained environment files. Canonical sources/engines, provenance,
+fixtures, toolchains, PHP Workbench and evaluation artifacts remain preserved.
+Deep/strict App110 signing and active171 checksums verify after deletion.
+Immediate filesystem free-space readback increases31,480,197,120 to32,253,403,136
+bytes; this is distinct from logical bytes removed. Native UI remains skipped.
+Evidence:artifacts/checks/slice168/{retention,delivery}.json and the relocated
+client-list check. No feature status or runtime code changed. Next remains the
+mixed-Composer witness fix before Host callback acceptance and packaging.
+
 Client verification slice167 (2026-11-18; candidate172 remains unpromoted):
 all11 affected real OpenStorm LspManager cases pass against172, including2 new
 cases across nine Laravel13.37 callback fixtures. The same emitted executable

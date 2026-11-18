@@ -1349,7 +1349,7 @@
     "signing": "ad-hoc; deep/strict verified",
     "installed": false,
     "notarized": false,
-    "compiler_cleanup": "Package recipe cargo-cleaned current compiler and duplicate staging; dist removed after embedded acceptance.",
+    "compiler_cleanup": "Slice168 removes27,035,919,112 logical bytes of current compiler/dist output after167; sole App110 and83,036,504-byte checksummed client-test executable retained. See artifacts/checks/slice168/retention.json.",
     "evidence": "artifacts/checks/slice165/final-check.json; artifacts/batches/0.1.110/build-receipt.json",
     "later_source_checkpoint": {
       "slice": 167,
@@ -1359,7 +1359,8 @@
       "engine": "0.11.1-openstorm.172",
       "description": "Callback client acceptance and safe mixed-context refusal/recovery verified; mixed-context rename success remains blocked. Fix engine witness routing before Host callback acceptance and promotion.",
       "evidence": "artifacts/checks/slice167/{client,retention}.json; artifacts/engines/0.11.1-openstorm.172/build-receipt.json"
-    }
+    },
+    "retention_slice": 168
   },
   "invokable_handler_navigation_candidate": {
     "source_slice": 109,

@@ -15,6 +15,59 @@ slice, commit and push it, and retain only the latest generated app. Native UI
 cases remain deferred/unverified; earlier native-first blocking checkpoints are
 historical and no longer prevent independent implementation.
 
+Package slice165 (2026-11-18, signed local App0.1.110 verified): deliver
+client164's Laravel route/view target synchronization correction in the local
+development app. Pending editor acknowledgements now precede target opening;
+stale rows retire and preserve the chosen name for Retry. Close, Back, project
+or chooser replacement and synchronization failure remain guarded. The exact
+frontend source/test hashes match accepted164: four regressions fail prior/pass
+corrected,103 focused tests and13 controlled-IPC browser checks pass, including
+two real-buffer delayed-acknowledgement workflows and retained screenshots.
+These browser observations do not establish native or real-server UI acceptance.
+
+Only45 local Cargo versions109 to110 and app metadata change in this package
+slice. External dependency blocks and plugin API1.10.0 stay unchanged. Fresh
+frontend13,397 passes/6 skipped, typecheck/lint/format/knip, version-helper tests,
+engine checksum/source fingerprint and Rust formatting pass. Production frontend
+and Safari15.4 build checks pass. Rust/IPC/engine logic is unchanged; reuse the
+source161-163 engine/workspace/client-host evidence, including5,155 workspace
+passes/229 ignored/one retained HTTP exclusion and112 actual client-host cases.
+No new Rust Clippy or full Rust-workspace run is claimed for this metadata slice.
+
+App110 is arm64 development/debug with production frontend assets. Identity
+cz.thinky.openstorm, minimum-OS13.0 metadata, independent settings/caches,
+.openidea compatibility, default appearance/keymaps/autosave, attribution/licenses,
+empty updater endpoints and existing debugger scope remain unchanged. Actual
+macOS13 runtime and native UI stay unverified; native checks remain user-skipped.
+Ad-hoc signature verifies deep/strict before and after all37 embedded-server
+stage groups. These cover PHP targets/builtins, plain PHP/Composer/Laravel,
+malformed initialization, aliases/exclusions, Kernel/provider/builder ordering,
+literal-map priority and Unicode ranges, dirty dependencies/restart, guarded
+refactors, namespace/source freshness and descriptor isolation. Owned children
+exit0 and original/borrowed inputs remain unchanged. The current Laravel13.37
+example passes121 PHP syntax checks/368 runtime assertions with exactly the
+previous3 intentional analyzer diagnostics (expected analyzer exit1).
+
+Bundle:artifacts/batches/0.1.110/OpenStorm.app.
+Main executable SHA256:d721a271f7eecf3a713b83131642f9a041351074308b9c44c68ea321783d8ec1.
+Embedded/default PHPantom171 SHA256:f8c9fb7e2d418b323df3ccfa958ce658482993e32aa9a938efde59695f0006db.
+The build receipt binds the exact164 frontend plus110 metadata, provenance,
+licenses and executable checksums; only later progress/ledger metadata differ.
+Engine dependencies are system libraries. The recipe retained109 until110's
+signature/receipt passed, then removed109, duplicate staging and current compiler
+output. Removed68,853,339 production frontend bytes after acceptance;
+only App110 remains. Source/engine archives, Workbench, fixtures, evaluation
+artifacts and receipts are preserved. No install, app launch, migration,
+notarization, public publishing or updater activation occurred.
+
+All69 statuses remain67 partial/2 user-deferred. Wider route/view, L63/L64,
+Auto PHP status, native/platform/performance and other roadmap gates remain open.
+Existing debug __eh_frame and serialized CLI socket-test limitations stay recorded.
+Commit/push this checkpoint and verify the exact remote ref and clean worktree.
+Evidence:artifacts/checks/slice165/{input,promotion-input,version-proof,
+identity-provenance,gates,package,embedded,final-check,delivery}.json and logs;
+App110 build-receipt/retention sidecars; unchanged164 browser screenshots/logs.
+
 Client slice164 (2026-11-18, Laravel route/view target freshness): apply the
 existing handler-selection synchronization barrier to route and view targets.
 Clicking Open now waits for every pending editor edit. An acknowledgement that

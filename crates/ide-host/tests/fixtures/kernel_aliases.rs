@@ -362,3 +362,96 @@ async fn inherited_kernel_alias_checked_plans_preserve_conflicts_and_reviewed_hi
         checked_rename_case(f, &declaration, relative).await;
     }
 }
+
+const BOUND_BOOTSTRAP: &str = r"<?php
+use Illuminate\Contracts\Http\Kernel as HttpKernel;
+use App\Runtime\SiteKernel as ProjectKernel;
+$app = new \Illuminate\Foundation\Application;
+$app->singleton(HttpKernel::class, ProjectKernel::class);
+return $app;
+";
+
+fn bound_fixture(property: &str) -> (Fixture, String) {
+    let declaration = KERNEL
+        .replacen("namespace App\\Http;", "namespace App\\Runtime;", 1)
+        .replace("class Kernel extends", "class SiteKernel extends")
+        .replace("middlewareAliases", property);
+    let conventional = KERNEL.replace("Middleware\\Audit as", "Middleware\\Trace as");
+    let next = declaration
+        .replace("class SiteKernel extends", "class NextKernel extends")
+        .replace("Middleware\\Audit as", "Middleware\\Trace as");
+    let f = fixture_with(&conventional, &[
+        ("bootstrap/app.php".into(), BOUND_BOOTSTRAP.into()),
+        ("app/Runtime/SiteKernel.php".into(), declaration.clone()),
+        ("app/Runtime/NextKernel.php".into(), next),
+        ("framework/Contracts/Http/Kernel.php".into(), "<?php namespace Illuminate\\Contracts\\Http; interface Kernel {}\n".into()),
+        ("framework/Foundation/Application.php".into(), "<?php namespace Illuminate\\Foundation; class Application {public function singleton($abstract,$concrete=null): void {}}\n".into()),
+    ]);
+    (f, declaration)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires PHPantom167 and owned PHP syntax-check executable"]
+async fn bound_kernel_navigation_preserves_managed_ancestry_and_ranges() {
+    for property in ["middlewareAliases", "routeMiddleware"] {
+        let (f, declaration) = bound_fixture(property);
+        navigation_case(
+            f,
+            &declaration,
+            "app/Runtime/SiteKernel.php",
+            "app/Http/KernelBase.php",
+            BASE,
+            "<?php namespace App\\Http; class KernelBase {}\n",
+        )
+        .await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires PHPantom167 and owned PHP syntax-check executable"]
+async fn bound_kernel_checked_plans_preserve_external_conflicts_and_reviewed_history() {
+    let (f, declaration) = bound_fixture("middlewareAliases");
+    checked_rename_case(f, &declaration, "app/Runtime/SiteKernel.php").await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires PHPantom167 and owned PHP syntax-check executable"]
+async fn bound_kernel_bootstrap_changes_retire_plans_and_replay_dirty_selection() {
+    let (f, _) = bound_fixture("middlewareAliases");
+    let outcome = std::panic::AssertUnwindSafe(async {
+        let bootstrap = f.root.join("bootstrap/app.php");
+        let bootstrap_doc = f.project.documents.open(&bootstrap).unwrap();
+        let class_path = f.root.join("app/Http/Middleware/Audit.php");
+        let class = f.project.documents.open(&class_path).unwrap();
+        let position = cursor(CLASS, "Audit {}");
+        hover(&f, "App\\Http\\Middleware\\Audit", "app/Runtime/SiteKernel.php").await;
+        let plan =
+            ide_host::ops::lsp::lsp_rename(&f.host, "main", RequestId::next(), class.id, position, "Auditor".into())
+                .await
+                .unwrap()
+                .edit;
+        let changed = BOUND_BOOTSTRAP.replace("SiteKernel as", "NextKernel as");
+        assert_eq!(changed.len(), BOUND_BOOTSTRAP.len());
+        f.project.documents.replace_all(bootstrap_doc.id, &changed).unwrap();
+        assert!(
+            ide_host::ops::lsp::apply_workspace_edit(&f.host, "main", plan).await.is_err(),
+            "changed bootstrap must retire a reviewed Kernel plan"
+        );
+        let found = definitions(&f).await;
+        assert_eq!(found.len(), 1, "bound Kernel must follow dirty bootstrap: {found:?}");
+        assert_eq!(*found[0].path, f.root.join("app/Runtime/NextKernel.php"));
+        hover(&f, "App\\Http\\Middleware\\Trace", "app/Runtime/NextKernel.php").await;
+        f.project.lsp.restart(f.project.lsp.servers()[0].id).await.unwrap();
+        hover(&f, "App\\Http\\Middleware\\Trace", "app/Runtime/NextKernel.php").await;
+        f.project.documents.replace_all(bootstrap_doc.id, BOUND_BOOTSTRAP).unwrap();
+        assert_eq!(*definitions(&f).await[0].path, f.root.join("app/Runtime/SiteKernel.php"));
+        assert_eq!(std::fs::read_to_string(&bootstrap).unwrap(), BOUND_BOOTSTRAP);
+        assert_eq!(std::fs::read_to_string(&class_path).unwrap(), CLASS);
+        assert!(!f.root.join("app/Http/Middleware/Auditor.php").exists());
+        assert!(f.project.documents.snapshot(bootstrap_doc.id).unwrap().text == BOUND_BOOTSTRAP);
+        assert_eq!(std::fs::read_to_string(f.root.join("routes/web.php")).unwrap(), CALLER);
+    })
+    .catch_unwind()
+    .await;
+    f.finish(outcome).await;
+}

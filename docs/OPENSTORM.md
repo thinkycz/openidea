@@ -15,6 +15,59 @@ slice, commit and push it, and retain only the latest generated app. Native UI
 cases remain deferred/unverified; earlier native-first blocking checkpoints are
 historical and no longer prevent independent implementation.
 
+Client/host slice150 (2026-11-18, verified;167 inactive pending packaging):
+exercise the source149 custom Kernel selection through actual LspManager and managed
+host operations. Three new host tests and two direct-client tests fail on166 and
+pass on167. The same executables establish the controls; host source/executable
+remain unchanged during client fixture corrections. Both alias properties retain
+custom declaration ownership, decoded UTF-16 ranges and foreign-receiver exclusions.
+Dirty imports, inheritance removal/restoration and restart keep their existing
+semantics. Bootstrap selection changes retire previewed plans even when bootstrap
+is not an edit target, then update navigation without caller edits and replay after
+restart. Checked class plans retain external-conflict guards, atomic cross-file
+apply and shared reviewed undo/redo, preserving original dirty buffers and disk.
+
+The direct client verifies the real Laravel13.37 bound-only alias, declaration and
+reference ranges, incomplete-context hover and checked-rename refusal. Rebinding its
+bootstrap to the conventional Kernel removes the alias; dirty restart retains that
+absence and restoration returns the custom declaration. Original fixture files
+stay unchanged and owned processes exit. The initial direct-client setup omitted
+its required candidate hook; preserve that failure. An unfiltered119-file hook then
+hit the30s rename timeout. Production's hook searches by symbol word. A conservative
+word-filtered fixture inventory returns all6 matching sources and the intended
+client checks pass, without a timeout or diagnostic suppression change. Retain the
+unfiltered log as a broader performance limitation; this is not a performance fix.
+The host tests use the existing production candidate hook throughout.
+
+All94 actual167 client/host cases pass:52 client,27 completion-host,10 guarded edits,
+2 controller URL-host,2 handler-host and1 PHP-target settings-host. Source, emitted
+executables and Cargo fingerprints remain fixed during the corpus. Fresh frontend
+13,393 passes/6 skipped, typecheck/lint/format/knip, production build and Safari15.4
+checks pass. Rust formatting and workspace all-target Clippy pass. Fresh serialized
+workspace:5,152 passes/211 ignored/one retained HTTP exclusion across
+224 groups; the5 additional ignored entries are explicitly
+run in the controls and client/host corpus. Generated bindings/command snapshots
+are unchanged. Keep the known default-parallel CLI socket-test limitation. Reuse
+unchanged controlled-browser evidence; native UI remains user-skipped. Identical
+167 retains source149's18,618 ordinary/17 ignored plus2 bounded checks, both engine
+Clippy modes, exact replay/build,26 stdio groups,119 Laravel syntax/355 runtime
+assertions and exact3 intentional analyzer diagnostics.
+
+Candidate167 SHA256:cd17bb14d8c699d05b24242f81b1a73750e85cae072b6be0a5c611e471b0d35c.
+Client/host receipt SHA256:a707eba58c1d9932f6c2173101116930dcc87e1ca049042dbdcb1f975211bc6e.
+App104/default166 hashes and deep/strict signature remain unchanged; App104 is the
+sole generated app. Keep only the current compiler/dist outputs needed immediately
+for the next package slice, then remove them after signed package verification.
+No new app, installation, migration, updater activation or debugger functionality.
+All69 statuses remain67 partial/2 user-deferred. Provider/builder/alias/closure
+selection remains L64; runtime mutation/callback order remains L63. Native/platform
+and broad performance gates remain partial. Commit/push and verify the remote ref
+and clean worktree before starting the dependent packaging slice.
+
+Evidence:artifacts/checks/slice150/{source-input,gates,controls,controls-process-cleanup,
+client-host,retention,delivery}.json; failed candidate-hook and unfiltered-scope logs,
+all final stage logs, and canonical167 client-host/delivery sidecars.
+
 Engine source slice149 (2026-11-18, verified;167 inactive): follow literal
 bootstrap HTTP Kernel bindings of the returned Application instead of always
 selecting app/Http/Kernel.php. A syntax/autoload/runtime-validated fixture proves

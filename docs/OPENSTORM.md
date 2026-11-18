@@ -15,6 +15,81 @@ slice, commit and push it, and retain only the latest generated app. Native UI
 cases remain deferred/unverified; earlier native-first blocking checkpoints are
 historical and no longer prevent independent implementation.
 
+Engine source slice161 (2026-11-18, verified;171 inactive): effective Kernel
+alias navigation now selects the modern middlewareAliases property ahead of
+routeMiddleware, independently of property layout. Resolve each selected Kernel
+separately through existing shared inheritance/method ownership. Standard
+constructor/sync ownership proves the cross-property rule. Literal string-key
+arrays and nested literal spreads preserve PHP's last decoded key, including
+escaped/UTF-16 source ranges. Inherited and trait property locations remain their
+own declarations. Unknown maps, numeric merge keys, custom lifecycle methods and
+ambiguous composition retain explicit incomplete alternatives. Methodless model
+fixtures retain both maps when they cannot prove a collision's runtime priority.
+
+This filters effective alias definitions, hover and declaration references. Keep
+physical registrations in checked class/FQN/namespace rename analysis, including
+shadowed class strings; their unsupported transforms still refuse without partial
+edits. There is no new type engine, setting, command, timeout or project execution
+inside framework inspection. AST map evidence is bounded and parsed once per
+source URI per lookup; dirty documents use current sources.
+
+Real Laravel13.37 proves170 returns two shadowed/effective declarations and two
+hover targets while both Kernel and Router select BuilderAudit. Preserve that
+executable-bound failure and the corrected single declaration/target/reference
+set. A public-handler regression fails2-versus1 before implementation. The initial
+probe used an invalid helper argument shape; preserve the TypeError/log and its
+corrected run. Initial compile errors used the wrong parser export path and an
+unconverted class-name atom; preserve those errors and the corrected build.
+The first uncertain-lifecycle protocol fixture used untyped constructor arguments
+that Laravel could not autowire. Retain its runtime failure and source; match the
+framework dependency types and rerun all five priority groups. Engine171 and the
+36 inherited groups stay unchanged.
+Seven new/89 middleware tests pass: literal priority, last decoded keys/spreads,
+parent/trait origins and dirty overrides, custom lifecycle refusal, uncertain
+maps/numeric keys, shadowed physical class-string protection and multiple possible
+Kernel roots. These tests do not authorize callback mutation or dynamic map order.
+Unknown-map unit inputs include incomplete/invalid editor buffers; accepted real
+PHP/Laravel runtime fixtures pass syntax and autoload checks.
+
+Final frozen-source gates pass18,651 ordinary tests/17 ignored plus2 bounded child
+checks, both release all-target Clippy modes, formatting, exact171-patch replay
+and pinned build. All41 stdio groups pass:36 inherited/provider controls plus
+five priority groups. Real constructor mutation and opaque constant maps retain
+incomplete hover/refusals; complete literal, escaped-spread and inherited-parent
+previews retain effective definitions, references and dirty refresh. Shadowed
+physical class strings still refuse unsupported edits. Actual runtime class
+loading is checked against the owned fixture path. All owned children exit0 and
+original/borrowed sources remain unchanged. The example adds AliasPriorityKernel:
+121 syntax checks/368 runtime assertions, plus exactly the previous3 deliberate
+analyzer diagnostics (expected exit1). Twelve plain-PHP syntax checks/runtime pass.
+
+Inactive171 SHA256:f8c9fb7e2d418b323df3ccfa958ce658482993e32aa9a938efde59695f0006db.
+Series SHA256:08c55509027111349b986212ec4540ff8ced9599ac7fddf1f2f75cb650cf0a5a.
+Build/source receipt SHA256:a21e7d957f05850fbf4eae58a514d94700a3d0c9744fd530c22201501f839497.
+Preserve pinned upstream, recipe, notices and canonical binary provenance;
+Cargo.toml/Cargo.lock/build.rs and MIT/Apache inputs stay unchanged. The arm64
+candidate links only macOS system libraries. This is source/stdio acceptance;
+actual OpenStorm client/host adoption and separate packaging remain next.
+App108/default170 and deep/strict signature stay unchanged; only App108 remains.
+Root compiler/dist remain absent. After exact source replay/archive comparison,
+remove engine compiler output and mutable scratch:2,371,162,930 logical
+bytes. Keep canonical sources/engines, Workbench, fixtures and earlier evidence.
+Reuse unchanged159/160 editor/workspace/frontend/package evidence; claim no new
+root frontend/workspace run or171 native acceptance. Native UI stays user-skipped.
+
+L63 retains callback/property mutation order, withMiddleware reset behavior,
+constant/dynamic/numeric maps, custom lifecycle methods and compatible overlapping
+property proofs. L64 retains unsupported dynamic/nested providers, custom apps/
+builders and factories. The Auto PHP widget remains Composer-derived. Wider
+middleware/native/platform/performance acceptance and all69 statuses stay67
+partial/2 user-deferred. Commit/push and verify the exact remote ref and clean
+worktree before client162 adoption, then a separate package checkpoint.
+
+Evidence:artifacts/checks/slice161-{source-freeze,engine-gates,source-test-summary,
+wire-gates,playground,new-example-checks,map-before170,retention,delivery}.json;
+map/provider final receipts, stage/failure logs, canonical171 build/source/delivery
+sidecars and the retained initial probe/type-error controls.
+
 Package slice160 (2026-11-18, signed local App0.1.108 verified): promote
 source158/client159-verified PHPantom170 into the default bundled resource and
 local development app. Immediate literal Application::register providers select

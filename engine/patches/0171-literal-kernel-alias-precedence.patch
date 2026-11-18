@@ -1,0 +1,635 @@
+--- a/docs/CHANGELOG.md
++++ b/docs/CHANGELOG.md
+@@ -1,3 +1,14 @@
++## OpenStorm .171 literal Kernel alias precedence
++
++Effective alias navigation honors standard Kernel modern-over-legacy property
++precedence and last decoded string keys in literal arrays/spreads. Shared
++constructor/synchronization ownership gates cross-property priority. Inherited
++and trait declarations retain their own locations, and possible Kernel roots
++remain separate. Unknown maps, integer merge keys, custom lifecycle methods and
++ambiguous composition retain incomplete alternatives. Physical class strings
++remain checked-rename inputs even when their alias declaration is shadowed.
++Contributed by @thinkycz.
++
+ ## OpenStorm .170 immediate provider HTTP Kernels
+ 
+ Literal providers registered on the returned application participate in initial
+--- a/docs/todo/laravel.md
++++ b/docs/todo/laravel.md
+@@ -649,6 +649,14 @@
+ 
+ **Impact: Medium · Complexity: Medium**
+ 
++Literal string-key maps now honor modern-over-legacy property precedence and
++last decoded keys in literal array/spread order, when shared method ownership
++proves the standard Kernel constructor/synchronization model. Inherited and trait
++property owners retain their locations; each possible selected Kernel keeps its
++own precedence. Physical class-string references remain transformation inputs.
++Custom lifecycle methods, opaque/numeric-key maps and ambiguous origins remain
++incomplete. These static priorities do not model callback/property mutations.
++
+ Resolve runtime-built alias maps and property mutations without executing bootstrap
+ code. Prove compatible multiple-trait declarations before enabling transformations;
+ otherwise keep all known source origins and explicit incomplete/ambiguous metadata.
+--- /dev/null
++++ b/examples/laravel/app/Runtime/AliasPriorityKernel.php
+@@ -0,0 +1,21 @@
++<?php
++
++namespace App\Runtime;
++
++use App\Http\Middleware\AuditRequests;
++use Illuminate\Auth\Middleware\Authenticate;
++use Illuminate\Foundation\Http\Kernel;
++
++class AliasPriorityKernel extends Kernel
++{
++    protected $middlewareAliases = [
++        'demo.kernel.priority' => AuditRequests::class,
++        'demo.kernel.duplicate' => Authenticate::class,
++        ...['demo.kernel.duplicate' => AuditRequests::class],
++    ];
++
++    protected $routeMiddleware = [
++        'demo.kernel.priority' => Authenticate::class,
++        'demo.kernel.legacy_only' => Authenticate::class,
++    ];
++}
+--- a/examples/laravel/assertions.php
++++ b/examples/laravel/assertions.php
+@@ -2248,6 +2248,14 @@
+ $providerApplication->register(\App\Providers\KernelServiceProvider::class, true);
+ check('Forced provider registration reapplies its binding', $providerApplication->make(\Illuminate\Contracts\Http\Kernel::class) instanceof \App\Runtime\SiteKernel);
+ 
++$priorityApplication = new \Illuminate\Foundation\Application(__DIR__);
++$priorityApplication->singleton(\Illuminate\Contracts\Http\Kernel::class, \App\Runtime\AliasPriorityKernel::class);
++$priorityKernel = $priorityApplication->make(\Illuminate\Contracts\Http\Kernel::class);
++check('Modern Kernel aliases override legacy aliases independent of property order', $priorityKernel->getMiddlewareAliases()['demo.kernel.priority'] === \App\Http\Middleware\AuditRequests::class);
++check('Legacy-only Kernel aliases remain registered', $priorityKernel->getMiddlewareAliases()['demo.kernel.legacy_only'] === \Illuminate\Auth\Middleware\Authenticate::class);
++check('Literal array spreads retain the last duplicate alias', $priorityKernel->getMiddlewareAliases()['demo.kernel.duplicate'] === \App\Http\Middleware\AuditRequests::class);
++check('The router receives the effective modern Kernel alias', $priorityApplication->make('router')->getMiddleware()['demo.kernel.priority'] === \App\Http\Middleware\AuditRequests::class);
++
+ echo "\n";
+ if ($failed === 0) {
+     echo "\033[32m✓ All $passed assertions passed.\033[0m\n";
+--- a/src/virtual_members/laravel/kernel_middleware.rs
++++ b/src/virtual_members/laravel/kernel_middleware.rs
+@@ -12,11 +12,99 @@
+ pub(crate) struct KernelAliasOrigin {
+     pub uri: String,
+     pub declaration_offset: u32,
++    pub root: String,
++    pub property: &'static str,
++    pub ordering_proven: bool,
+ }
+ 
+ pub(crate) struct KernelAliasSources {
+     pub origins: Vec<KernelAliasOrigin>,
+     pub complete: bool,
++}
++
++pub(super) struct KernelAliasChoice {
++    pub active: HashSet<(String, u32)>,
++    pub uncertain: HashSet<(String, u32)>,
++    pub complete: bool,
++}
++
++type AliasKeys = HashMap<String, u32>;
++
++fn literal_alias_keys(
++    expression: &mago_syntax::cst::Expression<'_>,
++    content: &str,
++    depth: usize,
++    remaining: &mut usize,
++) -> Option<AliasKeys> {
++    use mago_syntax::cst::ArrayElement;
++    if depth >= 64 {
++        return None;
++    }
++    let mut keys = HashMap::new();
++    for element in
++        crate::parser::array_literal_elements(crate::parser::unwrap_parens(expression))?.iter()
++    {
++        *remaining = remaining.checked_sub(1)?;
++        match element {
++            ArrayElement::KeyValue(pair) => {
++                let (name, start, _) = super::helpers::resolved_string_literal(
++                    crate::parser::unwrap_parens(pair.key),
++                    content,
++                )?;
++                // array_merge renumbers integer keys, including canonical integer strings.
++                if name.is_empty()
++                    || name
++                        .parse::<i64>()
++                        .is_ok_and(|number| number.to_string() == name)
++                {
++                    return None;
++                }
++                keys.insert(name.to_owned(), start as u32);
++            }
++            ArrayElement::Variadic(spread) => {
++                keys.extend(literal_alias_keys(
++                    spread.value,
++                    content,
++                    depth + 1,
++                    remaining,
++                )?);
++            }
++            _ => return None,
++        }
++    }
++    Some(keys)
++}
++
++fn literal_alias_maps(content: &str, offsets: &HashSet<u32>) -> HashMap<u32, Option<AliasKeys>> {
++    use mago_syntax::cst::{Node, PropertyItem};
++    crate::parser::with_parsed_program(content, "kernel_alias_priority", |program, _| {
++        let mut maps: HashMap<_, _> = offsets.iter().map(|offset| (*offset, None)).collect();
++        if !program.errors.is_empty() {
++            return maps;
++        }
++        let mut pending = vec![Node::Program(program)];
++        let mut remaining = 16_384;
++        while let Some(node) = pending.pop() {
++            if remaining == 0 {
++                break;
++            }
++            remaining -= 1;
++            if matches!(node, Node::HookedProperty(_) | Node::Method(_)) {
++                continue;
++            }
++            if let Node::PropertyItem(PropertyItem::Concrete(item)) = node
++                && offsets.contains(&item.variable.span.start.offset)
++            {
++                maps.insert(
++                    item.variable.span.start.offset,
++                    literal_alias_keys(item.value, content, 0, &mut 4096),
++                );
++                continue;
++            }
++            node.visit_children(|child| pending.push(child));
++        }
++        maps
++    })
+ }
+ 
+ fn identity(name: &str) -> String {
+@@ -274,6 +362,21 @@
+                 continue;
+             }
+             let effective = crate::inheritance::resolve_class_with_inheritance(class, &loader);
++            use crate::inheritance::ancestry::{MethodOrigin, resolve_concrete_method_origin};
++            let mut ordering_proven = true;
++            for method in ["__construct", "syncMiddlewareToRouter"] {
++                match resolve_concrete_method_origin(class, method, &loader) {
++                    MethodOrigin::Known { owner, .. }
++                        if owner
++                            .fqn()
++                            .eq_ignore_ascii_case("Illuminate\\Foundation\\Http\\Kernel") => {}
++                    MethodOrigin::Missing => ordering_proven = false,
++                    _ => {
++                        ordering_proven = false;
++                        sources.complete = false;
++                    }
++                }
++            }
+             let graph_complete = !missing.get()
+                 && complete_graph(class, &loaded.borrow(), true)
+                 && self.middleware_graph_sources_valid(
+@@ -353,11 +456,16 @@
+                         continue;
+                     }
+                     if !sources.origins.iter().any(|origin| {
+-                        origin.uri == owner_uri && origin.declaration_offset == offset
++                        origin.uri == owner_uri
++                            && origin.declaration_offset == offset
++                            && origin.root == class.fqn()
+                     }) {
+                         sources.origins.push(KernelAliasOrigin {
+                             uri: owner_uri,
+                             declaration_offset: offset,
++                            root: class.fqn().to_string(),
++                            property: name,
++                            ordering_proven,
+                         });
+                     }
+                 }
+@@ -366,6 +474,79 @@
+         if selected.is_some() && !found {
+             sources.complete = false;
+         }
++    }
++
++    pub(super) fn kernel_alias_choice(
++        &self,
++        sources: &KernelAliasSources,
++        name: &str,
++    ) -> KernelAliasChoice {
++        let mut choice = KernelAliasChoice {
++            active: HashSet::new(),
++            uncertain: HashSet::new(),
++            complete: true,
++        };
++        let mut offsets: HashMap<&str, HashSet<u32>> = HashMap::new();
++        let mut groups: HashMap<&str, Vec<&KernelAliasOrigin>> = HashMap::new();
++        for origin in &sources.origins {
++            offsets
++                .entry(&origin.uri)
++                .or_default()
++                .insert(origin.declaration_offset);
++            groups.entry(&origin.root).or_default().push(origin);
++        }
++        let maps: HashMap<_, _> = offsets
++            .into_iter()
++            .map(|(uri, offsets)| {
++                let parsed = self
++                    .get_file_content(uri)
++                    .map(|content| literal_alias_maps(&content, &offsets));
++                (uri, parsed)
++            })
++            .collect();
++        for origins in groups.values() {
++            let mut selected: HashMap<&str, (String, u32)> = HashMap::new();
++            let mut properties = HashSet::new();
++            let mut complete = true;
++            for origin in origins {
++                if !properties.insert(origin.property) {
++                    complete = false;
++                }
++                let keys = maps
++                    .get(origin.uri.as_str())
++                    .and_then(Option::as_ref)
++                    .and_then(|maps| maps.get(&origin.declaration_offset))
++                    .and_then(Option::as_ref);
++                if let Some(keys) = keys {
++                    if let Some(offset) = keys.get(name) {
++                        selected.insert(origin.property, (origin.uri.clone(), *offset));
++                    }
++                } else {
++                    complete = false;
++                }
++            }
++            if !complete {
++                choice.complete = false;
++                choice.uncertain.extend(
++                    origins
++                        .iter()
++                        .map(|origin| (origin.uri.clone(), origin.declaration_offset)),
++                );
++                continue;
++            }
++            let modern = selected.remove("middlewareAliases");
++            let legacy = selected.remove("routeMiddleware");
++            if modern.is_some()
++                && legacy.is_some()
++                && !origins.iter().all(|origin| origin.ordering_proven)
++            {
++                choice.complete = false;
++                choice.active.extend(modern.into_iter().chain(legacy));
++            } else {
++                choice.active.extend(modern.or(legacy));
++            }
++        }
++        choice
+     }
+ 
+     pub(crate) fn confirmed_kernel_alias_site(
+--- a/src/virtual_members/laravel/middleware_aliases.rs
++++ b/src/virtual_members/laravel/middleware_aliases.rs
+@@ -10,6 +10,7 @@
+     pub reference_range: Range,
+     pub target: Option<String>,
+     pub context_complete: bool,
++    kernel_site: Option<(u32, u32)>,
+ }
+ 
+ impl Backend {
+@@ -76,6 +77,23 @@
+                 require_complete,
+                 &sources,
+             )?);
++        }
++        if !require_complete && let Some(name) = name {
++            let choice = self.kernel_alias_choice(&sources, name);
++            registrations.retain(|site| {
++                site.kernel_site.is_none_or(|(declaration, offset)| {
++                    choice
++                        .active
++                        .contains(&(site.location.uri.to_string(), offset))
++                        || choice
++                            .uncertain
++                            .contains(&(site.location.uri.to_string(), declaration))
++                })
++            });
++            for site in &mut registrations {
++                site.context_complete &=
++                    choice.complete && (site.kernel_site.is_none() || site.target.is_some());
++            }
+         }
+         Some(registrations)
+     }
+@@ -214,6 +232,8 @@
+                     ),
+                     target: target.target.clone(),
+                     context_complete: sources.complete,
++                    kernel_site: (target.receiver == crate::symbol_map::ViewReceiverClass::KernelMiddlewareAliasDeclaration)
++                        .then_some(target.declaration_offset.map(|offset|(offset,target.start))).flatten(),
+                 })
+                 .collect(),
+         )
+--- a/tests/integration/laravel_middleware_aliases.rs
++++ b/tests/integration/laravel_middleware_aliases.rs
+@@ -3055,3 +3055,292 @@
+         }
+     }
+ }
++
++const ORDERED_KERNEL_BASE: &str = r"<?php namespace Illuminate\Foundation\Http;
++class Kernel {
++ public function __construct() {}
++ protected function syncMiddlewareToRouter() {}
++ public function getMiddlewareAliases() {return array_merge($this->routeMiddleware,$this->middlewareAliases);}
++}
++";
++
++#[tokio::test]
++async fn kernel_alias_literal_property_precedence_matches_standard_runtime() {
++    let source = KERNEL.replace(
++        "\n}",
++        "\nprotected $routeMiddleware = ['audited' => \\App\\Http\\Middleware\\Trace::class];\n}",
++    );
++    let (backend, _dir, caller, kernel) = kernel_workspace_extra(
++        &source,
++        &[("framework/Foundation/Http/Kernel.php", ORDERED_KERNEL_BASE)],
++    )
++    .await;
++    let found = definitions(&backend, &caller, SOURCE, "middleware('aud").await;
++    assert_eq!(
++        found.len(),
++        1,
++        "standard Kernel must select modern alias over legacy: {found:?}"
++    );
++    assert_eq!(found[0].uri, kernel);
++    assert_eq!(found[0].range.start, position_after(&source, "/* 😀 */ \""));
++    let detail = hover(&backend, &caller, SOURCE, "middleware('aud").await;
++    assert!(
++        detail.contains("Middleware\\Audit")
++            && !detail.contains("Middleware\\Trace")
++            && !detail.contains("incomplete"),
++        "{detail}"
++    );
++    let refs = find_references(
++        &backend,
++        &caller,
++        position_after(SOURCE, "middleware('aud"),
++        true,
++    )
++    .await;
++    assert_eq!(
++        refs.len(),
++        2,
++        "only effective declaration and caller are alias references: {refs:?}"
++    );
++}
++
++#[tokio::test]
++async fn kernel_alias_literal_arrays_keep_last_decoded_key_and_nested_spread_order() {
++    let original = r#"[/* 😀 */ "au\x64ited" => AuditAlias::class]"#;
++    for value in [
++        r"['audited'=>\App\Http\Middleware\Trace::class, ...['audited'=>\App\Http\Middleware\Trace::class], /* winner */ 'audited'=>AuditAlias::class]",
++        r"['audited'=>\App\Http\Middleware\Trace::class, ...array(/* winner */ 'audited'=>AuditAlias::class)]",
++    ] {
++        let source = KERNEL.replace(original, value);
++        assert_ne!(source, KERNEL);
++        let (backend, _dir, caller, kernel) = kernel_workspace_extra(
++            &source,
++            &[("framework/Foundation/Http/Kernel.php", ORDERED_KERNEL_BASE)],
++        )
++        .await;
++        let found = definitions(&backend, &caller, SOURCE, "middleware('aud").await;
++        assert_eq!(
++            found.len(),
++            1,
++            "last decoded literal array key wins: {found:?}"
++        );
++        assert_eq!(found[0].uri, kernel);
++        assert_eq!(
++            found[0].range.start,
++            position_after(&source, "/* winner */ '")
++        );
++        let detail = hover(&backend, &caller, SOURCE, "middleware('aud").await;
++        assert!(
++            detail.contains("Middleware\\Audit") && !detail.contains("Middleware\\Trace"),
++            "{detail}"
++        );
++    }
++}
++
++#[tokio::test]
++async fn kernel_alias_modern_parent_and_trait_maps_override_own_legacy_and_refresh_dirty_sources() {
++    for is_trait in [false, true] {
++        let parent = KERNEL.replace(
++            "class Kernel extends BaseKernel",
++            "class AliasParent extends BaseKernel",
++        );
++        let parent = if is_trait {
++            parent.replace("class AliasParent extends BaseKernel", "trait AliasParent")
++        } else {
++            parent
++        };
++        let declaration = "app/Http/AliasParent.php";
++        let root = if is_trait {
++            r"<?php namespace App\Http;class Kernel extends \Illuminate\Foundation\Http\Kernel {use AliasParent;protected $routeMiddleware=['audited'=>\App\Http\Middleware\Trace::class];}"
++        } else {
++            r"<?php namespace App\Http;class Kernel extends AliasParent {protected $routeMiddleware=['audited'=>\App\Http\Middleware\Trace::class];}"
++        };
++        let (backend, dir, caller, kernel) = kernel_workspace_extra(
++            root,
++            &[
++                ("framework/Foundation/Http/Kernel.php", ORDERED_KERNEL_BASE),
++                (declaration, &parent),
++            ],
++        )
++        .await;
++        let found = definitions(&backend, &caller, SOURCE, "middleware('aud").await;
++        assert_eq!(
++            found.len(),
++            1,
++            "modern property priority is separate from class ownership: {found:?}"
++        );
++        assert_eq!(
++            found[0].uri,
++            Url::from_file_path(dir.path().join(declaration)).unwrap()
++        );
++        open_document(&backend, &kernel, "php", root).await;
++        let changed = root.replace(
++            "protected $routeMiddleware",
++            "protected $middlewareAliases=[];protected $routeMiddleware",
++        );
++        change(&backend, &kernel, &changed, 2).await;
++        let found = definitions(&backend, &caller, SOURCE, "middleware('aud").await;
++        assert_eq!(
++            found.len(),
++            1,
++            "empty own modern map exposes legacy: {found:?}"
++        );
++        assert_eq!(found[0].uri, kernel);
++        assert!(
++            hover(&backend, &caller, SOURCE, "middleware('aud")
++                .await
++                .contains("Middleware\\Trace")
++        );
++        change(&backend, &kernel, root, 3).await;
++        assert_eq!(
++            definitions(&backend, &caller, SOURCE, "middleware('aud")
++                .await
++                .len(),
++            1
++        );
++        assert!(
++            hover(&backend, &caller, SOURCE, "middleware('aud")
++                .await
++                .contains("Middleware\\Audit")
++        );
++    }
++}
++
++#[tokio::test]
++async fn kernel_alias_custom_lifecycle_methods_keep_alternatives_and_refuse_edits() {
++    let collision = KERNEL.replace(
++        "\n}",
++        "\nprotected $routeMiddleware=['audited'=>\\App\\Http\\Middleware\\Trace::class];\n}",
++    );
++    for method in [
++        "public function __construct() {parent::__construct();}",
++        "protected function syncMiddlewareToRouter() {}",
++    ] {
++        let source = collision.replace("\n}", &format!("\n{method}\n}}"));
++        let (backend, dir, caller, _) = kernel_workspace_extra(
++            &source,
++            &[("framework/Foundation/Http/Kernel.php", ORDERED_KERNEL_BASE)],
++        )
++        .await;
++        assert_eq!(
++            definitions(&backend, &caller, SOURCE, "middleware('aud")
++                .await
++                .len(),
++            2
++        );
++        let detail = hover(&backend, &caller, SOURCE, "middleware('aud").await;
++        assert!(
++            detail.contains("incomplete"),
++            "custom Kernel method cannot prove runtime map order: {detail}"
++        );
++        let path = dir.path().join("app/Http/Middleware/Audit.php");
++        let text = std::fs::read_to_string(&path).unwrap();
++        let target = Url::from_file_path(path).unwrap();
++        open_document(&backend, &target, "php", &text).await;
++        assert!(
++            settled_target_rename(&backend, &target, &text, "class Aud", "Auditor")
++                .await
++                .is_err()
++        );
++    }
++}
++
++#[tokio::test]
++async fn kernel_alias_opaque_maps_and_numeric_merge_keys_cannot_prove_effective_order() {
++    for value in [
++        "ALIASES",
++        r"['audited'=>AuditAlias::class, ...$unknown]",
++        r"[$key=>AuditAlias::class]",
++        r"['1'=>AuditAlias::class,'audited'=>AuditAlias::class]",
++        r"[1=>AuditAlias::class,'audited'=>AuditAlias::class]",
++    ] {
++        let source=KERNEL.replace(r#"[/* 😀 */ "au\x64ited" => AuditAlias::class]"#,value).replace("\n}","\nprotected $routeMiddleware=['audited'=>\\App\\Http\\Middleware\\Trace::class];\n}");
++        let (backend, _dir, caller, _) = kernel_workspace_extra(
++            &source,
++            &[("framework/Foundation/Http/Kernel.php", ORDERED_KERNEL_BASE)],
++        )
++        .await;
++        let detail = hover(&backend, &caller, SOURCE, "middleware('aud").await;
++        assert!(
++            detail.contains("incomplete"),
++            "unproven map cannot publish complete priority: {value}: {detail}"
++        );
++        assert!(
++            !definitions(&backend, &caller, SOURCE, "middleware('aud")
++                .await
++                .is_empty()
++        );
++    }
++}
++
++#[tokio::test]
++async fn kernel_alias_shadowed_physical_class_strings_still_refuse_checked_renames() {
++    let source = KERNEL
++        .replace(
++            "\n}",
++            r"\nprotected $routeMiddleware=['audited'=>'App\Http\Middleware\Trace'];\n}",
++        )
++        .replace(r"\n", "\n");
++    let (backend, dir, caller, _) = kernel_workspace_extra(
++        &source,
++        &[("framework/Foundation/Http/Kernel.php", ORDERED_KERNEL_BASE)],
++    )
++    .await;
++    assert_eq!(
++        definitions(&backend, &caller, SOURCE, "middleware('aud")
++            .await
++            .len(),
++        1
++    );
++    let path = dir.path().join("app/Http/Middleware/Trace.php");
++    let text = std::fs::read_to_string(&path).unwrap();
++    let target = Url::from_file_path(path).unwrap();
++    open_document(&backend, &target, "php", &text).await;
++    let result = settled_target_rename(&backend, &target, &text, "class Tra", "Traced").await;
++    assert!(
++        result
++            .as_ref()
++            .is_err_and(|error| error.contains("middleware")),
++        "shadowed physical class string is still a reference: {result:?}"
++    );
++}
++
++#[tokio::test]
++async fn kernel_alias_property_priority_is_scoped_to_each_possible_selected_kernel() {
++    let site = KERNEL
++        .replace("namespace App\\Http;", "namespace App\\Runtime;")
++        .replace("class Kernel extends", "class SiteKernel extends")
++        .replace(
++            "\n}",
++            "\nprotected $routeMiddleware=['audited'=>\\App\\Http\\Middleware\\Trace::class];\n}",
++        );
++    let next = site
++        .replace("class SiteKernel extends", "class NextKernel extends")
++        .replace("AuditAlias::class", r"\App\Http\Middleware\Trace::class");
++    let bootstrap = r"<?php $app=new \Illuminate\Foundation\Application;$app->singleton(\Illuminate\Contracts\Http\Kernel::class,\App\Runtime\SiteKernel::class);if($condition)$app->singleton(\Illuminate\Contracts\Http\Kernel::class,\App\Runtime\NextKernel::class);return $app;";
++    let (backend, _dir, caller, _) = bound_kernel_workspace(
++        bootstrap,
++        &[
++            ("framework/Foundation/Http/Kernel.php", ORDERED_KERNEL_BASE),
++            ("app/Runtime/SiteKernel.php", &site),
++            ("app/Runtime/NextKernel.php", &next),
++        ],
++    )
++    .await;
++    let found = definitions(&backend, &caller, SOURCE, "middleware('aud").await;
++    assert_eq!(
++        found.len(),
++        2,
++        "retain one effective declaration per possible Kernel: {found:?}"
++    );
++    assert!(
++        found
++            .iter()
++            .all(|location| location.range.start == position_after(&site, "/* 😀 */ \""))
++    );
++    assert!(
++        hover(&backend, &caller, SOURCE, "middleware('aud")
++            .await
++            .contains("incomplete")
++    );
++}

@@ -1022,3 +1022,132 @@ it("retains a retryable file-change warning when a waiting query is invalidated"
   expect(mock.routes).toHaveBeenCalledOnce();
   expect(useLaravelNavigation.getState().error).toBeNull();
 });
+
+it.each(["routes", "views"] as const)(
+  "flushes a real pending sibling edit before opening a displayed %s target",
+  async (kind) => {
+    const { createMemoryBackend } = await import("@/editor/core/backend");
+    const { DocumentManager } = await import("@/editor/core/model/document");
+    const { EditorSlot } = await import("@/editor/core/model/slot");
+    const original = "<?php\nRoute::view('/invoices', 'invoices.show')->name('invoice.show');";
+    const backend = createMemoryBackend({ "/p/routes/web.php": original });
+    const edit = backend.edit.bind(backend);
+    let acknowledge: (() => void) | undefined;
+    vi.spyOn(backend, "edit").mockImplementation(
+      (...args) =>
+        new Promise((resolve, reject) => {
+          acknowledge = () => {
+            edit(...args).then(resolve, reject);
+          };
+        }),
+    );
+    const manager = new DocumentManager(backend, { settings: () => ({ files: { autoSave: false } }), notify: vi.fn() });
+    manager.start();
+    const model = await manager.acquire("/p/routes/web.php");
+    const slot = new EditorSlot(model, "pending-target", {
+      onFocus: () => {},
+      onBlur: () => {},
+      onSelection: () => {},
+      onUserEdit: () => {},
+      onContextMenu: () => {},
+    });
+    slot.mount(document.body);
+    if (kind === "views")
+      mock.views.mockImplementation((_request, _doc, name) =>
+        ok(
+          name === null
+            ? { views: ["invoices.show"], locations: [], incomplete: false }
+            : { views: [], locations: [loc(2)], incomplete: false },
+        ),
+      );
+    let selection: Promise<void> | undefined;
+    try {
+      await openLaravelNavigation(kind);
+      await selectLaravelItem(useLaravelNavigation.getState().items[0]!);
+      const item = useLaravelNavigation.getState().items[0]!;
+      slot.dispatchLocal({ changes: { from: 6, insert: "// unsaved 😀\n" }, userEvent: "input.type" });
+      selection = selectLaravelItem(item);
+      expect(mock.open).not.toHaveBeenCalled();
+      expect(useLaravelNavigation.getState().loading).toBe(true);
+      await waitFor(() => expect(acknowledge).toBeTypeOf("function"));
+      acknowledge!();
+      await selection;
+      expect((await backend.snapshot(model.doc)).text).toBe(
+        original.slice(0, 6) + "// unsaved 😀\n" + original.slice(6),
+      );
+      expect(mock.open).not.toHaveBeenCalled();
+      expect(useLaravelNavigation.getState()).toMatchObject({ loading: false, items: [], selectedName: item.name });
+      expect(useLaravelNavigation.getState().error).toContain("Project files changed");
+    } finally {
+      model.sync.flush();
+      acknowledge?.();
+      await model.sync.whenIdle();
+      await selection;
+      slot.dispose();
+      manager.stop();
+    }
+  },
+);
+
+it.each(["routes", "views"] as const)(
+  "guards displayed %s target activation across pending edits, cancellation and sync failure",
+  async (kind) => {
+    const { registerPendingEdits } = await import("@/editor/api");
+    const { backLaravelNavigation, retryLaravelNavigation } = await import("./laravel");
+    if (kind === "views")
+      mock.views.mockImplementation((_request, _doc, name) =>
+        ok(
+          name === null
+            ? { views: ["invoices.show"], locations: [], incomplete: true }
+            : { views: [], locations: [loc(2)], incomplete: false },
+        ),
+      );
+    for (const reason of ["unchanged", "close", "back", "project", "replacement", "failure"] as const) {
+      await openLaravelNavigation(kind);
+      await selectLaravelItem(useLaravelNavigation.getState().items[0]!);
+      const item = useLaravelNavigation.getState().items[0]!;
+      const opened = mock.open.mock.calls.length;
+      let release!: () => void;
+      let reject!: (error: Error) => void;
+      const barrier = new Promise<void>((resolve, fail) => {
+        release = resolve;
+        reject = fail;
+      });
+      const off = registerPendingEdits(() => barrier);
+      const selection = selectLaravelItem(item);
+      let replacement: Promise<void> | undefined;
+      try {
+        expect(mock.open).toHaveBeenCalledTimes(opened);
+        expect(useLaravelNavigation.getState().loading).toBe(true);
+        if (reason === "close") closeLaravelNavigation();
+        else if (reason === "back") replacement = backLaravelNavigation();
+        else if (reason === "project") useProject.setState({ project: { ...useProject.getState().project! } });
+        else if (reason === "replacement") replacement = openLaravelNavigation(kind === "routes" ? "views" : "routes");
+        if (reason === "failure") reject(new Error("Pending edit failed"));
+        else release();
+        await selection;
+        await replacement;
+        expect(mock.open).toHaveBeenCalledTimes(opened + (reason === "unchanged" ? 1 : 0));
+        if (reason === "failure") {
+          expect(useLaravelNavigation.getState()).toMatchObject({ loading: false, items: [], selectedName: item.name });
+          expect(useLaravelNavigation.getState().error).toBe("Pending edit failed");
+        }
+        if (reason === "back")
+          expect(useLaravelNavigation.getState()).toMatchObject({ phase: "names", loading: false });
+        if (reason === "replacement")
+          expect(useLaravelNavigation.getState().kind).toBe(kind === "routes" ? "views" : "routes");
+      } finally {
+        release();
+        off();
+        await selection;
+        await replacement;
+      }
+      if (reason === "failure") {
+        await retryLaravelNavigation();
+        expect(useLaravelNavigation.getState()).toMatchObject({ selectedName: item.name, loading: false, error: null });
+        await selectLaravelItem(useLaravelNavigation.getState().items[0]!);
+        expect(mock.open).toHaveBeenCalledTimes(opened + 1);
+      }
+    }
+  },
+);

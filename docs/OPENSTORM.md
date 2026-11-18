@@ -15,6 +15,42 @@ slice, commit and push it, and retain only the latest generated app. Native UI
 cases remain deferred/unverified; earlier native-first blocking checkpoints are
 historical and no longer prevent independent implementation.
 
+Client slice164 (2026-11-18, Laravel route/view target freshness): apply the
+existing handler-selection synchronization barrier to route and view targets.
+Clicking Open now waits for every pending editor edit. An acknowledgement that
+changes project text retires the displayed rows instead of opening an obsolete
+line. The chooser keeps the selected name and offers Retry; a fresh target can
+then open. Close, Back, project replacement and a newer chooser retire a waiting
+activation. A failed synchronization remains retryable without navigating.
+The route/view chooser reuses its existing loading, error and Retry states.
+
+Four new regression tests fail on the prior frontend and pass after the shared
+selection fix. Two use real DocumentManager/EditorSlot buffers with delayed
+backend acknowledgements and unsaved Unicode text; two cover six selection
+outcomes each (unchanged, Close, Back, project replacement, chooser replacement,
+sync failure and explicit recovery). Focused route/view/handler suite103 passes.
+Plain-browser production workbench checks13 pass, including two new route/view
+checks with real editor buffers, held backend edits, disabled Open, Retry of the
+same logical name, unchanged disk contents and eventual target selection.
+Screenshots:artifacts/checks/slice164/browser/*/pending-target-retired.png.
+Browser IPC replies are controlled; this is not native or real-server acceptance.
+Existing browser warnings for unstubbed status/file-provider IPC remain recorded.
+
+Full frontend13,397 passes/6 skipped and typecheck/lint/format/knip/build pass.
+Rust/IPC/engine inputs are unchanged: reuse slices161-163 engine, workspace and
+client-host acceptance rather than generate another compiler cache. Native UI
+remains explicitly user-skipped. This is source-only; App109/default171 remains
+unchanged, signed and the sole generated app, and does not yet include this
+frontend correction. Production dist output is removed after verification.
+No new package, installation, launch, notarization or public release.
+
+All69 areas remain67 partial/2 user-deferred. Wider route/view semantic freshness,
+engine/runtime ordering (L63/L64), Auto PHP status, native/platform/performance and
+other roadmap acceptance remain open. Commit/push this small checkpoint and
+verify the exact remote ref and clean worktree before the next slice.
+Evidence:artifacts/checks/slice164/{red,targeted,browser}.log; gates.json and six
+stage logs; acceptance.json/delivery.json, source hashes and retained screenshots.
+
 Package slice163 (2026-11-18, signed local App0.1.109 verified): promote
 source161/client162-verified PHPantom171 into the default bundled resource and
 local development app. Effective Kernel aliases use modern-over-legacy property

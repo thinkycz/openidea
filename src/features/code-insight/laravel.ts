@@ -339,26 +339,24 @@ export async function selectLaravelItem(item: LaravelNavigationItem) {
     await query(item.name);
     return;
   }
-  if (context.handler) {
-    const current = context;
-    const run = generation;
-    useLaravelNavigation.setState({ loading: true });
-    try {
-      await whenAllSynced();
-    } catch (error) {
-      if (context === current && run === generation && handlerInputCurrent(current))
-        invalidateLaravelNavigation(error instanceof Error ? error.message : String(error));
-      return;
-    }
-    if (
-      context !== current ||
-      run !== generation ||
-      useProject.getState().project !== current.project ||
-      !useLaravelNavigation.getState().items.includes(item)
-    )
-      return;
-    if (!handlerInputCurrent(current)) return;
+  const current = context;
+  const run = generation;
+  useLaravelNavigation.setState({ loading: true });
+  try {
+    await whenAllSynced();
+  } catch (error) {
+    if (context === current && run === generation && handlerInputCurrent(current))
+      invalidateLaravelNavigation(error instanceof Error ? error.message : String(error));
+    return;
   }
+  if (
+    context !== current ||
+    run !== generation ||
+    useProject.getState().project !== current.project ||
+    !useLaravelNavigation.getState().items.includes(item)
+  )
+    return;
+  if (!handlerInputCurrent(current)) return;
   const location = item.location;
   closeLaravelNavigation();
   try {

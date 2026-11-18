@@ -142,6 +142,68 @@ test("unsaved editor changes retire displayed route targets and Retry keeps the 
   expect(disk).not.toContain("unsaved dependency");
 });
 
+for (const kind of ["Routes", "Views"] as const) {
+  test(`opening a displayed Laravel ${kind} target waits for pending editor edits`, async ({
+    workbench: page,
+  }, info) => {
+    await seed(page);
+    const chooser = await browse(page, kind);
+    const name = kind === "Routes" ? "invoice.show" : "invoices.show";
+    await chooser.getByRole("textbox", { name: "Filter Laravel results" }).fill(name);
+    await chooser.getByRole("button", { name: "Show Targets", exact: true }).click();
+    await expect(chooser.getByRole("option")).toHaveCount(1);
+    await page.evaluate(async () => {
+      const backendPath = "/src/editor/core/backend.ts";
+      const apiPath = "/src/editor/api.ts";
+      const backend = (await import(/* @vite-ignore */ backendPath)).docBackend() as MemoryBackend;
+      const original = backend.edit;
+      const edit = backend.edit.bind(backend);
+      backend.edit = (...args) =>
+        new Promise((resolve, reject) => {
+          window.__ipc.handlers.fixture_release_target_edit = () => {
+            backend.edit = original;
+            edit(...args).then(resolve, reject);
+          };
+        });
+      (await import(/* @vite-ignore */ apiPath)).activeEditor()!.view.dispatch({
+        changes: { from: 6, insert: "// pending 😀 dependency\n" },
+        userEvent: "input.type",
+      });
+    });
+    await chooser.getByRole("button", { name: "Open", exact: true }).click();
+    await expect(chooser.getByRole("button", { name: "Open", exact: true })).toBeDisabled();
+    await expect(chooser.getByRole("status").last()).toContainText("Loading");
+    await expect
+      .poll(() => page.evaluate(() => typeof window.__ipc.handlers.fixture_release_target_edit))
+      .toBe("function");
+    await page.evaluate(() => window.__ipc.handlers.fixture_release_target_edit!({}));
+    await expect(chooser.getByRole("alert")).toContainText("Project files changed");
+    await expect(chooser.getByRole("option")).toHaveCount(0);
+    await expect(page.getByRole("tab", { name: /InvoiceController\.php/ })).toHaveAttribute("aria-selected", "true");
+    await page.screenshot({ path: info.outputPath("pending-target-retired.png"), animations: "disabled" });
+    await chooser.getByRole("button", { name: "Retry", exact: true }).click();
+    await expect(chooser.getByRole("option")).toHaveCount(1);
+    expect(
+      (await ipcCalls(page, kind === "Routes" ? "lsp_laravel_routes" : "lsp_laravel_views")).map((call) => call.name),
+    ).toEqual([null, name, name]);
+    const disk = await page.evaluate(async (source) => {
+      const path = "/src/editor/core/backend.ts";
+      return ((await import(/* @vite-ignore */ path)).docBackend() as MemoryBackend).files.get(source);
+    }, SOURCE);
+    expect(disk).not.toContain("pending 😀 dependency");
+    await chooser.getByRole("button", { name: "Open", exact: true }).click();
+    await expect(chooser).toBeHidden();
+    await expect
+      .poll(() =>
+        page.evaluate(async () => {
+          const path = "/src/workbench/contributions.ts";
+          return (await import(/* @vite-ignore */ path)).editorService().activeCursor()?.path;
+        }),
+      )
+      .toBe(kind === "Routes" ? ROUTE : VIEW);
+  });
+}
+
 test("Cancel retires an in-flight Views request and ignores its late response", async ({ workbench: page }) => {
   await seed(page);
   await page.evaluate(() => {

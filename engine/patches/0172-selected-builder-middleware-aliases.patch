@@ -1,0 +1,965 @@
+--- a/docs/CHANGELOG.md
++++ b/docs/CHANGELOG.md
+@@ -1,3 +1,16 @@
++## OpenStorm .172 selected builder middleware alias priority
++
++Literal alias maps in the selected standard builder's final Middleware callback
++can override Kernel properties for definition, hover and reference declarations.
++Builder/app aliases retain identity and callback order; duplicate literal/spread
++keys preserve decoded names and physical UTF-16 ranges. Constructor, sync and
++setter ownership must remain standard. Unknown ordering retains all known
++alternatives; opaque callback expressions or bootstrap identity cannot authorize
++checked edits. Inline callbacks keep existing physical-target validation. Later empty
++callbacks, default aliases and Router retention/reset interactions remain partial.
++Physical shadowed class strings stay in checked rename's source inventory.
++Contributed by @thinkycz.
++
+ ## OpenStorm .171 literal Kernel alias precedence
+ 
+ Effective alias navigation honors standard Kernel modern-over-legacy property
+--- a/docs/todo/laravel.md
++++ b/docs/todo/laravel.md
+@@ -647,6 +647,12 @@
+ 
+ #### L63. Dynamic and ambiguous Kernel registration metadata
+ 
++OpenStorm .172 resolves a literal explicit override in the final callback of the
++selected standard builder, preserving builder identity and physical rename guards.
++Empty/later resets can reintroduce legacy aliases or retain old Router entries;
++those paths, default aliases and dynamic callbacks remain incomplete.
++
++
+ **Impact: Medium · Complexity: Medium**
+ 
+ Literal string-key maps now honor modern-over-legacy property precedence and
+--- a/examples/laravel/assertions.php
++++ b/examples/laravel/assertions.php
+@@ -2256,6 +2256,34 @@
+ check('Literal array spreads retain the last duplicate alias', $priorityKernel->getMiddlewareAliases()['demo.kernel.duplicate'] === \App\Http\Middleware\AuditRequests::class);
+ check('The router receives the effective modern Kernel alias', $priorityApplication->make('router')->getMiddleware()['demo.kernel.priority'] === \App\Http\Middleware\AuditRequests::class);
+ 
++
++$callbackApplication = \Illuminate\Foundation\Application::configure(basePath: __DIR__)
++    ->withMiddleware(function (\Illuminate\Foundation\Configuration\Middleware $middleware) {
++        $middleware->alias(['demo.kernel.priority' => \Illuminate\Auth\Middleware\Authenticate::class]);
++    })->create();
++$callbackApplication->singleton(\Illuminate\Contracts\Http\Kernel::class, \App\Runtime\AliasPriorityKernel::class);
++$callbackKernel = $callbackApplication->make(\Illuminate\Contracts\Http\Kernel::class);
++check('Builder callback overrides the modern Kernel alias', $callbackKernel->getMiddlewareAliases()['demo.kernel.priority'] === \Illuminate\Auth\Middleware\Authenticate::class);
++check('Router receives the callback override', $callbackApplication->make('router')->getMiddleware()['demo.kernel.priority'] === \Illuminate\Auth\Middleware\Authenticate::class);
++
++$retainedApplication = \Illuminate\Foundation\Application::configure(basePath: __DIR__)
++    ->withMiddleware(function (\Illuminate\Foundation\Configuration\Middleware $middleware) {
++        $middleware->alias(['demo.kernel.duplicate' => \Illuminate\Auth\Middleware\Authenticate::class]);
++    })->withMiddleware()->create();
++$retainedApplication->singleton(\Illuminate\Contracts\Http\Kernel::class, \App\Runtime\AliasPriorityKernel::class);
++$retainedKernel = $retainedApplication->make(\Illuminate\Contracts\Http\Kernel::class);
++check('Empty later callback removes the custom key from the Kernel array', !array_key_exists('demo.kernel.duplicate', $retainedKernel->getMiddlewareAliases()));
++check('Router retains a prior callback key without a later registration', $retainedApplication->make('router')->getMiddleware()['demo.kernel.duplicate'] === \Illuminate\Auth\Middleware\Authenticate::class);
++
++$legacyResetApplication = \Illuminate\Foundation\Application::configure(basePath: __DIR__)
++    ->withMiddleware(function (\Illuminate\Foundation\Configuration\Middleware $middleware) {
++        $middleware->alias(['demo.kernel.priority' => \App\Http\Middleware\AuditRequests::class]);
++    })->withMiddleware()->create();
++$legacyResetApplication->singleton(\Illuminate\Contracts\Http\Kernel::class, \App\Runtime\AliasPriorityKernel::class);
++$legacyResetKernel = $legacyResetApplication->make(\Illuminate\Contracts\Http\Kernel::class);
++check('Empty later callback reintroduces the legacy Kernel key', $legacyResetKernel->getMiddlewareAliases()['demo.kernel.priority'] === \Illuminate\Auth\Middleware\Authenticate::class);
++check('Router receives the reintroduced legacy key', $legacyResetApplication->make('router')->getMiddleware()['demo.kernel.priority'] === \Illuminate\Auth\Middleware\Authenticate::class);
++
+ echo "\n";
+ if ($failed === 0) {
+     echo "\033[32m✓ All $passed assertions passed.\033[0m\n";
+--- a/src/virtual_members/laravel/builder_kernel.rs
++++ b/src/virtual_members/laravel/builder_kernel.rs
+@@ -157,12 +157,16 @@
+         names: &OwnedResolvedNames,
+     ) -> Option<KernelSelection> {
+         let mut known = true;
++        let mut middleware_sites = Vec::new();
+         let mut current = unwrapped(expr);
+         while let Expression::Call(Call::Method(call)) = current {
+             if matches!(&call.method,ClassLikeMemberSelector::Identifier(name) if name.value.eq_ignore_ascii_case(b"create"))
+             {
+                 return None;
+             }
++            if let Some(site) = super::builder_middleware::MiddlewareSite::of(call) {
++                middleware_sites.push(site);
++            }
+             known &= matches!(&call.method,ClassLikeMemberSelector::Identifier(name) if builder_method(name.value) && !name.value.eq_ignore_ascii_case(b"create"));
+             current = unwrapped(call.object);
+         }
+@@ -180,7 +184,16 @@
+         if !fqn.eq_ignore_ascii_case(APPLICATION) || !known {
+             return Some(KernelSelection::default());
+         }
+-        Some(self.standard_builder_kernel())
++        let mut selection = self.standard_builder_kernel();
++        if !middleware_sites.is_empty() {
++            selection.middleware = Some(Box::new(
++                super::builder_middleware::MiddlewareConfiguration {
++                    sites: middleware_sites,
++                    source_hash: None,
++                },
++            ));
++        }
++        Some(selection)
+     }
+ 
+     fn standard_builder_kernel(&self) -> KernelSelection {
+--- /dev/null
++++ b/src/virtual_members/laravel/builder_middleware.rs
+@@ -0,0 +1,245 @@
++//! Ordered literal Middleware::alias callbacks of the selected standard builder.
++use super::{
++    kernel_binding::{argument, unwrapped},
++    provider_resources::resolved_class_fqn,
++};
++use crate::{Backend, names::OwnedResolvedNames};
++use mago_span::HasSpan;
++use mago_syntax::cst::*;
++use std::collections::HashMap;
++
++const BUILDER: &str = "Illuminate\\Foundation\\Configuration\\ApplicationBuilder";
++const MIDDLEWARE: &str = "Illuminate\\Foundation\\Configuration\\Middleware";
++
++#[derive(Clone, Default)]
++pub(super) struct MiddlewareConfiguration {
++    pub sites: Vec<MiddlewareSite>,
++    pub source_hash: Option<[u8; 32]>,
++}
++
++#[derive(Clone)]
++pub(super) struct MiddlewareSite {
++    pub end: u32,
++    pub callback: Option<(u32, u32)>,
++    pub valid: bool,
++}
++impl MiddlewareSite {
++    pub fn of(call: &MethodCall<'_>) -> Option<Self> {
++        if !matches!(&call.method,ClassLikeMemberSelector::Identifier(name) if name.value.eq_ignore_ascii_case(b"withMiddleware"))
++        {
++            return None;
++        }
++        let valid = call.argument_list.arguments.len() <= 1
++            && call.argument_list.arguments.iter().all(|arg| match arg {
++                Argument::Positional(arg) => arg.ellipsis.is_none(),
++                Argument::Named(arg) => arg.name.value == b"callback",
++            });
++        Some(Self {
++            end: call.span().end.offset,
++            callback: argument(&call.argument_list, 0, b"callback")
++                .map(|expr| (expr.span().start.offset, expr.span().end.offset)),
++            valid,
++        })
++    }
++}
++pub(super) enum MiddlewareOrder {
++    Absent,
++    Unknown,
++    Opaque,
++    Callbacks(Vec<HashMap<String, u32>>),
++}
++fn parameter<'arena>(
++    params: &FunctionLikeParameterList<'arena>,
++    names: &OwnedResolvedNames,
++) -> Option<&'arena [u8]> {
++    if params.parameters.len() != 1 {
++        return None;
++    }
++    let param = params.parameters.iter().next()?;
++    if param.default_value.is_some()
++        || param.ampersand.is_some()
++        || param.ellipsis.is_some()
++        || !param.attribute_lists.is_empty()
++    {
++        return None;
++    }
++    let Hint::Identifier(hint) = param.hint.as_ref()? else {
++        return None;
++    };
++    resolved_class_fqn(hint, names).filter(|name| name.eq_ignore_ascii_case(MIDDLEWARE))?;
++    Some(param.variable.name)
++}
++fn alias_call(
++    expr: &Expression<'_>,
++    receiver: &[u8],
++    content: &str,
++    keys_remaining: &mut usize,
++) -> Option<HashMap<String, u32>> {
++    let Expression::Call(Call::Method(call)) = unwrapped(expr) else {
++        return None;
++    };
++    if !matches!(unwrapped(call.object),Expression::Variable(Variable::Direct(variable)) if variable.name==receiver)
++        || !matches!(&call.method,ClassLikeMemberSelector::Identifier(name) if name.value.eq_ignore_ascii_case(b"alias"))
++        || call.argument_list.arguments.len() != 1
++    {
++        return None;
++    }
++    super::kernel_middleware::literal_alias_keys(
++        argument(&call.argument_list, 0, b"aliases")?,
++        content,
++        0,
++        keys_remaining,
++    )
++}
++fn callback_keys(
++    expr: &Expression<'_>,
++    content: &str,
++    names: &OwnedResolvedNames,
++    keys_remaining: &mut usize,
++    statements_remaining: &mut usize,
++) -> Option<HashMap<String, u32>> {
++    match unwrapped(expr) {
++        Expression::Literal(Literal::Null(_)) => Some(HashMap::new()),
++        Expression::ArrowFunction(arrow) => alias_call(
++            arrow.expression,
++            parameter(&arrow.parameter_list, names)?,
++            content,
++            keys_remaining,
++        ),
++        Expression::Closure(closure) => {
++            if closure.use_clause.is_some()
++                || !closure.attribute_lists.is_empty()
++                || closure.ampersand.is_some()
++            {
++                return None;
++            }
++            let receiver = parameter(&closure.parameter_list, names)?;
++            let mut keys = HashMap::new();
++            if closure.body.statements.len() > 4096 {
++                return None;
++            }
++            for statement in closure.body.statements.iter() {
++                *statements_remaining = statements_remaining.checked_sub(1)?;
++                match statement {
++                    Statement::Noop(_) => {}
++                    Statement::Expression(statement) => keys.extend(alias_call(
++                        statement.expression,
++                        receiver,
++                        content,
++                        keys_remaining,
++                    )?),
++                    Statement::Return(statement) => {
++                        if let Some(value) = statement.value {
++                            keys.extend(alias_call(value, receiver, content, keys_remaining)?);
++                        }
++                        break;
++                    }
++                    _ => return None,
++                }
++            }
++            Some(keys)
++        }
++        _ => None,
++    }
++}
++impl Backend {
++    pub(super) fn bootstrap_middleware_order(
++        &self,
++        sites: &[MiddlewareSite],
++        complete: bool,
++        source_hash: Option<[u8; 32]>,
++    ) -> MiddlewareOrder {
++        if sites.is_empty() {
++            return MiddlewareOrder::Absent;
++        }
++        if !complete || sites.len() > 4096 || sites.iter().any(|site| !site.valid) {
++            return MiddlewareOrder::Opaque;
++        }
++        let Some(builder) = self.find_or_load_class(BUILDER) else {
++            return MiddlewareOrder::Opaque;
++        };
++        let loader = |name: &str| self.find_or_load_class(name);
++        use crate::inheritance::ancestry::{MethodOrigin, resolve_concrete_method_origin};
++        if !matches!(resolve_concrete_method_origin(&builder,"withMiddleware",&loader),MethodOrigin::Known{owner,..} if owner.fqn().eq_ignore_ascii_case(BUILDER))
++        {
++            return MiddlewareOrder::Opaque;
++        }
++        let Some(root) = self.workspace.workspace_root.read().clone() else {
++            return MiddlewareOrder::Opaque;
++        };
++        let uri = crate::util::path_to_uri(&root.join("bootstrap/app.php"));
++        let Some(content) = self.get_file_content(&uri) else {
++            return MiddlewareOrder::Opaque;
++        };
++        if source_hash != Some(crate::symbol_map::AnonymousCallable::source_hash(&content)) {
++            return MiddlewareOrder::Opaque;
++        }
++        let context = self.source_file_context(&content);
++        let Some(names) = context.resolved_names.as_deref() else {
++            return MiddlewareOrder::Opaque;
++        };
++        let result = crate::parser::with_parsed_program(
++            &content,
++            "builder_middleware_callbacks",
++            |program, content| {
++                if !program.errors.is_empty() {
++                    return None;
++                }
++                let wanted: std::collections::HashSet<_> =
++                    sites.iter().filter_map(|site| site.callback).collect();
++                let mut found = HashMap::new();
++                let mut opaque = false;
++                let mut pending = vec![Node::Program(program)];
++                let mut remaining = 16384usize;
++                let mut keys_remaining = 4096usize;
++                let mut statements_remaining = 4096usize;
++                while let Some(node) = pending.pop() {
++                    let Some(next) = remaining.checked_sub(1) else {
++                        return Some(MiddlewareOrder::Opaque);
++                    };
++                    remaining = next;
++                    if let Node::Expression(expr) = node {
++                        let key = (expr.span().start.offset, expr.span().end.offset);
++                        if wanted.contains(&key) {
++                            opaque |= !matches!(
++                                unwrapped(expr),
++                                Expression::Closure(_)
++                                    | Expression::ArrowFunction(_)
++                                    | Expression::Literal(Literal::Null(_))
++                            );
++                            found.insert(
++                                key,
++                                callback_keys(
++                                    expr,
++                                    content,
++                                    names,
++                                    &mut keys_remaining,
++                                    &mut statements_remaining,
++                                ),
++                            );
++                        }
++                    }
++                    node.visit_children(|child| pending.push(child));
++                }
++                if opaque || found.len() != wanted.len() {
++                    return Some(MiddlewareOrder::Opaque);
++                }
++                let mut ordered: Vec<_> = sites.iter().collect();
++                ordered.sort_by_key(|site| site.end);
++                ordered.dedup_by_key(|site| site.end);
++                ordered
++                    .into_iter()
++                    .map(|site| match site.callback {
++                        None => Some(HashMap::new()),
++                        Some(span) => found.remove(&span).flatten(),
++                    })
++                    .collect::<Option<Vec<_>>>()
++                    .map(MiddlewareOrder::Callbacks)
++            },
++        );
++        match result {
++            Some(order) => order,
++            None => MiddlewareOrder::Unknown,
++        }
++    }
++}
+--- a/src/virtual_members/laravel/kernel_binding.rs
++++ b/src/virtual_members/laravel/kernel_binding.rs
+@@ -28,12 +28,14 @@
+ pub(crate) struct KernelSelection {
+     pub roots: Vec<KernelRoot>,
+     pub complete: bool,
++    pub(super) middleware: Option<Box<super::builder_middleware::MiddlewareConfiguration>>,
+ }
+ impl KernelSelection {
+     fn conventional(complete: bool) -> Self {
+         Self {
+             roots: vec![KernelRoot::Conventional],
+             complete,
++            middleware: None,
+         }
+     }
+     fn uncertain(&mut self, target: Option<String>) {
+@@ -240,6 +242,7 @@
+     range: (u32, u32),
+ }
+ struct BuilderEffect {
++    middleware: Option<super::builder_middleware::MiddlewareSite>,
+     pure: bool,
+     receiver: String,
+     at: u32,
+@@ -373,6 +376,19 @@
+             .min()
+             .unwrap_or(range.1);
+         for effect in *effects {
++            if effect.at < *limit
++                && builder_site(&effect.receiver, effect.at, sites)
++                    .is_some_and(|site| site.origin == source.origin)
++                && let Some(middleware) = &effect.middleware
++            {
++                let mut middleware = middleware.clone();
++                middleware.valid &= effect.pure;
++                selection
++                    .middleware
++                    .get_or_insert_with(Default::default)
++                    .sites
++                    .push(middleware);
++            }
+             if effect.at < *limit
+                 && builder_site(&effect.receiver, effect.at, sites)
+                     .is_some_and(|site| site.origin == source.origin)
+@@ -489,6 +505,7 @@
+                         _ => None,
+                     };
+                     builder_effects.push(BuilderEffect {
++                        middleware: super::builder_middleware::MiddlewareSite::of(call),
+                         pure: pure_builder_chain(expr),
+                         receiver: bytes_to_str(receiver.name).to_owned(),
+                         at,
+@@ -785,7 +802,7 @@
+             let provider_mode = calls
+                 .iter()
+                 .any(|call| call.provider.is_some() && !call.in_callable);
+-            if provider_mode {
++            if provider_mode || selection.middleware.is_some() {
+                 for site in &assignments {
+                     if site.certain
+                         && site.pure_builder
+@@ -808,6 +825,8 @@
+                         trusted_statements.insert((effect.at, effect.end));
+                     }
+                 }
++            }
++            if provider_mode {
+                 // Provider boot effects depend on everything executed before registration.
+                 opaque |= top
+                     .direct
+@@ -904,6 +923,19 @@
+                         !selection.roots.is_empty() && program.errors.is_empty() && top.certain;
+                 }
+             }
++            if let Some(configuration) = &mut selection.middleware {
++                if top
++                    .direct
++                    .keys()
++                    .any(|range| !trusted_statements.contains(range))
++                {
++                    for site in &mut configuration.sites {
++                        site.valid = false;
++                    }
++                }
++                configuration.source_hash =
++                    Some(crate::symbol_map::AnonymousCallable::source_hash(content));
++            }
+             selection
+         })
+     }
+--- a/src/virtual_members/laravel/kernel_middleware.rs
++++ b/src/virtual_members/laravel/kernel_middleware.rs
+@@ -20,6 +20,8 @@
+ pub(crate) struct KernelAliasSources {
+     pub origins: Vec<KernelAliasOrigin>,
+     pub complete: bool,
++    pub(super) builder_order: super::builder_middleware::MiddlewareOrder,
++    pub(super) builder_priority_proven: bool,
+ }
+ 
+ pub(super) struct KernelAliasChoice {
+@@ -30,7 +32,7 @@
+ 
+ type AliasKeys = HashMap<String, u32>;
+ 
+-fn literal_alias_keys(
++pub(super) fn literal_alias_keys(
+     expression: &mago_syntax::cst::Expression<'_>,
+     content: &str,
+     depth: usize,
+@@ -277,6 +279,8 @@
+         let mut sources = KernelAliasSources {
+             origins: Vec::new(),
+             complete: true,
++            builder_order: super::builder_middleware::MiddlewareOrder::Absent,
++            builder_priority_proven: false,
+         };
+         let Some(root) = self.workspace.workspace_root.read().clone() else {
+             return Some(sources);
+@@ -309,6 +313,42 @@
+                 continue;
+             };
+             self.collect_kernel_alias_sources(&uri, &content, fqn.as_deref(), &mut sources);
++        }
++        if let Some(configuration) = selection.middleware {
++            let loader = |name: &str| self.find_or_load_class(name);
++            let mut priority_proven = true;
++            for origin in &sources.origins {
++                priority_proven &= origin.ordering_proven;
++                let Some(class) = loader(&origin.root) else {
++                    sources.complete = false;
++                    priority_proven = false;
++                    continue;
++                };
++                use crate::inheritance::ancestry::{MethodOrigin, resolve_concrete_method_origin};
++                match resolve_concrete_method_origin(&class, "setMiddlewareAliases", &loader) {
++                    MethodOrigin::Known { owner, .. }
++                        if owner
++                            .fqn()
++                            .eq_ignore_ascii_case("Illuminate\\Foundation\\Http\\Kernel") => {}
++                    MethodOrigin::Missing => priority_proven = false,
++                    _ => {
++                        sources.complete = false;
++                        priority_proven = false;
++                    }
++                }
++            }
++            sources.builder_order = self.bootstrap_middleware_order(
++                &configuration.sites,
++                sources.complete,
++                configuration.source_hash,
++            );
++            sources.builder_priority_proven = priority_proven;
++            if matches!(
++                &sources.builder_order,
++                super::builder_middleware::MiddlewareOrder::Opaque
++            ) {
++                sources.complete = false;
++            }
+         }
+         Some(sources)
+     }
+--- a/src/virtual_members/laravel/middleware_aliases.rs
++++ b/src/virtual_members/laravel/middleware_aliases.rs
+@@ -11,6 +11,7 @@
+     pub target: Option<String>,
+     pub context_complete: bool,
+     kernel_site: Option<(u32, u32)>,
++    site_offset: u32,
+ }
+ 
+ impl Backend {
+@@ -79,20 +80,59 @@
+             )?);
+         }
+         if !require_complete && let Some(name) = name {
+-            let choice = self.kernel_alias_choice(&sources, name);
+-            registrations.retain(|site| {
+-                site.kernel_site.is_none_or(|(declaration, offset)| {
+-                    choice
+-                        .active
+-                        .contains(&(site.location.uri.to_string(), offset))
+-                        || choice
+-                            .uncertain
+-                            .contains(&(site.location.uri.to_string(), declaration))
+-                })
+-            });
+-            for site in &mut registrations {
+-                site.context_complete &=
+-                    choice.complete && (site.kernel_site.is_none() || site.target.is_some());
++            use super::builder_middleware::MiddlewareOrder;
++            let ordered = match &sources.builder_order {
++                MiddlewareOrder::Callbacks(callbacks) if sources.builder_priority_proven => {
++                    let bootstrap_uri = crate::util::path_to_uri(&root.join("bootstrap/app.php"));
++                    callbacks
++                        .last()
++                        .and_then(|keys| keys.get(name))
++                        .filter(|offset| {
++                            registrations.iter().any(|site| {
++                                site.location.uri.as_str() == bootstrap_uri
++                                    && site.site_offset == **offset
++                                    && site.target.is_some()
++                            })
++                        })
++                }
++                _ => None,
++            };
++            let preserve_alternatives =
++                matches!(
++                    &sources.builder_order,
++                    MiddlewareOrder::Unknown | MiddlewareOrder::Opaque
++                ) || (matches!(&sources.builder_order, MiddlewareOrder::Callbacks(_))
++                    && ordered.is_none());
++            if preserve_alternatives {
++                // A reset may reintroduce legacy/default aliases or leave old Router entries behind.
++                for site in &mut registrations {
++                    site.context_complete = false;
++                }
++            } else {
++                let choice = self.kernel_alias_choice(&sources, name);
++                registrations.retain(|site| {
++                    site.kernel_site.is_none_or(|(declaration, offset)| {
++                        choice
++                            .active
++                            .contains(&(site.location.uri.to_string(), offset))
++                            || choice
++                                .uncertain
++                                .contains(&(site.location.uri.to_string(), declaration))
++                    })
++                });
++                for site in &mut registrations {
++                    site.context_complete &=
++                        choice.complete && (site.kernel_site.is_none() || site.target.is_some());
++                }
++                if let Some(offset) = ordered {
++                    let bootstrap_uri = crate::util::path_to_uri(&root.join("bootstrap/app.php"));
++                    registrations.retain(|site| {
++                        site.location.uri.as_str() == bootstrap_uri && site.site_offset == *offset
++                    });
++                    for site in &mut registrations {
++                        site.context_complete &= site.target.is_some();
++                    }
++                }
+             }
+         }
+         Some(registrations)
+@@ -232,6 +272,7 @@
+                     ),
+                     target: target.target.clone(),
+                     context_complete: sources.complete,
++                    site_offset: target.start,
+                     kernel_site: (target.receiver == crate::symbol_map::ViewReceiverClass::KernelMiddlewareAliasDeclaration)
+                         .then_some(target.declaration_offset.map(|offset|(offset,target.start))).flatten(),
+                 })
+--- a/src/virtual_members/laravel/mod.rs
++++ b/src/virtual_members/laravel/mod.rs
+@@ -108,6 +108,7 @@
+ mod builder;
+ mod builder_injection;
+ mod builder_kernel;
++mod builder_middleware;
+ mod casts;
+ mod commands;
+ mod completion_cache;
+--- a/tests/integration/laravel_middleware_aliases.rs
++++ b/tests/integration/laravel_middleware_aliases.rs
+@@ -3344,3 +3344,341 @@
+             .contains("incomplete")
+     );
+ }
++
++const CALLBACK_MIDDLEWARE: &str = r"<?php namespace Illuminate\Foundation\Configuration;
++class Middleware {
++ protected $customAliases=[];
++ public function alias(array $aliases): static {$this->customAliases=array_merge($this->customAliases,$aliases);return $this;}
++ protected function defaultAliases() { $aliases=['auth'=>\App\Http\Middleware\Trace::class]; return $aliases; }
++ public function getMiddlewareAliases() {return array_merge($this->defaultAliases(),$this->customAliases);}
++}
++";
++async fn ordered_callback_workspace(
++    bootstrap: &str,
++    legacy: bool,
++) -> (Backend, tempfile::TempDir, Url, Url) {
++    let kernel=ORDERED_KERNEL_BASE.replace("\n}", &format!("\n protected $middlewareAliases=['audited'=>\\App\\Http\\Middleware\\Trace::class];\n protected $routeMiddleware={};\n public function setMiddlewareAliases(array $aliases) {{$this->middlewareAliases=$aliases;$this->syncMiddlewareToRouter();return $this;}}\n}}",if legacy {"['audited'=>\\App\\Http\\Middleware\\Trace::class]"}else{"[]"}));
++    bound_kernel_workspace(
++        bootstrap,
++        &[
++            ("framework/Foundation/Application.php", FACTORY_APPLICATION),
++            (
++                "framework/Foundation/Configuration/ApplicationBuilder.php",
++                FACTORY_BUILDER,
++            ),
++            (
++                "framework/Foundation/Configuration/Middleware.php",
++                CALLBACK_MIDDLEWARE,
++            ),
++            ("framework/Foundation/Http/Kernel.php", &kernel),
++        ],
++    )
++    .await
++}
++const ORDERED_CALLBACK: &str = r"function(\Illuminate\Foundation\Configuration\Middleware $stack) {$stack->alias([/* 😀 */ 'audited'=>\App\Http\Middleware\Audit::class]);}";
++
++#[tokio::test]
++async fn builder_callback_alias_overrides_kernel_property_through_selected_builder_identity() {
++    for bootstrap in [
++        format!(
++            "<?php return \\Illuminate\\Foundation\\Application::configure()->withMiddleware({ORDERED_CALLBACK})->create();"
++        ),
++        format!(
++            "<?php $builder=\\Illuminate\\Foundation\\Application::configure();$builder->withMiddleware({ORDERED_CALLBACK});return $builder->create();"
++        ),
++        format!(
++            "<?php $builder=\\Illuminate\\Foundation\\Application::configure();$alias=$builder->withMiddleware({ORDERED_CALLBACK});$app=$alias->create();return $app;"
++        ),
++    ] {
++        let (backend, dir, route, _) = ordered_callback_workspace(&bootstrap, false).await;
++        let found = definitions(&backend, &route, SOURCE, "middleware('aud").await;
++        assert_eq!(
++            found.len(),
++            1,
++            "scheduled callback must override the Kernel property: {found:?}"
++        );
++        assert_eq!(
++            found[0].uri,
++            Url::from_file_path(dir.path().join("bootstrap/app.php")).unwrap()
++        );
++        assert_eq!(
++            found[0].range.start,
++            position_after(&bootstrap, "/* 😀 */ '")
++        );
++        let detail = hover(&backend, &route, SOURCE, "middleware('aud").await;
++        assert!(
++            detail.contains("Middleware\\Audit")
++                && !detail.contains("Middleware\\Trace")
++                && !detail.contains("incomplete"),
++            "{detail}"
++        );
++        let refs = find_references(
++            &backend,
++            &route,
++            position_after(SOURCE, "middleware('aud"),
++            true,
++        )
++        .await;
++        assert_eq!(
++            refs.len(),
++            2,
++            "effective declaration plus route reference: {refs:?}"
++        );
++    }
++}
++
++#[tokio::test]
++async fn builder_callback_last_literal_key_and_last_callback_keep_utf16_ranges_and_dirty_refresh() {
++    let first = ORDERED_CALLBACK.replace("Middleware\\Audit::class", "Middleware\\Trace::class");
++    let callback = r#"function(\Illuminate\Foundation\Configuration\Middleware $stack) {
++        $stack->alias(['audited'=>\App\Http\Middleware\Trace::class]);
++        $stack->alias(['audited'=>\App\Http\Middleware\Trace::class,...array(/* 😀 winner */ "au\x64ited"=>\App\Http\Middleware\Audit::class)]);
++    }"#;
++    let bootstrap = format!(
++        "<?php return \\Illuminate\\Foundation\\Application::configure()->withMiddleware({first})->withMiddleware({callback})->create();"
++    );
++    let (backend, dir, route, _) = ordered_callback_workspace(&bootstrap, false).await;
++    let file = Url::from_file_path(dir.path().join("bootstrap/app.php")).unwrap();
++    let assert_winner = |locations: Vec<Location>| {
++        assert_eq!(locations.len(), 1, "{locations:?}");
++        assert_eq!(locations[0].uri, file);
++        assert_eq!(
++            locations[0].range.start,
++            position_after(&bootstrap, "/* 😀 winner */ \"")
++        );
++    };
++    assert_winner(definitions(&backend, &route, SOURCE, "middleware('aud").await);
++    let changed = bootstrap.replace("Middleware\\Audit::class", "Middleware\\Trace::class");
++    open_document(&backend, &file, "php", &bootstrap).await;
++    change(&backend, &file, &changed, 2).await;
++    assert_winner(definitions(&backend, &route, SOURCE, "middleware('aud").await);
++    let detail = hover(&backend, &route, SOURCE, "middleware('aud").await;
++    assert!(
++        detail.contains("Middleware\\Trace")
++            && !detail.contains("Middleware\\Audit")
++            && !detail.contains("incomplete"),
++        "{detail}"
++    );
++    change(&backend, &file, &bootstrap, 3).await;
++    assert_winner(definitions(&backend, &route, SOURCE, "middleware('aud").await);
++    assert!(
++        hover(&backend, &route, SOURCE, "middleware('aud")
++            .await
++            .contains("Middleware\\Audit")
++    );
++    assert_eq!(
++        std::fs::read_to_string(file.to_file_path().unwrap()).unwrap(),
++        bootstrap
++    );
++}
++
++#[tokio::test]
++async fn builder_callback_unselected_builder_does_not_override_selected_application() {
++    let other = ORDERED_CALLBACK.replace("Middleware\\Audit::class", "Middleware\\Trace::class");
++    let bootstrap = format!(
++        "<?php $unused=\\Illuminate\\Foundation\\Application::configure()->withMiddleware({other});return \\Illuminate\\Foundation\\Application::configure()->withMiddleware({ORDERED_CALLBACK})->create();"
++    );
++    let (backend, dir, route, _) = ordered_callback_workspace(&bootstrap, false).await;
++    let found = definitions(&backend, &route, SOURCE, "middleware('aud").await;
++    assert_eq!(found.len(), 1, "{found:?}");
++    assert_eq!(
++        found[0].uri,
++        Url::from_file_path(dir.path().join("bootstrap/app.php")).unwrap()
++    );
++    assert_eq!(
++        found[0].range.start,
++        position_after(
++            &bootstrap,
++            &format!(
++                "{other});return \\Illuminate\\Foundation\\Application::configure()->withMiddleware(function(\\Illuminate\\Foundation\\Configuration\\Middleware $stack) {{$stack->alias([/* 😀 */ '"
++            )
++        )
++    );
++    let detail = hover(&backend, &route, SOURCE, "middleware('aud").await;
++    assert!(
++        detail.contains("Middleware\\Audit")
++            && !detail.contains("Middleware\\Trace")
++            && !detail.contains("incomplete"),
++        "{detail}"
++    );
++}
++
++#[tokio::test]
++async fn builder_callback_physical_shadowed_kernel_class_string_still_refuses_checked_rename() {
++    let bootstrap = format!(
++        "<?php return \\Illuminate\\Foundation\\Application::configure()->withMiddleware({ORDERED_CALLBACK})->create();"
++    );
++    let (backend, dir, route, _) = ordered_callback_workspace(&bootstrap, false).await;
++    let file =
++        Url::from_file_path(dir.path().join("framework/Foundation/Http/Kernel.php")).unwrap();
++    let kernel = std::fs::read_to_string(file.to_file_path().unwrap()).unwrap();
++    let dirty = kernel.replace(
++        r"\App\Http\Middleware\Trace::class",
++        r"'App\Http\Middleware\Trace'",
++    );
++    open_document(&backend, &file, "php", &dirty).await;
++    let found = definitions(&backend, &route, SOURCE, "middleware('aud").await;
++    assert_eq!(found.len(), 1, "{found:?}");
++    assert_eq!(
++        found[0].uri,
++        Url::from_file_path(dir.path().join("bootstrap/app.php")).unwrap()
++    );
++    let target = Url::from_file_path(dir.path().join("app/Http/Middleware/Trace.php")).unwrap();
++    let text = std::fs::read_to_string(target.to_file_path().unwrap()).unwrap();
++    open_document(&backend, &target, "php", &text).await;
++    let result = settled_target_rename(&backend, &target, &text, "class Trac", "Traced").await;
++    assert!(
++        result
++            .as_ref()
++            .is_err_and(|message| message.contains("literal middleware target")),
++        "{result:?}"
++    );
++    let target = Url::from_file_path(dir.path().join("app/Http/Middleware/Audit.php")).unwrap();
++    let text = std::fs::read_to_string(target.to_file_path().unwrap()).unwrap();
++    open_document(&backend, &target, "php", &text).await;
++    assert!(
++        settled_target_rename(&backend, &target, &text, "class Aud", "Audited")
++            .await
++            .is_ok_and(|edit| edit.is_some())
++    );
++}
++
++#[tokio::test]
++async fn builder_callback_dynamic_or_conditional_configuration_keeps_incomplete_results_and_physical_guards()
++ {
++    for callback in [
++        ORDERED_CALLBACK.replace("$stack->alias([", "$stack->alias($extra+["),
++        ORDERED_CALLBACK.replace("$stack->alias", "if($condition) $stack->alias"),
++        ORDERED_CALLBACK.replace("$stack->alias", "sideEffect();$stack->alias"),
++        ORDERED_CALLBACK.replace("$stack) {", "$stack) use($extra) {"),
++        "$callback".into(),
++    ] {
++        let bootstrap = format!(
++            "<?php return \\Illuminate\\Foundation\\Application::configure()->withMiddleware({callback})->create();"
++        );
++        let (backend, dir, route, _) = ordered_callback_workspace(&bootstrap, false).await;
++        let detail = hover(&backend, &route, SOURCE, "middleware('aud").await;
++        assert!(detail.contains("incomplete"), "{callback}: {detail}");
++        let target = Url::from_file_path(dir.path().join("app/Http/Middleware/Trace.php")).unwrap();
++        let text = std::fs::read_to_string(target.to_file_path().unwrap()).unwrap();
++        open_document(&backend, &target, "php", &text).await;
++        let result = settled_target_rename(&backend, &target, &text, "class Trac", "Traced").await;
++        if callback == "$callback" || callback.contains("$extra+[") {
++            assert!(
++                result
++                    .as_ref()
++                    .is_err_and(|message| message.contains("middleware")),
++                "{callback}: {result:?}"
++            );
++        } else {
++            assert!(
++                result.is_ok_and(|edit| edit.is_some()),
++                "known physical class references remain renameable: {callback}"
++            );
++        }
++    }
++}
++
++#[tokio::test]
++async fn builder_callback_empty_later_configuration_does_not_invent_kernel_or_router_reset_order() {
++    for legacy in [false, true] {
++        let bootstrap = format!(
++            "<?php return \\Illuminate\\Foundation\\Application::configure()->withMiddleware({ORDERED_CALLBACK})->withMiddleware()->create();"
++        );
++        let (backend, _dir, route, _) = ordered_callback_workspace(&bootstrap, legacy).await;
++        let detail = hover(&backend, &route, SOURCE, "middleware('aud").await;
++        assert!(detail.contains("incomplete"), "legacy={legacy}: {detail}");
++        assert!(
++            detail.contains("Middleware\\Audit") && detail.contains("Middleware\\Trace"),
++            "{detail}"
++        );
++        let found = definitions(&backend, &route, SOURCE, "middleware('aud").await;
++        assert_eq!(
++            found.len(),
++            if legacy { 3 } else { 2 },
++            "all known Kernel and callback alternatives must remain: {found:?}"
++        );
++    }
++}
++
++#[tokio::test]
++async fn builder_callback_unmodeled_bootstrap_execution_cannot_claim_complete_priority() {
++    let bootstrap = format!(
++        "<?php mutateGlobalState();return \\Illuminate\\Foundation\\Application::configure()->withMiddleware({ORDERED_CALLBACK})->create();"
++    );
++    let (backend, _dir, route, _) = ordered_callback_workspace(&bootstrap, false).await;
++    let detail = hover(&backend, &route, SOURCE, "middleware('aud").await;
++    assert!(detail.contains("incomplete"), "{detail}");
++}
++
++#[tokio::test]
++async fn builder_callback_budget_exhaustion_keeps_read_results_incomplete() {
++    for callback in [
++        ORDERED_CALLBACK.replace(
++            "{$stack->alias",
++            &format!("{{{}$stack->alias", ";".repeat(4097)),
++        ),
++        ORDERED_CALLBACK.replace(
++            "[/* 😀 */ 'audited'=>\\App\\Http\\Middleware\\Audit::class]",
++            &format!(
++                "[{}]",
++                "'audited'=>\\App\\Http\\Middleware\\Audit::class,".repeat(4097)
++            ),
++        ),
++    ] {
++        assert_ne!(callback, ORDERED_CALLBACK);
++        let bootstrap = format!(
++            "<?php return \\Illuminate\\Foundation\\Application::configure()->withMiddleware({callback})->create();"
++        );
++        let (backend, _dir, route, _) = ordered_callback_workspace(&bootstrap, false).await;
++        let detail = hover(&backend, &route, SOURCE, "middleware('aud").await;
++        assert!(
++            detail.contains("incomplete"),
++            "budget exhaustion must retain uncertainty"
++        );
++    }
++}
++
++#[tokio::test]
++async fn builder_callback_custom_kernel_setter_invalidates_priority_and_checked_edits() {
++    let bootstrap = format!(
++        "<?php $app=\\Illuminate\\Foundation\\Application::configure()->withMiddleware({ORDERED_CALLBACK})->create();$app->singleton(\\Illuminate\\Contracts\\Http\\Kernel::class,\\App\\Runtime\\SiteKernel::class);return $app;"
++    );
++    let (backend, dir, route, _) = ordered_callback_workspace(&bootstrap, false).await;
++    let file = Url::from_file_path(dir.path().join("app/Runtime/SiteKernel.php")).unwrap();
++    let found = definitions(&backend, &route, SOURCE, "middleware('aud").await;
++    assert_eq!(found.len(), 1, "{found:?}");
++    let source = std::fs::read_to_string(file.to_file_path().unwrap()).unwrap();
++    let dirty = source.replace(
++        "\n}",
++        "\npublic function setMiddlewareAliases(array $aliases) {return $this;}\n}",
++    );
++    open_document(&backend, &file, "php", &source).await;
++    change(&backend, &file, &dirty, 2).await;
++    assert!(
++        hover(&backend, &route, SOURCE, "middleware('aud")
++            .await
++            .contains("incomplete")
++    );
++    let target = Url::from_file_path(dir.path().join("app/Http/Middleware/Audit.php")).unwrap();
++    let text = std::fs::read_to_string(target.to_file_path().unwrap()).unwrap();
++    open_document(&backend, &target, "php", &text).await;
++    assert!(
++        settled_target_rename(&backend, &target, &text, "class Aud", "Audited")
++            .await
++            .as_ref()
++            .is_err_and(|message| message.contains("middleware"))
++    );
++    change(&backend, &file, &source, 3).await;
++    let found = definitions(&backend, &route, SOURCE, "middleware('aud").await;
++    assert_eq!(found.len(), 1, "{found:?}");
++    assert!(
++        !hover(&backend, &route, SOURCE, "middleware('aud")
++            .await
++            .contains("incomplete")
++    );
++    assert_eq!(
++        std::fs::read_to_string(file.to_file_path().unwrap()).unwrap(),
++        source
++    );
++}

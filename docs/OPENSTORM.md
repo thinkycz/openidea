@@ -15,6 +15,90 @@ slice, commit and push it, and retain only the latest generated app. Native UI
 cases remain deferred/unverified; earlier native-first blocking checkpoints are
 historical and no longer prevent independent implementation.
 
+Engine source slice166 (2026-11-18, inactive PHPantom172 verified): resolve
+explicit literal alias overrides in the selected standard builder's final
+Middleware callback. Real Laravel13.37 plus bundled171 proved one runtime Router/
+Kernel target while navigation returned both bootstrap and Kernel declarations.
+The strict171 stdio regression fails2-versus1; the released171 checksum and raw
+runtime/definition/hover results remain recorded. No source/app default is swapped.
+
+Patch172 carries callback sites through existing builder/application identity,
+using optional boxed metadata and an exact bootstrap source digest. Literal
+callbacks, imported type hints, successive alias calls and decoded duplicate/
+spread keys retain physical UTF16 positions and last-write priority. Shared
+constructor/sync/setter ownership gates priority. Unselected builders cannot
+replace the returned application's declarations. Opaque callback expressions or
+unmodeled bootstrap identity cannot authorize edits; custom setters stay unknown.
+Bounded node/statement/key walks stop with incomplete results. Unsaved bootstrap
+and setter changes retire and restore the current interpretation.
+
+Read ordering and physical class-rename inventory remain separate. Known ordered
+winners select only the effective definition/hover/reference declaration. Unknown
+inline ordering and later empty/default resets retain known bootstrap, modern
+and legacy alternatives with an incomplete notice. Existing foreign-receiver,
+computed-map, nullsafe, unresolved-target and literal-class-string rename guards
+keep their behavior and specific errors. Shadowed physical class strings still
+refuse partial class renames; fully witnessed named class references remain
+renameable even when their alias is shadowed or conditional. This is not complete
+callback/reset evaluation: Router entries can survive removal from the Kernel
+array, and a later reset can reintroduce legacy entries.
+
+Nine new/98 middleware prototype tests pass. Final frozen optimized source passes
+18,660 ordinary tests/17 ignored plus2 bounded children, both all-target Clippy
+modes (default and mem-audit), Rust formatting, exact patch replay/fingerprint
+and pinned release build. Final gates use normal optimization and stack limits.
+All48 stdio groups pass:41 inherited and7 new groups cover nine real callback
+fixtures, exact effective positions/hover/references, dirty refresh, independent
+builder identity, decoded spreads, checked physical edits, conditional/opaque
+callbacks, custom setters, legacy reintroduction and Router retention. Every
+callback fixture passes123 PHP syntax checks and owned Composer/root-class
+runtime resolution. The current Laravel example passes121 syntax checks/374
+runtime assertions and exactly the previous3 intentional analyzer diagnostics
+(expected analyzer exit1); plain PHP retains12 syntax/runtime checks. Owned
+children exit0; original and borrowed sources remain unchanged.
+
+Keep the initial diagnostic failures distinct from final acceptance. Two baseline
+Cargo invocations were explicitly cancelled after compiling unrelated targets;
+the real packaged171 stdio executable supplies the red control. Low-optimization
+prototype compilation exposes an inherited deep-test stack overflow in both171
+and the candidate; the opt0/8MiB runs are diagnostics only. Final optimized default-
+stack full tests pass. Early prototype read-order checks blocked legitimate
+physical renames; separation of those proofs restores all98 cases. The first
+real callback witness list included a nested Composer package's source: both171
+and172 reject that all-file list, while both accept the selected project's six
+managed sources. Refined diagnosis identifies app-modules/common/src/
+CommonServiceProvider.php, routed to a separate backend. Full-fixture syntax
+validation remains123 files; targeted rename witnesses now describe the actual
+managed project. Initial scripts/logs/failed receipt and the controlled comparison
+remain preserved. Broader mixed-backend witness/discovery acceptance stays open.
+
+Canonical candidate:artifacts/engines/0.11.1-openstorm.172/phpantom_lsp.
+SHA256:6b71ca698d2a276ac528ec2ee814fd334e2946cda6645d523c2fed2b4014dffc.
+Source: artifacts/phpantom/1756b1f920c1-4608a54817ef-verified.
+Pin:engine/candidates/0.11.1-openstorm.172-source.json; patch series172.
+MIT/Apache notices, upstream source/build inputs, provenance and arm64/version
+checks verify. Source/build receipts bind the exact frozen input. Removed
+3,161,589,739 logical bytes of engine compiler/scratch output;
+keep canonical sources/engines, Workbench, fixtures and evaluation receipts.
+App110/default171 remains unchanged, signed and the only generated app. Reuse
+unchanged164/165 root editor/workspace/frontend/package evidence; claim no new
+root workspace/frontend run or172 client/native acceptance. Native UI remains
+user-skipped. No app build/install, migration, release/tag or updater activation.
+
+Actual OpenStorm client/host adoption is next, followed by a separate package.
+L63 keeps default/later-empty callback resets, Router/legacy interaction,
+constant/dynamic/numeric maps, unsupported inline operations and custom lifecycle
+methods partial. L64 keeps unsupported dynamic/nested providers, custom apps/
+builders/factories and canonical implementation changes outside the recorded
+framework contract partial. Auto PHP status and wider69-area/native/platform/
+performance matrices remain unaccepted; all69 statuses stay67 partial/2 deferred.
+Commit/push this source checkpoint and verify its exact remote ref/clean worktree.
+
+Evidence:artifacts/checks/slice166-{source-freeze,engine-gates,source-test-summary,
+wire-gates,playground,new-example-checks,retention,delivery}.json; slice166/
+{red,prototype*,stack*,witness*,managed-wire*} logs/receipts, initial-all-file-
+witnesses archive and seven callback wire receipts; canonical172 build/provenance.
+
 Package slice165 (2026-11-18, signed local App0.1.110 verified): deliver
 client164's Laravel route/view target synchronization correction in the local
 development app. Pending editor acknowledgements now precede target opening;

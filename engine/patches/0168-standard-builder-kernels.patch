@@ -1,0 +1,854 @@
+--- a/docs/CHANGELOG.md
++++ b/docs/CHANGELOG.md
+@@ -30,6 +30,8 @@
+ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+ 
+ ## [Unreleased]
++
++- **Respect application-builder Kernel registration.** Modern Laravel middleware navigation follows the Kernel selected by the standard application builder and preserves later explicit bindings. Dirty framework registrations refresh their source origins; unresolved effects cannot authorize partial transformations. Contributed by @thinkycz.
+ 
+ - **Decode Laravel constant strings.** Escaped names used as route or container keys retain their PHP runtime values when folded from syntax. Contributed by @thinkycz.
+ 
+--- a/docs/todo/laravel.md
++++ b/docs/todo/laravel.md
+@@ -666,11 +666,13 @@
+ 
+ **Impact: Medium · Complexity: Medium**
+ 
+-Follow remaining HTTP Kernel bindings through registered providers, application
+-builder callbacks, container aliases and closure factories. Establish application
+-identity and framework registration/execution order before replacing property
+-catalog roots. Preserve project/source ownership, dirty updates, known alternatives
+-and complete-target guards without executing bootstrap code.
++Follow remaining HTTP Kernel bindings through immediate provider registration,
++custom or inherited application/builder implementations, builder variables,
++container aliases and closure factories. Establish application identity and actual
++framework execution order before replacing catalog roots. Distinguish the Kernel
++resolved for the initial request from bindings changed by later registered/boot
++callbacks. Preserve dirty source updates, known alternatives and complete-target
++guards without executing bootstrap code.
+ 
+ #### L57. Laravel queue names
+ 
+--- a/examples/laravel/assertions.php
++++ b/examples/laravel/assertions.php
+@@ -2221,6 +2221,16 @@
+ check('Bound Kernel exposes its own legacy alias', $boundKernel->getMiddlewareAliases()['demo.kernel.bound'] === \App\Http\Middleware\AuditRequests::class);
+ check('Bound Kernel preserves legacy aliases alongside builder configuration', $boundKernel->getMiddlewareAliases()['demo.kernel.legacy'] === \App\Http\Middleware\AuditRequests::class);
+ 
++$defaultApplication = \Illuminate\Foundation\Application::configure(basePath: __DIR__)->create();
++$defaultKernel = $defaultApplication->make(\Illuminate\Contracts\Http\Kernel::class);
++check('Standard builder selects the framework HTTP Kernel', get_class($defaultKernel) === \Illuminate\Foundation\Http\Kernel::class);
++check('Legacy application Kernel maps are inactive without a binding', !array_key_exists('demo.kernel.parent', $defaultKernel->getMiddlewareAliases()));
++$queuedApplication = \Illuminate\Foundation\Application::configure(basePath: __DIR__)
++    ->withSingletons([\Illuminate\Contracts\Http\Kernel::class => \App\Runtime\SiteKernel::class])
++    ->create();
++$queuedKernel = $queuedApplication->make(\Illuminate\Contracts\Http\Kernel::class);
++check('Provider-registered callbacks do not precede initial Kernel resolution', get_class($queuedKernel) === \Illuminate\Foundation\Http\Kernel::class);
++
+ echo "\n";
+ if ($failed === 0) {
+     echo "\033[32m✓ All $passed assertions passed.\033[0m\n";
+--- a/examples/laravel/bootstrap/app.php
++++ b/examples/laravel/bootstrap/app.php
+@@ -28,6 +28,7 @@
+         //
+     })->create();
+ 
++// configure() selects the framework Kernel unless an application binding replaces it.
+ // The HTTP Kernel may live outside app/Http/Kernel.php.
+ $application->singleton(HttpKernelContract::class, \App\Runtime\SiteKernel::class);
+ 
+--- /dev/null
++++ b/src/virtual_members/laravel/builder_kernel.rs
+@@ -0,0 +1,303 @@
++//! Initial HTTP Kernel registration by Laravel's standard application builder.
++use mago_syntax::cst::*;
++
++use super::kernel_binding::{KernelRoot, KernelSelection, argument, unwrapped};
++use super::provider_resources::{class_string_fqn, resolved_class_fqn};
++use crate::{Backend, names::OwnedResolvedNames};
++
++const APPLICATION: &str = "Illuminate\\Foundation\\Application";
++const BUILDER: &str = "Illuminate\\Foundation\\Configuration\\ApplicationBuilder";
++const CONTRACT: &str = "Illuminate\\Contracts\\Http\\Kernel";
++
++fn class_at<'ast, 'arena>(node: Node<'ast, 'arena>, offset: u32) -> Option<&'ast Class<'arena>> {
++    if let Node::Class(class) = node
++        && class.class.span.start.offset == offset
++    {
++        return Some(class);
++    }
++    let mut found = None;
++    node.visit_children(|child| {
++        if found.is_none() {
++            found = class_at(child, offset);
++        }
++    });
++    found
++}
++fn method<'a>(class: &'a Class<'a>, name: &[u8]) -> Option<&'a Block<'a>> {
++    class.members.iter().find_map(|member| match member {
++        ClassLikeMember::Method(method) if method.name.value.eq_ignore_ascii_case(name) => {
++            match &method.body {
++                MethodBody::Concrete(body) => Some(body),
++                _ => None,
++            }
++        }
++        _ => None,
++    })
++}
++fn is_variable(expr: &Expression<'_>, name: &[u8]) -> bool {
++    matches!(unwrapped(expr), Expression::Variable(Variable::Direct(variable)) if variable.name==name)
++}
++fn app_property(expr: &Expression<'_>) -> bool {
++    matches!(unwrapped(expr), Expression::Access(Access::Property(property)) if is_variable(property.object,b"$this") && matches!(&property.property,ClassLikeMemberSelector::Identifier(name) if name.value==b"app"))
++}
++fn configure_returns_builder(expr: &Expression<'_>, names: &OwnedResolvedNames) -> bool {
++    let mut current = unwrapped(expr);
++    let mut kernels = false;
++    while let Expression::Call(Call::Method(call)) = current {
++        let ClassLikeMemberSelector::Identifier(name) = &call.method else {
++            return false;
++        };
++        if ![
++            b"withkernels".as_slice(),
++            b"withevents",
++            b"withcommands",
++            b"withproviders",
++        ]
++        .iter()
++        .any(|known| name.value.eq_ignore_ascii_case(known))
++            || !call.argument_list.arguments.is_empty()
++        {
++            return false;
++        }
++        kernels |= name.value.eq_ignore_ascii_case(b"withKernels");
++        current = unwrapped(call.object);
++    }
++    let Expression::Instantiation(instance) = current else {
++        return false;
++    };
++    if !kernels {
++        return false;
++    }
++    match unwrapped(instance.class) {
++        Expression::Identifier(name) => {
++            resolved_class_fqn(name, names).is_some_and(|name| name.eq_ignore_ascii_case(BUILDER))
++        }
++        Expression::Access(Access::StaticProperty(property)) => {
++            matches!(
++                unwrapped(property.class),
++                Expression::Static(_) | Expression::Self_(_)
++            ) && matches!(&property.property,Variable::Direct(name) if name.name==b"$applicationBuilder")
++        }
++        _ => false,
++    }
++}
++
++impl Backend {
++    pub(super) fn configured_kernel_factory(
++        &self,
++        expr: &Expression<'_>,
++        names: &OwnedResolvedNames,
++    ) -> Option<KernelSelection> {
++        let Expression::Call(Call::Method(create)) = unwrapped(expr) else {
++            return None;
++        };
++        if !matches!(&create.method,ClassLikeMemberSelector::Identifier(name) if name.value.eq_ignore_ascii_case(b"create"))
++        {
++            return None;
++        }
++        let mut known = create.argument_list.arguments.is_empty();
++        let mut current = unwrapped(create.object);
++        while let Expression::Call(Call::Method(call)) = current {
++            known &= matches!(&call.method,ClassLikeMemberSelector::Identifier(name) if [b"withkernels".as_slice(),b"withevents",b"withcommands",b"withproviders",b"withrouting",b"withmiddleware",b"withexceptions",b"withbindings",b"withsingletons",b"withscopedsingletons",b"registered",b"withschedule",b"withcommandrouting"].iter().any(|known|name.value.eq_ignore_ascii_case(known)));
++            current = unwrapped(call.object);
++        }
++        let Expression::Call(Call::StaticMethod(configure)) = current else {
++            return Some(KernelSelection::default());
++        };
++        if !matches!(&configure.method,ClassLikeMemberSelector::Identifier(name) if name.value.eq_ignore_ascii_case(b"configure"))
++        {
++            return None;
++        }
++        let Expression::Identifier(class) = unwrapped(configure.class) else {
++            return None;
++        };
++        let fqn = resolved_class_fqn(class, names)?;
++        if !fqn.eq_ignore_ascii_case(APPLICATION) || !known {
++            return Some(KernelSelection::default());
++        }
++        Some(self.standard_builder_kernel())
++    }
++
++    fn standard_builder_kernel(&self) -> KernelSelection {
++        let Some(application) = self.find_or_load_class(APPLICATION) else {
++            return KernelSelection::default();
++        };
++        let Some(uri) = self.find_class_file_uri_for_fqn(APPLICATION) else {
++            return KernelSelection::default();
++        };
++        let Some(source) = self.get_file_content(&uri) else {
++            return KernelSelection::default();
++        };
++        let _parse = crate::parser::with_parse_cache(&source);
++        let context = self.source_file_context(&source);
++        let Some(names) = context.resolved_names.as_deref() else {
++            return KernelSelection::default();
++        };
++        let offset = context
++            .classes
++            .iter()
++            .find(|class| class.fqn().eq_ignore_ascii_case(&application.fqn()))
++            .map(|class| class.keyword_offset);
++        let valid = crate::parser::with_parsed_program(
++            &source,
++            "application_kernel_builder",
++            |program, _| {
++                let Some(class) =
++                    offset.and_then(|offset| class_at(Node::Program(program), offset))
++                else {
++                    return false;
++                };
++                if !program.errors.is_empty() {
++                    return false;
++                }
++                let mut builder = None;
++                for member in class.members.iter() {
++                    if let ClassLikeMember::Property(Property::Plain(property)) = member {
++                        for item in property.items.iter() {
++                            if let PropertyItem::Concrete(property) = item
++                                && property.variable.name == b"$applicationBuilder"
++                            {
++                                if builder.is_some() {
++                                    return false;
++                                }
++                                builder = class_string_fqn(unwrapped(property.value), names);
++                            }
++                        }
++                    }
++                }
++                if !builder.is_some_and(|builder| builder.eq_ignore_ascii_case(BUILDER)) {
++                    return false;
++                }
++                let Some(body) = method(class, b"configure") else {
++                    return false;
++                };
++                let mut returned = false;
++                for statement in body.statements.iter() {
++                    match statement {
++                        Statement::Expression(statement)
++                            if !returned
++                                && matches!(unwrapped(statement.expression),Expression::Assignment(assignment) if is_variable(assignment.lhs,b"$basePath")) =>
++                            {}
++                        Statement::Return(statement) if !returned => {
++                            returned = statement
++                                .value
++                                .is_some_and(|expr| configure_returns_builder(expr, names));
++                            if !returned {
++                                return false;
++                            }
++                        }
++                        Statement::Noop(_) => {}
++                        _ => return false,
++                    }
++                }
++                returned
++            },
++        );
++        if !valid {
++            return KernelSelection::default();
++        }
++        let Some(_builder) = self.find_or_load_class(BUILDER) else {
++            return KernelSelection::default();
++        };
++        let Some(uri) = self.find_class_file_uri_for_fqn(BUILDER) else {
++            return KernelSelection::default();
++        };
++        let Some(source) = self.get_file_content(&uri) else {
++            return KernelSelection::default();
++        };
++        let _parse = crate::parser::with_parse_cache(&source);
++        let context = self.source_file_context(&source);
++        let Some(names) = context.resolved_names.as_deref() else {
++            return KernelSelection::default();
++        };
++        let offset = context
++            .classes
++            .iter()
++            .find(|class| class.fqn().eq_ignore_ascii_case(BUILDER))
++            .map(|class| class.keyword_offset);
++        crate::parser::with_parsed_program(
++            &source,
++            "builder_kernel_registration",
++            |program, content| {
++                let Some(class) =
++                    offset.and_then(|offset| class_at(Node::Program(program), offset))
++                else {
++                    return KernelSelection::default();
++                };
++                let Some(create) = method(class, b"create") else {
++                    return KernelSelection::default();
++                };
++                if create.statements.len() != 1
++                    || !matches!(create.statements.iter().next(),Some(Statement::Return(statement)) if statement.value.is_some_and(app_property))
++                {
++                    return KernelSelection::default();
++                }
++                let Some(body) = method(class, b"withKernels") else {
++                    return KernelSelection::default();
++                };
++                let mut selection = KernelSelection::default();
++                let mut returned = false;
++                let mut complete = program.errors.is_empty();
++                for statement in body.statements.iter() {
++                    match statement {
++                        Statement::Expression(statement) if !returned => {
++                            let Expression::Call(Call::Method(call)) =
++                                unwrapped(statement.expression)
++                            else {
++                                complete = false;
++                                continue;
++                            };
++                            if !app_property(call.object)
++                                || !matches!(&call.method,ClassLikeMemberSelector::Identifier(name) if [b"singleton".as_slice(),b"bind",b"scoped"].iter().any(|known|name.value.eq_ignore_ascii_case(known)))
++                            {
++                                complete = false;
++                                continue;
++                            }
++                            let key =
++                                argument(&call.argument_list, 0, b"abstract").and_then(|expr| {
++                                    class_string_fqn(unwrapped(expr), names).or_else(|| {
++                                        super::const_eval::const_string(
++                                            expr,
++                                            content,
++                                            &super::const_eval::Scope::default(),
++                                        )
++                                    })
++                                });
++                            match key.as_deref() {
++                                Some(CONTRACT) => {
++                                    selection.roots = argument(&call.argument_list, 1, b"concrete")
++                                        .and_then(|expr| {
++                                            class_string_fqn(unwrapped(expr), names).or_else(|| {
++                                                super::const_eval::const_string(
++                                                    expr,
++                                                    content,
++                                                    &super::const_eval::Scope::default(),
++                                                )
++                                            })
++                                        })
++                                        .map(KernelRoot::Bound)
++                                        .into_iter()
++                                        .collect();
++                                }
++                                Some(_) => {}
++                                None => complete = false,
++                            }
++                        }
++                        Statement::Return(statement) if !returned => {
++                            returned = statement
++                                .value
++                                .is_some_and(|expr| is_variable(expr, b"$this"));
++                            if !returned {
++                                complete = false;
++                            }
++                        }
++                        Statement::Noop(_) => {}
++                        _ => complete = false,
++                    }
++                }
++                selection.complete = complete && returned && !selection.roots.is_empty();
++                selection
++            },
++        )
++    }
++}
+--- a/src/virtual_members/laravel/kernel_binding.rs
++++ b/src/virtual_members/laravel/kernel_binding.rs
+@@ -20,7 +20,7 @@
+     Bound(String),
+ }
+ 
+-#[derive(Default)]
++#[derive(Clone, Default)]
+ pub(crate) struct KernelSelection {
+     pub roots: Vec<KernelRoot>,
+     pub complete: bool,
+@@ -47,10 +47,11 @@
+ struct TopLevel {
+     direct: HashMap<(u32, u32), bool>,
+     returned: Option<(Option<String>, u32)>,
++    return_value: Option<(u32, u32)>,
+     limit: Option<u32>,
+     certain: bool,
+ }
+-fn unwrapped<'a>(mut expr: &'a Expression<'a>) -> &'a Expression<'a> {
++pub(super) fn unwrapped<'a>(mut expr: &'a Expression<'a>) -> &'a Expression<'a> {
+     while let Expression::Parenthesized(inner) = expr {
+         expr = inner.expression;
+     }
+@@ -86,6 +87,7 @@
+                 }
+                 Statement::Return(ret) => {
+                     self.returned = Some((ret.value.and_then(variable), ret.span().start.offset));
++                    self.return_value = ret.value.map(span);
+                     self.limit = Some(ret.span().end.offset);
+                 }
+                 Statement::OpeningTag(_)
+@@ -130,6 +132,7 @@
+     origin: u32,
+     alias: Option<String>,
+     certain: bool,
++    factory: Option<KernelSelection>,
+ }
+ fn origin(name: &str, before: u32, sites: &[AssignmentSite], depth: usize) -> Option<u32> {
+     if depth > 64 || depth > sites.len() {
+@@ -153,8 +156,9 @@
+     target: Option<String>,
+     certain: bool,
+     proven: bool,
+-}
+-fn argument<'a>(
++    opaque_effect: bool,
++}
++pub(super) fn argument<'a>(
+     args: &'a ArgumentList<'a>,
+     index: usize,
+     name: &[u8],
+@@ -207,8 +211,12 @@
+             top.statements(program.statements.iter());
+             let mut assignments = Vec::new();
+             let mut calls = Vec::new();
++            let mut returned_factory = None;
+             super::helpers::walk_program_expressions(program, &mut |expr| {
+                 let at = expr.span().start.offset;
++                if top.return_value == Some(span(expr)) {
++                    returned_factory = self.configured_kernel_factory(expr, names);
++                }
+                 if top.limit.is_some_and(|limit| at >= limit) {
+                     return ControlFlow::Continue(());
+                 }
+@@ -221,6 +229,7 @@
+                         at,
+                         origin: assign.rhs.span().start.offset,
+                         alias: variable(assign.rhs),
++                        factory: self.configured_kernel_factory(assign.rhs, names),
+                         certain: top.direct.get(&span(expr)).copied().unwrap_or(false)
+                             && matches!(assign.operator, AssignmentOperator::Assign(_)),
+                     });
+@@ -241,15 +250,33 @@
+                     b"singletonif",
+                     b"scopedif",
+                     b"extend",
++                    b"alias",
++                    b"register",
++                    b"boot",
++                    b"registerconfiguredproviders",
+                 ]
+                 .contains(&method.as_slice())
+                 {
+                     return ControlFlow::Continue(());
+                 }
+-                let key = argument(&call.argument_list, 0, b"abstract").and_then(|expr| {
+-                    class_string_fqn(unwrapped(expr), names)
+-                        .or_else(|| const_string(expr, content, &Scope::default()))
+-                });
++                let deferred_or_provider = [
++                    b"register".as_slice(),
++                    b"boot",
++                    b"registerconfiguredproviders",
++                ]
++                .contains(&method.as_slice());
++                let key_argument = if method == b"alias" {
++                    argument(&call.argument_list, 1, b"alias")
++                } else {
++                    argument(&call.argument_list, 0, b"abstract")
++                };
++                let key = (!deferred_or_provider)
++                    .then_some(key_argument)
++                    .flatten()
++                    .and_then(|expr| {
++                        class_string_fqn(unwrapped(expr), names)
++                            .or_else(|| const_string(expr, content, &Scope::default()))
++                    });
+                 if key.as_deref().is_some_and(|key| key != CONTRACT) {
+                     return ControlFlow::Continue(());
+                 }
+@@ -278,6 +305,14 @@
+                 let proven = ty.as_ref().is_some_and(|ty| {
+                     crate::class_lookup::is_subtype_of_named(ty, APPLICATION, class_loader)
+                 });
++                // Middleware::alias accepts one map; Container::alias requires two names.
++                if method == b"alias"
++                    && !proven
++                    && call.argument_list.arguments.len() == 1
++                    && matches!(call.argument_list.arguments.iter().next(),Some(Argument::Positional(argument)) if argument.ellipsis.is_none() && matches!(unwrapped(argument.value),Expression::Array(_)))
++                {
++                    return ControlFlow::Continue(());
++                }
+                 if !proven
+                     && ty
+                         .as_ref()
+@@ -287,28 +322,35 @@
+                 {
+                     return ControlFlow::Continue(());
+                 }
+-                let value = argument(
+-                    &call.argument_list,
+-                    1,
+-                    if method == b"instance" {
+-                        b"instance"
+-                    } else {
+-                        b"concrete"
+-                    },
+-                );
+-                let target = value.and_then(|value| {
+-                    let value = unwrapped(value);
+-                    if method == b"instance" {
+-                        if let Expression::Instantiation(inst) = value
+-                            && let Expression::Identifier(id) = inst.class
+-                        {
+-                            return resolved_class_fqn(id, names);
++                let value = if method == b"alias" {
++                    argument(&call.argument_list, 0, b"abstract")
++                } else {
++                    argument(
++                        &call.argument_list,
++                        1,
++                        if method == b"instance" {
++                            b"instance"
++                        } else {
++                            b"concrete"
++                        },
++                    )
++                };
++                let target = (!deferred_or_provider)
++                    .then_some(value)
++                    .flatten()
++                    .and_then(|value| {
++                        let value = unwrapped(value);
++                        if method == b"instance" {
++                            if let Expression::Instantiation(inst) = value
++                                && let Expression::Identifier(id) = inst.class
++                            {
++                                return resolved_class_fqn(id, names);
++                            }
++                            return None;
+                         }
+-                        return None;
+-                    }
+-                    class_string_fqn(value, names)
+-                        .or_else(|| const_string(value, content, &Scope::default()))
+-                });
++                        class_string_fqn(value, names)
++                            .or_else(|| const_string(value, content, &Scope::default()))
++                    });
+                 calls.push(BindingCall {
+                     receiver: (!in_callable(Node::Program(program), at))
+                         .then(|| variable(call.object))
+@@ -320,6 +362,9 @@
+                         && [b"bind".as_slice(), b"singleton", b"scoped", b"instance"]
+                             .contains(&method.as_slice()),
+                     proven,
++                    opaque_effect: deferred_or_provider
++                        || method == b"extend"
++                        || method == b"alias",
+                 });
+                 ControlFlow::Continue(())
+             });
+@@ -328,7 +373,14 @@
+                     .and_then(|name| origin(name, *at, &assignments, 0))
+             });
+             calls.sort_by_key(|call| call.at);
+-            let mut selection = KernelSelection::conventional(program.errors.is_empty());
++            let factory = returned
++                .and_then(|origin| assignments.iter().find(|site| site.origin == origin))
++                .and_then(|site| site.factory.clone())
++                .or(returned_factory);
++            let mut opaque = factory.as_ref().is_some_and(|factory| !factory.complete);
++            let mut selection =
++                factory.unwrap_or_else(|| KernelSelection::conventional(program.errors.is_empty()));
++            selection.complete &= program.errors.is_empty() && top.certain;
+             for call in calls {
+                 let owner = call
+                     .receiver
+@@ -337,12 +389,14 @@
+                 if owner.is_some() && returned.is_some() && owner != returned {
+                     continue;
+                 }
++                opaque |= call.opaque_effect;
+                 if owner.is_some() && owner == returned && call.certain && !call.proven {
+                     selection.roots.clear();
+                     selection.complete = false;
+                     continue;
+                 }
+-                if owner.is_none() || returned.is_none() || !call.proven || !call.certain {
++                if opaque || owner.is_none() || returned.is_none() || !call.proven || !call.certain
++                {
+                     selection.uncertain(call.target);
+                 } else {
+                     selection.roots = call.target.map(KernelRoot::Bound).into_iter().collect();
+--- a/src/virtual_members/laravel/mod.rs
++++ b/src/virtual_members/laravel/mod.rs
+@@ -107,6 +107,7 @@
+ mod auth;
+ mod builder;
+ mod builder_injection;
++mod builder_kernel;
+ mod casts;
+ mod commands;
+ mod completion_cache;
+--- a/tests/integration/laravel_middleware_aliases.rs
++++ b/tests/integration/laravel_middleware_aliases.rs
+@@ -36,13 +36,14 @@
+             "framework/Foundation/Configuration/Middleware.php",
+             "<?php namespace Illuminate\\Foundation\\Configuration; class Middleware {public function alias(array $aliases): static {return $this;}}",
+         ),
+-        (
+-            "framework/Foundation/Application.php",
+-            "<?php namespace Illuminate\\Foundation; class Application {public static function configure(?string $basePath = null): \\Illuminate\\Foundation\\Configuration\\ApplicationBuilder {return new \\Illuminate\\Foundation\\Configuration\\ApplicationBuilder;} }",
+-        ),
++        ("framework/Foundation/Application.php", FACTORY_APPLICATION),
+         (
+             "framework/Foundation/Configuration/ApplicationBuilder.php",
+-            "<?php namespace Illuminate\\Foundation\\Configuration; class ApplicationBuilder {public function withMiddleware(?callable $callback = null): static {return $this;} public function create(): \\Illuminate\\Foundation\\Application {return new \\Illuminate\\Foundation\\Application;}}",
++            FACTORY_BUILDER,
++        ),
++        (
++            "framework/Foundation/Http/Kernel.php",
++            "<?php namespace Illuminate\\Foundation\\Http; class Kernel {}",
+         ),
+         (
+             "framework/Routing/Controller.php",
+@@ -1454,11 +1455,12 @@
+ #[tokio::test]
+ async fn kernel_alias_multiple_static_maps_do_not_invent_override_order() {
+     let source = KERNEL.replace("protected $middlewareAliases", "protected $routeMiddleware = ['audited' => \\App\\Http\\Middleware\\Trace::class]; protected $middlewareAliases");
++    let bootstrap=BOOTSTRAP.replace("return Application::configure", "$app = Application::configure").replace("})->create();", "})->create(); $app->singleton(\\Illuminate\\Contracts\\Http\\Kernel::class, \\App\\Http\\Kernel::class); return $app;");
+     let (backend, _dir, uri, _) = kernel_workspace_extra(&source, &[
+-        ("bootstrap/app.php", BOOTSTRAP),
++        ("bootstrap/app.php", bootstrap.as_str()),
+         ("framework/Foundation/Configuration/Middleware.php", "<?php namespace Illuminate\\Foundation\\Configuration; class Middleware {public function alias(array $aliases): static {return $this;}}"),
+-        ("framework/Foundation/Application.php", "<?php namespace Illuminate\\Foundation; class Application {public static function configure(?string $basePath=null): \\Illuminate\\Foundation\\Configuration\\ApplicationBuilder {return new \\Illuminate\\Foundation\\Configuration\\ApplicationBuilder;}}"),
+-        ("framework/Foundation/Configuration/ApplicationBuilder.php", "<?php namespace Illuminate\\Foundation\\Configuration; class ApplicationBuilder {public function withMiddleware(?callable $callback=null): static {return $this;} public function create(): \\Illuminate\\Foundation\\Application {return new \\Illuminate\\Foundation\\Application;}}"),
++        ("framework/Foundation/Application.php", FACTORY_APPLICATION),
++        ("framework/Foundation/Configuration/ApplicationBuilder.php", FACTORY_BUILDER),
+     ]).await;
+     assert_eq!(
+         definitions(&backend, &uri, SOURCE, "middleware('aud")
+@@ -2228,3 +2230,213 @@
+     assert_eq!(found.len(), 1);
+     assert_eq!(found[0].uri, conventional);
+ }
++
++const FACTORY_APPLICATION: &str = r"<?php namespace Illuminate\Foundation;
++class Application {
++    protected static string $applicationBuilder = Configuration\ApplicationBuilder::class;
++    public static function configure(?string $basePath=null): Configuration\ApplicationBuilder {
++        return (new static::$applicationBuilder(new static))->withKernels();
++    }
++    public function singleton($abstract, $concrete = null): void {}
++    public function extend($abstract, $closure): void {}
++    public function alias($abstract, $alias): void {}
++    public function register($provider, $force=false): object {return new \stdClass;}
++}
++";
++const FACTORY_BUILDER: &str = r"<?php namespace Illuminate\Foundation\Configuration;
++class ApplicationBuilder {
++    public function __construct(protected \Illuminate\Foundation\Application $app) {}
++    public function withKernels(): static {
++        $this->app->singleton(\Illuminate\Contracts\Http\Kernel::class, \Illuminate\Foundation\Http\Kernel::class);
++        return $this;
++    }
++    public function withSingletons(array $singletons): static {return $this;}
++    public function withMiddleware(?callable $callback=null): static {return $this;}
++    public function create(): \Illuminate\Foundation\Application {return $this->app;}
++}
++";
++const FACTORY_KERNEL: &str = r#"<?php namespace Illuminate\Foundation\Http;
++use App\Http\Middleware\Trace as FactoryTarget;
++class Kernel {
++    protected $middlewareAliases = [/* 😀 */ "au\x64ited" => FactoryTarget::class];
++}
++"#;
++async fn builder_kernel_workspace(bootstrap: &str) -> (Backend, tempfile::TempDir, Url, Url) {
++    bound_kernel_workspace(
++        bootstrap,
++        &[
++            ("framework/Foundation/Application.php", FACTORY_APPLICATION),
++            (
++                "framework/Foundation/Configuration/ApplicationBuilder.php",
++                FACTORY_BUILDER,
++            ),
++            ("framework/Foundation/Http/Kernel.php", FACTORY_KERNEL),
++        ],
++    )
++    .await
++}
++
++#[tokio::test]
++async fn builder_kernel_factory_uses_the_registered_framework_kernel() {
++    for bootstrap in [
++        r"<?php return \Illuminate\Foundation\Application::configure()->create();",
++        r"<?php use Illuminate\Foundation\Application as App; $application=App::configure()->create(); return $application;",
++        r"<?php $application=(\Illuminate\Foundation\Application::configure()->create()); $alias=$application; return $alias;",
++    ] {
++        let (backend, dir, caller, conventional) = builder_kernel_workspace(bootstrap).await;
++        let found = definitions(&backend, &caller, SOURCE, "middleware('aud").await;
++        assert_eq!(found.len(), 1, "{found:?}");
++        assert_eq!(
++            found[0].uri,
++            Url::from_file_path(dir.path().join("framework/Foundation/Http/Kernel.php")).unwrap()
++        );
++        assert_eq!(found[0].range.start, position_after(FACTORY_KERNEL, "\""));
++        let detail = hover(&backend, &caller, SOURCE, "middleware('aud").await;
++        assert!(detail.contains("App\\Http\\Middleware\\Trace"), "{detail}");
++        let refs = find_references(
++            &backend,
++            &caller,
++            position_after(SOURCE, "middleware('aud"),
++            true,
++        )
++        .await;
++        assert!(
++            !refs.iter().any(|location| location.uri == conventional),
++            "{refs:?}"
++        );
++    }
++}
++
++#[tokio::test]
++async fn builder_kernel_factory_keeps_later_literal_application_bindings() {
++    let bootstrap = BOUND_BOOTSTRAP.replace(
++        "new \\Illuminate\\Foundation\\Application",
++        "\\Illuminate\\Foundation\\Application::configure()->create()",
++    );
++    let (backend, dir, caller, _) = builder_kernel_workspace(&bootstrap).await;
++    assert_bound_kernel(&backend, dir.path(), &caller, "app/Runtime/SiteKernel.php").await;
++}
++
++#[tokio::test]
++async fn builder_kernel_factory_queued_singletons_do_not_replace_the_initial_kernel() {
++    let bootstrap = r"<?php $app=\Illuminate\Foundation\Application::configure()->withSingletons([\Illuminate\Contracts\Http\Kernel::class=>\App\Runtime\SiteKernel::class])->create(); return $app;";
++    let (backend, dir, caller, _) = builder_kernel_workspace(bootstrap).await;
++    let found = definitions(&backend, &caller, SOURCE, "middleware('aud").await;
++    assert_eq!(found.len(), 1, "{found:?}");
++    assert_eq!(
++        found[0].uri,
++        Url::from_file_path(dir.path().join("framework/Foundation/Http/Kernel.php")).unwrap()
++    );
++}
++
++#[tokio::test]
++async fn builder_kernel_factory_dirty_framework_registration_retires_previous_origins() {
++    let bootstrap =
++        r"<?php $app=\Illuminate\Foundation\Application::configure()->create(); return $app;";
++    let (backend, dir, caller, _) = builder_kernel_workspace(bootstrap).await;
++    let builder = Url::from_file_path(
++        dir.path()
++            .join("framework/Foundation/Configuration/ApplicationBuilder.php"),
++    )
++    .unwrap();
++    assert_eq!(
++        definitions(&backend, &caller, SOURCE, "middleware('aud")
++            .await
++            .len(),
++        1
++    );
++    open_document(&backend, &builder, "php", FACTORY_BUILDER).await;
++    let changed = FACTORY_BUILDER.replace(
++        r"\Illuminate\Foundation\Http\Kernel::class",
++        r"\App\Runtime\SiteKernel::class",
++    );
++    change(&backend, &builder, &changed, 2).await;
++    assert_bound_kernel(&backend, dir.path(), &caller, "app/Runtime/SiteKernel.php").await;
++    change(&backend, &builder, FACTORY_BUILDER, 3).await;
++    let found = definitions(&backend, &caller, SOURCE, "middleware('aud").await;
++    assert_eq!(found.len(), 1, "{found:?}");
++    assert_eq!(
++        found[0].uri,
++        Url::from_file_path(dir.path().join("framework/Foundation/Http/Kernel.php")).unwrap()
++    );
++    assert_eq!(
++        std::fs::read_to_string(builder.to_file_path().unwrap()).unwrap(),
++        FACTORY_BUILDER
++    );
++}
++
++#[tokio::test]
++async fn builder_kernel_factory_opaque_registration_cannot_restore_legacy_maps() {
++    let bootstrap =
++        r"<?php $app=\Illuminate\Foundation\Application::configure()->create(); return $app;";
++    let (backend, dir, caller, _) = builder_kernel_workspace(bootstrap).await;
++    let builder = Url::from_file_path(
++        dir.path()
++            .join("framework/Foundation/Configuration/ApplicationBuilder.php"),
++    )
++    .unwrap();
++    let opaque = FACTORY_BUILDER.replace(r"\Illuminate\Foundation\Http\Kernel::class", "$unknown");
++    open_document(&backend, &builder, "php", &opaque).await;
++    assert!(
++        definitions(&backend, &caller, SOURCE, "middleware('aud")
++            .await
++            .is_empty()
++    );
++    let target = Url::from_file_path(dir.path().join("app/Http/Middleware/Audit.php")).unwrap();
++    let text = "<?php namespace App\\Http\\Middleware; class Audit {}";
++    open_document(&backend, &target, "php", text).await;
++    assert!(
++        settled_target_rename(&backend, &target, text, "class Aud", "Auditor")
++            .await
++            .is_err()
++    );
++}
++
++#[tokio::test]
++async fn builder_kernel_factory_unsupported_builder_state_refuses_legacy_fallback() {
++    for bootstrap in [
++        r"<?php $builder=\Illuminate\Foundation\Application::configure(); return $builder->create();",
++        r"<?php return \Illuminate\Foundation\Application::configure()->tap(fn($builder)=>$builder)->create();",
++    ] {
++        let (backend, dir, caller, _) = builder_kernel_workspace(bootstrap).await;
++        assert!(
++            definitions(&backend, &caller, SOURCE, "middleware('aud")
++                .await
++                .is_empty(),
++            "{bootstrap}"
++        );
++        let target = Url::from_file_path(dir.path().join("app/Http/Middleware/Audit.php")).unwrap();
++        let text = "<?php namespace App\\Http\\Middleware; class Audit {}";
++        open_document(&backend, &target, "php", text).await;
++        assert!(
++            settled_target_rename(&backend, &target, text, "class Aud", "Auditor")
++                .await
++                .is_err()
++        );
++    }
++}
++
++#[tokio::test]
++async fn builder_kernel_factory_opaque_effects_survive_later_literal_overrides() {
++    for effect in [
++        r"$app->extend(\Illuminate\Contracts\Http\Kernel::class, fn($kernel,$app)=>new \App\Runtime\SiteKernel);",
++        r"$app->alias(\App\Runtime\SiteKernel::class, \Illuminate\Contracts\Http\Kernel::class);",
++        r"$app->register(\App\Providers\KernelProvider::class);",
++    ] {
++        let bootstrap = format!(
++            r"<?php $app=\Illuminate\Foundation\Application::configure()->create(); {effect} $app->singleton(\Illuminate\Contracts\Http\Kernel::class,\App\Http\Kernel::class); return $app;"
++        );
++        let (backend, dir, caller, _) = builder_kernel_workspace(&bootstrap).await;
++        let detail = hover(&backend, &caller, SOURCE, "middleware('aud").await;
++        assert!(detail.contains("incomplete"), "{effect}: {detail}");
++        let target = Url::from_file_path(dir.path().join("app/Http/Middleware/Audit.php")).unwrap();
++        let text = "<?php namespace App\\Http\\Middleware; class Audit {}";
++        open_document(&backend, &target, "php", text).await;
++        assert!(
++            settled_target_rename(&backend, &target, text, "class Aud", "Auditor")
++                .await
++                .is_err(),
++            "{effect}"
++        );
++    }
++}

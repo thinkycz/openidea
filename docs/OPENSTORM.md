@@ -15,6 +15,74 @@ slice, commit and push it, and retain only the latest generated app. Native UI
 cases remain deferred/unverified; earlier native-first blocking checkpoints are
 historical and no longer prevent independent implementation.
 
+Engine source slice152 (2026-11-18, verified;168 inactive): select the
+initial HTTP Kernel registered by Laravel's standard Application::configure()
+builder instead of always inspecting a legacy App\Http\Kernel. The real13.37
+fixture proves shipped167 navigates to an inactive legacy alias while PHP resolves
+Illuminate\Foundation\Http\Kernel. Repeat the control with withSingletons:
+its registered callback has not run before the initial Kernel is resolved. Preserve
+that execution phase instead of treating queued callbacks as immediate bindings.
+
+Read standard configure/create/withKernels declarations through the existing parser,
+source context and class loaders. Keep resolved class names, source ownership and
+later literal application overrides. Support direct returns, application variables
+and their aliases; dirty framework registration changes retire/restore the selected
+origins without caller edits. Unsupported builder state, opaque targets and control
+flow remain incomplete. Extender, alias and provider uncertainty persists across
+later literal bindings; keep known alternatives and refuse partial class/namespace
+edits. Distinguish Container::alias's two names from Middleware::alias's single map
+so a configuration callback does not poison unrelated Kernel selection.
+
+Seven new public regressions and all63 middleware cases pass. Preserve the initial
+nine fixture failures: the old modern-bootstrap helper omitted actual standard
+builder/Kernel setup, and the multiple-map test assumed a legacy Kernel without
+binding it. Correct those fixtures while preserving every guard and source-range
+assertion. The new opaque-effect test first fails when a later singleton clears
+uncertainty, then passes after making it persistent. Preserve the one argument-role
+failure and its fix; no refusal assertion or diagnostic is suppressed.
+
+Frozen-source full suite:18,625 ordinary passes/17 ignored plus2 bounded children.
+Default and mem-audit release all-target Clippy, formatting, exact reconstruction
+and standalone default build pass. Patch0168 replays byte-for-byte from source167.
+Cargo.toml/Cargo.lock/build.rs, PHPantom MIT and stubs inputs are unchanged. All28
+final executable-bound stdio groups pass, including both real builder controls,
+existing custom/inherited Kernel ownership, checked rename/staleness, dirty/restart
+behavior, PHP targets, resource/receiver exclusions, project freshness, namespaces
+and descriptor isolation. Owned children exit0; originals/borrowed inputs stay
+unchanged. All12 plain-PHP syntax/runtime checks and119 Laravel syntax checks/358
+runtime assertions pass. Analyzer output stays exactly the same3 deliberate
+diagnostics at the original lines, expected exit1. The real and final controls
+validate actual container selection independently of fake type fixtures.
+
+Inactive PHPantom0.11.1-openstorm.168 SHA256:
+b8272d4cd7d8655fa69e09e4edcfd046e35114586439cd5d1dae7292b110fefe.
+Source series SHA256:7970661470a7bc4ad06bd429b396a89cdc51239e85c884cc745b0d378a1f6fc6.
+Candidate:artifacts/engines/0.11.1-openstorm.168/phpantom_lsp; arm64 and only macOS
+system runtime libraries. Immutable source/build receipt SHA256:
+46db66e18f38bd76e182a975e40c6a514fc3d86aed5c9b6d71f91a9b2cd2262b.
+Genuine OpenStorm client/host adoption and packaging follow as separate slices.
+App105/default167 hashes and deep/strict signature remain unchanged; App105 stays
+the sole generated app. Archive and compare source before removing the mutable
+scratch and cargo-cleaning engine output: removed
+2,446,091,672 logical bytes. Preserve canonical source/engines,
+Workbench, fixtures and receipts. Reuse unchanged150 frontend13,393/6 skipped,
+workspace5,152/211 ignored/one retained HTTP exclusion,94 actual167 client/host
+cases and151 package verification. No new root workspace/frontend or native UI
+acceptance claim for this source-only slice.
+
+L64 retains immediate providers, custom/inherited application/builder implementations,
+builder variables, complete alias ordering and closure factories. L63 retains
+runtime/property/callback alias-map ordering; broader middleware catalogs and
+transformations remain tracked. Auto status remains Composer-derived. Native UI
+stays user-skipped and wider platform/performance gates stay partial. All69 areas
+remain67 partial/2 user-deferred. Commit/push and verify exact remote ref and clean
+worktree before the next dependent client slice.
+
+Evidence:artifacts/checks/slice152-{source-freeze,engine-gates,source-test-summary,
+wire-gates,baseline167,baseline167-queued,builder-default,builder-queued,new-example-checks,
+playground,runtime-libraries,retention,final-check}.json; focused red/green and
+final stage logs; canonical168 source/build receipt and delivery sidecar after push.
+
 Package slice151 (2026-11-18, signed local App0.1.105 verified): promote
 source149/client150-verified PHPantom167 into the default resource pin and signed
 development app. Literal bootstrap HTTP Kernel bindings now select custom Kernel

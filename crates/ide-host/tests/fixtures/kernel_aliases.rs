@@ -724,3 +724,160 @@ async fn variable_builder_repeated_creation_keeps_owner_and_retires_off_target_p
     .await;
     f.finish(outcome).await;
 }
+
+const PROVIDER_BOOTSTRAP: &str = r"<?php
+$app=new \Illuminate\Foundation\Application;
+$app->register(\App\Providers\KernelProvider::class);
+return $app;
+";
+const PROVIDER: &str = r"<?php namespace App\Providers;
+use Illuminate\Contracts\Http\Kernel as HttpKernel;
+use App\Runtime\SiteKernel as SelectedKernel;
+class KernelProvider extends \Illuminate\Support\ServiceProvider {
+    public function register(): void {$this->app->singleton(HttpKernel::class,SelectedKernel::class);}
+}
+";
+
+fn immediate_provider_fixture(provider: &str) -> (Fixture, String) {
+    let selected = KERNEL
+        .replace("namespace App\\Http;", "namespace App\\Runtime;")
+        .replace("use App\\Http\\KernelBase as BaseKernel;\n", "")
+        .replace("class Kernel extends BaseKernel", "class SiteKernel extends \\Illuminate\\Foundation\\Http\\Kernel");
+    let conventional = KERNEL.replace("Middleware\\Audit as", "Middleware\\Trace as");
+    let f = fixture_with(
+        &conventional,
+        &[
+            ("bootstrap/app.php".into(), PROVIDER_BOOTSTRAP.into()),
+            ("app/Providers/KernelProvider.php".into(), provider.into()),
+            ("app/Runtime/SiteKernel.php".into(), selected.clone()),
+            ("framework/Contracts/Http/Kernel.php".into(), "<?php namespace Illuminate\\Contracts\\Http; interface Kernel {}\n".into()),
+            ("framework/Foundation/Application.php".into(), r"<?php namespace Illuminate\Foundation; class Application {public function singleton($abstract,$concrete=null): void {} public function register($provider,$force=false): \Illuminate\Support\ServiceProvider {}}".into()),
+            ("framework/Support/ServiceProvider.php".into(), r"<?php namespace Illuminate\Support; class ServiceProvider {protected $app; public function __construct($app) {$this->app=$app;} public function register() {}}".into()),
+        ],
+    );
+    (f, selected)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires PHPantom170 and owned PHP syntax-check executable"]
+async fn immediate_provider_navigation_retires_off_target_plans_and_replays_dirty_sources() {
+    let (f, selected) = immediate_provider_fixture(PROVIDER);
+    let outcome = std::panic::AssertUnwindSafe(async {
+        let path = f.root.join("app/Runtime/SiteKernel.php");
+        let found = definitions(&f).await;
+        assert_eq!(found.len(), 1, "managed immediate provider owner: {found:?}");
+        assert_eq!(*found[0].path, path);
+        assert_eq!(found[0].range.start, cursor(&selected, r"au\x64ited"));
+        hover(&f, "App\\Http\\Middleware\\Audit", "app/Runtime/SiteKernel.php").await;
+        let refs = ide_host::ops::lsp::lsp_references(
+            &f.host,
+            "main",
+            RequestId::next(),
+            f.doc,
+            cursor(CALLER, r"64ited"),
+            true,
+            true,
+            true,
+            ide_host::ops::Channel::new(|_| {}),
+        )
+        .await
+        .unwrap();
+        assert!(refs.incomplete.is_none(), "{refs:?}");
+        assert_eq!(refs.locations.len(), 2, "{refs:?}");
+        assert!(refs.locations.iter().all(|location| location.range.end.col - location.range.start.col == 10));
+        let provider = f.root.join("app/Providers/KernelProvider.php");
+        let doc = f.project.documents.open(&provider).unwrap();
+        let class = f.project.documents.open(&f.root.join("app/Http/Middleware/Audit.php")).unwrap();
+        let plan = ide_host::ops::lsp::lsp_rename(
+            &f.host,
+            "main",
+            RequestId::next(),
+            class.id,
+            cursor(CLASS, "Audit {}"),
+            "Auditor".into(),
+        )
+        .await
+        .unwrap()
+        .edit;
+        assert_eq!(plan.guard.as_ref().unwrap().documents_revision, f.project.documents.edit_revision().unwrap());
+        assert!(
+            !plan.files.iter().any(|edit| matches!(edit, ide_core::FileEdit::Edit {path,..} if **path==provider)),
+            "provider dependency must be outside the edit targets"
+        );
+        let changed = PROVIDER.replace("App\\Runtime\\SiteKernel as", "App\\Http\\Kernel as");
+        Fixture::lint(&changed);
+        f.project.documents.replace_all(doc.id, &changed).unwrap();
+        assert!(
+            ide_host::ops::lsp::apply_workspace_edit(&f.host, "main", plan).await.is_err(),
+            "provider dependency must retire a reviewed plan"
+        );
+        assert_eq!(*definitions(&f).await[0].path, f.root.join("app/Http/Kernel.php"));
+        hover(&f, "App\\Http\\Middleware\\Trace", "app/Http/Kernel.php").await;
+        f.project.lsp.restart(f.project.lsp.servers()[0].id).await.unwrap();
+        hover(&f, "App\\Http\\Middleware\\Trace", "app/Http/Kernel.php").await;
+        f.project.documents.replace_all(doc.id, PROVIDER).unwrap();
+        assert_eq!(*definitions(&f).await[0].path, path);
+        assert_eq!(std::fs::read_to_string(provider).unwrap(), PROVIDER);
+        assert_eq!(std::fs::read_to_string(path).unwrap(), selected);
+        assert_eq!(std::fs::read_to_string(f.root.join("app/Http/Middleware/Audit.php")).unwrap(), CLASS);
+        assert!(!f.root.join("app/Http/Middleware/Auditor.php").exists());
+    })
+    .catch_unwind()
+    .await;
+    f.finish(outcome).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires PHPantom170 and owned PHP syntax-check executable"]
+async fn immediate_provider_checked_edits_preserve_conflicts_dirty_buffers_and_shared_history() {
+    let (f, selected) = immediate_provider_fixture(PROVIDER);
+    checked_rename_case(f, &selected, "app/Runtime/SiteKernel.php").await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires PHPantom170 and owned PHP syntax-check executable"]
+async fn immediate_provider_maps_keep_order_and_unknown_lifecycle_refuses_checked_edits() {
+    let provider = PROVIDER.replace("    public function register()", r"    public $bindings=[HttpKernel::class=>\App\Http\Kernel::class]; public $singletons=[HttpKernel::class=>SelectedKernel::class];
+    public function register()");
+    let (f, _) = immediate_provider_fixture(&provider);
+    let outcome = std::panic::AssertUnwindSafe(async {
+        let found = definitions(&f).await;
+        assert_eq!(found.len(), 1, "managed provider map order: {found:?}");
+        assert_eq!(*found[0].path, f.root.join("app/Runtime/SiteKernel.php"));
+        let doc = f.project.documents.open(&f.root.join("app/Providers/KernelProvider.php")).unwrap();
+        let class = f.project.documents.open(&f.root.join("app/Http/Middleware/Audit.php")).unwrap();
+        for changed in [
+            provider.replace("register(): void", "register($phase=new \\stdClass): void"),
+            provider.replace("<?php namespace App\\Providers;", "<?php namespace App\\Providers; unmodeled();"),
+        ] {
+            Fixture::lint(&changed);
+            f.project.documents.replace_all(doc.id, &changed).unwrap();
+            let hover =
+                ide_host::ops::lsp::lsp_hover(&f.host, "main", RequestId::next(), f.doc, cursor(CALLER, r"64ited"))
+                    .await
+                    .unwrap()
+                    .unwrap();
+            assert!(hover.contents.value.contains("incomplete"), "{hover:?}");
+            let refused = ide_host::ops::lsp::lsp_rename(
+                &f.host,
+                "main",
+                RequestId::next(),
+                class.id,
+                cursor(CLASS, "Audit {}"),
+                "Auditor".into(),
+            )
+            .await;
+            assert!(
+                refused.as_ref().is_err_and(|error| error.message.contains("middleware")),
+                "unmodeled provider lifecycle cannot authorize a checked plan: {refused:?}"
+            );
+        }
+        f.project.documents.replace_all(doc.id, &provider).unwrap();
+        assert_eq!(*definitions(&f).await[0].path, f.root.join("app/Runtime/SiteKernel.php"));
+        assert_eq!(std::fs::read_to_string(f.root.join("app/Providers/KernelProvider.php")).unwrap(), provider);
+        assert!(!f.root.join("app/Http/Middleware/Auditor.php").exists());
+    })
+    .catch_unwind()
+    .await;
+    f.finish(outcome).await;
+}

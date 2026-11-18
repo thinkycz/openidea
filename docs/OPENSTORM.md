@@ -15,6 +15,68 @@ slice, commit and push it, and retain only the latest generated app. Native UI
 cases remain deferred/unverified; earlier native-first blocking checkpoints are
 historical and no longer prevent independent implementation.
 
+Client/host slice159 (2026-11-18, verified;170 inactive): immediate literal
+provider register methods and public bindings/singletons select the initial HTTP
+Kernel through actual OpenStorm managed documents and LspManager. Five new
+regressions cover method/map order, UTF-16 declaration/reference ranges, unsaved
+provider imports and property maps, dirty middleware class previews, engine restart,
+restored ownership and lifecycle refusal. The host rejects a reviewed plan after
+a provider dependency changes, before applying any edit. The shared checked-edit
+scenario verifies incomplete refusals, target-buffer/disk staleness, external-file
+conflicts, unsaved content preservation, actual rename/file moves and grouped
+undo/redo. Reuse the production edit path and its save-conflict protection.
+
+Before final acceptance, review found that opening a provider after a preview
+could invalidate the plan independently of the edit. The initial incomplete
+workspace run and queued waiter were stopped and retained. The final test opens
+the provider before requesting a preview, verifies its document witness is fresh
+and the provider is not an edit target, then changes its unsaved content. Full
+gates reran on that final source; the earlier partial run is not acceptance.
+
+Three new host positives and the real method/map client regression fail against
+169, then pass against170 using the same emitted executables. The lifecycle client
+regression fails on the retained unaccepted170 prototype: real external helper
+execution makes the framework Kernel win, while the prototype supplies a complete
+BuilderKernel hover. Correct170 keeps all three real lifecycle controls incomplete,
+refuses checked edits and preserves those refusals through restart. Source158's
+runtime counterexamples stay separate from normal accepted behavior.
+
+All107 actual client/host tests pass (50 host/57 client). The serialized full Rust
+workspace passes5,155/224 ignored, retaining the existing single HTTP confirmation
+test exclusion. Workspace all-target Clippy, Rust formatting, repository frontend
+formatting, binding fidelity and active169 checksum checks pass. Exact workspace-
+emitted test binary/fingerprint and runtime source hashes are recorded. All five
+real Laravel fixtures retain their syntax/runtime selection and original hashes
+before/after acceptance. Owned candidate/prototype server processes exit. No existing
+environment file is changed; synthetic test scopes retain prior authorization.
+The frontend runner first reused an existing format-log name and stopped after
+typecheck/lint. Those partial receipts are retained; all frontend gates reran with
+a distinct batch-log prefix. That runner error is not a product failure.
+Production frontend/editor sources remain identical to package157. Fresh full
+frontend tests pass13,393/6 skipped; typecheck, lint, formatting, knip and production
+build pass. Native UI remains user-skipped.
+
+Candidate170 client receipt SHA256:2f31e1f80fba152f98e154d4c7654960918b8d3e69b644b135729dfc2257f76c.
+Source receipt SHA256:15057447c692ee9f0a5f34f4077c9c1305a957e5adc9ec220da24b2754b1c5b5.
+App107/default169 hashes, notices and deep/strict signature stay unchanged. App107
+is the sole generated app. Retain the current compiler output solely as the next
+package160 input (26,881,672,535 compiler bytes
+and 68,853,451 frontend bytes);
+remove it after signed package acceptance. No extra app or engine compiler
+output exists. Source158/canonical provenance, evaluations and Workbench remain.
+Native UI stays explicitly user-skipped. Commit/push this independently accepted
+client slice and verify the remote ref/clean worktree before package promotion.
+
+L63/L64 still retain runtime/property/callback alias ordering, nested/dynamic
+providers, instances, custom constructors/apps/builders, closure factories and
+unmodeled lifecycle execution. Auto PHP status remains Composer-derived. Wider
+native/platform/performance gates and all69 statuses remain67 partial/2 deferred.
+
+Evidence:artifacts/checks/slice159/{source-input,fixture-input,gates,controls,
+client-host,frontend,retention,delivery}.json, stage/control logs and canonical170
+client-host-receipt/client-delivery sidecars. Source158 remains the engine source/
+stdio acceptance; packaging follows separately.
+
 Engine source slice158 (2026-11-18, verified;170 inactive): immediate literal
 Application::register providers select the returned application's initial HTTP
 Kernel. Use shared class/trait MethodOrigin ownership and existing bootstrap

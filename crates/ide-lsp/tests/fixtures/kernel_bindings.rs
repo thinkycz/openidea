@@ -501,3 +501,142 @@ async fn variable_builder_client_keeps_mutation_refusals_and_restores_dirty_depe
         std::panic::resume_unwind(panic);
     }
 }
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires PHPantom170 and retained Laravel13.37 immediate-provider fixtures"]
+async fn immediate_provider_client_keeps_real_method_map_order_dirty_ownership_and_restart() {
+    let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let engine = std::env::var_os("OPENSTORM_TEST_PHPANTOM_BIN")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| repo.join("src-tauri/resources/phpantom/phpantom_lsp"));
+    for (setting, fixture) in [
+        ("OPENSTORM_TEST_IMMEDIATE_PROVIDER_ROOT", "slice158-laravel-immediate-provider"),
+        ("OPENSTORM_TEST_PROVIDER_MAPS_ROOT", "slice158-laravel-provider-properties"),
+    ] {
+        let root = std::env::var_os(setting)
+            .map(PathBuf::from)
+            .unwrap_or_else(|| repo.join("artifacts/checks").join(fixture))
+            .canonicalize()
+            .unwrap();
+        let caller = root.join("routes/builder.php");
+        let provider = root.join("app/Providers/KernelProvider.php");
+        let declaration = root.join("app/Runtime/BuilderKernel.php");
+        let target = root.join("app/Http/Middleware/BuilderAudit.php");
+        let source = std::fs::read_to_string(&caller).unwrap();
+        let initial = std::fs::read_to_string(&provider).unwrap();
+        let registration = std::fs::read_to_string(&declaration).unwrap();
+        let class = std::fs::read_to_string(&target).unwrap();
+        let mgr = builder_variable_client(&root, &engine);
+        let doc = DocId::next();
+        let config = DocId::next();
+        let class_doc = DocId::next();
+        mgr.did_open(doc, &caller, &LanguageId::new("php"), 1, &source);
+        mgr.did_open(config, &provider, &LanguageId::new("php"), 1, &initial);
+        mgr.did_open(class_doc, &target, &LanguageId::new("php"), 1, &class);
+        let outcome=std::panic::AssertUnwindSafe(async {
+            assert!(!mgr.goto(doc,pos(&source,"BuilderAudit;"),GotoKind::Definition).await.unwrap().is_empty());
+            let position=pos(&source,"builder.audit");
+            let found=mgr.goto(doc,position,GotoKind::Definition).await.unwrap();
+            assert_eq!(found.len(),1,"real immediate provider client owner: {found:?}");
+            assert_eq!(*found[0].path,declaration);
+            assert_eq!(found[0].range.start,pos(&registration,"builder.audit"));
+            let refs=mgr.references(doc,position,true,true,Default::default()).await.unwrap();
+            assert!(refs.incomplete.is_none(),"{refs:?}");
+            assert!(refs.locations.iter().any(|location|*location.path==declaration && location.range.end.col-location.range.start.col==13),"{refs:?}");
+            let overlay=format!("{class}// Unsaved provider middleware documentation.\n");
+            replace(&mgr,class_doc,2,&class,&overlay);
+            let rename=mgr.rename(class_doc,pos(&class,"BuilderAudit {}"),"ReviewedProviderAudit".into(),Default::default()).await.unwrap();
+            assert!(rename.incomplete.is_none(),"{rename:?}");
+            assert!(rename.edit.files.iter().any(|edit|matches!(edit,ide_core::FileEdit::Edit{path,edits,..} if **path==declaration && edits.iter().any(|edit|edit.new_text.contains("ReviewedProviderAudit")))),"{rename:?}");
+            let changed=initial.replace("App\\Runtime\\BuilderKernel as RuntimeKernel","Illuminate\\Foundation\\Http\\Kernel as RuntimeKernel");
+            assert_ne!(changed,initial);
+            replace(&mgr,config,2,&initial,&changed);
+            assert!(mgr.goto(doc,position,GotoKind::Definition).await.unwrap().is_empty(),"dirty provider must retire the initial owner");
+            mgr.restart(mgr.servers()[0].id).await.unwrap();
+            assert!(mgr.goto(doc,position,GotoKind::Definition).await.unwrap().is_empty(),"restart must replay the dirty provider");
+            replace(&mgr,config,3,&changed,&initial);
+            if fixture.ends_with("properties") {
+                let changed=initial.replace("public $singletons=[HttpKernel::class=>RuntimeKernel::class]",r"public $singletons=[HttpKernel::class=>\Illuminate\Foundation\Http\Kernel::class]");
+                assert_ne!(changed,initial);
+                replace(&mgr,config,4,&initial,&changed);
+                assert!(mgr.goto(doc,position,GotoKind::Definition).await.unwrap().is_empty(),"singleton map must run after register and bindings");
+                replace(&mgr,config,5,&changed,&initial);
+            }
+            let restored=mgr.rename(class_doc,pos(&class,"BuilderAudit {}"),"ReviewedProviderAudit".into(),Default::default()).await.unwrap();
+            assert!(restored.incomplete.is_none(),"{restored:?}");
+            assert!(restored.edit.files.iter().any(|edit|matches!(edit,ide_core::FileEdit::Edit{path,..} if **path==declaration)),"{restored:?}");
+        }).catch_unwind().await;
+        mgr.shutdown_all().await;
+        assert!(mgr.servers().iter().all(|server| server.pid.is_none()));
+        for (path, text) in
+            [(&caller, &source), (&provider, &initial), (&declaration, &registration), (&target, &class)]
+        {
+            assert_eq!(std::fs::read_to_string(path).unwrap(), *text);
+        }
+        assert!(!root.join("app/Http/Middleware/ReviewedProviderAudit.php").exists());
+        if let Err(panic) = outcome {
+            std::panic::resume_unwind(panic);
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires PHPantom170 and retained real Laravel13.37 provider lifecycle controls"]
+async fn immediate_provider_client_keeps_lifecycle_refusals_across_restart() {
+    let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let engine = std::env::var_os("OPENSTORM_TEST_PHPANTOM_BIN")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| repo.join("src-tauri/resources/phpantom/phpantom_lsp"));
+    for (setting, fixture) in [
+        ("OPENSTORM_TEST_PROVIDER_EARLY_BOOT_ROOT", "slice158-laravel-provider-external-boot"),
+        ("OPENSTORM_TEST_PROVIDER_DEFAULT_ROOT", "slice158-laravel-provider-default-phase"),
+        ("OPENSTORM_TEST_PROVIDER_LOAD_ROOT", "slice158-laravel-provider-load-phase"),
+    ] {
+        let root = std::env::var_os(setting)
+            .map(PathBuf::from)
+            .unwrap_or_else(|| repo.join("artifacts/checks").join(fixture))
+            .canonicalize()
+            .unwrap();
+        let caller = root.join("routes/builder.php");
+        let target = root.join("app/Http/Middleware/BuilderAudit.php");
+        let source = std::fs::read_to_string(&caller).unwrap();
+        let class = std::fs::read_to_string(&target).unwrap();
+        let mgr = builder_variable_client(&root, &engine);
+        let doc = DocId::next();
+        let class_doc = DocId::next();
+        mgr.did_open(doc, &caller, &LanguageId::new("php"), 1, &source);
+        mgr.did_open(class_doc, &target, &LanguageId::new("php"), 1, &class);
+        let outcome = std::panic::AssertUnwindSafe(async {
+            assert!(!mgr.goto(doc, pos(&source, "BuilderAudit;"), GotoKind::Definition).await.unwrap().is_empty());
+            for restarted in [false, true] {
+                if restarted {
+                    mgr.restart(mgr.servers()[0].id).await.unwrap();
+                }
+                let hover = mgr.hover(doc, pos(&source, "builder.audit"), Default::default()).await.unwrap().unwrap();
+                assert!(hover.contents.value.contains("incomplete"), "{fixture}: {hover:?}");
+                let refused = mgr
+                    .rename(
+                        class_doc,
+                        pos(&class, "BuilderAudit {}"),
+                        "ReviewedProviderAudit".into(),
+                        Default::default(),
+                    )
+                    .await;
+                assert!(
+                    refused.as_ref().is_err_and(|error| error.message.contains("middleware")),
+                    "real lifecycle refusal must survive client restart: {fixture}: {refused:?}"
+                );
+            }
+        })
+        .catch_unwind()
+        .await;
+        mgr.shutdown_all().await;
+        assert!(mgr.servers().iter().all(|server| server.pid.is_none()));
+        assert_eq!(std::fs::read_to_string(&caller).unwrap(), source);
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), class);
+        assert!(!root.join("app/Http/Middleware/ReviewedProviderAudit.php").exists());
+        if let Err(panic) = outcome {
+            std::panic::resume_unwind(panic);
+        }
+    }
+}

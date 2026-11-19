@@ -15,6 +15,68 @@ slice, commit and push it, and retain only the latest generated app. Native UI
 cases remain deferred/unverified; earlier native-first blocking checkpoints are
 historical and no longer prevent independent implementation.
 
+Package slice187 (2026-11-19, accepted local development bundle):
+App 0.1.114 bundles engine 179 after all 120 current client/Host cases passed in
+slice186. The active source manifest, bundled provenance and 179-patch series
+match the signed executable; historical candidate provenance stays inactive.
+All 45 Cargo package changes are local version 113-to-114 updates. External
+dependencies, plugin API snapshots, attribution, licenses, project compatibility
+and disabled updater endpoints are preserved.
+
+The existing Vite port-selection test timed out again at five seconds. A full
+instrumented run reached listening at 123 ms but did not finish close() within
+that limit. Vite shutdown awaits dependency scanning; this port-only test was
+using the whole repository as its project. It now uses a private empty HTML
+project and cache, keeps the real Vite server and all port/URL assertions, and
+checks the listener is closed before removing its fixture. The timeout remains
+five seconds. No production launcher or Vite configuration changed. The focused
+post-fix trace listened at 77 ms and closed at 79 ms; full frontend suites pass
+with and without temporary instrumentation. The final source contains no tracing.
+Application startup and quit performance remain unverified. Initial failed
+gate receipts and the complete instrumented failure trace remain; see
+source-log retention details in diagnosis.json.
+
+Fresh checksum/source/version checks, 13,856 frontend tests with 8 skipped,
+type checking, lint, formatting, Knip and production/WebKit build checks pass.
+Existing lint warnings remain. All three bundled-resource Rust tests and
+ide-tools all-target Clippy pass. Slice186 workspace (5,338 passed, 238 ignored,
+11 existing exclusions), workspace Clippy and 120 real client/Host cases are
+reused for unchanged runtime logic. The slice185 source gate for engine 179
+(18,696 primary passes, 17 ignored, two bounded child passes and both Clippy
+variants) is reused; no fresh full-workspace or engine-suite run is claimed here.
+
+The server inside the app passes 16 fresh protocol groups: PHP target settings,
+bound-kernel navigation/refactoring, encoded plain/Laravel identities, resource
+middleware, eight setter cases, nine prior named-view cases and seven callback
+groups covering nine variants with 123 managed sources each. Fresh syntax checks
+cover 12 plain-PHP and 121 Laravel files; all 383 Laravel runtime assertions pass.
+The inherited recipe initially selected an older 379-assertion reference fixture;
+its results are retained separately, and the final probes use the accepted engine 179
+fixture with the correct source lines. The analyzer reports exactly three
+intentional diagnostics, with originals unchanged and owned child processes
+exiting. These checks exercise the embedded server. Native editor acceptance stays skipped.
+
+App identity cz.thinky.openstorm, version 0.1.114, arm64 architecture, source/build
+receipt, resource hashes and deep/strict ad-hoc signature pass, including after
+probes. Minimum macOS 13.0 is metadata only; actual macOS 13 runtime remains untested.
+Main SHA256:
+c87abc613aa21eedfe27d8e8bb9389e205800de5a191739e35e0cfd133ac138e.
+Engine SHA256:
+d5445b14fd4b72ac1b0fbf218c30bfe2390c02b89ca8403c8347d526370d4c4e.
+
+Only artifacts/batches/0.1.114/OpenStorm.app remains. App 0.1.113 was removed after the
+new signature and receipt passed. Staging and owned compiler output were removed
+(13115 files, 7.8GiB total), followed by 72,595,853 bytes of frontend output.
+Canonical sources, engines, provenance, Workbench, fixtures and evaluation evidence
+remain. Native GUI checks stay user-skipped; no app launch, installation,
+notarization or publication. Broader 69-area/platform/service acceptance and the
+older language-server startup-timeout attribution remain open. Statuses stay 67
+partial and two debugger areas user-deferred.
+Evidence: artifacts/checks/slice187/{input,identity-provenance,diagnosis,
+fixture-correction,gates-fixed,pipeline-fixed,fixture-checks,embedded,
+packaged-named-views,packaged-named-setters,final-check}.json and
+artifacts/batches/0.1.114/build-receipt.json.
+
 Client adoption slice186 (2026-11-19, accepted; engine 179 inactive):
 The actual OpenStorm client regression now covers eight earlier view-data forms
 and eight chained setter forms: reordered and mixed key/value arguments, array

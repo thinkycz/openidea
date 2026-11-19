@@ -1,6 +1,9 @@
 // @vitest-environment node
 import { afterEach, describe, expect, it } from "vitest";
 import { createServer, type Server } from "node:net";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { claimSession, preferredVitePort, withDevConfig, worktreeId } from "./dev-session.ts";
 
 const servers: Server[] = [];
@@ -34,18 +37,27 @@ describe("development worktrees", () => {
     const blocker = createServer();
     await new Promise<void>((resolve) => blocker.listen(port, "127.0.0.1", resolve));
     servers.push(blocker);
-    const vite = await createVite({
-      configFile: false,
-      logLevel: "silent",
-      server: { host: "127.0.0.1", port, strictPort: false, watch: null },
-    });
+    const root = await mkdtemp(join(tmpdir(), "openstorm-vite-port-"));
     try {
-      await vite.listen();
-      const address = vite.httpServer!.address();
-      expect(address && typeof address !== "string" && address.port).toBeGreaterThan(port);
-      expect(vite.resolvedUrls?.local[0]).not.toContain(`:${port}/`);
+      await writeFile(join(root, "index.html"), "<!doctype html><title>Port fixture</title>");
+      const vite = await createVite({
+        root,
+        cacheDir: join(root, ".vite"),
+        configFile: false,
+        logLevel: "silent",
+        server: { host: "127.0.0.1", port, strictPort: false, watch: null },
+      });
+      try {
+        await vite.listen();
+        const address = vite.httpServer!.address();
+        expect(address && typeof address !== "string" && address.port).toBeGreaterThan(port);
+        expect(vite.resolvedUrls?.local[0]).not.toContain(`:${port}/`);
+      } finally {
+        await vite.close();
+        expect(vite.httpServer!.listening).toBe(false);
+      }
     } finally {
-      await vite.close();
+      await rm(root, { recursive: true, force: true });
     }
   });
 

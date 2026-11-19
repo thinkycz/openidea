@@ -15,6 +15,70 @@ slice, commit and push it, and retain only the latest generated app. Native UI
 cases remain deferred/unverified; earlier native-first blocking checkpoints are
 historical and no longer prevent independent implementation.
 
+Source slice 173 (2026-11-19, inactive PHPantom174 accepted): prove compatible
+literal HTTP Kernel alias properties across class, parent and trait declarations.
+Compare PHP property flags, decoded string values and array order through shared
+source/name metadata. Duplicate string keys and literal spreads retain PHP order;
+unknown constants/contextual names, mismatched flags/defaults and malformed or
+missing graph sources keep incomplete metadata and transformation refusal.
+Compatible coequal traits retain both physical locations, while class ownership
+still wins for ordinary navigation. Preserve every physical graph declaration as
+a transformation input, including shadowed/private parent properties. Existing
+literal middleware target and alias-key transformation exclusions remain in L61.
+
+The real mixed-bootstrap demo.audit callback now has complete definition/hover
+context despite its compatible KernelAliases composition. demo.kernel.parent
+remains a valid Router-retained known declaration with an incomplete-context
+warning; no reset/default/retention ordering expansion is claimed. The previous engine173
+executable fails the initial completeness assertion on the same real fixture
+and corrected harness;174 passes. Four new public handler cases cover compatible
+class/trait defaults, dirty mismatch/restore, PHP array values/order and flags,
+private-parent literal targets and class overrides of parent defaults. Updated
+inherited/coequal-trait cases preserve all import edits. All 102 middleware cases
+and 18,667 ordinary optimized engine tests pass, 17 ignored/0 filtered, plus 2 bounded
+child tests. Default and mem-audit all-target Clippy with -D warnings, clippy --fix,
+format, full source fingerprint and pinned acquisition/build recipe pass.
+
+Final174 wire checks open all 122 PHP files in each of two Laravel13.37 variants.
+Ten observations cover initial, incompatible unsaved, restored, compatible unsaved
+and dirty restart replay. Stale witnesses refuse; named-reference checked plans
+include class/trait/parent/bootstrap edits and the exact PSR-4 file move; literal
+targets remain refused. All 4 owned trait servers exit normally and original files
+stay unchanged. Seven retained callback groups/nine variants with all 123 sources
+witnessed also pass; all 9 owned children exit. Current Laravel example passes 121
+syntax checks, 379 runtime assertions and exactly 3 intentional analyzer diagnostics
+(expected exit1); plain PHP 12 syntax checks and runtime assertions pass.
+
+Two probe mistakes are preserved rather than attributed to the engine: declaration
+edits follow the RenameFile destination URI, and the first named dirty-overlay
+suffix replacement corrupted an already qualified class name. V3 requires the
+exact resource move/destination and changes only the intended alias entry after
+PHP syntax validation. The original failed receipts and both correction records
+remain alongside the accepted V3 result. The initial short-name exact Rust filter
+ran zero tests; only the qualified failing handler test is the red evidence.
+
+174 is an inactive arm64 local engine with minOS13 metadata, system-only dynamic
+dependencies, verified licenses/source receipts and strict signature. Actual Mac13
+runtime remains unverified. App111/default173/resources and every non-doc packaged
+input remain byte-identical; reuse source170 workspace/Clippy and package171
+frontend evidence without claiming fresh root workspace/frontend/native runs.
+Client/Host trait-specific reviewed apply/history and freshness checks remain next
+before promotion. Native UI stays user-skipped; no app build/install/launch, profile
+migration, updater activation, notarization or public release. All 69 areas remain 67
+partial and 2 user-deferred; wider L61/L63/L64/F28 and performance/platform gates stay
+open. Only App111 remains. Cargo clean removes 2,413,636,613 logical compiler bytes;
+remove the 35,871,097-byte owned working copy after freezing its exact replay.
+Preserve canonical sources/engines, Workbench, fixtures and earlier evidence.
+
+Candidate174 SHA256: 7df3ac2abfc61ca1126b28beaf02d5b2657a786920b108cd62f1c5a0681c32a2.
+Patch-series SHA256: 82ccbce64e2cd0caaf1a3289c9b18f159290a7ba054ef5edfa26c79a7dc46b86.
+Source/provenance: engine/candidates/0.11.1-openstorm.174{-source,}.json and
+engine/patches/0174-compatible-kernel-trait-defaults.patch. Evidence:
+artifacts/checks/slice173/{source-freeze,source-test-summary,engine-gates,
+trait-wire-v3,callback-gates,laravel-final,negative173,acceptance,retention}.json,
+correction records/logs and artifacts/engines/0.11.1-openstorm.174/build-receipt.json.
+Commit/push/read-back and clean-worktree evidence reside in slice173/delivery.json.
+
 Audit slice 172 (2026-11-19, route middleware runtime oracle corrected): the
 package171 limitation report incorrectly treated Kernel.getMiddlewareAliases() as
 the effective route middleware table. A real Laravel13.37 runtime check shows

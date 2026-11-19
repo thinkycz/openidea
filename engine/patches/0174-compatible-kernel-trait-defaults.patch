@@ -1,0 +1,864 @@
+--- a/docs/CHANGELOG.md
++++ b/docs/CHANGELOG.md
+@@ -67,6 +67,8 @@
+ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+ 
+ ## [Unreleased]
++
++- **Compatible Kernel trait registrations.** Middleware navigation preserves complete context for compatible literal class, parent and trait defaults. Reviewed class edits retain every physical declaration; incompatible or unresolved compositions and literal middleware targets remain guarded. Contributed by @thinkycz.
+ 
+ - **Checked rename across Composer projects.** Unrelated open files no longer prevent PHP Rename. Stale sources and incomplete changes spanning dependent projects remain unavailable. Contributed by @thinkycz.
+ 
+--- a/docs/todo/laravel.md
++++ b/docs/todo/laravel.md
+@@ -664,8 +664,8 @@
+ incomplete. These static priorities do not model callback/property mutations.
+ 
+ Resolve runtime-built alias maps and property mutations without executing bootstrap
+-code. Prove compatible multiple-trait declarations before enabling transformations;
+-otherwise keep all known source origins and explicit incomplete/ambiguous metadata.
++code. Computed or unresolved compositions must keep all known source origins and
++explicit incomplete/ambiguous metadata.
+ Preserve complete target/source receipts for class and namespace changes, including
+ unresolved and read-only declaration origins.
+ 
+@@ -673,8 +673,10 @@
+ `setMiddlewareAliases`, in registration order rather than assuming class defaults
+ stay active.
+ 
+-Prove PHP compatibility of overlapping parent, class and trait property defaults
+-before allowing transformations that could update only one declaration.
++Extend compatibility proofs beyond literal string-key alias maps to computed
++constant defaults and contextual class names. Preserve PHP property flags and
++value/order equality, all physical declaration inputs, and unknown-result guards.
++Alias-key and literal middleware target transformations remain tracked by L61.
+ 
+ Account for standard `ApplicationBuilder::withMiddleware()` replacing Kernel
+ aliases during resolution, including its empty-callback form.
+--- a/examples/laravel/app/Demo.php
++++ b/examples/laravel/app/Demo.php
+@@ -1786,14 +1786,14 @@
+ 
+     public function applicationMiddlewareAliases(): void
+     {
+-        // Try definition, hover or references on demo.audit; bootstrap stays unexecuted.
++        // Compatible Kernel/trait defaults preserve callback navigation without executing bootstrap.
+         Route::get('/audited-demo', fn () => null)->middleware('demo.audit:strict');
+         // A class rename must refuse while this bootstrap target remains a literal string.
+         Route::get('/audited-literal-demo', fn () => null)->middleware('demo.audit.literal');
+         // The bound SiteKernel inherits these declarations; callbacks may replace runtime maps.
+         Route::get('/kernel-audit-demo', fn () => null)->middleware('demo.kernel.audit:strict');
+         Route::get('/legacy-audit-demo', fn () => null)->middleware('demo.kernel.legacy');
+-        // Effective property declarations live in ApplicationKernel and Concerns/KernelAliases.
++        // The Router can retain these aliases after a callback replaces the Kernel map.
+         Route::get('/parent-audit-demo', fn () => null)->middleware('demo.kernel.parent');
+         Route::get('/trait-audit-demo', fn () => null)->middleware('demo.kernel.trait');
+         // Try definition on the alias selected through the builder variable and custom Kernel binding.
+--- a/examples/laravel/assertions.php
++++ b/examples/laravel/assertions.php
+@@ -2221,6 +2221,19 @@
+ check('Bound Kernel exposes its own legacy alias', $boundKernel->getMiddlewareAliases()['demo.kernel.bound'] === \App\Http\Middleware\AuditRequests::class);
+ check('Bound Kernel preserves legacy aliases alongside builder configuration', $boundKernel->getMiddlewareAliases()['demo.kernel.legacy'] === \App\Http\Middleware\AuditRequests::class);
+ 
++$boundRouter = $boundApplication->make('router');
++check('Builder callback replaces the parent key in the Kernel getter', !array_key_exists('demo.kernel.parent', $boundKernel->getMiddlewareAliases()));
++check('Router retains a parent registration after Kernel replacement', $boundRouter->getMiddleware()['demo.kernel.parent'] === \App\Http\Middleware\AuditRequests::class);
++foreach (['demo.kernel.parent', 'demo.audit'] as $middlewareAlias) {
++    $resolvedRoute = new \Illuminate\Routing\Route('GET', '/trait-compatibility', fn () => null);
++    $resolvedRoute->middleware($middlewareAlias);
++    check("Route resolves retained middleware $middlewareAlias", $boundRouter->gatherRouteMiddleware($resolvedRoute) === [\App\Http\Middleware\AuditRequests::class]);
++}
++$composedDefaults = (new \ReflectionClass(\App\Http\ApplicationKernel::class))->getDefaultProperties();
++$traitDefaults = (new \ReflectionClass(\App\Http\Concerns\KernelAliases::class))->getDefaultProperties();
++check('Class and trait alias defaults have equal PHP values and order', $composedDefaults['routeMiddleware'] === $traitDefaults['routeMiddleware']);
++
++
+ $standardBuilder = \Illuminate\Foundation\Application::configure(basePath: __DIR__);
+ $builderAlias = $standardBuilder;
+ $defaultApplication = $builderAlias->create();
+--- a/src/virtual_members/laravel/kernel_middleware.rs
++++ b/src/virtual_members/laravel/kernel_middleware.rs
+@@ -19,9 +19,18 @@
+ 
+ pub(crate) struct KernelAliasSources {
+     pub origins: Vec<KernelAliasOrigin>,
++    pub physical_origins: Vec<KernelAliasOrigin>,
+     pub complete: bool,
+     pub(super) builder_order: super::builder_middleware::MiddlewareOrder,
+     pub(super) builder_priority_proven: bool,
++}
++
++impl KernelAliasSources {
++    pub(super) fn origins_for(&self, writer: bool) -> impl Iterator<Item = &KernelAliasOrigin> {
++        self.origins
++            .iter()
++            .chain(self.physical_origins.iter().filter(move |_| writer))
++    }
+ }
+ 
+ pub(super) struct KernelAliasChoice {
+@@ -278,6 +287,7 @@
+         let _foreign_scope = crate::type_engine::variable::forward_walk::suspend_diagnostic_scope();
+         let mut sources = KernelAliasSources {
+             origins: Vec::new(),
++            physical_origins: Vec::new(),
+             complete: true,
+             builder_order: super::builder_middleware::MiddlewareOrder::Absent,
+             builder_priority_proven: false,
+@@ -426,14 +436,37 @@
+                     loaded.borrow().values().cloned().collect(),
+                 );
+             sources.complete &= graph_complete;
+-            // PHP requires overlapping trait properties to have compatible declarations
+-            // and defaults. Do not authorize edits without proving that compatibility.
+             let scopes: Vec<_> = loaded.borrow().values().cloned().collect();
+-            sources.complete &= !scopes.iter().any(|scope| {
+-                ["middlewareAliases", "routeMiddleware"]
+-                    .iter()
+-                    .any(|name| trait_property_overlaps(scope, name, &loader))
+-            });
++            let compatible = self.compatible_kernel_property_origins(&scopes, &loader);
++            sources.complete &= compatible.is_some();
++            // Coalesced defaults are still physical transformation inputs, even when
++            // PHP selects the class's own property for ordinary navigation.
++            for (owner, name) in compatible.into_iter().flatten() {
++                let Some(owner_uri) = self.find_class_file_uri_for_fqn(&owner.fqn()) else {
++                    sources.complete = false;
++                    continue;
++                };
++                let offset = owner
++                    .get_property(name)
++                    .map_or(0, |property| property.name_offset);
++                if offset == 0 {
++                    sources.complete = false;
++                    continue;
++                }
++                if !sources.physical_origins.iter().any(|origin| {
++                    origin.uri == owner_uri
++                        && origin.declaration_offset == offset
++                        && origin.root == class.fqn()
++                }) {
++                    sources.physical_origins.push(KernelAliasOrigin {
++                        uri: owner_uri,
++                        declaration_offset: offset,
++                        root: class.fqn().to_string(),
++                        property: name,
++                        ordering_proven,
++                    });
++                }
++            }
+             for name in ["middlewareAliases", "routeMiddleware"] {
+                 let Some(property) = effective.get_property(name) else {
+                     continue;
+@@ -471,9 +504,6 @@
+                 }
+                 let snapshot = loaded.borrow().values().cloned().collect();
+                 let owners = trait_property_origins(owner, name, snapshot, &loader);
+-                if owners.len() > 1 {
+-                    sources.complete = false;
+-                }
+                 for owner in owners {
+                     if !matches!(owner.kind, ClassLikeKind::Class | ClassLikeKind::Trait) {
+                         sources.complete = false;
+@@ -545,11 +575,11 @@
+             })
+             .collect();
+         for origins in groups.values() {
+-            let mut selected: HashMap<&str, (String, u32)> = HashMap::new();
++            let mut selected: HashMap<&str, Vec<(String, u32)>> = HashMap::new();
+             let mut properties = HashSet::new();
+             let mut complete = true;
+             for origin in origins {
+-                if !properties.insert(origin.property) {
++                if !properties.insert(origin.property) && !sources.complete {
+                     complete = false;
+                 }
+                 let keys = maps
+@@ -559,7 +589,10 @@
+                     .and_then(Option::as_ref);
+                 if let Some(keys) = keys {
+                     if let Some(offset) = keys.get(name) {
+-                        selected.insert(origin.property, (origin.uri.clone(), *offset));
++                        selected
++                            .entry(origin.property)
++                            .or_default()
++                            .push((origin.uri.clone(), *offset));
+                     }
+                 } else {
+                     complete = false;
+@@ -581,9 +614,13 @@
+                 && !origins.iter().all(|origin| origin.ordering_proven)
+             {
+                 choice.complete = false;
+-                choice.active.extend(modern.into_iter().chain(legacy));
++                choice
++                    .active
++                    .extend(modern.into_iter().chain(legacy).flatten());
+             } else {
+-                choice.active.extend(modern.or(legacy));
++                choice
++                    .active
++                    .extend(modern.or(legacy).into_iter().flatten());
+             }
+         }
+         choice
+@@ -612,8 +649,7 @@
+                 }
+                 && target.declaration_offset.is_some_and(|offset| {
+                     sources
+-                        .origins
+-                        .iter()
++                        .origins_for(writer)
+                         .any(|origin| origin.uri == uri && origin.declaration_offset == offset)
+                 })
+         })
+--- /dev/null
++++ b/src/virtual_members/laravel/kernel_property.rs
+@@ -0,0 +1,326 @@
++//! PHP compatibility proof for composed HTTP Kernel alias properties.
++use crate::{
++    Backend,
++    names::OwnedResolvedNames,
++    types::{ClassInfo, ClassLikeKind, MAX_TRAIT_DEPTH, PropertyInfo, Visibility},
++};
++use mago_span::HasSpan;
++use mago_syntax::cst::{
++    Access, ArrayElement, ClassLikeConstantSelector, Expression, Modifier, Node, Property,
++    PropertyItem,
++};
++use std::{
++    collections::{HashMap, HashSet},
++    sync::Arc,
++};
++
++type AliasDefault = Vec<(String, String)>;
++
++// PHP replaces a repeated string key without moving its original position.
++fn insert_value(
++    values: &mut AliasDefault,
++    indices: &mut HashMap<String, usize>,
++    key: String,
++    value: String,
++) {
++    if let Some(index) = indices.get(&key) {
++        values[*index].1 = value;
++    } else {
++        indices.insert(key.clone(), values.len());
++        values.push((key, value));
++    }
++}
++
++fn literal_default(
++    expression: &Expression<'_>,
++    content: &str,
++    names: &OwnedResolvedNames,
++    depth: u32,
++    remaining: &mut usize,
++) -> Option<AliasDefault> {
++    if depth >= MAX_TRAIT_DEPTH {
++        return None;
++    }
++    let mut values: AliasDefault = Vec::new();
++    let mut indices = HashMap::new();
++    for element in
++        crate::parser::array_literal_elements(crate::parser::unwrap_parens(expression))?.iter()
++    {
++        *remaining = remaining.checked_sub(1)?;
++        match element {
++            ArrayElement::KeyValue(pair) => {
++                let (key, _, _) = super::helpers::resolved_string_literal(
++                    crate::parser::unwrap_parens(pair.key),
++                    content,
++                )?;
++                if key.is_empty()
++                    || key
++                        .parse::<i64>()
++                        .is_ok_and(|value| value.to_string() == key)
++                {
++                    return None;
++                }
++                let value = crate::parser::unwrap_parens(pair.value);
++                let target = if let Some((text, _, _)) =
++                    super::helpers::resolved_string_literal(value, content)
++                {
++                    text.to_owned()
++                } else if let Expression::Access(Access::ClassConstant(class)) = value {
++                    if !matches!(&class.constant, ClassLikeConstantSelector::Identifier(name) if name.value.eq_ignore_ascii_case(b"class"))
++                    {
++                        return None;
++                    }
++                    let qualifier = crate::parser::unwrap_parens(class.class);
++                    if !matches!(qualifier, Expression::Identifier(_)) {
++                        return None;
++                    }
++                    let text = names
++                        .get(qualifier.span().start.offset)?
++                        .trim_start_matches('\\');
++                    if ["self", "static", "parent"]
++                        .iter()
++                        .any(|keyword| text.eq_ignore_ascii_case(keyword))
++                    {
++                        return None;
++                    }
++                    text.to_owned()
++                } else {
++                    return None;
++                };
++                insert_value(&mut values, &mut indices, key.to_owned(), target);
++            }
++            ArrayElement::Variadic(spread) => {
++                for (key, value) in
++                    literal_default(spread.value, content, names, depth + 1, remaining)?
++                {
++                    insert_value(&mut values, &mut indices, key, value);
++                }
++            }
++            _ => return None,
++        }
++    }
++    Some(values)
++}
++
++struct TraitWalk {
++    active: HashSet<crate::atom::Atom>,
++    done: HashSet<crate::atom::Atom>,
++    remaining: usize,
++}
++
++fn declarations(
++    scope: &ClassInfo,
++    name: &str,
++    loader: &dyn Fn(&str) -> Option<Arc<ClassInfo>>,
++    depth: u32,
++    walk: &mut TraitWalk,
++    result: &mut Vec<Arc<ClassInfo>>,
++) -> Option<()> {
++    if depth >= MAX_TRAIT_DEPTH {
++        return None;
++    }
++    for used in &scope.used_traits {
++        walk.remaining = walk.remaining.checked_sub(1)?;
++        let used = loader(used)?;
++        if walk.done.contains(&used.fqn()) {
++            continue;
++        }
++        if used.kind != ClassLikeKind::Trait || !walk.active.insert(used.fqn()) {
++            return None;
++        }
++        if used
++            .get_property(name)
++            .is_some_and(|property| !property.is_virtual)
++            && !result.iter().any(|previous| previous.fqn() == used.fqn())
++        {
++            result.push(Arc::clone(&used));
++        }
++        declarations(&used, name, loader, depth + 1, walk, result)?;
++        walk.active.remove(&used.fqn());
++        walk.done.insert(used.fqn());
++    }
++    Some(())
++}
++
++fn same_declaration(left: &PropertyInfo, right: &PropertyInfo) -> bool {
++    !left.is_virtual
++        && !right.is_virtual
++        && !left.is_static
++        && !right.is_static
++        && !left.is_readonly
++        && !right.is_readonly
++        && left.visibility == right.visibility
++        && left.native_type_hint == right.native_type_hint
++}
++
++impl Backend {
++    fn kernel_property_default(&self, owner: &ClassInfo, name: &str) -> Option<AliasDefault> {
++        if owner.is_readonly
++            || owner
++                .properties
++                .iter()
++                .filter(|property| !property.is_virtual && property.name.as_str() == name)
++                .count()
++                != 1
++        {
++            return None;
++        }
++        let property = owner.get_property(name)?;
++        let uri = self.find_class_file_uri_for_fqn(&owner.fqn())?;
++        let content = self.get_file_content(&uri)?;
++        let context = self.source_file_context(&content);
++        let current = context
++            .classes
++            .iter()
++            .find(|class| class.fqn() == owner.fqn())?;
++        let current_property = current.get_property(name)?;
++        if current.kind != owner.kind
++            || current.is_readonly
++            || current.keyword_offset != owner.keyword_offset
++            || current_property.name_offset != property.name_offset
++            || current_property.source != property.source
++            || !same_declaration(current_property, property)
++        {
++            return None;
++        }
++        let names = context.resolved_names.as_deref()?;
++        crate::parser::with_parsed_program(&content, "kernel_trait_default", |program, content| {
++            if !program.errors.is_empty() {
++                return None;
++            }
++            let mut pending = vec![Node::Program(program)];
++            let mut remaining = 16_384usize;
++            while let Some(node) = pending.pop() {
++                remaining = remaining.checked_sub(1)?;
++                if let Node::Property(Property::Plain(plain)) = node {
++                    for item in plain.items.iter() {
++                        if item.variable().span.start.offset != property.name_offset {
++                            continue;
++                        }
++                        if plain.modifiers.iter().any(|modifier| {
++                            !matches!(
++                                modifier,
++                                Modifier::Public(_) | Modifier::Protected(_) | Modifier::Private(_)
++                            )
++                        }) {
++                            return None;
++                        }
++                        let PropertyItem::Concrete(item) = item else {
++                            return None;
++                        };
++                        return literal_default(item.value, content, names, 0, &mut 4096);
++                    }
++                }
++                if !matches!(node, Node::Method(_) | Node::HookedProperty(_)) {
++                    node.visit_children(|child| pending.push(child));
++                }
++            }
++            None
++        })
++    }
++
++    pub(super) fn compatible_kernel_property_origins(
++        &self,
++        scopes: &[Arc<ClassInfo>],
++        loader: &dyn Fn(&str) -> Option<Arc<ClassInfo>>,
++    ) -> Option<Vec<(Arc<ClassInfo>, &'static str)>> {
++        let mut physical = Vec::new();
++        for scope in scopes {
++            for name in ["middlewareAliases", "routeMiddleware"] {
++                let mut group = Vec::new();
++                declarations(
++                    scope,
++                    name,
++                    loader,
++                    0,
++                    &mut TraitWalk {
++                        active: HashSet::new(),
++                        done: HashSet::new(),
++                        remaining: 16_384,
++                    },
++                    &mut group,
++                )?;
++                if group.is_empty() {
++                    continue;
++                }
++                let declares = |candidate: &ClassInfo| {
++                    candidate
++                        .get_property(name)
++                        .is_some_and(|property| !property.is_virtual)
++                };
++                let inherited =
++                    crate::inheritance::ancestors(scope, loader).find_map(|(_, parent)| {
++                        let owner = if declares(&parent) {
++                            Some(parent)
++                        } else {
++                            crate::inheritance::find_declaring_trait(
++                                &parent.used_traits,
++                                loader,
++                                &declares,
++                            )
++                            .map(|(_, owner)| owner)
++                        }?;
++                        (owner.get_property(name)?.visibility != Visibility::Private)
++                            .then_some(owner)
++                    });
++                if declares(scope) {
++                    if let Some(parent) = inherited {
++                        let own = scope.get_property(name)?;
++                        let inherited = parent.get_property(name)?;
++                        // A class may change its parent's default, but not its native type or storage.
++                        if own.native_type_hint != inherited.native_type_hint
++                            || own.is_static != inherited.is_static
++                            || own.is_readonly != inherited.is_readonly
++                            || (inherited.visibility == Visibility::Public
++                                && own.visibility != Visibility::Public)
++                        {
++                            return None;
++                        }
++                        self.kernel_property_default(&parent, name)?;
++                    }
++                    group.push(Arc::clone(scope));
++                } else if let Some(inherited) = inherited {
++                    group.push(inherited);
++                }
++                if group.len() < 2 {
++                    continue;
++                }
++                let first = group[0].get_property(name)?;
++                let default = self.kernel_property_default(&group[0], name)?;
++                for owner in &group {
++                    if !same_declaration(first, owner.get_property(name)?)
++                        || self.kernel_property_default(owner, name)? != default
++                    {
++                        return None;
++                    }
++                }
++                for owner in group {
++                    if !physical
++                        .iter()
++                        .any(|(previous, previous_name): &(Arc<ClassInfo>, &str)| {
++                            *previous_name == name && previous.fqn() == owner.fqn()
++                        })
++                    {
++                        physical.push((owner, name));
++                    }
++                }
++            }
++        }
++        // Shadowed properties remain transformation inputs: a private parent or
++        // overridden default can still contain a literal target that cannot be edited.
++        for scope in scopes {
++            for name in ["middlewareAliases", "routeMiddleware"] {
++                if scope
++                    .get_property(name)
++                    .is_some_and(|property| !property.is_virtual && !property.is_static)
++                    && !physical.iter().any(|(owner, previous_name)| {
++                        *previous_name == name && owner.fqn() == scope.fqn()
++                    })
++                {
++                    physical.push((Arc::clone(scope), name));
++                }
++            }
++        }
++        Some(physical)
++    }
++}
+--- a/src/virtual_members/laravel/middleware_aliases.rs
++++ b/src/virtual_members/laravel/middleware_aliases.rs
+@@ -65,7 +65,7 @@
+             return None;
+         }
+         let mut uris = vec![crate::util::path_to_uri(&root.join("bootstrap/app.php"))];
+-        for origin in &sources.origins {
++        for origin in sources.origins_for(require_complete) {
+             if !uris.contains(&origin.uri) {
+                 uris.push(origin.uri.clone());
+             }
+@@ -184,8 +184,7 @@
+                 != crate::symbol_map::ViewReceiverClass::KernelMiddlewareAliasDeclaration
+                 || target.declaration_offset.is_some_and(|offset| {
+                     sources
+-                        .origins
+-                        .iter()
++                        .origins_for(require_complete)
+                         .any(|origin| origin.uri == uri && origin.declaration_offset == offset)
+                 })
+         };
+--- a/src/virtual_members/laravel/mod.rs
++++ b/src/virtual_members/laravel/mod.rs
+@@ -127,6 +127,7 @@
+ mod higher_order_proxy;
+ mod kernel_binding;
+ mod kernel_middleware;
++mod kernel_property;
+ mod kernel_provider;
+ mod macros;
+ mod magic_uses;
+--- a/tests/integration/laravel_middleware_aliases.rs
++++ b/tests/integration/laravel_middleware_aliases.rs
+@@ -1767,7 +1767,7 @@
+         Url::from_file_path(dir.path().join("app/Http/AliasInner.php")).unwrap()
+     );
+     assert!(
+-        hover(&backend, &caller, SOURCE, "middleware('aud")
++        !hover(&backend, &caller, SOURCE, "middleware('aud")
+             .await
+             .contains("incomplete")
+     );
+@@ -1776,12 +1776,14 @@
+     let uri = Url::from_file_path(middleware).unwrap();
+     open_document(&backend, &uri, "php", &text).await;
+     let result = settled_target_rename(&backend, &uri, &text, "class Aud", "Auditor").await;
+-    assert!(
+-        result
+-            .as_ref()
+-            .is_err_and(|message| message.contains("middleware")),
+-        "{result:?}"
+-    );
++    let edit = result.unwrap().unwrap();
++    for file in ["app/Http/ParentKernel.php", "app/Http/AliasInner.php"] {
++        let uri = Url::from_file_path(dir.path().join(file)).unwrap();
++        assert!(
++            !crate::common::edits_for_uri(&edit, &uri).is_empty(),
++            "{file}: {edit:?}"
++        );
++    }
+     let own=root.replace("use AliasInner;",r"use AliasInner; protected $middlewareAliases=['audited'=>\App\Http\Middleware\Audit::class];");
+     open_document(&backend, &kernel, "php", root).await;
+     change(&backend, &kernel, &own, 2).await;
+@@ -1881,7 +1883,7 @@
+ }
+ 
+ #[tokio::test]
+-async fn inherited_kernel_multiple_trait_origins_stay_explicit_and_refuse_ambiguous_edits() {
++async fn inherited_kernel_compatible_trait_edits_preserve_both_origins() {
+     let root = r"<?php namespace App\Http; class Kernel extends \Illuminate\Foundation\Http\Kernel {use AliasOne, AliasTwo;}";
+     let first = ALIAS_PARENT.replace(
+         "class ParentKernel extends \\Illuminate\\Foundation\\Http\\Kernel",
+@@ -1911,7 +1913,7 @@
+     }
+     let detail = hover(&backend, &caller, SOURCE, "middleware('aud").await;
+     assert!(
+-        detail.contains("ambiguous")
++        !detail.contains("ambiguous")
+             && detail.contains("AliasOne.php")
+             && detail.contains("AliasTwo.php"),
+         "{detail}"
+@@ -1921,12 +1923,14 @@
+     let uri = Url::from_file_path(path).unwrap();
+     open_document(&backend, &uri, "php", &text).await;
+     let result = settled_target_rename(&backend, &uri, &text, "class Aud", "Auditor").await;
+-    assert!(
+-        result
+-            .as_ref()
+-            .is_err_and(|message| message.contains("middleware")),
+-        "ambiguous ownership must not authorize edits: {result:?}"
+-    );
++    let edit = result.unwrap().unwrap();
++    for name in ["AliasOne", "AliasTwo"] {
++        let uri = Url::from_file_path(dir.path().join(format!("app/Http/{name}.php"))).unwrap();
++        assert!(
++            !crate::common::edits_for_uri(&edit, &uri).is_empty(),
++            "{name}: {edit:?}"
++        );
++    }
+ }
+ 
+ const BOUND_BOOTSTRAP: &str = r#"<?php
+@@ -3682,3 +3686,218 @@
+         source
+     );
+ }
++
++#[tokio::test]
++async fn compatible_kernel_trait_defaults_preserve_complete_navigation_and_all_rename_inputs() {
++    let kernel = r"<?php namespace App\Http;
++use App\Http\Middleware\Audit as Selected;
++class Kernel extends \Illuminate\Foundation\Http\Kernel {
++    use AliasDefaults;
++    protected $middlewareAliases = ['audited' => Selected::class];
++}";
++    let defaults = r#"<?php namespace App\Http;
++use App\Http\Middleware\Audit as Shared;
++trait AliasDefaults {
++    protected $middlewareAliases = ["au\x64ited" => Shared::class];
++}"#;
++    let (backend, dir, caller, kernel_uri) =
++        kernel_workspace_extra(kernel, &[("app/Http/AliasDefaults.php", defaults)]).await;
++    let detail = hover(&backend, &caller, SOURCE, "middleware('aud").await;
++    assert!(
++        !detail.contains("incomplete") && detail.contains("Middleware\\Audit"),
++        "{detail}"
++    );
++    let locations = definitions(&backend, &caller, SOURCE, "middleware('aud").await;
++    assert_eq!(locations.len(), 1, "{locations:?}");
++    assert_eq!(locations[0].uri, kernel_uri);
++    let target = Url::from_file_path(dir.path().join("app/Http/Middleware/Audit.php")).unwrap();
++    let target_text = std::fs::read_to_string(target.to_file_path().unwrap()).unwrap();
++    open_document(&backend, &target, "php", &target_text).await;
++    let edit = settled_target_rename(&backend, &target, &target_text, "class Aud", "Auditor")
++        .await
++        .unwrap()
++        .unwrap();
++    let defaults_uri = Url::from_file_path(dir.path().join("app/Http/AliasDefaults.php")).unwrap();
++    let changed = crate::common::apply_edits(
++        defaults,
++        &crate::common::edits_for_uri(&edit, &defaults_uri),
++    );
++    assert!(
++        changed.contains("Middleware\\Auditor as Shared"),
++        "{changed}"
++    );
++    let changed_kernel =
++        crate::common::apply_edits(kernel, &crate::common::edits_for_uri(&edit, &kernel_uri));
++    assert!(
++        changed_kernel.contains("Middleware\\Auditor as Selected"),
++        "{changed_kernel}"
++    );
++
++    open_document(&backend, &defaults_uri, "php", defaults).await;
++    let literal = defaults.replace("Shared::class", "'App\\\\Http\\\\Middleware\\\\Audit'");
++    change(&backend, &defaults_uri, &literal, 2).await;
++    let detail = hover(&backend, &caller, SOURCE, "middleware('aud").await;
++    assert!(!detail.contains("incomplete"), "{detail}");
++    assert!(
++        settled_target_rename(&backend, &target, &target_text, "class Aud", "Auditor")
++            .await
++            .as_ref()
++            .is_err_and(|message| message.contains("literal middleware"))
++    );
++    let incompatible = defaults.replace("Middleware\\Audit", "Middleware\\Trace");
++    change(&backend, &defaults_uri, &incompatible, 3).await;
++    let detail = hover(&backend, &caller, SOURCE, "middleware('aud").await;
++    assert!(detail.contains("incomplete"), "{detail}");
++    assert!(
++        settled_target_rename(&backend, &target, &target_text, "class Aud", "Auditor")
++            .await
++            .as_ref()
++            .is_err_and(|message| message.contains("middleware"))
++    );
++    change(&backend, &defaults_uri, defaults, 4).await;
++    let detail = hover(&backend, &caller, SOURCE, "middleware('aud").await;
++    assert!(!detail.contains("incomplete"), "{detail}");
++    assert_eq!(
++        std::fs::read_to_string(defaults_uri.to_file_path().unwrap()).unwrap(),
++        defaults
++    );
++}
++
++#[tokio::test]
++async fn kernel_trait_compatibility_uses_php_array_values_order_and_declaration_flags() {
++    let kernel = r"<?php namespace App\Http;
++use App\Http\Middleware\Audit as Selected;
++class Kernel extends \Illuminate\Foundation\Http\Kernel {
++    use AliasDefaults;
++    protected $middlewareAliases = ['audited'=>Selected::class, 'other'=>'other'];
++}";
++    for (property, expected_complete) in [
++        (
++            r"protected $middlewareAliases = ['audited'=>\App\Http\Middleware\Trace::class, ...['audited'=>\App\Http\Middleware\Audit::class], 'other'=>'other'];",
++            true,
++        ),
++        (
++            r"protected $middlewareAliases = ['other'=>'other', 'audited'=>\App\Http\Middleware\Audit::class];",
++            false,
++        ),
++        (
++            r"protected $middlewareAliases = ['audited'=>\App\Http\Middleware\Audit::class, 'other'=>1];",
++            false,
++        ),
++        (
++            r"public $middlewareAliases = ['audited'=>\App\Http\Middleware\Audit::class, 'other'=>'other'];",
++            false,
++        ),
++        (
++            r"protected array $middlewareAliases = ['audited'=>\App\Http\Middleware\Audit::class, 'other'=>'other'];",
++            false,
++        ),
++        (
++            r"protected $middlewareAliases = ['audited'=>self::class, 'other'=>'other'];",
++            false,
++        ),
++        (r"protected $middlewareAliases = DEFAULT_ALIASES;", false),
++        (
++            r"protected $middlewareAliases = ['audited'=>\App\Other\Audit::class, 'other'=>'other'];",
++            false,
++        ),
++    ] {
++        let defaults = format!("<?php namespace App\\Http; trait AliasDefaults {{{property}}}");
++        let (backend, _dir, caller, _) =
++            kernel_workspace_extra(kernel, &[("app/Http/AliasDefaults.php", &defaults)]).await;
++        let detail = hover(&backend, &caller, SOURCE, "middleware('aud").await;
++        assert_eq!(
++            !detail.contains("incomplete"),
++            expected_complete,
++            "{property}: {detail}"
++        );
++    }
++}
++
++#[tokio::test]
++async fn compatible_kernel_trait_defaults_do_not_hide_private_parent_literal_targets() {
++    let kernel = r"<?php namespace App\Http;
++class Kernel extends ParentKernel {
++    use AliasDefaults;
++    protected $middlewareAliases = ['audited'=>\App\Http\Middleware\Trace::class];
++}";
++    let defaults = r"<?php namespace App\Http; trait AliasDefaults {
++    protected $middlewareAliases = ['audited'=>\App\Http\Middleware\Trace::class];
++}";
++    let parent = r"<?php namespace App\Http;
++class ParentKernel extends \Illuminate\Foundation\Http\Kernel {
++    private $middlewareAliases = ['hidden'=>'App\Http\Middleware\Audit'];
++}";
++    let (backend, dir, caller, _) = kernel_workspace_extra(
++        kernel,
++        &[
++            ("app/Http/AliasDefaults.php", defaults),
++            ("app/Http/ParentKernel.php", parent),
++        ],
++    )
++    .await;
++    let detail = hover(&backend, &caller, SOURCE, "middleware('aud").await;
++    assert!(
++        !detail.contains("incomplete") && detail.contains("Middleware\\Trace"),
++        "{detail}"
++    );
++    let target = Url::from_file_path(dir.path().join("app/Http/Middleware/Audit.php")).unwrap();
++    let text = std::fs::read_to_string(target.to_file_path().unwrap()).unwrap();
++    open_document(&backend, &target, "php", &text).await;
++    let result = settled_target_rename(&backend, &target, &text, "class Aud", "Auditor").await;
++    assert!(
++        result
++            .as_ref()
++            .is_err_and(|message| message.contains("literal middleware")),
++        "{result:?}"
++    );
++}
++
++#[tokio::test]
++async fn kernel_trait_compatibility_preserves_class_override_of_parent_default() {
++    let kernel = r"<?php namespace App\Http;
++class Kernel extends ParentKernel {
++    use AliasDefaults;
++    protected $middlewareAliases = ['audited'=>\App\Http\Middleware\Trace::class];
++}";
++    let defaults = r"<?php namespace App\Http; trait AliasDefaults {
++    protected $middlewareAliases = ['audited'=>\App\Http\Middleware\Trace::class];
++}";
++    let (backend, dir, caller, kernel_uri) = kernel_workspace_extra(
++        kernel,
++        &[
++            ("app/Http/AliasDefaults.php", defaults),
++            ("app/Http/ParentKernel.php", ALIAS_PARENT),
++        ],
++    )
++    .await;
++    let detail = hover(&backend, &caller, SOURCE, "middleware('aud").await;
++    assert!(
++        !detail.contains("incomplete")
++            && detail.contains("Middleware\\Trace")
++            && !detail.contains("Middleware\\Audit"),
++        "{detail}"
++    );
++    let locations = definitions(&backend, &caller, SOURCE, "middleware('aud").await;
++    assert_eq!(locations.len(), 1, "{locations:?}");
++    assert_eq!(locations[0].uri, kernel_uri);
++    let target = Url::from_file_path(dir.path().join("app/Http/Middleware/Trace.php")).unwrap();
++    let text = std::fs::read_to_string(target.to_file_path().unwrap()).unwrap();
++    open_document(&backend, &target, "php", &text).await;
++    let edit = settled_target_rename(&backend, &target, &text, "class Tra", "Traced")
++        .await
++        .unwrap()
++        .unwrap();
++    for file in ["app/Http/Kernel.php", "app/Http/AliasDefaults.php"] {
++        let uri = Url::from_file_path(dir.path().join(file)).unwrap();
++        let source = std::fs::read_to_string(uri.to_file_path().unwrap()).unwrap();
++        let changed =
++            crate::common::apply_edits(&source, &crate::common::edits_for_uri(&edit, &uri));
++        assert!(
++            changed.contains("Middleware\\Traced::class"),
++            "{file}: {changed}"
++        );
++    }
++    let parent = Url::from_file_path(dir.path().join("app/Http/ParentKernel.php")).unwrap();
++    assert!(crate::common::edits_for_uri(&edit, &parent).is_empty());
++}

@@ -15,6 +15,63 @@ slice, commit and push it, and retain only the latest generated app. Native UI
 cases remain deferred/unverified; earlier native-first blocking checkpoints are
 historical and no longer prevent independent implementation.
 
+Blade drain coordination slice179 (2026-11-19, source/direct client accepted; inactive):
+Coalesce overlapping accepted view refreshes into one flight per Backend. Joining
+workers retain their original notification publication fence until shared work
+finishes. Joined requests and changed inputs request a followup pass; an aborted
+leader wakes joiners with an incomplete result so pending work can recover.
+Independent Composer backends keep independent coordination. Existing source,
+target, generation and request-deadline guards remain intact.
+
+Metadata-only actual-client tracing identifies first definitions waiting behind
+open notifications and then receiving short ContentModified replies, with at most
+2diagnostic requests in flight. One explicitly sampled175 process reaches the
+10-second deadline while stacks show overlapping Blade drains and target-lock
+contention. Profiling perturbs timing and is excluded from acceptance counts.
+The old source allowed multiple drains to copy the same pending callers. A baseline
+coordinator that admits duplicate leaders fails its runtime regression. Seven
+coordinator controls and2actual backend controls verify coalescing, input/join
+followups, independent projects, abort recovery and notification-fence lifetime.
+All612 selected Blade,8selected semantic-publication and42public Composer cases
+pass before freezing; the immutable full suite subsequently covers those inputs.
+
+Interleaved actual LspManager observations on the unchanged122-source corpus pass
+24/24 on each engine, balanced across literal/named routes. First-lookup median /
+maximum:175=6.685s/9.212s;176=5.322s/7.552s. Median delay after the last open log
+falls1.426s->0.212s; median definition withdrawals26.5->4. Diagnostic concurrency
+stays2. All48owned engines exit0/reap normally. This is a warmed-filesystem fixture
+comparison with metadata tracing, not app startup, universal latency or parity
+acceptance. The older unprofiled175 timeout remains retained and not uniquely
+attributed; later positives do not prove its complete resolution.
+
+Pinned176 acquisition matches all final workcopy inputs and symlinks. Required
+Clippy fix then formatting passes without code fixes; the changelog is updated.
+Final immutable release gates pass:18,687primary tests/17ignored/0filtered plus
+2existing bounded child passes, both all-target Clippy configurations (including
+mem-audit), fmt, source fingerprint and reproducible normal build. Final raw and
+ad-hoc signed engine bytes exactly match the paired specimen; signed SHA256:
+bdb3526e7ad99c52c03b350428980146b96e25472e5e84437e482fbdb5663f76.
+
+Fresh plain12/Laravel121syntax checks, plain runtime and379Laravel assertions
+pass. CLI retains exactly3intentional diagnostics. All62actual direct client
+cases pass on that final signed binary, including dirty dependency inference,
+UTF-16 ranges, stale responses, checked actions, references and restart. Fixture
+originals and emitted client executable/fingerprint hashes are verified. Root176
+broad workspace/frontend gates are reused only for unchanged root source/default
+resources. New176 Host adoption and packaging remain the next dependent slice;
+175Host passes are not reused as176 acceptance. Native UI remains user-skipped.
+
+Cargo clean removes2,913root compiler files/1007.9MiB and8,228engine files/2.2GiB.
+An additional219,034,754probe-build bytes,35,877,894duplicate workcopy bytes and
+56,484,352duplicate prototype bytes are removed after hash/source-map checks.
+The preserved final176 is byte-identical to that prototype. Targets/dist are
+absent; canonical engines/source, fixtures, Workbench and evaluation evidence
+remain. Sole App111/default173 and strict/deep signature remain verified. No
+promotion/install occurs; all69statuses remain67partial/2debugger user-deferred.
+Evidence: artifacts/checks/slice179/{decision,diagnosis,paired-summary,
+paired-wire-summary,paired-final-identity,freeze,engine-gates,engine-test-summary,
+candidate,fixture-checks,client-real,root-gates-reuse,retention,acceptance}.json.
+
 Actual-client adoption slice178 (2026-11-19, checked; engine175 still inactive):
 The unchanged current Host/client tests now run against signed candidate175.
 All119 pass:10Host edits,1PHP-setting lifecycle,2controller URL Host,42completion/

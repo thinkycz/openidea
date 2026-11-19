@@ -1,0 +1,382 @@
+diff --git a/docs/CHANGELOG.md b/docs/CHANGELOG.md
+index 1203bf415..6f3effee7 100644
+--- a/docs/CHANGELOG.md
++++ b/docs/CHANGELOG.md
+@@ -315,6 +315,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
+ 
+ ### Fixed
+ 
++- **Faster navigation with many open files.** PHP navigation can become ready sooner as projects restore PHP and Blade buffers, while view inference retains unsaved changes. Contributed by @thinkycz.
++
+ - **Keep expanded Blade attribute data uncertain when its keys are unknown.** `@aware` no longer treats an unreadable attribute bag as definitely missing data, while explicit attributes keep priority. Slot maps also retain support for numeric keys. Contributed by @thinkycz.
+ 
+ 
+diff --git a/src/blade/call_site_inference.rs b/src/blade/call_site_inference.rs
+index c1a3fef4a..b6b28916a 100644
+--- a/src/blade/call_site_inference.rs
++++ b/src/blade/call_site_inference.rs
+@@ -1973,6 +1973,24 @@ impl Backend {
+ 
+     /// Only accepted pending roots participate; this is not a workspace pass.
+     pub(crate) fn drain_pending_blade_refreshes(&self) {
++        use super::refresh_drain::Admission;
++        loop {
++            match self.blade_refresh_drain.enter() {
++                Admission::Joined(joined) => {
++                    if joined.wait() {
++                        return;
++                    }
++                }
++                Admission::Leader(mut flight) => loop {
++                    if flight.finish_pass(self.drain_pending_blade_refresh_pass()) {
++                        return;
++                    }
++                },
++            }
++        }
++    }
++
++    fn drain_pending_blade_refresh_pass(&self) -> bool {
+         let input = self.diag.documents.lock().input_epoch();
+         let mut callers: Vec<_> = self
+             .blade_pending_refreshes
+@@ -1992,10 +2010,7 @@ impl Backend {
+         // even when the changed source does not render any view. Retained work
+         // needs another pass against the new inputs. Stable unsupported components
+         // remain pending without a retry loop.
+-        let input_changed = !self.diag.documents.lock().input_matches(&input);
+-        if input_changed {
+-            self.schedule_pending_blade_refreshes();
+-        }
++        !self.diag.documents.lock().input_matches(&input)
+     }
+ 
+     pub(crate) fn schedule_pending_blade_refreshes(&self) {
+@@ -3703,4 +3718,68 @@ mod caller_refresh_ownership_tests {
+         assert!(has_type(&f.backend, &child, "Other"));
+         assert!(!has_type(&f.backend, &child, "User"));
+     }
++    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
++    async fn blade_caller_refresh_join_keeps_notification_fence_until_shared_work_finishes() {
++        use crate::blade::refresh_drain::Admission;
++        let f = fixture().await;
++        let Admission::Leader(mut flight) = f.backend.blade_refresh_drain.enter() else {
++            panic!("isolated fixture must have no active drain");
++        };
++        let dirty = PHP.replace("User()", "Other()");
++        changed(&f.backend, &f.caller, 2, &dirty).await;
++        settled(&f, || f.backend.blade_refresh_drain.requested_for_test()).await;
++        assert!(f.backend.diag.documents.lock().configuration_changing());
++        assert_eq!(
++            f.backend
++                .with_current_semantics(|| Ok(()))
++                .unwrap_err()
++                .code,
++            tower_lsp::jsonrpc::ErrorCode::ServerError(-32801),
++            "joining a drain must not release the notification publication early"
++        );
++        while !flight.finish_pass(f.backend.drain_pending_blade_refresh_pass()) {}
++        settled(&f, || {
++            has_type(&f.backend, &f.page, "Other")
++                && !has_type(&f.backend, &f.page, "User")
++                && f.backend.blade_pending_refreshes.lock().is_empty()
++                && !f.backend.diag.documents.lock().configuration_changing()
++        })
++        .await;
++        assert_eq!(
++            f.backend.get_file_content(f.caller.as_str()).unwrap(),
++            dirty
++        );
++        assert_eq!(
++            std::fs::read_to_string(f.root.join("app/Caller.php")).unwrap(),
++            PHP
++        );
++    }
++
++    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
++    async fn blade_caller_refresh_join_recovers_pending_source_after_leader_abort() {
++        use crate::blade::refresh_drain::Admission;
++        let f = fixture().await;
++        let Admission::Leader(flight) = f.backend.blade_refresh_drain.enter() else {
++            panic!("isolated fixture must have no active drain");
++        };
++        let dirty = PHP.replace("User()", "Other()");
++        changed(&f.backend, &f.caller, 2, &dirty).await;
++        settled(&f, || f.backend.blade_refresh_drain.requested_for_test()).await;
++        assert!(f.backend.diag.documents.lock().configuration_changing());
++        drop(flight);
++        settled(&f, || {
++            has_type(&f.backend, &f.page, "Other")
++                && f.backend.blade_pending_refreshes.lock().is_empty()
++                && !f.backend.diag.documents.lock().configuration_changing()
++        })
++        .await;
++        assert_eq!(
++            f.backend.get_file_content(f.caller.as_str()).unwrap(),
++            dirty
++        );
++        assert_eq!(
++            std::fs::read_to_string(f.root.join("app/Caller.php")).unwrap(),
++            PHP
++        );
++    }
+ }
+diff --git a/src/blade/mod.rs b/src/blade/mod.rs
+index f1510c37d..ddfc26f7f 100644
+--- a/src/blade/mod.rs
++++ b/src/blade/mod.rs
+@@ -16,6 +16,7 @@ pub(crate) mod layout;
+ pub(crate) mod outline;
+ pub(crate) mod pairing;
+ pub mod preprocessor;
++pub(crate) mod refresh_drain;
+ pub(crate) mod shared_vars;
+ pub(crate) mod signature;
+ pub mod source_map;
+diff --git a/src/blade/refresh_drain.rs b/src/blade/refresh_drain.rs
+new file mode 100644
+index 000000000..29fd302c8
+--- /dev/null
++++ b/src/blade/refresh_drain.rs
+@@ -0,0 +1,212 @@
++//! Coalesce overlapping passes while each caller retains its publication guard.
++use parking_lot::{Condvar, Mutex};
++use std::sync::Arc;
++
++/// Admission shared by all workers for one backend. No source payloads are retained.
++#[derive(Default)]
++pub(crate) struct RefreshDrain {
++    state: Mutex<State>,
++}
++#[derive(Default)]
++struct State {
++    active: Option<Arc<Completion>>,
++    requested: bool,
++}
++#[derive(Default)]
++struct Completion {
++    done: Mutex<Option<bool>>,
++    changed: Condvar,
++}
++/// A producer or a caller joining an existing flight.
++pub(crate) enum Admission<'a> {
++    Leader(Flight<'a>),
++    Joined(Joined),
++}
++/// Owns a flight until completion or unwinding.
++pub(crate) struct Flight<'a> {
++    drain: &'a RefreshDrain,
++    completion: Arc<Completion>,
++    finished: bool,
++}
++/// A waiter that keeps its own notification publication alive.
++pub(crate) struct Joined(Arc<Completion>);
++impl RefreshDrain {
++    /// Observes whether another caller has joined the active flight.
++    #[cfg(test)]
++    pub(crate) fn requested_for_test(&self) -> bool {
++        self.state.lock().requested
++    }
++
++    /// Starts a producer or requests a followup from the current one.
++    pub(crate) fn enter(&self) -> Admission<'_> {
++        let mut state = self.state.lock();
++        if let Some(completion) = state.active.clone() {
++            state.requested = true;
++            return Admission::Joined(Joined(completion));
++        }
++        let completion = Arc::default();
++        state.active = Some(Arc::clone(&completion));
++        state.requested = false;
++        Admission::Leader(Flight {
++            drain: self,
++            completion,
++            finished: false,
++        })
++    }
++}
++impl Flight<'_> {
++    /// Returns true once the flight completes; joins or newer inputs need another pass.
++    pub(crate) fn finish_pass(&mut self, repeat: bool) -> bool {
++        let mut state = self.drain.state.lock();
++        let requested = std::mem::take(&mut state.requested);
++        if repeat || requested {
++            return false;
++        }
++        state.active = None;
++        self.finished = true;
++        *self.completion.done.lock() = Some(true);
++        self.completion.changed.notify_all();
++        true
++    }
++}
++impl Drop for Flight<'_> {
++    fn drop(&mut self) {
++        if !self.finished {
++            let mut state = self.drain.state.lock();
++            state.active = None;
++            state.requested = false;
++            *self.completion.done.lock() = Some(false);
++            self.completion.changed.notify_all();
++        }
++    }
++}
++impl Joined {
++    /// Waits for completion; false means the producer aborted and work needs recovery.
++    pub(crate) fn wait(self) -> bool {
++        let mut done = self.0.done.lock();
++        while done.is_none() {
++            self.0.changed.wait(&mut done);
++        }
++        done.unwrap()
++    }
++}
++#[cfg(test)]
++mod tests {
++    use super::*;
++    #[test]
++    fn overlapping_refreshes_join_and_request_one_followup() {
++        let drain = RefreshDrain::default();
++        let Admission::Leader(mut first) = drain.enter() else {
++            panic!("first admission");
++        };
++        let Admission::Joined(second) = drain.enter() else {
++            panic!("overlapping caller started a duplicate drain");
++        };
++        let Admission::Joined(third) = drain.enter() else {
++            panic!("third caller started a duplicate drain");
++        };
++        assert!(
++            !first.finish_pass(false),
++            "joined requests need one followup pass"
++        );
++        assert!(
++            first.finish_pass(false),
++            "joins coalesce instead of one pass per caller"
++        );
++        assert!(second.wait() && third.wait());
++        assert!(matches!(drain.enter(), Admission::Leader(_)));
++    }
++    #[test]
++    fn changed_inputs_require_a_followup_without_another_caller() {
++        let drain = RefreshDrain::default();
++        let Admission::Leader(mut first) = drain.enter() else {
++            panic!("leader");
++        };
++        assert!(!first.finish_pass(true));
++        assert!(first.finish_pass(false));
++    }
++    #[test]
++    fn aborted_flight_releases_joiners_for_recovery() {
++        let drain = RefreshDrain::default();
++        let Admission::Leader(first) = drain.enter() else {
++            panic!("leader");
++        };
++        let Admission::Joined(waiter) = drain.enter() else {
++            panic!("join");
++        };
++        drop(first);
++        assert!(!waiter.wait(), "aborted work must not look completed");
++        let Admission::Leader(mut next) = drain.enter() else {
++            panic!("replacement leader");
++        };
++        assert!(
++            next.finish_pass(false),
++            "aborted join requests cannot leak into new flight"
++        );
++    }
++    #[test]
++    fn independent_project_drains_do_not_share_admission() {
++        let a = RefreshDrain::default();
++        let b = RefreshDrain::default();
++        let Admission::Leader(_a) = a.enter() else {
++            panic!("a");
++        };
++        let Admission::Leader(_b) = b.enter() else {
++            panic!("b");
++        };
++    }
++    #[test]
++    fn joiner_waits_for_completion_on_another_thread() {
++        let drain = RefreshDrain::default();
++        let Admission::Leader(mut first) = drain.enter() else {
++            panic!("leader");
++        };
++        let Admission::Joined(waiter) = drain.enter() else {
++            panic!("join");
++        };
++        let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel(0);
++        let worker = std::thread::spawn(move || {
++            ready_tx.send(()).unwrap();
++            waiter.wait()
++        });
++        ready_rx.recv().unwrap();
++        assert!(!first.finish_pass(false));
++        assert!(first.finish_pass(false));
++        assert!(worker.join().unwrap());
++    }
++    #[test]
++    fn input_change_and_join_share_one_followup_pass() {
++        let drain = RefreshDrain::default();
++        let Admission::Leader(mut first) = drain.enter() else {
++            panic!("leader");
++        };
++        let Admission::Joined(joined) = drain.enter() else {
++            panic!("join");
++        };
++        assert!(!first.finish_pass(true));
++        assert!(
++            first.finish_pass(false),
++            "input change must consume the joined request in the same followup"
++        );
++        assert!(joined.wait());
++    }
++
++    #[test]
++    fn dropping_completed_flight_cannot_abort_a_newer_flight() {
++        let drain = RefreshDrain::default();
++        let Admission::Leader(mut first) = drain.enter() else {
++            panic!("leader");
++        };
++        assert!(first.finish_pass(false));
++        let Admission::Leader(mut newer) = drain.enter() else {
++            panic!("new leader");
++        };
++        drop(first);
++        let Admission::Joined(joined) = drain.enter() else {
++            panic!("completed drop cleared newer admission");
++        };
++        assert!(!newer.finish_pass(false));
++        assert!(newer.finish_pass(false));
++        assert!(joined.wait());
++    }
++}
+diff --git a/src/lib.rs b/src/lib.rs
+index 7f6029a30..c13a21210 100644
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -739,6 +739,8 @@ pub struct Backend {
+     #[cfg(test)]
+     pub(crate) blade_refresh_test_barrier:
+         Arc<Mutex<Option<blade::call_site_inference::BladeRefreshTestBarrier>>>,
++    /// Coalesces dependent-scope passes while their source owners remain fenced.
++    pub(crate) blade_refresh_drain: Arc<blade::refresh_drain::RefreshDrain>,
+     pub(crate) blade_pending_refreshes:
+         Arc<Mutex<HashMap<String, blade::call_site_inference::PendingBladeRefresh>>>,
+     pub(crate) did_change_parse_locks: Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>,
+@@ -1337,6 +1339,7 @@ impl Backend {
+             index_merge_gate: Arc::new(ReentrantMutex::new(())),
+             #[cfg(test)]
+             blade_refresh_test_barrier: Arc::new(Mutex::new(None)),
++            blade_refresh_drain: Arc::new(blade::refresh_drain::RefreshDrain::default()),
+             blade_pending_refreshes: Arc::new(Mutex::new(HashMap::new())),
+             did_change_parse_locks: Arc::new(Mutex::new(HashMap::new())),
+             whole_file_coalesce: Arc::new(WholeFileCoalesce::default()),
+@@ -2194,6 +2197,7 @@ impl Backend {
+             index_merge_gate: Arc::clone(&self.index_merge_gate),
+             #[cfg(test)]
+             blade_refresh_test_barrier: Arc::clone(&self.blade_refresh_test_barrier),
++            blade_refresh_drain: Arc::clone(&self.blade_refresh_drain),
+             blade_pending_refreshes: Arc::clone(&self.blade_pending_refreshes),
+             did_change_parse_locks: Arc::clone(&self.did_change_parse_locks),
+             whole_file_coalesce: Arc::clone(&self.whole_file_coalesce),

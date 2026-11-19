@@ -15,6 +15,43 @@ slice, commit and push it, and retain only the latest generated app. Native UI
 cases remain deferred/unverified; earlier native-first blocking checkpoints are
 historical and no longer prevent independent implementation.
 
+Client adoption slice183 (2026-11-19, accepted; engine 178 inactive):
+The OpenStorm client now has a regression for named view/data arguments,
+imported helpers, both merge-data orders and chained writes. It checks exact
+UTF-16 member origins, unsaved model dependencies, restart replay, closing
+caller/dependency overlays back to disk, and refusal to navigate a data string
+as a view name. The same client executable fails on engine 176 after its
+positional control and passes on 178. An initial fixture lookup selected an
+opening quote rather than the view-name content; both positive and negative
+coordinates were corrected before acceptance, without changing the engine or
+deadlines. Exact fixture strings pass 10 PHP syntax checks and two PSR-4
+model-loading assertions.
+
+All 63 current client cases and 57 current Host cases pass on signed engine 178,
+using workspace-emitted executables and verified Cargo fingerprints. They cover
+the new regression and existing reviewed edits, history, external conflicts,
+Unicode, Composer, builtins, middleware and restart scenarios. Retained fixture
+originals are verified after every stage. Final executable, fingerprint and
+source hashes match before cleanup; no owned test server processes remain.
+
+Fresh workspace checks pass: 5,338 tests, 238 ignored and the same 11 planned
+environment/HTTP exclusions. Workspace all-target Clippy and Rust formatting
+pass. Frontend checks pass: type checking, lint, formatting, Knip, 13,856 tests
+with 8 skipped, production build and WebKit compatibility. Bindings fidelity and
+active source/provenance checks pass. Existing frontend lint warnings remain.
+The slice182 engine source gate is reused only for the exact unchanged engine
+178 executable and recipe; no fresh engine-suite run is claimed here.
+
+Default engine 176 and the sole App 0.1.112 remain unchanged. Promotion and
+packaging of 178 will be a separate slice. Native GUI checks remain explicitly
+skipped; broader area acceptance and the older unattributed startup timeout
+remain open. Statuses stay at 67 partial and 2 debugger areas user-deferred.
+After final checks, cargo clean removed 19,469 files totaling 26.7 GiB, and
+72,595,853 bytes of frontend output were removed. Canonical sources, engines,
+provenance, Workbench, fixtures and evaluation evidence remain.
+Evidence: artifacts/checks/slice183/{named-real-v2,fixture-correction,
+fixture-syntax,gates,workspace-summary,client-host-real,final-inputs,retention}.json.
+
 View argument slice182 (2026-11-19, source/wire accepted; inactive178):
 Named view/data arguments now retain template-name navigation, completion and
 cross-file variable inference when reordered. Helper imports, facade/factory

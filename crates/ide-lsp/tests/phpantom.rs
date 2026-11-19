@@ -14,6 +14,8 @@ mod controller_guards;
 mod controller_urls;
 #[path = "fixtures/kernel_bindings.rs"]
 mod kernel_bindings;
+#[path = "fixtures/view_arguments.rs"]
+mod view_arguments;
 
 fn pos(text: &str, needle: &str) -> Pos {
     let offset = text.find(needle).unwrap();

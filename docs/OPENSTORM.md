@@ -15,6 +15,59 @@ slice, commit and push it, and retain only the latest generated app. Native UI
 cases remain deferred/unverified; earlier native-first blocking checkpoints are
 historical and no longer prevent independent implementation.
 
+Package slice193 (2026-11-19, accepted local development bundle):
+App 0.1.116 bundles the exact accepted engine 180 namespace-action fix.
+Per-registration namespace attributes preserve the enclosing router-group action
+owner, including chained modifiers and reordered named arguments. Source/protocol
+acceptance is recorded in slice191; all 65 current client and 57 Host cases passed
+in slice192. Editor-side logic, external dependencies, plugin API snapshots,
+licenses, upstream attribution, project compatibility and disabled updates remain
+unchanged. The historical candidate manifest stays inactive; the active bundled
+resource has its own matching provenance and pinned source recipe. Only the
+application and 45 local Cargo package versions change alongside those resources.
+
+Fresh source fingerprint/checksum, version/provenance tests, 13,860 frontend tests
+(eight existing skips), type/lint/format/Knip checks, Rust formatting, three
+bundled-resource tests and ide-tools all-target Clippy pass. The actual app build
+passes production frontend and Safari 15.4 startup API/bundle syntax checks.
+Existing warnings remain. The embedded server passes six fresh namespace-action
+cases, four configured-PHP route/view list and exact-target cases, and eight
+named-view setter cases. Owned server processes exit normally. The retained
+Laravel 13.37 fixture passes 121 PHP syntax files, 387 actual runtime/autoload
+assertions and exactly three intentional analyzer diagnostics; original files
+remain unchanged. All 17 browser-workbench navigation flows pass with controlled
+backend metadata/IPC. These checks remain separate from native editor acceptance,
+which is user-skipped.
+
+The build receipt pins the source revision and complete changed-source snapshot.
+All compiled-source hashes, app identity, arm64 architecture, engine checksum,
+active provenance, licenses and post-probe deep/strict ad-hoc signature match.
+Minimum macOS 13.0 is metadata only; actual macOS 13 runtime remains untested.
+Main SHA256:
+848aa2faaa43357d13dbe2629cf18068a10690386cd7e392a604762813fc3ebc.
+Engine SHA256:
+fb2444ed29c0d96430c3a141b67b8cfb7ad04e8a2104171d1908c3ccdbc0f740.
+
+The unchanged engine180 source191 full suite and both all-target Clippy results
+are explicitly reused. Slice192 full workspace/all-target Clippy and 122 actual
+client/Host cases are reused only after matching all runtime/test source hashes
+and the identical engine checksum; Cargo.lock differs only in the 45 local
+application versions. No fresh full-engine/workspace/client rerun is claimed in
+this resource/package slice. No deadline, retry or exclusion changes.
+
+Only artifacts/batches/0.1.116/OpenStorm.app remains. App 0.1.115 was removed after
+the replacement signature and build receipt passed. Staging and compiler output
+(13115 files, 7.8GiB total) were removed, followed by 72,595,911 bytes
+of frontend output. Owned app/server processes and the browser test listener are
+absent. Canonical source, engines, provenance/licenses, Workbench, fixtures and
+evaluation evidence remain. No main-app launch, installation, notarization,
+publication or automatic-update activation occurred. The older unattributed
+startup timeout and broader Laravel/platform/service acceptance remain open;
+statuses stay 67 partial and two debugger areas user-deferred.
+Evidence: artifacts/checks/slice193/{input,pipeline,wire,packaged-namespaces,
+packaged-setters,fixture-runtime,embedded,post-package,acceptance}.json and
+artifacts/batches/0.1.116/{build-receipt,retention}.json.
+
 Client adoption slice192 (2026-11-19, accepted current client/Host; inactive engine 180):
 The new real-client namespace-action regression fails on engine 179 for the intended
 missing target and passes on signed engine 180 using the same executable and Cargo

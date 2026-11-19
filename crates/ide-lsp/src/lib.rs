@@ -4600,6 +4600,9 @@ impl LspManager {
             self.close_external_project(server, &run).await;
             peer.request::<_, Value>("shutdown", (), None).await.ok();
             peer.notify("exit", ()).ok();
+            if peer.pid().is_some() {
+                peer.close_write();
+            }
             peer.closed().await;
         };
         if tokio::time::timeout(Duration::from_secs(3), graceful).await.is_err() {

@@ -2,6 +2,50 @@ use super::*;
 use std::time::Duration;
 use tokio::io::{AsyncWriteExt, duplex};
 
+#[tokio::test]
+async fn closing_write_drains_both_framings_and_still_receives_pending_responses() {
+    for framing in [Framing::ContentLength, Framing::Lines] {
+        let (a, b) = duplex(64);
+        let (ar, aw) = tokio::io::split(a);
+        let (br, mut bw) = tokio::io::split(b);
+        let peer = Peer::connect_framed(ar, aw, Arc::new(NoopHandler), framing);
+        let request_peer = peer.clone();
+        let request = tokio::spawn(async move { request_peer.request::<_, Value>("pending", (), None).await });
+        let mut reader = tokio::io::BufReader::new(br);
+        let first = framing.read(&mut reader, &mut |_| {}).await.unwrap().unwrap();
+        let first: Value = serde_json::from_slice(&first).unwrap();
+        assert_eq!(first["method"], "pending");
+        let payload = "x".repeat(4096);
+        peer.notify("queued", json!({"payload":payload})).unwrap();
+        peer.notify("exit", ()).unwrap();
+        peer.close_write();
+        peer.close_write();
+        assert!(!peer.is_closed(), "read half must remain available");
+        assert!(matches!(peer.notify("late", ()), Err(RpcError::Closed)));
+        assert!(matches!(peer.request::<_, Value>("late", (), None).await, Err(RpcError::Closed)));
+        let drain = async {
+            let queued = framing.read(&mut reader, &mut |_| {}).await.unwrap().unwrap();
+            let queued: Value = serde_json::from_slice(&queued).unwrap();
+            assert_eq!(queued["method"], "queued");
+            assert_eq!(queued["params"]["payload"], payload);
+            let exit = framing.read(&mut reader, &mut |_| {}).await.unwrap().unwrap();
+            assert_eq!(serde_json::from_slice::<Value>(&exit).unwrap()["method"], "exit");
+            assert!(framing.read(&mut reader, &mut |_| {}).await.unwrap().is_none());
+        };
+        tokio::time::timeout(Duration::from_secs(1), drain).await.unwrap();
+        framing
+            .write(
+                &mut bw,
+                &serde_json::to_vec(&json!({"jsonrpc":"2.0","id":first["id"],"result":"after eof"})).unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(tokio::time::timeout(Duration::from_secs(1), request).await.unwrap().unwrap().unwrap(), "after eof");
+        bw.shutdown().await.unwrap();
+        tokio::time::timeout(Duration::from_secs(1), peer.closed()).await.unwrap();
+    }
+}
+
 mod framing_tests {
     use super::framing::*;
     use tokio::io::BufReader;

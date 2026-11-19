@@ -15,6 +15,65 @@ slice, commit and push it, and retain only the latest generated app. Native UI
 cases remain deferred/unverified; earlier native-first blocking checkpoints are
 historical and no longer prevent independent implementation.
 
+Owned-server lifecycle slice175 (2026-11-19, source checkpoint; not packaged): preserve
+queued shutdown/exit frames, then close stdin for owned subprocesses. Previously,
+stdin stayed open until the 3-second kill fallback despite a shutdown response.
+An actual Python protocol subprocess reproduces exit without EOF; the corrected
+case receives both and exits 0. Servers that ignore EOF or never answer shutdown
+still hit the bounded kill/reap fallback. Unowned connections retain their path.
+
+Peer::close_write drains queued frames, rejects later sends and keeps responses
+readable. A 64-byte transport test covers a 4 KiB queued payload, exit, idempotent
+close and a response after EOF with both Content-Length and line framing. All 244
+original mock cases pass with the owned-process guard. The first draft also closed
+connected mocks and released a held Java restart gate; its failure is preserved,
+and the original assertion remains unchanged.
+
+The scoped runtime hashes exactly match the original EOF-only workspace/Clippy
+snapshot: 5337 passed, 237 ignored, 11 filtered across 228 groups; format, bindings fidelity
+and default173 checksum pass. Forbidden HTTP/direnv cases remain filtered. Reuse
+is explicit in slice175/scoped/reused-gates.json; no new frontend pass is claimed.
+A direct metadata observer records 16 real candidate 174 subprocesses exiting 0 and
+being reaped in approximately 8–11 ms after shutdown, versus about 3 s in 24 baseline
+observations. These are server shutdown observations, not native app-quit timing.
+
+Real-server acceptance remains incomplete. Cold initial definition timed
+out once in 10.024 s after three successful startups; 419 responses include repeated
+ContentModified while callbacks finish below 1 ms. Twelve later diagnostic startups
+pass, but do not erase the failure or prove its pending semantic producer. Faster
+restart also exposes builtin reopen cancellation after Composer's watch event:
+phpantom-stub://DateTime?project_context=1 initially selects PHP 8.3, then that
+context is retired during the reload. The engine rejects the old identity with
+ContentModified. A retry draft passed 5 mock cases but the unchanged real Host case
+still failed after 30 s. That unsuccessful draft and its tests were removed; logs,
+source and failure receipts are preserved in slice175/rejected-retry and
+builtin-identity-probe. A future engine/client identity correction must preserve
+project isolation, stale-result refusal and existing deadlines. Do not strip the
+project qualifier or count mock-only passes as acceptance.
+
+The final real-server run has 116 passes/3 failures: all 62 client cases pass; Host
+has 54 passes and 3 cancellations. Failures are builtin reopen plus
+middleware_aliases::{exclusion_dependency_publication_and_unsaved_parent_survive_restart,
+resource_exclusions_native_availability_and_unsaved_overrides_survive_restart}.
+One isolated repeat per middleware case reproduces cancellation at the first
+definition after restart (fixture lines401 and562). The producers still need
+diagnosis; do not assume the builtin identity explanation applies to them. A separate default 173 control also
+fails builtin reopen. Fresh focused tests pass: 36 RPC, 206 LSP (1 ignored), 244 mocks,
+3 owned-process cases. No assertion, deadline, capability or corpus was weakened.
+These failures prevent package promotion of this source checkpoint. Evidence:
+slice175/scoped/{acceptance,client-host,focused,default173-builtin}.json.
+
+Candidate174 remains inactive; App 111/default 173 and all 69 whole-area statuses
+stay unchanged. No app/resource promotion or native UI verification is claimed.
+Source/evidence: artifacts/checks/slice175/{input,gates,workspace-summary,
+shutdown-red,shutdown-final,cold-start-diagnosis,owned-exit-observations}.json,
+scoped/, direct-fixed/4-named/, builtin-identity-probe/ and accompanying logs.
+Cleanup after all checks: cargo clean removes 19,644 compiler files
+(29,098,903,510 logical bytes); artifacts/build is absent. The owned
+73 MB diagnostic executable is removed; source, logs and provenance remain.
+Only generated App 0.1.111 remains, with unchanged executable/engine hashes and
+strict signature verified. Evidence: slice175/{retention,diagnostic-cleanup}.json.
+
 Client/Host slice174 (2026-11-19, request budget verified; adoption incomplete):
 limit background pull diagnostics to two requests per server instance. After a
 permit becomes available, recheck the latest source, open state, generation and

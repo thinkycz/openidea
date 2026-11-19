@@ -251,7 +251,7 @@ impl Handler for NoopHandler {
 type Pending = HashMap<i64, oneshot::Sender<Result<Value, RpcError>>>;
 
 struct Inner {
-    out: mpsc::UnboundedSender<Vec<u8>>,
+    out: Mutex<Option<mpsc::UnboundedSender<Vec<u8>>>>,
     pending: Mutex<Pending>,
     next_id: AtomicI64,
     /// Set once the transport is gone; new requests fail fast.
@@ -275,7 +275,7 @@ impl Inner {
         }
         let body = serde_json::to_vec(value).map_err(|e| RpcError::Protocol(e.to_string()))?;
         tracing::trace!(target: "ide_jsonrpc::wire", "--> {}", String::from_utf8_lossy(&body));
-        self.out.send(body).map_err(|_| RpcError::Closed)
+        self.out.lock().as_ref().ok_or(RpcError::Closed)?.send(body).map_err(|_| RpcError::Closed)
     }
 
     /// Fails every in-flight request and refuses new ones.
@@ -523,7 +523,7 @@ impl Peer {
         let (out_tx, mut out_rx) = mpsc::unbounded_channel::<Vec<u8>>();
         let (closed, _) = watch::channel(None);
         let inner = Arc::new(Inner {
-            out: out_tx,
+            out: Mutex::new(Some(out_tx)),
             pending: Mutex::new(HashMap::new()),
             next_id: AtomicI64::new(1),
             transport_closed: AtomicBool::new(false),
@@ -704,6 +704,12 @@ impl Peer {
             msg["params"] = params;
         }
         self.inner.send_value(&msg)
+    }
+
+    /// Finishes queued messages and closes the write half, keeping incoming responses active.
+    /// Further requests and notifications fail with [`RpcError::Closed`].
+    pub fn close_write(&self) {
+        self.inner.out.lock().take();
     }
 
     /// Resolves when the connection closes (process exit or EOF), with the exit code if known.

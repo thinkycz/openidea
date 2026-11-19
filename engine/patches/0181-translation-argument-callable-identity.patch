@@ -1,0 +1,175 @@
+diff --git a/docs/CHANGELOG.md b/docs/CHANGELOG.md
+index f70a57b025daca5eeaccdb22ae3ecd0c02fad175..06b8a17945a22403fdce07ac73edb2eb5cb6933c 100644
+--- a/docs/CHANGELOG.md
++++ b/docs/CHANGELOG.md
+@@ -1,3 +1,12 @@
++## OpenStorm .181 translation argument callable identity
++
++Locale and replacement-placeholder completion now shares the key-navigation
++callable identity proof. Imported global helper aliases keep their canonical
++parameter roles; namespaced local functions, foreign function imports and
++unrelated classes named Lang cannot receive Laravel argument suggestions.
++Existing positional/named binding and full-token UTF-16 edits remain unchanged.
++Contributed by @thinkycz.
++
+ ## OpenStorm .172 selected builder middleware alias priority
+ 
+ Literal alias maps in the selected standard builder's final Middleware callback
+diff --git a/src/completion/laravel_translation_args.rs b/src/completion/laravel_translation_args.rs
+index fa2e478159af0e01714d81a9b9a6ed46a88f22d7..1ae97c603b22c3ab191ab76bc79b7adb42e1582b 100644
+--- a/src/completion/laravel_translation_args.rs
++++ b/src/completion/laravel_translation_args.rs
+@@ -10,7 +10,7 @@ use tower_lsp::lsp_types::*;
+ use crate::Backend;
+ use crate::atom::literal_bytes_to_str;
+ use crate::completion::source::code_context::{CodeContext, OpenBracket};
+-use crate::completion::source::helpers::{split_trailing_ident, trailing_class_name};
++use crate::completion::source::helpers::split_trailing_ident;
+ use crate::text_position::{offset_to_position, position_to_offset};
+ use crate::types::FileContext;
+ 
+@@ -20,35 +20,31 @@ struct TranslationCall {
+ }
+ 
+ fn translation_call(
++    backend: &Backend,
+     content: &str,
+     paren: &OpenBracket,
+     ctx: &FileContext,
+ ) -> Option<TranslationCall> {
+-    let (name, _) = split_trailing_ident(&content[..paren.code_before]);
+-    let facade = if let Some(operator) = paren.callee_operator {
++    let callable = &content[..paren.code_before];
++    let (facade, name) = if let Some(operator) = paren.callee_operator {
+         if !operator.is_static {
+             return None;
+         }
+-        let receiver = trailing_class_name(&content[..operator.code_before]);
+-        let resolved =
+-            ctx.resolve_name_at(receiver, (operator.code_before - receiver.len()) as u32);
+-        if !resolved
+-            .trim_start_matches('\\')
+-            .eq_ignore_ascii_case("Illuminate\\Support\\Facades\\Lang")
+-            && !(receiver
+-                .trim_start_matches('\\')
+-                .eq_ignore_ascii_case("Lang")
+-                && !ctx.use_map.contains_key("Lang"))
+-        {
++        let role = backend.laravel_key_call_role(content, callable, ctx)?;
++        if !matches!(role.kind, crate::symbol_map::LaravelStringKind::Trans) {
+             return None;
+         }
+-        true
++        (true, split_trailing_ident(callable).0)
+     } else {
+-        let function = trailing_class_name(&content[..paren.code_before]);
+-        if function.trim_start_matches('\\').contains('\\') {
+-            return None;
+-        }
+-        false
++        (
++            false,
++            backend.global_laravel_helper(
++                content,
++                callable,
++                ctx,
++                &["__", "trans", "trans_choice"],
++            )?,
++        )
+     };
+     match (facade, name.to_ascii_lowercase().as_str()) {
+         (false, "__" | "trans") | (true, "get") => Some(TranslationCall {
+@@ -181,7 +177,7 @@ impl Backend {
+     ) -> Option<CompletionResponse> {
+         let (quote, quote_char) = code.open_string?;
+         let paren = code.enclosing_paren()?;
+-        let call = translation_call(content, paren, ctx)?;
++        let call = translation_call(self, content, paren, ctx)?;
+         let array = code.nested_pair(b'[', b'(').is_some();
+         if array {
+             if !matches!(code.last_code_byte(), Some(b'[' | b',')) {
+diff --git a/tests/integration/laravel_translation_keys.rs b/tests/integration/laravel_translation_keys.rs
+index 9ddbbe7719110f380d07def3e2bf989227ed6216..7d2a7ff496d9dc4b08af4c208a3a685631a777fd 100644
+--- a/tests/integration/laravel_translation_keys.rs
++++ b/tests/integration/laravel_translation_keys.rs
+@@ -1147,3 +1147,80 @@ async fn the_choice_directive_reaches_the_line() {
+         .unwrap_or_else(|| panic!("expected lang/en/messages.php, got {found:?}"));
+     assert_eq!(location.range.start.line, 3);
+ }
++
++async fn translation_argument_identity_case(marked: &str, detail: &str, expected: &[&str]) {
++    use crate::common::{complete_at_opened, position_after};
++    let cursor = marked.find('|').unwrap();
++    let content = marked.replacen('|', "", 1);
++    let (backend, _dir, uri) = create_initialized_psr4_workspace(
++        r#"{"require":{"laravel/framework":"13.37.0"},"autoload":{"psr-4":{"App\\":"app/"}}}"#,
++        &[
++            ("app/Demo.php", &content),
++            (
++                "lang/en/messages.php",
++                "<?php return ['hello'=>'Hello :name :count'];",
++            ),
++            (
++                "lang/fr/messages.php",
++                "<?php return ['hello'=>'Bonjour :name :count'];",
++            ),
++        ],
++        "app/Demo.php",
++    )
++    .await;
++    let at = position_after(&content, &content[..cursor]);
++    let items = complete_at_opened(&backend, &uri, at.line, at.character).await;
++    let relevant: Vec<_> = items
++        .iter()
++        .filter(|item| item.detail.as_deref() == Some(detail))
++        .collect();
++    let mut labels: Vec<_> = relevant.iter().map(|item| item.label.as_str()).collect();
++    labels.sort_unstable();
++    assert_eq!(
++        labels, expected,
++        "translation argument callable identity: {marked}; all items: {items:?}"
++    );
++    let start = content[..cursor].rfind('\'').unwrap() + 1;
++    let end = start + content[start..].find('\'').unwrap();
++    for item in relevant {
++        let Some(CompletionTextEdit::Edit(edit)) = &item.text_edit else {
++            panic!("translation argument must use a text edit")
++        };
++        assert_eq!(
++            edit.range,
++            Range::new(
++                position_after(&content, &content[..start]),
++                position_after(&content, &content[..end])
++            ),
++            "UTF-16 full-token range after emoji: {marked}"
++        );
++        assert_eq!(edit.new_text, item.label);
++        assert!(
++            item.additional_text_edits
++                .as_ref()
++                .is_none_or(Vec::is_empty)
++        );
++    }
++}
++
++#[tokio::test]
++async fn translation_argument_completion_follows_imported_helper_identity() {
++    translation_argument_identity_case(r###"<?php namespace App\Case0; use function trans as localize; /* 😀 */ return localize('messages.hello', [], 'e|n');"###, "Translation locale", &["en"]).await;
++    translation_argument_identity_case(r###"<?php namespace App\Case1; use function trans as localize; /* 😀 */ return localize('messages.hello', ['n|ame'=>'Ada']);"###, "Translation placeholder", &["name"]).await;
++    translation_argument_identity_case(r###"<?php namespace App\Case2; use function trans_choice as choose; /* 😀 */ return choose('messages.hello', 2, [], 'e|n');"###, "Translation locale", &["en"]).await;
++    translation_argument_identity_case(r###"<?php namespace App\Case3; use function trans_choice as choose; /* 😀 */ return choose('messages.hello', 2, ['n|ame'=>'Ada']);"###, "Translation placeholder", &["name"]).await;
++    translation_argument_identity_case(r###"<?php namespace App\Case4; use Illuminate\Support\Facades\Lang as L; /* 😀 */ return L::get('messages.hello', [], 'e|n');"###, "Translation locale", &["en"]).await;
++    translation_argument_identity_case(
++        r###"<?php namespace App\Case8; /* 😀 */ return trans('messages.hello', [], 'e|n');"###,
++        "Translation locale",
++        &["en"],
++    )
++    .await;
++}
++
++#[tokio::test]
++async fn translation_argument_completion_rejects_foreign_helper_and_facade_identity() {
++    translation_argument_identity_case(r###"<?php namespace App\Case5; function trans($key,$replace=[],$locale=null){return 'foreign';} /* 😀 */ return trans('messages.hello', [], 'e|n');"###, "Translation locale", &[]).await;
++    translation_argument_identity_case(r###"<?php namespace Foreign {function trans($key,$replace=[],$locale=null){return 'foreign';}} namespace App\Case6 {use function Foreign\trans; /* 😀 */ return trans('messages.hello', [], 'e|n');}"###, "Translation locale", &[]).await;
++    translation_argument_identity_case(r###"<?php namespace App\Case7; class Lang {public static function get($key,$replace=[],$locale=null){return 'foreign';}} /* 😀 */ return Lang::get('messages.hello', [], 'e|n');"###, "Translation locale", &[]).await;
++}

@@ -15,6 +15,64 @@ slice, commit and push it, and retain only the latest generated app. Native UI
 cases remain deferred/unverified; earlier native-first blocking checkpoints are
 historical and no longer prevent independent implementation.
 
+Translation identity slice194 (2026-11-19, source/protocol accepted; inactive engine 181):
+Translation locale and replacement-placeholder completion now uses the same
+semantic callable proof as key navigation. Imported aliases of trans and
+trans_choice retain canonical parameter roles. Namespaced local functions,
+foreign function imports and unrelated classes named Lang receive no Laravel
+argument suggestions. Existing argument binding and full-token edits remain.
+Typed translator receivers, wider unfinished/ambiguous call forms and broader
+locale/project-change/privacy acceptance remain open; no whole-area pass.
+
+The signed engine 180 baseline passes only two of nine completion fixtures:
+four imported helper cases are missed and three foreign-call cases receive
+incorrect locales. All nine isolated sources pass PHP syntax and actual
+Laravel 13.37 runtime assertions. Caller namespaces are distinct to prevent
+indexed declarations from shadowing another fixture's positive control; the
+initial shared-namespace probe is retained separately. Two public integration
+regressions fail on unchanged engine 180 for the intended callable-identity reason.
+After the shared proof is reused, both pass, including exact full-token UTF-16
+ranges after emoji and no additional import edits. Existing translation-argument
+checks pass 5 tests and the translation-key suite passes
+43 tests. The workcopy's cargo fmt --all command encounters
+vendored-workspace metadata; direct changed-file formatting and subsequent normal
+package formatting pass without altering workspace configuration.
+
+Frozen patch replay matches every source file and symlink. Full engine gates
+pass 18,700 primary tests, 17 ignored and two bounded child
+groups; both all-target Clippy configurations, formatting, source fingerprint and
+optimized build pass. Signed engine 181 then passes nine fresh stdio completion cases,
+nine syntax/runtime checks and exactly three intentional diagnostics on the
+unchanged Laravel reference fixture. Server exit, fixture originals and engine
+hashes are verified. Raw SHA256:
+a2fb861c836bfa0c88b78dced2c5006a6429987b23005c29fbe96c7c12e9044d.
+Signed SHA256:
+54c14f2cd21c0f4e3d9623a1f8d7cbd2a0a222c3a1f419b68acb05dd690fb698.
+Patch SHA256:
+c7ea2258a1111cfa60190f0a28f59466a4461ca616f17ec17194a07499399f1a.
+
+Root application/IPC/editor logic and active resources remain byte-identical to
+the accepted App 0.1.116 snapshot; slice193 frontend/package/resource checks and
+slice192 workspace/all-target Clippy for unchanged application logic are explicitly
+reused. No fresh root full-workspace/frontend suite or actual current client/Host
+run against engine 181 is claimed. Current client adoption and promotion/package remain
+separate pending slices. Candidate 181 stays inactive; native GUI remains skipped.
+
+Cleanup: Removed 8228 files, 2.2GiB total; 35,932,641 bytes of
+duplicate work-source content removed after canonical replay/hash proofs. Only
+App 0.1.116 remains, with unchanged main/engine hashes and deep/strict signature.
+Source/pins, canonical engines, provenance/licenses, Workbench, fixtures and
+evaluation evidence remain. The broader 69-area/platform/service acceptance and
+older startup-timeout attribution remain open. Statuses stay 67 partial and two
+debugger areas user-deferred.
+Reproduce source acquisition with
+`python3 scripts/prepare-phpantom.py --pin engine/candidates/0.11.1-openstorm.181-source.json`
+and the optimized executable with the same pin passed to `scripts/build-phpantom.py`.
+
+Evidence: artifacts/checks/slice194/{baseline,fixture-isolation,format-scope,
+red,focused,freeze,engine-gates,engine-test-summary,wire181,root-reuse,
+post-source,retention,acceptance}.json.
+
 Package slice193 (2026-11-19, accepted local development bundle):
 App 0.1.116 bundles the exact accepted engine 180 namespace-action fix.
 Per-registration namespace attributes preserve the enclosing router-group action

@@ -15,6 +15,52 @@ slice, commit and push it, and retain only the latest generated app. Native UI
 cases remain deferred/unverified; earlier native-first blocking checkpoints are
 historical and no longer prevent independent implementation.
 
+Client/Host slice 170 (2026-11-19, inactive PHPantom 173 accepted): complete the
+preserved regression draft after upstream merge cbf5defd6. Checked rename succeeds
+with dirty nested Composer documents still open across all four callback variants,
+including a second plan after dirty-source replay and server restart. Actual Host
+cases retain shadowed physical-reference guards, stale callback dependencies,
+external-file conflicts, reviewed class moves and shared undo/redo. Unrelated
+nested buffers remain dirty and byte-identical on disk throughout application and
+history restoration; undo restores the callback's unsaved buffer and original disk
+as separate states.
+
+The modern builder fixture now declares Laravel 13. Its 11 PHP syntax checks and
+both PSR-4 roots pass preflight. Direct protocol probes verify 172 refusal versus
+173 success with the same dirty nested witness. Actual OpenStorm controls also
+fail at the expected behavior on 171 (callback definition) and 172 (dirty nested
+rename stays unavailable), then pass both Host and both client cases on 173.
+These controls are separate diagnostics, not extra passing corpus cases.
+
+All 116 actual client/Host regressions pass using the exact newly emitted
+workspace executables: 1 language-level, 2 URL, 10 guarded edits, 40 completion/
+navigation/history, 2 handler and 61 client cases. This includes retained real
+Laravel fixtures, Composer/autoload helpers, builtins, Eloquent, routes, views,
+config/translations, cancellation, unsaved dependency freshness and restart.
+Executable/fingerprint/source hashes and all recorded fixture originals remain
+unchanged. No matching owned test/engine process remains.
+
+Serialized workspace tests pass 5,332 cases with 234 ignored and 11 documented
+HTTP/direnv filters across 227 result groups. Full workspace all-target Clippy
+with warnings denied, Rust formatting, generated binding/snapshot fidelity and
+default-engine checksum checks pass. Frontend/production inputs are unchanged
+from cbf5defd6; reuse its 13,837 frontend passes/8 skipped, 20 browser cases,
+production/Safari build and typecheck/lint/format/knip evidence. New PHP fixtures
+contain no environment files; prior synthetic-fixture approvals/exclusions remain.
+Native checks remain user-skipped; no native/real-service parity is claimed.
+
+Bundled PHPantom 171 and sole signed App 0.1.110 remain unchanged. Candidate 173
+is ready for a separate promotion/package slice; App 110 does not contain the
+latest upstream merge or the callback/witness fixes. Cross-graph reference
+aggregation remains unsupported/refused (F28); wider L63/L64 lifecycle, native,
+platform and performance acceptance remain open. Retain only the active compiler
+cache for the immediately following package build, whose recipe removes old app,
+staging, compiler and dist output after verification. Commit/push this source slice
+before changing the default pin/version. All 69 areas remain 67 partial and 2
+user-deferred. Evidence: artifacts/checks/slice170/{workspace-summary,gates,
+fixture-preflight,controls-host,controls-client,client-host,frontend-reuse,
+acceptance,delivery}.json and retained logs.
+
 Upstream merge checkpoint (2026-11-19, automated acceptance verified): integrate
 189 commits from l0ng-ai/openidea through
 958b3db122f698df56eb3839ea55aaba754401f8. Includes editor/Git fixes, run/build

@@ -2,8 +2,8 @@ use super::*;
 use futures::FutureExt;
 
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "requires PHPantom172 and retained real Laravel13.37 builder-callback fixtures"]
-async fn builder_callback_client_tracks_effective_aliases_and_preserves_nested_source_refusal() {
+#[ignore = "requires PHPantom173 and retained real Laravel13.37 builder-callback fixtures"]
+async fn builder_callback_client_tracks_effective_aliases_with_dirty_nested_sources() {
     let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
     let engine = std::env::var_os("OPENSTORM_TEST_PHPANTOM_BIN")
         .map(PathBuf::from)
@@ -41,9 +41,6 @@ async fn builder_callback_client_tracks_effective_aliases_and_preserves_nested_s
             let servers = mgr.servers();
             assert!(servers.iter().any(|server| *server.root == root), "{servers:?}");
             assert_eq!(servers.len(), 1, "outermost Composer root intentionally shares one transport: {servers:?}");
-            if variant != "basic" {
-                mgr.did_close(nested_doc);
-            }
             let position = pos(source, "builder.audit");
             let found = mgr.goto(doc, position, GotoKind::Definition).await.unwrap();
             assert_eq!(found.len(), 1, "selected callback must retire initial Kernel aliases: {variant}: {found:?}");
@@ -60,16 +57,10 @@ async fn builder_callback_client_tracks_effective_aliases_and_preserves_nested_s
             assert!(hover.contents.value.contains("AuditRequests") && !hover.contents.value.contains("BuilderAudit") && !hover.contents.value.contains("incomplete"), "{hover:?}");
             let overlay = format!("{class}// Unsaved shadowed middleware documentation.\n");
             replace(&mgr, class_doc, 2, class, &overlay);
-            if variant == "basic" {
-                let nested_dirty = format!("{}\n// Unsaved nested Composer dependency.\n", originals[4].1);
-                replace(&mgr, nested_doc, 2, &originals[4].1, &nested_dirty);
-                let refused = mgr.rename(class_doc, pos(class, "BuilderAudit {}"), "ReviewedCallbackAudit".into(), Default::default()).await.unwrap_err();
-                assert_eq!(refused.kind, ide_core::error::ErrorKind::Unavailable);
-                assert_eq!(refused.message, "PHP project is still updating. Retry Rename after indexing finishes.");
-                mgr.did_close(nested_doc);
-            }
+            let nested_dirty = format!("{}\n// Unsaved nested Composer dependency.\n", originals[4].1);
+            replace(&mgr, nested_doc, 2, &originals[4].1, &nested_dirty);
             let rename = mgr.rename(class_doc, pos(class, "BuilderAudit {}"), "ReviewedCallbackAudit".into(), Default::default()).await.unwrap();
-            assert!(rename.incomplete.is_none(), "closing the foreign transport document must restore the main-project plan: {rename:?}");
+            assert!(rename.incomplete.is_none(), "dirty unrelated Composer sources must not block the main-project plan: {rename:?}");
             assert!(rename.edit.files.iter().any(|edit| matches!(edit, ide_core::FileEdit::Edit { path, edits, .. } if **path == kernel && edits.iter().any(|edit| edit.new_text.contains("ReviewedCallbackAudit")))), "shadowed Kernel references must remain in checked edits: {rename:?}");
             assert!(!rename.edit.files.iter().any(|edit| matches!(edit, ide_core::FileEdit::Edit { path, .. } if **path == nested)), "{rename:?}");
             let changed = initial.replace("AuditRequests::class", "BuilderAudit::class");
@@ -86,6 +77,9 @@ async fn builder_callback_client_tracks_effective_aliases_and_preserves_nested_s
                 let hover = mgr.hover(doc, position, Default::default()).await.unwrap().unwrap();
                 assert!(hover.contents.value.contains("BuilderAudit") && !hover.contents.value.contains("AuditRequests"), "dirty callback must determine hover after restart: {hover:?}");
             }
+            let replayed = mgr.rename(class_doc, pos(class, "BuilderAudit {}"), "ReviewedCallbackAudit".into(), Default::default()).await.unwrap();
+            assert!(replayed.incomplete.is_none(), "restart must replay all dirty transport witnesses: {replayed:?}");
+            assert!(replayed.edit.files.iter().any(|edit| matches!(edit, ide_core::FileEdit::Edit { path, .. } if **path == bootstrap)), "dirty callback references must enter the restarted plan: {replayed:?}");
             replace(&mgr, config, 3, &changed, initial);
             let restored = mgr.hover(doc, position, Default::default()).await.unwrap().unwrap();
             assert!(restored.contents.value.contains("AuditRequests") && !restored.contents.value.contains("BuilderAudit"), "{restored:?}");

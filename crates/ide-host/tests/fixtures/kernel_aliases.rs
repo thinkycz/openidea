@@ -1037,3 +1037,213 @@ async fn kernel_priority_shadowed_class_strings_stay_guarded_after_effective_nav
     .await;
     f.finish(outcome).await;
 }
+
+const CALLBACK_BOOTSTRAP: &str = r#"<?php
+use Illuminate\Foundation\Application;
+use Illuminate\Foundation\Configuration\Middleware;
+$app=Application::configure()->withMiddleware(function(Middleware $middleware) {
+    $middleware->alias([/* 😀 chosen */ "au\x64ited"=>\App\Http\Middleware\Trace::class]);
+})->create();
+$app->singleton(\Illuminate\Contracts\Http\Kernel::class,\App\Http\Kernel::class);
+return $app;
+"#;
+const CALLBACK_MIDDLEWARE: &str = r"<?php namespace Illuminate\Foundation\Configuration;
+class Middleware {
+ protected $customAliases=[];
+ public function alias(array $aliases): static {$this->customAliases=array_merge($this->customAliases,$aliases);return $this;}
+ protected function defaultAliases() {return [];}
+ public function getMiddlewareAliases() {return array_merge($this->defaultAliases(),$this->customAliases);}
+}
+";
+
+fn callback_fixture() -> (Fixture, String) {
+    let kernel = kernel_priority_source();
+    let builder = BUILDER.replace("    public function create()", "    public function withMiddleware(?callable $callback=null): static {return $this;}\n    public function create()");
+    let framework = PRIORITY_BASE.replace("protected function syncMiddlewareToRouter() {}", "protected function syncMiddlewareToRouter() {} public function setMiddlewareAliases(array $aliases) {$this->middlewareAliases=$aliases;$this->syncMiddlewareToRouter();return $this;}");
+    let f = kernel_priority_fixture(
+        &kernel,
+        &[
+            ("composer.json".into(), r#"{"require":{"php":"^8.3","laravel/framework":"^13.0"},"autoload":{"psr-4":{"App\\":"app/","Illuminate\\":"framework/"}}}"#.into()),
+            ("bootstrap/app.php".into(), CALLBACK_BOOTSTRAP.into()),
+            ("framework/Foundation/Application.php".into(), BUILDER_APP.into()),
+            ("framework/Foundation/Configuration/ApplicationBuilder.php".into(), builder),
+            ("framework/Foundation/Configuration/Middleware.php".into(), CALLBACK_MIDDLEWARE.into()),
+            ("framework/Foundation/Http/Kernel.php".into(), framework),
+            (
+                "modules/peer/composer.json".into(),
+                r#"{"name":"fixture/peer","autoload":{"psr-4":{"Peer\\":"src/"}}}"#.into(),
+            ),
+            ("modules/peer/src/Peer.php".into(), "<?php namespace Peer; class Peer {}\n".into()),
+        ],
+    );
+    (f, kernel)
+}
+
+async fn callback_definition(f: &Fixture, expected: &str, rejected: &str) {
+    let found = definitions(f).await;
+    assert_eq!(found.len(), 1, "managed callback must retire shadowed Kernel declarations: {found:?}");
+    assert_eq!(*found[0].path, f.root.join("bootstrap/app.php"));
+    assert_eq!(found[0].range.start, cursor(CALLBACK_BOOTSTRAP, r"au\x64ited"));
+    let hover = ide_host::ops::lsp::lsp_hover(&f.host, "main", RequestId::next(), f.doc, cursor(CALLER, r"64ited"))
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        hover.contents.value.contains(expected)
+            && hover.contents.value.contains("bootstrap/app.php")
+            && !hover.contents.value.contains(rejected)
+            && !hover.contents.value.contains("incomplete"),
+        "{hover:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires PHPantom173 and owned PHP syntax-check executable"]
+async fn builder_callback_checked_edits_preserve_shadowed_sources_conflicts_and_history() {
+    let (f, kernel) = callback_fixture();
+    let readiness = std::panic::AssertUnwindSafe(async {
+        callback_definition(&f, "App\\Http\\Middleware\\Trace", "App\\Http\\Middleware\\Audit").await;
+        let refs = ide_host::ops::lsp::lsp_references(
+            &f.host,
+            "main",
+            RequestId::next(),
+            f.doc,
+            cursor(CALLER, r"64ited"),
+            true,
+            true,
+            true,
+            ide_host::ops::Channel::new(|_| {}),
+        )
+        .await
+        .unwrap();
+        assert!(refs.incomplete.is_none(), "{refs:?}");
+        assert_eq!(refs.locations.len(), 2, "{refs:?}");
+        assert!(refs.locations.iter().all(|location| location.range.end.col - location.range.start.col == 10));
+    })
+    .catch_unwind()
+    .await;
+    if readiness.is_err() {
+        f.finish(readiness).await;
+        return;
+    }
+    checked_rename_case(f, &kernel, "app/Http/Kernel.php").await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires PHPantom173 and owned PHP syntax-check executable"]
+async fn builder_callback_dirty_dependencies_retire_plans_and_keep_nested_buffers_through_history() {
+    let (f, _) = callback_fixture();
+    let outcome = std::panic::AssertUnwindSafe(async {
+        callback_definition(&f, "App\\Http\\Middleware\\Trace", "App\\Http\\Middleware\\Audit").await;
+        let bootstrap = f.root.join("bootstrap/app.php");
+        let config = f.project.documents.open(&bootstrap).unwrap();
+        let foreign = f.root.join("modules/peer/src/Peer.php");
+        let original = std::fs::read_to_string(&foreign).unwrap();
+        let nested = f.project.documents.open(&foreign).unwrap();
+        let nested_dirty = format!("{original}// Unsaved independent package.\n");
+        f.project.documents.replace_all(nested.id, &nested_dirty).unwrap();
+        assert!(
+            !ide_host::ops::lsp::lsp_goto(
+                &f.host,
+                "main",
+                nested.id,
+                cursor(&original, "Peer {}"),
+                GotoKind::Definition
+            )
+            .await
+            .unwrap()
+            .is_empty()
+        );
+        assert_eq!(f.project.lsp.servers().len(), 1);
+        let old = f.root.join("app/Http/Middleware/Audit.php");
+        let new = f.root.join("app/Http/Middleware/Auditor.php");
+        let class = f.project.documents.open(&old).unwrap();
+        let overlay = format!("{CLASS}// Unsaved callback middleware.\n");
+        f.project.documents.replace_all(class.id, &overlay).unwrap();
+        let plan = ide_host::ops::lsp::lsp_rename(
+            &f.host,
+            "main",
+            RequestId::next(),
+            class.id,
+            cursor(CLASS, "Audit {}"),
+            "Auditor".into(),
+        )
+        .await
+        .unwrap()
+        .edit;
+        assert_eq!(plan.guard.as_ref().unwrap().documents_revision, f.project.documents.edit_revision().unwrap());
+        assert!(
+            !plan
+                .files
+                .iter()
+                .any(|edit| matches!(edit,ide_core::FileEdit::Edit{path,..} if **path==bootstrap || **path==foreign)),
+            "dependency must be outside the first plan targets: {plan:?}"
+        );
+        let changed = CALLBACK_BOOTSTRAP.replace("Trace::class", "Audit::class");
+        Fixture::lint(&changed);
+        f.project.documents.replace_all(config.id, &changed).unwrap();
+        assert!(
+            ide_host::ops::lsp::apply_workspace_edit(&f.host, "main", plan).await.is_err(),
+            "off-target callback dependency must retire the reviewed plan"
+        );
+        assert_eq!(f.project.documents.snapshot(class.id).unwrap().text, overlay);
+        assert_eq!(std::fs::read_to_string(&old).unwrap(), CLASS);
+        assert!(!new.exists());
+        callback_definition(&f, "App\\Http\\Middleware\\Audit", "App\\Http\\Middleware\\Trace").await;
+        f.project.lsp.restart(f.project.lsp.servers()[0].id).await.unwrap();
+        callback_definition(&f, "App\\Http\\Middleware\\Audit", "App\\Http\\Middleware\\Trace").await;
+        let plan = ide_host::ops::lsp::lsp_rename(
+            &f.host,
+            "main",
+            RequestId::next(),
+            class.id,
+            cursor(CLASS, "Audit {}"),
+            "Auditor".into(),
+        )
+        .await
+        .unwrap()
+        .edit;
+        assert!(
+            plan.files.iter().any(|edit| matches!(edit,ide_core::FileEdit::Edit{path,..} if **path==bootstrap)),
+            "dirty callback must enter the fresh plan: {plan:?}"
+        );
+        ide_host::ops::lsp::apply_workspace_edit(&f.host, "main", plan).await.unwrap();
+        let renamed = f.project.documents.snapshot(class.id).unwrap();
+        assert!(renamed.text.contains("class Auditor") && renamed.text.contains("Unsaved callback middleware"));
+        assert!(!old.exists());
+        assert_eq!(std::fs::read_to_string(&new).unwrap(), renamed.text);
+        let updated = f.project.documents.snapshot(config.id).unwrap();
+        assert!(updated.text.contains("Middleware\\Auditor::class"));
+        Fixture::lint(&updated.text);
+        assert_eq!(std::fs::read_to_string(&bootstrap).unwrap(), updated.text);
+        let group = f
+            .events
+            .lock()
+            .unwrap()
+            .iter()
+            .rev()
+            .find_map(|event| match event {
+                ide_core::IdeEvent::DocPatched { history: Some(history), .. } => Some(history.group.clone()),
+                _ => None,
+            })
+            .expect("callback rename must share history");
+        for redo in [false, true] {
+            ide_host::ops::lsp::restore_reviewed_edit(&f.host, "main", group.clone(), redo).await.unwrap();
+            let restored = f.project.documents.snapshot(config.id).unwrap();
+            assert_eq!(restored.text, if redo { updated.text.as_str() } else { changed.as_str() });
+            assert_eq!(restored.dirty, !redo);
+            assert_eq!(
+                std::fs::read_to_string(&bootstrap).unwrap(),
+                if redo { updated.text.as_str() } else { CALLBACK_BOOTSTRAP }
+            );
+            assert_eq!(f.project.documents.by_path(if redo { &new } else { &old }), Some(class.id));
+            let peer = f.project.documents.snapshot(nested.id).unwrap();
+            assert_eq!(peer.text, nested_dirty);
+            assert!(peer.dirty);
+            assert_eq!(std::fs::read_to_string(&foreign).unwrap(), original);
+        }
+    })
+    .catch_unwind()
+    .await;
+    f.finish(outcome).await;
+}

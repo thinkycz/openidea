@@ -15,6 +15,46 @@ slice, commit and push it, and retain only the latest generated app. Native UI
 cases remain deferred/unverified; earlier native-first blocking checkpoints are
 historical and no longer prevent independent implementation.
 
+Client adoption slice186 (2026-11-19, accepted; engine 179 inactive):
+The actual OpenStorm client regression now covers eight earlier view-data forms
+and eight chained setter forms: reordered and mixed key/value arguments, array
+data with an ignored value, earlier-data replacement, chained replacement and
+case-insensitive with(). All 16 forms check view targets and exact UTF-16 member
+origins. Each of the eight forms using the Other model checks unsaved dependency changes,
+server restart replay, and closing the dependency back to disk. Closing the
+caller restores its original disk scope. Wrong-role strings remain non-targets.
+The same client executable fails on 178 at the first new setter after all eight
+earlier controls, and passes on 179. No deadline or retry changes were made.
+Exact fixture strings pass 18 PHP syntax checks and two PSR-4 model assertions.
+
+All 63 current client cases and 57 current Host cases pass on signed engine 179.
+They use workspace-emitted executables with verified Cargo fingerprints. Existing reviewed
+edits, history, external conflicts, Unicode, Composer, builtins, middleware and
+restart cases remain included. Retained fixture originals are checked after
+every stage. Executable, fingerprint and source hashes match before cleanup;
+no owned test server processes remain.
+
+Fresh workspace checks pass: 5,338 tests, 238 ignored and 11 existing planned
+exclusions. Workspace all-target Clippy,
+Rust formatting, frontend types/lint/format/Knip/full tests and production/WebKit
+build, bindings fidelity and active-source/provenance checks pass. Existing lint
+warnings remain. The slice185 engine source gates are reused for unchanged engine 179:
+18,696 primary passes, 17 ignored, two bounded children and both Clippy variants.
+No fresh engine-suite run is claimed here. The initial frontend suite had one
+five-second timeout in the existing Vite port-selection test (13,855 passed).
+The unchanged isolated test group passed, then the unchanged full-suite retry
+passed with 13,856 tests passing and 8 skipped. No test timeout, exclusion or source changed; the initial failure is
+retained and its timing cause remains unattributed.
+
+Default engine 178 and sole App 0.1.113 remain unchanged. Promotion and packaging
+are a separate next slice; native GUI checks remain user-skipped. Broader 69-area
+acceptance and older startup-timeout attribution remain open. Statuses stay 67
+partial and two debugger areas user-deferred. Cargo clean removed 19,469 files
+totaling 26.7 GiB, followed by 72,595,853 bytes of frontend output. Canonical sources,
+engines, provenance, Workbench, fixtures and evaluation evidence remain.
+Evidence: artifacts/checks/slice186/{fixture-syntax,named-real,gates,
+gates-recovered,workspace-summary,client-host-real,final-inputs,retention}.json.
+
 View setter slice185 (2026-11-19, source/protocol accepted; inactive engine 179):
 Chained View::with() calls now bind key and value by their PHP parameter roles.
 Reordered named setters retain Blade model assistance and replace earlier data.

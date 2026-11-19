@@ -45,6 +45,19 @@ async fn named_view_arguments_keep_unsaved_models_origins_and_restart_through_cl
             "Other.php",
         ),
         ("view('page', [], ['item' => new Item])", "price", "otherOnly", "Item.php"),
+        ("view('page')->with(value: new Other, key: 'item')", "otherOnly", "price", "Other.php"),
+        ("view('page')->with(key: 'item', value: new Item)", "price", "otherOnly", "Item.php"),
+        ("view('page')->with('item', value: new Other)", "otherOnly", "price", "Other.php"),
+        ("view('page')->with(value: new Item, key: ['item' => new Other])", "otherOnly", "price", "Other.php"),
+        ("view('page')->with(['item' => new Item], new Other)", "price", "otherOnly", "Item.php"),
+        ("view('page', ['item' => new Item])->with(value: new Other, key: 'item')", "otherOnly", "price", "Other.php"),
+        (
+            "view('page')->with('item', new Item)->with(value: new Other, key: 'item')",
+            "otherOnly",
+            "price",
+            "Other.php",
+        ),
+        ("view('page')->WITH(value: new Other, key: 'item')", "otherOnly", "price", "Other.php"),
     ];
     let initial = format!("{prefix}{}; }}\n", cases[0].0);
     let template = "{{-- 😀 template --}}\n{{ $item->name }}\n";
@@ -93,7 +106,7 @@ async fn named_view_arguments_keep_unsaved_models_origins_and_restart_through_cl
                 "UTF16 named model origin: {body}: {target:?}"
             );
             eprintln!("Accepted view data case {index}: {body}");
-            if index == 6 {
+            if *model == "Other.php" {
                 let dependency = DocId::next();
                 let fresh = other.replace("otherOnly", "freshOnly");
                 mgr.did_open(dependency, &root.join("app/Other.php"), &LanguageId::new("php"), 1, other);
@@ -112,7 +125,7 @@ async fn named_view_arguments_keep_unsaved_models_origins_and_restart_through_cl
             previous = text;
         }
         let invalid = format!("{prefix}view(data: 'page', view: 'missing'); }}\n");
-        replace(&mgr, caller, 9, &previous, &invalid);
+        replace(&mgr, caller, cases.len() as u32 + 1, &previous, &invalid);
         let wrong = mgr.goto(caller, pos(&invalid, "page'"), GotoKind::Definition).await.unwrap();
         assert!(
             !wrong.iter().any(|target| *target.path == root.join("resources/views/page.blade.php")),

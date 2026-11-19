@@ -15,6 +15,42 @@ slice, commit and push it, and retain only the latest generated app. Native UI
 cases remain deferred/unverified; earlier native-first blocking checkpoints are
 historical and no longer prevent independent implementation.
 
+Navigation source slice189 (2026-11-19, accepted source fix; packaging pending):
+Routes and Views now use the editor's configured PHP language, matching the
+existing handler action and backend. A custom .inc or extensionless PHP source
+can browse project routes/views; a .php file configured as plain text and virtual
+PHP documents are rejected before IPC. Translation-JSON candidate checks and
+backend resource validation remain in place. No project commands are executed.
+
+Four focused regressions fail on the old implementation and pass after the fix.
+All 107 focused route/view/handler tests pass. All 17 browser-workbench Laravel
+tests pass, including four new Find Action -> names -> target -> exact editor
+position cases using controlled backend language metadata and IPC replies. The
+unchanged App114 engine179 separately passes four real protocol list/target cases
+using .inc and extensionless source URIs with exact declaration positions, four
+PHP syntax checks and a disposable Composer PSR-4 manifest. It exits normally;
+no environment files are created. Client/workbench/protocol observations remain
+separate; no native application acceptance is claimed.
+
+Fresh type/lint/format/Knip checks, all 13,860 frontend tests (eight existing
+skips), production/WebKit build, Rust formatting, bindings fidelity and bundled
+engine verification pass. Existing lint/build warnings remain. All Rust, IPC,
+engine and dependency input hashes match slice188; its full workspace/all-target
+Clippy and 121 actual client/Host cases are reused for unchanged inputs. The
+engine suite is unchanged and not rerun. No deadline, retry or exclusion changes.
+
+App114 remains unchanged and does not yet contain this frontend fix. A separate
+packaging slice is required to deliver the changed frontend in a unique local
+build. The sole App114 signature and hashes pass; 72,595,911 bytes of generated
+frontend output are removed, compiler targets are absent and the owned browser
+test listener and protocol server have exited. Canonical sources, engines,
+provenance, Workbench, fixtures and evaluation evidence remain. Native GUI stays
+user-skipped; all 69 area statuses remain 67 partial and two debugger-deferred.
+Evidence: artifacts/checks/slice189/{red,green,e2e}.log and
+{wire,gates,retention,acceptance}.json.
+Reproduce the affected browser flows with
+`OPENIDEA_E2E_PORT=1467 pnpm e2e e2e/laravelNavigation.spec.ts --workers=2`.
+
 Factory client slice188 (2026-11-19, accepted core factory client coverage):
 OpenStorm now retains a regression for factory states and model/count inference
 against actual Laravel 13.37 dependencies. The test creates its own model/factory

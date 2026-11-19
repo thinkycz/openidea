@@ -50,7 +50,7 @@ let generation = 0;
 let pending: number | null = null;
 let syncing: number | null = null;
 
-function isHandlerSource(caret: CaretContext) {
+function isPhpSource(caret: CaretContext) {
   const editor = activeEditor();
   return caret.doc >= 0 && editor?.ctx.doc === caret.doc && editor.ctx.language === "php" && !isVirtualUri(caret.path);
 }
@@ -183,7 +183,7 @@ export async function openLaravelNavigation(kind: LaravelNavigationKind) {
   if (
     !caret ||
     !project ||
-    !(kind === "handler" ? isHandlerSource(caret) : isNavigationSource(caret.path, navigationRoots(project, settings)))
+    !(kind === "handler" ? isPhpSource(caret) : isNavigationSource(caret, navigationRoots(project, settings)))
   ) {
     hint(
       kind === "handler"
@@ -204,9 +204,10 @@ function navigationRoots(project: ProjectInfo, settings: ProjectInfo["settings"]
   return [...new Set([project.root, ...extra].map((root) => root.replaceAll("\\", "/").replace(/\/+$/, "")))].sort();
 }
 
-function isNavigationSource(path: string, roots: string[]) {
-  const file = path.replaceAll("\\", "/");
-  if (file.toLowerCase().endsWith(".php")) return true;
+function isNavigationSource(caret: CaretContext, roots: string[]) {
+  if (isVirtualUri(caret.path)) return false;
+  if (isPhpSource(caret)) return true;
+  const file = caret.path.replaceAll("\\", "/");
   // Candidate only: the backend validates the current root, Composer manifest,
   // Laravel dependency and exact translation-directory layout.
   return (
@@ -317,7 +318,7 @@ export async function retryLaravelNavigation() {
   }
   if (state.kind === "handler") {
     const caret = caretContext();
-    if (!caret || caret.doc !== context.doc || !isHandlerSource(caret)) {
+    if (!caret || caret.doc !== context.doc || !isPhpSource(caret)) {
       hint(tx("Return to the original PHP source to retry handler lookup"));
       return;
     }

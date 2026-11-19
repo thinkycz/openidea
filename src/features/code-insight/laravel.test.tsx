@@ -9,6 +9,18 @@ const mock = vi.hoisted(() => ({
   open: vi.fn(),
   hint: vi.fn(),
   caret: vi.fn(),
+  language: null as string | null,
+}));
+vi.mock("@/editor/api", async (orig) => ({
+  ...(await orig<typeof import("@/editor/api")>()),
+  activeEditor: () => ({
+    ctx: {
+      doc: mock.caret()?.doc,
+      path: mock.caret()?.path,
+      language: mock.language ?? (mock.caret()?.path.endsWith(".json") ? "json" : "php"),
+    },
+    view: mock.caret()?.view,
+  }),
 }));
 vi.mock("@/platform/ipc", async (orig) => {
   const actual = await orig<typeof import("@/platform/ipc")>();
@@ -46,6 +58,7 @@ const loc = (line: number) => ({
 let uninstall: () => void;
 beforeEach(() => {
   vi.clearAllMocks();
+  mock.language = null;
   mock.cancel.mockResolvedValue(undefined);
   mock.open.mockResolvedValue(undefined);
   mock.caret.mockReturnValue({ doc: 7, path: "/p/main.php", line: 0, col: 0, word: null, view: null });
@@ -82,6 +95,29 @@ it("keeps duplicate route targets and incomplete warnings through selection", as
   expect(mock.open).not.toHaveBeenCalled();
   await selectLaravelItem(useLaravelNavigation.getState().items[1]!);
   expect(mock.open).toHaveBeenCalledWith("/p/routes/web.php", 8, 0);
+  expect(useLaravelNavigation.getState().kind).toBeNull();
+});
+
+it.each(["routes", "views"] as const)("uses the configured PHP language for %s navigation", async (kind) => {
+  for (const path of ["/p/routes/custom.inc", "/p/route-index"]) {
+    mock.caret.mockReturnValue({ ...mock.caret(), path });
+    await openLaravelNavigation(kind);
+    expect(useLaravelNavigation.getState().kind).toBe(kind);
+    expect(kind === "routes" ? mock.routes : mock.views).toHaveBeenLastCalledWith(expect.any(Number), 7, null, 2000);
+    expect(mock.hint).not.toHaveBeenCalled();
+    closeLaravelNavigation();
+  }
+});
+
+it.each(["routes", "views"] as const)("rejects non-PHP and virtual PHP sources for %s navigation", async (kind) => {
+  mock.language = "plaintext";
+  await openLaravelNavigation(kind);
+  mock.language = "php";
+  mock.caret.mockReturnValue({ ...mock.caret(), path: "phpantom-builtin:///stubs/Core.php" });
+  await openLaravelNavigation(kind);
+  expect(mock.routes).not.toHaveBeenCalled();
+  expect(mock.views).not.toHaveBeenCalled();
+  expect(mock.hint).toHaveBeenCalledTimes(2);
   expect(useLaravelNavigation.getState().kind).toBeNull();
 });
 

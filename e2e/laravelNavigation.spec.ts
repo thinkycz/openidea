@@ -9,9 +9,9 @@ const SOURCE = `${ROOT}/app/InvoiceController.php`;
 const ROUTE = `${ROOT}/routes/web.php`;
 const VIEW = `${ROOT}/resources/views/invoices/show.blade.php`;
 
-async function seed(page: Page) {
+async function seed(page: Page, source = SOURCE, language?: string) {
   await page.evaluate(
-    async ({ source, route, view }) => {
+    async ({ source, route, view, language }) => {
       const backendPath = "/src/editor/core/backend.ts";
       const contributionsPath = "/src/workbench/contributions.ts";
       const projectPath = "/src/platform/project.ts";
@@ -21,6 +21,13 @@ async function seed(page: Page) {
       const settings = useProject.getState().settings ?? {};
       useProject.setState({ settings: { ...settings, files: { ...settings.files, autoSave: false } } });
       const backend = docBackend() as MemoryBackend;
+      if (language) {
+        const open = backend.open.bind(backend);
+        backend.open = async (path) => {
+          const result = await open(path);
+          return path === source ? { ...result, language } : result;
+        };
+      }
       backend.files.set(source, "<?php\nview('invoices.show');\nroute('invoice.show');\n");
       backend.files.set(
         route,
@@ -29,7 +36,7 @@ async function seed(page: Page) {
       backend.files.set(view, "<h1>Invoice</h1>\n<p>{{ $invoice->id }}</p>\n");
       await editorService().openFile(source, { asText: true, focus: true });
     },
-    { source: SOURCE, route: ROUTE, view: VIEW },
+    { source, route: ROUTE, view: VIEW, language },
   );
   await expect(page.locator(".cm-content").first()).toContainText("invoice.show");
   await stubDesktop(page);
@@ -75,6 +82,30 @@ async function browse(page: Page, kind: "Routes" | "Views") {
 }
 
 for (const kind of ["Routes", "Views"] as const) {
+  for (const name of ["custom.inc", "route-index"]) {
+    test(`Laravel ${kind} browses from configured PHP ${name}`, async ({ workbench: page }) => {
+      const source = `${ROOT}/app/${name}`;
+      await seed(page, source, "php");
+      const chooser = await browse(page, kind);
+      await chooser
+        .getByRole("textbox", { name: "Filter Laravel results" })
+        .fill(kind === "Routes" ? "invoice.show" : "invoices.show");
+      await chooser.getByRole("button", { name: "Show Targets", exact: true }).click();
+      await expect(chooser.getByRole("option")).toHaveCount(1);
+      await chooser.getByRole("button", { name: "Open", exact: true }).click();
+      await expect(chooser).toBeHidden();
+      await expect
+        .poll(() =>
+          page.evaluate(async () => {
+            const path = "/src/workbench/contributions.ts";
+            return (await import(/* @vite-ignore */ path)).editorService().activeCursor();
+          }),
+        )
+        .toMatchObject({ path: kind === "Routes" ? ROUTE : VIEW, line: kind === "Routes" ? 2 : 1, col: 0 });
+      expect(await ipcCalls(page, kind === "Routes" ? "lsp_laravel_routes" : "lsp_laravel_views")).toHaveLength(2);
+    });
+  }
+
   test(`Find Action discovers Laravel ${kind} and opens its selected target`, async ({ workbench: page }, info) => {
     await seed(page);
     const chooser = await browse(page, kind);

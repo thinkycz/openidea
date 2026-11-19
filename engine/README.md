@@ -1,7 +1,13 @@
 # Pinned PHPantom engine
 
-The local OpenStorm development candidate uses PHPantom `0.11.1-openstorm.154`
+The bundled OpenStorm development engine is PHPantom `0.11.1-openstorm.176`
 for Apple Silicon macOS. This is a local rebuild, not an upstream release.
+Engine174 adds compatible Kernel trait defaults,175 preserves verified loaded
+Composer contexts on watcher echoes, and176 coalesces overlapping Blade refresh
+drains. Source179 and client/Host179–180 acceptance support this pin; local
+package acceptance is tracked in `docs/OPENSTORM.md`.
+
+The following notes retain the earlier source and acceptance history.
 Source131 adds migration-derived declaration origins;132 follows registration
 order for container bindings and aliases within a provider group. Source133
 retires derived facade members and completion candidates after binding changes,

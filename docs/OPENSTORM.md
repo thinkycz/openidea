@@ -15,6 +15,49 @@ slice, commit and push it, and retain only the latest generated app. Native UI
 cases remain deferred/unverified; earlier native-first blocking checkpoints are
 historical and no longer prevent independent implementation.
 
+Package slice181 (2026-11-19, accepted local development bundle):
+App0.1.112 bundles the exact PHPantom176 executable accepted by 119 current
+client/Host cases in slices179–180. Its source manifest, bundled provenance and
+176-patch series match the signed executable. Historical candidate metadata
+remains inactive. All 45 Cargo updates are local version111-to112 substitutions;
+external dependencies, public plugin snapshots, attribution, licenses, project
+compatibility and disabled upstream updates are preserved.
+
+Fresh source, checksum and version checks pass, together with 13,856 frontend
+tests (8 skipped), type checking, lint (9 unchanged baseline warnings), formatting,
+Knip and the production frontend/WebKit bundle checks. All 3 bundled-resolution,
+explicit-path and tool-version Rust tests pass, as does ide-tools Clippy for all
+targets. Prior Rust176 workspace results (5,338 passed, 237 ignored, 11 planned
+exclusions), workspace Clippy and engine179 results (18,687 primary passes,
+17 ignored, plus 2 bounded child passes) are reused only for unchanged logic.
+No fresh full-workspace or engine-suite run is claimed for this package slice.
+
+The server inside the finished app passes 14 fresh wire groups: selected PHP
+targets/extensions, bound Kernel navigation/refactoring, encoded plain/Laravel
+identities, resource middleware and 7 callback groups containing 9 variants with
+123 managed sources each. Fresh syntax checks cover 12 plain-PHP and 121 Laravel
+files; all 379 Laravel runtime assertions pass. The analyzer reports exactly the
+3 intentional fixture diagnostics. Fixture originals remain unchanged and test
+server processes exit. These checks do not establish native editor acceptance.
+
+The bundle has identifier cz.thinky.openstorm, version0.1.112 and arm64
+architecture. The build receipt, hashes and deep/strict ad-hoc signature pass.
+Minimum macOS13.0 is metadata only; runtime on that OS remains untested.
+Main SHA256: d9d32d54cc0bd28a003f948c53a1c20ada1908aa9a6d470653300ea91ac7750a.
+Engine SHA256: bdb3526e7ad99c52c03b350428980146b96e25472e5e84437e482fbdb5663f76.
+
+Only artifacts/batches/0.1.112/OpenStorm.app remains. Previous App111 was removed
+after the new signature and receipt passed. Staging, 13,115 compiler files
+(7.8GiB reported) and 72,595,853 dist bytes were removed. Canonical sources,
+engines, provenance, Workbench, fixtures and evaluation records are preserved.
+The app was not launched, installed, notarized or published. Native UI checks
+remain explicitly user-skipped. The older intermittent startup timeout remains
+unattributed; broader platform, real-service and 69-area acceptance remains open.
+Statuses stay at 67 partial and 2 debugger areas deferred by the user.
+Evidence: artifacts/checks/slice181/{input,identity-provenance,gates,pipeline,
+fixture-checks,embedded,final-check,final-inputs}.json;
+artifacts/batches/0.1.112/build-receipt.json.
+
 Host adoption/preflight slice180 (2026-11-19, accepted;176 inactive):
 All57actual current Host cases pass against signed176:10reviewed edit/history
 cases,1PHP-setting lifecycle,2controller URL,42completion/middleware and2handler

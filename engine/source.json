@@ -2,8 +2,8 @@
   "repository": "https://github.com/PHPantom-dev/phpantom_lsp",
   "commit": "1756b1f920c1290d4c4fdd4d2c902fad53a75cd3",
   "archive_sha256": "f0a1dc7fa44d309e6d5e8ed65a2075749c1fc177b45820031f58290f1aec5cee",
-  "patches_sha256": "75d0d1da1fb2e58b4fb543e27ded703bce8c1972d48b520d7999e2823480f576",
-  "version": "0.11.1-openstorm.173",
+  "patches_sha256": "2d7dc0c6404ef33afcdf1e12a48a2d3b43c2a56473297ad50d485701e88dfce4",
+  "version": "0.11.1-openstorm.176",
   "patches": [
     {
       "file": "0001-workspace-tool-policy.patch",
@@ -696,6 +696,18 @@
     {
       "file": "0173-checked-rename-transport-witnesses.patch",
       "sha256": "aacbc1d0cebd49d97295c7e1f2b20770b97649143e066264ec8367ae6a87d573"
+    },
+    {
+      "file": "0174-compatible-kernel-trait-defaults.patch",
+      "sha256": "78c15a75b620951cd4a26be6a3e96a4d18ba77bbf8ea3ce7039c06218eac12af"
+    },
+    {
+      "file": "0175-loaded-composer-echo-receipts.patch",
+      "sha256": "6b437ded58f0a66441cd898ec3a401480bfaa7845d0f60ba57827aaadefe5ee2"
+    },
+    {
+      "file": "0176-coalesced-blade-refresh-drains.patch",
+      "sha256": "88eae4e0dcd65baf2a8a94a0a0d4c00f8557d087cdf630f240f5dbffd7ba2820"
     }
   ]
 }

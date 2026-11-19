@@ -15,6 +15,49 @@ slice, commit and push it, and retain only the latest generated app. Native UI
 cases remain deferred/unverified; earlier native-first blocking checkpoints are
 historical and no longer prevent independent implementation.
 
+Host adoption/preflight slice180 (2026-11-19, accepted;176 inactive):
+All57actual current Host cases pass against signed176:10reviewed edit/history
+cases,1PHP-setting lifecycle,2controller URL,42completion/middleware and2handler
+cases. This includes external conflicts, stale reviewed plans, unsaved replay,
+Unicode, builtin refresh and restart. Emitted executable/Cargo fingerprints and
+runtime source hashes are verified before cleanup; owned fixture originals remain
+unchanged. The62direct-client passes from179 are reused explicitly for exact
+unchanged manager/test/engine bytes. Together these establish current119client/
+Host cases; no fresh62rerun or native UI claim is made in this slice.
+
+The before-build verifier previously accepted a different active source recipe
+when executable checksum and provenance agreed. Its extracted checksum-only
+behavior passes2controls and fails the mismatch regression at runtime. A typed,
+pure verifier now matches version/upstream/archive/series identity, patch count,
+safe unique filenames, each patch checksum and concatenated series bytes. The
+existing CLI invokes it before Tauri packaging. All19focused cases pass, including
+legitimate empty patch series. Real173/176 records pass independently and their
+mixed recipe is refused; these checks execute no engine or project commands.
+
+The first full type check catches a missing JavaScript declaration and a tuple
+callback arity in the new tests. Converting the helper to the repository's typed
+Node-script convention and correcting the parameterization resolves both; initial
+failure logs remain. Final full13,856frontend tests/8skipped, all type checks,
+lint, formatting, Knip, production bundle/WebKit checks and bindings fidelity
+pass. Lint exits0 with the same9baseline warnings as176, compared without relying
+on parallel output order. No new warnings or suppression. Rust formatting passes;
+unchanged Rust workspace/Clippy176 and full engine179 gates are reused only in
+those unchanged scopes. New tooling receives fresh frontend/tooling checks.
+
+Default source/resources remain173; engine176 is Host-adopted but not promoted or
+packaged. Next is a separate local promotion/package slice with exact176 bytes
+and unique app metadata. Older first-definition timeout attribution, native UI,
+platform/real-service and whole-area acceptance remain open. All69statuses stay
+67partial/2debugger user-deferred; native UI is explicitly user-skipped.
+
+Cargo clean removes7,276files/5.4GiB;72,595,853dist bytes are removed after the
+bundle checks. Compiler targets/dist are absent. Sole App111/default173 retain
+exact hashes and strict/deep signature. Canonical sources/engines, Workbench,
+fixtures and evaluation evidence remain; no app install/launch/notarization.
+Evidence: artifacts/checks/slice180/{host-build,host-summary,host-real,
+provenance-real-final,tooling-initial-failure,tooling-gates,lint-baseline,scope,
+final-inputs,retention,acceptance}.json; provenance-red.log.
+
 Blade drain coordination slice179 (2026-11-19, source/direct client accepted; inactive):
 Coalesce overlapping accepted view refreshes into one flight per Backend. Joining
 workers retain their original notification publication fence until shared work

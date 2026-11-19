@@ -1,9 +1,10 @@
 import { readFileSync } from "node:fs";
-import { createHash } from "node:crypto";
+import { verifyBundledPhpantom } from "./phpantom-provenance.ts";
+
 const root = new URL("../src-tauri/resources/phpantom/", import.meta.url);
 const manifest = JSON.parse(readFileSync(new URL("provenance.json", root), "utf8"));
-const digest = createHash("sha256")
-  .update(readFileSync(new URL("phpantom_lsp", root)))
-  .digest("hex");
-if (digest !== manifest.sha256) throw new Error("Bundled PHPantom checksum does not match its provenance");
-console.log(`PHPantom ${manifest.version}: checksum verified (${manifest.platform})`);
+const source = JSON.parse(readFileSync(new URL("../engine/source.json", import.meta.url), "utf8"));
+verifyBundledPhpantom(readFileSync(new URL("phpantom_lsp", root)), manifest, source, (name) =>
+  readFileSync(new URL(`../engine/patches/${name}`, import.meta.url)),
+);
+console.log(`PHPantom ${manifest.version}: checksum and source verified (${manifest.platform})`);

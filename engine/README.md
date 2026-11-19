@@ -77,12 +77,13 @@ user-controlled Dock focus case remains unverified, and no full-area or release
 acceptance is claimed. The unaccepted129 source and its failed suite result
 remain reproducible.
 
-`source.json` pins the upstream source, archive checksum, unchanged114-patch PHP
-Workbench series and OpenStorm patches0115–0154. The bundled executable is
-verified by `node scripts/verify-phpantom.mjs`; its provenance and licenses are
-under `src-tauri/resources/phpantom/`. Source checks and client/host checks do not
-replace packaged native acceptance; broader component and view-data work remains
-open in `docs/OPENSTORM.md`.
+`source.json` pins the upstream source, archive checksum, PHP Workbench base
+series and ordered OpenStorm patches. Before packaging,
+`node scripts/verify-phpantom.mjs` verifies the executable, matches the active
+source identity to bundled provenance, and checks every patch and the complete
+series checksum. Provenance and licenses are under
+`src-tauri/resources/phpantom/`. Source and client/host checks do not replace
+packaged native acceptance; remaining work is tracked in `docs/OPENSTORM.md`.
 
 From the repository root:
 

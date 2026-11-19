@@ -2,8 +2,8 @@
   "repository": "https://github.com/PHPantom-dev/phpantom_lsp",
   "commit": "1756b1f920c1290d4c4fdd4d2c902fad53a75cd3",
   "archive_sha256": "f0a1dc7fa44d309e6d5e8ed65a2075749c1fc177b45820031f58290f1aec5cee",
-  "patches_sha256": "2d7dc0c6404ef33afcdf1e12a48a2d3b43c2a56473297ad50d485701e88dfce4",
-  "version": "0.11.1-openstorm.176",
+  "patches_sha256": "b26e44b05adc6400504ec0045397f0f038d2386478dfdc01034eb26dcf4037da",
+  "version": "0.11.1-openstorm.178",
   "patches": [
     {
       "file": "0001-workspace-tool-policy.patch",
@@ -708,6 +708,14 @@
     {
       "file": "0176-coalesced-blade-refresh-drains.patch",
       "sha256": "88eae4e0dcd65baf2a8a94a0a0d4c00f8557d087cdf630f240f5dbffd7ba2820"
+    },
+    {
+      "file": "0177-named-view-argument-bindings.patch",
+      "sha256": "aa9e9add8b84bbb31dcb20230152520144c45e08521d0b8a1c82c133f9a2aae3"
+    },
+    {
+      "file": "0178-view-fallback-data-priority.patch",
+      "sha256": "fc9587ee4a69c43c12cc7ba081ebd7c856ffc7503ca9470262f17e780d63330f"
     }
   ]
 }

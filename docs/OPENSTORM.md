@@ -15,6 +15,54 @@ slice, commit and push it, and retain only the latest generated app. Native UI
 cases remain deferred/unverified; earlier native-first blocking checkpoints are
 historical and no longer prevent independent implementation.
 
+Package slice184 (2026-11-19, accepted local development bundle):
+App 0.1.113 now bundles engine 178, accepted by all 120 current client/Host
+cases in slice183. The active source manifest, bundled provenance and 178-patch
+series match the signed executable; historical candidate provenance stays
+inactive. All 45 Cargo package changes are local version 112-to-113 updates.
+External dependencies, plugin API snapshots, attribution, licenses, project
+compatibility and disabled updater endpoints are unchanged.
+
+Fresh source/checksum/version checks, 13,856 frontend tests with 8 skipped,
+type checking, lint, formatting, Knip and production/WebKit build checks pass.
+Existing lint warnings remain. All three bundled-resource Rust tests and
+ide-tools all-target Clippy pass. The slice183 workspace suite (5,338 passed,
+238 ignored and 11 existing exclusions), workspace Clippy and all 120 real
+client/Host cases are reused for unchanged runtime logic. The exact engine178
+source suite from slice182 (18,694 primary passes, 17 ignored and two bounded
+child passes) is reused; this slice does not claim a fresh full-workspace or
+engine-suite run.
+
+The server inside the completed app passes 15 fresh protocol groups: PHP target
+settings, bound-kernel navigation/refactoring, encoded plain/Laravel identities,
+resource middleware, nine named-view cases and seven callback groups covering
+nine variants with 123 managed sources each. Named views retain data precedence,
+UTF-16 member origins and unsaved model changes, and reject wrong-role strings.
+Fresh syntax checks cover 12 plain-PHP and 121 Laravel files. All 379 Laravel
+runtime assertions pass, and the analyzer reports exactly three intentional
+diagnostics. Fixture originals remain unchanged; owned server processes exit.
+These are embedded-server checks, not native editor acceptance.
+
+App identity cz.thinky.openstorm, version 0.1.113, arm64 architecture, source/build
+receipt, resource hashes and deep/strict ad-hoc signature pass, including a
+signature check after the probes. Minimum macOS 13.0 is metadata only; actual
+macOS 13 runtime remains untested. Main SHA256:
+0a5fb88a50d5d6e2e60d147263f476ac5a1fcb3b8f873fa086f14cb823baa52e.
+Engine SHA256:
+2d459e60e471db5828dcc082f32f1521d81de41266070cb50671e80b5582387b.
+
+Only artifacts/batches/0.1.113/OpenStorm.app remains. App112 was removed after the
+new signature and receipt passed. Staging and owned compiler output were removed
+(13115 files, 7.8GiB total), followed by 72,595,853 bytes of frontend output.
+Canonical sources, engines, provenance, Workbench, fixtures and evaluation records
+remain. Native GUI checks are user-skipped; no app launch, installation,
+notarization or publication. The older startup-timeout attribution and broader
+platform/real-service/69-area acceptance remain open. Statuses remain 67 partial
+and 2 debugger areas user-deferred.
+Evidence: artifacts/checks/slice184/{input,identity-provenance,gates,pipeline,
+fixture-checks,embedded,packaged-named-views,final-check}.json and
+artifacts/batches/0.1.113/build-receipt.json.
+
 Client adoption slice183 (2026-11-19, accepted; engine 178 inactive):
 The OpenStorm client now has a regression for named view/data arguments,
 imported helpers, both merge-data orders and chained writes. It checks exact

@@ -15,6 +15,58 @@ slice, commit and push it, and retain only the latest generated app. Native UI
 cases remain deferred/unverified; earlier native-first blocking checkpoints are
 historical and no longer prevent independent implementation.
 
+Package slice190 (2026-11-19, accepted local development bundle):
+App 0.1.115 now includes the slice189 configured-PHP route/view navigation fix.
+Routes and Views accept custom .inc and extensionless sources whose configured
+editor language is PHP; non-PHP modes and virtual PHP sources are rejected before
+IPC. The prior translation-JSON candidate checks remain. Only local application
+and 45 Cargo package versions change in this packaging slice. External
+dependencies, engine 179 source/resources/provenance, plugin API snapshots,
+licenses, upstream attribution, project compatibility and disabled updates remain
+unchanged. No new debugger functionality or project command execution is added.
+
+Fresh source/checksum/version checks, all 13,860 frontend tests (eight existing
+skips), type/lint/format/Knip checks, Rust formatting, three bundled-resource tests
+and ide-tools all-target Clippy pass. Production frontend and Safari 15.4 startup
+API/bundle syntax checks pass in the actual app build. Existing lint/build
+warnings remain. The signed App 0.1.115 server passes four fresh route/view list and
+exact target-position cases from configured-PHP .inc/extensionless URI inputs;
+all four PHP fixture syntax checks pass and the owned server exits normally.
+All 17 browser-workbench navigation flows pass again with controlled backend
+metadata/IPC, including Find Action, chooser selection, exact editor positions
+and the existing stale/cancellation/recovery cases. These browser/protocol checks
+remain separate from native editor acceptance, which is user-skipped.
+
+The build receipt contains the exact accepted slice189 frontend source hashes.
+All recorded compiled-source hashes, app identity, arm64 architecture, engine 179
+checksum and provenance, licenses and post-probe deep/strict ad-hoc signature
+match. Source revision is the accepted slice189 commit plus the receipt's explicit
+version/metadata snapshot; final progress/ledger prose is excluded when comparing
+that pre-closeout snapshot. Minimum macOS 13.0 is metadata only; actual macOS 13
+runtime remains untested. Main SHA256:
+fd1658b9e8b10bdb5f3036db9c59abc699b216d4d03f7c147247b970fb446d5e.
+Engine SHA256:
+d5445b14fd4b72ac1b0fbf218c30bfe2390c02b89ca8403c8347d526370d4c4e.
+
+The unchanged engine 179 suite from slice185 and the 16 embedded groups from
+slice187 are reused; no fresh full-engine suite is claimed. Slice188 full
+workspace/all-target Clippy and 121 actual client/Host cases remain valid for
+unchanged Rust/IPC/engine logic. No new full-workspace or actual client/Host run
+is claimed in this metadata/package-only slice. Slice189's red/green source
+regressions remain accepted; no deadline, retry or exclusion was changed.
+
+Only artifacts/batches/0.1.115/OpenStorm.app remains. App 0.1.114 was removed after the
+new signature and build receipt passed. The staging app and owned compiler
+output (13115 files, 7.8GiB total) were removed, followed by
+72,595,911 bytes of frontend output. Owned app/server processes
+and the browser test listener are absent. Canonical sources, engines, provenance,
+Workbench, fixtures and evaluation evidence remain. No installation, GUI launch,
+notarization, publication or automatic-update activation occurred. The older
+unattributed startup timeout and broader Laravel/platform/service acceptance stay
+open; statuses remain 67 partial and two debugger areas user-deferred.
+Evidence: artifacts/checks/slice190/{input,pipeline,wire,post-package,
+acceptance}.json and artifacts/batches/0.1.115/{build-receipt,retention}.json.
+
 Navigation source slice189 (2026-11-19, accepted source fix; packaging pending):
 Routes and Views now use the editor's configured PHP language, matching the
 existing handler action and backend. A custom .inc or extensionless PHP source

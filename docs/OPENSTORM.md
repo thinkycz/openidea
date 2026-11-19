@@ -15,6 +15,44 @@ slice, commit and push it, and retain only the latest generated app. Native UI
 cases remain deferred/unverified; earlier native-first blocking checkpoints are
 historical and no longer prevent independent implementation.
 
+Actual-client adoption slice178 (2026-11-19, checked; engine175 still inactive):
+The unchanged current Host/client tests now run against signed candidate175.
+All119 pass:10Host edits,1PHP-setting lifecycle,2controller URL Host,42completion/
+middleware Host,2handler Host and62direct client cases. The retained immediate
+Composer-write/restart builtin reopen regression passes, replacing the same-source
+slice176 failure. Builtin text refresh remains read-only and clean, replaces the
+older virtual snapshot and advances its version exactly once. Existing guards,
+request deadlines, semantic assertions and independent project identities remain.
+
+The broader run covers reviewed import/rename plans, conflicts, history, Unicode,
+unsaved Laravel dependencies, controller URLs, guards, Kernel/provider lifecycle,
+Eloquent/facade/container inference, route/view/key references and restart. Fixture
+originals, runtime source hashes, emitted executable hashes and Cargo fingerprints
+are verified before cleanup. Both packages' exact selected test targets compile
+from a clean cache with --locked; the real suites use --ignored --test-threads=1.
+No root runtime, frontend, binding, resource or default-server source changes.
+Prior176 broad root gates and177 full engine gates are reused only in that
+unchanged scope; these119 actual engine175 integrations are fresh results.
+
+A separate unproxied actual LspManager observer replays the original122-source
+corpus through24fresh owned engines, alternating literal/named routes. All24first
+lookups return nonempty within the original10-second deadline (5.420–8.621s;
+warmed filesystem, not app-startup measurements). All24engines exit0 and are
+reaped; opened PHP source bytes remain unchanged. Exact target/range assertions
+belong to the full62client suite, not this observer. The earlier slice175 fourth named
+process timeout remains unexplained: later positives do not close its cause or
+establish a performance fix. No source change is attributed to that older issue.
+
+Cargo clean removes7,298 files/5.5GiB, followed by109,161,161bytes of owned probe
+executable/debug output after hash capture. Compiler targets/dist are absent.
+Canonical sources/engines, fixtures, Workbench and evaluation receipts remain.
+Sole App111/default173 and its strict/deep signature are retained; no package,
+promotion, install or native UI run occurs. All69statuses stay67partial/2debugger
+user-deferred. Next: diagnose the remaining startup publication/readiness gate
+before promotion, then resume the next Laravel navigation gap in a small slice.
+Evidence: artifacts/checks/slice178/{client-build,client-host,cold,cold-summary,
+final-inputs,scope,retention,acceptance}.json; original failures remain in175/176.
+
 Composer startup-echo slice177 (2026-11-19, engine-only accepted; inactive):
 the original public two-project regression fails with ContentModified after an
 unchanged Composer watch echo. A pinned175 patch now captures the exact parsed

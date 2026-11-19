@@ -15,6 +15,68 @@ slice, commit and push it, and retain only the latest generated app. Native UI
 cases remain deferred/unverified; earlier native-first blocking checkpoints are
 historical and no longer prevent independent implementation.
 
+Package slice 171 (2026-11-19, signed local App 0.1.111 verified): promote the
+exact PHPantom 173 executable accepted by source169 and client/Host170. Packages
+the managed builder-callback alias behavior, transport-wide checked-rename witness
+fix and upstream merge through958b3db12. Source170 commit b57bde768 is pushed
+before this separate promotion slice; its 116 actual client/Host cases, 5,332
+workspace tests/234 ignored/11 documented filters and full workspace Clippy remain
+valid for unchanged runtime Rust/IPC logic. No new full Rust test/Clippy run is
+claimed for package-only versions/resource metadata.
+
+Update 45 local Cargo versions from110 to111 plus application metadata, the
+accepted engine resource, provenance and source pin. External dependency blocks
+remain byte-identical. Current WIT API1.13.0 and released SDK snapshot1.11.0 stay
+unchanged: the public release helper would refresh that snapshot, so use only its
+local metadata/lockfile steps. This is a local development package, not a public
+plugin/API release. Fresh frontend tests pass13,837/8 skipped; typecheck, lint,
+format, knip, version-helper tests, source fingerprint, engine checksum and Rust
+format checks pass. Production frontend and Safari15.4 startup checks pass.
+
+All44 embedded-server stage groups pass after signing, including seven callback
+groups/nine real Laravel13.37 variants with all123 PHP files open and witnessed
+per variant. Covers PHP targets/builtins, plain PHP/Composer/Laravel, malformed
+initialization, aliases/exclusions, Kernel/provider/builder ordering, literal maps,
+Unicode ranges, unsaved dependencies, restart, guarded refactors and descriptor
+isolation. The current reference Laravel example passes121 syntax checks and374
+runtime assertions with exactly the previous3 deliberate analyzer diagnostics
+(expected analyzer exit1). Original/borrowed inputs stay unchanged; owned children
+exit and no matching embedded-engine process remains. Dynamic engine dependencies
+are system libraries. These are actual packaged CLI checks, not native UI checks.
+
+A separate runtime/packaged lookup audit makes an existing limitation explicit.
+In the main mixed-callback bootstrap, demo.audit resolves to bootstrap/app.php with
+an incomplete warning. Runtime retires demo.kernel.parent, but the engine retains
+its Kernel declaration as an uncertain known candidate. Effective runtime pruning
+for this broader bootstrap is not accepted. The first canonical audit accidentally
+queried a demo comment; its null callback result was a harness mistake, corrected
+by querying the real middleware argument in the packaged engine. Preserve that
+correction and the actual partial-context result in alias-packaged.json. Existing
+incomplete-context probes and newly complete callback fixtures are separate cases;
+no claim of blanket Laravel correctness or PhpStorm parity is made. Wider L63/L64,
+shared-graph aggregation F28, native/platform/performance and other gates stay open.
+
+App 0.1.111 is arm64 development/debug with production frontend assets, identifier
+cz.thinky.openstorm and minimum-OS13.0 metadata. Actual macOS13 runtime remains
+unverified. Preserve separate settings/caches, .openidea compatibility, upstream
+attribution/licenses, existing shortcuts/layout/autosave, save-conflict protection,
+empty updater endpoints and the debugger expansion exclusions. Native checks remain
+user-skipped; no install, app launch, migration, notarization or public release.
+
+Bundle: artifacts/batches/0.1.111/OpenStorm.app.
+Main SHA256: 91602c37f68f33449af2bcffdc81d7e4b8f25207559f3ee9f4cbae025398666d.
+Embedded/default PHPantom173 SHA256: f7ed9ae7cdc8d731162d6a42cdb13ea0889860fe4df202dd8cf999f56d3eb127.
+The source/build receipt, provenance, licenses, architecture and deep/strict
+signature verify after all embedded probes. The recipe retained110 until111's
+signature/receipt succeeded, then removed110, staging and current compiler output
+with Cargo clean. Remove 72,595,853 generated frontend bytes after acceptance;
+only App111 remains. Preserve pinned source/engines, Workbench, fixtures, tooling,
+previous evaluation artifacts and receipts. All69 areas remain67 partial and2
+user-deferred. Final commit/push/read-back and clean-worktree evidence reside in
+the local delivery receipt. Evidence: artifacts/checks/slice171/{input,gates,
+pipeline,identity-provenance,embedded,alias-packaged,final-check,delivery}.json,
+derived probe records/logs and App111 build-receipt/retention sidecars.
+
 Client/Host slice 170 (2026-11-19, inactive PHPantom 173 accepted): complete the
 preserved regression draft after upstream merge cbf5defd6. Checked rename succeeds
 with dirty nested Composer documents still open across all four callback variants,

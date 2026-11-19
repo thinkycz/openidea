@@ -15,6 +15,64 @@ slice, commit and push it, and retain only the latest generated app. Native UI
 cases remain deferred/unverified; earlier native-first blocking checkpoints are
 historical and no longer prevent independent implementation.
 
+Route namespace slice191 (2026-11-19, source/protocol accepted; inactive engine 180):
+Per-registration namespace attributes now preserve the enclosing router group's
+controller for method navigation, completion, hover, references and rename. The
+runtime namespace stored as route metadata does not replace the controller chosen
+when Laravel compiles the action. Actual namespace groups retain their separate
+context rules. Unknown macros and foreign receivers remain unsupported.
+
+All six valid protocol cases fail on bundled engine 179. Actual Laravel 13.37
+confirms the dispatch target with 12 assertions/18 syntax checks. The exact public regression
+sources pass 6 syntax checks/13 runtime assertions, including a guard proving that
+standalone controller(...)->get(...,'method') throws Invalid route action rather
+than selecting that controller. Negative/renamed sources pass 9 syntax checks and
+21 real-framework assertions; unrelated controller methods remain unchanged.
+
+The public regression fails on unchanged engine 179 for the intended absent
+target. Its 1,098 Rust input hashes are verified before production edits. A first
+whitelist-only correction passes the first four complete semantic forms and the
+ungrouped-owner guard, but fails the longer fifth chain; its receipts/logs remain.
+The receiver was already root/attribute/depth validated, then a duplicate
+whole-call root check counted the terminal HTTP call again. Static facade roots
+are now checked directly and method calls reuse their validated receiver. The
+depth constant remains 4; an over-limit guard and unknown/foreign receiver cases
+pass. No test deadline, retry helper or exclusion was changed. Both new public
+regressions and all 119 controller-route tests pass. The positive matrix checks
+exact UTF-16 declarations, completion, return-type hover, exact references and
+rename edits that preserve the other controller.
+
+The immutable source matches the pinned patch recipe including symlinks. Full
+source gates pass 18,698 primary tests with 17 ignored; two separately bounded
+child groups also pass. Both all-target Clippy configurations,
+formatting, source replay/fingerprint and optimized build pass. The signed arm64
+candidate server passes all six real protocol cases and exits normally. Fresh
+checks pass 12 plain-PHP and 121 Laravel syntax files, plain runtime assertions,
+all 387 Laravel runtime assertions and exactly three intentional analyzer
+messages at derived source lines. No unexpected analyzer diagnostics remain.
+Signed candidate SHA256:
+fb2444ed29c0d96430c3a141b67b8cfb7ad04e8a2104171d1908c3ccdbc0f740.
+Patch SHA256:
+9a2006c4b92b7bf5ba01317735aaf77788be48845c2078ae6e0b758980db45db.
+
+Root Rust/IPC/frontend/tooling/dependencies and active source/resource 179 remain
+unchanged, as does App 0.1.115. Prior slice188 workspace/all-target Clippy/121 actual
+client-Host checks and slice190 frontend/resource/build checks are reused only
+for their verified unchanged inputs. No new root full-suite or current client/
+Host adoption of engine 180 is claimed here. The candidate is inactive; adoption
+and a separate package are required before its navigation change reaches the app.
+
+Cargo clean removed 8,366 files totaling 2.2 GiB. The duplicate workcopy was
+removed after exact canonical-map proof. Only App 0.1.115 remains, with unchanged hashes and deep/strict
+signature. Canonical sources/engines, provenance/licenses, Workbench, fixtures and
+evaluation evidence remain. Native GUI stays user-skipped. Broader Laravel,
+platform/service acceptance and older startup attribution stay open; all 69 areas
+remain visible as 67 partial and two debugger areas user-deferred.
+Evidence: artifacts/checks/slice191/{red,red-inputs,baseline179,runtime,
+fixture-checks,extra-fixtures,whitelist-only-focused,chain-diagnosis,focused,
+freeze,engine-gates,engine-test-summary,wire180-green,post-source,root-reuse,
+retention}.json.
+
 Package slice190 (2026-11-19, accepted local development bundle):
 App 0.1.115 now includes the slice189 configured-PHP route/view navigation fix.
 Routes and Views accept custom .inc and extensionless sources whose configured

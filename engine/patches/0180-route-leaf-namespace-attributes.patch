@@ -1,0 +1,253 @@
+diff --git a/docs/CHANGELOG.md b/docs/CHANGELOG.md
+index acdd01748e4a4323c86d54fe3cf51ceba18bf7b5..f70a57b025daca5eeaccdb22ae3ecd0c02fad175 100644
+--- a/docs/CHANGELOG.md
++++ b/docs/CHANGELOG.md
+@@ -68,6 +68,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
+ 
+ ## [Unreleased]
+ 
++- **Navigate controller actions through route namespace attributes.** Per-route namespace modifiers preserve the enclosing controller for completion, hover, references and rename. Namespace groups retain their own controller context. Contributed by @thinkycz.
++
+ - **Compatible Kernel trait registrations.** Middleware navigation preserves complete context for compatible literal class, parent and trait defaults. Reviewed class edits retain every physical declaration; incompatible or unresolved compositions and literal middleware targets remain guarded. Contributed by @thinkycz.
+ 
+ - **Checked rename across Composer projects.** Unrelated open files no longer prevent PHP Rename. Stale sources and incomplete changes spanning dependent projects remain unavailable. Contributed by @thinkycz.
+diff --git a/examples/laravel/app/Demo.php b/examples/laravel/app/Demo.php
+index 9dc10f0cd4c2da62b086cdc8a82509847c8cbfdd..d1bbd0eda0dcfcdddc1dbdcd6c66f8c38cf86c1f 100644
+--- a/examples/laravel/app/Demo.php
++++ b/examples/laravel/app/Demo.php
+@@ -1657,6 +1657,8 @@ class Demo
+         Route::controller(BakeryController::class)->group(function (): void {
+             // Try: navigate or complete these actions through registrar modifiers.
+             Route::middleware('auth')->get('/fluent-bakeries', 'index');
++            // The leaf namespace does not replace this group's controller.
++            Route::namespace('Ignored')->get('/leaf-namespace-bakeries', 'index');
+             Route::prefix('admin')->match(['get', 'post'], '/fluent-bakeries/{bakery}', 'show');
+         });
+     }
+diff --git a/examples/laravel/assertions.php b/examples/laravel/assertions.php
+index 6f81d5e9b1fba2ca57fc0188d83286d0c492bbf1..218b6d1e7acccd7c8f66c64d1e8e9b90374fd41c 100644
+--- a/examples/laravel/assertions.php
++++ b/examples/laravel/assertions.php
+@@ -1962,6 +1962,10 @@ foreach ([
+     });
+     $router->controller($main)->group(function () use ($router, $alternate): void {
+         $router->controller($alternate)->get('/leaf-controller', 'index')->name('binding.leaf');
++        $router->namespace('Ignored')->get('/leaf-namespace', 'index')->name('binding.namespace');
++        $router->namespace('\\Ignored')->get('/rooted-leaf-namespace', 'index')->name('binding.rooted');
++        $router->namespace(null)->get('/null-leaf-namespace', 'index')->name('binding.null');
++        $router->namespace('First')->controller($alternate)->namespace('Last')->post('/chained-leaf-namespace', 'index')->name('binding.chained');
+         $router->controller('App\Http\Controllers\AlternateBakeryController')->group(function () use ($router): void {
+             $router->get('/nested-string', 'index')->name('binding.nested');
+         });
+@@ -1971,9 +1975,13 @@ foreach ([
+     });
+     $routes = [];
+     foreach ($router->getRoutes() as $route) { $routes[$route->getName()] = $route; }
+-    check('Controller binding examples register four handlers', count($routes) === 4);
++    check('Controller binding examples register eight handlers', count($routes) === 8);
+     check('Runtime class-string group selects its controller', ($routes['binding.string'] ?? null)?->getActionName() === $main . '@index');
+     check('A leaf attribute retains the enclosing controller', ($routes['binding.leaf'] ?? null)?->getActionName() === $main . '@index');
++    check('A leaf namespace retains the enclosing controller', ($routes['binding.namespace'] ?? null)?->getActionName() === $main . '@index');
++    check('A rooted leaf namespace retains the enclosing controller', ($routes['binding.rooted'] ?? null)?->getActionName() === $main . '@index');
++    check('A null leaf namespace retains the enclosing controller', ($routes['binding.null'] ?? null)?->getActionName() === $main . '@index');
++    check('Chained leaf attributes retain the enclosing controller', ($routes['binding.chained'] ?? null)?->getActionName() === $main . '@index');
+     check('A nested string group replaces the enclosing controller', ($routes['binding.nested'] ?? null)?->getActionName() === $alternate . '@index');
+     check('The final group controller replaces an earlier invalid name', ($routes['binding.last'] ?? null)?->getActionName() === $alternate . '@index');
+     check('Alternate controller implements its JSON return type', (new \App\Http\Controllers\AlternateBakeryController())->index()->getData(true) === ['preview' => true]);
+diff --git a/src/symbol_map/extraction/laravel.rs b/src/symbol_map/extraction/laravel.rs
+index 801e0e88cf9be9d2207ba6ab985c43b45e017fd6..6a2ae579afa2b3ff46a9c8575ba30065a5a7d1b2 100644
+--- a/src/symbol_map/extraction/laravel.rs
++++ b/src/symbol_map/extraction/laravel.rs
+@@ -2191,7 +2191,12 @@ pub(crate) fn laravel_route_action_argument<'a>(
+     resolved_names: Option<&crate::names::OwnedResolvedNames>,
+ ) -> Option<&'a Expression<'a>> {
+     let (method, arguments) = match expr {
+-        Expression::Call(Call::StaticMethod(call)) => (&call.method, &call.argument_list),
++        Expression::Call(Call::StaticMethod(call)) => {
++            if !route_facade_class(call.class, resolved_names) {
++                return None;
++            }
++            (&call.method, &call.argument_list)
++        }
+         Expression::Call(Call::Method(call)) => {
+             if !route_controller_registrar_chain(call.object, resolved_names) {
+                 return None;
+@@ -2211,9 +2216,6 @@ pub(crate) fn laravel_route_action_argument<'a>(
+     } else {
+         return None;
+     };
+-    if !chain_roots_at_route_facade(expr, resolved_names) {
+-        return None;
+-    }
+     let mut positional_action = None;
+     let mut named_action = None;
+     let mut named_seen = false;
+@@ -2245,8 +2247,8 @@ pub(crate) fn laravel_route_action_argument<'a>(
+ }
+ 
+ /// Only known RouteRegistrar attributes preserve the enclosing controller.
+-/// A per-registration controller attribute does not replace the router group
+-/// controller. Namespace changes and user macros need separate analysis.
++/// Per-registration controller and namespace attributes leave the router group
++/// unchanged. User macros need separate analysis.
+ fn route_controller_registrar_chain(
+     expr: &Expression<'_>,
+     resolved_names: Option<&crate::names::OwnedResolvedNames>,
+@@ -2263,6 +2265,7 @@ fn route_controller_registrar_chain(
+         b"middleware",
+         b"missing",
+         b"name",
++        b"namespace",
+         b"prefix",
+         b"scopeBindings",
+         b"where",
+diff --git a/tests/integration/laravel_route_controller.rs b/tests/integration/laravel_route_controller.rs
+index 33b7c7a8ea1aa8338556430d863616f9a858e61d..06ee1676cc777a98b2663711179776de95dcb3fb 100644
+--- a/tests/integration/laravel_route_controller.rs
++++ b/tests/integration/laravel_route_controller.rs
+@@ -559,11 +559,11 @@ async fn fluent_route_controller_actions_refuse_unknown_receivers_and_unmodeled_
+     for call in [
+         "Fake::middleware('auth')->get('/x', 'showInvoice')",
+         "Routes::customRegistrar()->get('/x', 'showInvoice')",
++        "Routes::middleware('web')->namespace('First')->controller(Inner::class)->namespace('Last')->prefix('too-deep')->post('/x', 'showInvoice')",
+         "Routes::get('/first', 'other')->get('/x', 'showInvoice')",
+         "Routes::middleware('auth')->get('showInvoice', 'other')",
+         "Routes::middleware('auth')->get(...$args, action: 'showInvoice')",
+         "Routes::middleware('auth')->get(action: 'showInvoice', action: 'showInvoice', uri: '/x')",
+-        "Routes::namespace('Other')->get('/x', 'showInvoice')",
+         "Routes::middleware('auth')->get('/x', 'other', action: 'showInvoice')",
+         "Routes::middleware('auth')->get(uri: '/x', 'showInvoice')",
+         "$registrar->get('/x', 'showInvoice')",
+@@ -4721,3 +4721,132 @@ async fn controller_url_completion_retires_and_restores_unsaved_helper_bindings(
+     }
+     assert_eq!(std::fs::read_to_string(path).unwrap(), original);
+ }
++
++#[tokio::test]
++async fn leaf_namespace_attributes_keep_group_action_semantics() {
++    use crate::common::{apply_edits, position_after};
++    for call in [
++        "Routes::namespace('Decoy')->get('/invoice', 'showInvoice')",
++        "Routes::namespace('\\\\Decoy')->get('/invoice', 'showInvoice')",
++        "Routes::namespace(null)->get('/invoice', 'showInvoice')",
++        "Routes::namespace('')->get('/invoice', 'showInvoice')",
++        "Routes::middleware('web')->namespace('First')->controller(Inner::class)->namespace('Last')->post('/invoice', 'showInvoice')",
++        "Routes::namespace('Decoy')->match(action: 'showInvoice', methods: ['get'], uri: '/invoice')",
++    ] {
++        let backend = create_test_backend();
++        let uri = Url::parse("file:///leaf-namespace-actions.php").unwrap();
++        let text = format!(
++            "<?php\nuse Illuminate\\Support\\Facades\\Route as Routes;\nclass Outer {{public function showInvoice(): string {{return 'outer';}}}}\nclass Inner {{public function showInvoice(): bool {{return true;}}}}\nRoutes::controller(Outer::class)->group(function () {{ /* 😀 */ {call}; }});\n"
++        );
++        open_php(&backend, &uri, &text).await;
++        let at = position_after(&text, "'showIn");
++        let declaration = position_after(&text, "class Outer {public function ");
++        let target = goto_def(&backend, &uri, at.line, at.character).await;
++        assert!(
++            matches!(target, Some(GotoDefinitionResponse::Scalar(ref location)) if location.uri == uri && location.range.start == declaration),
++            "leaf namespace must retain group action target {call}: {target:?}"
++        );
++        let completion = complete_at(&backend, &uri, &text, at.line, at.character).await;
++        assert!(
++            method_labels(&completion)
++                .iter()
++                .any(|name| name == "showInvoice"),
++            "leaf namespace completion {call}"
++        );
++        let context = TextDocumentPositionParams {
++            text_document: TextDocumentIdentifier { uri: uri.clone() },
++            position: at,
++        };
++        let hover = backend
++            .hover(HoverParams {
++                text_document_position_params: context.clone(),
++                work_done_progress_params: Default::default(),
++            })
++            .await
++            .unwrap()
++            .unwrap();
++        assert!(
++            matches!(hover.contents, HoverContents::Markup(ref markup) if markup.value.contains("showInvoice(): string")),
++            "leaf namespace hover {call}: {hover:?}"
++        );
++        let references = backend
++            .references(ReferenceParams {
++                text_document_position: context.clone(),
++                context: ReferenceContext {
++                    include_declaration: true,
++                },
++                work_done_progress_params: Default::default(),
++                partial_result_params: Default::default(),
++            })
++            .await
++            .unwrap()
++            .unwrap();
++        let mut actual: Vec<_> = references
++            .iter()
++            .map(|location| {
++                assert_eq!(location.uri, uri);
++                location.range.start
++            })
++            .collect();
++        actual.sort_by_key(|position| (position.line, position.character));
++        assert_eq!(
++            actual,
++            [declaration, {
++                let mut action = at;
++                action.character -= 6;
++                action
++            }],
++            "leaf namespace references {call}"
++        );
++        let edit = backend
++            .rename(RenameParams {
++                text_document_position: context,
++                new_name: "renderInvoice".into(),
++                work_done_progress_params: Default::default(),
++            })
++            .await
++            .unwrap()
++            .unwrap();
++        let changes = edit.changes.unwrap();
++        assert_eq!(changes.len(), 1);
++        let edits = &changes[&uri];
++        assert_eq!(edits.len(), 2, "leaf namespace rename {call}: {edits:?}");
++        assert_eq!(
++            apply_edits(&text, edits),
++            text.replacen("function showInvoice", "function renderInvoice", 1)
++                .replace("'showInvoice'", "'renderInvoice'"),
++            "leaf namespace rename preserves unrelated controller {call}"
++        );
++    }
++}
++
++#[tokio::test]
++async fn leaf_namespace_attributes_do_not_invent_an_ungrouped_controller() {
++    use crate::common::position_after;
++    for call in [
++        "Routes::namespace('Decoy')->get('/x', 'showInvoice')",
++        "Routes::namespace(null)->get('/x', 'showInvoice')",
++        "Routes::controller(Outer::class)->namespace('Decoy')->get('/x', 'showInvoice')",
++    ] {
++        let backend = create_test_backend();
++        let uri = Url::parse("file:///ungrouped-namespace-action.php").unwrap();
++        let text = format!(
++            "<?php\nuse Illuminate\\Support\\Facades\\Route as Routes;\nclass Outer {{public function showInvoice(): string {{return 'outer';}}}}\n{call};\n"
++        );
++        open_php(&backend, &uri, &text).await;
++        let at = position_after(&text, "'showIn");
++        assert!(
++            goto_def(&backend, &uri, at.line, at.character)
++                .await
++                .is_none(),
++            "ungrouped namespace must not invent a method owner {call}"
++        );
++        let completion = complete_at(&backend, &uri, &text, at.line, at.character).await;
++        assert!(
++            !method_labels(&completion)
++                .iter()
++                .any(|name| name == "showInvoice"),
++            "ungrouped namespace completion {call}"
++        );
++    }
++}

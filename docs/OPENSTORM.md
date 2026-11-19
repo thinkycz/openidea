@@ -15,6 +15,63 @@ slice, commit and push it, and retain only the latest generated app. Native UI
 cases remain deferred/unverified; earlier native-first blocking checkpoints are
 historical and no longer prevent independent implementation.
 
+Factory client slice188 (2026-11-19, accepted core factory client coverage):
+OpenStorm now retains a regression for factory states and model/count inference
+against actual Laravel 13.37 dependencies. The test creates its own model/factory
+sources and reads dependencies through a vendor link. It checks convention-based
+selection, UseFactory selection, newFactory() precedence, state-method and model
+completion/navigation with exact UTF-16 origins, unsaved factory/model changes,
+restart replay and closing overlays back to disk. Single results exclude
+collection map(); counted results include map() and exclude model-only markers
+before first() is called. count(null) restores the single model.
+
+Bundled engine 179 passed 11 preliminary wire cases. An initial helper compared
+signature labels with bare method names; normalization corrected that harness
+failure without changing the engine. The client test initially used modelKeys
+as a collection discriminator, but Laravel 13.37 also defines it on the builder.
+The corrected test uses map() with own model markers. A partially compiled broad
+run was deliberately stopped before execution to strengthen these checks; it is
+retained as incomplete and contributes no accepted gate result. PHP reflection
+file identities use canonical paths to preserve /var versus /private aliases.
+The exact final source strings pass 11 PHP syntax checks and 32 runtime/autoload
+assertions across convention, dirty model selection, attribute and override
+cases. No external database, environment file or application profile is changed.
+
+All 64 current client cases and 57 current Host cases pass on the server embedded
+in App 0.1.114. Workspace-emitted executables and Cargo fingerprints are checked
+before/after each stage; retained fixture originals remain unchanged. Fresh
+workspace checks pass: 5,338 tests, 239 ignored and 11 existing planned
+exclusions. Workspace all-target Clippy,
+Rust formatting, frontend types/lint/format/Knip/full tests and production/WebKit
+build, bindings fidelity and active-source checks pass. Existing lint warnings
+remain. No test deadline, retry helper or exclusion changed. The exact unchanged
+slice185 engine and slice187 package evidence is reused. The engine suite was
+not rerun; native GUI checks remain skipped.
+
+Default engine 179 and sole App 0.1.114 remain unchanged; this is a test-only source
+slice and requires no new application build. Cargo clean removed 19,469 files
+totaling 26.7 GiB, followed by 72,595,853 bytes of frontend output. Source input hashes,
+executables and fingerprints were verified before cleanup; no owned engine or
+target processes remain. Canonical sources, engines, provenance, Workbench,
+fixtures and evaluation evidence remain. Native GUI checks stay user-skipped.
+Factory seeders/resource-generation workflows, custom resolver/macro cases,
+relationship/state variants and broader platform/service acceptance remain open.
+The older startup-timeout attribution remains open. Statuses stay 67 partial
+and two debugger areas user-deferred.
+Evidence: artifacts/checks/slice188/{probe-v2,fixture-checks,
+validation-scope-correction,collection-discriminator-correction,focused,gates,
+workspace-summary,client-host-real,final-inputs,retention}.json.
+
+Reproduce against a disposable Laravel13.37 vendor directory and the pinned server:
+
+```sh
+OPENSTORM_TEST_FACTORY_VENDOR=/path/to/laravel/vendor \
+OPENSTORM_TEST_PHPANTOM_BIN=/path/to/OpenStorm.app/Contents/Resources/phpantom/phpantom_lsp \
+cargo test -p ide-lsp --test phpantom \
+  factories::factories_keep_states_models_unsaved_selection_origins_and_restart_through_client \
+  -- --ignored --exact --test-threads=1
+```
+
 Package slice187 (2026-11-19, accepted local development bundle):
 App 0.1.114 bundles engine 179 after all 120 current client/Host cases passed in
 slice186. The active source manifest, bundled provenance and 179-patch series

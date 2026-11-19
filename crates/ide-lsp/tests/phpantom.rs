@@ -12,6 +12,9 @@ use std::{path::PathBuf, sync::Arc, time::Duration};
 mod controller_guards;
 #[path = "fixtures/controller_urls.rs"]
 mod controller_urls;
+#[cfg(unix)]
+#[path = "fixtures/factories.rs"]
+mod factories;
 #[path = "fixtures/kernel_bindings.rs"]
 mod kernel_bindings;
 #[path = "fixtures/view_arguments.rs"]

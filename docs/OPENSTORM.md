@@ -15,6 +15,62 @@ slice, commit and push it, and retain only the latest generated app. Native UI
 cases remain deferred/unverified; earlier native-first blocking checkpoints are
 historical and no longer prevent independent implementation.
 
+Package slice196 (2026-11-19, accepted local development bundle):
+App 0.1.117 bundles the exact accepted engine 181 translation-argument fix.
+Imported global helper aliases retain canonical locale/placeholder roles;
+namespaced local functions, foreign imports and unrelated Lang classes receive
+no Laravel argument suggestions. Source/protocol acceptance is in slice194;
+all 66 current client and 57 Host cases passed in slice195, including unsaved
+catalog/import/function ownership, namespace changes, restart, exact UTF-16
+edits and close/reopen restoration. Native GUI remains user-skipped.
+
+Only app/45 local Cargo versions, bundled engine/source pin and resource
+provenance change alongside the progress ledger. External dependencies, editor
+logic, plugin API snapshots, licenses, upstream attribution, .openidea project
+compatibility and disabled automatic updates remain unchanged. Historical
+candidate provenance stays inactive; bundled engine 181 provenance is active and matches
+the pinned recipe and actual resource bytes.
+
+Fresh source/checksum/version/provenance, 13,860 frontend tests (eight existing
+skips), types/lint/format/Knip, Rust formatting, three resource tests and ide-tools
+all-target Clippy pass. The actual app build passes production frontend and
+Safari 15.4 startup API/bundle syntax checks. The embedded executable passes nine
+fresh translation-identity cases, nine PHP syntax checks and nine actual
+Laravel 13.37 runtime assertions; four configured-PHP route/view list/target cases,
+six namespace-action cases and eight named-view setter cases pass too. The
+retained Laravel fixture passes 121 PHP syntax files, 387 runtime assertions and
+exactly three intentional analyzer diagnostics with originals unchanged.
+All 17 browser-workbench navigation flows pass with controlled backend metadata/
+IPC. These remain distinct from native editor acceptance.
+
+The build receipt fixes the exact source revision and changed-source snapshot.
+Compiled-source hashes, arm64 identity, engine version/checksum, active
+provenance/licenses and post-probe deep/strict ad-hoc signature match. Minimum
+macOS 13.0 is metadata only; actual macOS 13 runtime remains untested.
+Main SHA256:
+369c54b715d73e1d937aae34268dc096c2f3b7f59de690fb6e7fcf387ec8a544.
+Engine SHA256:
+54c14f2cd21c0f4e3d9623a1f8d7cbd2a0a222c3a1f419b68acb05dd690fb698.
+
+Exact source194 engine tests/both all-target Clippy and runtime195 full workspace/
+all-target Clippy/123 actual client-Host cases are explicitly reused with matching
+source hashes and identical engine bytes. Cargo.lock changes only 45 local
+application versions. No fresh full engine/workspace/client rerun or native GUI
+claim; no deadline, retry or exclusion changes.
+
+Only artifacts/batches/0.1.117/OpenStorm.app remains. App 0.1.116 was removed after the
+replacement signature and build receipt succeeded. Staging and compiler output
+(13115 files, 7.8GiB total) were removed, followed by 72,595,911 bytes
+of frontend output. Owned app/server processes and browser-test listener are
+absent. Canonical sources, engines, provenance/licenses, Workbench, fixtures and
+evaluation evidence remain. No main-app launch, installation, notarization,
+publication or automatic-update activation occurred. Broader locale/helper/
+privacy/typed/unfinished/platform/service cases and older startup attribution
+remain open; statuses stay 67 partial and two debugger areas user-deferred.
+Evidence: artifacts/checks/slice196/{input,pipeline,packaged-translations,wire,
+packaged-namespaces,packaged-setters,fixture-runtime,embedded,post-package,
+acceptance}.json and artifacts/batches/0.1.117/{build-receipt,retention}.json.
+
 Translation client slice195 (2026-11-19, accepted current client/Host; inactive engine 181):
 The new actual-client regression fails on signed engine 180 for the intended missing
 imported-helper completion and passes on signed engine 181 with the same executable and

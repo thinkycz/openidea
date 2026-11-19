@@ -346,6 +346,7 @@ fn watcher_reports_changes() {
             paths.contains(&r.join("new.txt"))
                 && paths.contains(&r.join(".git/HEAD"))
                 && b.iter().any(|b| b.removed.contains(&r.join("existing.txt")))
+                && sunk.lock().iter().any(|event| matches!(event, IdeEvent::FsChanged { .. }))
         }),
         "batches: {:?}",
         batches.lock()
@@ -363,6 +364,41 @@ fn watcher_reports_changes() {
     write(&r.join("after-drop.txt"), "x");
     std::thread::sleep(Duration::from_millis(500));
     assert_eq!(batches.lock().len(), n, "no events after drop");
+}
+
+#[test]
+fn watcher_notifies_after_change_callback_updates_state() {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    let (_tmp, root) = root();
+    let path = root.join("published.php");
+    let state = Arc::new(AtomicU64::new(0));
+    let (sent, received) = std::sync::mpsc::channel();
+    let event_path = ide_core::IpcPath::from(path.clone());
+    let observed = state.clone();
+    let sink: SharedSink = Arc::new(move |event| {
+        if let IdeEvent::FsChanged { created, modified, .. } = event
+            && created.iter().chain(&modified).any(|path| path == &event_path)
+        {
+            let _ = sent.send(observed.load(Ordering::Acquire));
+        }
+    });
+    let callback_path = path.clone();
+    let watcher = Watcher::start(
+        &root,
+        Vec::new(),
+        sink,
+        Box::new(move |batch| {
+            if batch.created.iter().chain(&batch.modified).any(|path| path == &callback_path) {
+                state.store(1, Ordering::Release);
+            }
+        }),
+    )
+    .unwrap();
+    write(&path, "<?php class Published {}\n");
+    let published = received.recv_timeout(Duration::from_secs(10)).expect("file-change notification");
+    drop(watcher);
+    assert_eq!(published, 1, "subscribers must observe the applied change, not the previous state");
 }
 
 #[test]

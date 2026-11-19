@@ -391,6 +391,7 @@ function remove(\App\RouteBase $route) {$route->withoutMiddleware("au\x64ited");
         Fixture::lint(plain);
         let path = f.root.join("app/RouteBase.php");
         std::fs::write(&path, parented).unwrap();
+        f.file_change_observed(&path).await;
         let base = f.project.documents.open(&path).unwrap();
         let found = definitions(&f, position).await;
         assert_eq!(found.len(), 1, "new route receiver publication enables exclusion navigation: {found:?}");
@@ -552,6 +553,7 @@ function remove(\App\ResourceChild $resource) {$resource->withoutMiddlewareFor('
         Fixture::lint(custom);
         let path = f.root.join("app/ResourceChild.php");
         std::fs::write(&path, inherited).unwrap();
+        f.file_change_observed(&path).await;
         let child = f.project.documents.open(&path).unwrap();
         let found = definitions(&f, position).await;
         assert_eq!(found.len(), 1, "published resource receiver must enable navigation: {found:?}");

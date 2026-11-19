@@ -15,6 +15,46 @@ slice, commit and push it, and retain only the latest generated app. Native UI
 cases remain deferred/unverified; earlier native-first blocking checkpoints are
 historical and no longer prevent independent implementation.
 
+Watcher publication slice176 (2026-11-19, scoped source accepted; not packaged):
+run the synchronous on_change callback before FsChanged/ExcludedDirsChanged so
+subscribers see its updated domain state. The public watcher regression fails
+on the old order (observed state 0, expected 1) and passes with the correction.
+
+Numeric-only traces diagnose the two middleware failures: generation 2 and both
+buffer versions/text/attachments remain current, but the first request admits
+project revision 0 before the delayed dependency creation advances it to 1. The
+existing guard correctly rejects that response. The fixtures now await the exact
+dependency's FsChanged through Notify before testing dirty overrides and restart;
+all original semantic assertions remain. Old shutdown's three-second fallback had
+accidentally settled this setup. No client retry/rebase, guard relaxation, longer
+deadline or source-corpus reduction was added; temporary traces are removed and
+LSP runtime source is unchanged.
+
+Broad gates pass: Rust workspace 5,338 passed / 237 ignored / 11 planned exclusions;
+all-target Clippy, format and bindings fidelity; frontend 13,837 passed / 8 skipped,
+type checks, lint, formatting, Knip, production build and static WebKit checks.
+Final review also aligns an older watcher test's wait with callback-before-event;
+its assertions remain. Only that test file changes after the broad snapshot.
+All 15 VFS integration cases, full all-target Clippy and format pass again on the
+final inputs; production source is unchanged. Receipts distinguish both snapshots.
+
+All 42 real Host completion/middleware cases pass before and after broad gates.
+The broader Host run has 56 passes / 1 retained builtin-reopen failure after an
+immediate Composer disk change/restart. The retired project_context identity and
+previously captured cold 122-source timeout remain separate open gates; passing
+later runs do not establish their resolution. The 62 direct-client passes from
+slice175 are reused explicitly: LSP source and called VFS archive/io helpers are
+unchanged, and those tests construct no native Watcher. No fresh client/UI or
+whole-area acceptance is claimed; candidate174 stays inactive, App111/default173
+remain unchanged, and all 69 statuses remain 67 partial / 2 debugger deferred.
+
+After every check is terminal, cargo clean removes 17,323 files
+(27,726,499,218 logical bytes); 72,595,853 generated frontend
+bytes are removed. Only App0.1.111 remains; canonical sources/engines, Workbench,
+fixtures and evidence stay intact. Evidence: artifacts/checks/slice176/
+{diagnosis,trace-probes,watcher-red,watcher-green,workspace-summary,gates,
+final-test-sync,final-checks,host-summary,acceptance,retention}.json.
+
 Owned-server lifecycle slice175 (2026-11-19, source checkpoint; not packaged): preserve
 queued shutdown/exit frames, then close stdin for owned subprocesses. Previously,
 stdin stayed open until the 3-second kill fallback despite a shutdown response.

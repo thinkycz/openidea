@@ -34,6 +34,7 @@ struct Fixture {
     project: Arc<Project>,
     doc: DocId,
     events: Arc<std::sync::Mutex<Vec<ide_core::IdeEvent>>>,
+    events_changed: Arc<tokio::sync::Notify>,
 }
 
 impl Fixture {
@@ -83,7 +84,9 @@ impl Fixture {
         let mut php = ide_language::LanguageRegistry::load(None).unwrap().get(&LanguageId::new("php")).unwrap();
         php.language_servers.retain(|s| s.name == "phpantom");
         let events = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let events_changed = Arc::new(tokio::sync::Notify::new());
         let listener = events.clone();
+        let changed = events_changed.clone();
         let host = Host::new(HostConfig {
             project_environment: false,
             config_dir: tmp.path().join("config"),
@@ -93,7 +96,11 @@ impl Fixture {
             syntax: Arc::default(),
             sink_for: Box::new(move |_| {
                 let events = listener.clone();
-                Arc::new(move |event| events.lock().unwrap().push(event))
+                let changed = changed.clone();
+                Arc::new(move |event| {
+                    events.lock().unwrap().push(event);
+                    changed.notify_waiters();
+                })
             }),
             owner: |w| w,
             runtime: tokio::runtime::Handle::current(),
@@ -107,7 +114,7 @@ impl Fixture {
         }));
         let context = setup(&project, tmp.path());
         let doc = project.documents.open(&root.join(relative)).unwrap().id;
-        (Self { _tmp: tmp, root, host, project, doc, events }, context)
+        (Self { _tmp: tmp, root, host, project, doc, events, events_changed }, context)
     }
 
     fn lint(text: &str) {
@@ -147,6 +154,25 @@ impl Fixture {
             std::fs::read_to_string(stdout.path()).unwrap(),
             std::fs::read_to_string(stderr.path()).unwrap(),
         );
+    }
+
+    async fn file_change_observed(&self, path: &std::path::Path) {
+        let path = ide_core::IpcPath::from(path);
+        let observed = async {
+            loop {
+                let changed = self.events_changed.notified();
+                tokio::pin!(changed);
+                changed.as_mut().enable();
+                if self.events.lock().unwrap().iter().any(|event| {
+                    matches!(event, ide_core::IdeEvent::FsChanged { created, modified, .. }
+                        if created.iter().chain(modified).any(|p| p == &path))
+                }) {
+                    break;
+                }
+                changed.await;
+            }
+        };
+        tokio::time::timeout(Duration::from_secs(10), observed).await.expect("dependency file publication");
     }
 
     async fn complete(&self, position: Pos) -> CompletionList {

@@ -53,8 +53,8 @@ impl Default for WatchMode {
 type OnChange = Box<dyn Fn(&FsBatch) + Send + Sync>;
 type Emit = Arc<dyn Fn(&FsBatch) + Send + Sync>;
 
-/// Debounced watcher. Emits `IdeEvent::FsChanged` to `sink` and invokes
-/// `on_change` (used by the index) with the same batch. Stops when dropped;
+/// Debounced watcher. Invokes `on_change` (used by the index) before notifying
+/// `sink`, so subscribers observe the applied batch. Stops when dropped;
 /// no callback runs after `drop` returns.
 pub struct Watcher {
     inner: Inner,
@@ -87,6 +87,7 @@ impl Watcher {
         let shared = filter.excludes.clone();
         let rules = filter.gitignore.clone();
         let emit: Emit = Arc::new(move |batch: &FsBatch| {
+            on_change(batch);
             // VCS-metadata-only batches (`batch.vcs`) carry no worktree paths:
             // consumers that refresh on any `fsChanged` would reschedule purely
             // from the backend's own `.git/index` write.
@@ -105,7 +106,6 @@ impl Watcher {
             if !batch.excluded_dirs.is_empty() {
                 sink.emit(IdeEvent::ExcludedDirsChanged { dirs: batch.excluded_dirs.iter().map(Into::into).collect() });
             }
-            on_change(batch);
         });
         let (inner, polling) = match Self::start_native(&root, filter.clone(), emit.clone(), mode) {
             Ok(inner) => (inner, None),

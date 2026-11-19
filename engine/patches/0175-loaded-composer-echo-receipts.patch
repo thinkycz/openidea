@@ -1,0 +1,810 @@
+diff --git a/src/backend/startup.rs b/src/backend/startup.rs
+index 6e46c4a..5237f17 100644
+--- a/src/backend/startup.rs
++++ b/src/backend/startup.rs
+@@ -328,7 +328,11 @@ impl Backend {
+             // Parse composer.json once up front.  The result is used for
+             // PHP version detection and passed into init_single_project
+             // so the file is never re-read during startup.
+-            let composer_package = composer::read_composer_package(&root);
++            let loaded_composer = composer::read_composer_package_with_receipt(&root);
++            *self.workspace.loaded_composer_input.write() = loaded_composer
++                .as_ref()
++                .and_then(|(_, receipt)| receipt.clone());
++            let composer_package = loaded_composer.map(|(package, _)| package);
+ 
+             // An explicit editor selection wins. Auto resolves the saved
+             // configuration against this Composer project's own requirements.
+diff --git a/src/composer.rs b/src/composer.rs
+index 7b073cb..a1679c9 100644
+--- a/src/composer.rs
++++ b/src/composer.rs
+@@ -26,6 +26,10 @@ use std::fs;
+ use std::path::{Path, PathBuf};
+ 
+ pub use mago_composer::ComposerPackage;
++
++#[path = "composer_input.rs"]
++mod input;
++pub(crate) use input::{ComposerInputReceipt, read_composer_package_with_receipt};
+ use mago_composer::ComposerPackageExtra;
+ 
+ use crate::types::PhpVersion;
+diff --git a/src/composer_input.rs b/src/composer_input.rs
+new file mode 100644
+index 0000000..246b966
+--- /dev/null
++++ b/src/composer_input.rs
+@@ -0,0 +1,285 @@
++//! Receipts for the exact manifest bytes consumed during startup.
++use std::fs::File;
++use std::io::Read;
++use std::path::Path;
++
++#[cfg(unix)]
++use sha2::{Digest, Sha256};
++#[cfg(unix)]
++use std::{fs::Metadata, os::unix::fs::MetadataExt, path::PathBuf};
++
++use super::ComposerPackage;
++
++#[cfg(unix)]
++const LIMIT: u64 = 1024 * 1024;
++
++#[cfg(unix)]
++#[derive(Debug, Clone, PartialEq, Eq)]
++struct FileStamp {
++    device: u64,
++    inode: u64,
++    mode: u32,
++    len: u64,
++    modified: (i64, i64),
++    changed: (i64, i64),
++}
++
++#[cfg(unix)]
++impl FileStamp {
++    fn new(metadata: &Metadata) -> Option<Self> {
++        (metadata.is_file() && metadata.len() <= LIMIT).then(|| Self {
++            device: metadata.dev(),
++            inode: metadata.ino(),
++            mode: metadata.mode(),
++            len: metadata.len(),
++            modified: (metadata.mtime(), metadata.mtime_nsec()),
++            changed: (metadata.ctime(), metadata.ctime_nsec()),
++        })
++    }
++}
++
++#[cfg(unix)]
++#[derive(Debug, Clone, PartialEq, Eq)]
++pub(crate) struct ComposerInputReceipt {
++    path: PathBuf,
++    stamp: FileStamp,
++    digest: [u8; 32],
++}
++
++#[cfg(not(unix))]
++#[derive(Debug, Clone, PartialEq, Eq)]
++pub(crate) enum ComposerInputReceipt {}
++
++impl ComposerInputReceipt {
++    pub(crate) fn matches_current(&self, root: &Path) -> bool {
++        #[cfg(unix)]
++        {
++            if identity(&root.join("composer.json"))
++                != Some((self.path.clone(), self.stamp.clone()))
++            {
++                return false;
++            }
++            read_with(root, |file, content| {
++                file.take(LIMIT + 1).read_to_string(content)
++            })
++            .and_then(|(_, receipt)| receipt)
++            .as_ref()
++                == Some(self)
++        }
++        #[cfg(not(unix))]
++        {
++            let _ = root;
++            false
++        }
++    }
++}
++
++#[cfg(unix)]
++fn identity(path: &Path) -> Option<(PathBuf, FileStamp)> {
++    let canonical = path.canonicalize().ok()?;
++    if canonical != path {
++        return None;
++    }
++    let stamp = FileStamp::new(&std::fs::symlink_metadata(path).ok()?)?;
++    Some((canonical, stamp))
++}
++
++#[cfg(unix)]
++fn open_regular_input(path: &Path) -> std::io::Result<File> {
++    use rustix::fs::{Mode, OFlags};
++    // A substituted FIFO must not block open; the descriptor type is checked next.
++    rustix::fs::open(
++        path,
++        OFlags::RDONLY | OFlags::NONBLOCK | OFlags::CLOEXEC,
++        Mode::empty(),
++    )
++    .map(File::from)
++    .map_err(Into::into)
++}
++
++#[cfg(not(unix))]
++fn open_regular_input(path: &Path) -> std::io::Result<File> {
++    if !std::fs::metadata(path)?.is_file() {
++        return Err(std::io::Error::new(
++            std::io::ErrorKind::InvalidInput,
++            "manifest is not a regular file",
++        ));
++    }
++    File::open(path)
++}
++
++/// Missing proof does not prevent parsing ordinary manifests, including large ones.
++pub(crate) fn read_composer_package_with_receipt(
++    root: &Path,
++) -> Option<(ComposerPackage, Option<ComposerInputReceipt>)> {
++    read_with(root, |file, content| {
++        let length = file.metadata()?.len();
++        file.take(length.saturating_add(1)).read_to_string(content)
++    })
++}
++
++fn read_with(
++    root: &Path,
++    read: impl FnOnce(&mut File, &mut String) -> std::io::Result<usize>,
++) -> Option<(ComposerPackage, Option<ComposerInputReceipt>)> {
++    let path = root.join("composer.json");
++    #[cfg(unix)]
++    let before = identity(&path);
++    let mut file = open_regular_input(&path).ok()?;
++    if !file.metadata().ok()?.is_file() {
++        return None;
++    }
++    let mut content = String::new();
++    read(&mut file, &mut content).ok()?;
++    let package = content.parse::<ComposerPackage>().ok()?;
++    #[cfg(unix)]
++    let receipt = (|| {
++        let (path_before, stamp) = before?;
++        if stamp.len != content.len() as u64
++            || FileStamp::new(&file.metadata().ok()?).as_ref() != Some(&stamp)
++            || identity(&path) != Some((path_before.clone(), stamp.clone()))
++        {
++            return None;
++        }
++        Some(ComposerInputReceipt {
++            path: path_before,
++            stamp,
++            digest: Sha256::digest(content.as_bytes()).into(),
++        })
++    })();
++    #[cfg(not(unix))]
++    let receipt = None;
++    Some((package, receipt))
++}
++
++#[cfg(all(test, unix))]
++mod tests {
++    use super::*;
++
++    const JSON: &str = r#"{"require":{"php":"^8.2"}}"#;
++
++    fn fixture() -> (tempfile::TempDir, PathBuf) {
++        let temp = tempfile::tempdir().unwrap();
++        let root = temp.path().canonicalize().unwrap();
++        std::fs::write(root.join("composer.json"), JSON).unwrap();
++        (temp, root)
++    }
++
++    #[test]
++    fn receipt_matches_the_actual_parsed_input_and_unchanged_file() {
++        let (_temp, root) = fixture();
++        let (package, receipt) = read_composer_package_with_receipt(&root).unwrap();
++        assert_eq!(package.require.get("php").map(String::as_str), Some("^8.2"));
++        let receipt = receipt.unwrap();
++        assert_eq!(
++            receipt.digest,
++            <[u8; 32]>::from(Sha256::digest(JSON.as_bytes()))
++        );
++        assert!(receipt.matches_current(&root));
++    }
++
++    #[test]
++    fn replacement_deletion_and_changed_bytes_do_not_match() {
++        let (_temp, root) = fixture();
++        let receipt = read_composer_package_with_receipt(&root)
++            .unwrap()
++            .1
++            .unwrap();
++        let replacement = root.join("replacement.json");
++        std::fs::write(&replacement, JSON).unwrap();
++        std::fs::rename(&replacement, root.join("composer.json")).unwrap();
++        assert!(
++            !receipt.matches_current(&root),
++            "equal bytes cannot hide a new inode"
++        );
++        let fresh = read_composer_package_with_receipt(&root)
++            .unwrap()
++            .1
++            .unwrap();
++        std::fs::write(root.join("composer.json"), r#"{"require":{"php":"^8.4"}}"#).unwrap();
++        assert!(!fresh.matches_current(&root));
++        std::fs::remove_file(root.join("composer.json")).unwrap();
++        assert!(!fresh.matches_current(&root));
++    }
++
++    #[test]
++    fn a_change_during_read_keeps_old_parsed_bytes_but_withdraws_the_receipt() {
++        let (_temp, root) = fixture();
++        let (package, receipt) = read_with(&root, |file, content| {
++            let count = file.read_to_string(content)?;
++            std::fs::write(root.join("composer.json"), r#"{"require":{"php":"^8.4"}}"#)?;
++            Ok(count)
++        })
++        .unwrap();
++        assert_eq!(package.require.get("php").map(String::as_str), Some("^8.2"));
++        assert!(
++            receipt.is_none(),
++            "later file state must not label earlier consumed bytes"
++        );
++        let (current, receipt) = read_composer_package_with_receipt(&root).unwrap();
++        assert_eq!(current.require.get("php").map(String::as_str), Some("^8.4"));
++        assert!(receipt.unwrap().matches_current(&root));
++    }
++
++    #[test]
++    fn a_nonregular_manifest_is_refused_before_invoking_the_reader() {
++        let (_temp, root) = fixture();
++        std::fs::remove_file(root.join("composer.json")).unwrap();
++        std::fs::create_dir(root.join("composer.json")).unwrap();
++        let result = read_with(&root, |_, _| panic!("nonregular input reached the reader"));
++        assert!(result.is_none());
++    }
++
++    #[test]
++    fn fifo_replacement_cannot_block_receipt_or_startup_reads() {
++        let (_temp, root) = fixture();
++        let receipt = read_composer_package_with_receipt(&root)
++            .unwrap()
++            .1
++            .unwrap();
++        let path = root.join("composer.json");
++        std::fs::remove_file(&path).unwrap();
++        assert!(
++            std::process::Command::new("/usr/bin/mkfifo")
++                .arg(&path)
++                .status()
++                .unwrap()
++                .success()
++        );
++        assert!(!receipt.matches_current(&root));
++        assert!(read_composer_package_with_receipt(&root).is_none());
++    }
++
++    #[test]
++    fn uncertain_inputs_keep_parsing_but_have_no_receipt() {
++        let (_temp, root) = fixture();
++        let alias = root.join("alias");
++        std::os::unix::fs::symlink(&root, &alias).unwrap();
++        assert!(
++            read_composer_package_with_receipt(&alias)
++                .unwrap()
++                .1
++                .is_none()
++        );
++        let manifest = root.join("composer.json");
++        std::fs::rename(&manifest, root.join("real.json")).unwrap();
++        std::os::unix::fs::symlink(root.join("real.json"), &manifest).unwrap();
++        let (package, receipt) = read_composer_package_with_receipt(&root).unwrap();
++        assert_eq!(package.require.get("php").map(String::as_str), Some("^8.2"));
++        assert!(receipt.is_none());
++        std::fs::remove_file(&manifest).unwrap();
++        std::fs::write(
++            &manifest,
++            serde_json::json!({"description":"x".repeat(LIMIT as usize+1)}).to_string(),
++        )
++        .unwrap();
++        assert!(
++            read_composer_package_with_receipt(&root)
++                .unwrap()
++                .1
++                .is_none()
++        );
++        std::fs::write(&manifest, "{broken").unwrap();
++        assert!(read_composer_package_with_receipt(&root).is_none());
++    }
++}
+diff --git a/src/project_router.rs b/src/project_router.rs
+index db40c1e..c47b13f 100644
+--- a/src/project_router.rs
++++ b/src/project_router.rs
+@@ -41,6 +41,7 @@ pub(crate) struct ProjectContext {
+     installed_metadata: Option<InstalledMetadata>,
+     dependency_files: HashSet<PathBuf>,
+     ready: OnceCell<()>,
++    composer_input: Option<composer::ComposerInputReceipt>,
+ }
+ 
+ // Keep the declared spelling for live alias changes and the physical identity
+@@ -110,13 +111,32 @@ pub struct ProjectTargetQuery {
+ }
+ 
+ fn normalized(path: &Path) -> PathBuf {
+-    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
++    path.canonicalize()
++        .unwrap_or_else(|_| crate::project_scope::lexical_path(path))
+ }
+ fn contains(root: &Path, path: &Path) -> bool {
+-    path.starts_with(root) || normalized(path).starts_with(normalized(root))
++    crate::project_scope::lexical_path(path).starts_with(crate::project_scope::lexical_path(root))
++        || normalized(path).starts_with(normalized(root))
+ }
+ 
+ impl ProjectContext {
++    fn loaded_composer_echo(&self, path: &Path) -> bool {
++        let Some(root) = &self.root else {
++            return false;
++        };
++        // Prepared targets have an additional manifest read not covered by these receipts.
++        if self.ready.get().is_none()
++            || self.backend.workspace.startup_target.is_some()
++            || path != root.join("composer.json")
++        {
++            return false;
++        }
++        let loaded = self.backend.workspace.loaded_composer_input.read().clone();
++        self.composer_input.as_ref().is_some_and(|receipt| {
++            loaded.as_ref() == Some(receipt) && receipt.matches_current(root)
++        })
++    }
++
+     fn owns_installed_metadata(&self, path: &Path) -> bool {
+         if path.file_name().is_none_or(|name| name != "installed.json") {
+             return false;
+@@ -222,6 +242,7 @@ impl ProjectRouter {
+             dependencies: Vec::new(),
+             installed_metadata: None,
+             dependency_files: HashSet::new(),
++            composer_input: None,
+             ready: OnceCell::new(),
+         });
+         Self {
+@@ -358,7 +379,11 @@ impl ProjectRouter {
+             let mut dependencies = Vec::new();
+             let mut installed_metadata = None;
+             let mut dependency_files = HashSet::new();
+-            if let Some(package) = composer::read_composer_package(root) {
++            let loaded_composer = composer::read_composer_package_with_receipt(root);
++            let composer_input = loaded_composer
++                .as_ref()
++                .and_then(|(_, receipt)| receipt.clone());
++            if let Some((package, _)) = loaded_composer {
+                 let vendor = composer::get_vendor_dir(&package);
+                 let declared = root.join(&vendor).join("composer/installed.json");
+                 installed_metadata = Some(InstalledMetadata {
+@@ -405,6 +430,7 @@ impl ProjectRouter {
+                 dependencies,
+                 installed_metadata,
+                 dependency_files,
++                composer_input,
+                 ready: OnceCell::new(),
+             }));
+         }
+@@ -429,6 +455,7 @@ impl ProjectRouter {
+                 dependencies: Vec::new(),
+                 installed_metadata: None,
+                 dependency_files: HashSet::new(),
++                composer_input: None,
+                 ready: OnceCell::new(),
+             }));
+         }
+@@ -930,6 +957,31 @@ impl ProjectRouter {
+     pub(crate) async fn watched_files(&self, params: DidChangeWatchedFilesParams) {
+         let _gate = self.state.gate.write().await;
+         let contexts = self.state.contexts.read().clone();
++        let changes = params
++            .changes
++            .into_iter()
++            .filter(|event| {
++                if !matches!(event.typ, FileChangeType::CREATED | FileChangeType::CHANGED) {
++                    return true;
++                }
++                let Ok(path) = event.uri.to_file_path() else {
++                    return true;
++                };
++                if path.file_name().is_none_or(|name| name != "composer.json") {
++                    return true;
++                }
++                let mut consumers = contexts
++                    .iter()
++                    .filter(|context| context.consumes(&event.uri))
++                    .peekable();
++                !(consumers.peek().is_some()
++                    && consumers.all(|context| context.loaded_composer_echo(&path)))
++            })
++            .collect::<Vec<_>>();
++        if changes.is_empty() {
++            return;
++        }
++        let params = DidChangeWatchedFilesParams { changes };
+         let topology_changed = params.changes.iter().any(|event| {
+             let name = event
+                 .uri
+@@ -1509,6 +1561,24 @@ fn params_for_root(params: &InitializeParams, root: Option<&Path>) -> Initialize
+ #[cfg(test)]
+ mod tests {
+     use super::*;
++
++    #[test]
++    fn router_contains_normalizes_parent_components_for_existing_and_missing_paths() {
++        let temp = tempfile::tempdir().unwrap();
++        let root = temp.path().canonicalize().unwrap();
++        let a = root.join("a");
++        let b = root.join("b");
++        std::fs::create_dir_all(&a).unwrap();
++        std::fs::create_dir_all(&b).unwrap();
++        assert!(
++            !contains(&a, &a.join("../b")),
++            "a lexical prefix must not conceal a sibling dependency"
++        );
++        assert!(!contains(&a, &a.join("../b/missing.php")));
++        assert!(contains(&b, &a.join("../b/missing.php")));
++        assert!(contains(&a, &a.join("nested/../owned.php")));
++    }
++
+     #[test]
+     fn retiring_builtin_documents_releases_only_virtual_source_ownership() {
+         let router = ProjectRouter::new_test();
+@@ -1567,6 +1637,7 @@ mod tests {
+                 dependencies: Vec::new(),
+                 installed_metadata: None,
+                 dependency_files: HashSet::from([normalized(&shared)]),
++                composer_input: None,
+                 ready: OnceCell::new(),
+             }));
+         }
+diff --git a/src/project_router_global_config_tests.rs b/src/project_router_global_config_tests.rs
+index 9720a75..6e257b6 100644
+--- a/src/project_router_global_config_tests.rs
++++ b/src/project_router_global_config_tests.rs
+@@ -802,3 +802,66 @@ async fn client_language_level_survives_global_profile_version_and_extension_ref
+     assert_eq!(target.extensions, Some(vec!["core".into()]));
+     f.router.shutdown().await.unwrap();
+ }
++
++#[tokio::test]
++async fn global_prepared_target_requires_conservative_manifest_reload() {
++    let f = Fixture::new("# initial global profile\n", "").await;
++    let mut seen = Inputs::new();
++    f.apply(&mut seen).await;
++    assert_eq!(f.target().await.php_version, "8.2");
++    std::fs::write(&f.global, "# changed global profile\n").unwrap();
++    let composer = f.root.join("composer.json");
++    std::fs::write(
++        &composer,
++        r#"{"name":"owned/global-target","require":{"php":"^8.5"}}"#,
++    )
++    .unwrap();
++    let hook = Arc::new(TestHook {
++        stage: 0,
++        entered: tokio::sync::Notify::new(),
++        release: tokio::sync::Notify::new(),
++    });
++    *f.router.state.test_global_hook.lock() = Some(Arc::clone(&hook));
++    let state = Arc::clone(&f.router.state);
++    let job = tokio::spawn(async move {
++        let router = ProjectRouter {
++            state,
++            owns_supervisor: false,
++        };
++        let gate = Arc::clone(&router.state.gate);
++        let _guard = gate.write().await;
++        let retry = router.reconcile_global_locked(&mut seen).await;
++        (retry, seen)
++    });
++    tokio::time::timeout(Duration::from_secs(10), hook.entered.notified())
++        .await
++        .expect("supervisor reaches deterministic barrier");
++    std::fs::write(
++        &composer,
++        r#"{"name":"owned/global-target","require":{"php":"^8.3"}}"#,
++    )
++    .unwrap();
++    hook.release.notify_one();
++    let (retry, seen) = job.await.unwrap();
++    assert!(retry);
++    assert!(seen.is_empty());
++    assert_eq!(
++        f.target().await.php_version,
++        "8.5",
++        "fresh startup uses the resolved prepared fallback target"
++    );
++    f.router
++        .did_change_watched_files(DidChangeWatchedFilesParams {
++            changes: vec![FileEvent {
++                uri: Url::from_file_path(&composer).unwrap(),
++                typ: FileChangeType::CHANGED,
++            }],
++        })
++        .await;
++    assert_eq!(
++        f.target().await.php_version,
++        "8.3",
++        "startup parsed the later manifest, but the prepared target used earlier inputs; its echo is unproven"
++    );
++    f.router.shutdown().await.unwrap();
++}
+diff --git a/src/project_scope.rs b/src/project_scope.rs
+index f7254e9..408781c 100644
+--- a/src/project_scope.rs
++++ b/src/project_scope.rs
+@@ -96,7 +96,7 @@ impl ProjectScope {
+     }
+ }
+ 
+-fn lexical_path(path: &Path) -> PathBuf {
++pub(crate) fn lexical_path(path: &Path) -> PathBuf {
+     let mut result = PathBuf::new();
+     for component in path.components() {
+         match component {
+diff --git a/src/workspace_env.rs b/src/workspace_env.rs
+index d9ceb7d..c04e904 100644
+--- a/src/workspace_env.rs
++++ b/src/workspace_env.rs
+@@ -56,6 +56,8 @@ pub(crate) struct WorkspaceEnv {
+     pub(crate) startup_config: Option<Arc<config::Config>>,
+     /// PHP version resolved against the same validated Composer/config inputs.
+     pub(crate) startup_target: Option<PhpVersion>,
++    /// Exact manifest consumed by startup, shared with worker clones.
++    pub(crate) loaded_composer_input: Arc<RwLock<Option<composer::ComposerInputReceipt>>>,
+     /// Where the global `.phpantom.toml` layer is read from, or `None`
+     /// to load the project config on its own.
+     ///
+@@ -121,6 +123,7 @@ impl WorkspaceEnv {
+             router_managed_config: false,
+             startup_config: None,
+             startup_target: None,
++            loaded_composer_input: Arc::new(RwLock::new(None)),
+             global_config_path,
+             index_filters: Arc::new(RwLock::new(None)),
+             client_indexing: Arc::new(RwLock::new(config::ClientIndexingOptions::default())),
+@@ -146,6 +149,7 @@ impl Clone for WorkspaceEnv {
+             router_managed_config: self.router_managed_config,
+             startup_config: self.startup_config.as_ref().map(Arc::clone),
+             startup_target: self.startup_target,
++            loaded_composer_input: Arc::clone(&self.loaded_composer_input),
+             global_config_path: self.global_config_path.clone(),
+             index_filters: Arc::clone(&self.index_filters),
+             client_indexing: Arc::clone(&self.client_indexing),
+diff --git a/tests/integration/composer_project_contexts.rs b/tests/integration/composer_project_contexts.rs
+index 59e2686..3ae7412 100644
+--- a/tests/integration/composer_project_contexts.rs
++++ b/tests/integration/composer_project_contexts.rs
+@@ -2664,3 +2664,220 @@ async fn client_language_level_rootless_selection_and_invalid_initialize() {
+     );
+     router.shutdown().await.unwrap();
+ }
++
++#[cfg(unix)]
++#[tokio::test]
++async fn composer_project_contexts_loaded_manifest_echo_preserves_builtin_owners() {
++    let fixture = projects_with_distinct_php_targets();
++    let router = full_stub_router(&fixture).await;
++    let a = fixture.path("a", "builtin.php");
++    let b = fixture.path("b", "builtin.php");
++    let a_source = open(&router, &a).await;
++    let b_source = open(&router, &b).await;
++    let a_uri = datetime_definition(&router, &a, &a_source).await;
++    let b_uri = datetime_definition(&router, &b, &b_source).await;
++    router
++        .did_change_watched_files(DidChangeWatchedFilesParams {
++            changes: vec![
++                FileEvent {
++                    uri: Url::from_file_path(fixture.path("a", "composer.json")).unwrap(),
++                    typ: FileChangeType::CHANGED,
++                },
++                FileEvent {
++                    uri: Url::from_file_path(fixture.path("b", "composer.json")).unwrap(),
++                    typ: FileChangeType::CREATED,
++                },
++            ],
++        })
++        .await;
++    for (uri, version) in [(&a_uri, "8.2"), (&b_uri, "8.4")] {
++        let document = router
++            .workbench_builtin(BuiltinQuery {
++                uri: uri.to_string(),
++            })
++            .await
++            .expect("an echo of the exact loaded manifest must not retire a builtin owner");
++        assert_eq!(document.uri, uri.as_str());
++        assert!(document.content.contains("class DateTime"));
++        assert_eq!(
++            router
++                .workbench_active_target(ProjectTargetQuery {
++                    uri: Some(uri.clone())
++                })
++                .await
++                .unwrap()
++                .php_version,
++            version
++        );
++    }
++    assert_eq!(datetime_definition(&router, &a, &a_source).await, a_uri);
++    assert_eq!(datetime_definition(&router, &b, &b_source).await, b_uri);
++
++    let index = fixture.path("a", "index.php");
++    let index_source = open(&router, &index).await;
++    assert_members(&router, &index, &index_source, "fromA", &["fromB"]).await;
++    let service = fixture.path("a", "src/Service.php");
++    fs::write(
++        &service,
++        fs::read_to_string(&service)
++            .unwrap()
++            .replace("fromA", "freshA"),
++    )
++    .unwrap();
++    router
++        .did_change_watched_files(DidChangeWatchedFilesParams {
++            changes: vec![
++                FileEvent {
++                    uri: Url::from_file_path(fixture.path("a", "composer.json")).unwrap(),
++                    typ: FileChangeType::CHANGED,
++                },
++                FileEvent {
++                    uri: Url::from_file_path(&service).unwrap(),
++                    typ: FileChangeType::CHANGED,
++                },
++            ],
++        })
++        .await;
++    assert_members(
++        &router,
++        &index,
++        &index_source,
++        "freshA",
++        &["fromA", "fromB"],
++    )
++    .await;
++    assert!(
++        router
++            .workbench_builtin(BuiltinQuery {
++                uri: a_uri.to_string()
++            })
++            .await
++            .is_ok(),
++        "an echo must not consume an unrelated PHP change or rebuild its owner"
++    );
++
++    let manifest = fixture.path("a", "composer.json");
++    let mut package: serde_json::Value =
++        serde_json::from_slice(&fs::read(&manifest).unwrap()).unwrap();
++    package["config"] = serde_json::json!({"platform":{"php":"8.3.0"}});
++    fs::write(&manifest, package.to_string()).unwrap();
++    router
++        .did_change_watched_files(DidChangeWatchedFilesParams {
++            changes: vec![FileEvent {
++                uri: Url::from_file_path(&manifest).unwrap(),
++                typ: FileChangeType::CHANGED,
++            }],
++        })
++        .await;
++    for uri in [&a_uri, &b_uri] {
++        assert!(
++            router
++                .workbench_builtin(BuiltinQuery {
++                    uri: uri.to_string()
++                })
++                .await
++                .is_err(),
++            "actual metadata changes must still retire the old graph: {uri}"
++        );
++    }
++    let fresh = datetime_definition(&router, &a, &a_source).await;
++    assert_ne!(fresh, a_uri);
++    assert_eq!(
++        router
++            .workbench_active_target(ProjectTargetQuery { uri: Some(fresh) })
++            .await
++            .unwrap()
++            .php_version,
++        "8.3"
++    );
++    router.shutdown().await.unwrap();
++}
++
++#[cfg(unix)]
++#[tokio::test]
++async fn composer_project_contexts_equal_bytes_replacement_still_retires_builtin_identity() {
++    let fixture = projects_with_distinct_php_targets();
++    let router = full_stub_router(&fixture).await;
++    let a = fixture.path("a", "builtin.php");
++    let source = open(&router, &a).await;
++    let old = datetime_definition(&router, &a, &source).await;
++    let manifest = fixture.path("a", "composer.json");
++    let replacement = fixture.path("a", "replacement.json");
++    fs::write(&replacement, fs::read(&manifest).unwrap()).unwrap();
++    fs::rename(&replacement, &manifest).unwrap();
++    router
++        .did_change_watched_files(DidChangeWatchedFilesParams {
++            changes: vec![FileEvent {
++                uri: Url::from_file_path(&manifest).unwrap(),
++                typ: FileChangeType::CHANGED,
++            }],
++        })
++        .await;
++    assert!(
++        router
++            .workbench_builtin(BuiltinQuery {
++                uri: old.to_string()
++            })
++            .await
++            .is_err(),
++        "equal content must not conceal replacement of the loaded input"
++    );
++    let fresh = datetime_definition(&router, &a, &source).await;
++    assert_ne!(fresh, old);
++    router
++        .did_change_watched_files(DidChangeWatchedFilesParams {
++            changes: vec![FileEvent {
++                uri: Url::from_file_path(&manifest).unwrap(),
++                typ: FileChangeType::CHANGED,
++            }],
++        })
++        .await;
++    assert!(
++        router
++            .workbench_builtin(BuiltinQuery {
++                uri: fresh.to_string()
++            })
++            .await
++            .is_ok(),
++        "the new exact loaded state can subsequently be recognized"
++    );
++    router.shutdown().await.unwrap();
++}
++
++#[cfg(unix)]
++#[tokio::test]
++async fn composer_project_contexts_foreign_manifest_consumer_keeps_conservative_reload() {
++    let fixture = projects_with_distinct_php_targets();
++    let manifest = fixture.path("a", "composer.json");
++    let mut package: serde_json::Value =
++        serde_json::from_slice(&fs::read(&manifest).unwrap()).unwrap();
++    package["autoload"]["psr-4"]["Shared\\"] = serde_json::json!("../b/");
++    fs::write(&manifest, package.to_string()).unwrap();
++    let router = full_stub_router(&fixture).await;
++    let a = fixture.path("a", "builtin.php");
++    let b = fixture.path("b", "builtin.php");
++    let a_source = open(&router, &a).await;
++    let b_source = open(&router, &b).await;
++    let a_uri = datetime_definition(&router, &a, &a_source).await;
++    let b_uri = datetime_definition(&router, &b, &b_source).await;
++    router
++        .did_change_watched_files(DidChangeWatchedFilesParams {
++            changes: vec![FileEvent {
++                uri: Url::from_file_path(fixture.path("b", "composer.json")).unwrap(),
++                typ: FileChangeType::CHANGED,
++            }],
++        })
++        .await;
++    for uri in [&a_uri, &b_uri] {
++        assert!(
++            router
++                .workbench_builtin(BuiltinQuery {
++                    uri: uri.to_string()
++                })
++                .await
++                .is_err(),
++            "one root's receipt cannot stand in for another consuming graph: {uri}"
++        );
++    }
++    router.shutdown().await.unwrap();
++}

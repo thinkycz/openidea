@@ -15,6 +15,53 @@ slice, commit and push it, and retain only the latest generated app. Native UI
 cases remain deferred/unverified; earlier native-first blocking checkpoints are
 historical and no longer prevent independent implementation.
 
+Composer startup-echo slice177 (2026-11-19, engine-only accepted; inactive):
+the original public two-project regression fails with ContentModified after an
+unchanged Composer watch echo. A pinned175 patch now captures the exact parsed
+manifest input at router construction and backend startup, then filters only
+ready, own-root echoes whose two receipts and current bounded file state agree.
+No semantic ScopeID, retired-URI fallback, client retry or target guard changes.
+
+Expanded controls catch and correct two hazards before freezing: independently
+prepared PHP targets can refer to an earlier Composer generation (red85/expected83),
+and raw path-prefix containment wrongly treats a/../b as inside a (deterministic
+red and failed foreign-consumer control). Prepared targets remain conservative;
+lexical/canonical containment now recognizes the foreign dependency. Nonregular
+reader admission also has a red control; Unix nonblocking descriptor/type checks
+and bounded validation prevent FIFO/growth hangs. Unsupported, malformed, large,
+symlinked/noncanonical or otherwise unproved inputs retain the reload path.
+
+Focused green:6receipt controls including read-race/FIFO, containment, prepared
+transaction race, and14public project-context controls including real changes,
+equal-byte replacement, mixed PHP batches and foreign consumers. Full release
+engine tests/Clippy/mem-audit/build pass from a clean175 acquisition. Its full
+source map matches the owned workcopy; canonical173/174 are unchanged. This is an
+inactive engine-source candidate, not an actual OpenStorm client/app acceptance.
+Root runtime/JS stay unchanged from verified176; App111/default173, native UI
+skip and all69whole-area statuses stay unchanged. Earlier cold122-source timeout
+remains open. Evidence: artifacts/checks/slice177/{decision,freeze,safety-green,
+manifest-echo-red,prepared-target-red,safety-red,engine-gates}.json.
+
+Final175 gates:18,678 primary tests pass,17 ignored,0 filtered; two existing
+bounded child checks pass separately. Release all-target Clippy, its mem-audit
+variant, fmt, pinned-source replay and release build pass. Signed arm64 candidate
+SHA256:55a5540ab12289472ec1942d37aaeccbaca3db6baa5fa6132896dc6316bc27e9.
+Actual executable transport smoke reads two project-owned builtin bodies without
+retry and exits/reaps normally; awaited integration tests establish watcher
+handling deterministically. Fresh plain12/Laravel121 syntax checks and Laravel379
+runtime assertions pass; CLI retains exactly3 intentional diagnostics. These are
+engine/fixture results, not acceptance through OpenStorm's current client/Host.
+
+Root176 gates are reused only for unchanged root source. The original Host builtin
+reopen failure and cold122 timeout remain unaccepted until client-level checks.
+No promotion or package is made. Cargo clean removes12,847 files/6.6GiB; the
+35,985,941-byte duplicate workcopy is removed after full source-map comparison.
+Compiler targets/dist are absent; canonical sources, engines, fixtures, Workbench
+and evidence remain, with sole App111/default173 and its signature verified.
+Receipts: slice177/{engine-test-summary,candidate,engine-wire,fixture-checks,
+root-gates-reuse,retention,acceptance}.json. All69 area statuses remain67partial
+and2debugger user-deferred. Actual client adoption is the next dependent slice.
+
 Watcher publication slice176 (2026-11-19, scoped source accepted; not packaged):
 run the synchronous on_change callback before FsChanged/ExcludedDirsChanged so
 subscribers see its updated domain state. The public watcher regression fails

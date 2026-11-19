@@ -20,6 +20,9 @@ mod kernel_bindings;
 #[cfg(unix)]
 #[path = "fixtures/route_namespaces.rs"]
 mod route_namespaces;
+#[cfg(unix)]
+#[path = "fixtures/translation_arguments.rs"]
+mod translation_arguments;
 #[path = "fixtures/view_arguments.rs"]
 mod view_arguments;
 

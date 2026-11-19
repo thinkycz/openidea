@@ -15,6 +15,56 @@ slice, commit and push it, and retain only the latest generated app. Native UI
 cases remain deferred/unverified; earlier native-first blocking checkpoints are
 historical and no longer prevent independent implementation.
 
+Translation client slice195 (2026-11-19, accepted current client/Host; inactive engine 181):
+The new actual-client regression fails on signed engine 180 for the intended missing
+imported-helper completion and passes on signed engine 181 with the same executable and
+Cargo fingerprint. Nine helper/facade identity cases preserve expected locale or
+placeholder suggestions. Resolution retains exact full-token UTF-16 ranges after
+emoji, plain insertion, no import edits and no command. Real ide-text application
+preserves surrounding source; replacing a typo is then replayed through didChange
+and queried again.
+
+Unsaved catalog edits retire the old placeholder and add the new one; the other
+locale intentionally has only the independent count token, so it cannot retain
+the renamed token through the catalog's locale union. Imported helper rebinding,
+caller namespace changes and an unsaved cross-file function shadow update the
+suggestions. Dirty catalogs and function/import ownership survive restart.
+Closing overlays restores disk-backed semantics; closing/reopening the caller
+restores its original helper. Five disk originals remain unchanged and managers
+shut down on failure and success. Exact Rust fixtures pass 76 PHP syntax checks
+and 19 actual Laravel 13.37 runtime assertions with read-only framework dependencies
+and explicitly required fixture files. No root-class PSR4 installation acceptance
+is claimed. The initial checker tried replacing name_typo before removing its
+caret marker n|ame_typo, then executed the pre-edit source. It now uses the exact
+applied source asserted by Rust. That failure is retained; neither the Rust
+requirement nor production behavior changed.
+
+All 66 current client and 57 Host cases pass on signed engine 181 with workspace-emitted
+executables/fingerprints. Inputs, binaries, fingerprints and linked regression
+messages are verified; retained fixture originals stay unchanged. Fresh full
+workspace checks pass 5,338 tests, 241 ignored and
+11 existing planned exclusions across 228 groups. Workspace
+all-target Clippy, Rust formatting, frontend types/lint/format/Knip, 13,860 frontend
+tests (eight existing skips), production/WebKit build, bindings fidelity and
+active-source verification pass. No deadline, retry or exclusion changes.
+The unchanged engine 181 full source gates from slice194 are explicitly reused;
+no fresh engine suite or native GUI acceptance is claimed in this client slice.
+
+Cleanup: Removed 19469 files, 26.7GiB total; 72,595,911 bytes of frontend output
+removed after executable/fingerprint/source/original-file proofs. Only App 0.1.116
+remains with unchanged signature and default engine 180. Source/pins, canonical engines,
+provenance/licenses, Workbench, fixtures and evaluation evidence remain.
+Candidate 181 stays inactive pending separate promotion/package. Native GUI stays
+user-skipped; broader locale/typed receiver/unfinished/project/privacy/platform/
+service acceptance and older startup attribution remain open. Statuses stay 67
+partial and two debugger areas user-deferred.
+Evidence: artifacts/checks/slice195/{checker-correction,fixture-checks,focused,
+gates,workspace-summary,client-host-real,final-inputs,retention,acceptance}.json.
+
+Reproduce with OPENSTORM_TEST_FACTORY_VENDOR pointing at Laravel 13.37/vendor and
+OPENSTORM_TEST_PHPANTOM_BIN pointing at signed engine 181, then run
+`cargo test -p ide-lsp --test phpantom translation_arguments::translation_arguments_keep_callable_identity_dirty_dependencies_edits_and_restart -- --ignored --exact --test-threads=1`.
+
 Translation identity slice194 (2026-11-19, source/protocol accepted; inactive engine 181):
 Translation locale and replacement-placeholder completion now uses the same
 semantic callable proof as key navigation. Imported aliases of trans and

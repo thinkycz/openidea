@@ -15,6 +15,51 @@ slice, commit and push it, and retain only the latest generated app. Native UI
 cases remain deferred/unverified; earlier native-first blocking checkpoints are
 historical and no longer prevent independent implementation.
 
+View argument slice182 (2026-11-19, source/wire accepted; inactive178):
+Named view/data arguments now retain template-name navigation, completion and
+cross-file variable inference when reordered. Helper imports, facade/factory
+calls, typed factory first(), per-item/empty templates, and mergeData precedence
+are covered. Explicit data wins over mergeData regardless of source order;
+chained literal with() writes keep their priority. Physical locations and equal-origin
+type alternatives are preserved. Unrelated/wrong-case arguments, duplicate
+view-name bindings and unpacking do not invent view targets.
+
+Three public regressions fail on accepted176. The initial177 correction passes
+those tests but differential wire review exposes mergeData/empty-view regressions;
+its full job is deliberately cancelled, with the immutable recipe and evidence
+preserved. A178 precedence test then catches physical-position deduplication
+undoing layer order. The corrected178 passes all7 named regressions, all34
+view-name tests and all47 Blade call-site tests before freezing. Its exact
+recipe reproduces all2495 source files and symlinks.
+
+Final frozen-source gates pass:18,694 primary tests/17ignored plus2 bounded
+child checks; both release all-target Clippy configurations, formatting, source
+fingerprint and release build. Fresh12 plain-PHP/121 Laravel syntax checks,
+379 Laravel runtime assertions,8 actual view renders and6 reflected API-role
+assertions pass. The fresh Laravel analyzer reports exactly the3 intentional
+diagnostics. Final signed wire cases pass9/9 against accepted176's4/9, including
+unsaved data/model switches, exact UTF16 property declaration starts and normal
+child exit. The wrong-role string target is refused. Separate mergeData/empty
+preservation probes also pass. An initial wire harness incorrectly required a
+nonempty definition span; its correction checks the exact declaration start,
+including valid point locations, without changing engine behavior or deadlines.
+
+Signed178 SHA256: 2d459e60e471db5828dcc082f32f1521d81de41266070cb50671e80b5582387b.
+Source series: b26e44b05adc6400504ec0045397f0f038d2386478dfdc01034eb26dcf4037da.
+The candidate stays inactive. Actual current OpenStorm client/Host adoption,
+including new named-view cases, is next; no new app is packaged. Root181 checks
+are reused only after the complete source/build snapshot matches except the
+progress/ledger files. Root Rust/frontend logic and default176 are unchanged.
+App0.1.112 remains the sole generated app, with its exact hashes/signature.
+Owned compiler output and validated duplicate work/prototype files are removed;
+canonical sources, pins, licenses, Workbench and evaluation evidence remain.
+Native GUI checks are explicitly skipped. The older startup-timeout attribution,
+broader view/component contexts and whole-area acceptance remain open. All69
+areas remain visible:67partial and2 debugger areas deferred by the user.
+Evidence: artifacts/checks/slice182/{freeze178,engine-gates178,
+engine-test-summary178,post-source178,wire178-green,review178-paths,
+laravel-fixture,plain-fixture,runtime178-view-arguments,scope,retention}.json.
+
 Package slice181 (2026-11-19, accepted local development bundle):
 App0.1.112 bundles the exact PHPantom176 executable accepted by 119 current
 client/Host cases in slices179–180. Its source manifest, bundled provenance and

@@ -1,0 +1,506 @@
+diff --git a/docs/CHANGELOG.md b/docs/CHANGELOG.md
+index 022f57db8bd95551fea32ac1845692fa78248807..6d1226790091c2693cc3119ef64dfbee0a42ccf3 100644
+--- a/docs/CHANGELOG.md
++++ b/docs/CHANGELOG.md
+@@ -315,6 +315,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
+ 
+ ### Fixed
+ 
++- **View fallback data.** Template variables retain Laravel's merge-data precedence when arguments are reordered. Named per-item and empty views remain separate. Contributed by @thinkycz.
++
++
+ - **Named view data.** Reordering `view:` and `data:` no longer breaks navigation or template-variable assistance. View-name completion also follows the parameter being edited. Contributed by @thinkycz.
+ 
+ 
+diff --git a/examples/laravel/app/Demo.php b/examples/laravel/app/Demo.php
+index 4c18737034a530db6b4a3a0c503776cd04b67949..c5d1742dd7ec2d6ba65ecb4819313dea5bb1f70e 100644
+--- a/examples/laravel/app/Demo.php
++++ b/examples/laravel/app/Demo.php
+@@ -690,7 +690,7 @@ class Demo
+         $user = BlogAuthor::first();
+         // PHP Workbench: Laravel: Go to View browses this same template index.
+         // Undefined-function diagnostics exclude generated helpers; user-written calls remain checked.
+-        view(data: compact('posts', 'user'), view: 'welcome');
++        view(mergeData: [], view: 'welcome', data: compact('posts', 'user'));
+ 
+         // admin/users/index.blade.php declares $users and @extends('welcome'),
+         // and a layout renders from the same data array as its child — so the
+diff --git a/src/blade/call_site_inference.rs b/src/blade/call_site_inference.rs
+index b6b28916aec7cdf0048f50f1612f8908393f4f95..a638a0db8b280b7467c4f372a3bd5e65ee215a35 100644
+--- a/src/blade/call_site_inference.rs
++++ b/src/blade/call_site_inference.rs
+@@ -72,6 +72,8 @@ pub(crate) struct PassedVar {
+     /// True only for a synthetic value forwarded from Blade's surrounding scope.
+     /// Explicit data, shape arguments and each-bindings retain their own origin.
+     pub(crate) inherited: bool,
++    /// Inherited scope < factory mergeData < explicit data/with writes.
++    pub(crate) data_priority: u8,
+ }
+ 
+ /// One resolved `view()` / `View::make()` / `@include` call site.
+@@ -937,13 +939,15 @@ pub(super) fn join_call_site_types(types: Vec<PhpType>) -> PhpType {
+ ///
+ /// A PHP array keeps the last of a duplicated key and `View::with()`
+ /// assigns over the data the view was made with, so the template only
+-/// ever sees the last write. The entries are not collected in source
+-/// order (a chained `->with(…)` is walked before the call it hangs off),
+-/// so the key's position decides which write is last.
++/// ever sees the last write. Data-source priority precedes physical source
++/// position: named arguments can reorder mergeData after explicit data.
++/// Equal origins retain the type alternatives produced by a shape.
+ fn keep_last_writes(vars: &mut Vec<PassedVar>) {
+     let overwritten = |var: &PassedVar| {
+-        vars.iter()
+-            .any(|other| other.name == var.name && other.key_range.0 > var.key_range.0)
++        vars.iter().any(|other| {
++            other.name == var.name
++                && (other.data_priority, other.key_range.0) > (var.data_priority, var.key_range.0)
++        })
+     };
+     let keep: Vec<bool> = vars.iter().map(|var| !overwritten(var)).collect();
+     if keep.iter().all(|&k| k) {
+@@ -2826,6 +2830,7 @@ impl Backend {
+                                 value_range: site.name_range,
+                                 framework_bound: true,
+                                 inherited: true,
++                                data_priority: 0,
+                             });
+                         }
+                     }
+@@ -2834,14 +2839,21 @@ impl Backend {
+                 // the completeness the walker settled syntactically.
+                 let mut complete = site.complete;
+                 let mut entries = site.entries;
+-                entries.sort_by_key(|entry| match entry {
++                let mut fallback = site.fallback_entries;
++                let source_order = |entry: &SiteEntry<'_, '_>| match entry {
+                     SiteEntry::Expr { key_range, .. }
+                     | SiteEntry::Variable { key_range, .. }
+                     | SiteEntry::Iteration { key_range, .. } => key_range.0,
+                     SiteEntry::Shape { expr } => expr.span().start.offset,
+                     SiteEntry::UnknownWrite { offset } => *offset,
+-                });
+-                for entry in entries {
++                };
++                fallback.sort_by_key(&source_order);
++                entries.sort_by_key(source_order);
++                for (entry, data_priority) in fallback
++                    .into_iter()
++                    .map(|entry| (entry, 1))
++                    .chain(entries.into_iter().map(|entry| (entry, 2)))
++                {
+                     let framework_bound = entry.framework_bound();
+                     let (name, key_range, value_range, ty) = match entry {
+                         SiteEntry::Expr {
+@@ -2912,6 +2924,7 @@ impl Backend {
+                                         value_range: range,
+                                         framework_bound: false,
+                                         inherited: false,
++                                        data_priority,
+                                     }))
+                                 }
+                                 None => {
+@@ -2938,6 +2951,7 @@ impl Backend {
+                         value_range,
+                         framework_bound,
+                         inherited: false,
++                        data_priority,
+                     });
+                 }
+                 keep_last_writes(&mut vars);
+diff --git a/src/blade/view_call_walker.rs b/src/blade/view_call_walker.rs
+index b33a75ef106c6888e71387d8831d4f18289d8f44..fa98b33ed3afa83a3478204dc07c981637c948d5 100644
+--- a/src/blade/view_call_walker.rs
++++ b/src/blade/view_call_walker.rs
+@@ -120,6 +120,8 @@ pub(super) struct SiteDraft<'ast, 'arena> {
+     pub(super) offset: u32,
+     pub(super) name_range: ByteRange,
+     pub(super) entries: Vec<SiteEntry<'ast, 'arena>>,
++    /// Factory mergeData is applied before explicit data, regardless of source order.
++    pub(super) fallback_entries: Vec<SiteEntry<'ast, 'arena>>,
+     pub(super) complete: bool,
+     pub(super) forwards_scope: bool,
+ }
+@@ -152,12 +154,30 @@ impl<'ast, 'arena> CollectCtx<'_, 'ast, 'arena> {
+             offset,
+             name_range,
+             entries: Vec::new(),
++            fallback_entries: Vec::new(),
+             complete: true,
+             forwards_scope: true,
+         });
+         self.sites.last_mut().expect("just pushed")
+     }
+ 
++    fn record_merge_data(
++        &mut self,
++        offset: u32,
++        names: &[ByteRange],
++        arguments: &'ast ArgumentList<'arena>,
++        data_index: usize,
++    ) {
++        let mut entries = Vec::new();
++        let complete =
++            collect_parameter_argument(arguments, data_index + 1, "mergeData", &mut entries);
++        for name in names {
++            let site = self.site(offset, *name);
++            site.fallback_entries.extend(entries.iter().cloned());
++            site.complete &= complete;
++        }
++    }
++
+     /// Record the same data against every template one call names.
+     fn record(
+         &mut self,
+@@ -334,6 +354,14 @@ impl<'ast, 'arena, 'w> mago_syntax::walker::Walker<'ast, 'arena, CollectCtx<'w,
+             complete,
+             !is_each_render_function(name),
+         );
++        if !name.eq_ignore_ascii_case("blade_view_directive") && !is_each_render_function(name) {
++            ctx.record_merge_data(
++                node.span().start.offset,
++                &name_ranges,
++                &node.argument_list,
++                index + 1,
++            );
++        }
+     }
+ 
+     fn walk_in_static_method_call(
+@@ -366,6 +394,14 @@ impl<'ast, 'arena, 'w> mago_syntax::walker::Walker<'ast, 'arena, CollectCtx<'w,
+             complete,
+             true,
+         );
++        if is_view_facade(node.class) {
++            ctx.record_merge_data(
++                node.span().start.offset,
++                &name_ranges,
++                &node.argument_list,
++                index + 1,
++            );
++        }
+     }
+ 
+     /// `new Content(view: 'emails.orders.shipped', with: […])`, the value a
+@@ -429,6 +465,17 @@ impl<'ast, 'arena, 'w> mago_syntax::walker::Walker<'ast, 'arena, CollectCtx<'w,
+                 complete,
+                 true,
+             );
++            if ["make", "first", "renderWhen", "renderUnless"]
++                .iter()
++                .any(|name| method_name.eq_ignore_ascii_case(name))
++            {
++                ctx.record_merge_data(
++                    node.span().start.offset,
++                    &name_ranges,
++                    &node.argument_list,
++                    index + 1,
++                );
++            }
+             return;
+         }
+ 
+@@ -653,20 +700,13 @@ fn collect_render_each_sites<'ast, 'arena>(
+     walker: &ViewCallWalker<'_>,
+     ctx: &mut CollectCtx<'_, 'ast, 'arena>,
+ ) {
+-    let mut arguments = argument_list.arguments.iter();
+-    if let Some(view) = arguments.next() {
+-        let ranges = walker.matching_ranges(view.value());
+-        if !ranges.is_empty() {
+-            let mut entries = Vec::new();
+-            let complete = collect_each_arguments(argument_list, &mut entries);
+-            ctx.record(offset, &ranges, entries, complete, false);
+-        }
++    if let Some((_, ranges)) = walker.matches_parameter(argument_list, 0, "view") {
++        let mut entries = Vec::new();
++        let complete = collect_each_arguments(argument_list, &mut entries);
++        ctx.record(offset, &ranges, entries, complete, false);
+     }
+-    if let Some(empty) = arguments.nth(2) {
+-        let ranges = walker.matching_ranges(empty.value());
+-        if !ranges.is_empty() {
+-            ctx.record(offset, &ranges, Vec::new(), true, false);
+-        }
++    if let Some((_, ranges)) = walker.matches_parameter(argument_list, 3, "empty") {
++        ctx.record(offset, &ranges, Vec::new(), true, false);
+     }
+ }
+ 
+@@ -769,10 +809,24 @@ fn collect_data_argument<'ast, 'arena>(
+     index: usize,
+     entries: &mut Vec<SiteEntry<'ast, 'arena>>,
+ ) -> bool {
+-    match crate::call_args::argument_for_slot(argument_list, index, "data") {
++    collect_parameter_argument(argument_list, index, "data", entries)
++}
++
++fn collect_parameter_argument<'ast, 'arena>(
++    argument_list: &'ast ArgumentList<'arena>,
++    index: usize,
++    parameter: &str,
++    entries: &mut Vec<SiteEntry<'ast, 'arena>>,
++) -> bool {
++    match crate::call_args::argument_for_slot(argument_list, index, parameter) {
+         Some(Some(argument)) => collect_from_data_expr(argument, entries),
+         Some(None) => true,
+-        None => false,
++        None => {
++            entries.push(SiteEntry::UnknownWrite {
++                offset: argument_list.span().start.offset,
++            });
++            false
++        }
+     }
+ }
+ 
+@@ -820,11 +874,14 @@ fn collect_each_arguments<'ast, 'arena>(
+     argument_list: &'ast ArgumentList<'arena>,
+     entries: &mut Vec<SiteEntry<'ast, 'arena>>,
+ ) -> bool {
+-    let mut args = argument_list.arguments.iter().skip(1);
+-    let (Some(collection), Some(item)) = (args.next(), args.next()) else {
++    let Some(Some(collection)) = crate::call_args::argument_for_slot(argument_list, 1, "data")
++    else {
++        return false;
++    };
++    let Some(Some(item)) = crate::call_args::argument_for_slot(argument_list, 2, "iterator") else {
+         return false;
+     };
+-    let Expression::Literal(Literal::String(s)) = item.value() else {
++    let Expression::Literal(Literal::String(s)) = item else {
+         return false;
+     };
+     let Some(name) = string_literal_contents(s) else {
+@@ -833,7 +890,6 @@ fn collect_each_arguments<'ast, 'arena>(
+     // The item name is the only text at the call site that names either
+     // variable, so it is where a diagnostic about the pair points.
+     let key_range = (s.span.start.offset + 1, s.span.end.offset - 1);
+-    let collection = collection.value();
+     entries.push(SiteEntry::Iteration {
+         name,
+         key_range,
+diff --git a/src/symbol_map/extraction/expressions/calls.rs b/src/symbol_map/extraction/expressions/calls.rs
+index 7d58cfc32ac3bd489e4d4bab08d0ebabd2545499..bfee970641e9d27ea8e4d1f77cc10765e2537119 100644
+--- a/src/symbol_map/extraction/expressions/calls.rs
++++ b/src/symbol_map/extraction/expressions/calls.rs
+@@ -792,6 +792,7 @@ fn extract_call<'a>(
+                     record_view_receiver_sites(
+                         receiver,
+                         name_indices,
++                        &member_name,
+                         &method_call.argument_list,
+                         ctx.content,
+                         &mut ctx.view_receiver_sites,
+diff --git a/src/symbol_map/extraction/laravel.rs b/src/symbol_map/extraction/laravel.rs
+index 518ee6d91c8db683d7eafdaf2cb41d12381db49e..801e0e88cf9be9d2207ba6ab985c43b45e017fd6 100644
+--- a/src/symbol_map/extraction/laravel.rs
++++ b/src/symbol_map/extraction/laravel.rs
+@@ -695,9 +695,13 @@ pub(super) fn try_emit_render_each_view_spans(
+ ) {
+     for index in RENDER_EACH_VIEW_ARGS {
+         if names_a_render_each_template(index, argument_list, content) {
+-            try_emit_laravel_string_span_at(
+-                crate::symbol_map::LaravelStringKind::View,
++            try_emit_laravel_view_span_for_parameter(
+                 index,
++                if index == RENDER_EACH_EMPTY_ARG {
++                    "empty"
++                } else {
++                    "view"
++                },
+                 argument_list,
+                 content,
+                 spans,
+@@ -719,10 +723,11 @@ fn names_a_render_each_template(
+     if index != RENDER_EACH_EMPTY_ARG {
+         return true;
+     }
+-    let Some(arg) = argument_list.arguments.iter().nth(index) else {
++    let Some(Some(argument)) = crate::call_args::argument_for_slot(argument_list, index, "empty")
++    else {
+         return false;
+     };
+-    match string_literal_at_range(arg.value(), content) {
++    match string_literal_at_range(argument, content) {
+         Some((text, _, _)) => !text.starts_with("raw|"),
+         None => true,
+     }
+@@ -780,6 +785,7 @@ pub(super) fn view_receiver_method(
+ pub(super) fn record_view_receiver_sites(
+     receiver: ViewReceiverClass,
+     name_indices: &[usize],
++    method: &str,
+     argument_list: &ArgumentList<'_>,
+     content: &str,
+     sites: &mut Vec<ViewReceiverSite>,
+@@ -787,7 +793,20 @@ pub(super) fn record_view_receiver_sites(
+     let mut spans = Vec::new();
+     for index in name_indices {
+         if names_a_render_each_template(*index, argument_list, content) {
+-            try_emit_laravel_view_span_at(*index, argument_list, content, &mut spans);
++            let parameter = if *index == RENDER_EACH_EMPTY_ARG {
++                "empty"
++            } else if method.eq_ignore_ascii_case("first") {
++                "views"
++            } else {
++                "view"
++            };
++            try_emit_laravel_view_span_for_parameter(
++                *index,
++                parameter,
++                argument_list,
++                content,
++                &mut spans,
++            );
+         }
+     }
+     for span in spans {
+diff --git a/tests/integration/laravel_view_names.rs b/tests/integration/laravel_view_names.rs
+index 0430dcef3e85310660f7330549b60ba4de3e5bec..2701d7a65cba672e57c6cb6dffbfd80de4fc42ce 100644
+--- a/tests/integration/laravel_view_names.rs
++++ b/tests/integration/laravel_view_names.rs
+@@ -1285,3 +1285,143 @@ async fn named_view_arguments_other_roles_do_not_complete_views() {
+         );
+     }
+ }
++
++#[tokio::test]
++async fn named_view_arguments_keep_merge_data_below_explicit_and_chained_data() {
++    for (body, expected, forbidden) in [
++        (
++            "view(view: 'shop', mergeData: ['item' => new Item]);",
++            "price",
++            "otherOnly",
++        ),
++        (
++            "View::make(view: 'shop', mergeData: ['item' => new Item]);",
++            "price",
++            "otherOnly",
++        ),
++        (
++            "view(view: 'shop', data: ['item' => new Item], mergeData: ['item' => new Other]);",
++            "price",
++            "otherOnly",
++        ),
++        (
++            "view(mergeData: ['item' => new Other], view: 'shop', data: ['item' => new Item]);",
++            "price",
++            "otherOnly",
++        ),
++        (
++            "View::first(mergeData: ['item' => new Other], views: ['shop'], data: ['item' => new Item]);",
++            "price",
++            "otherOnly",
++        ),
++        (
++            "view()->make(mergeData: ['item' => new Other], data: ['item' => new Item], view: 'shop');",
++            "price",
++            "otherOnly",
++        ),
++        (
++            "view(mergeData: ['item' => new Item], view: 'shop', data: [])->with('item', new Other);",
++            "otherOnly",
++            "price",
++        ),
++    ] {
++        let source = named_view_controller(body);
++        let (backend, _dir) = create_psr4_workspace(
++            LARAVEL_APP_COMPOSER,
++            &[
++                ("app/Item.php", ITEM_CLASS),
++                (
++                    "app/Other.php",
++                    "<?php namespace App; class Other { public string $name = ''; public int $otherOnly = 1; }",
++                ),
++                ("app/NamedViewController.php", &source),
++                ("resources/views/shop.blade.php", "{{ $item->name }}\n"),
++            ],
++        );
++        backend.initialized(InitializedParams {}).await;
++        open_php_file(&backend, "app/NamedViewController.php").await;
++        let blade = open_blade_template(&backend, "resources/views/shop.blade.php").await;
++        let labels = crate::common::complete_labels_at_opened(&backend, &blade, 0, 10).await;
++        assert!(
++            labels.iter().any(|label| label == expected)
++                && !labels.iter().any(|label| label == forbidden),
++            "factory runtime data precedence: {body}: {labels:?}"
++        );
++    }
++}
++
++#[tokio::test]
++async fn named_view_arguments_render_each_keeps_item_and_empty_templates_separate() {
++    for body in [
++        "View::renderEach(view: 'rows', data: [new Item], iterator: 'row', empty: 'empty');",
++        "View::renderEach(empty: 'empty', iterator: 'row', data: [new Item], view: 'rows');",
++        "view()->renderEach(empty: 'empty', data: [new Item], view: 'rows', iterator: 'row');",
++    ] {
++        let source = named_view_controller(body);
++        let (backend, _dir) = create_psr4_workspace(
++            LARAVEL_APP_COMPOSER,
++            &[
++                ("app/Item.php", ITEM_CLASS),
++                ("app/NamedViewController.php", &source),
++                ("resources/views/rows.blade.php", "{{ $row->name }}\n"),
++                ("resources/views/empty.blade.php", "<p>No rows</p>\n"),
++            ],
++        );
++        backend.initialized(InitializedParams {}).await;
++        let uri = open_php_file(&backend, "app/NamedViewController.php").await;
++        for (name, suffix) in [
++            ("'rows'", "/resources/views/rows.blade.php"),
++            ("'empty'", "/resources/views/empty.blade.php"),
++        ] {
++            let found = definitions_at(&backend, &uri, &source, name).await;
++            assert!(
++                found
++                    .iter()
++                    .any(|target| target.uri.as_str().ends_with(suffix)),
++                "{body}: {name}: {found:?}"
++            );
++        }
++        let blade = open_blade_template(&backend, "resources/views/rows.blade.php").await;
++        let labels = crate::common::complete_labels_at_opened(&backend, &blade, 0, 9).await;
++        assert!(
++            labels.iter().any(|label| label == "price"),
++            "named iterator data: {body}: {labels:?}"
++        );
++    }
++}
++
++#[tokio::test]
++async fn named_view_arguments_typed_factory_uses_first_views_parameter() {
++    let mut composer: serde_json::Value = serde_json::from_str(LARAVEL_APP_COMPOSER).unwrap();
++    composer["autoload"]["psr-4"]["Illuminate\\Contracts\\View\\"] = "framework/".into();
++    let composer = composer.to_string();
++    let source = "<?php namespace App; use Illuminate\\Contracts\\View\\Factory; function render(Factory $factory, Item $item): mixed { return $factory->first(mergeData: [], views: ['shop'], data: ['item' => $item]); }";
++    let (backend, _dir) = create_psr4_workspace(
++        &composer,
++        &[
++            ("app/Item.php", ITEM_CLASS),
++            (
++                "framework/Factory.php",
++                "<?php namespace Illuminate\\Contracts\\View; interface Factory { public function first(array $views, array $data = [], array $mergeData = []): mixed; }",
++            ),
++            ("app/NamedViewController.php", source),
++            ("resources/views/shop.blade.php", "{{ $item->name }}\n"),
++        ],
++    );
++    backend.initialized(InitializedParams {}).await;
++    let uri = open_php_file(&backend, "app/NamedViewController.php").await;
++    let found = definitions_at(&backend, &uri, source, "'shop'").await;
++    assert!(
++        found.iter().any(|target| target
++            .uri
++            .as_str()
++            .ends_with("/resources/views/shop.blade.php")),
++        "typed first() named views: {found:?}"
++    );
++    let blade = open_blade_template(&backend, "resources/views/shop.blade.php").await;
++    let labels = crate::common::complete_labels_at_opened(&backend, &blade, 0, 10).await;
++    assert!(
++        labels.iter().any(|label| label == "price"),
++        "typed factory named data: {labels:?}"
++    );
++}

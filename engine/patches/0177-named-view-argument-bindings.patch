@@ -1,0 +1,626 @@
+diff --git a/docs/CHANGELOG.md b/docs/CHANGELOG.md
+index 6f3effee7c86bc9741018bfc3cfc0ade7d852750..022f57db8bd95551fea32ac1845692fa78248807 100644
+--- a/docs/CHANGELOG.md
++++ b/docs/CHANGELOG.md
+@@ -315,6 +315,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
+ 
+ ### Fixed
+ 
++- **Named view data.** Reordering `view:` and `data:` no longer breaks navigation or template-variable assistance. View-name completion also follows the parameter being edited. Contributed by @thinkycz.
++
++
+ - **Faster navigation with many open files.** PHP navigation can become ready sooner as projects restore PHP and Blade buffers, while view inference retains unsaved changes. Contributed by @thinkycz.
+ 
+ - **Keep expanded Blade attribute data uncertain when its keys are unknown.** `@aware` no longer treats an unreadable attribute bag as definitely missing data, while explicit attributes keep priority. Slot maps also retain support for numeric keys. Contributed by @thinkycz.
+diff --git a/examples/laravel/app/Demo.php b/examples/laravel/app/Demo.php
+index 6611038a50de801d2a0cdc1a5dfe6da1318704fc..4c18737034a530db6b4a3a0c503776cd04b67949 100644
+--- a/examples/laravel/app/Demo.php
++++ b/examples/laravel/app/Demo.php
+@@ -690,7 +690,7 @@ class Demo
+         $user = BlogAuthor::first();
+         // PHP Workbench: Laravel: Go to View browses this same template index.
+         // Undefined-function diagnostics exclude generated helpers; user-written calls remain checked.
+-        view('welcome', compact('posts', 'user'));
++        view(data: compact('posts', 'user'), view: 'welcome');
+ 
+         // admin/users/index.blade.php declares $users and @extends('welcome'),
+         // and a layout renders from the same data array as its child — so the
+diff --git a/src/blade/view_call_walker.rs b/src/blade/view_call_walker.rs
+index 121df68cba16961148e424f71c638def8aee3e32..b33a75ef106c6888e71387d8831d4f18289d8f44 100644
+--- a/src/blade/view_call_walker.rs
++++ b/src/blade/view_call_walker.rs
+@@ -209,6 +209,67 @@ impl ViewCallWalker<'_> {
+             })
+     }
+ 
++    fn matches_parameter(
++        &self,
++        argument_list: &ArgumentList<'_>,
++        index: usize,
++        parameter: &str,
++    ) -> Option<(usize, Vec<ByteRange>)> {
++        let argument = crate::call_args::argument_for_slot(argument_list, index, parameter)??;
++        let ranges = self.matching_ranges(argument);
++        (!ranges.is_empty()).then_some((index, ranges))
++    }
++
++    fn matches_function(
++        &self,
++        argument_list: &ArgumentList<'_>,
++        name: &str,
++    ) -> Option<(usize, Vec<ByteRange>)> {
++        if name.eq_ignore_ascii_case("blade_view_directive") || is_each_render_function(name) {
++            self.matches(argument_list)
++        } else {
++            self.matches_parameter(argument_list, 0, "view")
++        }
++    }
++
++    fn matches_method(
++        &self,
++        argument_list: &ArgumentList<'_>,
++        name: &str,
++    ) -> Option<(usize, Vec<ByteRange>)> {
++        let index = view_render_method_name_index(name)?;
++        self.matches_parameter(
++            argument_list,
++            index,
++            if name.eq_ignore_ascii_case("first") {
++                "views"
++            } else {
++                "view"
++            },
++        )
++    }
++
++    fn matches_static(
++        &self,
++        class: &Expression<'_>,
++        method: &str,
++        arguments: &ArgumentList<'_>,
++    ) -> Option<(usize, Vec<ByteRange>)> {
++        if is_view_facade(class) {
++            self.matches_method(arguments, method)
++        } else {
++            let Expression::Identifier(ident) = class else {
++                return None;
++            };
++            let class = crate::util::strip_fqn_prefix(bytes_to_str(ident.value()));
++            let index = usize::from(
++                class.eq_ignore_ascii_case("Route")
++                    || class.eq_ignore_ascii_case("Illuminate\\Support\\Facades\\Route"),
++            );
++            self.matches_parameter(arguments, index, "view")
++        }
++    }
++
+     /// The view-name ranges one argument holds: the string itself, or the
+     /// entries of the candidate array a `…First` directive names.
+     fn matching_ranges(&self, expr: &Expression<'_>) -> Vec<ByteRange> {
+@@ -252,10 +313,7 @@ impl<'ast, 'arena, 'w> mago_syntax::walker::Walker<'ast, 'arena, CollectCtx<'w,
+             return;
+         };
+         let name = crate::util::strip_fqn_prefix(bytes_to_str(ident.value()));
+-        if !is_view_render_function(name) {
+-            return;
+-        }
+-        let Some((index, name_ranges)) = self.matches(&node.argument_list) else {
++        let Some((index, name_ranges)) = self.matches_function(&node.argument_list, name) else {
+             return;
+         };
+         let mut entries = Vec::new();
+@@ -294,7 +352,9 @@ impl<'ast, 'arena, 'w> mago_syntax::walker::Walker<'ast, 'arena, CollectCtx<'w,
+         if !is_view_render_static_call(node.class, method_name) {
+             return;
+         }
+-        let Some((index, name_ranges)) = self.matches(&node.argument_list) else {
++        let Some((index, name_ranges)) =
++            self.matches_static(node.class, method_name, &node.argument_list)
++        else {
+             return;
+         };
+         let mut entries = Vec::new();
+@@ -356,7 +416,8 @@ impl<'ast, 'arena, 'w> mago_syntax::walker::Walker<'ast, 'arena, CollectCtx<'w,
+         // is was settled when the name was indexed, so a matching name at
+         // the position the method takes one is the whole test here.
+         if let Some(name_index) = view_render_method_name_index(method_name)
+-            && let Some((index, name_ranges)) = self.matches(&node.argument_list)
++            && let Some((index, name_ranges)) =
++                self.matches_method(&node.argument_list, method_name)
+             && index == name_index
+         {
+             let mut entries = Vec::new();
+@@ -548,17 +609,6 @@ fn arrayable_shape_entries(
+ /// Whether a helper function renders a view named by one of its string
+ /// arguments.
+ ///
+-/// `blade_view_directive` is what the preprocessor compiles Blade's own
+-/// `@include` family, `@extends`, and `@component` into, so a template
+-/// rendering another template is judged by the same rules a controller
+-/// is.  `@each` compiles to [`is_each_render_function`]'s marker instead,
+-/// because its arguments do not describe a data array.
+-fn is_view_render_function(name: &str) -> bool {
+-    name.eq_ignore_ascii_case("view")
+-        || name.eq_ignore_ascii_case("blade_view_directive")
+-        || is_each_render_function(name)
+-}
+-
+ /// Whether the call is the preprocessor's compilation of `@each`.
+ fn is_each_render_function(name: &str) -> bool {
+     name.eq_ignore_ascii_case("blade_each_directive")
+@@ -668,10 +718,7 @@ fn matching_view_call_in_chain(
+                     return None;
+                 };
+                 let name = crate::util::strip_fqn_prefix(bytes_to_str(ident.value()));
+-                if !is_view_render_function(name) {
+-                    return None;
+-                }
+-                let (_, ranges) = walker.matches(&fc.argument_list)?;
++                let (_, ranges) = walker.matches_function(&fc.argument_list, name)?;
+                 return Some((fc.span().start.offset, ranges));
+             }
+             Expression::Call(Call::StaticMethod(sc)) => {
+@@ -681,7 +728,11 @@ fn matching_view_call_in_chain(
+                 if !is_view_render_static_call(sc.class, bytes_to_str(method.value)) {
+                     return None;
+                 }
+-                let (_, ranges) = walker.matches(&sc.argument_list)?;
++                let (_, ranges) = walker.matches_static(
++                    sc.class,
++                    bytes_to_str(method.value),
++                    &sc.argument_list,
++                )?;
+                 return Some((sc.span().start.offset, ranges));
+             }
+             Expression::Call(Call::Method(mc)) => {
+@@ -691,7 +742,8 @@ fn matching_view_call_in_chain(
+                 if let ClassLikeMemberSelector::Identifier(method) = &mc.method
+                     && let Some(name_index) =
+                         view_render_method_name_index(bytes_to_str(method.value))
+-                    && let Some((index, ranges)) = walker.matches(&mc.argument_list)
++                    && let Some((index, ranges)) =
++                        walker.matches_method(&mc.argument_list, bytes_to_str(method.value))
+                     && index == name_index
+                 {
+                     return Some((mc.span().start.offset, ranges));
+@@ -717,9 +769,10 @@ fn collect_data_argument<'ast, 'arena>(
+     index: usize,
+     entries: &mut Vec<SiteEntry<'ast, 'arena>>,
+ ) -> bool {
+-    match argument_list.arguments.iter().nth(index) {
+-        Some(arg) => collect_from_data_expr(arg.value(), entries),
+-        None => true,
++    match crate::call_args::argument_for_slot(argument_list, index, "data") {
++        Some(Some(argument)) => collect_from_data_expr(argument, entries),
++        Some(None) => true,
++        None => false,
+     }
+ }
+ 
+diff --git a/src/call_args.rs b/src/call_args.rs
+index 6a68232f1ceef3e252b1e9eab78188595f203878..6418f60e4d080e0d8b4bdc6d87ed682e6f008914 100644
+--- a/src/call_args.rs
++++ b/src/call_args.rs
+@@ -21,6 +21,41 @@ fn param_name_bare(param: &ParameterInfo) -> &str {
+     name.strip_prefix('$').unwrap_or(name)
+ }
+ 
++/// Bind one known parameter without constructing or resolving a signature.
++/// The outer `None` refuses unpacking, duplicate bindings and positional
++/// arguments after named ones; `Some(None)` means the parameter was omitted.
++pub(crate) fn argument_for_slot<'a>(
++    arguments: &ArgumentList<'a>,
++    index: usize,
++    name: &str,
++) -> Option<Option<&'a Expression<'a>>> {
++    let mut value = None;
++    let mut positional = 0;
++    let mut named_seen = false;
++    for argument in arguments.arguments.iter() {
++        let selected = match argument {
++            Argument::Positional(argument) => {
++                if named_seen || argument.ellipsis.is_some() {
++                    return None;
++                }
++                let selected = (positional == index).then_some(argument.value);
++                positional += 1;
++                selected
++            }
++            Argument::Named(argument) => {
++                named_seen = true;
++                (bytes_to_str(argument.name.value) == name).then_some(argument.value)
++            }
++        };
++        if let Some(selected) = selected
++            && value.replace(selected).is_some()
++        {
++            return None;
++        }
++    }
++    Some(value)
++}
++
+ /// For each parameter in `params`, find the call argument that supplies it.
+ ///
+ /// PHP binding rules: positional arguments fill parameters left to right;
+diff --git a/src/completion/laravel_key_calls.rs b/src/completion/laravel_key_calls.rs
+index bfefb348bb70cdac84d234e7abde5fcef76c224b..2a23396594f296ec4aa06bd96fed7ee50278dc2e 100644
+--- a/src/completion/laravel_key_calls.rs
++++ b/src/completion/laravel_key_calls.rs
+@@ -1,4 +1,4 @@
+-//! Semantic callable identity for config and translation key completion.
++//! Semantic callable identity for config, translation and view key completion.
+ 
+ use super::laravel_string_keys::receiver_chain_start;
+ use super::source::helpers::{split_trailing_ident, trailing_class_name};
+@@ -21,12 +21,13 @@ impl Backend {
+                 content,
+                 callable,
+                 ctx,
+-                &["config", "__", "trans", "trans_choice"],
++                &["config", "__", "trans", "trans_choice", "view"],
+             )?;
+             return laravel_key_calls::function_call(helper);
+         }
+         if laravel_key_calls::config_method_call(method).is_none()
+             && laravel_key_calls::translation_method_call(method).is_none()
++            && laravel_key_calls::view_method_call(method).is_none()
+         {
+             return None;
+         }
+@@ -48,11 +49,18 @@ impl Backend {
+         if let Some(call) = receiver.strip_suffix(')')
+             && let Some(open) = call.rfind('(')
+             && call[open + 1..].trim().is_empty()
+-            && self
+-                .global_laravel_helper(content, call[..open].trim_end(), ctx, &["config"])
+-                .is_some()
++            && let Some(helper) = self.global_laravel_helper(
++                content,
++                call[..open].trim_end(),
++                ctx,
++                &["config", "view"],
++            )
+         {
+-            return laravel_key_calls::config_method_call(method);
++            return if helper.eq_ignore_ascii_case("view") {
++                laravel_key_calls::view_method_call(method)
++            } else {
++                laravel_key_calls::config_method_call(method)
++            };
+         }
+         // Resolve typed repositories through the existing callable target path.
+         // The method's actual owner can be an interface or an inherited base.
+@@ -85,6 +93,16 @@ impl Backend {
+                 return laravel_key_calls::translation_method_call(method);
+             }
+         }
++        for class in [
++            "Illuminate\\View\\Factory",
++            "Illuminate\\Contracts\\View\\Factory",
++        ] {
++            if owner.as_str().eq_ignore_ascii_case(class)
++                || crate::class_lookup::is_subclass_of(owner.as_str(), class, &loader)
++            {
++                return laravel_key_calls::view_method_call(method);
++            }
++        }
+         None
+     }
+ }
+diff --git a/src/symbol_map/extraction/expressions/calls.rs b/src/symbol_map/extraction/expressions/calls.rs
+index 2703271a4c61f46fc7ab43b4ea0ec8c4f86e85fc..7d58cfc32ac3bd489e4d4bab08d0ebabd2545499 100644
+--- a/src/symbol_map/extraction/expressions/calls.rs
++++ b/src/symbol_map/extraction/expressions/calls.rs
+@@ -553,7 +553,8 @@ fn extract_call<'a>(
+                             ctx.defer_laravel_spans_since(span_start, dependency);
+                         }
+                     }
+-                    let laravel_kind = if name_clean.eq_ignore_ascii_case("view")
++                    let laravel_kind = if key_helper
++                        .is_some_and(|call| call.kind == crate::symbol_map::LaravelStringKind::View)
+                         || name_clean.eq_ignore_ascii_case("blade_each_directive")
+                     {
+                         Some(crate::symbol_map::LaravelStringKind::View)
+@@ -760,8 +761,13 @@ fn extract_call<'a>(
+                 } else if is_laravel_view_factory_call(method_call.object)
+                     && let Some(index) = view_factory_method_name_index(&member_name)
+                 {
+-                    try_emit_laravel_view_span_at(
++                    try_emit_laravel_view_span_for_parameter(
+                         index,
++                        if member_name.eq_ignore_ascii_case("first") {
++                            "views"
++                        } else {
++                            "view"
++                        },
+                         &method_call.argument_list,
+                         ctx.content,
+                         &mut ctx.spans,
+@@ -1039,8 +1045,13 @@ fn extract_call<'a>(
+                     || clean_subject.eq_ignore_ascii_case("Illuminate\\Support\\Facades\\View")
+                 {
+                     if let Some(index) = view_factory_method_name_index(&member_name) {
+-                        try_emit_laravel_view_span_at(
++                        try_emit_laravel_view_span_for_parameter(
+                             index,
++                            if member_name.eq_ignore_ascii_case("first") {
++                                "views"
++                            } else {
++                                "view"
++                            },
+                             &static_call.argument_list,
+                             ctx.content,
+                             &mut ctx.spans,
+diff --git a/src/symbol_map/extraction/laravel.rs b/src/symbol_map/extraction/laravel.rs
+index 811b5182a4c31acc39c1e20336b98466c18d4c49..518ee6d91c8db683d7eafdaf2cb41d12381db49e 100644
+--- a/src/symbol_map/extraction/laravel.rs
++++ b/src/symbol_map/extraction/laravel.rs
+@@ -130,6 +130,12 @@ pub(super) fn try_emit_laravel_string_span(
+         }
+         return;
+     }
++    if kind == crate::symbol_map::LaravelStringKind::View {
++        if let Some(Some(view)) = crate::call_args::argument_for_slot(argument_list, 0, "view") {
++            push_laravel_string_span(kind, false, false, view, content, spans);
++        }
++        return;
++    }
+     emit_laravel_string_span(kind, false, 0, argument_list, content, spans);
+ }
+ 
+@@ -143,6 +149,13 @@ pub(super) fn try_emit_laravel_string_span_at(
+     content: &str,
+     spans: &mut Vec<SymbolSpan>,
+ ) {
++    if kind == crate::symbol_map::LaravelStringKind::View {
++        if let Some(Some(view)) = crate::call_args::argument_for_slot(argument_list, index, "view")
++        {
++            push_laravel_string_span(kind, false, false, view, content, spans);
++        }
++        return;
++    }
+     emit_laravel_string_span(kind, false, index, argument_list, content, spans);
+ }
+ 
+@@ -556,13 +569,25 @@ pub(super) fn try_emit_laravel_view_span_at(
+     argument_list: &ArgumentList<'_>,
+     content: &str,
+     spans: &mut Vec<SymbolSpan>,
++) {
++    try_emit_laravel_view_span_for_parameter(index, "view", argument_list, content, spans);
++}
++
++/// Select a template argument by its PHP parameter role.
++pub(super) fn try_emit_laravel_view_span_for_parameter(
++    index: usize,
++    parameter: &str,
++    argument_list: &ArgumentList<'_>,
++    content: &str,
++    spans: &mut Vec<SymbolSpan>,
+ ) {
+     let kind = crate::symbol_map::LaravelStringKind::View;
+-    let Some(arg) = argument_list.arguments.iter().nth(index) else {
++    let Some(Some(argument)) = crate::call_args::argument_for_slot(argument_list, index, parameter)
++    else {
+         return;
+     };
+-    let Some(elements) = crate::parser::array_literal_elements(arg.value()) else {
+-        return push_laravel_string_span(kind, false, false, arg.value(), content, spans);
++    let Some(elements) = crate::parser::array_literal_elements(argument) else {
++        return push_laravel_string_span(kind, false, false, argument, content, spans);
+     };
+     // Only one candidate of the list is rendered, and which one depends on
+     // what exists on disk, so a candidate that names nothing is the shape
+diff --git a/src/symbol_map/laravel_key_calls.rs b/src/symbol_map/laravel_key_calls.rs
+index c973ec138bbf202ac0e6fc3370e8fc51a73f8c72..cec6add21233be94ab8f649bdd655060f3bc07f3 100644
+--- a/src/symbol_map/laravel_key_calls.rs
++++ b/src/symbol_map/laravel_key_calls.rs
+@@ -1,4 +1,4 @@
+-//! Canonical Laravel config and translation call identities and key roles.
++//! Canonical Laravel config, translation and view call identities and key roles.
+ 
+ use super::LaravelStringKind;
+ 
+@@ -11,7 +11,9 @@ pub(crate) struct KeyCall {
+ 
+ pub(crate) fn function_call(name: &str) -> Option<KeyCall> {
+     let name = name.trim_start_matches('\\');
+-    if name.eq_ignore_ascii_case("config") {
++    if name.eq_ignore_ascii_case("view") {
++        view_method_call("make")
++    } else if name.eq_ignore_ascii_case("config") {
+         config_method_call("get")
+     } else if ["__", "trans", "trans_choice"]
+         .iter()
+@@ -25,7 +27,11 @@ pub(crate) fn function_call(name: &str) -> Option<KeyCall> {
+ 
+ pub(crate) fn static_call(receiver: &str, method: &str) -> Option<KeyCall> {
+     let receiver = receiver.trim_start_matches('\\');
+-    if receiver.eq_ignore_ascii_case("Illuminate\\Support\\Facades\\Config")
++    if receiver.eq_ignore_ascii_case("Illuminate\\Support\\Facades\\View")
++        || receiver.eq_ignore_ascii_case("View")
++    {
++        view_method_call(method)
++    } else if receiver.eq_ignore_ascii_case("Illuminate\\Support\\Facades\\Config")
+         || receiver.eq_ignore_ascii_case("Config")
+     {
+         config_method_call(method)
+@@ -66,3 +72,22 @@ pub(crate) fn translation_method_call(method: &str) -> Option<KeyCall> {
+             accepts_array: false,
+         })
+ }
++
++/// Template-name roles of the view factory's lookup/render methods.
++pub(crate) fn view_method_call(method: &str) -> Option<KeyCall> {
++    let (parameter, accepts_array) = if method.eq_ignore_ascii_case("first") {
++        ("views", true)
++    } else if ["make", "exists", "renderWhen", "renderUnless"]
++        .iter()
++        .any(|candidate| method.eq_ignore_ascii_case(candidate))
++    {
++        ("view", false)
++    } else {
++        return None;
++    };
++    Some(KeyCall {
++        kind: LaravelStringKind::View,
++        parameter,
++        accepts_array,
++    })
++}
+diff --git a/tests/integration/laravel_view_names.rs b/tests/integration/laravel_view_names.rs
+index 9a347f6ba291b52e1cbd6c9d63358b617cb0aeff..0430dcef3e85310660f7330549b60ba4de3e5bec 100644
+--- a/tests/integration/laravel_view_names.rs
++++ b/tests/integration/laravel_view_names.rs
+@@ -1138,3 +1138,150 @@ class Renderer
+         "a plain string parameter should not offer templates, got {offered:?}"
+     );
+ }
++
++fn named_view_controller(body: &str) -> String {
++    controller("NamedViewController", body).replace("namespace App;\n", "namespace App;\nuse Illuminate\\Support\\Facades\\{View, Route, Response};\nuse function view as render_view;\n")
++}
++
++#[tokio::test]
++async fn named_view_arguments_navigate_the_declared_view_parameter() {
++    for body in [
++        "view(data: ['item' => new Item], view: 'shop');",
++        "render_view(data: ['item' => new Item], view: 'shop');",
++        "view(data: ['item' => new Item], view: 'shop')->with('title', 'sample');",
++        "view(view: 'shop', data: ['item' => new Item]);",
++        "View::make(data: ['item' => new Item], view: 'shop');",
++        "View::first(data: ['item' => new Item], views: ['shop']);",
++        "View::renderWhen(data: ['item' => new Item], view: 'shop', condition: true);",
++        "view()->make(data: ['item' => new Item], view: 'shop');",
++        "Route::view(data: ['item' => new Item], view: 'shop', uri: '/shop');",
++        "Response::view(data: ['item' => new Item], view: 'shop');",
++    ] {
++        let source = named_view_controller(body);
++        let (backend, _dir) = create_psr4_workspace(
++            LARAVEL_APP_COMPOSER,
++            &[
++                ("app/Item.php", ITEM_CLASS),
++                ("app/NamedViewController.php", &source),
++                ("resources/views/shop.blade.php", "{{ $item->name }}\n"),
++            ],
++        );
++        backend.initialized(InitializedParams {}).await;
++        let uri = open_php_file(&backend, "app/NamedViewController.php").await;
++        let found = definitions_at(&backend, &uri, &source, "'shop'").await;
++        assert!(
++            found.iter().any(|target| target
++                .uri
++                .as_str()
++                .ends_with("/resources/views/shop.blade.php")),
++            "{body}: {found:?}"
++        );
++        let blade = open_blade_template(&backend, "resources/views/shop.blade.php").await;
++        let labels = crate::common::complete_labels_at_opened(&backend, &blade, 0, 10).await;
++        assert!(
++            labels.iter().any(|label| label == "price"),
++            "named data must reach the selected view: {body}: {labels:?}"
++        );
++    }
++}
++
++#[tokio::test]
++async fn named_view_arguments_complete_the_view_parameter_in_any_order() {
++    for body in [
++        "view(view: 'sh');",
++        "view(data: [], view: 'sh');",
++        "View::make(data: [], view: 'sh');",
++        "render_view(data: [], view: 'sh');",
++        "view()->make(data: [], view: 'sh');",
++        "View::first(data: [], views: ['sh']);",
++    ] {
++        let source = named_view_controller(body);
++        let (backend, _dir) = create_psr4_workspace(
++            LARAVEL_APP_COMPOSER,
++            &[
++                ("app/NamedViewController.php", &source),
++                ("resources/views/shop.blade.php", "<p>Shop</p>\n"),
++            ],
++        );
++        backend.initialized(InitializedParams {}).await;
++        let uri = open_php_file(&backend, "app/NamedViewController.php").await;
++        let position = crate::common::position_after(&source, "'sh");
++        let labels = crate::common::complete_labels_at_opened(
++            &backend,
++            &uri,
++            position.line,
++            position.character,
++        )
++        .await;
++        assert!(
++            labels.iter().any(|label| label == "shop"),
++            "{body}: {labels:?}"
++        );
++    }
++}
++
++#[tokio::test]
++async fn named_view_arguments_do_not_borrow_strings_from_other_parameters() {
++    for body in [
++        "view(data: 'shop', view: 'missing');",
++        "View::make(data: 'shop', view: 'missing');",
++        "view(View: 'shop');",
++        "view('shop', view: 'other');",
++        "view(...['view' => 'shop']);",
++        "unrelated(view: 'shop');",
++    ] {
++        let source = named_view_controller(body);
++        let (backend, _dir) = create_psr4_workspace(
++            LARAVEL_APP_COMPOSER,
++            &[
++                ("app/NamedViewController.php", &source),
++                ("resources/views/shop.blade.php", "<p>Shop</p>\n"),
++            ],
++        );
++        backend.initialized(InitializedParams {}).await;
++        let uri = open_php_file(&backend, "app/NamedViewController.php").await;
++        let found = definitions_at(&backend, &uri, &source, "'shop'").await;
++        assert!(
++            !found.iter().any(|target| target
++                .uri
++                .as_str()
++                .ends_with("/resources/views/shop.blade.php")),
++            "non-view or wrong-case parameter must not name a view: {body}: {found:?}"
++        );
++    }
++}
++
++#[tokio::test]
++async fn named_view_arguments_other_roles_do_not_complete_views() {
++    for body in [
++        "view(data: 'sh', view: 'missing');",
++        "View::make(data: 'sh', view: 'missing');",
++        "View::first(data: ['sh'], views: ['missing']);",
++        "view(mergeData: 'sh', view: 'missing');",
++        "view(View: 'sh');",
++        "unrelated(view: 'sh');",
++    ] {
++        let source = named_view_controller(body);
++        let (backend, _dir) = create_psr4_workspace(
++            LARAVEL_APP_COMPOSER,
++            &[
++                ("app/NamedViewController.php", &source),
++                ("resources/views/shop.blade.php", "<p>Shop</p>\n"),
++            ],
++        );
++        backend.initialized(InitializedParams {}).await;
++        let uri = open_php_file(&backend, "app/NamedViewController.php").await;
++        let position = crate::common::position_after(&source, "'sh");
++        let labels = crate::common::complete_labels_at_opened(
++            &backend,
++            &uri,
++            position.line,
++            position.character,
++        )
++        .await;
++        assert!(
++            !labels.iter().any(|label| label == "shop"),
++            "wrong parameter or unrelated callable: {body}: {labels:?}"
++        );
++    }
++}

@@ -141,7 +141,47 @@ function TooltipDelayRow() {
   );
 }
 
+const BUILD_WINDOW_WHEN = [
+  { value: "always", label: "Always" },
+  { value: "onError", label: "Only on errors" },
+  { value: "never", label: "Never" },
+];
+
 export const EXECUTION_PAGES: PageSpec[] = [
+  {
+    id: "build.compiler",
+    title: "Compiler",
+    group: BUILD_GROUP,
+    order: 355,
+    projectScope: true,
+    keywords: [
+      "Build tool window",
+      "Open Build tool window",
+      "Focus Build tool window",
+      "automatic build",
+      "before launch",
+    ],
+    sections: [
+      {
+        options: [
+          {
+            kind: "select",
+            key: "build.openToolWindow",
+            label: "Open Build tool window",
+            options: BUILD_WINDOW_WHEN,
+            hint: "Automatic and explicit builds. Run/Debug before-launch builds stay hidden until they fail.",
+          },
+          {
+            kind: "select",
+            key: "build.focusToolWindow",
+            label: "Focus Build tool window",
+            options: BUILD_WINDOW_WHEN,
+            hint: "When Build opens, whether it takes keyboard focus from the editor.",
+          },
+        ],
+      },
+    ],
+  },
   {
     id: "build.cmake",
     title: "CMake",
@@ -215,6 +255,9 @@ export const EXECUTION_PAGES: PageSpec[] = [
       "threads",
       "-T",
       "parallel",
+      "Always update snapshots",
+      "SNAPSHOT",
+      "-U",
     ],
     component: MavenPage,
   },
@@ -271,6 +314,17 @@ export const EXECUTION_PAGES: PageSpec[] = [
             key: "debugger.debugServerPage",
             label: "Debug a dev server's page in the browser",
             hint: "Debugging a script that starts Vite, Next.js or another dev server also opens its page in Chrome or Edge with the debugger attached.",
+          },
+        ],
+      },
+      {
+        title: "Flutter",
+        options: [
+          {
+            kind: "toggle",
+            key: "debugger.flutterHotReloadOnSave",
+            label: "Hot reload on save",
+            hint: "Saving a Dart file of a running Flutter debug session reloads the app, unless the file has errors.",
           },
         ],
       },

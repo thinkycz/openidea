@@ -15,6 +15,57 @@ slice, commit and push it, and retain only the latest generated app. Native UI
 cases remain deferred/unverified; earlier native-first blocking checkpoints are
 historical and no longer prevent independent implementation.
 
+Upstream merge slice197 (2026-11-19–20, automated acceptance verified):
+Merge 153 commits from l0ng-ai/openidea through
+9f4731189d73d6dedd331aa604ad6ca6489b35f7 (989 upstream paths). This imports editor
+save/diagnostic freshness fixes, LSP transport improvements, workbench layouts,
+Git, database, MCP, agent, Flutter and plugin API 1.14 development changes.
+Preserve OpenStorm identity/version 0.1.117, bundled PHPantom 181, project
+configuration compatibility, disabled updates and guarded refactoring. The prior
+exclusions of Java stream tracing/ide-streams and direct plugin-agent injection
+into debugger launches remain. Inherited changes are not new whole-area acceptance.
+
+Combine upstream version-aware dirty-state handling with OpenStorm’s external-save
+consent loop, pending document tracking and explicit discard guard. A new regression
+confirms that a newer edit stays dirty after a confirmed overwrite response, then
+saves normally. Retain empty-list diagnostic cleanup beside upstream edit mapping,
+semantic rename placeholders, stale-plan refusal and new dialog typography/layout.
+Adapt the retained hot-reload command to the upstream reason argument and the PHP
+language-setting test to Arc<Host>. Rename regressions now address symbolRename;
+VS Code presets register the two new silent-shelving actions with empty default
+bindings. Existing shortcuts remain. MCP/test-report branding uses OpenStorm;
+protocol headers remain compatible. Initial compile/test failures and their fixes
+are retained in the local receipts; no test exclusions or deadlines were expanded.
+
+Fresh workspace tests pass: 5,485 passed, 245 declared ignored, 11 existing explicit
+exclusions, 231 test groups. Workspace all-target Clippy with -D warnings and Rust
+formatting pass. Frontend: 14,393 passed/eight skipped; type checking including e2e,
+lint (with warnings), format, Knip, production build and Safari 15.4 startup checks
+pass. Bindings generation passes and both generated files match their checked
+snapshot exactly. The Rust results are retained after the final frontend-only test
+selector/keymap corrections; the full frontend checks were rerun after those fixes.
+
+All 66 actual PHPantom client and 57 Host cases pass on the unchanged signed 181
+engine, including dirty dependencies, restart, PHP target selection, reviewed edits,
+external conflicts and translation/view/route workflows. Protected fixture originals
+remain unchanged. All 53 selected browser flows pass across code insight, editor and
+Laravel navigation with controlled backend metadata/IPC. These are distinct from
+native editor acceptance, which remains user-skipped. Other browser/native/platform
+and real-service matrices are not newly accepted. Unchanged engine source acceptance
+from slice194 is reused after bundled source/provenance/checksum verification.
+
+No tracked or user environment files change; tests retain their previously approved
+disposable fixture scope. No replacement app is packaged or installed. Only
+artifacts/batches/0.1.117/OpenStorm.app remains, with its original executable hash and
+deep/strict ad-hoc signature verified after testing and cleanup. It predates this
+merge and does not contain the new upstream source. Owned compiler output and
+frontend dist output are removed; canonical sources, engines, receipts, Workbench
+and evaluation fixtures remain. Cleanup and acceptance receipts are under
+artifacts/checks/upstream-20261119. The typed-translator receiver investigation
+remains diagnostic artifacts only; no engine changes are included here. All 69
+area statuses remain unchanged. The requested merge commit/push and remote read-back
+are recorded in the local delivery receipt; Git history is authoritative.
+
 Package slice196 (2026-11-19, accepted local development bundle):
 App 0.1.117 bundles the exact accepted engine 181 translation-argument fix.
 Imported global helper aliases retain canonical locale/placeholder roles;

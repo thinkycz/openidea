@@ -1,7 +1,8 @@
 /**
  * Icon set: JetBrains new-UI ("expui") icons from intellij-community / intellij-plugins
  * (Apache-2.0 / MIT, see THIRD_PARTY_LICENSES.md), vendored as-is under
- * `./expui/<group>/<name>.svg` with their `_dark` and `@20x20` variants. File types
+ * `./expui/<group>/<name>.svg` with their `_dark` and `@20x20` variants; `./expui/flutter/`
+ * holds the Flutter plugin's tool window icons (BSD-3-Clause). File types
  * whose JetBrains icons are not open source use OpenStorm's own icons drawn in the same
  * style, under `./openidea/<group>/<name>.svg` (paths prefixed `openidea/`). Project type
  * logos under `./brands/` come from Simple Icons (CC0-1.0; see THIRD_PARTY_LICENSES.md). Names are the
@@ -268,6 +269,7 @@ const ICONS = {
   "agent-kiro": "openidea/agents/kiro",
   "agent-vibe": "openidea/agents/vibe",
   "agent-omp": "openidea/agents/omp",
+  "agent-hermes": "openidea/agents/hermes",
   "agent-deepseek-harness": "brands/deepseek",
   "toolwindow-maven": "toolwindows/maven",
   "toolwindow-gradle": "toolwindows/gradle",
@@ -310,6 +312,7 @@ const ICONS = {
   "page-first": "openidea/general/pageFirst",
   "page-last": "openidea/general/pageLast",
   sliders: "openidea/general/sliders",
+  layers: "openidea/general/layers",
   "graphql-variables": "openidea/general/graphqlVariables",
   layout: "general/layout",
   split: "general/splitVertically",
@@ -446,12 +449,17 @@ const ICONS = {
   "test-pending": "run/testNotRunYet",
   "test-show-passed": "run/showPassed",
   "test-show-ignored": "run/showIgnored",
+  "test-sort": "runConfigurations/sortByDuration",
   debug: "run/debug",
   "run-coverage": "run/runWithCoverage",
   profile: "run/profile",
   "toolwindow-coverage": "toolwindows/coverage",
   "toolwindow-profiler": "toolwindows/profiler",
   "toolwindow-logcat": "openidea/fileTypes/log",
+  "toolwindow-flutter-inspector": "flutter/inspector",
+  "toolwindow-flutter-devtools": "flutter/devTools",
+  "toolwindow-flutter-deep-links": "flutter/deepLinks",
+  "toolwindow-flutter-extensions": "flutter/extensions",
   "gutter-navigate": "general/autoscrollToSource",
   "gutter-run": "gutter/run",
   "gutter-run-all": "actions/runAll",

@@ -74,7 +74,7 @@ async fn php_setting_restarts_with_selected_target_and_restores_auto_and_dirty_b
     let mut php = ide_language::LanguageRegistry::load(None).unwrap().get(&LanguageId::new("php")).unwrap();
     php.language_servers.retain(|server| server.name == "phpantom");
     php.language_servers[0].command = bin.to_string_lossy().into_owned();
-    let host = Host::new(HostConfig {
+    let host = Arc::new(Host::new(HostConfig {
         project_environment: false,
         config_dir: tmp.path().join("config"),
         data_dir: tmp.path().join("data"),
@@ -84,7 +84,7 @@ async fn php_setting_restarts_with_selected_target_and_restores_auto_and_dirty_b
         sink_for: Box::new(|_| Arc::new(|_| {})),
         owner: |window| window,
         runtime: tokio::runtime::Handle::current(),
-    });
+    }));
     host.trust.decide(&root, true, false).unwrap();
     let project = host.open_project("main", &root).unwrap();
     let outcome = std::panic::AssertUnwindSafe(async {

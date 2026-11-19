@@ -25,7 +25,7 @@
  * the snapshot, selections mapped).
  */
 import { ChangeSet, Text } from "@codemirror/state";
-import type { TextChange, ReviewedEditHistory } from "@/platform/ipc";
+import { isErrorKind, type TextChange, type ReviewedEditHistory } from "@/platform/ipc";
 import { minimalChanges } from "./diff";
 
 export interface SyncTransport {
@@ -38,6 +38,8 @@ export interface SyncHost {
   applyRemote(changes: ChangeSet, workspaceEdit?: boolean, history?: ReviewedEditHistory | null): void;
   /** A locally produced batch accepted by the versioned backend. */
   onLocalCommitted?(baseVersion: number, version: number, changes: ChangeSet): void;
+  /** The local buffer has no pending edits or resync. */
+  onSynced?(): void;
   /** Called after a hard resync discarded local changes the backend never saw. */
   onDiscarded?(reason: unknown): void;
   /** Non-recoverable transport errors (logged by default). */
@@ -61,10 +63,6 @@ export const frameScheduler: Scheduler = (fn) => {
   requestAnimationFrame(once);
   setTimeout(once, 50);
 };
-
-function isOutOfSync(e: unknown): boolean {
-  return typeof e === "object" && e !== null && (e as { kind?: string }).kind === "outOfSync";
-}
 
 export function toTextChanges(cs: ChangeSet): TextChange[] {
   const out: TextChange[] = [];
@@ -158,6 +156,7 @@ export class DocSync {
     if (this.disposed || patch.version <= this.serverVersion) return;
     this.pendingRemote.push(patch);
     this.drainRemote();
+    this.resolveIdle();
   }
 
   dispose() {
@@ -208,7 +207,7 @@ export class DocSync {
   }
 
   private onReject(error: unknown) {
-    if (!isOutOfSync(error)) {
+    if (!isErrorKind(error, "outOfSync")) {
       this.host.onError?.(error);
       this.hardResync(error);
       return;
@@ -360,6 +359,7 @@ export class DocSync {
 
   private resolveIdle(force = false) {
     if (!force && !this.idle) return;
+    if (this.idle && !this.disposed) this.host.onSynced?.();
     const waiters = this.idleWaiters;
     this.idleWaiters = [];
     waiters.forEach((w) => w());

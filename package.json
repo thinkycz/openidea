@@ -7,7 +7,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "tsc --noEmit && vite build && node scripts/check-webkit.ts",
+    "build": "node --max-old-space-size=4096 node_modules/typescript/bin/tsc --noEmit && vite build && node scripts/check-webkit.ts",
     "preview": "vite preview",
     "tauri": "node scripts/tauri.ts",
     "test": "vitest run",
@@ -17,7 +17,7 @@
     "format": "oxfmt",
     "format:check": "oxfmt --check",
     "knip": "knip",
-    "typecheck": "tsrs --noEmit && tsrs -p tsconfig.node.json --noEmit && tsrs -p perf --noEmit && tsrs -p evals --noEmit && tsrs -p scripts --noEmit && tsrs -p smoke --noEmit",
+    "typecheck": "tsrs --noEmit && tsrs -p tsconfig.node.json --noEmit && tsrs -p perf --noEmit && tsrs -p evals --noEmit && tsrs -p scripts --noEmit && tsrs -p smoke --noEmit && tsrs -p e2e --noEmit",
     "gen:bindings": "cargo test -p openidea --test export_bindings",
     "gen:windows-icons": "node scripts/gen-windows-icons.ts",
     "gen:angular-grammar": "lezer-generator src/editor/core/cm/angular/angular.grammar --typeScript -o src/editor/core/cm/angular/parser.ts",

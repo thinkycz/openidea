@@ -909,6 +909,27 @@ async fn authenticates_and_retries_session_setup_once_on_auth_error() {
     mgr3.shutdown();
 }
 
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn hermes_profiles_complete_their_own_skills() {
+    let tmp = tempfile::tempdir().unwrap();
+    let skill = |dir: &str, name: &str| {
+        let dir = tmp.path().join(dir).join(name);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("SKILL.md"), format!("---\nname: {name}\ndescription: d\n---\n")).unwrap();
+    };
+    skill(".hermes/skills", "plan");
+    skill(".hermes/profiles/dom/skills/home", "lights");
+    std::fs::write(tmp.path().join(".hermes/profiles/dom/config.yaml"), "").unwrap();
+    let mgr = manager_at(tmp.path(), &tmp.path().join("models.json"), Arc::new(FakeAgent::default()));
+    let names = |c: Vec<AgentCommand>| c.into_iter().map(|c| c.name).collect::<Vec<_>>();
+    assert!(names(mgr.commands("hermes", None).await.unwrap()).contains(&"plan".to_owned()));
+    let dom = names(mgr.commands("hermes-dom", None).await.unwrap());
+    assert!(dom.contains(&"lights".to_owned()) && !dom.contains(&"plan".to_owned()));
+    assert!(!names(mgr.commands("claude", None).await.unwrap()).contains(&"plan".to_owned()));
+    mgr.shutdown();
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn commands_are_remembered_per_project_and_merged_with_skills_on_disk() {
     let tmp = tempfile::tempdir().unwrap();
@@ -1421,6 +1442,32 @@ async fn shell_commands_show_in_the_conversation_and_go_with_the_next_message() 
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn an_idle_task_starts_no_turn_until_its_first_message() {
+    let tmp = tempfile::tempdir().unwrap();
+    let agent = Arc::new(FakeAgent::default());
+    let mgr = manager(tmp.path(), agent.clone());
+    let task = mgr
+        .create(NewAgentTask {
+            prompt: text("! echo first"),
+            provider: "claude".into(),
+            isolation: Isolation::Local,
+            idle: true,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!((task.status, task.title.as_str()), (AgentStatus::Ready, "! echo first"));
+
+    mgr.run_shell(&task.id, "echo first", ide_core::CancellationToken::new()).await.unwrap();
+    assert!(agent.prompts.lock().is_empty(), "an idle task starts no turn");
+    mgr.prompt(&task.id, text("again"), false).await.unwrap();
+    wait_for(&mgr, &task.id, AgentStatus::Ready).await;
+    let sent = agent.prompts.lock().last().cloned().unwrap();
+    assert!(sent.pointer("/0/text").and_then(Value::as_str).is_some_and(|t| t.contains("echo first")));
+    assert_eq!(sent.pointer("/1/text").and_then(Value::as_str), Some("again"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn send_now_interrupts_the_turn_when_steering_is_refused() {
     let tmp = tempfile::tempdir().unwrap();
     let agent = Arc::new(FakeAgent { session_steering: true, ..FakeAgent::default() });
@@ -1852,6 +1899,32 @@ async fn real_claude_task_in_a_worktree() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn hermes_session_info_names_the_task_and_counts_compressions() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mgr = manager(tmp.path(), Arc::new(FakeAgent::default()));
+    let task = mgr
+        // "again" ends the turn at once; the default prompt waits for a permission answer.
+        .create(NewAgentTask { prompt: text("again"), provider: "claude".into(), ..Default::default() })
+        .await
+        .unwrap();
+    wait_for(&mgr, &task.id, AgentStatus::Ready).await;
+    let handle = mgr.task(&task.id).unwrap();
+    let info = |title: &str, depth: u32| {
+        json!({"sessionUpdate": "session_info_update", "title": title, "updatedAt": "2026-11-18T18:35:32.068362+00:00",
+            "_meta": {"hermes": {"sessionProvenance": {"sessionKind": "root", "parentHermesSessionId": null,
+                "compressionDepth": depth}}}})
+    };
+    handle.on_update(None, &info("Make a 3-step plan and carry it out: 1) list the…", 0));
+    handle.on_update(None, &info("List files and edit notes.txt", 0));
+    let t = handle.state.lock().task.clone();
+    assert_eq!(t.title, "List files and edit notes.txt", "the agent's latest title wins");
+    assert_eq!(t.stats.compressions, 0);
+    handle.on_update(None, &info("List files and edit notes.txt", 2));
+    assert_eq!(handle.state.lock().task.stats.compressions, 2);
+    mgr.shutdown();
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn renamed_titles_survive_updates_forks_and_restart() {
     let tmp = tempfile::tempdir().unwrap();
     let agent = Arc::new(FakeAgent::default());
@@ -1909,7 +1982,7 @@ async fn startup_warnings_survive_replay_and_restart_without_failing_the_task() 
     let handle = mgr.task(&task.id).unwrap();
     handle.replaying.store(true, Ordering::Release);
     handle.turn_started.store(false, Ordering::Release);
-    let client = Client { task: Arc::downgrade(&handle) };
+    let client = Client::new(&handle, None);
     client.on_notification(WARNING_NOTIFICATION, json!({"message": "Project MCP config is disabled until trusted."}));
     client.on_notification(WARNING_NOTIFICATION, json!({"message": "  "}));
     client.on_notification(WARNING_NOTIFICATION, json!({}));
@@ -3505,11 +3578,13 @@ fn streamed_text_is_sent_as_appends() {
     );
     let replaced = entry_event("t", &mut streamed, None, 3, &agent("Other"));
     assert!(matches!(replaced, AgentEvent::Entry { .. }), "text that doesn't extend the sent text is sent whole");
-    let thought = entry_event("t", &mut streamed, None, 4, &AgentEntry::Thought { text: "hmm…".into() });
+    let thought = AgentEntry::Thought { text: "hmm…".into(), started_ms: None };
+    let thought = entry_event("t", &mut streamed, None, 4, &thought);
     assert!(matches!(thought, AgentEvent::Entry { index: 4, .. }), "a new message starts whole");
     let tool = AgentEntry::Error { message: "x".into() };
     entry_event("t", &mut streamed, None, 4, &tool);
-    let again = entry_event("t", &mut streamed, None, 4, &AgentEntry::Thought { text: "hmm… ok".into() });
+    let again = AgentEntry::Thought { text: "hmm… ok".into(), started_ms: None };
+    let again = entry_event("t", &mut streamed, None, 4, &again);
     assert!(matches!(again, AgentEvent::Entry { .. }), "an entry replaced by another kind forgets its text");
 
     let long = "é".repeat(5000);
@@ -4377,6 +4452,7 @@ async fn per_session_mcp_overrides_filter_session_and_reload_when_idle() {
             isolation: Isolation::Local,
             base: None,
             mcp_overrides: BTreeMap::from([("slack".into(), false)]),
+            idle: false,
         })
         .await
         .unwrap();
@@ -4504,6 +4580,7 @@ async fn copilot_falls_back_to_acp_when_headless_probe_session_or_prompt_fails()
             isolation: Isolation::Local,
             base: None,
             mcp_overrides: BTreeMap::new(),
+            idle: false,
         })
         .await
         .unwrap();
@@ -4528,6 +4605,7 @@ async fn copilot_falls_back_to_acp_when_headless_probe_session_or_prompt_fails()
             isolation: Isolation::Local,
             base: None,
             mcp_overrides: BTreeMap::new(),
+            idle: false,
         })
         .await
         .unwrap();

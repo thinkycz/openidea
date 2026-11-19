@@ -62,8 +62,8 @@ afterEach(() => {
 it("uses a different semantic placeholder in the existing dialog without inserting it into the short declaration", async () => {
   await startRename(view);
   const popup = useLspPopup.getState().popup;
-  expect(popup?.kind).toBe("rename");
-  if (popup?.kind !== "rename") return;
+  expect(popup?.kind).toBe("symbolRename");
+  if (popup?.kind !== "symbolRename") return;
   expect(popup.initial).toBe("openstorm.billing.invoice");
   expect(popup.title).toContain("openstorm.billing.invoice");
   expect(inplaceSession(view.state)).toBeNull();
@@ -90,8 +90,8 @@ it.each([null, "invoice"])("retains normal in-place rename when the placeholder 
   view.dispatch({ changes: { from, to: from + 7, insert: "updated" }, userEvent: "input.type" });
   await startRename(view);
   const popup = useLspPopup.getState().popup;
-  expect(popup?.kind).toBe("rename");
-  if (popup?.kind !== "rename") return;
+  expect(popup?.kind).toBe("symbolRename");
+  if (popup?.kind !== "symbolRename") return;
   expect(popup.initial).toBe("updated");
   expect(view.state.doc.toString()).toBe(text);
   popup.onSubmit("updated");
@@ -129,8 +129,8 @@ it.each(["typed", "replaced", "read-only"])("discards late preparation after the
 it("refuses a dialog submission after the displayed source changed", async () => {
   await startRename(view);
   const popup = useLspPopup.getState().popup;
-  expect(popup?.kind).toBe("rename");
-  if (popup?.kind !== "rename") return;
+  expect(popup?.kind).toBe("symbolRename");
+  if (popup?.kind !== "symbolRename") return;
   view.dispatch({ changes: { from, to: from + 7, insert: "another" } });
   popup.onSubmit("openstorm.billing.details");
   await new Promise((resolve) => setTimeout(resolve, 0));
@@ -141,7 +141,7 @@ it("refuses a dialog submission after the displayed source changed", async () =>
 it("drops a completed rename plan after the source changes while the request is running", async () => {
   await startRename(view);
   const popup = useLspPopup.getState().popup;
-  if (popup?.kind !== "rename") throw new Error("rename dialog missing");
+  if (popup?.kind !== "symbolRename") throw new Error("rename dialog missing");
   let resolve!: (value: unknown) => void;
   mock.rename.mockImplementation(
     () =>

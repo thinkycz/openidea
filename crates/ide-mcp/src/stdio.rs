@@ -9,8 +9,18 @@ use bytes::Bytes;
 use http_body_util::{BodyExt, Full};
 use hyper::{Request, StatusCode, header};
 use serde_json::Value;
+use std::collections::HashSet;
+use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt};
+
+#[derive(Default)]
+struct BridgeState {
+    preferred: Option<SocketAddr>,
+    init_message: Option<Value>,
+    initialized_on: HashSet<SocketAddr>,
+}
 
 /// Runs the bridge on this process's stdin and stdout until stdin closes.
 /// `project` defaults to the current directory. Returns the exit code.
@@ -43,6 +53,7 @@ where
     W: AsyncWrite + Unpin,
 {
     let scope = crate::server::new_token()?;
+    let state = Arc::new(Mutex::new(BridgeState::default()));
     let mut lines = input.lines();
     let mut pending = tokio::task::JoinSet::new();
     let (sent, mut received) = tokio::sync::mpsc::unbounded_channel::<Value>();
@@ -57,10 +68,13 @@ where
                 if line.trim().is_empty() { continue; }
                 match serde_json::from_str::<Value>(&line) {
                     Ok(message) => {
-                        let (discovery, project, scope, sent) =
-                            (discovery.to_owned(), project.to_owned(), scope.clone(), sent.clone());
+                        if is_initialize(&message) {
+                            state.lock().unwrap().init_message = Some(message.clone());
+                        }
+                        let (discovery, project, scope, sent, state) =
+                            (discovery.to_owned(), project.to_owned(), scope.clone(), sent.clone(), state.clone());
                         pending.spawn(async move {
-                            if let Some(reply) = relay(&discovery, &project, &message, &scope, &sent).await {
+                            if let Some(reply) = relay(&discovery, &project, &message, &scope, &sent, &state).await {
                                 let _ = sent.send(reply);
                             }
                         });
@@ -86,6 +100,10 @@ where
     Ok(())
 }
 
+fn is_initialize(message: &Value) -> bool {
+    message.get("method").and_then(Value::as_str) == Some("initialize")
+}
+
 /// The IDE's answer to `message`, or an error response for each request in
 /// it when the IDE can't be reached. An answer on an event stream goes to `sent`
 /// with the messages before it.
@@ -95,16 +113,17 @@ async fn relay(
     message: &Value,
     scope: &str,
     sent: &tokio::sync::mpsc::UnboundedSender<Value>,
+    state: &Mutex<BridgeState>,
 ) -> Option<Value> {
-    let failure = match post(discovery, project, message, scope, sent).await {
+    let failure = match post(discovery, project, message, scope, sent, state).await {
         Ok(Answer::Streamed { answered: true }) => return None,
-        Ok(Answer::Streamed { answered: false }) => "OpenIDEA's answer ended early".to_owned(),
+        Ok(Answer::Streamed { answered: false }) => "OpenStorm's answer ended early".to_owned(),
         Ok(Answer::Body(StatusCode::ACCEPTED, _)) => return None,
         Ok(Answer::Body(_, body)) if !body.is_empty() => match serde_json::from_slice::<Value>(&body) {
             Ok(reply) => return Some(reply),
             Err(_) => String::from_utf8_lossy(&body).trim().to_owned(),
         },
-        Ok(Answer::Body(status, _)) => format!("OpenIDEA answered {status}"),
+        Ok(Answer::Body(status, _)) => format!("OpenStorm answered {status}"),
         Err(e) => e,
     };
     let errors: Vec<Value> = requests(message).into_iter().map(|id| error_response(id, NOT_OPEN, &failure)).collect();
@@ -132,10 +151,97 @@ enum Answer {
     },
 }
 
-/// POSTs `message` to the server in the discovery file; a message for the
-/// user when that fails.
+/// POSTs `message` to the server in the discovery file; when several servers share a data
+/// directory (multiple remote windows on one host), picks the one where `project` is open.
 async fn post(
     discovery: &Path,
+    project: &Path,
+    message: &Value,
+    scope: &str,
+    sent: &tokio::sync::mpsc::UnboundedSender<Value>,
+    state: &Mutex<BridgeState>,
+) -> Result<Answer, String> {
+    let not_running = || {
+        format!(
+            "OpenStorm's MCP server is not running. Start OpenStorm, open {} in it, and turn on Settings › Agents › MCP Server",
+            project.display()
+        )
+    };
+    let mut candidates = Discovery::candidates(discovery);
+    if candidates.is_empty() {
+        return Err(not_running());
+    }
+    if let Some(preferred) = state.lock().unwrap().preferred
+        && let Some(pos) = candidates.iter().position(|c| SocketAddr::new(c.address, c.port) == preferred)
+    {
+        let chosen = candidates.remove(pos);
+        candidates.insert(0, chosen);
+    }
+    let initializing = is_initialize(message);
+    let mut fallback: Option<(SocketAddr, Answer)> = None;
+    let mut last_error: Option<String> = None;
+    let total = candidates.len();
+    for (idx, info) in candidates.into_iter().enumerate() {
+        let at = SocketAddr::new(info.address, info.port);
+        if !initializing {
+            let init = {
+                let guard = state.lock().unwrap();
+                (!guard.initialized_on.contains(&at)).then(|| guard.init_message.clone()).flatten()
+            };
+            if let Some(mut init_msg) = init {
+                if let Some(obj) = init_msg.as_object_mut() {
+                    obj.insert("id".into(), Value::String(format!("__openidea_init_{idx}__")));
+                }
+                if post_one(&info, project, &init_msg, scope, sent).await.is_ok() {
+                    state.lock().unwrap().initialized_on.insert(at);
+                }
+            }
+        }
+        match post_one(&info, project, message, scope, sent).await {
+            Ok(answer) => {
+                if initializing {
+                    state.lock().unwrap().initialized_on.insert(at);
+                    if total > 1 && !serves_project(&info, project, scope).await {
+                        fallback.get_or_insert((at, answer));
+                        continue;
+                    }
+                } else if idx + 1 < total && is_not_open_reply(&answer) {
+                    fallback = Some((at, answer));
+                    continue;
+                }
+                state.lock().unwrap().preferred = Some(at);
+                return Ok(answer);
+            }
+            Err(err) => last_error = Some(err),
+        }
+    }
+    if let Some((at, answer)) = fallback {
+        state.lock().unwrap().preferred = Some(at);
+        return Ok(answer);
+    }
+    Err(last_error.unwrap_or_else(not_running))
+}
+
+/// Whether the server of `info` has `project` open: its `tools/list` doesn't answer "not open".
+async fn serves_project(info: &Discovery, project: &Path, scope: &str) -> bool {
+    let probe = serde_json::json!({ "jsonrpc": "2.0", "id": "__openidea_probe__", "method": "tools/list" });
+    let (discard, _) = tokio::sync::mpsc::unbounded_channel();
+    match post_one(info, project, &probe, scope, &discard).await {
+        Ok(answer @ Answer::Body(StatusCode::OK, _)) => !is_not_open_reply(&answer),
+        _ => false,
+    }
+}
+
+fn is_not_open_reply(answer: &Answer) -> bool {
+    let Answer::Body(StatusCode::OK, body) = answer else { return false };
+    serde_json::from_slice::<Value>(body)
+        .ok()
+        .and_then(|v| v.pointer("/error/code").and_then(Value::as_i64))
+        .is_some_and(|code| code == NOT_OPEN)
+}
+
+async fn post_one(
+    info: &Discovery,
     project: &Path,
     message: &Value,
     scope: &str,
@@ -143,16 +249,15 @@ async fn post(
 ) -> Result<Answer, String> {
     let not_running = || {
         format!(
-            "OpenIDEA's MCP server is not running. Start OpenIDEA, open {} in it, and turn on Settings › Agents › MCP Server",
+            "OpenStorm's MCP server is not running. Start OpenStorm, open {} in it, and turn on Settings › Agents › MCP Server",
             project.display()
         )
     };
-    let info = Discovery::read(discovery).map_err(|_| not_running())?;
-    let at = std::net::SocketAddr::new(info.address, info.port);
+    let at = SocketAddr::new(info.address, info.port);
     let stream = tokio::net::TcpStream::connect(at).await.map_err(|_| not_running())?;
     let (mut sender, conn) = hyper::client::conn::http1::handshake(hyper_util::rt::TokioIo::new(stream))
         .await
-        .map_err(|e| format!("cannot reach OpenIDEA: {e}"))?;
+        .map_err(|e| format!("cannot reach OpenStorm: {e}"))?;
     tokio::spawn(conn);
     let request = Request::post(format!("/mcp?project={}", crate::encode_query(&project.to_string_lossy())))
         .header(header::HOST, at.to_string())
@@ -162,7 +267,7 @@ async fn post(
         .header(header::ACCEPT, "application/json, text/event-stream")
         .body(Full::new(Bytes::from(message.to_string())))
         .map_err(|e| e.to_string())?;
-    let response = sender.send_request(request).await.map_err(|e| format!("cannot reach OpenIDEA: {e}"))?;
+    let response = sender.send_request(request).await.map_err(|e| format!("cannot reach OpenStorm: {e}"))?;
     let status = response.status();
     let streamed = response
         .headers()
@@ -170,12 +275,12 @@ async fn post(
         .is_some_and(|v| v.to_str().is_ok_and(|v| v.starts_with("text/event-stream")));
     let mut body = response.into_body();
     if !streamed {
-        let body = body.collect().await.map_err(|e| format!("OpenIDEA's answer: {e}"))?.to_bytes();
+        let body = body.collect().await.map_err(|e| format!("OpenStorm's answer: {e}"))?.to_bytes();
         return Ok(Answer::Body(status, body));
     }
     let (mut buffer, mut answered) = (Vec::new(), false);
     while let Some(frame) = body.frame().await {
-        let frame = frame.map_err(|e| format!("OpenIDEA's answer: {e}"))?;
+        let frame = frame.map_err(|e| format!("OpenStorm's answer: {e}"))?;
         let Ok(data) = frame.into_data() else { continue };
         buffer.extend_from_slice(&data);
         for data in take_events(&mut buffer) {

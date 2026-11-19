@@ -28,7 +28,7 @@ import {
 } from "@/editor/api";
 import { isUntitledUri, isVirtualUri } from "@/platform/virtualDocs";
 import { DocSync, type Scheduler, frameScheduler } from "../sync/DocSync";
-import type { DocBackend, LanguageInfo } from "../backend";
+import type { DocBackend, DocDirtyEvent, LanguageInfo } from "../backend";
 import {
   findLanguageDescription,
   languageInfo,
@@ -260,6 +260,11 @@ export class DocModel {
   /** Bumped by every change (local or remote). */
   changeCounter = 0;
   closed = false;
+  /**
+   * Tab moved to an auxiliary editor window that already holds this document:
+   * release must drop the local model and backend ref without autosave / keep-dirty.
+   */
+  handoffRelease = false;
   private refreshTimer: ReturnType<typeof setTimeout> | undefined;
   private saving: Promise<void> = Promise.resolve();
   private conflictRevision: string | null = null;
@@ -278,6 +283,7 @@ export class DocModel {
     this.discardRevision = null;
     return discard;
   }
+  private backendDirty: DocDirtyEvent | null = null;
   private meta: DocMeta;
 
   constructor(
@@ -338,6 +344,7 @@ export class DocModel {
             changes: eventChanges,
           });
         },
+        onSynced: () => this.applyBackendClean(),
         onDiscarded: (reason) => {
           logError(`document ${this.path}: unsaved edits replaced by the file's content`, reason);
           manager.notify({
@@ -380,6 +387,26 @@ export class DocModel {
   setMeta(patch: Partial<DocMeta>) {
     this.meta = { ...this.meta, ...patch };
     if (!this.closed) useDocMeta.setState({ [this.path]: this.meta });
+  }
+
+  onBackendDirty(event: DocDirtyEvent) {
+    if (this.backendDirty && event.version < this.backendDirty.version) return;
+    this.backendDirty = event;
+    if (event.dirty) {
+      if (!this.meta.dirty) this.setMeta({ dirty: true });
+    } else this.applyBackendClean();
+  }
+
+  private applyBackendClean() {
+    const event = this.backendDirty;
+    if (event && !event.dirty) this.markClean(event.version);
+  }
+
+  private markClean(version: number) {
+    // A clean event can arrive before an edit acknowledgement or after a newer edit.
+    if (!this.meta.dirty || !this.sync.idle || this.sync.serverVersion !== version) return;
+    this.modified.clear();
+    this.setMeta({ dirty: false });
   }
 
   ctx(): EditorDocContext {
@@ -765,9 +792,11 @@ export class DocModel {
         // an explicit save asks for one (Save As re-points the buffer, or stays
         // dirty on Cancel).
         if (reason === "auto") return;
-        if (await this.manager.saveAs(this)) this.modified.clear();
+        await this.manager.saveAs(this);
         return;
       }
+      const version = this.sync.serverVersion;
+      const observedDirty = this.backendDirty;
       let overwriteRevision: string | null = null;
       while (true) {
         const revision = await this.manager.backend.save(this.doc, overwriteRevision);
@@ -798,8 +827,8 @@ export class DocModel {
         overwriteRevision = revision;
       }
       this.conflictRevision = null;
-      this.modified.clear();
-      this.setMeta({ dirty: false });
+      if (this.backendDirty === observedDirty && (!observedDirty || observedDirty.version <= version))
+        this.markClean(version);
       _emitEditorEvent({ type: "docSaved", doc: this.doc, path: this.path });
     };
     this.saving = this.saving.then(run, run);
@@ -809,6 +838,7 @@ export class DocModel {
   /** Save As turned this untitled buffer into the file `info` points at. */
   retarget(info: DocumentInfo) {
     const old = this.path;
+    if (!this.backendDirty?.dirty || this.backendDirty.version < info.version) this.markClean(info.version);
     this._path = info.path;
     this.info = languageInfo(info.language);
     this.editorconfig = info.editorconfig ?? null;
@@ -820,7 +850,6 @@ export class DocModel {
       hasBom: info.hasBom,
       lineEnding: info.lineEnding,
       canReloadEncoding: info.canReloadEncoding,
-      dirty: false,
     };
     useDocMeta.setState((s) => {
       const next = { ...s };
@@ -919,13 +948,7 @@ export class DocumentManager {
       this.backend.onLanguage?.((e) =>
         (this.byId.get(e.doc) ?? this.pendingModels.get(e.doc))?.setLanguage(e.language, e.uiMode),
       ) ?? (() => {}),
-      this.backend.onDirty((e) => {
-        const m = this.byId.get(e.doc) ?? this.pendingModels.get(e.doc);
-        if (m && m.getMeta().dirty !== e.dirty) {
-          m.setMeta({ dirty: e.dirty });
-          if (!e.dirty) m.modified.clear();
-        }
-      }),
+      this.backend.onDirty((e) => (this.byId.get(e.doc) ?? this.pendingModels.get(e.doc))?.onBackendDirty(e)),
     );
     let prev = useEditorRegistry.getState().contributions;
     this.disposers.push(
@@ -1066,38 +1089,53 @@ export class DocumentManager {
     queueMicrotask(async () => {
       if (model.inUse() || model.closed) return;
       const discard = model.takeDiscardOnClose();
+      const handoff = model.handoffRelease;
+      model.handoffRelease = false;
       const files = this.settings()?.files;
-      if (!discard && files?.autoSave !== false && model.getMeta().dirty) {
+      if (!discard && !handoff && files?.autoSave !== false && model.getMeta().dirty) {
         try {
           await model.save("auto");
         } catch (e) {
           console.warn(`autosave of ${model.path} failed`, e);
         }
       }
-      if (!discard && model.getMeta().dirty && !isUntitledUri(model.path)) return;
-      if (model.inUse() || model.hasSaveConflict()) return;
+      if (!discard && !handoff && model.getMeta().dirty && !isUntitledUri(model.path)) return;
+      if (model.inUse() || (!handoff && model.hasSaveConflict())) return;
       await model.sync.whenIdle();
       if (model.closed || model.inUse() || this.byPath.get(model.path) !== model) return;
-      model.dispose();
-      this.byPath.delete(model.path);
-      this.byId.delete(model.doc);
-      useDocMeta.setState((s) => {
-        const next = { ...s };
-        delete next[model.path];
-        return next;
-      }, true);
-      useOutline.setState((s) => {
-        const next = { ...s };
-        delete next[model.path];
-        return next;
-      }, true);
-      _emitEditorEvent({ type: "docClosed", doc: model.doc, path: model.path });
+      this.forget(model);
       try {
         await this.backend.close(model.doc);
       } catch (e) {
         console.warn(`doc_close ${model.path} failed`, e);
       }
     });
+  }
+
+  /**
+   * The project closed or another one replaced it: its backend documents are gone, including
+   * those kept open without a tab for their unsaved changes (the leave guard already saved or
+   * discarded them). Untitled buffers follow the window and stay.
+   */
+  releaseProjectDocuments() {
+    for (const model of [...this.byPath.values()]) if (!isUntitledUri(model.path)) this.forget(model);
+  }
+
+  private forget(model: DocModel) {
+    model.dispose();
+    this.byPath.delete(model.path);
+    this.byId.delete(model.doc);
+    useDocMeta.setState((s) => {
+      const next = { ...s };
+      delete next[model.path];
+      return next;
+    }, true);
+    useOutline.setState((s) => {
+      const next = { ...s };
+      delete next[model.path];
+      return next;
+    }, true);
+    _emitEditorEvent({ type: "docClosed", doc: model.doc, path: model.path });
   }
 
   applySettings() {

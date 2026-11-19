@@ -103,7 +103,7 @@ export const LANGUAGE_PAGES: PageSpec[] = [
     title: "Go",
     group: LANGUAGES_GROUP,
     order: 390,
-    keywords: ["goroot", "gopath", "go sdk", "gopls"],
+    keywords: ["goroot", "gopath", "go sdk", "gopls", "gofumpt", "format"],
     component: GoPage,
   },
   {
@@ -169,7 +169,7 @@ export const LANGUAGE_PAGES: PageSpec[] = [
     title: "Markdown",
     group: LANGUAGES_GROUP,
     order: 400,
-    keywords: ["markdown", "preview", "font size", "jupyter", "notebook"],
+    keywords: ["markdown", "preview", "font size", "jupyter", "notebook", "run commands", "code block"],
     component: MarkdownPage,
   },
   {

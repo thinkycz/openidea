@@ -11,7 +11,7 @@ import { EditorSelection } from "@codemirror/state";
 import { create } from "zustand";
 import { setContext } from "@/platform/context";
 import { shortcutLabel } from "@/platform/keymap";
-import { isCancelled, isTauri } from "@/platform/ipc";
+import { isCancelled } from "@/platform/ipc";
 import { isSameOrInside } from "@/platform/paths";
 import { basename, dirname, useProject } from "@/platform/project";
 import { editorPrefs } from "@/platform/editorSettings";
@@ -48,7 +48,10 @@ import { useDistractionFree } from "@/workbench/distractionFree";
 import { restoreMaximizedToolWindow } from "@/workbench/toolwindows/store";
 import { ask, confirm } from "@/workbench/messages";
 import { t, tx } from "@/platform/i18n";
-import { call, commands } from "@/platform/ipc";
+import { call, commands, isErrorKind, isTauri } from "@/platform/ipc";
+import { openLightweightEditor } from "./openLightweightEditor";
+import { windowBackgroundHex } from "@/workbench/theme";
+import { hoverActionsAt } from "@/platform/hoverActions";
 import { save as saveFileDialog, type DialogFilter as SaveDialogFilter } from "@/platform/dialog";
 import { isUntitledUri, untitledTitle } from "@/platform/virtualDocs";
 import { isRemoteWindow } from "@/platform/remote";
@@ -464,6 +467,7 @@ export class EditorController implements SlotHost {
             _setEditorSwitching(false);
           }
           for (const tab of carriedUntitled) void this.ensureSlot(tab.id);
+          this.manager.releaseProjectDocuments();
           this.closeSession = null;
           this.closeCommitted = false;
           this.preparedDocuments.clear();
@@ -785,7 +789,7 @@ export class EditorController implements SlotHost {
         return this.slots.get(tabId) ?? this.createSlot(tabId, m, init);
       })
       .catch((e: unknown) => {
-        if (this.restoredTabs.has(tabId) && (e as { kind?: string } | null)?.kind === "notFound") {
+        if (this.restoredTabs.has(tabId) && isErrorKind(e, "notFound")) {
           // A file from the saved session no longer exists: drop its tab quietly.
           this.restoredTabs.delete(tabId);
           this.restoredViews.delete(path);
@@ -914,8 +918,23 @@ export class EditorController implements SlotHost {
     if (pos !== null && !view.state.selection.ranges.some((r) => r.from <= pos && pos <= r.to))
       view.dispatch({ selection: EditorSelection.cursor(pos) });
     const hasSel = !view.state.selection.main.empty;
+    const caretLine = view.state.doc.lineAt(view.state.selection.main.head).number - 1;
+    const hoverItems: MenuItem[] = hoverActionsAt(slot.model.doc, caretLine).map(({ plugin, action }) => ({
+      label: action.label,
+      verbatim: true,
+      icon: "run",
+      run: () =>
+        void call(
+          commands.lspExecuteCommand(slot.model.doc, {
+            title: action.tooltip ?? action.label,
+            command: `openidea.plugin-language:${plugin}:${action.command}`,
+            arguments: [JSON.stringify(action.argument)],
+          }),
+        ).catch(console.warn),
+    }));
     const items: MenuItem[] = [
       { kind: "action", action: "code.showIntentions", label: "Show Context Actions", icon: "bulb" },
+      ...(hoverItems.length ? ([{ kind: "separator" }, ...hoverItems] as MenuItem[]) : []),
       { kind: "separator" },
       // Like IDEA, Cut / Copy only with a selection.
       ...((hasSel
@@ -1957,7 +1976,7 @@ export class EditorController implements SlotHost {
   changeSplitOrientation(paneId: string) {
     this.apply((s) => changeSplitOrientation(s, paneId));
   }
-  /** Save or resolve the dirty guard, open the window, then remove the original tab. */
+  /** Open a lightweight aux editor (or a full window outside the project), then remove the original tab. */
   async detachTab(paneId: string, tabId: string): Promise<boolean> {
     const tab = useTabs.getState().panes[paneId]?.tabs.find((t) => t.id === tabId);
     const path = tab?.input.path;
@@ -1974,9 +1993,40 @@ export class EditorController implements SlotHost {
     const project = useProject.getState().project;
     const inProject =
       !!project && (project.workspace?.projects ?? [project.root]).some((root) => isSameOrInside(path, root));
+    const light = inProject && isTextTab(tab) && isTauri();
     return this.removeGuarded((s) => (s.panes[paneId] ? closeTab(s, paneId, tabId) : s), {
       beforeRemove: async () => {
         if (!useTabs.getState().panes[paneId]?.tabs.some((t) => t.id === tabId)) return false;
+        if (light) {
+          const slot = await this.ensureSlot(tabId);
+          if (!slot) return false;
+          const state = slot.currentState();
+          const main = state.selection.main;
+          const from = state.doc.lineAt(main.from);
+          const to = state.doc.lineAt(main.to);
+          try {
+            await openLightweightEditor(
+              {
+                path,
+                line: from.number - 1,
+                column: main.from - from.from,
+                endLine: to.number - 1,
+                endColumn: main.to - to.from,
+              },
+              windowBackgroundHex(),
+            );
+            slot.model.handoffRelease = true;
+            return true;
+          } catch (e) {
+            notifications().notify({
+              level: "error",
+              title: t("app.window.openFailed", { name: basename(path) }),
+              body: e instanceof Error ? e.message : String(e),
+              key: `app.open:${path}`,
+            });
+            return false;
+          }
+        }
         if (isTextTab(tab)) {
           const slot = await this.ensureSlot(tabId);
           if (!slot) return false;

@@ -42,7 +42,7 @@ import { publishPreviewSelection, publishPreviewTop, stepMarkdownPreviewFontZoom
 import { subscribeTheme, themeKey } from "@/platform/themeWatch";
 import { hasMermaid, MERMAID_SELECTOR, renderMermaidIn } from "./mermaid";
 import { renderMath } from "@/editor/lsp/markdownMath";
-import { modeOf, useMarkdownModes } from "./modes";
+import { modeOf, pinMarkdownMode, useMarkdownModes } from "./modes";
 import { MarkdownLayoutActions } from "./MarkdownLayoutActions";
 import {
   ANCHOR_PREFIX,
@@ -90,7 +90,8 @@ export function MarkdownEditor({
   children: ReactNode;
   actionsInTabs?: boolean;
 }) {
-  const mode = useMarkdownModes((s) => modeOf(s, path));
+  const mode = useMarkdownModes((s) => modeOf(s, tabId));
+  useEffect(() => pinMarkdownMode(tabId), [tabId]);
   const ref = useRef<HTMLDivElement>(null);
   const editorRef = useRef<HTMLDivElement>(null);
 
@@ -121,7 +122,10 @@ export function MarkdownEditor({
         className={styles.group}
         storageKey={mode === "split" ? SPLIT_STORAGE_KEY : undefined}
       >
-        <SplitPanel id="editor" style={{ overflow: "hidden" }} {...splitBounds}>
+        {/* Hidden but mounted in Preview only (its caret drives the preview). Disabled, it leaves the group a
+            single resizable panel: two enabled panels without a separator get an implicit resize region between
+            them, which for a hidden panel spans everything left of the preview. */}
+        <SplitPanel id="editor" style={{ overflow: "hidden" }} disabled={mode === "preview"} {...splitBounds}>
           <div ref={editorRef} className={styles.editor}>
             {children}
           </div>

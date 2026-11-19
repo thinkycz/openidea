@@ -57,6 +57,8 @@ export const commands = {
 	agentFork: (task: string, turns: number | null) => typedError<AgentTask_Serialize, IdeError>(__TAURI_INVOKE("agent_fork", { task, turns })),
 	/**  The task's uncommitted changes and the commits made since it started. */
 	agentGroupedChanges: (task: string) => typedError<AgentChanges, IdeError>(__TAURI_INVOKE("agent_grouped_changes", { task })),
+	/**  Hermes Agent profiles on this machine (`default` first); empty without Hermes. */
+	agentHermesProfiles: () => typedError<HermesProfile[], IdeError>(__TAURI_INVOKE("agent_hermes_profiles")),
 	/**  Imports an external session as a task: its first turn loads and replays it. */
 	agentImportSession: (provider: string, sessionId: string) => typedError<AgentTask_Serialize, IdeError>(__TAURI_INVOKE("agent_import_session", { provider, sessionId })),
 	/**  Discovers external MCP configuration files on disk (CLI user configs + workspace `.mcp.json`). */
@@ -286,6 +288,7 @@ export const commands = {
 	/**  Cucumber feature files and step definition files, for step navigation. */
 	cucumberSources: () => typedError<StepSource[], IdeError>(__TAURI_INVOKE("cucumber_sources")),
 	dbApplyEdits: (id: string, schema: string, table: string, edits: DbRowEdit[]) => typedError<number | null, IdeError>(__TAURI_INVOKE("db_apply_edits", { id, schema, table, edits })),
+	dbApproveJdbcSource: (source: DataSource_Deserialize) => typedError<null, IdeError>(__TAURI_INVOKE("db_approve_jdbc_source", { source })),
 	dbCompletion: (id: string) => typedError<DbCompletion, IdeError>(__TAURI_INVOKE("db_completion", { id })),
 	dbConnect: (id: string) => typedError<null, IdeError>(__TAURI_INVOKE("db_connect", { id })),
 	dbConnected: () => typedError<string[], IdeError>(__TAURI_INVOKE("db_connected")),
@@ -310,14 +313,18 @@ export const commands = {
 	dbExportFile: (path: string, text: string) => typedError<null, IdeError>(__TAURI_INVOKE("db_export_file", { path, text })),
 	dbFinishTransaction: (id: string, commit: boolean) => typedError<null, IdeError>(__TAURI_INVOKE("db_finish_transaction", { id, commit })),
 	dbHistory: (id: string) => typedError<DbHistoryEntry[], IdeError>(__TAURI_INVOKE("db_history", { id })),
+	dbJdbcDriverClasses: (jars: string[]) => typedError<string[], IdeError>(__TAURI_INVOKE("db_jdbc_driver_classes", { jars })),
+	dbJdbcDrivers: () => typedError<DbJdbcDriver[], IdeError>(__TAURI_INVOKE("db_jdbc_drivers")),
 	dbObjectDdl: (id: string, schema: string, kind: DbObjectKind, name: string) => typedError<string, IdeError>(__TAURI_INVOKE("db_object_ddl", { id, schema, kind, name })),
 	dbRemoveHistory: (id: string, texts: string[] | null) => typedError<null, IdeError>(__TAURI_INVOKE("db_remove_history", { id, texts })),
+	dbRemoveJdbcDriver: (id: string) => typedError<null, IdeError>(__TAURI_INVOKE("db_remove_jdbc_driver", { id })),
 	dbRetainCatalog: (id: string, databases: string[]) => typedError<null, IdeError>(__TAURI_INVOKE("db_retain_catalog", { id, databases })),
 	/**
 	 *  Runs `job` against target `id` and streams the tool's output; returns its exit code. Stays
 	 *  in the desktop shell like [`db_export_file`]: the paths in `job` are local.
 	 */
 	dbRunTool: (request: RequestId, id: string, executable: string, job: DbToolJob, onOutput: Channel<DbToolLine[]>) => typedError<number | null, IdeError>(__TAURI_INVOKE("db_run_tool", { request, id, executable, job, onOutput })),
+	dbSaveJdbcDriver: (driver: DbJdbcDriver) => typedError<null, IdeError>(__TAURI_INVOKE("db_save_jdbc_driver", { driver })),
 	dbSaveSources: (sources: DataSource_Deserialize[]) => typedError<null, IdeError>(__TAURI_INVOKE("db_save_sources", { sources })),
 	dbSavedCatalog: (id: string) => typedError<{
 	databases?: DbCatalogDatabase[],
@@ -381,7 +388,7 @@ export const commands = {
 } | null, IdeError>(__TAURI_INVOKE("debug_heap_path", { snapshot, object })),
 	/**  Copies the snapshot's dump to `path`, replacing a file there. */
 	debugHeapSave: (snapshot: HeapSnapshotId, path: IpcPath) => typedError<null, IdeError>(__TAURI_INVOKE("debug_heap_save", { snapshot, path })),
-	debugHotReload: (session: DebugSessionId) => typedError<null, IdeError>(__TAURI_INVOKE("debug_hot_reload", { session })),
+	debugHotReload: (session: DebugSessionId, reason: HotReloadReason) => typedError<null, IdeError>(__TAURI_INVOKE("debug_hot_reload", { session, reason })),
 	debugHotRestart: (session: DebugSessionId) => typedError<null, IdeError>(__TAURI_INVOKE("debug_hot_restart", { session })),
 	/**  Breakpoints of a debugged page on DOM events and on requests (js-debug). */
 	debugJsCustomBreakpoints: (session: DebugSessionId, ids: string[], xhr: string[]) => typedError<null, IdeError>(__TAURI_INVOKE("debug_js_custom_breakpoints", { session, ids, xhr })),
@@ -470,6 +477,11 @@ export const commands = {
 	 *  `outOfSync` when `base_version` is stale; the UI then calls `doc_snapshot`.
 	 */
 	docEdit: (doc: DocId, baseVersion: number, changes: ChangeSet) => typedError<number, IdeError>(__TAURI_INVOKE("doc_edit", { doc, baseVersion, changes })),
+	/**
+	 *  Structure view of a Flutter file: its declarations with the widgets they build. `None`
+	 *  when the Dart server published no widgets for it; `doc_outline` then applies.
+	 */
+	docFlutterOutline: (doc: DocId) => typedError<OutlineItem[] | null, IdeError>(__TAURI_INVOKE("doc_flutter_outline", { doc })),
 	docFolding: (doc: DocId) => typedError<FoldRange[], IdeError>(__TAURI_INVOKE("doc_folding", { doc })),
 	/**
 	 *  Tree-sitter highlighting for languages the UI has no CodeMirror mode for;
@@ -533,6 +545,11 @@ export const commands = {
 	dockerContainerStats: (endpoint: DockerEndpoint, id: string) => typedError<DockerContainerStats, IdeError>(__TAURI_INVOKE("docker_container_stats", { endpoint, id })),
 	/**  Processes running inside a container (`docker top`). */
 	dockerContainerTop: (endpoint: DockerEndpoint, id: string) => typedError<DockerProcessList, IdeError>(__TAURI_INVOKE("docker_container_top", { endpoint, id })),
+	/**
+	 *  Closes the connection's SSH tunnel and, when nothing else uses it, its SSH connection
+	 *  (Services › Disconnect); other endpoints keep nothing open.
+	 */
+	dockerDisconnect: (endpoint: DockerEndpoint) => typedError<null, IdeError>(__TAURI_INVOKE("docker_disconnect", { endpoint })),
 	/**  Follows `docker events` until the daemon goes away or the request is cancelled. */
 	dockerEvents: (request: RequestId, endpoint: DockerEndpoint, onEvent: Channel<DockerEvent>) => typedError<null, IdeError>(__TAURI_INVOKE("docker_events", { request, endpoint, onEvent })),
 	/**  Layers of an image (`docker image history`). */
@@ -584,6 +601,20 @@ export const commands = {
 	findSymbols: (query: string, filter: SymbolFilter, limit: number) => typedError<SymbolMatch[], IdeError>(__TAURI_INVOKE("find_symbols", { query, filter, limit })),
 	/**  Index symbols named exactly one of `names` inside `within` (an agent task's folder). */
 	findSymbolsNamed: (names: string[], within: IpcPath) => typedError<SymbolMatch[], IdeError>(__TAURI_INVOKE("find_symbols_named", { names, within })),
+	/**  Replaces the project's `flutter daemon`, after a failure or an SDK change. */
+	flutterDaemonRestart: () => typedError<FlutterDeviceList, IdeError>(__TAURI_INVOKE("flutter_daemon_restart")),
+	/**
+	 *  The project's Flutter devices, starting its `flutter daemon` on first use. Changes arrive as
+	 *  `IdeEvent::FlutterDevices`.
+	 */
+	flutterDevices: () => typedError<FlutterDeviceList, IdeError>(__TAURI_INVOKE("flutter_devices")),
+	/**  Looks at adb again, for Android devices Flutter doesn't report (awaiting authorization, offline). */
+	flutterDevicesRefresh: () => typedError<null, IdeError>(__TAURI_INVOKE("flutter_devices_refresh")),
+	/**
+	 *  The address of the project's DevTools server, started on first use. A server that failed or
+	 *  exited is only started again by the next request.
+	 */
+	flutterDevtoolsUrl: () => typedError<string, IdeError>(__TAURI_INVOKE("flutter_devtools_url")),
 	fsCompareDirectories: (left: string, right: string, request: RequestId, onProgress: Channel<DirectoryCompareProgress>) => typedError<DirectoryCompareEntry[], IdeError>(__TAURI_INVOKE("fs_compare_directories", { left, right, request, onProgress })),
 	fsCopy: (from: string, to: string) => typedError<null, IdeError>(__TAURI_INVOKE("fs_copy", { from, to })),
 	fsCopyMerge: (sourceRoot: string, destinationRoot: string, path: string, overwrite: boolean) => typedError<null, IdeError>(__TAURI_INVOKE("fs_copy_merge", { sourceRoot, destinationRoot, path, overwrite })),
@@ -942,7 +973,12 @@ export const commands = {
 	/**  The user closed the Run tool window tab of an agent command (`run_command`). */
 	mcpAgentRunClosed: (name: string) => typedError<null, IdeError>(__TAURI_INVOKE("mcp_agent_run_closed", { name })),
 	/**
-	 *  Settings › Agents › MCP Server › Regenerate Token: forgets the kept token, and restarts the
+	 *  Settings › Agents › IDE MCP Server › Background projects: the projects this host's server
+	 *  keeps loaded without a window.
+	 */
+	mcpBackgroundProjects: () => typedError<McpBackgroundProject_Serialize[], IdeError>(__TAURI_INVOKE("mcp_background_projects")),
+	/**
+	 *  Settings › Agents › IDE MCP Server › Regenerate Token: forgets the kept token, and restarts the
 	 *  server with a new one. Clients configured with the old token stop working.
 	 */
 	mcpRegenerateToken: () => typedError<null, IdeError>(__TAURI_INVOKE("mcp_regenerate_token")),
@@ -957,6 +993,8 @@ export const commands = {
 } | null, focused: boolean) => typedError<null, IdeError>(__TAURI_INVOKE("mcp_set_focused_editor", { editor, focused })),
 	mcpSetOpenEditors: (paths: IpcPath[]) => typedError<null, IdeError>(__TAURI_INVOKE("mcp_set_open_editors", { paths })),
 	mcpUiReady: (ready: boolean) => typedError<null, IdeError>(__TAURI_INVOKE("mcp_ui_ready", { ready })),
+	/**  Unloads one background project; a root that is not loaded is already unloaded. */
+	mcpUnloadBackgroundProject: (root: IpcPath) => typedError<null, IdeError>(__TAURI_INVOKE("mcp_unload_background_project", { root })),
 	/**
 	 *  Sets the menu's labels / accelerators and updates the menu when the visible
 	 *  items changed. Accelerators of actions that are not on the menu must not call
@@ -1165,7 +1203,7 @@ export const commands = {
 	/**  Writes a package the UI generated (an imported theme); returns the folder for the install page. */
 	pluginStagePackage: (name: string, files: PackageFile[]) => typedError<string, IdeError>(__TAURI_INVOKE("plugin_stage_package", { name, files })),
 	/**  Every plugin status bar item (later changes arrive as `statusItemChanged`). */
-	pluginStatusItems: () => __TAURI_INVOKE<PluginStatusItem[]>("plugin_status_items"),
+	pluginStatusItems: () => __TAURI_INVOKE<PluginStatusItem_Serialize[]>("plugin_status_items"),
 	/**  Routes this window's plugin events to `on_event` (replaces an earlier subscription). */
 	pluginSubscribe: (onEvent: Channel<PluginEvent_Deserialize>) => __TAURI_INVOKE<void>("plugin_subscribe", { onEvent }),
 	/**  Marks a keyed tab closed before ending its process. */
@@ -1841,6 +1879,11 @@ export const commands = {
 	 */
 	vcsUnshelve: (id: string, remove: boolean, path: string | null) => typedError<ApplyOutcome, IdeError>(__TAURI_INVOKE("vcs_unshelve", { id, remove, path })),
 	vcsUnstage: (paths: string[]) => typedError<null, IdeError>(__TAURI_INVOKE("vcs_unstage", { paths })),
+	/**
+	 *  Branches › Update Selected: fast-forwards local `branches` to their upstreams, one
+	 *  fetch per remote; the result says what happened to each. Cancellable.
+	 */
+	vcsUpdateBranches: (repo: string | null, request: RequestId, branches: string[], onOutput: Channel<string>) => typedError<BranchUpdate[], IdeError>(__TAURI_INVOKE("vcs_update_branches", { repo, request, branches, onOutput })),
 	vcsWorktrees: (repo: string | null) => typedError<Worktree[], IdeError>(__TAURI_INVOKE("vcs_worktrees", { repo })),
 	/**  Create Patch › Save to file. */
 	vcsWritePatch: (path: string, patch: string) => typedError<null, IdeError>(__TAURI_INVOKE("vcs_write_patch", { path, patch })),
@@ -1881,6 +1924,11 @@ export const commands = {
 	windowGroupCloseTabs: (keep: string, labels: string[]) => typedError<null, IdeError>(__TAURI_INVOKE("window_group_close_tabs", { keep, labels })),
 	windowGroupCurrent: () => typedError<WindowTab[], IdeError>(__TAURI_INVOKE("window_group_current")),
 	windowGroupDetach: (label: string) => typedError<null, IdeError>(__TAURI_INVOKE("window_group_detach", { label })),
+	/**
+	 *  Adds window `label` to this window's group as a new project tab and selects it. Unlike
+	 *  [`window_group_merge`], unrelated windows keep their own group.
+	 */
+	windowGroupJoin: (label: string) => typedError<null, IdeError>(__TAURI_INVOKE("window_group_join", { label })),
 	windowGroupMerge: () => typedError<null, IdeError>(__TAURI_INVOKE("window_group_merge")),
 	windowGroupReorder: (labels: string[]) => typedError<null, IdeError>(__TAURI_INVOKE("window_group_reorder", { labels })),
 	windowGroupRestore: () => typedError<null, IdeError>(__TAURI_INVOKE("window_group_restore")),
@@ -1904,6 +1952,11 @@ export const commands = {
 	 *  `background` (`#rrggbb`) paints it until its page has loaded.
 	 */
 	windowOpenDiff: (diff: DiffLaunch_Deserialize, background: string | null) => typedError<null, IdeError>(__TAURI_INVOKE("window_open_diff", { diff, background })),
+	/**
+	 *  Opens a lightweight editor window for `editor` next to this project window ("Open in New Window").
+	 *  `background` (`#rrggbb`) paints it until its page has loaded.
+	 */
+	windowOpenEditor: (editor: EditorLaunch_Deserialize, background: string | null) => typedError<null, IdeError>(__TAURI_INVOKE("window_open_editor", { editor, background })),
 	/**
 	 *  Detaches an editor tab: opens `file` in a forced new window (`project`, None
 	 *  for LightEdit, decided by the caller), bypassing the focus-an-existing-window
@@ -1974,6 +2027,8 @@ export const commands = {
 	diffBeforeFiles: boolean,
 	/**  Deployment windows: the server and local selection to compare. */
 	deployment: DeploymentLaunch | null,
+	/**  Editor windows: the file to show (Open in New Window → lightweight aux editor). */
+	editor: EditorLaunch_Serialize | null,
 } | null>("window_take_launch"),
 	/**
 	 *  Local bootstrap snapshot for a `settings-<parent>` window, avoiding a sequential
@@ -2203,11 +2258,15 @@ steered?: boolean } | { type: "agent"; text: string } |
 /**  A question that can be answered while the agent keeps working, or after the turn ends. */
 { type: "question"; id: string; title: string; questions: AgentQuestion[]; 
 /**  The submitted answers, or `Skipped`; `None` while unanswered. */
-chosen: string | null } | { type: "thought"; text: string } | { type: "tool"; id: string; title: string; 
+chosen: string | null } | { type: "thought"; text: string; 
+/**  When the reasoning started (ms since the epoch); `None` in tasks saved before. */
+startedMs?: number | null } | { type: "tool"; id: string; title: string; 
 /**  ACP tool kind: `read`, `edit`, `execute`, `search`, `fetch`, `think`… */
 kind: string; status: AgentToolStatus; locations: IpcPath[]; 
 /**  Text the tool reported (command output…), truncated. */
-output: string | null; diffs: AgentToolDiff[] } | { type: "plan"; items: AgentPlanItem[] } | 
+output: string | null; diffs: AgentToolDiff[]; 
+/**  When the call started and ended (ms since the epoch); `None` in tasks saved before. */
+startedMs?: number | null; endedMs?: number | null } | { type: "plan"; items: AgentPlanItem[] } | 
 /**  A subagent the agent started: its own session, whose entries are listed separately. */
 { type: "subagent"; 
 /**  The subagent's session id. */
@@ -2506,6 +2565,13 @@ export type AgentSecuritySettings = {
 	blockedCommands?: string[],
 };
 
+export type AgentSessionStats = {
+	/**  The last turn's tokens (`session/prompt` result `usage`). */
+	tokens?: AgentTokens | null,
+	/**  How many times the agent compressed the conversation (Hermes `compressionDepth`). */
+	compressions?: number,
+};
+
 /**  Settings › Agents: what the conversation shows and how messages are sent. */
 export type AgentSettings = AgentSettings_Serialize | AgentSettings_Deserialize;
 
@@ -2685,6 +2751,8 @@ export type AgentTask_Deserialize = {
 	background?: AgentBackgroundTask[],
 	/**  Per-session MCP server enable/disable overrides (`server_name` -> `enabled`), including `"openidea"`. */
 	mcpOverrides?: { [key in string]: boolean },
+	/**  Token counts of the last turn and context compressions, when the agent reports them. */
+	stats?: AgentSessionStats,
 };
 
 export type AgentTask_Serialize = {
@@ -2733,6 +2801,8 @@ export type AgentTask_Serialize = {
 	background: AgentBackgroundTask[],
 	/**  Per-session MCP server enable/disable overrides (`server_name` -> `enabled`), including `"openidea"`. */
 	mcpOverrides?: { [key in string]: boolean },
+	/**  Token counts of the last turn and context compressions, when the agent reports them. */
+	stats: AgentSessionStats,
 };
 
 /**  Token pricing (Credits per 1M tokens) and context window capacity for one tier. */
@@ -2742,6 +2812,12 @@ export type AgentTokenPricing = {
 	cacheRead?: number | null,
 	cacheWrite?: number | null,
 	contextTokens?: number | null,
+};
+
+export type AgentTokens = {
+	input: number,
+	cached: number,
+	output: number,
 };
 
 export type AgentToolDiff = {
@@ -3125,6 +3201,18 @@ export type BranchInfo = {
 	operation: string | null,
 };
 
+export type BranchUpdate = {
+	branch: string,
+	status: BranchUpdateStatus,
+	/**  Why it failed. */
+	message: string | null,
+};
+
+/**  What Update Selected did to one local branch. */
+export type BranchUpdateStatus = "updated" | "upToDate" | 
+/**  Diverged from its upstream: left as it is. */
+"notFastForward" | "noUpstream" | "failed";
+
 /**  Editor › General › Breadcrumbs. */
 export type BreadcrumbsSettings = {
 	show?: boolean,
@@ -3228,6 +3316,14 @@ export type BuildResult = {
 	warnings: number,
 	durationMs: number | null,
 	messages: BuildMessage[],
+};
+
+/**  Build, Execution, Deployment › Compiler (Build tool window behaviour). */
+export type BuildSettings = {
+	/**  When to open the Build tool window: `always` | `onError` | `never`. */
+	openToolWindow?: string,
+	/**  When to focus the Build tool window: `always` | `onError` | `never`. */
+	focusToolWindow?: string,
 };
 
 export type BuildSystem = "maven" | "gradle" | "cargo" | "go" | "typescript" | "cmake" | "dotnet" | 
@@ -3713,6 +3809,12 @@ export type CommitSettings = {
 	doubleClickOpensDiff?: boolean | null,
 	/**  Team conventions for Generate Commit Message with Agent, added to its prompt. */
 	agentInstructions?: string,
+	/**  The coding agent Generate Commit Message with Agent uses; empty follows the latest task's agent. */
+	agent?: string,
+	/**  That agent's model for commit messages; empty keeps the model the agent would use. */
+	agentModel?: string,
+	/**  That model's thinking level for commit messages; empty keeps the agent's. */
+	agentEffort?: string,
 };
 
 export type Commit_Deserialize = {
@@ -4127,6 +4229,8 @@ export type DataSource_Deserialize = {
 	id?: string,
 	name?: string,
 	driver?: DbDriver,
+	/**  An app-wide driver profile id; classpaths never come from a project. */
+	jdbcDriver?: string,
 	host?: string,
 	port?: number | null,
 	database?: string,
@@ -4171,6 +4275,8 @@ export type DataSource_Serialize = {
 	id: string,
 	name: string,
 	driver: DbDriver,
+	/**  An app-wide driver profile id; classpaths never come from a project. */
+	jdbcDriver?: string,
 	host: string,
 	port: number | null,
 	database: string,
@@ -4302,7 +4408,7 @@ export type DbDriver = "sqlite" | "postgres" |
 /**  Microsoft SQL Server. */
 "sqlServer" | "clickhouse" | 
 /**  Oracle Database (pure-Rust thin driver, no client library). */
-"oracle" | "snowflake";
+"oracle" | "snowflake" | "jdbc";
 
 export type DbDumpContent = "all" | "schemaOnly" | "dataOnly";
 
@@ -4370,6 +4476,14 @@ export type DbIntrospection = {
 	 *  one of these patterns (`*`, `?`; separated by commas or spaces). Empty: all.
 	 */
 	objectFilter?: string,
+};
+
+export type DbJdbcDriver = {
+	id: string,
+	name: string,
+	jars: string[],
+	className: string,
+	urlTemplate: string,
 };
 
 export type DbMysqlOptions = {
@@ -4740,6 +4854,17 @@ export type DebugEvent =
  *  changed and can be reloaded), `STARTING`, `END`, `WARNING` or `ERROR`.
  */
 { kind: "hotCodeReplace"; changeType: string; message: string } | 
+/**
+ *  `flutter debug_adapter`'s `flutter.appStarted` event (launch and attach): the session is
+ *  a Flutter app that can take a hot reload now. The plain Dart adapter never sends it.
+ */
+{ kind: "flutterAppStarted" } | 
+/**  The VM Service of a Flutter session's app, which DevTools connects to. */
+{ kind: "flutterVmService"; uri: string; 
+/**  The Flutter device the app runs on. */
+device: string | null } | 
+/**  Flutter's inspector selected a widget: its source, 0-based. */
+{ kind: "flutterNavigate"; path: IpcPath; line: number; column: number } | 
 /**  The session's capabilities changed after it started: fetch them again. */
 { kind: "capabilities" } | 
 /**
@@ -4778,6 +4903,8 @@ export type DebuggerSettings = {
 	skipLibraryCode?: boolean,
 	/**  JavaScript: debugging a dev server (`vite`, `next dev`) also opens its page in a browser session. */
 	debugServerPage?: boolean,
+	/**  Flutter: saving a Dart file of a running debug session hot reloads the app. */
+	flutterHotReloadOnSave?: boolean,
 	python?: PythonDebuggerSettings,
 };
 
@@ -5480,6 +5607,27 @@ export type EditorGeneralSettings = {
 	richTextCopy?: boolean,
 };
 
+/**  A file opened in a lightweight editor window, with optional caret / selection (0-based). */
+export type EditorLaunch = EditorLaunch_Serialize | EditorLaunch_Deserialize;
+
+/**  A file opened in a lightweight editor window, with optional caret / selection (0-based). */
+export type EditorLaunch_Deserialize = {
+	path: IpcPath,
+	line?: number | null,
+	column?: number | null,
+	endLine?: number | null,
+	endColumn?: number | null,
+};
+
+/**  A file opened in a lightweight editor window, with optional caret / selection (0-based). */
+export type EditorLaunch_Serialize = {
+	path: IpcPath,
+	line?: number | null,
+	column?: number | null,
+	endLine?: number | null,
+	endColumn?: number | null,
+};
+
 export type EditorSettings = EditorSettings_Serialize | EditorSettings_Deserialize;
 
 export type EditorSettings_Deserialize = {
@@ -6083,6 +6231,34 @@ export type FilesChanged = {
 	removed: string[],
 };
 
+/**  See [`FlutterDeviceList`]. */
+export type FlutterDaemonStatus = { kind: "stopped" } | 
+/**  Started; the first device discovery has not finished. */
+{ kind: "starting" } | { kind: "ready" } | 
+/**  No `flutter` executable on the search path. */
+{ kind: "notInstalled" } | 
+/**  The daemon could not start or exited: what it printed last. It is not restarted on its own. */
+{ kind: "failed"; message: string };
+
+/**  A target `flutter run -d <id>` can name, or an Android device adb sees but Flutter can't use yet. */
+export type FlutterDevice = {
+	id: string,
+	name: string,
+	/**  `android`, `ios`, `macos`, `web`, … */
+	platformType: string | null,
+	/**  `mobile`, `desktop` or `web`. */
+	category: string | null,
+	emulator: boolean,
+	/**  The adb state keeping it from being used (`unauthorized`, `offline`, …). */
+	unavailable: string | null,
+};
+
+/**  The project's Flutter devices, best default first. */
+export type FlutterDeviceList = {
+	status: FlutterDaemonStatus,
+	devices: FlutterDevice[],
+};
+
 export type FocusedEditor = {
 	path: IpcPath,
 	/**  Zero-based lines and UTF-16 columns, end exclusive. */
@@ -6386,6 +6562,8 @@ export type GoSettings = {
 	goroot?: string,
 	/**  Empty = `go env GOPATH`. */
 	gopath?: string,
+	/**  Format with gofumpt, a stricter gofmt (gopls `gofumpt`). */
+	gofumpt?: boolean,
 	buildTags?: GoBuildTags,
 	modules?: GoModules,
 };
@@ -6634,6 +6812,14 @@ export type HeapSummary = {
 	analysisMs: number,
 };
 
+/**  A profile and the name Hermes shows for it (`hermes profile list`). */
+export type HermesProfile = {
+	/**  What `hermes -p` takes; `default` is the Hermes home itself. */
+	name: string,
+	/**  `display_name` from the profile's `profile.yaml`, else the name. */
+	label: string,
+};
+
 export type HierarchyChoice = {
 	id: string,
 	makeAbstract: boolean,
@@ -6753,6 +6939,9 @@ export type HistoryKind =
  */
 "label";
 
+/**  What triggered a hot reload; `flutter debug_adapter` takes it as `reason`. */
+export type HotReloadReason = "manual" | "save";
+
 /**  Result of [`DebugManager::redefine_classes`]. */
 export type HotSwapResult = {
 	/**  Fully qualified names of the classes reloaded (empty: nothing had changed). */
@@ -6763,6 +6952,21 @@ export type HotSwapResult = {
 export type Hover = {
 	contents: Markup,
 	range: Range | null,
+};
+
+/**  An action rendered at the left edge of a line and revealed by hover. */
+export type HoverAction = {
+	/**  The line the button is drawn on; normally the declaration line. */
+	line: number,
+	/**  First line whose leftmost strip reveals this action, inclusive. */
+	startLine: number,
+	/**  Last line whose leftmost strip reveals this action, inclusive. */
+	endLine: number,
+	icon: string | null,
+	label: string,
+	tooltip: string | null,
+	command: string,
+	argument: string | null,
 };
 
 /**  One request with its outcome. */
@@ -6808,6 +7012,8 @@ export type HttpResponse = {
 	version: string,
 	headers: ([string, string])[],
 	contentType: string | null,
+	/**  Followed redirects, first hop first; empty when not redirected. */
+	redirects?: RedirectHop[],
 	/**  Body as text (lossy UTF-8); `None` for binary bodies. */
 	body: string | null,
 	/**  Size in bytes as received (after decompression). */
@@ -6847,6 +7053,8 @@ export type IdeEvent =
 { type: "dbSourcesChanged" } | { type: "mcpRequest"; id: number; request: McpUiRequest } | { type: "mcpRequestClosed"; id: number } | 
 /**  Project window membership or selection changed. */
 { type: "windowGroupsChanged" } | 
+/**  A project was loaded or unloaded for the MCP server without a window of its own. */
+{ type: "mcpBackgroundProjectsChanged" } | 
 /**  A window entered or left full screen, itself or as a member of a full-screen window group. */
 { type: "windowFullscreenChanged" } | 
 /**
@@ -6859,6 +7067,8 @@ export type IdeEvent =
  *  from changed and it can be reloaded.
  */
 { type: "direnv"; root: IpcPath; status: DirenvStatus } | 
+/**  The project's `flutter daemon` changed state, or a device came or went. */
+{ type: "flutterDevices"; list: FlutterDeviceList } | 
 /**  Files or directories changed on disk (after debouncing, ignore rules applied). */
 { type: "fsChanged"; created: IpcPath[]; modified: IpcPath[]; removed: IpcPath[]; 
 /**  Subtrees whose ignore rules changed, after the matchers were rebuilt. */
@@ -6875,7 +7085,9 @@ ignoreRules?: IpcPath[] } |
 /**  Part of a grouped transaction; the editor must not record a file-local undo. */
 workspaceEdit?: boolean } | 
 /**  A document's dirty flag changed (saved / modified externally). */
-{ type: "docDirty"; doc: DocId; dirty: boolean } | 
+{ type: "docDirty"; doc: DocId; dirty: boolean; 
+/**  Text version when this transition occurred, including when it was saved. */
+version: number } | 
 /**  A complete workspace edit can be undone as one operation. */
 { type: "workspaceEditApplied"; id: number; paths: IpcPath[]; 
 /**
@@ -7846,6 +8058,8 @@ export type Launch_Deserialize = {
 	diffBeforeFiles?: boolean,
 	/**  Deployment windows: the server and local selection to compare. */
 	deployment?: DeploymentLaunch | null,
+	/**  Editor windows: the file to show (Open in New Window → lightweight aux editor). */
+	editor?: EditorLaunch_Deserialize | null,
 };
 
 /**  What a freshly opened window should do once its frontend is up. */
@@ -7875,6 +8089,8 @@ export type Launch_Serialize = {
 	diffBeforeFiles: boolean,
 	/**  Deployment windows: the server and local selection to compare. */
 	deployment: DeploymentLaunch | null,
+	/**  Editor windows: the file to show (Open in New Window → lightweight aux editor). */
+	editor: EditorLaunch_Serialize | null,
 };
 
 /**  One SDK or library with its source folders (`< Python 3.12 (.venv) >`). */
@@ -8129,7 +8345,9 @@ export type LogcatLine = {
 	message: string,
 };
 
-export type LspRefreshKind = "inlayHints" | "semanticTokens" | "codeLens";
+export type LspRefreshKind = "inlayHints" | "semanticTokens" | "codeLens" | 
+/**  The Dart server published a document's Flutter outline. */
+"flutterOutline";
 
 export type MainToolbarSettings = {
 	left?: string[],
@@ -8146,10 +8364,23 @@ export type ManifestDependency = {
 	to: number,
 };
 
+export type MarkdownCommandDirectory = 
+/**  The project's root folder. */
+"project" | 
+/**  The Markdown file's parent folder. */
+"file";
+
 /**  Languages & Frameworks › Markdown. Like IDEA's, it is application-level only. */
 export type MarkdownSettings = {
 	/**  Preview (and notebook Markdown cell) font size in px; unset follows the editor font size. */
 	previewFontSize?: number | null,
+	/**
+	 *  "Detect commands that can be run right from Markdown files": gutter run icons on
+	 *  shell code blocks and on command lines in code blocks.
+	 */
+	runCommands?: boolean,
+	/**  Where those commands run; unset asks when the project and the file's folder differ. */
+	commandDirectory?: MarkdownCommandDirectory | null,
 };
 
 /**  A marketplace entry with what is installed. */
@@ -8298,7 +8529,60 @@ export type MavenSettings = {
 	 *  from a library class's Download Sources banner.
 	 */
 	downloadSources?: boolean,
+	/**
+	 *  Always update snapshots (`-U`): Maven checks remote repositories for newer SNAPSHOT
+	 *  dependencies on every sync, build and run, and jdtls on import (`java.maven.updateSnapshots`).
+	 */
+	updateSnapshots?: boolean,
 };
+
+/**  What keeps an idle background project loaded. */
+export type McpBackgroundHold = 
+/**  A tool call is in flight. */
+{ kind: "request" } | 
+/**  A run it started is alive; `name` is the first one's. */
+{ kind: "run"; name: string };
+
+/**  A project served without a window, as the IDE lists it. */
+export type McpBackgroundProject = McpBackgroundProject_Serialize | McpBackgroundProject_Deserialize;
+
+/**  A project served without a window, as the IDE lists it. */
+export type McpBackgroundProject_Deserialize = {
+	root: IpcPath,
+	/**  Seconds since its last tool call began or ended. */
+	idleSeconds: number,
+	/**
+	 *  Seconds until it is unloaded for being idle. Absent while something keeps it open
+	 *  and when idle projects are never unloaded.
+	 */
+	unloadsInSeconds?: number | null,
+	keptOpenBy?: McpBackgroundHold | null,
+};
+
+/**  A project served without a window, as the IDE lists it. */
+export type McpBackgroundProject_Serialize = {
+	root: IpcPath,
+	/**  Seconds since its last tool call began or ended. */
+	idleSeconds: number,
+	/**
+	 *  Seconds until it is unloaded for being idle. Absent while something keeps it open
+	 *  and when idle projects are never unloaded.
+	 */
+	unloadsInSeconds?: number | null,
+	keptOpenBy?: McpBackgroundHold | null,
+};
+
+/**  Which folders without an open window the MCP server still serves tools for. */
+export type McpBackgroundProjects = 
+/**  Only projects open in a window. */
+"off" | 
+/**
+ *  Also folders the user trusts: trusted projects, recent projects and the repositories inside
+ *  trusted locations.
+ */
+"trusted" | 
+/**  Only the folders in [`McpServerSettings::background_project_paths`] (and below them). */
+"listed";
 
 /**  Summary of one server discovered inside an external MCP configuration file. */
 export type McpDiscoveredServer = {
@@ -8391,7 +8675,10 @@ export type McpServerInput = {
 };
 
 /**  Agents › MCP Server: agents use the IDE's built-in tools. */
-export type McpServerSettings = {
+export type McpServerSettings = McpServerSettings_Serialize | McpServerSettings_Deserialize;
+
+/**  Agents › MCP Server: agents use the IDE's built-in tools. */
+export type McpServerSettings_Deserialize = {
 	/**  Serve the tools on [`Self::address`] while the IDE runs. */
 	enabled?: boolean,
 	/**
@@ -8420,9 +8707,75 @@ export type McpServerSettings = {
 	 *  make a new one each run.
 	 */
 	fixedToken?: boolean,
+	/**
+	 *  Serve tools for folders that have no open window (see [`McpBackgroundProjects`]); the
+	 *  project loads when an agent first asks for it.
+	 */
+	backgroundProjects?: McpBackgroundProjects,
+	/**
+	 *  The folders [`McpBackgroundProjects::Listed`] serves, and the ones `Trusted` serves even
+	 *  when untrusted.
+	 */
+	backgroundProjectPaths?: string[],
+	/**
+	 *  Minutes a background project may go without a tool call before it is unloaded, at most
+	 *  1440; 0 keeps it until the IDE quits.
+	 */
+	backgroundIdleMinutes?: number,
+	/**  Background projects loaded at once, 1 to 32; the least recently used one makes room. */
+	backgroundProjectLimit?: number,
 };
 
-/**  What Settings › Agents › MCP Server shows. */
+/**  Agents › MCP Server: agents use the IDE's built-in tools. */
+export type McpServerSettings_Serialize = {
+	/**  Serve the tools on [`Self::address`] while the IDE runs. */
+	enabled: boolean,
+	/**
+	 *  Run the tools that change the project or start processes without asking first
+	 *  (IDEA's brave mode). Read from the IDE's own settings only, never a project's.
+	 */
+	runWithoutConfirmation: boolean,
+	/**  Finished agent tabs (`run_command`) the Run tool window shows; older ones are archived. */
+	agentTabLimit: number,
+	/**  Archived agent tabs kept; older ones are closed. */
+	agentArchiveLimit: number,
+	/**
+	 *  The IP address to listen on: `127.0.0.1` (this computer only, the default), another
+	 *  address of this computer, or `0.0.0.0` / `::` for every address.
+	 */
+	address: string,
+	/**
+	 *  Listen on [`Self::port`] in every run, rather than a free port each time, so HTTP clients and
+	 *  port forwards keep working after a restart.
+	 */
+	fixedPort: boolean,
+	/**  The port of [`Self::fixed_port`]. */
+	port: number,
+	/**
+	 *  Keep the bearer token across runs (in the app data, readable by this user only) rather than
+	 *  make a new one each run.
+	 */
+	fixedToken: boolean,
+	/**
+	 *  Serve tools for folders that have no open window (see [`McpBackgroundProjects`]); the
+	 *  project loads when an agent first asks for it.
+	 */
+	backgroundProjects: McpBackgroundProjects,
+	/**
+	 *  The folders [`McpBackgroundProjects::Listed`] serves, and the ones `Trusted` serves even
+	 *  when untrusted.
+	 */
+	backgroundProjectPaths: string[],
+	/**
+	 *  Minutes a background project may go without a tool call before it is unloaded, at most
+	 *  1440; 0 keeps it until the IDE quits.
+	 */
+	backgroundIdleMinutes: number,
+	/**  Background projects loaded at once, 1 to 32; the least recently used one makes room. */
+	backgroundProjectLimit: number,
+};
+
+/**  What Settings › Agents › IDE MCP Server shows. */
 export type McpServerStatus = {
 	running: boolean,
 	/**  Why it isn't running though turned on. */
@@ -8435,13 +8788,13 @@ export type McpServerStatus = {
 	 *  reserved, so a free port was taken for this run.
 	 */
 	portUnavailable: string | null,
-	/**  The window's local project, which the URL and command below are for. */
+	/**  The window's project, which the URL and command below are for. */
 	project: IpcPath | null,
 	/**  `http://<address>:<port>/mcp?project=<root>`, with loopback for every address. */
 	url: string | null,
 	/**  Bearer token of `url` (changes with every run unless `mcpServer.fixedToken` is on). */
 	token: string | null,
-	/**  The stdio bridge: this executable and its arguments. */
+	/**  The stdio bridge: this host's executable and its arguments. */
 	stdioCommand: string[],
 };
 
@@ -8645,6 +8998,11 @@ export type NewAgentTask = {
 	base: string | null,
 	/**  Per-session MCP server enable/disable overrides (`server_name` -> `enabled`). */
 	mcpOverrides?: { [key in string]: boolean },
+	/**
+	 *  Creates the task without sending `prompt` (it only names the task): the composer's
+	 *  `!` command runs in it first.
+	 */
+	idle?: boolean,
 };
 
 /**  The approvals new agent tasks start with. */
@@ -9023,9 +9381,9 @@ export type PluginEvent_Deserialize =
 /**  Buttons running the plugin's own commands (`ui.notify`). */
 actions: NotificationAction[] }) & { arg?: never; args?: never; cancellable?: never; capabilities?: never; chain?: never; channel?: never; column?: never; connection?: never; cwd?: never; diff?: never; done?: never; fileName?: never; id?: never; item?: never; key?: never; line?: never; log?: never; message?: never; newWindow?: never; path?: never; program?: never; prompt?: never; promptId?: never; ranges?: never; reply?: never; request?: never; requestId?: never; reveal?: never; root?: never; rules?: never; selection?: never; sets?: never; taskId?: never; text?: never; theme?: never; total?: never; updates?: never; url?: never; value?: never; view?: never } | 
 /**  A plugin's status bar item was set (`item`) or removed. */
-({ type: "statusItemChanged"; pluginId: string; id: string; item: StatusItem | null }) & { actions?: never; arg?: never; args?: never; body?: never; cancellable?: never; capabilities?: never; chain?: never; channel?: never; column?: never; connection?: never; cwd?: never; diff?: never; done?: never; fileName?: never; key?: never; level?: never; line?: never; log?: never; message?: never; newWindow?: never; path?: never; program?: never; prompt?: never; promptId?: never; ranges?: never; reply?: never; request?: never; requestId?: never; reveal?: never; root?: never; rules?: never; selection?: never; sets?: never; taskId?: never; text?: never; theme?: never; title?: never; total?: never; updates?: never; url?: never; value?: never; view?: never } | 
+({ type: "statusItemChanged"; pluginId: string; id: string; item: StatusItem_Deserialize | null }) & { actions?: never; arg?: never; args?: never; body?: never; cancellable?: never; capabilities?: never; chain?: never; channel?: never; column?: never; connection?: never; cwd?: never; diff?: never; done?: never; fileName?: never; key?: never; level?: never; line?: never; log?: never; message?: never; newWindow?: never; path?: never; program?: never; prompt?: never; promptId?: never; ranges?: never; reply?: never; request?: never; requestId?: never; reveal?: never; root?: never; rules?: never; selection?: never; sets?: never; taskId?: never; text?: never; theme?: never; title?: never; total?: never; updates?: never; url?: never; value?: never; view?: never } | 
 /**  An override in the receiving window; removal exposes the global item. */
-({ type: "windowStatusItemChanged"; pluginId: string; id: string; item: StatusItem | null }) & { actions?: never; arg?: never; args?: never; body?: never; cancellable?: never; capabilities?: never; chain?: never; channel?: never; column?: never; connection?: never; cwd?: never; diff?: never; done?: never; fileName?: never; key?: never; level?: never; line?: never; log?: never; message?: never; newWindow?: never; path?: never; program?: never; prompt?: never; promptId?: never; ranges?: never; reply?: never; request?: never; requestId?: never; reveal?: never; root?: never; rules?: never; selection?: never; sets?: never; taskId?: never; text?: never; theme?: never; title?: never; total?: never; updates?: never; url?: never; value?: never; view?: never } | 
+({ type: "windowStatusItemChanged"; pluginId: string; id: string; item: StatusItem_Deserialize | null }) & { actions?: never; arg?: never; args?: never; body?: never; cancellable?: never; capabilities?: never; chain?: never; channel?: never; column?: never; connection?: never; cwd?: never; diff?: never; done?: never; fileName?: never; key?: never; level?: never; line?: never; log?: never; message?: never; newWindow?: never; path?: never; program?: never; prompt?: never; promptId?: never; ranges?: never; reply?: never; request?: never; requestId?: never; reveal?: never; root?: never; rules?: never; selection?: never; sets?: never; taskId?: never; text?: never; theme?: never; title?: never; total?: never; updates?: never; url?: never; value?: never; view?: never } | 
 /**
  *  A plugin's context key was set (`value`: JSON text) or removed, in the
  *  emitted window (every window when the client is `None`).
@@ -9133,9 +9491,9 @@ export type PluginEvent_Serialize =
 /**  Buttons running the plugin's own commands (`ui.notify`). */
 actions: NotificationAction[] }) & { arg?: never; args?: never; cancellable?: never; capabilities?: never; chain?: never; channel?: never; column?: never; connection?: never; cwd?: never; diff?: never; done?: never; fileName?: never; id?: never; item?: never; key?: never; line?: never; log?: never; message?: never; newWindow?: never; path?: never; program?: never; prompt?: never; promptId?: never; ranges?: never; reply?: never; request?: never; requestId?: never; reveal?: never; root?: never; rules?: never; selection?: never; sets?: never; taskId?: never; text?: never; theme?: never; total?: never; updates?: never; url?: never; value?: never; view?: never } | 
 /**  A plugin's status bar item was set (`item`) or removed. */
-({ type: "statusItemChanged"; pluginId: string; id: string; item: StatusItem | null }) & { actions?: never; arg?: never; args?: never; body?: never; cancellable?: never; capabilities?: never; chain?: never; channel?: never; column?: never; connection?: never; cwd?: never; diff?: never; done?: never; fileName?: never; key?: never; level?: never; line?: never; log?: never; message?: never; newWindow?: never; path?: never; program?: never; prompt?: never; promptId?: never; ranges?: never; reply?: never; request?: never; requestId?: never; reveal?: never; root?: never; rules?: never; selection?: never; sets?: never; taskId?: never; text?: never; theme?: never; title?: never; total?: never; updates?: never; url?: never; value?: never; view?: never } | 
+({ type: "statusItemChanged"; pluginId: string; id: string; item: StatusItem_Serialize | null }) & { actions?: never; arg?: never; args?: never; body?: never; cancellable?: never; capabilities?: never; chain?: never; channel?: never; column?: never; connection?: never; cwd?: never; diff?: never; done?: never; fileName?: never; key?: never; level?: never; line?: never; log?: never; message?: never; newWindow?: never; path?: never; program?: never; prompt?: never; promptId?: never; ranges?: never; reply?: never; request?: never; requestId?: never; reveal?: never; root?: never; rules?: never; selection?: never; sets?: never; taskId?: never; text?: never; theme?: never; title?: never; total?: never; updates?: never; url?: never; value?: never; view?: never } | 
 /**  An override in the receiving window; removal exposes the global item. */
-({ type: "windowStatusItemChanged"; pluginId: string; id: string; item: StatusItem | null }) & { actions?: never; arg?: never; args?: never; body?: never; cancellable?: never; capabilities?: never; chain?: never; channel?: never; column?: never; connection?: never; cwd?: never; diff?: never; done?: never; fileName?: never; key?: never; level?: never; line?: never; log?: never; message?: never; newWindow?: never; path?: never; program?: never; prompt?: never; promptId?: never; ranges?: never; reply?: never; request?: never; requestId?: never; reveal?: never; root?: never; rules?: never; selection?: never; sets?: never; taskId?: never; text?: never; theme?: never; title?: never; total?: never; updates?: never; url?: never; value?: never; view?: never } | 
+({ type: "windowStatusItemChanged"; pluginId: string; id: string; item: StatusItem_Serialize | null }) & { actions?: never; arg?: never; args?: never; body?: never; cancellable?: never; capabilities?: never; chain?: never; channel?: never; column?: never; connection?: never; cwd?: never; diff?: never; done?: never; fileName?: never; key?: never; level?: never; line?: never; log?: never; message?: never; newWindow?: never; path?: never; program?: never; prompt?: never; promptId?: never; ranges?: never; reply?: never; request?: never; requestId?: never; reveal?: never; root?: never; rules?: never; selection?: never; sets?: never; taskId?: never; text?: never; theme?: never; title?: never; total?: never; updates?: never; url?: never; value?: never; view?: never } | 
 /**
  *  A plugin's context key was set (`value`: JSON text) or removed, in the
  *  emitted window (every window when the client is `None`).
@@ -9259,6 +9617,10 @@ export type PluginJavaAgent = {
 	fileName: string,
 	/**  The optional argument passed after `=`. */
 	args: string | null,
+	/**  Extra JVM flags from `vmOptions` (API 1.14). */
+	vmOptions: string[],
+	/**  When `Some("jetbrains")`, those VM options apply only on JetBrains Runtime. */
+	jdk: string | null,
 	/**  The jar still has the hash recorded when `java.agent` was granted. */
 	approved: boolean,
 };
@@ -9272,6 +9634,7 @@ export type PluginLanguageVisuals = {
 	injections: Injection[],
 	colors: ([string, ColorInfo])[],
 	gutterActions: ([string, GutterAction])[],
+	hoverActions: ([string, HoverAction])[],
 };
 
 export type PluginLocation = {
@@ -9363,12 +9726,24 @@ export type PluginStatus =
 "blocked";
 
 /**  A plugin's status bar item. */
-export type PluginStatusItem = {
+export type PluginStatusItem = PluginStatusItem_Serialize | PluginStatusItem_Deserialize;
+
+/**  A plugin's status bar item. */
+export type PluginStatusItem_Deserialize = {
 	/**  Whether this item overrides the global item in the requesting window. */
 	window: boolean,
 	pluginId: string,
 	id: string,
-	item: StatusItem,
+	item: StatusItem_Deserialize,
+};
+
+/**  A plugin's status bar item. */
+export type PluginStatusItem_Serialize = {
+	/**  Whether this item overrides the global item in the requesting window. */
+	window: boolean,
+	pluginId: string,
+	id: string,
+	item: StatusItem_Serialize,
 };
 
 /**  A test update, carried by the optional test-results export. */
@@ -10006,6 +10381,13 @@ export type RecentProjectGroup = {
 	expanded?: boolean,
 };
 
+/**  One followed redirect: the response and the `Location` it pointed to. */
+export type RedirectHop = {
+	status: number,
+	statusText: string,
+	location: string,
+};
+
 export type RefactoringProblem = {
 	severity: ProblemSeverity,
 	message: string,
@@ -10137,8 +10519,6 @@ set_upstream?: boolean; no_verify?: boolean } |
 { op: "pushTag"; tag: string; remote: string } | 
 /**  Deletes tag `tag` on `remote` (Delete on Remote). */
 { op: "deleteRemoteTag"; tag: string; remote: string } | 
-/**  Fast-forwards local `branch` (not checked out) to its upstream. */
-{ op: "updateBranch"; branch: string } | 
 /**  Pull dialog: `branches` of `remote` (none = the configured merge branch). */
 { op: "pullFrom"; remote: string; branches: string[]; rebase: boolean; options: MergeOptions };
 
@@ -10883,6 +11263,8 @@ export type Settings_Deserialize = {
 	projectStructure?: ProjectStructureSettings,
 	/**  Version Control (Git, Commit, Confirmation, Issue Navigation). */
 	vcs?: VcsSettings,
+	/**  Build, Execution, Deployment › Compiler (Build tool window). */
+	build?: BuildSettings,
 	/**  Build, Execution, Deployment › Console. */
 	console?: ConsoleSettings,
 	debugger?: DebuggerSettings,
@@ -10903,6 +11285,8 @@ export type Settings_Deserialize = {
 	 *  options on top of the language definition, or a server defined here.
 	 */
 	languageServers?: { [key in string]: LanguageServerSettings_Deserialize },
+	/**  Tools › Download sources: a mirror prefix for the release archives the installer fetches. */
+	toolDownloads?: ToolDownloadSettings,
 	/**  Editor › Inspections profiles. */
 	inspections?: InspectionSettings,
 	/**  Editor › Natural Languages › Spelling. */
@@ -10917,7 +11301,7 @@ export type Settings_Deserialize = {
 	/**  Settings › Agents. */
 	agents?: AgentSettings_Deserialize,
 	/**  Agents › MCP Server (global only). */
-	mcpServer?: McpServerSettings,
+	mcpServer?: McpServerSettings_Deserialize,
 	/**  Tools › Agents: Command Execution Policy. */
 	agentSecurity?: AgentSecuritySettings,
 	/**  Appearance & Behavior › Scopes: named file sets other settings refer to. */
@@ -10955,6 +11339,8 @@ export type Settings_Serialize = {
 	projectStructure: ProjectStructureSettings,
 	/**  Version Control (Git, Commit, Confirmation, Issue Navigation). */
 	vcs: VcsSettings,
+	/**  Build, Execution, Deployment › Compiler (Build tool window). */
+	build: BuildSettings,
 	/**  Build, Execution, Deployment › Console. */
 	console: ConsoleSettings,
 	debugger: DebuggerSettings,
@@ -10975,6 +11361,8 @@ export type Settings_Serialize = {
 	 *  options on top of the language definition, or a server defined here.
 	 */
 	languageServers: { [key in string]: LanguageServerSettings_Serialize },
+	/**  Tools › Download sources: a mirror prefix for the release archives the installer fetches. */
+	toolDownloads: ToolDownloadSettings,
 	/**  Editor › Inspections profiles. */
 	inspections: InspectionSettings,
 	/**  Editor › Natural Languages › Spelling. */
@@ -10989,7 +11377,7 @@ export type Settings_Serialize = {
 	/**  Settings › Agents. */
 	agents: AgentSettings_Serialize,
 	/**  Agents › MCP Server (global only). */
-	mcpServer: McpServerSettings,
+	mcpServer: McpServerSettings_Serialize,
 	/**  Tools › Agents: Command Execution Policy. */
 	agentSecurity: AgentSecuritySettings,
 	/**  Appearance & Behavior › Scopes: named file sets other settings refer to. */
@@ -11082,6 +11470,8 @@ export type SizeSource =
 export type SkipReason = 
 /**  A configuration with this name already exists. */
 { kind: "nameTaken" } | 
+/**  An existing configuration (a detected one, say) runs the same command. */
+{ kind: "sameAs"; existing: string } | 
 /**  The configuration type has no equivalent here: a VS Code debugger (`cppdbg`), a JetBrains type (`Application`). */
 { kind: "unsupportedType"; type: string } | 
 /**  A `request` other than `launch` and `attach`. */
@@ -11245,12 +11635,32 @@ export type Stash = {
 };
 
 /**  A plugin's status bar item. */
-export type StatusItem = {
+export type StatusItem = StatusItem_Serialize | StatusItem_Deserialize;
+
+/**  A plugin's status bar item. */
+export type StatusItem_Deserialize = {
 	text: string,
 	tooltip: string | null,
 	/**  One of the plugin's commands, run on click. */
 	command: string | null,
+	/**  Opened on click instead of running `command` when not empty (API 1.14). */
+	menu?: StatusMenuEntry[],
 };
+
+/**  A plugin's status bar item. */
+export type StatusItem_Serialize = {
+	text: string,
+	tooltip: string | null,
+	/**  One of the plugin's commands, run on click. */
+	command: string | null,
+	/**  Opened on click instead of running `command` when not empty (API 1.14). */
+	menu?: StatusMenuEntry[],
+};
+
+/**  An entry of a plugin status bar item's menu (API 1.14, `ui.set-status-item-menu`). */
+export type StatusMenuEntry = 
+/**  Runs one of the plugin's commands with `argument`. */
+{ kind: "action"; label: string; description: string | null; command: string; argument: string | null } | { kind: "separator" } | { kind: "header"; label: string };
 
 /**  A call on the current line that Smart Step Into can enter (`stepInTargets`). */
 export type StepInTarget = {
@@ -11341,7 +11751,9 @@ export type SymbolFilter = "all" |
 "types";
 
 /**  Symbol kinds, a stable subset of LSP `SymbolKind`. */
-export type SymbolKind = "file" | "module" | "namespace" | "package" | "class" | "interface" | "struct" | "enum" | "enumMember" | "trait" | "function" | "method" | "constructor" | "field" | "property" | "variable" | "constant" | "typeParameter" | "typeAlias" | "macro" | "event" | "operator" | "key" | "unknown";
+export type SymbolKind = "file" | "module" | "namespace" | "package" | "class" | "interface" | "struct" | "enum" | "enumMember" | "trait" | "function" | "method" | "constructor" | "field" | "property" | "variable" | "constant" | "typeParameter" | "typeAlias" | "macro" | "event" | "operator" | "key" | 
+/**  A Flutter widget built in the code (Flutter outline only). */
+"widget" | "unknown";
 
 export type SymbolMatch = {
 	name: string,
@@ -11497,6 +11909,11 @@ export type TerminalSettings = {
 	/**  Shell command line; empty = the login shell. */
 	shellPath?: string,
 	tabName?: string,
+	/**
+	 *  Title a program sets (OSC 0/2) as the tab's name: `running` (while a command runs),
+	 *  `always`, or `off`.
+	 */
+	appTitleAsTabName?: string,
 	audibleBell?: boolean,
 	closeOnExit?: boolean,
 	mouseReporting?: boolean,
@@ -11687,6 +12104,24 @@ export type ToolCallDisplay =
 "grouped" | 
 /**  Each call on its own line. */
 "each";
+
+/**
+ *  Tools › Download sources: a mirror the installer tries when `github.com` is slow or
+ *  unreachable.
+ * 
+ *  The mirror is a proxy prefix: the official URL is appended to it unchanged
+ *  (`https://mirror.example/https://github.com/o/r/releases/download/…`), which is what the
+ *  public GitHub proxies speak. Only `github.com` downloads are affected — those proxies
+ *  hard-code that host, so Eclipse JDT LS and Open VSX keep their official addresses. Empty by
+ *  default, so every download stays on its official host until the user opts in.
+ */
+export type ToolDownloadSettings = {
+	/**
+	 *  Proxy prefix prepended to `https://github.com/…` archive addresses only; empty keeps
+	 *  every download on its official host.
+	 */
+	githubMirror?: string,
+};
 
 /**  UI-facing state of one tool. */
 export type ToolInfo = {

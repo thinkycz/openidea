@@ -10055,3 +10055,62 @@ async fn reference_retry_stops_on_settings_reconfiguration_restart_and_explicit_
         assert_eq!(state.requested("textDocument/references").len(), 1, "{mutation}");
     }
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn queued_diagnostic_pulls_leave_navigation_capacity_and_retire_closed_sources() {
+    use futures::FutureExt;
+    let mut caps = incremental_caps();
+    caps["diagnosticProvider"] = json!({ "interFileDependencies": false, "workspaceDiagnostics": false });
+    let h = harness(&[("mock", caps)]);
+    let s = h.launcher.state("mock");
+    let gate = Arc::new(Gate::default());
+    let hold = gate.clone();
+    let answer = pull_responder();
+    *s.responder.lock() = Some(Arc::new(move |state, method, params| {
+        if method == "textDocument/diagnostic" {
+            hold.hold();
+        }
+        answer(state, method, params)
+    }));
+    let docs: Vec<_> = (0..8).map(|i| h.open(&format!("queued-{i}.mk"), "bad\n")).collect();
+    let outcome = std::panic::AssertUnwindSafe(async {
+        h.wait_status("mock", ServerStatus::Ready).await;
+        eventually(|| s.requested("textDocument/diagnostic").len() >= 2).await;
+        let target = &docs[0].1;
+        s.respond(
+            "textDocument/definition",
+            json!({"uri":uri_of(target),"range":{"start":{"line":0,"character":0},"end":{"line":0,"character":3}}}),
+        );
+        assert_eq!(h.mgr.goto(docs[0].0, Pos::new(0, 0), GotoKind::Definition).await.unwrap().len(), 1);
+        let pending = s.requested("textDocument/diagnostic");
+        assert!(pending.len() <= 2, "diagnostic pulls must leave capacity for interactive requests: {pending:?}");
+        let queued: Vec<_> =
+            docs.iter().filter(|(_, path)| !pending.iter().any(|p| p["textDocument"]["uri"] == uri_of(path))).collect();
+        assert_eq!(queued.len(), 6);
+        let (closed, closed_path) = queued[0];
+        h.mgr.did_close(*closed);
+        let (changed, changed_path) = queued[1];
+        h.mgr.did_change(*changed, 2, &[change(rng(0, 0, 1, 0), "bad\nbad\n")], &|| unreachable!());
+        h.mgr.did_save(*changed, "bad\nbad\n");
+        let _: Value = s.peer().request("workspace/diagnostic/refresh", Value::Null, None).await.unwrap();
+        gate.open();
+        for (id, path) in &docs {
+            if id == closed {
+                continue;
+            }
+            let expected = if path == changed_path { vec!["bad".into(), "bad".into()] } else { vec!["bad".into()] };
+            eventually(|| shown(&h, path, "mock") == Some(expected.clone())).await;
+        }
+        assert!(
+            !s.requested("textDocument/diagnostic").iter().any(|p| p["textDocument"]["uri"] == uri_of(closed_path)),
+            "closed queued sources must not reach the server"
+        );
+    })
+    .catch_unwind()
+    .await;
+    gate.open();
+    h.mgr.shutdown_all().await;
+    if let Err(panic) = outcome {
+        std::panic::resume_unwind(panic);
+    }
+}

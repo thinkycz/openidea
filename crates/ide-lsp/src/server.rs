@@ -29,6 +29,8 @@ pub struct Running {
     pub caps: Arc<RwLock<ServerCaps>>,
     /// `workspace/didChangeWatchedFiles` registrations.
     pub watchers: Arc<RwLock<crate::file_watch::FileWatchers>>,
+    /// Background diagnostic pulls leave request capacity for interactive features.
+    pub diagnostic_slots: Arc<tokio::sync::Semaphore>,
 }
 
 pub enum Conn {

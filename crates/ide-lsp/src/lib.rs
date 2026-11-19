@@ -1052,8 +1052,13 @@ impl LspManager {
                 return;
             }
         };
-        let run =
-            Running { generation, peer: peer.clone(), caps: Arc::new(RwLock::new(caps)), watchers: Default::default() };
+        let run = Running {
+            generation,
+            peer: peer.clone(),
+            caps: Arc::new(RwLock::new(caps)),
+            watchers: Default::default(),
+            diagnostic_slots: Arc::new(tokio::sync::Semaphore::new(pull::CONCURRENCY)),
+        };
         if !server.set_initializing(run.clone()) {
             Self::kill_peer(&server, &peer).await;
             return;

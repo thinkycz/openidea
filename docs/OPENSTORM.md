@@ -15,6 +15,65 @@ slice, commit and push it, and retain only the latest generated app. Native UI
 cases remain deferred/unverified; earlier native-first blocking checkpoints are
 historical and no longer prevent independent implementation.
 
+Client/Host slice174 (2026-11-19, request budget verified; adoption incomplete):
+limit background pull diagnostics to two requests per server instance. After a
+permit becomes available, recheck the latest source, open state, generation and
+capability/suppression state. Release permits before retry backoff. Keep normal
+capabilities and the existing request deadlines; active cancellation is unchanged.
+The ordinary mock regression fails on the old unbounded client with eight held
+pulls, then passes with interactive navigation, queued close/change, refresh and
+eventual diagnostic publication. The original122-open diagnostic flood produced
+244 requests and a navigation/shutdown stall; capability masking remains a causal
+experiment only, never a product fix or acceptance result.
+
+Two actual Host tests exercise compatible Kernel class/parent/trait sources,
+checked PSR-4 moves, stale/off-target dirty dependencies, external disk conflicts,
+shared apply/undo/redo and dirty restart replay. PHP runtime reflection rejects a
+one-sided physical import change and accepts paired reviewed edits/history.
+Literal alias targets stay refused; Router-retained parent navigation keeps its
+existing incomplete-context warning. Actual Host and client controls fail on173
+for the intended semantic assertion and pass on174, rather than a protocol timeout.
+All57 retained real-server Host cases pass, including both new trait cases.
+
+Candidate174 client adoption is NOT accepted: the full direct suite reports61
+passes and1 failure in the new122-source case's initial definition request at
+kernel_bindings.rs:983 (unchanged10-second timeout). No assertion, corpus, timeout
+or capability was relaxed. A subsequent isolated forwarding trace passes, all12
+Kernel cases pass together, and12 repeated traced trait cases pass. Across their48
+server instances, all122 documents open, active pull requests never exceed2 and
+successful diagnostic reports arrive. These observations do not close the failed
+direct cold-start gate. Samples from passing runs show parsing/dependency work;
+the remaining timeout's cause is unproven. Investigate it before promoting174.
+
+All48 traced engine PIDs are absent afterward. The proxy has no normal-exit rows;
+the existing client sends shutdown/exit then uses its bounded3-second fallback
+kill. Do not claim graceful client exits from raw-wire helper exit0 receipts.
+The draft trace's exit0 assumption is corrected explicitly in its evidence;
+no product shutdown behavior changed in this slice.
+
+Fresh final Rust gates:5333 ordinary passes /237 ignored /11 intentionally filtered,
+227 groups; all-target workspace Clippy -D warnings, fmt, binding fidelity and
+default173 checksum pass. The first workspace attempt hit an untouched ide-run
+stop_group descendant-port failure. Three isolated runs of that exact executable,
+three selected-feature runs and the unchanged full workspace rerun pass; retain
+the original failure. Unchanged package171 frontend13837passes/8skips are reused,
+without claiming fresh frontend/native acceptance. App111 and inactive engine174
+strict signatures and hashes verify. No bundle/resource promotion, launch/install,
+profile migration, updater activation, notarization or public release. Only the
+App111 generated archive remains; Cargo clean removes19,822 compiler files totaling
+29,060,576,106 logical bytes (27.1GiB) after evidence freeze.
+Canonical engines/sources, Workbench, fixtures and earlier evidence are preserved.
+
+All69 statuses stay67partial/2user-deferred. Guarded Host safety and request bounds
+are verified; whole client adoption, wider L61/L63/L64/F28 and performance/platform
+acceptance remain open. Native UI stays user-skipped. Evidence:
+artifacts/checks/slice174/final/{acceptance,gates,workspace-summary,controls-host,
+controls-client,client-host,request-budget-wire,trace-harness-correction}.json;
+final/client-all.log; attempt1 stop-group failure/reruns; retained-prefix.json;
+startup-probe/result.json and logs/samples. Commit/push and retention receipts are
+slice174/delivery.json and slice174/retention.json. Next: reproduce and resolve the
+direct cold-start timeout; do not promote candidate174 based only on repeated passes.
+
 Source slice 173 (2026-11-19, inactive PHPantom174 accepted): prove compatible
 literal HTTP Kernel alias properties across class, parent and trait declarations.
 Compare PHP property flags, decoded string values and array order through shared

@@ -16,6 +16,7 @@ use std::time::Duration;
 
 /// How long typing must pause before a changed file is pulled again.
 pub(crate) const AFTER_EDIT: Duration = Duration::from_millis(300);
+pub(crate) const CONCURRENCY: usize = 2;
 const TIMEOUT: Duration = Duration::from_secs(30);
 /// Retries of a pull the server cancelled (`ServerCancelled`, e.g. while indexing).
 const RETRIES: u32 = 20;
@@ -130,15 +131,28 @@ impl LspManager {
             if !t.server.is_latest_pull(&t.path, pull) {
                 return;
             }
-            let mut params = json!({ "textDocument": { "uri": t.uri } });
-            if let Some(id) = t.server.pulled_result_id(&t.path) {
-                params["previousResultId"] = json!(id);
-            }
-            if let Some(identifier) = t.run.caps.read().raw.pointer("/diagnosticProvider/identifier") {
-                params["identifier"] = identifier.clone();
-            }
-            let request = t.run.peer.request::<Value, Value>("textDocument/diagnostic", params, None);
-            let report = match tokio::time::timeout(TIMEOUT, request).await {
+            let response = {
+                let Ok(_slot) = t.run.diagnostic_slots.acquire().await else { return };
+                // A queued pull may have been superseded, closed or retired while waiting.
+                if !t.server.is_latest_pull(&t.path, pull)
+                    || t.server.running_gen(t.run.generation).is_none()
+                    || !provides_pull(&t.run)
+                    || t.server.suppresses_diagnostics(&t.path)
+                    || !self.docs.lock().values().any(|doc| doc.path == t.path)
+                {
+                    return;
+                }
+                let mut params = json!({ "textDocument": { "uri": t.uri } });
+                if let Some(id) = t.server.pulled_result_id(&t.path) {
+                    params["previousResultId"] = json!(id);
+                }
+                if let Some(identifier) = t.run.caps.read().raw.pointer("/diagnosticProvider/identifier") {
+                    params["identifier"] = identifier.clone();
+                }
+                let request = t.run.peer.request::<Value, Value>("textDocument/diagnostic", params, None);
+                tokio::time::timeout(TIMEOUT, request).await
+            };
+            let report = match response {
                 Ok(Ok(report)) => report,
                 // This request has no cancellation of its own: the server cancelled it
                 // (`ServerCancelled` while busy, which asks to be asked again).

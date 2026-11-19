@@ -167,8 +167,9 @@ async fn checked_rename_case(f: Fixture, original: &str, relative: &str) {
         if relative == "app/Http/AliasInner.php" {
             let parent = f.root.join("app/Http/KernelBase.php");
             let parent_doc = f.project.documents.open(&parent).unwrap();
-            let overlapping =
-                original.replace("trait AliasInner", "class KernelBase extends \\Illuminate\\Foundation\\Http\\Kernel");
+            let overlapping = original
+                .replace("trait AliasInner", "class KernelBase extends \\Illuminate\\Foundation\\Http\\Kernel")
+                .replace("Middleware\\Audit as", "Middleware\\Trace as");
             assert_ne!(overlapping, original);
             Fixture::lint(&overlapping);
             f.project.documents.replace_all(parent_doc.id, &overlapping).unwrap();
@@ -183,7 +184,7 @@ async fn checked_rename_case(f: Fixture, original: &str, relative: &str) {
             .await;
             assert!(
                 refused.as_ref().is_err_and(|error| error.message.contains("middleware")),
-                "overlapping trait property plan: {refused:?}"
+                "incompatible trait property plan: {refused:?}"
             );
             assert_eq!(f.project.documents.snapshot(class.id).unwrap().text, overlay);
             assert_eq!(std::fs::read_to_string(&parent).unwrap(), BASE);
@@ -1057,12 +1058,27 @@ class Middleware {
 ";
 
 fn callback_fixture() -> (Fixture, String) {
-    let kernel = kernel_priority_source();
+    callback_fixture_with_trait(false)
+}
+
+const COMPATIBLE_TRAIT: &str = r#"<?php
+namespace App\Http;
+use App\Http\Middleware\Audit as Shared;
+trait AliasDefaults {
+    protected $middlewareAliases = [/* 😀 */ "audited" => Shared::class];
+}
+"#;
+
+fn callback_fixture_with_trait(composed: bool) -> (Fixture, String) {
+    let kernel = if composed {
+        kernel_priority_source()
+            .replace("class Kernel extends BaseKernel {", "class Kernel extends BaseKernel {\n    use AliasDefaults;")
+    } else {
+        kernel_priority_source()
+    };
     let builder = BUILDER.replace("    public function create()", "    public function withMiddleware(?callable $callback=null): static {return $this;}\n    public function create()");
     let framework = PRIORITY_BASE.replace("protected function syncMiddlewareToRouter() {}", "protected function syncMiddlewareToRouter() {} public function setMiddlewareAliases(array $aliases) {$this->middlewareAliases=$aliases;$this->syncMiddlewareToRouter();return $this;}");
-    let f = kernel_priority_fixture(
-        &kernel,
-        &[
+    let mut extra = vec![
             ("composer.json".into(), r#"{"require":{"php":"^8.3","laravel/framework":"^13.0"},"autoload":{"psr-4":{"App\\":"app/","Illuminate\\":"framework/"}}}"#.into()),
             ("bootstrap/app.php".into(), CALLBACK_BOOTSTRAP.into()),
             ("framework/Foundation/Application.php".into(), BUILDER_APP.into()),
@@ -1074,8 +1090,11 @@ fn callback_fixture() -> (Fixture, String) {
                 r#"{"name":"fixture/peer","autoload":{"psr-4":{"Peer\\":"src/"}}}"#.into(),
             ),
             ("modules/peer/src/Peer.php".into(), "<?php namespace Peer; class Peer {}\n".into()),
-        ],
-    );
+        ];
+    if composed {
+        extra.push(("app/Http/AliasDefaults.php".into(), COMPATIBLE_TRAIT.into()));
+    }
+    let f = kernel_priority_fixture(&kernel, &extra);
     (f, kernel)
 }
 
@@ -1242,6 +1261,200 @@ async fn builder_callback_dirty_dependencies_retire_plans_and_keep_nested_buffer
             assert!(peer.dirty);
             assert_eq!(std::fs::read_to_string(&foreign).unwrap(), original);
         }
+    })
+    .catch_unwind()
+    .await;
+    f.finish(outcome).await;
+}
+
+fn trait_defaults_runtime(f: &Fixture, expected: &str) {
+    let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let php = std::env::var_os("OPENSTORM_TEST_PHP_BIN")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| repo.join("artifacts/toolchains/php-8.4.23-static/php"));
+    let script = r"foreach (['framework/Foundation/Http/Kernel.php','app/Http/KernelBase.php','app/Http/AliasDefaults.php','app/Http/Kernel.php'] as $file) { require $argv[1].'/'.$file; }
+$defaults=(new ReflectionClass(\App\Http\Kernel::class))->getDefaultProperties();
+if ($defaults['middlewareAliases']['audited'] !== 'App\\Http\\Middleware\\'.$argv[2]) { exit(9); }";
+    let status = std::process::Command::new(php)
+        .args(["-n", "-r", script])
+        .arg(&f.root)
+        .arg(expected)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .status()
+        .unwrap();
+    assert!(status.success(), "composed PHP defaults must survive reviewed edits: {status}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires PHPantom174 and owned PHP syntax-check executable"]
+async fn compatible_trait_checked_apply_preserves_physical_sources_conflicts_and_history() {
+    let (f, kernel_source) = callback_fixture_with_trait(true);
+    let outcome = std::panic::AssertUnwindSafe(async {
+        callback_definition(&f, "App\\Http\\Middleware\\Trace", "App\\Http\\Middleware\\Audit").await;
+        let old = f.root.join("app/Http/Middleware/Audit.php");
+        let new = f.root.join("app/Http/Middleware/Auditor.php");
+        let kernel = f.root.join("app/Http/Kernel.php");
+        let trait_path = f.root.join("app/Http/AliasDefaults.php");
+        let class = f.project.documents.open(&old).unwrap();
+        let registration = f.project.documents.open(&kernel).unwrap();
+        let trait_doc = f.project.documents.open(&trait_path).unwrap();
+        let overlay = format!("{CLASS}// Unsaved compatible-trait target.\n");
+        f.project.documents.replace_all(class.id, &overlay).unwrap();
+        let dirty_trait = COMPATIBLE_TRAIT.replace("\"audited\"", "'audited'");
+        assert_ne!(dirty_trait, COMPATIBLE_TRAIT);
+        Fixture::lint(&dirty_trait);
+        f.project.documents.replace_all(trait_doc.id, &dirty_trait).unwrap();
+        let plan = ide_host::ops::lsp::lsp_rename(&f.host, "main", RequestId::next(), class.id, cursor(CLASS, "Audit {}"), "Auditor".into()).await.unwrap().edit;
+        for path in [&kernel, &trait_path] {
+            assert!(plan.files.iter().any(|edit| matches!(edit, ide_core::FileEdit::Edit{path:target,edits,..} if **target==*path && edits.iter().any(|edit| edit.new_text.contains("Middleware\\Auditor as")))), "compatible physical trait source must enter the reviewed plan: {path:?}: {plan:?}");
+        }
+        let literal = dirty_trait.replace("Shared::class", "'App\\\\Http\\\\Middleware\\\\Audit'");
+        Fixture::lint(&literal);
+        f.project.documents.replace_all(trait_doc.id, &literal).unwrap();
+        assert!(ide_host::ops::lsp::apply_workspace_edit(&f.host, "main", plan).await.is_err(), "a changed physical trait must retire the reviewed plan");
+        callback_definition(&f, "App\\Http\\Middleware\\Trace", "App\\Http\\Middleware\\Audit").await;
+        let refused = ide_host::ops::lsp::lsp_rename(&f.host, "main", RequestId::next(), class.id, cursor(CLASS, "Audit {}"), "Auditor".into()).await;
+        assert!(refused.as_ref().is_err_and(|error| error.message.contains("literal middleware")), "hidden compatible literal target must stay guarded: {refused:?}");
+        f.project.documents.replace_all(trait_doc.id, &dirty_trait).unwrap();
+        let stale = ide_host::ops::lsp::lsp_rename(&f.host, "main", RequestId::next(), class.id, cursor(CLASS, "Audit {}"), "Auditor".into()).await.unwrap().edit;
+        let external = format!("{COMPATIBLE_TRAIT}// External trait edit.\n");
+        std::fs::write(&trait_path, &external).unwrap();
+        assert!(ide_host::ops::lsp::apply_workspace_edit(&f.host, "main", stale).await.is_err());
+        assert_eq!(std::fs::read_to_string(&trait_path).unwrap(), external);
+        assert_eq!(std::fs::read_to_string(&old).unwrap(), CLASS);
+        assert_eq!(f.project.documents.snapshot(class.id).unwrap().text, overlay);
+        assert!(!new.exists());
+        std::fs::write(&trait_path, COMPATIBLE_TRAIT).unwrap();
+        let plan = ide_host::ops::lsp::lsp_rename(&f.host, "main", RequestId::next(), class.id, cursor(CLASS, "Audit {}"), "Auditor".into()).await.unwrap().edit;
+        assert!(plan.files.iter().any(|edit| matches!(edit,ide_core::FileEdit::Rename{from,to} if **from==old && **to==new)));
+        ide_host::ops::lsp::apply_workspace_edit(&f.host, "main", plan).await.unwrap();
+        let renamed = f.project.documents.snapshot(class.id).unwrap();
+        let kernel_updated = f.project.documents.snapshot(registration.id).unwrap();
+        let trait_updated = f.project.documents.snapshot(trait_doc.id).unwrap();
+        assert!(renamed.text.contains("class Auditor") && renamed.text.contains("Unsaved compatible-trait target"));
+        assert!(kernel_updated.text.contains("Middleware\\Auditor as AuditAlias"));
+        assert!(trait_updated.text.contains("Middleware\\Auditor as Shared"));
+        assert!(trait_updated.text.contains("'audited'"));
+        assert_eq!(f.project.documents.by_path(&new), Some(class.id));
+        assert!(!old.exists());
+        for (path, text) in [(&new, &renamed.text), (&kernel, &kernel_updated.text), (&trait_path, &trait_updated.text)] {
+            assert_eq!(std::fs::read_to_string(path).unwrap(), *text);
+            Fixture::lint(text);
+        }
+        trait_defaults_runtime(&f, "Auditor");
+        let group = f.events.lock().unwrap().iter().rev().find_map(|event| match event {
+            ide_core::IdeEvent::DocPatched{history:Some(history),..} => Some(history.group.clone()),
+            _ => None,
+        }).expect("compatible trait edits must share one history group");
+        for redo in [false, true] {
+            ide_host::ops::lsp::restore_reviewed_edit(&f.host, "main", group.clone(), redo).await.unwrap();
+            let class_snapshot = f.project.documents.snapshot(class.id).unwrap();
+            let trait_snapshot = f.project.documents.snapshot(trait_doc.id).unwrap();
+            assert_eq!(class_snapshot.text, if redo { renamed.text.as_str() } else { overlay.as_str() });
+            assert_eq!(trait_snapshot.text, if redo { trait_updated.text.as_str() } else { dirty_trait.as_str() });
+            assert_eq!(class_snapshot.dirty, !redo);
+            assert_eq!(trait_snapshot.dirty, !redo);
+            assert_eq!(f.project.documents.by_path(if redo { &new } else { &old }), Some(class.id));
+            assert_eq!(std::fs::read_to_string(if redo { &new } else { &old }).unwrap(), if redo { renamed.text.as_str() } else { CLASS });
+            assert_eq!(std::fs::read_to_string(&kernel).unwrap(), if redo { kernel_updated.text.as_str() } else { kernel_source.as_str() });
+            assert_eq!(std::fs::read_to_string(&trait_path).unwrap(), if redo { trait_updated.text.as_str() } else { COMPATIBLE_TRAIT });
+            trait_defaults_runtime(&f, if redo { "Auditor" } else { "Audit" });
+            callback_definition(&f, "App\\Http\\Middleware\\Trace", "App\\Http\\Middleware\\Audit").await;
+        }
+    }).catch_unwind().await;
+    f.finish(outcome).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires PHPantom174 and owned PHP syntax-check executable"]
+async fn compatible_trait_dependencies_retire_plans_and_replay_dirty_refusals() {
+    let (f, _) = callback_fixture_with_trait(true);
+    let outcome = std::panic::AssertUnwindSafe(async {
+        callback_definition(&f, "App\\Http\\Middleware\\Trace", "App\\Http\\Middleware\\Audit").await;
+        let old = f.root.join("app/Http/Middleware/Audit.php");
+        let new = f.root.join("app/Http/Middleware/Auditor.php");
+        let class = f.project.documents.open(&old).unwrap();
+        let dependency = f.root.join("app/Http/KernelBase.php");
+        let base = f.project.documents.open(&dependency).unwrap();
+        let trait_path = f.root.join("app/Http/AliasDefaults.php");
+        let trait_doc = f.project.documents.open(&trait_path).unwrap();
+        let plan = ide_host::ops::lsp::lsp_rename(
+            &f.host,
+            "main",
+            RequestId::next(),
+            class.id,
+            cursor(CLASS, "Audit {}"),
+            "Auditor".into(),
+        )
+        .await
+        .unwrap()
+        .edit;
+        assert!(!plan.files.iter().any(|edit| matches!(edit,ide_core::FileEdit::Edit{path,..} if **path==dependency)));
+        let base_dirty = format!("{BASE}// Unsaved off-target trait dependency.\n");
+        f.project.documents.replace_all(base.id, &base_dirty).unwrap();
+        assert!(
+            ide_host::ops::lsp::apply_workspace_edit(&f.host, "main", plan).await.is_err(),
+            "off-target trait graph dependency must retire the reviewed plan"
+        );
+        let plan = ide_host::ops::lsp::lsp_rename(
+            &f.host,
+            "main",
+            RequestId::next(),
+            class.id,
+            cursor(CLASS, "Audit {}"),
+            "Auditor".into(),
+        )
+        .await
+        .unwrap()
+        .edit;
+        let incompatible = COMPATIBLE_TRAIT.replace("Shared::class", "\\App\\Http\\Middleware\\Trace::class");
+        Fixture::lint(&incompatible);
+        f.project.documents.replace_all(trait_doc.id, &incompatible).unwrap();
+        assert!(ide_host::ops::lsp::apply_workspace_edit(&f.host, "main", plan).await.is_err());
+        for restarted in [false, true] {
+            if restarted {
+                f.project.lsp.restart(f.project.lsp.servers()[0].id).await.unwrap();
+            }
+            let result =
+                ide_host::ops::lsp::lsp_hover(&f.host, "main", RequestId::next(), f.doc, cursor(CALLER, r"64ited"))
+                    .await
+                    .unwrap()
+                    .unwrap();
+            assert!(
+                result.contents.value.contains("incomplete"),
+                "dirty incompatible trait must survive restart: {result:?}"
+            );
+            let refused = ide_host::ops::lsp::lsp_rename(
+                &f.host,
+                "main",
+                RequestId::next(),
+                class.id,
+                cursor(CLASS, "Audit {}"),
+                "Auditor".into(),
+            )
+            .await;
+            assert!(refused.as_ref().is_err_and(|error| error.message.contains("middleware")), "{refused:?}");
+        }
+        f.project.documents.replace_all(trait_doc.id, COMPATIBLE_TRAIT).unwrap();
+        callback_definition(&f, "App\\Http\\Middleware\\Trace", "App\\Http\\Middleware\\Audit").await;
+        let fresh = ide_host::ops::lsp::lsp_rename(
+            &f.host,
+            "main",
+            RequestId::next(),
+            class.id,
+            cursor(CLASS, "Audit {}"),
+            "Auditor".into(),
+        )
+        .await
+        .unwrap();
+        assert!(fresh.incomplete.is_none());
+        assert_eq!(f.project.documents.snapshot(base.id).unwrap().text, base_dirty);
+        assert!(f.project.documents.snapshot(base.id).unwrap().dirty);
+        assert_eq!(std::fs::read_to_string(&dependency).unwrap(), BASE);
+        assert_eq!(std::fs::read_to_string(&trait_path).unwrap(), COMPATIBLE_TRAIT);
+        assert_eq!(std::fs::read_to_string(&old).unwrap(), CLASS);
+        assert!(!new.exists());
     })
     .catch_unwind()
     .await;

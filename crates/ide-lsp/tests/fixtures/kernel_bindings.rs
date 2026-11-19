@@ -952,3 +952,79 @@ async fn kernel_priority_client_keeps_uncertain_maps_and_lifecycle_refusals_afte
         }
     }
 }
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires PHPantom174 and retained real Laravel13.37 trait fixtures"]
+async fn compatible_trait_client_tracks_real_dirty_context_and_checked_physical_targets() {
+    let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let engine = std::env::var_os("OPENSTORM_TEST_PHPANTOM_BIN")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| repo.join("src-tauri/resources/phpantom/phpantom_lsp"));
+    for variant in ["literal", "named"] {
+        let root = repo.join(format!("artifacts/checks/slice173-trait-wire-v3-{variant}")).canonicalize().unwrap();
+        let sources: Vec<_> = rename_candidates(&root)
+            .into_iter()
+            .map(|path| {
+                let text = std::fs::read_to_string(&path).unwrap();
+                (DocId::next(), path, text)
+            })
+            .collect();
+        assert_eq!(sources.len(), 122);
+        let find = |relative: &str| sources.iter().find(|(_, path, _)| *path == root.join(relative)).unwrap();
+        let (doc, _, source) = find("routes/trait-audit.php");
+        let (trait_doc, trait_path, original) = find("app/Http/Concerns/KernelAliases.php");
+        let (class_doc, class_path, class) = find("app/Http/Middleware/AuditRequests.php");
+        let bootstrap = root.join("bootstrap/app.php");
+        let mgr = builder_variable_client(&root, &engine);
+        for (id, path, text) in &sources {
+            mgr.did_open(*id, path, &LanguageId::new("php"), 1, text);
+        }
+        let outcome = std::panic::AssertUnwindSafe(async {
+            assert!(!mgr.goto(*doc, pos(source, "AuditRequests;"), GotoKind::Definition).await.unwrap().is_empty());
+            let needle = "'demo.kernel.trait' => AuditRequests::class";
+            assert_eq!(original.matches(needle).count(), 1);
+            let incompatible = original.replace(needle, "'demo.kernel.trait' => \\Illuminate\\Auth\\Middleware\\Authenticate::class");
+            let dirty = original.replace("'demo.kernel.trait'", "\"demo.kernel.trait\"");
+            assert_ne!(original, &dirty);
+            for state in 0..5 {
+                match state {
+                    1 => replace(&mgr, *trait_doc, 2, original, &incompatible),
+                    2 => replace(&mgr, *trait_doc, 3, &incompatible, original),
+                    3 => replace(&mgr, *trait_doc, 4, original, &dirty),
+                    4 => mgr.restart(mgr.servers()[0].id).await.unwrap(),
+                    _ => {}
+                }
+                let found = mgr.goto(*doc, pos(source, "demo.audit'"), GotoKind::Definition).await.unwrap();
+                assert_eq!(found.len(), 1, "{variant}/{state}: {found:?}");
+                assert_eq!(*found[0].path, bootstrap);
+                let hover = mgr.hover(*doc, pos(source, "demo.audit'"), Default::default()).await.unwrap().unwrap();
+                assert_eq!(!hover.contents.value.contains("incomplete"), state != 1, "compatible trait client context: {variant}/{state}: {hover:?}");
+                let parent = mgr.goto(*doc, pos(source, "demo.kernel.parent'"), GotoKind::Definition).await.unwrap();
+                assert_eq!(parent.len(), 1, "Router-retained parent: {variant}/{state}: {parent:?}");
+                assert_eq!(*parent[0].path, root.join("app/Http/ApplicationKernel.php"));
+                let proposal = mgr.rename(*class_doc, pos(class, "AuditRequests\n"), "ReviewedTraitAuditRequests".into(), Default::default()).await;
+                if state == 1 || variant == "literal" {
+                    assert!(proposal.as_ref().is_err_and(|error| error.message.contains("middleware")), "{variant}/{state}: {proposal:?}");
+                } else {
+                    let proposal = proposal.unwrap();
+                    assert!(proposal.incomplete.is_none(), "{proposal:?}");
+                    let moved = root.join("app/Http/Middleware/ReviewedTraitAuditRequests.php");
+                    assert!(proposal.edit.files.iter().any(|edit| matches!(edit, ide_core::FileEdit::Rename{from,to} if **from==*class_path && **to==moved)), "{proposal:?}");
+                    for relative in ["app/Http/Concerns/KernelAliases.php", "app/Http/ApplicationKernel.php", "app/Runtime/SiteKernel.php", "bootstrap/app.php"] {
+                        assert!(proposal.edit.files.iter().any(|edit| matches!(edit, ide_core::FileEdit::Edit{path,edits,..} if **path==root.join(relative) && edits.iter().any(|edit| edit.new_text.contains("ReviewedTraitAuditRequests")))), "physical trait rename input {relative}: {proposal:?}");
+                    }
+                }
+            }
+            assert_eq!(std::fs::read_to_string(trait_path).unwrap(), *original);
+        }).catch_unwind().await;
+        mgr.shutdown_all().await;
+        assert!(mgr.servers().iter().all(|server| server.pid.is_none()));
+        for (_, path, text) in sources {
+            assert_eq!(std::fs::read_to_string(path).unwrap(), text);
+        }
+        assert!(!root.join("app/Http/Middleware/ReviewedTraitAuditRequests.php").exists());
+        if let Err(panic) = outcome {
+            std::panic::resume_unwind(panic);
+        }
+    }
+}

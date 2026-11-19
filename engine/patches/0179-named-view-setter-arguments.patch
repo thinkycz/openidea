@@ -1,0 +1,201 @@
+diff --git a/docs/CHANGELOG.md b/docs/CHANGELOG.md
+index 6d1226790091c2693cc3119ef64dfbee0a42ccf3..acdd01748e4a4323c86d54fe3cf51ceba18bf7b5 100644
+--- a/docs/CHANGELOG.md
++++ b/docs/CHANGELOG.md
+@@ -315,6 +315,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
+ 
+ ### Fixed
+ 
++- **Named view setters.** Blade variable assistance follows reordered `key:` and `value:` arguments to chained `with()` calls. Later setters retain their data precedence. Contributed by @thinkycz.
++
+ - **View fallback data.** Template variables retain Laravel's merge-data precedence when arguments are reordered. Named per-item and empty views remain separate. Contributed by @thinkycz.
+ 
+ 
+diff --git a/examples/laravel/app/Demo.php b/examples/laravel/app/Demo.php
+index c5d1742dd7ec2d6ba65ecb4819313dea5bb1f70e..9dc10f0cd4c2da62b086cdc8a82509847c8cbfdd 100644
+--- a/examples/laravel/app/Demo.php
++++ b/examples/laravel/app/Demo.php
+@@ -691,6 +691,7 @@ class Demo
+         // PHP Workbench: Laravel: Go to View browses this same template index.
+         // Undefined-function diagnostics exclude generated helpers; user-written calls remain checked.
+         view(mergeData: [], view: 'welcome', data: compact('posts', 'user'));
++        view('welcome', compact('posts', 'user'))->with(value: $user, key: 'user');
+ 
+         // admin/users/index.blade.php declares $users and @extends('welcome'),
+         // and a layout renders from the same data array as its child — so the
+diff --git a/examples/laravel/assertions.php b/examples/laravel/assertions.php
+index c1aa20ff67142eb8b8d50bae729981db9ffec85b..6f81d5e9b1fba2ca57fc0188d83286d0c492bbf1 100644
+--- a/examples/laravel/assertions.php
++++ b/examples/laravel/assertions.php
+@@ -1649,6 +1649,19 @@ check(
+     $parseData->invoke($factory, $arrayable) === ['user' => null, 'posts' => []]
+ );
+ 
++// Named setters use parameter roles; array keys ignore the value argument.
++$namedView = (new ReflectionClass(\Illuminate\View\View::class))->newInstanceWithoutConstructor();
++$firstValue = new stdClass();
++$lastValue = new stdClass();
++$namedView->with(key: 'item', value: $firstValue);
++check('named view key/value binding', $namedView->getData()['item'] === $firstValue);
++$namedView->with(value: $lastValue, key: 'item');
++check('reordered named view setter replaces earlier data', $namedView->getData()['item'] === $lastValue);
++$namedView->with(value: $lastValue, key: ['item' => $firstValue]);
++check('array view setter ignores its value argument', $namedView->getData()['item'] === $firstValue);
++$namedView->WITH(value: $lastValue, key: 'item');
++check('view with method names are case insensitive', $namedView->getData()['item'] === $lastValue);
++
+ // ─── The scope an @include inherits ──────────────────────────────────────────
+ 
+ // @include compiles to a render of the partial with the variables defined at
+diff --git a/src/blade/view_call_walker.rs b/src/blade/view_call_walker.rs
+index fa98b33ed3afa83a3478204dc07c981637c948d5..6181502467375847dd6761a1426b8e7e724fae2b 100644
+--- a/src/blade/view_call_walker.rs
++++ b/src/blade/view_call_walker.rs
+@@ -484,7 +484,10 @@ impl<'ast, 'arena, 'w> mago_syntax::walker::Walker<'ast, 'arena, CollectCtx<'w,
+         // receiver chain may pass through other builder methods
+         // (`->layout(…)`), so scan the whole spine for the matching view
+         // call.
+-        if !method_name.starts_with("with") && !method_name.starts_with("With") {
++        if !method_name.eq_ignore_ascii_case("with")
++            && !method_name.starts_with("with")
++            && !method_name.starts_with("With")
++        {
+             return;
+         }
+         let Some((offset, name_ranges)) = matching_view_call_in_chain(node.object, self) else {
+@@ -506,34 +509,35 @@ impl<'ast, 'arena, 'w> mago_syntax::walker::Walker<'ast, 'arena, CollectCtx<'w,
+                 None => complete = false,
+             }
+         } else {
+-            let mut args = node.argument_list.arguments.iter();
+-            match (args.next(), args.next()) {
+-                (Some(key_arg), Some(value_arg)) => {
+-                    // ->with('key', $value)
+-                    match key_arg.value() {
+-                        Expression::Literal(Literal::String(s)) => {
+-                            match string_literal_contents(s) {
+-                                Some(name) => entries.push(SiteEntry::Expr {
+-                                    name,
+-                                    key_range: (s.span.start.offset + 1, s.span.end.offset - 1),
+-                                    expr: value_arg.value(),
+-                                }),
+-                                None => complete = false,
+-                            }
+-                        }
+-                        _ => {
+-                            if !matches!(key_arg.value(), Expression::Literal(_)) {
+-                                entries.push(SiteEntry::UnknownWrite {
+-                                    offset: key_arg.value().span().start.offset,
+-                                });
+-                            }
+-                            complete = false;
++            let key = crate::call_args::argument_for_slot(&node.argument_list, 0, "key");
++            let value = crate::call_args::argument_for_slot(&node.argument_list, 1, "value");
++            match (key, value) {
++                (Some(Some(key)), Some(_))
++                    if matches!(key, Expression::Array(_) | Expression::LegacyArray(_)) =>
++                {
++                    // An array key supplies the data; Laravel ignores value here.
++                    complete = collect_from_data_expr(key, &mut entries);
++                }
++                (Some(Some(key)), Some(Some(value))) => match key {
++                    Expression::Literal(Literal::String(s)) => match string_literal_contents(s) {
++                        Some(name) => entries.push(SiteEntry::Expr {
++                            name,
++                            key_range: (s.span.start.offset + 1, s.span.end.offset - 1),
++                            expr: value,
++                        }),
++                        None => complete = false,
++                    },
++                    _ => {
++                        if !matches!(key, Expression::Literal(_)) {
++                            entries.push(SiteEntry::UnknownWrite {
++                                offset: key.span().start.offset,
++                            });
+                         }
++                        complete = false;
+                     }
+-                }
+-                (Some(single), None) => {
+-                    // ->with(['key' => $value, …]) or ->with(compact('key'))
+-                    complete = collect_from_data_expr(single.value(), &mut entries);
++                },
++                (Some(Some(single)), Some(None)) => {
++                    complete = collect_from_data_expr(single, &mut entries);
+                 }
+                 _ => complete = false,
+             }
+diff --git a/tests/integration/laravel_view_names.rs b/tests/integration/laravel_view_names.rs
+index 2701d7a65cba672e57c6cb6dffbfd80de4fc42ce..3a798fb546d3a490d5bdcbae9f53dfc16c389b7b 100644
+--- a/tests/integration/laravel_view_names.rs
++++ b/tests/integration/laravel_view_names.rs
+@@ -1425,3 +1425,69 @@ async fn named_view_arguments_typed_factory_uses_first_views_parameter() {
+         "typed factory named data: {labels:?}"
+     );
+ }
++
++#[tokio::test]
++async fn named_view_arguments_with_binds_key_and_value_and_preserves_priority() {
++    for body in [
++        "view('shop')->with(value: new Item, key: 'item');",
++        "view('shop')->with(key: 'item', value: new Item);",
++        "view('shop')->with('item', value: new Item);",
++        "view('shop')->with(key: ['item' => new Item]);",
++        "view('shop')->with(value: new Other, key: ['item' => new Item]);",
++        "view('shop')->with(['item' => new Item], new Other);",
++        "view('shop')->WITH(value: new Item, key: 'item');",
++        "view('shop', ['item' => new Other])->with(value: new Item, key: 'item');",
++        "view('shop')->with('item', new Other)->with(value: new Item, key: 'item');",
++    ] {
++        let source = named_view_controller(body);
++        let (backend, _dir) = create_psr4_workspace(
++            LARAVEL_APP_COMPOSER,
++            &[
++                ("app/Item.php", ITEM_CLASS),
++                (
++                    "app/Other.php",
++                    "<?php namespace App; class Other { public int $otherOnly = 1; }",
++                ),
++                ("app/NamedViewController.php", &source),
++                ("resources/views/shop.blade.php", "{{ $item->name }}\n"),
++            ],
++        );
++        backend.initialized(InitializedParams {}).await;
++        open_php_file(&backend, "app/NamedViewController.php").await;
++        let blade = open_blade_template(&backend, "resources/views/shop.blade.php").await;
++        let labels = crate::common::complete_labels_at_opened(&backend, &blade, 0, 10).await;
++        assert!(
++            labels.iter().any(|label| label == "price")
++                && !labels.iter().any(|label| label == "otherOnly"),
++            "with parameter binding and final-write priority: {body}: {labels:?}"
++        );
++    }
++}
++
++#[tokio::test]
++async fn named_view_arguments_with_refuses_ambiguous_bindings() {
++    for body in [
++        "view('shop')->with(Key: 'item', value: new Item);",
++        "view('shop')->with(key: 'item', key: 'other', value: new Item);",
++        "view('shop')->with('item', key: 'other', value: new Item);",
++        "view('shop')->with(...['key' => 'item', 'value' => new Item]);",
++    ] {
++        let source = named_view_controller(body);
++        let (backend, _dir) = create_psr4_workspace(
++            LARAVEL_APP_COMPOSER,
++            &[
++                ("app/Item.php", ITEM_CLASS),
++                ("app/NamedViewController.php", &source),
++                ("resources/views/shop.blade.php", "{{ $item->name }}\n"),
++            ],
++        );
++        backend.initialized(InitializedParams {}).await;
++        open_php_file(&backend, "app/NamedViewController.php").await;
++        let blade = open_blade_template(&backend, "resources/views/shop.blade.php").await;
++        let labels = crate::common::complete_labels_at_opened(&backend, &blade, 0, 10).await;
++        assert!(
++            !labels.iter().any(|label| label == "price"),
++            "ambiguous with arguments must not invent a model: {body}: {labels:?}"
++        );
++    }
++}

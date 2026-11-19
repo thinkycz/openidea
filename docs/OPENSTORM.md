@@ -15,6 +15,46 @@ slice, commit and push it, and retain only the latest generated app. Native UI
 cases remain deferred/unverified; earlier native-first blocking checkpoints are
 historical and no longer prevent independent implementation.
 
+View setter slice185 (2026-11-19, source/protocol accepted; inactive engine 179):
+Chained View::with() calls now bind key and value by their PHP parameter roles.
+Reordered named setters retain Blade model assistance and replace earlier data.
+Literal array data ignores the second argument as Laravel does, and concrete
+with() method names remain case insensitive. The shared argument binder refuses
+ambiguous bindings and unpacking; prior positional and magic-setter behavior is
+covered by the existing suites. This does not claim broader dynamic data support.
+
+The new public regression fails on unchanged engine 178 for the intended empty-member
+result. The same direct protocol cases pass 3/8 on packaged engine 178 and 8/8 on signed engine 179;
+all nine prior named-view cases remain passing. They check navigation, UTF-16
+member origins, unsaved caller replacement, restoration, wrong-role refusal and
+normal server exit. Fresh Laravel fixture checks pass 121 PHP files and all 383
+runtime assertions, including four new checks against Laravel's real View::with.
+Plain PHP passes syntax checks for all 12 files and its runtime assertions.
+
+Focused source checks pass: nine named-argument tests, all 36 view-name tests and
+all 47 Blade inference tests. The full immutable source run passes
+18,696 primary tests with 17 ignored;
+2 bounded child groups also pass. Normal and memory-audit
+all-target Clippy, formatting, source replay/fingerprint and release build pass.
+All five changed source files and symlinks match the pinned recipe. The final
+signed arm64 executable passes strict signature and version checks. Analyzer
+output matches exactly three intentional diagnostics, with lines derived from
+unchanged source lines after adding the demo; no unexpected diagnostics remain.
+Final signed engine SHA256:
+d5445b14fd4b72ac1b0fbf218c30bfe2390c02b89ca8403c8347d526370d4c4e.
+
+Root Rust/IPC/frontend/tooling and the active resource are unchanged; prior
+root gates are reused only for that scope. Current OpenStorm client/Host adoption
+of engine 179 is the next separate slice and is not claimed here. App 0.1.113/default engine 178
+remain unchanged, with only that generated app retained. Cleanup:
+Removed 8366 files, 2.2GiB total; duplicate work/pending sources removed after exact
+canonical-map verification. Canonical sources, engines, provenance, licenses,
+Workbench, fixtures and evaluation evidence remain. Native GUI checks stay
+user-skipped. Broader 69-area acceptance and the older startup-timeout attribution
+remain open; statuses stay 67 partial and 2 debugger areas user-deferred.
+Evidence: artifacts/checks/slice185/{red,baseline178-extended,focused,freeze,
+engine-gates,engine-test-summary,post-source,root-reuse,retention}.json.
+
 Package slice184 (2026-11-19, accepted local development bundle):
 App 0.1.113 now bundles engine 178, accepted by all 120 current client/Host
 cases in slice183. The active source manifest, bundled provenance and 178-patch

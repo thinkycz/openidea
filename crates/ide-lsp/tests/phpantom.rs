@@ -17,6 +17,9 @@ mod controller_urls;
 mod factories;
 #[path = "fixtures/kernel_bindings.rs"]
 mod kernel_bindings;
+#[cfg(unix)]
+#[path = "fixtures/route_namespaces.rs"]
+mod route_namespaces;
 #[path = "fixtures/view_arguments.rs"]
 mod view_arguments;
 

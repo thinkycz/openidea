@@ -15,6 +15,55 @@ slice, commit and push it, and retain only the latest generated app. Native UI
 cases remain deferred/unverified; earlier native-first blocking checkpoints are
 historical and no longer prevent independent implementation.
 
+Client adoption slice192 (2026-11-19, accepted current client/Host; inactive engine 180):
+The new real-client namespace-action regression fails on engine 179 for the intended
+missing target and passes on signed engine 180 using the same executable and Cargo
+fingerprint. Six forms preserve physical UTF-16 declaration origins, completion,
+return-type hover and exact references. Unsaved declaration offsets/types survive
+server restart. Checked rename includes only the six action tokens and their
+current owner; applying those edits in memory updates subsequent semantics and
+preserves the unrelated controller. Closing dirty dependencies restores disk-backed semantics,
+changing/restarting the caller rebinds to the other owner, and close/reopen restores
+the original owner. All four owned disk originals stay unchanged; the manager
+always shuts down, including failure paths.
+
+Exact final source fixtures pass 12 PHP syntax checks and 52 actual Laravel 13.37
+runtime/autoload assertions. A syntax check initially caught a leading newline
+outside PHP before namespace; the insertion now remains inside the PHP tag.
+The first candidate run reaches checked rename after baseline/dirty/restart
+semantics pass, then correctly refuses an unavailable project scope: the
+standalone fixture omitted the Host's candidate enumeration hook. All three
+owned PHP sources are now supplied through the existing test convention.
+Both initial failures remain recorded; neither required an engine change or a
+weaker guard. The final source is rebuilt explicitly after fixture corrections.
+
+All 65 current client and 57 Host cases pass on signed engine 180 using workspace-emitted
+executables/fingerprints. Inputs, linked regression messages, binaries and
+fingerprints are verified before/after each stage; all retained fixture originals
+remain unchanged. Fresh full-workspace checks pass 5,338 tests,
+240 ignored and 11 existing planned exclusions across 228 groups.
+Workspace all-target Clippy, Rust formatting, frontend types/lint/format/Knip/
+full tests (13,860 passed; eight existing skips), production-WebKit build,
+bindings fidelity and active-source checks pass. Existing warnings remain; no deadline, retry helper or exclusion changed.
+Exact slice191 engine gates are reused for the unchanged signed engine 180; no new full
+engine suite or native GUI acceptance is claimed in this client-only slice.
+
+Cleanup: Removed 19469 files, 26.7GiB total; 72,595,911 bytes of generated
+frontend output removed after source/executable/fingerprint/original-file proofs.
+Only App 0.1.115 remains, with unchanged signature and default engine 179. Source/pins,
+engines, licenses/provenance, Workbench, fixtures and evaluation evidence remain.
+Candidate 180 stays inactive pending a separate promotion/package. Native GUI
+stays user-skipped; broader 69-area/platform/service acceptance and the older
+startup-timeout attribution remain open. Statuses stay 67 partial and two debugger
+areas user-deferred.
+Evidence: artifacts/checks/slice192/{fixture-initial-parse-failure,
+candidate-scope-correction,fixture-checks,focused,gates,workspace-summary,
+client-host-real,final-inputs,retention}.json.
+
+Reproduce with `OPENSTORM_TEST_FACTORY_VENDOR=/path/to/laravel13.37/vendor` and
+`OPENSTORM_TEST_PHPANTOM_BIN=/path/to/engine180`, then run
+`cargo test -p ide-lsp --test phpantom route_namespaces::namespace_actions_keep_owners_dirty_dependencies_restart_and_checked_rename -- --ignored --exact --test-threads=1`.
+
 Route namespace slice191 (2026-11-19, source/protocol accepted; inactive engine 180):
 Per-registration namespace attributes now preserve the enclosing router group's
 controller for method navigation, completion, hover, references and rename. The

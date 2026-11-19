@@ -15,6 +15,33 @@ slice, commit and push it, and retain only the latest generated app. Native UI
 cases remain deferred/unverified; earlier native-first blocking checkpoints are
 historical and no longer prevent independent implementation.
 
+Audit slice 172 (2026-11-19, route middleware runtime oracle corrected): the
+package171 limitation report incorrectly treated Kernel.getMiddlewareAliases() as
+the effective route middleware table. A real Laravel13.37 runtime check shows
+Kernel replacement drops demo.kernel.parent from that getter, while the Router
+retains its earlier AuditRequests registration. Router.gatherRouteMiddleware()
+resolves both demo.kernel.parent and demo.audit to AuditRequests. Packaged173
+navigation reaches the corresponding ApplicationKernel.php/bootstrap/app.php
+registrations; both are valid known candidates, with incomplete-context warnings.
+Do not prune the parent declaration on the basis of the Kernel getter alone.
+
+A separate controlled comparison removes only the compatible KernelAliases trait
+composition in an owned fixture, leaving runtime alias values unchanged. This
+clears the explicit callback's incomplete warning, isolating a conservative trait
+property overlap guard. Broader reset/default ordering remains incomplete; no
+trait compatibility proof or safe multi-owner write support is accepted here.
+Keep those checks coupled: relaxing the guard for navigation must not authorize
+renames that modify only one of PHP's compatible physical property declarations.
+
+The audit asserts actual middleware argument positions, runtime route resolution,
+packaged definitions/hover, unchanged owned PHP sources and normal server exit.
+Original package171 receipts remain frozen; slice172/router-oracle.json supersedes
+their runtime-retired interpretation. No application/engine source or binary
+changes, new build, native check or whole-area promotion. App111 remains the sole
+retained app; all69 areas remain67 partial and2 user-deferred. Evidence:
+artifacts/checks/slice172/{router-oracle,router-runtime,trait-isolation,isolation}.json
+and verify-router-oracle.py. Commit/push read-back is recorded in delivery.json.
+
 Package slice 171 (2026-11-19, signed local App 0.1.111 verified): promote the
 exact PHPantom 173 executable accepted by source169 and client/Host170. Packages
 the managed builder-callback alias behavior, transport-wide checked-rename witness
@@ -46,9 +73,10 @@ are system libraries. These are actual packaged CLI checks, not native UI checks
 
 A separate runtime/packaged lookup audit makes an existing limitation explicit.
 In the main mixed-callback bootstrap, demo.audit resolves to bootstrap/app.php with
-an incomplete warning. Runtime retires demo.kernel.parent, but the engine retains
-its Kernel declaration as an uncertain known candidate. Effective runtime pruning
-for this broader bootstrap is not accepted. The first canonical audit accidentally
+an incomplete warning. Correction by audit172: Kernel replacement drops
+demo.kernel.parent from its getter, but the Router retains the registration and
+resolves it for route middleware; the engine's known declaration is valid. Broader
+context completeness for this bootstrap remains unaccepted. The first canonical audit accidentally
 queried a demo comment; its null callback result was a harness mistake, corrected
 by querying the real middleware argument in the packaged engine. Preserve that
 correction and the actual partial-context result in alias-packaged.json. Existing

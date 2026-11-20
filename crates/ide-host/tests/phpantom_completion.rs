@@ -9,6 +9,9 @@ use std::{io::Write, path::PathBuf, process::Stdio, sync::Arc, time::Duration};
 mod kernel_aliases;
 #[path = "fixtures/middleware_aliases.rs"]
 mod middleware_aliases;
+#[cfg(unix)]
+#[path = "fixtures/translation_navigation.rs"]
+mod translation_navigation;
 
 const HEADER: &str = "<?php\nnamespace Harness;\nuse Illuminate\\Support\\Facades\\Route as Routes;\nuse App\\Other\\InvoiceController as InvoiceController;\n";
 const MAIN: &str = "<?php\nnamespace App;\n/** Main controller completion witness. */\nclass InvoiceController {public function __invoke(): bool {return true;} public function showInvoice(): bool {return true;}}\n";
@@ -52,6 +55,16 @@ impl Fixture {
         relative: &str,
         setup: impl FnOnce(&Arc<Project>, &std::path::Path) -> T,
     ) -> (Self, T) {
+        Self::new_at_with_fixture_setup(initial, extra, relative, |_| {}, setup)
+    }
+
+    fn new_at_with_fixture_setup<T>(
+        initial: &str,
+        extra: &[(String, String)],
+        relative: &str,
+        before_open: impl FnOnce(&std::path::Path),
+        setup: impl FnOnce(&Arc<Project>, &std::path::Path) -> T,
+    ) -> (Self, T) {
         let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
         let bin = std::env::var_os("OPENSTORM_TEST_PHPANTOM_BIN")
             .map(PathBuf::from)
@@ -78,6 +91,7 @@ impl Fixture {
                 Self::lint(text);
             }
         }
+        before_open(&root);
         let composer: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(root.join("composer.json")).unwrap()).unwrap();
         assert_eq!(composer["autoload"]["psr-4"]["App\\"], "app/");

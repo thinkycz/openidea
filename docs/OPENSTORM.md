@@ -15,6 +15,81 @@ slice, commit and push it, and retain only the latest generated app. Native UI
 cases remain deferred/unverified; earlier native-first blocking checkpoints are
 historical and no longer prevent independent implementation.
 
+Client evaluation slice202 (2026-11-20, regression coverage complete; engine184 rejected):
+Two regressions exercise typed translation navigation through actual LspManager
+and Host commands, managed documents and real Laravel 13.37 dependencies. The same
+client executable fails exact navigation on183 and passes184; the current Host
+executable separately fails183 and passes184. The client covers 13 supported
+receivers/seven negative controls, exact UTF-16 locale and hover ranges, 17 complete
+caller references, settled diagnostics, dirty dependency/catalog changes, restart
+and reopen. Host checks four exact references and refuses the foreign caller.
+Fresh fixtures pass 93 PHP syntax checks and 26 actual Laravel runtime assertions,
+including Composer PSR-4 reflection against the exact dependency file.
+
+Full compatibility does not pass: engine184 has 66 client passes and two timeouts.
+The callback case times out at hover; the compatible-trait case times out at its
+first declaration lookup. The identical uninstrumented client executable on183
+passes both. In isolated184 controls the callback passes, but the compatible-trait
+definition timeout reproduces. Original deadlines and assertions are unchanged.
+All 58 independent Host cases pass, including all 43 completion/guarded-edit cases,
+shared history and save-conflict protections. Original fixture bytes remain intact.
+Candidate184 stays inactive and is rejected for adoption/promotion/packaging.
+
+A one-second sample of an owned184 callback engine shows the main LSP thread in
+on_did_open -> Blade dependency snapshot/targets -> shared typed-receiver
+confirmation -> variable resolution. This points to eager work at Blade startup;
+it is a diagnostic lead, not a proven fix. The isolated callback timing includes
+this sample and is not a clean performance benchmark. Next: scope view-only
+consumers/cache entries by their requested key kind, preserve source-owned memo
+isolation and all translation behavior, then repeat these exact executables and
+budgets. Catalog-declaration usages remains zero/unaccepted; the older unattributed
+startup timeout is separate and remains open.
+
+The initial Host fixture creates its vendor symlink after project opening; both
+183 and184 return Cancelled before the intended comparison, while a forwarding
+trace passes184. Preparing vendor before opening the watched project restores the
+direct183 expected-failure/184 pass. The assertion body is identical, with no new
+warm-up lookup, result retry, deadline or exclusion. Existing helper callers keep
+a no-op pre-open setup. The amended helper is rebuilt using workspace features and
+all43 affected Host cases pass. This corrects fixture preparation; broader startup
+readiness is not established. A short isolated-package rebuild is intentionally
+stopped in favor of workspace feature fidelity; its receipt is preserved.
+
+Fresh workspace checks pass 5,485 tests/248 declared ignores/same11 exclusions
+across 231 groups. Ordinary production/test source is unchanged by the later
+fixture-only helper amendment. Final workspace no-run, all-target Clippy and
+formatting pass on the amended test source; its external Host cases are explicitly
+executed above. Frontend passes 14,395 tests/eight skips, types including e2e,
+lint/format/Knip and production build. Generated bindings retain their exact hash.
+All 53 selected browser code-insight/editor/Laravel flows pass with controlled
+backend metadata/IPC. They do not establish actual engine184 or native acceptance.
+The original failed integration receipt is retained. Independent evaluation runs
+only the remaining Host/browser checks and preserves the failed client status.
+
+Engine184 bytes still match source201's accepted source-only proof (18,716 primary
+tests/17 ignores/two bounded child groups, both Clippy modes, replay and build).
+Those checks and the new positive navigation subset do not override the failed
+client compatibility gate. Production application code is unchanged; package200's
+source snapshot differs only in two test-module parents, and new test fixtures are
+separately verified. Active/default183 and the sole signed App0.1.118 keep their
+original main/engine hashes and deep/strict ad-hoc signature. No new app is built.
+
+Cleanup: Removed 20275 files, 27.4GiB total; frontend dist is removed. One current regression
+executable set (1,265,342,848 bytes) plus fingerprints/source receipts is retained at
+artifacts/latest-runtime-tests/ for identical-executable repair comparisons,
+replacing the need to keep compiler/intermediate output. The latest-runtime directory contains
+only this current set. Canonical engines/sources, pins/licenses/provenance, PHP Workbench and prior
+reference/evaluation evidence remain. Native GUI stays user-skipped. All 69 areas
+remain 67 partial and two user-deferred; no installation, notarization, publishing,
+updater activation, migration, deployment or debugger expansion.
+
+Evidence: artifacts/checks/slice202/{client-build,client-probe,host-build,host-red,
+host-green,fixture-amendment,fixture-checks,protocol-fixture-checks,gates,
+client-host-real,integration,evaluation,failure-controls,final-gates,frozen-runtimes,
+retention,acceptance}.json; original failure logs, controlled comparison logs and
+control184-sample-2485.txt. Git history and the ignored delivery receipt record
+commit/push and remote read-back.
+
 Typed translation navigation slice201 (2026-11-20, source/protocol accepted; inactive184):
 Typed Translator and translator-contract key calls now share lazy receiver proof
 for definition, hover, caller-origin usages and missing-key diagnostics. Every

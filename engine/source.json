@@ -2,8 +2,8 @@
   "repository": "https://github.com/PHPantom-dev/phpantom_lsp",
   "commit": "1756b1f920c1290d4c4fdd4d2c902fad53a75cd3",
   "archive_sha256": "f0a1dc7fa44d309e6d5e8ed65a2075749c1fc177b45820031f58290f1aec5cee",
-  "patches_sha256": "50d70ea1427e6d35758d66ed58509adb8745a6e92f8d7c0539d4ae0478765cf3",
-  "version": "0.11.1-openstorm.183",
+  "patches_sha256": "4c61b99d2b042c652d164528438f6faba233a70e3dcbd6b8df8659a1057eb251",
+  "version": "0.11.1-openstorm.185",
   "patches": [
     {
       "file": "0001-workspace-tool-policy.patch",
@@ -736,6 +736,14 @@
     {
       "file": "0183-laravel-key-insert-replace-edits.patch",
       "sha256": "38c1352f6548a22c7de46a75bd07c39bdfa35b6c8b5825f4fb63031158b7757b"
+    },
+    {
+      "file": "0184-typed-translation-key-navigation.patch",
+      "sha256": "9f4fe760838b69617b3799aa38e47ba6b8934f7081bd1307f11125ec67922c56"
+    },
+    {
+      "file": "0185-view-only-typed-receiver-demand.patch",
+      "sha256": "49306655670e6ae558f26cccb6137aa81874ff0283f48ad3244aeca8fc96ae04"
     }
   ]
 }

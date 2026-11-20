@@ -15,6 +15,72 @@ slice, commit and push it, and retain only the latest generated app. Native UI
 cases remain deferred/unverified; earlier native-first blocking checkpoints are
 historical and no longer prevent independent implementation.
 
+Package slice204 (2026-11-20, accepted local development bundle):
+App 0.1.119 promotes the exact engine185 accepted in source/client slice203.
+Typed translation navigation includes definitions, hover, caller references and
+diagnostics. Blade dependency/data startup now confirms only view receivers,
+correcting the two engine184 Kernel timeouts without changing request deadlines.
+The application retains upstream source through 9f473118 and existing save-conflict
+protection. Native GUI remains user-skipped.
+
+Fresh acceptance: 14,395 frontend tests/eight skips, type checking, lint,
+formatting, Knip, five packaging-boundary tests, engine checksums, pinned-source
+replay, version/provenance tests, Rust formatting, three resource-resolution tests
+and resource all-target Clippy pass. The production frontend and arm64 native
+development app build succeed. Recipe tests verify the configured debug-assertions
+override. Source cfg
+excludes the worktree module when assertions are off. The signed binary contains
+the normal identifier and lacks the worktree prefix/module path. A late optional
+process recorder captures no compiler commands; its incomplete receipt remains
+and is not positive evidence. Source/recipe/binary checks support the expected
+normal identity; actual compiler flags and native runtime are not claimed.
+
+The executable inside the signed bundle passes all 68 actual client and 58 Host
+cases using the exact frozen202 test binaries and fingerprints. Runtime source
+hashes match; Cargo.lock differs only in 46 local package versions. Original
+request deadlines and assertions remain unchanged. This includes both formerly
+failing Kernel scenarios, managed dirty dependencies, guarded edits/history,
+external-save conflict refusal and engine restart. Physical fixtures remain
+unchanged. Packaged stdio separately passes 13 supported typed receiver cases,
+seven negative controls, 17 exact caller-reference ranges, settled diagnostics,
+same-length dirty dependency/catalog changes, close/reopen and two normal child
+exits. Configured PHP route/view lookup passes four cases. The Laravel 13.37
+reference passes 121 PHP syntax files, 387 runtime assertions and exactly three
+intentional analyzer diagnostics. Seventeen controlled-backend browser workbench
+flows pass; they are separate from native GUI acceptance.
+
+Engine bytes are identical to source203. Explicitly reuse its 18,719 primary tests,
+17 ignores, two bounded child groups, both Clippy configurations and final pinned
+replay/build with code-identical documentation-only finalization. Explicitly reuse
+source202's unchanged application workspace checks: 5,485 passes, 248 declared
+ignores, the same 11 exclusions and final workspace Clippy. No fresh full-workspace
+or engine-source rerun is claimed in this package slice.
+
+Version, receipt/source hashes, licenses/provenance, arm64 and deep/strict ad-hoc
+signature pass after the embedded probes. The historical185 candidate stays
+inactive; bundled provenance and engine/source.json now identify active185.
+Minimum macOS13 is metadata only; its runtime remains untested. The app is neither
+launched nor installed/notarized/published. Updater endpoints remain disabled.
+
+Retention: 13705 files, 8.5GiB total; 73,374,878 frontend bytes removed.
+Only artifacts/batches/0.1.119/OpenStorm.app remains. Prior App118 is removed after
+the replacement signature and build receipt succeed; staging/compiler output is
+removed. Canonical engines/source/pins/licenses/provenance, PHP Workbench,
+reference/evaluation artifacts and the one latest frozen regression set remain.
+Owned app/engine processes and the browser-test listener are absent.
+
+Catalog-declaration-origin usages still returns zero; the older unattributed
+startup timeout and broader platform/performance/locale/privacy/service matrices
+remain open. All 69 areas remain 67 partial and two debugger areas user-deferred.
+No migration, deployment, automatic-update activation or debugger expansion.
+App main SHA256: c8e7bb475976ca6f282b3fc5df8fa63bff2a40120b9ed8be200c976918364674.
+Embedded185 SHA256: 5f83fff38d7b9de8fe396da76767ee2a6beaf3b66e454ab0c9012476a805b5e8.
+Build receipt SHA256: e605d9bef8988f5f4d9152f58070c444cc3fa30a3eb24f726ecd3f1de9426d91.
+Evidence: artifacts/checks/slice204/{input,pipeline,embedded,client-host,
+packaged-navigation,wire,fixture-runtime,identity,post-package,acceptance}.json;
+artifacts/batches/0.1.119/{build-receipt,retention}.json. Git history and ignored
+delivery receipts record the commit, push and remote-ref verification.
+
 Blade startup demand slice203 (2026-11-20, source/client accepted; inactive185):
 View dependency and data refreshes were confirming every typed key receiver in a
 mixed file, including unrelated translation candidates. View startup, view data,

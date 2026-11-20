@@ -33,11 +33,17 @@ export const commands = {
 "group" | 
 /**  What the last turn changed, against the checkout as that turn started. */
 "lastTurn" | null) => typedError<AgentChange[], IdeError>(__TAURI_INVOKE("agent_changes", { task, view })),
+	/**  Installs the exact version offered if the selected installation still matches. */
+	agentCliUpdate: (provider: string, offer: AgentCliOffer, request: RequestId) => typedError<AgentCliUpdateResult, IdeError>(__TAURI_INVOKE("agent_cli_update", { provider, offer, request })),
+	/**  Checks the selected installation without modifying it. */
+	agentCliUpdateCheck: (provider: string, request: RequestId) => typedError<AgentCliUpdateResult, IdeError>(__TAURI_INVOKE("agent_cli_update_check", { provider, request })),
 	/**
 	 *  Slash commands to complete for `provider` in `task`'s directory, or in the project
 	 *  before a task exists (skills and custom commands on disk included).
 	 */
 	agentCommands: (provider: string, task: string | null) => typedError<AgentCommand[], IdeError>(__TAURI_INVOKE("agent_commands", { provider, task })),
+	/**  Reads the running session's context categories without sending a prompt. */
+	agentContextUsage: (task: string) => typedError<AgentContextUsage, IdeError>(__TAURI_INVOKE("agent_context_usage", { task })),
 	agentCreate: (request: NewAgentTask) => typedError<AgentTask_Serialize, IdeError>(__TAURI_INVOKE("agent_create", { request })),
 	/**  Imports a JetBrains `acp.json` file's `agent_servers` entries as custom agents. */
 	agentCustomImport: (text: string) => typedError<AcpImportOutcome[], IdeError>(__TAURI_INVOKE("agent_custom_import", { text })),
@@ -144,11 +150,16 @@ export const commands = {
 	agentShell: (task: string, command: string, request: RequestId) => typedError<null, IdeError>(__TAURI_INVOKE("agent_shell", { task, command, request })),
 	/**  Stops one of the task's background tasks. */
 	agentStopBackground: (task: string, background: string) => typedError<null, IdeError>(__TAURI_INVOKE("agent_stop_background", { task, background })),
-	/**  Streams the project's agent events to this window; returns every task. */
-	agentSubscribe: (onEvent: Channel<AgentEvent_Deserialize>) => typedError<AgentTask_Serialize[], IdeError>(__TAURI_INVOKE("agent_subscribe", { onEvent })),
+	/**
+	 *  Streams the project's agent events to `subscriber`, one of the project's windows (a remote
+	 *  host sees them all as one `window`); returns every task.
+	 */
+	agentSubscribe: (onEvent: Channel<AgentEvent_Deserialize>, subscriber: string) => typedError<AgentTask_Serialize[], IdeError>(__TAURI_INVOKE("agent_subscribe", { onEvent, subscriber })),
 	agentUnarchive: (task: string) => typedError<null, IdeError>(__TAURI_INVOKE("agent_unarchive", { task })),
 	/**  Drops a queued message and returns it (to edit it). */
 	agentUnqueue: (task: string, queued: string) => typedError<AgentQueued, IdeError>(__TAURI_INVOKE("agent_unqueue", { task, queued })),
+	/**  Stops the events of a window that closed. */
+	agentUnsubscribe: (subscriber: string) => typedError<null, IdeError>(__TAURI_INVOKE("agent_unsubscribe", { subscriber })),
 	/**  Locate Duplicates over the files of `scope`. */
 	analysisLocateDuplicates: (request: RequestId, scope: SearchScope, options: DuplicateOptions) => typedError<DuplicatesReport, IdeError>(__TAURI_INVOKE("analysis_locate_duplicates", { request, scope, options })),
 	/**  Devices `adb` knows about, online ones first. */
@@ -518,6 +529,8 @@ export const commands = {
 	docOutline: (doc: DocId) => typedError<OutlineItem[], IdeError>(__TAURI_INVOKE("doc_outline", { doc })),
 	/**  Python class facts for the inheritance inspections: tree-sitter, no language server. */
 	docPythonFacts: (doc: DocId) => typedError<PythonFacts, IdeError>(__TAURI_INVOKE("doc_python_facts", { doc })),
+	/**  Load Changes from Disk: discards the buffer's unsaved changes and reads its file again. */
+	docReloadFromDisk: (doc: DocId) => typedError<null, IdeError>(__TAURI_INVOKE("doc_reload_from_disk", { doc })),
 	docSave: (doc: DocId) => typedError<null, IdeError>(__TAURI_INVOKE("doc_save", { doc })),
 	docSaveAll: () => typedError<null, IdeError>(__TAURI_INVOKE("doc_save_all")),
 	/**
@@ -955,8 +968,9 @@ export const commands = {
 	mavenExcludeDependency: (pom: string, dependency: ArtifactKey, exclusion: ArtifactKey) => typedError<Location, IdeError>(__TAURI_INVOKE("maven_exclude_dependency", { pom, dependency, exclusion })),
 	/**
 	 *  The go-to-declaration target at `pos` of a Maven POM: the definition of the
-	 *  `${property}` at the caret, or the `<dependencyManagement>` / `<pluginManagement>`
-	 *  entry providing the dependency's / plugin's version, along the parent chain.
+	 *  `${property}` at the caret, the parent POM, or the dependency / plugin's own POM
+	 *  (a project module first, then the local repository). A dependency without a
+	 *  resolvable artifact POM falls back to its management entry.
 	 */
 	mavenGotoDeclaration: (pom: string, pos: Pos) => typedError<{
 	/**
@@ -970,6 +984,12 @@ export const commands = {
 	/**  The declaration as named for the user (`example.version`, `com.example:example-lib`). */
 	label: string,
 } | null, IdeError>(__TAURI_INVOKE("maven_goto_declaration", { pom, pos })),
+	/**
+	 *  Gutter targets of the unversioned dependencies and plugins in a Maven POM:
+	 *  the management declarations that actually supply their versions, including
+	 *  parent POMs and imported BOMs. Cancel with `cancel_request(request)`.
+	 */
+	mavenManagedDeclarations: (pom: string, request: RequestId) => typedError<PomManagedDeclaration[], IdeError>(__TAURI_INVOKE("maven_managed_declarations", { pom, request })),
 	/**  The user closed the Run tool window tab of an agent command (`run_command`). */
 	mcpAgentRunClosed: (name: string) => typedError<null, IdeError>(__TAURI_INVOKE("mcp_agent_run_closed", { name })),
 	/**
@@ -1329,6 +1349,12 @@ export const commands = {
 	remoteDelete: (connection: FsConnection, path: string) => typedError<null, IdeError>(__TAURI_INVOKE("remote_delete", { connection, path })),
 	remoteDisconnect: () => __TAURI_INVOKE<void>("remote_disconnect"),
 	remoteDownloadInto: (connection: FsConnection, paths: string[], target: IpcPath, request: RequestId) => typedError<TransferReport, IdeError>(__TAURI_INVOKE("remote_download_into", { connection, paths, target, request })),
+	/**
+	 *  The project view's Download to…: remote files and folders of this window's project into the
+	 *  local folder `target`, each under its own name. Like Remote Host › Download to…, nothing is
+	 *  written outside `target`, even through a local symlink inside it.
+	 */
+	remoteDownloadLocal: (paths: string[], target: string, request: RequestId, onProgress: Channel<DownloadProgress>) => typedError<TransferReport, IdeError>(__TAURI_INVOKE("remote_download_local", { paths, target, request, onProgress })),
 	/**
 	 *  Forwards `localhost:<remote_port>` of the remote host to the same port here when it is free,
 	 *  else to a free one. Nothing needs to listen there yet; connections are opened per use.
@@ -1911,6 +1937,12 @@ export const commands = {
 	/**  Focuses the next / previous window (⌘` / ⇧⌘`). */
 	windowCycle: (forward: boolean) => __TAURI_INVOKE<void>("window_cycle", { forward }),
 	/**
+	 *  Drags `paths` (local files and folders) out of `window` while the primary mouse button is
+	 *  still down, so the app they are dropped on copies them (#2867). Resolves when the drag ends,
+	 *  with whether a target took the files.
+	 */
+	windowDragFiles: (paths: string[]) => typedError<boolean, IdeError>(__TAURI_INVOKE("window_drag_files", { paths })),
+	/**
 	 *  Flash (`true`) or stop flashing (`false`) this window's taskbar button, like IDEA when a
 	 *  breakpoint is hit while the window is in the background (macOS bounces the dock icon,
 	 *  Linux sets the urgency hint). A focused window is never flashed: the user is already
@@ -2133,6 +2165,8 @@ export type AgentCapabilities = {
 	steer?: boolean,
 	/**  It reports its background tasks and stops them one by one. */
 	backgroundTasks?: boolean,
+	/**  The connected agent can report a breakdown of its context window. */
+	contextUsage?: boolean,
 };
 
 /**
@@ -2168,6 +2202,18 @@ export type AgentChangesView =
 "group" | 
 /**  What the last turn changed, against the checkout as that turn started. */
 "lastTurn";
+
+export type AgentCliOffer = {
+	current: string,
+	latest: string,
+	prefix: string,
+};
+
+export type AgentCliUpdateResult = {
+	status: "available",
+} & AgentCliOffer | {
+	status: "permission",
+} & AgentCliOffer | ({ status: "current"; current: string }) & { code?: never } | ({ status: "channel"; current: string }) & { code?: never } | ({ status: "updated"; current: string }) & { code?: never } | ({ status: "unmanaged" }) & { code?: never; current?: never } | ({ status: "error"; code: string }) & { current?: never };
 
 export type AgentCommand = {
 	/**  Without the leading `/`. */
@@ -2236,6 +2282,21 @@ export type AgentConfigVia =
 "mode" | 
 /**  `session/set_model` (agents that report `models` instead of a model config option). */
 "model";
+
+export type AgentContextCategory = {
+	name: string,
+	tokens: number,
+	kind: string | null,
+};
+
+export type AgentContextUsage = {
+	categories: AgentContextCategory[],
+	totalTokens: number,
+	maxTokens: number,
+	model: string,
+	isAutoCompactEnabled: boolean | null,
+	autoCompactThreshold: number | null,
+};
 
 export type AgentCost = {
 	amount: number | null,
@@ -2510,6 +2571,8 @@ export type AgentProvider = {
 	commandReadOnlyReason: AgentCommandReadOnlyReason | null,
 	/**  Whether the command was found (on `PATH`). */
 	installed: boolean,
+	/**  The built-in command can be owned by a global npm package. */
+	canCheckCliUpdate?: boolean,
 	/**  Environment variables it starts with (from its agent file). */
 	env: { [key in string]: string },
 	/**  Settings (models, modes…) the agent offered last time it ran; empty before its first session. */
@@ -2591,18 +2654,6 @@ export type AgentSettings_Deserialize = {
 	smoothText?: boolean,
 	/**  Conversations and the composer expand to the full width of the pane instead of staying in a centred column. */
 	fitWindowWidth?: boolean,
-	/**  While the agent works, playful words fill the pauses in what it reports. */
-	playfulStatus?: boolean,
-	/**
-	 *  Seconds the agent reports nothing new before the playful words take over; 0 shows them
-	 *  from the start.
-	 */
-	playfulAfterSeconds?: number,
-	/**
-	 *  The user's playful words by activity (`working`, `thinking`, `reading`, …), replacing
-	 *  the built-in ones of that activity; an empty list keeps its status factual.
-	 */
-	playfulWords?: { [key in string]: string[] },
 	thinking?: ThinkingDisplay,
 	toolCalls?: ToolCallDisplay,
 	/**  A tool call's output (a command's, a diff) is shown without opening it. */
@@ -2643,18 +2694,6 @@ export type AgentSettings_Serialize = {
 	smoothText: boolean,
 	/**  Conversations and the composer expand to the full width of the pane instead of staying in a centred column. */
 	fitWindowWidth: boolean,
-	/**  While the agent works, playful words fill the pauses in what it reports. */
-	playfulStatus: boolean,
-	/**
-	 *  Seconds the agent reports nothing new before the playful words take over; 0 shows them
-	 *  from the start.
-	 */
-	playfulAfterSeconds: number,
-	/**
-	 *  The user's playful words by activity (`working`, `thinking`, `reading`, …), replacing
-	 *  the built-in ones of that activity; an empty list keeps its status factual.
-	 */
-	playfulWords: { [key in string]: string[] },
 	thinking: ThinkingDisplay,
 	toolCalls: ToolCallDisplay,
 	/**  A tool call's output (a command's, a diff) is shown without opening it. */
@@ -3815,6 +3854,8 @@ export type CommitSettings = {
 	agentModel?: string,
 	/**  That model's thinking level for commit messages; empty keeps the agent's. */
 	agentEffort?: string,
+	/**  Show the Generate Commit Message with Agent button above the commit message. */
+	agentButton?: boolean,
 };
 
 export type Commit_Deserialize = {
@@ -3828,6 +3869,8 @@ export type Commit_Deserialize = {
 	historyPath?: string | null,
 	logPosition?: number | null,
 	logTotal?: number | null,
+	/**  Newest committer time at or after this row if newer than the row's commit. */
+	logMergeTimeMs?: number | null,
 	graphBoundaryParents?: string[],
 	/**  Reachability from HEAD, computed independently of the visible filters. */
 	onCurrentBranch?: boolean | null,
@@ -3857,6 +3900,8 @@ export type Commit_Serialize = {
 	historyPath?: string | null,
 	logPosition?: number | null,
 	logTotal?: number | null,
+	/**  Newest committer time at or after this row if newer than the row's commit. */
+	logMergeTimeMs?: number | null,
 	graphBoundaryParents?: string[],
 	/**  Reachability from HEAD, computed independently of the visible filters. */
 	onCurrentBranch?: boolean | null,
@@ -5490,6 +5535,13 @@ export type DocumentTextChange = {
 	insert: string,
 };
 
+/**  One file of a [`remote_download_local`] transfer starting: `done` of `total` files are finished. */
+export type DownloadProgress = {
+	path: string,
+	done: number,
+	total: number,
+};
+
 export type DuplicateGroup = {
 	tokens: number,
 	/**  Lines of the first fragment. */
@@ -5607,21 +5659,34 @@ export type EditorGeneralSettings = {
 	richTextCopy?: boolean,
 };
 
-/**  A file opened in a lightweight editor window, with optional caret / selection (0-based). */
+/**
+ *  What a lightweight editor window shows: a file, with optional caret / selection (0-based), or
+ *  the tab of another editor kind.
+ */
 export type EditorLaunch = EditorLaunch_Serialize | EditorLaunch_Deserialize;
 
-/**  A file opened in a lightweight editor window, with optional caret / selection (0-based). */
+/**
+ *  What a lightweight editor window shows: a file, with optional caret / selection (0-based), or
+ *  the tab of another editor kind.
+ */
 export type EditorLaunch_Deserialize = {
-	path: IpcPath,
+	path?: IpcPath | null,
+	/**  The tab's editor input, as JSON. */
+	input?: string | null,
 	line?: number | null,
 	column?: number | null,
 	endLine?: number | null,
 	endColumn?: number | null,
 };
 
-/**  A file opened in a lightweight editor window, with optional caret / selection (0-based). */
+/**
+ *  What a lightweight editor window shows: a file, with optional caret / selection (0-based), or
+ *  the tab of another editor kind.
+ */
 export type EditorLaunch_Serialize = {
-	path: IpcPath,
+	path?: IpcPath | null,
+	/**  The tab's editor input, as JSON. */
+	input?: string | null,
 	line?: number | null,
 	column?: number | null,
 	endLine?: number | null,
@@ -6501,6 +6566,8 @@ export type GitSettings = {
 	 */
 	inlineBlameClickable?: boolean,
 	showBranchInProjectView?: boolean,
+	/**  Branch operations from the branches popup act on every repository of the project. */
+	syncBranchOperations?: boolean,
 	/**  Path to the git executable; empty = auto-detect. */
 	executable?: string,
 	/**  Default of Update Project: `merge` | `rebase`. */
@@ -7088,6 +7155,11 @@ workspaceEdit?: boolean } |
 { type: "docDirty"; doc: DocId; dirty: boolean; 
 /**  Text version when this transition occurred, including when it was saved. */
 version: number } | 
+/**
+ *  An open document's file changed on disk while the buffer had unsaved changes. The buffer
+ *  keeps them (autosave leaves the file alone); the UI offers to load the disk version.
+ */
+{ type: "docDiskConflict"; doc: DocId; path: string } | 
 /**  A complete workspace edit can be undone as one operation. */
 { type: "workspaceEditApplied"; id: number; paths: IpcPath[]; 
 /**
@@ -9836,6 +9908,16 @@ export type PomGotoKind =
 "managedPlugin" | 
 /**  The POM of the artifact itself: a project module's, else the local repository's. */
 "artifactPom";
+
+/**  A dependency or plugin whose version comes from a management declaration. */
+export type PomManagedDeclaration = {
+	/**  0-based line of the `<dependency>` or `<plugin>` declaration. */
+	line: number,
+	/**  The interpolated version the management entry provides, when it has one. */
+	version: string | null,
+	/**  The management entry, possibly in a parent POM or an imported BOM. */
+	target: PomGoto,
+};
 
 /**  A 0-based line / UTF-16 column position. */
 export type Pos = {

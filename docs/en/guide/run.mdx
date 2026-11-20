@@ -112,7 +112,7 @@ The debugger adds attach-only types such as **Remote JVM Debug**, **Go Remote**,
 ### Common fields
 
 - **Run on**: the local machine, or an SSH host defined in **Settings › Build, Execution, Deployment › Run Targets**. Debugging is not available on run targets. See [SSH](/en/guide/remote/ssh).
-- **Working directory**: relative to the project root; empty means the project root.
+- **Working directory**: relative to the project root; empty means the project root. It may use the path macros `$PROJECT_DIR$`, `$ContentRoot$`, `$MODULE_DIR$`, `$MODULE_WORKING_DIR$` and `$USER_HOME$`, expanded when the configuration starts, so a shared configuration works on every machine.
 - **Environment variables**: `VAR=value` pairs separated by `;`. The list button opens the **Environment Variables** dialog, where **Include system environment variables** can be turned off.
 - **Debug adapter**: which debugger **Debug** uses for this configuration (for example `debugpy`, `js-debug`, `codelldb`, `delve`).
 
@@ -160,7 +160,7 @@ A **Compound** configuration starts several configurations at once. Run it to st
 Each launch opens a tab in the **Run** tool window (bottom). The toolbar has **Rerun**, **Debug**, **Rerun Failed Tests** (for test runs), **Update Application**, **Find…**, **Scroll to End**, **Soft-Wrap**, **Clear All** and **Edit Configurations…**.
 
 - File paths and stack trace frames in the output are links.
-- Repeated lines can be folded; configure the patterns in **Settings › Build, Execution, Deployment › Console**, along with the buffer size and the console encoding.
+- Repeated lines can be folded; configure the patterns in **Settings › Build, Execution, Deployment › Console**, along with the buffer size and the console encoding. **Fold Lines Like This** in the console's context menu opens that page with the selected text (or the clicked line) added as a pattern.
 - Log lines can take the colour of their level (`ERROR`, `WARN`, `INFO`, `DEBUG`, `TRACE`); colours the program prints itself are kept. Turn it on and pick the colours in **Settings › Build, Execution, Deployment › Console**.
 - For test runs the tab shows a test tree next to the output. See [Testing](/en/guide/testing).
 

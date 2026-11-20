@@ -64,6 +64,7 @@ function useLiveSessionCount(): number | null {
 export function activate(): () => void {
   useDebugRunSessions.setState({
     Console: lazyComponent(() => import("./ui/DebugConsole").then((m) => m.DebugServiceConsole)),
+    View: lazyComponent(() => import("./ui/DebugToolWindow").then((m) => m.DebugServiceView)),
   });
   loadWatches(useProject.getState().project?.root ?? null);
   publishContext();
@@ -73,7 +74,7 @@ export function activate(): () => void {
   loadJsBreakpoints(useProject.getState().project?.root ?? null);
   loadResponseOverrides(useProject.getState().project?.root ?? null);
   const disposers = [
-    () => useDebugRunSessions.setState({ sessions: [], serviceSessions: [], Console: null }),
+    () => useDebugRunSessions.setState({ sessions: [], serviceSessions: [], Console: null, View: null }),
     registerDebugActions(),
     registerDebugTabActions(),
     registerDevToolsWindows(),

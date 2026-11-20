@@ -192,6 +192,7 @@ pub fn client_accepts(event: &IdeEvent, trusted: bool) -> bool {
         | IdeEvent::DocPatched { .. }
         | IdeEvent::DocMoved { .. }
         | IdeEvent::DocDirty { .. }
+        | IdeEvent::DocDiskConflict { .. }
         | IdeEvent::WorkspaceEditApplied { .. }
         | IdeEvent::DocLanguage { .. }
         | IdeEvent::Diagnostics { .. }

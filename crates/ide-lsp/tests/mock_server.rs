@@ -23,6 +23,9 @@ mod json_translation_resources;
 #[path = "fixtures/json_composer_resources.rs"]
 mod json_composer_resources;
 
+#[path = "fixtures/json_resource_references.rs"]
+mod json_resource_references;
+
 // ------------------------------------------------------------------ mock server
 
 #[derive(Default)]

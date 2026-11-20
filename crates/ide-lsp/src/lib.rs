@@ -280,6 +280,7 @@ pub struct LspManager {
     jdtls_shared_hook: RwLock<Option<Arc<JdtlsSharedFn>>>,
     jdtls_workspace: Mutex<JdtlsWorkspace>,
     reconfigure_lock: tokio::sync::Mutex<()>,
+    php_json_resource_gate: tokio::sync::Mutex<()>,
     shutting_down: AtomicBool,
     execution_allowed: AtomicBool,
     java_usages_warned: AtomicBool,
@@ -575,6 +576,7 @@ impl LspManager {
             jdtls_shared_hook: RwLock::new(None),
             jdtls_workspace: Mutex::new(Default::default()),
             reconfigure_lock: tokio::sync::Mutex::new(()),
+            php_json_resource_gate: tokio::sync::Mutex::new(()),
             shutting_down: AtomicBool::new(false),
             execution_allowed: AtomicBool::new(true),
             java_usages_warned: AtomicBool::new(false),
@@ -1986,8 +1988,18 @@ impl LspManager {
         {
             return false;
         }
-        let sources = &snapshot.sources;
         let docs = self.docs.lock();
+        Self::navigation_documents_current(&docs, target, snapshot)
+            && target.server.running_gen(target.run.generation).is_some()
+            && self.project_files_revision.load(Ordering::Acquire) == snapshot.files_revision
+    }
+
+    fn navigation_documents_current(
+        docs: &HashMap<DocId, DocState>,
+        target: &Target,
+        snapshot: &NavigationSnapshot,
+    ) -> bool {
+        let sources = &snapshot.sources;
         docs.values().filter(|d| Self::navigation_attached(d, target)).count() == sources.len()
             && sources.iter().all(|source| {
                 docs.get(&source.doc).is_some_and(|d| {
@@ -1998,8 +2010,6 @@ impl LspManager {
                         && Self::navigation_attached(d, target)
                 })
             })
-            && target.server.running_gen(target.run.generation).is_some()
-            && self.project_files_revision.load(Ordering::Acquire) == snapshot.files_revision
     }
 
     /// A semantic publication is not evidence that a declaration is absent.
@@ -2340,6 +2350,37 @@ impl LspManager {
             && let Some(result) = self.configuration_navigation(&snap, pos, true, include_declaration, &cancel).await?
         {
             return Ok(result);
+        }
+        if project_wide && self.registered_json_candidate(&snap) {
+            let native = self
+                .native_references(doc, pos, include_declaration, project_wide, libraries, cancel.clone(), partial)
+                .await;
+            if let Some(mut registered) =
+                self.registered_json_references(&snap, pos, include_declaration, &cancel).await?
+            {
+                match native {
+                    Ok(native) => {
+                        registered.locations.extend(native.locations);
+                        registered.incomplete = registered.incomplete.or(native.incomplete);
+                        registered.classified.extend(native.classified);
+                        convert::dedup_locations(&mut registered.locations);
+                    }
+                    Err(error) if matches!(error.kind, ErrorKind::Cancelled | ErrorKind::OutOfSync) => {
+                        return Err(error);
+                    }
+                    Err(error) => {
+                        if error.kind != ErrorKind::Unavailable
+                            || snap.servers.iter().any(|server| {
+                                server.running().is_some_and(|run| run.caps.read().has("referencesProvider"))
+                            })
+                        {
+                            registered.incomplete = registered.incomplete.or(Some(ReferencesIncomplete::ServerFailed));
+                        }
+                    }
+                }
+                return Ok(registered);
+            }
+            return native;
         }
         // Scoped probes back code lenses and bulk analysis. Keep their native cost;
         // configuration indexing is reserved for explicit, project-wide usages.

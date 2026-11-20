@@ -15,6 +15,59 @@ slice, commit and push it, and retain only the latest generated app. Native UI
 cases remain deferred/unverified; earlier native-first blocking checkpoints are
 historical and no longer prevent independent implementation.
 
+Registered JSON Find Usages slice 211 (2026-11-20, client/Host accepted; inactive 188):
+FEAT-031/066/067: the existing project-wide Find Usages command now searches custom
+JSON catalogs through the opened project's and explicit content roots' Composer
+consumers. A current positive static registration and both resource capabilities
+are required before sending the current JSON buffer. Each request opens a temporary
+resource session and closes it on success, failure, cancellation or task abort.
+It does not write the catalog, manifest, provider or caller. Existing JSON-server
+results are merged; unavailable consumers and failed native queries retain
+incomplete-result information when registered results are available.
+
+Selection is serialized with the public metadata-query adapters so a different
+query cannot replace the consuming context while the temporary resource is open.
+The source check and open share the documents lock. A shared navigation-input
+helper preserves the existing snapshot checks and lock lifetime. Duplicate buffers,
+changed JSON/PHP inputs, Composer changes, project/root revisions, restart and
+execution disable retire the operation. Explicit ContentModified replies retry
+only the same inputs under the existing request deadline; final merged results
+are rechecked. Custom resource sessions are not attached for background reopening.
+
+The public Find Usages regression first returns zero callers where one is required.
+All 8 new protocol groups pass in the current workspace build, including private
+content before admission, native JSON results/failure flags, stale provider and JSON
+buffers, duplicate buffers, queued cancellation, task abort and capability refusal.
+The actual client starts with the catalog and no PHP editor, finds only the
+registered application caller through a nested package, tracks an unsaved Unicode
+key and recovers after restart. The new Host case exercises the normal references
+command, exact UTF-16 ranges, declaration inclusion, dirty keys, restart and
+discard/reopen; owned disk files remain unchanged.
+
+The exact current workspace-feature client rejects query-only engine 187, then all 70
+client and 60 Host cases pass on signed engine 188. Executable/fingerprint/source hashes and
+retained fixture originals match before/after; deadlines are unchanged. Fresh gates
+pass: Rust 5,577 / 256 ignored / the same 11 documented exclusions; all-target workspace
+Clippy with warnings denied; final Rust formatting; bindings fidelity and default
+engine provenance; frontend 14,603 / 8 skipped; types/lint/format/Knip; production
+build/Safari startup; and all 59 controlled-browser cases. Native GUI stays skipped
+under the user's current instruction; these are client/Host and browser checks.
+
+One latest 130-case executable set replaces the previous 1,266,870,864-byte
+payload after acceptance. Cargo cleanup removed 19,677 files (27.4 GiB). Frontend dist
+(73,745,139 bytes) is removed too. Historical receipts, the sole
+signed App 119, default 185, inactive 188 provenance and both existing stashes remain
+preserved. No application is packaged or engine promoted. Git delivery and remote
+read-back are recorded in the ignored slice receipt. All 69 areas remain visible
+at 67 partial/two user-deferred.
+
+Next: persistent custom-catalog forwarding and freshness across other PHP actions,
+wider nested-consumer discovery, separate-server package-provider overlays and
+multiple-positive-consumer acceptance before candidate promotion/packaging. Native
+UI, wider physical/service matrices and the other ledger gates remain unverified.
+Detailed evidence: artifacts/checks/slice 211/{gates,frontend-gates,evaluation,
+frozen-runtimes,retention}.json.
+
 Composer catalog admission slice210 (2026-11-20, client accepted; inactive188):
 FEAT-031/066/067: a consuming Composer manifest can now select PHPantom before a
 PHP editor exists. The query sends only project/resource URIs, requires both

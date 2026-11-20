@@ -1,5 +1,6 @@
 use super::*;
 mod composer;
+mod references;
 use composer::ComposerInputs;
 
 /// A content-free registration decision for one consuming PHP server generation.
@@ -123,6 +124,11 @@ impl LspManager {
         if !self.execution_allowed.load(Ordering::Acquire) {
             return Err(IdeError::unavailable("Language-server execution is disabled"));
         }
+        let _selection = tokio::select! {
+            biased;
+            () = cancel.cancelled() => return Err(IdeError::cancelled()),
+            gate = self.php_json_resource_gate.lock() => gate,
+        };
         let files_revision = self.project_files_revision.load(Ordering::Acquire);
         let snap = self.snapshot(php_doc)?;
         if snap.language.as_str() != "php"

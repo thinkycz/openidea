@@ -327,3 +327,97 @@ async fn catalog_host_tracks_managed_php_json_changes_restart_and_discard() {
     .await;
     f.finish(outcome).await;
 }
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires pinned PHPantom 188, owned PHP and Laravel 13.37 vendor fixture"]
+async fn registered_json_host_find_usages_tracks_dirty_keys_restart_and_discard() {
+    let vendor = PathBuf::from(std::env::var_os("OPENSTORM_TEST_FACTORY_VENDOR").expect("Laravel vendor fixture"))
+        .canonicalize()
+        .unwrap();
+    let caller = "<?php /* 😀 */ __('Greeting 😀');";
+    let json = r#"{"Greeting 😀":"Disk welcome"}"#;
+    let draft = r#"{"Draft 😀":"Private draft"}"#;
+    let provider = r#"<?php namespace App; class Provider extends \Illuminate\Support\ServiceProvider {public function boot(): void {$this->loadJsonTranslationsFrom(__DIR__.'/../packages/billing/json');}}"#;
+    let extra = vec![
+        (
+            "composer.json".into(),
+            r#"{"require":{"php":"^8.3","laravel/framework":"13.37.0"},"autoload":{"psr-4":{"App\\":"app/"}}}"#.into(),
+        ),
+        ("app/Provider.php".into(), provider.into()),
+        ("bootstrap/providers.php".into(), "<?php return [App\\Provider::class];".into()),
+        ("packages/billing/composer.json".into(), r#"{"name":"acme/billing"}"#.into()),
+        ("packages/billing/json/en.json".into(), json.into()),
+    ];
+    let (f, ()) = Fixture::new_at_with_fixture_setup(
+        caller,
+        &extra,
+        "app/Caller.php",
+        |root| std::os::unix::fs::symlink(&vendor, root.join("vendor")).unwrap(),
+        |_, _| (),
+    );
+    let outcome = std::panic::AssertUnwindSafe(async {
+        let catalog = f.project.documents.open(&f.root.join("packages/billing/json/en.json")).unwrap();
+        assert_eq!(catalog.language.as_str(), "json");
+        for restart in [false, true] {
+            if restart {
+                f.project.lsp.restart(f.project.lsp.servers()[0].id).await.unwrap();
+            }
+            for text in [json, draft, json] {
+                f.project.documents.replace_all(catalog.id, text).unwrap();
+                let key = if text == draft { "Draft 😀" } else { "Greeting 😀" };
+                for include in [false, true] {
+                    let refs = ide_host::ops::lsp::lsp_references(
+                        &f.host,
+                        "main",
+                        RequestId::next(),
+                        catalog.id,
+                        key_range(text, key).start,
+                        include,
+                        true,
+                        true,
+                        ide_host::ops::Channel::new(|_| {}),
+                    )
+                    .await
+                    .unwrap();
+                    assert!(refs.incomplete.is_none());
+                    let mut found: Vec<_> = refs.locations.iter().map(|l| (l.path.to_path_buf(), l.range)).collect();
+                    let mut expected = Vec::new();
+                    if text == json {
+                        expected.push((f.root.join("app/Caller.php"), key_range(caller, "Greeting 😀")));
+                    }
+                    if include {
+                        expected.push((f.root.join("packages/billing/json/en.json"), key_range(text, key)));
+                    }
+                    found.sort();
+                    expected.sort();
+                    assert_eq!(found, expected);
+                }
+            }
+        }
+        f.project.documents.replace_all(catalog.id, draft).unwrap();
+        f.project.documents.close(catalog.id);
+        let reopened = f.project.documents.open(&f.root.join("packages/billing/json/en.json")).unwrap();
+        let refs = ide_host::ops::lsp::lsp_references(
+            &f.host,
+            "main",
+            RequestId::next(),
+            reopened.id,
+            key_range(json, "Greeting 😀").start,
+            false,
+            true,
+            true,
+            ide_host::ops::Channel::new(|_| {}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(refs.locations.len(), 1);
+        assert_eq!(refs.locations[0].path.to_path_buf(), f.root.join("app/Caller.php"));
+        for (name, text) in &extra {
+            assert_eq!(&std::fs::read_to_string(f.root.join(name)).unwrap(), text);
+        }
+        assert_eq!(std::fs::read_to_string(f.root.join("app/Caller.php")).unwrap(), caller);
+    })
+    .catch_unwind()
+    .await;
+    f.finish(outcome).await;
+}

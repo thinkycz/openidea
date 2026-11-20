@@ -64,7 +64,7 @@ async fn registered_json_admission_selects_consuming_server_tracks_provider_chan
         Arc::new(LanguageRegistry::from_configs(vec![route_handler_language(&engine)])),
         Arc::new(|_: IdeEvent| {}),
     );
-    mgr.set_content_roots(vec![root.join("a/packages/billing")]);
+    mgr.set_content_roots(vec![root.join("a"), root.join("b"), root.join("a/packages/billing")]);
     let outcome = std::panic::AssertUnwindSafe(async {
         let manifest = root.join("a/composer.json");
         let catalog = root.join("a/packages/billing/json/en.json");
@@ -124,6 +124,30 @@ async fn registered_json_admission_selects_consuming_server_tracks_provider_chan
         let restored_composer =
             mgr.php_json_translation_resource_from_composer(&manifest, &catalog, Default::default()).await.unwrap();
         assert_eq!(restored_composer.root_path(), catalog.parent());
+        let refs = mgr
+            .references(
+                json,
+                pos(r#"{"Greeting 😀":"Unshared private overlay"}"#, "Greeting 😀"),
+                false,
+                true,
+                Default::default(),
+            )
+            .await
+            .unwrap();
+        assert!(refs.incomplete.is_none());
+        assert_eq!(refs.locations.len(), 1, "catalog-first Find Usages must find its consuming application");
+        assert_eq!(refs.locations[0].path.to_path_buf(), root.join("a/app/Caller.php"));
+        assert_eq!(refs.locations[0].range.start, pos(CALLER, "Greeting 😀"));
+        let dirty_json = r#"{"Draft 😀":"Private draft"}"#;
+        replace(&mgr, json, 2, r#"{"Greeting 😀":"Unshared private overlay"}"#, dirty_json);
+        assert!(
+            mgr.references(json, pos(dirty_json, "Draft 😀"), false, true, Default::default())
+                .await
+                .unwrap()
+                .locations
+                .is_empty()
+        );
+        replace(&mgr, json, 3, dirty_json, r#"{"Greeting 😀":"Unshared private overlay"}"#);
         let a = DocId::next();
         let b = DocId::next();
         let package = DocId::next();
@@ -200,6 +224,19 @@ async fn registered_json_admission_selects_consuming_server_tracks_provider_chan
             mgr.php_json_translation_resource_from_composer(&manifest, &catalog, Default::default()).await.unwrap();
         assert_eq!(restarted_composer.project_path(), manifest);
         assert_eq!(restarted_composer.root_path(), catalog.parent());
+        let refs = mgr
+            .references(
+                json,
+                pos(r#"{"Greeting 😀":"Unshared private overlay"}"#, "Greeting 😀"),
+                false,
+                true,
+                Default::default(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(refs.locations.len(), 1);
+        assert_eq!(refs.locations[0].path.to_path_buf(), root.join("a/app/Caller.php"));
+        assert_eq!(std::fs::read_to_string(&catalog).unwrap(), CATALOG);
         mgr.did_close(json);
     })
     .catch_unwind()

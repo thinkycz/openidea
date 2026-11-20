@@ -170,6 +170,20 @@ impl LspManager {
         resource: &Path,
         cancel: CancellationToken,
     ) -> IdeResult<PhpJsonTranslationResource> {
+        let _selection = tokio::select! {
+            biased;
+            () = cancel.cancelled() => return Err(IdeError::cancelled()),
+            gate = self.php_json_resource_gate.lock() => gate,
+        };
+        self.json_resource_from_composer(composer, resource, cancel).await
+    }
+
+    pub(super) async fn json_resource_from_composer(
+        &self,
+        composer: &Path,
+        resource: &Path,
+        cancel: CancellationToken,
+    ) -> IdeResult<PhpJsonTranslationResource> {
         if cancel.is_cancelled() {
             return Err(IdeError::cancelled());
         }

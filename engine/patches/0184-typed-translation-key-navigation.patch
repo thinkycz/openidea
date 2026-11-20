@@ -1,0 +1,707 @@
+diff --git a/docs/CHANGELOG.md b/docs/CHANGELOG.md
+index 266be1c212ab5968927a8aa2ce5de8a05ce6e952..b3a162ce6cd7a0c048d3486a1006e6ef2f557b80 100644
+--- a/docs/CHANGELOG.md
++++ b/docs/CHANGELOG.md
+@@ -1,3 +1,15 @@
++## OpenStorm .184 typed translation key navigation
++
++Typed translator and contract calls contribute lazy translation key spans for
++navigation, hover, usages and diagnostics. Public instance methods and every
++non-null union alternative must prove their translation role. Foreign, scalar,
++unknown or missing-method receivers contribute no translation spans. Named keys,
++null-safe calls and dirty dependency invalidation use existing shared paths.
++
++Cross-file typed receiver, member, body and closure passes isolate address/offset
++variable memos and restore their caller's state, including after unwinding.
++Equal-sized temporary parser buffers cannot exchange inferred receiver types.
++
+ ## OpenStorm .183 Laravel key insert/replace ranges
+ 
+ Quoted Laravel key completion negotiates insert/replace support. Supporting
+diff --git a/src/blade/call_site_inference.rs b/src/blade/call_site_inference.rs
+index a638a0db8b280b7467c4f372a3bd5e65ee215a35..ba977852d31703fd63f099f165121838fd26b1df 100644
+--- a/src/blade/call_site_inference.rs
++++ b/src/blade/call_site_inference.rs
+@@ -1752,7 +1752,10 @@ impl Backend {
+                 !uri.starts_with("phpantom-stub://")
+                     && !uri.starts_with("phpantom-stub-fn://")
+                     && !vendor_prefixes.iter().any(|p| uri.starts_with(p.as_str()))
+-                    && (!map.view_receiver_sites.is_empty()
++                    && (map
++                        .view_receiver_sites
++                        .iter()
++                        .any(|site| site.kind() == LaravelStringKind::View)
+                         || map.spans.iter().any(|span| {
+                             matches!(
+                                 &span.kind,
+@@ -1784,7 +1787,12 @@ impl Backend {
+                         } => Some(key.as_str()),
+                         _ => None,
+                     })
+-                    .chain(map.view_receiver_sites.iter().map(|site| site.key.as_str()))
++                    .chain(
++                        map.view_receiver_sites
++                            .iter()
++                            .filter(|site| site.kind() == LaravelStringKind::View)
++                            .map(|site| site.key.as_str()),
++                    )
+                     .collect();
+                 names.sort_unstable();
+                 names.dedup();
+@@ -1904,7 +1912,12 @@ impl Backend {
+         let map = self.symbol_maps.read().get(uri).cloned();
+         let mut names = HashSet::new();
+         if let Some(map) = map {
+-            let extra = if self.is_blade_file(uri) || map.view_receiver_sites.is_empty() {
++            let extra = if self.is_blade_file(uri)
++                || !map
++                    .view_receiver_sites
++                    .iter()
++                    .any(|site| site.kind() == LaravelStringKind::View)
++            {
+                 Arc::new(Vec::new())
+             } else {
+                 self.typed_receiver_view_spans_for(uri, &map)
+diff --git a/src/blade/typed_receiver.rs b/src/blade/typed_receiver.rs
+index 31adae0c9c805baf255654acb8327ccbd03a4629..73b1564160eb915498fb19a0d9f385ec6fb5e073 100644
+--- a/src/blade/typed_receiver.rs
++++ b/src/blade/typed_receiver.rs
+@@ -20,6 +20,10 @@
+ //! the symbol map records, that every consumer of view keys reads alongside
+ //! the map's own.
+ //!
++//! Typed translator key sites use the same cache: every non-null alternative
++//! must belong to the translator family and expose the public instance method.
++//! Their translation kind feeds definition, hover, references and diagnostics.
++//!
+ //! The same cache carries controller middleware guard sites. Their config
+ //! resource kind keeps view consumers separate while navigation, diagnostics
+ //! and references share the confirmed receiver and dependency invalidation.
+@@ -261,6 +265,11 @@ impl Backend {
+         // Confirmation can inspect a caller while another source owns the
+         // offset-only diagnostic snapshots. Resolve this file from its source.
+         let _foreign_scope = crate::type_engine::variable::forward_walk::suspend_diagnostic_scope();
++        // Cross-file scans can recycle equal-length parse buffers. Offset/address
++        // memos belong to this source and must not survive into another caller.
++        let _chain_guard = crate::type_engine::resolver::with_isolated_chain_cache();
++        let _variable_guard =
++            crate::type_engine::variable::resolution::with_isolated_var_type_memo();
+         let _resolver_guard = crate::type_engine::call_resolution::activate_type_engine_caches();
+         let _cache_guard =
+             crate::virtual_members::with_active_resolved_class_cache(&self.resolved_class_cache);
+@@ -361,6 +370,7 @@ impl Backend {
+                         .is_some_and(|ty| matches_receiver_family(ty, site.receiver, class_loader));
+                     if matches_receiver
+                         || (allow_uncertain
++                            && !matches!(site.receiver, ViewReceiverClass::Translation(_))
+                             && site.receiver.fqns().iter().any(|fqn| {
+                                 // Writes must refuse an ambiguous receiver; only a known
+                                 // unrelated concrete class rules this registration out.
+@@ -404,10 +414,20 @@ fn matches_receiver_family(
+     receiver: ViewReceiverClass,
+     class_loader: &dyn Fn(&str) -> Option<Arc<ClassInfo>>,
+ ) -> bool {
++    if matches!(receiver, ViewReceiverClass::Translation(_))
++        && let crate::php_type::TypeKind::Nullable(inner) = ty.kind()
++    {
++        return matches_receiver_family(inner, receiver, class_loader);
++    }
+     if let crate::php_type::TypeKind::Union(members) = ty.kind() {
+-        return members
+-            .iter()
+-            .all(|member| matches_receiver_family(member, receiver, class_loader));
++        let mut alternatives = members.iter().filter(|member| {
++            !matches!(receiver, ViewReceiverClass::Translation(_)) || !member.is_null()
++        });
++        let Some(first) = alternatives.next() else {
++            return false;
++        };
++        return matches_receiver_family(first, receiver, class_loader)
++            && alternatives.all(|member| matches_receiver_family(member, receiver, class_loader));
+     }
+     let family = receiver.fqns();
+     if !family
+@@ -416,6 +436,15 @@ fn matches_receiver_family(
+     {
+         return false;
+     }
++    if let ViewReceiverClass::Translation(method) = receiver {
++        let Some(class) = ty.base_name().and_then(class_loader) else {
++            return false;
++        };
++        let effective = crate::virtual_members::resolve_class_fully(&class, class_loader);
++        return effective.get_method(method).is_some_and(|method| {
++            !method.is_static && method.visibility == crate::types::Visibility::Public
++        });
++    }
+     if !matches!(
+         receiver,
+         ViewReceiverClass::RouteMiddleware(_, crate::symbol_map::RouteMiddlewareReceiver::Resource)
+diff --git a/src/references/receivers.rs b/src/references/receivers.rs
+index 18368af3c6ab69ef3ce8bc8ae709e39e67236505..5cb84bf95065b6df4e0c70b1a868b3d38f249132 100644
+--- a/src/references/receivers.rs
++++ b/src/references/receivers.rs
+@@ -408,6 +408,8 @@ impl Backend {
+         // file's cached answer. An isolated map is only ever populated and
+         // read within this one file's resolution below.
+         let _chain_guard = crate::type_engine::resolver::with_isolated_chain_cache();
++        let _variable_guard =
++            crate::type_engine::variable::resolution::with_isolated_var_type_memo();
+         let _resolver_guard = crate::type_engine::call_resolution::activate_type_engine_caches();
+         let resolved = carried
+             .into_iter()
+diff --git a/src/symbol_map/extraction/expressions/calls.rs b/src/symbol_map/extraction/expressions/calls.rs
+index bfee970641e9d27ea8e4d1f77cc10765e2537119..71ae13ae4cd04bf5263ea5c6df6ae05a7135f646 100644
+--- a/src/symbol_map/extraction/expressions/calls.rs
++++ b/src/symbol_map/extraction/expressions/calls.rs
+@@ -683,6 +683,16 @@ fn extract_call<'a>(
+                         &mut ctx.spans,
+                     );
+                 }
++                if let Some(method) =
++                    crate::symbol_map::laravel_key_calls::translation_method_name(&member_name)
++                {
++                    record_translation_receiver_sites(
++                        method,
++                        &method_call.argument_list,
++                        ctx.content,
++                        &mut ctx.view_receiver_sites,
++                    );
++                }
+                 if is_laravel_config_repository_call(
+                     method_call.object,
+                     &member_name,
+@@ -915,6 +925,16 @@ fn extract_call<'a>(
+                     );
+                 }
+ 
++                if let Some(method) =
++                    crate::symbol_map::laravel_key_calls::translation_method_name(&member_name)
++                {
++                    record_translation_receiver_sites(
++                        method,
++                        &method_call.argument_list,
++                        ctx.content,
++                        &mut ctx.view_receiver_sites,
++                    );
++                }
+                 if is_laravel_config_repository_call(
+                     method_call.object,
+                     &member_name,
+diff --git a/src/symbol_map/extraction/laravel.rs b/src/symbol_map/extraction/laravel.rs
+index 6a2ae579afa2b3ff46a9c8575ba30065a5a7d1b2..e7ac1918d79472c1575f72aa4e0e33a31193f707 100644
+--- a/src/symbol_map/extraction/laravel.rs
++++ b/src/symbol_map/extraction/laravel.rs
+@@ -776,6 +776,36 @@ pub(super) fn view_receiver_method(
+     None
+ }
+ 
++/// Defer a translation key until the receiver's type proves its callable role.
++pub(super) fn record_translation_receiver_sites(
++    method: &'static str,
++    arguments: &ArgumentList<'_>,
++    content: &str,
++    sites: &mut Vec<ViewReceiverSite>,
++) {
++    let mut spans = Vec::new();
++    try_emit_laravel_string_span(
++        crate::symbol_map::LaravelStringKind::Trans,
++        arguments,
++        content,
++        &mut spans,
++    );
++    for span in spans {
++        if let SymbolKind::LaravelStringKey {
++            key, is_optional, ..
++        } = span.kind
++        {
++            sites.push(ViewReceiverSite {
++                start: span.start,
++                end: span.end,
++                key,
++                is_optional,
++                receiver: ViewReceiverClass::Translation(method),
++            });
++        }
++    }
++}
++
+ /// Record every template a method call names, for the lazy pass that
+ /// settles what its receiver is (see [`ViewReceiverSite`]).
+ ///
+diff --git a/src/symbol_map/laravel_key_calls.rs b/src/symbol_map/laravel_key_calls.rs
+index cec6add21233be94ab8f649bdd655060f3bc07f3..010789dca3cb51138b23592d0a73f9b1cde73bbf 100644
+--- a/src/symbol_map/laravel_key_calls.rs
++++ b/src/symbol_map/laravel_key_calls.rs
+@@ -62,15 +62,18 @@ pub(crate) fn config_method_call(method: &str) -> Option<KeyCall> {
+     }
+ }
+ 
+-pub(crate) fn translation_method_call(method: &str) -> Option<KeyCall> {
++pub(crate) fn translation_method_name(method: &str) -> Option<&'static str> {
+     ["get", "has", "hasForLocale", "choice"]
+-        .iter()
+-        .any(|candidate| method.eq_ignore_ascii_case(candidate))
+-        .then_some(KeyCall {
+-            kind: LaravelStringKind::Trans,
+-            parameter: "key",
+-            accepts_array: false,
+-        })
++        .into_iter()
++        .find(|candidate| method.eq_ignore_ascii_case(candidate))
++}
++
++pub(crate) fn translation_method_call(method: &str) -> Option<KeyCall> {
++    translation_method_name(method).map(|_| KeyCall {
++        kind: LaravelStringKind::Trans,
++        parameter: "key",
++        accepts_array: false,
++    })
+ }
+ 
+ /// Template-name roles of the view factory's lookup/render methods.
+diff --git a/src/symbol_map/mod.rs b/src/symbol_map/mod.rs
+index 8acf954a0a707444e72015a77871b6aa18e921e6..4560f48b8415a49ea5a1f0a53ee84f1b1a4f2bed 100644
+--- a/src/symbol_map/mod.rs
++++ b/src/symbol_map/mod.rs
+@@ -801,6 +801,8 @@ pub(crate) struct GateSubject {
+ /// The receiver type that gives a candidate Laravel string its meaning.
+ #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+ pub(crate) enum ViewReceiverClass {
++    /// A key accepted by a public method on Laravel's translator.
++    Translation(&'static str),
+     /// Laravel's view factory, whose `make()` / `first()` / `exists()` /
+     /// `renderWhen()` / `renderUnless()` / `renderEach()` all name one.
+     Factory,
+@@ -837,6 +839,10 @@ impl ViewReceiverClass {
+     /// of.
+     pub(crate) fn fqns(self) -> &'static [&'static str] {
+         match self {
++            Self::Translation(_) => &[
++                "Illuminate\\Translation\\Translator",
++                "Illuminate\\Contracts\\Translation\\Translator",
++            ],
+             // The concrete `Illuminate\View\Factory` implements the
+             // contract, so the contract covers both spellings.
+             Self::Factory => &["Illuminate\\Contracts\\View\\Factory"],
+@@ -905,6 +911,7 @@ pub(crate) struct ViewReceiverSite {
+ impl ViewReceiverSite {
+     pub(crate) fn kind(&self) -> LaravelStringKind {
+         match self.receiver {
++            ViewReceiverClass::Translation(_) => LaravelStringKind::Trans,
+             ViewReceiverClass::RouteMiddleware(kind, _) => kind,
+             ViewReceiverClass::ControllerGuard => {
+                 LaravelStringKind::ConfigResource(LaravelConfigResource::AuthGuard)
+diff --git a/src/type_engine/call_resolution/out_param.rs b/src/type_engine/call_resolution/out_param.rs
+index 3c7970cc3b26f82a1d4755da6dadd5b0b29a9a5b..818a5cb7605afd6603aa2688510a1a49a0c60772 100644
+--- a/src/type_engine/call_resolution/out_param.rs
++++ b/src/type_engine/call_resolution/out_param.rs
+@@ -330,6 +330,7 @@ fn read_out_type(
+     let _isolated = (
+         crate::type_engine::variable::forward_walk::suspend_diagnostic_scope(),
+         crate::type_engine::resolver::with_isolated_chain_cache(),
++        crate::type_engine::variable::resolution::with_isolated_var_type_memo(),
+     );
+ 
+     // The request's parse cache holds only the request's own file, so this
+diff --git a/src/type_engine/call_resolution/target_cache.rs b/src/type_engine/call_resolution/target_cache.rs
+index f2beac9da1f9e70188336ab09482f5346fc7fbf2..8c7193e447f354c1b429226c40068dd85b9c9280 100644
+--- a/src/type_engine/call_resolution/target_cache.rs
++++ b/src/type_engine/call_resolution/target_cache.rs
+@@ -330,6 +330,7 @@ fn infer_body_return_type(
+             push_call_site_args(&declaring_fqn, method.name, call_args),
+             crate::type_engine::variable::forward_walk::suspend_diagnostic_scope(),
+             crate::type_engine::resolver::with_isolated_chain_cache(),
++            crate::type_engine::variable::resolution::with_isolated_var_type_memo(),
+         )
+     });
+ 
+diff --git a/src/type_engine/call_resolution/template_subs.rs b/src/type_engine/call_resolution/template_subs.rs
+index a81fb9f9552936e47d125e4d1c4b933183d07225..59726e9d87f47bca4430485adba126ddd4abfe08 100644
+--- a/src/type_engine/call_resolution/template_subs.rs
++++ b/src/type_engine/call_resolution/template_subs.rs
+@@ -648,7 +648,11 @@ fn walk_closure_body_locals(
+     // from, or record into, the active ones while this walk runs. See
+     // `out_param::read_out_type`, which walks another file's body for the
+     // same reason.
+-    let _isolated = (suspend_diagnostic_scope(), with_isolated_chain_cache());
++    let _isolated = (
++        suspend_diagnostic_scope(),
++        with_isolated_chain_cache(),
++        crate::type_engine::variable::resolution::with_isolated_var_type_memo(),
++    );
+     let _barrier = suspend_return_edges();
+ 
+     crate::parser::with_parsed_program(
+diff --git a/src/type_engine/mod.rs b/src/type_engine/mod.rs
+index 5ac6b539270838e0ae8c5389de77738970e3b0d4..d3b949d335a6199a906b9b2be59b715f4af7f475 100644
+--- a/src/type_engine/mod.rs
++++ b/src/type_engine/mod.rs
+@@ -56,12 +56,14 @@ pub(crate) mod variable;
+ pub(crate) struct MemoGuard<T: 'static> {
+     /// The memo to clear on drop, or `None` for a nested activation.
+     cell: Option<&'static std::thread::LocalKey<std::cell::RefCell<Option<T>>>>,
++    previous: Option<T>,
+ }
+ 
+ impl<T: 'static> Drop for MemoGuard<T> {
+     fn drop(&mut self) {
+         if let Some(cell) = self.cell {
+-            cell.with(|c| *c.borrow_mut() = None);
++            let previous = self.previous.take();
++            cell.with(|c| *c.borrow_mut() = previous);
+         }
+     }
+ }
+@@ -75,10 +77,27 @@ pub(crate) fn activate_memo<T: Default + 'static>(
+     cell: &'static std::thread::LocalKey<std::cell::RefCell<Option<T>>>,
+ ) -> MemoGuard<T> {
+     if cell.with(|c| c.borrow().is_some()) {
+-        return MemoGuard { cell: None };
++        return MemoGuard {
++            cell: None,
++            previous: None,
++        };
+     }
+     cell.with(|c| *c.borrow_mut() = Some(T::default()));
+-    MemoGuard { cell: Some(cell) }
++    MemoGuard {
++        cell: Some(cell),
++        previous: None,
++    }
++}
++
++/// Give a different source its own memo, restoring the caller's entries on drop.
++pub(crate) fn isolate_memo<T: Default + 'static>(
++    cell: &'static std::thread::LocalKey<std::cell::RefCell<Option<T>>>,
++) -> MemoGuard<T> {
++    let previous = cell.with(|c| c.borrow_mut().replace(T::default()));
++    MemoGuard {
++        cell: Some(cell),
++        previous,
++    }
+ }
+ 
+ // ─── Bounded, re-entrant, memoized inference ────────────────────────────────
+diff --git a/src/type_engine/variable/resolution.rs b/src/type_engine/variable/resolution.rs
+index 4b4a6631cc7137d983d6ab1cf482a91a7c3fda2a..9ea3a28c8014ca0ad25e986c33f68780ab4689d6 100644
+--- a/src/type_engine/variable/resolution.rs
++++ b/src/type_engine/variable/resolution.rs
+@@ -141,6 +141,11 @@ pub(crate) fn with_var_type_memo() -> VarTypeMemoGuard {
+     crate::type_engine::activate_memo(&VAR_TYPE_MEMO)
+ }
+ 
++/// A caller-owned pass must not reuse an enclosing source's variable answers.
++pub(crate) fn with_isolated_var_type_memo() -> VarTypeMemoGuard {
++    crate::type_engine::isolate_memo(&VAR_TYPE_MEMO)
++}
++
+ /// RAII guard for [`BUILDING_TOP_LEVEL_SCOPE`].
+ struct TopLevelScopeGuard {
+     key: usize,
+diff --git a/src/type_engine/variable/resolution_tests.rs b/src/type_engine/variable/resolution_tests.rs
+index af9197d09b26d065e3670b8fb46efde4a58001c6..60cc9540bc37ddfec35cb4c7fff07f8113becf60 100644
+--- a/src/type_engine/variable/resolution_tests.rs
++++ b/src/type_engine/variable/resolution_tests.rs
+@@ -2588,3 +2588,68 @@ function storedUnknownBranch(bool $condition, callable $unknown): void {
+         "an unconditional unknown write must remove the old closure origin"
+     );
+ }
++
++#[test]
++fn source_owned_variable_memo_restores_after_reused_buffer_and_unwind() {
++    let alpha = Arc::new(make_class("Alpha"));
++    let omega = Arc::new(make_class("Omega"));
++    let classes = vec![Arc::clone(&alpha), Arc::clone(&omega)];
++    let loader = |name: &str| match name {
++        "Alpha" => Some(Arc::clone(&alpha)),
++        "Omega" => Some(Arc::clone(&omega)),
++        _ => None,
++    };
++    let current = ClassInfo::default();
++    for unwind in [false, true] {
++        let mut source =
++            "<?php class Alpha {} class Omega {} $value = new Alpha(); $value;".to_string();
++        let pointer = source.as_ptr();
++        let length = source.len();
++        let position = source.rfind("$value;").unwrap() as u32;
++        let resolve = |source: &str| {
++            ResolvedType::types_joined(&super::resolve_variable_types(
++                "$value",
++                &current,
++                &classes,
++                source,
++                position,
++                &loader,
++                None,
++                Loaders::default(),
++            ))
++            .to_string()
++        };
++        let _outer = super::with_var_type_memo();
++        assert_eq!(
++            resolve(&source),
++            "Alpha",
++            "outer source owns its original answer"
++        );
++        let name = source.find("new Alpha").unwrap() + 4;
++        source.replace_range(name..name + 5, "Omega");
++        assert_eq!(
++            source.as_ptr(),
++            pointer,
++            "deterministic same-allocation source reuse"
++        );
++        assert_eq!(source.len(), length);
++        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
++            let _foreign = super::with_isolated_var_type_memo();
++            assert_eq!(
++                resolve(&source),
++                "Omega",
++                "a different source at the same address must not inherit variable types"
++            );
++            if unwind {
++                panic!("owned source unwind sentinel");
++            }
++        }));
++        assert_eq!(outcome.is_err(), unwind);
++        source.replace_range(name..name + 5, "Alpha");
++        assert_eq!(
++            resolve(&source),
++            "Alpha",
++            "foreign pass must restore the outer source's memo even after unwind"
++        );
++    }
++}
+diff --git a/tests/integration/laravel_translation_keys.rs b/tests/integration/laravel_translation_keys.rs
+index c5d4a680f46297c0ba9d5aff19ed1dd268b502a1..8b79aceb0f7e83d809aade53e76d66546ac30459 100644
+--- a/tests/integration/laravel_translation_keys.rs
++++ b/tests/integration/laravel_translation_keys.rs
+@@ -1380,3 +1380,228 @@ async fn typed_translation_completion_handles_incomplete_arguments() {
+     typed_translation_case(r###"<?php namespace App\Typed13; use Illuminate\Translation\Translator as Text; use Illuminate\Contracts\Translation\Translator as Contract; class Foreign {public function get($key, array $replace=[], $locale=null) {return 'foreign';}} class Holder {public function __construct(private Text $translator) {} public function render(): mixed { /* 😀 */ return $this->translator->get('messages.hello', [], 'e<caret>"###, "Translation locale", &["en"], false).await;
+     typed_translation_case(r###"<?php namespace App\Typed15; use Illuminate\Translation\Translator as Text; use Illuminate\Contracts\Translation\Translator as Contract; class Foreign {public function get($key, array $replace=[], $locale=null) {return 'foreign';}} function render(Text|Foreign $translator): mixed { /* 😀 */ return $translator->get('messages.hello', [], 'e<caret>"###, "Translation locale", &[], false).await;
+ }
++
++// Typed translation keys share definition, hover, usages and diagnostics.
++const TYPED_TRANSLATOR_CONTRACT: &str = r###"<?php namespace Illuminate\Contracts\Translation; interface Translator { public function get($key, array $replace=[], $locale=null); public function choice($key, $number, array $replace=[], $locale=null); public function getLocale(); public function setLocale($locale); }"###;
++const TYPED_TRANSLATOR_CLASS: &str = r###"<?php namespace Illuminate\Translation; class Translator implements \Illuminate\Contracts\Translation\Translator { public function get($key, array $replace=[], $locale=null, $fallback=true) {return $key;} public function choice($key, $number, array $replace=[], $locale=null) {return $key;} public function getLocale() {return 'en';} public function setLocale($locale) {} public function has($key, $locale=null, $fallback=true) {return true;} public function hasForLocale($key, $locale=null) {return true;} }"###;
++const TYPED_TRANSLATOR_PRELUDE: &str = r###"<?php namespace App; use Illuminate\Translation\Translator as Text; use Illuminate\Contracts\Translation\Translator as Contract; class Foreign { public function get($key, array $replace=[], $locale=null) {return 'foreign';} } "###;
++const TYPED_TRANSLATION_POSITIVE: &[&str] = &[
++    r###"function render(Text $text) { /* 😀 */ return $text->get('messages.hello'); }"###,
++    r###"function render(Contract $text) { /* 😀 */ return $text->get('messages.hello'); }"###,
++    r###"function render(Text $text) { /* 😀 */ return $text->get(locale:'en', key:'messages.hello'); }"###,
++    r###"function render(?Text $text) { /* 😀 */ return $text?->get('messages.hello'); }"###,
++    r###"function render(?Text $text) { /* 😀 */ return $text->get('messages.hello'); }"###,
++    r###"function render(Text|Contract $text) { /* 😀 */ return $text->get('messages.hello'); }"###,
++    r###"function render(Contract|Text $text) { /* 😀 */ return $text->get('messages.hello'); }"###,
++    r###"function render(Text $text) { /* 😀 */ return $text /* receiver */ -> GET('messages.hello'); }"###,
++    r###"function render(Text $text) { /* 😀 */ return $translated = $text->get('messages.hello'); }"###,
++    r###"class Holder { public function __construct(private Text $text) {} public function render() { /* 😀 */ return $this->text->get('messages.hello'); } }"###,
++    r###"function render(Text $text) { /* 😀 */ return $text->has('messages.hello'); }"###,
++    r###"function render(Text $text) { /* 😀 */ return $text->hasForLocale(locale:'en', key:'messages.hello'); }"###,
++    r###"function render(Contract $text) { /* 😀 */ return $text->choice(number:2, key:'messages.hello'); }"###,
++];
++const TYPED_TRANSLATION_NEGATIVE: &[&str] = &[
++    r###"function render(Foreign $text) { /* 😀 */ return $text->get('messages.hello'); }"###,
++    r###"function render(Text|Foreign $text) { /* 😀 */ return $text->get('messages.hello'); }"###,
++    r###"function render(Foreign|Text $text) { /* 😀 */ return $text->get('messages.hello'); }"###,
++    r###"function render(Text|int $text) { /* 😀 */ return $text->get('messages.hello'); }"###,
++    r###"function render(object $text) { /* 😀 */ return $text->get('messages.hello'); }"###,
++    r###"function render(Contract $text) { /* 😀 */ return $text->has('messages.hello'); }"###,
++    r###"function render(Text $text) { $text = new Foreign; /* 😀 */ return $text->get('messages.hello'); }"###,
++];
++
++async fn typed_translation_workspace(
++    body: &str,
++) -> (phpantom_lsp::Backend, tempfile::TempDir, Url, String) {
++    let source = format!("{TYPED_TRANSLATOR_PRELUDE}{body}");
++    let composer = r#"{"require":{"laravel/framework":"13.37.0"},"autoload":{"psr-4":{"App\\":"app/","Illuminate\\":"framework/"}}}"#;
++    let (backend, dir, uri) = create_initialized_psr4_workspace(
++        composer,
++        &[
++            (
++                "framework/Contracts/Translation/Translator.php",
++                TYPED_TRANSLATOR_CONTRACT,
++            ),
++            (
++                "framework/Translation/Translator.php",
++                TYPED_TRANSLATOR_CLASS,
++            ),
++            (
++                "lang/en/messages.php",
++                "<?php /* 😀 */ return ['hello'=>'Hello'];",
++            ),
++            ("lang/fr/messages.php", "<?php return ['hello'=>'Bonjour'];"),
++            ("app/Typed.php", &source),
++        ],
++        "app/Typed.php",
++    )
++    .await;
++    (backend, dir, uri, source)
++}
++
++#[tokio::test]
++async fn typed_translation_keys_navigate_and_hover_valid_receivers() {
++    for body in TYPED_TRANSLATION_POSITIVE {
++        let (backend, _dir, uri, source) = typed_translation_workspace(body).await;
++        let targets = definitions_at(&backend, &uri, &source, "messages.hello").await;
++        assert_eq!(
++            targets.len(),
++            2,
++            "typed translation must navigate to both locales: {body}; {targets:?}"
++        );
++        let en = location_in(&targets, "/lang/en/messages.php").unwrap();
++        let fr = location_in(&targets, "/lang/fr/messages.php").unwrap();
++        assert_eq!(
++            en.range,
++            Range::new(Position::new(0, 24), Position::new(0, 29)),
++            "UTF-16 declaration after emoji"
++        );
++        assert_eq!(
++            fr.range,
++            Range::new(Position::new(0, 15), Position::new(0, 20))
++        );
++        let hover = hover_on(&backend, &uri, &source, "messages.hello").await;
++        assert!(
++            hover.contains("Hello")
++                && hover.contains("Bonjour")
++                && hover.contains("lang/en/messages.php"),
++            "typed translation hover: {body}; {hover}"
++        );
++        assert!(trans_diagnostics(&backend, &uri, &source).is_empty());
++    }
++}
++
++#[tokio::test]
++async fn typed_translation_keys_refuse_foreign_ambiguous_or_missing_methods() {
++    for body in TYPED_TRANSLATION_NEGATIVE {
++        let (backend, _dir, uri, source) = typed_translation_workspace(body).await;
++        assert!(
++            definitions_at(&backend, &uri, &source, "messages.hello")
++                .await
++                .is_empty(),
++            "foreign/uncertain receiver must not borrow Laravel navigation: {body}"
++        );
++        let mut position = position_of(&source, "messages.hello");
++        position.character += 2;
++        let hover = backend
++            .hover(HoverParams {
++                text_document_position_params: TextDocumentPositionParams {
++                    text_document: TextDocumentIdentifier { uri: uri.clone() },
++                    position,
++                },
++                work_done_progress_params: Default::default(),
++            })
++            .await
++            .unwrap();
++        assert!(
++            hover.is_none(),
++            "foreign/uncertain receiver must not borrow Laravel hover: {body}"
++        );
++        assert!(trans_diagnostics(&backend, &uri, &source).is_empty());
++    }
++}
++
++#[tokio::test]
++async fn typed_translation_keys_follow_dirty_receiver_reassignment() {
++    let (backend, dir, uri, source) =
++        typed_translation_workspace(TYPED_TRANSLATION_POSITIVE[0]).await;
++    assert_eq!(
++        definitions_at(&backend, &uri, &source, "messages.hello")
++            .await
++            .len(),
++        2
++    );
++    let dirty = source.replace("return $text->", "$text = new Foreign; return $text->");
++    backend
++        .did_change(DidChangeTextDocumentParams {
++            text_document: VersionedTextDocumentIdentifier {
++                uri: uri.clone(),
++                version: 2,
++            },
++            content_changes: vec![TextDocumentContentChangeEvent {
++                range: None,
++                range_length: None,
++                text: dirty.clone(),
++            }],
++        })
++        .await;
++    assert!(
++        definitions_at(&backend, &uri, &dirty, "messages.hello")
++            .await
++            .is_empty(),
++        "dirty reassignment must retire cached translation identity"
++    );
++    backend
++        .did_change(DidChangeTextDocumentParams {
++            text_document: VersionedTextDocumentIdentifier {
++                uri: uri.clone(),
++                version: 3,
++            },
++            content_changes: vec![TextDocumentContentChangeEvent {
++                range: None,
++                range_length: None,
++                text: source.clone(),
++            }],
++        })
++        .await;
++    assert_eq!(
++        definitions_at(&backend, &uri, &source, "messages.hello")
++            .await
++            .len(),
++        2
++    );
++    assert_eq!(
++        std::fs::read_to_string(dir.path().join("app/Typed.php")).unwrap(),
++        source
++    );
++}
++
++#[tokio::test]
++async fn typed_translation_keys_references_include_valid_callers_only() {
++    let body = "function render(Text $text, Contract $contract, Text|Foreign $uncertain, Foreign $foreign) { /* 😀 */ $text->get('messages.hello'); $contract->choice('messages.hello', 2); $uncertain->get('messages.hello'); $foreign->get('messages.hello'); }";
++    let (backend, _dir, uri, source) = typed_translation_workspace(body).await;
++    let mut position = position_of(&source, "messages.hello");
++    position.character += 2;
++    let refs = backend
++        .references(ReferenceParams {
++            text_document_position: TextDocumentPositionParams {
++                text_document: TextDocumentIdentifier { uri: uri.clone() },
++                position,
++            },
++            context: ReferenceContext {
++                include_declaration: true,
++            },
++            work_done_progress_params: Default::default(),
++            partial_result_params: Default::default(),
++        })
++        .await
++        .unwrap()
++        .unwrap_or_default();
++    assert_eq!(
++        refs.len(),
++        4,
++        "two typed callers and two locale declarations, no ambiguous/foreign leaks: {refs:?}"
++    );
++    let callers: Vec<_> = refs.iter().filter(|x| x.uri == uri).collect();
++    assert_eq!(callers.len(), 2);
++    let offsets: Vec<_> = source
++        .match_indices("messages.hello")
++        .map(|(i, _)| Position::new(0, source[..i].encode_utf16().count() as u32))
++        .collect();
++    let mut found: Vec<_> = callers.iter().map(|x| x.range.start).collect();
++    found.sort();
++    assert_eq!(found, offsets[..2]);
++}
++
++#[tokio::test]
++async fn typed_translation_keys_diagnose_only_proven_missing_keys() {
++    let body = "function render(Text $text, Foreign $foreign, Text|Foreign $uncertain) { /* 😀 */ $text->get('messages.absent'); $foreign->get('messages.foreign'); $uncertain->get('messages.uncertain'); }";
++    let (backend, _dir, uri, source) = typed_translation_workspace(body).await;
++    let messages = trans_diagnostics(&backend, &uri, &source);
++    assert_eq!(
++        messages.len(),
++        1,
++        "only the proven translator call is a missing key: {messages:?}"
++    );
++    assert!(messages[0].contains("messages.absent"));
++}

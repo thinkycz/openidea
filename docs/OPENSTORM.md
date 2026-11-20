@@ -15,6 +15,88 @@ slice, commit and push it, and retain only the latest generated app. Native UI
 cases remain deferred/unverified; earlier native-first blocking checkpoints are
 historical and no longer prevent independent implementation.
 
+Typed translation navigation slice201 (2026-11-20, source/protocol accepted; inactive184):
+Typed Translator and translator-contract key calls now share lazy receiver proof
+for definition, hover, caller-origin usages and missing-key diagnostics. Every
+non-null union alternative must be a translator with the public instance method.
+Named arguments, nullable/null-safe calls, promoted properties and compatible
+unions work; foreign/scalar/unknown peers, missing methods and reassignment are
+refused. View-only consumers filter translation sites to preserve Blade inference.
+
+Actual signed engine183 provides completion but no typed definition/hover; helper
+controls still resolve both locales. Five new public regressions plus four existing controls reproduce four
+failures and five passes. The first implementation misses PHP's nullable
+wrapper; the corrected focused run passes all nine selected tests. Five argument,
+two foreign diagnostic-scope and all 55 translation-key tests also pass.
+
+A real multi-file references probe then finds one omitted valid caller and one
+included ambiguous caller despite an unchanged total count. Equal-length temporary
+parser buffers can reuse the same variable-memo address/offset key. A deterministic
+same-buffer source-switch regression reproduces the wrong class. Source-owned memo
+scopes fix cross-file and seeded-body boundaries, restore outer state after normal
+return or unwinding, and retain normal nested same-source sharing. The final public
+and protocol checks pass. Exact target checks catch this error even when total
+counts match.
+
+Frozen source replay matches all files and symlinks. Full engine validation passes
+18,716 primary tests, 17 declared ignores and two bounded child groups. Both
+all-target Clippy configurations, formatting, source fingerprint and optimized
+build pass. Signed arm64 engine184 passes 13 exact two-locale UTF-16 navigation and
+hover cases, seven negative controls, exactly 17 caller-origin reference ranges,
+settled missing-key diagnostics, seven dirty-dependency/catalog/close/reopen/restart
+observations, unchanged physical files and two graceful engine exits. Catalog
+edits preserve equal byte length; scalar and array LSP Location forms are checked.
+
+Fixtures are validated against actual Laravel 13.37. Separate unit and exact
+protocol sources each pass 60 syntax and 20 runtime checks. Lifecycle fixtures pass
+eight syntax/two runtime checks, including Composer PSR-4 reflection against the
+exact Selected.php; diagnostic fixtures pass two syntax/two runtime checks. Current
+file declarations are explicitly loaded; only framework classes are claimed to be
+Composer-loaded in the single-file helper cases. No environment files are created.
+The retained reference corpus still reports exactly three intentional diagnostics
+with original bytes unchanged.
+
+Probe corrections remain in evidence: the first negative-hover harness wrongly
+required a result; reflection initially compared symlink spellings; an early pull
+diagnostic result was an unsettled fast report; and a one-locale definition used a
+valid scalar Location. Final checks normalize valid protocol forms and wait for an
+actual diagnostic refresh plus an independent same-document helper warning.
+Expected target sets, UTF-16 ranges and negative controls are preserved. Exact
+17 reference ranges are freshly checked on the signed canonical engine, after the
+work-build probe had checked their exact URI set.
+
+Catalog-declaration-origin usages returns zero in both baseline and candidate and
+remains an explicit unaccepted case. Current OpenStorm LspManager/Host adoption of
+184 and packaging are the next separate steps. No fresh root workspace, frontend,
+client184, browser or native acceptance is claimed here: exact package200 runtime,
+editor, IPC and resource hashes match; reuse199 workspace 5,485/246 ignored/same11
+exclusions, workspace Clippy and 124 actual client/Host cases, plus200 fresh 14,395
+frontend/eight skips, tooling, resource, package and embedded-engine evidence.
+
+Default source/resources remain183 and the sole signed app remains
+artifacts/batches/0.1.118/OpenStorm.app with its original main and bundled-engine
+hashes. Native GUI remains user-skipped. The inactive184 binary is signed and its
+source/provenance/licenses retained. Compiler cleanup: Removed 8228 files, 2.2GiB total.
+The duplicate workcopy is removed after exact canonical comparison. PHP Workbench,
+canonical sources/engines, licenses, pins and reference/evaluation evidence remain.
+No installation, notarization, publishing, updater activation, migration, deployment
+or debugger expansion. All 69 areas stay 67 partial and two user-deferred; broader
+receiver/locale/privacy/platform/service matrices and the older unattributed
+startup timeout remain open.
+
+Raw184 SHA256: 40009462245dc24c96d72b0de54847c9fa1208cb386a0bdb64b436384222e762.
+Signed184 SHA256: 8ce60dc5cffb56a94943498056b730302105c7a2d6da73e721755b28051beba8.
+Patch SHA256: 9f4fe760838b69617b3799aa38e47ba6b8934f7081bd1307f11125ec67922c56.
+Rebuild: scripts/prepare-phpantom.py and scripts/build-phpantom.py with
+--pin engine/candidates/0.11.1-openstorm.184-source.json.
+Evidence: artifacts/checks/slice201/{baseline183,navigation-baseline183-callers,
+navigation-settled-baseline183,red-refined,memo-red,focused,
+framework-checks,protocol-fixture-checks,lifecycle-fixture-checks,
+diagnostic-fixture-checks,work-acceptance,freeze,engine-gates,engine-test-summary,
+wire184,post-source,engine-retention,acceptance}.json. Historical failed work/probe
+logs are retained; the final canonical probe and gates are authoritative. Git
+history and the ignored delivery receipt record commit/push and remote read-back.
+
 Package slice200 (2026-11-20, accepted local development bundle):
 App 0.1.118 bundles exact accepted engine183 typed translator completion and
 quoted-key Tab replacement. Source/client slice199 proves typed locales,

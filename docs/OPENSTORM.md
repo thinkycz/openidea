@@ -15,6 +15,73 @@ slice, commit and push it, and retain only the latest generated app. Native UI
 cases remain deferred/unverified; earlier native-first blocking checkpoints are
 historical and no longer prevent independent implementation.
 
+Blade startup demand slice203 (2026-11-20, source/client accepted; inactive185):
+View dependency and data refreshes were confirming every typed key receiver in a
+mixed file, including unrelated translation candidates. View startup, view data,
+view diagnostics, create-view actions and view usages now request only view
+receivers. Each file caches view-only and full-key results independently with
+shared source/dependency eviction. Full translation/middleware proof and the
+source-owned variable/chain memo guards are preserved.
+
+A deterministic regression on 184 observes the unrelated translator being fully
+resolved during a real Blade dependency snapshot. It fails for that reason;
+two query-order and same-length edit controls pass. All three pass after scoping
+receiver demand. Source-memo restoration/unwind, translation argument and foreign
+diagnostic-scope checks pass. The unchanged 202 client executable passes both
+previously failing Kernel callback/trait scenarios and the typed-translation
+workflow without a warm-up, result retry or changed deadline.
+
+Canonical engine validation passes 18,719 primary tests, 17 declared ignores and
+two bounded child groups. Both all-target Clippy configurations, formatting,
+pinned replay and optimized build pass. The engine contributor's fix-mode Clippy
+and subsequent formatting leave executable inputs unchanged. A documentation-only
+amendment moves the release note to the upstream contributor format. Its initial
+re-diff accidentally includes a generated source marker; replay rejects it before
+any delivery. Restricting the patch to the six reviewed files corrects the recipe.
+Final replay differs only in changelog/provenance marker, and the rebuilt raw
+binary is byte-identical. Original gate receipts, rejected patch and correction
+evidence remain; no test exclusions or requirements are weakened.
+
+Final signed185 passes all 68 actual client and 58 Host cases using the exact202
+frozen executables/fingerprints and source hashes. This includes both 184 timeouts,
+managed dirty changes, shared edit history, save-conflict refusal and engine
+restart; all retained physical fixture originals remain unchanged. Standalone
+stdio additionally passes 13 supported receiver cases/seven negative controls,
+17 exact caller-reference ranges, settled diagnostics, dirty dependency/catalog
+changes, close/reopen and two graceful engine exits. Fresh examples pass 12 plain
+PHP syntax files/runtime assertions and 121 Laravel syntax files/387 actual
+Laravel 13.37 assertions/exactly three intentional analyzer diagnostics.
+
+Root application source and test executables are unchanged from202. Explicitly
+reuse its 5,485 workspace passes/248 declared ignores/same 11 exclusions, final
+workspace Clippy/fmt, 14,395 frontend passes/eight skips, types/lint/format/Knip/build,
+binding fidelity and 53 controlled-backend browser flows. No fresh root/browser or
+native GUI acceptance is claimed here. Native checks stay user-skipped. Canonical
+185 is signed arm64 but inactive; default/source/resources 183 and the sole signed
+App 0.1.118 retain their original hashes and deep/strict ad-hoc signature.
+Promotion/packaging is the next separate slice.
+
+The two reproduced184 failures are corrected in these unchanged client scenarios.
+Broader performance/locale/privacy/platform/service matrices and the older
+unattributed startup timeout remain open; catalog-declaration-origin usages still
+returns zero. All 69 areas remain 67 partial and two debugger areas user-deferred.
+No installation, notarization, publishing, updater activation, migration,
+deployment or debugger expansion.
+
+Cleanup: Removed 8228 files, 2.2GiB total; duplicate workcopy removed after exact comparison.
+Canonical source/engines, pins/licenses/provenance, PHP Workbench and prior
+reference/evaluation artifacts remain. Only App118 and the one current frozen
+regression executable set are retained as before; compiler output is removed.
+Raw185 SHA256: c5c2c8366de48a25475e919ed8edbf33393cde5a1fcaa405c2f0c00137a5ac0c.
+Signed185 SHA256: 5f83fff38d7b9de8fe396da76767ee2a6beaf3b66e454ab0c9012476a805b5e8.
+Patch SHA256: 49306655670e6ae558f26cccb6137aa81874ff0283f48ad3244aeca8fc96ae04.
+Rebuild with scripts/prepare-phpantom.py and scripts/build-phpantom.py using
+--pin engine/candidates/0.11.1-openstorm.185-source.json.
+Evidence: artifacts/checks/slice203/{input,red,focused,work-probe,freeze,
+engine-gates,engine-test-summary,source-finalization,post-source,wire185,
+plain-fixture,fixture-runtime,client-host,engine-retention,acceptance}.json.
+Git history and the ignored delivery receipt record commit/push and remote ref.
+
 Client evaluation slice202 (2026-11-20, regression coverage complete; engine184 rejected):
 Two regressions exercise typed translation navigation through actual LspManager
 and Host commands, managed documents and real Laravel 13.37 dependencies. The same

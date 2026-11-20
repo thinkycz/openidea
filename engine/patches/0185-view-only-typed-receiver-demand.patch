@@ -1,0 +1,375 @@
+diff --git a/docs/CHANGELOG.md b/docs/CHANGELOG.md
+index b3a162ce6cd7a0c048d3486a1006e6ef2f557b80..5482a5e1d74f430dfb1b8c6b423d2624d0aeb8cd 100644
+--- a/docs/CHANGELOG.md
++++ b/docs/CHANGELOG.md
+@@ -108,6 +108,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
+ 
+ ## [Unreleased]
+ 
++- **Keep PHP navigation responsive in Laravel projects.** Definition and hover requests no longer stall while opening Laravel projects containing view calls. Translation navigation retains its existing behavior. Contributed by @thinkycz.
++
+ - **Navigate controller actions through route namespace attributes.** Per-route namespace modifiers preserve the enclosing controller for completion, hover, references and rename. Namespace groups retain their own controller context. Contributed by @thinkycz.
+ 
+ - **Compatible Kernel trait registrations.** Middleware navigation preserves complete context for compatible literal class, parent and trait defaults. Reviewed class edits retain every physical declaration; incompatible or unresolved compositions and literal middleware targets remain guarded. Contributed by @thinkycz.
+diff --git a/src/blade/call_site_inference.rs b/src/blade/call_site_inference.rs
+index ba977852d31703fd63f099f165121838fd26b1df..e772bc5bfc15cc501162001f5dbda5519ac66a4e 100644
+--- a/src/blade/call_site_inference.rs
++++ b/src/blade/call_site_inference.rs
+@@ -1329,7 +1329,7 @@ impl Backend {
+                 site.kind() == LaravelStringKind::View && view_names.contains(&site.key)
+             });
+             let extra = if has_candidate {
+-                self.typed_receiver_view_spans_for(file_uri, &symbol_map)
++                self.typed_view_receiver_spans_for(file_uri, &symbol_map)
+             } else {
+                 Arc::new(Vec::new())
+             };
+@@ -1920,7 +1920,7 @@ impl Backend {
+             {
+                 Arc::new(Vec::new())
+             } else {
+-                self.typed_receiver_view_spans_for(uri, &map)
++                self.typed_view_receiver_spans_for(uri, &map)
+             };
+             names.extend(map.spans.iter().chain(extra.iter()).filter_map(
+                 |span| match &span.kind {
+diff --git a/src/blade/typed_receiver.rs b/src/blade/typed_receiver.rs
+index 73b1564160eb915498fb19a0d9f385ec6fb5e073..728a5719e26e513361930ef9d8ebd7d00b142f06 100644
+--- a/src/blade/typed_receiver.rs
++++ b/src/blade/typed_receiver.rs
+@@ -20,7 +20,9 @@
+ //! the symbol map records, that every consumer of view keys reads alongside
+ //! the map's own.
+ //!
+-//! Typed translator key sites use the same cache: every non-null alternative
++//! View-only demand has a separate result in each cache entry, so dependency
++//! refreshes never confirm unrelated translation or middleware receivers.
++//! Typed translator key sites share invalidation: every non-null alternative
+ //! must belong to the translator family and expose the public instance method.
+ //! Their translation kind feeds definition, hover, references and diagnostics.
+ //!
+@@ -37,17 +39,29 @@ use mago_syntax::cst::*;
+ 
+ use crate::Backend;
+ use crate::parser::with_parsed_program;
+-use crate::symbol_map::{SymbolMap, SymbolSpan, ViewReceiverClass, ViewReceiverSite};
++use crate::symbol_map::{
++    LaravelStringKind, SymbolKind, SymbolMap, SymbolSpan, ViewReceiverClass, ViewReceiverSite,
++};
+ use crate::type_engine::resolver::{CtxLoaders, Loaders, VarResolutionCtx, resolve_target_classes};
+ use crate::types::ClassInfo;
+ 
+-/// One file's confirmed extra view spans, and the source length they were
++/// One file's full and view-only key results, and the source length they were
+ /// derived from.
+ ///
+ /// The length is the same staleness signal [`SymbolMap::matches_source`]
+ /// uses: an insertion or removal since the spans were computed moves every
+ /// offset in them, so they have to be recomputed rather than reused.
+-pub(crate) type TypedReceiverSpans = (u32, Arc<Vec<SymbolSpan>>);
++pub(crate) struct TypedReceiverSpans {
++    source_len: u32,
++    all: Option<Arc<Vec<SymbolSpan>>>,
++    views: Option<Arc<Vec<SymbolSpan>>>,
++}
++
++#[derive(Clone, Copy)]
++enum ReceiverDemand {
++    All,
++    Views,
++}
+ 
+ impl Backend {
+     /// Resolve `$this` exactly as member completion does, including static
+@@ -184,8 +198,7 @@ impl Backend {
+         }
+     }
+ 
+-    /// The view-name spans of `uri` whose render site is recognised by the
+-    /// receiver's type rather than its spelling.
++    /// All key spans of `uri` recognised by the receiver's type.
+     ///
+     /// Empty — without any work at all — for a file whose symbol map
+     /// recorded no candidate sites, which is every file that does not call
+@@ -199,11 +212,39 @@ impl Backend {
+         uri: &str,
+         map: &SymbolMap,
+     ) -> Arc<Vec<SymbolSpan>> {
+-        if map.view_receiver_sites.is_empty() {
++        self.typed_receiver_spans_for(uri, map, ReceiverDemand::All)
++    }
++
++    /// View dependency/data consumers must leave other key receivers lazy.
++    pub(crate) fn typed_view_receiver_spans_for(
++        &self,
++        uri: &str,
++        map: &SymbolMap,
++    ) -> Arc<Vec<SymbolSpan>> {
++        self.typed_receiver_spans_for(uri, map, ReceiverDemand::Views)
++    }
++
++    fn typed_receiver_spans_for(
++        &self,
++        uri: &str,
++        map: &SymbolMap,
++        demand: ReceiverDemand,
++    ) -> Arc<Vec<SymbolSpan>> {
++        if map.view_receiver_sites.is_empty()
++            || (matches!(demand, ReceiverDemand::Views)
++                && !map
++                    .view_receiver_sites
++                    .iter()
++                    .any(|site| site.kind() == LaravelStringKind::View))
++        {
+             return empty_spans();
+         }
+-        if let Some((source_len, spans)) = self.typed_receiver_view_spans_cache.read().get(uri)
+-            && *source_len == map.source_len
++        if let Some(cached) = self.typed_receiver_view_spans_cache.read().get(uri)
++            && cached.source_len == map.source_len
++            && let Some(spans) = match demand {
++                ReceiverDemand::All => &cached.all,
++                ReceiverDemand::Views => &cached.views,
++            }
+         {
+             return Arc::clone(spans);
+         }
+@@ -211,16 +252,58 @@ impl Backend {
+         let Some(content) = self.effective_content(uri) else {
+             return empty_spans();
+         };
+-        // The recorded offsets index the text the map was built from; a
+-        // buffer that has grown or shrunk since is a different text.
+         if !map.matches_source(&content) {
+             return empty_spans();
+         }
+ 
+-        let spans = Arc::new(self.confirm_view_receiver_sites(uri, &content, map));
+-        self.typed_receiver_view_spans_cache
+-            .write()
+-            .insert(uri.to_string(), (map.source_len, Arc::clone(&spans)));
++        let spans = Arc::new(match demand {
++            ReceiverDemand::All => self.confirm_view_receiver_sites(uri, &content, map),
++            ReceiverDemand::Views => {
++                let sites: Vec<_> = map
++                    .view_receiver_sites
++                    .iter()
++                    .filter(|site| site.kind() == LaravelStringKind::View)
++                    .cloned()
++                    .collect();
++                self.confirm_typed_receiver_sites(uri, &content, map, &sites, false)
++            }
++        });
++        let mut cache = self.typed_receiver_view_spans_cache.write();
++        let cached = cache
++            .entry(uri.to_owned())
++            .or_insert_with(|| TypedReceiverSpans {
++                source_len: map.source_len,
++                all: None,
++                views: None,
++            });
++        if cached.source_len != map.source_len {
++            *cached = TypedReceiverSpans {
++                source_len: map.source_len,
++                all: None,
++                views: None,
++            };
++        }
++        match demand {
++            ReceiverDemand::Views => cached.views = Some(Arc::clone(&spans)),
++            ReceiverDemand::All => {
++                cached.views = Some(Arc::new(
++                    spans
++                        .iter()
++                        .filter(|span| {
++                            matches!(
++                                span.kind,
++                                SymbolKind::LaravelStringKey {
++                                    kind: LaravelStringKind::View,
++                                    ..
++                                }
++                            )
++                        })
++                        .cloned()
++                        .collect(),
++                ));
++                cached.all = Some(Arc::clone(&spans));
++            }
++        }
+         spans
+     }
+ 
+@@ -744,3 +827,130 @@ mod foreign_diagnostic_scope_tests {
+         confirm_under_foreign_scope(Some(PhpType::named(crate::atom::atom("UnrelatedReceiver"))));
+     }
+ }
++
++#[cfg(test)]
++mod startup_demand_tests {
++    use super::*;
++    use crate::symbol_map::{LaravelStringKind, SymbolKind};
++
++    const FACTORY: &str = r"<?php namespace Illuminate\Contracts\View; interface Factory {public function make($view, array $data=[]): mixed;}";
++    const TRANSLATOR: &str = r"<?php namespace Illuminate\Contracts\Translation; interface Translator {public function get($key, array $replace=[], $locale=null);}";
++    const TRANSLATOR_URI: &str = "file:///view-demand/Translator.php";
++    const URI: &str = "file:///view-demand/caller.php";
++    const SOURCE: &str = r"<?php /* 😀 */ namespace App;
++use Illuminate\Contracts\View\Factory;
++use Illuminate\Contracts\Translation\Translator;
++function page(Factory $views) {return $views->make('demand-page');}
++function label(Translator $text) {return $text->get('messages.hello');}
++";
++
++    fn publish(backend: &Backend, uri: &str, source: &str, version: i32) -> Arc<String> {
++        let source = Arc::new(source.to_owned());
++        backend.diag.documents.lock().open(uri, version, &source);
++        backend
++            .open_files
++            .write()
++            .insert(uri.to_owned(), Arc::clone(&source));
++        backend.update_ast(uri, &source);
++        source
++    }
++
++    fn fixture() -> Backend {
++        let backend = Backend::new_test();
++        backend.resolved_class_cache.write().set_laravel(true);
++        publish(&backend, "file:///view-demand/Factory.php", FACTORY, 1);
++        publish(&backend, TRANSLATOR_URI, TRANSLATOR, 1);
++        publish(&backend, URI, SOURCE, 1);
++        backend
++    }
++
++    fn keys(backend: &Backend) -> Vec<String> {
++        let map = backend.symbol_map_for(URI).unwrap();
++        let spans = backend.typed_receiver_view_spans_for(URI, &map);
++        let content = backend.open_files.read().get(URI).unwrap().clone();
++        let mut keys: Vec<_> = spans
++            .iter()
++            .map(|span| {
++                let SymbolKind::LaravelStringKey { kind, key, .. } = &span.kind else {
++                    panic!("real key span required")
++                };
++                assert_eq!(&content[span.start as usize..span.end as usize], key);
++                format!(
++                    "{}:{key}",
++                    match kind {
++                        LaravelStringKind::View => "view",
++                        LaravelStringKind::Trans => "trans",
++                        _ => panic!("unexpected key kind"),
++                    }
++                )
++            })
++            .collect();
++        keys.sort();
++        keys
++    }
++
++    fn startup(backend: &Backend) {
++        let content = backend.open_files.read().get(URI).unwrap().clone();
++        assert!(
++            backend.parse_blade_dependency_snapshot(URI, &content),
++            "real accepted caller dependency snapshot"
++        );
++    }
++
++    #[test]
++    fn startup_keeps_unrelated_translation_receiver_resolution_lazy() {
++        let backend = fixture();
++        let key = (
++            crate::atom::atom("Illuminate\\Contracts\\Translation\\Translator"),
++            Vec::new(),
++        );
++        assert!(!backend.resolved_class_cache.read().contains_key(&key));
++        startup(&backend);
++        assert!(
++            !backend.resolved_class_cache.read().contains_key(&key),
++            "view dependency startup must not resolve an unrelated translation receiver"
++        );
++        assert_eq!(keys(&backend), ["trans:messages.hello", "view:demand-page"]);
++        assert!(
++            backend.resolved_class_cache.read().contains_key(&key),
++            "a real translation query must still resolve its receiver"
++        );
++    }
++
++    #[test]
++    fn startup_and_full_key_queries_keep_both_kinds_in_either_order() {
++        for full_first in [false, true] {
++            let backend = fixture();
++            if full_first {
++                assert_eq!(keys(&backend), ["trans:messages.hello", "view:demand-page"]);
++            }
++            startup(&backend);
++            assert_eq!(keys(&backend), ["trans:messages.hello", "view:demand-page"]);
++            startup(&backend);
++            assert_eq!(keys(&backend), ["trans:messages.hello", "view:demand-page"]);
++        }
++    }
++
++    #[test]
++    fn demand_caches_follow_same_length_dependency_and_caller_changes() {
++        let backend = fixture();
++        startup(&backend);
++        assert_eq!(keys(&backend), ["trans:messages.hello", "view:demand-page"]);
++        let missing = TRANSLATOR.replace("function get(", "function put(");
++        assert_eq!(missing.len(), TRANSLATOR.len());
++        publish(&backend, TRANSLATOR_URI, &missing, 2);
++        startup(&backend);
++        assert_eq!(keys(&backend), ["view:demand-page"]);
++        publish(&backend, TRANSLATOR_URI, TRANSLATOR, 3);
++        startup(&backend);
++        assert_eq!(keys(&backend), ["trans:messages.hello", "view:demand-page"]);
++        let changed = SOURCE.replace("messages.hello", "messages.other");
++        assert_eq!(changed.len(), SOURCE.len());
++        publish(&backend, URI, &changed, 2);
++        startup(&backend);
++        assert_eq!(keys(&backend), ["trans:messages.other", "view:demand-page"]);
++        publish(&backend, URI, SOURCE, 3);
++        startup(&backend);
++        assert_eq!(keys(&backend), ["trans:messages.hello", "view:demand-page"]);
++    }
++}
+diff --git a/src/code_actions/create_missing_view.rs b/src/code_actions/create_missing_view.rs
+index aaafb5e70411fa6644309856819953c0b5081f79..3ca1c084b93bad1375ee750ec9b75bce02007562 100644
+--- a/src/code_actions/create_missing_view.rs
++++ b/src/code_actions/create_missing_view.rs
+@@ -41,7 +41,7 @@ impl Backend {
+             Some(sm) => sm,
+             None => return,
+         };
+-        let extra = self.typed_receiver_view_spans_for(uri, &symbol_map);
++        let extra = self.typed_view_receiver_spans_for(uri, &symbol_map);
+ 
+         let mut view_names: Option<std::sync::Arc<[String]>> = None;
+ 
+diff --git a/src/diagnostics/blade_call_site.rs b/src/diagnostics/blade_call_site.rs
+index 13547ce96bb9fb956656552540d04019569274de..6b438a5e21c1584e1c2e6439290c8ab2f751e9e4 100644
+--- a/src/diagnostics/blade_call_site.rs
++++ b/src/diagnostics/blade_call_site.rs
+@@ -60,7 +60,7 @@ impl Backend {
+         let Some(symbol_map) = self.symbol_maps.read().get(uri).cloned() else {
+             return;
+         };
+-        let extra = self.typed_receiver_view_spans_for(uri, &symbol_map);
++        let extra = self.typed_view_receiver_spans_for(uri, &symbol_map);
+         let keys: HashMap<u32, String> = symbol_map
+             .spans
+             .iter()
+diff --git a/src/virtual_members/laravel/string_keys.rs b/src/virtual_members/laravel/string_keys.rs
+index e04fdb36e53664279fe48fea220c40239a792452..9256cc4b5d3ab3651c43ea268d01a1dc9a56825e 100644
+--- a/src/virtual_members/laravel/string_keys.rs
++++ b/src/virtual_members/laravel/string_keys.rs
+@@ -315,7 +315,11 @@ fn find_string_key_usages(
+             .iter()
+             .any(|site| site.kind() == *kind && site.key == key);
+         let extra = if has_candidate {
+-            backend.typed_receiver_view_spans_for(file_uri, symbol_map)
++            if *kind == LaravelStringKind::View {
++                backend.typed_view_receiver_spans_for(file_uri, symbol_map)
++            } else {
++                backend.typed_receiver_view_spans_for(file_uri, symbol_map)
++            }
+         } else {
+             std::sync::Arc::new(Vec::new())
+         };

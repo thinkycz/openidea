@@ -15,6 +15,72 @@ slice, commit and push it, and retain only the latest generated app. Native UI
 cases remain deferred/unverified; earlier native-first blocking checkpoints are
 historical and no longer prevent independent implementation.
 
+Managed JSON sessions slice 212 (2026-11-20; client/Host accepted; candidate 188 inactive):
+FEAT-031/066/067: admitted custom JSON overlays now participate in the selected
+PHP server's navigation snapshots. Their attachments carry a selector and a
+cancellation token. Relevant document open/edit/save/close, Composer changes,
+watched-file changes, roots/settings changes, execution disable and server stop
+retire the session immediately. Unrelated JSON buffers do not retire it. A new
+server generation cannot replay an old session without another admission; normal
+JSON completion and other language actions continue through their own servers.
+
+A per-server resource revision records attachment and retirement under the
+documents lock. PHP replies spanning an entire catalog open/close cycle expire
+even when the final document set matches again. Session completion accounts only
+for its own overlay, preserving the captured PHP inputs and Composer disk witness.
+An inactive-session counter avoids scanning the document map on ordinary edits.
+Fallback attachment/detachment and normal notebook attachment construction retain
+the same ownership rules; background forwarding remains subsequent work.
+
+The new public regression first proves that an edited catalog remains open while
+a references reply is held. It now closes before that reply is released. All 51
+focused JSON cases pass, including five new protocol groups: edit/close retirement,
+open/close-cycle freshness, concurrent PHP hover, relevant inputs versus unrelated
+buffers, and normal JSON completion plus restart admission. Existing cancellation,
+source/authority, Composer, native JSON and optional-server cases remain intact.
+
+A real-engine protocol proxy holds selected replies while forwarding other frames.
+Its first version loses a tracked reply when a server request reuses the client's
+numeric ID. A deterministic fake-engine counterexample reproduces this defect;
+the corrected proxy forwards the server request and holds only the client reply.
+The first checked-rename fixture also lacks the candidate hook supplied by the
+Host. Supplying the complete owned PHP fixture set fixes its scope; the rename
+assertion remains intact.
+Failure logs remain, original deadlines stay unchanged, and production engine
+behavior is not altered to accommodate either fixture correction.
+
+All five real-client scenarios pass: private hover while a session is active,
+checked rename during that session, edit/close/provider retirement before releasing
+references, stale concurrent hover refusal, and an entire session between PHP
+request and reply. Fresh PHP hover returns disk or the newly selected provider's
+value while the old real references reply is still held. The new Host scenario
+repeats edit and close through managed documents and the existing references
+command. Exact Unicode keys, actual engine open/close packets, pinned Laravel
+13.37.0, PHP/JSON syntax, unchanged owned disk files and process shutdown are checked.
+
+Final current executables reject query-only engine 187, then pass all 71 client
+and 61 Host cases on signed engine 188, with source/fingerprint/binary witnesses
+and retained fixture originals unchanged. Fresh gates pass: Rust 5,582 / 258
+ignored / the same 11 documented exclusions; workspace all-target Clippy with
+warnings denied; Rust formatting; bindings fidelity; default engine provenance;
+frontend 14,603 / 8 skipped; types/lint/format/Knip; production build/Safari startup;
+and all 59 controlled-browser cases. Native GUI checks remain user-skipped.
+
+The latest 132-case executable set replaces the previous
+1,269,714,880-byte payload after acceptance. Cargo cleanup:
+Removed 19,677 files (27.4 GiB) and frontend dist (73,745,139 bytes).
+The sole signed App 119, default engine 185, candidate 188 provenance, historical
+receipts and both stashes remain preserved. No app or engine is promoted. Normal
+Git delivery and remote read-back are recorded in the ignored acceptance receipt.
+All 69 areas remain visible at 67 partial/two user-deferred.
+
+Next: persistent custom-catalog discovery and forwarding using managed sessions,
+wider nested-consumer discovery, separate-server package-provider overlays and
+multiple-positive-consumer acceptance before candidate promotion/packaging.
+Native UI and wider physical/service matrices remain unverified. Evidence:
+artifacts/checks/slice212/{gates,frontend-gates,evaluation,proxy-ids,
+frozen-runtimes,retention}.json.
+
 Registered JSON Find Usages slice 211 (2026-11-20, client/Host accepted; inactive 188):
 FEAT-031/066/067: the existing project-wide Find Usages command now searches custom
 JSON catalogs through the opened project's and explicit content roots' Composer
@@ -65,7 +131,7 @@ Next: persistent custom-catalog forwarding and freshness across other PHP action
 wider nested-consumer discovery, separate-server package-provider overlays and
 multiple-positive-consumer acceptance before candidate promotion/packaging. Native
 UI, wider physical/service matrices and the other ledger gates remain unverified.
-Detailed evidence: artifacts/checks/slice 211/{gates,frontend-gates,evaluation,
+Detailed evidence: artifacts/checks/slice211/{gates,frontend-gates,evaluation,
 frozen-runtimes,retention}.json.
 
 Composer catalog admission slice210 (2026-11-20, client accepted; inactive188):

@@ -140,6 +140,8 @@ pub struct Server {
     /// Woken whenever a `$/progress` task ends or the server's loading state changes.
     phase_notify: Notify,
     transient: Mutex<HashMap<PathBuf, Transient>>,
+    /// Guarded resource ownership changes, updated under the manager's documents lock.
+    pub resource_revision: std::sync::atomic::AtomicU64,
     pub java_build_lock: Arc<tokio::sync::Mutex<()>>,
     /// Classpath folders still missing after a full build (a module without output), so a
     /// launch rebuilds for a missing output folder only once.
@@ -195,6 +197,7 @@ impl Server {
             loading: Mutex::new(None),
             phase_notify: Notify::new(),
             transient: Mutex::new(HashMap::new()),
+            resource_revision: std::sync::atomic::AtomicU64::new(0),
             java_build_lock: Arc::new(tokio::sync::Mutex::new(())),
             java_absent_outputs: Mutex::new(Default::default()),
             startup_lock: Arc::new(tokio::sync::Mutex::new(())),

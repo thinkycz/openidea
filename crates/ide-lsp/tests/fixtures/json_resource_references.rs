@@ -318,3 +318,298 @@ async fn registered_json_find_usages_reports_failed_native_json_queries_as_incom
     assert_eq!(refs.incomplete, Some(ReferencesIncomplete::ServerFailed));
     h.mgr.shutdown_all().await;
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn registered_json_sessions_close_before_a_held_reference_reply_after_edit_or_close() {
+    for change in ["edit", "close"] {
+        let h = harness_for("php", "php", &[("phpantom", caps())], &[]);
+        std::fs::write(h.root.join("composer.json"), MANIFEST).unwrap();
+        let path = h.root.join("catalogs/en.json");
+        let resource = path.clone();
+        let gate = Arc::new(Gate::default());
+        let held = gate.clone();
+        let state = h.launcher.state("phpantom");
+        state.responder.lock().replace(Arc::new(move |_, method, params| match method {
+            METHOD => Some(echo(params, resource.parent())),
+            "textDocument/references" => {
+                held.hold();
+                Some(json!([]))
+            }
+            _ => None,
+        }));
+        let doc = DocId::next();
+        h.mgr.did_open(doc, &path, &LanguageId::new("json"), 1, TEXT);
+        let manager = h.mgr.clone();
+        let pending =
+            tokio::spawn(async move { manager.references(doc, Pos::new(0, 2), false, true, Default::default()).await });
+        eventually(|| gate.entered()).await;
+        if change == "close" {
+            h.mgr.did_close(doc);
+        } else {
+            h.mgr.did_change(
+                doc,
+                2,
+                &[AppliedChange { range: rng(0, 0, 0, TEXT.encode_utf16().count() as u32), text: "{}".into() }],
+                &|| "{}".into(),
+            );
+        }
+        let closed = tokio::time::timeout(Duration::from_secs(2), async {
+            while state.docs.lock().contains_key(&uri_of(&path)) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .is_ok();
+        gate.open();
+        let result = pending.await.unwrap();
+        h.mgr.shutdown_all().await;
+        assert!(closed, "{change}: discard the stale overlay before the held server reply is released");
+        assert!(result.is_err());
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn registered_json_sessions_invalidate_php_replies_across_a_complete_open_close_cycle() {
+    let h = harness_for("php", "php", &[("phpantom", caps())], &[]);
+    std::fs::write(h.root.join("composer.json"), MANIFEST).unwrap();
+    let resource = h.root.join("catalogs/en.json");
+    let catalog = resource.clone();
+    let gate = Arc::new(Gate::default());
+    let held = gate.clone();
+    let state = h.launcher.state("phpantom");
+    state.responder.lock().replace(Arc::new(move |_, method, params| match method {
+        METHOD => Some(echo(params, resource.parent())),
+        "textDocument/hover" => {
+            held.hold();
+            Some(json!({"contents":{"kind":"markdown","value":"old semantic reply"}}))
+        }
+        _ => None,
+    }));
+    let (php, _) = h.open("Caller.php", "<?php class Caller {}");
+    h.wait_status("phpantom", ServerStatus::Ready).await;
+    let json = DocId::next();
+    h.mgr.did_open(json, &catalog, &LanguageId::new("json"), 1, TEXT);
+    let manager = h.mgr.clone();
+    let pending = tokio::spawn(async move { manager.hover(php, Pos::new(0, 12), Default::default()).await });
+    eventually(|| gate.entered()).await;
+    let result = h.mgr.references(json, Pos::new(0, 2), false, true, Default::default()).await;
+    gate.open();
+    let hover = pending.await.unwrap();
+    h.mgr.shutdown_all().await;
+    assert!(result.is_ok(), "{result:?}");
+    assert!(
+        hover.is_err(),
+        "a PHP reply spanning a complete catalog session must be retired even when the document set matches again: {hover:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn registered_json_sessions_cancel_before_held_replies_and_retire_concurrent_php_hover() {
+    let h = harness_for("php", "php", &[("phpantom", caps())], &[]);
+    std::fs::write(h.root.join("composer.json"), MANIFEST).unwrap();
+    let resource = h.root.join("catalogs/en.json");
+    let catalog = resource.clone();
+    let ref_gate = Arc::new(Gate::default());
+    let held_ref = ref_gate.clone();
+    let hover_gate = Arc::new(Gate::default());
+    let held_hover = hover_gate.clone();
+    let state = h.launcher.state("phpantom");
+    state.responder.lock().replace(Arc::new(move |state, method, params| match method {
+        METHOD => Some(echo(params, resource.parent())),
+        "textDocument/references" => {
+            held_ref.hold();
+            Some(json!([]))
+        }
+        "textDocument/hover" => {
+            assert_eq!(state.docs.lock().get(&uri_of(&resource)).map(String::as_str), Some(TEXT));
+            held_hover.hold();
+            Some(json!({"contents":{"kind":"markdown","value":"private overlay"}}))
+        }
+        _ => None,
+    }));
+    let (php, _) = h.open("Caller.php", "<?php class Caller {}");
+    h.wait_status("phpantom", ServerStatus::Ready).await;
+    let json = DocId::next();
+    h.mgr.did_open(json, &catalog, &LanguageId::new("json"), 1, TEXT);
+    let manager = h.mgr.clone();
+    let refs =
+        tokio::spawn(async move { manager.references(json, Pos::new(0, 2), false, true, Default::default()).await });
+    eventually(|| ref_gate.entered()).await;
+    let manager = h.mgr.clone();
+    let hover = tokio::spawn(async move { manager.hover(php, Pos::new(0, 12), Default::default()).await });
+    eventually(|| hover_gate.entered()).await;
+    h.mgr.did_change(
+        json,
+        2,
+        &[AppliedChange { range: rng(0, 0, 0, TEXT.encode_utf16().count() as u32), text: "{}".into() }],
+        &|| "{}".into(),
+    );
+    let retired = tokio::time::timeout(Duration::from_secs(2), async {
+        while !refs.is_finished() || state.docs.lock().contains_key(&uri_of(&catalog)) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .is_ok();
+    ref_gate.open();
+    hover_gate.open();
+    let refs = refs.await.unwrap();
+    let hover = hover.await.unwrap();
+    h.mgr.shutdown_all().await;
+    assert!(retired, "retire the pending references and the overlay without waiting for the server reply");
+    assert!(refs.is_err());
+    assert!(hover.is_err(), "{hover:?}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn registered_json_sessions_retire_for_relevant_inputs_and_preserve_unrelated_json_buffers() {
+    for change in [
+        "provider edit",
+        "provider open",
+        "provider close",
+        "composer edit",
+        "composer open",
+        "composer close",
+        "roots",
+        "settings",
+        "watch",
+        "disable",
+        "unrelated",
+    ] {
+        let h = harness_for("php", "php", &[("phpantom", caps())], &[]);
+        let manifest = h.root.join("composer.json");
+        std::fs::write(&manifest, MANIFEST).unwrap();
+        let resource = h.root.join("catalogs/en.json");
+        let catalog = resource.clone();
+        let state = h.launcher.state("phpantom");
+        let gate = Arc::new(Gate::default());
+        let held = gate.clone();
+        state.responder.lock().replace(Arc::new(move |_, method, params| match method {
+            METHOD => Some(echo(params, resource.parent())),
+            "textDocument/references" => {
+                held.hold();
+                Some(json!([]))
+            }
+            _ => None,
+        }));
+        let (provider, _) = h.open("Provider.php", "<?php /* provider */");
+        h.wait_status("phpantom", ServerStatus::Ready).await;
+        let composer = DocId::next();
+        if change.starts_with("composer") && change != "composer open" {
+            h.mgr.did_open(composer, &manifest, &LanguageId::new("json"), 1, MANIFEST);
+        }
+        let json = DocId::next();
+        h.mgr.did_open(json, &catalog, &LanguageId::new("json"), 1, TEXT);
+        let manager = h.mgr.clone();
+        let pending =
+            tokio::spawn(
+                async move { manager.references(json, Pos::new(0, 2), false, true, Default::default()).await },
+            );
+        eventually(|| gate.entered()).await;
+        match change {
+            "provider edit" => h.mgr.did_change(
+                provider,
+                2,
+                &[AppliedChange {
+                    range: rng(0, 0, 0, "<?php /* provider */".encode_utf16().count() as u32),
+                    text: "<?php /* changed */".into(),
+                }],
+                &|| "<?php /* changed */".into(),
+            ),
+            "provider open" => {
+                h.open("New.php", "<?php class NewProvider {}");
+            }
+            "provider close" => h.mgr.did_close(provider),
+            "composer open" => h.mgr.did_open(composer, &manifest, &LanguageId::new("json"), 1, MANIFEST),
+            "composer close" => h.mgr.did_close(composer),
+            "composer edit" => h.mgr.did_change(
+                composer,
+                2,
+                &[AppliedChange { range: rng(0, 0, 0, MANIFEST.len() as u32), text: "{}".into() }],
+                &|| "{}".into(),
+            ),
+            "roots" => h.mgr.set_content_roots(vec![h.root.join("other")]),
+            "settings" => h.mgr.reconfigure().await,
+            "watch" => {
+                let path = h.root.join("Changed.php");
+                std::fs::write(&path, "<?php class Changed {}").unwrap();
+                h.mgr.php_files_changed(&[path], &[], &[]);
+            }
+            "disable" => h.mgr.set_execution_allowed(false),
+            "unrelated" => {
+                h.mgr.did_open(DocId::next(), &h.root.join("unrelated.json"), &LanguageId::new("json"), 1, "{}")
+            }
+            _ => unreachable!(),
+        }
+        let retired = if change == "unrelated" {
+            false
+        } else {
+            tokio::time::timeout(Duration::from_secs(2), async {
+                while !pending.is_finished() || state.docs.lock().contains_key(&uri_of(&catalog)) {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .is_ok()
+        };
+        let unrelated_stays =
+            change != "unrelated" || (!pending.is_finished() && state.docs.lock().contains_key(&uri_of(&catalog)));
+        gate.open();
+        let result = pending.await.unwrap();
+        h.mgr.shutdown_all().await;
+        if change == "unrelated" {
+            assert!(unrelated_stays);
+            assert!(result.is_ok(), "{result:?}");
+        } else {
+            assert!(retired, "{change}: retire before the held reply is released");
+            assert!(result.is_err());
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn registered_json_sessions_keep_json_actions_and_require_new_admission_after_restart() {
+    let h = harness_languages(
+        &[("php", "php", &[("phpantom", caps())]), ("json", "json", &[("json-lsp", incremental_caps())])],
+        |_| {},
+    );
+    std::fs::write(h.root.join("composer.json"), MANIFEST).unwrap();
+    let resource = h.root.join("catalogs/en.json");
+    let catalog = resource.clone();
+    let gate = Arc::new(Gate::default());
+    let held = gate.clone();
+    let state = h.launcher.state("phpantom");
+    state.responder.lock().replace(Arc::new(move |_, method, params| match method {
+        METHOD => Some(echo(params, resource.parent())),
+        "textDocument/references" => {
+            held.hold();
+            Some(json!([]))
+        }
+        _ => None,
+    }));
+    let json = DocId::next();
+    h.mgr.did_open(json, &catalog, &LanguageId::new("json"), 1, TEXT);
+    let manager = h.mgr.clone();
+    let pending =
+        tokio::spawn(async move { manager.references(json, Pos::new(0, 2), false, true, Default::default()).await });
+    eventually(|| gate.entered()).await;
+    let completion = h.mgr.completion(json, Pos::new(0, 2), None, Default::default()).await;
+    let id = h.mgr.servers().into_iter().find(|server| server.name == "phpantom").unwrap().id;
+    h.mgr.restart(id).await.unwrap();
+    let reopened = state
+        .notified("textDocument/didOpen")
+        .iter()
+        .filter(|params| params["textDocument"]["uri"] == uri_of(&catalog))
+        .count();
+    let retired = tokio::time::timeout(Duration::from_secs(2), pending).await;
+    gate.open();
+    assert!(completion.is_ok());
+    assert!(state.requested("textDocument/completion").is_empty());
+    assert_eq!(reopened, 1, "a new generation must not replay the old catalog before admission");
+    assert!(retired.unwrap().unwrap().is_err());
+    let refs = h.mgr.references(json, Pos::new(0, 2), false, true, Default::default()).await.unwrap();
+    assert!(refs.locations.is_empty());
+    assert_eq!(state.requested(METHOD).len(), 2);
+    assert_eq!(h.launcher.state("json-lsp").docs.lock().get(&uri_of(&catalog)).map(String::as_str), Some(TEXT));
+    h.mgr.shutdown_all().await;
+}

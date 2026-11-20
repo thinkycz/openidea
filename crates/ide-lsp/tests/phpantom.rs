@@ -10,6 +10,9 @@ use std::{path::PathBuf, sync::Arc, time::Duration};
 
 #[path = "fixtures/json_resource_admission.rs"]
 mod json_resource_admission;
+#[cfg(unix)]
+#[path = "fixtures/json_resource_sessions.rs"]
+mod json_resource_sessions;
 
 #[path = "fixtures/controller_guards.rs"]
 mod controller_guards;

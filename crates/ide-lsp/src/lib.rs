@@ -131,6 +131,12 @@ struct Attached {
     server: Arc<Server>,
     /// Instance generation the document was `didOpen`ed on, if any.
     opened_gen: Option<u64>,
+    resource: Option<JsonResourceAttachment>,
+}
+
+struct JsonResourceAttachment {
+    selector: PathBuf,
+    cancel: CancellationToken,
 }
 
 struct DocState {
@@ -212,6 +218,7 @@ struct NavigationSource {
 struct NavigationSnapshot {
     sources: Vec<NavigationSource>,
     files_revision: u64,
+    resources_revision: u64,
 }
 
 impl DocSnap {
@@ -281,6 +288,7 @@ pub struct LspManager {
     jdtls_workspace: Mutex<JdtlsWorkspace>,
     reconfigure_lock: tokio::sync::Mutex<()>,
     php_json_resource_gate: tokio::sync::Mutex<()>,
+    json_resource_count: AtomicU64,
     shutting_down: AtomicBool,
     execution_allowed: AtomicBool,
     java_usages_warned: AtomicBool,
@@ -577,6 +585,7 @@ impl LspManager {
             jdtls_workspace: Mutex::new(Default::default()),
             reconfigure_lock: tokio::sync::Mutex::new(()),
             php_json_resource_gate: tokio::sync::Mutex::new(()),
+            json_resource_count: AtomicU64::new(0),
             shutting_down: AtomicBool::new(false),
             execution_allowed: AtomicBool::new(true),
             java_usages_warned: AtomicBool::new(false),
@@ -603,6 +612,7 @@ impl LspManager {
             changed
         };
         if changed {
+            self.retire_json_resources();
             self.project_files_revision.fetch_add(1, Ordering::AcqRel);
         }
         if changed
@@ -627,6 +637,7 @@ impl LspManager {
             changed
         };
         if changed {
+            self.retire_json_resources();
             self.project_files_revision.fetch_add(1, Ordering::AcqRel);
         }
         if changed && let Some(me) = self.me.upgrade() {
@@ -825,12 +836,22 @@ impl LspManager {
         {
             let mut docs = self.docs.lock();
             for (id, servers) in wanted {
+                if self.json_resource_count.load(Ordering::Acquire) != 0
+                    && let Some(doc) = docs.get(&id)
+                {
+                    let added: Vec<_> = servers
+                        .iter()
+                        .filter(|server| !doc.servers.iter().any(|attached| attached.server.id == server.id))
+                        .map(|server| server.id)
+                        .collect();
+                    self.retire_json_resources_in(&mut docs, |_, _, _, attached| added.contains(&attached.server.id));
+                }
                 let Some(d) = docs.get_mut(&id) else { continue };
                 for server in &servers {
                     if d.servers.iter().any(|a| a.server.id == server.id) {
                         continue;
                     }
-                    let mut attached = Attached { server: server.clone(), opened_gen: None };
+                    let mut attached = Attached { server: server.clone(), opened_gen: None, resource: None };
                     if let Some(run) = server.running() {
                         let supported = self.php_resource_supported(&d.language, server, &run.caps.read());
                         if supported && run.caps.read().open_close {
@@ -1120,9 +1141,9 @@ impl LspManager {
                         continue;
                     }
                     let params = d.did_open_params();
-                    for a in
-                        d.servers.iter_mut().filter(|a| a.server.id == server.id && a.opened_gen != Some(generation))
-                    {
+                    for a in d.servers.iter_mut().filter(|a| {
+                        a.resource.is_none() && a.server.id == server.id && a.opened_gen != Some(generation)
+                    }) {
                         if open_close && let Err(e) = peer.notify("textDocument/didOpen", params.clone()) {
                             tracing::debug!("{}: didOpen: {e}", server.name);
                         }
@@ -1339,7 +1360,7 @@ impl LspManager {
             language: language.clone(),
             version: version as i32,
             text: Arc::new(DocText::new(text)),
-            servers: servers.iter().map(|s| Attached { server: s.clone(), opened_gen: None }).collect(),
+            servers: servers.iter().map(|s| Attached { server: s.clone(), opened_gen: None, resource: None }).collect(),
             compose_detected,
             notebook: None,
             changed: std::time::Instant::now(),
@@ -1347,6 +1368,10 @@ impl LspManager {
         };
         let compose_added = {
             let mut docs = self.docs.lock();
+            if self.json_resource_count.load(Ordering::Acquire) != 0 {
+                let ids: Vec<_> = servers.iter().map(|server| server.id).collect();
+                self.retire_json_resources_for_source(&mut docs, doc, &state.path, &state.canonical, &ids);
+            }
             let already_detected =
                 compose_detected && docs.values().any(|d| d.compose_detected && d.path == state.path);
             let params = state.did_open_params();
@@ -1392,6 +1417,7 @@ impl LspManager {
     pub fn did_change(&self, doc: DocId, version: u32, changes: &[AppliedChange], full_text: &dyn Fn() -> String) {
         let _gate = self.injections.gate.lock();
         let mut docs = self.docs.lock();
+        self.retire_json_resources_for_document(&mut docs, doc);
         let Some(d) = docs.get_mut(&doc) else { return };
         d.version = version as i32;
         d.changed = std::time::Instant::now();
@@ -1479,7 +1505,11 @@ impl LspManager {
         }
         let docs = self.docs.lock();
         for d in docs.values().filter(|d| d.notebook.is_none()) {
-            if !d.servers.iter().any(|a| a.server.id == server.id && a.opened_gen == Some(generation)) {
+            if !d
+                .servers
+                .iter()
+                .any(|a| a.resource.is_none() && a.server.id == server.id && a.opened_gen == Some(generation))
+            {
                 continue;
             }
             let params = json!({
@@ -1494,6 +1524,7 @@ impl LspManager {
 
     pub fn did_save(&self, doc: DocId, text: &str) {
         let mut docs = self.docs.lock();
+        self.retire_json_resources_for_document(&mut docs, doc);
         let Some(d) = docs.get_mut(&doc) else { return };
         if d.text.as_str() != text {
             Arc::make_mut(&mut d.text).set(text);
@@ -1531,6 +1562,7 @@ impl LspManager {
         self.go_mod_queries.lock().cancel(doc);
         let (d, compose_removed) = {
             let mut docs = self.docs.lock();
+            self.retire_json_resources_for_document(&mut docs, doc);
             let Some(d) = docs.remove(&doc) else { return };
             let removed =
                 d.compose_detected && !docs.values().any(|other| other.compose_detected && other.path == d.path);
@@ -1561,8 +1593,9 @@ impl LspManager {
             .servers
             .iter()
             .filter(|a| {
-                d.notebook.is_none()
-                    || a.opened_gen.is_some_and(|g| a.server.running().is_some_and(|run| run.generation == g))
+                a.resource.is_none()
+                    && (d.notebook.is_none()
+                        || a.opened_gen.is_some_and(|g| a.server.running().is_some_and(|run| run.generation == g)))
             })
             .map(|a| a.server.clone())
             .collect();
@@ -1962,9 +1995,8 @@ impl LspManager {
             return Err(IdeError::cancelled());
         }
         let files_revision = self.project_files_revision.load(Ordering::Acquire);
-        let sources: Vec<_> = self
-            .docs
-            .lock()
+        let docs = self.docs.lock();
+        let sources: Vec<_> = docs
             .iter()
             .filter(|(_, d)| Self::navigation_attached(d, target))
             .map(|(doc, d)| NavigationSource {
@@ -1975,7 +2007,11 @@ impl LspManager {
                 text: d.text.clone(),
             })
             .collect();
-        Ok(NavigationSnapshot { sources, files_revision })
+        Ok(NavigationSnapshot {
+            sources,
+            files_revision,
+            resources_revision: target.server.resource_revision.load(Ordering::Acquire),
+        })
     }
 
     fn navigation_attached(doc: &DocState, target: &Target) -> bool {
@@ -2000,7 +2036,8 @@ impl LspManager {
         snapshot: &NavigationSnapshot,
     ) -> bool {
         let sources = &snapshot.sources;
-        docs.values().filter(|d| Self::navigation_attached(d, target)).count() == sources.len()
+        target.server.resource_revision.load(Ordering::Acquire) == snapshot.resources_revision
+            && docs.values().filter(|d| Self::navigation_attached(d, target)).count() == sources.len()
             && sources.iter().all(|source| {
                 docs.get(&source.doc).is_some_and(|d| {
                     d.version == source.version
@@ -4365,6 +4402,7 @@ impl LspManager {
     pub fn set_execution_allowed(&self, allowed: bool) {
         let previous = self.execution_allowed.swap(allowed, Ordering::AcqRel);
         if !allowed {
+            self.retire_json_resources();
             self.go_mod_queries.lock().cancel_all();
             for server in self.servers.lock().iter() {
                 server.start_token().cancel();
@@ -4391,6 +4429,7 @@ impl LspManager {
     pub async fn reconfigure(&self) {
         // Settings-only notifications retain the server generation; retire
         // navigation receipts before any asynchronous reconfiguration work.
+        self.retire_json_resources();
         self.project_files_revision.fetch_add(1, Ordering::AcqRel);
         let _reconfigure = self.reconfigure_lock.lock().await;
         if !self.execution_allowed.load(Ordering::Acquire) {
@@ -4536,6 +4575,7 @@ impl LspManager {
         {
             let mut docs = self.docs.lock();
             for (id, gone) in shadowed {
+                self.retire_json_resources_in(&mut docs, |_, _, _, attached| gone.contains(&attached.server.id));
                 let Some(d) = docs.get_mut(&id) else { continue };
                 let (leaving, staying): (Vec<Attached>, Vec<Attached>) =
                     d.servers.drain(..).partition(|a| gone.contains(&a.server.id));
@@ -4685,6 +4725,7 @@ impl LspManager {
             }
             return;
         };
+        self.retire_json_resources_for_server(server.id);
         let peer = run.peer.clone();
         // A server we connected to without starting it (an open Godot editor) is not
         // ours to shut down: only the connection closes.

@@ -203,6 +203,7 @@ impl LspManager {
         }
         // Closed dependencies are absent from open-buffer snapshots. Retire
         // pending navigation before notifying servers of the observed changes.
+        self.retire_json_resources();
         self.project_files_revision.fetch_add(1, Ordering::AcqRel);
         let params = lsp::DidChangeWatchedFilesParams { changes };
         for server in self.servers.lock().iter() {

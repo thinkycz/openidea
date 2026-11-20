@@ -189,7 +189,11 @@ impl LspManager {
                 let mut docs = self.docs.lock();
                 for (_, doc) in &state.cells {
                     if let Some(d) = docs.get_mut(doc) {
-                        d.servers.extend(added.iter().map(|s| Attached { server: s.clone(), opened_gen: None }));
+                        d.servers.extend(added.iter().map(|s| Attached {
+                            server: s.clone(),
+                            opened_gen: None,
+                            resource: None,
+                        }));
                     }
                 }
             }
@@ -232,7 +236,11 @@ impl LspManager {
                     language: state.language.clone(),
                     version: 1,
                     text: Arc::new(DocText::new(&cell.source)),
-                    servers: state.servers.iter().map(|s| Attached { server: s.clone(), opened_gen: None }).collect(),
+                    servers: state
+                        .servers
+                        .iter()
+                        .map(|s| Attached { server: s.clone(), opened_gen: None, resource: None })
+                        .collect(),
                     compose_detected: false,
                     notebook: Some(path.to_owned()),
                     changed: std::time::Instant::now(),

@@ -217,6 +217,30 @@ async fn typed_translation_navigation_keeps_exact_callers_diagnostics_dirty_depe
             "typed translation client references must retain every exact caller and refuse ambiguous peers"
         );
         assert_eq!(found.len(), 17);
+        for (name, text) in [("lang/en/messages.php", EN), ("lang/fr/messages.php", FR)] {
+            let catalog = DocId::next();
+            mgr.did_open(catalog, &root.join(name), &LanguageId::new("php"), 1, text);
+            for include_declaration in [false, true] {
+                let refs = mgr
+                    .references(catalog, pos(text, "hello"), include_declaration, true, Default::default())
+                    .await
+                    .unwrap();
+                assert!(refs.incomplete.is_none(), "catalog-origin scan must retain completeness metadata");
+                let mut actual: Vec<_> = refs.locations.iter().map(location_key).collect();
+                let mut expected = expected.clone();
+                if !include_declaration {
+                    expected.retain(|target| !target.0.starts_with(root.join("lang")));
+                }
+                actual.sort();
+                expected.sort();
+                assert_eq!(
+                    actual, expected,
+                    "client catalog-origin references must match exact callers and declaration policy"
+                );
+            }
+            mgr.did_close(catalog);
+        }
+
         let diagnostic_doc = DocId::next();
         mgr.did_open(diagnostic_doc, &root.join("app/Diagnostics.php"), &LanguageId::new("php"), 1, DIAGNOSTICS);
         let items = settled_diagnostics(&events, &changed, &root.join("app/Diagnostics.php")).await;
@@ -263,6 +287,106 @@ async fn typed_translation_navigation_keeps_exact_callers_diagnostics_dirty_depe
             "typed navigation must preserve disk originals"
         );
     }
+    if let Err(panic) = outcome {
+        std::panic::resume_unwind(panic);
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires pinned PHPantom and Laravel 13.37 vendor fixture"]
+async fn catalog_client_tracks_unsaved_php_json_origins_restart_and_close() {
+    let vendor = PathBuf::from(std::env::var_os("OPENSTORM_TEST_FACTORY_VENDOR").expect("Laravel vendor fixture"))
+        .canonicalize()
+        .unwrap();
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path().canonicalize().unwrap();
+    let source = "<?php /* 😀 */ __('Fresh 😀'); trans('messages.draft');";
+    let php = "<?php /* 😀 */ return ['draft'=>'PHP value'];";
+    let json = r#"{"Fresh 😀":"JSON value"}"#;
+    for (name, text) in [
+        ("composer.json", COMPOSER),
+        ("app/Caller.php", source),
+        ("lang/en/control.php", "<?php return [];"),
+        ("lang/en.json", "{}"),
+    ] {
+        let path = root.join(name);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, text).unwrap();
+    }
+    std::os::unix::fs::symlink(vendor, root.join("vendor")).unwrap();
+    let engine = PathBuf::from(std::env::var_os("OPENSTORM_TEST_PHPANTOM_BIN").expect("pinned PHPantom"));
+    let mgr = LspManager::new(
+        root.clone(),
+        Arc::new(LanguageRegistry::from_configs(vec![route_handler_language(&engine)])),
+        Arc::new(|_| {}),
+    );
+    let outcome = std::panic::AssertUnwindSafe(async {
+        let caller = DocId::next();
+        mgr.did_open(caller, &root.join("app/Caller.php"), &LanguageId::new("php"), 1, source);
+        let php_doc = DocId::next();
+        mgr.did_open(php_doc, &root.join("lang/en/messages.php"), &LanguageId::new("php"), 1, php);
+        let json_doc = DocId::next();
+        mgr.did_open(json_doc, &root.join("lang/fr.json"), &LanguageId::new("json"), 1, json);
+        let cases = [
+            (php_doc, "lang/en/messages.php", php, "draft", "messages.draft", "PHP value"),
+            (json_doc, "lang/fr.json", json, "Fresh 😀", "Fresh 😀", "JSON value"),
+        ];
+        for restart in [false, true] {
+            if restart {
+                mgr.restart(mgr.servers()[0].id).await.unwrap();
+            }
+            for (doc, path, text, needle, key, value) in cases {
+                let mut expected =
+                    vec![expected_key(&root, "app/Caller.php", source, key), expected_key(&root, path, text, needle)];
+                expected.sort();
+                let targets = mgr.goto(caller, pos(source, key), GotoKind::Definition).await.unwrap();
+                assert_eq!(
+                    targets.iter().map(location_key).collect::<Vec<_>>(),
+                    vec![expected_key(&root, path, text, needle)],
+                    "caller must see unsaved catalog without a catalog request or disk file"
+                );
+                for origin in [caller, doc] {
+                    let at = if origin == caller { pos(source, key) } else { pos(text, needle) };
+                    let refs = mgr.references(origin, at, true, true, Default::default()).await.unwrap();
+                    assert!(refs.incomplete.is_none());
+                    let mut actual: Vec<_> = refs.locations.iter().map(location_key).collect();
+                    actual.sort();
+                    assert_eq!(
+                        actual, expected,
+                        "client unsaved PHP/JSON catalog origin must retain exact references after restart"
+                    );
+                }
+                let hover = mgr
+                    .hover(caller, pos(source, key), Default::default())
+                    .await
+                    .unwrap()
+                    .expect("unsaved catalog hover");
+                assert!(hover.contents.value.contains(value), "{hover:?}");
+                let list = settled_completion(&mgr, caller, pos(source, key)).await;
+                assert!(list.items.iter().any(|item| item.label == key), "{list:?}");
+                assert!(!root.join(path).exists());
+            }
+        }
+        mgr.did_close(php_doc);
+        mgr.did_close(json_doc);
+        for (_, path, _, _, key, _) in cases {
+            assert!(mgr.goto(caller, pos(source, key), GotoKind::Definition).await.unwrap().is_empty());
+            let refs = mgr.references(caller, pos(source, key), true, true, Default::default()).await.unwrap();
+            assert!(refs.incomplete.is_none());
+            assert_eq!(
+                refs.locations.iter().map(location_key).collect::<Vec<_>>(),
+                vec![expected_key(&root, "app/Caller.php", source, key)],
+                "closing an unsaved catalog must retire its declaration"
+            );
+            assert!(!root.join(path).exists());
+        }
+        assert_eq!(std::fs::read_to_string(root.join("app/Caller.php")).unwrap(), source);
+        assert_eq!(std::fs::read_to_string(root.join("lang/en.json")).unwrap(), "{}");
+    })
+    .catch_unwind()
+    .await;
+    mgr.shutdown_all().await;
+    assert!(mgr.servers().iter().all(|s| s.status == ServerStatus::Stopped && s.pid.is_none()));
     if let Err(panic) = outcome {
         std::panic::resume_unwind(panic);
     }

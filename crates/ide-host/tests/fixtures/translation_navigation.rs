@@ -127,6 +127,39 @@ async fn typed_translation_host_navigation_tracks_managed_dependencies_catalogs_
         found.sort();
         expected.sort();
         assert_eq!(found, expected, "managed translation references must refuse foreign caller");
+        for (name, text) in [("lang/en/messages.php", EN), ("lang/fr/messages.php", FR)] {
+            let catalog = f.project.documents.open(&f.root.join(name)).unwrap();
+            for include_declaration in [false, true] {
+                let refs = ide_host::ops::lsp::lsp_references(
+                    &f.host,
+                    "main",
+                    RequestId::next(),
+                    catalog.id,
+                    key_range(text, "hello").start,
+                    include_declaration,
+                    true,
+                    true,
+                    ide_host::ops::Channel::new(|_| {}),
+                )
+                .await
+                .unwrap();
+                assert!(refs.incomplete.is_none());
+                let mut actual: Vec<_> =
+                    refs.locations.into_iter().map(|target| (target.path.to_path_buf(), target.range)).collect();
+                let mut expected = expected.clone();
+                if !include_declaration {
+                    expected.retain(|target| !target.0.starts_with(f.root.join("lang")));
+                }
+                actual.sort();
+                expected.sort();
+                assert_eq!(
+                    actual, expected,
+                    "Host catalog-origin references must retain exact managed callers and declaration policy"
+                );
+            }
+            f.project.documents.close(catalog.id);
+        }
+
         let dependency = f.project.documents.open(&f.root.join("app/Shared/Selected.php")).unwrap();
         f.project.documents.replace_all(dependency.id, FOREIGN).unwrap();
         targets(&f, &[]).await;
@@ -147,6 +180,148 @@ async fn typed_translation_host_navigation_tracks_managed_dependencies_catalogs_
             assert_eq!(&std::fs::read_to_string(f.root.join(name)).unwrap(), text);
         }
         assert_eq!(std::fs::read_to_string(f.root.join("app/Caller.php")).unwrap(), CALLER);
+    })
+    .catch_unwind()
+    .await;
+    f.finish(outcome).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires pinned PHPantom, owned PHP and Laravel 13.37 vendor fixture"]
+async fn catalog_host_tracks_managed_php_json_changes_restart_and_discard() {
+    let vendor = PathBuf::from(std::env::var_os("OPENSTORM_TEST_FACTORY_VENDOR").expect("Laravel vendor fixture"))
+        .canonicalize()
+        .unwrap();
+    let caller = "<?php /* 😀 */ __('Fresh 😀'); trans('messages.draft');";
+    let php = "<?php /* 😀 */ return ['draft'=>'PHP value'];";
+    let json = r#"{"Fresh 😀":"JSON value"}"#;
+    let extra = vec![("lang/en/messages.php".into(), "<?php return [];".into()), ("lang/fr.json".into(), "{}".into())];
+    let (f, ()) = Fixture::new_at_with_fixture_setup(
+        caller,
+        &extra,
+        "app/Caller.php",
+        |root| std::os::unix::fs::symlink(&vendor, root.join("vendor")).unwrap(),
+        |_, _| (),
+    );
+    let outcome = std::panic::AssertUnwindSafe(async {
+        let php_doc = f.project.documents.open(&f.root.join("lang/en/messages.php")).unwrap();
+        assert_eq!(php_doc.language, ide_core::LanguageId::new("php"));
+        let json_doc = f.project.documents.open(&f.root.join("lang/fr.json")).unwrap();
+        assert_eq!(json_doc.language, ide_core::LanguageId::new("json"));
+        f.project.documents.replace_all(php_doc.id, php).unwrap();
+        f.project.documents.replace_all(json_doc.id, json).unwrap();
+        let cases = [
+            (php_doc.id, "lang/en/messages.php", php, "draft", "messages.draft", "PHP value"),
+            (json_doc.id, "lang/fr.json", json, "Fresh 😀", "Fresh 😀", "JSON value"),
+        ];
+        for restart in [false, true] {
+            if restart {
+                f.project.lsp.restart(f.project.lsp.servers()[0].id).await.unwrap();
+            }
+            for (doc, path, text, needle, key, value) in cases {
+                let targets = ide_host::ops::lsp::lsp_goto(
+                    &f.host,
+                    "main",
+                    f.doc,
+                    key_range(caller, key).start,
+                    GotoKind::Definition,
+                )
+                .await
+                .unwrap();
+                assert_eq!(
+                    targets.len(),
+                    1,
+                    "managed dirty catalog must be visible from its caller without a resource query"
+                );
+                assert_eq!(targets[0].path.to_path_buf(), f.root.join(path));
+                assert_eq!(targets[0].range, key_range(text, needle));
+                let mut expected = vec![
+                    (f.root.join("app/Caller.php"), key_range(caller, key)),
+                    (f.root.join(path), key_range(text, needle)),
+                ];
+                expected.sort();
+                for origin in [f.doc, doc] {
+                    let position =
+                        if origin == f.doc { key_range(caller, key).start } else { key_range(text, needle).start };
+                    let refs = ide_host::ops::lsp::lsp_references(
+                        &f.host,
+                        "main",
+                        RequestId::next(),
+                        origin,
+                        position,
+                        true,
+                        true,
+                        true,
+                        ide_host::ops::Channel::new(|_| {}),
+                    )
+                    .await
+                    .unwrap();
+                    assert!(refs.incomplete.is_none());
+                    let mut actual: Vec<_> =
+                        refs.locations.into_iter().map(|target| (target.path.to_path_buf(), target.range)).collect();
+                    actual.sort();
+                    assert_eq!(
+                        actual, expected,
+                        "Host dirty PHP/JSON catalog origin must preserve exact managed references"
+                    );
+                }
+                let hover = ide_host::ops::lsp::lsp_hover(
+                    &f.host,
+                    "main",
+                    RequestId::next(),
+                    f.doc,
+                    key_range(caller, key).start,
+                )
+                .await
+                .unwrap()
+                .expect("managed catalog hover");
+                assert!(hover.contents.value.contains(value), "{hover:?}");
+                let list = f.complete(key_range(caller, key).start).await;
+                assert!(list.items.iter().any(|item| item.label == key));
+                let snapshot = f.project.documents.snapshot(doc).unwrap();
+                assert!(snapshot.dirty);
+                assert_eq!(snapshot.text, text);
+            }
+        }
+        f.project.documents.close(php_doc.id);
+        f.project.documents.close(json_doc.id);
+        for (_, path, _, _, key, _) in cases {
+            assert!(
+                ide_host::ops::lsp::lsp_goto(
+                    &f.host,
+                    "main",
+                    f.doc,
+                    key_range(caller, key).start,
+                    GotoKind::Definition
+                )
+                .await
+                .unwrap()
+                .is_empty()
+            );
+            let refs = ide_host::ops::lsp::lsp_references(
+                &f.host,
+                "main",
+                RequestId::next(),
+                f.doc,
+                key_range(caller, key).start,
+                true,
+                true,
+                true,
+                ide_host::ops::Channel::new(|_| {}),
+            )
+            .await
+            .unwrap();
+            assert!(refs.incomplete.is_none());
+            assert_eq!(refs.locations.len(), 1);
+            assert_eq!(refs.locations[0].path.to_path_buf(), f.root.join("app/Caller.php"));
+            assert_eq!(refs.locations[0].range, key_range(caller, key));
+            assert_eq!(
+                std::fs::read_to_string(f.root.join(path)).unwrap(),
+                if path.ends_with(".json") { "{}" } else { "<?php return [];" }
+            );
+        }
+        assert_eq!(f.project.documents.snapshot(f.doc).unwrap().text, caller);
+        assert_eq!(std::fs::read_to_string(f.root.join("app/Caller.php")).unwrap(), caller);
     })
     .catch_unwind()
     .await;

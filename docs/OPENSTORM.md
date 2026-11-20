@@ -15,6 +15,37 @@ slice, commit and push it, and retain only the latest generated app. Native UI
 cases remain deferred/unverified; earlier native-first blocking checkpoints are
 historical and no longer prevent independent implementation.
 
+Client catalog adoption slice206 (2026-11-20, accepted; inactive186):
+The actual client and Host now verify catalog-origin references, including exact
+locations and includeDeclaration policy from both PHP declarations. A new client
+case opens named PHP/JSON catalogs before any disk file exists; caller-first
+navigation, both-origin references, UTF-16 ranges, completion, hover, restart
+replay and close retirement pass. A new Host case checks existing managed
+PHP/JSON files with dirty overlays through the same lifecycle and discard. Disk
+originals stay unchanged; JSON is detected by the fixture's real language
+registry without launching a global JSON server.
+
+Four exact cases fail on185 at the intended new catalog-origin assertions and
+pass on186 using byte-identical current workspace-feature-graph executables.
+All 69 client and 59 Host cases pass on186 with unchanged request deadlines.
+Fresh workspace checks pass 5,485 tests/250 ignores/the same 11 exclusions,
+all-target Clippy and formatting. Frontend passes 14,395 tests/eight skips,
+types, lint, format, Knip and build. Bindings fidelity, default185 checksum and
+53 controlled-backend browser flows pass. Source205 engine18,728/17 ignores/two
+bounded child groups, both Clippy modes and protocol/runtime fixture acceptance
+are reused against the exact signed186 bytes; no fresh engine compilation is
+claimed in206.
+
+The client JSON resource bridge admits only lang/ and resources/lang/ files;
+registered custom JSON roots need a separate guarded integration pass. Host
+untitled documents before first save are also outside this acceptance. Engine186
+stays inactive/unbundled; sole App119/default185 and signatures remain unchanged.
+The accepted128-case executable set replaces the prior set, and owned compiler
+and frontend output are removed. Native GUI remains user-skipped. All69 areas
+remain67 partial/two debugger-deferred; no blanket area completion is claimed.
+Evidence: artifacts/checks/slice206/acceptance.json, evaluation.json, gates.json,
+browser.json, frozen-runtimes.json and retention.json.
+
 Translation declaration usages slice205 (2026-11-20, source/protocol accepted; inactive186):
 PHP translation catalog declarations returned zero references while a caller of
 the same key returned 17 exact locations. The JSON declaration fallback also

@@ -95,8 +95,11 @@ impl Fixture {
         let composer: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(root.join("composer.json")).unwrap()).unwrap();
         assert_eq!(composer["autoload"]["psr-4"]["App\\"], "app/");
-        let mut php = ide_language::LanguageRegistry::load(None).unwrap().get(&LanguageId::new("php")).unwrap();
+        let registry = ide_language::LanguageRegistry::load(None).unwrap();
+        let mut php = registry.get(&LanguageId::new("php")).unwrap();
         php.language_servers.retain(|s| s.name == "phpantom");
+        let mut json = registry.get(&LanguageId::new("json")).unwrap();
+        json.language_servers.clear();
         let events = Arc::new(std::sync::Mutex::new(Vec::new()));
         let events_changed = Arc::new(tokio::sync::Notify::new());
         let listener = events.clone();
@@ -106,7 +109,7 @@ impl Fixture {
             config_dir: tmp.path().join("config"),
             data_dir: tmp.path().join("data"),
             local_data_dir: tmp.path().join("local-data"),
-            languages: Arc::new(ide_language::LanguageRegistry::from_configs(vec![php])),
+            languages: Arc::new(ide_language::LanguageRegistry::from_configs(vec![php, json])),
             syntax: Arc::default(),
             sink_for: Box::new(move |_| {
                 let events = listener.clone();

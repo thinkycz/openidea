@@ -15,6 +15,128 @@ slice, commit and push it, and retain only the latest generated app. Native UI
 cases remain deferred/unverified; earlier native-first blocking checkpoints are
 historical and no longer prevent independent implementation.
 
+Registered JSON buffer routing slice208 (2026-11-20, source/protocol accepted; inactive188):
+Engine187 admits registered custom JSON directories but routes standard JSON
+buffers into the nested Composer library. Closed catalog origins, dirty data and
+new unsaved locales consequently miss their consuming Laravel graph. Three
+public regressions fail before the fix. Actual187 transport records17 failures
+and eight additional shared-context failures; the failure receipts remain.
+
+Engine188 uses cached static JSON registrations as graph dependencies. A
+successful admission query records the closed resource's consuming context using
+existing ordered navigation tickets; an open resource retains its selected
+context. Unique registered applications also resolve closed package catalogs.
+Root matching avoids cloning/sorting the catalog table and adds no directory
+walk. The separate phpWorkbenchRegisteredJsonTranslations capability advertises
+custom-root standard buffer support in addition to187's query capability.
+
+Forwarded JSON remains data through open/change/close and semantic recovery.
+Workspace JSON discovery retains its prior filter. Engine187 also reports a PHP
+error and indexes a PHP class from a JSON value. Diagnostic recovery now records
+the current data revision without a PHP AST; native PHP collectors leave resource
+diagnostics to the resource language service. The actual PHP control still
+reports its unknown function. No PHP diagnostic is disabled for PHP documents.
+
+The first focused CI attempt passes three routing cases but rejects the new
+diagnostic test at its PHP control: the test omitted the symbol map required by
+FileDiagnosticContext. Existing diagnostic test helpers initialize it with
+update_ast. The corrected test does so for PHP and also seeds a prior PHP
+classification for JSON; positive and negative assertions remain intact.
+That correction changed only test setup. Its production source hashes match
+the preceding build. The pinned recipe and actual protocol probes are rerun;
+the old recipe, signed-artifact checksums, rejection and corrected-source
+receipts are retained.
+
+The next full suite catches an accidental broadening of the global resource
+filter:6979 unit cases pass, but the inherited config/en.json discovery assertion
+fails. The global predicate is restored to its original narrow rule; forwarded
+JSON retains the separate data guard. The existing assertion remains intact.
+Wrong-filter source, recipe and failure receipts remain; its binary and duplicate
+are retired after corrected acceptance. Final source/recipe/build, actual probes
+and full checks are rerun, including that exact discovery-policy regression.
+
+Actual Composer reload then exposes11 failures despite the pre-reload source's
+full18,742 suite passing. Dirty, never-saved and following JSON edits miss their
+consumer; shared reload loses both dirty values and its selected context. ready()
+filtered documents before provider roots existed and ownership restored too soon.
+Final188 replays registered JSON after initialization, remaps prior selected roots
+and unique consumers, and records routing after data delivery. A fifth public
+regression and unchanged before/after protocol probes cover the correction.
+Fifteen direct-reload phases and12 shared-reload phases/two dirty-value hovers
+pass without manually closing/reopening or resending resource buffers.
+
+Fresh checks: five focused public cases, the retained three JSON diagnostic-run
+ownership cases, seven admission cases, full18,743 primary tests/17 declared
+ignores/two bounded child groups, default and mem-audit all-target Clippy, fmt,
+pinned replay and optimized build all pass. The final raw checksum equals the
+build-first artifact; the identical signed binary is retained through acceptance.
+Plain-PHP12 syntax/runtime and Laravel121 syntax/387 actual Laravel13.37 runtime
+assertions/exactly three intentional analyzer diagnostics pass. Fresh24 metadata
+tests and actual188/all188 patch/default185 provenance checks pass.
+
+Actual signed188 stdio passes ten buffer phases, caller-first and catalog-first
+restart replay, exact UTF-16 references/definitions, dirty/discard lifecycle,
+sibling isolation and unchanged disk files. Eight shared-directory phases verify
+closed A/B context selection, active context retention, dirty data in both
+registered graphs and discard. JSON text produces no workspace class or PHP
+finding; a real PHP control reaches its explicit slow finding. A JSON resultId
+is reported as fast-or-full publication, never as a complete slow-phase barrier.
+The three initial probe files match their187 negative controls byte for byte,
+with the same deadlines. Both reload probes match their pre-replay188 negative
+controls. An exploratory retired-key origin expectation and an initial
+PHP readiness check against an intermediate fast result were corrected before
+acceptance; both versions and rejection evidence remain. No valid positive
+assertion or request budget was relaxed.
+A later shared-probe raw admission assertion rejects a reply without recording it;
+an ordinary instrumented run passes. A controlled pending resource publication
+returns-32801. Shared admission now uses the same existing20-second stale-response
+handler as navigation; only-32801 is eligible, while every other error and exact
+result remains strict. The updated identical probe still fails all eight cases on187
+and passes all eight on188. A separate busy control observes one-32801 and recovers
+to all eight exact results. No priming is added to the main probe. The initial
+unrecorded reply remains unattributed; no exact cause is assigned to it.
+
+Retained protocol controls pass26 registration/refusal decisions and three
+provider phases,17 exact catalog/caller references,13 positive/seven negative
+receivers, unsaved JSON two references/one definition, diagnostics and restart.
+Custom JSON providers pass three phases/two actual Laravel assertions. Four client
+and two Host controls pass with the unchanged frozen206 binaries, fingerprints,
+source hashes and original deadlines. Full128 acceptance on188 and the new
+protocol's client wiring remain pending. New client forwarding must check both
+query and buffer-routing capabilities and preserve revision/authority fences.
+
+Application code is unchanged since206: explicitly reuse its5,485 workspace
+passes/250 ignores/the same11 exclusions/final workspace Clippy and14,395 frontend
+tests/eight skips/types/lint/format/Knip/build/bindings/53 browser checks. No fresh
+root workspace or native GUI pass is claimed. Sole App119/default185 and the one
+latest frozen runtime test set remain unchanged. Engine188 is inactive/unbundled;
+client integration, full client adoption and promotion/packaging remain next.
+
+Cleanup: Removed 8228 files, 2.2GiB total. The owned workcopy, duplicate Laravel
+fixture, staging and rejected executables (226,910,192 bytes including
+the earlier identical duplicate) are removed. Canonical source/engine,
+pins, licenses/provenance, original PHP Workbench/reference/evaluation artifacts,
+sole App119 and latest runtime set are retained. No owned engine/compiler process
+remains. Native GUI is user-skipped; broader locale/project/profile,
+privacy/AI, platform/service and performance matrices, Host untitled first-save
+and older unattributed timeout remain open. All69 areas stay67 partial/two
+user-deferred debugger areas.
+Raw188 SHA256: c2236f31aef1bfa7c80bb542070a890df40ebb2b7f066685a7b970d29d680cfe.
+Signed188 SHA256: c006b599ed39caa523c3951884c9d80f91635c39a787b6c26dee0d74bed46518.
+Patch SHA256: 7e9a91fdf36daf2a4892bf0621992fe08609217341463affa427e009f334c84d.
+Rebuild using scripts/prepare-phpantom.py and scripts/build-phpantom.py with
+--pin engine/candidates/0.11.1-openstorm.188-source.json.
+Evidence: artifacts/checks/slice208/{input,red,diagnostic-root-cause,
+diagnostic-probe-review,test-fixture-root-cause,admission-readiness-root-cause,
+discovery-filter-root-cause,project-replay-root-cause,
+baseline187,baseline187-diagnostics,
+baseline187-shared-context,shared-context-control,preflight,freeze,early-wire,
+engine-gates,engine-test-summary,post-source,wire188-buffer,wire188-reload,
+wire188-shared-reload-shared-context,
+wire188-buffer-diagnostics,wire188-buffer-shared-context,wire188-resource,
+wire188,draft188-final,custom-json188,plain-fixture,laravel-fixture,
+quick-controls,metadata-checks,engine-retention,acceptance,delivery}.json.
+
 JSON resource admission slice207 (2026-11-20, source/protocol accepted; inactive187):
 The client currently forwards only application lang/ and resources/lang/ JSON.
 Engine187 supplies a typed, content-free registration query before sharing a

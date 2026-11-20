@@ -23,6 +23,9 @@ mod route_namespaces;
 #[cfg(unix)]
 #[path = "fixtures/translation_arguments.rs"]
 mod translation_arguments;
+#[cfg(unix)]
+#[path = "fixtures/translation_receivers.rs"]
+mod translation_receivers;
 #[path = "fixtures/view_arguments.rs"]
 mod view_arguments;
 

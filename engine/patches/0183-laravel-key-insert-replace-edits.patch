@@ -1,0 +1,312 @@
+diff --git a/docs/CHANGELOG.md b/docs/CHANGELOG.md
+index 9cfe3e06ee6d093ff1870767fad8bc508f88dd0d..266be1c212ab5968927a8aa2ce5de8a05ce6e952 100644
+--- a/docs/CHANGELOG.md
++++ b/docs/CHANGELOG.md
+@@ -1,3 +1,12 @@
++## OpenStorm .183 Laravel key insert/replace ranges
++
++Quoted Laravel key completion negotiates insert/replace support. Supporting
++clients keep prefix insertion for Enter and receive a complete quoted-token
++replacement range for Tab, including dotted or Unicode suffixes. Legacy clients
++receive a full-token text edit. Explicit middleware segments keep their bounded
++ranges; open-ended, interpolated and multiline forms retain conservative ranges.
++The capability survives blocking clones and project initialization.
++
+ ## OpenStorm .182 typed translation receivers
+ 
+ Translation locale and replacement-placeholder completion supports typed
+diff --git a/src/backend/startup.rs b/src/backend/startup.rs
+index 5237f170396eb72794377818f7b41e8d00b797fc..bd864f44d2cc85d7c540392c257421d189b931aa 100644
+--- a/src/backend/startup.rs
++++ b/src/backend/startup.rs
+@@ -49,6 +49,18 @@ impl Backend {
+             self.set_client_indexing_options(options);
+         }
+ 
++        self.supports_insert_replace.store(
++            params
++                .capabilities
++                .text_document
++                .as_ref()
++                .and_then(|td| td.completion.as_ref())
++                .and_then(|completion| completion.completion_item.as_ref())
++                .and_then(|item| item.insert_replace_support)
++                .unwrap_or(false),
++            Ordering::Release,
++        );
++
+         let client_supports_pull = params
+             .capabilities
+             .text_document
+diff --git a/src/completion/laravel_string_keys/mod.rs b/src/completion/laravel_string_keys/mod.rs
+index 8c9a0940a39ccccdaa573915197cb7a0b2e378b6..8a2598739ddc11f770c811094e84eb0d5294be1e 100644
+--- a/src/completion/laravel_string_keys/mod.rs
++++ b/src/completion/laravel_string_keys/mod.rs
+@@ -9,7 +9,7 @@
+ //! - `__('|')` / `trans('|')` / `Lang::get('|')` → translation keys
+ //! - `env('|')` / `Env::get('|')` → environment variables
+ 
+-use std::sync::Arc;
++use std::sync::{Arc, atomic::Ordering};
+ 
+ use tower_lsp::lsp_types::*;
+ 
+@@ -213,6 +213,7 @@ impl Backend {
+             ctx.content_start_offset,
+             position,
+             ctx.replacement,
++            self.supports_insert_replace.load(Ordering::Acquire),
+         )
+     }
+ 
+@@ -250,16 +251,16 @@ impl Backend {
+             sc.string_content_start,
+             position,
+             None,
++            self.supports_insert_replace.load(Ordering::Acquire),
+         )
+     }
+ }
+ 
+ /// Offer `names` as replacements for the string the cursor is typing.
+ ///
+-/// Each item replaces the whole literal from `content_start` to the cursor
+-/// rather than inserting at it, so a dotted name is not mangled by the
+-/// editor's word-based filtering (which treats `.` as a boundary and would
+-/// otherwise leave `users.users.profile` behind).
++/// Insertion keeps the prefix-to-cursor range. Replacement consumes the
++/// closed literal's suffix as well, including dots. Legacy clients receive
++/// a full-token edit; explicit middleware segments keep their own range.
+ fn string_key_response(
+     names: Vec<String>,
+     kind: CompletionItemKind,
+@@ -267,6 +268,7 @@ fn string_key_response(
+     content_start: usize,
+     position: Position,
+     replacement: Option<(usize, char)>,
++    supports_insert_replace: bool,
+ ) -> Option<CompletionResponse> {
+     if names.is_empty() {
+         return None;
+@@ -277,6 +279,15 @@ fn string_key_response(
+             crate::text_position::offset_to_position(content, end)
+         }),
+     };
++    let replace_range = replacement
++        .is_none()
++        .then(|| quoted_key_end(content, content_start, position))
++        .flatten()
++        .map(|end| Range {
++            start: edit_range.start,
++            end,
++        })
++        .unwrap_or(edit_range);
+     let items: Vec<CompletionItem> = names
+         .into_iter()
+         .enumerate()
+@@ -294,13 +305,40 @@ fn string_key_response(
+                 kind: Some(kind),
+                 sort_text: Some(format!("{:05}", i)),
+                 filter_text: Some(name.clone()),
+-                text_edit: Some(CompletionTextEdit::Edit(TextEdit {
+-                    range: edit_range,
+-                    new_text,
+-                })),
++                text_edit: Some(if supports_insert_replace && replace_range != edit_range {
++                    CompletionTextEdit::InsertAndReplace(InsertReplaceEdit {
++                        new_text,
++                        insert: edit_range,
++                        replace: replace_range,
++                    })
++                } else {
++                    CompletionTextEdit::Edit(TextEdit {
++                        range: replace_range,
++                        new_text,
++                    })
++                }),
+                 ..Default::default()
+             })
+         })
+         .collect();
+     (!items.is_empty()).then_some(CompletionResponse::Array(items))
+ }
++
++fn quoted_key_end(content: &str, start: usize, cursor: Position) -> Option<Position> {
++    let bytes = content.as_bytes();
++    let quote = *bytes.get(start.checked_sub(1)?)?;
++    if !matches!(quote, b'\'' | b'"') {
++        return None;
++    }
++    let offset = crate::text_position::position_to_offset(content, cursor) as usize;
++    let end = (offset..bytes.len())
++        .find(|index| bytes[*index] == quote && context::is_unescaped(bytes, *index))?;
++    if quote == b'"'
++        && (start..end).any(|index| bytes[index] == b'$' && context::is_unescaped(bytes, index))
++    {
++        return None;
++    }
++    let start_position = crate::text_position::offset_to_position(content, start);
++    let end_position = crate::text_position::offset_to_position(content, end);
++    (start_position.line == cursor.line && end_position.line == cursor.line).then_some(end_position)
++}
+diff --git a/src/completion/laravel_string_keys/tests.rs b/src/completion/laravel_string_keys/tests.rs
+index b7928f9841fe07b153d361ddc019b94bdd79e816..e9bba3c194bd10655885acf831dc0191cb727c81 100644
+--- a/src/completion/laravel_string_keys/tests.rs
++++ b/src/completion/laravel_string_keys/tests.rs
+@@ -1183,3 +1183,127 @@ fn concurrent_first_callers_build_the_enumeration_once() {
+         assert_eq!(&names[..], &["home".to_string()]);
+     }
+ }
++
++#[test]
++fn quoted_key_edits_keep_insert_and_full_token_replace_ranges() {
++    for marked in [
++        "<?php /* 😀 */ config('app.na|me');",
++        "<?php /* 😀 */ config(\"app.na|me.old\");",
++        "<?php /* 😀 */ config('app.na|me\\'old');",
++        "<?php /* 😀 */ config('app.na|me😀.old');",
++    ] {
++        let cursor = marked.find('|').unwrap();
++        let content = marked.replacen('|', "", 1);
++        let start = content[..cursor].rfind(['\'', '"']).unwrap() + 1;
++        let end = content.rfind(['\'', '"']).unwrap();
++        let at = crate::text_position::offset_to_position(&content, cursor);
++        let insert = Range::new(
++            crate::text_position::offset_to_position(&content, start),
++            at,
++        );
++        let replace = Range::new(
++            insert.start,
++            crate::text_position::offset_to_position(&content, end),
++        );
++        for modern in [false, true] {
++            let result = string_key_response(
++                vec!["app.name".into()],
++                CompletionItemKind::VALUE,
++                &content,
++                start,
++                at,
++                None,
++                modern,
++            )
++            .unwrap();
++            let items = completion_response_items(result);
++            let edit = items[0].text_edit.as_ref().unwrap();
++            let (range, inserted) = match edit {
++                CompletionTextEdit::InsertAndReplace(edit) => {
++                    assert!(modern);
++                    assert_eq!(edit.insert, insert);
++                    assert_eq!(edit.replace, replace);
++                    (edit.replace, edit.new_text.as_str())
++                }
++                CompletionTextEdit::Edit(edit) => {
++                    assert!(!modern);
++                    assert_eq!(edit.range, replace);
++                    (edit.range, edit.new_text.as_str())
++                }
++            };
++            assert_eq!(range, replace, "whole quoted key after UTF-16 emoji");
++            let from = crate::text_position::position_to_offset(&content, range.start) as usize;
++            let to = crate::text_position::position_to_offset(&content, range.end) as usize;
++            assert_eq!(
++                format!("{}{}{}", &content[..from], inserted, &content[to..]),
++                format!("{}app.name{}", &content[..start], &content[end..])
++            );
++        }
++    }
++}
++
++#[test]
++fn quoted_key_edits_keep_open_end_segment_and_interpolation_boundaries() {
++    for (marked, explicit) in [
++        ("<?php config('app.na|", None),
++        ("<?php config(\"app.na|me.$suffix\");", None),
++        ("<?php config('app.na|me\n.other');", None),
++        ("<?php config('app.na|me,other');", Some(',')),
++    ] {
++        let cursor = marked.find('|').unwrap();
++        let content = marked.replacen('|', "", 1);
++        let start = content[..cursor].rfind(['\'', '"']).unwrap() + 1;
++        let at = crate::text_position::offset_to_position(&content, cursor);
++        let replacement = explicit.map(|byte| (content.find(byte).unwrap(), '\''));
++        let result = string_key_response(
++            vec!["app.name".into()],
++            CompletionItemKind::VALUE,
++            &content,
++            start,
++            at,
++            replacement,
++            true,
++        )
++        .unwrap();
++        let items = completion_response_items(result);
++        let Some(CompletionTextEdit::Edit(edit)) = &items[0].text_edit else {
++            panic!("keep explicit or unsupported ranges")
++        };
++        assert_eq!(
++            edit.range.end,
++            replacement
++                .map(|(end, _)| crate::text_position::offset_to_position(&content, end))
++                .unwrap_or(at)
++        );
++    }
++}
++
++#[tokio::test]
++async fn insert_replace_capability_is_negotiated_and_survives_blocking_clones() {
++    use std::sync::atomic::Ordering;
++    for advertised in [None, Some(false), Some(true)] {
++        let backend = crate::Backend::new_test();
++        let mut capabilities = serde_json::json!({});
++        if let Some(value) = advertised {
++            capabilities = serde_json::json!({"textDocument":{"completion":{"completionItem":{"insertReplaceSupport":value}}}});
++        }
++        backend
++            .on_initialize(InitializeParams {
++                capabilities: serde_json::from_value(capabilities).unwrap(),
++                ..Default::default()
++            })
++            .await
++            .unwrap();
++        assert_eq!(
++            backend.supports_insert_replace.load(Ordering::Acquire),
++            advertised.unwrap_or(false)
++        );
++        assert_eq!(
++            backend
++                .clone_for_blocking()
++                .supports_insert_replace
++                .load(Ordering::Acquire),
++            advertised.unwrap_or(false)
++        );
++    }
++}
+diff --git a/src/lib.rs b/src/lib.rs
+index c13a21210ca9c69d36e217318ce77f63abff8a5f..063eba844e57455b67c785ef48802759d6357b2b 100644
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -1022,6 +1022,8 @@ pub struct Backend {
+     /// `schedule_diagnostics_for_open_files`.  When `false`, the server
+     /// falls back to the push model (`textDocument/publishDiagnostics`).
+     pub(crate) supports_pull_diagnostics: Arc<std::sync::atomic::AtomicBool>,
++    /// The client can choose insertion or full-token replacement for completion.
++    pub(crate) supports_insert_replace: Arc<std::sync::atomic::AtomicBool>,
+     /// Whether the client supports file rename operations in workspace edits.
+     ///
+     /// Set during `initialize` based on the client's
+@@ -1404,6 +1406,7 @@ impl Backend {
+             mago_analyze_tool: ExternalToolWorker::new(),
+ 
+             supports_pull_diagnostics: Arc::new(std::sync::atomic::AtomicBool::new(false)),
++            supports_insert_replace: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+             supports_file_rename: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+             supports_file_create: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+             supports_work_done_progress: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+@@ -2248,6 +2251,7 @@ impl Backend {
+             mago_lint_tool: self.mago_lint_tool.clone(),
+             mago_analyze_tool: self.mago_analyze_tool.clone(),
+             supports_pull_diagnostics: Arc::clone(&self.supports_pull_diagnostics),
++            supports_insert_replace: Arc::clone(&self.supports_insert_replace),
+             supports_file_rename: Arc::clone(&self.supports_file_rename),
+             supports_file_create: Arc::clone(&self.supports_file_create),
+             supports_work_done_progress: Arc::clone(&self.supports_work_done_progress),

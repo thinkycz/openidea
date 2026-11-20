@@ -440,6 +440,33 @@ describe("applying completions", () => {
     await vi.waitFor(() => expect(view.state.selection.main.head).toBe(17));
   });
 
+  for (const mode of ["insert", "replace"] as const) {
+    it(`applies PHP dotted-key ${mode} ranges after emoji and preserves undo`, () => {
+      const { view, req } = setup("<?php /* 😀 */ $translator->get('mess|ages.hellO.old');", "", [history()]);
+      const phpReq = { ...req, path: "/p/routes/web.php", language: "PHP" };
+      const original = req.text.toString();
+      const start = original.indexOf("'messages.") + 1;
+      const end = original.indexOf("'", start);
+      const completion = makeCompletion(
+        item({
+          label: "messages.hello",
+          kind: "value",
+          insertText: "messages.hello",
+          replaceRange: { start: { line: 0, col: start }, end: { line: 0, col: req.pos } },
+          replaceRangeTab: { start: { line: 0, col: start }, end: { line: 0, col: end } },
+        }),
+        phpReq,
+      );
+      applyLspCompletion(view, completion, start, req.pos, mode);
+      const expected = `${original.slice(0, start)}messages.hello${original.slice(mode === "replace" ? end : req.pos)}`;
+      expect(view.state.doc.toString()).toBe(expected);
+      expect(undo(view)).toBe(true);
+      expect(view.state.doc.toString()).toBe(original);
+      expect(redo(view)).toBe(true);
+      expect(view.state.doc.toString()).toBe(expected);
+    });
+  }
+
   it("uses the server's ⇥ range when given", () => {
     const { view, req } = setup("a.cr|Order.x");
     const c = makeCompletion(

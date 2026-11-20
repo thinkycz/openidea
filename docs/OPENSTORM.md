@@ -15,6 +15,69 @@ slice, commit and push it, and retain only the latest generated app. Native UI
 cases remain deferred/unverified; earlier native-first blocking checkpoints are
 historical and no longer prevent independent implementation.
 
+Client completion slice199 (2026-11-20, automated acceptance; inactive engine183):
+Exercise typed translator locale, placeholder and key completion through the actual
+LspManager, completion resolve and core text-edit application. The same client
+executable reproduces the missing typed locale on engine181 and a separate dotted-key
+Tab failure on engine182. Prefix-only key edits let the editor retain a dotted suffix.
+Engine183 negotiates insert/replace support and supplies separate prefix insertion
+and full static quoted-key replacement ranges. Enter retains insertion semantics;
+Tab consumes the complete key. Legacy clients receive a full-token TextEdit.
+Explicit middleware segments keep their bounded ranges. Open-ended, interpolated
+and multiline forms keep conservative ranges; their broader acceptance remains open.
+
+Three engine regressions cover capability negotiation/blocking clones, escaped
+quotes, Unicode, whole-token replacement and conservative boundaries. Two editor
+regressions verify actual Enter/Tab application plus undo/redo after emoji.
+The current client exercises 22 complete and 22 bare translator cases, positive and
+negative unions, a misspelled placeholder, five unfinished buffers, unsaved catalog
+and cross-file receiver-type changes, import/namespace changes, restart and
+close/reopen. Resolve preserves plain text, ranges and imports; Tab edits leave
+no duplicate suffix. Original disk files and server shutdown are checked.
+
+Fresh fixture validation passes 208 syntax inputs and 52 actual Laravel 13.37
+runtime checks. Composer PSR-4 selection is checked by reflection against the exact
+Selected.php file. The final signed engine passes 22 complete and 22 bare stdio
+cases, 44 syntax/runtime checks, five incomplete-buffer/restoration cases, and
+exactly the retained fixture's three intentional analyzer diagnostics. Ten further
+modern/legacy protocol cases cover config, translation, view and environment keys,
+with 20 syntax checks. Only previously approved synthetic environment values are
+used in disposable fixtures; existing environment files remain unchanged.
+
+Frozen source replay matches all files/symlinks. Full engine validation passes
+18,710 primary tests, 17 declared ignores and two bounded child groups. Both
+all-target Clippy configurations, formatting, source fingerprint and optimized
+build pass. Raw SHA256: 54d6189f88f513fcec719b066deb6e6a86c289cbf637122e334966e2bd786b0a.
+Signed SHA256: fe2ca7791e5e0b202a0c71186115cbb60cbfd9626ab7e14a055d91c7cd234506.
+Patch SHA256: 38c1352f6548a22c7de46a75bd07c39bdfa35b6c8b5825f4fb63031158b7757b.
+
+Fresh root gates pass: 5,485 Rust tests, 246 declared ignores (one new external-engine
+fixture), the same 11 existing exclusions, workspace all-target Clippy and formatting.
+Frontend: 14,395 passed/eight skipped, types including e2e, lint, formatting, Knip
+and production build. Generated bindings and command snapshots match their prior
+hashes. All 67 actual client and 57 Host cases pass on final signed183 with protected
+fixture originals unchanged. All 53 selected browser code-insight/editor/Laravel
+flows pass with controlled backend metadata/IPC. These establish automated client
+and editor acceptance; native UI remains explicitly user-skipped.
+
+Candidate183 remains inactive. Default source/resources and sole App 0.1.117 retain
+engine181 and their original hashes/deep strict ad-hoc signature. The app predates
+the latest upstream merge and this slice; promotion/packaging remains the next
+separate slice. No replacement bundle, installation, publishing, migration,
+updater activation, deployment or debugger expansion. All 69 statuses remain
+67 partial and two user-deferred. Broader receiver/locale/privacy/platform/service
+matrices and the older unattributed startup timeout remain open.
+
+Removed 8228 files, 2.2GiB total; the exact duplicate engine workcopy is removed.
+Root compiler output (27.1 GiB) and frontend dist output are also removed. Canonical source/engine,
+pins, licenses/provenance, PHP Workbench and prior evaluation artifacts remain.
+Evidence: artifacts/checks/slice199/{red-client,green-client,focused,fixture-checks,
+freeze,engine-gates,engine-test-summary,wire183,bare183,key-wire,post-source,gates,
+workspace-summary,client-host-real,integration,engine-retention,retention,acceptance}.json.
+Rebuild with the 183-source pin passed to scripts/prepare-phpantom.py and
+scripts/build-phpantom.py. Git history and the local delivery receipt record
+commit/push and remote read-back.
+
 Typed translator slice198 (2026-11-20, source/protocol accepted; inactive182):
 Locale and replacement-placeholder completion supports typed Translator and
 translation contract instance calls, null-safe receivers, typed properties,

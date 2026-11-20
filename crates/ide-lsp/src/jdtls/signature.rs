@@ -60,7 +60,7 @@ pub(super) fn changed(
 
 impl LspManager {
     pub(super) async fn jdtls_target(&self, doc: DocId, feature: &str) -> IdeResult<(DocSnap, Target)> {
-        let (snap, targets) = self.doc_targets(doc, feature, |_| true).await?;
+        let (snap, targets) = self.doc_targets(doc, feature, |_| true, None).await?;
         let t = targets
             .into_iter()
             .find(|t| t.server.name == SERVER)

@@ -54,7 +54,7 @@ impl LspManager {
         cancel: &CancellationToken,
     ) -> IdeResult<(R, DocSnap, Target)> {
         let (snap, mut targets) =
-            self.doc_targets(doc, feature(kind), |c| c.commands().iter().any(|c| c == command)).await?;
+            self.doc_targets(doc, feature(kind), |c| c.commands().iter().any(|c| c == command), Some(cancel)).await?;
         let t = targets.swap_remove(0);
         let at = snap.position(&t, pos);
         let mut arguments = vec![json!(snap.uri), json!(at.line), json!(at.character), json!(kind)];

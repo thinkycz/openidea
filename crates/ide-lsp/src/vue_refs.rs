@@ -59,7 +59,7 @@ impl LspManager {
 
     async fn definition_file(&self, doc: DocId, pos: Pos) -> Option<PathBuf> {
         let (method, cap, feature) = goto_method(GotoKind::Definition);
-        let (snap, targets) = self.doc_targets(doc, feature, |c| c.has(cap)).await.ok()?;
+        let (snap, targets) = self.doc_targets(doc, feature, |c| c.has(cap), None).await.ok()?;
         let found = self.goto_in(&snap, &targets, method, pos, None, None).await.ok()?;
         // The import binding itself is no answer.
         found.into_iter().find(|l| l.uri.is_none() && *l.path != snap.path).map(|l| l.path.into_path_buf())

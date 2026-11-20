@@ -1,6 +1,7 @@
 //! Typed PHPantom extensions. Receipts refer to the exact UTF-8 overlay sent
 //! to this engine generation, including unsaved dependencies.
 mod resources;
+pub(crate) use resources::JsonResourceWitness;
 pub use resources::PhpJsonTranslationResource;
 
 use super::*;
@@ -467,7 +468,7 @@ impl LspManager {
             () = cancel.cancelled() => return Err(IdeError::cancelled()),
             result = self.doc_targets(doc, "Laravel route handler", |caps| {
                 caps.raw.pointer("/experimental/phpWorkbenchRouteHandler").and_then(Value::as_bool) == Some(true)
-            }) => result?,
+            }, Some(&cancel)) => result?,
         };
         if snap.language.as_str() != "php" || !snap.uri.as_str().starts_with("file:") {
             return Err(IdeError::unavailable("Open a PHP source to find its route handler"));
@@ -532,7 +533,7 @@ impl LspManager {
             return Err(IdeError::invalid("Laravel query limit must be between 1 and 5000"));
         }
         let capability = format!("/experimental/phpWorkbench{feature}");
-        let snap = self.snapshot(doc)?;
+        let mut snap = self.snapshot(doc)?;
         let files_revision = self.project_files_revision.load(std::sync::atomic::Ordering::Acquire);
         // Static project queries may use the existing safe JSON translation
         // bridge. Keep generic PHP operations excluded in doc_targets.
@@ -559,6 +560,7 @@ impl LspManager {
             .into_iter()
             .find(|target| self.php_resource_supported(&snap.language, &target.server, &target.caps()))
             .ok_or_else(|| unsupported(&snap.servers, feature))?;
+        self.sync_php_json_resources(&mut snap, std::slice::from_ref(&target), cancel).await?;
         let before = self.navigation_sources(&snap, &target)?;
         if before.files_revision != files_revision {
             return Err(IdeError::new(ErrorKind::OutOfSync, "Project roots or files changed during Laravel lookup"));

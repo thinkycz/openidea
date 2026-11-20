@@ -32,7 +32,7 @@ fn refactors(caps: &ServerCaps) -> bool {
 impl LspManager {
     /// The server of `doc` that answers `phoxite/refactor/*`, when one is attached.
     pub(crate) async fn phoxite_refactor_target(&self, doc: DocId) -> Option<(DocSnap, Target)> {
-        let (snap, mut targets) = self.doc_targets(doc, "refactorings", refactors).await.ok()?;
+        let (snap, mut targets) = self.doc_targets(doc, "refactorings", refactors, None).await.ok()?;
         Some((snap, targets.swap_remove(0)))
     }
 

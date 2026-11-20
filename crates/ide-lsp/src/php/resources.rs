@@ -1,6 +1,7 @@
 use super::*;
 mod composer;
 mod references;
+mod sync;
 use composer::ComposerInputs;
 
 /// A content-free registration decision for one consuming PHP server generation.
@@ -11,7 +12,13 @@ pub struct PhpJsonTranslationResource {
     root: Option<PathBuf>,
     target: Target,
     sources: NavigationSnapshot,
-    composer: Option<ComposerInputs>,
+    composer: Option<Arc<ComposerInputs>>,
+}
+
+pub(crate) struct JsonResourceWitness {
+    project: PathBuf,
+    resource: PathBuf,
+    composer: Option<Arc<ComposerInputs>>,
 }
 
 impl std::fmt::Debug for PhpJsonTranslationResource {

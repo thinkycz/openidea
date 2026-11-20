@@ -190,25 +190,7 @@ impl LspManager {
         if !self.execution_allowed.load(Ordering::Acquire) {
             return Err(IdeError::unavailable("Language-server execution is disabled"));
         }
-        if composer.file_name().is_none_or(|name| name != "composer.json")
-            || !composer.is_absolute()
-            || !composer.starts_with(self.project_root_for(composer))
-        {
-            return Err(IdeError::invalid("Select a Composer manifest in an opened project or content root"));
-        }
-        if resource.extension().is_none_or(|ext| ext != "json")
-            || resource.file_stem().is_none_or(|stem| stem.is_empty())
-        {
-            return Err(IdeError::invalid("Expected a JSON locale file"));
-        }
-        let revision = self.project_files_revision.load(Ordering::Acquire);
-        let buffers = self.composer_buffers(composer);
-        let disk = composer_disk(composer, resource, &buffers, &cancel).await?;
-        if !self.composer_buffers_current(composer, &buffers)
-            || self.project_files_revision.load(Ordering::Acquire) != revision
-        {
-            return Err(IdeError::new(ErrorKind::OutOfSync, "Composer project changed before resource lookup"));
-        }
+        let (inputs, revision) = self.composer_resource_inputs(composer, resource, &cancel).await?;
         let manager = self.me.upgrade().ok_or_else(IdeError::cancelled)?;
         let project = composer.to_owned();
         let servers = tokio::select! {
@@ -243,10 +225,62 @@ impl LspManager {
             root: None,
             target,
             sources,
-            composer: Some(ComposerInputs { disk, buffers }),
+            composer: Some(Arc::new(inputs)),
         };
         self.php_json_translation_resource_current(&receipt, cancel.clone()).await?;
         self.query_json_translation_resource(receipt, cancel).await
+    }
+
+    async fn composer_resource_inputs(
+        &self,
+        composer: &Path,
+        resource: &Path,
+        cancel: &CancellationToken,
+    ) -> IdeResult<(ComposerInputs, u64)> {
+        if composer.file_name().is_none_or(|name| name != "composer.json")
+            || !composer.is_absolute()
+            || !composer.starts_with(self.project_root_for(composer))
+        {
+            return Err(IdeError::invalid("Select a Composer manifest in an opened project or content root"));
+        }
+        if resource.extension().is_none_or(|ext| ext != "json")
+            || resource.file_stem().is_none_or(|stem| stem.is_empty())
+        {
+            return Err(IdeError::invalid("Expected a JSON locale file"));
+        }
+        let revision = self.project_files_revision.load(Ordering::Acquire);
+        let buffers = self.composer_buffers(composer);
+        let disk = composer_disk(composer, resource, &buffers, cancel).await?;
+        if !self.composer_buffers_current(composer, &buffers)
+            || self.project_files_revision.load(Ordering::Acquire) != revision
+        {
+            return Err(IdeError::new(ErrorKind::OutOfSync, "Composer project changed before resource lookup"));
+        }
+        Ok((ComposerInputs { disk, buffers }, revision))
+    }
+
+    pub(super) async fn json_resource_on_target(
+        &self,
+        composer: &Path,
+        resource: &Path,
+        source: &DocSnap,
+        target: &Target,
+        cancel: &CancellationToken,
+    ) -> IdeResult<PhpJsonTranslationResource> {
+        let (inputs, revision) = self.composer_resource_inputs(composer, resource, cancel).await?;
+        let sources = self.navigation_sources(source, target)?;
+        if sources.files_revision != revision || !self.execution_allowed.load(Ordering::Acquire) {
+            return Err(IdeError::cancelled());
+        }
+        let receipt = PhpJsonTranslationResource {
+            project: composer.to_owned(),
+            resource: resource.to_owned(),
+            root: None,
+            target: target.clone(),
+            sources,
+            composer: Some(Arc::new(inputs)),
+        };
+        self.query_json_translation_resource(receipt, cancel.clone()).await
     }
 
     pub(super) async fn current_composer_resource_query(

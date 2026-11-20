@@ -1,13 +1,35 @@
 use super::*;
 
-struct ResourceSession<'a> {
+pub(super) struct ResourceSession<'a> {
     manager: &'a LspManager,
     target: Target,
     doc: DocId,
     cancel: CancellationToken,
+    retained: bool,
+    pub(super) witness: Arc<JsonResourceWitness>,
 }
 
 impl ResourceSession<'_> {
+    pub(super) fn retain(mut self) -> IdeResult<()> {
+        let mut docs = self.manager.docs.lock();
+        let resource = docs
+            .get_mut(&self.doc)
+            .and_then(|doc| {
+                doc.servers.iter_mut().find(|attached| {
+                    attached.server.id == self.target.server.id
+                        && attached.opened_gen == Some(self.target.run.generation)
+                })
+            })
+            .and_then(|attached| attached.resource.as_mut())
+            .ok_or_else(IdeError::cancelled)?;
+        if resource.cancel.is_cancelled() || self.cancel.is_cancelled() {
+            return Err(IdeError::cancelled());
+        }
+        resource.persistent = true;
+        self.retained = true;
+        Ok(())
+    }
+
     fn finish(self, receipt: &mut PhpJsonTranslationResource) -> IdeResult<()> {
         let mut docs = self.manager.docs.lock();
         if self.cancel.is_cancelled()
@@ -33,6 +55,9 @@ impl ResourceSession<'_> {
 
 impl Drop for ResourceSession<'_> {
     fn drop(&mut self) {
+        if self.retained {
+            return;
+        }
         self.manager.retire_json_resources_in(&mut self.manager.docs.lock(), |doc, _, _, attached| {
             doc == self.doc
                 && attached.server.id == self.target.server.id
@@ -72,6 +97,7 @@ impl LspManager {
     }
 
     pub(crate) fn retire_json_resources(&self) {
+        self.invalidate_json_preparation();
         if self.json_resource_count.load(Ordering::Acquire) != 0 {
             self.retire_json_resources_in(&mut self.docs.lock(), |_, _, _, _| true);
         }
@@ -103,6 +129,13 @@ impl LspManager {
     }
 
     pub(crate) fn retire_json_resources_for_document(&self, docs: &mut HashMap<DocId, DocState>, doc: DocId) {
+        if docs.get(&doc).is_some_and(|source| Self::json_catalog_path(&source.path, &source.uri, &source.language)) {
+            self.record_json_catalog_change();
+        } else if docs.get(&doc).is_some_and(|source| {
+            source.language.as_str() == "php" || source.path.file_name().is_some_and(|name| name == "composer.json")
+        }) {
+            self.invalidate_json_preparation();
+        }
         if self.json_resource_count.load(Ordering::Acquire) == 0 {
             return;
         }
@@ -137,7 +170,7 @@ impl LspManager {
         Ok(())
     }
 
-    fn open_json_session<'a>(
+    pub(super) fn open_json_session<'a>(
         &'a self,
         snap: &DocSnap,
         receipt: &mut PhpJsonTranslationResource,
@@ -172,10 +205,20 @@ impl LspManager {
         }
         let doc_id = doc_id.expect("current JSON resource document");
         let cancel = CancellationToken::new();
+        let witness = Arc::new(JsonResourceWitness {
+            project: receipt.project.clone(),
+            resource: receipt.resource.clone(),
+            composer: receipt.composer.clone(),
+        });
         docs.get_mut(&doc_id).expect("current JSON resource document").servers.push(Attached {
             server: target.server.clone(),
             opened_gen: Some(target.run.generation),
-            resource: Some(JsonResourceAttachment { selector: receipt.project.clone(), cancel: cancel.clone() }),
+            resource: Some(JsonResourceAttachment {
+                selector: receipt.project.clone(),
+                cancel: cancel.clone(),
+                persistent: false,
+                witness: witness.clone(),
+            }),
         });
         self.json_resource_count.fetch_add(1, Ordering::AcqRel);
         receipt.sources.resources_revision = target.server.resource_revision.fetch_add(1, Ordering::AcqRel) + 1;
@@ -186,7 +229,8 @@ impl LspManager {
             language: snap.language.clone(),
             text: snap.text.clone(),
         });
-        let session = ResourceSession { manager: self, target: target.clone(), doc: doc_id, cancel };
+        let session =
+            ResourceSession { manager: self, target: target.clone(), doc: doc_id, cancel, retained: false, witness };
         let params = json!({"textDocument":{"uri":snap.uri,"languageId":"json","version":snap.version,"text":snap.text.as_str()}});
         let sent = target.run.peer.notify("textDocument/didOpen", params);
         drop(docs);
@@ -208,6 +252,9 @@ impl LspManager {
             () = cancel.cancelled() => return Err(IdeError::cancelled()),
             gate = self.php_json_resource_gate.lock() => gate,
         };
+        self.retire_json_resources_in(&mut self.docs.lock(), |_, path, _, attached| {
+            path == snap.path && attached.resource.as_ref().is_some_and(|resource| resource.persistent)
+        });
         self.json_buffer_current(snap)?;
         if !self.execution_allowed.load(Ordering::Acquire) {
             return Ok(None);

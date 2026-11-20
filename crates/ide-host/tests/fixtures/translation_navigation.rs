@@ -497,12 +497,216 @@ async fn registered_json_host_retires_managed_overlays_before_held_real_referenc
             let captured:serde_json::Value=serde_json::from_str(&std::fs::read_to_string(control.join("references.json")).unwrap()).unwrap();assert_eq!(captured["result"].as_array().unwrap().len(),1,"{captured}");
             let at=key_range(caller,"Greeting 😀").start;
             let hover=ide_host::ops::lsp::lsp_hover(&f.host,"main",RequestId::next(),f.doc,at).await.unwrap().unwrap();assert!(hover.contents.value.contains("Private overlay"),"{hover:?}");
-            if mutation=="edit" {f.project.documents.replace_all(catalog.id,r#"{"Draft 😀":"Private draft"}"#).unwrap();} else {f.project.documents.close(catalog.id);}
+            if mutation=="edit" {f.project.documents.replace_all(catalog.id,r#"{"Greeting 😀":"Current overlay"}"#).unwrap();} else {f.project.documents.close(catalog.id);}
             let result=tokio::time::timeout(Duration::from_secs(2),&mut pending).await.expect("managed document lifecycle must retire the operation before its real reply is released");assert!(result.is_err(),"{result:?}");
-            let hover=ide_host::ops::lsp::lsp_hover(&f.host,"main",RequestId::next(),f.doc,at).await.unwrap().unwrap();assert!(hover.contents.value.contains("Disk welcome"),"{hover:?}");assert!(!hover.contents.value.contains("Private overlay"));
+            let hover=ide_host::ops::lsp::lsp_hover(&f.host,"main",RequestId::next(),f.doc,at).await.unwrap().unwrap();let expected=if mutation=="edit" {"Current overlay"} else {"Disk welcome"};assert!(hover.contents.value.contains(expected),"{mutation}: {hover:?}");assert!(!hover.contents.value.contains("Private overlay"));
             std::fs::write(control.join("references.release"),"release").unwrap();for(name,text)in &extra{assert_eq!(&std::fs::read_to_string(f.root.join(name)).unwrap(),text);}assert_eq!(std::fs::read_to_string(f.root.join("app/Caller.php")).unwrap(),caller);
         }).catch_unwind().await;
         std::fs::write(control.join("references.release"), "release").unwrap();
         f.finish(outcome).await;
     }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires pinned PHPantom 188, owned PHP and Laravel 13.37 vendor fixture"]
+async fn ordinary_php_host_navigation_uses_managed_unsaved_catalogs_without_find_usages() {
+    let vendor = PathBuf::from(std::env::var_os("OPENSTORM_TEST_FACTORY_VENDOR").expect("Laravel vendor"))
+        .canonicalize()
+        .unwrap();
+    let installed: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(vendor.join("composer/installed.json")).unwrap()).unwrap();
+    assert!(
+        installed["packages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|package| package["name"] == "laravel/framework" && package["version"] == "v13.37.0")
+    );
+    let engine = PathBuf::from(std::env::var_os("OPENSTORM_TEST_PHPANTOM_BIN").expect("pinned PHPantom"))
+        .canonicalize()
+        .unwrap();
+    let caller = "<?php /* 😀 */ __('Greeting 😀');";
+    let json = r#"{"Greeting 😀":"Disk welcome"}"#;
+    let overlay = r#"{"Greeting 😀":"Private overlay"}"#;
+    let updated = r#"{"Greeting 😀":"Updated private value"}"#;
+    let provider = r#"<?php namespace App; class Provider extends \Illuminate\Support\ServiceProvider {public function boot(): void {$this->loadJsonTranslationsFrom(__DIR__.'/../packages/billing/json');}}"#;
+    let extra = vec![
+        (
+            "composer.json".into(),
+            r#"{"require":{"php":"^8.3","laravel/framework":"13.37.0"},"autoload":{"psr-4":{"App\\":"app/"}}}"#.into(),
+        ),
+        ("app/Provider.php".into(), provider.into()),
+        ("bootstrap/providers.php".into(), "<?php return [App\\Provider::class];".into()),
+        ("packages/billing/composer.json".into(), r#"{"name":"acme/billing"}"#.into()),
+        ("packages/billing/json/en.json".into(), json.into()),
+    ];
+    let (f, control) = Fixture::new_at_with_fixture_setup(
+        caller,
+        &extra,
+        "app/Caller.php",
+        |root| std::os::unix::fs::symlink(&vendor, root.join("vendor")).unwrap(),
+        move |project, temp| {
+            let control = temp.join("control");
+            std::fs::create_dir(&control).unwrap();
+            std::fs::write(control.join("methods.json"), "[]").unwrap();
+            let proxy = temp.join("json-session-replies.py");
+            std::fs::write(&proxy, include_str!("../../../ide-lsp/tests/fixtures/phpantom-json-session-replies.py"))
+                .unwrap();
+            let selected = control.clone();
+            project.lsp.set_config_hook(Box::new(move |cfg, _| {
+                if cfg.name == "phpantom" {
+                    let args = std::mem::take(&mut cfg.args);
+                    cfg.command = std::env::var("OPENSTORM_TEST_PYTHON").unwrap_or_else(|_| "python3".into());
+                    cfg.args = vec![
+                        "-I".into(),
+                        proxy.to_string_lossy().into_owned(),
+                        engine.to_string_lossy().into_owned(),
+                        selected.to_string_lossy().into_owned(),
+                    ];
+                    cfg.args.extend(args);
+                }
+            }));
+            control
+        },
+    );
+    let outcome = std::panic::AssertUnwindSafe(async {
+        let path = f.root.join("packages/billing/json/en.json");
+        let catalog = f.project.documents.open(&path).unwrap();
+        assert_eq!(catalog.language.as_str(), "json");
+        f.project.documents.replace_all(catalog.id, overlay).unwrap();
+        for _ in 0..2 {
+            let hover = ide_host::ops::lsp::lsp_hover(
+                &f.host,
+                "main",
+                RequestId::next(),
+                f.doc,
+                key_range(caller, "Greeting 😀").start,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            assert!(hover.contents.value.contains("Private overlay"), "{hover:?}");
+            let targets = ide_host::ops::lsp::lsp_goto(
+                &f.host,
+                "main",
+                f.doc,
+                key_range(caller, "Greeting 😀").start,
+                GotoKind::Definition,
+            )
+            .await
+            .unwrap();
+            assert_eq!(targets.len(), 1);
+            assert_eq!(targets[0].path.to_path_buf(), path);
+            assert_eq!(targets[0].range, key_range(overlay, "Greeting 😀"));
+        }
+        let opens = std::fs::read_to_string(control.join("events.jsonl"))
+            .unwrap()
+            .lines()
+            .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+            .filter(|event| {
+                event["method"] == "textDocument/didOpen" && event["uri"] == ide_lsp::path_to_uri_string(&path)
+            })
+            .count();
+        assert_eq!(opens, 1, "normal Host navigation reuses one admitted catalog");
+        f.project.documents.replace_all(catalog.id, updated).unwrap();
+        let hover = ide_host::ops::lsp::lsp_hover(
+            &f.host,
+            "main",
+            RequestId::next(),
+            f.doc,
+            key_range(caller, "Greeting 😀").start,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(hover.contents.value.contains("Updated private value"));
+        let draft = r#"{"Draft 😀":"Private draft"}"#;
+        let draft_caller = caller.replace("Greeting 😀", "Draft 😀");
+        f.project.documents.replace_all(catalog.id, draft).unwrap();
+        f.project.documents.replace_all(f.doc, &draft_caller).unwrap();
+        let hover = ide_host::ops::lsp::lsp_hover(
+            &f.host,
+            "main",
+            RequestId::next(),
+            f.doc,
+            key_range(&draft_caller, "Draft 😀").start,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(hover.contents.value.contains("Private draft"));
+        let targets = ide_host::ops::lsp::lsp_goto(
+            &f.host,
+            "main",
+            f.doc,
+            key_range(&draft_caller, "Draft 😀").start,
+            GotoKind::Definition,
+        )
+        .await
+        .unwrap();
+        assert_eq!(targets[0].path.to_path_buf(), path);
+        assert_eq!(targets[0].range, key_range(draft, "Draft 😀"));
+        let server = f.project.lsp.servers().into_iter().find(|server| server.name == "phpantom").unwrap().id;
+        f.project.lsp.restart(server).await.unwrap();
+        let hover = ide_host::ops::lsp::lsp_hover(
+            &f.host,
+            "main",
+            RequestId::next(),
+            f.doc,
+            key_range(&draft_caller, "Draft 😀").start,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(hover.contents.value.contains("Private draft"));
+        f.project.documents.replace_all(f.doc, caller).unwrap();
+        f.project.documents.close(catalog.id);
+        let hover = ide_host::ops::lsp::lsp_hover(
+            &f.host,
+            "main",
+            RequestId::next(),
+            f.doc,
+            key_range(caller, "Greeting 😀").start,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(hover.contents.value.contains("Disk welcome"));
+        let reopened = f.project.documents.open(&path).unwrap();
+        f.project.documents.replace_all(reopened.id, overlay).unwrap();
+        let hover = ide_host::ops::lsp::lsp_hover(
+            &f.host,
+            "main",
+            RequestId::next(),
+            f.doc,
+            key_range(caller, "Greeting 😀").start,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(hover.contents.value.contains("Private overlay"));
+        let refs = ide_host::ops::lsp::lsp_references(
+            &f.host,
+            "main",
+            RequestId::next(),
+            reopened.id,
+            key_range(overlay, "Greeting 😀").start,
+            false,
+            true,
+            true,
+            ide_host::ops::Channel::new(|_| {}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(refs.locations.len(), 1);
+        assert_eq!(refs.locations[0].path.to_path_buf(), f.root.join("app/Caller.php"));
+        assert_eq!(refs.locations[0].range, key_range(caller, "Greeting 😀"));
+        for (name, text) in &extra {
+            assert_eq!(&std::fs::read_to_string(f.root.join(name)).unwrap(), text);
+        }
+        assert_eq!(std::fs::read_to_string(f.root.join("app/Caller.php")).unwrap(), caller);
+    })
+    .catch_unwind()
+    .await;
+    f.finish(outcome).await;
 }

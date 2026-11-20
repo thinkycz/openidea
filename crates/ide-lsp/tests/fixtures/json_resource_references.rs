@@ -613,3 +613,314 @@ async fn registered_json_sessions_keep_json_actions_and_require_new_admission_af
     assert_eq!(h.launcher.state("json-lsp").docs.lock().get(&uri_of(&catalog)).map(String::as_str), Some(TEXT));
     h.mgr.shutdown_all().await;
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn registered_json_ordinary_php_hover_automatically_keeps_and_refreshes_catalog_overlays() {
+    let h = harness_languages(
+        &[("php", "php", &[("phpantom", caps())]), ("json", "json", &[("json-lsp", incremental_caps())])],
+        |_| {},
+    );
+    std::fs::write(h.root.join("composer.json"), MANIFEST).unwrap();
+    let resource = h.root.join("catalogs/en.json");
+    let catalog = resource.clone();
+    let state = h.launcher.state("phpantom");
+    state.responder.lock().replace(Arc::new(move|state,method,params|match method{
+        METHOD=>Some(echo(params,resource.parent())),
+        "textDocument/hover"=>Some(json!({"contents":{"kind":"markdown","value":state.docs.lock().get(&uri_of(&resource)).cloned().unwrap_or_else(||"Disk value".into())}})),
+        _=>None,
+    }));
+    let (php, _) = h.open("Caller.php", "<?php __('Greeting 😀');");
+    let json = DocId::next();
+    h.mgr.did_open(json, &catalog, &LanguageId::new("json"), 1, TEXT);
+    let hover = h.mgr.hover(php, Pos::new(0, 10), Default::default()).await.unwrap().unwrap();
+    let active = state.docs.lock().get(&uri_of(&catalog)).cloned();
+    let reused = h.mgr.hover(php, Pos::new(0, 10), Default::default()).await.unwrap().unwrap();
+    assert_eq!(reused.contents.value, TEXT);
+    assert_eq!(state.requested(METHOD).len(), 1, "reuse unchanged admission");
+    let updated = r#"{"Greeting 😀":"Updated draft"}"#;
+    h.mgr.did_change(
+        json,
+        2,
+        &[AppliedChange { range: rng(0, 0, 0, TEXT.encode_utf16().count() as u32), text: updated.into() }],
+        &|| updated.into(),
+    );
+    let changed = h.mgr.hover(php, Pos::new(0, 10), Default::default()).await.unwrap().unwrap();
+    assert_eq!(changed.contents.value, updated);
+    let server = h.mgr.servers().into_iter().find(|server| server.name == "phpantom").unwrap().id;
+    h.mgr.restart(server).await.unwrap();
+    let restarted = h.mgr.hover(php, Pos::new(0, 10), Default::default()).await.unwrap().unwrap();
+    assert_eq!(restarted.contents.value, updated);
+    h.mgr.did_close(json);
+    let closed = h.mgr.hover(php, Pos::new(0, 10), Default::default()).await.unwrap().unwrap();
+    assert_eq!(closed.contents.value, "Disk value");
+    h.mgr.shutdown_all().await;
+    assert_eq!(
+        hover.contents.value, TEXT,
+        "ordinary PHP hover must see the unsaved registered catalog without Find Usages"
+    );
+    assert_eq!(active.as_deref(), Some(TEXT), "retain the admitted overlay after the PHP request");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn registered_json_automatic_sync_preserves_provider_choices_and_refuses_unproven_roots() {
+    for (name, enabled, registered) in
+        [("phpantom", false, true), ("phpantom", true, false), ("phpactor", true, true), ("intelephense", true, true)]
+    {
+        let mut capabilities = caps();
+        capabilities["experimental"]["phpWorkbenchRegisteredJsonTranslations"] = json!(enabled);
+        let h = harness_for("php", "php", &[(name, capabilities)], &[]);
+        std::fs::write(h.root.join("composer.json"), MANIFEST).unwrap();
+        let resource = h.root.join("catalogs/en.json");
+        let catalog = resource.clone();
+        let state = h.launcher.state(name);
+        state.responder.lock().replace(Arc::new(move |_, method, params| match method {
+            METHOD => Some(echo(params, registered.then(|| resource.parent().unwrap()))),
+            "textDocument/hover" => Some(json!({"contents":{"kind":"markdown","value":"ordinary provider"}})),
+            _ => None,
+        }));
+        let (php, _) = h.open("Caller.php", "<?php __('Greeting 😀');");
+        h.mgr.did_open(DocId::next(), &catalog, &LanguageId::new("json"), 1, TEXT);
+        let hover = h.mgr.hover(php, Pos::new(0, 10), Default::default()).await.unwrap().unwrap();
+        assert_eq!(hover.contents.value, "ordinary provider");
+        assert!(
+            state
+                .notified("textDocument/didOpen")
+                .iter()
+                .all(|params| params["textDocument"]["uri"] != uri_of(&catalog))
+        );
+        assert_eq!(state.requested(METHOD).len(), usize::from(name == "phpantom" && enabled));
+        h.mgr.shutdown_all().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn registered_json_automatic_sync_cancels_pending_admission_before_sharing_text() {
+    for change in ["cancel", "json edit", "json close", "php edit", "settings", "disable"] {
+        let h = harness_for("php", "php", &[("phpantom", caps())], &[]);
+        std::fs::write(h.root.join("composer.json"), MANIFEST).unwrap();
+        let resource = h.root.join("catalogs/en.json");
+        let catalog = resource.clone();
+        let state = h.launcher.state("phpantom");
+        let gate = Arc::new(Gate::default());
+        let held = gate.clone();
+        state.responder.lock().replace(Arc::new(move |_, method, params| {
+            (method == METHOD).then(|| {
+                held.hold();
+                echo(params, resource.parent())
+            })
+        }));
+        let code = "<?php __('Greeting 😀');";
+        let (php, _) = h.open("Caller.php", code);
+        let json = DocId::next();
+        h.mgr.did_open(json, &catalog, &LanguageId::new("json"), 1, TEXT);
+        let cancel = CancellationToken::new();
+        let token = cancel.clone();
+        let manager = h.mgr.clone();
+        let pending = tokio::spawn(async move { manager.hover(php, Pos::new(0, 10), token).await });
+        eventually(|| gate.entered()).await;
+        match change {
+            "cancel" => cancel.cancel(),
+            "json edit" => h.mgr.did_change(
+                json,
+                2,
+                &[AppliedChange { range: rng(0, 0, 0, TEXT.encode_utf16().count() as u32), text: "{}".into() }],
+                &|| "{}".into(),
+            ),
+            "json close" => h.mgr.did_close(json),
+            "php edit" => h.mgr.did_change(
+                php,
+                2,
+                &[AppliedChange {
+                    range: rng(0, 0, 0, code.encode_utf16().count() as u32),
+                    text: "<?php /* changed */".into(),
+                }],
+                &|| "<?php /* changed */".into(),
+            ),
+            "settings" => h.mgr.reconfigure().await,
+            "disable" => h.mgr.set_execution_allowed(false),
+            _ => unreachable!(),
+        }
+        let retired = tokio::time::timeout(Duration::from_secs(2), async {
+            while !pending.is_finished() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .is_ok();
+        gate.open();
+        let result = pending.await.unwrap();
+        h.mgr.shutdown_all().await;
+        assert!(retired, "{change}");
+        assert!(result.is_err(), "{change}: {result:?}");
+        assert!(
+            state
+                .notified("textDocument/didOpen")
+                .iter()
+                .all(|params| params["textDocument"]["uri"] != uri_of(&catalog))
+        );
+        assert!(state.requested("textDocument/hover").is_empty());
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn registered_json_opening_a_catalog_retires_a_php_reply_started_without_overlays() {
+    let h = harness_for("php", "php", &[("phpantom", caps())], &[]);
+    std::fs::write(h.root.join("composer.json"), MANIFEST).unwrap();
+    let gate = Arc::new(Gate::default());
+    let held = gate.clone();
+    h.launcher.state("phpantom").responder.lock().replace(Arc::new(move |_, method, _| {
+        (method == "textDocument/hover").then(|| {
+            held.hold();
+            json!({"contents":{"kind":"markdown","value":"old disk value"}})
+        })
+    }));
+    let (php, _) = h.open("Caller.php", "<?php __('Greeting 😀');");
+    let manager = h.mgr.clone();
+    let pending = tokio::spawn(async move { manager.hover(php, Pos::new(0, 10), Default::default()).await });
+    eventually(|| gate.entered()).await;
+    let json = DocId::next();
+    h.mgr.did_open(json, &h.root.join("catalogs/en.json"), &LanguageId::new("json"), 1, TEXT);
+    h.mgr.did_close(json);
+    gate.open();
+    let result = pending.await.unwrap();
+    h.mgr.shutdown_all().await;
+    assert!(result.is_err(), "a PHP reply spanning a potential catalog open/close must expire: {result:?}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn registered_json_automatic_sync_uses_the_consuming_manifest_for_unsaved_php_files() {
+    let h = harness_for("php", "php", &[("phpantom", caps())], &[]);
+    let manifest = h.root.join("composer.json");
+    std::fs::write(&manifest, MANIFEST).unwrap();
+    let nested = h.root.join("packages/billing");
+    std::fs::create_dir_all(&nested).unwrap();
+    std::fs::write(nested.join("composer.json"), "{}").unwrap();
+    let resource = nested.join("json/en.json");
+    let catalog = resource.clone();
+    let expected_manifest = manifest.clone();
+    let state = h.launcher.state("phpantom");
+    state.responder.lock().replace(Arc::new(move|state,method,params|match method{METHOD=>{assert_eq!(params["projectUri"],uri_of(&expected_manifest));Some(echo(params,resource.parent()))},"textDocument/hover"=>Some(json!({"contents":{"kind":"markdown","value":state.docs.lock().get(&uri_of(&resource)).cloned().unwrap_or_else(||"disk".into())}})),_=>None}));
+    let php = DocId::next();
+    let path = h.root.join("Unsaved.php");
+    h.mgr.did_open(php, &path, &LanguageId::new("php"), 1, "<?php __('Greeting 😀');");
+    h.mgr.did_open(DocId::next(), &catalog, &LanguageId::new("json"), 1, TEXT);
+    let hover = h.mgr.hover(php, Pos::new(0, 10), Default::default()).await.unwrap().unwrap();
+    assert_eq!(hover.contents.value, TEXT);
+    assert!(!path.exists());
+    assert!(!catalog.exists());
+    h.mgr.shutdown_all().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn registered_json_automatic_sync_rechecks_retained_composer_inputs_before_reuse() {
+    for change in ["disk", "buffer"] {
+        let h = harness_for("php", "php", &[("phpantom", caps())], &[]);
+        let manifest = h.root.join("composer.json");
+        std::fs::write(&manifest, MANIFEST).unwrap();
+        let catalog = h.root.join("catalogs/en.json");
+        let resource = catalog.clone();
+        let state = h.launcher.state("phpantom");
+        state.responder.lock().replace(Arc::new(move |state, method, params| match method {
+            METHOD => Some(echo(params, resource.parent())),
+            "textDocument/hover" => Some(json!({"contents":{"kind":"markdown","value":state.docs.lock().get(&uri_of(&resource)).cloned().unwrap_or_else(||"disk".into())}})),
+            _ => None,
+        }));
+        let (php, _) = h.open("Caller.php", "<?php __('Greeting 😀');");
+        h.mgr.did_open(DocId::next(), &catalog, &LanguageId::new("json"), 1, TEXT);
+        let hover = h.mgr.hover(php, Pos::new(0, 10), Default::default()).await.unwrap().unwrap();
+        assert_eq!(hover.contents.value, TEXT);
+        let composer = if change == "disk" {
+            // Deliberately omit a watcher notification: a retained witness must still expire.
+            std::fs::write(&manifest, "{}").unwrap();
+            None
+        } else {
+            let doc = DocId::next();
+            h.mgr.did_open(doc, &manifest, &LanguageId::new("json"), 1, "{}");
+            Some(doc)
+        };
+        let stale = h.mgr.hover(php, Pos::new(0, 10), Default::default()).await;
+        assert!(stale.is_err(), "{change}: {stale:?}");
+        assert_eq!(state.requested("textDocument/hover").len(), 1, "do not dispatch using stale authority");
+        eventually(|| !state.docs.lock().contains_key(&uri_of(&catalog))).await;
+        assert_eq!(state.requested(METHOD).len(), 1, "do not admit while a manifest buffer is dirty");
+        if let Some(doc) = composer {
+            h.mgr.did_close(doc);
+        } else {
+            std::fs::write(&manifest, MANIFEST).unwrap();
+        }
+        let recovered = h.mgr.hover(php, Pos::new(0, 10), Default::default()).await.unwrap().unwrap();
+        assert_eq!(recovered.contents.value, TEXT);
+        assert_eq!(state.requested(METHOD).len(), 2, "recovery requires a fresh admission");
+        h.mgr.shutdown_all().await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn registered_json_automatic_sync_readmits_when_a_shared_server_changes_consuming_projects() {
+    let h = harness_for("php", "php", &[("phpantom", caps())], &[]);
+    std::fs::write(h.root.join("composer.json"), MANIFEST).unwrap();
+    let nested = h.root.join("packages/consumer");
+    std::fs::create_dir_all(&nested).unwrap();
+    std::fs::write(nested.join("composer.json"), MANIFEST).unwrap();
+    let catalog = h.root.join("catalogs/en.json");
+    let resource = catalog.clone();
+    let state = h.launcher.state("phpantom");
+    state.responder.lock().replace(Arc::new(move |state, method, params| match method {
+        METHOD => Some(echo(params, resource.parent())),
+        "textDocument/hover" => Some(json!({"contents":{"kind":"markdown","value":state.docs.lock().get(&uri_of(&resource)).cloned().unwrap_or_else(||"disk".into())}})),
+        _ => None,
+    }));
+    let (outer, _) = h.open("Caller.php", "<?php __('Greeting 😀');");
+    let (inner, _) = h.open("packages/consumer/Caller.php", "<?php __('Greeting 😀');");
+    h.mgr.did_open(DocId::next(), &catalog, &LanguageId::new("json"), 1, TEXT);
+    for doc in [outer, inner, outer] {
+        let hover = h.mgr.hover(doc, Pos::new(0, 10), Default::default()).await.unwrap().unwrap();
+        assert_eq!(hover.contents.value, TEXT);
+    }
+    let projects: Vec<_> = state.requested(METHOD).into_iter().map(|params| params["projectUri"].clone()).collect();
+    assert_eq!(
+        projects,
+        vec![
+            uri_of(&h.root.join("composer.json")),
+            uri_of(&nested.join("composer.json")),
+            uri_of(&h.root.join("composer.json"))
+        ]
+    );
+    h.mgr.shutdown_all().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn registered_json_php_loading_retry_cannot_adopt_a_replacement_catalog_session() {
+    let h = harness_for("php", "php", &[("phpantom", caps())], &[]);
+    std::fs::write(h.root.join("composer.json"), MANIFEST).unwrap();
+    let catalog = h.root.join("catalogs/en.json");
+    let resource = catalog.clone();
+    let state = h.launcher.state("phpantom");
+    state.responder.lock().replace(Arc::new(move |state, method, params| match method {
+        METHOD => Some(echo(params, resource.parent())),
+        "textDocument/hover" => Some(if state.requested("textDocument/hover").len() == 1 {
+            Value::Null
+        } else {
+            json!({"contents":{"kind":"markdown","value":"replacement session"}})
+        }),
+        "textDocument/references" => Some(json!([])),
+        _ => None,
+    }));
+    let (php, _) = h.open("Caller.php", "<?php __('Greeting 😀');");
+    let json = DocId::next();
+    h.mgr.did_open(json, &catalog, &LanguageId::new("json"), 1, TEXT);
+    h.wait_status("phpantom", ServerStatus::Ready).await;
+    state.peer().notify("experimental/serverStatus", json!({"health":"ok","quiescent":false})).unwrap();
+    h.wait_status("phpantom", ServerStatus::Busy).await;
+    let manager = h.mgr.clone();
+    let pending = tokio::spawn(async move { manager.hover(php, Pos::new(0, 10), Default::default()).await });
+    eventually(|| state.requested("textDocument/hover").len() == 1).await;
+    h.mgr.references(json, Pos::new(0, 2), false, true, Default::default()).await.unwrap();
+    let fresh = h.mgr.hover(php, Pos::new(0, 10), Default::default()).await.unwrap().unwrap();
+    assert_eq!(fresh.contents.value, "replacement session");
+    state.peer().notify("experimental/serverStatus", json!({"health":"ok","quiescent":true})).unwrap();
+    let result = tokio::time::timeout(Duration::from_secs(2), pending).await.unwrap().unwrap();
+    h.mgr.shutdown_all().await;
+    assert!(result.is_err(), "the old preparation must not adopt a replacement session on retry: {result:?}");
+    assert_eq!(state.requested("textDocument/hover").len(), 2, "reject before sending the old retry");
+}

@@ -194,10 +194,10 @@ async fn registered_json_admission_selects_consuming_server_tracks_provider_chan
         );
         let hover = mgr.hover(a, pos(CALLER, "Greeting 😀"), Default::default()).await.unwrap().unwrap();
         assert!(
-            hover.contents.value.contains("Disk welcome"),
-            "catalog admission must not forward the private overlay: {hover:?}"
+            hover.contents.value.contains("Unshared private overlay"),
+            "ordinary PHP hover must automatically admit its current custom catalog: {hover:?}"
         );
-        assert!(!hover.contents.value.contains("Unshared private overlay"));
+        assert!(!hover.contents.value.contains("Disk welcome"));
 
         let provider = DocId::next();
         let provider_path = root.join("a/app/Provider.php");

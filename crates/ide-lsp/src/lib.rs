@@ -137,6 +137,8 @@ struct Attached {
 struct JsonResourceAttachment {
     selector: PathBuf,
     cancel: CancellationToken,
+    witness: Arc<php::JsonResourceWitness>,
+    persistent: bool,
 }
 
 struct DocState {
@@ -201,6 +203,8 @@ struct DocSnap {
     language: LanguageId,
     text: Arc<DocText>,
     servers: Vec<Arc<Server>>,
+    catalogs_revision: Option<u64>,
+    prepared_resources: Vec<(ide_core::ServerId, u64)>,
     /// [`DocState::changed`].
     changed: std::time::Instant,
 }
@@ -219,6 +223,7 @@ struct NavigationSnapshot {
     sources: Vec<NavigationSource>,
     files_revision: u64,
     resources_revision: u64,
+    catalogs_revision: Option<u64>,
 }
 
 impl DocSnap {
@@ -289,6 +294,8 @@ pub struct LspManager {
     reconfigure_lock: tokio::sync::Mutex<()>,
     php_json_resource_gate: tokio::sync::Mutex<()>,
     json_resource_count: AtomicU64,
+    json_catalog_revision: AtomicU64,
+    json_preparation_changed: tokio::sync::watch::Sender<u64>,
     shutting_down: AtomicBool,
     execution_allowed: AtomicBool,
     java_usages_warned: AtomicBool,
@@ -586,6 +593,8 @@ impl LspManager {
             reconfigure_lock: tokio::sync::Mutex::new(()),
             php_json_resource_gate: tokio::sync::Mutex::new(()),
             json_resource_count: AtomicU64::new(0),
+            json_catalog_revision: AtomicU64::new(0),
+            json_preparation_changed: tokio::sync::watch::channel(0).0,
             shutting_down: AtomicBool::new(false),
             execution_allowed: AtomicBool::new(true),
             java_usages_warned: AtomicBool::new(false),
@@ -1368,6 +1377,13 @@ impl LspManager {
         };
         let compose_added = {
             let mut docs = self.docs.lock();
+            if Self::json_catalog_path(&state.path, &state.uri, &state.language) {
+                self.record_json_catalog_change();
+            } else if state.language.as_str() == "php"
+                || state.path.file_name().is_some_and(|name| name == "composer.json")
+            {
+                self.invalidate_json_preparation();
+            }
             if self.json_resource_count.load(Ordering::Acquire) != 0 {
                 let ids: Vec<_> = servers.iter().map(|server| server.id).collect();
                 self.retire_json_resources_for_source(&mut docs, doc, &state.path, &state.canonical, &ids);
@@ -1607,6 +1623,8 @@ impl LspManager {
             text: d.text.clone(),
             servers,
             changed: d.changed,
+            catalogs_revision: None,
+            prepared_resources: Vec::new(),
         })
     }
 
@@ -1628,8 +1646,9 @@ impl LspManager {
         doc: DocId,
         feature: &str,
         pred: impl Fn(&ServerCaps) -> bool,
+        cancel: Option<&CancellationToken>,
     ) -> IdeResult<(DocSnap, Vec<Target>)> {
-        let snap = self.snapshot(doc)?;
+        let mut snap = self.snapshot(doc)?;
         // Automatically shared Laravel resource sources support PHP references,
         // not PHP formatting, completion, rename, or other PHP-only operations.
         let servers: Vec<_> =
@@ -1638,6 +1657,7 @@ impl LspManager {
         if targets.is_empty() {
             return Err(unsupported(&snap.servers, feature));
         }
+        self.sync_php_json_resources(&mut snap, &targets, &cancel.cloned().unwrap_or_default()).await?;
         Ok((snap, targets))
     }
 
@@ -1696,7 +1716,8 @@ impl LspManager {
         trigger: Option<String>,
         cancel: CancellationToken,
     ) -> IdeResult<CompletionList> {
-        let (snap, targets) = self.doc_targets(doc, "completion", |c| c.has("completionProvider")).await?;
+        let (snap, targets) =
+            self.doc_targets(doc, "completion", |c| c.has("completionProvider"), Some(&cancel)).await?;
         let sources = targets
             .iter()
             .filter(|t| snap.asks(t, pos))
@@ -1755,7 +1776,8 @@ impl LspManager {
         automatic: bool,
         cancel: CancellationToken,
     ) -> IdeResult<Vec<InlineCompletionItem>> {
-        let (snap, targets) = self.doc_targets(doc, "inline completion", |c| c.has("inlineCompletionProvider")).await?;
+        let (snap, targets) =
+            self.doc_targets(doc, "inline completion", |c| c.has("inlineCompletionProvider"), Some(&cancel)).await?;
         let requests = targets.iter().map(|t| {
             let mut params = snap.pos_params(t, pos);
             params["context"] = json!({ "triggerKind": if automatic { 2 } else { 1 } });
@@ -1816,7 +1838,7 @@ impl LspManager {
     }
 
     pub async fn hover(&self, doc: DocId, pos: Pos, cancel: CancellationToken) -> IdeResult<Option<Hover>> {
-        let (snap, targets) = self.doc_targets(doc, "hover", |c| c.has("hoverProvider")).await?;
+        let (snap, targets) = self.doc_targets(doc, "hover", |c| c.has("hoverProvider"), Some(&cancel)).await?;
         let mut out = Outcome::new();
         for t in targets.iter().filter(|t| snap.asks(t, pos)) {
             let r: IdeResult<Option<lsp::Hover>> =
@@ -1890,7 +1912,7 @@ impl LspManager {
     }
 
     pub async fn signature_help(&self, doc: DocId, pos: Pos) -> IdeResult<Option<SignatureHelp>> {
-        let (snap, targets) = self.doc_targets(doc, "signature help", |c| c.has("signatureHelpProvider")).await?;
+        let (snap, targets) = self.doc_targets(doc, "signature help", |c| c.has("signatureHelpProvider"), None).await?;
         let mut out = Outcome::new();
         for t in targets.iter().filter(|t| snap.asks(t, pos)) {
             let mut params = snap.pos_params(t, pos);
@@ -1926,7 +1948,7 @@ impl LspManager {
             }
         }
         let (method, cap, feature) = goto_method(kind);
-        let (snap, targets) = self.doc_targets(doc, feature, |c| c.has(cap)).await?;
+        let (snap, targets) = self.doc_targets(doc, feature, |c| c.has(cap), None).await?;
         self.goto_in(&snap, &targets, method, pos, None, None).await
     }
 
@@ -1941,7 +1963,7 @@ impl LspManager {
         partial: &(dyn Fn(Vec<Location>) + Send + Sync),
     ) -> IdeResult<Vec<Location>> {
         let (method, cap, feature) = goto_method(GotoKind::Implementation);
-        let (snap, targets) = self.doc_targets(doc, feature, |c| c.has(cap)).await?;
+        let (snap, targets) = self.doc_targets(doc, feature, |c| c.has(cap), Some(&cancel)).await?;
         self.goto_in(&snap, &targets, method, pos, Some(&cancel), Some(partial)).await
     }
 
@@ -1956,7 +1978,7 @@ impl LspManager {
         cancel: CancellationToken,
     ) -> IdeResult<Vec<Vec<Location>>> {
         let (method, cap, feature) = goto_method(GotoKind::Implementation);
-        let (snap, targets) = self.doc_targets(doc, feature, |c| c.has(cap)).await?;
+        let (snap, targets) = self.doc_targets(doc, feature, |c| c.has(cap), Some(&cancel)).await?;
         let sources = targets
             .iter()
             .filter(|t| positions.iter().any(|pos| snap.asks(t, *pos)))
@@ -1978,7 +2000,15 @@ impl LspManager {
     }
 
     fn navigation_sources(&self, snap: &DocSnap, target: &Target) -> IdeResult<NavigationSnapshot> {
-        let snapshot = self.navigation_snapshot(target)?;
+        let mut snapshot = self.navigation_snapshot(target)?;
+        snapshot.catalogs_revision = snap.catalogs_revision;
+        if snap
+            .prepared_resources
+            .iter()
+            .any(|(server, revision)| *server == target.server.id && *revision != snapshot.resources_revision)
+        {
+            return Err(IdeError::cancelled());
+        }
         if !snapshot.sources.iter().any(|d| {
             d.uri == snap.uri
                 && d.version == snap.version
@@ -2011,6 +2041,7 @@ impl LspManager {
             sources,
             files_revision,
             resources_revision: target.server.resource_revision.load(Ordering::Acquire),
+            catalogs_revision: None,
         })
     }
 
@@ -2019,7 +2050,10 @@ impl LspManager {
     }
 
     fn navigation_current(&self, target: &Target, snapshot: &NavigationSnapshot) -> bool {
-        if self.project_files_revision.load(Ordering::Acquire) != snapshot.files_revision
+        if snapshot
+            .catalogs_revision
+            .is_some_and(|revision| revision != self.json_catalog_revision.load(Ordering::Acquire))
+            || self.project_files_revision.load(Ordering::Acquire) != snapshot.files_revision
             || target.server.running_gen(target.run.generation).is_none()
         {
             return false;
@@ -2028,6 +2062,9 @@ impl LspManager {
         Self::navigation_documents_current(&docs, target, snapshot)
             && target.server.running_gen(target.run.generation).is_some()
             && self.project_files_revision.load(Ordering::Acquire) == snapshot.files_revision
+            && snapshot
+                .catalogs_revision
+                .is_none_or(|revision| revision == self.json_catalog_revision.load(Ordering::Acquire))
     }
 
     fn navigation_documents_current(
@@ -2271,7 +2308,7 @@ impl LspManager {
         cancel: CancellationToken,
     ) -> IdeResult<Vec<Location>> {
         let (_, cap, feature) = goto_method(GotoKind::Implementation);
-        let (snap, targets) = self.doc_targets(doc, feature, |c| c.has(cap)).await?;
+        let (snap, targets) = self.doc_targets(doc, feature, |c| c.has(cap), Some(&cancel)).await?;
         let mut out = locs;
         for t in &targets {
             out = self.java_implementation_locations(&snap, t, pos, out, Some(&cancel)).await;
@@ -2479,7 +2516,7 @@ impl LspManager {
                 }
                 (original, targets)
             } else {
-                self.doc_targets(doc, "find references", |caps| caps.has("referencesProvider")).await?
+                self.doc_targets(doc, "find references", |caps| caps.has("referencesProvider"), Some(&cancel)).await?
             };
         // The extension preserves method identity before JDT collapses references to locations.
         // Old/custom servers retain the standard protocol, including cancellation and scope widening.
@@ -2727,7 +2764,7 @@ impl LspManager {
 
     pub async fn document_highlights(&self, doc: DocId, pos: Pos) -> IdeResult<Vec<Highlight>> {
         let (snap, targets) =
-            self.doc_targets(doc, "document highlights", |c| c.has("documentHighlightProvider")).await?;
+            self.doc_targets(doc, "document highlights", |c| c.has("documentHighlightProvider"), None).await?;
         let mut out = Outcome::new();
         for t in &targets {
             let r = self
@@ -2876,7 +2913,7 @@ impl LspManager {
         only: Vec<String>,
         cancel: Option<&CancellationToken>,
     ) -> IdeResult<CodeActionQuery> {
-        let (snap, targets) = self.doc_targets(doc, "code actions", |c| c.has("codeActionProvider")).await?;
+        let (snap, targets) = self.doc_targets(doc, "code actions", |c| c.has("codeActionProvider"), cancel).await?;
         if only.iter().any(|k| k == "source.organizeImports")
             && let Some(t) = targets.iter().find(|t| {
                 t.caps().raw.pointer("/experimental/phpWorkbenchOptimizeImports").and_then(Value::as_bool) == Some(true)
@@ -3122,7 +3159,7 @@ impl LspManager {
     }
 
     pub async fn prepare_rename_details(&self, doc: DocId, pos: Pos) -> IdeResult<Option<RenamePreparation>> {
-        let (snap, targets) = self.doc_targets(doc, "rename", |c| c.has("renameProvider")).await?;
+        let (snap, targets) = self.doc_targets(doc, "rename", |c| c.has("renameProvider"), None).await?;
         let current = |t: &Target| {
             t.server.running_gen(t.run.generation).is_some()
                 && self.docs.lock().get(&doc).is_some_and(|d| {
@@ -3193,7 +3230,7 @@ impl LspManager {
         new_name: String,
         cancel: CancellationToken,
     ) -> IdeResult<Renamed> {
-        let (snap, targets) = self.doc_targets(doc, "rename", |c| c.has("renameProvider")).await?;
+        let (snap, targets) = self.doc_targets(doc, "rename", |c| c.has("renameProvider"), Some(&cancel)).await?;
         // A checked PHP provider is authoritative: another provider must not
         // turn its collision/staleness refusal into an unchecked successful edit.
         if let Some(t) = targets.iter().find(|t| {
@@ -3594,7 +3631,7 @@ impl LspManager {
             None => ("textDocument/formatting", "documentFormattingProvider", "formatting"),
             Some(_) => ("textDocument/rangeFormatting", "documentRangeFormattingProvider", "range formatting"),
         };
-        let (snap, targets) = self.doc_targets(doc, feature, |c| c.has(cap)).await?;
+        let (snap, targets) = self.doc_targets(doc, feature, |c| c.has(cap), None).await?;
         let t = &targets[0];
         let mut params = json!({
             "textDocument": snap.ident(),
@@ -3608,7 +3645,7 @@ impl LspManager {
     }
 
     pub async fn inlay_hints(&self, doc: DocId, range: Range) -> IdeResult<Vec<InlayHint>> {
-        let (snap, targets) = self.doc_targets(doc, "inlay hints", |c| c.has("inlayHintProvider")).await?;
+        let (snap, targets) = self.doc_targets(doc, "inlay hints", |c| c.has("inlayHintProvider"), None).await?;
         let angular = angular::serves_inlay_hints(snap.language.as_str(), snap.text.as_str());
         let requests = targets.iter().filter(|t| angular || t.server.name != angular::SERVER).map(|t| {
             let params = json!({ "textDocument": snap.ident(), "range": snap.range(t, range) });
@@ -3666,7 +3703,7 @@ impl LspManager {
     }
 
     pub async fn code_lens(&self, doc: DocId) -> IdeResult<Vec<CodeLens>> {
-        let (snap, targets) = self.doc_targets(doc, "code lens", |c| c.has("codeLensProvider")).await?;
+        let (snap, targets) = self.doc_targets(doc, "code lens", |c| c.has("codeLensProvider"), None).await?;
         let requests = targets.iter().map(|t| {
             let params = json!({ "textDocument": snap.ident() });
             async move {
@@ -3706,7 +3743,7 @@ impl LspManager {
 
     /// The document's links; ones without a target are resolved when the server can.
     pub async fn document_links(&self, doc: DocId) -> IdeResult<Vec<DocumentLink>> {
-        let (snap, targets) = self.doc_targets(doc, "document links", |c| c.has("documentLinkProvider")).await?;
+        let (snap, targets) = self.doc_targets(doc, "document links", |c| c.has("documentLinkProvider"), None).await?;
         let requests = targets.iter().map(|t| {
             let params = json!({ "textDocument": snap.ident() });
             async move {
@@ -3757,7 +3794,8 @@ impl LspManager {
         direction: HierarchyDirection,
         cancel: CancellationToken,
     ) -> IdeResult<CallHierarchy> {
-        let (snap, targets) = self.doc_targets(doc, "call hierarchy", |c| c.has("callHierarchyProvider")).await?;
+        let (snap, targets) =
+            self.doc_targets(doc, "call hierarchy", |c| c.has("callHierarchyProvider"), Some(&cancel)).await?;
         let t = &targets[0];
         let cancel = &cancel;
         let items: Option<Vec<lsp::CallHierarchyItem>> = self
@@ -3827,7 +3865,7 @@ impl LspManager {
     /// The type at `pos` as the server's type hierarchy names it (with its `detail`, the
     /// package for Java); `None` when there is no type there.
     pub async fn prepare_type_hierarchy(&self, doc: DocId, pos: Pos) -> IdeResult<Option<HierarchyItem>> {
-        let (snap, targets) = self.doc_targets(doc, "type hierarchy", |c| c.has("typeHierarchyProvider")).await?;
+        let (snap, targets) = self.doc_targets(doc, "type hierarchy", |c| c.has("typeHierarchyProvider"), None).await?;
         let t = &targets[0];
         let items: Option<Vec<serde_json::Value>> =
             self.call(t, "textDocument/prepareTypeHierarchy", snap.pos_params(t, pos), None, DEFAULT_TIMEOUT).await?;
@@ -3845,7 +3883,7 @@ impl LspManager {
         pos: Pos,
         direction: HierarchyDirection,
     ) -> IdeResult<Vec<HierarchyItem>> {
-        let (snap, targets) = self.doc_targets(doc, "type hierarchy", |c| c.has("typeHierarchyProvider")).await?;
+        let (snap, targets) = self.doc_targets(doc, "type hierarchy", |c| c.has("typeHierarchyProvider"), None).await?;
         let t = &targets[0];
         // Items stay raw JSON: they go back to the server as they came (`data`),
         // and lsp-types mistypes `tags` (jdtls sends an array).

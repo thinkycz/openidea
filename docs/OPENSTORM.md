@@ -15,6 +15,84 @@ slice, commit and push it, and retain only the latest generated app. Native UI
 cases remain deferred/unverified; earlier native-first blocking checkpoints are
 historical and no longer prevent independent implementation.
 
+Automatic PHP catalog overlays slice 213 (2026-11-20; client/Host accepted; candidate 188 inactive):
+FEAT-031/066/067: ordinary PHP requests now prepare eligible open custom JSON
+translation catalogs before asking the selected PHPantom server. Current positive
+admission opens the managed overlay; successful preparation retains it for later
+PHP requests. A user no longer needs JSON Find Usages first. Native JSON providers
+and optional PHP servers keep their existing selection. Both registration and
+buffer capabilities are required. Unproven roots never receive catalog text.
+
+Preparation uses the consuming PHP file's nearest Composer manifest within its
+opened content root, including never-saved PHP files. Retained overlays carry
+local Composer and path-authority witnesses; reuse validates them again. A
+regression first exposes reuse of the wrong manifest when two consumers share
+one server. Switching consumers now retires and re-admits the overlay for the
+current manifest. Unreported Composer disk changes and dirty manifest buffers
+refuse reuse, retire stale text and recover through fresh admission.
+
+Catalog open/edit/close revisions invalidate PHP results even across a complete
+open/close cycle with no final catalog remaining. Pending admission watches
+relevant document, configuration and execution changes; cancellation drops it
+before text disclosure. Existing session ownership, current-source checks,
+server generations, temporary Find Usages cleanup and resource revisions remain
+shared. Provider edits, JSON edits, restart and reopen retire retained sessions;
+the next PHP action re-admits current text. Explicit JSON Find Usages replaces
+persistent ownership before inspecting its own consuming contexts.
+
+Review also exposes a loading-retry race: an old PHP hover can adopt a replacement
+session after Find Usages closes and re-admits the same catalog. A deterministic
+counterexample first returns that replacement value. Final preparation now checks
+the exact admitted witness under the document lock and carries each server's
+resource revision into the PHP snapshot. A retry rejects a replacement before
+sending another hover RPC. All 59 focused JSON cases pass. Two workspace builds
+were deliberately interrupted before tests for this correction and the Host
+expectation update below; their logs remain. Final gates use the refreshed
+source snapshot.
+
+The initial ordinary-hover regression observes the disk value instead of the
+unsaved catalog. Eight new protocol groups cover reuse and refresh, capabilities
+and provider choices, cancellation during admission, no-catalog open/close
+freshness, unsaved consuming files, Composer witnesses, shared-server context
+switching and loading retries. Existing JSON admission, native-provider, authority,
+cancellation and held-reply regressions remain checked. Tests that formerly expected disk after
+explicit session cleanup now expect the still-open catalog to be re-admitted by
+the next normal PHP request; old held replies must still expire.
+
+New real-client and managed Host cases use pinned Laravel 13.37.0, actual JSON
+open/close frames and Unicode positions. Ordinary hover and definitions see
+unsaved values and keys, reuse an admitted overlay, then recover after catalog
+and PHP edits, provider changes, server restart, close and reopen. A nested
+Composer file beside the catalog cannot replace the consuming PHP context.
+JSON Find Usages remains usable afterward; owned disk contents stay unchanged
+and fixture processes shut down. These exercise the production client/Host,
+not packaged native UI, which remains user-skipped.
+
+Fresh workspace executables reject query-only engine 187, then pass all 72
+client and 62 Host cases on signed inactive engine 188. Source, binary and Cargo
+fingerprint witnesses and retained fixture originals remain unchanged. Gates:
+Rust 5,590 passed / 260 ignored / the same 11 documented exclusions; workspace
+all-target Clippy with warnings denied; Rust formatting; bindings fidelity;
+default-engine provenance; frontend 14,603 passed / eight skipped; frontend
+types/lint/format/Knip; production build/Safari startup; 59 controlled-browser
+cases. No engine source or bundled/default version changes in this slice.
+
+The latest 134-case executable set replaces the previous
+1,270,668,512-byte payload after acceptance. Cargo cleanup:
+Removed 19701 files, 27.6GiB total. Removed frontend dist (73,745,139 bytes).
+The sole signed App 119, default engine 185, engine provenance, historical receipts
+and both stashes remain preserved. No new app is packaged or promoted. Normal
+Git delivery and remote read-back are recorded in the ignored acceptance receipt.
+All 69 areas remain visible at 67 partial/two user-deferred.
+
+Next: autonomous catalog discovery/reconciliation, wider nested-consumer discovery,
+separate-server package-provider overlays and multiple-positive-consumer acceptance
+before engine promotion and packaging. Preparation currently inspects open JSON
+catalogs on PHP requests; unregistered results are not negatively cached. Large
+catalog-set performance, native UI and wider physical/service matrices remain
+unverified. Evidence: artifacts/checks/slice213/{gates,frontend-gates,evaluation,
+focused-real-host,frozen-runtimes,retention}.json and retained failure logs.
+
 Managed JSON sessions slice 212 (2026-11-20; client/Host accepted; candidate 188 inactive):
 FEAT-031/066/067: admitted custom JSON overlays now participate in the selected
 PHP server's navigation snapshots. Their attachments carry a selector and a

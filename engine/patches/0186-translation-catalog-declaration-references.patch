@@ -1,0 +1,885 @@
+diff --git a/docs/CHANGELOG.md b/docs/CHANGELOG.md
+index 5482a5e1d74f430dfb1b8c6b423d2624d0aeb8cd..fc983ed328cfe80c67053d6c377fc67d4666f5d7 100644
+--- a/docs/CHANGELOG.md
++++ b/docs/CHANGELOG.md
+@@ -108,6 +108,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
+ 
+ ## [Unreleased]
+ 
++- **Find translation usages from language files.** Find References on a PHP or JSON translation key returns its PHP and Blade callers, including registered package catalogs. New catalog buffers are available before their first save. Unrelated JSON files no longer borrow translation usages. Contributed by @thinkycz.
++
+ - **Keep PHP navigation responsive in Laravel projects.** Definition and hover requests no longer stall while opening Laravel projects containing view calls. Translation navigation retains its existing behavior. Contributed by @thinkycz.
+ 
+ - **Navigate controller actions through route namespace attributes.** Per-route namespace modifiers preserve the enclosing controller for completion, hover, references and rename. Namespace groups retain their own controller context. Contributed by @thinkycz.
+diff --git a/examples/laravel/app/Demo.php b/examples/laravel/app/Demo.php
+index d1bbd0eda0dcfcdddc1dbdcd6c66f8c38cf86c1f..498f8e1e9b3516e9c8aff7488a254b5564f27b17 100644
+--- a/examples/laravel/app/Demo.php
++++ b/examples/laravel/app/Demo.php
+@@ -804,8 +804,8 @@ class Demo
+         request()->routeIs('bakeries.*');
+ 
+         // Translation Keys
+-        // Ctrl+Click a JSON key to reach its exact declaration; find
+-        // references from lang/en.json to return to its call sites.
++        // Ctrl+Click a translation key; find references from PHP/JSON catalog keys.
++        // New catalog buffers are available before their first save.
+         __('Fresh bread for :name', ['name' => 'Ada']);
+ 
+         // Try: complete the locale argument or a replacement-array key.
+diff --git a/src/references/dispatch.rs b/src/references/dispatch.rs
+index 6cdbca662939c335c513a81e874979c57ef1e33d..cc4c7afd3fa37914042a71f0f8c0a9a9c3de1b31 100644
+--- a/src/references/dispatch.rs
++++ b/src/references/dispatch.rs
+@@ -164,7 +164,17 @@ impl Backend {
+             return Some(locations);
+         }
+ 
+-        if self.resolved_class_cache.read().is_laravel()
++        if mode == ReferenceSearchMode::References
++            && self.resolved_class_cache.read().is_laravel()
++            && let Some(mut locations) =
++                self.find_translation_declaration_references(uri, position, include_declaration)
++        {
++            sort_locations_for_references(&mut locations);
++            return Some(locations);
++        }
++
++        if mode == ReferenceSearchMode::Rename
++            && self.resolved_class_cache.read().is_laravel()
+             && let Some(locations) = laravel::find_json_trans_references(
+                 self,
+                 uri,
+diff --git a/src/virtual_members/laravel/trans_catalog.rs b/src/virtual_members/laravel/trans_catalog.rs
+index 3c41bfb3c03c1e0c87e40c6b4072c475adf45bb2..8c528368db83662010681c97749ac8f167b3e0bc 100644
+--- a/src/virtual_members/laravel/trans_catalog.rs
++++ b/src/virtual_members/laravel/trans_catalog.rs
+@@ -4,7 +4,7 @@ use std::collections::{BTreeMap, BTreeSet};
+ use std::path::Path;
+ use std::sync::Arc;
+ 
+-use tower_lsp::lsp_types::{Location, Range, Url};
++use tower_lsp::lsp_types::{Location, Position, Range, Url};
+ 
+ use crate::Backend;
+ use crate::text_position::LineIndex;
+@@ -193,6 +193,66 @@ impl TranslationCatalog {
+         }
+     }
+ 
++    fn insert_open_resource(
++        &mut self,
++        backend: &Backend,
++        uri: &str,
++        path: &Path,
++        root: &ProviderResource,
++    ) {
++        let Ok(relative) = path.strip_prefix(&root.path) else {
++            return;
++        };
++        let (locale, group) = if root.namespace.is_empty()
++            && relative.extension().is_some_and(|ext| ext == "json")
++            && relative
++                .parent()
++                .is_some_and(|parent| parent.as_os_str().is_empty())
++        {
++            let Some(locale) = relative.file_stem().and_then(|stem| stem.to_str()) else {
++                return;
++            };
++            (locale, None)
++        } else if relative.extension().is_some_and(|ext| ext == "php") {
++            let mut components = relative.components();
++            let Some(locale) = components.next().and_then(|part| part.as_os_str().to_str()) else {
++                return;
++            };
++            if locale == "vendor" {
++                return;
++            }
++            let Some(group) = components
++                .as_path()
++                .to_str()
++                .and_then(|path| path.strip_suffix(".php"))
++            else {
++                return;
++            };
++            if group.is_empty() {
++                return;
++            }
++            (locale, Some(group.replace(std::path::MAIN_SEPARATOR, "/")))
++        } else {
++            return;
++        };
++        let qualified_group = group.as_ref().map(|group| {
++            if root.namespace.is_empty() {
++                group.clone()
++            } else {
++                format!("{}::{group}", root.namespace)
++            }
++        });
++        if self.files.iter().any(|file| {
++            file.uri.as_str() == uri
++                && file.locale == locale
++                && file.group.as_deref() == qualified_group.as_deref()
++        }) {
++            return;
++        }
++        self.locales.insert(locale.to_string());
++        self.insert_file(backend, path, locale, &root.namespace, group.as_deref());
++    }
++
+     fn insert_open_group(&mut self, backend: &Backend, uri: &str, locale: &str, group: &str) {
+         if self.files.iter().any(|file| file.uri.as_str() == uri) {
+             return;
+@@ -209,6 +269,64 @@ impl TranslationCatalog {
+ }
+ 
+ impl Backend {
++    /// Find PHP and Blade uses of the catalog key declared at `position`.
++    pub(crate) fn find_translation_declaration_references(
++        &self,
++        uri: &str,
++        position: Position,
++        include_declaration: bool,
++    ) -> Option<Vec<Location>> {
++        use crate::reference_index::ReferenceIndexKey;
++        use crate::symbol_map::LaravelStringKind;
++
++        if !uri.ends_with(".php") && !uri.ends_with(".json") {
++            return None;
++        }
++        let catalog = self.cached_translations();
++        if !catalog.contains_uri(uri) {
++            return None;
++        }
++        // One physical catalog can be registered under several namespaces.
++        let keys: Vec<_> = catalog
++            .entries
++            .iter()
++            .filter(|(_, entries)| {
++                entries.iter().any(|entry| {
++                    catalog.files[entry.file].uri.as_str() == uri
++                        && entry.range.start <= position
++                        && position <= entry.range.end
++                })
++            })
++            .map(|(key, _)| key.as_str())
++            .collect();
++        if keys.is_empty() {
++            return None;
++        }
++        let kind = LaravelStringKind::Trans;
++        let candidates: Vec<_> = keys
++            .iter()
++            .map(|key| ReferenceIndexKey::LaravelString {
++                kind,
++                key: (*key).to_string(),
++            })
++            .collect();
++        let snapshot = self.user_file_symbol_maps_for_reference_keys(&candidates);
++        Some(
++            keys.into_iter()
++                .flat_map(|key| {
++                    super::string_keys::find_laravel_string_key_references(
++                        self,
++                        &kind,
++                        key,
++                        uri,
++                        &snapshot,
++                        include_declaration,
++                    )
++                })
++                .collect(),
++        )
++    }
++
+     /// Read the shared translation catalog, building it only on a cache miss.
+     pub(crate) fn cached_translations(&self) -> Arc<TranslationCatalog> {
+         self.cached_laravel_enumeration(
+@@ -252,7 +370,7 @@ impl Backend {
+         roots.sort_by(|a, b| (&a.path, &a.namespace).cmp(&(&b.path, &b.namespace)));
+         roots.dedup();
+         let mut catalog = TranslationCatalog::default();
+-        for root in roots {
++        for root in &roots {
+             if let Ok(uri) = Url::from_directory_path(&root.path) {
+                 catalog.roots.push(uri.to_string());
+             }
+@@ -272,6 +390,19 @@ impl Backend {
+                 }
+             }
+         }
++        // Snapshot URIs before insert_file reads their buffers again.
++        let open_uris: Vec<_> = self.open_files.read().keys().cloned().collect();
++        for uri in open_uris {
++            let Some(path) = Url::parse(&uri)
++                .ok()
++                .and_then(|uri| uri.to_file_path().ok())
++            else {
++                continue;
++            };
++            for root in &roots {
++                catalog.insert_open_resource(self, &uri, &path, root);
++            }
++        }
+         // A new language file can be open before it exists on disk. The
+         // nonblocking snapshot is safe while the workspace index resolves types.
+         if let Some(root) = workspace_root {
+diff --git a/tests/integration/laravel_translation_keys.rs b/tests/integration/laravel_translation_keys.rs
+index 8b79aceb0f7e83d809aade53e76d66546ac30459..169ff86500bfdac5d2e9839e24ef257cc1f3bf5c 100644
+--- a/tests/integration/laravel_translation_keys.rs
++++ b/tests/integration/laravel_translation_keys.rs
+@@ -1605,3 +1605,655 @@ async fn typed_translation_keys_diagnose_only_proven_missing_keys() {
+     );
+     assert!(messages[0].contains("messages.absent"));
+ }
++
++#[tokio::test]
++async fn translation_catalog_origin_php_roots_groups_and_utf16_ranges() {
++    let english = "<?php /* 😀 */ return ['hello'=>'Hello', 'group'=>['child'=>'Child']];";
++    let french = "<?php return ['hello'=>'Bonjour'];";
++    let template = "😀 {{ __('messages.hello') }}";
++    let (backend, dir, uri, source) = workspace(
++        LARAVEL_APP_COMPOSER,
++        &[
++            ("lang/en/messages.php", english),
++            ("resources/lang/fr/messages.php", french),
++            ("resources/views/page.blade.php", template),
++        ],
++        "__('messages.hello'); trans('messages.hello'); __('messages.group'); __('messages.group.child');",
++    ).await;
++    let blade = open_blade_template(&backend, "resources/views/page.blade.php").await;
++    for include_declaration in [false, true] {
++        let callers = crate::common::find_references(
++            &backend,
++            &uri,
++            position_of(&source, "messages.hello"),
++            include_declaration,
++        )
++        .await;
++        assert_eq!(
++            callers.len(),
++            if include_declaration { 5 } else { 3 },
++            "{callers:?}"
++        );
++        let at = position_of(template, "messages.hello");
++        assert!(callers.contains(&Location::new(
++            blade.clone(),
++            Range::new(at, Position::new(at.line, at.character + 14))
++        )));
++        for (path, text) in [
++            ("lang/en/messages.php", english),
++            ("resources/lang/fr/messages.php", french),
++        ] {
++            let declaration_uri = Url::from_file_path(dir.path().join(path)).unwrap();
++            let found = crate::common::find_references(
++                &backend,
++                &declaration_uri,
++                position_of(text, "hello"),
++                include_declaration,
++            )
++            .await;
++            assert_eq!(
++                found, callers,
++                "{path}: declaration and caller must identify the same translation"
++            );
++            if include_declaration {
++                let at = position_of(text, "hello");
++                assert!(found.contains(&Location::new(
++                    declaration_uri,
++                    Range::new(at, Position::new(at.line, at.character + 5))
++                )));
++            }
++        }
++    }
++    let en = Url::from_file_path(dir.path().join("lang/en/messages.php")).unwrap();
++    for (needle, key) in [
++        ("group", "messages.group'"),
++        ("child", "messages.group.child"),
++    ] {
++        let expected =
++            crate::common::find_references(&backend, &uri, position_of(&source, key), true).await;
++        assert_eq!(expected.len(), 2, "{key}: {expected:?}");
++        assert_eq!(
++            crate::common::find_references(&backend, &en, position_of(english, needle), true).await,
++            expected
++        );
++    }
++    assert!(
++        crate::common::find_references(&backend, &en, position_of(english, "Hello"), true)
++            .await
++            .is_empty()
++    );
++}
++
++#[tokio::test]
++async fn translation_catalog_origin_follows_dirty_keys_callers_and_unsaved_files() {
++    let initial = "<?php /* 😀 */ return ['saved'=>'Saved'];";
++    let (backend, dir, uri, source) = workspace(
++        LARAVEL_APP_COMPOSER,
++        &[("lang/en/messages.php", initial)],
++        "__('messages.saved'); __('messages.other'); __('draft.saved');",
++    )
++    .await;
++    let en = Url::from_file_path(dir.path().join("lang/en/messages.php")).unwrap();
++    crate::common::open_php(&backend, &en, initial).await;
++    assert_eq!(
++        crate::common::find_references(&backend, &en, position_of(initial, "saved"), false)
++            .await
++            .len(),
++        1
++    );
++    let dirty = initial.replace("'saved'", "'other'");
++    backend
++        .did_change(DidChangeTextDocumentParams {
++            text_document: VersionedTextDocumentIdentifier {
++                uri: en.clone(),
++                version: 2,
++            },
++            content_changes: vec![TextDocumentContentChangeEvent {
++                range: None,
++                range_length: None,
++                text: dirty.clone(),
++            }],
++        })
++        .await;
++    let expected = crate::common::find_references(
++        &backend,
++        &uri,
++        position_of(&source, "messages.other"),
++        false,
++    )
++    .await;
++    assert_eq!(expected.len(), 1);
++    assert_eq!(
++        crate::common::find_references(&backend, &en, position_of(&dirty, "other"), false).await,
++        expected
++    );
++    backend
++        .did_change(DidChangeTextDocumentParams {
++            text_document: VersionedTextDocumentIdentifier {
++                uri: uri.clone(),
++                version: 2,
++            },
++            content_changes: vec![TextDocumentContentChangeEvent {
++                range: None,
++                range_length: None,
++                text: source.replace("messages.saved", "messages.other"),
++            }],
++        })
++        .await;
++    assert_eq!(
++        crate::common::find_references(&backend, &en, position_of(&dirty, "other"), false)
++            .await
++            .len(),
++        2
++    );
++    backend
++        .did_close(DidCloseTextDocumentParams {
++            text_document: TextDocumentIdentifier { uri: uri.clone() },
++        })
++        .await;
++    assert_eq!(
++        crate::common::find_references(&backend, &en, position_of(&dirty, "other"), false).await,
++        expected
++    );
++    backend
++        .did_close(DidCloseTextDocumentParams {
++            text_document: TextDocumentIdentifier { uri: en.clone() },
++        })
++        .await;
++    let original = crate::common::find_references(
++        &backend,
++        &uri,
++        position_of(&source, "messages.saved"),
++        false,
++    )
++    .await;
++    assert_eq!(
++        crate::common::find_references(&backend, &en, position_of(initial, "saved"), false).await,
++        original
++    );
++    let draft_path = dir.path().join("lang/en/draft.php");
++    let draft = Url::from_file_path(&draft_path).unwrap();
++    crate::common::open_php(&backend, &draft, initial).await;
++    assert_eq!(
++        crate::common::find_references(&backend, &draft, position_of(initial, "saved"), true)
++            .await
++            .len(),
++        2
++    );
++    backend
++        .did_close(DidCloseTextDocumentParams {
++            text_document: TextDocumentIdentifier { uri: draft },
++        })
++        .await;
++    assert!(!draft_path.exists());
++    assert_eq!(
++        std::fs::read_to_string(dir.path().join("lang/en/messages.php")).unwrap(),
++        initial
++    );
++    assert_eq!(
++        std::fs::read_to_string(dir.path().join("app/Demo.php")).unwrap(),
++        source
++    );
++}
++
++#[tokio::test]
++async fn translation_catalog_origin_namespaces_and_published_overrides() {
++    let published = "<?php /* 😀 */ return ['total'=>'Published'];";
++    let (backend, dir, uri, source) = workspace(
++        PACKAGE_COMPOSER,
++        &[
++            ("bootstrap/providers.php", PACKAGE_PROVIDER_LIST),
++            (
++                "packages/billing/src/BillingServiceProvider.php",
++                BILLING_PROVIDER,
++            ),
++            ("packages/billing/lang/en/invoice.php", BILLING_INVOICE),
++            ("lang/vendor/billing/en/invoice.php", published),
++        ],
++        "__('billing::invoice.total'); __('invoice.total');",
++    )
++    .await;
++    let expected = crate::common::find_references(
++        &backend,
++        &uri,
++        position_of(&source, "billing::invoice.total"),
++        true,
++    )
++    .await;
++    assert_eq!(
++        expected.len(),
++        3,
++        "one namespaced caller and two declarations: {expected:?}"
++    );
++    for (path, text) in [
++        ("packages/billing/lang/en/invoice.php", BILLING_INVOICE),
++        ("lang/vendor/billing/en/invoice.php", published),
++    ] {
++        let declaration = Url::from_file_path(dir.path().join(path)).unwrap();
++        assert_eq!(
++            crate::common::find_references(
++                &backend,
++                &declaration,
++                position_of(text, "total"),
++                true
++            )
++            .await,
++            expected,
++            "{path}"
++        );
++    }
++}
++
++#[tokio::test]
++async fn translation_catalog_origin_json_requires_actual_registered_membership() {
++    let json = r#"{"Greeting 😀":"Welcome"}"#;
++    let (backend, dir, uri, source) = workspace(
++        LARAVEL_APP_COMPOSER,
++        &[
++            ("lang/en.json", json),
++            ("scratch/lang/en.json", json),
++            ("scratch/en.json", json),
++        ],
++        "__('Greeting 😀');",
++    )
++    .await;
++    let expected =
++        crate::common::find_references(&backend, &uri, position_of(&source, "Greeting"), true)
++            .await;
++    assert_eq!(expected.len(), 2);
++    for (path, registered) in [
++        ("lang/en.json", true),
++        ("scratch/lang/en.json", false),
++        ("scratch/en.json", false),
++    ] {
++        let declaration = Url::from_file_path(dir.path().join(path)).unwrap();
++        crate::common::open_document(&backend, &declaration, "json", json).await;
++        let found = crate::common::find_references(
++            &backend,
++            &declaration,
++            position_of(json, "Greeting"),
++            true,
++        )
++        .await;
++        if registered {
++            assert_eq!(found, expected);
++        } else {
++            assert!(
++                found.is_empty(),
++                "unregistered catalog must not borrow app callers: {path}: {found:?}"
++            );
++        }
++    }
++}
++
++#[tokio::test]
++async fn translation_catalog_origin_duplicate_keys_and_value_positions() {
++    let catalog = "<?php /* 😀 */ return ['repeat'=>'old', 'repeat'=>'new', 'value'=>'repeat'];";
++    let (backend, dir, uri, source) = workspace(
++        LARAVEL_APP_COMPOSER,
++        &[
++            ("lang/en/messages.php", catalog),
++            ("scratch/lang/en/messages.php", catalog),
++        ],
++        "__('messages.repeat');",
++    )
++    .await;
++    let en = Url::from_file_path(dir.path().join("lang/en/messages.php")).unwrap();
++    let mut active = position_of(catalog, "'repeat'=>'new'");
++    active.character += 1;
++    let expected = crate::common::find_references(
++        &backend,
++        &uri,
++        position_of(&source, "messages.repeat"),
++        true,
++    )
++    .await;
++    assert_eq!(expected.len(), 2);
++    assert!(expected.contains(&Location::new(
++        en.clone(),
++        Range::new(active, Position::new(active.line, active.character + 6))
++    )));
++    assert_eq!(
++        crate::common::find_references(&backend, &en, active, true).await,
++        expected
++    );
++    for needle in ["repeat'=>'old", "old", "new", "repeat'];"] {
++        assert!(
++            crate::common::find_references(&backend, &en, position_of(catalog, needle), true)
++                .await
++                .is_empty(),
++            "{needle}"
++        );
++    }
++    let foreign = Url::from_file_path(dir.path().join("scratch/lang/en/messages.php")).unwrap();
++    assert!(
++        crate::common::find_references(&backend, &foreign, active, true)
++            .await
++            .is_empty()
++    );
++}
++
++#[tokio::test]
++async fn translation_catalog_origin_typed_receiver_proof_does_not_enable_rename() {
++    let body = "function render(Text $text, Contract $contract, Text|Foreign $uncertain, Foreign $foreign) { /* 😀 */ $text->get('messages.hello'); $contract->choice('messages.hello', 2); $uncertain->get('messages.hello'); $foreign->get('messages.hello'); }";
++    let (backend, dir, uri, source) = typed_translation_workspace(body).await;
++    let en = Url::from_file_path(dir.path().join("lang/en/messages.php")).unwrap();
++    let catalog = std::fs::read_to_string(dir.path().join("lang/en/messages.php")).unwrap();
++    let position = position_of(&catalog, "hello");
++    crate::common::open_php(&backend, &en, &catalog).await;
++    assert!(
++        backend
++            .prepare_rename(TextDocumentPositionParams {
++                text_document: TextDocumentIdentifier { uri: en.clone() },
++                position
++            })
++            .await
++            .unwrap()
++            .is_none()
++    );
++    assert!(
++        backend
++            .rename(RenameParams {
++                text_document_position: TextDocumentPositionParams {
++                    text_document: TextDocumentIdentifier { uri: en.clone() },
++                    position
++                },
++                new_name: "renamed".into(),
++                work_done_progress_params: Default::default()
++            })
++            .await
++            .unwrap()
++            .is_none()
++    );
++    let expected = crate::common::find_references(
++        &backend,
++        &uri,
++        position_of(&source, "messages.hello"),
++        true,
++    )
++    .await;
++    assert_eq!(expected.len(), 4);
++    assert_eq!(
++        crate::common::find_references(&backend, &en, position, true).await,
++        expected
++    );
++    assert_eq!(
++        std::fs::read_to_string(dir.path().join("lang/en/messages.php")).unwrap(),
++        catalog
++    );
++}
++
++#[tokio::test]
++async fn translation_catalog_origin_shared_file_unions_registered_namespace_callers() {
++    let provider = BILLING_PROVIDER.replace(
++        "$this->loadTranslationsFrom(__DIR__.'/../lang', 'billing');",
++        "$this->loadTranslationsFrom(__DIR__.'/../lang', 'billing');\n        $this->loadTranslationsFrom(__DIR__.'/../lang', 'bakery');",
++    );
++    let (backend, dir, uri, source) = workspace(
++        PACKAGE_COMPOSER,
++        &[
++            ("bootstrap/providers.php", PACKAGE_PROVIDER_LIST),
++            ("packages/billing/src/BillingServiceProvider.php", &provider),
++            ("packages/billing/lang/en/invoice.php", BILLING_INVOICE),
++        ],
++        "__('billing::invoice.total'); __('bakery::invoice.total'); __('invoice.total');",
++    )
++    .await;
++    let mut expected = Vec::new();
++    for key in ["billing::invoice.total", "bakery::invoice.total"] {
++        let found =
++            crate::common::find_references(&backend, &uri, position_of(&source, key), true).await;
++        assert_eq!(
++            found.len(),
++            2,
++            "each namespace resolves one caller and the shared declaration: {found:?}"
++        );
++        for location in found {
++            if !expected.contains(&location) {
++                expected.push(location);
++            }
++        }
++    }
++    assert_eq!(expected.len(), 3);
++    let declaration =
++        Url::from_file_path(dir.path().join("packages/billing/lang/en/invoice.php")).unwrap();
++    for include_declaration in [false, true] {
++        let found = crate::common::find_references(
++            &backend,
++            &declaration,
++            position_of(BILLING_INVOICE, "total"),
++            include_declaration,
++        )
++        .await;
++        assert_eq!(
++            found.len(),
++            if include_declaration { 3 } else { 2 },
++            "{found:?}"
++        );
++        assert!(found.iter().all(|location| expected.contains(location)));
++        assert!(include_declaration || found.iter().all(|location| location.uri == uri));
++    }
++}
++
++#[tokio::test]
++async fn translation_catalog_origin_custom_json_roots_follow_dirty_provider_selection() {
++    let provider = BILLING_PROVIDER.replace(
++        "$this->loadTranslationsFrom(__DIR__.'/../lang', 'billing');",
++        "$this->loadJsonTranslationsFrom(__DIR__.'/../json');",
++    );
++    let json = r#"{"Greeting 😀":"Welcome"}"#;
++    let (backend, dir, uri, source) = workspace(
++        PACKAGE_COMPOSER,
++        &[
++            ("bootstrap/providers.php", PACKAGE_PROVIDER_LIST),
++            ("packages/billing/src/BillingServiceProvider.php", &provider),
++            ("packages/billing/json/en.json", json),
++            ("packages/billing/alternate/en.json", json),
++        ],
++        "__('Greeting 😀');",
++    )
++    .await;
++    let active = Url::from_file_path(dir.path().join("packages/billing/json/en.json")).unwrap();
++    let alternate =
++        Url::from_file_path(dir.path().join("packages/billing/alternate/en.json")).unwrap();
++    for target in [&active, &alternate] {
++        crate::common::open_document(&backend, target, "json", json).await;
++    }
++    let expected =
++        crate::common::find_references(&backend, &uri, position_of(&source, "Greeting"), true)
++            .await;
++    assert_eq!(expected.len(), 2, "{expected:?}");
++    assert_eq!(
++        crate::common::find_references(&backend, &active, position_of(json, "Greeting"), true)
++            .await,
++        expected
++    );
++    assert!(
++        crate::common::find_references(&backend, &alternate, position_of(json, "Greeting"), true)
++            .await
++            .is_empty()
++    );
++    let provider_uri = Url::from_file_path(
++        dir.path()
++            .join("packages/billing/src/BillingServiceProvider.php"),
++    )
++    .unwrap();
++    crate::common::open_php(&backend, &provider_uri, &provider).await;
++    backend
++        .did_change(DidChangeTextDocumentParams {
++            text_document: VersionedTextDocumentIdentifier {
++                uri: provider_uri.clone(),
++                version: 2,
++            },
++            content_changes: vec![TextDocumentContentChangeEvent {
++                range: None,
++                range_length: None,
++                text: provider.replace("../json", "../alternate"),
++            }],
++        })
++        .await;
++    let expected_alternate =
++        crate::common::find_references(&backend, &uri, position_of(&source, "Greeting"), true)
++            .await;
++    assert_eq!(expected_alternate.len(), 2);
++    assert!(
++        expected_alternate
++            .iter()
++            .any(|location| location.uri == alternate)
++    );
++    assert_eq!(
++        crate::common::find_references(&backend, &alternate, position_of(json, "Greeting"), true)
++            .await,
++        expected_alternate
++    );
++    assert!(
++        crate::common::find_references(&backend, &active, position_of(json, "Greeting"), true)
++            .await
++            .is_empty()
++    );
++    backend
++        .did_close(DidCloseTextDocumentParams {
++            text_document: TextDocumentIdentifier { uri: provider_uri },
++        })
++        .await;
++    assert_eq!(
++        crate::common::find_references(&backend, &active, position_of(json, "Greeting"), true)
++            .await,
++        expected
++    );
++    assert!(
++        crate::common::find_references(&backend, &alternate, position_of(json, "Greeting"), true)
++            .await
++            .is_empty()
++    );
++    assert_eq!(
++        std::fs::read_to_string(
++            dir.path()
++                .join("packages/billing/src/BillingServiceProvider.php")
++        )
++        .unwrap(),
++        provider
++    );
++}
++
++#[tokio::test]
++async fn translation_catalog_origin_unsaved_registered_php_and_json_files() {
++    let provider = BILLING_PROVIDER.replace(
++        "$this->loadTranslationsFrom(__DIR__.'/../lang', 'billing');",
++        "$this->loadTranslationsFrom(__DIR__.'/../lang', 'billing');\n        $this->loadTranslationsFrom(__DIR__.'/../lang', 'bakery');\n        $this->loadJsonTranslationsFrom(__DIR__.'/../json');",
++    );
++    let (backend, dir, uri, source) = workspace(
++        PACKAGE_COMPOSER,
++        &[
++            ("bootstrap/providers.php", PACKAGE_PROVIDER_LIST),
++            ("packages/billing/src/BillingServiceProvider.php", &provider),
++            ("lang/en/messages.php", "<?php return ['control'=>'Existing'];"),
++            ("lang/en.json", r#"{"Control":"Existing"}"#),
++            ("packages/billing/lang/en/invoice.php", BILLING_INVOICE),
++            ("packages/billing/json/en.json", r#"{"Control":"Existing"}"#),
++        ],
++        "__('messages.draft'); __('billing::invoice.draft'); __('bakery::invoice.draft'); __('New app draft 😀'); __('New package draft 😀');",
++    ).await;
++    let drafts = [
++        (
++            "lang/fr/messages.php",
++            "<?php /* 😀 */ return ['draft'=>'New line'];",
++            "draft",
++            "php",
++            2,
++        ),
++        (
++            "packages/billing/lang/fr/invoice.php",
++            "<?php /* 😀 */ return ['draft'=>'New line'];",
++            "draft",
++            "php",
++            3,
++        ),
++        (
++            "lang/fr.json",
++            r#"{"New app draft 😀":"New line"}"#,
++            "New app draft",
++            "json",
++            2,
++        ),
++        (
++            "packages/billing/json/fr.json",
++            r#"{"New package draft 😀":"New line"}"#,
++            "New package draft",
++            "json",
++            2,
++        ),
++    ];
++    for (path, text, _, language, _) in drafts {
++        let target = Url::from_file_path(dir.path().join(path)).unwrap();
++        crate::common::open_document(&backend, &target, language, text).await;
++        assert!(!dir.path().join(path).exists());
++    }
++    for (path, text, needle, _, count) in drafts {
++        let target = Url::from_file_path(dir.path().join(path)).unwrap();
++        let found =
++            crate::common::find_references(&backend, &target, position_of(text, needle), true)
++                .await;
++        assert_eq!(found.len(), count, "{path}: {found:?}");
++        assert!(found.iter().any(|location| location.uri == target));
++        assert!(
++            found
++                .iter()
++                .all(|location| location.uri == target || location.uri == uri)
++        );
++    }
++    let keys = [
++        ("messages.draft", "lang/fr/messages.php"),
++        (
++            "billing::invoice.draft",
++            "packages/billing/lang/fr/invoice.php",
++        ),
++        (
++            "bakery::invoice.draft",
++            "packages/billing/lang/fr/invoice.php",
++        ),
++        ("New app draft 😀", "lang/fr.json"),
++        ("New package draft 😀", "packages/billing/json/fr.json"),
++    ];
++    for (key, path) in keys {
++        let definitions = definitions_at(&backend, &uri, &source, key).await;
++        assert_eq!(definitions.len(), 1, "{key}: {definitions:?}");
++        assert_eq!(
++            definitions[0].uri,
++            Url::from_file_path(dir.path().join(path)).unwrap()
++        );
++        assert_eq!(
++            crate::common::find_references(&backend, &uri, position_of(&source, key), true)
++                .await
++                .len(),
++            2
++        );
++    }
++    for (path, _, _, _, _) in drafts {
++        let target = Url::from_file_path(dir.path().join(path)).unwrap();
++        backend
++            .did_close(DidCloseTextDocumentParams {
++                text_document: TextDocumentIdentifier { uri: target },
++            })
++            .await;
++        assert!(!dir.path().join(path).exists());
++    }
++    for (key, _) in keys {
++        assert!(
++            definitions_at(&backend, &uri, &source, key)
++                .await
++                .is_empty(),
++            "{key}"
++        );
++        assert_eq!(
++            crate::common::find_references(&backend, &uri, position_of(&source, key), true)
++                .await
++                .len(),
++            1
++        );
++    }
++    assert_eq!(
++        std::fs::read_to_string(dir.path().join("app/Demo.php")).unwrap(),
++        source
++    );
++}

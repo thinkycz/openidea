@@ -15,6 +15,82 @@ slice, commit and push it, and retain only the latest generated app. Native UI
 cases remain deferred/unverified; earlier native-first blocking checkpoints are
 historical and no longer prevent independent implementation.
 
+Translation declaration usages slice205 (2026-11-20, source/protocol accepted; inactive186):
+PHP translation catalog declarations returned zero references while a caller of
+the same key returned 17 exact locations. The JSON declaration fallback also
+mistook an unrelated lang directory for a registered resource. Catalog-origin
+references now use shared translation metadata and the existing reference index
+and typed receiver proof. One physical file registered under multiple namespaces
+returns the union of those callers; duplicate locations are removed. PHP catalog
+rename remains unsupported, and its refusal is tested.
+
+Seven public-handler regressions fail on unchanged engine185 for the intended reasons.
+Coverage includes both application roots, PHP groups/nesting, Unicode/Blade ranges,
+provider namespaces/published overrides, duplicate keys, foreign JSON paths,
+dirty caller/catalog changes, unsaved files and rename refusal. A separate actual
+stdio control on185 preserves custom JSON-root registration, dirty provider
+selection, restoration and two real Laravel assertions.
+
+The first186 source passes eight focused cases, 18,727 primary tests and both
+Clippy modes, but a new unsaved-JSON stdio case exposes a regression:185 returns
+one caller from the unsaved catalog; draft186 returns zero. Neither has the
+unsaved declaration in its shared metadata. That draft is rejected without
+promotion. Corrected metadata admits open PHP/JSON catalogs under registered
+application/package roots before their first save, preserving namespace aliases.
+All nine focused cases and final 18,728 primary tests/17 declared ignores/two
+bounded child groups pass. Both revisions receive fix-mode all-target Clippy and
+subsequent formatting; final default/mem-audit Clippy, pinned replay and optimized
+build pass. Initial source/pin/patch, complete gate receipts and the failing
+protocol observation remain as negative evidence.
+
+Final signed186 stdio returns the same 17 exact references from the PHP catalog
+and its caller. Thirteen supported typed receivers/seven foreign controls,
+settled diagnostics, dirty dependencies/catalogs, close/reopen and engine restart
+pass. The same probe on185/final186 verifies an unsaved JSON catalog: final186
+returns two references and one exact definition, completion and hover reflect
+the buffer, diagnostics retain an independent missing-key control, and close
+retires all buffer metadata. Custom JSON-provider tests pass three selection
+phases/two Laravel runtime assertions. Three unchanged frozen client controls
+(Kernel trait, callback and typed translation) pass with original deadlines.
+They are targeted controls; full 126 client/Host cases and new catalog-origin
+client/Host assertions remain the next slice before promotion or packaging.
+
+Fresh canonical examples pass 12 plain PHP syntax files/runtime assertions and
+121 Laravel syntax files/387 actual Laravel 13.37 assertions/exactly three
+intentional analyzer diagnostics. Demo edits are two comments, with line counts
+preserved. The first copied-fixture runtime has 386 passes/one physical-source
+failure: its shared Composer loader points to the old project. Redirecting only
+declared project PSR-4/classmap entries in memory restores the original check;
+shared vendor bytes and original fixtures stay unchanged. Both failure and
+correction logs are retained. Final runtime reflection proves the controller
+loads from the current fixture, and every PHP fixture byte matches final source.
+
+App 0.1.119/default185 source/resources and signatures retain their original
+hashes. Engine186 is signed arm64 but inactive. The build receipt from slice204 proves
+application source/bindings unchanged; explicitly reuse its 14,395 frontend
+tests/eight skips/types/lint/format/Knip/build/resource gates and 202's 5,485
+workspace passes/248 ignores/same 11 exclusions/final workspace Clippy. Fresh root provenance/release metadata checks pass 24 tests and formatting passes
+3,543 files. No fresh root-workspace or native GUI acceptance is claimed. Native checks remain
+user-skipped. No install, notarization, publication, migration, updater activation,
+deployment or debugger expansion. Broader locale/project/privacy/platform/service
+and performance matrices, plus the older unattributed timeout, remain open.
+All 69 areas remain 67 partial and two debugger areas user-deferred.
+
+Cleanup: Removed 8228 files, 2.2GiB total; duplicate engine workcopy and Laravel fixture removed.
+Only App119 remains. Canonical sources/engines, pins/licenses/provenance, original
+PHP Workbench/reference/evaluation artifacts and the one latest frozen runtime
+set are retained. No owned engine/compiler process remains.
+Raw186 SHA256: 12c5238c6496a3c16e694d588d245438694f6427d1991f8ec0fff4f87f21779b.
+Signed186 SHA256: b27504ec258f00cbfe0e764ca9d05c390b5b95493740b0564f8439a6f6d5a9b6.
+Patch SHA256: ef3d9cd42beeffab871cd3f454c804c9c1bf7e004ad253165967ebdf2f0546bb.
+Rebuild using scripts/prepare-phpantom.py and scripts/build-phpantom.py with
+--pin engine/candidates/0.11.1-openstorm.186-source.json.
+Evidence: artifacts/checks/slice205/{input,baseline-summary,red-final,
+initial-rejection,initial-engine-gates,revised-preflight,freeze,engine-gates,
+engine-test-summary,post-source,wire186,draft186-final,custom-json186,
+plain-fixture,laravel-fixture,quick-controls,engine-retention,acceptance}.json.
+Git history and ignored delivery receipts record commit/push and remote-ref checks.
+
 Package slice204 (2026-11-20, accepted local development bundle):
 App 0.1.119 promotes the exact engine185 accepted in source/client slice203.
 Typed translation navigation includes definitions, hover, caller references and

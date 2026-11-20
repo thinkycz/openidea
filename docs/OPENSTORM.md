@@ -15,6 +15,107 @@ slice, commit and push it, and retain only the latest generated app. Native UI
 cases remain deferred/unverified; earlier native-first blocking checkpoints are
 historical and no longer prevent independent implementation.
 
+JSON resource admission slice207 (2026-11-20, source/protocol accepted; inactive187):
+The client currently forwards only application lang/ and resources/lang/ JSON.
+Engine187 supplies a typed, content-free registration query before sharing a
+custom-root buffer. phpWorkbench/jsonTranslationResource takes an existing
+consuming-project PHP document or Composer manifest and a proposed JSON URI. It
+returns the registered direct locale directory, or null for an unrelated
+resource. The query has its own advertised capability and reuses provider
+registrations and the existing semantic freshness gate. It runs no project
+tools and accepts no buffer text.
+
+Old186 returns Method not found on the actual transport before JSON content is
+sent. The first187 passes six focused backend cases, full18,734/17 ignores/two
+bounded child groups and both Clippy modes. A documentation amendment reproduces
+its raw bytes. Actual stdio then rejects it: dirty provider changes inside an
+explicitly mapped nested Composer package do not reach the consuming app. The
+identical wire probe reproduces that failure twice. Both positive gates and the
+negative transport result are retained; that candidate is not promoted.
+
+The router's dependency list kept external PSR-4 roots but dropped explicit
+internal roots before applying nested-project exclusions. Corrected187 retains
+PSR-4 directories explicitly mapped inside nested Composer projects. A new public
+Router regression checks initial discovery, dirty updates, discard and sibling
+isolation. All seven focused cases and final18,738 primary tests/17 ignores/two
+bounded child groups/default and mem-audit Clippy/fmt/pin replay/build pass.
+The first graph-fixed build returns the dirty registration but retains a
+noncanonical src/../alternate rootUri. The strict transport check refuses it.
+Final187 returns the already validated canonical resource parent, and the dirty
+provider/Router tests now assert exact URI values. An identical build-first
+signed probe passes26 decisions before the final full suite is rerun. The same
+signed artifact is retained through final acceptance. Both rejected variants and
+failure receipts remain documented. The final source includes contributor-style
+changelog and client-protocol docs.
+An earlier review moves filesystem checks off async entry and into the existing
+cancel-safe worker before acceptance; its interrupted compile/source remains as
+unaccepted history. No PHP type claim changes; the transport example is in the
+editor setup documentation and canonical PHP examples are verified unchanged.
+
+Final signed187 stdio passes 26 exact registration/refusal decisions, package
+consumption with its own Composer manifest, neighbor-project isolation, three
+provider phases, unknown-field rejection and dirty-provider replay after restart.
+The probe bytes are identical to the rejected187 negative control. It sends no
+JSON resource contents, creates no proposed locale files and adds no priming,
+retries or wider request budgets. Both engine sessions exit cleanly. Timings are
+recorded for 27 endpoint requests including invalid/refusal cases; they do
+not measure native startup, idle CPU, memory or parity.
+
+The unchanged unsaved-JSON control exposes an inherited diagnostic failure on
+both186 and pre-fix187: navigation retires the closed catalog but caller diagnostics
+retain their old result. Three deterministic open/change/close regressions all
+fail before the fix. JSON catalog admission now uses existing broad semantic
+publication: prior diagnostic runs lose ownership and pull caches are evicted
+before readiness is exposed. Ordinary PHP source updates remain selective.
+All three unit regressions, the unchanged build-first diagnostic probe and final
+signed stdio controls pass at the original deadlines. Baseline/candidate failures
+and traces are retained in diagnostic-root-cause.json and pre-diagnostic-fix/.
+
+Existing signed187 protocol controls retain17 exact catalog/caller references,
+13 positive/seven negative receivers, dirty sources, settled diagnostics,
+completion/hover and restart. Unsaved JSON retains two references/one exact
+definition and close retirement. Custom JSON providers pass three phases/two
+actual Laravel assertions. Four client and two Host cases pass with unchanged
+frozen206 executables, fingerprints, source hashes and deadlines: typed catalog
+navigation, unsaved client resources, managed PHP/JSON discard, Kernel trait and
+callback controls. These are targeted controls; neither full128 acceptance on187
+nor the new protocol's client integration is claimed. Custom-root forwarding
+remains next. Engine187 is inactive/unbundled; sole App119/default185 and the
+latest128-case executable set remain unchanged.
+
+Fresh canonical fixtures pass12 plain-PHP syntax files/runtime and121 Laravel
+syntax files/387 actual Laravel13.37 assertions/exactly three intentional analyzer
+diagnostics. In-memory PSR-4/classmap redirection preserves shared vendor bytes
+and proves the reflected controller loads from the owned fixture. Fresh24
+metadata tests, actual187/all187 patch checksum/pin and default185 checks pass.
+Application source is unchanged since206: reuse its5,485 workspace passes/250
+ignores/the same11 exclusions/final workspace Clippy and14,395 frontend tests/
+eight skips/types/lint/format/Knip/build/bindings/53 browser checks explicitly.
+No fresh root workspace or native GUI pass is claimed.
+
+Cleanup: Removed 8230 files, 2.2GiB total. Owned compiler output, workcopy, duplicate Laravel
+fixture and all five rejected, superseded and staging executables are removed
+(283,591,376 bytes). Rejected source, pin/patch, checksums, licenses/provenance
+and failure receipts remain. Canonical final
+sources/engines, original PHP Workbench/reference/evaluation artifacts, sole
+App119 and one latest frozen test set are retained. No owned engine/compiler
+process remains. Native GUI is user-skipped; full locale/project/privacy/platform/
+service and performance matrices, Host untitled first-save and the older
+unattributed timeout remain open. All69 areas stay67 partial/two debugger-deferred.
+Raw187 SHA256: e1f72bcb8f10653448923780a6e7c568b607ff6fc6c607b287be2ab24fb57f24.
+Signed187 SHA256: aa78113eea54ec2dd67b9fcab4ea748b9d6e314d4f7a1f5199d686d0019306e3.
+Patch SHA256: 4af739ad94bca506f9cd7f50694fc8cbff1621106681ab3569e2ae021b7c2472.
+Rebuild with scripts/prepare-phpantom.py and scripts/build-phpantom.py using
+--pin engine/candidates/0.11.1-openstorm.187-source.json.
+Evidence: artifacts/checks/slice207/{input,red,initial-review,nested-root-cause,
+nested-red-confirmed,rejected-post-source,canonical-root-cause,noncanonical-post-source,
+early-wire,rejected-engine-gates,preflight,freeze,
+engine-gates,engine-test-summary,diagnostic-root-cause,early187-diagnostic-fixed,
+post-source,wire187-resource,wire187,
+draft187-final,custom-json187,plain-fixture,laravel-fixture,quick-controls,
+metadata-checks,engine-retention,acceptance}.json. Git history/delivery receipts
+record commit/push and remote-ref checks.
+
 Client catalog adoption slice206 (2026-11-20, accepted; inactive186):
 The actual client and Host now verify catalog-origin references, including exact
 locations and includeDeclaration policy from both PHP declarations. A new client

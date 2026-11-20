@@ -1,0 +1,1106 @@
+diff --git a/docs/CHANGELOG.md b/docs/CHANGELOG.md
+index fc983ed328cfe80c67053d6c377fc67d4666f5d7..cb0608fbe8f3a32da7fb6e8b2ff44e2a6f3a4971 100644
+--- a/docs/CHANGELOG.md
++++ b/docs/CHANGELOG.md
+@@ -349,6 +349,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
+ 
+ ### Added
+ 
++- **Inspect Laravel JSON translation resources.** Editor integrations can identify registered locale files before sharing their buffers, including new paths and unsaved provider changes. Contributed by @thinkycz.
++
+ - **Rename controllers directly from Laravel runtime strings.** Rename inside a statically resolved controller action or group binding to preview the same class edits as starting from its PHP declaration. Shared, unresolved and installed-package targets remain protected. Contributed by @thinkycz
+ 
+ - **Rename controller classes used in route strings.** A class rename started from PHP updates proven literal route actions and controller bindings with the proper quoting, preserving method suffixes and ignoring lexical import aliases. Shared or unresolved bindings and namespace moves remain refused. Contributed by @thinkycz.
+@@ -361,6 +363,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
+ 
+ ### Fixed
+ 
++- **Translation diagnostics refresh after catalog edits.** Opening, changing, or discarding an unsaved JSON translation catalog refreshes warnings in unchanged PHP callers. Contributed by @thinkycz.
++
++- **Keep nested Composer dependencies current.** Unsaved PHP changes in explicitly mapped nested package directories now refresh their consuming projects while sibling projects retain separate state. Contributed by @thinkycz.
++
+ - **Named view setters.** Blade variable assistance follows reordered `key:` and `value:` arguments to chained `with()` calls. Later setters retain their data precedence. Contributed by @thinkycz.
+ 
+ - **View fallback data.** Template variables retain Laravel's merge-data precedence when arguments are reordered. Named per-item and empty views remain separate. Contributed by @thinkycz.
+diff --git a/docs/editor-setup.md b/docs/editor-setup.md
+index dd479523a3734f507da17fa7aa5e843d3d4804d1..40827a86634d0b9c3fbd850b9c28e2cb86e4bef4 100644
+--- a/docs/editor-setup.md
++++ b/docs/editor-setup.md
+@@ -194,3 +194,48 @@ lsp.add_server {
+ ```
+ 
+ For AI coding agent setup, see [Agent Setup](agent-setup.md).
++
++## OpenStorm client extensions
++
++### JSON translation resources
++
++OpenStorm's downstream engine advertises
++`experimental.phpWorkbenchJsonTranslationResource` for a content-free registration
++query. Before sending a JSON locale buffer, call
++`phpWorkbench/jsonTranslationResource` with an existing PHP document or Composer
++manifest from the consuming Laravel project. A package's own Composer manifest
++need not select that consuming project.
++
++For a translation directory statically registered by an active provider:
++
++```json
++{
++  "projectUri": "file:///project/composer.json",
++  "resourceUri": "file:///project/packages/shop/translations/fr.json"
++}
++```
++
++The response echoes both selectors and identifies the registered directory:
++
++```json
++{
++  "projectUri": "file:///project/composer.json",
++  "resourceUri": "file:///project/packages/shop/translations/fr.json",
++  "rootUri": "file:///project/packages/shop/translations/"
++}
++```
++
++`rootUri` is null when the proposed file is not a statically registered JSON
++locale resource. Use preferred physical file URIs; the locale file and its parent
++directories may be new. The request contains no file text. Invalid authorities,
++non-JSON paths, aliases and non-file targets are refused.
++
++Keep the selected project, document revisions and server generation current while
++awaiting the response. Recheck after provider, project or configuration changes
++and server restart before forwarding more content. Missing capability, null,
++failed or stale responses do not admit the buffer. The query reports static
++registration information; client buffer forwarding is a separate integration.
++
++PSR-4 source directories explicitly mapped inside a nested Composer project
++remain dependencies of the consuming application. Their unsaved PHP provider
++changes refresh its registration decisions without merging sibling projects.
+diff --git a/src/backend/documents.rs b/src/backend/documents.rs
+index bb3526542a4aaa5a3dc7fc6ea85b2e5ca908c6b6..576251d7485616d237cc53e0d2e05ae212a40bad 100644
+--- a/src/backend/documents.rs
++++ b/src/backend/documents.rs
+@@ -79,7 +79,7 @@ impl Backend {
+             self.open_files
+                 .write()
+                 .insert(uri.clone(), Arc::clone(&text));
+-            self.begin_owned_background_index_publication_locked(&mut documents)
++            self.begin_owned_document_publication_locked(&uri, &mut documents)
+         };
+ 
+         // Resource documents are not PHP source. Build a lightweight symbol
+@@ -211,7 +211,7 @@ impl Backend {
+                 .write()
+                 .insert(uri.clone(), Arc::clone(&text));
+             (
+-                self.begin_owned_background_index_publication_locked(&mut documents),
++                self.begin_owned_document_publication_locked(&uri, &mut documents),
+                 source_only_change,
+             )
+         };
+@@ -411,7 +411,7 @@ impl Backend {
+                 old_targets.extend(work.targets);
+             }
+             let opening = documents.closed_opening(&uri);
+-            let publication = self.begin_owned_background_index_publication_locked(&mut documents);
++            let publication = self.begin_owned_document_publication_locked(&uri, &mut documents);
+             (opening, publication)
+         };
+         // Keep this lock identity across reopen: detached old work may still hold it.
+@@ -702,6 +702,134 @@ mod unsaved_fanout_tests {
+         );
+     }
+ 
++    async fn assert_json_catalog_publication_retires_caller(event: &str) {
++        let f = fixture(DEPENDENCY, CALLER).await;
++        let root = f
++            .helper
++            .to_file_path()
++            .unwrap()
++            .parent()
++            .unwrap()
++            .to_owned();
++        std::fs::create_dir_all(root.join("lang")).unwrap();
++        let catalog = Url::from_file_path(root.join("lang/fr.json")).unwrap();
++        let open = || DidOpenTextDocumentParams {
++            text_document: TextDocumentItem {
++                uri: catalog.clone(),
++                language_id: "json".into(),
++                version: 1,
++                text: r#"{"Draft":"Bonjour"}"#.into(),
++            },
++        };
++        if event != "open" {
++            f.backend.on_did_open(open()).await;
++        }
++        f.backend
++            .supports_pull_diagnostics
++            .store(true, Ordering::Release);
++        f.backend.diag.pending_uris.lock().clear();
++        f.backend
++            .diag
++            .last_full
++            .lock()
++            .insert(f.caller.to_string(), Vec::new());
++        f.backend
++            .diag
++            .result_ids
++            .lock()
++            .insert(f.caller.to_string(), 7);
++        let text = f
++            .backend
++            .open_files
++            .read()
++            .get(f.caller.as_str())
++            .cloned()
++            .unwrap();
++        let revision = f
++            .backend
++            .diag
++            .documents
++            .lock()
++            .capture(f.caller.as_str(), &text)
++            .unwrap();
++        match event {
++            "open" => f.backend.on_did_open(open()).await,
++            "change" => {
++                f.backend
++                    .on_did_change(DidChangeTextDocumentParams {
++                        text_document: VersionedTextDocumentIdentifier {
++                            uri: catalog.clone(),
++                            version: 2,
++                        },
++                        content_changes: vec![TextDocumentContentChangeEvent {
++                            range: None,
++                            range_length: None,
++                            text: "{}".into(),
++                        }],
++                    })
++                    .await
++            }
++            "close" => {
++                f.backend
++                    .on_did_close(DidCloseTextDocumentParams {
++                        text_document: TextDocumentIdentifier {
++                            uri: catalog.clone(),
++                        },
++                    })
++                    .await
++            }
++            _ => unreachable!(),
++        }
++        assert!(
++            !catalog.to_file_path().unwrap().exists(),
++            "buffer remains unsaved"
++        );
++        assert!(
++            !f.backend
++                .diag
++                .last_full
++                .lock()
++                .contains_key(f.caller.as_str()),
++            "{event} must evict stale caller diagnostics"
++        );
++        assert!(
++            f.backend
++                .diag
++                .pending_uris
++                .lock()
++                .contains(f.caller.as_str()),
++            "{event} must queue the unchanged caller"
++        );
++        assert_eq!(
++            f.backend.diag.result_ids.lock().get(f.caller.as_str()),
++            Some(&7),
++            "retain result IDs until fresh results publish"
++        );
++        assert!(
++            !f.backend
++                .diag
++                .documents
++                .lock()
++                .mark_phase(f.caller.as_str(), revision.as_ref(), true),
++            "old diagnostic work must lose ownership"
++        );
++    }
++
++    #[tokio::test]
++    async fn json_catalog_open_retires_cached_caller_diagnostics() {
++        assert_json_catalog_publication_retires_caller("open").await;
++    }
++
++    #[tokio::test]
++    async fn json_catalog_change_retires_cached_caller_diagnostics() {
++        assert_json_catalog_publication_retires_caller("change").await;
++    }
++
++    #[tokio::test]
++    async fn json_catalog_close_retires_cached_caller_diagnostics() {
++        assert_json_catalog_publication_retires_caller("close").await;
++    }
++
+     #[tokio::test]
+     async fn unsaved_method_declaration_change_queues_unchanged_caller() {
+         let f = fixture(DEPENDENCY, CALLER).await;
+@@ -937,8 +1065,10 @@ mod completed_open_readiness_tests {
+         assert!(!backend.retire_empty_pending_blade_caller(&uri, &text));
+         let publication = {
+             let _merge = backend.index_merge_gate.lock();
+-            backend
+-                .begin_owned_background_index_publication_locked(&mut backend.diag.documents.lock())
++            backend.begin_owned_document_publication_locked(
++                "file:///source.php",
++                &mut backend.diag.documents.lock(),
++            )
+         };
+         assert!(backend.diag.documents.lock().configuration_changing());
+         assert!(backend.retire_completed_open_blade_dependencies(&uri, &text));
+diff --git a/src/backend/semantic_snapshot.rs b/src/backend/semantic_snapshot.rs
+index 22e07d23f217d48f80f8378ed237bda2a673ede8..3dcd7ee00b10b00958c0a6c0d8917aea258b1852 100644
+--- a/src/backend/semantic_snapshot.rs
++++ b/src/backend/semantic_snapshot.rs
+@@ -67,12 +67,18 @@ impl Backend {
+ 
+     /// Admit the publication without releasing the accepted source lock.
+     /// Readers cannot capture the interval between an edit and this guard.
+-    pub(crate) fn begin_owned_background_index_publication_locked(
++    pub(crate) fn begin_owned_document_publication_locked(
+         &self,
++        uri: &str,
+         documents: &mut crate::diagnostics::revision::Revisions,
+     ) -> impl Drop + Send + 'static + use<> {
+         let backend = self.clone_for_blocking();
+-        documents.begin_source_publication();
++        if crate::resource_navigation::is_json_translation_document(uri) {
++            // JSON keys can affect any open PHP caller, including unresolved keys.
++            documents.begin_background_index_change();
++        } else {
++            documents.begin_source_publication();
++        }
+         OwnedSemanticPublication(backend)
+     }
+ 
+@@ -317,8 +323,10 @@ mod tests {
+     #[test]
+     fn selective_source_publication_preserves_unrelated_diagnostics() {
+         let (backend, _, unrelated) = selective_fixture();
+-        let guard = backend
+-            .begin_owned_background_index_publication_locked(&mut backend.diag.documents.lock());
++        let guard = backend.begin_owned_document_publication_locked(
++            "file:///source.php",
++            &mut backend.diag.documents.lock(),
++        );
+         assert!(backend.with_semantic_epoch(|| Ok(())).is_err());
+         backend.schedule_diagnostics("file:///changed.blade.php".into());
+         drop(guard);
+@@ -341,8 +349,10 @@ mod tests {
+     #[test]
+     fn selective_source_publication_remembers_broad_overlap_until_last_drop() {
+         let (backend, _, unrelated) = selective_fixture();
+-        let source = backend
+-            .begin_owned_background_index_publication_locked(&mut backend.diag.documents.lock());
++        let source = backend.begin_owned_document_publication_locked(
++            "file:///source.php",
++            &mut backend.diag.documents.lock(),
++        );
+         let broad = backend.begin_background_index_publication();
+         drop(broad);
+         assert!(backend.diag.pending_uris.lock().is_empty());
+@@ -411,7 +421,7 @@ mod tests {
+         documents.open(uri, 1, &old);
+         assert!(documents.change(uri, 2, &new));
+         let input = documents.input_epoch();
+-        let publication = backend.begin_owned_background_index_publication_locked(&mut documents);
++        let publication = backend.begin_owned_document_publication_locked(uri, &mut documents);
+         assert!(documents.input_matches(&input));
+         assert!(documents.capture(uri, &new).is_err());
+         assert_eq!(
+@@ -437,8 +447,10 @@ mod tests {
+         let observer = backend.clone_for_blocking();
+         let input = observer.diag.documents.lock().input_epoch();
+         let borrowed = observer.begin_background_index_publication();
+-        let owned = backend
+-            .begin_owned_background_index_publication_locked(&mut backend.diag.documents.lock());
++        let owned = backend.begin_owned_document_publication_locked(
++            "file:///source.php",
++            &mut backend.diag.documents.lock(),
++        );
+         drop(backend);
+         assert!(observer.diag.documents.lock().input_matches(&input));
+         assert_eq!(
+diff --git a/src/backend/startup.rs b/src/backend/startup.rs
+index bd864f44d2cc85d7c540392c257421d189b931aa..30b6e371913cc39af4971a403b646ad9c3ebfda3 100644
+--- a/src/backend/startup.rs
++++ b/src/backend/startup.rs
+@@ -298,7 +298,7 @@ impl Backend {
+                     ..ExecuteCommandOptions::default()
+                 }),
+                 experimental: Some(
+-                    serde_json::json!({"phpWorkbenchEnvironmentResources": true, "phpWorkbenchJsonTranslations": true, "phpWorkbenchRoutes": true, (crate::workbench_route_handler::CAPABILITY): true, "phpWorkbenchViews": true, "phpWorkbenchBuiltins": true, "phpWorkbenchActiveTarget": true, (crate::workbench_active_target::CLIENT_LEVEL_CAPABILITY): true, "phpWorkbenchRenameChecked": true, (crate::workbench_optimize_imports::CAPABILITY): true, "phpWorkbenchCallHierarchyAnalysis": true, (crate::structural_search::wire::EXPERIMENTAL_CAPABILITY): true, (crate::structural_search::wire::REPLACE_EXPERIMENTAL_CAPABILITY): true}),
++                    serde_json::json!({"phpWorkbenchEnvironmentResources": true, "phpWorkbenchJsonTranslations": true, (crate::workbench_translation_resources::CAPABILITY): true, "phpWorkbenchRoutes": true, (crate::workbench_route_handler::CAPABILITY): true, "phpWorkbenchViews": true, "phpWorkbenchBuiltins": true, "phpWorkbenchActiveTarget": true, (crate::workbench_active_target::CLIENT_LEVEL_CAPABILITY): true, "phpWorkbenchRenameChecked": true, (crate::workbench_optimize_imports::CAPABILITY): true, "phpWorkbenchCallHierarchyAnalysis": true, (crate::structural_search::wire::EXPERIMENTAL_CAPABILITY): true, (crate::structural_search::wire::REPLACE_EXPERIMENTAL_CAPABILITY): true}),
+                 ),
+                 ..ServerCapabilities::default()
+             },
+diff --git a/src/lib.rs b/src/lib.rs
+index 063eba844e57455b67c785ef48802759d6357b2b..9087fdfab8ba9f0c6139a6a605f4a3a5ed664200 100644
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -91,6 +91,7 @@ pub mod workbench_optimize_imports;
+ pub mod workbench_rename;
+ pub mod workbench_route_handler;
+ pub mod workbench_routes;
++pub mod workbench_translation_resources;
+ pub mod workbench_views;
+ 
+ // Use mimalloc on Linux, where the system allocator is 4-6x slower for
+diff --git a/src/main.rs b/src/main.rs
+index 1e1c4050fd8aa453924fbe24b118e75f4e0460f1..a76256f17cc2b12ecf6a0bb0aeaf737434debcd1 100644
+--- a/src/main.rs
++++ b/src/main.rs
+@@ -606,6 +606,10 @@ async fn async_main(cli: Cli) {
+                         ProjectRouter::workbench_structural_replace,
+                     )
+                     .custom_method("phpWorkbench/views", ProjectRouter::workbench_views)
++                    .custom_method(
++                        phpantom_lsp::workbench_translation_resources::METHOD,
++                        ProjectRouter::workbench_json_translation_resource,
++                    )
+                     .custom_method("phpWorkbench/builtin", ProjectRouter::workbench_builtin)
+                     .custom_method(
+                         "phpWorkbench/activeTarget",
+@@ -658,6 +662,10 @@ async fn async_main(cli: Cli) {
+                         ProjectRouter::workbench_structural_replace,
+                     )
+                     .custom_method("phpWorkbench/views", ProjectRouter::workbench_views)
++                    .custom_method(
++                        phpantom_lsp::workbench_translation_resources::METHOD,
++                        ProjectRouter::workbench_json_translation_resource,
++                    )
+                     .custom_method("phpWorkbench/builtin", ProjectRouter::workbench_builtin)
+                     .custom_method(
+                         "phpWorkbench/activeTarget",
+diff --git a/src/project_router.rs b/src/project_router.rs
+index c47b13fdf0cc7191d643cd8ff8f76b26542f964b..2446fa5ba51e3163144a87d13d48154e880a9f5e 100644
+--- a/src/project_router.rs
++++ b/src/project_router.rs
+@@ -396,7 +396,15 @@ impl ProjectRouter {
+                     mappings
+                         .into_iter()
+                         .map(|mapping| root.join(mapping.base_path))
+-                        .filter(|path| !contains(root, path)),
++                        .filter(|path| {
++                            // A nested manifest does not cancel an explicit PSR-4 source dependency.
++                            !contains(root, path)
++                                || backend
++                                    .project_scope
++                                    .excluded_roots()
++                                    .iter()
++                                    .any(|nested| contains(nested, path))
++                        }),
+                 );
+                 dependencies.extend(composer::installed_path_package_roots(root, &vendor));
+                 dependency_files.extend(
+diff --git a/src/virtual_members/laravel/trans_catalog.rs b/src/virtual_members/laravel/trans_catalog.rs
+index 8c528368db83662010681c97749ac8f167b3e0bc..a85fea1044bd34ee96d424a2642a9e6bc13c3dd2 100644
+--- a/src/virtual_members/laravel/trans_catalog.rs
++++ b/src/virtual_members/laravel/trans_catalog.rs
+@@ -337,7 +337,7 @@ impl Backend {
+         )
+     }
+ 
+-    fn build_translation_catalog(&self) -> TranslationCatalog {
++    fn translation_roots(&self) -> Vec<ProviderResource> {
+         let mut roots = self.laravel_provider_resources.read().trans_dirs.clone();
+         let workspace_root = self.workspace.workspace_root.read().clone();
+         if let Some(root) = &workspace_root {
+@@ -369,6 +369,21 @@ impl Backend {
+         }
+         roots.sort_by(|a, b| (&a.path, &a.namespace).cmp(&(&b.path, &b.namespace)));
+         roots.dedup();
++        roots
++    }
++
++    /// Classify a direct JSON locale file without opening or parsing its contents.
++    pub(crate) fn json_translation_resource_root(&self, path: &Path) -> Option<std::path::PathBuf> {
++        let parent = path.parent()?;
++        self.translation_roots().into_iter().find_map(|root| {
++            (root.namespace.is_empty() && crate::project_scope::lexical_path(&root.path) == parent)
++                .then(|| parent.to_path_buf())
++        })
++    }
++
++    fn build_translation_catalog(&self) -> TranslationCatalog {
++        let roots = self.translation_roots();
++        let workspace_root = self.workspace.workspace_root.read().clone();
+         let mut catalog = TranslationCatalog::default();
+         for root in &roots {
+             if let Ok(uri) = Url::from_directory_path(&root.path) {
+diff --git a/src/workbench_translation_resources.rs b/src/workbench_translation_resources.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..957c0ebedb4cc996f08e1b341f18b865ff130134
+--- /dev/null
++++ b/src/workbench_translation_resources.rs
+@@ -0,0 +1,176 @@
++//! Content-free admission for a JSON translation overlay.
++use std::path::PathBuf;
++
++use crate::{Backend, project_router::ProjectRouter};
++use serde::{Deserialize, Serialize};
++use tower_lsp::{
++    jsonrpc::{Error, Result},
++    lsp_types::Url,
++};
++
++/// Query a resource before forwarding its contents to the PHP server.
++pub const METHOD: &str = "phpWorkbench/jsonTranslationResource";
++/// The server can classify registered resources without a didOpen notification.
++pub const CAPABILITY: &str = "phpWorkbenchJsonTranslationResource";
++
++/// The consuming PHP project and a proposed JSON locale file.
++#[derive(Clone, Debug, Deserialize, Serialize)]
++#[serde(rename_all = "camelCase", deny_unknown_fields)]
++pub struct TranslationResourceQuery {
++    /// Existing PHP project document or Composer manifest selecting the graph.
++    pub project_uri: Url,
++    /// Preferred physical spelling; the file and parent directories may be new.
++    pub resource_uri: Url,
++}
++
++/// A current static registration decision; no file content is returned.
++#[derive(Clone, Debug, Deserialize, Serialize)]
++#[serde(rename_all = "camelCase")]
++pub struct TranslationResourceReply {
++    /// Echo of the project selector used for this request.
++    pub project_uri: Url,
++    /// Echo of the exact proposed resource authority.
++    pub resource_uri: Url,
++    /// Direct JSON locale directory, or null when not statically registered.
++    pub root_uri: Option<Url>,
++}
++
++fn local_path(uri: &Url) -> Result<PathBuf> {
++    if uri.as_str().len() > 1024 * 1024
++        || uri.scheme() != "file"
++        || uri.query().is_some()
++        || uri.fragment().is_some()
++    {
++        return Err(Error::invalid_params("Expected a bounded local file URI"));
++    }
++    let path = uri
++        .to_file_path()
++        .map_err(|_| Error::invalid_params("Expected a local file URI"))?;
++    if !path.is_absolute() || path.to_str().is_none_or(|p| p.contains('\0')) {
++        return Err(Error::invalid_params("Expected an absolute local path"));
++    }
++    if Url::from_file_path(&path).ok().as_ref() != Some(uri) {
++        return Err(Error::invalid_params("Expected an unambiguous file URI"));
++    }
++    Ok(path)
++}
++
++fn local_authority(uri: &Url) -> Result<PathBuf> {
++    let path = local_path(uri)?;
++    let mut ancestor = path.as_path();
++    let mut missing = Vec::new();
++    let physical = loop {
++        match std::fs::symlink_metadata(ancestor) {
++            Ok(_) => {
++                break ancestor
++                    .canonicalize()
++                    .map_err(|_| Error::invalid_params("Unresolvable file authority"))?;
++            }
++            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
++                missing.push(
++                    ancestor
++                        .file_name()
++                        .ok_or_else(|| Error::invalid_params("Missing file authority"))?
++                        .to_owned(),
++                );
++                ancestor = ancestor
++                    .parent()
++                    .ok_or_else(|| Error::invalid_params("Missing file authority"))?;
++            }
++            Err(_) => return Err(Error::invalid_params("Unreadable file authority")),
++        }
++    };
++    let physical = missing
++        .into_iter()
++        .rev()
++        .fold(physical, |path, part| path.join(part));
++    if physical != path || Url::from_file_path(&physical).ok().as_ref() != Some(uri) {
++        return Err(Error::invalid_params("Use the preferred physical file URI"));
++    }
++    Ok(path)
++}
++
++impl TranslationResourceQuery {
++    fn validate(&self) -> Result<PathBuf> {
++        let project = local_path(&self.project_uri)?;
++        if !(project.extension().is_some_and(|ext| ext == "php")
++            || project
++                .file_name()
++                .is_some_and(|name| name == "composer.json"))
++        {
++            return Err(Error::invalid_params(
++                "Select a PHP project document or Composer manifest",
++            ));
++        }
++        let resource = local_path(&self.resource_uri)?;
++        if resource.extension().is_none_or(|ext| ext != "json")
++            || resource.file_stem().is_none_or(|name| name.is_empty())
++        {
++            return Err(Error::invalid_params("Expected a JSON locale file"));
++        }
++        Ok(resource)
++    }
++
++    fn validate_authority(&self) -> Result<PathBuf> {
++        self.validate()?;
++        if !local_authority(&self.project_uri)?.is_file() {
++            return Err(Error::invalid_params(
++                "Select an existing PHP project document or Composer manifest",
++            ));
++        }
++        let resource = local_authority(&self.resource_uri)?;
++        if std::fs::metadata(&resource).is_ok_and(|metadata| !metadata.is_file()) {
++            return Err(Error::invalid_params("Expected a regular JSON locale file"));
++        }
++        Ok(resource)
++    }
++}
++
++impl ProjectRouter {
++    /// Use the caller's Composer context, including package-provider registrations.
++    pub async fn workbench_json_translation_resource(
++        &self,
++        query: TranslationResourceQuery,
++    ) -> Result<TranslationResourceReply> {
++        query.validate()?;
++        let _request = self.request_guard().await;
++        self.project_for(&query.project_uri)
++            .await?
++            .backend
++            .workbench_json_translation_resource(query)
++            .await
++    }
++}
++
++impl Backend {
++    /// Classify only current static registrations, without running framework code.
++    pub async fn workbench_json_translation_resource(
++        &self,
++        query: TranslationResourceQuery,
++    ) -> Result<TranslationResourceReply> {
++        let path = query.validate()?;
++        let backend = self.clone_for_blocking();
++        crate::server::run_blocking_cancel_safe("json_translation_resource", move || {
++            backend.with_prepared_current_semantics(|| {
++                // Revalidate after preparation, including external alias changes.
++                let current = query.validate_authority()?;
++                if current != path {
++                    return Err(Error::invalid_params("Resource authority changed"));
++                }
++                let root = if backend.resolved_class_cache.read().is_laravel() {
++                    backend.json_translation_resource_root(&path)
++                } else {
++                    None
++                };
++                let root_uri = root.and_then(|path| Url::from_directory_path(path).ok());
++                Ok(TranslationResourceReply {
++                    project_uri: query.project_uri.clone(),
++                    resource_uri: query.resource_uri.clone(),
++                    root_uri,
++                })
++            })
++        })
++        .await
++        .ok_or_else(Error::internal_error)?
++    }
++}
+diff --git a/tests/integration/laravel_translation_keys.rs b/tests/integration/laravel_translation_keys.rs
+index 169ff86500bfdac5d2e9839e24ef257cc1f3bf5c..8f12f6cef2ce5ae98fcf7d5cfb192413c20dc3f5 100644
+--- a/tests/integration/laravel_translation_keys.rs
++++ b/tests/integration/laravel_translation_keys.rs
+@@ -2257,3 +2257,483 @@ async fn translation_catalog_origin_unsaved_registered_php_and_json_files() {
+         source
+     );
+ }
++
++async fn query_json_resource(
++    backend: &phpantom_lsp::Backend,
++    project: &Url,
++    resource: &Url,
++) -> tower_lsp::jsonrpc::Result<
++    phpantom_lsp::workbench_translation_resources::TranslationResourceReply,
++> {
++    backend
++        .workbench_json_translation_resource(
++            phpantom_lsp::workbench_translation_resources::TranslationResourceQuery {
++                project_uri: project.clone(),
++                resource_uri: resource.clone(),
++            },
++        )
++        .await
++}
++
++#[tokio::test]
++async fn json_resource_admission_uses_registered_roots_without_opening_the_resource() {
++    let provider = BILLING_PROVIDER.replace(
++        "$this->loadTranslationsFrom(__DIR__.'/../lang', 'billing');",
++        "$this->loadTranslationsFrom(__DIR__.'/../lang', 'billing');\n        $this->loadJsonTranslationsFrom(__DIR__.'/../json');",
++    );
++    let (backend, dir, uri, _) = workspace(
++        PACKAGE_COMPOSER,
++        &[
++            ("bootstrap/providers.php", PACKAGE_PROVIDER_LIST),
++            ("packages/billing/src/BillingServiceProvider.php", &provider),
++            (
++                "packages/billing/json/en.json",
++                "invalid JSON contents must not affect admission",
++            ),
++            ("packages/billing/lang/en.json", "{}"),
++        ],
++        "",
++    )
++    .await;
++    for path in [
++        "lang/fr.json",
++        "resources/lang/日本語.json",
++        "packages/billing/json/en.json",
++        "packages/billing/json/new-locale.json",
++    ] {
++        let target = Url::from_file_path(dir.path().join(path)).unwrap();
++        let before = std::fs::read(dir.path().join(path)).ok();
++        let reply = query_json_resource(&backend, &uri, &target).await.unwrap();
++        assert_eq!(reply.project_uri, uri);
++        assert_eq!(reply.resource_uri, target);
++        assert_eq!(
++            reply.root_uri,
++            Some(Url::from_directory_path(dir.path().join(path).parent().unwrap()).unwrap()),
++            "{path}"
++        );
++        assert_eq!(std::fs::read(dir.path().join(path)).ok(), before);
++    }
++    for path in [
++        "packages/billing/lang/en.json",
++        "packages/billing/other/en.json",
++        "unrelated/lang/en.json",
++        "lang/en/nested.json",
++        "resources/lang/en/nested.json",
++        "lang-adjacent/en.json",
++    ] {
++        let target = Url::from_file_path(dir.path().join(path)).unwrap();
++        assert!(
++            query_json_resource(&backend, &uri, &target)
++                .await
++                .unwrap()
++                .root_uri
++                .is_none(),
++            "{path}"
++        );
++    }
++}
++
++#[tokio::test]
++async fn json_resource_admission_tracks_dirty_provider_selection_and_discard() {
++    let provider = BILLING_PROVIDER.replace(
++        "$this->loadTranslationsFrom(__DIR__.'/../lang', 'billing');",
++        "$this->loadJsonTranslationsFrom(__DIR__.'/../json');",
++    );
++    let (backend, dir, uri, _) = workspace(
++        PACKAGE_COMPOSER,
++        &[
++            ("bootstrap/providers.php", PACKAGE_PROVIDER_LIST),
++            ("packages/billing/src/BillingServiceProvider.php", &provider),
++        ],
++        "",
++    )
++    .await;
++    let active = Url::from_file_path(dir.path().join("packages/billing/json/fr.json")).unwrap();
++    let alternate =
++        Url::from_file_path(dir.path().join("packages/billing/alternate/fr.json")).unwrap();
++    let provider_uri = Url::from_file_path(
++        dir.path()
++            .join("packages/billing/src/BillingServiceProvider.php"),
++    )
++    .unwrap();
++    for phase in 0..3 {
++        if phase == 1 {
++            crate::common::open_php(&backend, &provider_uri, &provider).await;
++            backend
++                .did_change(DidChangeTextDocumentParams {
++                    text_document: VersionedTextDocumentIdentifier {
++                        uri: provider_uri.clone(),
++                        version: 2,
++                    },
++                    content_changes: vec![TextDocumentContentChangeEvent {
++                        range: None,
++                        range_length: None,
++                        text: provider.replace("../json", "../alternate"),
++                    }],
++                })
++                .await;
++        } else if phase == 2 {
++            backend
++                .did_close(DidCloseTextDocumentParams {
++                    text_document: TextDocumentIdentifier {
++                        uri: provider_uri.clone(),
++                    },
++                })
++                .await;
++        }
++        for (target, registered) in [(&active, phase != 1), (&alternate, phase == 1)] {
++            let expected = registered.then(|| {
++                Url::from_directory_path(target.to_file_path().unwrap().parent().unwrap()).unwrap()
++            });
++            assert_eq!(
++                query_json_resource(&backend, &uri, target)
++                    .await
++                    .unwrap()
++                    .root_uri,
++                expected,
++                "dirty provider decisions must use the preferred resource directory URI"
++            );
++        }
++        assert!(!dir.path().join("packages/billing/json").exists());
++        assert!(!dir.path().join("packages/billing/alternate").exists());
++    }
++    assert_eq!(
++        std::fs::read_to_string(provider_uri.to_file_path().unwrap()).unwrap(),
++        provider
++    );
++}
++
++#[tokio::test]
++async fn json_resource_admission_requires_registered_providers() {
++    let provider = BILLING_PROVIDER.replace(
++        "$this->loadTranslationsFrom(__DIR__.'/../lang', 'billing');",
++        "$this->loadJsonTranslationsFrom(__DIR__.'/../json');",
++    );
++    let (backend, dir, uri, _) = workspace(
++        PACKAGE_COMPOSER,
++        &[
++            ("bootstrap/providers.php", "<?php return [];"),
++            ("packages/billing/src/BillingServiceProvider.php", &provider),
++        ],
++        "",
++    )
++    .await;
++    let target = Url::from_file_path(dir.path().join("packages/billing/json/en.json")).unwrap();
++    assert!(
++        query_json_resource(&backend, &uri, &target)
++            .await
++            .unwrap()
++            .root_uri
++            .is_none()
++    );
++    let list = Url::from_file_path(dir.path().join("bootstrap/providers.php")).unwrap();
++    crate::common::open_php(&backend, &list, "<?php return [];").await;
++    backend
++        .did_change(DidChangeTextDocumentParams {
++            text_document: VersionedTextDocumentIdentifier {
++                uri: list.clone(),
++                version: 2,
++            },
++            content_changes: vec![TextDocumentContentChangeEvent {
++                range: None,
++                range_length: None,
++                text: PACKAGE_PROVIDER_LIST.into(),
++            }],
++        })
++        .await;
++    assert!(
++        query_json_resource(&backend, &uri, &target)
++            .await
++            .unwrap()
++            .root_uri
++            .is_some()
++    );
++    backend
++        .did_close(DidCloseTextDocumentParams {
++            text_document: TextDocumentIdentifier { uri: list },
++        })
++        .await;
++    assert!(
++        query_json_resource(&backend, &uri, &target)
++            .await
++            .unwrap()
++            .root_uri
++            .is_none()
++    );
++}
++
++#[tokio::test]
++async fn json_resource_admission_rejects_unrelated_project_and_non_laravel_roots() {
++    let plain = r#"{"autoload":{"psr-4":{"App\\":"app/"}}}"#;
++    for composer in [LARAVEL_APP_COMPOSER, plain] {
++        let (backend, dir, uri, _) = workspace(composer, &[], "").await;
++        let own = Url::from_file_path(dir.path().join("lang/en.json")).unwrap();
++        assert_eq!(
++            query_json_resource(&backend, &uri, &own)
++                .await
++                .unwrap()
++                .root_uri
++                .is_some(),
++            composer == LARAVEL_APP_COMPOSER
++        );
++        let neighbor = tempfile::tempdir().unwrap();
++        let foreign = Url::from_file_path(neighbor.path().join("lang/en.json")).unwrap();
++        assert!(
++            query_json_resource(&backend, &uri, &foreign)
++                .await
++                .unwrap()
++                .root_uri
++                .is_none()
++        );
++    }
++}
++
++#[tokio::test]
++async fn json_resource_admission_rejects_invalid_uris_types_and_ambiguous_authorities() {
++    let (backend, dir, uri, _) = workspace(LARAVEL_APP_COMPOSER, &[], "").await;
++    let resource = Url::from_file_path(dir.path().join("lang/en.json")).unwrap();
++    let mut query = resource.clone();
++    query.set_query(Some("token=value"));
++    let mut fragment = resource.clone();
++    fragment.set_fragment(Some("section"));
++    for target in [
++        query,
++        fragment,
++        Url::parse("untitled:locale.json").unwrap(),
++        Url::parse("https://example.test/lang/en.json").unwrap(),
++        Url::from_file_path(dir.path().join("lang/locale.php")).unwrap(),
++        Url::from_file_path(dir.path().join("lang/locale.txt")).unwrap(),
++        Url::from_file_path(dir.path().join("lang/name\0.json")).unwrap(),
++    ] {
++        assert_eq!(
++            query_json_resource(&backend, &uri, &target)
++                .await
++                .unwrap_err()
++                .code,
++            tower_lsp::jsonrpc::ErrorCode::InvalidParams,
++            "{target}"
++        );
++    }
++    let directory = dir.path().join("lang/directory.json");
++    std::fs::create_dir_all(&directory).unwrap();
++    assert!(
++        query_json_resource(&backend, &uri, &Url::from_file_path(directory).unwrap())
++            .await
++            .is_err()
++    );
++    for project in [
++        Url::parse("untitled:project.php").unwrap(),
++        Url::from_file_path(dir.path().join("missing.php")).unwrap(),
++        resource.clone(),
++    ] {
++        assert!(
++            query_json_resource(&backend, &project, &resource)
++                .await
++                .is_err()
++        );
++    }
++    let oversized =
++        Url::from_file_path(dir.path().join(format!("{}.json", "x".repeat(1_048_577)))).unwrap();
++    assert!(
++        query_json_resource(&backend, &uri, &oversized)
++            .await
++            .is_err()
++    );
++    let request = serde_json::json!({"projectUri":uri,"resourceUri":resource,"text":"must not transmit contents"});
++    assert!(
++        serde_json::from_value::<
++            phpantom_lsp::workbench_translation_resources::TranslationResourceQuery,
++        >(request)
++        .is_err()
++    );
++}
++
++#[cfg(unix)]
++#[tokio::test]
++async fn json_resource_admission_refuses_symlink_aliases_and_external_targets() {
++    let (backend, dir, uri, _) =
++        workspace(LARAVEL_APP_COMPOSER, &[("lang/en.json", "{}")], "").await;
++    let socket = dir.path().join("lang/socket.json");
++    let _listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
++    assert!(
++        query_json_resource(&backend, &uri, &Url::from_file_path(socket).unwrap())
++            .await
++            .is_err()
++    );
++    let outside = tempfile::tempdir().unwrap();
++    let external = outside.path().join("en.json");
++    std::fs::write(&external, "{}").unwrap();
++    std::os::unix::fs::symlink(&external, dir.path().join("lang/linked.json")).unwrap();
++    std::os::unix::fs::symlink(dir.path().join("lang"), dir.path().join("alias")).unwrap();
++    for path in ["lang/linked.json", "alias/en.json", "alias/new.json"] {
++        let target = Url::from_file_path(dir.path().join(path)).unwrap();
++        assert!(
++            query_json_resource(&backend, &uri, &target).await.is_err(),
++            "{path}"
++        );
++    }
++    assert!(
++        query_json_resource(&backend, &uri, &Url::from_file_path(external).unwrap())
++            .await
++            .unwrap()
++            .root_uri
++            .is_none()
++    );
++}
++
++#[tokio::test]
++async fn json_resource_admission_keeps_nested_psr4_consumers_current_without_sibling_leakage() {
++    use phpantom_lsp::ProjectRouter;
++    use phpantom_lsp::workbench_translation_resources::TranslationResourceQuery;
++    let directory = tempfile::tempdir().unwrap();
++    let root = directory.path().canonicalize().unwrap();
++    let provider = BILLING_PROVIDER.replace(
++        "$this->loadTranslationsFrom(__DIR__.'/../lang', 'billing');",
++        "$this->loadJsonTranslationsFrom(__DIR__.'/../json');",
++    );
++    for (path, text) in [
++        ("composer.json", PACKAGE_COMPOSER),
++        ("app/Demo.php", "<?php"),
++        ("bootstrap/providers.php", PACKAGE_PROVIDER_LIST),
++        (
++            "packages/billing/composer.json",
++            r#"{"name":"acme/billing","autoload":{"psr-4":{"Acme\\Billing\\":"src/"}}}"#,
++        ),
++        (
++            "packages/billing/src/BillingServiceProvider.php",
++            provider.as_str(),
++        ),
++        ("other/composer.json", LARAVEL_APP_COMPOSER),
++        ("other/app/Demo.php", "<?php"),
++    ] {
++        let path = root.join(path);
++        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
++        std::fs::write(path, text).unwrap();
++    }
++    let router = std::sync::Arc::new(ProjectRouter::new_test());
++    router
++        .initialize(InitializeParams {
++            root_uri: Some(Url::from_directory_path(&root).unwrap()),
++            workspace_folders: Some(vec![WorkspaceFolder {
++                uri: Url::from_directory_path(&root).unwrap(),
++                name: "nested-provider".into(),
++            }]),
++            ..InitializeParams::default()
++        })
++        .await
++        .unwrap();
++    router.initialized(InitializedParams {}).await;
++    let worker = std::sync::Arc::clone(&router);
++    let outcome = tokio::spawn(async move {
++        let router = worker;
++        let project = Url::from_file_path(root.join("app/Demo.php")).unwrap();
++        let sibling = Url::from_file_path(root.join("other/app/Demo.php")).unwrap();
++        let active = Url::from_file_path(root.join("packages/billing/json/fr.json")).unwrap();
++        let alternate =
++            Url::from_file_path(root.join("packages/billing/alternate/fr.json")).unwrap();
++        let provider_uri =
++            Url::from_file_path(root.join("packages/billing/src/BillingServiceProvider.php"))
++                .unwrap();
++        let initial = router
++            .workbench_json_translation_resource(TranslationResourceQuery {
++                project_uri: project.clone(),
++                resource_uri: active.clone(),
++            })
++            .await
++            .unwrap();
++        assert!(
++            initial.root_uri.is_some(),
++            "declared consuming graph must discover the provider before any buffer is opened"
++        );
++        router
++            .did_open(DidOpenTextDocumentParams {
++                text_document: TextDocumentItem {
++                    uri: provider_uri.clone(),
++                    language_id: "php".into(),
++                    version: 1,
++                    text: provider.clone(),
++                },
++            })
++            .await;
++        router
++            .did_change(DidChangeTextDocumentParams {
++                text_document: VersionedTextDocumentIdentifier {
++                    uri: provider_uri.clone(),
++                    version: 2,
++                },
++                content_changes: vec![TextDocumentContentChangeEvent {
++                    range: None,
++                    range_length: None,
++                    text: provider.replace("../json", "../alternate"),
++                }],
++            })
++            .await;
++        for (target, expected) in [(&alternate, true), (&active, false)] {
++            let reply = router
++                .workbench_json_translation_resource(TranslationResourceQuery {
++                    project_uri: project.clone(),
++                    resource_uri: target.clone(),
++                })
++                .await
++                .unwrap();
++            assert_eq!(
++                reply.root_uri,
++                expected.then(|| Url::from_directory_path(
++                    target.to_file_path().unwrap().parent().unwrap()
++                )
++                .unwrap()),
++                "nested Composer PSR-4 consumers must receive dirty provider buffers"
++            );
++            let unrelated = router
++                .workbench_json_translation_resource(TranslationResourceQuery {
++                    project_uri: sibling.clone(),
++                    resource_uri: target.clone(),
++                })
++                .await
++                .unwrap();
++            assert!(
++                unrelated.root_uri.is_none(),
++                "a sibling Composer project must not inherit this provider"
++            );
++        }
++        router
++            .did_close(DidCloseTextDocumentParams {
++                text_document: TextDocumentIdentifier {
++                    uri: provider_uri.clone(),
++                },
++            })
++            .await;
++        for (target, expected) in [(&active, true), (&alternate, false)] {
++            let reply = router
++                .workbench_json_translation_resource(TranslationResourceQuery {
++                    project_uri: project.clone(),
++                    resource_uri: target.clone(),
++                })
++                .await
++                .unwrap();
++            assert_eq!(
++                reply.root_uri,
++                expected.then(|| Url::from_directory_path(
++                    target.to_file_path().unwrap().parent().unwrap()
++                )
++                .unwrap()),
++                "discard must restore the consuming project's registered roots"
++            );
++        }
++        assert_eq!(
++            std::fs::read_to_string(provider_uri.to_file_path().unwrap()).unwrap(),
++            provider
++        );
++        assert!(
++            !active.to_file_path().unwrap().exists() && !alternate.to_file_path().unwrap().exists()
++        );
++    })
++    .await;
++    router.shutdown().await.unwrap();
++    if let Err(error) = outcome {
++        if error.is_panic() {
++            std::panic::resume_unwind(error.into_panic());
++        }
++        panic!("router regression task was cancelled: {error}");
++    }
++}

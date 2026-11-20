@@ -15,6 +15,70 @@ slice, commit and push it, and retain only the latest generated app. Native UI
 cases remain deferred/unverified; earlier native-first blocking checkpoints are
 historical and no longer prevent independent implementation.
 
+Typed translator slice198 (2026-11-20, source/protocol accepted; inactive182):
+Locale and replacement-placeholder completion supports typed Translator and
+translation contract instance calls, null-safe receivers, typed properties,
+compatible unions, named arguments and case-insensitive method names. Shared
+config/translation/view key proof locates the actual receiver through the AST,
+so return/assignment prefixes and comments do not enter type resolution.
+Every non-null union member must expose the public method and agree on its
+framework key role. Foreign/scalar/unknown or different-framework peers are
+refused regardless of order. Helpers/facades and existing argument binding remain.
+
+An unfinished argument can remove its entire function/class node from the parser.
+An isolated AST probe demonstrates that loss. A span-only recovery still failed;
+recovering a temporary prefix file context restores the actual parameter/property
+and lexical names. Recovery publishes no editor metadata and bypasses shared
+resolved-class caches. Its spans map back to the original source; completion
+edits use original UTF-16 token ranges. No synthetic buffer text is applied.
+
+The retained engine 181 baseline passes only 5/19 argument cases (all negatives)
+and 5/19 key cases in returned statements. Bare expressions pass 16/19 key cases,
+exposing a commented receiver miss and unsafe translator-first/scalar unions.
+All 19 originals pass syntax and actual Laravel 13.37 runtime checks. Four of six
+public regressions fail on unchanged engine 181 for the intended receiver behavior;
+negative controls pass. Seven final public regressions pass, including five
+unfinished buffers and exact full-token UTF-16 edits after emoji without import
+edits. All 5 existing argument checks and all 50 translation-key cases pass.
+Forty baseline/stub syntax inputs are checked; public tests use representative
+framework signatures, while protocol/runtime checks use actual Laravel 13.37.
+
+Frozen patch replay matches every source file and symlink. Full engine gates pass
+18,707 primary tests, 17 declared ignores and two bounded child groups; both
+all-target Clippy configurations, formatting, source fingerprint and optimized
+build pass. The signed candidate passes 22 complete and 22 bare statement cases,
+44 fresh PHP syntax/runtime checks, five incomplete unsaved-buffer cases and
+restoration with original disk bytes, clean server exit and unchanged dependency
+hashes. Added real cases cover assignment, reverse compatible union order and a
+translator/config-repository union. The retained Laravel reference fixture emits
+exactly its three intentional analyzer diagnostics with originals unchanged.
+Raw SHA256: ad2c22c6c1aa651628d09b0b43fffeeed98a6d85d598e90a76d2ef78bc6f5774.
+Signed SHA256: 2402c056b3406f31ebd795f5b494e6296b468815cf9a651df2ee3a2828477c19.
+Patch SHA256: d9fe4226322d2e43fae95c15cd8e6be1683bad3ea56fc944e5c0f4608790a4c1.
+
+Root application/editor/IPC code, default source/resources and sole App 0.1.117
+remain unchanged at accepted 7253fff. Its 5,485 Rust/14,393 frontend tests, workspace
+Clippy, types/lint/format/Knip/build/bindings, 123 client/Host engine 181 checks and 53 browser
+flows are explicitly reused. This does not claim a new root suite or current
+client/Host engine 182 acceptance. Adoption and packaging remain the next separate slices.
+Native UI remains user-skipped; the current app still contains engine 181 and predates the
+latest upstream source merge. Both default/bundled bytes and its original main
+hash/deep strict ad-hoc signature are verified after tests and cleanup.
+
+Removed 8,228 files, 2.2 GiB total; redundant source workcopy removed after exact comparison.
+The diagnostic AST executable is removed too. Canonical source/engine, source pin,
+licenses/provenance, PHP Workbench and prior evaluation artifacts remain. Only
+App 0.1.117 remains; no new application bundle, installation, publishing, updater,
+migration, deployment or debugger expansion. All 69 statuses stay 67 partial and two
+user-deferred. Broader receiver/locale/privacy/platform/service acceptance and the
+older unattributed startup timeout remain open. Reproduce with
+`python3 scripts/prepare-phpantom.py --pin engine/candidates/0.11.1-openstorm.182-source.json`
+and the same pin passed to `scripts/build-phpantom.py`.
+Evidence: artifacts/checks/slice198/{input,red,focused,fixture-checks,freeze,
+engine-gates,engine-test-summary,wire182,bare182,post-source,retention,acceptance}.json
+and ast-diagnosis.log. Git history and the local delivery receipt record the
+requested commit/push and remote read-back.
+
 Upstream merge slice197 (2026-11-19–20, automated acceptance verified):
 Merge 153 commits from l0ng-ai/openidea through
 9f4731189d73d6dedd331aa604ad6ca6489b35f7 (989 upstream paths). This imports editor

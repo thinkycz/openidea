@@ -1,0 +1,430 @@
+diff --git a/docs/CHANGELOG.md b/docs/CHANGELOG.md
+index 06b8a17945a22403fdce07ac73edb2eb5cb6933c..9cfe3e06ee6d093ff1870767fad8bc508f88dd0d 100644
+--- a/docs/CHANGELOG.md
++++ b/docs/CHANGELOG.md
+@@ -1,3 +1,13 @@
++## OpenStorm .182 typed translation receivers
++
++Translation locale and replacement-placeholder completion supports typed
++Translator/contract instances, null-safe receivers and compatible unions. Key
++completion uses the same proof across return/assignment prefixes and comments;
++foreign, scalar or incompatible union peers cannot authorize Laravel suggestions.
++Unfinished arguments recover a local prefix context without publishing synthetic
++declarations or seeding shared resolved-class caches. Existing helper/facade
++identity, argument binding and UTF-16 full-token edits remain unchanged.
++
+ ## OpenStorm .181 translation argument callable identity
+ 
+ Locale and replacement-placeholder completion now shares the key-navigation
+diff --git a/src/completion/laravel_key_calls.rs b/src/completion/laravel_key_calls.rs
+index 2a23396594f296ec4aa06bd96fed7ee50278dc2e..4e6f1740654134f584c7a06d75b7c8730b5e6020 100644
+--- a/src/completion/laravel_key_calls.rs
++++ b/src/completion/laravel_key_calls.rs
+@@ -1,8 +1,15 @@
+ //! Semantic callable identity for config, translation and view key completion.
+ 
++use mago_span::HasSpan;
++use mago_syntax::cst::{ClassLikeMemberSelector, Node};
++
+ use super::laravel_string_keys::receiver_chain_start;
+ use super::source::helpers::{split_trailing_ident, trailing_class_name};
++use crate::class_lookup::find_class_at_offset;
++use crate::php_type::{PhpType, TypeKind};
+ use crate::symbol_map::laravel_key_calls::{self, KeyCall};
++use crate::type_engine::resolver::{CtxLoaders, resolve_target_classes};
++use crate::types::{AccessKind, Visibility};
+ use crate::{Backend, types::FileContext};
+ 
+ pub(crate) type KeyCallRole<'a> = dyn Fn(&str) -> Option<KeyCall> + 'a;
+@@ -62,47 +69,166 @@ impl Backend {
+                 laravel_key_calls::config_method_call(method)
+             };
+         }
+-        // Resolve typed repositories through the existing callable target path.
+-        // The method's actual owner can be an interface or an inherited base.
+-        let start = receiver_chain_start(receiver);
+-        let target = self.resolve_callable_target_at_offset(
+-            &callable[start..],
+-            content,
+-            callable.len() as u32,
+-            ctx,
+-        )?;
+-        let owner = target.owner_class?;
+-        let loader = self.class_loader(ctx);
+-        for class in [
+-            "Illuminate\\Config\\Repository",
+-            "Illuminate\\Contracts\\Config\\Repository",
+-        ] {
+-            if owner.as_str().eq_ignore_ascii_case(class)
+-                || crate::class_lookup::is_subclass_of(owner.as_str(), class, &loader)
+-            {
+-                return laravel_key_calls::config_method_call(method);
++        // The AST supplies the receiver without return/assignment prefixes or
++        // comments between it and the member operator.
++        let recovered = receiver_span(content, callable.trim_end().len());
++        let (start, end) = recovered
++            .as_ref()
++            .map(|(start, end, _)| (*start, *end))
++            .unwrap_or_else(|| (receiver_chain_start(receiver), receiver.len()));
++        let subject = content.get(start..end)?;
++        let repaired = recovered
++            .as_ref()
++            .and_then(|(_, _, source)| source.as_deref());
++        let local_ctx = repaired.map(|source| self.source_file_context(source));
++        let ctx = local_ctx.as_ref().unwrap_or(ctx);
++        let resolution_source = repaired.unwrap_or(content);
++        let offset = callable.len() as u32;
++        let namespace = ctx.namespace_at(offset);
++        let use_map = ctx.use_map_at(offset);
++        let loader = self.class_loader_with(&ctx.classes, use_map, namespace);
++        let functions =
++            self.function_loader_with(ctx.resolved_names.as_deref(), use_map, namespace);
++        let macro_this = self.laravel_macro_this_resolver(&loader);
++        let mut rctx = self.resolution_ctx_at(
++            find_class_at_offset(&ctx.classes, offset),
++            &ctx.classes,
++            resolution_source,
++            offset,
++            CtxLoaders::new(&loader, &functions, &macro_this),
++        );
++        // Recovered declarations must not seed shared class caches.
++        if repaired.is_some() {
++            rctx.resolved_class_cache = None;
++        }
++        let mut role: Option<KeyCall> = None;
++        for target in resolve_target_classes(subject, AccessKind::Arrow, &rctx) {
++            let mut members = Vec::new();
++            non_null_members(&target.type_string, &mut members);
++            for member in members {
++                let class = loader(member.base_name()?)?;
++                let effective = crate::virtual_members::resolve_class_fully_maybe_cached(
++                    &class,
++                    &loader,
++                    rctx.resolved_class_cache,
++                );
++                if effective.get_method(method)?.visibility != Visibility::Public {
++                    return None;
++                }
++                let owner = class.fqn();
++                let belongs = |family| {
++                    owner.eq_ignore_ascii_case(family)
++                        || crate::class_lookup::is_subclass_of(owner.as_str(), family, &loader)
++                };
++                let candidate = if [
++                    "Illuminate\\Config\\Repository",
++                    "Illuminate\\Contracts\\Config\\Repository",
++                ]
++                .into_iter()
++                .any(belongs)
++                {
++                    laravel_key_calls::config_method_call(method)
++                } else if [
++                    "Illuminate\\Translation\\Translator",
++                    "Illuminate\\Contracts\\Translation\\Translator",
++                ]
++                .into_iter()
++                .any(belongs)
++                {
++                    laravel_key_calls::translation_method_call(method)
++                } else if [
++                    "Illuminate\\View\\Factory",
++                    "Illuminate\\Contracts\\View\\Factory",
++                ]
++                .into_iter()
++                .any(belongs)
++                {
++                    laravel_key_calls::view_method_call(method)
++                } else {
++                    None
++                }?;
++                if role.is_some_and(|previous| {
++                    previous.kind != candidate.kind
++                        || previous.parameter != candidate.parameter
++                        || previous.accepts_array != candidate.accepts_array
++                }) {
++                    return None;
++                }
++                role = Some(candidate);
+             }
+         }
+-        for class in [
+-            "Illuminate\\Translation\\Translator",
+-            "Illuminate\\Contracts\\Translation\\Translator",
+-        ] {
+-            if owner.as_str().eq_ignore_ascii_case(class)
+-                || crate::class_lookup::is_subclass_of(owner.as_str(), class, &loader)
+-            {
+-                return laravel_key_calls::translation_method_call(method);
++        role
++    }
++}
++
++fn non_null_members<'a>(ty: &'a PhpType, out: &mut Vec<&'a PhpType>) {
++    match ty.kind() {
++        TypeKind::Union(members) => {
++            for member in members {
++                non_null_members(member, out);
+             }
+         }
+-        for class in [
+-            "Illuminate\\View\\Factory",
+-            "Illuminate\\Contracts\\View\\Factory",
+-        ] {
+-            if owner.as_str().eq_ignore_ascii_case(class)
+-                || crate::class_lookup::is_subclass_of(owner.as_str(), class, &loader)
+-            {
+-                return laravel_key_calls::view_method_call(method);
++        TypeKind::Nullable(inner) => non_null_members(inner, out),
++        _ if ty.is_null() => {}
++        _ => out.push(ty),
++    }
++}
++
++fn receiver_span(content: &str, method_end: usize) -> Option<(usize, usize, Option<String>)> {
++    fn find(node: Node<'_, '_>, end: usize) -> Option<(usize, usize)> {
++        let span = node.span();
++        if end < span.start.offset as usize || end > span.end.offset as usize {
++            return None;
++        }
++        let receiver = match node {
++            Node::MethodCall(call) => Some((call.object, &call.method)),
++            Node::NullSafeMethodCall(call) => Some((call.object, &call.method)),
++            _ => None,
++        };
++        if let Some((object, ClassLikeMemberSelector::Identifier(name))) = receiver
++            && name.span().end.offset as usize == end
++        {
++            let span = object.span();
++            return Some((span.start.offset as usize, span.end.offset as usize));
++        }
++        let mut found = None;
++        node.visit_children(|child| {
++            if found.is_none() {
++                found = find(child, end);
++            }
++        });
++        found
++    }
++    let found =
++        crate::parser::with_parsed_program(content, "laravel_key_receiver", |program, _| {
++            find(Node::Program(program), method_end)
++        });
++    if let Some((start, end)) = found {
++        return Some((start, end, None));
++    }
++    // An unfinished argument may hide the whole call from the parser. Close
++    // only the prefix through the member name; its original offsets stay valid.
++    let prefix = content.get(..method_end)?;
++    let code = super::source::code_context::code_context_at(prefix, prefix.len())?;
++    let mut repaired = format!("{prefix}()");
++    for bracket in code.open_brackets.iter().rev() {
++        match bracket.byte {
++            b'(' => repaired.push(')'),
++            b'[' => repaired.push(']'),
++            b'{' => {
++                if !repaired.ends_with([';', '}']) {
++                    repaired.push(';');
++                }
++                repaired.push('}');
+             }
++            _ => return None,
+         }
+-        None
+     }
++    repaired.push(';');
++    let (start, end) = crate::parser::with_parsed_program(
++        &repaired,
++        "laravel_key_receiver_prefix",
++        |program, _| find(Node::Program(program), method_end),
++    )?;
++    Some((start, end, Some(repaired)))
+ }
+diff --git a/src/completion/laravel_translation_args.rs b/src/completion/laravel_translation_args.rs
+index 1ae97c603b22c3ab191ab76bc79b7adb42e1582b..8fa7040aa33e07e90d79ecf417ed0dddcaf935a1 100644
+--- a/src/completion/laravel_translation_args.rs
++++ b/src/completion/laravel_translation_args.rs
+@@ -26,10 +26,7 @@ fn translation_call(
+     ctx: &FileContext,
+ ) -> Option<TranslationCall> {
+     let callable = &content[..paren.code_before];
+-    let (facade, name) = if let Some(operator) = paren.callee_operator {
+-        if !operator.is_static {
+-            return None;
+-        }
++    let (member, name) = if paren.callee_operator.is_some() {
+         let role = backend.laravel_key_call_role(content, callable, ctx)?;
+         if !matches!(role.kind, crate::symbol_map::LaravelStringKind::Trans) {
+             return None;
+@@ -46,7 +43,7 @@ fn translation_call(
+             )?,
+         )
+     };
+-    match (facade, name.to_ascii_lowercase().as_str()) {
++    match (member, name.to_ascii_lowercase().as_str()) {
+         (false, "__" | "trans") | (true, "get") => Some(TranslationCall {
+             locale: 2,
+             replace: Some(1),
+diff --git a/tests/integration/laravel_translation_keys.rs b/tests/integration/laravel_translation_keys.rs
+index 7d2a7ff496d9dc4b08af4c208a3a685631a777fd..c5d4a680f46297c0ba9d5aff19ed1dd268b502a1 100644
+--- a/tests/integration/laravel_translation_keys.rs
++++ b/tests/integration/laravel_translation_keys.rs
+@@ -1224,3 +1224,159 @@ async fn translation_argument_completion_rejects_foreign_helper_and_facade_ident
+     translation_argument_identity_case(r###"<?php namespace Foreign {function trans($key,$replace=[],$locale=null){return 'foreign';}} namespace App\Case6 {use function Foreign\trans; /* 😀 */ return trans('messages.hello', [], 'e|n');}"###, "Translation locale", &[]).await;
+     translation_argument_identity_case(r###"<?php namespace App\Case7; class Lang {public static function get($key,$replace=[],$locale=null){return 'foreign';}} /* 😀 */ return Lang::get('messages.hello', [], 'e|n');"###, "Translation locale", &[]).await;
+ }
++
++async fn typed_translation_case(marked: &str, detail: &str, expected: &[&str], key: bool) {
++    use crate::common::{complete_at_opened, position_after};
++    let offset = marked.find("<caret>").unwrap();
++    let content = marked.replacen("<caret>", "", 1);
++    let offset = if key {
++        content
++            .find("'messages.hello'")
++            .map(|start| start + "'mess".len())
++            .unwrap_or(offset)
++    } else {
++        offset
++    };
++    let contract = r#"<?php namespace Illuminate\Contracts\Translation; interface Translator { public function get($key, array $replace=[], $locale=null); public function choice($key,$number,array $replace=[],$locale=null); }"#;
++    let concrete = r#"<?php namespace Illuminate\Translation; class Translator implements \Illuminate\Contracts\Translation\Translator { public function get($key,array $replace=[],$locale=null,$fallback=true) {return $key;} public function choice($key,$number,array $replace=[],$locale=null) {return $key;} public function has($key,$locale=null,$fallback=true) {return true;} public function hasForLocale($key,$locale=null) {return true;} }"#;
++    let (backend, _dir, uri) = create_initialized_psr4_workspace(
++        r#"{"require":{"laravel/framework":"13.37.0"},"autoload":{"psr-4":{"App\\":"app/","Illuminate\\":"framework/"}}}"#,
++        &[
++            ("app/Demo.php", &content),
++            ("framework/Contracts/Translation/Translator.php", contract),
++            ("framework/Translation/Translator.php", concrete),
++            ("lang/en/messages.php", "<?php return ['hello'=>'Hello :name :count'];"),
++            ("lang/fr/messages.php", "<?php return ['hello'=>'Bonjour :name :count'];"),
++        ], "app/Demo.php").await;
++    let at = position_after(&content, &content[..offset]);
++    let items = complete_at_opened(&backend, &uri, at.line, at.character).await;
++    let mut labels: Vec<_> = items
++        .iter()
++        .filter(|x| {
++            if key {
++                x.label == "messages.hello"
++            } else {
++                x.detail.as_deref() == Some(detail)
++            }
++        })
++        .map(|x| x.label.as_str())
++        .collect();
++    labels.sort_unstable();
++    assert_eq!(
++        labels, expected,
++        "typed translation receiver: {marked}; key={key}; items={items:?}"
++    );
++    if !key {
++        let start = content[..offset].rfind('\'').unwrap() + 1;
++        let end = start + content[start..].find('\'').unwrap_or(content.len() - start);
++        for item in items.iter().filter(|x| x.detail.as_deref() == Some(detail)) {
++            let Some(CompletionTextEdit::Edit(edit)) = &item.text_edit else {
++                panic!("typed argument text edit required")
++            };
++            assert_eq!(
++                edit.range,
++                Range::new(
++                    position_after(&content, &content[..start]),
++                    position_after(&content, &content[..end])
++                ),
++                "UTF-16 full-token edit"
++            );
++            assert_eq!(edit.new_text, item.label);
++            assert!(
++                item.additional_text_edits
++                    .as_ref()
++                    .is_none_or(Vec::is_empty)
++            );
++        }
++    }
++}
++
++#[tokio::test]
++async fn typed_translation_arguments_accept_compatible_receivers() {
++    typed_translation_case(r###"<?php namespace App\Typed0; use Illuminate\Translation\Translator as Text; use Illuminate\Contracts\Translation\Translator as Contract; class Foreign {public function get($key, array $replace=[], $locale=null) {return 'foreign';}} function render(Text $translator): mixed { /* 😀 */ return $translator->get('messages.hello', [], 'e<caret>n'); } return render($GLOBALS['probe_translator']);"###, "Translation locale", &["en"], false).await;
++    typed_translation_case(r###"<?php namespace App\Typed1; use Illuminate\Translation\Translator as Text; use Illuminate\Contracts\Translation\Translator as Contract; class Foreign {public function get($key, array $replace=[], $locale=null) {return 'foreign';}} function render(Text $translator): mixed { /* 😀 */ return $translator->get('messages.hello', ['n<caret>ame'=>'Ada']); } return render($GLOBALS['probe_translator']);"###, "Translation placeholder", &["name"], false).await;
++    typed_translation_case(r###"<?php namespace App\Typed2; use Illuminate\Translation\Translator as Text; use Illuminate\Contracts\Translation\Translator as Contract; class Foreign {public function get($key, array $replace=[], $locale=null) {return 'foreign';}} function render(Text $translator): mixed { /* 😀 */ return $translator->get(locale: 'e<caret>n', key: 'messages.hello'); } return render($GLOBALS['probe_translator']);"###, "Translation locale", &["en"], false).await;
++    typed_translation_case(r###"<?php namespace App\Typed3; use Illuminate\Translation\Translator as Text; use Illuminate\Contracts\Translation\Translator as Contract; class Foreign {public function get($key, array $replace=[], $locale=null) {return 'foreign';}} function render(Contract $translator): mixed { /* 😀 */ return $translator->get('messages.hello', [], 'e<caret>n'); } return render($GLOBALS['probe_translator']);"###, "Translation locale", &["en"], false).await;
++    typed_translation_case(r###"<?php namespace App\Typed4; use Illuminate\Translation\Translator as Text; use Illuminate\Contracts\Translation\Translator as Contract; class Foreign {public function get($key, array $replace=[], $locale=null) {return 'foreign';}} function render(Contract $translator): mixed { /* 😀 */ return $translator->get('messages.hello', ['n<caret>ame'=>'Ada']); } return render($GLOBALS['probe_translator']);"###, "Translation placeholder", &["name"], false).await;
++    typed_translation_case(r###"<?php namespace App\Typed5; use Illuminate\Translation\Translator as Text; use Illuminate\Contracts\Translation\Translator as Contract; class Foreign {public function get($key, array $replace=[], $locale=null) {return 'foreign';}} function render(Text $translator): mixed { /* 😀 */ return $translator->choice('messages.hello', 2, [], 'e<caret>n'); } return render($GLOBALS['probe_translator']);"###, "Translation locale", &["en"], false).await;
++    typed_translation_case(r###"<?php namespace App\Typed6; use Illuminate\Translation\Translator as Text; use Illuminate\Contracts\Translation\Translator as Contract; class Foreign {public function get($key, array $replace=[], $locale=null) {return 'foreign';}} function render(Contract $translator): mixed { /* 😀 */ return $translator->choice(key: 'messages.hello', number: 2, replace: ['n<caret>ame'=>'Ada']); } return render($GLOBALS['probe_translator']);"###, "Translation placeholder", &["name"], false).await;
++    typed_translation_case(r###"<?php namespace App\Typed7; use Illuminate\Translation\Translator as Text; use Illuminate\Contracts\Translation\Translator as Contract; class Foreign {public function get($key, array $replace=[], $locale=null) {return 'foreign';}} function render(Text $translator): mixed { /* 😀 */ return $translator->has('messages.hello', 'e<caret>n'); } return render($GLOBALS['probe_translator']);"###, "Translation locale", &["en"], false).await;
++    typed_translation_case(r###"<?php namespace App\Typed8; use Illuminate\Translation\Translator as Text; use Illuminate\Contracts\Translation\Translator as Contract; class Foreign {public function get($key, array $replace=[], $locale=null) {return 'foreign';}} function render(Text $translator): mixed { /* 😀 */ return $translator->hasForLocale(locale: 'e<caret>n', key: 'messages.hello'); } return render($GLOBALS['probe_translator']);"###, "Translation locale", &["en"], false).await;
++    typed_translation_case(r###"<?php namespace App\Typed9; use Illuminate\Translation\Translator as Text; use Illuminate\Contracts\Translation\Translator as Contract; class Foreign {public function get($key, array $replace=[], $locale=null) {return 'foreign';}} function render(?Text $translator): mixed { /* 😀 */ return $translator?->get('messages.hello', [], 'e<caret>n'); } return render($GLOBALS['probe_translator']);"###, "Translation locale", &["en"], false).await;
++    typed_translation_case(r###"<?php namespace App\Typed10; use Illuminate\Translation\Translator as Text; use Illuminate\Contracts\Translation\Translator as Contract; class Foreign {public function get($key, array $replace=[], $locale=null) {return 'foreign';}} function render(Text|Contract $translator): mixed { /* 😀 */ return $translator->get('messages.hello', [], 'e<caret>n'); } return render($GLOBALS['probe_translator']);"###, "Translation locale", &["en"], false).await;
++    typed_translation_case(r###"<?php namespace App\Typed11; use Illuminate\Translation\Translator as Text; use Illuminate\Contracts\Translation\Translator as Contract; class Foreign {public function get($key, array $replace=[], $locale=null) {return 'foreign';}} function render(Text $translator): mixed { /* 😀 */ return $translator->GET('messages.hello', [], 'e<caret>n'); } return render($GLOBALS['probe_translator']);"###, "Translation locale", &["en"], false).await;
++    typed_translation_case(r###"<?php namespace App\Typed12; use Illuminate\Translation\Translator as Text; use Illuminate\Contracts\Translation\Translator as Contract; class Foreign {public function get($key, array $replace=[], $locale=null) {return 'foreign';}} function render(Text $translator): mixed { /* 😀 */ return $translator /* receiver */ -> get('messages.hello', [], 'e<caret>n'); } return render($GLOBALS['probe_translator']);"###, "Translation locale", &["en"], false).await;
++    typed_translation_case(r###"<?php namespace App\Typed13; use Illuminate\Translation\Translator as Text; use Illuminate\Contracts\Translation\Translator as Contract; class Foreign {public function get($key, array $replace=[], $locale=null) {return 'foreign';}} class Holder {public function __construct(private Text $translator) {} public function render(): mixed { /* 😀 */ return $this->translator->get('messages.hello', [], 'e<caret>n'); }} function render(Text $translator): mixed {return (new Holder($translator))->render();} return render($GLOBALS['probe_translator']);"###, "Translation locale", &["en"], false).await;
++}
++
++#[tokio::test]
++async fn typed_translation_arguments_reject_ambiguous_receivers() {
++    typed_translation_case(r###"<?php namespace App\Typed14; use Illuminate\Translation\Translator as Text; use Illuminate\Contracts\Translation\Translator as Contract; class Foreign {public function get($key, array $replace=[], $locale=null) {return 'foreign';}} function render(Foreign $translator): mixed { /* 😀 */ return $translator->get('messages.hello', [], 'e<caret>n'); } return render(new Foreign);"###, "Translation locale", &[], false).await;
++    typed_translation_case(r###"<?php namespace App\Typed15; use Illuminate\Translation\Translator as Text; use Illuminate\Contracts\Translation\Translator as Contract; class Foreign {public function get($key, array $replace=[], $locale=null) {return 'foreign';}} function render(Text|Foreign $translator): mixed { /* 😀 */ return $translator->get('messages.hello', [], 'e<caret>n'); } return render(new Foreign);"###, "Translation locale", &[], false).await;
++    typed_translation_case(r###"<?php namespace App\Typed16; use Illuminate\Translation\Translator as Text; use Illuminate\Contracts\Translation\Translator as Contract; class Foreign {public function get($key, array $replace=[], $locale=null) {return 'foreign';}} function render(Foreign|Text $translator): mixed { /* 😀 */ return $translator->get('messages.hello', [], 'e<caret>n'); } return render(new Foreign);"###, "Translation locale", &[], false).await;
++    typed_translation_case(r###"<?php namespace App\Typed17; use Illuminate\Translation\Translator as Text; use Illuminate\Contracts\Translation\Translator as Contract; class Foreign {public function get($key, array $replace=[], $locale=null) {return 'foreign';}} function render(Text|int $translator): mixed { /* 😀 */ return $translator->get('messages.hello', [], 'e<caret>n'); } return render($GLOBALS['probe_translator']);"###, "Translation locale", &[], false).await;
++    typed_translation_case(r###"<?php namespace App\Typed18; use Illuminate\Translation\Translator as Text; use Illuminate\Contracts\Translation\Translator as Contract; class Foreign {public function get($key, array $replace=[], $locale=null) {return 'foreign';}} function render(object $translator): mixed { /* 😀 */ return $translator->get('messages.hello', [], 'e<caret>n'); } return render(new Foreign);"###, "Translation locale", &[], false).await;
++}
++
++#[tokio::test]
++async fn typed_translation_keys_accept_statement_receivers() {
++    typed_translation_case(r###"<?php namespace App\Typed0; use Illuminate\Translation\Translator as Text; use Illuminate\Contracts\Translation\Translator as Contract; class Foreign {public function get($key, array $replace=[], $locale=null) {return 'foreign';}} function render(Text $translator): mixed { /* 😀 */ return $translator->get('messages.hello', [], 'e<caret>n'); } return render($GLOBALS['probe_translator']);"###, "Translation locale", &["messages.hello"], true).await;
++    typed_translation_case(r###"<?php namespace App\Typed1; use Illuminate\Translation\Translator as Text; use Illuminate\Contracts\Translation\Translator as Contract; class Foreign {public function get($key, array $replace=[], $locale=null) {return 'foreign';}} function render(Text $translator): mixed { /* 😀 */ return $translator->get('messages.hello', ['n<caret>ame'=>'Ada']); } return render($GLOBALS['probe_translator']);"###, "Translation placeholder", &["messages.hello"], true).await;
++    typed_translation_case(r###"<?php namespace App\Typed2; use Illuminate\Translation\Translator as Text; use Illuminate\Contracts\Translation\Translator as Contract; class Foreign {public function get($key, array $replace=[], $locale=null) {return 'foreign';}} function render(Text $translator): mixed { /* 😀 */ return $translator->get(locale: 'e<caret>n', key: 'messages.hello'); } return render($GLOBALS['probe_translator']);"###, "Translation locale", &["messages.hello"], true).await;
++    typed_translation_case(r###"<?php namespace App\Typed3; use Illuminate\Translation\Translator as Text; use Illuminate\Contracts\Translation\Translator as Contract; class Foreign {public function get($key, array $replace=[], $locale=null) {return 'foreign';}} function render(Contract $translator): mixed { /* 😀 */ return $translator->get('messages.hello', [], 'e<caret>n'); } return render($GLOBALS['probe_translator']);"###, "Translation locale", &["messages.hello"], true).await;
++    typed_translation_case(r###"<?php namespace App\Typed4; use Illuminate\Translation\Translator as Text; use Illuminate\Contracts\Translation\Translator as Contract; class Foreign {public function get($key, array $replace=[], $locale=null) {return 'foreign';}} function render(Contract $translator): mixed { /* 😀 */ return $translator->get('messages.hello', ['n<caret>ame'=>'Ada']); } return render($GLOBALS['probe_translator']);"###, "Translation placeholder", &["messages.hello"], true).await;
++    typed_translation_case(r###"<?php namespace App\Typed5; use Illuminate\Translation\Translator as Text; use Illuminate\Contracts\Translation\Translator as Contract; class Foreign {public function get($key, array $replace=[], $locale=null) {return 'foreign';}} function render(Text $translator): mixed { /* 😀 */ return $translator->choice('messages.hello', 2, [], 'e<caret>n'); } return render($GLOBALS['probe_translator']);"###, "Translation locale", &["messages.hello"], true).await;
++    typed_translation_case(r###"<?php namespace App\Typed6; use Illuminate\Translation\Translator as Text; use Illuminate\Contracts\Translation\Translator as Contract; class Foreign {public function get($key, array $replace=[], $locale=null) {return 'foreign';}} function render(Contract $translator): mixed { /* 😀 */ return $translator->choice(key: 'messages.hello', number: 2, replace: ['n<caret>ame'=>'Ada']); } return render($GLOBALS['probe_translator']);"###, "Translation placeholder", &["messages.hello"], true).await;
++    typed_translation_case(r###"<?php namespace App\Typed7; use Illuminate\Translation\Translator as Text; use Illuminate\Contracts\Translation\Translator as Contract; class Foreign {public function get($key, array $replace=[], $locale=null) {return 'foreign';}} function render(Text $translator): mixed { /* 😀 */ return $translator->has('messages.hello', 'e<caret>n'); } return render($GLOBALS['probe_translator']);"###, "Translation locale", &["messages.hello"], true).await;
++    typed_translation_case(r###"<?php namespace App\Typed8; use Illuminate\Translation\Translator as Text; use Illuminate\Contracts\Translation\Translator as Contract; class Foreign {public function get($key, array $replace=[], $locale=null) {return 'foreign';}} function render(Text $translator): mixed { /* 😀 */ return $translator->hasForLocale(locale: 'e<caret>n', key: 'messages.hello'); } return render($GLOBALS['probe_translator']);"###, "Translation locale", &["messages.hello"], true).await;
++    typed_translation_case(r###"<?php namespace App\Typed9; use Illuminate\Translation\Translator as Text; use Illuminate\Contracts\Translation\Translator as Contract; class Foreign {public function get($key, array $replace=[], $locale=null) {return 'foreign';}} function render(?Text $translator): mixed { /* 😀 */ return $translator?->get('messages.hello', [], 'e<caret>n'); } return render($GLOBALS['probe_translator']);"###, "Translation locale", &["messages.hello"], true).await;
++    typed_translation_case(r###"<?php namespace App\Typed10; use Illuminate\Translation\Translator as Text; use Illuminate\Contracts\Translation\Translator as Contract; class Foreign {public function get($key, array $replace=[], $locale=null) {return 'foreign';}} function render(Text|Contract $translator): mixed { /* 😀 */ return $translator->get('messages.hello', [], 'e<caret>n'); } return render($GLOBALS['probe_translator']);"###, "Translation locale", &["messages.hello"], true).await;
++    typed_translation_case(r###"<?php namespace App\Typed11; use Illuminate\Translation\Translator as Text; use Illuminate\Contracts\Translation\Translator as Contract; class Foreign {public function get($key, array $replace=[], $locale=null) {return 'foreign';}} function render(Text $translator): mixed { /* 😀 */ return $translator->GET('messages.hello', [], 'e<caret>n'); } return render($GLOBALS['probe_translator']);"###, "Translation locale", &["messages.hello"], true).await;
++    typed_translation_case(r###"<?php namespace App\Typed12; use Illuminate\Translation\Translator as Text; use Illuminate\Contracts\Translation\Translator as Contract; class Foreign {public function get($key, array $replace=[], $locale=null) {return 'foreign';}} function render(Text $translator): mixed { /* 😀 */ return $translator /* receiver */ -> get('messages.hello', [], 'e<caret>n'); } return render($GLOBALS['probe_translator']);"###, "Translation locale", &["messages.hello"], true).await;
++    typed_translation_case(r###"<?php namespace App\Typed13; use Illuminate\Translation\Translator as Text; use Illuminate\Contracts\Translation\Translator as Contract; class Foreign {public function get($key, array $replace=[], $locale=null) {return 'foreign';}} class Holder {public function __construct(private Text $translator) {} public function render(): mixed { /* 😀 */ return $this->translator->get('messages.hello', [], 'e<caret>n'); }} function render(Text $translator): mixed {return (new Holder($translator))->render();} return render($GLOBALS['probe_translator']);"###, "Translation locale", &["messages.hello"], true).await;
++}
++
++#[tokio::test]
++async fn typed_translation_keys_reject_union_peers_in_both_orders() {
++    typed_translation_case(r###"<?php namespace App\Typed14; use Illuminate\Translation\Translator as Text; use Illuminate\Contracts\Translation\Translator as Contract; class Foreign {public function get($key, array $replace=[], $locale=null) {return 'foreign';}} function render(Foreign $translator): mixed { /* 😀 */ return $translator->get('messages.hello', [], 'e<caret>n'); } return render(new Foreign);"###, "Translation locale", &[], true).await;
++    typed_translation_case(r###"<?php namespace App\Typed15; use Illuminate\Translation\Translator as Text; use Illuminate\Contracts\Translation\Translator as Contract; class Foreign {public function get($key, array $replace=[], $locale=null) {return 'foreign';}} function render(Text|Foreign $translator): mixed { /* 😀 */ return $translator->get('messages.hello', [], 'e<caret>n'); } return render(new Foreign);"###, "Translation locale", &[], true).await;
++    typed_translation_case(r###"<?php namespace App\Typed16; use Illuminate\Translation\Translator as Text; use Illuminate\Contracts\Translation\Translator as Contract; class Foreign {public function get($key, array $replace=[], $locale=null) {return 'foreign';}} function render(Foreign|Text $translator): mixed { /* 😀 */ return $translator->get('messages.hello', [], 'e<caret>n'); } return render(new Foreign);"###, "Translation locale", &[], true).await;
++    typed_translation_case(r###"<?php namespace App\Typed17; use Illuminate\Translation\Translator as Text; use Illuminate\Contracts\Translation\Translator as Contract; class Foreign {public function get($key, array $replace=[], $locale=null) {return 'foreign';}} function render(Text|int $translator): mixed { /* 😀 */ return $translator->get('messages.hello', [], 'e<caret>n'); } return render($GLOBALS['probe_translator']);"###, "Translation locale", &[], true).await;
++    typed_translation_case(r###"<?php namespace App\Typed18; use Illuminate\Translation\Translator as Text; use Illuminate\Contracts\Translation\Translator as Contract; class Foreign {public function get($key, array $replace=[], $locale=null) {return 'foreign';}} function render(object $translator): mixed { /* 😀 */ return $translator->get('messages.hello', [], 'e<caret>n'); } return render(new Foreign);"###, "Translation locale", &[], true).await;
++}
++
++#[tokio::test]
++async fn typed_translation_keys_validate_bare_compatible_receivers() {
++    typed_translation_case(r###"<?php namespace App\Typed0; use Illuminate\Translation\Translator as Text; use Illuminate\Contracts\Translation\Translator as Contract; class Foreign {public function get($key, array $replace=[], $locale=null) {return 'foreign';}} function render(Text $translator): mixed { $translator->get('messages.hello', [], 'e<caret>n'); return null; } return render($GLOBALS['probe_translator']);"###, "Translation locale", &["messages.hello"], true).await;
++    typed_translation_case(r###"<?php namespace App\Typed1; use Illuminate\Translation\Translator as Text; use Illuminate\Contracts\Translation\Translator as Contract; class Foreign {public function get($key, array $replace=[], $locale=null) {return 'foreign';}} function render(Text $translator): mixed { $translator->get('messages.hello', ['n<caret>ame'=>'Ada']); return null; } return render($GLOBALS['probe_translator']);"###, "Translation placeholder", &["messages.hello"], true).await;
++    typed_translation_case(r###"<?php namespace App\Typed2; use Illuminate\Translation\Translator as Text; use Illuminate\Contracts\Translation\Translator as Contract; class Foreign {public function get($key, array $replace=[], $locale=null) {return 'foreign';}} function render(Text $translator): mixed { $translator->get(locale: 'e<caret>n', key: 'messages.hello'); return null; } return render($GLOBALS['probe_translator']);"###, "Translation locale", &["messages.hello"], true).await;
++    typed_translation_case(r###"<?php namespace App\Typed3; use Illuminate\Translation\Translator as Text; use Illuminate\Contracts\Translation\Translator as Contract; class Foreign {public function get($key, array $replace=[], $locale=null) {return 'foreign';}} function render(Contract $translator): mixed { $translator->get('messages.hello', [], 'e<caret>n'); return null; } return render($GLOBALS['probe_translator']);"###, "Translation locale", &["messages.hello"], true).await;
++    typed_translation_case(r###"<?php namespace App\Typed4; use Illuminate\Translation\Translator as Text; use Illuminate\Contracts\Translation\Translator as Contract; class Foreign {public function get($key, array $replace=[], $locale=null) {return 'foreign';}} function render(Contract $translator): mixed { $translator->get('messages.hello', ['n<caret>ame'=>'Ada']); return null; } return render($GLOBALS['probe_translator']);"###, "Translation placeholder", &["messages.hello"], true).await;
++    typed_translation_case(r###"<?php namespace App\Typed5; use Illuminate\Translation\Translator as Text; use Illuminate\Contracts\Translation\Translator as Contract; class Foreign {public function get($key, array $replace=[], $locale=null) {return 'foreign';}} function render(Text $translator): mixed { $translator->choice('messages.hello', 2, [], 'e<caret>n'); return null; } return render($GLOBALS['probe_translator']);"###, "Translation locale", &["messages.hello"], true).await;
++    typed_translation_case(r###"<?php namespace App\Typed6; use Illuminate\Translation\Translator as Text; use Illuminate\Contracts\Translation\Translator as Contract; class Foreign {public function get($key, array $replace=[], $locale=null) {return 'foreign';}} function render(Contract $translator): mixed { $translator->choice(key: 'messages.hello', number: 2, replace: ['n<caret>ame'=>'Ada']); return null; } return render($GLOBALS['probe_translator']);"###, "Translation placeholder", &["messages.hello"], true).await;
++    typed_translation_case(r###"<?php namespace App\Typed7; use Illuminate\Translation\Translator as Text; use Illuminate\Contracts\Translation\Translator as Contract; class Foreign {public function get($key, array $replace=[], $locale=null) {return 'foreign';}} function render(Text $translator): mixed { $translator->has('messages.hello', 'e<caret>n'); return null; } return render($GLOBALS['probe_translator']);"###, "Translation locale", &["messages.hello"], true).await;
++    typed_translation_case(r###"<?php namespace App\Typed8; use Illuminate\Translation\Translator as Text; use Illuminate\Contracts\Translation\Translator as Contract; class Foreign {public function get($key, array $replace=[], $locale=null) {return 'foreign';}} function render(Text $translator): mixed { $translator->hasForLocale(locale: 'e<caret>n', key: 'messages.hello'); return null; } return render($GLOBALS['probe_translator']);"###, "Translation locale", &["messages.hello"], true).await;
++    typed_translation_case(r###"<?php namespace App\Typed9; use Illuminate\Translation\Translator as Text; use Illuminate\Contracts\Translation\Translator as Contract; class Foreign {public function get($key, array $replace=[], $locale=null) {return 'foreign';}} function render(?Text $translator): mixed { $translator?->get('messages.hello', [], 'e<caret>n'); return null; } return render($GLOBALS['probe_translator']);"###, "Translation locale", &["messages.hello"], true).await;
++    typed_translation_case(r###"<?php namespace App\Typed10; use Illuminate\Translation\Translator as Text; use Illuminate\Contracts\Translation\Translator as Contract; class Foreign {public function get($key, array $replace=[], $locale=null) {return 'foreign';}} function render(Text|Contract $translator): mixed { $translator->get('messages.hello', [], 'e<caret>n'); return null; } return render($GLOBALS['probe_translator']);"###, "Translation locale", &["messages.hello"], true).await;
++    typed_translation_case(r###"<?php namespace App\Typed11; use Illuminate\Translation\Translator as Text; use Illuminate\Contracts\Translation\Translator as Contract; class Foreign {public function get($key, array $replace=[], $locale=null) {return 'foreign';}} function render(Text $translator): mixed { $translator->GET('messages.hello', [], 'e<caret>n'); return null; } return render($GLOBALS['probe_translator']);"###, "Translation locale", &["messages.hello"], true).await;
++    typed_translation_case(r###"<?php namespace App\Typed12; use Illuminate\Translation\Translator as Text; use Illuminate\Contracts\Translation\Translator as Contract; class Foreign {public function get($key, array $replace=[], $locale=null) {return 'foreign';}} function render(Text $translator): mixed { $translator /* receiver */ -> get('messages.hello', [], 'e<caret>n'); return null; } return render($GLOBALS['probe_translator']);"###, "Translation locale", &["messages.hello"], true).await;
++    typed_translation_case(r###"<?php namespace App\Typed13; use Illuminate\Translation\Translator as Text; use Illuminate\Contracts\Translation\Translator as Contract; class Foreign {public function get($key, array $replace=[], $locale=null) {return 'foreign';}} class Holder {public function __construct(private Text $translator) {} public function render(): mixed { $this->translator->get('messages.hello', [], 'e<caret>n'); return null; }} function render(Text $translator): mixed {return (new Holder($translator))->render();} return render($GLOBALS['probe_translator']);"###, "Translation locale", &["messages.hello"], true).await;
++}
++
++#[tokio::test]
++async fn typed_translation_keys_validate_bare_ambiguous_receivers() {
++    typed_translation_case(r###"<?php namespace App\Typed14; use Illuminate\Translation\Translator as Text; use Illuminate\Contracts\Translation\Translator as Contract; class Foreign {public function get($key, array $replace=[], $locale=null) {return 'foreign';}} function render(Foreign $translator): mixed { $translator->get('messages.hello', [], 'e<caret>n'); return null; } return render(new Foreign);"###, "Translation locale", &[], true).await;
++    typed_translation_case(r###"<?php namespace App\Typed15; use Illuminate\Translation\Translator as Text; use Illuminate\Contracts\Translation\Translator as Contract; class Foreign {public function get($key, array $replace=[], $locale=null) {return 'foreign';}} function render(Text|Foreign $translator): mixed { $translator->get('messages.hello', [], 'e<caret>n'); return null; } return render(new Foreign);"###, "Translation locale", &[], true).await;
++    typed_translation_case(r###"<?php namespace App\Typed16; use Illuminate\Translation\Translator as Text; use Illuminate\Contracts\Translation\Translator as Contract; class Foreign {public function get($key, array $replace=[], $locale=null) {return 'foreign';}} function render(Foreign|Text $translator): mixed { $translator->get('messages.hello', [], 'e<caret>n'); return null; } return render(new Foreign);"###, "Translation locale", &[], true).await;
++    typed_translation_case(r###"<?php namespace App\Typed17; use Illuminate\Translation\Translator as Text; use Illuminate\Contracts\Translation\Translator as Contract; class Foreign {public function get($key, array $replace=[], $locale=null) {return 'foreign';}} function render(Text|int $translator): mixed { $translator->get('messages.hello', [], 'e<caret>n'); return null; } return render($GLOBALS['probe_translator']);"###, "Translation locale", &[], true).await;
++    typed_translation_case(r###"<?php namespace App\Typed18; use Illuminate\Translation\Translator as Text; use Illuminate\Contracts\Translation\Translator as Contract; class Foreign {public function get($key, array $replace=[], $locale=null) {return 'foreign';}} function render(object $translator): mixed { $translator->get('messages.hello', [], 'e<caret>n'); return null; } return render(new Foreign);"###, "Translation locale", &[], true).await;
++}
++
++#[tokio::test]
++async fn typed_translation_completion_handles_incomplete_arguments() {
++    typed_translation_case(r#"<?php use Illuminate\Translation\Translator as Text; function render(Text $translator) { /* 😀 */ return $translator->get('messages.hello', [], 'e<caret>"#, "Translation locale", &["en"], false).await;
++    typed_translation_case(r#"<?php use Illuminate\Translation\Translator as Text; function render(Text $translator) { /* 😀 */ return $translator->get('messages.hello', ['n<caret>"#, "Translation placeholder", &["name"], false).await;
++    typed_translation_case(r#"<?php use Illuminate\Translation\Translator as Text; function render(Text $translator) { /* 😀 */ return $translator->get('mess<caret>"#, "Translation key", &["messages.hello"], true).await;
++    typed_translation_case(r###"<?php namespace App\Typed13; use Illuminate\Translation\Translator as Text; use Illuminate\Contracts\Translation\Translator as Contract; class Foreign {public function get($key, array $replace=[], $locale=null) {return 'foreign';}} class Holder {public function __construct(private Text $translator) {} public function render(): mixed { /* 😀 */ return $this->translator->get('messages.hello', [], 'e<caret>"###, "Translation locale", &["en"], false).await;
++    typed_translation_case(r###"<?php namespace App\Typed15; use Illuminate\Translation\Translator as Text; use Illuminate\Contracts\Translation\Translator as Contract; class Foreign {public function get($key, array $replace=[], $locale=null) {return 'foreign';}} function render(Text|Foreign $translator): mixed { /* 😀 */ return $translator->get('messages.hello', [], 'e<caret>"###, "Translation locale", &[], false).await;
++}

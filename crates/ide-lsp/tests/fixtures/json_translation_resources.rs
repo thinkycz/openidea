@@ -2,7 +2,7 @@ use super::*;
 
 const METHOD: &str = "phpWorkbench/jsonTranslationResource";
 
-fn caps() -> Value {
+pub(super) fn caps() -> Value {
     let mut caps = incremental_caps();
     caps["experimental"] = json!({
         "phpWorkbenchJsonTranslationResource":true,
@@ -11,9 +11,36 @@ fn caps() -> Value {
     caps
 }
 
-fn echo(params: &Value, root: Option<&Path>) -> Value {
+pub(super) fn echo(params: &Value, root: Option<&Path>) -> Value {
     json!({"projectUri":params["projectUri"],"resourceUri":params["resourceUri"],
         "rootUri":root.map(|p| format!("{}/", uri_of(p)))})
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn laravel_json_composer_admits_without_opening_php_or_sharing_catalog_buffers() {
+    let h = harness_for("php", "php", &[("phpantom", caps())], &[]);
+    let manifest = h.root.join("composer.json");
+    std::fs::write(&manifest, r#"{"require":{"laravel/framework":"13.37.0"}}"#).unwrap();
+    let resource = h.root.join("packages/catalogs/😀 json/en.json");
+    let state = h.launcher.state("phpantom");
+    let directory = resource.parent().unwrap().to_owned();
+    state
+        .responder
+        .lock()
+        .replace(Arc::new(move |_, method, params| (method == METHOD).then(|| echo(params, Some(&directory)))));
+    assert!(h.mgr.servers().is_empty());
+    let receipt =
+        h.mgr.php_json_translation_resource_from_composer(&manifest, &resource, Default::default()).await.unwrap();
+    assert_eq!(receipt.project_path(), manifest);
+    assert_eq!(receipt.resource_path(), resource);
+    assert_eq!(receipt.root_path(), resource.parent());
+    h.mgr.php_json_translation_resource_current(&receipt, Default::default()).await.unwrap();
+    assert_eq!(state.requested(METHOD), [json!({"projectUri":uri_of(&manifest),"resourceUri":uri_of(&resource)})]);
+    assert!(state.notified("textDocument/didOpen").is_empty());
+    assert!(state.notified("textDocument/didChange").is_empty());
+    assert!(state.docs.lock().is_empty());
+    assert!(!resource.exists());
+    h.mgr.shutdown_all().await;
 }
 
 #[tokio::test(flavor = "multi_thread")]

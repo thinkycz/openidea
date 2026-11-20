@@ -66,18 +66,73 @@ async fn registered_json_admission_selects_consuming_server_tracks_provider_chan
     );
     mgr.set_content_roots(vec![root.join("a/packages/billing")]);
     let outcome = std::panic::AssertUnwindSafe(async {
+        let manifest = root.join("a/composer.json");
+        let catalog = root.join("a/packages/billing/json/en.json");
+        let json = DocId::next();
+        mgr.did_open(json, &catalog, &LanguageId::new("json"), 1, r#"{"Greeting 😀":"Unshared private overlay"}"#);
+        assert!(mgr.servers().is_empty(), "a custom catalog alone must not disclose its buffer to PHP");
+        let catalog_first =
+            mgr.php_json_translation_resource_from_composer(&manifest, &catalog, Default::default()).await.unwrap();
+        assert_eq!(catalog_first.project_path(), manifest);
+        assert_eq!(catalog_first.root_path(), catalog.parent());
+        mgr.php_json_translation_resource_current(&catalog_first, Default::default()).await.unwrap();
+        assert!(
+            mgr.php_json_translation_resource_from_composer(
+                &root.join("b/composer.json"),
+                &catalog,
+                Default::default()
+            )
+            .await
+            .unwrap()
+            .root_path()
+            .is_none()
+        );
+        assert!(
+            mgr.php_json_translation_resource_from_composer(
+                &root.join("a/packages/billing/composer.json"),
+                &catalog,
+                Default::default()
+            )
+            .await
+            .unwrap()
+            .root_path()
+            .is_none()
+        );
+        let composer_doc = DocId::next();
+        mgr.did_open(composer_doc, &manifest, &LanguageId::new("json"), 1, COMPOSER);
+        assert!(mgr.php_json_translation_resource_current(&catalog_first, Default::default()).await.is_err());
+        let opened_manifest =
+            mgr.php_json_translation_resource_from_composer(&manifest, &catalog, Default::default()).await.unwrap();
+        assert_eq!(opened_manifest.root_path(), catalog.parent());
+        let dirty_composer = COMPOSER.replace("app/", "elsewhere/");
+        replace(&mgr, composer_doc, 2, COMPOSER, &dirty_composer);
+        assert!(mgr.php_json_translation_resource_current(&opened_manifest, Default::default()).await.is_err());
+        assert!(
+            mgr.php_json_translation_resource_from_composer(&manifest, &catalog, Default::default()).await.is_err()
+        );
+        assert_eq!(std::fs::read_to_string(&manifest).unwrap(), COMPOSER);
+        mgr.did_close(composer_doc);
+        let closed_manifest =
+            mgr.php_json_translation_resource_from_composer(&manifest, &catalog, Default::default()).await.unwrap();
+        std::fs::write(&manifest, format!("{COMPOSER}\n")).unwrap();
+        assert!(
+            mgr.php_json_translation_resource_current(&closed_manifest, Default::default()).await.is_err(),
+            "an unreported disk change must retire a Composer receipt"
+        );
+        std::fs::write(&manifest, COMPOSER).unwrap();
+        mgr.php_files_changed(&[], std::slice::from_ref(&manifest), &[]);
+        let restored_composer =
+            mgr.php_json_translation_resource_from_composer(&manifest, &catalog, Default::default()).await.unwrap();
+        assert_eq!(restored_composer.root_path(), catalog.parent());
         let a = DocId::next();
         let b = DocId::next();
         let package = DocId::next();
         let a_path = root.join("a/app/Caller.php");
         let package_path = root.join("a/packages/billing/own.php");
-        let catalog = root.join("a/packages/billing/json/en.json");
         let alternate = root.join("a/packages/billing/alternate/en.json");
         mgr.did_open(a, &a_path, &LanguageId::new("php"), 1, CALLER);
         mgr.did_open(b, &root.join("b/app/Caller.php"), &LanguageId::new("php"), 1, CALLER);
         mgr.did_open(package, &package_path, &LanguageId::new("php"), 1, "<?php /* separate Composer graph */");
-        let json = DocId::next();
-        mgr.did_open(json, &catalog, &LanguageId::new("json"), 1, r#"{"Greeting 😀":"Unshared private overlay"}"#);
         let receipt = mgr.php_json_translation_resource(a, &catalog, Default::default()).await.unwrap();
         assert_eq!(receipt.project_path(), a_path);
         assert_eq!(receipt.resource_path(), catalog);
@@ -141,6 +196,10 @@ async fn registered_json_admission_selects_consuming_server_tracks_provider_chan
         let restarted = mgr.php_json_translation_resource(a, &catalog, Default::default()).await.unwrap();
         assert_eq!(restarted.root_path(), catalog.parent());
         mgr.php_json_translation_resource_current(&restarted, Default::default()).await.unwrap();
+        let restarted_composer =
+            mgr.php_json_translation_resource_from_composer(&manifest, &catalog, Default::default()).await.unwrap();
+        assert_eq!(restarted_composer.project_path(), manifest);
+        assert_eq!(restarted_composer.root_path(), catalog.parent());
         mgr.did_close(json);
     })
     .catch_unwind()

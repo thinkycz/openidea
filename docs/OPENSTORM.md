@@ -15,6 +15,67 @@ slice, commit and push it, and retain only the latest generated app. Native UI
 cases remain deferred/unverified; earlier native-first blocking checkpoints are
 historical and no longer prevent independent implementation.
 
+Composer catalog admission slice210 (2026-11-20, client accepted; inactive188):
+FEAT-031/066/067: a consuming Composer manifest can now select PHPantom before a
+PHP editor exists. The query sends only project/resource URIs, requires both
+registration and registered-buffer capabilities, and retains positive or unproven
+registration. No fake PHP/Composer document is opened; manifest and catalog text
+are not forwarded. Existing JSON language servers keep their own buffers.
+
+The local manifest witness includes bounded content, physical authority, file
+identity/metadata and every matching open manifest buffer, including aliases.
+JSON layout/line-ending differences are accepted when effective JSON is unchanged;
+semantic unsaved changes are refused without saving or overwriting anything.
+Receipts expire on disk replacement/change/deletion, buffer open/edit/close,
+source changes, root/settings changes, restart and execution disable. Unix reads
+use no-follow/nonblocking descriptors. Explicit ContentModified retries keep one
+existing deadline and check the same manifest inputs before and after every
+attempt. Current navigation's source-document requirement remains intact; a
+shared snapshot helper supports the Composer selector's initially empty PHP set.
+
+The public positive case first fails at the unimplemented selector. All15 new
+Composer groups plus prior JSON/admission regressions pass together (32 cases).
+The FIFO fixture initially calls Rustix functions unavailable on Apple platforms;
+inspect the platform cfg and use the existing repository mkfifo fixture pattern.
+Keep the nonblocking refusal assertion; production code does not change for that
+fixture correction. Invalid/oversized/nonregular/aliased manifests are refused
+before PHP starts. Changed manifest buffers and execution-disabled projects do
+not trigger an admission RPC. Explicit external content roots remain supported.
+The new Unix Rustix edge reuses the locked package without version updates.
+
+The final actual-client scenario validates Laravel13.37.0, Composer/JSON syntax,
+five PHP files and a runtime translation assertion. It now begins with a custom
+JSON catalog and no PHP editor: consuming application admission succeeds while
+nested package/sibling contexts remain unregistered. Opening, editing, closing
+and restoring the Composer buffer retires old receipts; unreported disk changes
+also retire receipts. Fresh queries after normal watched-file notification and
+restart recover the current context. Existing PHP-source/provider tests remain.
+The exact current client executable rejects query-only187, then all70 client and
+59 Host cases pass on signed188 with unchanged deadlines and retained fixture
+originals. Executable, Cargo-fingerprint and source hashes match before/after.
+
+Fresh gates pass: workspace5,569 /255 ignored /the same11 documented HTTP/direnv
+exclusions, all-target workspace Clippy with warnings denied, bindings fidelity,
+default-engine provenance, frontend14,603 /8 skipped, types/lint/format/Knip,
+production build/Safari startup and all59 controlled-browser flows. Focused
+ide-lsp all-target Clippy also passes before broad checks. These are source,
+actual client/Host and controlled-browser evidence; native GUI remains skipped.
+
+One latest current129-case executable set replaces the previous1,266,643,456-byte
+payload set after acceptance; historical receipts remain. Removed 20791 files, 27.7GiB total.
+Frontend dist is removed after verification. Sole App119, its strict/deep
+signature, default185 checksum/provenance, inactive188 metadata and both stashes
+remain preserved. No app is packaged or promoted. Source is committed and pushed
+through normal hooks; delivery and remote read-back are recorded in the ignored
+slice receipt. All69 areas remain visible at67 partial/two user-deferred.
+
+Next: automatic consumer discovery and guarded registered-JSON forwarding through
+the client/Host; verify cross-server package-provider overlays, graph/config
+changes, cancellation, restart, close/discard and reopen before promotion and
+packaging. This slice supplies manifest selection, not automatic forwarding or
+freshness of unreported engine configuration changes. Detailed evidence:
+artifacts/checks/slice210/{gates,frontend-gates,evaluation,frozen-runtimes,retention}.json.
+
 Registered JSON admission client slice209 (2026-11-20, client accepted; inactive188):
 FEAT-031/066/067: the client now queries phpWorkbench/jsonTranslationResource
 through the consuming open physical PHP source, requiring both query and

@@ -1,4 +1,6 @@
 use super::*;
+mod composer;
+use composer::ComposerInputs;
 
 /// A content-free registration decision for one consuming PHP server generation.
 /// Revalidate before using it; it does not authorize forwarding buffer contents.
@@ -8,6 +10,7 @@ pub struct PhpJsonTranslationResource {
     root: Option<PathBuf>,
     target: Target,
     sources: NavigationSnapshot,
+    composer: Option<ComposerInputs>,
 }
 
 impl std::fmt::Debug for PhpJsonTranslationResource {
@@ -148,33 +151,58 @@ impl LspManager {
                 "Project roots or files changed during JSON resource lookup",
             ));
         }
-        let params = ResourceQuery { project_uri: snap.uri, resource_uri: uri::path_to_uri(resource) };
-        let server_cancel = target.server.start_token();
+        let receipt = PhpJsonTranslationResource {
+            project: snap.path,
+            resource: resource.to_owned(),
+            root: None,
+            target,
+            sources,
+            composer: None,
+        };
+        self.query_json_translation_resource(receipt, cancel).await
+    }
+
+    async fn query_json_translation_resource(
+        &self,
+        mut receipt: PhpJsonTranslationResource,
+        cancel: CancellationToken,
+    ) -> IdeResult<PhpJsonTranslationResource> {
+        let params = ResourceQuery {
+            project_uri: uri::path_to_uri(&receipt.project),
+            resource_uri: uri::path_to_uri(&receipt.resource),
+        };
+        let server_cancel = receipt.target.server.start_token();
         let reply: IdeResult<ResourceReply> = tokio::select! {
             biased;
             () = cancel.cancelled() => return Err(IdeError::cancelled()),
             () = server_cancel.cancelled() => {
                 return Err(IdeError::new(ErrorKind::OutOfSync, "JSON resource server stopped or execution was disabled"));
             }
-            reply = self.current_navigation(
-                &target,
-                "phpWorkbench/jsonTranslationResource",
-                serde_json::to_value(&params).map_err(|error| IdeError::internal(error.to_string()))?,
-                &sources,
-                Some(&cancel),
-                LONG_TIMEOUT,
-            ) => reply,
+            reply = async {
+                if receipt.composer.is_some() {
+                    self.current_composer_resource_query(&receipt, &params, &cancel).await
+                } else {
+                    self.current_navigation(
+                        &receipt.target,
+                        "phpWorkbench/jsonTranslationResource",
+                        serde_json::to_value(&params).map_err(|error| IdeError::internal(error.to_string()))?,
+                        &receipt.sources,
+                        Some(&cancel),
+                        LONG_TIMEOUT,
+                    ).await
+                }
+            } => reply,
         };
         if cancel.is_cancelled() {
             return Err(IdeError::cancelled());
         }
-        self.laravel_query_current(&target, &sources)?;
+        self.laravel_query_current(&receipt.target, &receipt.sources)?;
         let reply = reply?;
         if reply.project_uri != params.project_uri.as_str() || reply.resource_uri != params.resource_uri.as_str() {
             return Err(IdeError::invalid("JSON resource lookup returned mismatched URI receipts"));
         }
         let root = if let Some(root_uri) = reply.root_uri {
-            let root = resource.parent().ok_or_else(|| IdeError::invalid("Missing resource directory"))?;
+            let root = receipt.resource.parent().ok_or_else(|| IdeError::invalid("Missing resource directory"))?;
             let mut expected = uri::path_to_uri_string(root);
             if !expected.ends_with('/') {
                 expected.push('/');
@@ -186,8 +214,7 @@ impl LspManager {
         } else {
             None
         };
-        let receipt =
-            PhpJsonTranslationResource { project: snap.path, resource: resource.to_owned(), root, target, sources };
+        receipt.root = root;
         self.php_json_translation_resource_current(&receipt, cancel).await?;
         Ok(receipt)
     }
@@ -206,7 +233,11 @@ impl LspManager {
         if !self.execution_allowed.load(Ordering::Acquire) || !supports_resources(&receipt.target.caps()) {
             return Err(IdeError::new(ErrorKind::OutOfSync, "JSON resource server capabilities changed"));
         }
-        let authority = resource_authority(&receipt.project, &receipt.resource, &cancel).await;
+        let authority = if let Some(composer) = &receipt.composer {
+            self.composer_inputs_current(&receipt.project, &receipt.resource, composer, &cancel).await
+        } else {
+            resource_authority(&receipt.project, &receipt.resource, &cancel).await
+        };
         if cancel.is_cancelled() {
             return Err(IdeError::cancelled());
         }

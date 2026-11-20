@@ -20,6 +20,9 @@ use std::time::Duration;
 #[path = "fixtures/json_translation_resources.rs"]
 mod json_translation_resources;
 
+#[path = "fixtures/json_composer_resources.rs"]
+mod json_composer_resources;
+
 // ------------------------------------------------------------------ mock server
 
 #[derive(Default)]

@@ -1943,6 +1943,19 @@ impl LspManager {
     }
 
     fn navigation_sources(&self, snap: &DocSnap, target: &Target) -> IdeResult<NavigationSnapshot> {
+        let snapshot = self.navigation_snapshot(target)?;
+        if !snapshot.sources.iter().any(|d| {
+            d.uri == snap.uri
+                && d.version == snap.version
+                && d.language == snap.language
+                && Arc::ptr_eq(&d.text, &snap.text)
+        }) {
+            return Err(IdeError::cancelled());
+        }
+        Ok(snapshot)
+    }
+
+    fn navigation_snapshot(&self, target: &Target) -> IdeResult<NavigationSnapshot> {
         if target.server.running_gen(target.run.generation).is_none() {
             return Err(IdeError::cancelled());
         }
@@ -1960,14 +1973,6 @@ impl LspManager {
                 text: d.text.clone(),
             })
             .collect();
-        if !sources.iter().any(|d| {
-            d.uri == snap.uri
-                && d.version == snap.version
-                && d.language == snap.language
-                && Arc::ptr_eq(&d.text, &snap.text)
-        }) {
-            return Err(IdeError::cancelled());
-        }
         Ok(NavigationSnapshot { sources, files_revision })
     }
 

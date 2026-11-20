@@ -54,6 +54,7 @@ pub use kotlin_lsp::{KotlinDebugServer, KotlinDebugUnavailable};
 pub use launch::{LaunchError, Launcher, ProcessLauncher};
 pub use message_requests::answer as answer_message_request;
 pub use notebook::{NotebookCell, NotebookCellDoc, cell_uri};
+pub use php::PhpJsonTranslationResource;
 pub use plugin_requests::plugin_method_allowed;
 pub use scope::{CandidateFiles, CandidateFn, CandidateQuery, MAX_CANDIDATES};
 pub use uri::{is_virtual_uri, path_to_uri_string, uri_target, uri_to_path};

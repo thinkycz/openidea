@@ -8,6 +8,9 @@ use ide_text::AppliedChange;
 use parking_lot::Mutex;
 use std::{path::PathBuf, sync::Arc, time::Duration};
 
+#[path = "fixtures/json_resource_admission.rs"]
+mod json_resource_admission;
+
 #[path = "fixtures/controller_guards.rs"]
 mod controller_guards;
 #[path = "fixtures/controller_urls.rs"]

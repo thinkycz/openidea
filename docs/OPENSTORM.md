@@ -15,6 +15,68 @@ slice, commit and push it, and retain only the latest generated app. Native UI
 cases remain deferred/unverified; earlier native-first blocking checkpoints are
 historical and no longer prevent independent implementation.
 
+Registered JSON admission client slice209 (2026-11-20, client accepted; inactive188):
+FEAT-031/066/067: the client now queries phpWorkbench/jsonTranslationResource
+through the consuming open physical PHP source, requiring both query and
+registered-buffer capabilities. It does not choose the catalog's Composer server
+or share JSON text. An opaque result preserves positive or unproven registration,
+project/resource paths, source snapshots, project-file revision and server
+generation. Exact URI echoes, required nullable root and direct locale-directory
+replies are checked. Cancel-safe physical-authority checks run on a blocking
+worker and reject aliases/nonregular files. Revalidation retains the same inputs;
+it does not authorize forwarding buffer contents or rebase an old decision.
+
+The initial public regression fails at the unimplemented adapter. Fourteen focused
+regression groups pass after integration, covering both capabilities, malformed
+replies, Unicode URIs, negative and never-saved resources, symlinks/sockets,
+source/file/root/settings changes, restart, cancellation and bounded explicit
+ContentModified retries. An added execution-boundary case first proves the
+adapter still sent an RPC after execution was disabled. Early execution checks
+and server-token cancellation now prevent both that query and subsequent stale
+retries, without weakening the original assertion.
+
+The actual-client fixture uses Laravel 13.37.0, validated Composer/JSON files,
+five PHP syntax checks and an actual Laravel translation assertion. It verifies
+consuming vs nested/sibling contexts, private JSON-overlay isolation, unsaved
+application-provider changes/discard, never-saved locale admission and restart.
+The first attempt incorrectly expected a separate nested server without declaring
+a nested content root; root detection uses the outermost marker within a content
+root. Configure the nested root through the existing public API and keep the
+original assertion. Production code is unchanged by that fixture correction.
+
+Final signed188 acceptance runs the actual workspace-feature executables: all70
+client and59 Host cases pass, with retained fixture originals and request deadlines
+unchanged. The exact same client executable rejects query-only187 at the required
+buffer capability. This is the current regression corpus, not automatic custom
+JSON forwarding or native UI acceptance. Current executable hashes, Cargo
+fingerprints and source hashes are recorded before and after evaluation.
+
+Fresh final gates pass: Rust workspace5,554 /255 ignored /the same11 documented
+HTTP-confirmation/direnv exclusions; all-target workspace Clippy with warnings
+denied; unchanged regenerated bindings and default-engine provenance; frontend
+14,603 /8 skipped, typechecking, lint, formatting, Knip, production build and Safari
+startup checks; all59 controlled-browser editor/tab-close/code-intelligence/Laravel
+cases. The first workspace run also passes; Clippy then rejects two needless
+references in new-test path comparisons. The correction changes only that test,
+keeps both assertions, and is followed by the fresh full workspace/Clippy run.
+All initial failures and correction receipts remain in artifacts/checks/slice209/.
+
+Only one latest current129-case executable set remains; the previous1,263,439,456
+bytes of executable payloads are retired after replacement acceptance while old
+receipts remain. Cargo clean removes19,677 files /27.4GiB; frontend dist removes
+73,745,139 bytes after verification. The sole App119, strict/deep signature, default185 checksum/provenance,
+inactive188 metadata and both pre-existing stashes remain preserved. No app is
+packaged and no native GUI check is performed. Source is committed/pushed through
+normal hooks; delivery/remote read-back is recorded in the ignored slice receipt.
+
+Next dependent slices: Composer-only and catalog-first selection, guarded
+registered-JSON forwarding through the actual client/Host, including cross-server
+package-provider overlays, fresh admission after graph/config changes, cancellation,
+restart, close/discard and reopening; then promotion/packaging. Those cases remain
+unimplemented or unverified here. All69 areas remain visible at67 partial/two
+user-deferred; debugger expansion stays deferred. Detailed evidence:
+artifacts/checks/slice209/{final-gates,frontend-gates,evaluation,frozen-runtimes,retention}.json.
+
 Upstream integration (2026-11-20, upstream `5baaf5b7d`):
 Merged 151 commits from l0ng-ai/openidea/main since `9f4731189` into the existing
 OpenStorm branch. This includes editor/tooltip and highlighting fixes, Git and

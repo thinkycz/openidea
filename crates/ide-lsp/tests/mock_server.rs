@@ -17,6 +17,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
+#[path = "fixtures/json_translation_resources.rs"]
+mod json_translation_resources;
+
 // ------------------------------------------------------------------ mock server
 
 #[derive(Default)]
@@ -9724,6 +9727,45 @@ async fn hierarchy_refactorings_use_phoxites_requests_when_the_server_advertises
     let e = failed.unwrap_err();
     assert_eq!(e.kind, ide_core::error::ErrorKind::Protocol);
     assert_eq!(e.message, "any-name: index out of bounds");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn laravel_json_resource_query_keeps_content_private_and_preserves_receipt() {
+    let mut caps = incremental_caps();
+    caps["experimental"] = json!({
+        "phpWorkbenchJsonTranslationResource":true,
+        "phpWorkbenchRegisteredJsonTranslations":true
+    });
+    let h = harness_for("php", "php", &[("phpantom", caps)], &[]);
+    let (doc, project) = h.open("caller.php", "<?php /* consuming application */");
+    let resource = h.root.join("packages/texts/catalogs/😀 en.json");
+    std::fs::create_dir_all(resource.parent().unwrap()).unwrap();
+    std::fs::write(&resource, r#"{"Hello":"Private catalog text"}"#).unwrap();
+    h.mgr.did_open(DocId::next(), &resource, &LanguageId::new("json"), 1, r#"{"Hello":"Unsaved private text"}"#);
+    h.wait_status("phpantom", ServerStatus::Ready).await;
+    let state = h.launcher.state("phpantom");
+    let root_uri = format!("{}/", uri_of(resource.parent().unwrap()));
+    state.responder.lock().replace(Arc::new(move |_, method, params| {
+        (method == "phpWorkbench/jsonTranslationResource").then(|| {
+            json!({
+                "projectUri":params["projectUri"],"resourceUri":params["resourceUri"],"rootUri":root_uri
+            })
+        })
+    }));
+    let receipt = h.mgr.php_json_translation_resource(doc, &resource, Default::default()).await.unwrap();
+    assert_eq!(receipt.project_path(), project);
+    assert_eq!(receipt.resource_path(), resource);
+    assert_eq!(receipt.root_path(), resource.parent());
+    h.mgr.php_json_translation_resource_current(&receipt, Default::default()).await.unwrap();
+    assert_eq!(
+        state.requested("phpWorkbench/jsonTranslationResource"),
+        [json!({
+            "projectUri":uri_of(&project),"resourceUri":uri_of(&resource)
+        })]
+    );
+    assert!(!state.docs.lock().contains_key(&uri_of(&resource)), "admission must not share JSON contents");
+    assert_eq!(std::fs::read_to_string(resource).unwrap(), r#"{"Hello":"Private catalog text"}"#);
+    h.mgr.shutdown_all().await;
 }
 
 #[tokio::test(flavor = "multi_thread")]

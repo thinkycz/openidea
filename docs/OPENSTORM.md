@@ -15,6 +15,75 @@ slice, commit and push it, and retain only the latest generated app. Native UI
 cases remain deferred/unverified; earlier native-first blocking checkpoints are
 historical and no longer prevent independent implementation.
 
+Package slice200 (2026-11-20, accepted local development bundle):
+App 0.1.118 bundles exact accepted engine183 typed translator completion and
+quoted-key Tab replacement. Source/client slice199 proves typed locales,
+placeholders and keys through LspManager, resolve and real text-edit application,
+including dirty dependencies, incomplete buffers, restart and reopen. This app
+also includes the previously merged upstream source through 9f473118.
+Native GUI remains user-skipped.
+
+The upstream merge introduced debug worktree identity. The old packaging recipe
+would build a development app with a worktree-specific settings scope despite its
+normal bundle identifier. A new packaging regression reproduces inherited
+assertions=true; the recipe now forces CARGO_PROFILE_DEV_DEBUG_ASSERTIONS=false
+for its child build. All five packaging boundary tests pass. Development sessions
+retain their upstream worktree isolation. Actual library/binary compiler commands
+show assertions off, the worktree identity literal is absent from the executable,
+and bundle metadata retains cz.thinky.openstorm. This is compiler/source evidence;
+the normal-identity branch has not been exercised by a native launch here.
+
+Changes cover the app version, 46 local Cargo package versions, bundled engine
+source/provenance, the packaging recipe/regression and this ledger. External dependencies, editor logic,
+plugin API snapshots, licenses, upstream attribution, .openidea compatibility and
+disabled automatic updates are preserved. The original source-fidelity run stops
+before packaging when the recipe changes, after its resource tests pass. Its
+unchanged frontend/resource input evidence is retained; corrected source hashes,
+recipe tests, formatting, resource Clippy and the actual build are checked again.
+No test exclusions, timeouts or acceptance requirements are weakened.
+
+Fresh checks pass: 14,395 frontend tests/eight skips, types including e2e,
+lint/format/Knip, source/checksum/version/provenance, Rust formatting, three resource
+tests and resource all-target Clippy. The actual build passes production frontend
+and Safari 15.4 startup checks. The executable inside the signed app passes
+22 complete and 22 bare translator/key cases, 44 PHP syntax/runtime checks,
+five incomplete-buffer/restoration cases, ten modern/legacy key-edit cases with
+20 syntax checks, nine helper/facade identity cases, four configured-PHP route/view
+cases, six namespace-action cases and eight named-view setter cases. The retained
+Laravel 13.37 reference passes 121 syntax files, 387 runtime assertions and exactly
+three intentional analyzer diagnostics with original files unchanged. All 17
+browser navigation flows pass with controlled backend metadata/IPC. Those browser
+results remain distinct from native editor acceptance.
+
+Source/build receipts, actual arm64 main executable, engine183 checksum/version,
+active provenance/licenses and post-probe deep/strict ad-hoc signature match.
+Minimum macOS 13.0 is metadata only; actual macOS 13 runtime remains untested.
+Main SHA256: 1803d9456a4a636ae682d5a0dea89a3762b135d99906f61f30138bf7fc051683.
+Engine SHA256: fe2ca7791e5e0b202a0c71186115cbb60cbfd9626ab7e14a055d91c7cd234506.
+The native Cargo profile is development with assertions disabled; frontend assets
+are bundled. Historical candidate183 provenance stays inactive, while bundled
+provenance and engine/source.json identify active183.
+
+Exact slice199 engine tests/both all-target Clippy and application workspace/
+Clippy/124 actual client-Host cases are explicitly reused against matching runtime
+source hashes and identical engine bytes. Cargo.lock changes only 46 local app
+versions. No fresh full engine/workspace/client suite or native GUI run is claimed.
+
+Only artifacts/batches/0.1.118/OpenStorm.app remains. The prior App 0.1.117 is
+removed after replacement signature and receipt succeed. Staging/compiler output
+(13705 files, 8.5GiB total) and 73,374,878 frontend bytes are removed.
+Owned main-app/engine processes and browser listener are absent. Canonical sources,
+engines, licenses/provenance, PHP Workbench and evaluation evidence remain.
+No installation, notarization, publishing, automatic-update activation, profile
+migration, deployment or debugger expansion. The older unattributed startup timeout
+and broader receiver/locale/privacy/platform/service matrices remain open.
+All 69 statuses stay 67 partial and two debugger areas user-deferred.
+Evidence: artifacts/checks/slice200/{input,pipeline-pre-identity,pipeline,identity,
+packaged-typed,packaged-bare,key-wire,packaged-translations,wire,packaged-namespaces,
+packaged-setters,fixture-runtime,embedded,post-package,acceptance}.json;
+identity-red/green.log and old-pipeline-terminal.log; and
+artifacts/batches/0.1.118/{build-receipt,retention}.json.
+
 Client completion slice199 (2026-11-20, automated acceptance; inactive engine183):
 Exercise typed translator locale, placeholder and key completion through the actual
 LspManager, completion resolve and core text-edit application. The same client

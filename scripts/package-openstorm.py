@@ -42,7 +42,9 @@ def main():
         raise RuntimeError('Use artifacts/build; shared/evaluation build caches are not managed here')
     if (ROOT / 'artifacts').is_symlink() or (ROOT / 'artifacts/build').is_symlink():
         raise RuntimeError('Refusing a symlinked build directory')
-    env = dict(os.environ, CARGO_TARGET_DIR=str(target), CARGO_INCREMENTAL='0')
+    # A bundled app uses the application identity; dev sessions stay worktree-isolated.
+    env = dict(os.environ, CARGO_TARGET_DIR=str(target), CARGO_INCREMENTAL='0',
+               CARGO_PROFILE_DEV_DEBUG_ASSERTIONS='false')
     run('pnpm', 'tauri', 'build', '--debug', '--bundles', 'app', env=env)
     source = target / 'debug/bundle/macos/OpenStorm.app'
     info = plistlib.loads((source / 'Contents/Info.plist').read_bytes())

@@ -29,6 +29,17 @@ class PackagingBoundaryTests(unittest.TestCase):
     def version(self, version):
         (self.root / 'package.json').write_text(json.dumps({'version': version}))
 
+    def test_bundled_development_build_keeps_application_identity(self):
+        class BuildCaptured(Exception):
+            pass
+
+        with patch.dict(os.environ, {'CARGO_PROFILE_DEV_DEBUG_ASSERTIONS': 'true'}):
+            with patch.object(package, 'run', side_effect=BuildCaptured) as build:
+                with self.assertRaises(BuildCaptured):
+                    package.main()
+        self.assertEqual(build.call_args.args, ('pnpm', 'tauri', 'build', '--debug', '--bundles', 'app'))
+        self.assertEqual(build.call_args.kwargs['env'].get('CARGO_PROFILE_DEV_DEBUG_ASSERTIONS'), 'false')
+
     def test_version_cannot_escape_archives(self):
         self.version('../outside')
         with self.assertRaisesRegex(RuntimeError, 'numeric'):
